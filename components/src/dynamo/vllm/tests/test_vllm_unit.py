@@ -486,6 +486,54 @@ def test_vllm_publishes_structural_tag_reasoning_policy(
     )
 
 
+@pytest.mark.parametrize(
+    ("hf_config", "expected"),
+    [
+        (SimpleNamespace(video_token_id=101, video_token_index=202), 101),
+        (SimpleNamespace(video_token_index=202), 202),
+        (SimpleNamespace(), None),
+    ],
+)
+def test_resolve_video_token_id(hf_config, expected):
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=hf_config))
+
+    assert _load_vllm_main()._resolve_video_token_id(vllm_config) == expected
+
+
+def test_kv_event_publisher_receives_video_token_id(monkeypatch):
+    vllm_main = _load_vllm_main()
+    publisher = Mock()
+    monkeypatch.setattr(vllm_main, "KvEventPublisher", publisher)
+    monkeypatch.setattr(vllm_main, "get_dp_range_for_worker", lambda _: (0, 1))
+    monkeypatch.setattr(vllm_main, "get_configured_kv_event_block_size", lambda _: 16)
+    monkeypatch.setattr(vllm_main, "_resolve_image_token_id", lambda *_: 100)
+    monkeypatch.setattr(vllm_main, "_resolve_video_token_id", lambda _: 200)
+    monkeypatch.setattr(
+        vllm_main.ZmqEventPublisher,
+        "offset_endpoint_port",
+        lambda endpoint, data_parallel_rank: endpoint,
+    )
+    config = SimpleNamespace(
+        engine_args=SimpleNamespace(
+            enable_prefix_caching=True,
+            kv_events_config=SimpleNamespace(
+                enable_kv_cache_events=True,
+                endpoint="tcp://*:5557",
+            ),
+        ),
+        enable_local_indexer=True,
+        kv_state_endpoint=None,
+    )
+
+    publishers = vllm_main.setup_kv_event_publisher(
+        config, SimpleNamespace(), SimpleNamespace()
+    )
+
+    assert publishers is not None and len(publishers) == 1
+    assert publisher.call_args.kwargs["image_token_id"] == 100
+    assert publisher.call_args.kwargs["video_token_id"] == 200
+
+
 @pytest.mark.parametrize("load_format", ["modelexpress", "mx"])
 def test_should_not_prefetch_model_for_modelexpress_load_formats(load_format):
     from dynamo.vllm.main import (
@@ -579,6 +627,8 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
         component="backend",
         namespace="dynamo",
         engine_args=FakeEngineArgs(),
+        embedding_worker=False,
+        embedding_worker_processes=1,
         gms_shadow_mode=False,
         multimodal_embedding_cache_capacity_gb=0,
         route_to_encoder=False,
@@ -1176,24 +1226,31 @@ class TestBenchmarkGrid:
             assert ctx_len <= total_kv
 
 
-def test_build_sampling_params_allowlists_router_hint_extra_args():
+def test_build_sampling_params_attaches_kv_hint_message():
     from dynamo.vllm.handlers import build_sampling_params
 
-    router_hint = {
+    source_locations_payload = {
         "source_control_endpoint": "tcp://127.0.0.1:23280",
         "block_hashes": [11, 22],
+    }
+    kv_hint = {
+        "protocol_version": "0.1",
+        "message_id": "msg-123",
+        "actions": [
+            {
+                "action_id": "a1",
+                "action_type": "kv.fetch",
+                "action_version": "1.0",
+                "payload": source_locations_payload,
+            },
+        ],
     }
     request = {
         "token_ids": [1, 2, 3],
         "sampling_options": {},
         "stop_conditions": {},
         "output_options": {},
-        "extra_args": {
-            "kv_transfer_params": {
-                "router_hint": router_hint,
-                "untrusted_connector_param": "dropped",
-            },
-        },
+        "kv_hint": kv_hint,
     }
 
     default_sampling_params = {
@@ -1214,7 +1271,7 @@ def test_build_sampling_params_allowlists_router_hint_extra_args():
     assert sp.extra_args == {
         "kv_transfer_params": {
             "internal": "kept",
-            "router_hint": router_hint,
+            "kv_hint": kv_hint,
         },
         "other_internal": "kept",
     }
@@ -1227,50 +1284,49 @@ def test_build_sampling_params_allowlists_router_hint_extra_args():
         {"do_remote_decode": True, "remote_engine_id": "prefill-a"},
     ],
 )
-def test_update_kv_transfer_params_preserves_router_hint_only(kv_transfer_params):
+def test_update_kv_transfer_params_preserves_kv_hint_only(kv_transfer_params):
     from dynamo.vllm.handlers import _update_kv_transfer_params
 
-    request_router_hint = {
-        "source_control_endpoint": "tcp://127.0.0.1:23280",
-        "block_hashes": [11, 22],
+    request_kv_hint = {
+        "protocol_version": "0.1",
+        "message_id": "msg-request",
+        "actions": [],
     }
-    stale_router_hint = {
-        "source_control_endpoint": "tcp://127.0.0.1:23281",
-        "block_hashes": [33, 44],
+    stale_kv_hint = {
+        "protocol_version": "0.1",
+        "message_id": "msg-stale",
+        "actions": [],
     }
     sampling_params = SimpleNamespace(
         extra_args={
             "kv_transfer_params": {
-                "router_hint": request_router_hint,
+                "kv_hint": request_kv_hint,
                 "untrusted_connector_param": "dropped",
             }
         }
     )
-    kv_transfer_params = {**kv_transfer_params, "router_hint": stale_router_hint}
+    kv_transfer_params = {**kv_transfer_params, "kv_hint": stale_kv_hint}
 
     _update_kv_transfer_params(
-        sampling_params, kv_transfer_params, preserve_router_hint=True
+        sampling_params, kv_transfer_params, preserve_kv_hint=True
     )
 
     assert sampling_params.extra_args["kv_transfer_params"] == {
-        **{
-            key: value
-            for key, value in kv_transfer_params.items()
-            if key != "router_hint"
-        },
-        "router_hint": request_router_hint,
+        **{key: value for key, value in kv_transfer_params.items() if key != "kv_hint"},
+        "kv_hint": request_kv_hint,
     }
 
 
-def test_update_kv_transfer_params_drops_existing_router_hint_by_default():
+def test_update_kv_transfer_params_drops_existing_kv_hint_by_default():
     from dynamo.vllm.handlers import _update_kv_transfer_params
 
-    router_hint = {
-        "source_control_endpoint": "tcp://127.0.0.1:23280",
-        "block_hashes": [11, 22],
+    kv_hint = {
+        "protocol_version": "0.1",
+        "message_id": "msg-request",
+        "actions": [],
     }
     sampling_params = SimpleNamespace(
-        extra_args={"kv_transfer_params": {"router_hint": router_hint}}
+        extra_args={"kv_transfer_params": {"kv_hint": kv_hint}}
     )
 
     _update_kv_transfer_params(sampling_params, {"transfer_id": "prefill-1"})
@@ -1280,12 +1336,13 @@ def test_update_kv_transfer_params_drops_existing_router_hint_by_default():
     }
 
 
-def test_update_kv_transfer_params_drops_replacement_router_hint():
+def test_update_kv_transfer_params_drops_replacement_kv_hint():
     from dynamo.vllm.handlers import _update_kv_transfer_params
 
-    stale_router_hint = {
-        "source_control_endpoint": "tcp://127.0.0.1:23281",
-        "block_hashes": [33, 44],
+    stale_kv_hint = {
+        "protocol_version": "0.1",
+        "message_id": "msg-stale",
+        "actions": [],
     }
     sampling_params = SimpleNamespace(extra_args={})
 
@@ -1293,7 +1350,7 @@ def test_update_kv_transfer_params_drops_replacement_router_hint():
         sampling_params,
         {
             "transfer_id": "prefill-1",
-            "router_hint": stale_router_hint,
+            "kv_hint": stale_kv_hint,
         },
     )
 
@@ -1305,13 +1362,14 @@ def test_update_kv_transfer_params_drops_replacement_router_hint():
 def test_update_kv_transfer_params_copies_extra_args_before_mutating():
     from dynamo.vllm.handlers import _update_kv_transfer_params
 
-    router_hint = {
-        "source_control_endpoint": "tcp://127.0.0.1:23280",
-        "block_hashes": [11, 22],
+    kv_hint = {
+        "protocol_version": "0.1",
+        "message_id": "msg-request",
+        "actions": [],
     }
     shared_extra_args = {
         "kv_transfer_params": {
-            "router_hint": router_hint,
+            "kv_hint": kv_hint,
             "internal": "kept-in-default",
         },
         "other_internal": "kept",
@@ -1319,12 +1377,12 @@ def test_update_kv_transfer_params_copies_extra_args_before_mutating():
     sampling_params = SimpleNamespace(extra_args=shared_extra_args)
 
     _update_kv_transfer_params(
-        sampling_params, {"transfer_id": "prefill-1"}, preserve_router_hint=True
+        sampling_params, {"transfer_id": "prefill-1"}, preserve_kv_hint=True
     )
 
     assert shared_extra_args == {
         "kv_transfer_params": {
-            "router_hint": router_hint,
+            "kv_hint": kv_hint,
             "internal": "kept-in-default",
         },
         "other_internal": "kept",
@@ -1333,7 +1391,7 @@ def test_update_kv_transfer_params_copies_extra_args_before_mutating():
     assert sampling_params.extra_args == {
         "kv_transfer_params": {
             "transfer_id": "prefill-1",
-            "router_hint": router_hint,
+            "kv_hint": kv_hint,
         },
         "other_internal": "kept",
     }
@@ -1835,6 +1893,7 @@ class TestEmbeddingWorkerFlag:
         mock_vllm_cli("--model", "Qwen/Qwen3-0.6B")
         config = parse_args()
         assert config.embedding_worker is False
+        assert config.embedding_worker_processes == 1
 
     def test_flag_sets_true(self, mock_vllm_cli):
         """--embedding-worker on its own with default agg mode parses cleanly."""
@@ -1847,6 +1906,53 @@ class TestEmbeddingWorkerFlag:
         )
         config = parse_args()
         assert config.embedding_worker is True
+
+    def test_embedding_worker_processes_parse(self, mock_vllm_cli):
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--embedding-worker",
+            "--embedding-worker-processes",
+            "8",
+            "--runner",
+            "pooling",
+        )
+        config = parse_args()
+        assert config.embedding_worker_processes == 8
+
+    def test_embedding_worker_processes_require_embedding_worker(self, mock_vllm_cli):
+        mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--embedding-worker-processes", "4")
+        with pytest.raises(ValueError, match="requires --embedding-worker"):
+            parse_args()
+
+    def test_embedding_worker_processes_reject_data_parallel(self, mock_vllm_cli):
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--embedding-worker",
+            "--embedding-worker-processes",
+            "4",
+            "--runner",
+            "pooling",
+            "--data-parallel-size",
+            "2",
+        )
+        with pytest.raises(ValueError, match="data-parallel-size=1"):
+            parse_args()
+
+    def test_embedding_worker_processes_reject_lora(self, mock_vllm_cli):
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--embedding-worker",
+            "--embedding-worker-processes",
+            "4",
+            "--runner",
+            "pooling",
+            "--enable-lora",
+        )
+        with pytest.raises(ValueError, match="--enable-lora"):
+            parse_args()
 
     def test_rejects_prefill_disagg(self, mock_vllm_cli):
         """--embedding-worker combined with --disaggregation-mode prefill is rejected."""
@@ -1976,3 +2082,78 @@ async def test_generate_text_mode_applies_nvext_cache_salt():
 
     assert chunks
     assert captured["prompt"]["cache_salt"] == "dynamo-cache-salt:tenant-a"
+
+
+@pytest.mark.asyncio
+async def test_generate_text_mode_notifies_for_empty_decoded_token():
+    from dynamo.vllm.handlers import DecodeWorkerHandler
+
+    class InputParams:
+        def get_input_param(self, request, use_tokenizer):
+            assert use_tokenizer is True
+            return [1, 2, 3]
+
+    class Context:
+        def __init__(self):
+            self.notifications = 0
+
+        def trace_headers(self):
+            return {}
+
+        def notify_first_token(self):
+            self.notifications += 1
+
+    context = Context()
+
+    class EngineClient:
+        def generate(self, prompt, *args, **kwargs):
+            async def gen():
+                yield SimpleNamespace(
+                    outputs=[
+                        SimpleNamespace(
+                            index=0,
+                            text="",
+                            token_ids=[101],
+                            finish_reason=None,
+                        )
+                    ]
+                )
+                assert context.notifications == 1
+                yield SimpleNamespace(
+                    outputs=[
+                        SimpleNamespace(
+                            index=0,
+                            text="a",
+                            token_ids=[101, 102],
+                            finish_reason=None,
+                        )
+                    ]
+                )
+
+            return gen()
+
+    @asynccontextmanager
+    async def abort_monitor(*args, **kwargs):
+        yield
+
+    handler = SimpleNamespace(
+        input_param_manager=InputParams(),
+        default_sampling_params={},
+        config=SimpleNamespace(disaggregation_mode=DisaggregationMode.AGGREGATED),
+        engine_client=EngineClient(),
+        _deferred_aborts={},
+        _shutdown_on_engine_dead=lambda exc: None,
+        _abort_monitor=abort_monitor,
+        _to_local_dp_rank=lambda rank: None,
+    )
+    request = {"model": "test-model", "prompt": "ignored after tokenization"}
+
+    chunks = [
+        chunk
+        async for chunk in DecodeWorkerHandler._generate_text_mode(
+            handler, request, context, "req-1"
+        )
+    ]
+
+    assert chunks[0]["choices"][0]["delta"]["content"] == ""
+    assert context.notifications == 1

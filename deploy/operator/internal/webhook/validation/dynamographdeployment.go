@@ -80,8 +80,22 @@ func (v *DynamoGraphDeploymentValidator) Validate(
 	deployment *nvidiacomv1beta1.DynamoGraphDeployment,
 	runtimeVersionSource runtimeVersionValidationSource,
 ) (admission.Warnings, error) {
+	return v.validate(ctx, deployment, runtimeVersionSource, false)
+}
+
+func (v *DynamoGraphDeploymentValidator) validate(
+	ctx context.Context,
+	deployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	runtimeVersionSource runtimeVersionValidationSource,
+	ratchetRuntimeVersion bool,
+) (admission.Warnings, error) {
 	validation := &dynamoGraphDeploymentValidation{
-		sharedValidation: sharedValidation{ctx: ctx, mgr: v.mgr, runtimeVersionSource: runtimeVersionSource},
+		sharedValidation: sharedValidation{
+			ctx:                   ctx,
+			mgr:                   v.mgr,
+			runtimeVersionSource:  runtimeVersionSource,
+			ratchetRuntimeVersion: ratchetRuntimeVersion,
+		},
 	}
 
 	allErrs := validation.validateDynamoGraphDeployment(deployment)
@@ -106,13 +120,18 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(
 	runtimeVersionSource runtimeVersionValidationSource,
 ) (admission.Warnings, error) {
 	validation := &dynamoGraphDeploymentValidation{
-		sharedValidation:  sharedValidation{ctx: ctx, mgr: v.mgr, runtimeVersionSource: runtimeVersionSource},
+		sharedValidation: sharedValidation{
+			ctx:                   ctx,
+			mgr:                   v.mgr,
+			runtimeVersionSource:  runtimeVersionSource,
+			ratchetRuntimeVersion: true,
+		},
 		userInfo:          userInfo,
 		operatorPrincipal: operatorPrincipal,
 	}
 
 	allErrs := validation.validateDynamoGraphDeploymentUpdate(newDGD, oldDGD)
-	if validation.validatesRuntimeVersionFor(runtimeVersionSourceV1Alpha1) {
+	if validation.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
 		newAlpha, err := alphaDynamoGraphDeploymentForValidation(newDGD)
 		if err != nil {
 			return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoGraphDeployment fields: %w", err)
@@ -127,6 +146,47 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(
 			field.NewPath("spec"),
 		)...)
 	}
+	return validation.warnings, invalidDynamoGraphDeploymentError(newDGD, allErrs)
+}
+
+// ValidateTerminatingUpdate validates an update to a DynamoGraphDeployment that
+// already carries a deletionTimestamp.
+//
+// Only the metadata update rules run. A finalizer can hold an object terminating
+// for an arbitrary period, so durable controller-owned metadata still has to be
+// protected, but any rule that judges the new object on its own can refuse the
+// cleanup update a legacy object needs and leave it impossible to finalize. The
+// spec update traversal is not purely comparative: it validates new-state GPU
+// memory service settings, and the v1alpha1 compatibility view returns a hard
+// error for an object that cannot round-trip.
+//
+// ctx, oldDGD, and newDGD must not be nil. If userInfo is nil, provider
+// materialization fails closed.
+func (v *DynamoGraphDeploymentValidator) ValidateTerminatingUpdate(
+	ctx context.Context,
+	oldDGD *nvidiacomv1beta1.DynamoGraphDeployment,
+	newDGD *nvidiacomv1beta1.DynamoGraphDeployment,
+	userInfo *authenticationv1.UserInfo,
+	operatorPrincipal string,
+) (admission.Warnings, error) {
+	// runtimeVersionSource is inert here: the metadata-only path never consults
+	// it, and the Disabled variant went away when runtime-version validation
+	// moved to the ratchet flag, so this carries the v1beta1 default.
+	validation := &dynamoGraphDeploymentValidation{
+		sharedValidation: sharedValidation{
+			ctx:                  ctx,
+			mgr:                  v.mgr,
+			runtimeVersionSource: runtimeVersionSourceV1Beta1,
+		},
+		userInfo:          userInfo,
+		operatorPrincipal: operatorPrincipal,
+	}
+
+	allErrs := validation.validateObjectMetaUpdate(
+		&newDGD.ObjectMeta,
+		&oldDGD.ObjectMeta,
+		field.NewPath("metadata"),
+	)
 	return validation.warnings, invalidDynamoGraphDeploymentError(newDGD, allErrs)
 }
 
@@ -202,11 +262,11 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMeta(
 
 	// Restrict the durable workload provider to programs implemented by the controller.
 	if value, exists := objectMeta.Annotations[consts.KubeAnnotationWorkloadProvider]; exists &&
-		value != consts.WorkloadProviderComponent && value != consts.WorkloadProviderGrove {
+		!isSupportedWorkloadProvider(value) {
 		allErrs = append(allErrs, field.NotSupported(
 			annotationsPath.Key(consts.KubeAnnotationWorkloadProvider),
 			value,
-			[]string{consts.WorkloadProviderComponent, consts.WorkloadProviderGrove},
+			supportedWorkloadProviders(),
 		))
 	}
 
@@ -418,24 +478,12 @@ func groveTopologyOverrideCompositionErrors(
 		if providerOverrideWritesGroveTopology(component.ProviderOverride, provider, provideroverride.ScopeComponent, component) {
 			allErrs = append(allErrs, field.Forbidden(componentPath.Child("providerOverride", "value"), detail))
 		}
-		if component.Multinode == nil {
-			continue
-		}
-		if component.Multinode.Leader != nil && providerOverrideWritesGroveTopology(
-			component.Multinode.Leader.ProviderOverride,
-			provider,
-			provideroverride.ScopeMultinodeLeader,
-			component,
-		) {
-			allErrs = append(allErrs, field.Forbidden(componentPath.Child("multinode", "leader", "providerOverride", "value"), detail))
-		}
-		if component.Multinode.Worker != nil && providerOverrideWritesGroveTopology(
-			component.Multinode.Worker.ProviderOverride,
-			provider,
-			provideroverride.ScopeMultinodeWorker,
-			component,
-		) {
-			allErrs = append(allErrs, field.Forbidden(componentPath.Child("multinode", "worker", "providerOverride", "value"), detail))
+		for roleIndex := range component.Roles {
+			role := &component.Roles[roleIndex]
+			scope, ok := provideroverride.ScopeForComponentRole(role.Name)
+			if ok && providerOverrideWritesGroveTopology(role.ProviderOverride, provider, scope, component) {
+				allErrs = append(allErrs, field.Forbidden(componentPath.Child("roles").Index(roleIndex).Child("providerOverride", "value"), detail))
+			}
 		}
 	}
 	return allErrs
@@ -648,6 +696,21 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMetaUpdate(
 		allErrs = append(allErrs, field.Forbidden(
 			annotationsPath.Key(consts.KubeAnnotationWorkloadProvider),
 			"may only be materialized by the Dynamo operator",
+		))
+	}
+
+	// A newly materialized provider must name a program the controller
+	// implements. The create-side metadata rules do not run while an object is
+	// terminating, so this has to hold on the update path as well. Only
+	// materialization needs it: once a provider exists, the immutability rule
+	// below rejects any change to it, so checking the value again there would
+	// report the same annotation twice.
+	if !oldProviderExists && newProviderExists &&
+		!isSupportedWorkloadProvider(newProvider) {
+		allErrs = append(allErrs, field.NotSupported(
+			annotationsPath.Key(consts.KubeAnnotationWorkloadProvider),
+			newProvider,
+			supportedWorkloadProviders(),
 		))
 	}
 

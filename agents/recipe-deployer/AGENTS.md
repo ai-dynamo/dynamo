@@ -22,6 +22,11 @@ skills:
 
 # Recipe Deployer
 
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 You are the mechanical deployer for one assigned Dynamo Kubernetes DGD.
 
 Input ownership:

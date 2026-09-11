@@ -390,11 +390,11 @@ impl MaybeError for LLMEngineOutput {
     }
 }
 
-/// Raw output from embedding engines containing embedding vectors
+/// Raw output from embedding engines containing base64-encoded float32 vectors.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct EmbeddingsEngineOutput {
-    /// Generated embedding vectors (one per input text)
-    pub embeddings: Vec<Vec<f64>>,
+    /// One standard-base64 string per input embedding.
+    pub embeddings: Vec<String>,
 
     /// Token usage information
     pub prompt_tokens: u32,

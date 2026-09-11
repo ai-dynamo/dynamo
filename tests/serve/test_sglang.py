@@ -5,7 +5,6 @@ import dataclasses
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Optional
 
 import pytest
 
@@ -44,6 +43,7 @@ from tests.utils.payload_builder import (
     guided_decoding_chat_payload_default,
     image_token_metrics_payload,
     kv_events_metrics_payload,
+    lora_chat_payload,
     metric_payload_default,
     responses_payload_default,
     responses_stream_payload_default,
@@ -51,10 +51,11 @@ from tests.utils.payload_builder import (
 )
 from tests.utils.payloads import (
     ChatPayload,
+    HttpErrorPayload,
     ImageGenerationPayload,
-    LoraTestChatPayload,
     ResponsesPayload,
     ResponsesStreamPayload,
+    SGLangDisaggRouterMetricsPayload,
     VideoGenerationPayload,
 )
 from tests.utils.port_utils import allocate_contiguous_ports, deallocate_ports
@@ -227,12 +228,19 @@ sglang_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
-            # Disagg workers expose fewer sglang:* metrics; check the
-            # prefill worker's endpoint (mirrors disaggregated_same_gpu).
-            metric_payload_default(
+            # The router distributes these requests across both prefill
+            # workers, so validate the aggregate instead of requiring one
+            # worker to observe all six requests.
+            SGLangDisaggRouterMetricsPayload(
+                body={},
+                expected_response=[],
+                expected_log=[],
                 min_num_requests=6,
-                backend="sglang_disagg",
                 port=DefaultPort.SYSTEM1.value,
+                system_ports=[
+                    DefaultPort.SYSTEM1.value,
+                    DefaultPort.SYSTEM2.value,
+                ],
             ),
         ],
     ),
@@ -265,6 +273,17 @@ sglang_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
+            HttpErrorPayload(
+                body={
+                    "messages": [{"role": "user", "content": "Name one color."}],
+                    "n": 2,
+                    "max_tokens": 1,
+                },
+                expected_response=["supports only n=1"],
+                expected_log=[],
+                endpoint="/v1/chat/completions",
+                timeout=10,
+            ),
             # Disagg workers expose fewer sglang:* metrics (~14 vs ~25 for aggregated)
             # because each only runs half the scheduler pipeline.
             metric_payload_default(
@@ -528,12 +547,31 @@ sglang_configs = {
         ],
         delayed_start=0,
         timeout=360,
+        env={
+            "DYN_MM_ENABLE_LIBJPEG": "1",
+            "DYNAMO_REQUIRE_LIBJPEG_TURBO_TEST": "1",
+        },
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             # Inline-base64 PNG: exercises strip_inline_data_urls in the
             # Rust frontend + NIXL RDMA transfer of decoded pixels — the
             # path that distinguishes FD from the plain URL path.
             make_image_payload_b64(["green"]),
+            chat_payload(
+                [
+                    {"type": "text", "text": "What is in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+                        },
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["image", "bus", "train", "streetcar"],
+                temperature=0.0,
+                max_tokens=100,
+            ),
             image_token_metrics_payload(),
         ],
     ),
@@ -633,6 +671,50 @@ sglang_configs = {
                     {
                         "type": "video_url",
                         "video_url": {"url": VIDEO_TEST_URI},
+                    },
+                ],
+                repeat_count=1,
+                expected_response=MULTIMODAL_VIDEO_EXPECTED,
+                temperature=0.0,
+                max_tokens=100,
+            )
+        ],
+    ),
+    "video_agg_fd_qwen": SGLangConfig(
+        name="video_agg_fd_qwen",
+        directory=sglang_dir,
+        script_name="agg_vision.sh",
+        marks=[
+            pytest.mark.multimodal,
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(10.0),
+            pytest.mark.requested_sglang_kv_tokens(8736),
+            pytest.mark.timeout(390),
+            pytest.mark.pre_merge,
+            # TODO: Enable media-ffmpeg in the SGLang container build, then
+            # remove this skip. Frontend video decoding requires the Dynamo
+            # binding to be built with media-ffmpeg support.
+            pytest.mark.skip(reason="SGLang container lacks media-ffmpeg support"),
+        ],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        script_args=[
+            "--model-path",
+            "Qwen/Qwen3-VL-2B-Instruct",
+            "--frontend-decoding",
+        ],
+        env={
+            "DYN_MM_ALLOW_INTERNAL": "1",
+            "DYN_MM_VIDEO_NUM_FRAMES": "4",
+        },
+        timeout=360,
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload(
+                [
+                    {"type": "text", "text": "Describe the video in detail"},
+                    {
+                        "type": "video_url",
+                        "video_url": {"url": MULTIMODAL_VIDEO_URL},
                     },
                 ],
                 repeat_count=1,
@@ -1100,40 +1182,6 @@ def test_sglang_deployment(
 # ── LoRA Tests ──────────────────────────────────────────────────────────────
 
 lora_dir = os.path.join(sglang_dir, "launch/lora")
-
-
-def lora_chat_payload(
-    lora_name: str,
-    s3_uri: str,
-    system_port: int = DefaultPort.SYSTEM1.value,
-    repeat_count: int = 2,
-    expected_response: Optional[list] = None,
-    expected_log: Optional[list] = None,
-    max_tokens: int = 100,
-    temperature: float = 0.0,
-) -> LoraTestChatPayload:
-    """Create a LoRA-enabled chat payload for testing"""
-    return LoraTestChatPayload(
-        body={
-            "model": lora_name,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": "What is deep learning? Answer in one sentence.",
-                }
-            ],
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "stream": False,
-        },
-        lora_name=lora_name,
-        s3_uri=s3_uri,
-        system_port=system_port,
-        repeat_count=repeat_count,
-        expected_response=expected_response
-        or ["learning", "neural", "network", "AI", "model"],
-        expected_log=expected_log or [],
-    )
 
 
 @pytest.mark.sglang

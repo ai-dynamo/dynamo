@@ -24,7 +24,8 @@ use dynamo_kv_router::sequences::topology::WorkerDpRange;
 use dynamo_kv_router::{
     ActiveSequencesMultiWorker, DefaultWorkerSelector, RadixTree, RoutingPartitionRef,
     SchedulingRequest, SequenceRequest, SessionContext, TrackingHashAlgorithm, TrackingHashContext,
-    TrackingHashScope, WorkerLoadProjection, WorkerSelector, scheduling::TierOverlapBlocks,
+    TrackingHashScope, WorkerLoadProjection, WorkerSelectionInput, WorkerSelector,
+    scheduling::TierOverlapBlocks,
 };
 use dynamo_tokens::SequenceHash;
 use rustc_hash::FxHashMap;
@@ -296,8 +297,8 @@ impl PendingRequest {
                 effective_overlap_blocks,
                 effective_cached_tokens,
             },
-            router_hint_candidates: None,
-            retain_router_hint_chain: false,
+            kv_transfer_candidates: None,
+            retain_kv_transfer_chain: false,
             worker_loads,
             track_prefill_tokens: self.track_prefill_tokens,
             router_config_override: None,
@@ -308,8 +309,9 @@ impl PendingRequest {
             session_context: self
                 .session_id
                 .clone()
-                .map(|session_id| SessionContext::new(session_id, None, None, None, None)),
+                .map(|session_id| SessionContext::new(session_id, None, None, None)),
             expected_output_tokens: self.expected_output_tokens,
+            affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: RoutingConstraints::default(),
@@ -925,12 +927,14 @@ impl OfflineReplayRouter {
             .project_worker_loads(request.token_seq.as_deref(), decay_now);
         let scheduling_request = request.scheduling_request(self.block_size as usize, worker_loads);
         let eligibility = scheduling_request.eligibility();
-        let selection = self.selector.select_worker(
-            &self.workers_with_configs,
-            &scheduling_request,
-            eligibility,
-            self.block_size,
-        )?;
+        let selection = self
+            .selector
+            .select_worker(WorkerSelectionInput::configured(
+                &self.workers_with_configs,
+                &scheduling_request,
+                eligibility,
+                self.block_size,
+            ))?;
         let worker_id = usize::try_from(selection.worker.worker_id)
             .map_err(|_| anyhow!("selected worker id does not fit into usize"))?;
         let dp_rank = usize::try_from(selection.worker.dp_rank)

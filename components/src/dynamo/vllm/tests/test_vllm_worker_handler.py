@@ -1136,6 +1136,70 @@ class TestDeferredAbort:
 
         handler.engine_client.abort.assert_awaited_once_with("req-6")
 
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_abort_monitor_cleans_waitables_after_normal_completion(self):
+        handler = _make_handler()
+        handler.shutdown_event = asyncio.Event()
+
+        killed_future = asyncio.get_running_loop().create_future()
+        context = MagicMock()
+        context.async_killed_or_stopped.return_value = killed_future
+
+        async with handler._abort_monitor(context, "req-cleanup"):
+            for _ in range(10):
+                if handler.shutdown_event._waiters:
+                    break
+                await asyncio.sleep(0)
+            assert len(handler.shutdown_event._waiters) == 1
+
+        assert killed_future.cancelled()
+        assert not handler.shutdown_event._waiters
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_abort_monitor_preserves_engine_shutdown_during_cleanup(self):
+        handler = _make_handler()
+        handler.engine_client = MagicMock()
+        handler.engine_client.abort = AsyncMock()
+        handler.shutdown_event = asyncio.Event()
+
+        killed_future = asyncio.get_running_loop().create_future()
+        context = MagicMock()
+        context.async_killed_or_stopped.return_value = killed_future
+
+        real_gather = asyncio.gather
+        gather_entered = asyncio.Event()
+        gather_release = asyncio.Event()
+
+        async def delayed_gather(*args, **kwargs):
+            gather_entered.set()
+            await gather_release.wait()
+            return await real_gather(*args, **kwargs)
+
+        with patch.object(mod.asyncio, "gather", side_effect=delayed_gather):
+            with pytest.raises(mod.EngineShutdown):
+                async with handler._abort_monitor(
+                    context, "req-shutdown"
+                ) as monitor_task:
+                    for _ in range(10):
+                        if handler.shutdown_event._waiters:
+                            break
+                        await asyncio.sleep(0)
+                    assert len(handler.shutdown_event._waiters) == 1
+
+                    handler.shutdown_event.set()
+                    for _ in range(10):
+                        if monitor_task.done() or gather_entered.is_set():
+                            break
+                        await asyncio.sleep(0)
+                    assert monitor_task.done() or gather_entered.is_set()
+
+        handler.engine_client.abort.assert_awaited_once_with("req-shutdown")
+        assert killed_future.cancelled()
+        assert not handler.shutdown_event._waiters
+        assert not gather_entered.is_set()
+
     # close() cleanup tests: case 1b safety
 
     @pytest.mark.asyncio
@@ -1402,6 +1466,22 @@ class TestEmbeddingWorkerHandlerCancellation:
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
+    async def test_abort_monitor_cleans_up_all_waiters(self):
+        handler = self._make_embedding_handler()
+        handler.shutdown_event = asyncio.Event()
+        context = self._make_context()
+        killed_or_stopped = context.async_killed_or_stopped.return_value
+
+        async with handler._abort_monitor(context, "test-req"):
+            while not handler.shutdown_event._waiters:
+                await asyncio.sleep(0)
+            assert len(handler.shutdown_event._waiters) == 1
+
+        assert killed_or_stopped.cancelled()
+        assert not handler.shutdown_event._waiters
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
     async def test_partial_failure_cancels_in_flight_encodes(self):
         """When one prompt's encode raises, the siblings must be cancelled.
 
@@ -1478,16 +1558,69 @@ class TestEmbeddingWorkerHandlerCancellation:
         assert len(response["data"]) == 2
         assert response["data"][0]["index"] == 0
         assert response["data"][1]["index"] == 1
-        # The worker always emits base64 on the internal worker->frontend
-        # wire format; the Rust HTTP frontend decodes back to float at the
-        # HTTP boundary when the client asks for float. So both data items
-        # have the same base64 of [0.1, 0.2, 0.3] here.
         expected_b64 = mod._encode_floats_to_base64([0.1, 0.2, 0.3])
         assert response["data"][0]["embedding"] == expected_b64
         assert response["data"][1]["embedding"] == expected_b64
         # No tasks were in flight at gather completion, so the finally
         # cancel-and-await pass must not have touched the engine.
         assert aborted == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    @pytest.mark.parametrize(
+        "encoding_fields",
+        [{}, {"encoding_format": None}, {"encoding_format": "float"}],
+        ids=["omitted", "null", "float"],
+    )
+    async def test_tokens_default_response_uses_base64_engine_output_shape(
+        self, encoding_fields
+    ):
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+
+        async def fake_encode(prompt, pooling_params, request_id):
+            output = MagicMock()
+            output.outputs.data = torch.tensor([0.1, 0.2, 0.3])
+            output.prompt_token_ids = prompt["prompt_token_ids"]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+        responses = [
+            response
+            async for response in handler.generate(
+                {
+                    "token_ids": [[11, 12, 13]],
+                    "model": "test-model",
+                    **encoding_fields,
+                },
+                context,
+            )
+        ]
+
+        assert responses == [
+            {
+                "embeddings": [mod._encode_floats_to_base64([0.1, 0.2, 0.3])],
+                "prompt_tokens": 3,
+                "total_tokens": 3,
+            }
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_tokens_invalid_encoding_format_is_rejected(self):
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+
+        with pytest.raises(ValueError, match="Invalid 'encoding_format' value"):
+            async for _ in handler.generate(
+                {
+                    "token_ids": [[11, 12, 13]],
+                    "model": "test-model",
+                    "encoding_format": "invalid",
+                },
+                context,
+            ):
+                pass
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
@@ -1504,8 +1637,7 @@ class TestEmbeddingWorkerHandlerCancellation:
         context = self._make_context()
         captured: dict = {}
         # vLLM's pooler has already reduced to the requested ``dimensions``, so
-        # the stub returns a 128-dim vector (not 3) -- otherwise the handler's
-        # oversized-dimensions guard would (correctly) reject it.
+        # the stub returns the final 128-dim vector.
         vec = [i * 0.01 for i in range(128)]
 
         async def fake_encode(prompt, pooling_params, request_id):
@@ -1523,11 +1655,12 @@ class TestEmbeddingWorkerHandlerCancellation:
         pp = captured["pooling_params"]
         assert pp.task == "embed"
         assert pp.dimensions == 128
-        # No post-hoc truncation: the handler returns exactly the vector vLLM
-        # produced (the 128-float stub here), trusting the pooler to have
-        # already applied the dimensionality reduction.
-        expected_b64 = mod._encode_floats_to_base64(vec)
-        assert responses[0]["data"][0]["embedding"] == expected_b64
+        # No post-hoc truncation: the handler transports the vector produced
+        # by vLLM unchanged. A separate defensive guard rejects outputs shorter
+        # than the requested dimensions.
+        assert responses[0]["data"][0]["embedding"] == (
+            mod._encode_floats_to_base64(vec)
+        )
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
@@ -1596,6 +1729,101 @@ class TestEmbeddingWorkerHandlerCancellation:
                 "prompt": "hello",
                 "tokenization_kwargs": {"truncate_prompt_tokens": -1},
             },
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_raw_text_add_special_tokens_forwarded_to_vllm(self):
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+        captured: list[dict | None] = []
+
+        async def fake_encode(
+            prompt, pooling_params, request_id, *, tokenization_kwargs=None
+        ):
+            captured.append(tokenization_kwargs)
+            output = MagicMock()
+            output.outputs.data = torch.tensor([0.1, 0.2, 0.3])
+            output.prompt_token_ids = [1, 2, 3]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+
+        for add_special_tokens in (True, False):
+            request = {
+                "input": "hello",
+                "model": "test-model",
+                "add_special_tokens": add_special_tokens,
+                "truncate_prompt_tokens": 128,
+            }
+            _ = [r async for r in handler.generate(request, context)]
+
+        assert captured == [
+            {"truncate_prompt_tokens": 128, "add_special_tokens": True},
+            {"truncate_prompt_tokens": 128, "add_special_tokens": False},
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_omitted_add_special_tokens_is_not_forwarded_to_vllm(self):
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+        captured: list[dict] = []
+
+        async def fake_encode(prompt, pooling_params, request_id, **kwargs):
+            captured.append(kwargs)
+            output = MagicMock()
+            output.outputs.data = torch.tensor([0.1, 0.2, 0.3])
+            output.prompt_token_ids = [1, 2, 3]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+        request = {"input": "hello", "model": "test-model"}
+        _ = [r async for r in handler.generate(request, context)]
+
+        assert captured == [{}]
+
+    @pytest.mark.parametrize("value", ["true", 1, 0, []])
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_add_special_tokens_rejects_non_bool(self, value):
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+        request = {
+            "input": "hello",
+            "model": "test-model",
+            "add_special_tokens": value,
+        }
+        with pytest.raises(TypeError, match="Invalid 'add_special_tokens' type"):
+            async for _ in handler.generate(request, context):
+                pass
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_rust_preprocessed_token_ids_are_not_retokenized(self):
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+        captured = []
+
+        async def fake_encode(prompt, pooling_params, request_id):
+            captured.append(prompt)
+            output = MagicMock()
+            output.outputs.data = torch.tensor([0.1, 0.2, 0.3])
+            output.prompt_token_ids = prompt["prompt_token_ids"]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+        request = {
+            "token_ids": [[11, 12, 13], [21, 22]],
+            "model": "test-model",
+            "add_special_tokens": True,
+            "truncate_prompt_tokens": 2,
+        }
+        _ = [r async for r in handler.generate(request, context)]
+
+        assert [p["prompt_token_ids"] for p in captured] == [
+            [11, 12, 13],
+            [21, 22],
         ]
 
     @pytest.mark.parametrize(

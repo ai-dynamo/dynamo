@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use socket2::{Domain, SockAddr, Socket, Type};
+use socket2::{Domain, SockAddr, SockRef, Socket, Type};
 use std::{
     collections::{HashMap, HashSet},
     net::{IpAddr, SocketAddr, TcpListener},
@@ -22,7 +22,7 @@ const TOMBSTONE_TTL: Duration = Duration::from_secs(5);
 use bytes::Bytes;
 use derive_builder::Builder;
 use futures::{SinkExt, StreamExt};
-use local_ip_address::{Error, list_afinet_netifas, local_ip, local_ipv6};
+use local_ip_address::Error;
 use parking_lot::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -47,26 +47,10 @@ use crate::pipeline::{
         tcp::StreamType,
     },
 };
-use anyhow::{Context, Result, anyhow as error};
+use crate::utils::ip_resolver::resolve_host_or_interface;
+use anyhow::{Result, anyhow as error};
 
-// Trait for IP address resolution - allows dependency injection for testing
-pub trait IpResolver {
-    fn local_ip(&self) -> Result<std::net::IpAddr, Error>;
-    fn local_ipv6(&self) -> Result<std::net::IpAddr, Error>;
-}
-
-// Default implementation using the real local_ip_address crate
-pub struct DefaultIpResolver;
-
-impl IpResolver for DefaultIpResolver {
-    fn local_ip(&self) -> Result<std::net::IpAddr, Error> {
-        local_ip()
-    }
-
-    fn local_ipv6(&self) -> Result<std::net::IpAddr, Error> {
-        local_ipv6()
-    }
-}
+pub use crate::utils::ip_resolver::{DefaultIpResolver, IpResolver};
 
 #[allow(dead_code)]
 type ResponseType = TwoPartMessage;
@@ -76,6 +60,8 @@ pub struct ServerOptions {
     #[builder(default = "0")]
     pub port: u16,
 
+    /// IP literal or exact network interface name used to bind and advertise the server.
+    /// When unset, Dynamo selects a local address automatically.
     #[builder(default)]
     pub interface: Option<String>,
 }
@@ -90,7 +76,7 @@ impl ServerOptions {
 /// A Response connection is a connection that is established by a client with the intention of sending
 /// specific data back to the server.
 pub struct TcpStreamServer {
-    local_ip: String,
+    local_ip: IpAddr,
     local_port: u16,
     state: Arc<Mutex<State>>,
 }
@@ -173,6 +159,10 @@ fn prune_tombstones(tombstones: &mut HashMap<EndpointInstanceId, Instant>, now: 
 }
 
 impl TcpStreamServer {
+    pub fn local_address(&self) -> Result<SocketAddr> {
+        Ok(SocketAddr::new(self.local_ip, self.local_port))
+    }
+
     pub fn options_builder() -> ServerOptionsBuilder {
         ServerOptionsBuilder::default()
     }
@@ -185,19 +175,12 @@ impl TcpStreamServer {
         options: ServerOptions,
         resolver: R,
     ) -> Result<Arc<Self>, PipelineError> {
-        let local_ip = match options.interface {
-            Some(interface) => {
-                let interfaces: HashMap<String, std::net::IpAddr> =
-                    list_afinet_netifas()?.into_iter().collect();
-
-                interfaces
-                    .get(&interface)
-                    .ok_or(PipelineError::Generic(format!(
-                        "Interface not found: {}",
-                        interface
-                    )))?
-                    .to_string()
-            }
+        let local_ip = match options.interface.as_deref() {
+            Some(host) => resolve_host_or_interface(host, &resolver).map_err(|error| {
+                PipelineError::Generic(format!(
+                    "Failed to resolve configured TCP host '{host}': {error}"
+                ))
+            })?,
             None => {
                 let resolved_ip = resolver.local_ip().or_else(|err| match err {
                     Error::LocalIpAddressNotFound => resolver.local_ipv6(),
@@ -222,7 +205,6 @@ impl TcpStreamServer {
                         )));
                     }
                 }
-                .to_string()
             }
         };
 
@@ -233,13 +215,14 @@ impl TcpStreamServer {
             PipelineError::Generic(format!("Failed to build TCP TLS acceptor: {}", e))
         })?;
 
-        let local_port = Self::start(local_ip.clone(), options.port, state.clone(), tls_acceptor)
+        let local_port = Self::start(local_ip, options.port, state.clone(), tls_acceptor)
             .await
             .map_err(|e| {
                 PipelineError::Generic(format!("Failed to start TcpStreamServer: {}", e))
             })?;
 
-        tracing::debug!("tcp transport service on {local_ip}:{local_port}");
+        let local_addr = SocketAddr::new(local_ip, local_port);
+        tracing::debug!("tcp transport service on {local_addr}");
 
         Ok(Arc::new(Self {
             local_ip,
@@ -297,6 +280,27 @@ impl TcpStreamServer {
         if let Some(s) = send_subject {
             entry.insert((StreamType::Request, s.to_string()));
         }
+        true
+    }
+
+    /// Associate a request-only callback registration with a backend instance.
+    /// QUIC response mode still uses TCP for bidirectional request callbacks.
+    pub async fn associate_request_instance(&self, subject: &str, id: &EndpointInstanceId) -> bool {
+        let mut state = self.state.lock();
+        let now = Instant::now();
+        prune_tombstones(&mut state.removed_instances, now);
+        if state.removed_instances.contains_key(id) {
+            state.tx_subjects.remove(subject);
+            return false;
+        }
+        state
+            .subject_instance
+            .insert(subject.to_string(), id.clone());
+        state
+            .instance_subjects
+            .entry(id.clone())
+            .or_default()
+            .insert((StreamType::Request, subject.to_string()));
         true
     }
 
@@ -369,48 +373,30 @@ impl TcpStreamServer {
     }
 
     /// Build a TLS acceptor from env vars if `DYN_TCP_TLS_CERT_PATH` and
-    /// `DYN_TCP_TLS_KEY_PATH` are set.
-    fn build_tls_acceptor() -> anyhow::Result<Option<Arc<TlsAcceptor>>> {
+    /// `DYN_TCP_TLS_KEY_PATH` are set. Validation and diagnostics are shared with
+    /// the request-plane server via
+    /// [`crate::tls_utils::server_tls_acceptor_config`]; a client CA enables mTLS.
+    fn build_tls_acceptor() -> anyhow::Result<Option<TlsAcceptor>> {
         use crate::config::environment_names::tcp_response_stream::tls as env;
         let cert_path = std::env::var(env::DYN_TCP_TLS_CERT_PATH).ok();
         let key_path = std::env::var(env::DYN_TCP_TLS_KEY_PATH).ok();
-        match (cert_path, key_path) {
-            (Some(cert), Some(key)) => {
-                let server_config =
-                    crate::tls_utils::server_tls_config(cert.as_ref(), key.as_ref())?;
-                tracing::info!("TCP server: TLS enabled");
-                Ok(Some(Arc::new(TlsAcceptor::from(Arc::new(server_config)))))
-            }
-            (None, None) => {
-                // Warn if the client side has TLS configured — mixing plaintext server with
-                // TLS client (or vice versa) results in failed connections that are hard to debug.
-                let client_tls_set = std::env::var(env::DYN_TCP_TLS_CA_CERT_PATH).is_ok()
-                    || crate::config::env_is_truthy(env::DYN_TCP_TLS_INSECURE);
-                if client_tls_set {
-                    tracing::warn!(
-                        "TCP server is running in plaintext mode but client TLS env vars are set. \
-                         Set {} and {} to enable server-side TLS, or unset client TLS vars.",
-                        env::DYN_TCP_TLS_CERT_PATH,
-                        env::DYN_TCP_TLS_KEY_PATH,
-                    );
-                }
-                Ok(None)
-            }
-            _ => anyhow::bail!(
-                "Both {} and {} must be set to enable TCP TLS",
-                env::DYN_TCP_TLS_CERT_PATH,
-                env::DYN_TCP_TLS_KEY_PATH
-            ),
-        }
+        let client_ca = std::env::var(env::DYN_TCP_TLS_CLIENT_CA_CERT_PATH).ok();
+        Ok(crate::tls_utils::server_tls_acceptor_config(
+            "TCP server",
+            cert_path.as_deref().map(std::path::Path::new),
+            key_path.as_deref().map(std::path::Path::new),
+            client_ca.as_deref().map(std::path::Path::new),
+        )?
+        .map(|config| TlsAcceptor::from(Arc::new(config))))
     }
 
     async fn start(
-        local_ip: String,
+        local_ip: IpAddr,
         local_port: u16,
         state: Arc<Mutex<State>>,
-        tls_acceptor: Option<Arc<TlsAcceptor>>,
+        tls_acceptor: Option<TlsAcceptor>,
     ) -> Result<u16> {
-        let addr = format!("{}:{}", local_ip, local_port);
+        let addr = SocketAddr::new(local_ip, local_port);
         let state_clone = state.clone();
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<u16>>();
         {
@@ -495,7 +481,7 @@ impl ResponseService for TcpStreamServer {
     async fn register(&self, options: StreamOptions) -> PendingConnections {
         // oneshot channels to pass back the sender and receiver objects
 
-        let address = format!("{}:{}", self.local_ip, self.local_port);
+        let address = SocketAddr::new(self.local_ip, self.local_port).to_string();
         tracing::debug!("Registering new TcpStream on {address}");
 
         let send_stream = if options.enable_request_stream {
@@ -787,12 +773,12 @@ type BoxWrite = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
 // the sender, then we spawn a task to forward all bytes from the tcp stream
 // to the sender
 async fn tcp_listener(
-    addr: String,
+    addr: SocketAddr,
     state: Arc<Mutex<State>>,
-    tls_acceptor: Option<Arc<TlsAcceptor>>,
+    tls_acceptor: Option<TlsAcceptor>,
     read_tx: tokio::sync::oneshot::Sender<Result<u16>>,
 ) -> Result<()> {
-    let listener = tokio::net::TcpListener::bind(&addr)
+    let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to start TcpListender on {}: {}", addr, e));
 
@@ -846,7 +832,7 @@ async fn tcp_listener(
             }
         }
 
-        match stream.set_linger(Some(std::time::Duration::from_secs(0))) {
+        match SockRef::from(&stream).set_linger(Some(std::time::Duration::from_secs(0))) {
             Ok(_) => (),
             Err(e) => {
                 tracing::warn!("failed to set tcp stream to linger: {e}");
@@ -1341,36 +1327,29 @@ mod tests {
     use crate::pipeline::Context;
     use crate::pipeline::network::DEFAULT_SEND_BUFFER_COUNT;
     use crate::pipeline::network::tcp::client::TcpClient;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
+    use crate::tls_utils::test_certs::self_signed_pair;
     use tokio::io::{AsyncWriteExt, ReadHalf, WriteHalf};
     use tokio::net::TcpStream;
 
-    fn make_cert_files() -> (NamedTempFile, NamedTempFile) {
-        let key_pair = rcgen::KeyPair::generate().unwrap();
-        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
-            .unwrap()
-            .self_signed(&key_pair)
-            .unwrap();
-        let mut cert_file = NamedTempFile::new().unwrap();
-        cert_file.write_all(cert.pem().as_bytes()).unwrap();
-        let mut key_file = NamedTempFile::new().unwrap();
-        key_file
-            .write_all(key_pair.serialize_pem().as_bytes())
-            .unwrap();
-        (cert_file, key_file)
-    }
-
     #[test]
     fn build_tls_acceptor_no_env_vars_is_plaintext() {
-        temp_env::with_vars_unset(["DYN_TCP_TLS_CERT_PATH", "DYN_TCP_TLS_KEY_PATH"], || {
-            assert!(TcpStreamServer::build_tls_acceptor().unwrap().is_none());
-        });
+        // Also clear the client-CA var: ambient it would turn this into an error
+        // (client CA without a server cert/key) instead of plaintext.
+        temp_env::with_vars_unset(
+            [
+                "DYN_TCP_TLS_CERT_PATH",
+                "DYN_TCP_TLS_KEY_PATH",
+                "DYN_TCP_TLS_CLIENT_CA_CERT_PATH",
+            ],
+            || {
+                assert!(TcpStreamServer::build_tls_acceptor().unwrap().is_none());
+            },
+        );
     }
 
     #[test]
     fn build_tls_acceptor_partial_config_errors() {
-        let (cert, key) = make_cert_files();
+        let (cert, key) = self_signed_pair();
         let cert_str = cert.path().to_str().unwrap();
         let key_str = key.path().to_str().unwrap();
         // only cert
@@ -1393,13 +1372,46 @@ mod tests {
 
     #[test]
     fn build_tls_acceptor_both_paths_is_tls() {
-        let (cert, key) = make_cert_files();
+        let (cert, key) = self_signed_pair();
         temp_env::with_vars(
             [
                 ("DYN_TCP_TLS_CERT_PATH", Some(cert.path().to_str().unwrap())),
                 ("DYN_TCP_TLS_KEY_PATH", Some(key.path().to_str().unwrap())),
             ],
             || assert!(TcpStreamServer::build_tls_acceptor().unwrap().is_some()),
+        );
+    }
+
+    #[test]
+    fn build_tls_acceptor_with_client_ca_is_mtls() {
+        // A client CA turns the response-stream server into an mTLS acceptor.
+        let (cert, key) = self_signed_pair();
+        temp_env::with_vars(
+            [
+                ("DYN_TCP_TLS_CERT_PATH", Some(cert.path().to_str().unwrap())),
+                ("DYN_TCP_TLS_KEY_PATH", Some(key.path().to_str().unwrap())),
+                (
+                    "DYN_TCP_TLS_CLIENT_CA_CERT_PATH",
+                    Some(cert.path().to_str().unwrap()),
+                ),
+            ],
+            || assert!(TcpStreamServer::build_tls_acceptor().unwrap().is_some()),
+        );
+    }
+
+    #[test]
+    fn build_tls_acceptor_client_ca_without_server_identity_errors() {
+        let (cert, _key) = self_signed_pair();
+        temp_env::with_vars(
+            [
+                ("DYN_TCP_TLS_CERT_PATH", None),
+                ("DYN_TCP_TLS_KEY_PATH", None),
+                (
+                    "DYN_TCP_TLS_CLIENT_CA_CERT_PATH",
+                    Some(cert.path().to_str().unwrap()),
+                ),
+            ],
+            || assert!(TcpStreamServer::build_tls_acceptor().is_err()),
         );
     }
 
@@ -1570,6 +1582,51 @@ mod tests {
 
         // The server should work with the fallback IP
         assert!(socket_addr.port() > 0, "Server should have a valid port");
+    }
+
+    #[tokio::test]
+    async fn configured_ip_literals_bind_and_format_addresses() {
+        let ipv6_available = TcpListener::bind("[::1]:0").is_ok();
+
+        for (host, expected_ip) in [
+            ("127.0.0.1", "127.0.0.1".parse::<IpAddr>().unwrap()),
+            ("::1", "::1".parse::<IpAddr>().unwrap()),
+        ] {
+            if expected_ip.is_ipv6() && !ipv6_available {
+                eprintln!("skipping IPv6 bind because this host does not support IPv6 loopback");
+                continue;
+            }
+
+            let server = TcpStreamServer::new_with_resolver(
+                ServerOptions {
+                    port: 0,
+                    interface: Some(host.to_string()),
+                },
+                FailingIpResolver,
+            )
+            .await
+            .unwrap();
+            let context = Context::new(());
+            let pending = server
+                .register(
+                    StreamOptions::builder()
+                        .context(context.context())
+                        .enable_request_stream(false)
+                        .enable_response_stream(true)
+                        .build()
+                        .unwrap(),
+                )
+                .await;
+            let connection_info = pending.recv_stream.unwrap().connection_info;
+            let tcp_info: TcpStreamConnectionInfo = connection_info.try_into().unwrap();
+            let address = tcp_info.address.parse::<SocketAddr>().unwrap();
+
+            assert_eq!(address.ip(), expected_ip);
+            assert_ne!(address.port(), 0);
+            if expected_ip.is_ipv6() {
+                assert!(tcp_info.address.starts_with('['));
+            }
+        }
     }
 
     /// Create a test server using the failing IP resolver (falls back to loopback).
