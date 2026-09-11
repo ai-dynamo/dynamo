@@ -2371,7 +2371,7 @@ mod tests {
         // StreamReceiver doesn't impl Debug, so we can't use `.expect_err`.
         match outcome {
             Err(err) => assert!(
-                err.message.contains("malformed prologue"),
+                err.contains("malformed prologue"),
                 "expected malformed-prologue error, got: {err}"
             ),
             Ok(_) => panic!("invalid prologue should produce an error, but got Ok"),

@@ -255,6 +255,38 @@ impl std::fmt::Display for StreamPrologueError {
     }
 }
 
+/// Derefs to the message so code written against the previous `String` error
+/// keeps working: `err.contains(..)`, `err.len()`, `&err[..]` all still resolve.
+/// Only an explicit `String` type annotation or signature needs updating.
+impl std::ops::Deref for StreamPrologueError {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.message
+    }
+}
+
+impl AsRef<str> for StreamPrologueError {
+    fn as_ref(&self) -> &str {
+        &self.message
+    }
+}
+
+impl From<String> for StreamPrologueError {
+    fn from(message: String) -> Self {
+        Self::from_message(message)
+    }
+}
+
+impl From<&str> for StreamPrologueError {
+    fn from(message: &str) -> Self {
+        Self::from_message(message)
+    }
+}
+
+/// The error type widened from `String` to [`StreamPrologueError`] so a
+/// pre-stream failure keeps the worker's [`crate::error::ErrorType`] instead of
+/// only its display text.
 pub type StreamProvider<T> = tokio::sync::oneshot::Receiver<Result<T, StreamPrologueError>>;
 
 /// Owning `Drop` here (rather than on `RegisteredStream`) lets `into_parts()`
@@ -557,7 +589,7 @@ mod tests {
     use super::{
         DEFAULT_SEND_BUFFER_COUNT, IngressResponseEncoder, NetworkStreamWrapper,
         RequestControlMessage, RequestPlanePayloadCodec, RequestType, ResponseStreamPrologue,
-        ResponseType, SerdeIngressPayloadAdapter, StreamOptions,
+        ResponseType, SerdeIngressPayloadAdapter, StreamOptions, StreamPrologueError,
     };
     use crate::engine::AsyncEngineContextProvider;
     use crate::error::{BackendError, DynamoError, ErrorType};
@@ -586,6 +618,27 @@ mod tests {
             prologue.typed_error.is_none(),
             "an absent typed error must decode to None, not fail"
         );
+    }
+
+    /// Pins the `String` compat shim on the widened `StreamProvider` error:
+    /// `str` methods and `String` conversion must keep resolving without a
+    /// field access, or the source break gets wider than intended.
+    #[test]
+    fn stream_prologue_error_substitutes_for_the_previous_string() {
+        let err = StreamPrologueError::from_message("malformed prologue: bad header");
+
+        assert!(err.contains("malformed prologue"));
+        assert!(err.starts_with("malformed"));
+        assert_eq!(err.len(), "malformed prologue: bad header".len());
+        assert_eq!(&err[..9], "malformed");
+        assert_eq!(err.as_ref() as &str, "malformed prologue: bad header");
+
+        let converted: StreamPrologueError = "from a &str".into();
+        assert_eq!(converted.message, "from a &str");
+        assert!(converted.typed_error.is_none());
+
+        let converted: StreamPrologueError = String::from("from a String").into();
+        assert_eq!(converted.message, "from a String");
     }
 
     #[test]
