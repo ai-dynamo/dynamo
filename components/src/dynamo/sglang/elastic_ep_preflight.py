@@ -19,11 +19,10 @@ from typing import Dict, List, Optional, Tuple
 MOONCAKE_BACKEND = "mooncake"
 
 # The torch backend names SGLang registers its elastic-EP process groups under
-# (sglang/srt/distributed/parallel_state.py): the device group and the CPU group
-# it uses for the metadata collectives. The extension registers both together, so
-# one present without the other is a partial registration the engine falls over
-# on later.
-_REQUIRED_TORCH_BACKENDS = ("mooncake", "mooncake-cpu")
+# (sglang/srt/distributed/parallel_state.py): the CUDA device group and the CPU
+# group it uses for metadata collectives. The extension must register both with
+# their expected device capabilities, or engine startup still fails later.
+_REQUIRED_TORCH_BACKENDS = {"mooncake": "cuda", "mooncake-cpu": "cpu"}
 
 # mooncake renamed this extension ``mooncake.ep`` -> ``mooncake.pg``; SGLang
 # v0.5.16 imports the old name and v0.5.18 the new one.
@@ -227,7 +226,8 @@ def _build_diagnostic(
     ]
     if missing_backends:
         lines.append(
-            "  required by SGLang but not registered: " f"{', '.join(missing_backends)}"
+            "  required by SGLang but missing or unavailable for its expected device: "
+            f"{', '.join(missing_backends)}"
         )
     if enable_dp_attention:
         lines.append(
@@ -256,7 +256,8 @@ def check_elastic_ep_backend(
     Raises:
         ValueError: The mooncake backend was requested but its torch
             ProcessGroup extension does not import, or imports without
-            registering both of the backends SGLang asks torch for.
+            registering both of the backends SGLang asks torch for with their
+            required device capabilities.
     """
     if not elastic_ep_backend:
         return
@@ -271,7 +272,9 @@ def check_elastic_ep_backend(
         if readable_backends is None:
             return
         missing_backends = tuple(
-            name for name in _REQUIRED_TORCH_BACKENDS if name not in readable_backends
+            name
+            for name, required_device in _REQUIRED_TORCH_BACKENDS.items()
+            if required_device not in readable_backends.get(name, ())
         )
         if not missing_backends:
             return
