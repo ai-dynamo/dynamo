@@ -275,6 +275,7 @@ def build_tool_call_guided_decoding(
                 return {"regex": r"\{\}"}
             if (
                 request.parallel_tool_calls is False
+                and tool_choice == "required"
                 and json_schema.get("type") == "array"
             ):
                 json_schema["maxItems"] = 1

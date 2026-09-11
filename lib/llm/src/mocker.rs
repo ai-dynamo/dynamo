@@ -8,6 +8,7 @@
 
 mod handoff;
 mod metrics;
+mod sglang;
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -20,6 +21,7 @@ use std::time::{Duration, Instant};
 use crate::backend::ExecutionContext;
 use crate::kv_router::publisher::{KvEventPublisher, KvEventSourceConfig, WorkerMetricsPublisher};
 use crate::protocols::TokenIdType;
+use crate::protocols::common::FinishReason;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 use anyhow::{Context, Result, bail};
 use dynamo_kv_router::protocols::{KvCacheEvent, StorageTier};
@@ -792,6 +794,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let (request, ctx) = input.into_parts();
         let request_start = Instant::now();
+        let native_sglang = sglang::response_metadata(&request, ctx.id()).map_err(Error::from)?;
+        let native_sglang_terminal = native_sglang.is_some();
 
         let dp_rank = self.resolve_dp_rank(&request);
 
@@ -818,7 +822,19 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 .ok_or_else(|| Error::msg("max_output_tokens must be specified for mocker"))?
                 as usize
         };
-        let replay_key = request.get_annotation_value(OUTPUT_REPLAY_ID_ANNOTATION_KEY);
+        let replay_key = request
+            .get_annotation_value(OUTPUT_REPLAY_ID_ANNOTATION_KEY)
+            .or_else(|| {
+                // A native SGLang decode request has no replay annotation, so fall back to its
+                // rid. Only do so when a trace is loaded, otherwise every native request would
+                // warn below about a replay it never asked for.
+                if is_prefill {
+                    return None;
+                }
+                let metadata = native_sglang.as_ref()?;
+                self.response_replay_table.as_ref()?;
+                Some(metadata.request_id().to_string())
+            });
         let planned_output_token_ids = replay_key.as_deref().and_then(|key| {
             let Some(table) = self.response_replay_table.as_ref() else {
                 tracing::warn!(
@@ -1141,10 +1157,15 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                         }
 
                         if signal.completed {
-                            if !send_response(&stream_tx, output, &async_context) {
-                                break;
-                            }
-                            native_timing.record_tokens(1);
+                            let mut terminal_output = if native_sglang_terminal {
+                                Some(output)
+                            } else {
+                                if !send_response(&stream_tx, output, &async_context) {
+                                    break;
+                                }
+                                native_timing.record_tokens(1);
+                                None
+                            };
 
                             let delay_completed = tokio::select! {
                                 _ = wait_for_no_bootstrap_handoff_delay(
@@ -1202,26 +1223,45 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                 }
                             }
 
-                            let mut final_output = LLMEngineOutput::length();
-                            if let Some(cached) = cached_prefix_tokens {
-                                final_output.completion_usage = Some(usage_with_cached_tokens(
-                                    prompt_tokens_count,
-                                    token_count,
-                                    cached,
-                                ));
-                            }
-                            if !send_response(&stream_tx, final_output, &async_context) {
-                                break;
+                            if native_sglang_terminal {
+                                // Native SGLang carries terminal metadata on the final token.
+                                let mut output = terminal_output
+                                    .take()
+                                    .expect("native SGLang request has a terminal token");
+                                output.finish_reason = Some(FinishReason::Length);
+                                if let Some(cached) = cached_prefix_tokens {
+                                    output.completion_usage = Some(usage_with_cached_tokens(
+                                        prompt_tokens_count,
+                                        token_count,
+                                        cached,
+                                    ));
+                                }
+                                if !send_response(&stream_tx, output, &async_context) {
+                                    break;
+                                }
+                                native_timing.record_tokens(1);
+                            } else {
+                                let mut final_output = LLMEngineOutput::length();
+                                if let Some(cached) = cached_prefix_tokens {
+                                    final_output.completion_usage = Some(usage_with_cached_tokens(
+                                        prompt_tokens_count,
+                                        token_count,
+                                        cached,
+                                    ));
+                                }
+                                if !send_response(&stream_tx, final_output, &async_context) {
+                                    break;
+                                }
                             }
                             native_timing.record_normal_completion();
                             request_completed_normally = true;
                             break;
+                        } else {
+                            if !send_response(&stream_tx, output, &async_context) {
+                                break;
+                            }
+                            native_timing.record_tokens(1);
                         }
-
-                        if !send_response(&stream_tx, output, &async_context) {
-                            break;
-                        }
-                        native_timing.record_tokens(1);
                     }
 
                     _ = &mut context_stopped => {
@@ -1251,7 +1291,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             tokio::spawn(response_task);
         }
 
-        let stream = UnboundedReceiverStream::new(stream_rx).map(Annotated::from_data);
+        let mut completion_tokens = 0_usize;
+        let stream = UnboundedReceiverStream::new(stream_rx).map(move |mut output| {
+            if let Some(metadata) = native_sglang.as_ref() {
+                completion_tokens = completion_tokens.saturating_add(output.token_ids.len());
+                sglang::adapt(metadata, &mut output, completion_tokens);
+            }
+            Annotated::from_data(output)
+        });
         Ok(ResponseStream::new(Box::pin(stream), ctx.context()))
     }
 }
@@ -1447,6 +1494,39 @@ mod tests {
         let mut expected_finish = LLMEngineOutput::length();
         expected_finish.completion_usage = Some(usage_with_cached_tokens(3, 1, 0));
         assert_eq!(stream.next().await.unwrap().data.unwrap(), expected_finish);
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn native_sglang_completion_attaches_length_to_final_token() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(64)
+            .max_num_batched_tokens(Some(64))
+            .speedup_ratio(1000.0)
+            .build()
+            .unwrap();
+        let live = LiveEngine::start(args.clone(), 0).unwrap();
+        let engine = MockerExecutionContext::new(args);
+        assert!(engine.engines.set(vec![live]).is_ok());
+
+        let mut request = decode_request(3, 1);
+        request.extra_args = Some(serde_json::json!({"sglang_tito": {"rid": "native"}}));
+
+        let mut stream = engine.generate(SingleIn::new(request)).await.unwrap();
+        let output = stream.next().await.unwrap().data.unwrap();
+        assert_eq!(output.token_ids.len(), 1);
+        assert_eq!(
+            output.finish_reason,
+            LLMEngineOutput::length().finish_reason
+        );
+        let response = &output.engine_data.as_ref().unwrap()["sglang_response"];
+        assert_eq!(response["output_ids"], serde_json::json!(output.token_ids));
+        assert_eq!(response["meta_info"]["completion_tokens"], 1);
+        assert_eq!(
+            response["meta_info"]["finish_reason"],
+            serde_json::json!({"type": "length"})
+        );
         assert!(stream.next().await.is_none());
     }
 

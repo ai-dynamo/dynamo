@@ -10,6 +10,7 @@ use futures::{Stream, StreamExt, stream};
 use std::str::FromStr;
 use std::sync::Arc;
 
+use crate::grpc::service::dispatch_error_status;
 use crate::http::service::metadata::extract_metadata_from_grpc;
 use crate::types::Annotated;
 
@@ -119,7 +120,7 @@ pub async fn tensor_response_stream(
                 .inc_rejection(&model_name, crate::http::service::metrics::Endpoint::Tensor);
             return Status::resource_exhausted(e.to_string());
         }
-        Status::internal(format!("Failed to generate tensor response stream: {}", e))
+        dispatch_error_status(e.as_ref(), "Failed to generate tensor response stream")
     })?;
 
     // capture the context to cancel the stream if the client disconnects
