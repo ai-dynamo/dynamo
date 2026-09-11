@@ -900,28 +900,6 @@ class HandlerBase(BaseGenerativeHandler):
         # Fallback: text-only flow (no multimodal processor or no multimodal data)
         return request.get("token_ids")
 
-    def validate_request(self, request: dict) -> None:
-        """Reject a request no worker in this pool can serve, at call time.
-
-        Called by ``push_egress_capable`` *before* the async generator is
-        created, so the refusal travels in the response prologue rather than as
-        the first stream item. That distinction decides what a streaming client
-        sees: a pre-stream failure becomes the HTTP status, while a refusal
-        raised from inside the generator body arrives after 200 is committed.
-
-        Synchronous and side-effect free by contract -- it runs before any
-        engine work, so it may only inspect the request and static capability.
-        The guards it calls remain in the generation path as a backstop for
-        callers that do not route through the decorator.
-        """
-        reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))
-
-        if self.multimodal_processor is None and self._request_has_multimodal(request):
-            raise InvalidArgument(
-                "Multimodal input received but worker started without --modality multimodal. "
-                "Restart the worker with --modality multimodal or remove image_url content."
-            )
-
     def _request_has_multimodal(self, request: dict) -> bool:
         if request.get("multi_modal_data"):
             return True
