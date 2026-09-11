@@ -9,6 +9,7 @@ fn engine_args() -> MockEngineArgs {
     MockEngineArgs::builder()
         .engine_type(EngineType::Sglang)
         .block_size(4)
+        .enable_prefix_caching(false)
         .num_gpu_blocks(128)
         .max_num_seqs(Some(8))
         .max_num_batched_tokens(Some(64))
@@ -172,4 +173,69 @@ async fn missing_abort_is_idempotent() {
             .into_inner();
         assert!(response.success);
     }
+}
+
+#[tokio::test]
+async fn kv_event_discovery_follows_regular_mocker_rules() {
+    for (mode, prefix_caching, publishes) in [
+        (ServerMode::Aggregated, true, true),
+        (ServerMode::Prefill, true, true),
+        (ServerMode::Decode, true, false),
+        (ServerMode::Aggregated, false, false),
+    ] {
+        let mut args = engine_args();
+        args.enable_prefix_caching = prefix_caching;
+        let service = SglangMockerService::new(
+            MockerServerConfig {
+                mode,
+                ..Default::default()
+            },
+            args,
+        )
+        .unwrap();
+        let info: serde_json::Value = serde_json::from_str(
+            &service
+                .get_server_info(Request::new(pb::GetServerInfoRequest {}))
+                .await
+                .unwrap()
+                .into_inner()
+                .json_info,
+        )
+        .unwrap();
+        let events = &info["kv_events"];
+        assert_eq!(!events.is_null(), publishes);
+        if publishes {
+            assert_eq!(events["publisher"], "zmq");
+            assert_eq!(events["endpoint_host"], "0.0.0.0");
+            assert!(events["endpoint_port_base"].as_u64().unwrap() > 0);
+            assert_eq!(events["block_size"], 4);
+            assert_eq!(events["dp_size"], 1);
+            assert_eq!(events["topic"], "");
+        }
+    }
+}
+
+#[tokio::test]
+async fn failed_kv_publisher_is_not_advertised() {
+    let occupied = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let mut args = engine_args();
+    args.enable_prefix_caching = true;
+    args.zmq_kv_events_port = Some(occupied.local_addr().unwrap().port());
+    let service = SglangMockerService::new(MockerServerConfig::default(), args).unwrap();
+    let info: serde_json::Value = serde_json::from_str(
+        &service
+            .get_server_info(Request::new(pb::GetServerInfoRequest {}))
+            .await
+            .unwrap()
+            .into_inner()
+            .json_info,
+    )
+    .unwrap();
+    assert!(info["kv_events"].is_null());
+    assert!(
+        service
+            .generate(Request::new(request("no-publisher")))
+            .await
+            .is_ok()
+    );
 }

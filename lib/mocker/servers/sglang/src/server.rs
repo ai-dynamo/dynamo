@@ -8,9 +8,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use clap::ValueEnum;
-use dynamo_mocker::common::protocols::{EngineType, MockEngineArgs, OutputSignal, WorkerType};
-use dynamo_mocker::live::{LiveEngine, LiveRequest, stable_request_uuid};
+use dynamo_mocker::common::protocols::{
+    EngineType, KvEventPublishers, MockEngineArgs, OutputSignal, WorkerType,
+};
+use dynamo_mocker::live::{LiveEngine, LiveEngineConfig, LiveRequest, stable_request_uuid};
 use dynamo_mocker::scheduler::MockerMetrics;
+use dynamo_mocker::services::zmq_events::ZmqKvEventSink;
 use dynamo_sglang_sidecar::proto as pb;
 use futures::Stream;
 use serde_json::json;
@@ -83,7 +86,8 @@ impl Default for MockerServerConfig {
 
 #[derive(Clone, Debug)]
 struct DiscoveryMetadata {
-    page_size: usize,
+    page_size: u32,
+    kv_events: Option<serde_json::Value>,
     max_total_num_tokens: usize,
     max_running_requests: usize,
     max_prefill_tokens: usize,
@@ -124,7 +128,6 @@ impl SglangMockerService {
             );
         }
 
-        let engine_args = engine_args.normalized()?;
         anyhow::ensure!(
             engine_args.engine_type == EngineType::Sglang,
             "Mocker engine_type must be sglang"
@@ -135,19 +138,65 @@ impl SglangMockerService {
             "Mocker worker_type must be aggregated; use the server mode for the emulated wire role"
         );
 
+        let engine_args = engine_args.normalized()?;
+        let page_size = u32::try_from(engine_args.block_size)
+            .map_err(|_| anyhow::anyhow!("block_size exceeds the KV event discovery range"))?;
         let max_total_num_tokens = engine_args
             .num_gpu_blocks
             .checked_mul(engine_args.block_size)
             .ok_or_else(|| anyhow::anyhow!("num_gpu_blocks * block_size overflows usize"))?;
+        let sink = if engine_args.needs_kv_publisher() && config.mode != ServerMode::Decode {
+            match ZmqKvEventSink::bind(
+                engine_args.zmq_kv_events_port,
+                engine_args.zmq_replay_port,
+                DP_RANK,
+                page_size,
+            ) {
+                Ok(sink) => Some(sink),
+                Err(error) => {
+                    tracing::error!(dp_rank = DP_RANK, %error, "Failed to create ZMQ KV event sink");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let kv_events = sink.as_ref().map(|sink| {
+            let address: std::net::SocketAddr = sink
+                .endpoint()
+                .strip_prefix("tcp://")
+                .expect("ZMQ sink uses TCP")
+                .parse()
+                .expect("ZMQ sink reports a bound socket address");
+            json!({
+                "publisher": "zmq",
+                "endpoint_host": address.ip().to_string(),
+                "endpoint_port_base": address.port(),
+                "topic": "",
+                "block_size": page_size,
+                "dp_size": 1,
+            })
+        });
         let discovery = DiscoveryMetadata {
-            page_size: engine_args.block_size,
+            page_size,
+            kv_events,
             max_total_num_tokens,
             max_running_requests: engine_args
                 .max_num_seqs
                 .unwrap_or(engine_args.num_gpu_blocks),
             max_prefill_tokens: engine_args.max_num_batched_tokens.unwrap_or(8_192),
         };
-        let engine = LiveEngine::start(engine_args, DP_RANK)?;
+        let engine = LiveEngine::start_with_config(
+            engine_args,
+            DP_RANK,
+            LiveEngineConfig {
+                kv_event_publishers: KvEventPublishers::new(
+                    None,
+                    sink.map(|sink| Arc::new(sink) as _),
+                ),
+                ..Default::default()
+            },
+        )?;
         let max_concurrent_requests = config.max_concurrent_requests;
         Ok(Self {
             config: Arc::new(config),
@@ -205,6 +254,7 @@ impl SglangMockerService {
             json_info: json!({
                 "disaggregation_mode": self.config.mode.discovery_value(),
                 "page_size": self.discovery.page_size,
+                "kv_events": self.discovery.kv_events,
                 "max_total_num_tokens": self.discovery.max_total_num_tokens,
                 "max_running_requests": self.discovery.max_running_requests,
                 "max_prefill_tokens": self.discovery.max_prefill_tokens,
