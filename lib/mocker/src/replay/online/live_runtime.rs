@@ -46,7 +46,15 @@ struct LiveRunSession {
     tasks: JoinSet<Result<()>>,
     recorder_tx: super::recorder::RecorderSender,
     recorder: OnlineTraceRecorder,
-    admission_task: tokio::task::JoinHandle<Result<()>>,
+    // Abort-on-drop, not a bare `JoinHandle`: every `bail!` in `finish()` (and every `?` on an
+    // internal failure) drops this session, and a dropped `JoinHandle` detaches its task rather
+    // than stopping it. The cancellation contract in AGENTS.md requires terminating outstanding
+    // replay work; dropping the replay-owned runtime only happens to do that for callers that
+    // own a per-call runtime, and `LiveRuntime::run` is also reachable on a caller-owned one.
+    // The `JoinSet` holding the request tasks already aborts on drop, so this makes the
+    // admission forwarder match. The happy path still awaits it -- `AbortOnDropHandle` is a
+    // `Future` -- so ordered settlement is unchanged.
+    admission_task: tokio_util::task::AbortOnDropHandle<Result<()>>,
 }
 
 struct LiveRunSessionConfig {
@@ -76,8 +84,9 @@ impl LiveRunSession {
         } = config;
         let recorder = OnlineTraceRecorder::start(recorder_options);
         let recorder_tx = recorder.sender();
-        let admission_task =
-            tokio::spawn(forward_admissions(start, admission_rx, recorder.sender()));
+        let admission_task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(
+            forward_admissions(start, admission_rx, recorder.sender()),
+        ));
         let task_ctx = RequestTaskContext {
             engines,
             num_workers,
@@ -506,5 +515,69 @@ impl LiveRuntime {
         }
 
         session.finish().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::protocols::MockEngineArgs;
+    use crate::replay::ReplayRouterMode;
+
+    /// Every `bail!` in `finish()` -- and every `?` on an internal failure -- drops the session
+    /// while the admission forwarder is still parked on `admission_rx.recv()`. A bare
+    /// `JoinHandle` detaches on drop and leaves that task running on a caller-owned runtime;
+    /// only `AbortOnDropHandle` terminates it, which is what the cancellation contract in
+    /// AGENTS.md ("terminate outstanding replay work") requires.
+    #[tokio::test]
+    async fn dropping_a_session_terminates_the_admission_forwarder() {
+        // Held for the duration so the forwarder never observes a closed channel and can only
+        // stop by being aborted.
+        let (_admission_tx, admission_rx) = mpsc::unbounded_channel();
+        let router = Arc::new(
+            ReplayRouter::new(
+                ReplayRouterMode::RoundRobin,
+                &MockEngineArgs::default(),
+                None,
+                None,
+                1,
+            )
+            .unwrap(),
+        );
+        let session = LiveRunSession::new(
+            LiveRunSessionConfig {
+                engines: Arc::from(Vec::new()),
+                num_workers: 1,
+                dp_size: 1,
+                router,
+                start: Instant::now(),
+                workload: None,
+                cancel: CancellationToken::new(),
+            },
+            admission_rx,
+            OnlineRecorderOptions {
+                capture_per_request: false,
+                sla: Default::default(),
+                num_workers: 1,
+                gpus_per_worker: 1,
+            },
+        );
+
+        let admission = session.admission_task.abort_handle();
+        tokio::task::yield_now().await;
+        assert!(
+            !admission.is_finished(),
+            "the admission forwarder must still be parked on recv() before the session drops"
+        );
+
+        drop(session);
+        // Abort is asynchronous: the runtime has to reach the task to cancel it.
+        for _ in 0..100 {
+            if admission.is_finished() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("dropping the session left the admission forwarder running");
     }
 }
