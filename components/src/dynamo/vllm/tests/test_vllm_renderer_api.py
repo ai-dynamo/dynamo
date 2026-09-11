@@ -489,6 +489,12 @@ class TestVllmRendererApi:
         core_output_fields = core_output_fields + tuple(
             fields + vllm_028_output_extra_fields for fields in core_output_fields
         )
+        # The DeepSeek V4.1 preview appends speculative-decoding metrics. Dynamo
+        # does not consume these metrics when reconstructing an EngineCoreOutput,
+        # so msgspec retains the default None value at its array-like slot.
+        core_output_fields = core_output_fields + tuple(
+            fields + ("spec_decode_metrics",) for fields in core_output_fields
+        )
         valid_output_fields = core_output_fields + tuple(
             fields + omni_output_extra_fields for fields in core_output_fields
         )
@@ -527,6 +533,8 @@ class TestVllmRendererApi:
             assert output.mm_cache_miss_hashes is None
         if "new_sampling_mask" in EngineCoreOutput.__struct_fields__:
             assert output.new_sampling_mask is None
+        if "spec_decode_metrics" in EngineCoreOutput.__struct_fields__:
+            assert output.spec_decode_metrics is None
         assert output.finish_reason is FinishReason.STOP
         assert output.stop_reason == "eos"
 
