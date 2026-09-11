@@ -1072,8 +1072,14 @@ impl OfflineReplayRouter {
             }
         });
 
+        // `add_request_if_registered`, not `add_request`: this module
+        // deliberately splits remove_worker from finalize_worker_removal so
+        // a request racing worker removal is visible instead of silently
+        // recreating the removed worker. add_request's lazy-registration
+        // path (multi_worker.rs) exists for callers with no such split and
+        // would defeat that invariant here (round-12 L3).
         self.slots
-            .add_request(
+            .add_request_if_registered(
                 SequenceRequest {
                     request_id,
                     token_sequence: request.token_seq,
