@@ -635,7 +635,17 @@ async fn anthropic_messages(
             &ctx,
         )
         .await
-        .map_err(|(status, _json_err)| anthropic_backend_error(status))?;
+        .map_err(|error_response| {
+            // Classify before the body is rewritten: only the status survives
+            // into Anthropic's error format, and the status alone cannot tell a
+            // capacity rejection from a validation failure, or a client hangup
+            // from a backend fault.
+            super::openai::log_pre_commit_error(&request_id, &error_response);
+            inflight_guard.mark_error(super::openai::extract_error_type_from_response(
+                &error_response,
+            ));
+            anthropic_backend_error(error_response.0)
+        })?;
 
         stream_handle.arm();
 

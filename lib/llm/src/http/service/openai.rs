@@ -239,7 +239,7 @@ fn classify_error_for_metrics(code: StatusCode, message: &str) -> ErrorType {
 }
 
 /// Extract ErrorType from ErrorResponse for metrics
-fn extract_error_type_from_response(response: &ErrorResponse) -> ErrorType {
+pub(super) fn extract_error_type_from_response(response: &ErrorResponse) -> ErrorType {
     response
         .1
         .metric_error_type
@@ -2592,7 +2592,7 @@ pub(super) async fn until_client_disconnects<T>(
 ///
 /// A client that hung up is an expected outcome rather than a backend fault, so
 /// it must not raise the log level on a busy frontend.
-fn log_pre_commit_error(request_id: &str, error_response: &ErrorResponse) {
+pub(super) fn log_pre_commit_error(request_id: &str, error_response: &ErrorResponse) {
     if error_response.1.metric_error_type == Some(ErrorType::Cancelled) {
         tracing::debug!(
             request_id,
