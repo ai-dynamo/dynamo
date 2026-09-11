@@ -862,8 +862,23 @@ impl OfflineReplayRouter {
 
     /// Drop the retained topology/cache state after the engine confirms that
     /// the draining worker no longer owns any request lifecycle state.
+    ///
+    /// Drops the routing-eligibility entry too, even though the caller is
+    /// expected to have dropped it already via [`Self::remove_worker`].
+    /// `aisimulate-core`'s `PlacementPolicy` trait documents no ordering
+    /// contract at all -- `worker_removed` following `worker_draining` is true
+    /// only by construction of the driving code (every id reaching
+    /// `try_remove_drained` was first put in `pending_removal` by
+    /// `mark_for_removal`, whose ids are all reported as draining first).
+    /// Leaving the entry behind if that ever changed would be silently
+    /// catastrophic rather than merely wrong: the selector would keep choosing
+    /// a worker whose slots are unregistered, and the next request routed to it
+    /// would fail `add_request_if_registered` and abort the whole simulation.
+    /// Enforce the invariant here instead of assuming it upstream; it is a
+    /// no-op on the expected path.
     pub(crate) fn finalize_worker_removal(&mut self, worker_id: usize) -> Result<()> {
         let wid = worker_id as WorkerId;
+        self.workers_with_configs.remove(&wid);
         self.slots
             .unregister_worker(wid)
             .map_err(anyhow::Error::from)?;
@@ -2299,6 +2314,37 @@ policy_classes:
         assert!(snapshot.active_blocks_by_worker.is_empty());
         assert!(snapshot.indexer.cached_blocks_by_worker.is_empty());
         router.add_worker(0).unwrap();
+    }
+
+    /// `worker_removed` without a preceding `worker_draining` is not something
+    /// today's `aisimulate-core` driving code produces, but its
+    /// `PlacementPolicy` trait promises nothing about ordering. If
+    /// `finalize_worker_removal` left the routing-eligibility entry behind, the
+    /// selector would keep picking a worker whose slots are gone and the next
+    /// request would abort the run inside `add_request_if_registered` -- so
+    /// assert the router survives the unordered case rather than trusting the
+    /// caller.
+    #[test]
+    fn finalize_worker_removal_without_draining_still_ends_routing_eligibility() {
+        let mut router =
+            OfflineReplayRouter::new(&queueing_args(), Some(queueing_router_config()), None, 2)
+                .unwrap();
+
+        // No `remove_worker(1)` first: straight to finalization.
+        router.finalize_worker_removal(1).unwrap();
+
+        let effects = router
+            .on_request_arrival(&request(1, 7), None, 0.0)
+            .unwrap();
+        assert_eq!(
+            effects.admissions.len(),
+            1,
+            "admission must succeed rather than fail on an unregistered worker"
+        );
+        assert_eq!(
+            effects.admissions[0].worker_idx, 0,
+            "the finalized worker must no longer be routable"
+        );
     }
 
     #[test]
