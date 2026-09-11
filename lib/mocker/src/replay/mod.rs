@@ -166,14 +166,28 @@ pub(crate) fn normalize_trace_requests(
         .map(|(arrival_timestamp_ms, _)| *arrival_timestamp_ms)
         .ok_or_else(|| anyhow::anyhow!("trace replay requires at least one timestamped request"))?;
 
-    Ok(timestamped
+    // Re-check finiteness on the way out, not just on the way in. Both operands and
+    // the divisor are already known finite, yet the rebase can still overflow: the
+    // subtraction of two far-apart finite arrivals can reach infinity, and so can a
+    // division by a subnormal-but-positive `arrival_speedup_ratio`. Both consumers
+    // currently catch this downstream -- `deadline_from_ms` online, aisimulate-core's
+    // admission gate offline -- but that leaves the invariant enforced in two other
+    // modules (one of them another crate) instead of in the function whose job it is,
+    // and reports it as a confusing error from a distant layer partway into a run.
+    timestamped
         .into_iter()
-        .map(|(arrival_timestamp_ms, mut request)| {
-            request.arrival_timestamp_ms =
-                Some((arrival_timestamp_ms - first_arrival_ms) / arrival_speedup_ratio);
-            request
+        .enumerate()
+        .map(|(index, (arrival_timestamp_ms, mut request))| {
+            let rebased = (arrival_timestamp_ms - first_arrival_ms) / arrival_speedup_ratio;
+            anyhow::ensure!(
+                rebased.is_finite(),
+                "trace replay request {index} rebases to a non-finite arrival timestamp \
+                 ({arrival_timestamp_ms} - {first_arrival_ms}) / {arrival_speedup_ratio} = {rebased}"
+            );
+            request.arrival_timestamp_ms = Some(rebased);
+            Ok(request)
         })
-        .collect::<VecDeque<_>>())
+        .collect::<anyhow::Result<VecDeque<_>>>()
 }
 
 pub(crate) fn effective_agentic_lanes(
@@ -262,6 +276,35 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "trace replay request 0 has a non-finite arrival timestamp, got inf"
+        );
+    }
+
+    #[test]
+    fn test_normalize_trace_requests_rejects_a_rebase_that_overflows_to_infinity() {
+        // Every input is finite and the ratio is finite and positive, so the input
+        // gate above passes -- the overflow is created by the rebase itself.
+        let error = normalize_trace_requests(
+            vec![
+                request_at(Some(-f64::MAX), 1),
+                request_at(Some(f64::MAX), 2),
+            ],
+            1.0,
+        )
+        .expect_err("a rebase that overflows to infinity must be rejected");
+        assert!(
+            error.to_string().contains("non-finite arrival timestamp"),
+            "{error}"
+        );
+
+        // The same gap reached through a subnormal-but-positive speedup ratio.
+        let error = normalize_trace_requests(
+            vec![request_at(Some(0.0), 1), request_at(Some(1000.0), 2)],
+            1e-320,
+        )
+        .expect_err("a speedup ratio that overflows the rebase must be rejected");
+        assert!(
+            error.to_string().contains("non-finite arrival timestamp"),
+            "{error}"
         );
     }
 
