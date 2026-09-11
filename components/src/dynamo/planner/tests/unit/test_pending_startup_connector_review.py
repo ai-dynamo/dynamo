@@ -3,8 +3,11 @@
 
 """Exercise provider status contracts and asynchronous startup cancellation."""
 
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import datetime, timezone
+from threading import Event, get_ident
 from unittest.mock import Mock
 
 import pytest
@@ -268,3 +271,49 @@ def test_checkpoint_filter_does_not_hide_failed_worker_with_inherited_labels():
     ]
     connector = _connector(deployment, pods)
     assert not connector._get_worker_inventory_sync("p", "d").startup_in_progress
+
+
+@pytest.mark.asyncio
+async def test_inventory_retirement_cannot_erase_concurrent_scale_down():
+    deployment, pods = _deployment(), _pods()
+    connector = _connector(deployment, pods)
+    connector._startup_scale_down_targets = {"p": 1}
+    status = connector.kube_api.get_service_replica_status
+    inspecting_old_target, resume = Event(), Event()
+    main_thread = get_ident()
+    worker_calls = 0
+
+    def interleaved_status(snapshot, name):
+        nonlocal worker_calls
+        if get_ident() != main_thread:
+            worker_calls += 1
+            # Two status reads classify startup; the third inspects the old
+            # completed p=1 target, just before it is retired.
+            if worker_calls == 3:
+                inspecting_old_target.set()
+                assert resume.wait(5)
+        return status(snapshot, name)
+
+    connector.kube_api.get_service_replica_status = interleaved_status
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        retirement = executor.submit(
+            connector._startup_scale_down_in_progress, deployment, pods
+        )
+        try:
+            assert await asyncio.to_thread(inspecting_old_target.wait, 5)
+            await connector.set_component_replicas(
+                [
+                    TargetReplica(
+                        sub_component_type=SubComponentType.DECODE, desired_replicas=1
+                    )
+                ],
+                blocking=False,
+            )
+        finally:
+            resume.set()
+        assert await asyncio.wrap_future(retirement)
+
+    # The stale inventory observed p=1 settled, but d=1 was accepted meanwhile.
+    # It must remain held until the new reduction actually converges.
+    assert connector._startup_scale_down_targets == {"d": 1}
+    connector.kube_api.update_graph_replicas.assert_called_once_with("qwen", "d", 1)

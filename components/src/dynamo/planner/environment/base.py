@@ -12,6 +12,7 @@ from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.connectors.base import (
     PlannerConnector,
+    PowerAwareConnector,
     is_power_aware_connector,
     is_startup_aware_connector,
 )
@@ -511,6 +512,20 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
             if self.require_decode and self._state.decode.info is not None
             else None
         )
+        power_controller: Optional[PowerAwareConnector] = None
+        if self.config.enable_power_awareness:
+            if not is_power_aware_connector(self.controller):
+                raise DeploymentValidationError(
+                    [
+                        "Power awareness requires a connector that implements "
+                        "PowerAwareConnector (get_graph_deployment, "
+                        "get_component_power_configs, "
+                        "wait_for_settled_graph_deployment, "
+                        "get_power_aware_worker_counts); "
+                        "this connector does not."
+                    ]
+                )
+            power_controller = self.controller
         if is_startup_aware_connector(self.controller):
             inventory = await self.controller.get_worker_inventory(
                 prefill_component_name=prefill_name,
@@ -540,19 +555,8 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
                     replicas.scaling = scaling
                     replicas.pending_startup = pending
             return
-        if self.config.enable_power_awareness:
-            if not is_power_aware_connector(self.controller):
-                raise DeploymentValidationError(
-                    [
-                        "Power awareness requires a connector that implements "
-                        "PowerAwareConnector (get_graph_deployment, "
-                        "get_component_power_configs, "
-                        "wait_for_settled_graph_deployment, "
-                        "get_power_aware_worker_counts); "
-                        "this connector does not."
-                    ]
-                )
-            counts = await self.controller.get_power_aware_worker_counts(
+        if power_controller is not None:
+            counts = await power_controller.get_power_aware_worker_counts(
                 prefill_component_name=prefill_name,
                 decode_component_name=decode_name,
             )

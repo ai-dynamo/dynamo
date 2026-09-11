@@ -76,6 +76,7 @@ class WorkerCounts:
 
     @property
     def startup_in_progress(self) -> bool:
+        """True when verified startup-only inventory includes pending workers."""
         return self.pending_num_prefill > 0 or self.pending_num_decode > 0
 
 

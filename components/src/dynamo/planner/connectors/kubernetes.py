@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import os
+from threading import Lock
 from typing import Optional
 
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
@@ -101,6 +102,7 @@ class KubernetesConnector(PlannerConnector):
         # DGDSA application and DGD status are asynchronous. Hold subsequent
         # writes until a startup reversal has actually finished, not just until
         # the pre-write Ready condition is observed again.
+        self._startup_scale_down_lock = Lock()
         self._startup_scale_down_targets: dict[str, int] = {}
 
     async def async_init(self):
@@ -787,7 +789,13 @@ class KubernetesConnector(PlannerConnector):
         return info
 
     def _startup_scale_down_in_progress(self, deployment: dict, pods: list) -> bool:
-        if not self._startup_scale_down_targets:
+        # Snapshot under the lock, then do Kubernetes I/O without holding it.
+        # Writers replace the dictionary so identity detects even a concurrent
+        # request for the same target, not only a different replica count.
+        with self._startup_scale_down_lock:
+            previous_targets = self._startup_scale_down_targets
+            targets = previous_targets.copy()
+        if not targets:
             return False
         if not self.kube_api.is_spec_generation_observed(deployment):
             return True
@@ -798,7 +806,7 @@ class KubernetesConnector(PlannerConnector):
         components = get_components_by_name(deployment)
         startup = self.kube_api.pending_startup_replicas(deployment, pods)
         remaining: dict[str, int] = {}
-        for name, target in self._startup_scale_down_targets.items():
+        for name, target in targets.items():
             desired = Service(
                 name=name, service=components.get(name, {})
             ).number_replicas()
@@ -815,14 +823,22 @@ class KubernetesConnector(PlannerConnector):
                 remaining[name] = target
             # Once excess/terminating replicas are gone, a survivor becoming
             # unready is startup capacity again, not an unfinished drain.
-        self._startup_scale_down_targets = remaining
-        return bool(remaining)
+        with self._startup_scale_down_lock:
+            if self._startup_scale_down_targets is previous_targets:
+                self._startup_scale_down_targets = remaining
+            return bool(self._startup_scale_down_targets)
 
     async def get_worker_inventory(
         self,
         prefill_component_name: Optional[str] = None,
         decode_component_name: Optional[str] = None,
     ) -> WorkerCounts:
+        """Read selected roles' serving/pending inventory off the event loop.
+
+        DGD status and Pods supply startup, drain, and rollout checks, including
+        the power-aware readiness guarantees. An omitted component name reports
+        zero counts for that role; pending counts never include draining workers.
+        """
         return await asyncio.to_thread(
             self._get_worker_inventory_sync,
             prefill_component_name,
@@ -1009,7 +1025,9 @@ class KubernetesConnector(PlannerConnector):
             ).number_replicas()
             for target in target_replicas
         )
-        if not ready or self._startup_scale_down_targets or reducing:
+        with self._startup_scale_down_lock:
+            scale_down_pending = bool(self._startup_scale_down_targets)
+        if not ready or scale_down_pending or reducing:
             pods = KubernetesAPI.exclude_checkpoint_capture_pods(
                 self.kube_api.list_pods_for_graph(self.graph_deployment_name)
             )
@@ -1086,9 +1104,11 @@ class KubernetesConnector(PlannerConnector):
                     target_replica.desired_replicas,
                 )
                 if startup_reduction:
-                    self._startup_scale_down_targets[
-                        service.name
-                    ] = target_replica.desired_replicas
+                    with self._startup_scale_down_lock:
+                        self._startup_scale_down_targets = {
+                            **self._startup_scale_down_targets,
+                            service.name: target_replica.desired_replicas,
+                        }
             else:
                 logger.info(
                     f"{target_replica.sub_component_type.value} component {service.name} already at desired replica count {target_replica.desired_replicas}, skipping"

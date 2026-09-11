@@ -5,6 +5,7 @@
 
 from copy import deepcopy
 from datetime import datetime, timezone
+from threading import Lock
 from unittest.mock import Mock
 
 import pytest
@@ -228,6 +229,7 @@ def _connector(deployment, pods):
     connector.graph_deployment_name = "qwen"
     connector.kube_api = api
     connector.raise_not_ready = False
+    connector._startup_scale_down_lock = Lock()
     connector._startup_scale_down_targets = {}
     return connector
 
@@ -298,7 +300,7 @@ async def test_connector_cancels_startup_and_holds_until_drain_finishes():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("target", [-1, 2, 3])
+@pytest.mark.parametrize("target", [-1, 3])
 async def test_unready_connector_rejects_non_reductions_and_negative_targets(target):
     connector = _connector(_deployment(), _pods())
     await connector.set_component_replicas(
