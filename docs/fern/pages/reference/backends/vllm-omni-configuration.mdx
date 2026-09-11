@@ -39,7 +39,12 @@ These are the vLLM-Omni orchestration flags. The omni worker also accepts the sa
   separate from request-time LoRA loading.
 </ParamField>
 <ParamField path="--diffusion-attention-backend" type="string">
-  Default diffusion attention backend, such as `TRTLLM_ATTN` or `FLASH_ATTN`.
+  Default diffusion attention backend, such as `TRTLLM_ATTN`, `FLASH_ATTN`, or
+  `FASTVIDEO_VSA`.
+</ParamField>
+<ParamField path="--fastvideo-vsa-topk" type="int">
+  Key/value blocks retained per query block by `FASTVIDEO_VSA`. The value must
+  be positive; FastH3 VSA starts with 64.
 </ParamField>
 
 ## Memory & Performance
