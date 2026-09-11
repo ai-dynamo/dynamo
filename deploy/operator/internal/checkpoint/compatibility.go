@@ -224,7 +224,6 @@ func canonicalSnapshotContainer(container corev1.Container, keepName bool) corev
 
 	// Health and termination policy affect Kubernetes lifecycle, not whether a
 	// captured process image can resume in this container.
-	container.ImagePullPolicy = ""
 	container.Lifecycle = nil
 	container.LivenessProbe = nil
 	container.ReadinessProbe = nil

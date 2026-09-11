@@ -117,6 +117,14 @@ func TestComputeSnapshotCompatibilityHashRejectsProcessContractChanges(t *testin
 			gmsMode: "disabled",
 		},
 		{
+			name: "image pull policy",
+			mutate: func(template *corev1.PodTemplateSpec) {
+				template.Spec.Containers[0].ImagePullPolicy = corev1.PullAlways
+			},
+			backend: "vllm",
+			gmsMode: "disabled",
+		},
+		{
 			name: "engine arguments",
 			mutate: func(template *corev1.PodTemplateSpec) {
 				template.Spec.Containers[0].Args = append(template.Spec.Containers[0].Args, "--tensor-parallel-size=2")
