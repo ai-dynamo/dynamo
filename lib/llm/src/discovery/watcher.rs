@@ -1353,19 +1353,7 @@ fn lora_projection_fingerprint(card: &ModelDeploymentCard) -> anyhow::Result<Str
     Ok(blake3::hash(&serde_json::to_vec(&value)?).to_string())
 }
 
-/// Digest of the Qwen video prompt-expansion contract this worker published, or
-/// `None` when it published none.
-///
-/// The frontend builds one video-routing processor per WorkerSet, so it may
-/// only use a contract every member agrees on. Workers derive the contract from
-/// their own packages and engine-level `--mm-processor-kwargs`, so two workers
-/// in the same deployment can legitimately publish different ones. Reducing the
-/// contract to a digest here lets the group compare members without carrying
-/// the payload around; see `discovery::controller::cohort_video_contract`.
-///
-/// The contract deliberately stays out of `mdcsum()`. Workers that predate it
-/// publish nothing, and a checksum split would put them in their own cohort,
-/// which removes the whole serving group rather than just the video routing.
+/// Digest the Qwen video prompt-expansion contract, when published.
 fn qwen_video_contract_digest(card: &ModelDeploymentCard) -> Option<String> {
     let mut contract = card
         .runtime_config

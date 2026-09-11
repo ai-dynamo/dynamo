@@ -75,15 +75,7 @@ fn cohort_video_contract(members: &[DesiredInstance]) -> Option<String> {
         .then_some(agreed)
 }
 
-/// Fold the cohort's video contract into the fingerprint the status machine
-/// compares against.
-///
-/// The contract is outside the card checksum, so a member joining or leaving
-/// can change what the cohort agrees on without changing any member's
-/// fingerprint. Folding it in here rebuilds the group on that transition
-/// instead of leaving it serving with a contract one of its members never
-/// published. A cohort with no agreement keeps the bare fingerprint, so
-/// deployments that never carry the contract are unaffected.
+/// Add the agreed contract to the status-machine fingerprint.
 fn cohort_fingerprint(fingerprint: &str, video_contract: Option<&str>) -> String {
     match video_contract {
         Some(contract) => format!("{fingerprint}\0video_contract\0{contract}"),
@@ -1333,11 +1325,7 @@ mod tests {
         assert_eq!(host.members(&group_key()), BTreeSet::from([compatible.key]));
     }
 
-    /// A worker that predates the video contract publishes none, so a rolling
-    /// upgrade routinely mixes it with workers that do. The card checksum is
-    /// the same either way, so the two share a cohort and text serving
-    /// survives; only exact video routing is withdrawn, and it comes back once
-    /// the group agrees again.
+    // Legacy workers join the cohort without exact video routing.
     #[tokio::test]
     async fn a_worker_without_the_video_contract_joins_instead_of_conflicting() {
         let (host, mut starts) = FakeHost::new();
@@ -1386,10 +1374,7 @@ mod tests {
         assert_eq!(host.members(&group_key()), BTreeSet::from([current.key]));
     }
 
-    /// Two workers of the same version can still publish different contracts,
-    /// because engine-level `--mm-processor-kwargs` changes the video token
-    /// layout. They serve as one group, without exact video routing, rather
-    /// than one being served with the other's contract.
+    // Contract disagreement disables exact video routing for the cohort.
     #[tokio::test]
     async fn differing_video_contracts_serve_together_without_exact_video_routing() {
         let (host, mut starts) = FakeHost::new();
@@ -1413,10 +1398,7 @@ mod tests {
         );
     }
 
-    /// The contract sits outside the materialization fingerprint, so an
-    /// instance that republishes its card with a different contract looks
-    /// unchanged by fingerprint alone. It is still an update: the group's
-    /// agreement moves with it.
+    // Contract-only card updates must refresh the cohort agreement.
     #[tokio::test]
     async fn republishing_only_the_video_contract_updates_the_group() {
         let (host, mut starts) = FakeHost::new();
@@ -1446,7 +1428,7 @@ mod tests {
         assert_eq!(host.members(&group_key()), BTreeSet::from([first.key]));
     }
 
-    /// The contract only forces a rebuild when the agreement itself changes.
+    // An agreeing member does not rebuild the cohort.
     #[tokio::test]
     async fn an_agreeing_member_joins_without_rebuilding_the_group() {
         let (host, mut starts) = FakeHost::new();

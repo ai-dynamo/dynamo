@@ -1222,9 +1222,7 @@ impl ModelDeploymentCard {
                     bytes_to_hash.extend_from_slice(b"\0vllm_enable_tower_connector_lora\0true");
                 }
 
-                // The Qwen video prompt-expansion contract is deliberately absent
-                // here. It is a per-WorkerSet routing input, resolved across the
-                // whole cohort in `discovery::controller`, not a reason to split one.
+                // The Qwen video contract is resolved per cohort, not per card.
 
                 // TODO: Do we want any other user_data or runtime_config?
 
