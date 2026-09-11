@@ -47,6 +47,16 @@ The official `Qwen/Qwen3-ASR-1.7B` repository currently needs Rust-frontend-comp
 
 The Python `vllm` package and `vllm-rs` must expose compatible EngineCore and gRPC contracts. Prefer artifacts built from the same vLLM source revision; do not combine a Python wheel from one nightly with a `vllm-rs` binary from another. The sidecar's vendored gRPC source revisions are recorded in [`proto/README.md`](proto/README.md).
 
+A matched pair is not sufficient on its own. EngineCore encodes each message as a msgpack array ordered by field position, so a third package that appends fields to `vllm.v1.engine.EngineCoreOutput` makes every element longer than the strict Rust decoder in `vllm-rs` expects, and the engine output fails to decode even though both halves of `vllm` agree. vLLM loads every `vllm.general_plugins` entry point unless `VLLM_PLUGINS` names an allowlist, so such a package reaches the engine processes `vllm-rs` manages without being asked for. vLLM-Omni is one such package: it appends three fields. The Dynamo vLLM runtime image therefore ships `vllm-rs` on `PATH` as a wrapper that sets `VLLM_PLUGINS` to the plugins this decoder tolerates.
+
+Invoking the binary by its path inside the `vllm` package bypasses that wrapper, so set `VLLM_PLUGINS` yourself when you do:
+
+```bash
+VLLM_PLUGINS=modelexpress \
+  "$(python3 -c 'import os, vllm; print(os.path.dirname(vllm.__file__))')/vllm-rs" \
+  serve Qwen/Qwen3-0.6B --host 127.0.0.1 --grpc-port 50051
+```
+
 Start vLLM with its gRPC listener:
 
 ```bash

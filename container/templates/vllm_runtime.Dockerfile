@@ -182,6 +182,12 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 {# Inline expression, not a block tag: render.py leaves trim_blocks off, so a tag
    on its own line inside the RUN breaks the backslash continuation. #}
 {% set vllm_rs_required = "1" if device == "cuda" else "0" %}
+{# EngineCore msgpack is positional, so any auto-loaded plugin that extends
+   vllm.v1.engine.EngineCoreOutput makes every engine output the wrong length for
+   the strict Rust decoder in `vllm-rs`. vLLM-Omni appends three fields and is
+   installed in this image, so the wrapper below allowlists only the plugins that
+   decoder tolerates. #}
+{% set vllm_rs_plugins = "modelexpress" if context.vllm.enable_modelexpress == "true" else "" %}
 
 # The vLLM 0.28.0 release images resolve the unbounded `transformers>=5.5.3`
 # requirement to 5.15.1, but vLLM-Omni 0.28.0rc1 caps Transformers below 5.15.
@@ -531,18 +537,33 @@ if actual != expected:
     raise RuntimeError(f"expected transformers {expected}, found {actual}")
 PY
 
-# `vllm-rs` ships inside the installed `vllm` package, not as a console script;
-# linking it keeps the binary at that package's vLLM revision. Fatal on cuda only.
+# `vllm-rs` ships inside the installed `vllm` package, not as a console script.
+# The PATH entry is a wrapper rather than a symlink: it still resolves the binary
+# out of the installed package, so it stays at that package's vLLM revision, and
+# it additionally pins VLLM_PLUGINS for the engine processes `vllm-rs` manages.
+# Fatal on cuda only.
 RUN set -eu; \
     pkg="$({{ python_executable }} -c 'import os, vllm; print(os.path.dirname(vllm.__file__))')"; \
     if [ -f "${pkg}/vllm-rs" ] && [ -x "${pkg}/vllm-rs" ]; then \
-        ln -sf "${pkg}/vllm-rs" {{ vllm_rs_link }}; \
+        printf '%s\n' \
+            '#!/bin/sh' \
+            '# vLLM loads every vllm.general_plugins entry point unless VLLM_PLUGINS' \
+            '# names an allowlist. vLLM-Omni appends three fields to' \
+            '# vllm.v1.engine.EngineCoreOutput, and EngineCore msgpack is positional,' \
+            '# so the strict Rust decoder in this binary then rejects every engine' \
+            '# output as the wrong length. Allow only the plugins it tolerates. An' \
+            '# exported VLLM_PLUGINS, the empty allowlist included, still wins.' \
+            'VLLM_PLUGINS="${VLLM_PLUGINS-{{ vllm_rs_plugins }}}"' \
+            'export VLLM_PLUGINS' \
+            "exec \"${pkg}/vllm-rs\" \"\$@\"" \
+            > {{ vllm_rs_link }}; \
+        chmod 755 {{ vllm_rs_link }}; \
         vllm-rs --help >/dev/null; \
     elif [ "{{ vllm_rs_required }}" = "1" ]; then \
         echo "ERROR: installed vllm package (${pkg}) ships no executable vllm-rs" >&2; \
         exit 1; \
     else \
-        echo "WARNING: installed vllm package (${pkg}) ships no executable vllm-rs; not linking it onto PATH" >&2; \
+        echo "WARNING: installed vllm package (${pkg}) ships no executable vllm-rs; not putting it onto PATH" >&2; \
     fi
 
 USER dynamo
