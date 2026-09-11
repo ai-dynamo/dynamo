@@ -24,6 +24,15 @@ spec:
                 # generic target, which has no RDMA device.
                 - name: MC_FORCE_TCP
                   $patch: delete
+                # Register GPU memory for RDMA through DMA-BUF, not through the
+                # nvidia_peermem kernel module. These nodes load nvidia,
+                # nvidia_drm, nvidia_modeset and nvidia_uvm, and no peermem. With
+                # the default Mooncake path every GPU registration fails:
+                #   rdma_context.cpp:602] Failed to register memory: Bad address [14]
+                # Host memory still registers, so the workers reach Ready and the
+                # API answers HTTP 200 with content null.
+                - name: WITH_NVIDIA_PEERMEM
+                  value: "0"
                 # eth0 is the GKE default pod interface. NCCL and Gloo must not
                 # pick an RDMA interface for their control plane.
                 - name: NCCL_SOCKET_IFNAME

@@ -145,6 +145,8 @@ spec:
           - -m
           - dynamo.sglang
           env:
+          - name: WITH_NVIDIA_PEERMEM
+            value: "0"
           - name: NCCL_SOCKET_IFNAME
             value: eth0
           - name: GLOO_SOCKET_IFNAME
@@ -247,6 +249,8 @@ spec:
           - -m
           - dynamo.sglang
           env:
+          - name: WITH_NVIDIA_PEERMEM
+            value: "0"
           - name: NCCL_SOCKET_IFNAME
             value: eth0
           - name: GLOO_SOCKET_IFNAME
