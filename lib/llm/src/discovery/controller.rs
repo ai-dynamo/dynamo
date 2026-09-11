@@ -509,7 +509,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         if group.cohorts.is_empty() {
             group.admission_tx.send_replace(Vec::new());
             cancel_build(&old_status);
-            if !status_has_commit(&old_status) {
+            if !status_has_commit(&old_status) && group.pending_removal.is_none() {
                 return;
             }
             // A complete drain is a succession, so everything a succession retires
