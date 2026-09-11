@@ -1430,9 +1430,16 @@ impl DistributedRuntime {
                 })
             });
 
-        self.inner
-            .engine_routes()
-            .register(&route_name, rust_callback);
+        let route_default = match gated_by {
+            Some(gate) => rs::engine_routes::RouteDefault::Gated(gate),
+            None if default_enabled => rs::engine_routes::RouteDefault::Enabled,
+            None => rs::engine_routes::RouteDefault::Disabled,
+        };
+        self.inner.engine_routes().register_with_default(
+            &route_name,
+            rust_callback,
+            route_default,
+        );
         tracing::debug!("Registered engine route: /engine/{}", route_name);
         Ok(())
     }
