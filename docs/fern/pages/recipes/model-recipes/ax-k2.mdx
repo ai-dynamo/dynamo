@@ -184,17 +184,6 @@ Benchmarking uses synthetic EAGLE3 acceptance length 2.12.
 | Chat (15% subset) | vLLM | Aggregated (2 workers) | B200 | 16 | 76.49 | 55.83 | 0.525 |
 | Chat (15% subset) | vLLM | Disaggregated (2P1D) | B200 | 16 | 61.97 | 83 | 3.879 |
 
-GPU throughput is output-token throughput divided by all serving GPUs:
-eight for aggregated serving and twelve for disaggregated serving.
-Per-user throughput is the mean request output-token rate. TTFT means time
-to first token; the table reports its median in seconds. The 15% subset
-of the 8K/1K Mooncake chat trace retains 70% KV reuse.
-
-The aggregate run completed all 1,765 requests; the disaggregated run completed 1,755 of 1,765, with 10 failed
-requests. Warmup differed: 20 requests for aggregate and 32 for disaggregate.
-The checked-in benchmark job runs the full eligible trace at C=32; this table
-reports the short trace at C=16.
-
 ## Compare All Targets
 
 | Setting | Aggregated | Disaggregated |
