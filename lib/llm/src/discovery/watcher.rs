@@ -434,12 +434,7 @@ where
 
         validate_selector_worker_role(card, self.require_typed_worker_role)?;
 
-        // One video-routing processor serves the whole WorkerSet, so it may
-        // only use a contract every member published. Where they disagree,
-        // withhold the contract from the card the pipeline is built from: the
-        // preprocessor then takes the same path as a worker that published no
-        // contract and leaves exact video routing off. Text serving, and every
-        // other member of the group, are untouched.
+        // Prepare without exact video routing unless the cohort agreed on a contract.
         if spec.video_contract.is_none()
             && card
                 .runtime_config

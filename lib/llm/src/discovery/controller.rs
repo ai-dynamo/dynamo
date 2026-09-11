@@ -89,8 +89,7 @@ pub(crate) struct GroupSpec {
     pub(crate) fingerprint: String,
     pub(crate) generation: u64,
     pub(crate) representative: DesiredInstance,
-    /// The cohort-wide contract from [`cohort_video_contract`]. `None` means
-    /// the group must build with exact video routing disabled.
+    /// The cohort-wide contract, if any.
     pub(crate) video_contract: Option<String>,
 }
 
@@ -639,10 +638,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 continue;
             };
             let fingerprint = fingerprint.clone();
-            // The status carries the cohort fingerprint, which folds in the
-            // agreed video contract, so it is not a key into `cohorts`. A
-            // queued group has exactly one cohort — more than one is a
-            // conflict — so take that one.
+            // The status fingerprint includes the contract; take the sole cohort.
             let Some((_, member_keys)) = group.sole_cohort() else {
                 continue;
             };
@@ -709,11 +705,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             }
             return;
         };
-        // `cohorts` is keyed by the per-card fingerprint while the spec carries
-        // the cohort fingerprint, which also folds in the agreed video
-        // contract. Derive the group's current cohort fingerprint rather than
-        // looking the spec's up, so a build stays current only while the cohort
-        // it was started for still describes the group.
+        // The spec fingerprint includes the contract, unlike the `cohorts` key.
         let cohort_members = group
             .sole_cohort()
             .map(|(fingerprint, member_keys)| (fingerprint.clone(), member_keys.clone()))
@@ -1325,7 +1317,6 @@ mod tests {
         assert_eq!(host.members(&group_key()), BTreeSet::from([compatible.key]));
     }
 
-    // Legacy workers join the cohort without exact video routing.
     #[tokio::test]
     async fn a_worker_without_the_video_contract_joins_instead_of_conflicting() {
         let (host, mut starts) = FakeHost::new();
@@ -1374,7 +1365,6 @@ mod tests {
         assert_eq!(host.members(&group_key()), BTreeSet::from([current.key]));
     }
 
-    // Contract disagreement disables exact video routing for the cohort.
     #[tokio::test]
     async fn differing_video_contracts_serve_together_without_exact_video_routing() {
         let (host, mut starts) = FakeHost::new();
@@ -1398,7 +1388,6 @@ mod tests {
         );
     }
 
-    // Contract-only card updates must refresh the cohort agreement.
     #[tokio::test]
     async fn republishing_only_the_video_contract_updates_the_group() {
         let (host, mut starts) = FakeHost::new();
@@ -1428,7 +1417,6 @@ mod tests {
         assert_eq!(host.members(&group_key()), BTreeSet::from([first.key]));
     }
 
-    // An agreeing member does not rebuild the cohort.
     #[tokio::test]
     async fn an_agreeing_member_joins_without_rebuilding_the_group() {
         let (host, mut starts) = FakeHost::new();
