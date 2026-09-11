@@ -25,6 +25,7 @@ from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
+from dynamo.common.lora.manager import lora_runtime_enabled
 from dynamo.common.model_fetch import fetch_model
 from dynamo.common.snapshot.restore_context import (
     parse_snapshot_restore_runtime_config,
@@ -926,7 +927,10 @@ async def register_vllm_model(
 
 
 def _base_model_lora_capacity(config: Config, model_type: ModelType) -> int | None:
-    if not getattr(config.engine_args, "enable_lora", False):
+    # Same predicate as endpoint registration and adapter resolution. If this
+    # advertised capacity on the engine flag alone, the frontend would place an
+    # adapter on a worker whose resolver cannot resolve it.
+    if not lora_runtime_enabled(getattr(config.engine_args, "enable_lora", False)):
         return None
     # vLLM rejects architectures without LoRA support at engine startup, so any
     # worker that reached registration can serve adapters.

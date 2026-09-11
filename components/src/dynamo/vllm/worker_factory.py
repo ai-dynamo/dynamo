@@ -20,6 +20,7 @@ from vllm.config import VllmConfig
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo import prometheus_names
+from dynamo.common.lora.manager import lora_runtime_enabled
 from dynamo.common.model_taints import register_model_taint_route
 from dynamo.common.rl import first_endpoint_response, register_rl_routes
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
@@ -1069,7 +1070,17 @@ class WorkerFactory:
         so the lifecycle endpoints are unregistered on graceful shutdown,
         matching the decode/prefill worker pattern.
         """
-        if not getattr(config.engine_args, "enable_lora", False):
+        engine_lora_enabled = bool(getattr(config.engine_args, "enable_lora", False))
+        if not lora_runtime_enabled(engine_lora_enabled):
+            if engine_lora_enabled:
+                logger.warning(
+                    "LoRA is enabled in engine args but the LoRA manager is "
+                    "unavailable, so the adapter lifecycle endpoints are not "
+                    "being registered. Set DYN_LORA_ENABLED=true. Registering "
+                    "them anyway would advertise adapter capacity this worker "
+                    "cannot honour, and adapter-named requests would be "
+                    "answered from the base weights."
+                )
             return []
 
         metrics_labels = [("model", config.model)]
