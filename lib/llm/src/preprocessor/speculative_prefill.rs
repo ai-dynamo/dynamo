@@ -729,7 +729,10 @@ mod tests {
         drop(first);
         drop(second);
         let replacement = PrefillTasks::new(None);
-        assert!(Arc::ptr_eq(&admission, &replacement.preprocessing_admission));
+        assert!(Arc::ptr_eq(
+            &admission,
+            &replacement.preprocessing_admission
+        ));
     }
 
     #[tokio::test(start_paused = true)]
@@ -797,7 +800,11 @@ mod tests {
             );
             assert_eq!(wrapped.collect::<Vec<_>>().await.len(), 2);
             wait_for_dispatch(&entered).await;
-            assert_eq!(tracker.len(), 2, "track the async task and blocking closure");
+            assert_eq!(
+                tracker.len(),
+                2,
+                "track the async task and blocking closure"
+            );
             assert_eq!(admission.available_permits(), 0);
 
             match termination {
@@ -848,7 +855,11 @@ mod tests {
             assert!(tracker.wait().now_or_never().is_some());
             assert_eq!(retained_formatter.strong_count(), 0);
             assert_eq!(admission.available_permits(), 1);
-            assert_eq!(backend.generate_calls(), 0, "cancelled work must not dispatch");
+            assert_eq!(
+                backend.generate_calls(),
+                0,
+                "cancelled work must not dispatch"
+            );
 
             // Once the old closure returns, a new owner can use the recovered slot.
             let mut replacement = test_tasks(None);
