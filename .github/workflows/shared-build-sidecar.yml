@@ -137,21 +137,28 @@ jobs:
       # own -test image unmodified and installs the sidecar binary from this
       # artifact via PATH (see shared-test.yml's sidecar_binary_artifact
       # input). amd64-only: sidecar tests only run on amd64 GPU runners.
+      #
+      # buildx local output, not `docker pull` + `docker create` + `docker
+      # cp`: these builder runners route to a remote BuildKit worker (see
+      # init-dynamo-builder above) with no local docker daemon, so plain
+      # `docker` CLI commands against an image fail with "failed to connect
+      # to the docker API at unix:///var/run/docker.sock". `docker buildx
+      # build` talks to the remote builder directly and needs no daemon.
+      # Reuses the same builder and build cache as "Build and Push Image"
+      # above, so the sidecar-binaries target (which only depends on the
+      # {vllm,sglang,trtllm}-builder stages) is a near-instant cache hit.
       - name: Extract sidecar binaries (amd64)
         id: binary-artifact
         shell: bash
-        env:
-          IMAGE_URI: ${{ steps.calculate-target-tag.outputs.image_uri }}
         run: |
           set -euo pipefail
-          docker pull --platform linux/amd64 "${IMAGE_URI}"
-          cid=$(docker create --platform linux/amd64 "${IMAGE_URI}")
-          trap 'docker rm -f "${cid}" >/dev/null 2>&1 || true' EXIT
           mkdir -p sidecar-binaries
-          for backend in vllm sglang trtllm; do
-            docker cp "${cid}:/usr/local/bin/dynamo-${backend}-sidecar" \
-              "sidecar-binaries/dynamo-${backend}-sidecar"
-          done
+          docker buildx build \
+            --target sidecar-binaries \
+            --platform linux/amd64 \
+            -f lib/sidecar/Dockerfile \
+            --output type=local,dest=sidecar-binaries \
+            .
           name="dynamo-sidecar-binaries-${GITHUB_SHA}"
           echo "name=${name}" >> "${GITHUB_OUTPUT}"
 
