@@ -707,9 +707,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 continue;
             };
             let committed_members = match &group.status {
-                GroupStatus::Queued {
-                    committed_members, ..
-                } => committed_members.clone(),
+                GroupStatus::Queued { committed_members, .. } => committed_members.clone(),
                 _ => unreachable!("queued status was checked above"),
             };
             let Some(mdc_checksum) = group.selected_checksum().map(str::to_string) else {
@@ -807,9 +805,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                     ) == result.spec.fingerprint
                 });
         let committed_members = match &group.status {
-            GroupStatus::Building {
-                committed_members, ..
-            } => committed_members.clone(),
+            GroupStatus::Building { committed_members, .. } => committed_members.clone(),
             _ => None,
         };
         if !is_current {
@@ -1058,28 +1054,12 @@ fn status_has_commit(status: &GroupStatus) -> bool {
 
 fn status_committed_members(status: &GroupStatus) -> Option<&BTreeSet<String>> {
     match status {
-        GroupStatus::Ready {
-            committed_members, ..
-        }
-        | GroupStatus::BlockedReady {
-            committed_members, ..
-        } => Some(committed_members),
-        GroupStatus::Queued {
-            committed_members,
-            ..
-        }
-        | GroupStatus::Building {
-            committed_members,
-            ..
-        }
-        | GroupStatus::Retrying {
-            committed_members,
-            ..
-        }
-        | GroupStatus::Blocked {
-            committed_members,
-            ..
-        } => committed_members.as_ref(),
+        GroupStatus::Ready { committed_members, .. }
+        | GroupStatus::BlockedReady { committed_members, .. } => Some(committed_members),
+        GroupStatus::Queued { committed_members, .. }
+        | GroupStatus::Building { committed_members, .. }
+        | GroupStatus::Retrying { committed_members, .. }
+        | GroupStatus::Blocked { committed_members, .. } => committed_members.as_ref(),
         GroupStatus::Idle => None,
     }
 }
