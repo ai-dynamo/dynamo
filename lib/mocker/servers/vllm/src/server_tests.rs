@@ -45,6 +45,14 @@ fn request(id: &str) -> pb::GenerateRequest {
 }
 
 #[test]
+fn lora_requests_are_rejected() {
+    let mut request = request("lora");
+    request.lora_name = "adapter".to_string();
+    let error = PreparedRequest::new(request, &MockerServerConfig::default()).unwrap_err();
+    assert_eq!(error.code(), tonic::Code::Unimplemented);
+}
+
+#[test]
 fn preparation_is_deterministic() {
     let config = MockerServerConfig::default();
     let first = PreparedRequest::new(request("stable"), &config).unwrap();

@@ -68,6 +68,9 @@ impl PreparedRequest {
         mut request: pb::GenerateRequest,
         config: &MockerServerConfig,
     ) -> BoxedStatusResult<Self> {
+        if !request.lora_name.is_empty() {
+            return Err(Status::unimplemented("LoRA is not supported by the mock server").into());
+        }
         if !request.model.is_empty() && request.model != config.model {
             return Err(Status::not_found(format!(
                 "model '{}' is not served; expected '{}'",
