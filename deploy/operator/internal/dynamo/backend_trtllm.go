@@ -7,8 +7,9 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/mutation"
+	trtllmmutation "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/mutation/trtllm"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -35,80 +36,50 @@ func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNod
 		return nil
 	}
 
-	// Configure probes for multinode deployments
-	if role == RoleWorker {
-		// For workers: remove liveness and startup probes, set readiness to check SSH port
-		container.LivenessProbe = nil
-		container.StartupProbe = nil
-		container.ReadinessProbe = &corev1.Probe{
-			ProbeHandler: corev1.ProbeHandler{
-				TCPSocket: &corev1.TCPSocketAction{
-					Port: intstr.FromInt(commonconsts.MpiRunSshPort),
-				},
-			},
-			InitialDelaySeconds: 20,
-			PeriodSeconds:       20,
-			TimeoutSeconds:      5,
-			FailureThreshold:    10,
-		}
-	}
-	// For leaders: leave all probes untouched
-
-	// Add SSH keypair volume mount for multinode deployments
-	b.addSSHVolumeMount(container)
-
-	// Add OpenMPI environment variable to keep FQDN hostnames
-	envVar := corev1.EnvVar{
-		Name:  "OMPI_MCA_orte_keep_fqdn_hostnames",
-		Value: "1",
-	}
-	container.Env = append(container.Env, envVar)
-
-	// Update container command based on role
+	var launchMutations mutation.EngineMutations
 	switch role {
 	case RoleLeader:
 		containerGPUs, err := containerGPUCount()
 		if err != nil {
 			return fmt.Errorf("failed to resolve container GPUs: %w", err)
 		}
-		b.setupLeaderContainer(container, numberOfNodes, serviceName, multinodeDeployer, containerGPUs)
+		launchContainer := container.DeepCopy()
+		launchContainer.Env = append(launchContainer.Env, trtllmmutation.MPIEnvironment())
+		command, args := b.leaderCommand(launchContainer, numberOfNodes, serviceName, multinodeDeployer, containerGPUs)
+		launchMutations = trtllmmutation.LeaderLaunch(command, args)
 	case RoleWorker:
-		b.setupWorkerContainer(container)
+		command, args := b.workerCommand()
+		launchMutations = trtllmmutation.WorkerLaunch(command, args)
 	}
 
-	return nil
+	mutations := mutation.Concat(
+		trtllmmutation.MultinodeWiring(b.MpiRunSecretName),
+		launchMutations,
+	)
+	return mutations.Apply(component, role, container)
 }
 
 // UpdatePodSpec injects the SSH keypair volume into the pod spec for TRT-LLM
 // multinode deployments so that leader and worker containers can mount it.
-func (b *TRTLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
-	// Add SSH keypair volume for TRTLLM multinode deployments
-	if numberOfNodes > 1 {
-		sshVolume := corev1.Volume{
-			Name: b.MpiRunSecretName,
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{
-					SecretName:  b.MpiRunSecretName,
-					DefaultMode: func() *int32 { mode := int32(0644); return &mode }(),
-				},
-			},
-		}
-		podSpec.Volumes = append(podSpec.Volumes, sshVolume)
+func (b *TRTLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) error {
+	if numberOfNodes <= 1 {
+		return nil
 	}
+	return trtllmmutation.PodSpec(b.MpiRunSecretName).Apply(component, role, podSpec)
 }
 
 // addSSHVolumeMount adds the SSH keypair secret volume mount to the container
 func (b *TRTLLMBackend) addSSHVolumeMount(container *corev1.Container) {
-	sshVolumeMount := corev1.VolumeMount{
-		Name:      b.MpiRunSecretName,
-		MountPath: "/ssh-pk",
-		ReadOnly:  true,
-	}
-	container.VolumeMounts = append(container.VolumeMounts, sshVolumeMount)
+	_ = trtllmmutation.SSHVolumeMount(b.MpiRunSecretName).Apply(container)
 }
 
 // setupLeaderContainer configures the leader node with SSH setup and mpirun command
 func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, numberOfNodes int32, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs int64) {
+	command, args := b.leaderCommand(container, numberOfNodes, serviceName, multinodeDeployer, containerGPUs)
+	_ = trtllmmutation.LeaderLaunch(command, args).Apply(nil, RoleLeader, container)
+}
+
+func (b *TRTLLMBackend) leaderCommand(container *corev1.Container, numberOfNodes int32, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs int64) ([]string, []string) {
 	// Generate the list of all hostnames
 	hostNamesList := b.hostNamesList(numberOfNodes, serviceName, multinodeDeployer)
 	allHostnames := strings.Join(hostNamesList, ",")
@@ -116,15 +87,15 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 	// Store original command/args for later use
 	var originalCommand string
 
-	if len(container.Command) > 0 && isPythonCommand(container.Command[0]) {
+	if len(container.Command) > 0 && mutation.IsPythonCommand(container.Command[0]) {
 		// Direct Python command: combine command + args
 		// Shell-quote each part to handle args with spaces (e.g., JSON in --override-engine-args)
 		var quotedParts []string
 		for _, part := range container.Command {
-			quotedParts = append(quotedParts, shellQuoteForBashC(part))
+			quotedParts = append(quotedParts, mutation.ShellQuote(part))
 		}
 		for _, part := range container.Args {
-			quotedParts = append(quotedParts, shellQuoteForBashC(part))
+			quotedParts = append(quotedParts, mutation.ShellQuote(part))
 		}
 		originalCommand = strings.Join(quotedParts, " ")
 	} else if len(container.Args) > 0 {
@@ -183,13 +154,16 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 	}
 	fullCommand := strings.Join(allCommands, " && ")
 
-	// Update container to use bash with the full command
-	container.Command = []string{"/bin/sh", "-c"}
-	container.Args = []string{fullCommand}
+	return []string{"/bin/sh", "-c"}, []string{fullCommand}
 }
 
 // setupWorkerContainer configures worker nodes with SSH setup and daemon
 func (b *TRTLLMBackend) setupWorkerContainer(container *corev1.Container) {
+	command, args := b.workerCommand()
+	_ = trtllmmutation.WorkerLaunch(command, args).Apply(nil, RoleWorker, container)
+}
+
+func (b *TRTLLMBackend) workerCommand() ([]string, []string) {
 	// Setup SSH for worker nodes
 	// Use $HOME instead of ~ for the same reasons as setupLeaderContainer (see comment above).
 	sshSetupCommands := []string{
@@ -222,9 +196,7 @@ func (b *TRTLLMBackend) setupWorkerContainer(container *corev1.Container) {
 
 	fullCommand := strings.Join(sshSetupCommands, " && ")
 
-	// Update container to use bash with the SSH setup and daemon
-	container.Command = []string{"/bin/sh", "-c"}
-	container.Args = []string{fullCommand}
+	return []string{"/bin/sh", "-c"}, []string{fullCommand}
 }
 
 // hostNamesList generates the list of hostnames for all nodes in the multinode deployment
