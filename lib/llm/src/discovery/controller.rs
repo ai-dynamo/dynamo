@@ -122,6 +122,17 @@ pub(crate) trait ControllerHost: Send + Sync + 'static {
         adapters: &[DesiredInstance],
     ) -> anyhow::Result<()>;
 
+    /// Commit a build over the catalog entry a drained predecessor left behind
+    /// under the same key, in one host operation. Committing after a separate
+    /// `remove_group` would leave the model unlisted in between.
+    fn supersede_group(
+        &self,
+        spec: &GroupSpec,
+        prepared: Self::Prepared,
+        members: &[DesiredInstance],
+        adapters: &[DesiredInstance],
+    ) -> anyhow::Result<()>;
+
     fn replace_group(
         &self,
         key: &GroupKey,
@@ -175,8 +186,9 @@ struct DesiredGroup {
     status: GroupStatus,
     /// Set while the host still holds the catalog entry of a group that has lost
     /// every member: the instant the entry is withdrawn if nothing has taken the
-    /// key over by then. A successor withdraws it as part of committing its own
-    /// build, so the entry never outlives the group it describes.
+    /// key over by then. A successor replaces the entry as it commits its own
+    /// build, so the entry never outlives the group it describes and the model
+    /// is never unlisted between the two.
     pending_removal: Option<Instant>,
 }
 
@@ -815,14 +827,19 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 group.admission_tx.send_replace(admitted_ids(&members));
                 // The predecessor's catalog entry was held past its drain to keep
                 // the model listed. This build is its successor, and a group id
-                // can only be committed once, so withdraw the retired entry first.
-                if group.pending_removal.take().is_some() {
-                    self.host.remove_group(&result.spec.key);
-                }
-                match self
-                    .host
-                    .commit_group(&result.spec, prepared, &members, &adapters)
-                {
+                // can only be committed once, so the entry is replaced rather
+                // than committed over. Withdrawing it in a separate call first
+                // would unlist the model until the commit landed, and a request
+                // arriving in that window would get the `404` the retained entry
+                // exists to prevent.
+                let commit = if group.pending_removal.take().is_some() {
+                    self.host
+                        .supersede_group(&result.spec, prepared, &members, &adapters)
+                } else {
+                    self.host
+                        .commit_group(&result.spec, prepared, &members, &adapters)
+                };
+                match commit {
                     Ok(()) => {
                         group.retry_attempt = 0;
                         group.status = GroupStatus::Ready {
@@ -1104,6 +1121,7 @@ mod tests {
         adapter_projections: Mutex<HashMap<String, HashMap<String, String>>>,
         admissions: Mutex<Vec<watch::Receiver<Vec<u64>>>>,
         removed_groups: AtomicUsize,
+        superseded_groups: AtomicUsize,
         discarded: AtomicUsize,
     }
 
@@ -1123,6 +1141,7 @@ mod tests {
                     adapter_projections: Mutex::new(HashMap::new()),
                     admissions: Mutex::new(Vec::new()),
                     removed_groups: AtomicUsize::new(0),
+                    superseded_groups: AtomicUsize::new(0),
                     discarded: AtomicUsize::new(0),
                 }),
                 start_rx,
@@ -1271,6 +1290,43 @@ mod tests {
             );
             drop(committed);
             self.store_adapters(&spec.key, adapters);
+            Ok(())
+        }
+
+        fn supersede_group(
+            &self,
+            spec: &GroupSpec,
+            prepared: Self::Prepared,
+            members: &[DesiredInstance],
+            adapters: &[DesiredInstance],
+        ) -> anyhow::Result<()> {
+            let Prepared(_build) = prepared;
+            if self
+                .commit_failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                self.committed.lock().unwrap().remove(&spec.key.id());
+                anyhow::bail!("injected commit conflict");
+            }
+            let mut committed = self.committed.lock().unwrap();
+            // `ModelManager::supersede_discovery_group` exists to replace a
+            // retained entry in one operation, so the entry must still be there
+            // and must never be observable as absent.
+            anyhow::ensure!(
+                committed.contains_key(&spec.key.id()),
+                "discovery group {:?} has no retained entry to supersede",
+                spec.key.id()
+            );
+            committed.insert(
+                spec.key.id(),
+                members.iter().map(|member| member.key.clone()).collect(),
+            );
+            drop(committed);
+            self.store_adapters(&spec.key, adapters);
+            self.superseded_groups.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
@@ -1547,9 +1603,14 @@ mod tests {
             BTreeSet::from([replacement.key.clone()])
         );
         assert_eq!(
-            host.removed_groups.load(Ordering::SeqCst),
+            host.superseded_groups.load(Ordering::SeqCst),
             1,
-            "the successor withdraws the retired entry as it commits its own"
+            "the successor replaces the retained entry as it commits its own"
+        );
+        assert_eq!(
+            host.removed_groups.load(Ordering::SeqCst),
+            0,
+            "the entry is never withdrawn, so the model is listed throughout"
         );
 
         tokio::time::advance(Duration::from_secs(5)).await;
@@ -1558,7 +1619,7 @@ mod tests {
             host.members(&group_key()),
             BTreeSet::from([replacement.key])
         );
-        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 1);
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1617,7 +1678,8 @@ mod tests {
             host.members(&group_key()),
             BTreeSet::from([replacement.key.clone()])
         );
-        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 1);
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
+        assert_eq!(host.superseded_groups.load(Ordering::SeqCst), 1);
         assert_eq!(host.starts.load(Ordering::SeqCst), 2);
 
         tokio::time::advance(Duration::from_secs(60)).await;
@@ -1626,7 +1688,7 @@ mod tests {
             host.members(&group_key()),
             BTreeSet::from([replacement.key])
         );
-        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 1);
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
     }
 
     /// A replacement that is still building when the window closes loses the

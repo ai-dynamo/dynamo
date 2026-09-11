@@ -648,6 +648,83 @@ impl ModelManager {
         members: Vec<(String, ModelDeploymentCard)>,
         adapters: Vec<(String, ModelDeploymentCard)>,
     ) -> anyhow::Result<()> {
+        let _reservation = self.reservation_lock.lock();
+        let lora_before = self.lora_projection_locked();
+        let (primary, namespace) = self.commit_discovery_group_locked(
+            group_id,
+            worker_set_key,
+            worker_set,
+            members,
+            adapters,
+        )?;
+        let lora_after = self.lora_projection_locked();
+        self.publish_lora_projection_locked(Self::union_lora_projection(&lora_before, &lora_after));
+        self.reconcile_discovery_topology(&primary, &namespace);
+        self.publish_catalog_locked();
+        self.publish_lora_projection_locked(lora_after);
+        Ok(())
+    }
+
+    /// Replace the committed group under `group_id` with a newly built successor,
+    /// in one catalog publication.
+    ///
+    /// A group that has lost every member keeps its catalog entry for a grace
+    /// period so the model stays listed. Removing that entry and then committing
+    /// the successor would publish a catalog without the model in between, and a
+    /// request arriving in that window would be answered `404` — the failure the
+    /// retained entry exists to prevent. Both halves therefore run under one hold
+    /// of `reservation_lock` and become visible together.
+    ///
+    /// A successor that cannot be installed leaves the predecessor withdrawn: the
+    /// removal is published and the error returned, which is the state a failed
+    /// commit after a removal would also leave behind.
+    pub(crate) fn supersede_discovery_group(
+        &self,
+        group_id: &str,
+        worker_set_key: &str,
+        worker_set: WorkerSet,
+        members: Vec<(String, ModelDeploymentCard)>,
+        adapters: Vec<(String, ModelDeploymentCard)>,
+    ) -> anyhow::Result<Option<RemovedDiscoveryGroup>> {
+        let _reservation = self.reservation_lock.lock();
+        let lora_before = self.lora_projection_locked();
+        let withdrawn = self.remove_discovery_group_locked(group_id);
+        let committed = self.commit_discovery_group_locked(
+            group_id,
+            worker_set_key,
+            worker_set,
+            members,
+            adapters,
+        );
+        let lora_after = self.lora_projection_locked();
+        self.publish_lora_projection_locked(Self::union_lora_projection(&lora_before, &lora_after));
+        if let Some((_, primary, namespace)) = &withdrawn
+            && committed
+                .as_ref()
+                .ok()
+                .is_none_or(|(successor, _)| successor != primary)
+        {
+            self.reconcile_discovery_topology(primary, namespace);
+        }
+        if let Ok((primary, namespace)) = &committed {
+            self.reconcile_discovery_topology(primary, namespace);
+        }
+        self.publish_catalog_locked();
+        self.publish_lora_projection_locked(lora_after);
+        committed?;
+        Ok(withdrawn.map(|(removed, _, _)| removed))
+    }
+
+    /// Install a group's state without publishing the result. The caller holds
+    /// `reservation_lock`. Returns the primary model name and topology namespace.
+    fn commit_discovery_group_locked(
+        &self,
+        group_id: &str,
+        worker_set_key: &str,
+        worker_set: WorkerSet,
+        members: Vec<(String, ModelDeploymentCard)>,
+        adapters: Vec<(String, ModelDeploymentCard)>,
+    ) -> anyhow::Result<(String, String)> {
         let representative = members
             .first()
             .map(|(_, card)| card)
@@ -662,8 +739,6 @@ impl ModelManager {
         let namespace = worker_set.namespace().to_string();
         let representative = representative.clone();
 
-        let _reservation = self.reservation_lock.lock();
-        let lora_before = self.lora_projection_locked();
         anyhow::ensure!(
             !self.discovery_groups.contains_key(group_id),
             "discovery group {group_id:?} is already committed"
@@ -751,12 +826,7 @@ impl ModelManager {
                 worker_set,
             },
         );
-        let lora_after = self.lora_projection_locked();
-        self.publish_lora_projection_locked(Self::union_lora_projection(&lora_before, &lora_after));
-        self.reconcile_discovery_topology(&primary, &namespace);
-        self.publish_catalog_locked();
-        self.publish_lora_projection_locked(lora_after);
-        Ok(())
+        Ok((primary, namespace))
     }
 
     fn validate_adapter_claims<'a>(
@@ -895,9 +965,28 @@ impl ModelManager {
     pub(crate) fn remove_discovery_group(&self, group_id: &str) -> Option<RemovedDiscoveryGroup> {
         let _reservation = self.reservation_lock.lock();
         let lora_before = self.lora_projection_locked();
+        let (removed, primary, topology_namespace) =
+            self.remove_discovery_group_locked(group_id)?;
+        let lora_after = self.lora_projection_locked();
+        self.publish_lora_projection_locked(Self::union_lora_projection(&lora_before, &lora_after));
+        self.reconcile_discovery_topology(&primary, &topology_namespace);
+        self.publish_catalog_locked();
+        self.publish_lora_projection_locked(lora_after);
+        Some(removed)
+    }
+
+    /// Withdraw a group's state without publishing the result. The caller holds
+    /// `reservation_lock` and decides which catalog the removal becomes visible
+    /// in, so a successor can be installed in the same one. Returns the removed
+    /// group with its primary model name and topology namespace.
+    fn remove_discovery_group_locked(
+        &self,
+        group_id: &str,
+    ) -> Option<(RemovedDiscoveryGroup, String, String)> {
         let (_, group) = self.discovery_groups.remove(group_id)?;
         let representative = group.representative.clone();
         let topology_namespace = group.namespace.clone();
+        let primary = group.primary.clone();
 
         for key in group.cards.keys() {
             self.cards.remove(key);
@@ -936,12 +1025,7 @@ impl ModelManager {
             representative,
             cards,
         };
-        let lora_after = self.lora_projection_locked();
-        self.publish_lora_projection_locked(Self::union_lora_projection(&lora_before, &lora_after));
-        self.reconcile_discovery_topology(&group.primary, &topology_namespace);
-        self.publish_catalog_locked();
-        self.publish_lora_projection_locked(lora_after);
-        Some(removed)
+        Some((removed, primary, topology_namespace))
     }
 
     // -- Model cards --
@@ -3374,6 +3458,105 @@ mod tests {
         assert!(manager.get_model("committed").is_none());
         assert!(manager.get_model("alias").is_none());
         assert_eq!(manager.resolve_canonical_name("alias"), "alias");
+    }
+
+    fn commit_single_member(manager: &ModelManager, group_id: &str, instance: &str) {
+        let card = ModelDeploymentCard::with_name_only("model");
+        let worker_set = WorkerSet::new(
+            "deployment".to_string(),
+            card.mdcsum().to_string(),
+            card.clone(),
+        );
+        manager
+            .commit_discovery_group(
+                group_id,
+                "model-workers",
+                worker_set,
+                vec![(instance.to_string(), card)],
+                Vec::new(),
+            )
+            .unwrap();
+    }
+
+    fn supersede_single_member(
+        manager: &ModelManager,
+        group_id: &str,
+        instance: &str,
+    ) -> Option<RemovedDiscoveryGroup> {
+        let card = ModelDeploymentCard::with_name_only("model");
+        let worker_set = WorkerSet::new(
+            "deployment".to_string(),
+            card.mdcsum().to_string(),
+            card.clone(),
+        );
+        manager
+            .supersede_discovery_group(
+                group_id,
+                "model-workers",
+                worker_set,
+                vec![(instance.to_string(), card)],
+                Vec::new(),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn superseding_a_discovery_group_swaps_its_members_in_one_publication() {
+        let manager = ModelManager::new();
+        commit_single_member(&manager, "group", "instance-1");
+        assert!(manager.get_committed_model("model").is_some());
+
+        let withdrawn = supersede_single_member(&manager, "group", "instance-2");
+
+        assert!(
+            withdrawn.is_some(),
+            "the predecessor is reported as removed"
+        );
+        assert!(manager.get_committed_model("model").is_some());
+        assert_eq!(
+            manager.get_model_card_keys(),
+            vec!["instance-2".to_string()],
+            "only the successor's card is published"
+        );
+    }
+
+    /// The retained entry exists so that a request arriving during a rolling
+    /// update is answered by the model rather than by `404`. Withdrawing the
+    /// entry and then committing the successor would publish a catalog without
+    /// the model in between; this reader samples the published catalog the whole
+    /// way through and would observe that gap.
+    #[test]
+    fn a_reader_never_sees_the_model_unlisted_while_its_group_is_superseded() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let manager = Arc::new(ModelManager::new());
+        commit_single_member(&manager, "group", "instance-0");
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let reader = std::thread::spawn({
+            let manager = Arc::clone(&manager);
+            let stop = Arc::clone(&stop);
+            move || {
+                let mut unlisted = 0usize;
+                while !stop.load(Ordering::Relaxed) {
+                    if manager.get_committed_model("model").is_none() {
+                        unlisted += 1;
+                    }
+                }
+                unlisted
+            }
+        });
+
+        for generation in 1..64 {
+            supersede_single_member(&manager, "group", &format!("instance-{generation}"));
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        assert_eq!(
+            reader.join().unwrap(),
+            0,
+            "the model is listed at every point of a succession"
+        );
     }
 
     #[derive(Debug, Clone)]
