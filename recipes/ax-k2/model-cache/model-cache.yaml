@@ -12,9 +12,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-resources:
-  - deploy.yaml
-components:
-  - ../../../../../kustomize/components/dynamo-openapi
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-cache
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 600Gi
+  # Edit this to a ReadWriteMany storage class available on the target cluster.
+  storageClassName: "your-storage-class-name"

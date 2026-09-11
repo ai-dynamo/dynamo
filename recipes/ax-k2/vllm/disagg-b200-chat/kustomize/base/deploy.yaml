@@ -16,10 +16,10 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: axk2-disagg-b200-chat-2p1d-k3-config
+  name: axk2-disagg-b200-chat-config
   labels:
-    app.kubernetes.io/name: axk2-disagg-b200-chat-2p1d-k3
-    app.kubernetes.io/part-of: ax-k2-nvfp4
+    app.kubernetes.io/name: axk2-disagg-b200-chat
+    app.kubernetes.io/part-of: ax-k2
 data:
   kv-transfer-config-prefill: |-
     {
@@ -59,10 +59,10 @@ data:
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: axk2-disagg-b200-chat-2p1d-k3
+  name: axk2-disagg-b200-chat
   labels:
-    app.kubernetes.io/name: axk2-disagg-b200-chat-2p1d-k3
-    app.kubernetes.io/part-of: ax-k2-nvfp4
+    app.kubernetes.io/name: axk2-disagg-b200-chat
+    app.kubernetes.io/part-of: ax-k2
 spec:
   backendFramework: vllm
   components:
@@ -77,11 +77,11 @@ spec:
             axk2.nvidia.com/routing: kv-aware
         spec:
           imagePullSecrets:
-            - name: nvcr-imagepullsecret
+            - name: runtime-imagepullsecret
           schedulerName: default-scheduler
           containers:
             - name: main
-              image: nvcr.io/nvstaging/nim/ax-k2-nvfp4:dynamo-1.4.1-vllm0.26.0-axk2-patches1-4@sha256:d4700ed2346c4766ba9e1c27db215909b58af0151c880828fdc795bd1f629db9
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-30282ab72cc420f8bd7d0d509cb04a1637b80754-vllm-runtime
               imagePullPolicy: IfNotPresent
               workingDir: /workspace
               command:
@@ -131,7 +131,7 @@ spec:
             axk2.nvidia.com/routing: kv-aware
         spec:
           imagePullSecrets:
-            - name: nvcr-imagepullsecret
+            - name: runtime-imagepullsecret
           affinity:
             nodeAffinity:
               requiredDuringSchedulingIgnoredDuringExecution:
@@ -150,11 +150,11 @@ spec:
                         - key: nvidia.com/dynamo-graph-deployment-name
                           operator: In
                           values:
-                            - axk2-disagg-b200-chat-2p1d-k3
+                            - axk2-disagg-b200-chat
                     topologyKey: kubernetes.io/hostname
           containers:
             - name: main
-              image: nvcr.io/nvstaging/nim/ax-k2-nvfp4:dynamo-1.4.1-vllm0.26.0-axk2-patches1-4@sha256:d4700ed2346c4766ba9e1c27db215909b58af0151c880828fdc795bd1f629db9
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-30282ab72cc420f8bd7d0d509cb04a1637b80754-vllm-runtime
               imagePullPolicy: IfNotPresent
               workingDir: /workspace
               command:
@@ -172,6 +172,7 @@ spec:
                     --tensor-parallel-size 4 \
                     --data-parallel-size 1 \
                     --attention-backend FLASHINFER_MLA_SPARSE \
+                    --kernel-config '{"enable_flashinfer_autotune": false}' \
                     --kv-cache-dtype fp8 \
                     --max-model-len 262144 \
                     --enable-prefix-caching \
@@ -195,14 +196,14 @@ spec:
                 - name: KV_TRANSFER_CONFIG
                   valueFrom:
                     configMapKeyRef:
-                      name: axk2-disagg-b200-chat-2p1d-k3-config
+                      name: axk2-disagg-b200-chat-config
                       key: kv-transfer-config-prefill
                 # Keep the EAGLE3 model and draft length identical to decode so
                 # the draft-model state and KV layout match across the NIXL handoff.
                 - name: SPECULATIVE_CONFIG
                   valueFrom:
                     configMapKeyRef:
-                      name: axk2-disagg-b200-chat-2p1d-k3-config
+                      name: axk2-disagg-b200-chat-config
                       key: speculative-config-prefill
                 - name: NIXL_LOG_LEVEL
                   value: INFO
@@ -241,7 +242,7 @@ spec:
           volumes:
             - name: model-cache
               persistentVolumeClaim:
-                claimName: shared-model-cache
+                claimName: model-cache
             - name: runtime-tmp
               emptyDir: {}
           schedulerName: default-scheduler
@@ -263,7 +264,7 @@ spec:
             axk2.nvidia.com/routing: kv-aware
         spec:
           imagePullSecrets:
-            - name: nvcr-imagepullsecret
+            - name: runtime-imagepullsecret
           affinity:
             nodeAffinity:
               requiredDuringSchedulingIgnoredDuringExecution:
@@ -282,11 +283,11 @@ spec:
                         - key: nvidia.com/dynamo-graph-deployment-name
                           operator: In
                           values:
-                            - axk2-disagg-b200-chat-2p1d-k3
+                            - axk2-disagg-b200-chat
                     topologyKey: kubernetes.io/hostname
           containers:
             - name: main
-              image: nvcr.io/nvstaging/nim/ax-k2-nvfp4:dynamo-1.4.1-vllm0.26.0-axk2-patches1-4@sha256:d4700ed2346c4766ba9e1c27db215909b58af0151c880828fdc795bd1f629db9
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-30282ab72cc420f8bd7d0d509cb04a1637b80754-vllm-runtime
               imagePullPolicy: IfNotPresent
               workingDir: /workspace
               command:
@@ -304,6 +305,7 @@ spec:
                     --tensor-parallel-size 4 \
                     --data-parallel-size 1 \
                     --attention-backend FLASHINFER_MLA_SPARSE \
+                    --kernel-config '{"enable_flashinfer_autotune": false}' \
                     --kv-cache-dtype fp8 \
                     --max-model-len 262144 \
                     --enable-prefix-caching \
@@ -326,12 +328,12 @@ spec:
                 - name: KV_TRANSFER_CONFIG
                   valueFrom:
                     configMapKeyRef:
-                      name: axk2-disagg-b200-chat-2p1d-k3-config
+                      name: axk2-disagg-b200-chat-config
                       key: kv-transfer-config-decode
                 - name: SPECULATIVE_CONFIG
                   valueFrom:
                     configMapKeyRef:
-                      name: axk2-disagg-b200-chat-2p1d-k3-config
+                      name: axk2-disagg-b200-chat-config
                       key: speculative-config-decode
                 - name: NIXL_LOG_LEVEL
                   value: INFO
@@ -370,7 +372,7 @@ spec:
           volumes:
             - name: model-cache
               persistentVolumeClaim:
-                claimName: shared-model-cache
+                claimName: model-cache
             - name: runtime-tmp
               emptyDir: {}
           schedulerName: default-scheduler

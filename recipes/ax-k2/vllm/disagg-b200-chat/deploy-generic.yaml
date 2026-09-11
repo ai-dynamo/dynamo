@@ -3,10 +3,10 @@
 
 # Generated file. For repository contributors, do not edit this checked-in copy.
 # Regenerate every public overlay and rendered manifest of this matrix (from the repository root):
-#   scripts/kustomize-matrix.py unfold recipes/ax-k2-nvfp4/vllm/disagg-b200-chat-2p1d/.kustomize-matrix.yaml
-#   scripts/kustomize-matrix.py render recipes/ax-k2-nvfp4/vllm/disagg-b200-chat-2p1d/.kustomize-matrix.yaml
+#   scripts/kustomize-matrix.py unfold recipes/ax-k2/vllm/disagg-b200-chat/.kustomize-matrix.yaml
+#   scripts/kustomize-matrix.py render recipes/ax-k2/vllm/disagg-b200-chat/.kustomize-matrix.yaml
 # Inspect only this Kustomize overlay (from the repository root):
-#   kustomize build recipes/ax-k2-nvfp4/vllm/disagg-b200-chat-2p1d/kustomize/overlays/generic
+#   kustomize build recipes/ax-k2/vllm/disagg-b200-chat/kustomize/overlays/generic
 # You may edit a copy before applying it.
 
 #
@@ -25,9 +25,9 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   labels:
-    app.kubernetes.io/name: axk2-disagg-b200-chat-2p1d-k3
-    app.kubernetes.io/part-of: ax-k2-nvfp4
-  name: axk2-disagg-b200-chat-2p1d-k3-config
+    app.kubernetes.io/name: axk2-disagg-b200-chat
+    app.kubernetes.io/part-of: ax-k2
+  name: axk2-disagg-b200-chat-config
 data:
   kv-transfer-config-decode: |-
     {
@@ -68,9 +68,9 @@ apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   labels:
-    app.kubernetes.io/name: axk2-disagg-b200-chat-2p1d-k3
-    app.kubernetes.io/part-of: ax-k2-nvfp4
-  name: axk2-disagg-b200-chat-2p1d-k3
+    app.kubernetes.io/name: axk2-disagg-b200-chat
+    app.kubernetes.io/part-of: ax-k2
+  name: axk2-disagg-b200-chat
 spec:
   backendFramework: vllm
   components:
@@ -99,7 +99,7 @@ spec:
             valueFrom:
               fieldRef:
                 fieldPath: metadata.uid
-          image: nvcr.io/nvstaging/nim/ax-k2-nvfp4:dynamo-1.4.1-vllm0.26.0-axk2-patches1-4@sha256:d4700ed2346c4766ba9e1c27db215909b58af0151c880828fdc795bd1f629db9
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-30282ab72cc420f8bd7d0d509cb04a1637b80754-vllm-runtime
           imagePullPolicy: IfNotPresent
           name: main
           ports:
@@ -121,7 +121,7 @@ spec:
               memory: 16Gi
           workingDir: /workspace
         imagePullSecrets:
-        - name: nvcr-imagepullsecret
+        - name: runtime-imagepullsecret
         schedulerName: default-scheduler
     replicas: 1
     runtimeVersionOverride: 1.4.1
@@ -150,7 +150,7 @@ spec:
                   - key: nvidia.com/dynamo-graph-deployment-name
                     operator: In
                     values:
-                    - axk2-disagg-b200-chat-2p1d-k3
+                    - axk2-disagg-b200-chat
                 topologyKey: kubernetes.io/hostname
               weight: 100
         containers:
@@ -166,6 +166,7 @@ spec:
               --tensor-parallel-size 4 \
               --data-parallel-size 1 \
               --attention-backend FLASHINFER_MLA_SPARSE \
+              --kernel-config '{"enable_flashinfer_autotune": false}' \
               --kv-cache-dtype fp8 \
               --max-model-len 262144 \
               --enable-prefix-caching \
@@ -193,19 +194,19 @@ spec:
             valueFrom:
               configMapKeyRef:
                 key: kv-transfer-config-prefill
-                name: axk2-disagg-b200-chat-2p1d-k3-config
+                name: axk2-disagg-b200-chat-config
           - name: SPECULATIVE_CONFIG
             valueFrom:
               configMapKeyRef:
                 key: speculative-config-prefill
-                name: axk2-disagg-b200-chat-2p1d-k3-config
+                name: axk2-disagg-b200-chat-config
           - name: NIXL_LOG_LEVEL
             value: INFO
           - name: UCX_RCACHE_MAX_UNRELEASED
             value: "1024"
           - name: UCX_TLS
             value: rc_x,rc,cuda_copy,cuda_ipc
-          image: nvcr.io/nvstaging/nim/ax-k2-nvfp4:dynamo-1.4.1-vllm0.26.0-axk2-patches1-4@sha256:d4700ed2346c4766ba9e1c27db215909b58af0151c880828fdc795bd1f629db9
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-30282ab72cc420f8bd7d0d509cb04a1637b80754-vllm-runtime
           imagePullPolicy: IfNotPresent
           name: main
           resources:
@@ -236,7 +237,7 @@ spec:
             name: runtime-tmp
           workingDir: /workspace
         imagePullSecrets:
-        - name: nvcr-imagepullsecret
+        - name: runtime-imagepullsecret
         schedulerName: default-scheduler
         tolerations:
         - effect: NoSchedule
@@ -246,7 +247,7 @@ spec:
         volumes:
         - name: model-cache
           persistentVolumeClaim:
-            claimName: shared-model-cache
+            claimName: model-cache
         - emptyDir: {}
           name: runtime-tmp
     replicas: 2
@@ -277,7 +278,7 @@ spec:
                   - key: nvidia.com/dynamo-graph-deployment-name
                     operator: In
                     values:
-                    - axk2-disagg-b200-chat-2p1d-k3
+                    - axk2-disagg-b200-chat
                 topologyKey: kubernetes.io/hostname
               weight: 100
         containers:
@@ -293,6 +294,7 @@ spec:
               --tensor-parallel-size 4 \
               --data-parallel-size 1 \
               --attention-backend FLASHINFER_MLA_SPARSE \
+              --kernel-config '{"enable_flashinfer_autotune": false}' \
               --kv-cache-dtype fp8 \
               --max-model-len 262144 \
               --enable-prefix-caching \
@@ -319,19 +321,19 @@ spec:
             valueFrom:
               configMapKeyRef:
                 key: kv-transfer-config-decode
-                name: axk2-disagg-b200-chat-2p1d-k3-config
+                name: axk2-disagg-b200-chat-config
           - name: SPECULATIVE_CONFIG
             valueFrom:
               configMapKeyRef:
                 key: speculative-config-decode
-                name: axk2-disagg-b200-chat-2p1d-k3-config
+                name: axk2-disagg-b200-chat-config
           - name: NIXL_LOG_LEVEL
             value: INFO
           - name: UCX_RCACHE_MAX_UNRELEASED
             value: "1024"
           - name: UCX_TLS
             value: rc_x,rc,cuda_copy,cuda_ipc
-          image: nvcr.io/nvstaging/nim/ax-k2-nvfp4:dynamo-1.4.1-vllm0.26.0-axk2-patches1-4@sha256:d4700ed2346c4766ba9e1c27db215909b58af0151c880828fdc795bd1f629db9
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-30282ab72cc420f8bd7d0d509cb04a1637b80754-vllm-runtime
           imagePullPolicy: IfNotPresent
           name: main
           resources:
@@ -362,7 +364,7 @@ spec:
             name: runtime-tmp
           workingDir: /workspace
         imagePullSecrets:
-        - name: nvcr-imagepullsecret
+        - name: runtime-imagepullsecret
         schedulerName: default-scheduler
         tolerations:
         - effect: NoSchedule
@@ -372,7 +374,7 @@ spec:
         volumes:
         - name: model-cache
           persistentVolumeClaim:
-            claimName: shared-model-cache
+            claimName: model-cache
         - emptyDir: {}
           name: runtime-tmp
     replicas: 1

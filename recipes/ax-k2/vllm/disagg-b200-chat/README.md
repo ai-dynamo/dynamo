@@ -3,7 +3,7 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# A.X-K2-NVFP4: two prefill workers and one decode worker
+# A.X-K2 Disaggregated Serving
 
 This variant serves A.X-K2-NVFP4 through the Dynamo KV-aware router using
 12 B200 GPUs: two TP4 prefill replicas and one TP4 decode replica.
@@ -15,14 +15,17 @@ This variant serves A.X-K2-NVFP4 through the Dynamo KV-aware router using
 
 Both roles use DP1, ordinary FP8 KV cache, `FLASHINFER_MLA_SPARSE`, prefix
 caching, and the same pinned target and EAGLE3 revisions. Expert parallelism
-is disabled. EAGLE3 uses real acceptance on both roles. The frontend consumes
+is disabled. FlashInfer autotuning is disabled on both roles with
+`--kernel-config '{"enable_flashinfer_autotune": false}'`.
+EAGLE3 uses real acceptance on both roles. The frontend consumes
 prefill KV events with a 64-token block size. NIXL transfers KV state using
 CUDA buffers and UCX; each worker requests one `rdma/shared_ib` resource.
 
 ## Deploy
 
-The namespace must contain the `shared-model-cache` PVC with both pinned
-model snapshots and an `nvcr-imagepullsecret` that can pull the runtime image.
+The namespace must contain the `model-cache` PVC with both pinned
+model snapshots and a `runtime-imagepullsecret` that can pull the pinned runtime
+from `dynamoci.azurecr.io`.
 At least three groups of four B200 GPUs and 400 GiB of host memory per worker
 must be schedulable. Set `CONTEXT` and `NAMESPACE` to your cluster context and
 namespace, then run from this directory:
@@ -30,10 +33,10 @@ namespace, then run from this directory:
 ```bash
 kubectl --context "${CONTEXT}" -n "${NAMESPACE}" apply -f deploy-generic.yaml
 kubectl --context "${CONTEXT}" -n "${NAMESPACE}" wait --for=condition=Ready pod \
-  -l nvidia.com/dynamo-graph-deployment-name=axk2-disagg-b200-chat-2p1d-k3 \
+  -l nvidia.com/dynamo-graph-deployment-name=axk2-disagg-b200-chat \
   --timeout=7200s
 kubectl --context "${CONTEXT}" -n "${NAMESPACE}" port-forward \
-  service/axk2-disagg-b200-chat-2p1d-k3-frontend 8000:8000
+  service/axk2-disagg-b200-chat-frontend 8000:8000
 ```
 
 Call `/v1/models` and `/v1/chat/completions` through the forwarded port with
@@ -47,8 +50,8 @@ Edit `kustomize/base/deploy.yaml`; `deploy-generic.yaml` is generated. From
 the repository root, regenerate it with:
 
 ```bash
-python3 scripts/kustomize-matrix.py unfold recipes/ax-k2-nvfp4/vllm/disagg-b200-chat-2p1d/.kustomize-matrix.yaml
-python3 scripts/kustomize-matrix.py render recipes/ax-k2-nvfp4/vllm/disagg-b200-chat-2p1d/.kustomize-matrix.yaml
+python3 scripts/kustomize-matrix.py unfold recipes/ax-k2/vllm/disagg-b200-chat/.kustomize-matrix.yaml
+python3 scripts/kustomize-matrix.py render recipes/ax-k2/vllm/disagg-b200-chat/.kustomize-matrix.yaml
 ```
 
 The same configuration can be applied through the generated overlay:
