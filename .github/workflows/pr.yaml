@@ -355,6 +355,11 @@ jobs:
     uses: $/.github/workflows/shared-build-sidecar.yml
     with:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      # Default (60) is tight for a cold cache: multi-arch cargo build of 3
+      # sidecar crates + dynamo-llm/dynamo-runtime, plus the compliance and
+      # binary-extraction steps that follow it. Observed a legitimate cold
+      # build exceed 60m with room to spare in run 34547963529.
+      build_timeout_minutes: 90
       artifact_retention_days: '7'
       diff_event_context: pr
       diff_current_branch: ${{ github.ref_name }}
