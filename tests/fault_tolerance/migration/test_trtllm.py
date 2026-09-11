@@ -37,6 +37,7 @@ DECODE_MAX_TOKENS = 3072
 KV_TRANSFER_MAX_SEQ_LEN = 2048
 KV_TRANSFER_MAX_TOKENS = 1536
 KV_TRANSFER_BASELINE_MAX_TOKENS = 256
+KV_TRANSFER_BASELINE_REQUESTS = 3
 KV_TRANSFER_PROMPT_REPETITIONS = 128
 
 # Keep one active worker-failure case for every migration-policy outcome while
@@ -490,18 +491,22 @@ def test_request_migration_trtllm_kv_transfer(
                 {("prefill", "generate"): 1, ("backend", "generate"): 2},
             )
 
-            # The fault is injected after five streamed chunks. A 256-token
-            # reference therefore checks deterministic continuation beyond it
-            # without paying for a second full-length generation.
-            baseline_output = request_to_completion(
-                frontend.frontend_port,
-                use_chat_completion=(request_api == "chat"),
-                stream=stream,
-                max_tokens=KV_TRANSFER_BASELINE_MAX_TOKENS,
-                use_long_prompt=True,
-                long_prompt_repetitions=KV_TRANSFER_PROMPT_REPETITIONS,
-                force_max_output_tokens=True,
-            )
+            # GPU model output can diverge despite fixed sampling parameters.
+            # Characterize the stable prefix across both round-robin decode
+            # workers, then require migration to preserve it past the fault.
+            baseline_outputs = [
+                request_to_completion(
+                    frontend.frontend_port,
+                    use_chat_completion=(request_api == "chat"),
+                    stream=stream,
+                    max_tokens=KV_TRANSFER_BASELINE_MAX_TOKENS,
+                    use_long_prompt=True,
+                    long_prompt_repetitions=KV_TRANSFER_PROMPT_REPETITIONS,
+                    force_max_output_tokens=True,
+                )
+                for _ in range(KV_TRANSFER_BASELINE_REQUESTS)
+            ]
+            stable_output_prefix = os.path.commonprefix(baseline_outputs)
 
             transfer_baselines = {
                 worker.system_port: read_trtllm_kv_transfer_metrics(worker.system_port)
@@ -525,7 +530,7 @@ def test_request_migration_trtllm_kv_transfer(
                 expected_ongoing_request_count=1,
                 verify_replacement_worker=True,
                 force_max_output_tokens=True,
-                expected_output_prefix=baseline_output,
+                expected_output_prefix=stable_output_prefix,
             )
             wait_for_trtllm_kv_transfer_success(
                 replacement_worker.system_port,
