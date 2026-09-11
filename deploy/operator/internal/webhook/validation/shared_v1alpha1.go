@@ -74,7 +74,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecV1alpha1(
 			fmt.Sprintf("cannot inject frontend sidecar: a container named %q already exists in extraPodSpec.containers", consts.FrontendSidecarContainerName),
 		))
 	}
-	if spec.Failover != nil {
+	if spec.Failover != nil && v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
 		allErrs = append(allErrs, v.validateFailoverSpecV1alpha1(spec.Failover, fldPath.Child("failover"))...)
 	}
 

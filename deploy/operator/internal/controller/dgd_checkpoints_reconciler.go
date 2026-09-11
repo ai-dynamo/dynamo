@@ -265,6 +265,11 @@ func (r *dgdCheckpointsReconciler) reconcileAutomaticSnapshotJob(
 	if err != nil {
 		return nil, err
 	}
+	if dynamo.IsIntraPodFailoverEnabled(component) {
+		if err := dynamo.PrepareVLLMSnapshotSourceContainer(targetContainer); err != nil {
+			return nil, err
+		}
+	}
 	var gmsSpec *nvidiacomv1alpha1.GPUMemoryServiceSpec
 	if converted := gms.ToAlphaSpec(dynamo.GetGPUMemoryService(component)); converted != nil {
 		gmsSpec = converted.DeepCopy()

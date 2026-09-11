@@ -18,8 +18,10 @@
 package dynamo
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -275,6 +277,15 @@ func addGPUToleration(podSpec *corev1.PodSpec) {
 }
 
 // removeEnvVar removes all occurrences of the named env var from a container.
+func containerHasEnvVar(c *corev1.Container, name string) bool {
+	for i := range c.Env {
+		if c.Env[i].Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 func removeEnvVar(c *corev1.Container, name string) {
 	filtered := c.Env[:0]
 	for _, e := range c.Env {
@@ -387,9 +398,9 @@ func gmsResourceSharingEntries(serviceName string, roles []ServiceRole) []grovev
 // ──────────────────────────────────────────────────────────────────────────────
 // Intra-pod GMS failover (Mode: intraPod)
 //
-// The main container is cloned into two engine containers (active + standby)
-// within the same pod. GPU access is shared via DRA and a GMS sidecar
-// injects weights via the shared emptyDir volume.
+// The main container is cloned into active and standby engine containers within
+// the same pod. GPU access is shared via DRA and a GMS sidecar injects weights
+// via the shared emptyDir volume.
 // ──────────────────────────────────────────────────────────────────────────────
 
 // intraPodFailoverLockFile is the lock file path used by engine containers to
@@ -397,8 +408,223 @@ func gmsResourceSharingEntries(serviceName string, roles []ServiceRole) []grovev
 var intraPodFailoverLockFile = filepath.Join(gmsruntime.SharedMountPath, "failover.lock")
 
 const (
-	failoverEngineCount = 2
+	failoverEngineCount                    = 2
+	vllmModuleName                         = "dynamo.vllm"
+	vllmLoadFormatFlag                     = "--load-format"
+	vllmWorkerClassFlag                    = "--worker-cls"
+	checkpointFailoverCompatibilityMessage = "Snapshot with active/passive failover requires an operator-managed automatic single-node Worker checkpoint"
 )
+
+// ValidateAutomaticFailoverCheckpointSource validates the DGD component that
+// produces the one canonical checkpoint source.
+func ValidateFailoverCheckpointForDGD(
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	backendFramework string,
+) []error {
+	if !hasCheckpointFailover(component) {
+		return nil
+	}
+	return wrapFailoverCompatibilityViolations(
+		validateFailoverCheckpointProfile(component, backendFramework),
+	)
+}
+
+// ValidateAutomaticFailoverCheckpointTarget validates the DCD that restores
+// the DGD-owned checkpoint into the configured failover engines.
+func ValidateFailoverCheckpointForDCD(
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	backendFramework string,
+) []error {
+	if !hasCheckpointFailover(component) {
+		return nil
+	}
+	violations := validateFailoverCheckpointProfile(component, backendFramework)
+	config := component.Experimental.Checkpoint
+	if config.CheckpointRef == nil || *config.CheckpointRef == "" {
+		violations = append(violations, errors.New("checkpointRef must name the checkpoint to restore"))
+	}
+	return wrapFailoverCompatibilityViolations(violations)
+}
+
+func hasCheckpointFailover(component *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
+	return component != nil &&
+		component.Experimental != nil &&
+		component.Experimental.Checkpoint != nil &&
+		component.Experimental.Checkpoint.Enabled &&
+		(component.Experimental.GPUMemoryService == nil ||
+			component.Experimental.GPUMemoryService.Mode != v1beta1.GMSModeInterPod) &&
+		IsIntraPodFailoverEnabled(component)
+}
+
+func validateFailoverCheckpointProfile(
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	backendFramework string,
+) []error {
+	experimental := component.Experimental
+	config := experimental.Checkpoint
+	violations := make([]error, 0, 12)
+
+	if config.Mode != "" && config.Mode != v1beta1.CheckpointModeAuto {
+		violations = append(violations, errors.New("checkpoint mode must be automatic"))
+	}
+	if config.TargetContainerName != "" && config.TargetContainerName != commonconsts.MainContainerName {
+		violations = append(violations, errors.New("targetContainerName must be main"))
+	}
+	backend := BackendFramework(backendFramework)
+	if backend != BackendFrameworkVLLM && backend != BackendFrameworkSGLang {
+		violations = append(violations, errors.New("backendFramework must be vllm or sglang"))
+	}
+	if component.ComponentType != v1beta1.ComponentTypeWorker {
+		violations = append(violations, errors.New("component type must be Worker"))
+	}
+	if experimental.GPUMemoryService == nil ||
+		(experimental.GPUMemoryService.Mode != "" &&
+			experimental.GPUMemoryService.Mode != v1beta1.GMSModeIntraPod) {
+		violations = append(violations, errors.New("gpuMemoryService.mode must be IntraPod"))
+	}
+	if !IsIntraPodFailoverEnabled(component) {
+		violations = append(violations, errors.New("failover.mode must be IntraPod"))
+	}
+	if component.GetNumberOfNodes() != 1 {
+		violations = append(violations, errors.New("worker must use exactly one node"))
+	}
+
+	main := GetMainContainer(component)
+	if main == nil {
+		return append(violations, errors.New("podTemplate must contain the main container"))
+	}
+	gpuCount, err := getGPUCount(main.Resources)
+	if err != nil {
+		violations = append(violations, fmt.Errorf("main container GPU resources are invalid: %w", err))
+	} else if gpuCount != 1 {
+		violations = append(violations, errors.New("main container must request exactly one GPU"))
+	}
+	if backend == BackendFrameworkVLLM {
+		// The operator derives these from DYN_GMS_USE_V1, which it injects when a
+		// checkpoint is configured. A user value is either ignored or contradicts
+		// the operator's selection, so reject it rather than silently rewriting it.
+		// DYN_VLLM_GMS_SHADOW_MODE marks a cold-start shadow engine and is unset
+		// on the snapshot path. SGLang has no equivalents.
+		for _, flag := range []string{vllmWorkerClassFlag, vllmLoadFormatFlag} {
+			if _, found, err := tokenizedFlag(main.Args, flag); err != nil {
+				violations = append(violations, err)
+			} else if found {
+				violations = append(violations, fmt.Errorf("%s is managed by the operator and must not be set", flag))
+			}
+		}
+		if containerHasEnvVar(main, "DYN_VLLM_GMS_SHADOW_MODE") {
+			violations = append(violations, errors.New("DYN_VLLM_GMS_SHADOW_MODE is managed by the operator and must not be set"))
+		}
+	}
+	// Assigned per engine container by the operator, for every backend.
+	if containerHasEnvVar(main, "DYN_FORWARDPASS_METRIC_PORT") {
+		violations = append(violations, errors.New("DYN_FORWARDPASS_METRIC_PORT is managed by the operator and must not be set"))
+	}
+	for _, profile := range failoverSnapshotFlagProfile(backend) {
+		value, found, err := tokenizedFlag(main.Args, profile.flag)
+		if err != nil {
+			violations = append(violations, err)
+			continue
+		}
+		if !found {
+			value = profile.defaultValue
+		}
+		if value != profile.want {
+			violations = append(violations, fmt.Errorf("%s (got %q)", profile.description, value))
+		}
+	}
+	return violations
+}
+
+type failoverSnapshotFlag struct {
+	flag         string
+	defaultValue string
+	want         string
+	description  string
+}
+
+// failoverSnapshotFlagProfile returns the engine arguments that must resolve to a
+// single-rank aggregated worker. The two engines share one GPU, so any form of
+// parallelism or disaggregation is unsupported. vLLM and SGLang spell the
+// parallelism flags differently.
+func failoverSnapshotFlagProfile(backend BackendFramework) []failoverSnapshotFlag {
+	shared := []failoverSnapshotFlag{
+		{flag: "--disaggregation-mode", defaultValue: "agg", want: "agg", description: "disaggregation mode must be aggregated"},
+		{flag: "--request-plane", defaultValue: "tcp", want: "tcp", description: "request plane must be tcp"},
+	}
+	switch backend {
+	case BackendFrameworkSGLang:
+		return append(shared,
+			failoverSnapshotFlag{flag: "--tp", defaultValue: "1", want: "1", description: "tensor parallel size must be 1"},
+			failoverSnapshotFlag{flag: "--dp-size", defaultValue: "1", want: "1", description: "data parallel size must be 1"},
+			failoverSnapshotFlag{flag: "--pp-size", defaultValue: "1", want: "1", description: "pipeline parallel size must be 1"},
+		)
+	default:
+		return append(shared,
+			failoverSnapshotFlag{flag: tensorParallelSizeFlag, defaultValue: "1", want: "1", description: "tensor parallel size must be 1"},
+			failoverSnapshotFlag{flag: pipelineParallelSizeFlag, defaultValue: "1", want: "1", description: "pipeline parallel size must be 1"},
+			failoverSnapshotFlag{flag: dataParallelSizeFlag, defaultValue: "1", want: "1", description: "data parallel size must be 1"},
+		)
+	}
+}
+
+func wrapFailoverCompatibilityViolations(violations []error) []error {
+	if len(violations) == 0 {
+		return nil
+	}
+	return []error{fmt.Errorf("%s: %w", checkpointFailoverCompatibilityMessage, errors.Join(violations...))}
+}
+
+// PrepareVLLMSnapshotSourceContainer reconciles operator-injected configuration
+// that a capture pod must not carry. WorkerDefaults.GetBaseContainer stamps
+// DYN_FORWARDPASS_METRIC_PORT on every worker; a capture pod has no Dynamo
+// endpoint to publish to. This cannot be asserted upstream because the operator
+// injects it during pod generation, after validation has already run.
+func PrepareVLLMSnapshotSourceContainer(container *corev1.Container) error {
+	if container == nil {
+		return fmt.Errorf("snapshot source container is nil")
+	}
+	removeEnvVar(container, "DYN_FORWARDPASS_METRIC_PORT")
+	return nil
+}
+
+func tokenizedFlag(args []string, flag string) (value string, found bool, err error) {
+	for i, arg := range args {
+		switch {
+		case arg == flag:
+			if found {
+				return "", false, fmt.Errorf("%s must appear at most once", flag)
+			}
+			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "--") {
+				return "", false, fmt.Errorf("%s requires a value", flag)
+			}
+			value, found = args[i+1], true
+		case strings.HasPrefix(arg, flag+"="):
+			if found {
+				return "", false, fmt.Errorf("%s must appear at most once", flag)
+			}
+			value = strings.TrimPrefix(arg, flag+"=")
+			if value == "" {
+				return "", false, fmt.Errorf("%s requires a value", flag)
+			}
+			found = true
+		}
+	}
+	return value, found, nil
+}
+
+// configureCheckpointFailoverEngines adapts failover engine containers for the
+// snapshot-backed path. Shadow mode is incompatible with failover + snapshot,
+// which runs on GMS V1: it is set unconditionally for intra-pod failover by
+// applyVLLMOverrides, so unset it here.
+func configureCheckpointFailoverEngines(podSpec *corev1.PodSpec) {
+	engineNames := IntraPodFailoverEngineContainerNames()
+	for i := range podSpec.Containers {
+		if slices.Contains(engineNames, podSpec.Containers[i].Name) {
+			removeEnvVar(&podSpec.Containers[i], "DYN_VLLM_GMS_SHADOW_MODE")
+		}
+	}
+}
 
 // IsIntraPodFailoverEnabled is true only when failover clones engine
 // containers inside one pod. Inter-pod failover keeps one main container per
@@ -421,7 +647,7 @@ func IntraPodFailoverEngineContainerNames() []string {
 	return names
 }
 
-// buildFailoverPod clones the main container into two engine containers (active + standby).
+// buildFailoverPod clones the main container into active and standby engine containers.
 // This runs AFTER applyGPUMemoryService, so the main container already has DRA claims,
 // shared volume mount, and TMPDIR set. This function only handles engine duplication
 // and failover-specific env vars.
@@ -444,16 +670,21 @@ func buildFailoverPod(
 		engines[i] = buildEngineContainer(mainContainer, i, commonconsts.DynamoSystemPort+i)
 	}
 
-	podSpec.Containers = append(engines, sidecars...)
+	updated := podSpec.DeepCopy()
+	updated.Containers = append(engines, sidecars...)
 
 	// Backend-specific overrides
 	switch backendFramework {
 	case BackendFrameworkVLLM:
-		applyVLLMOverrides(podSpec, numberOfNodes)
+		applyVLLMOverrides(updated, numberOfNodes)
+	case BackendFrameworkSGLang:
+		// SGLang needs only the backend-agnostic engine identity, health and
+		// lock wiring applied above; there are no per-engine ports to stagger.
 	default:
-		return fmt.Errorf("failover is currently supported only for vLLM (detected: %s)", backendFramework)
+		return fmt.Errorf("failover is currently supported only for vLLM and SGLang (detected: %s)", backendFramework)
 	}
 
+	*podSpec = *updated
 	return nil
 }
 

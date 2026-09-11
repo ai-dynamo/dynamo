@@ -34,6 +34,7 @@ import (
 	k8sresource "k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/utils/ptr"
 )
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -614,11 +615,24 @@ func TestBuildFailoverPod_EmptyContainers(t *testing.T) {
 	assert.Contains(t, err.Error(), "at least one container")
 }
 
-func TestBuildFailoverPod_RejectsNonVLLM(t *testing.T) {
+func TestBuildFailoverPod_AcceptsSGLang(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkSGLang)
+	require.NoError(t, buildFailoverPod(&ps, 1, BackendFrameworkSGLang))
+	require.Len(t, ps.Containers, failoverEngineCount+1)
+	names := make([]string, 0, len(ps.Containers))
+	for _, c := range ps.Containers {
+		names = append(names, c.Name)
+	}
+	for _, want := range IntraPodFailoverEngineContainerNames() {
+		assert.Contains(t, names, want)
+	}
+}
+
+func TestBuildFailoverPod_RejectsUnsupportedBackend(t *testing.T) {
+	ps := intraPodFailoverPodSpec()
+	err := buildFailoverPod(&ps, 1, BackendFrameworkTRTLLM)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "currently supported only for vLLM")
+	assert.Contains(t, err.Error(), "currently supported only for vLLM and SGLang")
 }
 
 func TestBuildFailoverPod_EngineEnvVars(t *testing.T) {
@@ -727,6 +741,64 @@ func TestBuildFailoverPod_SingleNodeNoNNODES(t *testing.T) {
 	}
 }
 
+func TestValidateFailoverCheckpoint(t *testing.T) {
+	component := validAutomaticFailoverComponent()
+
+	t.Run("accepts a DGD and its DCD", func(t *testing.T) {
+		require.Empty(t, ValidateFailoverCheckpointForDGD(component, string(BackendFrameworkVLLM)))
+
+		target := component.DeepCopy()
+		target.Experimental.Checkpoint.CheckpointRef = ptr.To("checkpoint-worker")
+		require.Empty(t, ValidateFailoverCheckpointForDCD(target, string(BackendFrameworkVLLM)))
+
+		twoShadows := component.DeepCopy()
+		twoShadows.Experimental.Failover.NumShadows = 2
+		require.Empty(t, ValidateFailoverCheckpointForDGD(twoShadows, string(BackendFrameworkVLLM)))
+	})
+
+	t.Run("rejects an incompatible runtime profile", func(t *testing.T) {
+		target := component.DeepCopy()
+		target.Experimental.Checkpoint.CheckpointRef = ptr.To("checkpoint-worker")
+		target.PodTemplate.Spec.Containers[0].Args = []string{
+			"-m", vllmModuleName,
+			"--disaggregation-mode", "decode",
+			"--request-plane=nats",
+			"--tensor-parallel-size", "2",
+			"--pipeline-parallel-size=2",
+			"--data-parallel-size", "2",
+		}
+
+		violations := ValidateFailoverCheckpointForDCD(target, string(BackendFrameworkVLLM))
+		require.Len(t, violations, 1)
+		for _, message := range []string{
+			"disaggregation mode must be aggregated",
+			"request plane must be tcp",
+			"tensor parallel size must be 1",
+			"pipeline parallel size must be 1",
+			"data parallel size must be 1",
+		} {
+			assert.ErrorContains(t, violations[0], message)
+		}
+	})
+
+}
+
+func TestPrepareVLLMSnapshotSourceContainer(t *testing.T) {
+	container := corev1.Container{
+		Name: "main",
+		Env: []corev1.EnvVar{
+			{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: "20380"},
+			{Name: "KEEP_ME", Value: "1"},
+		},
+	}
+
+	require.NoError(t, PrepareVLLMSnapshotSourceContainer(&container))
+
+	assert.False(t, containerHasEnvVar(&container, "DYN_FORWARDPASS_METRIC_PORT"))
+	assert.True(t, containerHasEnvVar(&container, "KEEP_ME"))
+	require.Error(t, PrepareVLLMSnapshotSourceContainer(nil))
+}
+
 // --- IsIntraPodFailoverEnabled ---
 
 func TestIsIntraPodFailoverEnabled(t *testing.T) {
@@ -750,6 +822,27 @@ func TestIntraPodFailoverEngineContainerNames(t *testing.T) {
 // ──────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────────
+
+func validAutomaticFailoverComponent() *v1beta1.DynamoComponentDeploymentSharedSpec {
+	return &v1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: v1beta1.ComponentTypeWorker,
+		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:    commonconsts.MainContainerName,
+				Command: []string{"python3"},
+				Args:    []string{"-m", vllmModuleName},
+				Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+					corev1.ResourceName("nvidia.com/gpu"): k8sresource.MustParse("1"),
+				}},
+			}},
+		}},
+		Experimental: &v1beta1.ExperimentalSpec{
+			Checkpoint:       &v1beta1.ComponentCheckpointConfig{Enabled: true},
+			GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeIntraPod},
+			Failover:         &v1beta1.FailoverSpec{Mode: v1beta1.GMSModeIntraPod, NumShadows: 1},
+		},
+	}
+}
 
 func hasToleration(podSpec *corev1.PodSpec, key string) bool {
 	for _, t := range podSpec.Tolerations {
