@@ -86,6 +86,11 @@ LoRA requires a vLLM build containing
 NIXL prefill/decode also requires the gRPC numeric-conversion fix in
 [vllm-project/vllm#54814](https://github.com/vllm-project/vllm/pull/54814).
 
+For local LoRA serving, use [`launch/agg_lora.sh`](launch/agg_lora.sh) or
+[`launch/disagg_lora.sh`](launch/disagg_lora.sh). Both print adapter loading examples
+and accept `--help` for GPU, port, and cache settings. Load each adapter on both
+workers before sending prefill/decode traffic.
+
 ## Run
 
 ### Runtime compatibility
