@@ -21,7 +21,7 @@ import time
 from concurrent.futures import TimeoutError as FutureTimeoutError
 
 import pytest
-from _deps import HAS_GMS, HAS_PYNVML
+from _deps import HAS_CUDA, HAS_GMS, HAS_PYNVML, HAS_XPU
 
 if not HAS_GMS:
     pytest.skip(
@@ -75,12 +75,27 @@ _SLOW_POLL_INTERVAL_SECONDS = 0.1
 
 
 def _gpu_memory_free_bytes(device: int = 0) -> int:
-    pynvml.nvmlInit()
-    try:
-        handle = pynvml.nvmlDeviceGetHandleByIndex(device)
-        return int(pynvml.nvmlDeviceGetMemoryInfo(handle).free)
-    finally:
-        pynvml.nvmlShutdown()
+    """Query free GPU memory — works on both CUDA (pynvml) and XPU (torch.xpu)."""
+    if HAS_XPU:
+        import torch
+
+        free_bytes, _total = torch.xpu.mem_get_info(device)
+        # Workaround: GPU runtime does not reflect VMM allocations in
+        # free-memory queries. Subtract internally tracked VMM usage.
+        try:
+            from gpu_memory_service.common.vmm import _sycl_vmm
+
+            free_bytes = max(0, free_bytes - _sycl_vmm.total_allocated_bytes())
+        except Exception:
+            pass
+        return int(free_bytes)
+    else:
+        pynvml.nvmlInit()
+        try:
+            handle = pynvml.nvmlDeviceGetHandleByIndex(device)
+            return int(pynvml.nvmlDeviceGetMemoryInfo(handle).free)
+        finally:
+            pynvml.nvmlShutdown()
 
 
 def _drop_connection(session: _GMSClientSession) -> None:
@@ -234,7 +249,11 @@ def running_gms(monkeypatch, tmp_path):
     # Inject fake VMM into the process-global singleton so that
     # GMSAllocationManager and GMSClientMemoryManager both use it.
     monkeypatch.setattr(_vmm_module, "_vmm_instance", fake_vmm)
-    monkeypatch.setattr(_vmm_module, "_vmm_device_type", VMMDeviceType.CUDA)
+    monkeypatch.setattr(
+        _vmm_module,
+        "_vmm_device_type",
+        VMMDeviceType.XPU if HAS_XPU else VMMDeviceType.CUDA,
+    )
 
     socket_path = str(tmp_path / "gms.sock")
     server = GMSRPCServer(socket_path, device=0, allocation_retry_interval=0.01)
@@ -889,7 +908,7 @@ def test_reallocate_all_handles_reuses_preserved_vas_in_new_layout(
 
 
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
-def test_scratch_reallocation_keeps_committed_allocation_on_cuda_granularity(
+def test_scratch_reallocation_keeps_committed_allocation_on_vmm_granularity(
     running_gms,
 ):
     _, socket_path = running_gms
@@ -930,7 +949,11 @@ async def test_allocation_manager_lazily_exports_fresh_fds(monkeypatch):
 
     fake_vmm = _CountingVMM()
     monkeypatch.setattr(_vmm_module, "_vmm_instance", fake_vmm)
-    monkeypatch.setattr(_vmm_module, "_vmm_device_type", VMMDeviceType.CUDA)
+    monkeypatch.setattr(
+        _vmm_module,
+        "_vmm_device_type",
+        VMMDeviceType.XPU if HAS_XPU else VMMDeviceType.CUDA,
+    )
 
     allocations = GMSAllocationManager(device=0)
     info = await allocations.allocate(size=4096, tag="weights")
@@ -954,7 +977,11 @@ async def test_allocation_manager_lazily_exports_fresh_fds(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(180)
-@pytest.mark.skipif(not HAS_PYNVML, reason="pynvml is not available")
+@pytest.mark.skipif(
+    not (HAS_CUDA and HAS_PYNVML),
+    reason="CUDA+pynvml only. Caveat: Unsupported on XPU."
+    "Re-enable when VMM OOM + free-memory tracking ready for XPU.",
+)
 async def test_large_allocation_unblocks_after_export_fd_holder_dies(
     tmp_path,
 ):

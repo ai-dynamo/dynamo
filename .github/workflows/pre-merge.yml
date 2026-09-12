@@ -442,6 +442,11 @@ jobs:
       run: |
         cargo check --locked -p dynamo-kv-router --no-default-features --features standalone-slot-tracker
         cargo check --locked -p dynamo-kv-router --no-default-features --features standalone-indexer
+    - name: Run standalone slot-tracker feature tests
+      if: matrix.dir == '.'
+      working-directory: ${{ matrix.dir }}
+      # No workspace member requests standalone-slot-tracker, so it needs an explicit run here.
+      run: cargo test --locked -p dynamo-kv-router --features standalone-slot-tracker --lib 'services::'
     - name: Run canonical replay feature tests
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}

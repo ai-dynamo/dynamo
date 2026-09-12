@@ -97,6 +97,7 @@ derive_builder = { workspace = true }
 either = { workspace = true }
 futures = { workspace = true }
 futures-util = { workspace = true }
+half = { version = "2", features = ["serde", "num-traits"] }
 hf-hub = { workspace = true, features = ["tokio", "rustls-tls", "ureq"] }
 http-body-util = "0.1"
 ipnet = { workspace = true }

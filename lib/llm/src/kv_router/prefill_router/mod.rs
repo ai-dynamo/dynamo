@@ -25,7 +25,7 @@ use dynamo_runtime::{
 use futures::stream::{self, StreamExt};
 
 use crate::{
-    discovery::ModelManager,
+    discovery::{ModelManager, WorkerSetTarget, WorkerSetTargetId},
     kv_router::{RoutingHost, SelectionPolicySource},
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
@@ -213,8 +213,8 @@ pub(crate) const BYPASS_REMOTE_PREFILL_ANNOTATION: &str = "x-bypass-remote-prefi
 /// channel.
 pub struct PrefillRouter {
     binding: ArcSwapOption<PrefillBinding>,
-    target: Mutex<Option<EndpointId>>,
-    target_tx: Option<watch::Sender<Option<dynamo_runtime::component::Endpoint>>>,
+    target: Mutex<Option<WorkerSetTargetId>>,
+    target_tx: Option<watch::Sender<Option<WorkerSetTarget>>>,
     /// Decode routing owns conditional-disagg planning and dispatch. This is
     /// installed after the frontend constructs its one decode `RoutingHost`.
     decode_routing_host: OnceLock<Arc<RoutingHost>>,
@@ -246,6 +246,7 @@ pub struct PrefillRouter {
 }
 
 struct PrefillBinding {
+    target_id: WorkerSetTargetId,
     endpoint_id: EndpointId,
     router: Arc<RoutingHost>,
     /// Resolved at activation from the prefill card. Lives here rather than on
@@ -269,11 +270,11 @@ struct PrefillBuildContext {
 }
 
 pub(crate) trait PrefillRouterLifecycle: Send + Sync {
-    fn set_target(&self, target: Option<dynamo_runtime::component::Endpoint>);
+    fn set_target(&self, target: Option<WorkerSetTarget>);
 }
 
 impl PrefillRouterLifecycle for PrefillRouter {
-    fn set_target(&self, target: Option<dynamo_runtime::component::Endpoint>) {
+    fn set_target(&self, target: Option<WorkerSetTarget>) {
         self.set_target(target);
     }
 }

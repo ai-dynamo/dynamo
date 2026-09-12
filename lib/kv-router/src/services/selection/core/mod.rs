@@ -396,7 +396,7 @@ impl SelectionCore {
         let cancel_token = cancel_token.child_token();
         let indexer_registry = Arc::new(
             WorkerRegistry::new_with_cancel_token(indexer_threads, cancel_token.clone())
-                .retain_empty_partitions(),
+                .with_retained_indexers(),
         );
         let listens_for_kv_events = kv_router_config.use_kv_events && !indexer_policy.is_remote();
         indexer_registry.set_indexer_policy(indexer_policy);
