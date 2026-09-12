@@ -67,6 +67,15 @@ struct RequestContext {
     request_metadata: HashMap<String, prost_types::Struct>,
     response_headers: HashMap<String, String>,
 
+    /// Endpoint the data plane reported as having served the request, from the
+    /// GAIE `x-gateway-destination-endpoint-served` metadata. `None` until the
+    /// response headers arrive, and when the gateway does not supply it.
+    ///
+    /// This is the authoritative answer to "where did this request go"; it can
+    /// differ from [`Self::target_endpoint`], which is only what the EPP
+    /// recommended.
+    served_endpoint: Option<String>,
+
     req_header_resp: Option<ProcessingResponse>,
     req_body_resp: Vec<ProcessingResponse>,
     req_trailer_resp: Option<ProcessingResponse>,
@@ -101,6 +110,7 @@ impl RequestContext {
             request_headers: Vec::new(),
             request_metadata: HashMap::new(),
             response_headers: HashMap::new(),
+            served_endpoint: None,
             req_header_resp: None,
             req_body_resp: Vec::new(),
             req_trailer_resp: None,
@@ -361,6 +371,34 @@ impl<P: EndpointPicker> ExtProcServer<P> {
 
     /// Handle response headers from the upstream model server.
     fn handle_response_headers(ctx: &mut RequestContext, hdr: &ext_proc::HttpHeaders) {
+        // The data plane reports where the request landed on the response, not
+        // at dispatch, so this is the earliest point the EPP can know the real
+        // serving endpoint rather than the one it recommended.
+        ctx.served_endpoint = extract_served_endpoint(&ctx.request_metadata);
+        if ctx.body_routed
+            && let Some(served) = ctx.served_endpoint.as_deref()
+            && served != ctx.target_endpoint
+        {
+            // The gateway retried, or overrode the pick. Every downstream
+            // bookkeeping call for this stream — `add_request` at pick time,
+            // and the prefill-complete and free callbacks — is attributed to
+            // `target_endpoint`, so the router's load accounting now describes
+            // a worker that did not serve this request.
+            //
+            // TODO(epp-served-endpoint-rebook): re-attribute the booking to the
+            // serving worker. It needs a router call that moves a booking
+            // between workers; freeing and re-adding races the response that is
+            // already in flight.
+            tracing::warn!(
+                request_id = %ctx.request_id,
+                picked = %ctx.target_endpoint,
+                served = %served,
+                "Gateway served a different endpoint than the EPP picked; \
+                 router load accounting is attributed to the picked worker"
+            );
+            crate::metrics::inc_endpoint_mismatch();
+        }
+
         if let Some(header_map) = &hdr.headers {
             for h in &header_map.headers {
                 let key = h.key.to_ascii_lowercase();
@@ -884,6 +922,58 @@ fn extract_model_from_body(body: &[u8]) -> String {
 }
 
 /// Extract the candidate endpoint subset from ext-proc request metadata.
+/// Read the endpoint the data plane actually served the request from.
+///
+/// GAIE proposal 004 (endpoint-picker protocol) requires this:
+///
+/// > For each HTTP response, the data plane MUST communicate to the EPP the
+/// > endpoint that served the request
+///
+/// carried in `ProcessingRequest.metadata_context` under the `envoy.lb`
+/// namespace as `x-gateway-destination-endpoint-served`.
+///
+/// It exists because the endpoint the EPP *picked* is not necessarily the one
+/// that *served*: the picker may return a list, and the data plane walks it
+/// according to its retry configuration until one succeeds. Only the data
+/// plane knows where the request landed.
+///
+/// Returns `None` when the gateway does not supply it. That is tolerated
+/// rather than treated as a protocol error: the field is a `MUST` in the spec,
+/// but a gateway that omits it should still serve traffic, and the EPP has no
+/// way to enforce compliance mid-stream.
+///
+/// A comma-separated value is read last-entry-first, on the assumption that a
+/// retrying data plane appends attempts in order and the final entry is the one
+/// that succeeded. A single endpoint is the common case.
+fn extract_served_endpoint(
+    request_metadata: &HashMap<String, prost_types::Struct>,
+) -> Option<String> {
+    let value = request_metadata
+        .get(metadata::DESTINATION_ENDPOINT_NAMESPACE)?
+        .fields
+        .get(metadata::DESTINATION_ENDPOINT_SERVED_KEY)?;
+
+    let raw = match &value.kind {
+        Some(prost_types::value::Kind::StringValue(s)) => s.as_str(),
+        // A list form is not in the spec, but mirroring `extract_candidate_subset`
+        // costs nothing and avoids silently dropping a conformant-enough gateway.
+        Some(prost_types::value::Kind::ListValue(list)) => {
+            return list.values.iter().rev().find_map(|v| match &v.kind {
+                Some(prost_types::value::Kind::StringValue(s)) if !s.trim().is_empty() => {
+                    Some(s.trim().to_string())
+                }
+                _ => None,
+            });
+        }
+        _ => return None,
+    };
+
+    raw.rsplit(',')
+        .map(str::trim)
+        .find(|entry| !entry.is_empty())
+        .map(str::to_string)
+}
+
 fn extract_candidate_subset(
     request_metadata: &HashMap<String, prost_types::Struct>,
 ) -> Vec<String> {
@@ -1599,5 +1689,138 @@ mod tests {
             dynamo_llm::http::service::metadata::MetadataHeaderError::TooManyEntries { limit: 64 },
         ));
         assert_eq!(err.status_code, StatusCode::RequestHeaderFieldsTooLarge);
+    }
+
+    // -----------------------------------------------------------------------
+    // GAIE served-endpoint feedback
+    // -----------------------------------------------------------------------
+
+    fn served_metadata(value: prost_types::value::Kind) -> HashMap<String, prost_types::Struct> {
+        let mut fields = std::collections::BTreeMap::new();
+        fields.insert(
+            metadata::DESTINATION_ENDPOINT_SERVED_KEY.to_string(),
+            prost_types::Value { kind: Some(value) },
+        );
+        HashMap::from([(
+            metadata::DESTINATION_ENDPOINT_NAMESPACE.to_string(),
+            prost_types::Struct { fields },
+        )])
+    }
+
+    fn served_string(value: &str) -> HashMap<String, prost_types::Struct> {
+        served_metadata(prost_types::value::Kind::StringValue(value.to_string()))
+    }
+
+    #[test]
+    fn served_endpoint_reads_the_gaie_metadata() {
+        let metadata = served_string("10.0.0.7:8000");
+        assert_eq!(
+            extract_served_endpoint(&metadata).as_deref(),
+            Some("10.0.0.7:8000")
+        );
+    }
+
+    /// A gateway that omits the field must not break the stream. The spec makes
+    /// it a MUST, but the EPP cannot enforce compliance mid-request.
+    #[test]
+    fn served_endpoint_absent_is_none_not_an_error() {
+        assert_eq!(extract_served_endpoint(&HashMap::new()), None);
+
+        // Namespace present, key missing.
+        let mut only_namespace = HashMap::new();
+        only_namespace.insert(
+            metadata::DESTINATION_ENDPOINT_NAMESPACE.to_string(),
+            prost_types::Struct::default(),
+        );
+        assert_eq!(extract_served_endpoint(&only_namespace), None);
+    }
+
+    /// A retrying data plane appends attempts; the last is the one that served.
+    #[test]
+    fn served_endpoint_takes_the_last_entry_of_a_retry_list() {
+        let metadata = served_string("10.0.0.7:8000,10.0.0.9:8000");
+        assert_eq!(
+            extract_served_endpoint(&metadata).as_deref(),
+            Some("10.0.0.9:8000")
+        );
+
+        let listed = served_metadata(prost_types::value::Kind::ListValue(
+            prost_types::ListValue {
+                values: vec![
+                    prost_types::Value {
+                        kind: Some(prost_types::value::Kind::StringValue(
+                            "10.0.0.7:8000".to_string(),
+                        )),
+                    },
+                    prost_types::Value {
+                        kind: Some(prost_types::value::Kind::StringValue(
+                            "10.0.0.9:8000".to_string(),
+                        )),
+                    },
+                ],
+            },
+        ));
+        assert_eq!(
+            extract_served_endpoint(&listed).as_deref(),
+            Some("10.0.0.9:8000")
+        );
+    }
+
+    #[test]
+    fn served_endpoint_ignores_blank_and_non_string_values() {
+        assert_eq!(extract_served_endpoint(&served_string("")), None);
+        assert_eq!(extract_served_endpoint(&served_string("   ")), None);
+        assert_eq!(extract_served_endpoint(&served_string(" , ")), None);
+        assert_eq!(
+            extract_served_endpoint(&served_metadata(prost_types::value::Kind::BoolValue(true))),
+            None
+        );
+    }
+
+    /// IPv6 endpoints are bracketed, so the comma split must not corrupt them.
+    #[test]
+    fn served_endpoint_preserves_bracketed_ipv6() {
+        let metadata = served_string("[2001:db8::10]:8000");
+        assert_eq!(
+            extract_served_endpoint(&metadata).as_deref(),
+            Some("[2001:db8::10]:8000")
+        );
+    }
+
+    /// The whole point of reading this field: the EPP's pick is a
+    /// recommendation, and only the data plane knows where the request landed.
+    #[test]
+    fn served_endpoint_is_recorded_and_compared_against_the_pick() {
+        let mut ctx = RequestContext::new();
+        ctx.body_routed = true;
+        ctx.target_endpoint = "10.0.0.7:8000".to_string();
+        ctx.request_metadata = served_string("10.0.0.9:8000");
+
+        ExtProcServer::<crate::epp::Router>::handle_response_headers(
+            &mut ctx,
+            &ext_proc::HttpHeaders::default(),
+        );
+
+        assert_eq!(ctx.served_endpoint.as_deref(), Some("10.0.0.9:8000"));
+        assert_ne!(
+            ctx.served_endpoint.as_deref(),
+            Some(ctx.target_endpoint.as_str())
+        );
+    }
+
+    #[test]
+    fn served_endpoint_matching_the_pick_is_the_ordinary_case() {
+        let mut ctx = RequestContext::new();
+        ctx.body_routed = true;
+        ctx.target_endpoint = "10.0.0.7:8000".to_string();
+        ctx.request_metadata = served_string("10.0.0.7:8000");
+
+        ExtProcServer::<crate::epp::Router>::handle_response_headers(
+            &mut ctx,
+            &ext_proc::HttpHeaders::default(),
+        );
+
+        assert_eq!(ctx.served_endpoint.as_deref(), Some("10.0.0.7:8000"));
+        assert_eq!(ctx.state, StreamState::ResponseReceived);
     }
 }
