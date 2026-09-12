@@ -15,6 +15,13 @@ Main submodules:
 
 from importlib import import_module
 from types import ModuleType
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # Declared, not imported at runtime. Without these the `__getattr__` below
+    # is the only thing that resolves them, and hiding it from the type checker
+    # would make every one of these look missing.
+    from . import config_dump, constants, snapshot, utils
 
 try:
     from ._version import __version__
@@ -29,9 +36,15 @@ except Exception:
 __all__ = ["__version__", "config_dump", "constants", "snapshot", "utils"]
 
 
-def __getattr__(name: str) -> ModuleType:
-    if name in {"config_dump", "constants", "snapshot", "utils"}:
-        module = import_module(f"{__name__}.{name}")
-        globals()[name] = module
-        return module
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+# Hidden from the type checker on purpose. A module-level `__getattr__` tells
+# mypy this package may have any attribute, so `from dynamo.common import Typo`
+# would check clean in every module that imports from here. The block above
+# already declares the real submodules, so the checker loses nothing.
+if not TYPE_CHECKING:
+
+    def __getattr__(name: str) -> ModuleType:
+        if name in {"config_dump", "constants", "snapshot", "utils"}:
+            module = import_module(f"{__name__}.{name}")
+            globals()[name] = module
+            return module
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
