@@ -189,6 +189,12 @@ impl DiscoveredModel {
         self.identity.max_loras
     }
 
+    pub(crate) fn is_base_model_name(&self, name: &str) -> bool {
+        name == self.identity.source
+            || name == self.identity.served_name
+            || self.identity.aliases.iter().any(|alias| alias == name)
+    }
+
     fn total_kv_blocks_per_rank(&self) -> Option<u64> {
         let total_kv_blocks = nonzero(self.server.total_kv_blocks)?;
         let data_parallel_size = u64::from(self.data_parallel_size());

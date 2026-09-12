@@ -12,8 +12,8 @@ repository.workspace = true
 description = "Rust sidecar for vLLM's native gRPC server"
 
 [package.metadata.cargo-machete]
-# prost is used by generated code; LoRA dependencies are used by the next stacked PR.
-ignored = ["prost", "dynamo-llm", "dynamo-runtime", "tempfile"]
+# Referenced by protobuf code generated into OUT_DIR.
+ignored = ["prost"]
 
 [[bin]]
 name = "dynamo-vllm-sidecar"
