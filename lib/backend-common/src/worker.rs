@@ -1413,15 +1413,36 @@ fn graceful_shutdown_timeout() -> Duration {
         DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_RELEASE
     };
 
-    let value = std::env::var(env_worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT).ok();
+    // var_os, not var().ok(): the latter maps VarError::NotUnicode to None, so a
+    // non-UTF-8 value would look unset here and skip the warning below.
+    let value = std::env::var_os(env_worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT);
     let secs = graceful_shutdown_timeout_secs(value.as_deref(), default);
     Duration::from_secs(secs)
 }
 
-fn graceful_shutdown_timeout_secs(value: Option<&str>, default: u64) -> u64 {
-    value
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(default)
+fn graceful_shutdown_timeout_secs(value: Option<&std::ffi::OsStr>, default: u64) -> u64 {
+    use dynamo_runtime::config::environment_names::worker as env_worker;
+
+    // Warn on a value that cannot be used, as the neighbouring env readers do:
+    // silently substituting the default hides a typo that changes shutdown
+    // behaviour. Unset and empty stay quiet, matching `drain_timeout_secs`.
+    // A value that is not valid UTF-8 is unusable for the same reason a value
+    // that is not a number is, so it takes the same branch.
+    match value.filter(|value| !value.is_empty()) {
+        None => default,
+        Some(value) => match value.to_str().and_then(|value| value.parse::<u64>().ok()) {
+            Some(secs) => secs,
+            None => {
+                tracing::warn!(
+                    "Invalid {}={:?}; using default {}s",
+                    env_worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT,
+                    value,
+                    default
+                );
+                default
+            }
+        },
+    }
 }
 
 /// Compose the post-signal shutdown deadline from the drain+cleanup
@@ -3284,6 +3305,8 @@ mod tests {
     // graceful_shutdown_timeout env-var parsing
     // -------------------------------------------------------------------
 
+    use std::ffi::OsStr;
+
     fn expected_default_timeout_secs() -> u64 {
         if cfg!(debug_assertions) {
             dynamo_runtime::worker::DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_DEBUG
@@ -3303,7 +3326,7 @@ mod tests {
     #[test]
     fn shutdown_timeout_parses_valid_value() {
         assert_eq!(
-            graceful_shutdown_timeout_secs(Some("42"), expected_default_timeout_secs()),
+            graceful_shutdown_timeout_secs(Some(OsStr::new("42")), expected_default_timeout_secs()),
             42
         );
     }
@@ -3311,7 +3334,26 @@ mod tests {
     #[test]
     fn shutdown_timeout_falls_back_to_default_on_parse_error() {
         assert_eq!(
-            graceful_shutdown_timeout_secs(Some("not-a-number"), expected_default_timeout_secs()),
+            graceful_shutdown_timeout_secs(
+                Some(OsStr::new("not-a-number")),
+                expected_default_timeout_secs()
+            ),
+            expected_default_timeout_secs()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_timeout_falls_back_to_default_on_a_non_utf8_value() {
+        // `var().ok()` mapped VarError::NotUnicode to None, so this value used to
+        // reach the reader looking unset and took the silent path.
+        use std::os::unix::ffi::OsStrExt;
+
+        assert_eq!(
+            graceful_shutdown_timeout_secs(
+                Some(OsStr::from_bytes(b"\xff30")),
+                expected_default_timeout_secs()
+            ),
             expected_default_timeout_secs()
         );
     }
@@ -3319,7 +3361,7 @@ mod tests {
     #[test]
     fn shutdown_timeout_treats_empty_as_unset() {
         assert_eq!(
-            graceful_shutdown_timeout_secs(Some(""), expected_default_timeout_secs()),
+            graceful_shutdown_timeout_secs(Some(OsStr::new("")), expected_default_timeout_secs()),
             expected_default_timeout_secs()
         );
     }
