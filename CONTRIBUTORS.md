@@ -9,4 +9,6 @@ Generated from `.github/codeowners/external_contributors.yaml`. Do not
 hand-edit — update that file and regenerate (see
 `.github/codeowners/README.md`).
 
-_No external contributors yet._
+| Contributor | Level | GitHub | Affiliation | Areas |
+| --- | --- | --- | --- | --- |
+| Antonio Ojea | Contributor | [@aojea](https://github.com/aojea) | Google | `tpu` |

@@ -1,0 +1,118 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Aggregated vLLM deployment on Google TPU using Kubernetes Dynamic Resource Allocation (DRA)
+# and the Dynamo vLLM sidecar.
+#
+# The worker pod has two containers:
+#   - main: the Dynamo worker (dynamo-vllm-sidecar). No TPU access needed.
+#     Handles registration, discovery, and communicates with the engine over gRPC on 127.0.0.1.
+#   - vllm-engine: stock upstream vLLM TPU image (vllm/vllm-tpu). Holds the TPU DRA claim.
+#     Runs as a native sidecar container (initContainers with restartPolicy: Always).
+
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: tpu-template
+spec:
+  spec:
+    devices:
+      requests:
+        - name: tpus
+          exactly:
+            deviceClassName: tpu.google.com
+            # Grabs every TPU chip exposed on whatever node this claim is
+            # scheduled onto (matches a single-host TPU slice, e.g. a v5e-8 node).
+            # Replace with `count: N` to request a specific number of chips instead.
+            allocationMode: All
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-agg-tpu-dra
+spec:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        # Dynamo frontend. The operator injects discovery env and command.
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.0
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+  - name: VllmWorker
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        tolerations:
+        - key: "google.com/tpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+        initContainers:
+        # vllm-engine as a native sidecar (initContainer with restartPolicy: Always):
+        # Starts before `main` and stops after it. Uses stock vllm/vllm-tpu image.
+        - name: vllm-engine
+          image: vllm/vllm-tpu:v0.27.0
+          restartPolicy: Always
+          startupProbe:
+            exec:
+              command:
+              - python3
+              - -c
+              - import socket; socket.create_connection(('127.0.0.1', 50051), 2).close()
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 60   # ~5 min for model load / XLA compilation; raise for larger models
+          readinessProbe:
+            exec:
+              command:
+              - python3
+              - -c
+              - import socket; socket.create_connection(('127.0.0.1', 50051), 2).close()
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            claims:
+            - name: tpus
+            requests:
+              ephemeral-storage: 2Gi
+          volumeMounts:
+          - name: dshm
+            mountPath: /dev/shm
+          # vllm-rs is located in the installed vllm package directory.
+          # --host 127.0.0.1 keeps unauthenticated gRPC on pod loopback.
+          command:
+          - /bin/sh
+          - -c
+          - >-
+            exec "$(python3 -c 'import os,vllm; print(os.path.join(os.path.dirname(vllm.__file__), "vllm-rs"))')"
+            serve Qwen/Qwen3-0.6B --host 127.0.0.1 --grpc-port 50051 -- --max-model-len 2048
+        containers:
+        # The Dynamo sidecar worker.
+        # Must be named "main": the operator injects discovery env + probes by name.
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-sidecar:1.4.0
+          command:
+          - dynamo-vllm-sidecar
+          args:
+          - --grpc-endpoint
+          - 127.0.0.1:50051
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+        volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+        resourceClaims:
+        - name: tpus
+          resourceClaimTemplateName: tpu-template
