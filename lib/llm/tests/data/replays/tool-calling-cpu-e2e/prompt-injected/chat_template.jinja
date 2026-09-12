@@ -1,0 +1,2 @@
+{% for message in messages %}{{ message['role'] }}: {{ message['content'] | trim }}
+{% endfor %}{% if add_generation_prompt %}assistant: <think>{% endif %}
