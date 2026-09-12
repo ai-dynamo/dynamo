@@ -233,7 +233,6 @@ impl SystemHealth {
         self.canary_maintenance.remove(&lease);
     }
 
-    /// Drop expired leases before checking whether canary probes are suppressed.
     fn prune_expired_canary_maintenance(&mut self, now: Instant) {
         self.canary_maintenance
             .retain(|_, deadline| now < *deadline);

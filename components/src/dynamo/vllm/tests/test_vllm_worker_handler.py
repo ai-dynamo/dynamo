@@ -2146,7 +2146,6 @@ class TestRLAdminRouteHardening:
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
     async def test_cancelled_init_releases_its_maintenance_lease(self):
-        """Cancelling the admin call must not leave the canary suppressed."""
         handler = _make_handler()
         handler._pause_lock = asyncio.Lock()
         handler.engine_client = MagicMock()
