@@ -8,6 +8,9 @@ Uses Criterion with local test data. Runs automatically via `cargo bench`.
 cargo bench --bench tokenizer_simple -p dynamo-llm
 ```
 
+Exception: the two `fastokens` benches download a tokenizer from HuggingFace
+Hub and skip unless `RUN_BENCH=1` is set (see `tokenizer_dataset` below).
+
 ## tokenizer_dataset
 
 Downloads a real dataset from HuggingFace Hub (LongBench-v2, ~500 samples) and
