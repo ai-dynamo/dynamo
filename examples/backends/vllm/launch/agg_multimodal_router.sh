@@ -162,7 +162,8 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
 done
 
 echo "=== Starting frontend (KV router, MM-aware exact routing) ==="
-env "${COMMON_ENV[@]}" \
+env -u DYN_SYSTEM_PORT -u DYN_SYSTEM_PORT1 -u DYN_SYSTEM_PORT2 -u DYN_SYSTEM_PORT3 \
+    "${COMMON_ENV[@]}" \
     "DYN_LOG=${DYN_LOG_VAL}" \
 python -m dynamo.frontend \
     --http-port "${HTTP_PORT}" \
