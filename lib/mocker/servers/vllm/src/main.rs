@@ -51,7 +51,7 @@ fn load_engine_args(value: Option<&str>) -> anyhow::Result<MockEngineArgs> {
             .map_err(anyhow::Error::msg)
             .with_context(|| format!("failed to load --extra-engine-args from {path}"))?,
     };
-    args.normalized().context("invalid Mocker engine arguments")
+    Ok(args)
 }
 
 #[tokio::main]

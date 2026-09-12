@@ -246,3 +246,17 @@ async fn dropping_sidecar_stream_cancels_mocker_work() {
     .await
     .expect("dropping the gRPC stream should cancel scheduler work promptly");
 }
+
+mod common;
+
+#[tokio::test]
+async fn sidecar_relays_stored_and_evicted_blocks() {
+    let mut args = fast_engine_args();
+    args.num_gpu_blocks = 8;
+    args.max_num_seqs = Some(1);
+    let block_size = u32::try_from(args.block_size).unwrap();
+    let server = RunningServer::start(ServerMode::Aggregated, args).await;
+    let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
+    engine.start(0).await.unwrap();
+    common::check_kv_events(&engine, block_size).await;
+}
