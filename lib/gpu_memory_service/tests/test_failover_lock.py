@@ -195,6 +195,7 @@ async def test_owner_separate_instance(lock_path):
 # half of it, a 2x margin on an exact bound.
 HOLD_S = 0.2
 
+
 def _racer(
     lock_path: str,
     engine_id: str,
@@ -235,8 +236,7 @@ def _racer(
 @pytest.mark.asyncio
 # Backstop, not the primary bound: every wait below carries its own 10 s
 # timeout, summing to 80 s, so those report a precise failure first. This
-# catches the one wait that has no timeout of its own, the parent's gate
-# acquire.
+# catches a child or queue shutdown path that blocks outside those waits.
 @pytest.mark.timeout(90)
 async def test_cross_process_race(lock_path):
     """Two processes contend for the lock; the kernel serializes their holds."""
