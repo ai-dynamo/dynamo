@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Scan PR dependency additions
+description: Scan only dependencies added or version-changed versus the selected PR baseline.
+
+inputs:
+  compliance_root:
+    description: Directory containing current CSV, diff CSV, and CycloneDX pairs.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install uv
+      uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+      with:
+        version: 0.11.15
+        enable-cache: false
+
+    - name: Set up Grype
+      uses: ./.github/actions/setup-grype
+
+    - name: Evaluate PR dependency vulnerability policy
+      shell: bash
+      env:
+        PYTHONPATH: container
+      run: |
+        set -euo pipefail
+        uv run --no-project python -m compliance.vulnerability_scan pr-root \
+          --root "${{ inputs.compliance_root }}"

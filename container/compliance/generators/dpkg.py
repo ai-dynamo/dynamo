@@ -24,8 +24,10 @@ from __future__ import annotations
 
 import logging
 import re
+import shlex
 import subprocess
 from pathlib import Path
+from urllib.parse import quote
 
 from .. import overrides as license_overrides
 from .common import UNKNOWN, Component
@@ -398,6 +400,43 @@ def _resolve_license(pkg_name: str, version: str = "", root: Path = Path("/")) -
 # ---- Distribution scan ---------------------------------------------------------
 
 
+def _read_os_release(root: Path) -> tuple[str, str]:
+    """Return the normalized distro ID and version from ``etc/os-release``."""
+    values: dict[str, str] = {}
+    os_release = root / "etc/os-release"
+    if not os_release.is_file():
+        return "", ""
+    for line in os_release.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, raw_value = line.split("=", 1)
+        parsed = shlex.split(raw_value, comments=False, posix=True)
+        values[key] = parsed[0] if parsed else ""
+    return values.get("ID", "").lower(), values.get("VERSION_ID", "")
+
+
+def _dpkg_purl(
+    name: str,
+    version: str,
+    architecture: str,
+    distro_id: str,
+    distro_version: str,
+) -> str:
+    """Build a distro- and architecture-qualified Package URL for a dpkg package."""
+    namespace = quote(distro_id, safe="") if distro_id else ""
+    qualified_name = (
+        f"{namespace}/{quote(name, safe='')}" if namespace else quote(name, safe="")
+    )
+    qualifiers: list[str] = []
+    if architecture:
+        qualifiers.append(f"arch={quote(architecture, safe='')}")
+    if distro_id and distro_version:
+        distro = quote(f"{distro_id}-{distro_version}", safe="")
+        qualifiers.append(f"distro={distro}")
+    suffix = f"?{'&'.join(qualifiers)}" if qualifiers else ""
+    return f"pkg:deb/{qualified_name}@{quote(version, safe='')}{suffix}"
+
+
 def collect_components(root: Path = Path("/")) -> list[Component]:
     """Run dpkg-query, resolve licenses, return Components.
 
@@ -406,7 +445,11 @@ def collect_components(root: Path = Path("/")) -> list[Component]:
     (e.g. macOS dev shells, Alpine builders, distroless images). Inside the
     runtime images we ship, dpkg-query is always present.
     """
-    cmd = ["dpkg-query", "-W", "-f=${Package}\\t${Version}\\n"]
+    cmd = [
+        "dpkg-query",
+        "-W",
+        "-f=${Package}\\t${Version}\\t${Architecture}\\n",
+    ]
     if root != Path("/"):
         cmd.insert(1, f"--admindir={root / 'var/lib/dpkg'}")
 
@@ -422,12 +465,15 @@ def collect_components(root: Path = Path("/")) -> list[Component]:
 
     components: list[Component] = []
     unresolved = 0
+    distro_id, distro_version = _read_os_release(root)
     for line in result.stdout.splitlines():
-        if "\t" not in line:
+        fields = line.split("\t")
+        if len(fields) != 3:
             continue
-        name, version = line.split("\t", 1)
+        name, version, architecture = fields
         name = name.strip()
         version = version.strip()
+        architecture = architecture.strip()
         if not name or not version:
             continue
         spdx = _resolve_license(name, version, root)
@@ -440,6 +486,13 @@ def collect_components(root: Path = Path("/")) -> list[Component]:
                 version=version,
                 spdx=spdx,
                 source_url=None,  # apt-get source URL is the right answer; see source-archival
+                purl=_dpkg_purl(
+                    name,
+                    version,
+                    architecture,
+                    distro_id,
+                    distro_version,
+                ),
             )
         )
 
