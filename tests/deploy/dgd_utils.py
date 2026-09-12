@@ -4,10 +4,12 @@
 """Helpers for live-cluster DynamoGraphDeployment tests."""
 
 import asyncio
+import copy
 import logging
 import os
 import re
 import secrets
+import subprocess
 import time
 from dataclasses import dataclass, field
 from typing import Any, List, Literal, Optional
@@ -481,17 +483,150 @@ class ServiceSpec:
         self.gpus = value
 
 
+# The DGD reaches a companion resource only through these keys. Measured over
+# every manifest in ``recipes/`` that declares a DynamoGraphDeployment: 91
+# ConfigMaps, each referenced by ``configMap.name`` or ``configMapKeyRef.name``;
+# 2 ResourceClaimTemplates and the channel template of all 28 ComputeDomains,
+# each referenced by ``resourceClaimTemplateName``. Nothing else names one.
+_CONFIGMAP_REF_KEYS = ("configMap", "configMapRef", "configMapKeyRef")
+_TEMPLATE_REF_KEY = "resourceClaimTemplateName"
+
+
+def _rewrite_companion_refs(node: Any, renames: dict) -> None:
+    """Point every companion reference in a DGD at its renamed resource.
+
+    Key-scoped rather than a blanket string substitution, on purpose: recipes
+    routinely name the pod-local volume after the ConfigMap it mounts, and
+    ``volumes[].name`` has to keep matching ``volumeMounts[].name`` within the
+    pod. It does not name the ConfigMap and must not be renamed with it.
+    """
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in _CONFIGMAP_REF_KEYS and isinstance(value, dict):
+                referenced = value.get("name")
+                if isinstance(referenced, str) and referenced in renames:
+                    value["name"] = renames[referenced]
+            elif (
+                key == _TEMPLATE_REF_KEY and isinstance(value, str) and value in renames
+            ):
+                node[key] = renames[value]
+            else:
+                _rewrite_companion_refs(value, renames)
+    elif isinstance(node, list):
+        for item in node:
+            _rewrite_companion_refs(item, renames)
+
+
 class DeploymentSpec:
     def __init__(
         self, base: str, endpoint="/v1/chat/completions", port=8000, system_port=9090
     ):
-        """Load the deployment YAML file"""
+        """Load the deployment YAML file.
+
+        Recipe manifests are frequently multi-document -- a DynamoGraphDeployment
+        alongside ConfigMaps, ComputeDomains or ResourceClaimTemplates. Select
+        the DGD document rather than assuming a single-document file, otherwise
+        ``yaml.safe_load`` raises ComposerError on the majority of
+        ``recipes/*/deploy.yaml``.
+
+        The other documents are **kept**, not discarded. 97 of the 178 recipes
+        that declare a DGD also bundle at least one companion resource, and in
+        every one of those the DGD references a companion by name -- 76
+        ConfigMaps, 27 ComputeDomains, 2 ResourceClaimTemplates. Applying the
+        DGD alone leaves its workers in ``CreateContainerConfigError`` waiting
+        for a ConfigMap that was never created. See :attr:`companions`, which
+        :class:`ManagedDeployment` applies before the DGD and removes on
+        cleanup.
+        """
         with open(base, "r") as f:
-            self._deployment_spec = yaml.safe_load(f)
+            docs = [d for d in yaml.safe_load_all(f) if isinstance(d, dict)]
+        graph_deployments = [
+            d for d in docs if d.get("kind") == "DynamoGraphDeployment"
+        ]
+        if len(graph_deployments) > 1:
+            raise ValueError(
+                f"{base} contains {len(graph_deployments)} DynamoGraphDeployment "
+                "documents; expected exactly one"
+            )
+        if graph_deployments:
+            self._deployment_spec = graph_deployments[0]
+        elif len(docs) == 1:
+            # Preserve the original behaviour for manifests that omit `kind`.
+            self._deployment_spec = docs[0]
+        else:
+            raise ValueError(
+                f"{base} contains no DynamoGraphDeployment document "
+                f"(found kinds: {sorted({d.get('kind') for d in docs})})"
+            )
+        # Everything that is not the selected DGD, in file order. Order matters:
+        # a ComputeDomain must exist before the workers that claim it.
+        self._companions = [d for d in docs if d is not self._deployment_spec]
         self._endpoint = endpoint
         self._port = port
         self._system_port = system_port
         self._schema = self._detect_schema()
+
+    @property
+    def companions(self) -> list[dict]:
+        """Non-DGD documents from the same manifest, in file order.
+
+        Mutable on purpose: callers that rename the deployment must rename the
+        companions the DGD references too, or the reference dangles.
+        """
+        return self._companions
+
+    def uniquify(self, suffix: str) -> dict[str, str]:
+        """Give the DGD *and every companion* a per-run name.
+
+        Suffixing only the DGD leaves every companion sharing one namespaced
+        name with every other run, which breaks two ways:
+
+        * ``_create_companions`` applies them, so a second recipe declaring the
+          same name silently overwrites the first one's content. Measured over
+          ``recipes/``: 14 companion names are reused across files, including
+          ``ConfigMap/prefill-config`` and ``ConfigMap/decode-config`` in seven
+          manifests each.
+        * ``_delete_companions`` runs from ``_delete_deployment``, which
+          ``__aenter__`` calls *before* creating -- so a starting run deletes a
+          running one's prerequisites and its workers fall into
+          ``CreateContainerConfigError``.
+
+        Returns the ``old -> new`` map, for logging and for tests.
+        """
+        renames: dict[str, str] = {}
+        # Only companion names drive the reference rewrite. The DGD's own name
+        # is renamed too, but a reference matching it names something this
+        # manifest does not create, and rewriting that would invent a dangling
+        # name rather than repair one.
+        companion_renames: dict[str, str] = {}
+
+        def rename(holder: dict, key: str = "name", *, owned: bool = True) -> None:
+            old = holder.get(key)
+            if isinstance(old, str) and old:
+                renames[old] = holder[key] = f"{old}{suffix}"
+                if owned:
+                    companion_renames[old] = renames[old]
+
+        rename(self._deployment_spec.setdefault("metadata", {}), owned=False)
+
+        for doc in self._companions:
+            metadata = doc.get("metadata")
+            if isinstance(metadata, dict):
+                rename(metadata)
+            if doc.get("kind") == "ComputeDomain":
+                # A pod never names the ComputeDomain. It names the
+                # ResourceClaimTemplate the ComputeDomain controller creates for
+                # its channel -- cluster state under a name of the manifest's
+                # choosing, so it collides just as hard. All 28 ComputeDomains
+                # in recipes/ are wired exactly this way.
+                channel = ((doc.get("spec") or {}).get("channel") or {}).get(
+                    "resourceClaimTemplate"
+                )
+                if isinstance(channel, dict):
+                    rename(channel)
+
+        _rewrite_companion_refs(self._deployment_spec, companion_renames)
+        return renames
 
     def _detect_schema(self) -> str:
         """Detect whether the loaded manifest is v1alpha1 (services dict) or
@@ -1363,6 +1498,91 @@ class ManagedDeployment:
 
         await self._restart_stateful(ETCD_STS_NAME, ETCD_LABEL)
 
+    def _kubectl(self, verb: str, documents: list, *extra: str):
+        """Run ``kubectl <verb>`` over a list of documents on stdin.
+
+        ``kubectl`` rather than a typed client because companions are
+        kind-agnostic: the corpus contains ConfigMaps, ComputeDomains
+        (``resource.nvidia.com``) and ResourceClaimTemplates
+        (``resource.k8s.io``). Reaching each through its own typed API means a
+        new dispatch arm every time a recipe adopts a new kind, and the one that
+        is missing fails by leaving a worker stuck rather than by raising.
+        ``tests/deploy/test_dgd.py`` already applies manifests this way.
+        """
+        if not documents:
+            return None
+        payload = yaml.safe_dump_all([self._retarget(d) for d in documents])
+        result = subprocess.run(
+            ["kubectl", verb, "-n", self.namespace, *extra, "-f", "-"],
+            input=payload,
+            capture_output=True,
+            text=True,
+        )
+        if result.stdout.strip():
+            self._logger.info(f"kubectl {verb}: {result.stdout.strip()}")
+        if result.stderr.strip():
+            self._logger.warning(f"kubectl {verb}: {result.stderr.strip()}")
+        return result
+
+    def _retarget(self, document: dict) -> dict:
+        """Point a companion at this deployment's namespace.
+
+        Only rewritten when the document already declares one, so a
+        cluster-scoped kind is not given a namespace it cannot have. Four
+        companions in the recipe corpus declare the literal placeholder
+        ``<your-namespace>``, which is neither a valid namespace name nor the
+        one under test; leaving it makes ``kubectl`` reject the whole apply
+        with a namespace mismatch.
+        """
+        metadata = document.get("metadata")
+        if not isinstance(metadata, dict) or "namespace" not in metadata:
+            return document
+        retargeted = copy.deepcopy(document)
+        retargeted["metadata"]["namespace"] = self.namespace
+        return retargeted
+
+    async def _create_companions(self):
+        """Apply the manifest's non-DGD documents, before the DGD.
+
+        Order matters both ways: a ConfigMap must exist before the pod that
+        mounts it, and a ComputeDomain before the workers that claim it. The
+        operator does not create these -- they ship in the same file precisely
+        because they are the deployment's own prerequisites.
+        """
+        companions = getattr(self.deployment_spec, "companions", [])
+        if not companions:
+            return
+        described = ", ".join(
+            f"{d.get('kind')}/{(d.get('metadata') or {}).get('name', '?')}"
+            for d in companions
+        )
+        self._logger.info(
+            f"Applying {len(companions)} companion resource(s): {described}"
+        )
+        result = self._kubectl("apply", companions)
+        if result is not None and result.returncode != 0:
+            raise RuntimeError(
+                f"failed to apply companion resources ({described}) for "
+                f"{self._deployment_name}: {result.stderr.strip()}"
+            )
+
+    async def _delete_companions(self):
+        """Remove the companions this deployment created.
+
+        Best-effort and never raises: teardown must not mask the failure that
+        the test was actually reporting. ``--ignore-not-found`` because a
+        namespace scrub or a previous cleanup may have removed them already.
+        """
+        companions = getattr(self.deployment_spec, "companions", [])
+        if not companions:
+            return
+        try:
+            self._kubectl(
+                "delete", companions, "--ignore-not-found=true", "--wait=false"
+            )
+        except Exception as e:  # noqa: BLE001
+            self._logger.warning(f"failed to delete companion resources: {e}")
+
     async def _create_deployment(self):
         """
         Create a DynamoGraphDeployment from either a dict or yaml file path.
@@ -1374,6 +1594,9 @@ class ManagedDeployment:
         # Extract service names
 
         self._services = self.deployment_spec.services
+
+        # Prerequisites first: the DGD references these by name.
+        await self._create_companions()
 
         self._logger.info(
             f"Starting Deployment {self._deployment_name} with spec {self.deployment_spec}"
@@ -1640,6 +1863,9 @@ class ManagedDeployment:
         except exceptions.ApiException as e:
             if e.status != 404:  # Ignore if already deleted
                 raise
+        finally:
+            # After the DGD, so nothing is still mounting them.
+            await self._delete_companions()
 
     def port_forward(
         self, pod: Pod, remote_port: int, max_connection_attempts: int = 3

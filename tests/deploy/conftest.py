@@ -100,6 +100,27 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="Model snapshot path inside --model-cache-pvc.",
     )
     parser.addoption(
+        "--recipe",
+        type=str,
+        default=None,
+        help="Path to any DynamoGraphDeployment manifest (for example "
+        "recipes/<model>/<backend>/<profile>/deploy.yaml) to deploy and run "
+        "recipe-scoped tests against. The cluster is chosen by KUBECONFIG.",
+    )
+    parser.addoption(
+        "--recipe-model",
+        type=str,
+        default=None,
+        help="Served model name to send in requests. Defaults to the model "
+        "parsed out of the --recipe manifest's worker args.",
+    )
+    parser.addoption(
+        "--recipe-deploy-timeout",
+        type=int,
+        default=1800,
+        help="Seconds to wait for a --recipe deployment to become ready.",
+    )
+    parser.addoption(
         "--dgdr-total-gpus",
         type=int,
         default=0,
@@ -246,6 +267,34 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
             item.stash.get(_deploy_test_failed_key, False)
             or outcome.get_result().failed
         )
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: List[pytest.Item]
+) -> None:
+    """Size a recipe test's outer timeout from the budgets it actually waits on.
+
+    pytest-timeout resolves a ``@pytest.mark.timeout(...)`` marker ahead of the
+    ``--timeout`` command line option (``_get_item_settings`` consults the
+    marker first and falls back to ``config._env_timeout`` only when the marker
+    is absent). A static marker is therefore a ceiling nobody can raise from the
+    command line, so it has to be derived here, where the value of
+    ``--recipe-deploy-timeout`` is known.
+
+    Applies to any deploy test module that declares ``POST_READY_BUDGET``: the
+    seconds it may spend *after* the deployment reports Ready. The outer timeout
+    becomes readiness plus that, which keeps the inner waits expiring first --
+    ``ManagedDeployment`` then raises with pod-status diagnostics instead of
+    pytest-timeout killing the test mid-wait with a bare traceback.
+    """
+    deploy_timeout = config.getoption("--recipe-deploy-timeout", None)
+    if not deploy_timeout:
+        return
+    for item in items:
+        budget = getattr(getattr(item, "module", None), "POST_READY_BUDGET", None)
+        if budget is None:
+            continue
+        item.add_marker(pytest.mark.timeout(int(deploy_timeout) + int(budget)))
 
 
 def _filter_targets(
