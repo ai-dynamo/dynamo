@@ -245,7 +245,7 @@ def _racer(
 # Backstop, not the primary bound: every wait below carries its own 10 s
 # timeout, summing to 80 s, so those report a precise failure first. This
 # catches the one wait that has no timeout of its own, the parent's gate
-# acquire. Measured runtime is about 5 s.
+# acquire.
 @pytest.mark.timeout(90)
 async def test_cross_process_race(lock_path):
     """Two processes contend for the lock; the kernel serializes their holds."""
