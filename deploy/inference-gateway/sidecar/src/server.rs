@@ -25,6 +25,9 @@ pub trait PdAdapter: Send + Sync + 'static {
         prefill_endpoint: PrefillEndpoint,
         cancellation: CancellationToken,
     ) -> Result<Response<Body>, SidecarError>;
+
+    /// Wait for backend cleanup after the HTTP server exits.
+    async fn shutdown(&self) {}
 }
 
 #[derive(Debug, Default)]
