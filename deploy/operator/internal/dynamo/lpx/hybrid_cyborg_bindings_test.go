@@ -86,3 +86,55 @@ func TestRenderSelectedCyborgConfigMapServerNames(t *testing.T) {
 	t.Log("Verify missing tokenizer metadata is rejected")
 	require.EqualError(t, err, "capnp manifest build is missing model.tokenizer.path")
 }
+
+func TestRenderCyborgConfigMapPreservesProjectedEndpoints(t *testing.T) {
+	t.Parallel()
+
+	t.Log("Cover the legacy launcher's 14 endpoints and selected PropSync chain roots")
+	for _, test := range []struct {
+		name        string
+		partitions  int
+		chains      [][]uint32
+		wantOffsets []int
+	}{
+		{name: "legacy 14 endpoints", partitions: 14, wantOffsets: []int{0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26}},
+		{name: "chain followed by endpoint", partitions: 4, chains: [][]uint32{{1, 2}}, wantOffsets: []int{0, 2, 6}},
+		{name: "two chains followed by endpoint", partitions: 5, chains: [][]uint32{{0, 1}, {2, 3}}, wantOffsets: []int{0, 4, 8}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			t.Log("Project a hybrid compiler inventory with two-node physical partitions")
+			fixture := newV2CompilerFixture()
+			partition := fixture.partitions[0]
+			fixture.compilationMode = manifestcapnp.CompilationMode_lpx
+			fixture.numLPUNodes = uint32(2 * test.partitions)
+			fixture.selectedPropSyncChains = test.chains
+			fixture.partitions = make([]testV3CapnpPartition, test.partitions)
+			for index := range fixture.partitions {
+				fixture.partitions[index] = partition
+				fixture.partitions[index].id = uint32(index)
+			}
+			snapshot := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
+			projection := projectTestBuild(t, normalizeTestSnapshot(t, snapshot), PipelineLPX, `{"prop_sync":false}`)
+			projection.stage = testRenderComponentName
+
+			t.Log("Keep every physical scheduler partition and Agent, including chain followers")
+			require.Len(t, projection.RequestSpec("test", "agents", nil).Partitions, test.partitions)
+			require.Equal(t, 2*test.partitions, projection.agentReplicas)
+
+			t.Log("Render only projected endpoints without compressing their physical Agent offsets")
+			workload := &SelectedWorkload{modelProjections: []*ModelProjection{projection}, scalingGroupReplicas: 1}
+			plan, err := workload.PlanNodeLocalMaterialization("test-dgd")
+			require.NoError(t, err)
+			configMap, err := workload.RenderCyborgConfigMap("test", "test-dgd", renderTestPodSpec())
+			require.NoError(t, err)
+			prefix := plan.LPXScalingGroupTemplate + "-${GROVE_PCSG_INDEX}-" + plan.Agents[0].TemplateName + "-"
+			servers := make([]string, len(test.wantOffsets))
+			for index, offset := range test.wantOffsets {
+				servers[index] = prefix + strconv.Itoa(offset)
+			}
+			require.Equal(t, strings.Join(servers, "\n"), configMap.Data["lpu_servers"])
+		})
+	}
+}
