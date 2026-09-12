@@ -220,6 +220,27 @@ logging.basicConfig(
 # ---------------------------------------------------------------------------
 
 
+@pytest.hookimpl(tryfirst=True, optionalhook=True)
+def pytest_xdist_auto_num_workers(config: pytest.Config) -> int | None:
+    """Resolve ``-n auto`` from the GPU budget before xdist consumes it."""
+    vram_limit = config.getoption("max_vram_gib", default=None)
+    if vram_limit is None:
+        return None
+
+    # Delayed: this logic is only relevant when --max-vram-gib is set, and
+    # detect_gpus() uses an optional pynvml import (may be absent on CPU-only runners).
+    from tests.utils.pytest_parallel_gpu import _parse_cuda_visible
+    from tests.utils.vram_utils import auto_worker_count, detect_gpus
+
+    gpus = detect_gpus()
+    cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if cvd is not None:
+        visible_indices = _parse_cuda_visible(cvd, gpus)
+        gpus = [gpu for gpu in gpus if gpu["index"] in visible_indices]
+
+    return auto_worker_count(gpus, vram_limit) if gpus else 1
+
+
 def pytest_configure(config: pytest.Config) -> None:
     """Configure session: validate --models-dir and detect GPUs for --max-vram-gib."""
     # Dual-register custom markers (also declared in pyproject
