@@ -152,9 +152,7 @@ pub async fn spawn_system_status_server(
             tracing::error!("Failed to bind to address {initial_bind_address}: {error}");
             error
         })?;
-    tracing::info!(
-        "[spawn_system_status_server] system status server bound to: {actual_address}"
-    );
+    tracing::info!("[spawn_system_status_server] system status server bound to: {actual_address}");
 
     // Reuse the concrete address so an ephemeral port remains stable across rebinds.
     let listener =
