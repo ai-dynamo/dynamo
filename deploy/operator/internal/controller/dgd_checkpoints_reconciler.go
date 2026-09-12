@@ -256,15 +256,6 @@ func (r *dgdCheckpointsReconciler) reconcileAutomaticSnapshotJob(
 		return nil, fmt.Errorf("checkpoint config is required")
 	}
 
-	checkpointID := checkpoint.DGDCheckpointID(
-		dynamoDeployment.Namespace,
-		dynamoDeployment.Name,
-		string(dynamoDeployment.UID),
-		componentName,
-		workerHash,
-		consts.SnapshotCompatibilityVersion,
-	)
-
 	backendFramework, err := dynamo.BackendFrameworkForComponent(component, dynamoDeployment)
 	if err != nil {
 		return nil, fmt.Errorf("failed to determine backend framework for component %s: %w", componentName, err)
@@ -325,6 +316,15 @@ func (r *dgdCheckpointsReconciler) reconcileAutomaticSnapshotJob(
 	if err != nil {
 		return nil, err
 	}
+	checkpointID := checkpoint.DGDCheckpointID(
+		dynamoDeployment.Namespace,
+		dynamoDeployment.Name,
+		string(dynamoDeployment.UID),
+		componentName,
+		workerHash,
+		compatibilityHash,
+		consts.SnapshotCompatibilityVersion,
+	)
 	var checkpointGMSClaimTemplateName string
 	if gmsSpec != nil && gmsSpec.Enabled {
 		checkpointGMSClaimTemplateName = checkpointGMSResourceClaimTemplateName(checkpointID)
@@ -492,10 +492,9 @@ func (r *dgdCheckpointsReconciler) syncAutomaticSnapshotJob(
 		return created, nil
 	}
 
-	// A deterministic name may be reused only by this graph incarnation.
-	// Capture inputs that participate in the worker hash select a new name;
-	// inputs outside that hash intentionally preserve the existing one-shot job,
-	// matching the previous automatic-capture invalidation contract.
+	// A deterministic name may be reused only by this graph incarnation and
+	// compatibility contract. Capture inputs covered by either the worker hash
+	// or compatibility hash select a fresh immutable one-shot job.
 	if existing.Annotations[consts.CheckpointAutoAnnotation] != consts.KubeLabelValueTrue ||
 		existing.Annotations[consts.CheckpointOwnerUIDAnnotation] != string(dgd.UID) {
 		return nil, fmt.Errorf("SnapshotJob %s already exists and is not managed by DGD uid %q", key, dgd.UID)

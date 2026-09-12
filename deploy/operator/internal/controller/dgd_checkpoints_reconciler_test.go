@@ -160,7 +160,14 @@ func reconcileAutomaticSnapshotJobForTest(
 	t.Helper()
 	workerHash, err := checkpointWorkerHashForComponent(dgd, componentName)
 	require.NoError(t, err)
-	_, err = newTestDGDCheckpointsReconciler(reconciler).reconcileAutomaticSnapshotJob(
+	checkpointReconciler := newTestDGDCheckpointsReconciler(reconciler)
+	compatibilityHash, err := checkpointReconciler.snapshotCompatibilityHashForComponent(
+		dgd,
+		componentName,
+		component,
+	)
+	require.NoError(t, err)
+	_, err = checkpointReconciler.reconcileAutomaticSnapshotJob(
 		context.Background(),
 		dgd,
 		componentName,
@@ -176,6 +183,7 @@ func reconcileAutomaticSnapshotJobForTest(
 		string(dgd.UID),
 		componentName,
 		workerHash,
+		compatibilityHash,
 		commonconsts.SnapshotCompatibilityVersion,
 	)
 	job := &snapshotv1alpha1.SnapshotJob{}
@@ -183,9 +191,10 @@ func reconcileAutomaticSnapshotJobForTest(
 		Namespace: dgd.Namespace,
 		Name:      "checkpoint-" + checkpointID,
 	}, job))
-	compatibilityHash := job.Spec.PodSnapshotTemplate.Metadata.Annotations[commonconsts.SnapshotCompatibilityHashAnnotation]
-	assert.Regexp(t, "^[0-9a-f]{64}$", compatibilityHash)
-	assert.NotEqual(t, workerHash, compatibilityHash)
+	jobCompatibilityHash := job.Spec.PodSnapshotTemplate.Metadata.Annotations[commonconsts.SnapshotCompatibilityHashAnnotation]
+	assert.Equal(t, compatibilityHash, jobCompatibilityHash)
+	assert.Regexp(t, "^[0-9a-f]{64}$", jobCompatibilityHash)
+	assert.NotEqual(t, workerHash, jobCompatibilityHash)
 	return job
 }
 
@@ -283,6 +292,7 @@ func TestDGDCheckpointsReconciler_SnapshotJobPreservesGMSSaverClient(t *testing.
 		string(dgd.UID),
 		"worker",
 		workerHash,
+		job.Spec.PodSnapshotTemplate.Metadata.Annotations[commonconsts.SnapshotCompatibilityHashAnnotation],
 		commonconsts.SnapshotCompatibilityVersion,
 	)
 	claimTemplateName := checkpointGMSResourceClaimTemplateName(checkpointID)
@@ -442,6 +452,60 @@ func TestDGDCheckpointsReconciler_SnapshotJobAppliesDGDDefaults(t *testing.T) {
 		Name:      commonconsts.KubeValueNameSharedMemory,
 		MountPath: commonconsts.DefaultSharedMemoryMountPath,
 	})
+}
+
+func TestDGDCheckpointsReconciler_CompatibilityHashChangeRecaptures(t *testing.T) {
+	t.Log("Build an automatic checkpoint component with a stable worker generation")
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:        fake.NewClientBuilder().WithScheme(testScheme).Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
+	}
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+			UID:       types.UID("dgd-uid"),
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:  commonconsts.MainContainerName,
+						Image: "checkpoint-writer:latest",
+					}},
+				}},
+				Experimental: &v1beta1.ExperimentalSpec{Checkpoint: &v1beta1.ComponentCheckpointConfig{
+					Enabled: true,
+					Mode:    v1beta1.CheckpointModeAuto,
+				}},
+			}},
+		},
+	}
+	workerHash := betaDGDWorkersSpecHash(t, dgd)
+	dgd.Annotations = map[string]string{commonconsts.AnnotationCurrentWorkerHashV2: workerHash}
+	component := dgd.GetComponentByName("worker")
+	require.NotNil(t, component)
+
+	t.Log("Create the first immutable capture job")
+	first := reconcileAutomaticSnapshotJobForTest(t, reconciler, dgd, "worker", component)
+	firstHash := first.Spec.PodSnapshotTemplate.Metadata.Annotations[commonconsts.SnapshotCompatibilityHashAnnotation]
+
+	t.Log("Change an operator-rendered process input outside the DGD worker hash")
+	reconciler.Config.Infrastructure.NATSTLSCAPath = "/etc/dynamo/tls/new-nats-ca.pem"
+	second := reconcileAutomaticSnapshotJobForTest(t, reconciler, dgd, "worker", component)
+	secondHash := second.Spec.PodSnapshotTemplate.Metadata.Annotations[commonconsts.SnapshotCompatibilityHashAnnotation]
+
+	t.Log("Verify the new compatibility contract selects a fresh job")
+	assert.NotEqual(t, firstHash, secondHash)
+	assert.NotEqual(t, first.Name, second.Name)
+	jobs := &snapshotv1alpha1.SnapshotJobList{}
+	require.NoError(t, reconciler.List(context.Background(), jobs, client.InNamespace(dgd.Namespace)))
+	assert.Len(t, jobs.Items, 2)
 }
 
 func TestDGDCheckpointsReconciler_SnapshotJobUsesTargetContainer(t *testing.T) {
@@ -675,6 +739,7 @@ func TestDGDCheckpointsReconciler_CompatibilityVersionUpgradeRecaptures(t *testi
 		"worker",
 		workerHash,
 		"",
+		"",
 	)
 	legacyJob := &snapshotv1alpha1.SnapshotJob{
 		ObjectMeta: metav1.ObjectMeta{
@@ -759,12 +824,19 @@ func TestDGDCheckpointsReconciler_CompatibilityVersionUpgradeRecaptures(t *testi
 	assert.False(t, result.Infos["worker"].Ready)
 
 	t.Log("Verify v2 selects a fresh immutable job without deleting the legacy capture")
+	currentCompatibilityHash, err := checkpointReconciler.snapshotCompatibilityHashForComponent(
+		dgd,
+		"worker",
+		dgd.GetComponentByName("worker"),
+	)
+	require.NoError(t, err)
 	currentCheckpointID := checkpoint.DGDCheckpointID(
 		dgd.Namespace,
 		dgd.Name,
 		string(dgd.UID),
 		"worker",
 		workerHash,
+		currentCompatibilityHash,
 		commonconsts.SnapshotCompatibilityVersion,
 	)
 	currentJob := &snapshotv1alpha1.SnapshotJob{}
