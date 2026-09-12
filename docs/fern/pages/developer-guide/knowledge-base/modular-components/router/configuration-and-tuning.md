@@ -159,6 +159,51 @@ rather than being silently ignored. It selects the least-loaded worker once the 
 largest count is more than 1.1 times the smallest; otherwise it prefers the worker holding the
 largest device-KV overlap when that overlap covers more than 50% of the request's blocks.
 
+#### Adaptive Cache/Load Weights
+
+> [!WARNING]
+> Experimental. This mode responds to load signals. It does not learn from request latency, and its serving performance needs workload-specific evaluation.
+
+To enable adaptive weights inside `dynamo-two-tier-cost-fn`, add `adaptive: {}` to its parameters. This replaces the threshold switch with a weighted cache/load score. Omitting `adaptive` preserves the original two-tier behavior.
+
+```yaml
+worker_selection:
+  aggregated: adaptive
+  prefill: adaptive
+  instances:
+    - name: adaptive
+      type: dynamo-two-tier-cost-fn
+      parameters:
+        adaptive: {}
+```
+
+The controller follows the [llm-d adaptive configurator's weight rule](https://github.com/nirrozenbaum/gateway-api-inference-extension/blob/6c0f8d8496b56d68c30369520f3c4477adf8cd42/pkg/epp/scheduling/adaptive_configurator.go): increase the load weight as imbalance grows, and limit that increase when all eligible workers are busy. The remaining weight favors cache reuse. Dynamo supplies active-request counts directly, without background detectors or latency feedback.
+
+| Parameter under `adaptive` | Default | Meaning |
+|---|---|---|
+| `update_interval_ms` | `100` | Minimum time between weight updates. Must be positive. Updates run during selection, with no background timer. |
+| `load_scale` | `32.0` | Active-request scale that damps small load differences and determines pressure sensitivity. Must be finite and at least `1.0`. |
+
+The current implementation fixes the weight rule. Let `min` and `max` be the smallest and largest active-request counts among eligible workers, and let `s` be `load_scale`:
+
+```text
+imbalance = (max - min) / (max + s)
+pressure = min / (min + s)
+sigmoid = 1 / (1 + exp(-10 * (imbalance - 0.5)))
+distribution_max = 0.9 - pressure * (0.9 - 0.5)
+load_weight = 0.1 + sigmoid * (distribution_max - 0.1)
+
+cache_fraction = clamp(device_overlap_blocks / request_blocks, 0, 1)
+load_cost = (active_requests - min) / (s + max - min)
+cost = (1 - load_weight) * (1 - cache_fraction) + load_weight * load_cost
+```
+
+The worker with the lowest cost wins. Equal costs keep candidate row order, as in the two-tier mode. A zero-block request or non-finite overlap receives no cache credit. Requests still use current cache and load inputs between weight updates.
+
+Each model, routing group, and worker role has its own controller state. Both signals describe the current eligible pool, which can differ between requests with different routing constraints. Active-request counts are load proxies, not measured GPU utilization or engine queue depth. The example leaves decode on the default selector.
+
+Do not combine adaptive mode with tuned `cache_threshold`, `balance_abs_threshold`, or `balance_rel_threshold` values. Those parameters belong to the two-tier rule, and non-default values cause a startup error in adaptive mode.
+
 #### Override the Selection
 
 `DYN_ROUTER_WORKER_SELECTION_POLICY` overrides every stage. `--router-prefill-policy` and

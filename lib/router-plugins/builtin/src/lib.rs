@@ -121,4 +121,35 @@ worker_selection:
             "the error should name the offending key: {error}"
         );
     }
+
+    #[test]
+    fn resolves_adaptive_yaml_and_rejects_invalid_or_conflicting_parameters() {
+        let yaml = |parameters: &str| {
+            format!(
+                "worker_selection:\n  aggregated: adaptive\n  instances:\n    - name: adaptive\n      type: dynamo-two-tier-cost-fn\n      parameters: {parameters}\n"
+            )
+        };
+        let (config, factory) = resolve(&yaml("{adaptive: {}}"));
+        factory.unwrap().unwrap()(
+            &config,
+            WorkerType::Aggregated,
+            RoutingPartitionRef::new("model", "default"),
+        );
+
+        for (parameters, key) in [
+            ("{adaptive: {update_interval_ms: 0}}", "update_interval_ms"),
+            ("{adaptive: {load_scale: 0}}", "load_scale"),
+            ("{adaptive: {load_sclae: 32}}", "load_sclae"),
+            (
+                "{adaptive: {}, balance_abs_threshold: 16}",
+                "two-tier thresholds",
+            ),
+        ] {
+            let (_, resolved) = resolve(&yaml(parameters));
+            let Err(error) = resolved else {
+                panic!("invalid parameters resolved: {parameters}");
+            };
+            assert!(error.to_string().contains(key), "{error}");
+        }
+    }
 }
