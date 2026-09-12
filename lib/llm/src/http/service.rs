@@ -61,8 +61,8 @@ fn apply_request_tool_call_parsing_options(
         .as_ref()
         .unwrap_or(&ChatCompletionToolChoiceOption::Auto);
     let converted_tool_choice = crate::preprocessor::tool_choice::convert_tool_choice(tool_choice);
-    let tools = request.inner.tools.as_deref().unwrap_or(&[]);
-    let converted_tools = crate::preprocessor::tool_choice::convert_tools(tools);
+    let converted_tools =
+        crate::preprocessor::tool_choice::effective_tool_definitions(&request.inner)?;
     let uses_structural_tag = crate::preprocessor::structural_tag::structural_tag_decision(
         parsing_options.tool_call_parser.as_deref(),
         &converted_tool_choice,
@@ -109,6 +109,94 @@ mod tests {
             }]
         });
         serde_json::from_value(value).expect("request must deserialize")
+    }
+
+    fn dynamic_request(tool_choice: Option<Value>) -> NvCreateChatCompletionRequest {
+        let mut value = json!({
+            "model": "test-model",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "",
+                    "tools": [{
+                        "name": "lookup",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"query": {"type": "string"}}
+                        },
+                        "strict": true
+                    }]
+                },
+                {"role": "user", "content": "test"}
+            ]
+        });
+        if let Some(tool_choice) = tool_choice {
+            value["tool_choice"] = tool_choice;
+        }
+        serde_json::from_value(value).expect("dynamic request must deserialize")
+    }
+
+    #[test]
+    fn kimi_k3_dynamic_tools_enable_response_parsing_without_a_top_level_sentinel() {
+        let parsing_options = ParsingOptions {
+            tool_call_parser: Some("kimi_k3".to_string()),
+            ..Default::default()
+        };
+        let result =
+            apply_request_tool_call_parsing_options(parsing_options, &dynamic_request(None))
+                .expect("dynamic tools must configure parsing");
+
+        assert!(!result.suppress_tool_calls);
+        assert_eq!(result.tools.len(), 1);
+        assert_eq!(result.tools[0].name, "lookup");
+        assert_eq!(result.tools[0].strict, Some(true));
+    }
+
+    #[test]
+    fn kimi_k3_forced_dynamic_tools_use_native_xtml_policies() {
+        for (tool_choice, expected) in [
+            (json!("required"), GuidedToolConstraint::None),
+            (
+                json!({"type": "function", "function": {"name": "lookup"}}),
+                GuidedToolConstraint::StructuralTag,
+            ),
+        ] {
+            let parsing_options = ParsingOptions {
+                tool_call_parser: Some("kimi_k3".to_string()),
+                ..Default::default()
+            };
+            let result = apply_request_tool_call_parsing_options(
+                parsing_options,
+                &dynamic_request(Some(tool_choice)),
+            )
+            .expect("forced dynamic tool choice must configure parsing");
+
+            assert!(!result.suppress_tool_calls);
+            assert_eq!(result.guided_tool_constraint, expected);
+            assert_eq!(result.tools.len(), 1);
+            assert_eq!(result.tools[0].name, "lookup");
+        }
+    }
+
+    #[test]
+    fn dynamic_tools_with_tool_choice_none_still_suppress_calls() {
+        let parsing_options = ParsingOptions {
+            tool_call_parser: Some("kimi_k3".to_string()),
+            ..Default::default()
+        };
+        let result = apply_request_tool_call_parsing_options(
+            parsing_options,
+            &dynamic_request(Some(json!("none"))),
+        )
+        .expect("tool_choice none must remain valid");
+
+        assert!(result.suppress_tool_calls);
+        assert_eq!(result.guided_tool_constraint, GuidedToolConstraint::None);
+        assert_eq!(
+            result.tools.len(),
+            1,
+            "declarations remain available to parsers"
+        );
     }
 
     // A Kimi K2 pair with a forced/named tool_choice must resolve to the real

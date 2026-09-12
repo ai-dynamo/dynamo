@@ -62,8 +62,8 @@ aisimulate-core = { version = "=0.1.0-dev.2" }
 dynamo-runtime = { path = "lib/runtime", version = "1.5.0" }
 dynamo-llm = { path = "lib/llm", version = "1.5.0" }
 dynamo-rl = { path = "lib/rl", version = "1.5.0" }
-dynamo-tokenizers = { version = "=1.8.1" }
-dynamo-renderer = { version = "=5.1.2" }
+dynamo-tokenizers = { version = "=1.8.2" }
+dynamo-renderer = { version = "=5.3.0" }
 dynamo-tokens = { path = "lib/tokens", version = "1.5.0" }
 dynamo-truthy = { path = "lib/truthy", version = "1.5.0" }
 dynamo-data-gen = { path = "lib/data-gen", version = "1.5.0" }
@@ -71,8 +71,8 @@ dynamo-kv-hashing = { path = "lib/kv-hashing", version = "1.5.0" }
 dynamo-memory = { path = "lib/memory", version = "1.5.0" }
 dynamo-mocker = { path = "lib/mocker", version = "1.5.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.5.0" }
-dynamo-protocols = { version = "=5.4.1" }
-dynamo-parsers = { version = "8.1.0" }
+dynamo-protocols = { version = "=6.0.0" }
+dynamo-parsers = { version = "9.0.0" }
 
 # Published on crates.io. To see all available versions:
 #   web:          https://crates.io/crates/dynamo-parsers-v2/versions
