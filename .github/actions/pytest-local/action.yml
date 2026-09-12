@@ -176,9 +176,14 @@ runs:
         # Artifacts go to the GitHub Actions checkout so the per-job upload in
         # shared-test.yml can find them.
         TEST_RESULTS_DIR="${GITHUB_WORKSPACE}/test-results"
-        mkdir -p "${TEST_RESULTS_DIR}"
+        mkdir -p "${TEST_RESULTS_DIR}/status"
         chmod 777 "${TEST_RESULTS_DIR}"
         echo "📁 Test results will be saved to: ${TEST_RESULTS_DIR}"
+
+        # Cleared up front so the file read at the end of the job can only have
+        # come from this run of this stage.
+        STATUS_FILE="${TEST_RESULTS_DIR}/status/${STR_TEST_TYPE}.exitcode"
+        rm -f "${STATUS_FILE}"
 
         # NVMe guard: GPU runners mount ${NVME_DIR} (nvme-scratch emptyDir, NVMe-backed via
         # instanceStorePolicy: RAID0). CPU/ARM runners have no ${NVME_DIR} mount.
@@ -302,6 +307,12 @@ runs:
         elif [[ "${DRY_RUN}" != "true" ]]; then
           echo "⚠️  JUnit XML file not found - test results may not be available for upload"
         fi
+
+        # Checked by "Verify test stages completed" in shared-test.yml, which
+        # cannot use the exit below or $GITHUB_ENV: a truncated script is still
+        # reported as a successful step and its $GITHUB_ENV writes are dropped.
+        # Keep this last - its absence is what proves the script was truncated.
+        echo "${TEST_EXIT_CODE}" > "${STATUS_FILE}"
 
         exit ${TEST_EXIT_CODE}
 
