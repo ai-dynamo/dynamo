@@ -207,7 +207,6 @@ pub fn error_type_name(error_type: ErrorType) -> &'static str {
         ErrorType::Backend(BackendError::ResponseTimeout) => "backend_response_timeout",
         ErrorType::Backend(BackendError::Cancelled) => "backend_cancelled",
         ErrorType::Backend(BackendError::EngineShutdown) => "engine_shutdown",
-        ErrorType::Backend(BackendError::EngineDraining) => "engine_draining",
         ErrorType::Backend(BackendError::StreamIncomplete) => "stream_incomplete",
     }
 }
@@ -224,7 +223,6 @@ fn error_outcome(error_type: ErrorType) -> &'static str {
         ErrorType::Disconnected
         | ErrorType::Backend(BackendError::Disconnected)
         | ErrorType::Backend(BackendError::EngineShutdown)
-        | ErrorType::Backend(BackendError::EngineDraining)
         | ErrorType::Backend(BackendError::StreamIncomplete) => "worker_disconnected",
         ErrorType::CannotConnect | ErrorType::Backend(BackendError::CannotConnect) => {
             "connection_failed"

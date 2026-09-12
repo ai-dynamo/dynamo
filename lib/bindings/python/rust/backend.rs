@@ -1677,6 +1677,19 @@ where
 /// subclasses go through the shared mapping table; built-in Python
 /// exceptions fall back to the closest category.
 fn py_err_to_dynamo(err: PyErr) -> DynamoError {
+    if Python::with_gil(|py| err.is_instance_of::<pyo3::exceptions::PyGeneratorExit>(py)) {
+        return DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::Cancelled))
+            .message("engine draining")
+            .cause(
+                DynamoError::builder()
+                    .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+                    .message("engine shutting down")
+                    .build(),
+            )
+            .build();
+    }
+
     let (backend, message) = Python::with_gil(|py| {
         if let Some(mapped) = py_exception_to_backend_error(py, &err) {
             return mapped;
@@ -1707,8 +1720,6 @@ fn py_err_to_dynamo(err: PyErr) -> DynamoError {
             BackendError::Disconnected
         } else if err.is_instance_of::<pyo3::exceptions::asyncio::CancelledError>(py) {
             BackendError::Cancelled
-        } else if err.is_instance_of::<pyo3::exceptions::PyGeneratorExit>(py) {
-            BackendError::EngineDraining
         } else {
             BackendError::Unknown
         };

@@ -972,10 +972,16 @@ mod tests {
     }
 
     #[test]
-    fn terminal_frame_from_engine_draining_is_a_cancellation() {
+    fn terminal_frame_from_controlled_drain_is_a_cancellation() {
         let shutdown = DynamoError::builder()
-            .error_type(ErrorType::Backend(BackendError::EngineDraining))
-            .message("engine shutting down")
+            .error_type(ErrorType::Backend(BackendError::Cancelled))
+            .message("engine draining")
+            .cause(
+                DynamoError::builder()
+                    .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+                    .message("engine shutting down")
+                    .build(),
+            )
             .build();
         let frame = PushFrame::error(Annotated::from_err(shutdown));
         assert_eq!(frame.kind, ResponseFrameKind::Cancellation);

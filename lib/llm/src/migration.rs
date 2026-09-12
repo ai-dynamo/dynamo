@@ -83,7 +83,6 @@ fn is_migratable(err: &(dyn StdError + 'static)) -> bool {
         // via the same signal); migrate instead of hanging to the stream timeout.
         ErrorType::ResponseTimeout,
         ErrorType::Backend(BackendError::EngineShutdown),
-        ErrorType::Backend(BackendError::EngineDraining),
         // A truncated stream from a departed worker is recoverable by failover.
         ErrorType::Backend(BackendError::StreamIncomplete),
         // One overloaded worker: another may have room. Pool-wide exhaustion is

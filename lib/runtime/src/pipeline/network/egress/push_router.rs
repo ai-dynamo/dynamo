@@ -46,7 +46,6 @@ fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
         ErrorType::ConnectionTimeout,
         ErrorType::ResponseTimeout,
         ErrorType::Backend(BackendError::EngineShutdown),
-        ErrorType::Backend(BackendError::EngineDraining),
         // A stream that ends mid-generation means this worker dropped the
         // request. Quarantine it, or a migration retry can reselect the same
         // worker before discovery removal catches up.

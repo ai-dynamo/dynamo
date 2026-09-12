@@ -821,7 +821,8 @@ where
 pub enum ResponseFrameKind {
     /// An ordinary response payload, or the end-of-stream marker.
     Data,
-    /// The engine returned a typed error for this request.
+    /// The engine returned a typed error or an untyped error envelope for this
+    /// request.
     EngineError,
     /// The request was torn down rather than failing: the caller cancelled it,
     /// or the worker is shutting down.
@@ -833,12 +834,11 @@ pub enum ResponseFrameKind {
 
 /// Error types that mean "this request was torn down", not "the engine failed".
 ///
-/// `Backend(EngineDraining)` is what `PyGeneratorExit` maps to, which is how a
-/// draining Python worker ends its open streams.
+/// `PyGeneratorExit` maps to `Backend(Cancelled)` with an `EngineShutdown`
+/// cause, which is how a draining Python worker ends its open streams.
 const TEARDOWN_ERROR_TYPES: &[crate::error::ErrorType] = &[
     crate::error::ErrorType::Cancelled,
     crate::error::ErrorType::Backend(crate::error::BackendError::Cancelled),
-    crate::error::ErrorType::Backend(crate::error::BackendError::EngineDraining),
 ];
 
 impl ResponseFrameKind {

@@ -131,7 +131,6 @@ define_dynamo_exceptions!(
     (ConnectionTimeout, BackendError::ConnectionTimeout),
     (Cancelled, BackendError::Cancelled),
     (EngineShutdown, BackendError::EngineShutdown),
-    (EngineDraining, BackendError::EngineDraining),
     (StreamIncomplete, BackendError::StreamIncomplete),
 );
 
