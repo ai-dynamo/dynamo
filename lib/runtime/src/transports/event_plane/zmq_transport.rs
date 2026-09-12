@@ -14,12 +14,14 @@
 //! - Frame 2: sequence (8 bytes, u64 big-endian) - for fast deduplication
 //! - Frame 3: Binary frame (5-byte header + EventEnvelope payload)
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context as _, Result, anyhow};
 use async_stream::stream;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
-use std::sync::{Arc, OnceLock};
+use once_cell::sync::OnceCell;
+use std::ffi::OsStr;
+use std::sync::Arc;
 use thiserror::Error;
 use tmq::{
     AsZmqSocket, Context, Message, Multipart, SocketBuilder,
@@ -33,9 +35,34 @@ use tokio_util::task::AbortOnDropHandle;
 ///
 /// libzmq spawns background I/O threads per `Context`, so all PUB/SUB sockets
 /// share one. `zmq::Context` is reference-counted; clones drive the same context.
-fn shared_zmq_context() -> Context {
-    static CONTEXT: OnceLock<Context> = OnceLock::new();
-    CONTEXT.get_or_init(Context::new).clone()
+fn shared_zmq_context() -> Result<Context> {
+    static CONTEXT: OnceCell<Context> = OnceCell::new();
+    CONTEXT
+        .get_or_try_init(|| {
+            let value = std::env::var_os("DYN_ZMQ_IO_THREADS");
+            configured_zmq_context(value.as_deref())
+        })
+        .cloned()
+}
+
+fn configured_zmq_context(value: Option<&OsStr>) -> Result<Context> {
+    let io_threads = value
+        .unwrap_or_else(|| OsStr::new("4"))
+        .to_str()
+        .context("DYN_ZMQ_IO_THREADS must be valid UTF-8")?
+        .parse::<i32>()
+        .context("DYN_ZMQ_IO_THREADS must be a positive integer")?;
+    anyhow::ensure!(
+        io_threads > 0,
+        "DYN_ZMQ_IO_THREADS must be a positive integer"
+    );
+    let context = Context::new();
+    // Configure the process-wide context before creating any PUB/SUB sockets.
+    context
+        .set_io_threads(io_threads)
+        .context("failed to apply DYN_ZMQ_IO_THREADS to the event-plane ZMQ context")?;
+    tracing::info!(io_threads, "Configured shared event-plane ZMQ context");
+    Ok(context)
 }
 
 /// High Water Mark (HWM) for ZMQ sockets.
@@ -78,13 +105,6 @@ fn map_socket_creation_error(error: tmq::TmqError) -> anyhow::Error {
     };
 
     match guidance {
-        Some(guidance) => error_with_guidance(error, guidance),
-        None => error.into(),
-    }
-}
-
-fn map_io_socket_creation_error(error: std::io::Error) -> anyhow::Error {
-    match socket_limit_guidance(error.raw_os_error(), PROCESS_FD_LIMIT_GUIDANCE) {
         Some(guidance) => error_with_guidance(error, guidance),
         None => error.into(),
     }
@@ -151,26 +171,24 @@ pub struct ZmqPubTransport {
 impl ZmqPubTransport {
     /// Create a new ZMQ publisher by binding to an endpoint.
     ///
-    /// If port is 0, finds an available port using TcpListener first,
-    /// then binds ZMQ to that port.
+    /// If the TCP port is 0, ZMQ allocates and reserves an ephemeral port
+    /// on the publisher socket itself.
     ///
     /// Returns the transport and the actual bound endpoint.
     pub async fn bind(endpoint: &str, topic: &str) -> Result<(Self, String)> {
-        let actual_endpoint = if endpoint.ends_with(":0") {
-            let listener = tokio::net::TcpListener::bind("0.0.0.0:0")
-                .await
-                .map_err(map_io_socket_creation_error)?;
-            let actual_addr = listener.local_addr()?;
-            let port = actual_addr.port();
-            drop(listener);
-
-            format!("tcp://0.0.0.0:{port}")
+        let bind_endpoint = if endpoint.starts_with("tcp://") && endpoint.ends_with(":0") {
+            format!("{}*", &endpoint[..endpoint.len() - 1])
         } else {
             endpoint.to_string()
         };
 
-        let ctx = shared_zmq_context();
-        let socket = bind_tmq_socket(configure_publish_builder(publish(&ctx)), &actual_endpoint)?;
+        let ctx = shared_zmq_context()?;
+        let socket = bind_tmq_socket(configure_publish_builder(publish(&ctx)), &bind_endpoint)?;
+        let actual_endpoint = socket
+            .get_socket()
+            .get_last_endpoint()
+            .context("Failed to read bound ZMQ publisher endpoint")?
+            .map_err(|_| anyhow!("Bound ZMQ publisher endpoint is not valid UTF-8"))?;
 
         tracing::info!(
             endpoint = %actual_endpoint,
@@ -194,7 +212,7 @@ impl ZmqPubTransport {
 
     /// Connect to single broker XSUB endpoint (broker mode)
     pub async fn connect(xsub_endpoint: &str, topic: &str) -> Result<Self> {
-        let ctx = shared_zmq_context();
+        let ctx = shared_zmq_context()?;
         let socket = connect_tmq_socket(configure_publish_builder(publish(&ctx)), xsub_endpoint)?;
 
         tracing::info!(
@@ -217,7 +235,7 @@ impl ZmqPubTransport {
             anyhow::bail!("Cannot connect to zero endpoints");
         };
 
-        let ctx = shared_zmq_context();
+        let ctx = shared_zmq_context()?;
         let socket = connect_tmq_socket(configure_publish_builder(publish(&ctx)), first_endpoint)?;
 
         for endpoint in endpoints {
@@ -284,6 +302,54 @@ pub struct ZmqWireMessage {
 
 pub type ZmqWireStream =
     std::pin::Pin<Box<dyn futures::Stream<Item = Result<ZmqWireMessage>> + Send>>;
+
+/// One dynamically managed ZMQ SUB socket connected to several publishers.
+///
+/// The caller must keep this value in one task. ZMQ SUB sockets are not thread-safe.
+pub struct DynamicZmqSubSocket {
+    socket: Subscribe,
+    expected_topic: Vec<u8>,
+}
+
+impl DynamicZmqSubSocket {
+    /// Connect a new SUB socket with an explicit receive high-water mark.
+    pub fn connect_with_rcvhwm(endpoint: &str, topic: &str, rcvhwm: i32) -> Result<Self> {
+        let socket = ZmqSubTransport::connect_socket_with_rcvhwm(endpoint, topic, rcvhwm)?;
+        tracing::info!(endpoint, topic, rcvhwm, "Dynamic ZMQ SUB socket connected");
+        Ok(Self {
+            socket,
+            expected_topic: topic.as_bytes().to_vec(),
+        })
+    }
+
+    /// Connect this SUB socket to one more publisher endpoint.
+    pub fn add_endpoint(&mut self, endpoint: &str) -> Result<()> {
+        self.socket.get_socket().connect(endpoint)?;
+        Ok(())
+    }
+
+    /// Stop receiving from one publisher endpoint.
+    pub fn remove_endpoint(&mut self, endpoint: &str) -> Result<()> {
+        self.socket.get_socket().disconnect(endpoint)?;
+        Ok(())
+    }
+
+    /// Receive and decode the next multipart message.
+    pub async fn next(&mut self) -> Option<Result<ZmqWireMessage>> {
+        loop {
+            let frames = match self.socket.next().await? {
+                Ok(frames) => frames,
+                Err(error) => return Some(Err(error.into())),
+            };
+            match decode_multipart(frames, &self.expected_topic) {
+                Ok(message) => return Some(Ok(message)),
+                Err(error) => {
+                    tracing::warn!(%error, "Dropping malformed dynamic ZMQ message");
+                }
+            }
+        }
+    }
+}
 
 /// One event envelope whose ZMQ frames and envelope attribution agree.
 #[derive(Debug)]
@@ -393,7 +459,7 @@ impl ZmqSubTransport {
 
     fn connect_socket_with_rcvhwm(endpoint: &str, topic: &str, rcvhwm: i32) -> Result<Subscribe> {
         anyhow::ensure!(rcvhwm > 0, "ZMQ receive HWM must be greater than zero");
-        let ctx = shared_zmq_context();
+        let ctx = shared_zmq_context()?;
         let socket = connect_tmq_socket(
             configure_subscribe_builder_with_hwm(subscribe(&ctx), rcvhwm),
             endpoint,
@@ -489,11 +555,7 @@ impl ZmqSubTransport {
                 };
 
                 match decode_multipart(frames, &expected_topic) {
-                    Ok(message) => yield Ok(ZmqWireMessage {
-                        publisher_id: message.publisher_id,
-                        sequence: message.sequence,
-                        payload: message.payload,
-                    }),
+                    Ok(message) => yield Ok(message),
                     Err(error) => {
                         tracing::warn!(%error, "Dropping malformed ZMQ message");
                     }
@@ -521,7 +583,7 @@ impl ZmqSubTransport {
             anyhow::bail!("Cannot connect to zero endpoints");
         };
 
-        let ctx = shared_zmq_context();
+        let ctx = shared_zmq_context()?;
         let socket =
             connect_tmq_socket(configure_subscribe_builder(subscribe(&ctx)), first_endpoint)?
                 .subscribe(topic.as_bytes())?;
@@ -586,13 +648,7 @@ impl ZmqSubTransport {
     }
 }
 
-struct DecodedZmqMessage {
-    publisher_id: u64,
-    sequence: u64,
-    payload: Bytes,
-}
-
-fn decode_multipart(mut frames: Multipart, expected_topic: &[u8]) -> Result<DecodedZmqMessage> {
+fn decode_multipart(mut frames: Multipart, expected_topic: &[u8]) -> Result<ZmqWireMessage> {
     if frames.len() != 4 {
         anyhow::bail!("unexpected ZMQ multipart frame count: {}", frames.len());
     }
@@ -625,7 +681,7 @@ fn decode_multipart(mut frames: Multipart, expected_topic: &[u8]) -> Result<Deco
     let frame_bytes = Bytes::from_owner(ZmqMessageOwner(frame_message));
     let frame = Frame::decode(frame_bytes)?;
 
-    Ok(DecodedZmqMessage {
+    Ok(ZmqWireMessage {
         publisher_id,
         sequence,
         payload: frame.payload,
@@ -667,8 +723,25 @@ impl EventTransportRx for ZmqSubTransport {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn configures_zmq_io_threads() {
+        for (value, expected) in [(None, 4), (Some("1"), 1)] {
+            let context = super::configured_zmq_context(value.map(OsStr::new)).unwrap();
+            assert_eq!(context.get_io_threads().unwrap(), expected);
+        }
+        for value in ["0", "invalid", "2147483648"] {
+            assert!(super::configured_zmq_context(Some(OsStr::new(value))).is_err());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            assert!(super::configured_zmq_context(Some(OsStr::from_bytes(b"\xff"))).is_err());
+        }
+    }
+
     use super::*;
     use crate::transports::event_plane::{EventEnvelope, MsgpackCodec};
+    use std::collections::HashSet;
     use tokio::time::{Duration, timeout};
 
     #[test]
@@ -699,16 +772,6 @@ mod tests {
     }
 
     #[test]
-    fn io_emfile_preserves_error_and_adds_fd_guidance() {
-        let error = std::io::Error::from_raw_os_error(libc::EMFILE);
-        let original = error.to_string();
-        let message = map_io_socket_creation_error(error).to_string();
-
-        assert!(message.starts_with(&original));
-        assert!(message.contains(PROCESS_FD_LIMIT_GUIDANCE));
-    }
-
-    #[test]
     fn non_emfile_error_is_unchanged() {
         let error = tmq::TmqError::Io(std::io::Error::from_raw_os_error(libc::EINVAL));
         let original = error.to_string();
@@ -724,6 +787,44 @@ mod tests {
             .send(Multipart::from(frames))
             .await
             .unwrap();
+    }
+
+    fn encoded_event(topic: &str, publisher_id: u64, sequence: u64) -> Bytes {
+        MsgpackCodec
+            .encode_envelope(&EventEnvelope {
+                publisher_id,
+                sequence,
+                published_at: sequence,
+                topic: topic.to_string(),
+                payload: Bytes::from_static(b"payload"),
+            })
+            .unwrap()
+    }
+
+    async fn receive_publishers(
+        subscriber: &mut DynamicZmqSubSocket,
+        topic: &str,
+        sequence: u64,
+        expected: usize,
+        publications: &[(&ZmqPubTransport, &Bytes)],
+    ) -> HashSet<u64> {
+        timeout(Duration::from_secs(2), async {
+            let mut seen = HashSet::new();
+            while seen.len() < expected {
+                for (publisher, payload) in publications {
+                    publisher.publish(topic, (*payload).clone()).await.unwrap();
+                }
+                if let Ok(Some(Ok(message))) =
+                    timeout(Duration::from_millis(25), subscriber.next()).await
+                    && message.sequence == sequence
+                {
+                    seen.insert(message.publisher_id);
+                }
+            }
+            seen
+        })
+        .await
+        .expect("dynamic subscriber should receive expected publishers")
     }
 
     #[test]
@@ -759,11 +860,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_zmq_pubsub_basic() {
-        let port = 25555;
-        let endpoint = format!("tcp://127.0.0.1:{port}");
         let topic = "test-topic";
 
-        let (publisher, _actual_endpoint) = ZmqPubTransport::bind(&endpoint, topic)
+        let (publisher, endpoint) = ZmqPubTransport::bind("tcp://127.0.0.1:0", topic)
             .await
             .expect("Failed to create publisher");
 
@@ -956,6 +1055,64 @@ mod tests {
         assert_eq!(
             codec.decode_envelope(&wire.payload).unwrap().payload,
             sentinel.payload
+        );
+    }
+
+    #[tokio::test]
+    async fn dynamic_sub_socket_adds_and_removes_publishers() {
+        let process = std::process::id();
+        let endpoint_a = format!("inproc://dynamo-zmq-dynamic-a-{process}");
+        let endpoint_b = format!("inproc://dynamo-zmq-dynamic-b-{process}");
+        let topic = "dynamic-subscriber";
+        let (publisher_a, _) = ZmqPubTransport::bind(&endpoint_a, topic).await.unwrap();
+        let (publisher_b, _) = ZmqPubTransport::bind(&endpoint_b, topic).await.unwrap();
+        let mut subscriber =
+            DynamicZmqSubSocket::connect_with_rcvhwm(&endpoint_a, topic, ZMQ_RCVHWM).unwrap();
+        subscriber.add_endpoint(&endpoint_b).unwrap();
+
+        let encoded_a = encoded_event(topic, 101, 1);
+        let encoded_b = encoded_event(topic, 202, 1);
+        let seen = receive_publishers(
+            &mut subscriber,
+            topic,
+            1,
+            2,
+            &[(&publisher_a, &encoded_a), (&publisher_b, &encoded_b)],
+        )
+        .await;
+        assert_eq!(seen, HashSet::from([101, 202]));
+
+        subscriber.remove_endpoint(&endpoint_a).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let encoded_a_after_removal = encoded_event(topic, 101, 2);
+        let encoded_b_after_removal = encoded_event(topic, 202, 2);
+        let publications = [
+            (&publisher_a, &encoded_a_after_removal),
+            (&publisher_b, &encoded_b_after_removal),
+        ];
+        assert_eq!(
+            receive_publishers(&mut subscriber, topic, 2, 1, &publications).await,
+            HashSet::from([202])
+        );
+
+        let removed_delivery = timeout(Duration::from_millis(250), async {
+            loop {
+                publisher_a
+                    .publish(topic, encoded_a_after_removal.clone())
+                    .await
+                    .unwrap();
+                if let Some(Ok(message)) = subscriber.next().await
+                    && message.publisher_id == 101
+                    && message.sequence == 2
+                {
+                    return;
+                }
+            }
+        })
+        .await;
+        assert!(
+            removed_delivery.is_err(),
+            "removed publisher delivered data"
         );
     }
 

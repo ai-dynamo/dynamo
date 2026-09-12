@@ -24,6 +24,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
@@ -161,9 +162,20 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	MinAvailable *int32 `json:"minAvailable,omitempty"`
 
-	// multinode configures multinode components.
+	// multinode configures worker, prefill, or decode components that span
+	// multiple Pods.
 	// +optional
 	Multinode *MultinodeSpec `json:"multinode,omitempty"`
+
+	// roles expose the named Pod-producing parts inside a compound component.
+	// When set for a multinode component, this list must contain exactly one
+	// leader and one worker role. Admission defaults omitted replicas to 1 for
+	// leader and multinode.nodeCount minus 1 for worker. Omitting the roles list
+	// preserves the implicit multinode role layout.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	Roles []ComponentRoleSpec `json:"roles,omitempty"`
 
 	// sharedMemorySize controls the size of the tmpfs mounted at `/dev/shm`.
 	// `nil` selects the operator default (8Gi), a positive quantity sets a
@@ -342,7 +354,7 @@ func (s *DynamoComponentDeploymentSharedSpec) IsInterPodGMSEnabled() bool {
 func (s *DynamoComponentDeploymentSharedSpec) IsGroveScalingGroupForced() bool {
 	return s.Experimental != nil &&
 		s.Experimental.Grove != nil &&
-		s.Experimental.Grove.ForceScalingGroup
+		ptr.Deref(s.Experimental.Grove.ForceScalingGroup, false)
 }
 
 // UsesPCSG reports whether Grove renders this component as a

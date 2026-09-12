@@ -265,7 +265,7 @@ pub(crate) fn contains_unquoted_marker(content: &str, marker: &str) -> bool {
 /// if it never appears outside a quoted span. Shared scanner behind
 /// [`contains_unquoted_marker`] and [`detect_prefill`], which needs the position (not
 /// just presence) to compare two markers' first occurrences.
-fn first_unquoted_marker_position(content: &str, marker: &str) -> Option<usize> {
+pub(crate) fn first_unquoted_marker_position(content: &str, marker: &str) -> Option<usize> {
     let chars: Vec<(usize, char)> = content.char_indices().collect();
     // Whether an unescaped `"`, `'`, or `` ` `` appears anywhere at or after each
     // position, precomputed once in O(n) so the scan below doesn't rescan the
@@ -316,6 +316,84 @@ fn first_unquoted_marker_position(content: &str, marker: &str) -> Option<usize> 
         }
     }
     None
+}
+
+/// Return the first unquoted native tool-call marker configured for `parser`.
+///
+/// Native markers quoted as prose remain visible text in both streaming and
+/// aggregated responses.
+pub(crate) fn first_unquoted_native_tool_call_marker(content: &str, parser: &str) -> Option<usize> {
+    native_tool_call_start_tokens(parser)?
+        .iter()
+        .filter_map(|marker| first_unquoted_marker_position(content, marker))
+        .min()
+}
+
+/// Like [`first_unquoted_native_tool_call_marker`], but only for markers that cannot be
+/// ordinary prose.
+///
+/// Truncating a response at a marker is safe only when the marker is control syntax. Some
+/// parsers open a call with a plain word — `phi4` uses `functools` — and an answer about
+/// the Python module of that name would lose everything from the word onward. A marker
+/// carrying a punctuation character (`<`, `|`, `[`) cannot be written by accident.
+pub(crate) fn first_unquoted_structural_tool_call_marker(
+    content: &str,
+    parser: &str,
+) -> Option<usize> {
+    native_tool_call_start_tokens(parser)?
+        .iter()
+        .filter(|marker| !marker.chars().all(char::is_alphanumeric))
+        .filter_map(|marker| first_unquoted_marker_position(content, marker))
+        .min()
+}
+
+/// Return the start of an unquoted native marker, including an unquoted
+/// partial marker suffix that must remain buffered for the next stream chunk.
+pub(crate) fn unquoted_native_tool_call_marker_or_prefix_start(
+    content: &str,
+    parser: &str,
+) -> Option<usize> {
+    let markers = native_tool_call_start_tokens(parser)?;
+    if let Some(marker_start) = markers
+        .iter()
+        .filter_map(|marker| first_unquoted_marker_position(content, marker))
+        .min()
+    {
+        return Some(marker_start);
+    }
+
+    markers
+        .iter()
+        .flat_map(|marker| {
+            marker
+                .char_indices()
+                .skip(1)
+                .map(move |(end, _)| &marker[..end])
+        })
+        .filter(|prefix| {
+            let before = content.strip_suffix(prefix).unwrap_or(content);
+            first_unquoted_marker_position(before, prefix).is_none()
+        })
+        .filter_map(|prefix| {
+            let before = content.strip_suffix(prefix)?;
+            let position = first_unquoted_marker_position(content, prefix)?;
+            (position == before.len()).then_some(position)
+        })
+        .min()
+}
+
+fn native_tool_call_start_tokens(parser: &str) -> Option<Vec<String>> {
+    let parser_key = if parser.is_empty() { "default" } else { parser };
+    Some(
+        dynamo_parsers::tool_calling::parsers::get_tool_parser_map()
+            .get(parser_key)?
+            .parser_config
+            .tool_call_start_tokens()
+            .iter()
+            .filter(|marker| !marker.is_empty())
+            .cloned()
+            .collect(),
+    )
 }
 
 /// Index into the fixed-size "which quote characters close later" arrays used by

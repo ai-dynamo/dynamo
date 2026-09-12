@@ -42,6 +42,7 @@ These recipes demonstrate aggregated or disaggregated serving:
 | **[Qwen3.8-2.4T-A95B-FP8](qwen3.8-2.4t-a95b-fp8/)** | vLLM, SGLang | Aggregated / Disaggregated | 16x GB300 / GB200 | ✅ | ❌ | Hybrid gated-delta-net + 512-expert MoE (262K ctx), FP8 weights + FP8 KV, TP16 over MNNVL, KV-aware routing + prefix caching, reasoning + tool calling | ❌ |
 | **[Qwen3.5-122B-A10B-NVFP4](qwen3.5-122b/nvfp4/vllm/agg-b200-agentic/)** | vLLM | Aggregated | 2x B200 | ✅ | ✅ | Hybrid GDN+MoE, NVFP4 + FP8 KV, TP1 x `replicas: 2`, KV-aware routing; agentic profile | ❌ |
 | **[Qwen3.5-122B-A10B-NVFP4](qwen3.5-122b/nvfp4/vllm/disagg-b200-agentic/)** | vLLM | Disaggregated | 3x B200 | ✅ | ✅ | Hybrid GDN+MoE, NVFP4 + FP8 KV, 1P2D over NIXL, KV-aware routing; agentic profile | ❌ |
+| **[Qwen3.6-35B-A3B](qwen3.6-35b-a3b/)** | SGLang | Aggregated | 1x B200/GB200/H200 | ✅ | ✅ | Hybrid GDN+MoE, NVFP4 + FP8 KV on Blackwell / FP8 weights + BF16 KV on H200, MTP spec decode, TP1 | ❌ |
 | **[GPT-OSS-120B](gpt-oss-120b/trtllm/agg/)** | TensorRT-LLM | Aggregated | 4x GB200 | ✅ | ✅ | Blackwell only, WideEP | ❌ |
 | **[GPT-OSS-120B](gpt-oss-120b/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | 5x Blackwell (GB200/B200) | ✅ | ✅ | Prefill/Decode split | ❌ |
 | **[GPT-OSS-120B](gpt-oss-120b/vllm/)** | vLLM | Agg + Disagg | 8x B200 / 8x H200 | ✅ | ✅ | MXFP4 MoE + FP8 KV, 8x TP1 agg / decode-heavy single-node disagg (2P6D B200, 4P4D H200), EAGLE3 spec decode, KV-aware routing, harmony reasoning + tool calling; agentic profile | ❌ |
@@ -60,7 +61,8 @@ These recipes demonstrate aggregated or disaggregated serving:
 | **[Kimi-K3](kimi-k3/vllm/)** | vLLM | Agg + Disagg | 16x GB200 / 16x GB300 | ✅ | ❌ | Multimodal MoE (1M ctx), MXFP4 experts + BF16 dense + FP8 KV, TP16 over MNNVL (GB200) / TP8 (GB300), KV-aware routing, FlashInfer MLA, reasoning + tool calling; plus disagg 1P1D (32x GB200) / 1P2D (24x GB300) | ❌ |
 | **[Kimi-K2.6](kimi-k2.6/vllm/)** | vLLM | Aggregated | 4x B200 / 8x H200 | ✅ | ✅ | MoE, NVFP4+FP8 KV (B200) / INT4 (H200), TP4/TP8, EAGLE3 MLA spec decode, LMCache CPU offload; text+image, chat + agentic profiles | ❌ |
 | **[Nemotron-3-Super](nemotron-3-super/vllm/)** | vLLM | Aggregated | 4x B200 / 4x H200 | ✅ | ✅ | ~120B hybrid Mamba/Attention/MoE (~12B active), NVFP4 (B200) / FP8 (H200) + FP8 KV, TP4+EP, MTP, KV-aware routing; chat + agentic profiles | ❌ |
-| **[Nemotron-3-Ultra](nemotron-3-ultra/vllm/)** | vLLM | Agg + Disagg | B200 / GB200 / H200 | ✅ | ✅ | Optimized agentic profiles for native 256K and opt-in 1M context; NVFP4 + FP8, MTP, and KV-aware routing | ❌ |
+| **[Nemotron-3-Ultra](nemotron-3-ultra/vllm/)** | vLLM | Agg + Disagg | B200 / GB200 / H200 | ✅ | ✅ | Optimized agentic profiles for native 256K and opt-in 1M context; NVFP4 + FP8, MTP, and KV-aware routing |
+| **[Qwen3.8-Flash-Next](qwen3.8-flash-next/)** | vLLM | Agg + Disagg | 4x B200 / 8x B200 / 12x B200 | ✅ | ✅ | Multimodal (text+image+video) ultra-sparse MoE (125B / 6B active) with GDN+QSA hybrid attention, 51B N-gram embedding offload to host RAM, Inferact NVFP4 weights, TP4+EP, MTP3 spec decode, KV-aware routing, reasoning + tool calling (`qwen3_coder`); agentic profile | ❌ |
 
 **Legend:**
 - **Deployment**: ✅ = Complete `deploy.yaml` manifest available
@@ -305,7 +307,7 @@ resources:
 **Scaling:**
 ```yaml
 services:
-  VllmDecodeWorker:
+  decode:
     replicas: 2  # Scale to multiple workers
 ```
 

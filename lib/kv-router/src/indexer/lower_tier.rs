@@ -25,13 +25,13 @@ use super::WorkerObservationState;
 use super::{
     EventKind, KvIndexerMetrics, KvRouterError, SyncIndexer, WorkerLookupStats, WorkerTask,
 };
+use crate::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
 use crate::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash, OverlapScores, ResetScope, ResidencyDomain,
     ResidencyOwner, ResidencyOwnerKey, ResidencyProjection, ResidencyRoutingSnapshot, RouterEvent,
     WorkerWithDpRank,
 };
-use crate::router_hint::{RouterHintCandidateSource, RouterHintRootCandidates};
 
 type WorkerSet = FxHashSet<WorkerWithDpRank>;
 type HintSourceSet = FxHashSet<ResidencyOwnerKey>;
@@ -45,12 +45,12 @@ struct RoutingFrontier {
 type FrontierBuckets = FxHashMap<Option<ExternalSequenceBlockHash>, RoutingFrontier>;
 type FinalStates = FxHashMap<WorkerWithDpRank, (usize, Option<ExternalSequenceBlockHash>)>;
 #[derive(Debug, Clone, Default)]
-pub struct RouterHintExtensions {
+pub struct KvTransferExtensions {
     pub block_hashes: Vec<(usize, ExternalSequenceBlockHash)>,
-    pub owner_prefix_blocks: FxHashMap<RouterHintCandidateSource, usize>,
+    pub owner_prefix_blocks: FxHashMap<KvTransferCandidateSource, usize>,
 }
 
-impl RouterHintExtensions {
+impl KvTransferExtensions {
     fn record_match<'a>(
         &mut self,
         pos: usize,
@@ -72,11 +72,11 @@ impl RouterHintExtensions {
 
         for worker in workers {
             self.owner_prefix_blocks
-                .insert(RouterHintCandidateSource::Worker(*worker), pos + 1);
+                .insert(KvTransferCandidateSource::Worker(*worker), pos + 1);
         }
         for owner in hint_sources {
             self.owner_prefix_blocks
-                .insert(RouterHintCandidateSource::CacheOwner(*owner), pos + 1);
+                .insert(KvTransferCandidateSource::CacheOwner(*owner), pos + 1);
         }
     }
 }
@@ -492,8 +492,8 @@ impl LowerTierContinuation {
 pub struct LowerTierMatchDetails {
     pub hits: FxHashMap<WorkerWithDpRank, usize>,
     pub next_continuations: FxHashMap<WorkerWithDpRank, LowerTierContinuation>,
-    pub router_hint_root_candidates: Option<RouterHintRootCandidates>,
-    pub router_hint_extensions: Option<RouterHintExtensions>,
+    pub kv_transfer_candidates: Option<KvTransferCandidates>,
+    pub kv_transfer_extensions: Option<KvTransferExtensions>,
 }
 
 /// Standalone lower-tier continuation index.
@@ -622,7 +622,7 @@ impl LowerTierIndexer {
         let indexed_owner = IndexedResidencyOwner::from_exact(owner);
         let remove_worker_entry = {
             let Some(owner_state) = worker_blocks.get_mut(&indexed_owner) else {
-                return Err(KvCacheEventError::BlockNotFound);
+                return Ok(());
             };
             if owner_state.owner != owner {
                 return Err(KvCacheEventError::UnsupportedResidencyDomain);
@@ -631,7 +631,7 @@ impl LowerTierIndexer {
 
             for block_hash in block_hashes {
                 let Some(key) = worker_map.remove(block_hash) else {
-                    return Err(KvCacheEventError::BlockNotFound);
+                    continue;
                 };
 
                 self.remove_owner_from_edge(key, indexed_owner);
@@ -842,7 +842,7 @@ impl LowerTierIndexer {
         &self,
         local_hashes: &[LocalBlockHash],
         continuations: &std::collections::HashMap<WorkerWithDpRank, LowerTierContinuation, S>,
-        retain_router_hint_extensions: bool,
+        retain_kv_transfer_extensions: bool,
     ) -> LowerTierMatchDetails
     where
         S: BuildHasher,
@@ -850,7 +850,7 @@ impl LowerTierIndexer {
         self.query_match_details_with_options_and_projection(
             local_hashes,
             continuations,
-            retain_router_hint_extensions,
+            retain_kv_transfer_extensions,
             &ResidencyProjection::default(),
         )
     }
@@ -859,7 +859,7 @@ impl LowerTierIndexer {
         &self,
         local_hashes: &[LocalBlockHash],
         continuations: &std::collections::HashMap<WorkerWithDpRank, LowerTierContinuation, S>,
-        retain_router_hint_extensions: bool,
+        retain_kv_transfer_extensions: bool,
         projection: &ResidencyProjection,
     ) -> LowerTierMatchDetails
     where
@@ -869,7 +869,7 @@ impl LowerTierIndexer {
         self.query_match_details_with_options_and_snapshot(
             local_hashes,
             continuations,
-            retain_router_hint_extensions,
+            retain_kv_transfer_extensions,
             &snapshot,
         )
     }
@@ -878,15 +878,15 @@ impl LowerTierIndexer {
         &self,
         local_hashes: &[LocalBlockHash],
         continuations: &std::collections::HashMap<WorkerWithDpRank, LowerTierContinuation, S>,
-        retain_router_hint_extensions: bool,
+        retain_kv_transfer_extensions: bool,
         snapshot: &ResidencyRoutingSnapshot,
     ) -> LowerTierMatchDetails
     where
         S: BuildHasher,
     {
         let projection = snapshot.projection();
-        let mut router_hint_extensions =
-            retain_router_hint_extensions.then(RouterHintExtensions::default);
+        let mut kv_transfer_extensions =
+            retain_kv_transfer_extensions.then(KvTransferExtensions::default);
 
         // Build the sorted breakpoint list. Each entry is a position in the
         // hash sequence and a set of (parent_hash -> workers) groups that start
@@ -914,7 +914,7 @@ impl LowerTierIndexer {
                     .insert(*worker);
             }
 
-            if retain_router_hint_extensions && let Some(&first_hash) = local_hashes.first() {
+            if retain_kv_transfer_extensions && let Some(&first_hash) = local_hashes.first() {
                 let sources = self.root_router_hint_sources(first_hash, snapshot);
                 if !sources.is_empty() {
                     let idx = match pos_index.get(&0) {
@@ -964,7 +964,7 @@ impl LowerTierIndexer {
                     next_breakpoint,
                     &mut overflow,
                     &mut final_states,
-                    router_hint_extensions.as_mut(),
+                    kv_transfer_extensions.as_mut(),
                     projection,
                 );
             }
@@ -983,7 +983,7 @@ impl LowerTierIndexer {
         // Convert final_states into the result. Workers that never appeared in
         // final_states (e.g. empty sequence) keep their original continuation.
         let mut results = LowerTierMatchDetails {
-            router_hint_extensions,
+            kv_transfer_extensions,
             ..Default::default()
         };
         for (worker, continuation) in continuations {
@@ -1163,7 +1163,7 @@ fn advance_state_to_breakpoint(
     next_breakpoint: usize,
     overflow: &mut FrontierBuckets,
     final_states: &mut FinalStates,
-    mut router_hint_extensions: Option<&mut RouterHintExtensions>,
+    mut kv_transfer_extensions: Option<&mut KvTransferExtensions>,
     projection: &ResidencyProjection,
 ) {
     let mut cur_pos = start_pos;
@@ -1184,7 +1184,7 @@ fn advance_state_to_breakpoint(
             next_breakpoint,
             overflow,
             final_states,
-            router_hint_extensions.as_deref_mut(),
+            kv_transfer_extensions.as_deref_mut(),
             projection,
         );
         return;
@@ -1254,7 +1254,7 @@ fn advance_state_to_breakpoint(
         }
 
         let child_hash = edge.child_hash();
-        if let Some(extensions) = router_hint_extensions.as_deref_mut() {
+        if let Some(extensions) = kv_transfer_extensions.as_deref_mut() {
             extensions.record_match(
                 cur_pos,
                 child_hash,
@@ -1278,7 +1278,7 @@ fn advance_state_to_breakpoint(
                 next_breakpoint,
                 overflow,
                 final_states,
-                router_hint_extensions.as_deref_mut(),
+                kv_transfer_extensions.as_deref_mut(),
                 projection,
             );
             return;
@@ -1314,7 +1314,7 @@ fn advance_single_worker(
     next_breakpoint: usize,
     overflow: &mut FrontierBuckets,
     final_states: &mut FinalStates,
-    mut router_hint_extensions: Option<&mut RouterHintExtensions>,
+    mut kv_transfer_extensions: Option<&mut KvTransferExtensions>,
     projection: &ResidencyProjection,
 ) {
     while *cur_pos < next_breakpoint {
@@ -1332,7 +1332,7 @@ fn advance_single_worker(
         }
 
         let child_hash = edge.child_hash();
-        if let Some(extensions) = router_hint_extensions.as_deref_mut() {
+        if let Some(extensions) = kv_transfer_extensions.as_deref_mut() {
             extensions.record_match(
                 *cur_pos,
                 child_hash,
@@ -1376,12 +1376,12 @@ mod tests {
         RoutingScopeId, StableDpSlotId,
     };
     use crate::indexer::{KvIndexerInterface, ThreadPoolIndexer};
+    use crate::kv_hints::KvTransferCandidateSource;
     use crate::protocols::{
         ExternalSequenceBlockHash, KvCacheEventData, KvCacheStoreData, LocalBlockHash,
         ResidencyDomain, ResidencyOwner, ResidencyProjection, ResidencyRoutingSnapshot,
         RouterEvent, RouterHintSourceMetadata, StorageTier, WireResidencyDomain, WorkerWithDpRank,
     };
-    use crate::router_hint::RouterHintCandidateSource;
     use crate::test_utils::{remove_event, router_event, stored_blocks_with_sequence_hashes};
 
     fn local_hashes(values: &[u64]) -> Vec<LocalBlockHash> {
@@ -1486,11 +1486,6 @@ mod tests {
 
         fn remove_worker(&mut self, worker_id: u64) {
             self.index.remove_worker(&mut self.worker_blocks, worker_id);
-        }
-
-        fn remove_worker_dp_rank(&mut self, worker_id: u64, dp_rank: u32) {
-            self.index
-                .remove_worker_dp_rank(&mut self.worker_blocks, worker_id, dp_rank);
         }
 
         fn root_workers(&self, local_hash: LocalBlockHash) -> Vec<WorkerWithDpRank> {
@@ -1659,6 +1654,7 @@ mod tests {
             .apply_event(RouterEvent {
                 worker_id: 7,
                 state_source: None,
+                session_id: None,
                 storage_tier: StorageTier::Device,
                 residency_domain: WireResidencyDomain::default(),
                 event: crate::protocols::KvCacheEvent {
@@ -1974,12 +1970,12 @@ mod tests {
             true,
             &snapshot,
         );
-        let extensions = details.router_hint_extensions.unwrap();
+        let extensions = details.kv_transfer_extensions.unwrap();
 
         assert_eq!(
             extensions
                 .owner_prefix_blocks
-                .get(&RouterHintCandidateSource::CacheOwner(owner_key)),
+                .get(&KvTransferCandidateSource::CacheOwner(owner_key)),
             Some(&1)
         );
         assert_eq!(
@@ -2012,6 +2008,55 @@ mod tests {
             after_one_remove.get(&WorkerWithDpRank::new(13, 0)),
             Some(&0)
         );
+    }
+
+    #[test]
+    fn removal_batches_are_idempotent_and_preserve_other_owners() {
+        let mut index = TestLowerTierIndex::new();
+        let removed = WorkerWithDpRank::new(1, 0);
+        let other_rank = WorkerWithDpRank::new(1, 1);
+        let other_worker = WorkerWithDpRank::new(2, 0);
+        for worker in [removed, other_rank, other_worker] {
+            index
+                .apply_event(store_event(
+                    worker.worker_id,
+                    worker.dp_rank,
+                    0,
+                    None,
+                    &[11, 12],
+                    &[101, 102],
+                ))
+                .unwrap();
+        }
+
+        let batch = remove_event(
+            1,
+            1,
+            0,
+            vec![
+                ExternalSequenceBlockHash(999),
+                ExternalSequenceBlockHash(101),
+                ExternalSequenceBlockHash(101),
+                ExternalSequenceBlockHash(102),
+            ],
+        );
+        index.apply_event(batch.clone()).unwrap();
+        index.apply_event(batch).unwrap();
+        index
+            .apply_event(remove_event(99, 2, 0, vec![ExternalSequenceBlockHash(101)]))
+            .unwrap();
+
+        let continuations = [removed, other_rank, other_worker]
+            .into_iter()
+            .map(|worker| (worker, LowerTierContinuation::from_root(0)))
+            .collect::<FxHashMap<_, _>>();
+        let hits = index.query_contiguous_hits(&local_hashes(&[11, 12]), &continuations);
+        assert_eq!(hits.get(&removed), Some(&0));
+        assert_eq!(hits.get(&other_rank), Some(&2));
+        assert_eq!(hits.get(&other_worker), Some(&2));
+        assert!(index.dump_events().iter().all(|event| {
+            event.worker_id != removed.worker_id || event.event.dp_rank != removed.dp_rank
+        }));
     }
 
     #[test]
@@ -2095,21 +2140,21 @@ mod tests {
     }
 
     #[test]
-    fn start_pos_past_end_returns_zero() {
+    fn exhausted_sequence_returns_zero() {
         let mut index = TestLowerTierIndex::new();
         index
             .apply_event(store_event(23, 0, 0, Some(1100), &[91], &[901]))
             .unwrap();
 
-        let query = local_hashes(&[91]);
-        let mut continuations = FxHashMap::default();
-        continuations.insert(
-            WorkerWithDpRank::new(23, 0),
-            LowerTierContinuation::new(1, ExternalSequenceBlockHash(1100)),
-        );
-
-        let hits = index.query_contiguous_hits(&query, &continuations);
-        assert_eq!(hits.get(&WorkerWithDpRank::new(23, 0)), Some(&0));
+        let worker = WorkerWithDpRank::new(23, 0);
+        for query in [local_hashes(&[91]), Vec::new()] {
+            let continuation =
+                LowerTierContinuation::new(query.len(), ExternalSequenceBlockHash(1100));
+            let continuations = FxHashMap::from_iter([(worker, continuation)]);
+            let details = index.query_match_details(&query, &continuations);
+            assert_eq!(details.hits.get(&worker), Some(&0));
+            assert_eq!(details.next_continuations.get(&worker), Some(&continuation));
+        }
     }
 
     #[test]
@@ -2201,9 +2246,8 @@ mod tests {
             .apply_event(store_event(41, 0, 0, Some(3000), &[1], &[301]))
             .unwrap();
         index
-            .apply_event(store_event(41, 1, 1, Some(4000), &[2], &[401]))
+            .apply_event(store_event(41, 1, 1, Some(4000), &[1], &[401]))
             .unwrap();
-        index.remove_worker(41);
 
         let mut continuations = FxHashMap::default();
         continuations.insert(
@@ -2215,35 +2259,14 @@ mod tests {
             LowerTierContinuation::new(0, ExternalSequenceBlockHash(4000)),
         );
 
+        let before = index.query_contiguous_hits(&local_hashes(&[1]), &continuations);
+        assert_eq!(before.get(&WorkerWithDpRank::new(41, 0)), Some(&1));
+        assert_eq!(before.get(&WorkerWithDpRank::new(41, 1)), Some(&1));
+        index.remove_worker(41);
+
         let hits = index.query_contiguous_hits(&local_hashes(&[1]), &continuations);
         assert_eq!(hits.get(&WorkerWithDpRank::new(41, 0)), Some(&0));
         assert_eq!(hits.get(&WorkerWithDpRank::new(41, 1)), Some(&0));
-    }
-
-    #[test]
-    fn remove_worker_dp_rank_keeps_other_ranks() {
-        let mut index = TestLowerTierIndex::new();
-        index
-            .apply_event(store_event(43, 0, 0, Some(5000), &[1], &[501]))
-            .unwrap();
-        index
-            .apply_event(store_event(43, 1, 1, Some(6000), &[2], &[601]))
-            .unwrap();
-        index.remove_worker_dp_rank(43, 0);
-
-        let mut continuations = FxHashMap::default();
-        continuations.insert(
-            WorkerWithDpRank::new(43, 0),
-            LowerTierContinuation::new(0, ExternalSequenceBlockHash(5000)),
-        );
-        continuations.insert(
-            WorkerWithDpRank::new(43, 1),
-            LowerTierContinuation::new(0, ExternalSequenceBlockHash(6000)),
-        );
-
-        let hits = index.query_contiguous_hits(&local_hashes(&[2]), &continuations);
-        assert_eq!(hits.get(&WorkerWithDpRank::new(43, 0)), Some(&0));
-        assert_eq!(hits.get(&WorkerWithDpRank::new(43, 1)), Some(&1));
     }
 
     #[test]
@@ -2624,24 +2647,6 @@ mod tests {
         assert_eq!(details.hits.get(&WorkerWithDpRank::new(101, 0)), Some(&1),);
         assert_eq!(details.hits.get(&WorkerWithDpRank::new(102, 0)), Some(&0),);
         assert_eq!(details.hits.get(&WorkerWithDpRank::new(103, 0)), Some(&0),);
-    }
-
-    /// Empty sequence — every worker should get 0 hits.
-    #[test]
-    fn empty_sequence_returns_zero_hits() {
-        let mut index = TestLowerTierIndex::new();
-        index
-            .apply_event(store_event(111, 0, 0, None, &[1], &[101]))
-            .unwrap();
-
-        let mut continuations = FxHashMap::default();
-        continuations.insert(
-            WorkerWithDpRank::new(111, 0),
-            LowerTierContinuation::from_root(0),
-        );
-
-        let details = index.query_match_details(&local_hashes(&[]), &continuations);
-        assert_eq!(details.hits.get(&WorkerWithDpRank::new(111, 0)), Some(&0));
     }
 
     // --- dump_events tests ---
