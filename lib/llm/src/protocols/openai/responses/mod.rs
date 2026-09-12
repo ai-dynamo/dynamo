@@ -373,25 +373,6 @@ fn convert_input_content_to_text(content: &[InputContent]) -> String {
         .join("")
 }
 
-/// Counterpart to `convert_input_content_to_text` for upstream's
-/// `InputContent`. Reachable only via `FunctionCallOutput::Content`, which is
-/// not Dynamo-owned and therefore carries upstream variants. The sibling
-/// `EasyInputContent::ContentList` is Dynamo-owned and routed through
-/// `convert_input_content_to_text` / `convert_input_content_to_user_content`.
-fn convert_upstream_input_content_to_text(
-    content: &[dynamo_protocols::types::responses::UpstreamInputContent],
-) -> String {
-    use dynamo_protocols::types::responses::UpstreamInputContent;
-    content
-        .iter()
-        .filter_map(|p| match p {
-            UpstreamInputContent::InputText(t) => Some(t.text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("")
-}
-
 /// Accumulator for consecutive assistant-side items (OutputMessage, FunctionCall,
 /// Reasoning, assistant EasyMessage). Chat Completions represents an assistant
 /// turn as a single message carrying `content`, `tool_calls`, and
@@ -561,9 +542,7 @@ fn convert_input_items_to_messages(
                     std::mem::take(&mut pending).flush_into(&mut messages);
                     let output_text = match &fco.output {
                         FunctionCallOutput::Text(text) => text.clone(),
-                        FunctionCallOutput::Content(parts) => {
-                            convert_upstream_input_content_to_text(parts)
-                        }
+                        FunctionCallOutput::Content(parts) => convert_input_content_to_text(parts),
                     };
                     messages.push(ChatCompletionRequestMessage::Tool(
                         ChatCompletionRequestToolMessage {
@@ -1913,7 +1892,14 @@ mod tests {
                     })),
                     InputItem::Item(Item::FunctionCallOutput(FunctionCallOutputItemParam {
                         call_id: "call_123".into(),
-                        output: FunctionCallOutput::Text(r#"{"temp":"72F"}"#.into()),
+                        output: FunctionCallOutput::Content(vec![
+                            InputContent::InputText(InputTextContent {
+                                text: "{\"temp\":\"".into(),
+                            }),
+                            InputContent::InputText(InputTextContent {
+                                text: "72F\"}".into(),
+                            }),
+                        ]),
                         id: None,
                         status: None,
                     })),
@@ -1933,7 +1919,17 @@ mod tests {
             messages[1],
             ChatCompletionRequestMessage::Assistant(_)
         ));
-        assert!(matches!(messages[2], ChatCompletionRequestMessage::Tool(_)));
+        match &messages[2] {
+            ChatCompletionRequestMessage::Tool(tool) => {
+                assert_eq!(tool.tool_call_id, "call_123");
+                assert!(matches!(
+                    &tool.content,
+                    ChatCompletionRequestToolMessageContent::Text(text)
+                        if text == r#"{"temp":"72F"}"#
+                ));
+            }
+            other => panic!("expected tool message, got {other:?}"),
+        }
     }
 
     #[test]
