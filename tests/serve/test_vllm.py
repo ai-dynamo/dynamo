@@ -43,6 +43,7 @@ from tests.utils.payload_builder import (
     embedding_payload_default,
     kv_events_metrics_payload,
     lora_chat_payload,
+    lora_embedding_payload,
     metric_payload_default,
     pooling_payload,
     router_cached_tokens_chat_payload,
@@ -914,6 +915,60 @@ def test_lora_aggregated(
         script_name="lora/agg_lora.sh",
         marks=[],  # markers at function-level
         model="Qwen/Qwen3-0.6B",
+        timeout=600,
+        env=minio_config.get_env_vars(),
+        request_payloads=[lora_payload],
+    )
+
+    config = dataclasses.replace(
+        config, frontend_port=dynamo_dynamic_ports.frontend_port
+    )
+    run_serve_deployment(
+        config,
+        request,
+        ports=dynamo_dynamic_ports,
+        extra_env=minio_config.get_env_vars(),
+    )
+
+
+@pytest.mark.vllm
+@pytest.mark.core
+@pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.model("Qwen/Qwen3-Embedding-0.6B")
+@pytest.mark.model("codelion/Qwen3-0.6B-accuracy-recovery-lora")
+@pytest.mark.profiled_vram_gib(3.8)  # actual nvidia-smi peak
+@pytest.mark.requested_vllm_kv_cache_bytes(
+    531_964_000
+)  # KV cache cap (2x safety over min=265_981_952)
+@pytest.mark.timeout(300)
+@pytest.mark.post_merge
+def test_lora_embedding_aggregated(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    minio_lora_service,
+    dynamo_dynamic_ports,
+):
+    """Requires the adapter and base-model embeddings to differ, so a silent
+    fallback to the base weights fails the test instead of passing."""
+    minio_config: MinioLoraConfig = minio_lora_service
+    base_model = "Qwen/Qwen3-Embedding-0.6B"
+
+    lora_payload = lora_embedding_payload(
+        lora_name=minio_config.lora_name,
+        s3_uri=minio_config.get_s3_uri(),
+        base_model=base_model,
+        input_data="The capital of France is Paris.",
+        system_port=DefaultPort.SYSTEM1.value,
+    )
+
+    config = VLLMConfig(
+        name="test_lora_embedding_aggregated",
+        directory=vllm_dir,
+        script_name="lora/agg_embed_lora.sh",
+        marks=[],  # markers at function-level
+        model=base_model,
         timeout=600,
         env=minio_config.get_env_vars(),
         request_payloads=[lora_payload],

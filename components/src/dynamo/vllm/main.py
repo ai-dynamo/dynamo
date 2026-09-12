@@ -25,6 +25,7 @@ from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
+from dynamo.common.lora.manager import lora_runtime_enabled
 from dynamo.common.model_fetch import fetch_model
 from dynamo.common.snapshot.lifecycle import elect_and_wake
 from dynamo.common.snapshot.restore_context import (
@@ -955,26 +956,20 @@ async def register_vllm_model(
         router_config=build_router_config(config.router_advertisement),
         ignore_weights=should_register_model_ignore_weights(config),
         model_aliases=config.served_model_aliases or None,
-        # Advertise LoRA capacity on the BASE card so the frontend can place the first
-        # adapter onto an idle worker. Decode, aggregated, and prefill workers all serve
-        # lifecycle registration; embeddings and classify still do not.
+        # Advertise LoRA capacity on the BASE card so the frontend can place the
+        # first adapter onto an idle worker.
         max_gpu_lora_count=_base_model_lora_capacity(config, model_type),
     )
 
 
 def _base_model_lora_capacity(config: Config, model_type: ModelType) -> int | None:
-    if not getattr(config.engine_args, "enable_lora", False):
+    # Same predicate as endpoint registration and adapter resolution. If this
+    # advertised capacity on the engine flag alone, the frontend would place an
+    # adapter on a worker whose resolver cannot resolve it.
+    if not lora_runtime_enabled(getattr(config.engine_args, "enable_lora", False)):
         return None
-    # Pooling-family workers (embedding, classify|pooling) do not serve the
-    # LoRA load endpoints, so they must not advertise adapter capacity. Use
-    # capability checks, not identity: the classify worker registers the
-    # combined ModelType.Classify | ModelType.Pooling bits.
-    if (
-        model_type.supports_embedding()
-        or model_type.supports_classify()
-        or model_type.supports_pooling()
-    ):
-        return None
+    # vLLM rejects architectures without LoRA support at engine startup, so any
+    # worker that reached registration can serve adapters.
     return config.engine_args.max_loras
 
 

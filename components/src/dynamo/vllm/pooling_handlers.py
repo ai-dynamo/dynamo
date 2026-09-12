@@ -22,6 +22,7 @@ from vllm.config import ModelConfig
 from vllm.inputs import TextPrompt, TokensPrompt
 
 from dynamo._core import Context
+from dynamo.llm import ModelType
 
 from .args import Config
 from .handlers import EmbeddingWorkerHandler
@@ -52,16 +53,23 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
         config: Config,
         model_config: ModelConfig | None = None,
         shutdown_event: Optional[asyncio.Event] = None,
+        generate_endpoint=None,
     ) -> None:
         super().__init__(
             runtime=runtime,
             engine=engine,
             config=config,
             shutdown_event=shutdown_event,
+            generate_endpoint=generate_endpoint,
+            model_config=model_config,
         )
-        self.model_config = model_config
         self._default_pooling_task: str | None = None
         logger.info("Classify worker handler initialized")
+
+    def _lora_model_type(self) -> ModelType:
+        """One worker registers both pooling-family types, so adapter cards
+        must carry the same pair as the base card."""
+        return ModelType.Classify | ModelType.Pooling
 
     def _id2label(self) -> dict[int, str]:
         """Return the model's Hugging Face label map with integer keys."""
@@ -150,39 +158,51 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
         tokenizer = getattr(self.engine_client.renderer, "tokenizer", None)
         engine_request_id = context.id()
         priority = request.get("priority", 0)
+        # Resolved once per request -- every prompt in the batch names the same
+        # model -- and held for the whole batch. Raises for an unknown non-base
+        # name rather than quietly pooling with the base weights. The
+        # reservation is what keeps a concurrent unload or hot swap from
+        # changing the adapter out from under the later waves this batch is
+        # admitted in.
+        model_name = request.get("model") or self.config.served_model_name or ""
+        async with self._reserved_lora_request(model_name) as lora_request:
 
-        async def _encode_one(idx: int, prompt: Any) -> Any:
-            request_id = f"{engine_request_id}-{idx}"
-            encode_arg = _prepare_pooling_prompt(
-                prompt,
-                request,
-                tokenize_params,
-                tokenizer,
-            )
-            final_output = None
-            async with self._abort_monitor(context, request_id):
-                encode_kwargs: dict[str, Any] = {
-                    "prompt": encode_arg,
-                    "pooling_params": pooling_params,
-                    "request_id": request_id,
-                }
-                if priority != 0:
-                    encode_kwargs["priority"] = priority
-                # Token-ID prompts have already been passed through vLLM's
-                # TokenizeParams. Text prompts are tokenized inside AsyncLLM.
-                if tokenization_kwargs is not None and isinstance(prompt, str):
-                    encode_kwargs["tokenization_kwargs"] = tokenization_kwargs
-
-                async for output in self.engine_client.encode(**encode_kwargs):
-                    final_output = output
-
-            if final_output is None:
-                raise RuntimeError(
-                    f"vLLM engine.encode produced no output for input index {idx}"
+            async def _encode_one(idx: int, prompt: Any) -> Any:
+                request_id = f"{engine_request_id}-{idx}"
+                encode_arg = _prepare_pooling_prompt(
+                    prompt,
+                    request,
+                    tokenize_params,
+                    tokenizer,
                 )
-            return final_output
+                final_output = None
+                async with self._abort_monitor(context, request_id):
+                    encode_kwargs: dict[str, Any] = {
+                        "prompt": encode_arg,
+                        "pooling_params": pooling_params,
+                        "request_id": request_id,
+                    }
+                    # Omitting this silently pools with the base model for a
+                    # request that named an adapter.
+                    if lora_request is not None:
+                        encode_kwargs["lora_request"] = lora_request
+                    if priority != 0:
+                        encode_kwargs["priority"] = priority
+                    # Token-ID prompts have already been passed through vLLM's
+                    # TokenizeParams. Text prompts are tokenized inside AsyncLLM.
+                    if tokenization_kwargs is not None and isinstance(prompt, str):
+                        encode_kwargs["tokenization_kwargs"] = tokenization_kwargs
 
-        return await self._run_pooling_batch(prompts, _encode_one)
+                    async for output in self.engine_client.encode(**encode_kwargs):
+                        final_output = output
+
+                if final_output is None:
+                    raise RuntimeError(
+                        f"vLLM engine.encode produced no output for input index {idx}"
+                    )
+                return final_output
+
+            return await self._run_pooling_batch(prompts, _encode_one)
 
     async def generate(
         self, request: dict, context: Context

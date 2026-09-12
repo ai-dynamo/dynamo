@@ -448,16 +448,16 @@ class TestClassifyWorkerExclusivity:
         with pytest.raises(ValueError, match="headless"):
             config._validate_classify_worker_exclusivity()
 
-    def test_enable_lora_combination_rejected(self):
-        """The pooling-family handler never forwards lora_request to
-        engine_client.encode(), so an adapter-targeted request would silently
-        run against the base model."""
+    def test_enable_lora_combination_accepted(self):
+        """The pooling-family handler forwards lora_request to
+        engine_client.encode(), so adapters are served rather than silently
+        ignored. Architectures that cannot take an adapter are rejected by
+        vLLM at engine start, not here."""
         config = create_config()
         config.classify_worker = True
         config.disaggregation_mode = DisaggregationMode.AGGREGATED
         config.engine_args = SimpleNamespace(enable_lora=True)
-        with pytest.raises(ValueError, match="enable-lora"):
-            config._validate_classify_worker_exclusivity()
+        config._validate_classify_worker_exclusivity()
 
     def test_no_op_when_classify_worker_disabled(self):
         config = create_config()
@@ -485,12 +485,14 @@ class TestParseArgsLoraExclusivity:
         with pytest.raises(ValueError, match="enable-lora"):
             self._parse(["--realtime", "--enable-lora"])
 
-    def test_classify_worker_with_enable_lora_is_rejected(self):
-        """Kept separate from the --realtime case: the classify rule may be
-        removed once LoRA is supported on pooling-family workers, and the
-        --realtime rule is independent of that."""
-        with pytest.raises(ValueError, match="enable-lora"):
-            self._parse(["--classify-worker", "--enable-lora"])
+    def test_classify_worker_with_enable_lora_is_accepted(self):
+        """The classify rule this replaces existed only because the
+        pooling-family handler dropped lora_request on the floor. It now
+        forwards it, so the combination is valid; #14446 anticipated this
+        removal. The --realtime rule is independent and still applies."""
+        config = self._parse(["--classify-worker", "--enable-lora"])
+        assert config.engine_args.enable_lora is True
+        assert config.classify_worker is True
 
     def test_enable_lora_alone_is_accepted(self):
         config = self._parse(["--enable-lora"])

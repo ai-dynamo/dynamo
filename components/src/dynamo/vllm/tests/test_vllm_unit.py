@@ -73,25 +73,46 @@ def _load_vllm_main() -> ModuleType:
 
 
 @pytest.mark.parametrize(
-    "enable_lora, model_type, expected",
+    "enable_lora, lora_manager_ready, model_type, expected",
     [
-        (True, dynamo_llm.ModelType.Prefill, 3),
-        (True, dynamo_llm.ModelType.Chat, 3),
-        (True, dynamo_llm.ModelType.Embedding, None),
+        (True, True, dynamo_llm.ModelType.Prefill, 3),
+        (True, True, dynamo_llm.ModelType.Chat, 3),
+        (True, True, dynamo_llm.ModelType.Embedding, 3),
         (
             True,
+            True,
+            dynamo_llm.ModelType.Classify | dynamo_llm.ModelType.Pooling,
+            3,
+        ),
+        (False, True, dynamo_llm.ModelType.Prefill, None),
+        # --enable-lora without a LoRA manager cannot load an adapter.
+        # Advertising capacity anyway lets the frontend place an adapter on a
+        # worker whose resolver returns None for it, and the request is then
+        # answered from the base weights with no error. Registration,
+        # advertisement, and resolution must agree.
+        (True, False, dynamo_llm.ModelType.Embedding, None),
+        (
+            True,
+            False,
             dynamo_llm.ModelType.Classify | dynamo_llm.ModelType.Pooling,
             None,
         ),
-        (False, dynamo_llm.ModelType.Prefill, None),
     ],
 )
-def test_base_model_lora_capacity(enable_lora, model_type, expected):
+def test_base_model_lora_capacity(
+    enable_lora, lora_manager_ready, model_type, expected
+):
     config = SimpleNamespace(
         engine_args=SimpleNamespace(enable_lora=enable_lora, max_loras=3)
     )
 
-    assert _load_vllm_main()._base_model_lora_capacity(config, model_type) == expected
+    with patch(
+        "dynamo.common.lora.manager.get_lora_manager",
+        return_value=Mock() if lora_manager_ready else None,
+    ):
+        assert (
+            _load_vllm_main()._base_model_lora_capacity(config, model_type) == expected
+        )
 
 
 def test_kv_event_block_size_prefers_cached_main_attention_value():
