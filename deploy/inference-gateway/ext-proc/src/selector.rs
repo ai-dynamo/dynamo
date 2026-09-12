@@ -49,6 +49,8 @@ pub struct SelectRequest {
     /// already knows so the booking is releasable even if this response is lost.
     pub reservation_id: String,
     pub token_ids: Vec<u32>,
+    /// Prefill estimate used only when tokenization is unavailable.
+    pub estimated_input_tokens: usize,
     pub allowed_worker_ids: Option<HashSet<u64>>,
     pub priority_jump: Option<f64>,
     pub strict_priority: Option<u32>,
@@ -277,6 +279,21 @@ impl Selector {
     /// rather than cloned on the hot path.
     pub async fn select_and_reserve(&self, req: SelectRequest) -> Result<SelectResponse> {
         let reservation_id = req.reservation_id;
+        // Empty hashes disable prefix matching, but degraded requests still
+        // reserve their estimated prefill load until the first generated token.
+        let prompt = if req.token_ids.is_empty() {
+            PromptRequest {
+                block_hashes: Some(Vec::new()),
+                sequence_hashes: Some(Vec::new()),
+                isl_tokens: Some(req.estimated_input_tokens.max(1)),
+                ..Default::default()
+            }
+        } else {
+            PromptRequest {
+                token_ids: Some(req.token_ids),
+                ..Default::default()
+            }
+        };
         let core_req = CoreSelectAndReserveRequest {
             model_name: req.model_name,
             routing_group: DEFAULT_ROUTING_GROUP.to_string(),
@@ -284,10 +301,7 @@ impl Selector {
             // this id; feed it the EPP-minted reservation id so the booking stays
             // EPP-known (releasable even if this response is lost).
             selection_id: Some(reservation_id.clone()),
-            prompt: PromptRequest {
-                token_ids: Some(req.token_ids),
-                ..Default::default()
-            },
+            prompt,
             router_config_override: None,
             expected_output_tokens: req.expected_output_tokens,
             session_id: None,
@@ -504,12 +518,19 @@ models:
             model_name: "test-model".to_string(),
             reservation_id: reservation_id.to_string(),
             token_ids: (1..=16).collect(),
+            estimated_input_tokens: 4096,
             allowed_worker_ids: None,
             priority_jump: None,
             strict_priority: None,
             expected_output_tokens: None,
             policy_class: None,
         }
+    }
+
+    fn load_only_select_request(reservation_id: &str) -> SelectRequest {
+        let mut request = select_request(reservation_id);
+        request.token_ids.clear();
+        request
     }
 
     /// Reconcile a single schedulable worker into a fresh selector, asserting the
@@ -640,6 +661,28 @@ worker_selection:
             .free_reservation("res-1")
             .await
             .expect("freeing an already-freed booking is an idempotent no-op");
+    }
+
+    #[tokio::test]
+    async fn load_only_reserves_estimated_prefill_without_prefix_matches() {
+        let selector = selector_with_schedulable_worker().await;
+
+        for estimate in [0, 64] {
+            let mut request = load_only_select_request("load-only");
+            request.estimated_input_tokens = estimate;
+            let response = selector
+                .select_and_reserve(request)
+                .await
+                .expect("load-only fallback should still reserve a worker");
+            assert_eq!(response.worker_id, 1);
+            assert_eq!(response.overlap.longest_matched, 0);
+            assert_eq!(response.effective_prefill_tokens, estimate.max(1));
+
+            selector
+                .free_reservation("load-only")
+                .await
+                .expect("load-only reservation should be releasable");
+        }
     }
 
     /// Item 5: prefill completion releases prompt load exactly once and is
@@ -960,19 +1003,24 @@ worker_selection:
             .await
             .expect("worker should register");
 
-        let mut req = select_request("res-eot");
-        req.expected_output_tokens = Some(128);
-        selector
-            .select_and_reserve(req)
-            .await
-            .expect("reserve should succeed");
+        for mut req in [
+            select_request("res-eot"),
+            load_only_select_request("res-eot-load-only"),
+        ] {
+            *recorded.lock().unwrap() = None;
+            req.expected_output_tokens = Some(128);
+            selector
+                .select_and_reserve(req)
+                .await
+                .expect("reserve should succeed");
 
-        let observed = *recorded.lock().unwrap();
-        assert_eq!(
-            observed,
-            Some(128),
-            "expected_output_tokens must reach the worker-selection policy; got {observed:?}"
-        );
+            let observed = *recorded.lock().unwrap();
+            assert_eq!(
+                observed,
+                Some(128),
+                "expected_output_tokens must reach the worker-selection policy; got {observed:?}"
+            );
+        }
     }
 
     /// Fallback parity with the integrated router: `policy_class` is passed

@@ -135,21 +135,27 @@ impl EppRouter {
         self.reflector_ready.load(Ordering::Acquire)
     }
 
-    /// Tokenize a chat body for routing → `(token_ids, priority_jump,
-    /// strict_priority, expected_output_tokens)`. Priority uses header-over-body
-    /// precedence via [`resolve_request_priority`]
+    /// Tokenize a chat body for routing and resolve its scheduling metadata.
+    /// Priority uses header-over-body precedence via [`resolve_request_priority`].
+    /// On failure the already-resolved priority is returned alongside the error
+    /// so a degraded pick keeps it.
     async fn tokenize(
         &self,
         request_body: bytes::Bytes,
         priority_header: Option<String>,
         strict_priority_header: Option<String>,
-    ) -> Result<(Vec<u32>, Option<f64>, Option<u32>, Option<u32>), TokenizeError> {
+    ) -> Result<TokenizedRequest, TokenizeFailure> {
         // Parse only `nvext.agent_hints` for priority — the worker re-parses the
         // full body anyway, so we skip allocating the large `messages`/tools
         // fields. Malformed JSON still fails here (→ 400); a well-formed body that
         // is not a valid chat request is caught by the renderer below.
         let hints: RoutingHints =
-            serde_json::from_slice(&request_body).map_err(TokenizeError::InvalidBody)?;
+            serde_json::from_slice(&request_body).map_err(|error| TokenizeFailure {
+                priority_jump: None,
+                strict_priority: None,
+                expected_output_tokens: None,
+                error: TokenizeError::InvalidBody(error),
+            })?;
         let resolved = resolve_request_priority(
             hints.nvext.as_ref().and_then(|n| n.agent_hints.as_ref()),
             priority_header.as_deref(),
@@ -161,17 +167,22 @@ impl EppRouter {
             .and_then(|n| n.agent_hints.as_ref())
             .and_then(|h| h.osl);
         // Moves the `Bytes` into reqwest (zero-copy) rather than copying.
-        let token_ids = self
-            .renderer
-            .render_chat(request_body)
-            .await
-            .map_err(TokenizeError::Render)?;
-        Ok((
+        let token_ids =
+            self.renderer
+                .render_chat(request_body)
+                .await
+                .map_err(|e| TokenizeFailure {
+                    priority_jump: resolved.priority_jump,
+                    strict_priority: resolved.strict_priority,
+                    expected_output_tokens,
+                    error: TokenizeError::Render(e),
+                })?;
+        Ok(TokenizedRequest {
             token_ids,
-            resolved.priority_jump,
-            resolved.strict_priority,
+            priority_jump: resolved.priority_jump,
+            strict_priority: resolved.strict_priority,
             expected_output_tokens,
-        ))
+        })
     }
 
     /// Ready workers inside an Envoy `candidate_subset`, resolved in a single index
@@ -318,10 +329,17 @@ impl EndpointPicker for EppRouter {
             first_header(&req.headers, HEADER_REQUEST_PRIORITY).map(str::to_owned);
         let strict_priority_header =
             first_header(&req.headers, HEADER_REQUEST_STRICT_PRIORITY).map(str::to_owned);
-        let (tokens, priority_jump, strict_priority, expected_output_tokens) = self
-            .tokenize(req.body.clone(), priority_header, strict_priority_header)
-            .await
-            .map_err(|e| e.into_pick_error(&req.request_id))?;
+        let TokenizedRequest {
+            token_ids: tokens,
+            priority_jump,
+            strict_priority,
+            expected_output_tokens,
+        } = tokenized_or_load_only(
+            self.tokenize(req.body.clone(), priority_header, strict_priority_header)
+                .await,
+            &req.request_id,
+        )?;
+
         let policy_class = requested_policy_class(&req.headers)?;
 
         // EPP-minted booking key (not the reused `x-request-id`): stays
@@ -341,6 +359,10 @@ impl EndpointPicker for EppRouter {
             model_name: self.model_name.clone(),
             reservation_id: reservation_id.clone(),
             token_ids: tokens,
+            // Budget one token per serialized request byte when rendering is
+            // unavailable. This overestimates ordinary text, but cannot account
+            // for media URL expansion or tokens injected by the chat template.
+            estimated_input_tokens: req.body.len().max(1),
             // `None` on the ordinary path: the selector schedules over its
             // catalog; `Some` only carries an Envoy subset constraint.
             allowed_worker_ids: allowed,
@@ -458,6 +480,7 @@ impl<R: ReservationReleaser> Drop for ReservationGuard<R> {
 
 /// Why tokenizing a request for routing failed. Kept typed so the picker can map
 /// each cause to the correct HTTP status instead of collapsing everything to 400.
+#[derive(Debug)]
 enum TokenizeError {
     /// The request body could not be parsed — a genuine client (400) error.
     InvalidBody(serde_json::Error),
@@ -466,6 +489,28 @@ enum TokenizeError {
 }
 
 impl TokenizeError {
+    /// True only for renderer failures that are safe to retry by routing without
+    /// prefix information. Keep configuration and contract failures visible: a
+    /// load-only fallback must not turn a broken renderer setup into silent loss
+    /// of KV-aware routing.
+    fn should_degrade(&self) -> bool {
+        match self {
+            TokenizeError::InvalidBody(_) => false,
+            TokenizeError::Render(RenderError::Unavailable { .. })
+            | TokenizeError::Render(RenderError::Timeout { .. }) => true,
+            TokenizeError::Render(RenderError::UpstreamStatus { status, .. }) => {
+                // These statuses conventionally describe transient overload or
+                // gateway/service unavailability. Keep the list explicit so auth,
+                // routing, and renderer programming errors remain visible.
+                matches!(status.as_u16(), 429 | 502 | 503 | 504)
+            }
+            // A successful response that violates the renderer contract, or
+            // exceeds the configured limit, is a configuration/program error.
+            TokenizeError::Render(RenderError::InvalidResponse { .. })
+            | TokenizeError::Render(RenderError::ResponseTooLarge { .. }) => false,
+        }
+    }
+
     /// Map to a client-safe [`PickError`], logging the detailed cause (which may
     /// include upstream URLs/bodies) server-side rather than returning it.
     fn into_pick_error(self, request_id: &str) -> PickError {
@@ -500,6 +545,53 @@ impl TokenizeError {
                 }
             }
         }
+    }
+}
+
+#[derive(Debug)]
+struct TokenizedRequest {
+    token_ids: Vec<u32>,
+    priority_jump: Option<f64>,
+    strict_priority: Option<u32>,
+    expected_output_tokens: Option<u32>,
+}
+
+#[derive(Debug)]
+struct TokenizeFailure {
+    priority_jump: Option<f64>,
+    strict_priority: Option<u32>,
+    expected_output_tokens: Option<u32>,
+    error: TokenizeError,
+}
+
+/// Apply the EPP's failure policy after tokenization. The degraded request keeps
+/// all resolved scheduling metadata and replaces only token IDs with an empty
+/// vector, so the selector scores workers by load without changing eligibility.
+fn tokenized_or_load_only(
+    result: Result<TokenizedRequest, TokenizeFailure>,
+    request_id: &str,
+) -> Result<TokenizedRequest, PickError> {
+    match result {
+        Ok(tokenized) => Ok(tokenized),
+        Err(TokenizeFailure {
+            priority_jump,
+            strict_priority,
+            expected_output_tokens,
+            error,
+        }) if error.should_degrade() => {
+            tracing::warn!(
+                request_id = %request_id,
+                error = ?error,
+                "Tokenization failed; routing with load-only scoring"
+            );
+            Ok(TokenizedRequest {
+                token_ids: Vec::new(),
+                priority_jump,
+                strict_priority,
+                expected_output_tokens,
+            })
+        }
+        Err(TokenizeFailure { error, .. }) => Err(error.into_pick_error(request_id)),
     }
 }
 
@@ -605,6 +697,168 @@ mod tests {
             map(StatusCode::SERVICE_UNAVAILABLE),
             PickError::TokenizerUnavailable
         ));
+    }
+
+    #[tokio::test]
+    async fn transient_renderer_failure_degrades_and_keeps_priority() {
+        // Accept the connection and close it without an HTTP response. This
+        // gives us the same unavailable variant produced by `VllmRenderClient`
+        // without racing another process to reuse a dropped ephemeral port.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(stream);
+        });
+        let renderer =
+            VllmRenderClient::new(&format!("http://{address}"), Duration::from_secs(1), 1024)
+                .unwrap();
+        let render_error = renderer
+            .render_chat(bytes::Bytes::from_static(b"{}"))
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        assert!(matches!(&render_error, RenderError::Unavailable { .. }));
+
+        let degraded = tokenized_or_load_only(
+            Err(TokenizeFailure {
+                priority_jump: Some(3.5),
+                strict_priority: Some(7),
+                expected_output_tokens: Some(128),
+                error: TokenizeError::Render(render_error),
+            }),
+            "req-1",
+        )
+        .expect("transport failure should route load-only");
+        assert!(degraded.token_ids.is_empty());
+        assert_eq!(degraded.priority_jump, Some(3.5));
+        assert_eq!(degraded.strict_priority, Some(7));
+        assert_eq!(degraded.expected_output_tokens, Some(128));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        });
+        let renderer = VllmRenderClient::new(
+            &format!("http://{address}"),
+            Duration::from_millis(100),
+            1024,
+        )
+        .unwrap();
+        let timeout_error = renderer
+            .render_chat(bytes::Bytes::from_static(b"{}"))
+            .await
+            .unwrap_err();
+        server.abort();
+        let _ = server.await;
+        assert!(matches!(&timeout_error, RenderError::Timeout { .. }));
+        let degraded = tokenized_or_load_only(
+            Err(TokenizeFailure {
+                priority_jump: Some(4.5),
+                strict_priority: Some(8),
+                expected_output_tokens: Some(128),
+                error: TokenizeError::Render(timeout_error),
+            }),
+            "req-2",
+        )
+        .expect("timeout should route load-only");
+        assert!(degraded.token_ids.is_empty());
+        assert_eq!(degraded.priority_jump, Some(4.5));
+        assert_eq!(degraded.strict_priority, Some(8));
+    }
+
+    #[test]
+    fn tokenization_failure_policy_keeps_bad_input_visible() {
+        use reqwest::StatusCode;
+
+        let malformed = tokenized_or_load_only(
+            Err(TokenizeFailure {
+                priority_jump: None,
+                strict_priority: None,
+                expected_output_tokens: None,
+                error: TokenizeError::InvalidBody(
+                    serde_json::from_str::<()>("not json").unwrap_err(),
+                ),
+            }),
+            "req-1",
+        );
+        assert!(matches!(malformed, Err(PickError::InvalidRequest(_))));
+
+        for status in [StatusCode::BAD_REQUEST, StatusCode::UNPROCESSABLE_ENTITY] {
+            let result = tokenized_or_load_only(
+                Err(TokenizeFailure {
+                    priority_jump: Some(1.0),
+                    strict_priority: Some(2),
+                    expected_output_tokens: Some(128),
+                    error: TokenizeError::Render(RenderError::UpstreamStatus {
+                        status,
+                        body: String::new(),
+                    }),
+                }),
+                "req-1",
+            );
+            assert!(
+                matches!(result, Err(PickError::InvalidRequest(_))),
+                "{status} must remain a client error"
+            );
+        }
+
+        let contract_error = tokenized_or_load_only(
+            Err(TokenizeFailure {
+                priority_jump: Some(1.0),
+                strict_priority: Some(2),
+                expected_output_tokens: Some(128),
+                error: TokenizeError::Render(RenderError::InvalidResponse {
+                    source: serde_json::from_str::<()>("not json").unwrap_err(),
+                }),
+            }),
+            "req-1",
+        );
+        assert!(matches!(
+            contract_error,
+            Err(PickError::TokenizerUpstreamError)
+        ));
+
+        let status = StatusCode::UNAUTHORIZED;
+        let config_error = tokenized_or_load_only(
+            Err(TokenizeFailure {
+                priority_jump: Some(1.0),
+                strict_priority: Some(2),
+                expected_output_tokens: Some(128),
+                error: TokenizeError::Render(RenderError::UpstreamStatus {
+                    status,
+                    body: String::new(),
+                }),
+            }),
+            "req-1",
+        );
+        assert!(
+            matches!(config_error, Err(PickError::TokenizerUpstreamError)),
+            "{status} must remain visible as an upstream configuration error"
+        );
+
+        for status in [
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::GATEWAY_TIMEOUT,
+        ] {
+            tokenized_or_load_only(
+                Err(TokenizeFailure {
+                    priority_jump: Some(1.0),
+                    strict_priority: Some(2),
+                    expected_output_tokens: Some(128),
+                    error: TokenizeError::Render(RenderError::UpstreamStatus {
+                        status,
+                        body: String::new(),
+                    }),
+                }),
+                "req-1",
+            )
+            .expect("transient renderer status should route load-only");
+        }
     }
 
     #[test]
