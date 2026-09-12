@@ -253,6 +253,8 @@ manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and C
 	$(YQ) eval '(.spec.versions[] | select(.name == "v1beta1") | .schema.openAPIV3Schema.properties.spec.required) |= (. - ["name"])' -i --indent 2 config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml
 	echo "Removing DGD-only provider overrides from standalone DynamoComponentDeployment schemas"
 	$(YQ) eval '(.spec.versions[].schema.openAPIV3Schema.properties.spec.properties) |= del(.providerOverride) | (.spec.versions[].schema.openAPIV3Schema.properties.spec.properties.roles.items.properties) |= del(.providerOverride)' -i --indent 2 config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml
+	echo "Removing DGD-only LPX fields and validation rules from standalone DynamoComponentDeployment schemas"
+	$(YQ) eval '(.spec.versions[].schema.openAPIV3Schema.properties.spec) |= (del(.properties.lpx) | (select(has("x-kubernetes-validations"))."x-kubernetes-validations") |= map(select(.rule | test("\\b(self|oldSelf)\\.lpx\\b") | not)))' -i --indent 2 config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml
 	# PodTemplateSpec is an external Kubernetes type, so its item-level markers cannot be declared on the API field.
 	# Item-scoped rules avoid unbounded list comprehensions without imposing maxItems on the public API.
 	# The annotation value bound matches Kubernetes' total annotation size limit.
@@ -283,10 +285,6 @@ manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and C
 		if ! $(YQ) eval '.metadata.annotations."helm.sh/resource-policy"' "$$file" | grep -q "keep"; then \
 			$(YQ) eval '.metadata.annotations."helm.sh/resource-policy" = "keep"' -i "$$file"; \
 		fi; \
-	done
-	# Compact LPX schemas last: subsequent schema edits could change an aliased role.
-	for file in config/crd/bases/nvidia.com_dynamographdeployments.yaml config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml; do \
-		$(YQ) --from-file api/scripts/lpx-crd-schema.yq -i --indent 2 $$file || exit 1; \
 	done
 .PHONY: generate
 generate: controller-gen generate-pydantic ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.

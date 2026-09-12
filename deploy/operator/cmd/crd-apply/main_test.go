@@ -126,6 +126,18 @@ func TestCRDApplyInstallsGeneratedSchemas(t *testing.T) {
 		for _, version := range crd.Spec.Versions {
 			status := version.Schema.OpenAPIV3Schema.Properties["status"]
 			if name == "dynamographdeployments.nvidia.com" {
+				t.Log("Preserve upstream role PodTemplate documentation in both DGD versions")
+				spec := version.Schema.OpenAPIV3Schema.Properties["spec"]
+				var component *apiextensionsv1.JSONSchemaProps
+				if version.Name == "v1alpha1" {
+					component = spec.Properties["services"].AdditionalProperties.Schema
+				} else {
+					component = spec.Properties["components"].Items.Schema
+				}
+				template := component.Properties["roles"].Items.Schema.Properties["podTemplate"]
+				require.NotEmpty(t, template.Description)
+				require.NotEmpty(t, template.Properties["spec"].Description)
+
 				if _, exists := status.Properties["modelDownload"]; exists {
 					t.Errorf("%s %s retains status.modelDownload", name, version.Name)
 				}
