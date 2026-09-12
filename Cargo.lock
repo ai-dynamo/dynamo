@@ -2399,8 +2399,11 @@ dependencies = [
  "opentelemetry",
  "parking_lot",
  "prometheus",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "serial_test",
+ "temp-env",
  "tokio",
  "tokio-util",
  "tracing",
@@ -2696,6 +2699,7 @@ dependencies = [
  "futures",
  "futures-util",
  "galil-seiferas",
+ "half",
  "hf-hub 0.4.3",
  "http-body-util",
  "image",
@@ -4222,6 +4226,7 @@ dependencies = [
  "num-traits",
  "rand 0.9.4",
  "rand_distr",
+ "serde",
  "zerocopy",
 ]
 

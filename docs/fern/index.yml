@@ -557,6 +557,11 @@ navigation:
                       - page: Multimodal
                         slug: tensorrt-llm-multimodal
                         path: pages/developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/multimodal.md
+                  - section: Triton
+                    collapsed: true
+                    contents:
+                      - page: Overview
+                        path: pages/developer-guide/knowledge-base/modular-components/backends/triton/overview.md
                   - section: vLLM
                     collapsed: true
                     contents:
@@ -1174,12 +1179,12 @@ navigation:
           - page: Overview
             path: pages/reference/nixl-connect/overview.mdx
 
-      # The Dynamo release artifacts eligible for NVIDIA Enterprise Support.
+      # The Dynamo release artifacts eligible for enterprise support.
       # Same binaries as the open-source artifacts; the -enterprise suffix
       # marks the curated publication channel and the commercial support
       # boundary. Commercial support requires an NVIDIA AI Enterprise
       # subscription; the artifacts are free to download and run.
-      - section: Enterprise
+      - section: Enterprise Support
         icon: badge-check
         slug: enterprise
         collapsed: true

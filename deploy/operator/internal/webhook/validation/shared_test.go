@@ -251,12 +251,34 @@ func TestValidateDynamoComponentDeploymentSharedSpecFieldPaths(t *testing.T) {
 	assertFieldPaths(t, errs, []string{
 		"spec.components[0].minAvailable",
 		"spec.components[0].sharedMemorySize",
-		"spec.components[0].type",
 		"spec.components[0].multinode",
+		"spec.components[0].type",
 		"spec.components[0].replicas",
 		"spec.components[0].eppConfig.configMapRef.name",
 		"spec.components[0].frontendSidecar",
 	})
+}
+
+func TestSupportsMultinodeComponentType(t *testing.T) {
+	tests := []struct {
+		componentType nvidiacomv1beta1.ComponentType
+		allowed       bool
+	}{
+		{componentType: nvidiacomv1beta1.ComponentTypeWorker, allowed: true},
+		{componentType: nvidiacomv1beta1.ComponentTypePrefill, allowed: true},
+		{componentType: nvidiacomv1beta1.ComponentTypeDecode, allowed: true},
+		{componentType: nvidiacomv1beta1.ComponentTypeFrontend},
+		{componentType: nvidiacomv1beta1.ComponentTypePlanner},
+		{componentType: nvidiacomv1beta1.ComponentTypeEPP},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.componentType), func(t *testing.T) {
+			if got := supportsMultinodeComponentType(tt.componentType); got != tt.allowed {
+				t.Fatalf("supportsMultinodeComponentType(%q) = %t, want %t", tt.componentType, got, tt.allowed)
+			}
+		})
+	}
 }
 
 func TestValidateProviderOverrideOutsideDGD(t *testing.T) {
@@ -310,6 +332,23 @@ func TestValidateComponentRolesRejectsDuplicateMultinodeRole(t *testing.T) {
 		"spec.components[0].roles[1].name",
 		"spec.components[0].roles",
 	})
+}
+
+func TestValidateComponentRoleSpecPodTemplateCapability(t *testing.T) {
+	validation := &sharedValidation{ctx: context.Background()}
+	rolePath := field.NewPath("spec", "components").Index(0).Child("roles").Index(0)
+	role := &nvidiacomv1beta1.ComponentRoleSpec{
+		Name:        nvidiacomv1beta1.ComponentRoleLeader,
+		PodTemplate: &corev1.PodTemplateSpec{},
+	}
+
+	t.Log("Reject role PodTemplates unless the enclosing role schema opts in")
+	errs := validation.validateComponentRoleSpec(role, rolePath, componentRoleSpecValidationOptions{})
+	assertFieldPaths(t, errs, []string{"spec.components[0].roles[0].podTemplate"})
+
+	t.Log("Allow a component-specific role schema to opt in without changing the shared validator")
+	errs = validation.validateComponentRoleSpec(role, rolePath, componentRoleSpecValidationOptions{podTemplateAllowed: true})
+	assertFieldPaths(t, errs, nil)
 }
 
 func TestValidateDynamoComponentDeploymentSharedSpecFrontendSidecar(t *testing.T) {
