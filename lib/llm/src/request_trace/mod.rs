@@ -6,6 +6,7 @@ pub mod config;
 mod integration;
 mod otel_sink;
 pub mod payload;
+mod payload_engine;
 pub(crate) mod payload_stream;
 mod record;
 mod replay;
@@ -37,6 +38,7 @@ pub(crate) use integration::{
     build_request_end_trace_state, finish_reason_metadata_handle, wrap_chat_request_end_stream,
     wrap_completion_request_end_stream,
 };
+pub(crate) use payload_engine::wrap_chat_request_payload_engine;
 pub(crate) use record::{publish_tool_record, validate_tool_record};
 pub(crate) use replay::replay_metrics;
 pub use types::{
