@@ -89,6 +89,15 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
     <div className="dynamo-model-tags"><span>TensorRT-LLM</span><span>8x B200/GB200/H200</span><span>Agentic + multimodal</span></div>
   <a className="dynamo-card-link" href="gemma-4-31b.mdx" aria-label="Open the Gemma-4-31B recipe">Open recipe</a>
   </div>
+  <div className="dynamo-model-card" data-recipe-card data-provider="deepseek" data-runtime="sglang" data-hardware="gb200" data-technique="aggregated disaggregated kv-routing spec-decoding expert-parallel" data-workload="agentic long-context-reuse">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/deepseek-ai.webp" alt="" />
+      <div><h3>DeepSeek-V4.1-Flash</h3><p>DeepSeek</p></div>
+    </div>
+    <p className="dynamo-model-summary">SGLang recipes on GB200, aggregated with KV-aware routing and DSpark speculation, or 1P1D disaggregated with Mooncake KV transfer over the NVLink fabric.</p>
+    <div className="dynamo-model-tags"><span>SGLang</span><span>8x GB200</span><span>Day-0 · up to 1M context</span></div>
+  <a className="dynamo-card-link" href="deepseek-v4-1-flash.mdx" aria-label="Open the DeepSeek-V4.1-Flash recipe">Open recipe</a>
+  </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="zai" data-runtime="vllm" data-hardware="gb200 h200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/zai-org.svg" alt="" />
