@@ -357,6 +357,56 @@ def test_redact_masks_url_credentials():
     assert "https://***@pypi.corp/simple" in masked
 
 
+def test_redact_masks_credentials_when_the_username_holds_an_unencoded_at():
+    """Registry URLs are routinely written with an email as the username.
+
+    Stopping at the first "@" masked only the username and left the password
+    in the log line.
+    """
+    line = "pip install --index-url https://user@corp.com:secret@pypi.corp/simple"
+    masked = install_media_decoders._redact(line)
+
+    assert "secret" not in masked
+    assert "https://***@pypi.corp/simple" in masked
+
+
+def test_redact_stops_at_a_query_or_fragment_after_the_host():
+    """An "@" in a query must not drag the match past the host.
+
+    The bounding class used to be `[^/\\s]+`, so a credentialed URL collapsed to
+    `https://***@value` and lost its host, and a URL with no userinfo at all
+    gained a redaction it never needed.
+    """
+    line = "pip install --index-url https://user:secret@pypi.corp?next=a@b"
+    masked = install_media_decoders._redact(line)
+
+    assert "secret" not in masked
+    assert masked == "pip install --index-url https://***@pypi.corp?next=a@b"
+
+
+def test_redact_masks_every_credentialed_url_on_one_line():
+    line = "https://a@h1/x https://user@corp.com:secret@h2/y"
+    masked = install_media_decoders._redact(line)
+
+    assert "secret" not in masked
+    assert masked == "https://***@h1/x https://***@h2/y"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "https://pypi.org/simple and mail user@example.com",
+        # An "@" past the host is query or fragment text, not userinfo. No
+        # path, so the "/" boundary cannot be what stops the match.
+        "https://pypi.org?next=user@example.com",
+        "https://pypi.org#frag@x",
+    ],
+)
+def test_redact_leaves_lines_without_url_userinfo_alone(line: str):
+    """A bare address in the text is not userinfo and must not be rewritten."""
+    assert install_media_decoders._redact(line) == line
+
+
 # ---------------------------------------------------------------------------
 # CLI.
 # ---------------------------------------------------------------------------
