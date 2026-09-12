@@ -11,7 +11,11 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+
+/// How long the watch stream waits between two registry reads.
+const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Shared in-memory registry for mock discovery
 #[derive(Clone, Default)]
@@ -45,6 +49,22 @@ impl MockDiscovery {
             registry,
         }
     }
+}
+
+/// The instances the registry holds for a query, keyed by instance id.
+fn query_snapshot(
+    registry: &SharedMockRegistry,
+    query: &DiscoveryQuery,
+) -> HashMap<DiscoveryInstanceId, DiscoveryInstance> {
+    registry
+        .instances
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|instance| matches_query(instance, query))
+        .cloned()
+        .map(|instance| (instance.id(), instance))
+        .collect()
 }
 
 /// Helper function to check if an instance matches a discovery query
@@ -258,21 +278,14 @@ impl Discovery for MockDiscovery {
         _cancel_token: Option<CancellationToken>,
     ) -> Result<DiscoveryStream> {
         let registry = self.registry.clone();
+        // The first snapshot is taken before the return, so a caller that lists afterwards cannot
+        // observe an instance that an unregister removes before the first poll.
+        let mut current = query_snapshot(&registry, &query);
 
         let stream = async_stream::stream! {
             let mut known_instances = HashMap::<DiscoveryInstanceId, DiscoveryInstance>::new();
 
             loop {
-                let current: HashMap<DiscoveryInstanceId, DiscoveryInstance> = {
-                    let instances = registry.instances.lock().unwrap();
-                    instances
-                        .iter()
-                        .filter(|instance| matches_query(instance, &query))
-                        .cloned()
-                        .map(|instance| (instance.id(), instance))
-                        .collect()
-                };
-
                 let (events, reconciled) =
                     reconcile_discovery_snapshot(&known_instances, current);
                 for event in events {
@@ -280,7 +293,8 @@ impl Discovery for MockDiscovery {
                 }
 
                 known_instances = reconciled;
-                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                tokio::time::sleep(POLL_INTERVAL).await;
+                current = query_snapshot(&registry, &query);
             }
         };
 
@@ -330,6 +344,43 @@ mod tests {
 
         assert_eq!(event, DiscoveryEvent::Added(updated.clone()));
         assert_eq!(client.list(query).await.unwrap(), vec![updated]);
+    }
+
+    #[tokio::test]
+    async fn watch_reports_an_unregister_that_follows_establishment() {
+        let client = MockDiscovery::new(Some(1), SharedMockRegistry::new());
+        let instance = client
+            .register(DiscoverySpec::Endpoint {
+                namespace: "ns".to_string(),
+                component: "component".to_string(),
+                endpoint: "endpoint".to_string(),
+                transport: TransportType::Tcp("127.0.0.1:8000".to_string()),
+                device_type: None,
+                request_plane_codec: None,
+            })
+            .await
+            .unwrap();
+
+        let mut stream = client
+            .list_and_watch(DiscoveryQuery::AllEndpoints, None)
+            .await
+            .unwrap();
+        // list_and_watch returned, so the first snapshot is taken and this unregister is newer.
+        client.unregister(instance.clone()).await.unwrap();
+
+        let added = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("the first snapshot must reach the stream")
+            .unwrap()
+            .unwrap();
+        assert_eq!(added, DiscoveryEvent::Added(instance.clone()));
+
+        let removed = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("an unregister after establishment must reach the stream")
+            .unwrap()
+            .unwrap();
+        assert_eq!(removed, DiscoveryEvent::Removed(instance.id()));
     }
 
     fn model_spec(
