@@ -239,6 +239,19 @@ class Endpoint:
         """
         ...
 
+    async def list_endpoint_taints(self, only_live: bool = True) -> Dict[str, Set[str]]:
+        """
+        Snapshot the taints advertised by this endpoint's workers.
+
+        Returns a dict mapping each worker's instance ID (as a string) to the
+        set of taints that worker advertises through its registered model's
+        runtime config. With ``only_live=True`` only workers that currently
+        have a live endpoint instance are included; ``only_live=False`` also
+        includes advertised model records from workers that are not currently
+        live.
+        """
+        ...
+
 class PyAsyncRequestStream:
     """
     Python-visible inbound iterator handed to bidirectional engine
