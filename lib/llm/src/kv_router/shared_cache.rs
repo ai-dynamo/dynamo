@@ -56,6 +56,8 @@ struct SglangHicacheMooncakeConfig {
     extra_backend_tag: Option<String>,
     #[serde(default)]
     kv_events_endpoint: Option<String>,
+    #[serde(default)]
+    pool_key_suffixes: Vec<String>,
 }
 
 impl SglangHicacheMooncakeConfig {
@@ -69,6 +71,7 @@ impl SglangHicacheMooncakeConfig {
             && self.tp_lcm_size == other.tp_lcm_size
             && self.should_split_heads == other.should_split_heads
             && self.extra_backend_tag == other.extra_backend_tag
+            && self.pool_key_suffixes == other.pool_key_suffixes
     }
 }
 
@@ -566,6 +569,15 @@ fn expand_actual_query_keys(
     config: &SglangHicacheMooncakeConfig,
 ) -> Vec<String> {
     let logical_key = maybe_prefix_key(logical_page_hash, config.extra_backend_tag.as_deref());
+
+    if !config.pool_key_suffixes.is_empty() {
+        return config
+            .pool_key_suffixes
+            .iter()
+            .map(|suffix| format!("{logical_key}{suffix}"))
+            .collect();
+    }
+
     let pp_size = config.pp_size.max(1);
 
     if config.is_mla_model {
@@ -631,6 +643,7 @@ mod tests {
             should_split_heads: false,
             extra_backend_tag: None,
             kv_events_endpoint: Some("tcp://127.0.0.1:5557".to_string()),
+            pool_key_suffixes: vec![],
         }
     }
 
@@ -739,6 +752,76 @@ mod tests {
                 "tag_hash_3_v",
             ]
         );
+    }
+
+    #[test]
+    fn test_expand_actual_query_keys_uses_advertised_pool_suffixes() {
+        let config = SglangHicacheMooncakeConfig {
+            pool_key_suffixes: vec![
+                "__deepseek_v4_c4".to_string(),
+                "__deepseek_v4_c128".to_string(),
+                "__deepseek_v4_c4_indexer".to_string(),
+                "__deepseek_v4_c4_state".to_string(),
+                "__deepseek_v4_c4_indexer_state".to_string(),
+                "__swa".to_string(),
+            ],
+            ..mooncake_config()
+        };
+
+        let query_keys = expand_actual_query_keys("hash", &config);
+        assert_eq!(
+            query_keys,
+            vec![
+                "hash__deepseek_v4_c4",
+                "hash__deepseek_v4_c128",
+                "hash__deepseek_v4_c4_indexer",
+                "hash__deepseek_v4_c4_state",
+                "hash__deepseek_v4_c4_indexer_state",
+                "hash__swa",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_blocks_hits_deepseek_v4_pool_suffixed_keys() {
+        // Regression: the guessed `_k`/`_v` layout never matches DeepSeek V4's per-pool keys.
+        let hash = "cf97adeedb59e05bfd73a2b4c2a8885708c4f4f70c84c64b27120e72ab733b72".to_string();
+        let config = SglangHicacheMooncakeConfig {
+            pool_key_suffixes: vec![
+                "__deepseek_v4_c4".to_string(),
+                "__deepseek_v4_c4_indexer".to_string(),
+                "__deepseek_v4_c4_state".to_string(),
+            ],
+            ..mooncake_config()
+        };
+        let cache = HicacheSharedKvCache::new(runtime_watch_with_config(config));
+        cache.apply_batch(
+            1,
+            vec![
+                MooncakeObjectEvent {
+                    event_type: "stored".to_string(),
+                    object_key: Some(format!("{hash}__deepseek_v4_c4")),
+                    tenant_id: "default".to_string(),
+                    group_id: None,
+                },
+                MooncakeObjectEvent {
+                    event_type: "stored".to_string(),
+                    object_key: Some(format!("{hash}__deepseek_v4_c4_indexer")),
+                    tenant_id: "default".to_string(),
+                    group_id: None,
+                },
+                MooncakeObjectEvent {
+                    event_type: "stored".to_string(),
+                    object_key: Some(format!("{hash}__deepseek_v4_c4_state")),
+                    tenant_id: "default".to_string(),
+                    group_id: None,
+                },
+            ],
+        );
+
+        let hits = cache.check_blocks(&[1, 2, 3, 4], 4, None).await.unwrap();
+        assert_eq!(hits.ranges, vec![Range { start: 0, end: 1 }]);
+        assert_eq!(hits.total_hits, 1);
     }
 
     #[test]
