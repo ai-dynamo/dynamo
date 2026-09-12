@@ -4677,7 +4677,7 @@ LPXConfiguration holds LPX scheduler integration and model-registry settings.
 **Appears in:** [OperatorConfiguration](#operatorconfiguration)
 
 <ParamField path="enabled" type="boolean" default="false">
-Enabled opts the operator into LPX request production. When true, startup verifies that the separately installed LPX API serves scheduling.lpu.nvidia.com/v1alpha1 LpuPipelineRequest resources and fails otherwise.
+Enabled opts the operator into LPX request production. When true, startup requires the scheduling.lpu.nvidia.com/v1alpha1 LpuPipelineRequest and scheduler.grove.io/v1alpha1 PodGang APIs to be installed separately.
 </ParamField>
 
 <ParamField path="modelRegistryURL" type="string">

@@ -3444,7 +3444,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `enabled` _boolean_ | Enabled opts the operator into LPX request production. When true, startup<br />verifies that the separately installed LPX API serves<br />scheduling.lpu.nvidia.com/v1alpha1 LpuPipelineRequest resources and fails<br />otherwise. | false |  |
+| `enabled` _boolean_ | Enabled opts the operator into LPX request production. When true, startup<br />requires the scheduling.lpu.nvidia.com/v1alpha1 LpuPipelineRequest and<br />scheduler.grove.io/v1alpha1 PodGang APIs to be installed separately. | false |  |
 | `modelRegistryURL` _string_ | ModelRegistryURL configures the location of the LPU model registry used by LPX.<br />Supported values are an absolute local path (or file:// URL) and gs:// URLs. |  |  |
 
 

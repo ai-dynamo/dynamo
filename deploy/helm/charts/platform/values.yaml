@@ -94,9 +94,9 @@ dynamo-operator:
   # LPX is installed and operated separately. These values only opt the
   # Dynamo operator into producing node-local scheduling requests.
   lpx:
-    # -- Enable LPX integration. Startup verifies that the externally installed
-    # LPX API serves scheduling.lpu.nvidia.com/v1alpha1 LpuPipelineRequest
-    # resources and fails otherwise.
+    # -- Enable LPX integration. Startup requires the externally installed
+    # scheduling.lpu.nvidia.com/v1alpha1 LpuPipelineRequest and
+    # scheduler.grove.io/v1alpha1 PodGang APIs.
     enabled: false
     # -- Configure the LPU model registry used by the LPX integration.
     modelRegistryURL: ""
