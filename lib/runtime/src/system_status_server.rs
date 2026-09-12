@@ -880,24 +880,25 @@ mod tests {
         let accepted = tokio::spawn(async move { rebinding.accept().await });
 
         let mut accepted = accepted;
-        let (peer, client_addr) = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let Ok(stream) = tokio::net::TcpStream::connect(address).await else {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                    continue;
-                };
-                let client_addr = stream.local_addr().unwrap();
-                tokio::select! {
-                    result = &mut accepted => {
-                        let (_io, peer) = result.expect("accept task should not panic");
-                        return (peer, client_addr);
+        let (peer, client_addr) =
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let Ok(stream) = tokio::net::TcpStream::connect(address).await else {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        continue;
+                    };
+                    let client_addr = stream.local_addr().unwrap();
+                    tokio::select! {
+                        result = &mut accepted => {
+                            let (_io, peer) = result.expect("accept task should not panic");
+                            return (peer, client_addr);
+                        }
+                        _ = tokio::time::sleep(Duration::from_millis(50)) => {}
                     }
-                    _ = tokio::time::sleep(Duration::from_millis(50)) => {}
                 }
-            }
-        })
-        .await
-        .expect("listener should rebind and accept connections again");
+            })
+            .await
+            .expect("listener should rebind and accept connections again");
 
         assert_eq!(
             peer,
