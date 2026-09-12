@@ -1426,6 +1426,20 @@ mod tests {
     }
 
     #[test]
+    fn worker_unavailable_roundtrips_with_semantic_identity() {
+        let error = DynamoError::builder()
+            .error_type(ErrorClass::WorkerUnavailable)
+            .build();
+
+        let decoded: DynamoError =
+            serde_json::from_str(&serde_json::to_string(&error).unwrap()).unwrap();
+
+        assert_eq!(decoded.error_type(), ErrorClass::WorkerUnavailable);
+        assert_eq!(decoded.class(), ErrorClass::Unavailable);
+        assert_eq!(decoded.reason().as_str(), "backend.worker_unavailable");
+    }
+
+    #[test]
     fn response_timeout_subtypes_roundtrip() {
         for error_type in [
             ErrorClass::ResponseTimeout,
