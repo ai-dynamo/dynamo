@@ -127,8 +127,7 @@ func admissionSourceVersion(t *testing.T, object runtime.Object) string {
 	case *nvidiacomv1alpha1.DynamoGraphDeployment,
 		*nvidiacomv1alpha1.DynamoComponentDeployment,
 		*nvidiacomv1alpha1.DynamoGraphDeploymentRequest,
-		*nvidiacomv1alpha1.DynamoModel,
-		*nvidiacomv1alpha1.DynamoCheckpoint:
+		*nvidiacomv1alpha1.DynamoModel:
 		return nvidiacomv1alpha1.GroupVersion.Version
 	case *nvidiacomv1beta1.DynamoGraphDeployment,
 		*nvidiacomv1beta1.DynamoComponentDeployment,
@@ -252,12 +251,34 @@ func TestValidateDynamoComponentDeploymentSharedSpecFieldPaths(t *testing.T) {
 	assertFieldPaths(t, errs, []string{
 		"spec.components[0].minAvailable",
 		"spec.components[0].sharedMemorySize",
-		"spec.components[0].type",
 		"spec.components[0].multinode",
+		"spec.components[0].type",
 		"spec.components[0].replicas",
 		"spec.components[0].eppConfig.configMapRef.name",
 		"spec.components[0].frontendSidecar",
 	})
+}
+
+func TestSupportsMultinodeComponentType(t *testing.T) {
+	tests := []struct {
+		componentType nvidiacomv1beta1.ComponentType
+		allowed       bool
+	}{
+		{componentType: nvidiacomv1beta1.ComponentTypeWorker, allowed: true},
+		{componentType: nvidiacomv1beta1.ComponentTypePrefill, allowed: true},
+		{componentType: nvidiacomv1beta1.ComponentTypeDecode, allowed: true},
+		{componentType: nvidiacomv1beta1.ComponentTypeFrontend},
+		{componentType: nvidiacomv1beta1.ComponentTypePlanner},
+		{componentType: nvidiacomv1beta1.ComponentTypeEPP},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.componentType), func(t *testing.T) {
+			if got := supportsMultinodeComponentType(tt.componentType); got != tt.allowed {
+				t.Fatalf("supportsMultinodeComponentType(%q) = %t, want %t", tt.componentType, got, tt.allowed)
+			}
+		})
+	}
 }
 
 func TestValidateProviderOverrideOutsideDGD(t *testing.T) {
@@ -285,6 +306,49 @@ func TestValidateProviderOverrideOutsideDGD(t *testing.T) {
 	if len(errs) != 1 || errs[0].Field != "spec.providerOverride" {
 		t.Fatalf("validation errors = %v, want one error for spec.providerOverride", errs)
 	}
+}
+
+func TestValidateComponentRolesRejectsDuplicateMultinodeRole(t *testing.T) {
+	t.Log("Build an explicit multinode role list with the leader declared twice")
+	component := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+		Multinode: &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
+		Roles: []nvidiacomv1beta1.ComponentRoleSpec{
+			{Name: nvidiacomv1beta1.ComponentRoleLeader},
+			{Name: nvidiacomv1beta1.ComponentRoleLeader},
+		},
+	}
+	validation := &sharedValidation{ctx: context.Background()}
+
+	t.Log("Validate the closed multinode role schema independently of OpenAPI list-map checks")
+	errs := validation.validateComponentRoles(
+		component,
+		field.NewPath("spec", "components").Index(0).Child("roles"),
+		false,
+		"",
+	)
+
+	t.Log("Report both the duplicate entry and the missing mandatory worker role")
+	assertFieldPaths(t, errs, []string{
+		"spec.components[0].roles[1].name",
+		"spec.components[0].roles",
+	})
+}
+
+func TestValidateComponentRoleSpecPodTemplateCapability(t *testing.T) {
+	validation := &sharedValidation{ctx: context.Background()}
+	rolePath := field.NewPath("spec", "components").Index(0).Child("roles").Index(0)
+	role := &nvidiacomv1beta1.ComponentRoleSpec{
+		Name:        nvidiacomv1beta1.ComponentRoleLeader,
+		PodTemplate: &corev1.PodTemplateSpec{},
+	}
+
+	t.Log("Reject role PodTemplates unless the enclosing role schema opts in")
+	errs := validation.validateComponentRoleSpec(role, rolePath, componentRoleSpecValidationOptions{})
+	assertFieldPaths(t, errs, []string{"spec.components[0].roles[0].podTemplate"})
+
+	t.Log("Allow a component-specific role schema to opt in without changing the shared validator")
+	errs = validation.validateComponentRoleSpec(role, rolePath, componentRoleSpecValidationOptions{podTemplateAllowed: true})
+	assertFieldPaths(t, errs, nil)
 }
 
 func TestValidateDynamoComponentDeploymentSharedSpecFrontendSidecar(t *testing.T) {

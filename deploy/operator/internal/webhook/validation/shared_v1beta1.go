@@ -63,6 +63,7 @@ type dynamoComponentDeploymentSharedSpecValidationOptions struct {
 	validateInferencePoolAvailability bool
 	providerOverridesSupported        bool
 	workloadProvider                  string
+	oldComponent                      *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
 }
 
 // validateDynamoComponentDeploymentSharedSpec validates spec. spec and fldPath must not be nil.
@@ -96,14 +97,13 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		))
 	}
 
-	// Validate explicit multinode role configuration in API declaration order.
-	if spec.Multinode != nil {
-		allErrs = append(allErrs, v.validateMultinodeSpec(
-			spec.Multinode,
-			fldPath.Child("multinode"),
+	// Validate the complete role schema against the enclosing component shape.
+	if spec.Roles != nil {
+		allErrs = append(allErrs, v.validateComponentRoles(
+			spec,
+			fldPath.Child("roles"),
 			options.providerOverridesSupported,
 			options.workloadProvider,
-			spec,
 		)...)
 	}
 
@@ -116,14 +116,14 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		))
 	}
 
+	// Ratchet unsupported legacy multinode combinations on update.
+	allErrs = append(allErrs, validateMultinodeComponentType(spec, options.oldComponent, fldPath.Child("multinode"))...)
+
 	if spec.ComponentType == nvidiacomv1beta1.ComponentTypeEPP {
 		if options.validateInferencePoolAvailability {
 			if err := inferencePoolAvailabilityError(v.ctx, v.mgr); err != nil {
 				allErrs = append(allErrs, field.Forbidden(fldPath.Child("type"), fmt.Sprintf("cannot deploy EPP component: %v", err)))
 			}
-		}
-		if spec.IsMultinode() {
-			allErrs = append(allErrs, field.Forbidden(fldPath.Child("multinode"), "EPP component cannot be multinode"))
 		}
 		if spec.Replicas != nil && *spec.Replicas != 1 {
 			allErrs = append(allErrs, field.Invalid(
@@ -190,6 +190,51 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 	}
 
 	return allErrs
+}
+
+func supportsMultinodeComponentType(componentType nvidiacomv1beta1.ComponentType) bool {
+	switch componentType {
+	case nvidiacomv1beta1.ComponentTypeWorker,
+		nvidiacomv1beta1.ComponentTypePrefill,
+		nvidiacomv1beta1.ComponentTypeDecode:
+		return true
+	default:
+		return false
+	}
+}
+
+func hasUnsupportedMultinode(spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) bool {
+	return spec != nil && spec.Multinode != nil && !supportsMultinodeComponentType(spec.ComponentType)
+}
+
+// validateMultinodeComponentType rejects unsupported new combinations and
+// ratchets identical legacy violations on update. fldPath points to multinode.
+func validateMultinodeComponentType(
+	newSpec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	oldSpec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	if !hasUnsupportedMultinode(newSpec) {
+		return nil
+	}
+	if oldSpec != nil && oldSpec.ComponentType == newSpec.ComponentType &&
+		hasUnsupportedMultinode(oldSpec) &&
+		apiequality.Semantic.DeepEqual(oldSpec.Multinode, newSpec.Multinode) {
+		return nil
+	}
+	return field.ErrorList{field.Forbidden(
+		fldPath,
+		"multinode is supported only for worker, prefill, or decode components",
+	)}
+}
+
+func removesUnsupportedMultinode(
+	newSpec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	oldSpec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+) bool {
+	return hasUnsupportedMultinode(oldSpec) &&
+		newSpec.Multinode == nil &&
+		newSpec.ComponentType == oldSpec.ComponentType
 }
 
 type providerOverrideValidationOptions struct {
@@ -287,66 +332,110 @@ func (v *sharedValidation) validateProviderOverride(
 	return allErrs
 }
 
-// validateMultinodeSpec validates multinode. multinode, component, and fldPath must not be nil.
-func (v *sharedValidation) validateMultinodeSpec(
-	multinode *nvidiacomv1beta1.MultinodeSpec,
+// validateComponentRoles validates the role set defined by the enclosing
+// component. component and fldPath must not be nil.
+func (v *sharedValidation) validateComponentRoles(
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
 	providerOverridesSupported bool,
 	workloadProvider string,
-	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
-
-	// Validate the optional leader provider context.
-	if multinode.Leader != nil {
-		allErrs = append(allErrs, v.validateMultinodeRoleSpec(
-			multinode.Leader,
-			fldPath.Child("leader"),
-			multinodeRoleSpecValidationOptions{
-				providerOverridesSupported: providerOverridesSupported,
-				workloadProvider:           workloadProvider,
-				scope:                      provideroverride.ScopeMultinodeLeader,
-				component:                  component,
-			},
-		)...)
+	if component.Multinode == nil {
+		return field.ErrorList{field.Forbidden(
+			fldPath,
+			"roles are supported only for component shapes that define a role schema; this release supports multinode components",
+		)}
 	}
 
-	// Validate the optional worker provider context.
-	if multinode.Worker != nil {
-		allErrs = append(allErrs, v.validateMultinodeRoleSpec(
-			multinode.Worker,
-			fldPath.Child("worker"),
-			multinodeRoleSpecValidationOptions{
-				providerOverridesSupported: providerOverridesSupported,
-				workloadProvider:           workloadProvider,
-				scope:                      provideroverride.ScopeMultinodeWorker,
-				component:                  component,
-			},
-		)...)
+	// Multinode explicit mode is a closed schema: exactly one leader and worker.
+	seen := make(map[string]struct{}, len(component.Roles))
+	for i := range component.Roles {
+		role := &component.Roles[i]
+		rolePath := fldPath.Index(i)
+		scope, knownRole := provideroverride.ScopeForComponentRole(role.Name)
+		if !knownRole {
+			allErrs = append(allErrs, field.NotSupported(
+				rolePath.Child("name"),
+				role.Name,
+				[]string{nvidiacomv1beta1.ComponentRoleLeader, nvidiacomv1beta1.ComponentRoleWorker},
+			))
+		} else if _, exists := seen[role.Name]; exists {
+			allErrs = append(allErrs, field.Duplicate(rolePath.Child("name"), role.Name))
+		} else {
+			seen[role.Name] = struct{}{}
+		}
+
+		if role.Replicas != nil && knownRole {
+			expected := int32(1)
+			if role.Name == nvidiacomv1beta1.ComponentRoleWorker {
+				expected = component.Multinode.NodeCount - 1
+			}
+			if *role.Replicas != expected {
+				allErrs = append(allErrs, field.Invalid(
+					rolePath.Child("replicas"),
+					*role.Replicas,
+					fmt.Sprintf("must equal %d for multinode role %q", expected, role.Name),
+				))
+			}
+		}
+
+		if knownRole {
+			allErrs = append(allErrs, v.validateComponentRoleSpec(
+				role,
+				rolePath,
+				componentRoleSpecValidationOptions{
+					providerOverridesSupported: providerOverridesSupported,
+					workloadProvider:           workloadProvider,
+					scope:                      scope,
+					component:                  component,
+				},
+			)...)
+		}
+	}
+
+	for _, requiredRole := range []string{
+		nvidiacomv1beta1.ComponentRoleLeader,
+		nvidiacomv1beta1.ComponentRoleWorker,
+	} {
+		if _, exists := seen[requiredRole]; !exists {
+			allErrs = append(allErrs, field.Required(
+				fldPath,
+				fmt.Sprintf("must contain the %q role", requiredRole),
+			))
+		}
 	}
 	return allErrs
 }
 
-type multinodeRoleSpecValidationOptions struct {
+type componentRoleSpecValidationOptions struct {
 	providerOverridesSupported bool
 	workloadProvider           string
 	scope                      provideroverride.Scope
 	component                  *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+	podTemplateAllowed         bool
 }
 
-// validateMultinodeRoleSpec validates role. role and fldPath must not be nil;
-// the optional provider override may be nil.
-func (v *sharedValidation) validateMultinodeRoleSpec(
-	role *nvidiacomv1beta1.MultinodeRoleSpec,
+// validateComponentRoleSpec validates role. role and fldPath must not be nil;
+// the optional provider override and PodTemplate may be nil.
+func (v *sharedValidation) validateComponentRoleSpec(
+	role *nvidiacomv1beta1.ComponentRoleSpec,
 	fldPath *field.Path,
-	options multinodeRoleSpecValidationOptions,
+	options componentRoleSpecValidationOptions,
 ) field.ErrorList {
+	allErrs := field.ErrorList{}
+	if role.PodTemplate != nil && !options.podTemplateAllowed {
+		allErrs = append(allErrs, field.Forbidden(
+			fldPath.Child("podTemplate"),
+			"is not supported for this component role",
+		))
+	}
 	if role.ProviderOverride == nil {
-		return nil
+		return allErrs
 	}
 
 	// Validate the provider fragment against this exact multinode role.
-	return v.validateProviderOverride(
+	return append(allErrs, v.validateProviderOverride(
 		role.ProviderOverride,
 		fldPath.Child("providerOverride"),
 		providerOverrideValidationOptions{
@@ -355,7 +444,7 @@ func (v *sharedValidation) validateMultinodeRoleSpec(
 			scope:            options.scope,
 			component:        options.component,
 		},
-	)
+	)...)
 }
 
 // validateEPPConfig validates deprecated Go-EPP config. config and fldPath must not be nil.
@@ -576,7 +665,7 @@ func (v *sharedValidation) validateGroveSpec(
 	fldPath *field.Path,
 	grovePathway bool,
 ) field.ErrorList {
-	if grove.ForceScalingGroup && !grovePathway {
+	if k8sptr.Deref(grove.ForceScalingGroup, false) && !grovePathway {
 		return field.ErrorList{field.Forbidden(
 			fldPath.Child("forceScalingGroup"),
 			"is currently supported only for Grove-backed DynamoGraphDeployment components",
@@ -648,21 +737,30 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 		)...)
 	}
 
-	// Keep the component's multinode shape and nested provider identities stable.
+	// Keep the component's multinode shape stable across updates. Permit
+	// removing a legacy multinode value from an unsupported component type.
 	if newComponent.IsMultinode() != oldComponent.IsMultinode() {
-		allErrs = append(allErrs, field.Invalid(
-			fldPath.Child("multinode"),
-			newComponent.Multinode,
-			"cannot change node topology between single-node and multi-node after creation",
-		))
-	}
-
-	// Keep existing multinode role provider identities stable across updates.
-	if newComponent.Multinode != nil && oldComponent.Multinode != nil {
-		allErrs = append(allErrs, validateMultinodeSpecUpdate(
-			newComponent.Multinode,
-			oldComponent.Multinode,
-			fldPath.Child("multinode"),
+		if !removesUnsupportedMultinode(newComponent, oldComponent) {
+			allErrs = append(allErrs, field.Invalid(
+				fldPath.Child("multinode"),
+				newComponent.Multinode,
+				"cannot change node topology between single-node and multi-node after creation",
+			))
+		}
+	} else {
+		if !hasUnsupportedMultinode(newComponent) &&
+			newComponent.Multinode != nil && oldComponent.Multinode != nil &&
+			newComponent.Multinode.NodeCount != oldComponent.Multinode.NodeCount {
+			allErrs = append(allErrs, field.Invalid(
+				fldPath.Child("multinode", "nodeCount"),
+				newComponent.Multinode.NodeCount,
+				apivalidation.FieldImmutableErrorMsg,
+			))
+		}
+		allErrs = append(allErrs, validateComponentRolesUpdate(
+			newComponent,
+			oldComponent,
+			fldPath.Child("roles"),
 		)...)
 	}
 
@@ -759,39 +857,71 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 	return allErrs
 }
 
-// validateMultinodeSpecUpdate validates a multinode update. newMultinode, oldMultinode, and fldPath must not be nil.
-func validateMultinodeSpecUpdate(
-	newMultinode *nvidiacomv1beta1.MultinodeSpec,
-	oldMultinode *nvidiacomv1beta1.MultinodeSpec,
+// validateComponentRolesUpdate permits equivalent role-mode migrations and
+// otherwise keeps explicit role names stable. Inputs must not be nil.
+func validateComponentRolesUpdate(
+	newComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	oldComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
 ) field.ErrorList {
-	allErrs := field.ErrorList{}
-
-	// Keep an existing leader provider identity stable across updates.
-	if newMultinode.Leader != nil && oldMultinode.Leader != nil {
-		allErrs = append(allErrs, validateMultinodeRoleSpecUpdate(
-			newMultinode.Leader,
-			oldMultinode.Leader,
-			fldPath.Child("leader"),
-		)...)
+	// Permit representation-only implicit/explicit migrations, but require
+	// role-specific configuration changes to happen in a subsequent update.
+	if (newComponent.Roles == nil) != (oldComponent.Roles == nil) {
+		explicitComponent := newComponent
+		implicitComponent := oldComponent
+		if explicitComponent.Roles == nil {
+			explicitComponent, implicitComponent = implicitComponent, explicitComponent
+		}
+		if explicitComponent.Multinode != nil && implicitComponent.Multinode != nil &&
+			dynamo.ExplicitMultinodeRolesMatchImplicit(explicitComponent) {
+			return nil
+		}
+		return field.ErrorList{field.Forbidden(
+			fldPath,
+			"cannot switch between implicit and explicit roles while changing the resolved role model; make the equivalent role structure explicit first",
+		)}
 	}
 
-	// Keep an existing worker provider identity stable across updates.
-	if newMultinode.Worker != nil && oldMultinode.Worker != nil {
-		allErrs = append(allErrs, validateMultinodeRoleSpecUpdate(
-			newMultinode.Worker,
-			oldMultinode.Worker,
-			fldPath.Child("worker"),
+	// Match role-level provider identity by semantic name rather than list order.
+	allErrs := field.ErrorList{}
+	newRoles := newComponent.Roles
+	oldRoles := oldComponent.Roles
+	oldByName := make(map[string]*nvidiacomv1beta1.ComponentRoleSpec, len(oldRoles))
+	for i := range oldRoles {
+		oldByName[oldRoles[i].Name] = &oldRoles[i]
+	}
+	newNames := make(map[string]struct{}, len(newRoles))
+	for i := range newRoles {
+		newRole := &newRoles[i]
+		newNames[newRole.Name] = struct{}{}
+		oldRole, exists := oldByName[newRole.Name]
+		if !exists {
+			continue
+		}
+		allErrs = append(allErrs, validateComponentRoleSpecUpdate(
+			newRole,
+			oldRole,
+			fldPath.Index(i),
 		)...)
+	}
+	if len(newNames) != len(oldByName) {
+		allErrs = append(allErrs, field.Invalid(fldPath, newRoles, "role names are immutable after creation"))
+		return allErrs
+	}
+	for name := range oldByName {
+		if _, exists := newNames[name]; !exists {
+			allErrs = append(allErrs, field.Invalid(fldPath, newRoles, "role names are immutable after creation"))
+			break
+		}
 	}
 	return allErrs
 }
 
-// validateMultinodeRoleSpecUpdate validates a role update. newRole, oldRole,
+// validateComponentRoleSpecUpdate validates a role update. newRole, oldRole,
 // and fldPath must not be nil; either optional provider override may be nil.
-func validateMultinodeRoleSpecUpdate(
-	newRole *nvidiacomv1beta1.MultinodeRoleSpec,
-	oldRole *nvidiacomv1beta1.MultinodeRoleSpec,
+func validateComponentRoleSpecUpdate(
+	newRole *nvidiacomv1beta1.ComponentRoleSpec,
+	oldRole *nvidiacomv1beta1.ComponentRoleSpec,
 	fldPath *field.Path,
 ) field.ErrorList {
 	if newRole.ProviderOverride == nil || oldRole.ProviderOverride == nil {
@@ -915,7 +1045,7 @@ func (v *sharedValidation) validateExperimentalSpecUpdate(
 			fldPath.Child("grove"),
 			options.ownerKind,
 		)...)
-	} else if oldGrove != nil && oldGrove.ForceScalingGroup {
+	} else if oldGrove != nil && k8sptr.Deref(oldGrove.ForceScalingGroup, false) {
 		allErrs = append(allErrs, field.Invalid(
 			fldPath.Child("grove", "forceScalingGroup"),
 			nil,
@@ -934,13 +1064,14 @@ func (v *sharedValidation) validateGroveSpecUpdate(
 	fldPath *field.Path,
 	ownerKind schema.GroupKind,
 ) field.ErrorList {
-	oldForced := oldGrove != nil && oldGrove.ForceScalingGroup
-	if newGrove.ForceScalingGroup == oldForced {
+	oldForced := oldGrove != nil && k8sptr.Deref(oldGrove.ForceScalingGroup, false)
+	newForced := k8sptr.Deref(newGrove.ForceScalingGroup, false)
+	if newForced == oldForced {
 		return nil
 	}
 	return field.ErrorList{field.Invalid(
 		fldPath.Child("forceScalingGroup"),
-		newGrove.ForceScalingGroup,
+		newForced,
 		fmt.Sprintf("cannot be toggled after creation; delete and recreate the %s to change it", ownerKind.Kind),
 	)}
 }

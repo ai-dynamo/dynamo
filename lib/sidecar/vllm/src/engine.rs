@@ -17,7 +17,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
 use crate::client::{self, CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
-use crate::convert::{ResponseState, build_generate_request, data_parallel_rank};
+use crate::convert::{
+    ResponseState, build_generate_request, data_parallel_rank, normalize_response_options,
+};
 use crate::model::DiscoveredModel;
 
 pub struct VllmSidecarEngine {
@@ -75,16 +77,6 @@ impl VllmSidecarEngine {
     }
 
     fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
-        if args.sidecar.common.disaggregation_mode.is_encode() {
-            return Err(client::invalid_argument(
-                "encode mode is not supported by the vLLM sidecar",
-            ));
-        }
-        if args.sidecar.common.route_to_encoder {
-            return Err(client::invalid_argument(
-                "route-to-encoder is not supported by the vLLM sidecar",
-            ));
-        }
         if args.sidecar.common.dyn_tool_call_parser.is_some()
             || args.sidecar.common.dyn_reasoning_parser.is_some()
         {
@@ -113,13 +105,19 @@ impl VllmSidecarEngine {
         );
         let model = bootstrap_discover(&endpoint, transport, bootstrap_deadline)?;
         let mode = args.sidecar.common.disaggregation_mode;
+        if mode.is_encode() && !model.supports_multimodal {
+            return Err(client::invalid_argument(format!(
+                "encode mode requires a multimodal engine; `{}` does not advertise multimodal support",
+                model.served_name
+            )));
+        }
         let rl_metadata = enable_rl
             .then(|| model.rl_worker_metadata(vllm_http_url))
             .transpose()?;
         let engine = Self::new(endpoint, model.clone(), mode, transport);
         let config = WorkerConfig {
             namespace: args.sidecar.common.namespace,
-            // Prefill/decode must register under fixed role components so the
+            // Disaggregated workers register under fixed role components so the
             // frontend can route the disaggregated handoff; aggregated keeps the
             // operator-configured component (`--component` / `DYN_COMPONENT`).
             component: match mode {
@@ -140,7 +138,7 @@ impl VllmSidecarEngine {
                 .exclude_tools_when_tool_choice_none,
             enable_kv_routing: true,
             disaggregation_mode: mode,
-            route_to_encoder: false,
+            route_to_encoder: args.sidecar.common.route_to_encoder,
             enable_rl,
             rl_metadata,
             ..Default::default()
@@ -218,13 +216,14 @@ impl LLMEngine for VllmSidecarEngine {
             .get()
             .ok_or_else(|| client::engine_shutdown("vLLM sidecar is not started"))?;
         let request_id = ctx.id().to_string();
+        let request = normalize_response_options(request)?;
         let mut state = ResponseState::new(&request, self.mode);
         let data_parallel_rank = data_parallel_rank(&request, self.mode);
         let mut proto_request = build_generate_request(request, request_id, self.mode)?;
         proto_request.model.clone_from(&self.model.served_name);
         let defer_request_cancellation = self.mode.is_decode();
         let stopped_ctx = ctx.inner_arc();
-        let shutdown = self.cancel.clone();
+        let shutdown = self.cancel.child_token();
         let mut request_cancellation = Box::pin(async move { stopped_ctx.stopped().await });
         let mut shutdown_cancellation = Box::pin(async move { shutdown.cancelled().await });
         let stream = if defer_request_cancellation {

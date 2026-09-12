@@ -133,6 +133,7 @@ impl VllmMockerService {
                 })?
                 .unwrap_or_default(),
             rl_capabilities: None,
+            supports_native_sampling_params_json: false,
         };
         Ok(Self {
             config: Arc::new(config),

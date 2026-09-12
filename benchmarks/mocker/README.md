@@ -2,7 +2,7 @@
 
 These benchmarks demonstrate the benefit the AIC Rust core (aiconfigurator #1200)
 delivers to its consumer, the Dynamo mocker: they compare the mocker driving the
-Rust crate (`RustAicCallback`, wrapping `aiconfigurator_core::AicEngine`) against
+Rust crate (`RustAicCallback`, wrapping `aisimulate_core::AicEngine`) against
 the pre-#1200 pure-Python AIC. The headline numbers:
 
 - **~1.2x** faster offline replay (end-to-end). Offline replay is a

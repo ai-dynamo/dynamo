@@ -3,6 +3,7 @@
 
 import asyncio
 import logging
+import os
 import sys
 
 import uvloop
@@ -30,6 +31,7 @@ from dynamo.sglang.init_multimodal import (
     init_multimodal_prefill_worker,
     init_multimodal_worker,
 )
+from dynamo.sglang.nixl_telemetry import install_per_rank_nixl_prometheus_ports
 from dynamo.sglang.shutdown import install_graceful_shutdown
 from dynamo.sglang.snapshot import prepare_snapshot_engine
 
@@ -43,7 +45,14 @@ async def worker(argv: list[str] | None = None):
     config = await parse_args(argv)
     dump_config(config.dynamo_args.dump_config_to, config)
 
-    if config.server_args.load_format == "gms":
+    # Must run before any sgl.Engine is constructed: it changes how the engine
+    # launches its scheduler processes, each of which needs its own exporter port.
+    install_per_rank_nixl_prometheus_ports()
+
+    if (
+        config.server_args.load_format == "gms"
+        and os.environ.get("DYN_GMS_USE_V1") != "true"
+    ):
         from gpu_memory_service.integrations.sglang import setup_gms
 
         override_server_args(
@@ -71,6 +80,7 @@ async def worker(argv: list[str] | None = None):
         discovery_backend=dynamo_args.discovery_backend,
         request_plane=dynamo_args.request_plane,
         event_plane=dynamo_args.event_plane,
+        response_plane=dynamo_args.response_plane,
     )
 
     # Keep the flock alive for process lifetime. Linux releases it on exit.

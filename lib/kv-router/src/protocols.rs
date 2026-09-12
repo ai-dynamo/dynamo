@@ -279,14 +279,14 @@ fn compute_seq_hash_for_block_with(
     sequence_hashes
 }
 
-/// Router-hint metadata exposed by a worker config for one global DP rank.
+/// TRANSFER hint metadata exposed by a worker config for one global DP rank.
 ///
 /// This is borrowed from the underlying worker config so candidate filtering can
 /// check capability, role compatibility, and source endpoint presence without
 /// allocating. `source_control_endpoint` is optional because targets only need
 /// to consume hints, while sources must provide an endpoint.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RouterHintWorkerMetadata<'a> {
+pub struct KvHintTransferWorkerMetadata<'a> {
     pub worker_type: &'a str,
     pub source_control_endpoint: Option<&'a str>,
 }
@@ -300,16 +300,15 @@ pub trait WorkerConfigLike {
     fn max_num_batched_tokens(&self) -> Option<u64>;
     fn total_kv_blocks(&self) -> Option<u64>;
 
-    /// Router-hint capability and source metadata for a specific global DP rank.
+    /// TRANSFER capability and source metadata for a specific global DP rank.
     ///
-    /// `None` means this worker/rank does not support router hints. Backends
-    /// that support hints but cannot serve as a source may return `Some` with
-    /// `source_control_endpoint: None`. If router hints grow into a broader
-    /// multi-backend contract, move this method into a dedicated extension trait.
-    fn router_hint_metadata_for_dp_rank(
+    /// `None` means this worker/rank does not support TRANSFER. Backends that
+    /// support TRANSFER but cannot serve as a source may return `Some` with
+    /// `source_control_endpoint: None`.
+    fn kv_hint_transfer_metadata_for_dp_rank(
         &self,
         _dp_rank: DpRank,
-    ) -> Option<RouterHintWorkerMetadata<'_>> {
+    ) -> Option<KvHintTransferWorkerMetadata<'_>> {
         None
     }
 
@@ -938,11 +937,23 @@ impl Placement {
 pub struct PlacementEvent {
     pub placement: Placement,
     pub event: KvCacheEvent,
+    /// Session that triggered this store or reuse report, if provided by the engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 impl PlacementEvent {
     pub fn new(placement: Placement, event: KvCacheEvent) -> Self {
-        Self { placement, event }
+        Self {
+            placement,
+            event,
+            session_id: None,
+        }
+    }
+
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
     }
 
     pub fn local_gpu(worker_id: WorkerId, event: KvCacheEvent) -> Self {
@@ -953,12 +964,14 @@ impl PlacementEvent {
         let PlacementOwner::LocalWorker(worker) = self.placement.owner else {
             return None;
         };
-        Some(RouterEvent::with_residency_domain(
+        let mut event = RouterEvent::with_residency_domain(
             worker.worker_id,
             self.event,
             self.placement.tier,
             self.placement.residency_domain,
-        ))
+        );
+        event.session_id = self.session_id;
+        Some(event)
     }
 }
 
@@ -1098,7 +1111,6 @@ pub struct ActiveLoad {
     ///
     /// This is published by workers only and is the authoritative signal for
     /// backend KV occupancy used by overload detection.
-    #[serde(default)]
     pub kv_used_blocks: Option<u64>,
 }
 
@@ -1156,7 +1168,6 @@ pub struct ActiveSequenceEvent {
     /// Source DRT identity, used to suppress a publisher's own echo. Router events use the router
     /// ID; worker-origin completion marks use the worker ID.
     pub router_id: u64,
-    #[serde(default)]
     pub lora_name: Option<String>,
 }
 
@@ -1183,7 +1194,6 @@ pub enum ActiveSequenceEventData {
         #[serde(default = "default_track_prefill_tokens")]
         track_prefill_tokens: bool,
         expected_output_tokens: Option<u32>,
-        #[serde(default)]
         prefill_load_hint: Option<PrefillLoadHint>,
     },
     // NOTE: Output-block growth is intentionally not a replica-sync event. It can occur
@@ -1246,7 +1256,6 @@ pub struct KvCacheStoreData {
     /// The optional hash of the parent block.
     pub parent_hash: Option<ExternalSequenceBlockHash>,
     /// Absolute position of the first block in this batch for positional replay.
-    #[serde(default)]
     pub start_position: Option<u32>,
     /// A list of stored blocked data.
     pub blocks: Vec<KvCacheStoredBlockData>,
@@ -1367,7 +1376,6 @@ pub struct KvCacheStoredBlockData {
     /// Extra multimodal metadata for this block
     /// Note: Do NOT use skip_serializing_if with bincode - it breaks deserialization
     /// because bincode is positional and expects all fields to be present.
-    #[serde(default)]
     pub mm_extra_info: Option<BlockExtraInfo>,
 }
 
@@ -1458,6 +1466,9 @@ pub enum KvCacheEventError {
     UnsupportedResidencyDomain,
 }
 
+/// Reserved session key for events that predate session attribution.
+pub const UNATTRIBUTED_SESSION_ID: &str = "__dynamo_unattributed__";
+
 /// A [`KvCacheEvent`] on a specific LLM worker denoted by [`WorkerId`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RouterEvent {
@@ -1476,10 +1487,13 @@ pub struct RouterEvent {
     ///
     /// This is absent on the legacy Worker-only wire. CacheOwner events are
     /// valid only on a versioned, residency-aware source where this field is
-    /// present; they must never be sent to legacy consumers. Keep this field
-    /// last so legacy positional MessagePack remains prefix-compatible.
+    /// present; they must never be sent to legacy consumers. MessagePack
+    /// compatibility relies on `to_vec_named`; positional encoding is unsupported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_source: Option<CacheOwnerId>,
+    /// Session that triggered this store or reuse report, if provided by the engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 impl RouterEvent {
@@ -1516,6 +1530,7 @@ impl RouterEvent {
         Self {
             worker_id,
             state_source: None,
+            session_id: None,
             storage_tier,
             residency_domain: WireResidencyDomain::explicit(residency_domain),
             event,
@@ -1537,6 +1552,18 @@ impl RouterEvent {
     pub fn with_state_source(mut self, state_source: CacheOwnerId) -> Self {
         self.state_source = Some(state_source);
         self
+    }
+
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
+    }
+
+    /// Return the reported session or the shared fallback for unattributed events.
+    pub fn session_id_or_unattributed(&self) -> &str {
+        self.session_id
+            .as_deref()
+            .unwrap_or(UNATTRIBUTED_SESSION_ID)
     }
 
     /// Resolve a storage mutation to its canonical logical domain.
@@ -1902,6 +1929,7 @@ mod tests {
             ];
             let decoded: Vec<RouterEvent> =
                 rmp_serde::from_slice(&rmp_serde::to_vec_named(&legacy).unwrap()).unwrap();
+            assert_eq!(decoded[0].session_id, None);
             assert_eq!(
                 decoded[0].resolved_residency_domain(),
                 Ok(ResidencyDomain::Worker)
@@ -1913,11 +1941,16 @@ mod tests {
                 stored(3),
                 StorageTier::Disk,
                 ResidencyDomain::Worker,
-            );
+            )
+            .with_session_id("session-1");
             let old_reader: LegacyRouterEvent =
                 rmp_serde::from_slice(&rmp_serde::to_vec_named(&explicit_worker).unwrap()).unwrap();
             assert_eq!(old_reader.event.event_id, 3);
             assert_eq!(old_reader.storage_tier, StorageTier::Disk);
+
+            let round_trip: RouterEvent =
+                rmp_serde::from_slice(&rmp_serde::to_vec_named(&explicit_worker).unwrap()).unwrap();
+            assert_eq!(round_trip.session_id.as_deref(), Some("session-1"));
 
             let mixed = vec![
                 ExplicitDomainEvent {
@@ -2531,7 +2564,7 @@ mod tests {
             "Default kv_transfer_preferred_weight() should return None"
         );
         assert!(config.native_offloading_capacity_tokens().is_none());
-        assert!(config.router_hint_metadata_for_dp_rank(0).is_none());
+        assert!(config.kv_hint_transfer_metadata_for_dp_rank(0).is_none());
     }
 
     #[test]

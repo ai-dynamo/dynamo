@@ -297,7 +297,7 @@ service.
 </ParamField>
 
 <ParamField path="aic_perf_model" type="AICPerfModelSpec" default="null">
-  Native AIConfigurator forward-pass model identity passed directly to the `aiconfigurator-core` wheel, enabling real-time AIC estimates with online correction. Unsupported native configs fall back to FPM regression. Does not trigger an AIC interpolation sweep.
+  Native AIConfigurator forward-pass model identity passed to the compatibility `aiconfigurator_core` namespace in the `aisimulate` wheel, enabling real-time AIC estimates with online correction. Unsupported native configs fall back to FPM regression. Does not trigger an AIC interpolation sweep.
 </ParamField>
 
 <Indent>
@@ -374,6 +374,10 @@ service.
 
 <ParamField path="throughput_adjustment_interval_seconds" type="integer" default="180">
   Seconds between throughput-based scaling decisions. Also accepts the alias `throughput_adjustment_interval`.
+</ParamField>
+
+<ParamField path="max_throughput_scaling_replicas" type="integer" default="8">
+  Maximum replica-count change per component from one throughput observation. The Planner caps and stores the throughput lower bound, so load-scaling ticks cannot repeatedly apply the same uncapped prediction. GPU and power budgets can reduce the change further. At the nominal minimum GPU budget, scale-down-only requests hold. At a full GPU budget, two scale-up requests hold; an opposing prefill/decode proposal applies only the largest atomic pair that fits the budget. Endpoint and out-of-band budget recovery take precedence over this limit. Must be greater than `0`.
 </ParamField>
 
 <ParamField path="throughput_metrics_source" type="string" default="frontend">
@@ -634,6 +638,11 @@ containers, and container environment variables merge by `name`; atomic lists
 such as graph-level `spec.env` and container `args` replace their generated
 values.
 
+To permit custom model repository code without depending on the selected topology, set
+`spec.overrides.trustRemoteCode: true`. The profiler applies `--trust-remote-code` to every generated
+vLLM or SGLang worker after the component topology is known. Enable this setting only for model
+repositories you trust.
+
 ### Generated component names
 
 An entry in `spec.overrides.dgd.spec.components` must use the exact, case-sensitive
@@ -642,7 +651,7 @@ Service resource names. The current profiler templates generate these components
 
 | Backend | Aggregated | Disaggregated |
 |---|---|---|
-| vLLM | `Frontend`, `VllmDecodeWorker` | `Frontend`, `VllmDecodeWorker`, `VllmPrefillWorker` |
+| vLLM | `Frontend`, `worker` | `Frontend`, `decode`, `prefill` |
 | SGLang | `Frontend`, `decode` | `Frontend`, `decode`, `prefill` |
 | TensorRT-LLM | `Frontend`, `TRTLLMWorker` | `Frontend`, `decode`, `prefill` |
 
@@ -681,10 +690,12 @@ spec:
                   value: /usr/local/cuda/bin/ptxas
 ```
 
-Overrides can modify only components present in the generated DGD; unknown names are ignored with a
-warning, and an override cannot add deployment topology. Labels and annotations merge,
-`metadata.name` selects the final DGD name, and other identity metadata is ignored. `status`, null
-values for typed fields, and field deletion are not supported.
+Overrides can modify only components present in the generated DGD. An unresolved `spec.components` or
+`spec.services` name causes DGD materialization to fail. A recognized deprecated name may be
+translated to the corresponding component in the selected topology with a warning. An override
+cannot add deployment topology. Labels and annotations merge, `metadata.name` selects the final DGD
+name, and other identity metadata is ignored. `status`, null values for typed fields, and field
+deletion are not supported.
 
 To add flags to a container already present in the generated DGD, set `$patch.args` to `append` on
 that named container:

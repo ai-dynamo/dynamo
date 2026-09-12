@@ -104,10 +104,6 @@ We also support running lightweight mock engines that simulate vLLM behavior wit
 
 #### Disaggregated Serving with Mockers (No GPU Required)
 
-> [!WARNING]
-> The public online Mocker CLI is temporarily unavailable. The direct commands below do not run in
-> this release and are retained only to document the workflow that will return in a future release.
-
 You can test disaggregated serving entirely with mockers by launching separate prefill and decode mocker groups that share a namespace. This is useful for validating routing logic, metrics, and the prefill-decode handoff without any GPUs.
 
 ```bash
@@ -115,13 +111,13 @@ NAMESPACE="test-disagg"
 MODEL="Qwen/Qwen3-0.6B"
 
 # Terminal 1: Decode mockers (2 workers)
-python -m dynamo.mocker --model-path "$MODEL" \
+python3 -m dynamo.mocker --model-path "$MODEL" \
     --endpoint "dyn://${NAMESPACE}.backend.generate" \
     --disaggregation-mode decode --num-workers 2 \
     --speedup-ratio 10 --block-size 16
 
 # Terminal 2: Prefill mockers (2 workers)
-python -m dynamo.mocker --model-path "$MODEL" \
+python3 -m dynamo.mocker --model-path "$MODEL" \
     --endpoint "dyn://${NAMESPACE}.prefill.generate" \
     --disaggregation-mode prefill --num-workers 2 \
     --speedup-ratio 10 --block-size 16
@@ -287,7 +283,7 @@ python real_data_benchmark.py --input-dataset trace.jsonl --prefix-root-multipli
 1. The trace is synthesized (same parameters as `real_data_benchmark.py`) and split into low / medium / high tiers according to `--priority-distribution`.
 2. Each tier is sent to aiperf as a concurrent stream. In the priority-tagged run, every trace row carries an OpenAI-compatible extension field:
    ```json
-   {"nvext": {"agent_hints": {"priority": <value>}}}
+   {"extra": {"nvext": {"agent_hints": {"priority": <value>}}}}
    ```
    The `priority` value raises the request's router queue priority -- a higher value shifts the request's effective arrival time earlier, giving it priority over lower-valued requests.
 3. The baseline and priority runs use the same aiperf seed and split so prompt content matches. The priority run offsets `hash_ids` to keep its KV cache cold relative to the baseline and prevent mocker KV cache cross-contamination.
@@ -369,31 +365,34 @@ python agent_benchmark.py --input-dataset trace.jsonl --concurrency 10 --delay 1
 
 Both `real_data_benchmark.py` and `agent_benchmark.py` accept trace datasets in JSONL format (one JSON object per line). The format is compatible with [Mooncake trace format](https://github.com/kvcache-ai/Mooncake).
 
+For `agent_benchmark.py`, each row contains only the new input for that turn. AIPerf builds the request by appending the row to earlier turns and live assistant responses from the same `session_id`. Supplying a cumulative context on every row duplicates the earlier conversation and overstates the prompt work.
+
 #### Fields
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `input_length` | int | Number of input tokens for this request |
+| `input_length` | int | Number of new input tokens in this turn. For `agent_benchmark.py`, exclude earlier turns and assistant responses. |
 | `output_length` | int | Number of output tokens to generate |
 | `session_id` | string | Groups turns into multi-turn conversations. Requests with the same `session_id` are processed sequentially. |
-| `hash_ids` | list[int] | List of hash IDs representing prefix blocks for KV cache routing. Shared hash IDs indicate shared prefixes. |
+| `hash_ids` | list[int] | Hash IDs representing blocks in this row's input. For later turns in `agent_benchmark.py`, do not repeat blocks already supplied by earlier turns. |
 | `delay` | int | Delay in milliseconds to wait before sending this turn (applied after the previous turn in the same session completes). Not applied to first turns. |
 
 #### Example Trace File
 
 ```jsonl
-{"session_id": "conv_0", "input_length": 9176, "output_length": 152, "hash_ids": [0, 1, 2, 3, 4, 5]}
-{"session_id": "conv_0", "input_length": 9368, "output_length": 104, "hash_ids": [0, 1, 2, 3, 4, 5, 6, 7], "delay": 500}
-{"session_id": "conv_0", "input_length": 9516, "output_length": 164, "hash_ids": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9], "delay": 500}
-{"session_id": "conv_1", "input_length": 9445, "output_length": 143, "hash_ids": [0, 1, 2, 10, 11, 12, 13]}
-{"session_id": "conv_1", "input_length": 9628, "output_length": 123, "hash_ids": [0, 1, 2, 10, 11, 12, 13, 14, 15], "delay": 500}
+{"session_id": "conv_0", "input_length": 1024, "output_length": 152, "hash_ids": [0, 1]}
+{"session_id": "conv_0", "input_length": 192, "output_length": 104, "hash_ids": [2], "delay": 500}
+{"session_id": "conv_0", "input_length": 148, "output_length": 164, "hash_ids": [3], "delay": 500}
+{"session_id": "conv_1", "input_length": 1024, "output_length": 143, "hash_ids": [0, 1]}
+{"session_id": "conv_1", "input_length": 183, "output_length": 123, "hash_ids": [4], "delay": 500}
 ```
 
 In this example:
 - `conv_0` and `conv_1` are two separate conversations that can run concurrently
 - Within each conversation, turns are processed sequentially
 - Subsequent turns have a 500ms delay after the previous turn completes
-- `hash_ids` show prefix sharing: both conversations share prefix blocks `[0, 1, 2]`
+- The first turns share prefix blocks `[0, 1]`; later turns add only their new input blocks
+- AIPerf adds each live assistant response to its session before sending the next turn
 
 ## Benchmarking Results
 
