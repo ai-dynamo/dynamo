@@ -92,6 +92,7 @@ fn is_migration_eligible(reason: &ErrorReason) -> bool {
             | "backend.response_timeout"
             | "backend.engine_shutdown"
             | "backend.stream_incomplete"
+            | "backend.worker_unavailable"
             | "capacity.worker_overloaded"
     )
 }
