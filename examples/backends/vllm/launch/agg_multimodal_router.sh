@@ -134,13 +134,9 @@ GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 # Phase 1: launch all workers in parallel.
 # Under SINGLE_GPU=true, requires the KV-bytes cap (CI sets it via the
 # requested_vllm_kv_cache_bytes marker) — otherwise vLLM's 0.9 default races.
-WORKER_PORTS=()
-KV_EVENTS_PORTS=()
 for i in $(seq 1 "${NUM_WORKERS}"); do
-    WORKER_PORT=$(dyn_port DYN_SYSTEM_PORT "$i" $((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2)))
-    KV_EVENTS_PORT=$(dyn_port DYN_VLLM_KV_EVENT_PORT "$i" $((KV_EVENTS_PORT_BASE + (i - 1))))
-    WORKER_PORTS+=("${WORKER_PORT}")
-    KV_EVENTS_PORTS+=("${KV_EVENTS_PORT}")
+    WORKER_PORT=$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))
+    KV_EVENTS_PORT=$((KV_EVENTS_PORT_BASE + (i - 1)))
     if [[ "${SINGLE_GPU}" == "true" ]]; then GPU_ID=0; else GPU_ID=$((i - 1)); fi
 
     KV_EVENTS_CONFIG="{\"enable_kv_cache_events\":true,\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_EVENTS_PORT}\"}"
@@ -161,7 +157,8 @@ done
 
 # Phase 2: wait for all workers to be ready.
 for i in $(seq 1 "${NUM_WORKERS}"); do
-    wait_ready "http://127.0.0.1:${WORKER_PORTS[i-1]}/health" "vLLM backend $i"
+    WORKER_PORT=$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))
+    wait_ready "http://127.0.0.1:${WORKER_PORT}/health" "vLLM backend $i"
 done
 
 echo "=== Starting frontend (KV router, MM-aware exact routing) ==="
@@ -188,8 +185,8 @@ echo
 echo "=== All services are ready ==="
 echo "Frontend:        http://127.0.0.1:${HTTP_PORT}"
 for i in $(seq 1 "${NUM_WORKERS}"); do
-    echo "Worker $i health: http://127.0.0.1:${WORKER_PORTS[i-1]}/health"
-    echo "Worker $i kv-events: tcp://*:${KV_EVENTS_PORTS[i-1]}"
+    echo "Worker $i health: http://127.0.0.1:$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))/health"
+    echo "Worker $i kv-events: tcp://*:$((KV_EVENTS_PORT_BASE + (i - 1)))"
 done
 echo
 echo "Architecture: Rust frontend (MM-aware KV router) -> ${NUM_WORKERS}x vLLM workers"
