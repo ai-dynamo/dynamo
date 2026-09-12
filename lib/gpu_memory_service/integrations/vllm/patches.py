@@ -6,10 +6,8 @@
 Patches:
   - MemorySnapshot.measure: adds GMS-committed bytes to free_memory in RO mode.
   - request_memory: bypasses the free>=requested check during deferred-KV init.
-  - NixlBaseConnector KV registration: defers normal or cross-layer
-    registration during the scratch phase and stashes it for replay at wake.
-  - init_kv_cache: scopes the scratch mem-pool to the raw KV tensors only, so
-    BlockTables / workspace / pointer tensors keep real (un-aliased) memory.
+  - NixlBaseConnector KV registration: defers registration during the scratch
+    phase and stashes it for replay at wake.
 
 The torch.cuda.empty_cache patch lives in integrations/common/patches.py.
 """
@@ -31,7 +29,6 @@ logger = logging.getLogger(__name__)
 _memory_snapshot_patched = False
 _request_memory_patched = False
 _register_kv_caches_patched = False
-_kv_cache_pool_scope_patched = False
 _NIXL_MODULE = "vllm.distributed.kv_transfer.kv_connector.v1.nixl"
 
 
@@ -157,7 +154,6 @@ def patch_register_kv_caches() -> None:
     # retain the scratch-registration safety gate.
     nixl_base_connector = nixl_module.NixlBaseConnector
     original_register = nixl_base_connector.register_kv_caches
-    original_register_cross_layers = nixl_base_connector.register_cross_layers_kv_cache
 
     def has_deferred_kv_backing() -> bool:
         """Fail closed when scratch-KV state cannot be determined."""
@@ -184,20 +180,7 @@ def patch_register_kv_caches() -> None:
             return
         return original_register(self, kv_caches)
 
-    def patched_register_cross_layers_kv_cache(self, kv_cache, attn_backend):
-        if has_deferred_kv_backing():
-            self._scratch_cross_layers_kv_pending = (kv_cache, attn_backend)
-            logger.info(
-                "[GMS Patch] Deferring NIXL cross-layer KV cache registration "
-                "for wake replay"
-            )
-            return
-        return original_register_cross_layers(self, kv_cache, attn_backend)
-
     nixl_base_connector.register_kv_caches = patched_register_kv_caches
-    nixl_base_connector.register_cross_layers_kv_cache = (
-        patched_register_cross_layers_kv_cache
-    )
     _register_kv_caches_patched = True
     logger.info("[GMS Patch] Patched NixlBaseConnector KV registration")
 
@@ -205,47 +188,6 @@ def patch_register_kv_caches() -> None:
 # =============================================================================
 # Patch application helper
 # =============================================================================
-
-
-def patch_kv_cache_pool_scope() -> None:
-    """Scope the scratch mem-pool to init_kv_cache (the raw KV tensors) only.
-
-    Keeps BlockTables / workspace / the block-table pointer tensor on real memory.
-    Single-block scratch aliases everything in the pool onto one granule, so a KV
-    write over that pointer tensor would corrupt the block-table gather kernel
-    (-> illegal memory access).
-    """
-    global _kv_cache_pool_scope_patched
-
-    if _kv_cache_pool_scope_patched:
-        return
-
-    try:
-        import torch
-        from gpu_memory_service.client.torch.allocator import gms_use_mem_pool
-        from vllm.v1.worker.gpu import model_runner as gpu_model_runner
-
-        original_init_kv_cache = gpu_model_runner.init_kv_cache
-    except (ImportError, AttributeError) as exc:
-        logger.debug("[GMS Patch] init_kv_cache pool-scope not available: %s", exc)
-        return
-
-    def patched_init_kv_cache(*args, **kwargs):
-        # Installed only in shadow mode, so always scope to the pool. init_kv_cache
-        # allocates on the worker's current device.
-        from gpu_memory_service.common.vmm import get_vmm_device_type
-        from gpu_memory_service.integrations.common.utils import torch_device
-
-        dev_mod = torch_device()
-        device = torch.device(get_vmm_device_type().value, dev_mod.current_device())
-        with gms_use_mem_pool("kv_cache", device):
-            return original_init_kv_cache(*args, **kwargs)
-
-    gpu_model_runner.init_kv_cache = patched_init_kv_cache
-    _kv_cache_pool_scope_patched = True
-    logger.info(
-        "[GMS Patch] Scoped scratch mem-pool to init_kv_cache (KV tensors only)"
-    )
 
 
 def apply_scratch_kv_patches() -> None:
@@ -258,5 +200,4 @@ def apply_scratch_kv_patches() -> None:
     # than leave a partially applied scratch configuration.
     patch_register_kv_caches()
     patch_request_memory()
-    patch_kv_cache_pool_scope()
     logger.info("[GMS Patch] applied")

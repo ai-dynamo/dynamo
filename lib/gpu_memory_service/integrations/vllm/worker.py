@@ -282,19 +282,13 @@ class GMSWorker(_BaseWorker):
         # KV cache. Publish before connector setup, allocation, or warm-up.
         publish_pending_gms_write()
 
-        from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
-
-        ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
-
         device = self.local_rank
         socket = get_socket_path(device, "kv_cache")
         if is_scratch_kv_enabled():
             # Client-local scratch only — no GMS server session at init.
             # wake_up will connect RW and allocate fresh server backing.
             scratch_mgr = get_or_create_scratch_manager(socket, device, tag="kv_cache")
-            # The scratch pool is scoped to the KV tensors by
-            # patch_kv_cache_pool_scope(), not the whole initialize_kv_cache.
-            self.model_runner.initialize_kv_cache(kv_cache_config)
+            super().initialize_from_config(kv_cache_config)
             # Visible summary of scratch engagement (GMS worker logs are routed
             # through vLLM's handler by configure_gms_worker_logging()).
             n_scratch, virtual_bytes, physical_bytes = scratch_mgr.scratch_summary()
@@ -324,12 +318,9 @@ class GMSWorker(_BaseWorker):
                 mode=RequestedLockType.RW,
                 tag="kv_cache",
             )
-            with gms_use_mem_pool(
-                "kv_cache", torch.device(f"{get_vmm_device_type().value}:{device}")
-            ):
-                self.model_runner.initialize_kv_cache(kv_cache_config)
+            super().initialize_from_config(kv_cache_config)
         else:
-            self.model_runner.initialize_kv_cache(kv_cache_config)
+            super().initialize_from_config(kv_cache_config)
 
     def load_model(self, *args, **kwargs) -> None:
         """Load model with corrected memory accounting.
@@ -499,24 +490,11 @@ class GMSWorker(_BaseWorker):
                     len(kv_cache_manager.mappings),
                     commit.granted_lock_type.name,
                 )
-            self.model_runner.post_kv_cache_wake_up()
             if was_scratch:
                 self._register_kv_caches_with_nixl()
 
     def _register_kv_caches_with_nixl(self) -> None:
-        """Fire the NixlConnector KV-cache registration after deferred KV swap.
-
-        During scratch phase the patches.patch_register_kv_caches gate intercepts
-        either register_kv_caches(dict) or register_cross_layers_kv_cache(...)
-        and stashes the original arguments on the connector. We replay those
-        arguments here after the real KV backing has been remapped.
-
-        Imports from the package root (vllm.distributed.kv_transfer) — the
-        kv_connector.v1.base re-exports were unreliable across vLLM versions
-        and a silent ImportError here would make this a no-op, leaving
-        NixlConnectorWorker.kv_topo=None and crashing on the first
-        scheduler tick.
-        """
+        """Replay deferred NIXL registration after restoring real KV backing."""
         from vllm.distributed.kv_transfer import (
             get_kv_transfer_group,
             has_kv_transfer_group,
@@ -526,30 +504,14 @@ class GMSWorker(_BaseWorker):
             return
         group = get_kv_transfer_group()
         pending = getattr(group, "_scratch_kv_pending", None)
-        pending_cross_layers = getattr(group, "_scratch_cross_layers_kv_pending", None)
-        if pending is not None and pending_cross_layers is not None:
-            raise RuntimeError(
-                "NIXL connector deferred both normal and cross-layer KV registration"
-            )
-        if pending is None and pending_cross_layers is None:
-            # Nothing was stashed — either no deferred registration, or a
-            # non-NixlConnector connector that didn't hit the patched path.
+        if pending is None:
             return
-        if pending is not None:
-            group.register_kv_caches(pending)
-            delattr(group, "_scratch_kv_pending")
-            logger.info(
-                "[GMS] Registered %d kv_cache tensors with KV transfer group",
-                len(pending),
-            )
-        else:
-            assert pending_cross_layers is not None
-            kv_cache, attn_backend = pending_cross_layers
-            group.register_cross_layers_kv_cache(kv_cache, attn_backend)
-            delattr(group, "_scratch_cross_layers_kv_pending")
-            logger.info(
-                "[GMS] Registered cross-layer kv_cache tensor with KV transfer group"
-            )
+        group.register_kv_caches(pending)
+        delattr(group, "_scratch_kv_pending")
+        logger.info(
+            "[GMS] Registered %d kv_cache tensors with KV transfer group",
+            len(pending),
+        )
 
     def _maybe_get_memory_pool_context(self, tag: str):
         """Route tag-scoped runtime allocations to the right allocator.
@@ -565,6 +527,8 @@ class GMSWorker(_BaseWorker):
             logger.debug("[GMS] Skipping CuMemAllocator for weights")
             return nullcontext()
         if tag == "kv_cache":
+            if not (is_scratch_kv_enabled() or self.model_config.enable_sleep_mode):
+                return nullcontext()
             return gms_use_mem_pool(
                 "kv_cache", torch.device(get_vmm_device_type().value, self.local_rank)
             )

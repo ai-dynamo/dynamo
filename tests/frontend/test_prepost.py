@@ -9,6 +9,7 @@
 import json
 
 import pytest
+from packaging.version import Version
 
 from .common import check_module_available
 
@@ -20,11 +21,16 @@ HAS_QWEN3_TOOL_PARSER = check_module_available(
     "vllm.tool_parsers.qwen3_engine_tool_parser"
 ) or check_module_available("vllm.tool_parsers.qwen3coder_tool_parser")
 if HAS_VLLM:
+    from vllm import __version__ as vllm_version
+
+    if Version(vllm_version).release >= (0, 29):
+        from vllm.entrypoints.generate.base.protocol import FunctionDefinition
+    else:
+        from vllm.entrypoints.openai.engine.protocol import FunctionDefinition
     from vllm.entrypoints.openai.chat_completion.protocol import (
         ChatCompletionRequest,
         ChatCompletionToolsParam,
     )
-    from vllm.entrypoints.openai.engine.protocol import FunctionDefinition
     from vllm.outputs import CompletionOutput
     from vllm.sampling_params import SamplingParams
     from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser

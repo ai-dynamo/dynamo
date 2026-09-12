@@ -8,6 +8,8 @@ import logging
 from typing import Any, cast
 
 import torch
+import vllm_omni.config as omni_config
+import vllm_omni.entrypoints.utils as omni_entrypoint_utils
 from vllm.sampling_params import SamplingParams
 from vllm_omni.distributed.omni_connectors.utils.serialization import OmniSerializer
 from vllm_omni.entrypoints.stage_utils import shm_read_bytes
@@ -22,6 +24,25 @@ DEFAULT_VIDEO_SIZE = "832x480"
 MAX_IMAGE_DIMENSION = 4096
 # Longest a client-supplied ``size`` may render as inside an error or log line.
 SIZE_LABEL_LIMIT = 32
+
+
+def resolve_stage_configs(
+    model: str, *, trust_remote_code: bool, deploy_config_path: str | None
+) -> tuple[str | None, list[Any]]:
+    """Resolve stages with either the core or the older XPU Omni API."""
+    kwargs = dict(
+        trust_remote_code=trust_remote_code,
+        deploy_config_path=deploy_config_path,
+        stage_overrides=None,
+        strategy_config_path=None,
+    )
+    if hasattr(omni_config, "resolve_omni_config"):
+        resolved = omni_config.resolve_omni_config(model, cli_overrides={}, **kwargs)
+        return resolved.config_path, list(resolved.stage_configs)
+    path, stages, _ = omni_entrypoint_utils.load_and_resolve_stage_configs(
+        model, stage_configs_path=None, kwargs={}, **kwargs
+    )
+    return path, list(stages)
 
 
 def _coerce_dimension(value: Any, name: str) -> int:

@@ -32,6 +32,7 @@ import pytest
 # Module-level vLLM import so the real site-packages ``vllm`` loads (matches the
 # pattern in test_vllm_instrumented_scheduler.py / test_vllm_unit.py).
 import vllm  # noqa: F401,E402
+from packaging.version import Version
 
 pytestmark = [
     pytest.mark.unit,
@@ -95,11 +96,15 @@ def test_new_request_data_has_fields_instrumented_scheduler_sets():
 
 
 def test_scheduler_output_new_connector_fields_remain_optional():
-    """Dynamo constructs SchedulerOutput directly without v0.27's new fields."""
     from vllm.v1.core.sched.output import SchedulerOutput
 
     fields = {field.name: field for field in dataclasses.fields(SchedulerOutput)}
-    for field_name in ("ec_manager_metadata", "partial_tail_offloads"):
+    connector_field = (
+        "kv_connector_block_state"
+        if Version(vllm.__version__).release >= (0, 29)
+        else "partial_tail_offloads"
+    )
+    for field_name in ("ec_manager_metadata", connector_field):
         assert field_name in fields, (
             f"vLLM SchedulerOutput.{field_name} is gone — re-audit Dynamo's "
             "direct SchedulerOutput construction."

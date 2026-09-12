@@ -4,12 +4,15 @@
 """Tests that every DiffusionParallelConfig field is either exposed in Dynamo or intentionally skipped."""
 
 import dataclasses
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 try:
+    from vllm_omni.config import DeployConfig, VllmOmniConfig
     from vllm_omni.diffusion.data import DiffusionParallelConfig
+    from vllm_omni.model_executor.models.qwen3_tts.pipeline import QWEN3_TTS_PIPELINE
 
     from dynamo.vllm.omni.args import OmniDiffusionKwargs, OmniParallelKwargs
     from dynamo.vllm.omni.base_handler import BaseOmniHandler
@@ -23,11 +26,12 @@ pytestmark = [
     pytest.mark.pre_merge,
 ]
 
-# These fields are not exposed in OmniParallelKwargs, because they are derived from other fields.
+# Keep upstream defaults for unexposed fields and let it derive the sequence size.
 _SKIP_FIELDS = {
     "sequence_parallel_size",
     "enable_expert_parallel",
     "ulysses_mode",
+    "ulysses_a2a_permute",
     "mask_sp_padding",
 }
 
@@ -61,9 +65,13 @@ def _make_config(**parallel_overrides):
     return cfg
 
 
-def _build_kwargs(config):
+def _build_kwargs(config, stage_type="diffusion"):
     handler = BaseOmniHandler.__new__(BaseOmniHandler)
-    return handler._build_omni_kwargs(config)
+    with patch(
+        "dynamo.vllm.omni.base_handler.resolve_stage_configs",
+        return_value=(None, [SimpleNamespace(stage_type=stage_type)]),
+    ):
+        return handler._build_omni_kwargs(config)
 
 
 class TestDiffusionParallelConfigCoverage:
@@ -107,6 +115,19 @@ class TestDiffusionParallelConfigCoverage:
         kwargs = _build_kwargs(config)
 
         assert kwargs["output_modalities"] == ["image"]
+
+    def test_tts_kwargs_accepted_by_upstream_pipeline(self):
+        config = _make_config()
+        config.diffusion.enforce_eager = True
+
+        kwargs = _build_kwargs(config, stage_type="llm")
+
+        VllmOmniConfig.from_pipeline_config(
+            QWEN3_TTS_PIPELINE,
+            user_deploy_config=DeployConfig(),
+            cli_overrides=kwargs,
+        )
+        assert kwargs["enforce_eager"] is True
 
     def test_lora_disabled_resolves_no_capacity(self):
         config = _make_config()

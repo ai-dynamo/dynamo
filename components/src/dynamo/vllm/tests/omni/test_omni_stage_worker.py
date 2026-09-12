@@ -21,6 +21,7 @@ try:
         _prepare_connector_payload,
         _Proxy,
         _stage_config_to_dict,
+        _uses_nixl_connector,
     )
     from dynamo.vllm.omni.utils import _build_sampling_params
 except ImportError:
@@ -494,6 +495,12 @@ def test_prepare_connector_payload_preserves_empty_attr_positions():
 
     assert payload["engine_inputs"] is output
     assert payload["_dynamo_completion_output_attrs"] == [{}]
+
+
+def test_stage_connectors_without_config_file():
+    resolved_path = _ensure_stage_connectors(None, [])
+    assert resolved_path is None
+    assert not _uses_nixl_connector(resolved_path, [])
 
 
 def test_ensure_stage_connectors_adds_missing_shared_memory_edge(tmp_path):

@@ -29,15 +29,12 @@ pytestmark = [
 ]
 
 
-def test_nixl_base_patch_covers_pull_push_and_cross_layer_registration(monkeypatch):
-    """Patch the shared vLLM 0.27 base rather than its pull-only alias."""
+def test_nixl_base_patch_covers_pull_and_push_registration(monkeypatch):
+    """Both NIXL modes defer registration through the vLLM 0.29 base."""
 
     class NixlBaseConnector:
         def register_kv_caches(self, kv_caches):
             raise AssertionError("scratch-backed KV caches must be deferred")
-
-        def register_cross_layers_kv_cache(self, kv_cache, attn_backend):
-            raise AssertionError("scratch-backed cross-layer KV must be deferred")
 
     class NixlPullConnector(NixlBaseConnector):
         pass
@@ -60,13 +57,8 @@ def test_nixl_base_patch_covers_pull_push_and_cross_layer_registration(monkeypat
     pull = NixlPullConnector()
     push = NixlPushConnector()
     kv_caches = {"layer.0": object()}
-    cross_layer_kv = object()
-    attn_backend = object()
     pull.register_kv_caches(kv_caches)
-    push.register_cross_layers_kv_cache(cross_layer_kv, attn_backend)
+    push.register_kv_caches(kv_caches)
 
     assert pull._scratch_kv_pending is kv_caches
-    assert push._scratch_cross_layers_kv_pending == (
-        cross_layer_kv,
-        attn_backend,
-    )
+    assert push._scratch_kv_pending is kv_caches
