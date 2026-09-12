@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use async_trait::async_trait;
+use dynamo_llm::first_token::FirstTokenSource;
 use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
 use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
 use dynamo_runtime::engine::AsyncEngineContext;
@@ -29,7 +30,7 @@ use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::disagg::DisaggregationMode;
-use crate::engine::{GenerateContext, LLMEngine, RawEngine};
+use crate::engine::{FirstTokenNotifier, GenerateContext, LLMEngine, RawEngine};
 
 /// Test-only override count. Compiled out of release builds — tests acquire
 /// an `OtlpExportOverride` RAII guard to force-enable the recording
@@ -135,11 +136,21 @@ impl Drop for CancelMonitorGuard {
 pub(crate) struct EngineAdapter {
     engine: Arc<dyn LLMEngine>,
     mode: DisaggregationMode,
+    first_token_source: Option<FirstTokenSource>,
 }
 
 impl EngineAdapter {
     pub(crate) fn new(engine: Arc<dyn LLMEngine>, mode: DisaggregationMode) -> Self {
-        Self { engine, mode }
+        Self {
+            engine,
+            mode,
+            first_token_source: None,
+        }
+    }
+
+    pub(crate) fn with_first_token_source(mut self, source: FirstTokenSource) -> Self {
+        self.first_token_source = Some(source);
+        self
     }
 }
 
@@ -289,8 +300,18 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             (None, None)
         };
 
-        let gen_ctx =
-            GenerateContext::with_metadata(ctx.clone(), ft_tx.clone(), handle.metadata().clone());
+        let dp_rank = request.routing.as_ref().and_then(|routing| routing.dp_rank);
+        let first_token = FirstTokenNotifier::for_request(
+            ft_tx.clone(),
+            self.first_token_source.as_ref(),
+            ctx.id(),
+            dp_rank,
+        );
+        let gen_ctx = GenerateContext::with_first_token_notifier(
+            ctx.clone(),
+            first_token.clone(),
+            handle.metadata().clone(),
+        );
         // `.instrument()` the setup call so a setup-time error lands on the
         // same span as the streaming body.
         let chunks = self
@@ -395,11 +416,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                 stream_span.record("ttft_ms", format!("{:.2}", ttft_ms).as_str());
                                 last_token_at = Some(Instant::now());
                             }
-                            if let Some(tx) = &ft_tx {
-                                // Receiver is held by the monitor task; send only
-                                // fails if it panicked, in which case the abort is
-                                // already moot.
-                                let _ = tx.send(true);
+                            if let Some(notifier) = &first_token {
+                                notifier.notify();
                             }
                             if let Some(link) = &worker_trace_link {
                                 chunk.worker_trace_link = Some(link.clone());

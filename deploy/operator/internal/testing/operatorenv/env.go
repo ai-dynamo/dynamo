@@ -21,24 +21,23 @@ import (
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/podcache"
+	snapshotcrds "github.com/ai-dynamo/snapshot/api/v1alpha1/crds"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/rand"
-	"k8s.io/client-go/discovery/cached/memory"
-	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/restmapper"
-	"k8s.io/client-go/scale"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	controllerconfig "sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
+	"sigs.k8s.io/yaml"
 )
 
 // AdmissionWebhooks selects the Helm-rendered admission registrations installed in envtest.
@@ -48,6 +47,9 @@ type AdmissionWebhooks struct {
 	// BypassUsers excludes named API users from validating admission.
 	// It is intended for seeding legacy states that current admission rejects.
 	BypassUsers []string
+	// MutatingBypassUsers excludes named API users from mutating admission.
+	// It is intended for seeding legacy states before exercising current defaulting.
+	MutatingBypassUsers []string
 }
 
 // WebhookSetupOptions contains the effective operator settings passed to SetupWebhooks.
@@ -187,8 +189,13 @@ func startRuntime(opts Options) (*runtimeEnv, error) {
 	if err != nil {
 		return nil, err
 	}
+	snapshotCRDs, err := defaultSnapshotCRDs(opts, operatorCfg)
+	if err != nil {
+		return nil, err
+	}
 	testEnv := &envtest.Environment{
 		Scheme:                scheme,
+		CRDs:                  snapshotCRDs,
 		CRDDirectoryPaths:     crdDirectoryPaths(opts),
 		ErrorIfCRDPathMissing: false,
 		BinaryAssetsDirectory: binaryAssetsDirectory(opts),
@@ -229,6 +236,7 @@ func webhookInstallOptions(opts Options) (envtest.WebhookInstallOptions, error) 
 	}
 	install := envtest.WebhookInstallOptions{}
 	if opts.Admission.Mutating {
+		addMutatingBypassUsers(mutating, opts.Admission.MutatingBypassUsers)
 		install.MutatingWebhooks = mutating
 	}
 	if opts.Admission.Validating {
@@ -337,6 +345,11 @@ func (e *TestEnv) RESTConfig() *rest.Config {
 	return rest.CopyConfig(e.rt.config)
 }
 
+// Scheme returns the runtime scheme used by the envtest API server and its clients.
+func (e *TestEnv) Scheme() *k8sruntime.Scheme {
+	return e.rt.scheme
+}
+
 // AddUser provisions an authenticated envtest user and returns its REST configuration.
 // Authorization must be granted separately so it does not alter the admission identity.
 func (e *TestEnv) AddUser(user envtest.User) (*rest.Config, error) {
@@ -357,14 +370,10 @@ func (e *TestEnv) RuntimeConfig() *commoncontroller.RuntimeConfig {
 	return e.rt.runtimeConfig
 }
 
-// ScaleClient returns a scale client configured for this envtest API server.
-func (e *TestEnv) ScaleClient() (scale.ScalesGetter, error) {
-	return newScaleClient(e.rt.config)
-}
-
 // StartManager starts a namespace-scoped controller manager configured by setup.
 func (e *TestEnv) StartManager(setup func(ctrl.Manager) error) {
 	e.tb.Helper()
+	skipNameValidation := true
 	cacheOptions := cache.Options{
 		DefaultNamespaces: map[string]cache.Config{
 			e.namespace: {},
@@ -374,9 +383,10 @@ func (e *TestEnv) StartManager(setup func(ctrl.Manager) error) {
 		e.tb.Fatalf("configure Pod cache: %v", err)
 	}
 	mgr, err := ctrl.NewManager(e.rt.config, ctrl.Options{
-		Scheme:  e.rt.scheme,
-		Metrics: metricsserver.Options{BindAddress: "0"},
-		Cache:   cacheOptions,
+		Scheme:     e.rt.scheme,
+		Metrics:    metricsserver.Options{BindAddress: "0"},
+		Cache:      cacheOptions,
+		Controller: controllerconfig.Controller{SkipNameValidation: &skipNameValidation},
 	})
 	if err != nil {
 		e.tb.Fatalf("create manager: %v", err)
@@ -465,25 +475,12 @@ func defaultOperatorConfig(in *configv1alpha1.OperatorConfiguration) *configv1al
 }
 
 func defaultRuntimeConfig(cfg *configv1alpha1.OperatorConfiguration) *commoncontroller.RuntimeConfig {
+	// Build config-derived defaults before the envtest API server exists. Tests that override
+	// dependency CRDs must resolve API-derived gates with features.New after creating a manager.
 	gate := features.Defaults()
 	gate.Checkpoint = cfg.Checkpoint.Enabled
 	gate.GPUDiscovery = cfg.Namespace.Restricted == "" || ptr.Deref(cfg.GPU.DiscoveryEnabled, true)
 	return &commoncontroller.RuntimeConfig{Gate: gate}
-}
-
-func newScaleClient(config *rest.Config) (scale.ScalesGetter, error) {
-	kubeClient, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return nil, err
-	}
-	cachedDiscovery := memory.NewMemCacheClient(kubeClient.Discovery())
-	restMapper := restmapper.NewDeferredDiscoveryRESTMapper(cachedDiscovery)
-	return scale.NewForConfig(
-		config,
-		restMapper,
-		dynamic.LegacyAPIPathResolverFunc,
-		scale.NewDiscoveryScaleKindResolver(cachedDiscovery),
-	)
 }
 
 func crdDirectoryPaths(opts Options) []string {
@@ -496,10 +493,33 @@ func crdDirectoryPaths(opts Options) []string {
 		filepath.Join(root, "internal", "controller", "testing", "prometheus"),
 		filepath.Join(root, "internal", "controller", "testing", "volcano.sh"),
 		filepath.Join(root, "internal", "controller", "testing", "run.ai"),
-		filepath.Join(root, "internal", "controller", "testing", "nvidia"),
 		filepath.Join(root, "internal", "controller", "testing", "inference.networking.k8s.io"),
 		filepath.Join(root, "internal", "controller", "testing", "grove.io"),
 	}
+}
+
+// defaultSnapshotCRDs installs the exact CRDs shipped by the Snapshot API
+// dependency. Explicit CRD directory overrides remain authoritative for tests
+// that intentionally construct a narrower environment. A nil configuration or
+// a disabled checkpoint gate installs no Snapshot CRDs.
+func defaultSnapshotCRDs(
+	opts Options,
+	config *configv1alpha1.OperatorConfiguration,
+) ([]*apiextensionsv1.CustomResourceDefinition, error) {
+	if len(opts.CRDDirectoryPaths) > 0 || config == nil || !config.Checkpoint.Enabled {
+		return nil, nil
+	}
+
+	manifests := snapshotcrds.All()
+	crds := make([]*apiextensionsv1.CustomResourceDefinition, 0, len(manifests))
+	for _, manifest := range manifests {
+		crd := &apiextensionsv1.CustomResourceDefinition{}
+		if err := yaml.Unmarshal([]byte(manifest), crd); err != nil {
+			return nil, fmt.Errorf("decode embedded Snapshot CRD: %w", err)
+		}
+		crds = append(crds, crd)
+	}
+	return crds, nil
 }
 
 func binaryAssetsDirectory(opts Options) string {

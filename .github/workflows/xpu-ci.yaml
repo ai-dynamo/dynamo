@@ -119,6 +119,7 @@ jobs:
 
           docker build \
             --progress=plain \
+            --target test_image \
             --tag "${TEST_IMAGE_TAG}" \
             -f container/Dockerfile.test \
             --build-arg BASE_IMAGE=${{ steps.build.outputs.image_tag }} \
@@ -126,7 +127,7 @@ jobs:
 
       - name: Upload build log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: xpu-build-log
           path: |
@@ -176,7 +177,7 @@ jobs:
           fi
 
       - name: Run XPU tests
-        uses: ./.github/actions/pytest
+        uses: $/.github/actions/pytest
         with:
           pytest_marks: '${{ inputs.pytest_markers }} and xpu_1'
           image_tag: ${{ env.TEST_IMAGE_TAG }}
@@ -224,7 +225,7 @@ jobs:
           docker rm -f "${CONTAINER_ID_PREFIX}_pytest" 2>/dev/null || true
 
       - name: Run XPU 2-card tests
-        uses: ./.github/actions/pytest
+        uses: $/.github/actions/pytest
         with:
           pytest_marks: '${{ inputs.pytest_markers }} and xpu_2'
           image_tag: ${{ env.TEST_IMAGE_TAG }}

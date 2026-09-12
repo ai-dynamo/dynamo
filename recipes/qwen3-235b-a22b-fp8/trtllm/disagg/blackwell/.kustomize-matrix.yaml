@@ -8,7 +8,10 @@ matrix:
       components: []
     - name: aws-p6-b200.48xlarge
       components:
-        - ../../../../kustomize/components/aws-efa-p8d8
+        - ../../../../kustomize/components/disagg-workers/aws-efa
+      templates:
+        - source: ../../../../kustomize/templates/aws-efa/p6-b200.48xlarge
+          path: components/efa
     - name: gcp-roce
       components:
         - ../../../../kustomize/components/disagg-workers/gke-roce

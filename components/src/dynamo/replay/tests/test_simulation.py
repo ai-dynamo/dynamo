@@ -1,19 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Optional-dependency preflight must run before the simulation imports.
 # ruff: noqa: E402
+# Optional-dependency preflight must run before the simulation imports.
 
 """Tests for the transitional Dynamo Sweeper replay runner."""
 
 from __future__ import annotations
 
 import json
-import sys
-from importlib.util import module_from_spec, spec_from_file_location
-from pathlib import Path
 
 import pytest
-from pydantic import BaseModel, ValidationError
 
 pytest.importorskip(
     "aisimulate.sweeper",
@@ -26,21 +22,13 @@ from aisimulate.sweeper.replay import (
     ReplayOutputRequirements,
     ReplaySpec,
 )
-from dynamo.replay import PlannerReplayDetails, ReplayReport, simulation
 
-_RUN_SWEEP_PATH = (
-    Path(__file__).resolve().parents[5]
-    / "aisimulate/examples/sweeper/tools/run_sweep.py"
+from dynamo.replay import (
+    PlannerReplayDetails,
+    ReplayReport,
+    run_trace_replay,
+    simulation,
 )
-if not _RUN_SWEEP_PATH.is_file():
-    pytest.skip(
-        "AI Simulate example fixtures are not included in the ai-dynamo wheel",
-        allow_module_level=True,
-    )
-_RUN_SWEEP_SPEC = spec_from_file_location("dynamo_sweeper_example", _RUN_SWEEP_PATH)
-assert _RUN_SWEEP_SPEC is not None and _RUN_SWEEP_SPEC.loader is not None
-run_sweep_cli = module_from_spec(_RUN_SWEEP_SPEC)
-_RUN_SWEEP_SPEC.loader.exec_module(run_sweep_cli)
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -173,6 +161,39 @@ def test_trace_runner_preserves_current_replay_arguments(monkeypatch) -> None:
     assert seen["sla_e2e_ms"] is None
     assert report.metrics["planner_total_ticks"] == 7.0
     assert report.metadata["planner_total_ticks"] == 7
+
+
+def test_trace_paths_only_workload_routes_to_trace_replay(monkeypatch) -> None:
+    seen = {}
+
+    def fake_run_trace_replay(**kwargs):
+        seen.update(kwargs)
+        return _report({"completed_requests": 2})
+
+    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
+    monkeypatch.setattr(simulation, "run_trace_replay", fake_run_trace_replay)
+    spec = ReplaySpec(
+        backend_deployment=_agg_deployment(),
+        workload={
+            "trace_paths": ["first.jsonl", "second.jsonl"],
+            "trace_format": "dynamo",
+            "arrival_speedup_ratio": 2.0,
+            "agentic_lanes": 4,
+        },
+        goal={"target": "throughput"},
+    )
+
+    report = simulation.DynamoReplayRunnerFactory().create(0).run(spec)
+
+    assert seen["trace_files"] == ["first.jsonl", "second.jsonl"]
+    assert seen["arrival_speedup_ratio"] == 2.0
+    assert seen["agentic_lanes"] == 4
+    assert report.metrics["completed_requests"] == 2.0
+
+
+def test_trace_replay_rejects_boolean_agentic_lanes() -> None:
+    with pytest.raises(TypeError, match="agentic_lanes must be an integer"):
+        run_trace_replay("unused.jsonl", agentic_lanes=True)
 
 
 def test_runner_captures_per_request_output_when_requested(monkeypatch) -> None:
@@ -317,6 +338,67 @@ def test_synthetic_request_rate_must_be_positive(request_rate: float) -> None:
         simulation.DynamoReplayRunnerFactory().create(0).run(spec)
 
 
+def test_direct_predict_resolves_kv_capacity_fraction(monkeypatch) -> None:
+    class CapacityArgs:
+        num_gpu_blocks = 100
+        block_size = 16
+        dp_size = 1
+
+    monkeypatch.setattr(
+        simulation.DynamoReplayRunner,
+        "_engine_args",
+        staticmethod(lambda _payload: CapacityArgs()),
+    )
+    spec = ReplaySpec(
+        backend_deployment=_agg_deployment(),
+        workload={
+            "isl": 100,
+            "osl": 20,
+            "kv_load_ratio": 0.5,
+            "num_request_ratio": 10.0,
+        },
+        goal={"target": "throughput"},
+    )
+
+    runner = simulation.DynamoReplayRunnerFactory().create(0)
+    assert runner._effective_in_flight_cap(spec) == 21
+    assert runner._synthetic_kwargs(spec)["request_count"] == 210
+
+
+def test_fixed_timing_keeps_aic_identity_out_of_runtime_args(monkeypatch) -> None:
+    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
+    monkeypatch.setattr(
+        simulation,
+        "materialize_aic_num_gpu_blocks",
+        lambda payload: payload,
+    )
+    engine_args = simulation.DynamoReplayRunner._engine_args(
+        {
+            "engine_type": "vllm",
+            "aic_backend": "vllm",
+            "aic_backend_version": "0.11.0",
+            "aic_system": "h200_sxm",
+            "aic_model_path": "example/model",
+            "aic_attention_dp_size": 2,
+            "aic_pp_size": 1,
+            "timing_model": {
+                "type": "fixed",
+                "prefill_ms": 1.0,
+                "decode_ms": 1.0,
+            },
+        }
+    )
+
+    lowered = json.loads(engine_args.payload)
+    assert "aic_backend" not in lowered
+    assert "aic_backend_version" not in lowered
+    assert "aic_system" not in lowered
+    assert "aic_model_path" not in lowered
+    assert "aic_attention_dp_size" not in lowered
+    assert lowered["dp_size"] == 2
+    assert "aic_pp_size" not in lowered
+
+
 def test_factory_preserves_trtllm_disagg_gate() -> None:
     capabilities = simulation.DynamoReplayRunnerFactory().capabilities()
 
@@ -351,48 +433,6 @@ def test_factory_owns_replay_spec_abi_version(monkeypatch) -> None:
     assert simulation._REPLAY_SPEC_API_VERSION == 1
     assert seen["version"] == 1
     assert seen["supports_disaggregated_attention_dp"] is False
-
-
-def test_dynamo_sweep_cli_formats_adapter_validation_errors(
-    monkeypatch, tmp_path, capsys
-) -> None:
-    class AdapterSchema(BaseModel):
-        interval: int
-
-    with pytest.raises(ValidationError) as caught:
-        AdapterSchema.model_validate({"interval": "invalid"})
-
-    config_path = tmp_path / "sweep.yaml"
-    config_path.write_text(
-        "search_space:\n"
-        "  model_name: example/model\n"
-        "  hardware_sku: h200_sxm\n"
-        "workload:\n"
-        "  isl: 128\n"
-        "  osl: 16\n"
-        "  request_rate: 1\n"
-        "  num_request_ratio: 3\n"
-    )
-
-    class RejectingSweeper:
-        def __init__(self, **kwargs):
-            del kwargs
-
-        def run(self, config):
-            del config
-            raise caught.value
-
-    monkeypatch.setattr(run_sweep_cli, "Sweeper", RejectingSweeper)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["run_sweep.py", "--config", str(config_path)],
-    )
-
-    with pytest.raises(SystemExit, match="2"):
-        run_sweep_cli.main()
-
-    assert "invalid adapter search space" in capsys.readouterr().err
 
 
 def test_goodput_goal_fails_closed_when_replay_omits_metric(monkeypatch) -> None:

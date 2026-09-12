@@ -88,9 +88,13 @@ func betaDGDWorkersSpecHash(t testing.TB, dgd *v1beta1.DynamoGraphDeployment) st
 
 func legacyDGDWorkersSpecHash(t testing.TB, dgd *v1beta1.DynamoGraphDeployment) string {
 	t.Helper()
-	hash, err := dynamo.ComputeLegacyAlphaDGDWorkersSpecHash(dgd)
+	alpha := &v1alpha1.DynamoGraphDeployment{}
+	if err := alpha.ConvertFrom(dgd); err != nil {
+		t.Fatalf("convert v1beta1 DGD to v1alpha1: %v", err)
+	}
+	hash, err := v1alpha1.ComputeDGDWorkersSpecHash(alpha)
 	if err != nil {
-		t.Fatalf("compute v1alpha1-compatible DGD worker hash: %v", err)
+		t.Fatalf("compute v1alpha1 DGD worker hash: %v", err)
 	}
 	return hash
 }

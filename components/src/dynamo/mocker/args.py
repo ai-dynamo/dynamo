@@ -195,8 +195,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         dest="num_gpu_blocks",  # Maps to num_gpu_blocks in MockEngineArgs
         default=None,
-        help="Explicit usable GPU-block capacity for the mock KV cache. When "
-        "unset, AIC-backed mocker estimates the value; non-AIC mocker uses 16384.",
+        help="Explicit usable GPU-block capacity per data-parallel rank for the mock "
+        "KV cache. When unset, AIC-backed mocker estimates the value; non-AIC "
+        "mocker uses 16384.",
     )
     parser.add_argument(
         "--block-size",
@@ -299,8 +300,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--aic-perf-model",
         action="store_true",
         default=False,
-        help="Use aiconfigurator-core directly for latency prediction. "
-        "Requires aiconfigurator-core installed.",
+        help="Use AISimulate's AIC perf model directly for latency prediction. "
+        "Requires aisimulate installed.",
     )
     parser.add_argument(
         "--gpu-memory-utilization",
@@ -469,6 +470,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="SGLang schedule conservativeness factor 0.0-1.0 (default: 1.0).",
     )
+    parser.add_argument(
+        "--sglang-generate",
+        action="store_true",
+        default=False,
+        help="Serve native streaming SGLang /generate requests (default: disabled).",
+    )
 
     # TensorRT-LLM-specific configuration
     parser.add_argument(
@@ -601,6 +608,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=["nats", "tcp"],
         default=os.environ.get("DYN_REQUEST_PLANE", "tcp"),
         help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|tcp]",
+    )
+    parser.add_argument(
+        "--response-plane",
+        type=str,
+        choices=["tcp", "quic"],
+        default=os.environ.get("DYN_RESPONSE_PLANE", "tcp"),
+        help="Select the response transport. Frontend and workers must match.",
     )
     parser.add_argument(
         "--event-plane",

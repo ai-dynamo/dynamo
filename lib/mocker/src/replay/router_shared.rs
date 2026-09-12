@@ -7,9 +7,10 @@ use std::sync::Arc;
 use crate::common::protocols::MockEngineArgs;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::protocols::{
-    ActiveLoad, ActiveSequenceEvent, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+    ActiveSequenceEvent, WorkerConfigLike, WorkerId, WorkerWithDpRank,
 };
 use dynamo_kv_router::scheduling::queue::DEFAULT_MAX_BATCHED_TOKENS;
+use dynamo_kv_router::sequences::SchedulerLoadSnapshot;
 use dynamo_kv_router::{
     ActiveSequencesMultiWorker, DefaultWorkerSelector, LocalScheduler, SequencePublisher,
 };
@@ -22,7 +23,7 @@ impl SequencePublisher for ReplayNoopPublisher {
         Ok(())
     }
 
-    fn publish_load(&self, _load: ActiveLoad) {}
+    fn publish_scheduler_load(&self, _load: SchedulerLoadSnapshot) {}
 
     fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: usize, _: usize) {}
 }

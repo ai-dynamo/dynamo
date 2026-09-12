@@ -128,6 +128,7 @@ python3 -m dynamo.sglang \
     --model-path "$MODEL_PATH" \
     --served-model-name "$MODEL_PATH" \
     --tp "$TP_SIZE" \
+    --nccl-port "${DYN_SYSTEM_PORT2:-30005}" \
     --video-generation-worker \
     --media-output-fs-url "$FS_URL" \
     --trust-remote-code \
