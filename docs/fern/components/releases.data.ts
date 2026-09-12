@@ -71,8 +71,8 @@ export const CURRENT_TAG = "1.4.2";
 export const CURRENT_WHEEL = "1.4.2";
 
 export const MAIN_TOT: BackendPins = {
-  sglang: "0.5.18",
-  trtllm: "1.3.0rc24",
+  sglang: "0.5.19",
+  trtllm: "1.3.0rc25",
   vllm: "0.28.0",
   nixlSglang: "1.4.0",
   nixlTrtllm: "1.3.1",
@@ -92,7 +92,7 @@ export const RELEASES: Release[] = [
     pins: { sglang: "0.5.16", trtllm: "1.3.0rc22", vllm: "0.26.0", nixlSglang: "1.3.0", nixlTrtllm: "1.3.1", nixlVllm: "1.3.2" },
     ucx: "1.21.x",
     delta:
-      "Patch release and the first Dynamo Enterprise release: a curated set of release artifacts publishes under the -enterprise suffix on NGC, eligible for NVIDIA Enterprise Support, with no functional or binary differences from the open-source artifacts. Fixes NIXL loader-path resolution in the Frontend and SGLang Runtime images, removes the unused Nsight EFA metrics plugin, and tightens dependency pins (pillow v12.3.0 floor, plotext below v6, EFA Installer v1.50). Backend pins are unchanged from v1.4.0.",
+      "Patch release and the first Dynamo Enterprise Support release: a curated set of release artifacts publishes under the -enterprise suffix on NGC, eligible for enterprise support, with no functional or binary differences from the open-source artifacts. Fixes NIXL loader-path resolution in the Frontend and SGLang Runtime images, removes the unused Nsight EFA metrics plugin, and tightens dependency pins (pillow v12.3.0 floor, plotext below v6, EFA Installer v1.50). Backend pins are unchanged from v1.4.0.",
   },
   {
     version: "v1.4.1",
@@ -1210,7 +1210,7 @@ export const FEATURE_INTERACTIONS: BackendInteractions[] = [
       // KV Block Manager
       [{ status: "wip" }, { status: "wip" }, { status: "wip" }, { status: "na" }],
       // Multimodal
-      [{ status: "yes", label: "Supported serving patterns", note: "Supports aggregated EPD, E/PD, and E/P/D patterns. Traditional disaggregated EP/D is not supported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/sglang-multimodal" }, { status: "yes", label: "Image-aware routing on Dynamo's SGLang image", note: "Hash forwarding is upstream in SGLang 0.5.13+ and Dynamo pins 0.5.18, so the shipped image routes on image overlap. A custom build without that patch still serves the request but degrades to text-prefix routing.", source: "/dynamo/dev/multimodal/multimodal-kv-routing" }, { status: "na" }, { status: "wip" }, { status: "na" }],
+      [{ status: "yes", label: "Supported serving patterns", note: "Supports aggregated EPD, E/PD, and E/P/D patterns. Traditional disaggregated EP/D is not supported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/sglang-multimodal" }, { status: "yes", label: "Image-aware routing on Dynamo's SGLang image", note: "Hash forwarding is upstream in SGLang 0.5.13+ and Dynamo pins 0.5.19, so the shipped image routes on image overlap. A custom build without that patch still serves the request but degrades to text-prefix routing.", source: "/dynamo/dev/multimodal/multimodal-kv-routing" }, { status: "na" }, { status: "wip" }, { status: "na" }],
       // Request Migration
       [{ status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "wip" }, { status: "yes" }, { status: "na" }],
       // Request Cancellation
@@ -1387,22 +1387,21 @@ export const RELEASE_STATS: Record<string, ReleaseStats> = {
 
 export const NIGHTLY_BUILDS: NightlyBuild[] = [
   {
-    version: "1.4.0.dev20260803",
-    date: "Aug 3, 2026",
+    version: "1.5.0.dev20260831",
+    date: "Aug 31, 2026",
     packages: ["ai-dynamo", "ai-dynamo-runtime", "kvbm"],
   },
   {
-    version: "1.4.0.dev20260802",
-    date: "Aug 2, 2026",
+    version: "1.5.0.dev20260830",
+    date: "Aug 30, 2026",
     packages: ["ai-dynamo", "ai-dynamo-runtime", "kvbm"],
   },
   {
-    version: "1.4.0.dev20260730",
-    date: "Jul 30, 2026",
-    packages: ["ai-dynamo", "ai-dynamo-runtime"],
-    note: "kvbm was not published for this nightly.",
+    version: "1.5.0.dev20260829",
+    date: "Aug 29, 2026",
+    packages: ["ai-dynamo", "ai-dynamo-runtime", "kvbm"],
   },
 ];
 
 export const NIGHTLIES_NOTE =
-  "ai-dynamo, ai-dynamo-runtime, and kvbm nightly builds from main publish wheels tagged `*.devYYYYMMDD` (since Apr 24, 2026). Install with pip or uv using `--pre` and the NVIDIA extra-index pattern shown above. Runtime containers use rolling `*-runtime-nightly:latest` tags on NGC.";
+  "ai-dynamo and ai-dynamo-runtime nightly builds from main publish wheels tagged `*.devYYYYMMDD` (since Apr 24, 2026); kvbm joined the nightly train on Aug 2, 2026. Install with pip or uv using `--pre` and the NVIDIA extra-index pattern shown above. Runtime containers publish to the `*-runtime-nightly` repositories on NGC, under a dated `YYYYMMDD-<shortsha>` tag plus a rolling `latest` tag.";

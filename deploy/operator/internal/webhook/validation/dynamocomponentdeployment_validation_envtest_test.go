@@ -27,7 +27,9 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8sptr "k8s.io/utils/ptr"
 	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
@@ -61,6 +63,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		wantWebhookErrs    []string
 		wantWarnings       []string
 		wantPodAnnotations map[string]string
+		wantRoleReplicas   map[string]int32
 	}{
 		// Baseline schema and webhook behavior.
 		{
@@ -69,6 +72,99 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.Replicas = &validReplicas
 				dcd.Spec.BackendFramework = dcdAdmissionSGLangBackend
 			}),
+		},
+		{
+			name: "v1beta1 explicit multinode roles are shared with standalone components",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 4}
+				dcd.Spec.Roles = []nvidiacomv1beta1.ComponentRoleSpec{
+					{Name: nvidiacomv1beta1.ComponentRoleLeader},
+					{Name: nvidiacomv1beta1.ComponentRoleWorker},
+				}
+			}),
+			wantRoleReplicas: map[string]int32{
+				nvidiacomv1beta1.ComponentRoleLeader: 1,
+				nvidiacomv1beta1.ComponentRoleWorker: 3,
+			},
+		},
+		{
+			name: "v1alpha1 explicit multinode roles convert for standalone components",
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.Multinode = &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 4}
+				dcd.Spec.Roles = []nvidiacomv1alpha1.ComponentRoleSpec{
+					{Name: nvidiacomv1alpha1.ComponentRoleLeader},
+					{Name: nvidiacomv1alpha1.ComponentRoleWorker},
+				}
+			}),
+			wantRoleReplicas: map[string]int32{
+				nvidiacomv1beta1.ComponentRoleLeader: 1,
+				nvidiacomv1beta1.ComponentRoleWorker: 3,
+			},
+		},
+		{
+			name: "v1beta1 explicit multinode role replicas must match node count",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 4}
+				dcd.Spec.Roles = []nvidiacomv1beta1.ComponentRoleSpec{
+					{Name: nvidiacomv1beta1.ComponentRoleLeader, Replicas: k8sptr.To(int32(1))},
+					{Name: nvidiacomv1beta1.ComponentRoleWorker, Replicas: k8sptr.To(int32(2))},
+				}
+			}),
+			wantWebhookErrs: []string{
+				`spec.roles[1].replicas: Invalid value: 2: must equal 3 for multinode role "worker"`,
+			},
+		},
+		{
+			name: "v1beta1 frontend component cannot be multinode",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			wantWebhookErrs: []string{
+				"spec.multinode: Forbidden: multinode is supported only for worker, prefill, or decode components",
+			},
+		},
+		{
+			name: "v1beta1 planner component cannot be multinode",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypePlanner
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			wantWebhookErrs: []string{
+				"spec.multinode: Forbidden: multinode is supported only for worker, prefill, or decode components",
+			},
+		},
+		{
+			name: "v1beta1 role PodTemplates require component-specific support",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+				dcd.Spec.Roles = []nvidiacomv1beta1.ComponentRoleSpec{
+					{
+						Name: nvidiacomv1beta1.ComponentRoleLeader,
+						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+							Name: consts.MainContainerName, Image: "registry.example/leader:1.1.0",
+						}}}},
+					},
+					{Name: nvidiacomv1beta1.ComponentRoleWorker},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.roles[0].podTemplate: Forbidden: is not supported for this component role"},
+		},
+		{
+			name: "v1alpha1 role PodTemplates require component-specific support",
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.Multinode = &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2}
+				dcd.Spec.Roles = []nvidiacomv1alpha1.ComponentRoleSpec{
+					{
+						Name: nvidiacomv1alpha1.ComponentRoleLeader,
+						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+							Name: consts.MainContainerName, Image: "registry.example/leader:1.1.0",
+						}}}},
+					},
+					{Name: nvidiacomv1alpha1.ComponentRoleWorker},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.roles[0].podTemplate: Forbidden: is not supported for this component role"},
 		},
 		{
 			name: "v1beta1 main image is required when pod template is absent on create",
@@ -260,6 +356,46 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{"spec.experimental.checkpoint: Forbidden: checkpoint functionality is disabled in the operator configuration"},
 		},
 		{
+			name: "v1beta1 standalone worker checkpointRef is rejected",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{
+						Enabled:       true,
+						CheckpointRef: k8sptr.To("worker-snapshot"),
+					},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.experimental.checkpoint.checkpointRef: Forbidden: worker-class checkpointRef is supported only on DynamoGraphDeployment-managed components"},
+		},
+		{
+			name: "v1alpha1 standalone worker checkpointRef is rejected",
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.Checkpoint = &nvidiacomv1alpha1.ServiceCheckpointConfig{
+					Enabled:       true,
+					CheckpointRef: k8sptr.To("worker-snapshot"),
+				}
+			}),
+			wantWebhookErrs: []string{"spec.checkpoint.checkpointRef: Forbidden: worker-class checkpointRef is supported only on DynamoGraphDeployment-managed components"},
+		},
+		{
+			name: "DGD-managed worker checkpointRef is accepted",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.OwnerReferences = []metav1.OwnerReference{{
+					APIVersion: nvidiacomv1beta1.GroupVersion.String(),
+					Kind:       nvidiacomv1beta1.DynamoGraphDeploymentGVK.Kind,
+					Name:       "graph",
+					UID:        "graph-uid",
+					Controller: k8sptr.To(true),
+				}}
+				dcd.Spec.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{
+						Enabled:       true,
+						CheckpointRef: k8sptr.To("worker-snapshot"),
+					},
+				}
+			}),
+		},
+		{
 			name: "invalid replicas",
 			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
 				dcd.Spec.Replicas = &negativeReplicas
@@ -425,15 +561,6 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				}
 			}),
 			wantCELErr: "spec.experimental.gpuMemoryService: Invalid value: extraClientPods is reserved for inter-pod GMS and is not implemented yet",
-		},
-		{
-			name: "v1beta1 EPP config on a worker is rejected by CEL",
-			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
-				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "epp-config"}},
-				}
-			}),
-			wantCELErr: "spec: Invalid value: eppConfig may only be set when type is epp",
 		},
 		{
 			name: "v1beta1 checkpoint job with checkpointRef is rejected by CEL",
@@ -604,13 +731,19 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		},
 		{
 			name: "deprecated checkpoint mode with checkpointRef is accepted",
-			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypeWorker,
-				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.OwnerReferences = []metav1.OwnerReference{{
+					APIVersion: nvidiacomv1alpha1.GroupVersion.String(),
+					Kind:       "DynamoGraphDeployment",
+					Name:       "graph",
+					UID:        "graph-uid",
+					Controller: k8sptr.To(true),
+				}}
+				dcd.Spec.Checkpoint = &nvidiacomv1alpha1.ServiceCheckpointConfig{
 					Enabled:       true,
 					Mode:          nvidiacomv1alpha1.CheckpointModeManual,
 					CheckpointRef: k8sptr.To("existing-checkpoint"),
-				},
+				}
 			}),
 		},
 		{
@@ -944,10 +1077,12 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: consts.ComponentTypeEPP,
 				Multinode:     &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2},
+				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{Image: frontendImage150},
+				},
 			}),
 			wantWebhookErrs: []string{
-				"spec.multinode: Forbidden: EPP component cannot be multinode",
-				"spec.eppConfig: Required value: is required for EPP components",
+				"spec.multinode: Forbidden: multinode is supported only for worker, prefill, or decode components",
 			},
 		},
 		{
@@ -955,26 +1090,131 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: consts.ComponentTypeEPP,
 				Replicas:      &validMinAvail,
+				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{Image: frontendImage150},
+				},
 			}),
 			wantWebhookErrs: []string{
 				"spec.replicas: Invalid value: 2: EPP component must have exactly 1 replica",
-				"spec.eppConfig: Required value: is required for EPP components",
 			},
 		},
 		{
-			name: "v1alpha1 EPP requires configuration",
+			name: "v1alpha1 native Rust EPP accepts a 1.5 image without eppConfig",
 			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: consts.ComponentTypeEPP,
+				Replicas:      &oneReplica,
+				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{Image: frontendImage150},
+				},
 			}),
-			wantWebhookErrs: []string{"spec.eppConfig: Required value: is required for EPP components"},
 		},
 		{
-			name: "v1beta1 EPP without configuration reaches and is rejected by the v1beta1 webhook",
+			name: "v1beta1 native Rust EPP accepts a 1.5 image without eppConfig",
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = frontendImage150
 			}),
-			wantWebhookErrs: []string{"spec.eppConfig: Required value: is required for EPP components"},
 		},
+		{
+			name: "v1alpha1 legacy Go EPP accepts a 1.4 image with eppConfig",
+			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeEPP,
+				Replicas:      &oneReplica,
+				EPPConfig: &nvidiacomv1alpha1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+					},
+				},
+				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{Image: legacyEPPImage140},
+				},
+			}),
+		},
+		{
+			name: "v1beta1 legacy Go EPP accepts a 1.4 image with eppConfig",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
+				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+					},
+				}
+			}),
+		},
+		{
+			name: "v1alpha1 rejects eppConfig with a 1.5 image",
+			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeEPP,
+				Replicas:      &oneReplica,
+				EPPConfig: &nvidiacomv1alpha1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+					},
+				},
+				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{Image: frontendImage150},
+				},
+			}),
+			wantWebhookErrs: []string{"spec.eppConfig: Forbidden: must be omitted for native Rust EPP images with runtime version 1.5.0 or later"},
+		},
+		{
+			name: "v1beta1 rejects eppConfig with a 1.5 image",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = frontendImage150
+				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+					},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.eppConfig: Forbidden: must be omitted for native Rust EPP images with runtime version 1.5.0 or later"},
+		},
+		{
+			name: "v1alpha1 rejects a 1.4 image without eppConfig",
+			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeEPP,
+				Replicas:      &oneReplica,
+				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{Image: legacyEPPImage140},
+				},
+			}),
+			wantWebhookErrs: []string{"spec.eppConfig: Required value: is required for legacy Go EPP images with runtime version earlier than 1.5.0"},
+		},
+		{
+			name: "v1beta1 rejects a 1.4 image without eppConfig",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
+			}),
+			wantWebhookErrs: []string{"spec.eppConfig: Required value: is required for legacy Go EPP images with runtime version earlier than 1.5.0"},
+		},
+		// EPP is never exempt from the runtime-version requirement: the eppConfig
+		// contract is decided entirely by the resolved version, so an unresolvable
+		// one is reported rather than admitted with no contract checked.
+		{
+			name: "v1beta1 EPP with an unresolvable image version requires runtimeVersionOverride",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/dynamo-frontend:latest"
+			}),
+			wantWebhookErrs: []string{"spec.runtimeVersionOverride: Required value: is required when the specified main container image has no parseable semantic-version tag"},
+		},
+		// eppConfig is deprecated but still served, so its shape rules keep
+		// their coverage. The default 1.1.0 fixture image is a pre-1.5.0
+		// legacy Go EPP runtime, where an eppConfig is expected and only its
+		// shape is under test.
 		{
 			name: "v1alpha1 empty EPP config reaches and is rejected by the webhook",
 			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -1030,24 +1270,18 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{"spec.eppConfig.configMapRef.name: Required value: is required"},
 		},
 		{
-			name: "valid v1alpha1 EPP config reaches the webhook",
-			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypeEPP,
-				Replicas:      &oneReplica,
-				EPPConfig: &nvidiacomv1alpha1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "epp-config"}},
-				},
-			}),
-		},
-		{
-			name: "valid v1beta1 EPP config reaches the v1beta1 webhook",
+			// eppConfig is only meaningful for an EPP component; the controller
+			// silently ignores it on any other type, so CEL rejects it at
+			// admission instead of letting it land as dead configuration.
+			name: "v1beta1 rejects eppConfig on a non-epp component",
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
-				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
-				dcd.Spec.Replicas = &oneReplica
 				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "epp-config"}},
+					ConfigMapRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+					},
 				}
 			}),
+			wantCELErr: "spec: Invalid value: eppConfig may only be set when type is epp",
 		},
 
 		// Pair shared pod-template validation across both served source versions.
@@ -1190,12 +1424,322 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
+			// Unchanged compliant legacy pair: an unrelated field change
+			// (replicas stays 1 here; only exercising the update path) must
+			// not re-trigger the image/eppConfig compatibility check.
+			name: "v1beta1 unchanged legacy image and eppConfig pair remains allowed on update",
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
+				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+					},
+				}
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
+				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+					},
+				}
+			}),
+		},
+		{
+			name:               "v1beta1 unrelated update ratchets an identical pre-existing native image and eppConfig mismatch",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = frontendImage150
+				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+				}
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Labels = map[string]string{"updated": "true"}
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = frontendImage150
+				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+				}
+			}),
+		},
+		{
+			// type is immutable once set, so the only transition into EPP starts
+			// from an unset type; it must still validate the complete contract.
+			name: "v1beta1 setting a previously unset component type to EPP validates the complete runtime contract",
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = ""
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
+			}),
+			wantWebhookErrs: []string{"spec.eppConfig: Required value: is required for legacy Go EPP images with runtime version earlier than 1.5.0"},
+		},
+		{
+			name:               "v1beta1 changing eppConfig on a pre-existing native mismatch is rejected",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = frontendImage150
+				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+				}
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = frontendImage150
+				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "changed-epp-config"}},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.eppConfig: Forbidden: must be omitted for native Rust EPP images with runtime version 1.5.0 or later"},
+		},
+		{
+			// Split update: eppConfig cleared but the image stays at the
+			// legacy 1.4 tag -- the Go EPP binary would start with no
+			// CLI flags/config mount. Must be rejected even though the
+			// image field itself did not change.
+			name: "v1beta1 clearing eppConfig while image stays legacy is rejected on update",
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
+				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+					},
+				}
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
+			}),
+			wantWebhookErrs: []string{"spec.eppConfig: Required value: is required for legacy Go EPP images with runtime version earlier than 1.5.0"},
+		},
+		{
+			// Split update: eppConfig added while the image stays at a
+			// native Rust EPP 1.5 tag -- the Rust binary would get handed a
+			// legacy config mount it never reads. Must be rejected even
+			// though the image field itself did not change.
+			name: "v1beta1 adding eppConfig while image stays native Rust is rejected on update",
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = frontendImage150
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = frontendImage150
+				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+					},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.eppConfig: Forbidden: must be omitted for native Rust EPP images with runtime version 1.5.0 or later"},
+		},
+		{
+			// Atomic migration: image and eppConfig change together, in the
+			// same update, from a compliant legacy pair to a compliant
+			// native pair. Must be accepted -- only the new tuple matters.
+			name: "v1beta1 atomic migration from legacy image with eppConfig to native image without it is accepted",
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
+				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+					},
+				}
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = frontendImage150
+			}),
+		},
+		{
+			// Atomic rollback: the reverse migration, in one update. Must
+			// also be accepted.
+			name: "v1beta1 atomic rollback from native image to legacy image with eppConfig is accepted",
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = frontendImage150
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
+				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+					},
+				}
+			}),
+		},
+		{
+			// v1alpha1 side of the same split-update rejection.
+			name: "v1alpha1 clearing eppConfig while image stays legacy is rejected on update",
+			oldDeployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeEPP,
+				Replicas:      &oneReplica,
+				EPPConfig: &nvidiacomv1alpha1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+					},
+				},
+				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{Image: legacyEPPImage140},
+				},
+			}),
+			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeEPP,
+				Replicas:      &oneReplica,
+				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{Image: legacyEPPImage140},
+				},
+			}),
+			wantWebhookErrs: []string{"spec.eppConfig: Required value: is required for legacy Go EPP images with runtime version earlier than 1.5.0"},
+		},
+		{
+			// v1alpha1 side of the same atomic-migration acceptance.
+			name: "v1alpha1 atomic migration from legacy image with eppConfig to native image without it is accepted",
+			oldDeployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeEPP,
+				Replicas:      &oneReplica,
+				EPPConfig: &nvidiacomv1alpha1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+					},
+				},
+				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{Image: legacyEPPImage140},
+				},
+			}),
+			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeEPP,
+				Replicas:      &oneReplica,
+				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{Image: frontendImage150},
+				},
+			}),
+		},
+		{
+			name:               "v1beta1 unchanged legacy frontend multinode survives an unrelated update",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+				dcd.Labels = map[string]string{"updated": "true"}
+			}),
+		},
+		{
+			name:               "v1beta1 legacy frontend multinode can be removed",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+			}),
+		},
+		{
+			name:               "v1beta1 legacy frontend multinode cannot change node count",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 3}
+			}),
+			wantWebhookErrs: []string{
+				"spec.multinode: Forbidden: multinode is supported only for worker, prefill, or decode components",
+			},
+		},
+		{
 			name:          "v1beta1 multinode layout change is rejected by the shared update validator",
 			oldDeployment: betaDCDForAdmission(nil),
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
 			}),
 			wantWebhookErrs: []string{`spec.multinode: Invalid value: {"nodeCount":2}: cannot change node topology between single-node and multi-node after creation`},
+		},
+		{
+			name: "v1beta1 multinode node count is immutable",
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 3}
+			}),
+			wantWebhookErrs: []string{"spec.multinode.nodeCount: Invalid value: 3: " + apivalidation.FieldImmutableErrorMsg},
+		},
+		{
+			name: "v1alpha1 multinode node count is immutable after conversion",
+			oldDeployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.Multinode = &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2}
+			}),
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.Multinode = &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 3}
+			}),
+			wantWebhookErrs: []string{"spec.multinode.nodeCount: Invalid value: 3: " + apivalidation.FieldImmutableErrorMsg},
+		},
+		{
+			name: "v1beta1 implicit to semantically equivalent explicit roles is allowed",
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				setBetaExplicitMultinodeRoles(&dcd.Spec.DynamoComponentDeploymentSharedSpec, 2)
+			}),
+		},
+		{
+			name: "v1beta1 explicit to semantically equivalent implicit roles is allowed",
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				setBetaExplicitMultinodeRoles(&dcd.Spec.DynamoComponentDeploymentSharedSpec, 2)
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
 		},
 		{
 			name:               "v1alpha1 update aggregates create and DCD-specific update errors",
@@ -1257,12 +1801,24 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				test.seedGates = &seedGates
 			}
 			actual := runAdmissionTest(t, test)
-			if tt.wantPodAnnotations != nil {
-				t.Log("Verify the API server preserved embedded pod-template annotations")
-				var actualDCD nvidiacomv1beta1.DynamoComponentDeployment
-				if err := runtime.DefaultUnstructuredConverter.FromUnstructured(actual.Object, &actualDCD); err != nil {
-					t.Fatalf("convert admitted DCD: %v", err)
+			if tt.wantPodAnnotations != nil || tt.wantRoleReplicas != nil {
+				actualDCD := admittedBetaDCD(t, actual)
+				if tt.wantRoleReplicas != nil {
+					t.Log("Verify admission persisted the defaulted multinode role replicas")
+					actualRoleReplicas := make(map[string]int32, len(actualDCD.Spec.Roles))
+					for i := range actualDCD.Spec.Roles {
+						role := &actualDCD.Spec.Roles[i]
+						actualRoleReplicas[role.Name] = k8sptr.Deref(role.Replicas, 0)
+					}
+					if !maps.Equal(actualRoleReplicas, tt.wantRoleReplicas) {
+						t.Fatalf("role replicas = %v, want %v", actualRoleReplicas, tt.wantRoleReplicas)
+					}
 				}
+				if tt.wantPodAnnotations == nil {
+					return
+				}
+
+				t.Log("Verify the API server preserved embedded pod-template annotations")
 				if actualDCD.Spec.PodTemplate == nil {
 					t.Fatal("admitted DCD has no spec.podTemplate")
 				}
@@ -1272,6 +1828,26 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}
 		})
 	}
+}
+
+func admittedBetaDCD(t *testing.T, actual *unstructured.Unstructured) *nvidiacomv1beta1.DynamoComponentDeployment {
+	t.Helper()
+	beta := &nvidiacomv1beta1.DynamoComponentDeployment{}
+	if actual.GetAPIVersion() == nvidiacomv1beta1.GroupVersion.String() {
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(actual.Object, beta); err != nil {
+			t.Fatalf("convert admitted v1beta1 DCD: %v", err)
+		}
+		return beta
+	}
+
+	alpha := &nvidiacomv1alpha1.DynamoComponentDeployment{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(actual.Object, alpha); err != nil {
+		t.Fatalf("convert admitted v1alpha1 DCD: %v", err)
+	}
+	if err := alpha.ConvertTo(beta); err != nil {
+		t.Fatalf("convert admitted DCD to v1beta1: %v", err)
+	}
+	return beta
 }
 
 func alphaDCDForAdmission(

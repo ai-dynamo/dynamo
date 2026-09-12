@@ -11,6 +11,7 @@ use dynamo_runtime::{
 };
 use futures::{StreamExt, stream};
 
+use super::SessionAffinityMode::{Hard, Soft};
 use super::{
     AffinityAcquire, AffinityCoordinator, AffinityTarget, LlmResponse, affinity_id,
     coordinator::ReplicaApplyOutcome, explicit_target,
@@ -57,6 +58,14 @@ fn cancelled_response_stream() -> dynamo_runtime::pipeline::ManyOut<LlmResponse>
     let controller = Controller::new("cancelled-stream".to_string());
     controller.stop();
     ResponseStream::new(Box::pin(stream::empty()), Arc::new(controller))
+}
+
+async fn bind(coordinator: &AffinityCoordinator, target: AffinityTarget) {
+    let operation = coordinator.acquire(&session_id(), None).await.unwrap();
+    let mut stream = operation
+        .into_stream(target, response_stream(1), Hard)
+        .unwrap();
+    while stream.next().await.is_some() {}
 }
 
 async fn assert_binding_expires_after_refreshed_ttl(coordinator: &AffinityCoordinator) {
@@ -331,7 +340,7 @@ async fn session_affinity_committed_binding_survives_cancelled_stream_until_ttl(
     let coordinator = coordinator();
     let operation = coordinator.acquire(&session_id(), None).await.unwrap();
     let mut stream = operation
-        .into_stream(target(7, Some(0)), cancelled_response_stream())
+        .into_stream(target(7, Some(0)), cancelled_response_stream(), Hard)
         .unwrap();
     tokio::time::advance(Duration::from_secs(9)).await;
     assert!(stream.next().await.is_none());
@@ -598,19 +607,46 @@ async fn session_affinity_publishes_after_dispatch_and_lease_completion() {
     let selected_target = target(7, Some(0));
     let operation = coordinator.acquire(&session_id(), None).await.unwrap();
     let stream = operation
-        .into_stream(selected_target, response_stream(1))
+        .into_stream(selected_target, response_stream(1), Hard)
         .unwrap();
 
     let after_dispatch = updates.recv().await.unwrap();
     assert_eq!(after_dispatch.session_id, session_id().as_str());
     assert_eq!(after_dispatch.worker_id, selected_target.worker_id);
     assert_eq!(after_dispatch.dp_rank, selected_target.dp_rank);
-    assert_eq!(after_dispatch.router_id, 99);
+    assert_eq!(after_dispatch.writer_id, 99);
 
     drop(stream);
     let after_completion = updates.recv().await.unwrap();
     assert_eq!(after_completion, after_dispatch);
     assert!(updates.try_recv().is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_affinity_republishes_the_stored_replica_version() {
+    let coordinator = coordinator();
+    let mut updates = coordinator.enable_test_replica(99, 1);
+    let replicated_target = target(7, Some(0));
+    assert_eq!(
+        coordinator.apply_versioned_replica_update_for_test(
+            session_id().as_str(),
+            replicated_target,
+            123,
+            7,
+        ),
+        ReplicaApplyOutcome::Inserted
+    );
+
+    let AffinityAcquire::Bound { lease, .. } =
+        coordinator.acquire(&session_id(), None).await.unwrap()
+    else {
+        panic!("replicated binding must be acquired");
+    };
+    drop(lease);
+
+    let update = updates.recv().await.unwrap();
+    assert_eq!(update.sequence, 123);
+    assert_eq!(update.writer_id, 7);
 }
 
 #[tokio::test(start_paused = true)]
@@ -621,13 +657,13 @@ async fn session_affinity_worker_only_binding_allows_ranked_dispatch_without_nar
     let initialization = coordinator.acquire(&session_id(), None).await.unwrap();
     drop(
         initialization
-            .into_stream(worker_binding, response_stream(1))
+            .into_stream(worker_binding, response_stream(1), Hard)
             .unwrap(),
     );
 
     let continuation = coordinator.acquire(&session_id(), None).await.unwrap();
     let stream = continuation
-        .into_stream(target(7, Some(3)), response_stream(1))
+        .into_stream(target(7, Some(3)), response_stream(1), Hard)
         .expect("worker-only affinity must allow the scheduler to select a DP rank");
 
     assert_eq!(
@@ -638,6 +674,42 @@ async fn session_affinity_worker_only_binding_allows_ranked_dispatch_without_nar
 }
 
 #[tokio::test(start_paused = true)]
+async fn soft_worker_only_binding_stays_worker_scoped_after_ranked_dispatch() {
+    let coordinator = coordinator();
+    let worker_binding = target(7, None);
+    bind(&coordinator, worker_binding).await;
+
+    let continuation = coordinator.acquire(&session_id(), None).await.unwrap();
+    let mut stream = continuation
+        .into_stream(target(7, Some(3)), response_stream(1), Soft)
+        .unwrap();
+    while stream.next().await.is_some() {}
+
+    assert_eq!(
+        coordinator.query_target(&session_id(), None).unwrap(),
+        Some(worker_binding)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn soft_ranked_binding_is_not_widened_by_worker_only_dispatch() {
+    let coordinator = coordinator();
+    let ranked_binding = target(7, Some(2));
+    bind(&coordinator, ranked_binding).await;
+
+    let continuation = coordinator.acquire(&session_id(), None).await.unwrap();
+    let mut stream = continuation
+        .into_stream(target(8, None), response_stream(1), Soft)
+        .unwrap();
+    while stream.next().await.is_some() {}
+
+    assert_eq!(
+        coordinator.query_target(&session_id(), None).unwrap(),
+        Some(ranked_binding)
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn session_affinity_ranked_binding_rejects_mismatched_rank_dispatch() {
     let coordinator = coordinator();
     let binding = target(7, Some(2));
@@ -645,16 +717,122 @@ async fn session_affinity_ranked_binding_rejects_mismatched_rank_dispatch() {
     let initialization = coordinator.acquire(&session_id(), None).await.unwrap();
     drop(
         initialization
-            .into_stream(binding, response_stream(1))
+            .into_stream(binding, response_stream(1), Hard)
             .unwrap(),
     );
 
     let continuation = coordinator.acquire(&session_id(), None).await.unwrap();
     assert!(
         continuation
-            .into_stream(target(7, Some(3)), response_stream(1))
+            .into_stream(target(7, Some(3)), response_stream(1), Hard)
             .is_err()
     );
+    assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn soft_affinity_rebinds_after_dispatch() {
+    let coordinator = coordinator();
+    let original = target(7, Some(0));
+    let replacement = target(8, Some(1));
+    bind(&coordinator, original).await;
+
+    let failed_attempt = coordinator.acquire(&session_id(), None).await.unwrap();
+    drop(failed_attempt);
+    assert_eq!(
+        coordinator.query_target(&session_id(), None).unwrap(),
+        Some(original)
+    );
+
+    let successful_attempt = coordinator.acquire(&session_id(), None).await.unwrap();
+    let stream = successful_attempt
+        .into_stream(replacement, response_stream(1), Soft)
+        .unwrap();
+    assert_eq!(
+        coordinator.query_target(&session_id(), None).unwrap(),
+        Some(replacement)
+    );
+    drop(stream);
+}
+
+#[tokio::test(start_paused = true)]
+async fn concurrent_soft_rebind_uses_observed_version_cas() {
+    let coordinator = coordinator();
+    let original = target(7, Some(0));
+    let winner = target(8, Some(0));
+    let stale = target(9, Some(0));
+    bind(&coordinator, original).await;
+    let first = coordinator.acquire(&session_id(), None).await.unwrap();
+    let second = coordinator.acquire(&session_id(), None).await.unwrap();
+
+    let mut first_stream = first.into_stream(winner, response_stream(1), Soft).unwrap();
+    let mut second_stream = second.into_stream(stale, response_stream(1), Soft).unwrap();
+    while first_stream.next().await.is_some() {}
+    while second_stream.next().await.is_some() {}
+    assert_eq!(
+        coordinator.query_target(&session_id(), None).unwrap(),
+        Some(winner)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn replica_applies_only_newer_affinity_versions() {
+    let coordinator = coordinator();
+    let first = target(7, Some(0));
+    let newer = target(8, Some(0));
+    let stale = target(9, Some(0));
+
+    assert_eq!(
+        coordinator.apply_versioned_replica_update_for_test("ordered", first, 3, 10),
+        ReplicaApplyOutcome::Inserted
+    );
+    assert_eq!(
+        coordinator.apply_versioned_replica_update_for_test("ordered", newer, 4, 10),
+        ReplicaApplyOutcome::ReplacedNewer
+    );
+    assert_eq!(
+        coordinator.apply_versioned_replica_update_for_test("ordered", stale, 3, 11),
+        ReplicaApplyOutcome::IgnoredConflict
+    );
+    assert_eq!(
+        coordinator
+            .query_target(&SessionAffinityId::new("ordered"), None)
+            .unwrap(),
+        Some(newer)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn stale_lease_cannot_invalidate_or_refresh_newer_replica_binding() {
+    let coordinator = coordinator();
+    let original = target(7, Some(0));
+    let replacement = target(8, Some(0));
+    bind(&coordinator, original).await;
+    let stale = coordinator.acquire(&session_id(), None).await.unwrap();
+    let replacement_sequence = u64::MAX / 2;
+    coordinator.apply_versioned_replica_update_for_test(
+        session_id().as_str(),
+        replacement,
+        replacement_sequence,
+        1,
+    );
+    stale.invalidate();
+    assert_eq!(
+        coordinator.query_target(&session_id(), None).unwrap(),
+        Some(replacement)
+    );
+
+    let stale = coordinator.acquire(&session_id(), None).await.unwrap();
+    tokio::time::advance(Duration::from_secs(9)).await;
+    coordinator.apply_versioned_replica_update_for_test(
+        session_id().as_str(),
+        replacement,
+        replacement_sequence.saturating_add(1),
+        1,
+    );
+    tokio::time::advance(Duration::from_secs(9)).await;
+    drop(stale);
+    tokio::time::advance(Duration::from_secs(2)).await;
     assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
 }
 
@@ -666,7 +844,7 @@ async fn session_affinity_completion_restores_expired_remote_binding() {
     let replicated_target = target(7, Some(0));
     let operation = origin.acquire(&session_id(), None).await.unwrap();
     let stream = operation
-        .into_stream(replicated_target, response_stream(1))
+        .into_stream(replicated_target, response_stream(1), Hard)
         .unwrap();
 
     let after_dispatch = updates.recv().await.unwrap();

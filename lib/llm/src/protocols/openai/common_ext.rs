@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use validator::Validate;
 
+use crate::protocols::common::GuidedDecodingOptions;
+
 /// Common extensions for OpenAI API requests that are not part of the standard OpenAI spec
 /// but are commonly needed across different request types.
 #[derive(ToSchema, Serialize, Deserialize, Builder, Validate, Debug, Clone, Default)]
@@ -72,7 +74,6 @@ pub struct CommonExt {
     /// If specified, the output will follow the whitespace pattern. Can be a string or null.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
-    #[allow(unused)] // Not used
     pub guided_whitespace_pattern: Option<String>,
 
     /// Whether to skip special tokens in the decoded output.
@@ -109,6 +110,21 @@ pub struct CommonExt {
     #[schema(ignore)]
     #[builder(default, setter(strip_option))]
     pub continue_final_message: Option<bool>,
+}
+
+pub(crate) fn extract_guided_decoding_options(
+    request: &impl CommonExtProvider,
+) -> anyhow::Result<Option<GuidedDecodingOptions>> {
+    let guided_whitespace_pattern = request.get_guided_whitespace_pattern();
+    GuidedDecodingOptions::from_optional(
+        request.get_guided_json(),
+        request.get_guided_regex(),
+        request.get_guided_choice(),
+        request.get_guided_grammar(),
+        request.get_guided_decoding_backend(),
+        guided_whitespace_pattern.clone(),
+        None,
+    )
 }
 
 impl CommonExt {
