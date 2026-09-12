@@ -468,6 +468,7 @@ mod tests {
             )
             .unwrap(),
         );
+        let (_runtime_configs_tx, runtime_config_watch) = watch::channel(HashMap::new());
         let prefill = PrefillRouter::disabled(Arc::new(ModelManager::new()), mode, None);
         prefill.binding.store(Some(Arc::new(
             crate::kv_router::prefill_router::PrefillBinding {
@@ -484,6 +485,7 @@ mod tests {
                     name: endpoint_name.to_string(),
                 },
                 router: shared.clone(),
+                _runtime_config_watch: runtime_config_watch,
                 prefill_router_mode: mode,
             },
         )));
@@ -520,6 +522,7 @@ mod tests {
             (7, ModelRuntimeConfig::default()),
             (8, ModelRuntimeConfig::default()),
         ]));
+        let runtime_config_watch = workers_rx.clone();
         let config = KvRouterConfig {
             overlap_score_credit: 0.0,
             router_temperature: 0.0,
@@ -557,6 +560,7 @@ mod tests {
             target_id: crate::discovery::WorkerSetTargetId::Legacy(endpoint_id.clone()),
             endpoint_id,
             router: Arc::new(KvPushRouter::new(push_router, chooser.clone(), None).unwrap()),
+            _runtime_config_watch: runtime_config_watch,
             prefill_router_mode: RouterMode::KV,
         });
         (binding, chooser)
