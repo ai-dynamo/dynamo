@@ -234,6 +234,60 @@ message ObservationData
   optional TrafficMetrics traffic = 1;
   optional FpmData fpm = 2;
   optional WorkerState workers = 3;
+  optional BatchSchedulingData batch = 4;
+}
+
+// Mirrors BatchSchedulingObservation (core/types.py). Each repeated input is
+// timestamped independently because Batch Gateway, traffic, and dispatcher
+// observations may be sampled at different times. Once this message is
+// present, an absent pool_traffic or dispatcher_feedback entry means that
+// source is unknown/unusable for the pool on this tick; absence must never be
+// interpreted as numeric zero. Known zero traffic is carried explicitly in a
+// PoolTrafficDemand value.
+message BatchSchedulingData
+{
+  repeated BatchJobDemand job_demands = 1;
+  repeated PoolTrafficDemand pool_traffic = 2;
+  repeated BatchDispatcherFeedback dispatcher_feedback = 3;
+}
+
+// Mirrors BatchJobDemand (core/types.py). Raw counters are retained for audit;
+// remaining_requests is derived and validated by the core adapter.
+message BatchJobDemand
+{
+  double observed_at_s = 1;       // absolute wall-clock timestamp
+  string pool_id = 2;
+  string job_id = 3;
+  string status = 4;
+  int64 total_requests = 5;
+  int64 completed_requests = 6;
+  int64 failed_requests = 7;
+  optional double deadline_at_s = 8;  // absolute wall-clock deadline; unset = none
+  string work_class = 9;              // opaque request/workload class
+  int64 remaining_requests = 10;
+}
+
+// Online (non-batch) offered load for a pool. This is deliberately separate
+// from Batch Gateway state; safe capacity remains derived from existing
+// Planner worker/capability inputs.
+message PoolTrafficDemand
+{
+  double observed_at_s = 1;  // absolute wall-clock timestamp
+  string pool_id = 2;
+  double online_offered_rps = 3;
+}
+
+// Mirrors BatchDispatcherFeedback (core/types.py).
+message BatchDispatcherFeedback
+{
+  double observed_at_s = 1;  // absolute wall-clock timestamp
+  string pool_id = 2;
+  double observation_window_s = 3;
+  int64 queued_requests = 4;
+  int64 inflight_requests = 5;
+  double actual_dispatch_rps = 6;  // achieved batch admissions over the window
+  // Unset means no applied Planner cap was reported; 0.0 is an explicit pause.
+  optional double applied_max_admission_rps = 7;
 }
 
 // Mirrors TrafficObservation (types.py)
