@@ -57,6 +57,10 @@ spec:
           - /bin/sh
           - -lc
           env:
+          - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
           - name: KV_TRANSFER_CONFIG
             value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
           - name: NCCL_SOCKET_IFNAME
@@ -91,7 +95,7 @@ spec:
             value: /model-cache
           - name: VLLM_LOGGING_LEVEL
             value: INFO
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0
           securityContext:
             capabilities:
               add:
@@ -160,7 +164,7 @@ spec:
         imagePullSecrets:
         - name: nvcr-pull-secret
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.1
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.5.0
           securityContext:
             runAsUser: 0
           volumeMounts:
@@ -216,6 +220,11 @@ spec:
           - /bin/sh
           - -lc
           env:
+          # Use the Pod IP because hostname lookup can prefer an unreachable IPv6 address in dual-stack clusters.
+          - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
           - name: KV_TRANSFER_CONFIG
             value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
           - name: NCCL_SOCKET_IFNAME
@@ -250,7 +259,7 @@ spec:
             value: /model-cache
           - name: VLLM_LOGGING_LEVEL
             value: INFO
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0
           securityContext:
             capabilities:
               add:

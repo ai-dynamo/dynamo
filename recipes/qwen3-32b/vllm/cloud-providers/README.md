@@ -44,16 +44,14 @@ Neither path requires regeneration.
 |-------------------|-----------------|---------|
 | `deploy-aks-ib.yaml` | Azure AKS InfiniBand | `kustomize/overlays/aks-ib/` |
 | `deploy-aws-p5.48xlarge.yaml` | AWS EFA + libfabric on `p5.48xlarge`, derived from each worker's GPU count | `kustomize/overlays/aws-p5.48xlarge/` |
+| `deploy-gke-a4-dranet.yaml` | GKE A4 DRANET; GPU-aligned RDMA derived from each worker's GPU count | `kustomize/overlays/gke-a4-dranet/` |
 | `deploy-gke-roce.yaml` | GKE RoCE | `kustomize/overlays/gke-roce/` |
 | `deploy-nebius-ib.yaml` | Nebius InfiniBand | `kustomize/overlays/nebius-ib/` |
 | `deploy-nscale-ib.yaml` | Nscale InfiniBand | `kustomize/overlays/nscale-ib/` |
 
-For example, apply the GKE RoCE composition directly from its checked-in
-Kustomization:
-
-```bash
-kubectl apply -k kustomize/overlays/gke-roce -n ${NAMESPACE}
-```
+GKE A4 requires GKE Standard 1.34.1-gke.1829001 or later, Dataplane V2, and
+[managed DRANET](https://cloud.google.com/kubernetes-engine/docs/how-to/allocate-network-resources-dra).
+Custom-scheduler binders also need access to `resourceclaims/binding`.
 
 To make a local, uncommitted composition, create your own `kustomization.yaml` in
 the repository checkout or use `compose` from the repository root:

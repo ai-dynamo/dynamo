@@ -6,7 +6,7 @@
 #   scripts/kustomize-matrix.py unfold recipes/qwen3-32b/vllm/cloud-providers/.kustomize-matrix.yaml
 #   scripts/kustomize-matrix.py render recipes/qwen3-32b/vllm/cloud-providers/.kustomize-matrix.yaml
 # Inspect only this Kustomize overlay (from the repository root):
-#   kustomize build recipes/qwen3-32b/vllm/cloud-providers/kustomize/overlays/nebius-ib
+#   kustomize build recipes/qwen3-32b/vllm/cloud-providers/kustomize/overlays/gke-a4-dranet
 # You may edit a copy before applying it.
 
 # Qwen3-32B BF16 disagg, 1 prefill + 1 decode, with provider-specific RDMA in overlays.
@@ -28,6 +28,8 @@ spec:
           prometheus.io/port: "19090"
           prometheus.io/scrape: "true"
       extraPodSpec:
+        imagePullSecrets:
+        - name: nvcr-pull-secret
         mainContainer:
           args:
           - |
@@ -54,10 +56,15 @@ spec:
                 fieldPath: status.podIP
           - name: KV_TRANSFER_CONFIG
             value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
-          - name: UCX_RNDV_THRESH
-            value: "8192"
-          - name: NCCL_SOCKET_IFNAME
-            value: eth0
+          # Require reliable-connected RoCE and CUDA memory support; do not fall back to TCP or CUDA IPC.
+          - name: UCX_TLS
+            value: rc_x,rc,cuda_copy
+          - name: UCX_IB_GPU_DIRECT_RDMA
+            value: "yes"
+          - name: UCX_MAX_RNDV_RAILS
+            value: "4"
+          - name: UCX_RNDV_SCHEME
+            value: get_zcopy
           - name: NIXL_TELEMETRY_ENABLE
             value: "y"
           - name: NIXL_TELEMETRY_EXPORTER
@@ -87,43 +94,39 @@ spec:
           - name: VLLM_LOGGING_LEVEL
             value: INFO
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0
+          resources:
+            claims:
+            - name: devices
           securityContext:
+            allowPrivilegeEscalation: false
             capabilities:
               add:
               - IPC_LOCK
-              - SYS_PTRACE
-            privileged: true
+              - SYS_RESOURCE
             runAsUser: 0
           volumeMounts:
-          - mountPath: /dev/infiniband
-            name: ib
-          - mountPath: /dev/shm
-            name: shm
           - mountPath: /model-cache
             name: model-cache
           workingDir: /workspace
+        nodeSelector:
+          cloud.google.com/gke-accelerator: nvidia-b200
+        resourceClaims:
+        - name: devices
+          resourceClaimTemplateName: q32b-1p1d-cloud-provider-decodeworker-a4-devices
+        tolerations:
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
         volumes:
-        - hostPath:
-            path: /dev/infiniband
-          name: ib
-        - emptyDir:
-            medium: Memory
-            sizeLimit: 64Gi
-          name: shm
         - name: model-cache
           persistentVolumeClaim:
             claimName: model-cache
       replicas: 1
       resources:
-        limits:
-          custom:
-            rdma/ib: "1"
-          gpu: "4"
+        limits: {}
         requests:
           custom:
             ephemeral-storage: 2Gi
-            rdma/ib: "1"
-          gpu: "4"
       subComponentType: decode
     Frontend:
       componentType: frontend
@@ -131,6 +134,8 @@ spec:
       - name: HF_HOME
         value: /model-cache
       extraPodSpec:
+        imagePullSecrets:
+        - name: nvcr-pull-secret
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.5.0
           securityContext:
@@ -160,6 +165,8 @@ spec:
           prometheus.io/port: "19090"
           prometheus.io/scrape: "true"
       extraPodSpec:
+        imagePullSecrets:
+        - name: nvcr-pull-secret
         mainContainer:
           args:
           - |
@@ -186,8 +193,15 @@ spec:
                 fieldPath: status.podIP
           - name: KV_TRANSFER_CONFIG
             value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
-          - name: NCCL_SOCKET_IFNAME
-            value: eth0
+          # Require reliable-connected RoCE and CUDA memory support; do not fall back to TCP or CUDA IPC.
+          - name: UCX_TLS
+            value: rc_x,rc,cuda_copy
+          - name: UCX_IB_GPU_DIRECT_RDMA
+            value: "yes"
+          - name: UCX_MAX_RNDV_RAILS
+            value: "4"
+          - name: UCX_RNDV_SCHEME
+            value: get_zcopy
           - name: NIXL_TELEMETRY_ENABLE
             value: "y"
           - name: NIXL_TELEMETRY_EXPORTER
@@ -217,41 +231,169 @@ spec:
           - name: VLLM_LOGGING_LEVEL
             value: INFO
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0
+          resources:
+            claims:
+            - name: devices
           securityContext:
+            allowPrivilegeEscalation: false
             capabilities:
               add:
               - IPC_LOCK
-              - SYS_PTRACE
-            privileged: true
+              - SYS_RESOURCE
             runAsUser: 0
           volumeMounts:
-          - mountPath: /dev/infiniband
-            name: ib
-          - mountPath: /dev/shm
-            name: shm
           - mountPath: /model-cache
             name: model-cache
           workingDir: /workspace
+        nodeSelector:
+          cloud.google.com/gke-accelerator: nvidia-b200
+        resourceClaims:
+        - name: devices
+          resourceClaimTemplateName: q32b-1p1d-cloud-provider-prefillworker-a4-devices
+        tolerations:
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
         volumes:
-        - hostPath:
-            path: /dev/infiniband
-          name: ib
-        - emptyDir:
-            medium: Memory
-            sizeLimit: 64Gi
-          name: shm
         - name: model-cache
           persistentVolumeClaim:
             claimName: model-cache
       replicas: 1
       resources:
-        limits:
-          custom:
-            rdma/ib: "1"
-          gpu: "4"
+        limits: {}
         requests:
           custom:
             ephemeral-storage: 2Gi
-            rdma/ib: "1"
-          gpu: "4"
       subComponentType: prefill
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: q32b-1p1d-cloud-provider-decodeworker-a4-devices
+spec:
+  spec:
+    devices:
+      constraints:
+      - matchAttribute: resource.kubernetes.io/pcieRoot
+        requests:
+        - gpu-0
+        - rdma-0
+      - matchAttribute: resource.kubernetes.io/pcieRoot
+        requests:
+        - gpu-1
+        - rdma-1
+      - matchAttribute: resource.kubernetes.io/pcieRoot
+        requests:
+        - gpu-2
+        - rdma-2
+      - matchAttribute: resource.kubernetes.io/pcieRoot
+        requests:
+        - gpu-3
+        - rdma-3
+      requests:
+      - exactly:
+          allocationMode: ExactCount
+          count: 1
+          deviceClassName: gpu.nvidia.com
+        name: gpu-0
+      - exactly:
+          allocationMode: ExactCount
+          count: 1
+          deviceClassName: mrdma.google.com
+        name: rdma-0
+      - exactly:
+          allocationMode: ExactCount
+          count: 1
+          deviceClassName: gpu.nvidia.com
+        name: gpu-1
+      - exactly:
+          allocationMode: ExactCount
+          count: 1
+          deviceClassName: mrdma.google.com
+        name: rdma-1
+      - exactly:
+          allocationMode: ExactCount
+          count: 1
+          deviceClassName: gpu.nvidia.com
+        name: gpu-2
+      - exactly:
+          allocationMode: ExactCount
+          count: 1
+          deviceClassName: mrdma.google.com
+        name: rdma-2
+      - exactly:
+          allocationMode: ExactCount
+          count: 1
+          deviceClassName: gpu.nvidia.com
+        name: gpu-3
+      - exactly:
+          allocationMode: ExactCount
+          count: 1
+          deviceClassName: mrdma.google.com
+        name: rdma-3
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: q32b-1p1d-cloud-provider-prefillworker-a4-devices
+spec:
+  spec:
+    devices:
+      constraints:
+      - matchAttribute: resource.kubernetes.io/pcieRoot
+        requests:
+        - gpu-0
+        - rdma-0
+      - matchAttribute: resource.kubernetes.io/pcieRoot
+        requests:
+        - gpu-1
+        - rdma-1
+      - matchAttribute: resource.kubernetes.io/pcieRoot
+        requests:
+        - gpu-2
+        - rdma-2
+      - matchAttribute: resource.kubernetes.io/pcieRoot
+        requests:
+        - gpu-3
+        - rdma-3
+      requests:
+      - exactly:
+          allocationMode: ExactCount
+          count: 1
+          deviceClassName: gpu.nvidia.com
+        name: gpu-0
+      - exactly:
+          allocationMode: ExactCount
+          count: 1
+          deviceClassName: mrdma.google.com
+        name: rdma-0
+      - exactly:
+          allocationMode: ExactCount
+          count: 1
+          deviceClassName: gpu.nvidia.com
+        name: gpu-1
+      - exactly:
+          allocationMode: ExactCount
+          count: 1
+          deviceClassName: mrdma.google.com
+        name: rdma-1
+      - exactly:
+          allocationMode: ExactCount
+          count: 1
+          deviceClassName: gpu.nvidia.com
+        name: gpu-2
+      - exactly:
+          allocationMode: ExactCount
+          count: 1
+          deviceClassName: mrdma.google.com
+        name: rdma-2
+      - exactly:
+          allocationMode: ExactCount
+          count: 1
+          deviceClassName: gpu.nvidia.com
+        name: gpu-3
+      - exactly:
+          allocationMode: ExactCount
+          count: 1
+          deviceClassName: mrdma.google.com
+        name: rdma-3
