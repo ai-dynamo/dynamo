@@ -124,6 +124,7 @@ where
 
     let single_chunk_stream = async move {
         let chunks: Vec<_> = stream.collect().await;
+        let error_chunk = chunks.iter().find(|chunk| chunk.error.is_some()).cloned();
         let chunks_stream = futures::stream::iter(chunks);
         let parsing_options = ParsingOptions::default();
 
@@ -134,12 +135,14 @@ where
             }
             Err(e) => {
                 tracing::warn!("fold aggregation failed: {e}");
-                // Drop tx without sending so the request payload future resolves to None.
-                // The client still receives a (best-effort) empty fallback chunk so
-                // the HTTP response shape stays valid; the combined request payload record is
-                // emitted with `response = None`.
                 drop(tx);
-                let fallback = NvCreateChatCompletionResponse {
+                if let Some(error) = error_chunk {
+                    return Box::pin(futures::stream::once(async move { error })) as PayloadStream;
+                }
+
+                // Preserve the existing empty-stream behavior for control requests that
+                // intentionally do not produce a backend response.
+                final_response_to_one_chunk_stream(NvCreateChatCompletionResponse {
                     inner: dynamo_protocols::types::CreateChatCompletionResponse {
                         id: String::new(),
                         created: 0,
@@ -151,8 +154,7 @@ where
                         service_tier: None,
                     },
                     nvext: None,
-                };
-                final_response_to_one_chunk_stream(fallback)
+                })
             }
         }
     };
@@ -263,6 +265,7 @@ mod tests {
         ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionStreamResponseDelta,
         FinishReason, FunctionCallStream, FunctionType, Role,
     };
+    use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
     use futures::StreamExt;
     use futures::stream;
 
@@ -617,6 +620,33 @@ mod tests {
             final_resp.is_none(),
             "Empty stream should resolve request payload future to None, not a fallback record"
         );
+    }
+
+    #[tokio::test]
+    async fn test_fold_preserves_backend_error_instead_of_returning_empty_choices() {
+        let error = Annotated {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(
+                DynamoError::builder()
+                    .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                    .message("maximum context length exceeded")
+                    .build(),
+            ),
+        };
+        let (folded, future) = fold_aggregate_with_future(stream::iter([error]));
+
+        let results: Vec<_> = folded.collect().await;
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].data.is_none());
+        assert_eq!(
+            results[0].error.as_ref().map(DynamoError::error_type),
+            Some(ErrorType::Backend(BackendError::InvalidArgument))
+        );
+        assert!(future.await.is_none());
     }
 
     #[tokio::test]
