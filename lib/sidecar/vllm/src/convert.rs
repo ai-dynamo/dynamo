@@ -146,6 +146,7 @@ pub(crate) fn build_generate_request(
         priority,
         session_id: None,
         media,
+        lora_name: String::new(),
         native_sampling_params_json,
     })
 }

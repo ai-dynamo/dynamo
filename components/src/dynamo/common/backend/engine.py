@@ -132,6 +132,7 @@ class LlmRegistration:
     bootstrap_host: Optional[str] = None
     bootstrap_port: Optional[int] = None
     enable_eagle: bool = False
+    max_gpu_lora_count: Optional[int] = None
 
 
 @dataclass

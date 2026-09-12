@@ -230,6 +230,7 @@ impl LlmRegistration {
         bootstrap_host = None,
         bootstrap_port = None,
         enable_eagle = false,
+        max_gpu_lora_count = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -243,6 +244,7 @@ impl LlmRegistration {
         bootstrap_host: Option<String>,
         bootstrap_port: Option<u16>,
         enable_eagle: bool,
+        max_gpu_lora_count: Option<u32>,
     ) -> Self {
         Self {
             inner: RsLlmRegistration {
@@ -251,6 +253,7 @@ impl LlmRegistration {
                 total_kv_blocks,
                 max_num_seqs,
                 max_num_batched_tokens,
+                max_gpu_lora_count,
                 data_parallel_size,
                 data_parallel_start_rank,
                 enable_eagle,
@@ -279,6 +282,10 @@ impl LlmRegistration {
     #[getter]
     fn max_num_batched_tokens(&self) -> Option<u64> {
         self.inner.max_num_batched_tokens
+    }
+    #[getter]
+    fn max_gpu_lora_count(&self) -> Option<u32> {
+        self.inner.max_gpu_lora_count
     }
     #[getter]
     fn data_parallel_size(&self) -> Option<u32> {
@@ -896,6 +903,7 @@ impl PyEngineCore {
                     total_kv_blocks: opt_attr::<u64>(&v, "total_kv_blocks")?,
                     max_num_seqs: opt_attr::<u64>(&v, "max_num_seqs")?,
                     max_num_batched_tokens: opt_attr::<u64>(&v, "max_num_batched_tokens")?,
+                    max_gpu_lora_count: opt_attr::<u32>(&v, "max_gpu_lora_count")?,
                     data_parallel_size: opt_attr::<u32>(&v, "data_parallel_size")?,
                     data_parallel_start_rank: opt_attr::<u32>(&v, "data_parallel_start_rank")?,
                     enable_eagle: opt_attr::<bool>(&v, "enable_eagle")?.unwrap_or(false),
