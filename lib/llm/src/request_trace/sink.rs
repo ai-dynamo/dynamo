@@ -416,10 +416,14 @@ impl ActiveInput {
     /// workers and wait for them to drain. Returns `None` while another input
     /// is still running, and when no workers were started.
     pub async fn release_and_drain(self) -> Option<TraceShutdownReport> {
+        // Serialize the final decrement with worker creation. Otherwise a new
+        // input could reuse the old workers immediately before this last input
+        // takes them out of the slot to drain.
+        let _lifecycle = WORKER_LIFECYCLE.lock().await;
         if !self.release() {
             return None;
         }
-        shutdown_workers().await
+        shutdown_workers_locked().await
     }
 
     /// Release the registration, reporting whether it was the last one. `Drop`
@@ -434,6 +438,13 @@ impl ActiveInput {
 
 impl Drop for ActiveInput {
     fn drop(&mut self) {
+        // Take the worker slot before releasing the registration. A new input
+        // either increments the count first (so this is not the last guard),
+        // or waits for this cancellation and then retires the cancelled
+        // generation before it reuses the slot.
+        let slot = WORKERS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if ACTIVE_INPUTS.fetch_sub(1, Ordering::AcqRel) != 1 {
             return;
         }
@@ -448,7 +459,8 @@ impl Drop for ActiveInput {
         // before the process exits, so say so rather than fail quietly. There
         // is nothing to say when no workers were running, which is every run
         // with request tracing switched off.
-        if cancel_workers() {
+        if let Some(workers) = slot.as_ref() {
+            workers.token.cancel();
             tracing::warn!(
                 "request trace sinks were cancelled without a bounded drain because the last \
                  input ended early; records still queued may be lost if the process exits \
@@ -458,28 +470,15 @@ impl Drop for ActiveInput {
     }
 }
 
-/// Cancel the retained workers without waiting for them, so they begin their
-/// own teardown, and report whether there were any. Unlike [`shutdown_workers`]
-/// this does not take the workers out of the static: a later bounded drain, if
-/// one happens, can still join them.
-fn cancel_workers() -> bool {
-    let slot = WORKERS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    match slot.as_ref() {
-        Some(workers) => {
-            workers.token.cancel();
-            true
-        }
-        None => false,
-    }
-}
-
 /// Cancel the retained workers and wait for them to drain, bounded by
 /// [`SHUTDOWN_TIMEOUT`]. Returns `None` when no workers were started, which is
 /// the case whenever request tracing is disabled.
 pub async fn shutdown_workers() -> Option<TraceShutdownReport> {
     let _lifecycle = WORKER_LIFECYCLE.lock().await;
+    shutdown_workers_locked().await
+}
+
+async fn shutdown_workers_locked() -> Option<TraceShutdownReport> {
     let workers = {
         let mut slot = WORKERS
             .lock()
