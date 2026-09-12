@@ -70,6 +70,11 @@ func GetK8sDiscoveryRole(dgdName string, namespace string) *rbacv1.Role {
 				Verbs:     []string{"get", "list", "watch"},
 			},
 			{
+				APIGroups: []string{"coordination.k8s.io"},
+				Resources: []string{"leases"},
+				Verbs:     []string{"get"},
+			},
+			{
 				APIGroups: []string{apiGroupNvidia},
 				Resources: []string{"dynamoworkermetadatas"},
 				Verbs:     []string{"create", "get", "list", "watch", "update", "patch", "delete"},
