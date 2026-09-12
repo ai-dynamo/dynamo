@@ -475,10 +475,8 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             .to_string();
         let member_keys = group.cohorts[&mdc_checksum].clone();
         let members = self.members(&member_keys);
-        let fingerprint = cohort_fingerprint(
-            &mdc_checksum,
-            cohort_video_contract(&members).as_deref(),
-        );
+        let fingerprint =
+            cohort_fingerprint(&mdc_checksum, cohort_video_contract(&members).as_deref());
         let fingerprint_changed =
             status_checksum(&old_status).is_some_and(|previous| previous != fingerprint);
         let mut retained_commit = status_committed_members(&old_status).cloned();
@@ -513,7 +511,8 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         if !matches!(
             &old_status,
             GroupStatus::Ready { .. } | GroupStatus::BlockedReady { .. }
-        ) || (fingerprint_changed && retained_commit.is_some()) {
+        ) || (fingerprint_changed && retained_commit.is_some())
+        {
             group.admission_tx.send_replace(admitted);
         }
 
@@ -707,7 +706,9 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 continue;
             };
             let committed_members = match &group.status {
-                GroupStatus::Queued { committed_members, .. } => committed_members.clone(),
+                GroupStatus::Queued {
+                    committed_members, ..
+                } => committed_members.clone(),
                 _ => unreachable!("queued status was checked above"),
             };
             let Some(mdc_checksum) = group.selected_checksum().map(str::to_string) else {
@@ -766,9 +767,9 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 });
                 let outcome = match future.catch_unwind().await {
                     Ok(outcome) => outcome,
-                    Err(_) => BuildOutcome::Failed(anyhow::anyhow!(
-                        "model materialization panicked"
-                    )),
+                    Err(_) => {
+                        BuildOutcome::Failed(anyhow::anyhow!("model materialization panicked"))
+                    }
                 };
                 BuildResult {
                     spec: task_spec,
@@ -805,7 +806,9 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                     ) == result.spec.fingerprint
                 });
         let committed_members = match &group.status {
-            GroupStatus::Building { committed_members, .. } => committed_members.clone(),
+            GroupStatus::Building {
+                committed_members, ..
+            } => committed_members.clone(),
             _ => None,
         };
         if !is_current {
@@ -830,7 +833,8 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                     self.host
                         .replace_prepared_group(&result.spec, prepared, &members, &adapters)
                 } else {
-                    self.host.commit_group(&result.spec, prepared, &members, &adapters)
+                    self.host
+                        .commit_group(&result.spec, prepared, &members, &adapters)
                 };
                 match commit_result {
                     Ok(()) => {
@@ -1053,12 +1057,24 @@ fn status_has_commit(status: &GroupStatus) -> bool {
 
 fn status_committed_members(status: &GroupStatus) -> Option<&BTreeSet<String>> {
     match status {
-        GroupStatus::Ready { committed_members, .. }
-        | GroupStatus::BlockedReady { committed_members, .. } => Some(committed_members),
-        GroupStatus::Queued { committed_members, .. }
-        | GroupStatus::Building { committed_members, .. }
-        | GroupStatus::Retrying { committed_members, .. }
-        | GroupStatus::Blocked { committed_members, .. } => committed_members.as_ref(),
+        GroupStatus::Ready {
+            committed_members, ..
+        }
+        | GroupStatus::BlockedReady {
+            committed_members, ..
+        } => Some(committed_members),
+        GroupStatus::Queued {
+            committed_members, ..
+        }
+        | GroupStatus::Building {
+            committed_members, ..
+        }
+        | GroupStatus::Retrying {
+            committed_members, ..
+        }
+        | GroupStatus::Blocked {
+            committed_members, ..
+        } => committed_members.as_ref(),
         GroupStatus::Idle => None,
     }
 }
