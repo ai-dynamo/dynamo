@@ -913,18 +913,29 @@ where
     ) -> impl std::future::Future<
         Output = std::result::Result<(EncodedResponseFrame, ResponseFrameKind), PipelineError>,
     > + Send {
-        async move {
-            let frame = self
-                .encode_response(payload_codec, response, complete_final)
-                .await?;
-            let kind = if frame.is_error {
-                ResponseFrameKind::EngineError
-            } else {
-                ResponseFrameKind::Data
-            };
-            Ok((frame, kind))
-        }
+        encode_response_classified_default(self, payload_codec, response, complete_final)
     }
+}
+
+async fn encode_response_classified_default<U, Adapter>(
+    adapter: &Adapter,
+    payload_codec: RequestPlanePayloadCodec,
+    response: Option<U>,
+    complete_final: bool,
+) -> std::result::Result<(EncodedResponseFrame, ResponseFrameKind), PipelineError>
+where
+    U: Data,
+    Adapter: IngressResponseEncoder<U> + ?Sized,
+{
+    let frame = adapter
+        .encode_response(payload_codec, response, complete_final)
+        .await?;
+    let kind = if frame.is_error {
+        ResponseFrameKind::EngineError
+    } else {
+        ResponseFrameKind::Data
+    };
+    Ok((frame, kind))
 }
 
 /// Complete request/response payload adapter for an ingress engine.
