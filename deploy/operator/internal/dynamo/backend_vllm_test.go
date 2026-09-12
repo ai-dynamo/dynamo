@@ -985,6 +985,19 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 		}
 	}
 
+	rayMultinodePodSpec := func(image, leaderHost string) *corev1.PodSpec {
+		return &corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name:    "main",
+					Image:   image,
+					Command: []string{"/bin/sh", "-c"},
+					Args:    []string{fmt.Sprintf("ray start --address=%s:%s --block", leaderHost, VLLMPort)},
+				},
+			},
+		}
+	}
+
 	tests := []struct {
 		name                string
 		numberOfNodes       int32
@@ -993,8 +1006,10 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 		multinodeDeployer   MultinodeDeployer
 		initialPodSpec      *corev1.PodSpec
 		expectInitContainer bool
+		expectedInitName    string
 		expectedInitImage   string
 		expectedLeaderHost  string
+		expectedPort        string
 	}{
 		{
 			name:                "mp worker with Grove deployer injects init container",
@@ -1003,8 +1018,10 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 			multinodeDeployer:   &GroveMultinodeDeployer{},
 			initialPodSpec:      mpMultinodePodSpec("vllm:latest"),
 			expectInitContainer: true,
+			expectedInitName:    "wait-for-leader-mp",
 			expectedInitImage:   "vllm:latest",
 			expectedLeaderHost:  "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}",
+			expectedPort:        commonconsts.VLLMMpMasterPort,
 		},
 		{
 			name:                "mp worker with LWS deployer injects init container",
@@ -1013,8 +1030,65 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 			multinodeDeployer:   &LWSMultinodeDeployer{},
 			initialPodSpec:      mpMultinodePodSpec("vllm:v2"),
 			expectInitContainer: true,
+			expectedInitName:    "wait-for-leader-mp",
 			expectedInitImage:   "vllm:v2",
 			expectedLeaderHost:  "${LWS_LEADER_ADDRESS}",
+			expectedPort:        commonconsts.VLLMMpMasterPort,
+		},
+		{
+			// LWS-vs-Grove hostname expansion is already exercised by the mp worker
+			// with LWS deployer case above, and the Ray-command-matching logic itself
+			// (waitForLeaderPortAndName) takes an already-resolved leaderHostname and
+			// does not branch on which deployer produced it -- so a Grove-deployer Ray
+			// worker plus an LWS-deployer mp worker together cover both dimensions
+			// without a redundant LWS+Ray combination.
+			//
+			// Leader vs. worker is also not Ray/mp-specific: waitForLeaderPortAndName
+			// returns before inspecting the container command whenever role != RoleWorker,
+			// so the existing "mp leader does not inject init container" case below
+			// already covers that guard for any command shape, Ray included.
+			name:                "plain Ray TP/PP worker with Grove deployer injects init container on the Ray port",
+			numberOfNodes:       2,
+			role:                RoleWorker,
+			multinodeDeployer:   &GroveMultinodeDeployer{},
+			initialPodSpec:      rayMultinodePodSpec("vllm:ray", "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE)"),
+			expectInitContainer: true,
+			expectedInitName:    "wait-for-leader-ray",
+			expectedInitImage:   "vllm:ray",
+			expectedLeaderHost:  "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}",
+			expectedPort:        VLLMPort,
+		},
+		{
+			// A hand-authored or externally-addressed Ray worker matches the same
+			// shape (single-arg "ray start --address=...:PORT --block" under
+			// /bin/sh -c) but joins a host the operator did not derive from this
+			// deployer/service. Injecting the wait-for-leader-ray init container
+			// here would make it wait on the wrong hostname and never succeed.
+			name:                "Ray worker joining a custom/external address does not inject init container",
+			numberOfNodes:       2,
+			role:                RoleWorker,
+			multinodeDeployer:   &GroveMultinodeDeployer{},
+			initialPodSpec:      rayMultinodePodSpec("vllm:ray-external", "external-ray-head.example.com"),
+			expectInitContainer: false,
+		},
+		{
+			name:              "elastic-EP Ray worker (own leader health-gate) does not get a second init container",
+			numberOfNodes:     2,
+			role:              RoleWorker,
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialPodSpec: &corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:    "main",
+						Image:   "vllm:elastic-ep",
+						Command: []string{"/bin/sh", "-c"},
+						Args: []string{fmt.Sprintf(
+							"i=0; until python3 -c \"import urllib.request\" 2>/dev/null; do i=$((i+1)); sleep 15; done && ray start --address=leader:%s --block",
+							VLLMPort)},
+					},
+				},
+			},
+			expectInitContainer: false,
 		},
 		{
 			name:              "mp worker with executor flag in command injects init container",
@@ -1031,8 +1105,10 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 				},
 			},
 			expectInitContainer: true,
+			expectedInitName:    "wait-for-leader-mp",
 			expectedInitImage:   "vllm:command",
 			expectedLeaderHost:  "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}",
+			expectedPort:        commonconsts.VLLMMpMasterPort,
 		},
 		{
 			name:              "mp worker with shell-form command injects init container",
@@ -1053,8 +1129,10 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 				},
 			},
 			expectInitContainer: true,
+			expectedInitName:    "wait-for-leader-mp",
 			expectedInitImage:   "vllm:shell-command",
 			expectedLeaderHost:  "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}",
+			expectedPort:        commonconsts.VLLMMpMasterPort,
 		},
 		{
 			name:                "mp leader does not inject init container",
@@ -1065,6 +1143,10 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 			expectInitContainer: false,
 		},
 		{
+			// Covers the same worker/no-match/no-injection outcome as the
+			// external-address and elastic-EP Ray cases above, through the mp check
+			// instead of the Ray one -- no separate contract beyond that existing
+			// non-injection coverage.
 			name:          "data parallel worker with mp origin does not inject init container",
 			numberOfNodes: 2,
 			role:          RoleWorker,
@@ -1075,23 +1157,6 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 			},
 			multinodeDeployer:   &LWSMultinodeDeployer{},
 			initialPodSpec:      dpMultinodePodSpec("vllm:dp"),
-			expectInitContainer: false,
-		},
-		{
-			name:              "non-mp worker command does not inject init container",
-			numberOfNodes:     2,
-			role:              RoleWorker,
-			multinodeDeployer: &GroveMultinodeDeployer{},
-			initialPodSpec: &corev1.PodSpec{
-				Containers: []corev1.Container{
-					{
-						Name:    "main",
-						Image:   "vllm:latest",
-						Command: []string{"/bin/sh", "-c"},
-						Args:    []string{"ray start --address=leader:6379 --block"},
-					},
-				},
-			},
 			expectInitContainer: false,
 		},
 		{
@@ -1122,8 +1187,10 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 				return podSpec
 			}(),
 			expectInitContainer: true,
+			expectedInitName:    "wait-for-leader-mp",
 			expectedInitImage:   "vllm:latest",
 			expectedLeaderHost:  "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}",
+			expectedPort:        commonconsts.VLLMMpMasterPort,
 		},
 	}
 
@@ -1140,12 +1207,12 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 				g.Expect(tt.initialPodSpec.Volumes).To(gomega.HaveLen(initialVolCount + 1))
 
 				injected := tt.initialPodSpec.InitContainers[len(tt.initialPodSpec.InitContainers)-1]
-				g.Expect(injected.Name).To(gomega.Equal("wait-for-leader-mp"))
+				g.Expect(injected.Name).To(gomega.Equal(tt.expectedInitName))
 				g.Expect(injected.Image).To(gomega.Equal(tt.expectedInitImage))
 
 				expectedCmd := fmt.Sprintf(
 					`export LEADER_HOST="%s" LEADER_PORT="%s" && exec python3 /scripts/wait-for-leader.py`,
-					tt.expectedLeaderHost, commonconsts.VLLMMpMasterPort)
+					tt.expectedLeaderHost, tt.expectedPort)
 				g.Expect(injected.Command).To(gomega.Equal([]string{"sh", "-c", expectedCmd}))
 				g.Expect(injected.Env).To(gomega.BeEmpty())
 
