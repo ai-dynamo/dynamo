@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 from urllib.parse import urlparse
 
-import httpx
+import aiohttp
 import torch
 from safetensors.torch import load as safetensors_load
 from safetensors.torch import load_file as safetensors_load_file
@@ -192,7 +192,7 @@ class MultimodalRequestProcessor:
             return next(iter(data.values()))
         return data
 
-    def load_tensor_from_path_or_url(
+    async def load_tensor_from_path_or_url(
         self, path: str
     ) -> "torch.Tensor | Dict[str, torch.Tensor]":
         """Load tensors from a local .safetensors path or URL.
@@ -215,8 +215,13 @@ class MultimodalRequestProcessor:
             if parsed.scheme not in ("http", "https"):
                 raise RuntimeError(f"Unsupported URL scheme: {parsed.scheme}")
             try:
-                with httpx.Client(timeout=300.0) as client:
-                    with client.stream("GET", path) as resp:
+                timeout = aiohttp.ClientTimeout(total=300.0)
+                # trust_env=True honors HTTP_PROXY / HTTPS_PROXY / NO_PROXY, which
+                # aiohttp ignores by default.
+                async with aiohttp.ClientSession(
+                    timeout=timeout, trust_env=True
+                ) as client:
+                    async with client.get(path) as resp:
                         resp.raise_for_status()
                         content_length = resp.headers.get("content-length")
                         if (
@@ -230,7 +235,7 @@ class MultimodalRequestProcessor:
                             )
                         chunks = []
                         downloaded = 0
-                        for chunk in resp.iter_bytes():
+                        async for chunk in resp.content.iter_chunked(1 << 20):
                             downloaded += len(chunk)
                             if downloaded > self.max_file_size_bytes:
                                 raise RuntimeError(
@@ -240,8 +245,8 @@ class MultimodalRequestProcessor:
                                 )
                             chunks.append(chunk)
                         content = b"".join(chunks)
-                    data = safetensors_load(content)
-                    return self._unwrap_safetensors(data)
+                data = safetensors_load(content)
+                return self._unwrap_safetensors(data)
             except RuntimeError:
                 raise
             except Exception as e:
@@ -454,7 +459,7 @@ class MultimodalRequestProcessor:
                 if embedding_paths:
                     try:
                         raw_loaded = [
-                            self.load_tensor_from_path_or_url(path)
+                            await self.load_tensor_from_path_or_url(path)
                             for path in embedding_paths
                         ]
                         loaded_embeddings = []
