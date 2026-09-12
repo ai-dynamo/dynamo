@@ -18,8 +18,10 @@ const (
 )
 
 // applyVLLMOverrides injects vLLM-specific env vars into all engine containers.
-// Port staggering (NIXL side channel, KV event, master port) prevents collisions
-// between engines sharing the same pod network namespace.
+// Port staggering (NIXL side channel, master port) prevents collisions between
+// engines sharing the same pod network namespace. The KV event port is not
+// staggered here: vLLM takes it from --kv-events-config, which the operator
+// does not set.
 // For multinode deployments, it also injects NNODES so engines know the group size.
 func applyVLLMOverrides(podSpec *corev1.PodSpec, numberOfNodes int32) {
 	for i := range podSpec.Containers {
@@ -33,7 +35,6 @@ func applyVLLMOverrides(podSpec *corev1.PodSpec, numberOfNodes int32) {
 		c.Env = append(c.Env,
 			corev1.EnvVar{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"},
 			corev1.EnvVar{Name: "VLLM_NIXL_SIDE_CHANNEL_PORT", Value: strconv.Itoa(5600 + engineID)},
-			corev1.EnvVar{Name: "DYN_VLLM_KV_EVENT_PORT", Value: strconv.Itoa(20080 + engineID)},
 		)
 
 		// Stagger --master-port for TP so each engine group uses a distinct

@@ -643,6 +643,8 @@ func TestBuildFailoverPod_EngineEnvVars(t *testing.T) {
 		assert.False(t, hasOldHealth, "engine-%d should not have DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", i)
 		_, hasHealthCheck := env["DYN_HEALTH_CHECK_ENABLED"]
 		assert.False(t, hasHealthCheck, "engine-%d should not have DYN_HEALTH_CHECK_ENABLED", i)
+		_, hasKVEventPort := env["DYN_VLLM_KV_EVENT_PORT"]
+		assert.False(t, hasKVEventPort, "engine-%d should not have DYN_VLLM_KV_EVENT_PORT", i)
 	}
 }
 
