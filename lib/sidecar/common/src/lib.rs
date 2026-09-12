@@ -8,6 +8,16 @@ mod endpoint;
 mod error;
 mod transport;
 
+#[cfg(feature = "tonic-v14")]
+pub mod v14 {
+    use tonic_v14 as tonic;
+
+    pub use crate::error::status_to_dynamo_v14 as status_to_dynamo;
+
+    // Keep connection policy identical across Tonic versions.
+    include!("transport.rs");
+}
+
 pub use args::{GrpcTransportArgs, GrpcTransportConfig, SidecarArgs};
 pub use endpoint::{GrpcEndpoint, HttpEndpoint};
 pub use error::{

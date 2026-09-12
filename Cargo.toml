@@ -195,6 +195,11 @@ prost-types = { version = "0.13.5" }
 tonic = { version = "0.13.1" }
 tonic-health = { version = "0.13.1" }
 tonic-build = { version = "0.13.1" }
+# vllm-proto exposes 0.14 types; other generated bindings still use 0.13.
+prost-types-v14 = { package = "prost-types", version = "0.14.3" }
+tonic-v14 = { package = "tonic", version = "0.14.6" }
+tonic-health-v14 = { package = "tonic-health", version = "0.14.6" }
+vllm-proto = { version = "=0.1.0" }
 kube = { version = "2.0.1", default-features = false, features = ["client", "rustls-tls", "aws-lc-rs", "runtime"] }
 k8s-openapi = { version = "0.26.0", features = ["v1_32"] }
 rcgen = { version = "0.13" }

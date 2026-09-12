@@ -39,7 +39,7 @@ spec:
       spec:
         # vllm-engine as a native sidecar (initContainer, restartPolicy: Always):
         # it starts before `main` and stops after it. Stock multi-arch vLLM image
-        # (v0.28.0 ships vllm-rs; its gRPC matches the sidecar's vendored proto).
+        # (v0.28.0 ships vllm-rs; its gRPC matches the sidecar's pinned vllm-proto crate).
         initContainers:
         - name: vllm-engine
           image: vllm/vllm-openai:v0.28.0

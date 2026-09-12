@@ -27,9 +27,14 @@ pub(crate) fn build_generate_request(
     let request = normalize_response_options(request)?;
     validate_request(&request, mode)?;
     validate_multimodal_cache_uuids(&request)?;
-    let mut native_sampling_params_json = native_sampling_params_json(&request)?;
-    if mode.is_prefill() || mode.is_encode() {
-        native_sampling_params_json.clear();
+    // vllm-proto 0.1.0 cannot represent native sampling JSON. Never silently
+    // discard it on workers that generate tokens. Prefill/encode intentionally
+    // use the canonical one-token request instead of decode sampling controls.
+    if !mode.is_prefill() && !mode.is_encode() && vllm_tito_sampling(&request.extra_args)?.is_some()
+    {
+        return Err(client::invalid_argument(
+            "native /inference/v1/generate sampling is not supported by vllm-proto 0.1.0; use the chat/completions API",
+        ));
     }
 
     let has_media = request
@@ -146,7 +151,7 @@ pub(crate) fn build_generate_request(
         priority,
         session_id: None,
         media,
-        native_sampling_params_json,
+        lora_name: String::new(),
     })
 }
 
@@ -197,95 +202,6 @@ pub(crate) fn normalize_response_options(
         extra.insert("kv_transfer_params".to_string(), legacy_kv_transfer);
     }
     Ok(request)
-}
-
-fn native_sampling_params_json(request: &PreprocessedRequest) -> Result<Vec<u8>, DynamoError> {
-    let Some(mut native) = vllm_tito_sampling(&request.extra_args)?.cloned() else {
-        return Ok(Vec::new());
-    };
-    macro_rules! overlay {
-        ($name:literal, $value:expr) => {
-            if let Some(value) = $value {
-                native.insert(
-                    $name.to_string(),
-                    serde_json::to_value(value).map_err(|error| {
-                        client::invalid_argument(format!(
-                            "failed to serialize canonical sampling_params.{}: {error}",
-                            $name
-                        ))
-                    })?,
-                );
-            }
-        };
-    }
-
-    let sampling = &request.sampling_options;
-    overlay!("temperature", sampling.temperature);
-    overlay!("top_p", sampling.top_p);
-    overlay!("min_p", sampling.min_p);
-    overlay!("seed", sampling.seed);
-    overlay!("presence_penalty", sampling.presence_penalty);
-    overlay!("frequency_penalty", sampling.frequency_penalty);
-    overlay!("repetition_penalty", sampling.repetition_penalty);
-    overlay!(
-        "include_stop_str_in_output",
-        sampling.include_stop_str_in_output
-    );
-    if let Some(top_k) = sampling.top_k {
-        overlay!("top_k", Some(if top_k == -1 { 0 } else { top_k }));
-    }
-
-    let stopping = &request.stop_conditions;
-    overlay!("max_tokens", stopping.max_tokens);
-    overlay!("min_tokens", stopping.min_tokens);
-    overlay!("ignore_eos", stopping.ignore_eos);
-    if stopping.stop_token_ids.is_some() || stopping.stop_token_ids_hidden.is_some() {
-        overlay!(
-            "stop_token_ids",
-            Some(stop_token_ids(
-                stopping.stop_token_ids.clone(),
-                stopping.stop_token_ids_hidden.clone(),
-            ))
-        );
-    }
-
-    let output = &request.output_options;
-    if native
-        .get("logprob_token_ids")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|ids| !ids.is_empty())
-    {
-        native.remove("logprobs");
-    } else {
-        overlay!("logprobs", output.logprobs.map(native_logprob_count));
-    }
-    overlay!(
-        "prompt_logprobs",
-        output.prompt_logprobs.map(native_logprob_count)
-    );
-    overlay!("skip_special_tokens", output.skip_special_tokens);
-    let extra = request
-        .extra_args
-        .as_ref()
-        .and_then(serde_json::Value::as_object);
-    overlay!(
-        "skip_reading_prefix_cache",
-        bool_extra(extra, "skip_reading_prefix_cache")?
-    );
-
-    if native
-        .get("return_token_ids")
-        .is_some_and(|value| value != &serde_json::Value::Bool(true))
-    {
-        return Err(client::invalid_argument(
-            "extra_args.vllm_tito.sampling_params.return_token_ids must be true",
-        ));
-    }
-    serde_json::to_vec(&native).map_err(|error| {
-        client::invalid_argument(format!(
-            "extra_args.vllm_tito.sampling_params is invalid: {error}"
-        ))
-    })
 }
 
 fn vllm_tito_sampling(
@@ -343,14 +259,6 @@ fn legacy_logprob_count(
                 "extra_args.vllm_tito.sampling_params.{field} must be non-negative or -1"
             ))),
         },
-    }
-}
-
-fn native_logprob_count(value: u32) -> i64 {
-    if value == u32::MAX {
-        -1
-    } else {
-        i64::from(value)
     }
 }
 
