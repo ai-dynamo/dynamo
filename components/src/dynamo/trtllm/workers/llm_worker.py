@@ -14,6 +14,7 @@ import os
 import sys
 from typing import Any, Optional
 
+import yaml
 from huggingface_hub import try_to_load_from_cache
 from huggingface_hub.utils import HFValidationError
 from prometheus_client import REGISTRY
@@ -78,6 +79,7 @@ from dynamo.trtllm.utils.trtllm_utils import (
     deep_update,
     get_spec_decode_runtime_data,
     publish_trtllm_token_budget,
+    warn_override_collisions,
 )
 
 try:
@@ -191,23 +193,6 @@ def build_kv_connector_config(config: Config):
             logging.error(f"Invalid connector: {config.connector[0]}")
             sys.exit(1)
     return None
-
-
-def _warn_override_collisions(target: dict, source: dict, path: str = "") -> None:
-    """Log warnings for keys in *source* that will overwrite existing values in *target*."""
-    for key, new_val in source.items():
-        full_key = f"{path}.{key}" if path else key
-        if key in target:
-            old_val = target[key]
-            if isinstance(new_val, dict) and isinstance(old_val, dict):
-                _warn_override_collisions(old_val, new_val, full_key)
-            elif old_val != new_val:
-                logging.warning(
-                    "override_engine_args will replace %s: %r -> %r",
-                    full_key,
-                    old_val,
-                    new_val,
-                )
 
 
 def _parse_model_loader_extra_config(raw: object) -> dict[str, object]:
@@ -451,6 +436,15 @@ async def init_llm_worker(
 
     if config.extra_engine_args != "":
         # TODO: Support extra engine args from json file as well.
+        # Warn on collisions using the parsed YAML *before* the merge, so the
+        # warning only fires on keys the user actually set in the file (arg_map
+        # is pre-populated with non-None defaults that recipes legitimately
+        # override, and a post-merge diff would warn on every normal start).
+        with open(config.extra_engine_args) as f:
+            extra_options = yaml.safe_load(f) or {}
+        warn_override_collisions(
+            arg_map, extra_options, source_name="extra_engine_args"
+        )
         arg_map = update_llm_args_with_extra_options(arg_map, config.extra_engine_args)
 
     # Apply override_engine_args if provided
@@ -459,7 +453,7 @@ async def init_llm_worker(
             overrides = json.loads(config.override_engine_args)
             logging.info(f"Applying engine arg overrides: {overrides}")
 
-            _warn_override_collisions(arg_map, overrides)
+            warn_override_collisions(arg_map, overrides)
             deep_update(arg_map, overrides)
         except json.JSONDecodeError as e:
             logging.error(f"Failed to parse override_engine_args as JSON: {e}")
