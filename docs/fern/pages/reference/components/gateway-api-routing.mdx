@@ -52,8 +52,8 @@ and is configured through `DYN_*` environment variables. It implements the GAIE
 
 <ParamField path="spec.components[].replicas" type="integer" default="1">
   Number of EPP pods. Increase it for endpoint-picker throughput or to survive the loss of a single
-  EPP pod. Above `1`, the operator defaults `DYN_ROUTER_REPLICA_SYNC` to `true` so replicas share
-  active-load state, and the routing accuracy of the fleet becomes approximate. Read
+  EPP pod. For a native Rust EPP above `1`, the operator defaults `DYN_ROUTER_REPLICA_SYNC` to `true`
+  so replicas share active-load state, and the routing accuracy of the fleet becomes approximate. Read
   [EPP Replication and Routing Accuracy](#epp-replication-and-routing-accuracy) before scaling it.
 
   The deprecated Go EPP, selected by the presence of `eppConfig`, hosts no Dynamo KV router and has
@@ -116,8 +116,9 @@ Gateway topology.
 
 <ParamField path="DYN_ROUTER_REPLICA_SYNC" type="boolean" default="false">
   Publishes and consumes best-effort active-sequence state across EPP replicas through the Dynamo event
-  plane. The operator defaults it to `true` when `replicas` is above `1`, and a value set in
-  `podTemplate` takes precedence. It has no peer to synchronize with at one replica. See
+  plane. For a native Rust EPP, the operator defaults it to `true` when `replicas` is above `1`, and a
+  value set in `podTemplate` takes precedence. The deprecated Go EPP never receives it and cannot be
+  replicated. It has no peer to synchronize with at one replica. See
   [EPP Replication and Routing Accuracy](#epp-replication-and-routing-accuracy).
 </ParamField>
 
@@ -174,12 +175,16 @@ whether or not the backend request it accounted for has finished.
 At one replica the consequences are self-correcting. At several replicas they are not:
 
 - **A retry can land on a different EPP.** Envoy load-balances `ext_proc` streams across EPP pods with
-  no request affinity. If a stream fails and Envoy retries, the replica that made the original booking
-  frees it when its stream ends, while the backend may still be generating. That worker's load is then
-  understated on the replica that placed it and, once the retry is booked elsewhere, double-counted
-  across the fleet until one of the two bookings is freed.
+  no request affinity, so a retried request is picked by whichever replica Envoy chooses next. Backend
+  load and booking state then diverge, and they move in opposite directions.
 - **Backend work can outlive the stream.** An `ext_proc` disconnect does not cancel work already
-  dispatched to the worker. The EPP stops accounting for a request that is still consuming KV blocks.
+  dispatched to the worker, so the original attempt can still be generating when the retry is
+  dispatched. Two attempts consume capacity for one logical request.
+- **Booking state undercounts that, and briefly overcounts on some replicas.** The replica that placed
+  the original booking frees it when its stream ends, and that `free` propagates. Replicas that receive
+  it stop accounting for the original attempt while it is still running, so the fleet understates the
+  worker. A replica whose `free` has not yet arrived holds the original booking alongside the retry's
+  and counts the request twice until it does.
 - **Expiry bounds the error but does not correct it.** A quiet booking is reclaimed by a router-owned
   reaper at `DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS` (default `300` seconds). Lease expiry is local to
   the replica that holds it and publishes no `free`, so peers reclaim their copies on their own timers.
