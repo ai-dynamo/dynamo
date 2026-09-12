@@ -280,7 +280,6 @@ async fn bind_system_status_listener(
     Ok((listener, actual_address))
 }
 
-/// Rebinds after fatal accept errors.
 /// Axum's [`Listener::accept`] cannot return an error, so recovery must happen here.
 struct RebindingTcpListener {
     /// Concrete address returned by the initial bind, including an assigned ephemeral port.
