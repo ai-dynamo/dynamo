@@ -408,16 +408,12 @@ class PrometheusAPIClient:
                 )
                 return None
             return completed_count
-        except (
-            PrometheusApiClientException,
-            RequestsConnectionError,
-            RequestsTimeout,
-        ) as e:
-            logger.error("Error getting avg request count; demand is UNKNOWN: %s", e)
-            return None
         except Exception:
-            logger.exception("Unexpected error getting avg request count")
-            raise
+            # Never propagate: the tick loop catches only GPUShapeUnavailableError
+            # (core/base.py:1042), so anything else here shuts the planner down.
+            # An unreadable metric must degrade to unknown demand, not to no planner.
+            logger.exception("Error getting avg request count; demand is UNKNOWN")
+            return None
 
     def get_avg_input_sequence_tokens(self, interval: str, model_name: str):
         if self.metrics_source == "router":
