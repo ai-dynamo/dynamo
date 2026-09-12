@@ -755,7 +755,7 @@ mod tests {
             self.requests.fetch_add(1, Ordering::Relaxed);
             let output = Annotated::from_data(LLMEngineOutput {
                 routing_data: Some(RoutingData {
-                    token_ids: Some(request.token_ids.clone()),
+                    token_ids: Some(request.token_ids.as_ref().clone()),
                     ..Default::default()
                 }),
                 ..Default::default()

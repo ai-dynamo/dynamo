@@ -129,7 +129,7 @@ struct DecoderParams {
 impl DecoderParams {
     fn from_request(request: &PreprocessedRequest) -> Self {
         Self {
-            prompt_token_ids: request.token_ids.clone(),
+            prompt_token_ids: request.token_ids.as_ref().clone(),
             stop_conditions: request.stop_conditions.clone(),
             // Default to true to match upstream framework behavior:
             //   vLLM/sgLang/TRT-LLM: SamplingParams.skip_special_tokens defaults True
