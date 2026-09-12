@@ -11,6 +11,12 @@ import time
 from typing import Any
 
 import sglang as sgl
+from sglang.srt.managers.io_struct import (
+    ContinueGenerationReqInput,
+    PauseGenerationReqInput,
+    ReleaseMemoryOccupationReqInput,
+    ResumeMemoryOccupationReqInput,
+)
 
 from dynamo.common.snapshot.lifecycle import (
     EngineSnapshotController,
@@ -19,9 +25,29 @@ from dynamo.common.snapshot.lifecycle import (
 )
 from dynamo.sglang._compat import override_server_args, resolved_server_args
 
-from .pause import SGLangEnginePauseController
-
 logger = logging.getLogger(__name__)
+
+
+class _SGLangSnapshotLifecycle:
+    """Adapt SGLang's native controls to the snapshot lifecycle interface."""
+
+    def __init__(self, engine: sgl.Engine):
+        self._tokenizer_manager = engine.tokenizer_manager
+
+    async def pause(self) -> None:
+        await self._tokenizer_manager.pause_generation(PauseGenerationReqInput())
+        await self._tokenizer_manager.release_memory_occupation(
+            ReleaseMemoryOccupationReqInput(), None
+        )
+
+    async def resume(self) -> None:
+        await self._tokenizer_manager.resume_memory_occupation(
+            ResumeMemoryOccupationReqInput(), None
+        )
+        await self._tokenizer_manager.continue_generation(ContinueGenerationReqInput())
+
+    def mark_resumed(self) -> None:
+        pass
 
 
 async def warmup_engine(engine: sgl.Engine, server_args: Any) -> None:
@@ -171,7 +197,7 @@ async def prepare_snapshot_engine(
 
     snapshot_controller = EngineSnapshotController(
         engine=engine,
-        pause_controller=SGLangEnginePauseController(engine),
+        pause_controller=_SGLangSnapshotLifecycle(engine),
         snapshot_config=snapshot_config,
     )
     if not await snapshot_controller.wait_for_restore():
