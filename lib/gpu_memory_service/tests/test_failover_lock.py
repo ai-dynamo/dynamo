@@ -195,32 +195,32 @@ async def test_owner_separate_instance(lock_path):
 # half of it, a 2x margin on an exact bound.
 HOLD_S = 0.2
 
+# Start p2 late enough that removing the parent gate recreates the original
+# no-contention failure: p1 can finish its hold before p2 starts its probe.
+START_STAGGER_S = 0.3
+
 
 def _racer(
     lock_path: str,
     engine_id: str,
-    acquired_queue: multiprocessing.Queue,
-    attempt_queue,
-    hold_queue,
+    ready_queue: multiprocessing.Queue,
     result_queue: multiprocessing.Queue,
 ):
-    """Acquire the lock, coordinate the hold, report timing, and release."""
+    """Confirm contention, acquire the lock, report timing, hold, and release."""
     import fcntl
 
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
 
-    # Announce immediately before flock(), letting the parent ensure the
-    # contender has started its acquisition attempt before the holder's timer.
-    if attempt_queue is not None:
-        attempt_queue.put(engine_id)
-
     t0 = time.monotonic()
-    fcntl.flock(fd, fcntl.LOCK_EX)
-    t1 = time.monotonic()
-    acquired_queue.put(engine_id)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        # A failed non-blocking flock proves this racer reached kernel
+        # contention before the parent releases the gate.
+        ready_queue.put(engine_id)
+        fcntl.flock(fd, fcntl.LOCK_EX)
 
-    if hold_queue is not None:
-        hold_queue.get(timeout=10)
+    t1 = time.monotonic()
 
     os.ftruncate(fd, 0)
     os.lseek(fd, 0, os.SEEK_SET)
@@ -250,26 +250,34 @@ def _racer(
 @pytest.mark.timeout(90)
 async def test_cross_process_race(lock_path):
     """Two processes contend for the lock; the kernel serializes their holds."""
-    acquired_queue = multiprocessing.Queue()
-    attempt_queue = multiprocessing.Queue()
-    hold_queue = multiprocessing.Queue()
+    import fcntl
+
+    ready_queue = multiprocessing.Queue()
     result_queue = multiprocessing.Queue()
 
     p1 = multiprocessing.Process(
-        target=_racer,
-        args=(lock_path, "p1", acquired_queue, None, hold_queue, result_queue),
+        target=_racer, args=(lock_path, "p1", ready_queue, result_queue)
     )
     p2 = multiprocessing.Process(
-        target=_racer,
-        args=(lock_path, "p2", acquired_queue, attempt_queue, None, result_queue),
+        target=_racer, args=(lock_path, "p2", ready_queue, result_queue)
     )
 
     try:
-        p1.start()
-        assert acquired_queue.get(timeout=10) == "p1"
-        p2.start()
-        assert attempt_queue.get(timeout=10) == "p2"
-        hold_queue.put("p1")
+        gate_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+        try:
+            fcntl.flock(gate_fd, fcntl.LOCK_EX)
+
+            p1.start()
+            assert ready_queue.get(timeout=10) == "p1"
+            time.sleep(START_STAGGER_S)
+            p2.start()
+            assert ready_queue.get(timeout=10) == "p2"
+        finally:
+            # LOCK_UN, not os.close(gate_fd): children inherit the parent's
+            # open file description, so closing only the parent copy would
+            # leave the gate locked.
+            fcntl.flock(gate_fd, fcntl.LOCK_UN)
+            os.close(gate_fd)
 
         # Blocking gets rather than Queue.empty(): empty() is not a
         # synchronization primitive, and joining a child before draining its
@@ -289,9 +297,7 @@ async def test_cross_process_race(lock_path):
                 p.terminate()
             if p.pid is not None:  # None when start() was never reached
                 p.join(timeout=10)
-        acquired_queue.close()
-        attempt_queue.close()
-        hold_queue.close()
+        ready_queue.close()
         result_queue.close()
 
     # CLOCK_MONOTONIC is system-wide on Linux, so the two children's stamps are
