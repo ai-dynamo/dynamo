@@ -49,9 +49,11 @@ dyn_port() {
     local variable="${prefix}${index}"
     local value="${!variable:-}"
     local minimum_port=1
+    local maximum_port=65535
 
     if [[ "${prefix}" == "DYN_SYSTEM_PORT" ]]; then
         minimum_port=0
+        maximum_port=32767
     fi
 
     local selected="${value:-${fallback}}"
@@ -61,7 +63,7 @@ dyn_port() {
             echo "Missing or invalid managed port ${variable}: ${value:-<unset>}" >&2
             return 1
         fi
-        if (( 10#${value} < minimum_port || 10#${value} > 32767 )); then
+        if (( 10#${value} < minimum_port || 10#${value} > maximum_port )); then
             echo "Managed port ${variable} is out of range: ${value}" >&2
             return 1
         fi
@@ -73,7 +75,7 @@ dyn_port() {
         echo "Invalid port ${variable}: ${value}" >&2
         return 1
     fi
-    if [[ ! "${selected}" =~ ^[0-9]+$ ]] || (( 10#${selected} < minimum_port || 10#${selected} > 32767 )); then
+    if [[ ! "${selected}" =~ ^[0-9]+$ ]] || (( 10#${selected} < minimum_port || 10#${selected} > maximum_port )); then
         echo "Port ${variable} is out of range: ${selected}" >&2
         return 1
     fi
