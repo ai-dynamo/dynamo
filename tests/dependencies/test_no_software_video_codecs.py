@@ -63,6 +63,22 @@ _REQUIRED = ("vp9",)
 
 _SURFACES = ("encoders", "decoders", "parsers")
 
+# Bitstream filters PyNvVideoCodec needs to feed NVDEC. It calls
+# av_bsf_get_by_name("h264_mp4toannexb") to reframe MP4/AVCC into Annex-B before
+# handing the stream to the hardware decoder, so their absence breaks hardware
+# H.264/H.265 decode outright -- and does so from inside a vendored library, as
+# "SimpleDecoder constructor failed: av_bsf_get_by_name() failed", which points
+# nowhere near this build.
+#
+# Collected for presence only and deliberately NOT added to _SURFACES: these
+# names contain "h264"/"hevc" and would trip _DISALLOWED_RE, yet they carry no
+# codec implementation -- they reframe an already-encoded stream. That is the
+# same distinction the build-time guard in wheel_builder.Dockerfile draws when
+# it scans encoders/decoders/parsers and skips -bsfs.
+_REQUIRED_BSFS = ("h264_mp4toannexb", "hevc_mp4toannexb")
+
+_PRESENCE_SURFACES = _SURFACES + ("bsfs",)
+
 
 def _ffmpeg() -> str:
     """Resolve FFmpeg the way the encode path does."""
@@ -87,7 +103,7 @@ def _surface(exe: str, surface: str) -> str:
 def _surfaces() -> dict[str, str]:
     exe = _ffmpeg()
     try:
-        out = {s: _surface(exe, s) for s in _SURFACES}
+        out = {s: _surface(exe, s) for s in _PRESENCE_SURFACES}
     except (OSError, FileNotFoundError) as exc:
         pytest.fail(f"could not run the shipped ffmpeg ({exe}): {exc}")
     if not any(out.values()):
@@ -102,6 +118,25 @@ def _assert_required_codecs_present(surfaces: dict[str, str]) -> None:
         assert name in listing, (
             f"{name} missing from the shipped ffmpeg -- the build is broken, and "
             "the absence assertions here would pass vacuously"
+        )
+
+
+def _assert_required_bsfs_present(surfaces: dict[str, str]) -> None:
+    """The NVDEC feed path must keep its bitstream filters.
+
+    Paired with the absence checks below on purpose: this file asserts what the
+    images may not carry, and hardware decode is the reason H.264/H.265 may be
+    absent in software at all. If these filters go, the justification goes with
+    them, quietly.
+    """
+    listing = surfaces.get("bsfs", "").lower()
+    for name in _REQUIRED_BSFS:
+        assert name in listing, (
+            f"{name} missing from the shipped ffmpeg -- PyNvVideoCodec cannot "
+            "build its NVDEC pipeline without it, and hardware H.264/H.265 "
+            "decode fails at runtime with 'av_bsf_get_by_name() failed'. It is "
+            "enabled in wheel_builder.Dockerfile via --enable-bsf; a blanket "
+            "--disable-bsfs would drop it again."
         )
 
 
@@ -231,6 +266,7 @@ def _assert_bundled_libavcodecs_carry_no_software_codecs() -> None:
 def _check_image() -> None:
     surfaces = _surfaces()
     _assert_required_codecs_present(surfaces)
+    _assert_required_bsfs_present(surfaces)
     _assert_no_software_codecs(surfaces)
     _assert_python_carriers_absent()
     _assert_bundled_libavcodecs_carry_no_software_codecs()
