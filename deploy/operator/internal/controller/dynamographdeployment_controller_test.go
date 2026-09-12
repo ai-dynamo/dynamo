@@ -115,6 +115,7 @@ func TestDynamoGraphDeploymentReconcileLocksProviderBeforeRejectingStoredCheckpo
 		Build()
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client:        kubeClient,
+		DirectClient:  kubeClient,
 		Recorder:      events.NewFakeRecorder(10),
 		Config:        &configv1alpha1.OperatorConfiguration{},
 		RuntimeConfig: &controller_common.RuntimeConfig{},
@@ -172,6 +173,7 @@ func TestDynamoGraphDeploymentReconcileFinalizesDeletingStoredCheckpointIncompat
 		Build()
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client:        kubeClient,
+		DirectClient:  kubeClient,
 		Recorder:      events.NewFakeRecorder(10),
 		Config:        &configv1alpha1.OperatorConfiguration{},
 		RuntimeConfig: &controller_common.RuntimeConfig{},
@@ -209,6 +211,7 @@ func TestDynamoGraphDeploymentReconcileFinalizesWithoutSnapshotTypes(t *testing.
 		Build()
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client:        kubeClient,
+		DirectClient:  kubeClient,
 		Recorder:      events.NewFakeRecorder(10),
 		Config:        &configv1alpha1.OperatorConfiguration{},
 		RuntimeConfig: &controller_common.RuntimeConfig{},
@@ -556,8 +559,9 @@ func TestDGDScalingAdaptersReconciler_Reconcile(t *testing.T) {
 			fakeClient := clientBuilder.Build()
 
 			r := &DynamoGraphDeploymentReconciler{
-				Client:   fakeClient,
-				Recorder: events.NewFakeRecorder(10),
+				Client:       fakeClient,
+				DirectClient: fakeClient,
+				Recorder:     events.NewFakeRecorder(10),
 			}
 
 			t.Log("Reconcile scaling adapters")
@@ -664,8 +668,9 @@ func TestDGDScalingAdaptersReconciler_EmitsDeleteEventOnlyAfterSuccessfulDelete(
 				Build()
 			recorder := events.NewFakeRecorder(10)
 			reconciler := &DynamoGraphDeploymentReconciler{
-				Client:   kubeClient,
-				Recorder: recorder,
+				Client:       kubeClient,
+				DirectClient: kubeClient,
+				Recorder:     recorder,
 			}
 
 			require.NoError(t, newDGDScalingAdaptersReconciler(reconciler.Client, reconciler.Recorder).Reconcile(context.Background(), dgd))
@@ -1049,6 +1054,7 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 			recorder := events.NewFakeRecorder(100)
 			reconciler := &DynamoGraphDeploymentReconciler{
 				Client:        fakeKubeClient,
+				DirectClient:  fakeKubeClient,
 				Recorder:      recorder,
 				Config:        &configv1alpha1.OperatorConfiguration{},
 				RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{DRA: tt.draEnabled}},
@@ -1142,6 +1148,7 @@ func TestGroveWorkloadsReconciler_UsesPreservedAlphaServiceIngress(t *testing.T)
 
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client:        fakeKubeClient,
+		DirectClient:  fakeKubeClient,
 		Recorder:      events.NewFakeRecorder(100),
 		Config:        &configv1alpha1.OperatorConfiguration{},
 		RuntimeConfig: &controller_common.RuntimeConfig{},
@@ -2380,9 +2387,10 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 
 			recorder := events.NewFakeRecorder(100)
 			reconciler := &DynamoGraphDeploymentReconciler{
-				Client:   fakeKubeClient,
-				Recorder: recorder,
-				Config:   &configv1alpha1.OperatorConfiguration{},
+				Client:       fakeKubeClient,
+				DirectClient: fakeKubeClient,
+				Recorder:     recorder,
+				Config:       &configv1alpha1.OperatorConfiguration{},
 				RuntimeConfig: &controller_common.RuntimeConfig{
 					Gate: features.Gates{Grove: tt.groveEnabled},
 				},
@@ -3041,6 +3049,7 @@ func TestComponentWorkloadsReconciler_Reconcile(t *testing.T) {
 			recorder := events.NewFakeRecorder(100)
 			reconciler := &DynamoGraphDeploymentReconciler{
 				Client:        fakeKubeClient,
+				DirectClient:  fakeKubeClient,
 				Recorder:      recorder,
 				Config:        &configv1alpha1.OperatorConfiguration{},
 				RuntimeConfig: &controller_common.RuntimeConfig{},
@@ -3267,7 +3276,8 @@ func TestDGDGroveTopologyConditionReconciler_Reconcile(t *testing.T) {
 
 			fakeClient := fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).Build()
 			reconciler := &DynamoGraphDeploymentReconciler{
-				Client: fakeClient,
+				Client:       fakeClient,
+				DirectClient: fakeClient,
 				RuntimeConfig: &controller_common.RuntimeConfig{
 					Gate: features.Gates{Grove: tt.groveEnabled},
 				},
@@ -3487,8 +3497,10 @@ func TestGroveWatchSetup_MapPodCliqueScalingGroupToRequests(t *testing.T) {
 			if tt.existingPCS != nil {
 				builder = builder.WithObjects(tt.existingPCS)
 			}
+			kubeClient := builder.Build()
 			r := &DynamoGraphDeploymentReconciler{
-				Client: builder.Build(),
+				Client:       kubeClient,
+				DirectClient: kubeClient,
 			}
 			reqs := newGroveWatchSetup(r.Client).
 				mapPodCliqueScalingGroupToRequests(context.Background(), tt.obj)
