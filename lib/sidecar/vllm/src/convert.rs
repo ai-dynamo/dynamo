@@ -840,7 +840,7 @@ fn build_preprocessed_media(
                         identifier: identifier.clone(),
                         offset: placeholder.offset,
                         length: placeholder.length,
-                        mm_hash: Some(producer_hash),
+                        mm_hash: Some(identifier.clone()),
                         is_embed: placeholder.is_embed.clone().unwrap_or_default(),
                     },
                 )),
