@@ -1086,7 +1086,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			},
 		},
 		{
-			name: "v1alpha1 EPP accepts more than one replica",
+			name: "v1alpha1 native Rust EPP accepts more than one replica",
 			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: consts.ComponentTypeEPP,
 				Replicas:      &validMinAvail,
@@ -1094,6 +1094,24 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					MainContainer: &corev1.Container{Image: frontendImage150},
 				},
 			}),
+		},
+		{
+			name: "v1alpha1 legacy Go EPP still requires one replica",
+			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeEPP,
+				Replicas:      &validMinAvail,
+				EPPConfig: &nvidiacomv1alpha1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+					},
+				},
+				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{Image: legacyEPPImage140},
+				},
+			}),
+			wantWebhookErrs: []string{
+				"spec.replicas: Invalid value: 2: EPP component must have exactly 1 replica",
+			},
 		},
 		{
 			name: "v1alpha1 native Rust EPP accepts a 1.5 image without eppConfig",

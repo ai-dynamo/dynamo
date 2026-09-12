@@ -253,6 +253,7 @@ func TestValidateDynamoComponentDeploymentSharedSpecFieldPaths(t *testing.T) {
 		"spec.components[0].sharedMemorySize",
 		"spec.components[0].multinode",
 		"spec.components[0].type",
+		"spec.components[0].replicas",
 		"spec.components[0].eppConfig.configMapRef.name",
 		"spec.components[0].frontendSidecar",
 	})

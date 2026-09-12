@@ -55,6 +55,10 @@ and is configured through `DYN_*` environment variables. It implements the GAIE
   EPP pod. Above `1`, the operator defaults `DYN_ROUTER_REPLICA_SYNC` to `true` so replicas share
   active-load state, and the routing accuracy of the fleet becomes approximate. Read
   [EPP Replication and Routing Accuracy](#epp-replication-and-routing-accuracy) before scaling it.
+
+  The deprecated Go EPP, selected by the presence of `eppConfig`, hosts no Dynamo KV router and has
+  no way to share state between replicas. It must have exactly `1` replica, and admission rejects any
+  other value.
 </ParamField>
 
 <ParamField path="spec.components[].frontendSidecar" type="string" required={true}>

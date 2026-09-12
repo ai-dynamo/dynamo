@@ -27,6 +27,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	corev1 "k8s.io/api/core/v1"
@@ -124,6 +125,17 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 			if err := inferencePoolAvailabilityError(v.ctx, v.mgr); err != nil {
 				allErrs = append(allErrs, field.Forbidden(fldPath.Child("type"), fmt.Sprintf("cannot deploy EPP component: %v", err)))
 			}
+		}
+		// The native Rust EPP replicates: its replicas share active-sequence
+		// state through the Dynamo event plane. The deprecated Go EPP, selected
+		// by the presence of eppConfig, hosts no Dynamo KV router and has no
+		// equivalent, so it keeps the single-replica restriction it shipped with.
+		if epp.IsLegacyGoEPP(spec.EPPConfig) && spec.Replicas != nil && *spec.Replicas != 1 {
+			allErrs = append(allErrs, field.Invalid(
+				fldPath.Child("replicas"),
+				*spec.Replicas,
+				"EPP component must have exactly 1 replica",
+			))
 		}
 	}
 	// Validate the represented eppConfig once using the submitted API version's field path.
