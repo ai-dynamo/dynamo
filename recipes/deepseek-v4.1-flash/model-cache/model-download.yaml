@@ -1,0 +1,58 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: model-download
+spec:
+  backoffLimit: 3
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: model-download
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: model-download
+          image: python:3.10-slim
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          command: ["sh", "-c"]
+          envFrom:
+            - secretRef:
+                name: hf-token-secret
+          env:
+            - name: HF_HOME
+              value: /shared-model-cache
+            - name: HF_XET_HIGH_PERFORMANCE
+              value: "1"
+            - name: MODEL_NAME
+              value: deepseek-ai/DeepSeek-V4.1-Flash
+            - name: MODEL_REVISION
+              value: dba1be0a40aa45a94ad051997016db3960a90277
+          # 510 GB over 48 shards. The Job can run for hours on a cold PVC.
+          args:
+            - |
+              set -eux
+              pip install --no-cache-dir huggingface_hub==1.16.4
+              hf download $MODEL_NAME --revision $MODEL_REVISION
+              # A download by commit hash writes no refs/main, and the workers
+              # load the bare model id, which resolves main. Offline that misses
+              # and startup fails. Point main at the snapshot we just pinned.
+              REPO_DIR=$HF_HOME/hub/models--$(echo $MODEL_NAME | sed 's|/|--|')
+              mkdir -p $REPO_DIR/refs
+              printf '%s' $MODEL_REVISION > $REPO_DIR/refs/main
+          volumeMounts:
+            - name: shared-model-cache
+              mountPath: /shared-model-cache
+      volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
