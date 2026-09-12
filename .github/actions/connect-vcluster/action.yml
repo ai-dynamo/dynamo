@@ -49,7 +49,8 @@ runs:
         KUBECONFIG_TMP="${KUBECONFIG_PATH}.tmp"
 
         start_port_forward() {
-          kubectl port-forward -n "${NAMESPACE}" "svc/${VCLUSTER_NAME}" 8443:443 > "${PF_LOG}" 2>&1 &
+          printf '\n[%s] Starting vCluster API port-forward\n' "$(date -u +%FT%TZ)" >> "${PF_LOG}"
+          kubectl port-forward -n "${NAMESPACE}" "svc/${VCLUSTER_NAME}" 8443:443 >> "${PF_LOG}" 2>&1 &
           PF_PID=$!
           echo "${PF_PID}" > "${PF_PID_FILE}"
           echo "Started vCluster API port-forward pid ${PF_PID}; log: ${PF_LOG}"
@@ -143,7 +144,8 @@ runs:
             vcluster_name="$4"
 
             start_pf() {
-              kubectl port-forward -n "${namespace}" "svc/${vcluster_name}" 8443:443 > "${pf_log}" 2>&1 &
+              printf "\n[%s] Watchdog restarting vCluster API port-forward\n" "$(date -u +%FT%TZ)" >> "${pf_log}"
+              kubectl port-forward -n "${namespace}" "svc/${vcluster_name}" 8443:443 >> "${pf_log}" 2>&1 &
               echo "$!" > "${pf_pid_file}"
             }
 
@@ -159,7 +161,7 @@ runs:
               fi
               sleep 5
             done
-          ' _ "${PF_PID_FILE}" "${PF_LOG}" "${NAMESPACE}" "${VCLUSTER_NAME}" > "${WATCHDOG_LOG}" 2>&1 &
+          ' _ "${PF_PID_FILE}" "${WATCHDOG_LOG}" "${NAMESPACE}" "${VCLUSTER_NAME}" > "${WATCHDOG_LOG}" 2>&1 &
           echo "$!" > "${WATCHDOG_PID_FILE}"
           echo "Started vCluster API port-forward watchdog; log: ${WATCHDOG_LOG}"
         fi
