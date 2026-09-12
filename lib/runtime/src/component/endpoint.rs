@@ -17,7 +17,7 @@ use crate::{
     },
     protocols::EndpointId,
     traits::DistributedRuntimeProvider,
-    transports::nats,
+    transports::{nats, tcp},
 };
 
 fn endpoint_device_type() -> Option<DeviceType> {
@@ -251,7 +251,7 @@ impl EndpointConfigBuilder {
                     "Unable to register service for discovery"
                 );
                 let _ = server
-                    .unregister_endpoint(&endpoint_name_for_task, connection_id)
+                    .unregister_endpoint_instance(&endpoint_id, connection_id)
                     .await;
                 if let Some(tracker) = tracker_clone {
                     tracker.unregister_endpoint();
@@ -285,7 +285,7 @@ impl EndpointConfigBuilder {
             );
 
             if let Err(e) = server_for_cleanup
-                .unregister_endpoint(&endpoint_name_for_cleanup, connection_id)
+                .unregister_endpoint_instance(&endpoint_id, connection_id)
                 .await
             {
                 tracing::warn!(
@@ -315,7 +315,7 @@ impl EndpointConfigBuilder {
 ///
 /// This function handles both health check and discovery transport building.
 /// All transport modes use consistent addressing:
-/// - TCP: Includes instance_id and endpoint name for routing (e.g., host:port/instance_id_hex/endpoint_name)
+/// - TCP: Includes instance ID, namespace, component, and endpoint name in the request path
 /// - NATS: Uses subject-based addressing (unique per endpoint)
 ///
 /// # Errors
@@ -336,13 +336,12 @@ fn build_transport_type_inner(
                 .filter(|&p| p != 0)
                 .unwrap_or(crate::pipeline::network::manager::get_actual_tcp_rpc_port()?);
 
-            // Include instance_id and endpoint name for proper TCP routing.
-            // Format: host:port/instance_id_hex/endpoint_name
-            // This ensures each worker has a unique routing key when multiple workers
-            // share the same TCP server (e.g., --num-workers > 1).
+            // Clients forward the discovered path unchanged; ingress uses the same key.
             let tcp_endpoint = format!(
-                "{}:{}/{:x}/{}",
-                tcp_host, tcp_port, connection_id, endpoint_id.name
+                "{}:{}/{}",
+                tcp_host,
+                tcp_port,
+                tcp::instance_path(endpoint_id, connection_id)
             );
 
             Ok(TransportType::Tcp(tcp_endpoint))

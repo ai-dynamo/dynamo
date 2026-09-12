@@ -13,6 +13,7 @@ use crate::metrics::work_handler_pool::{
     WORK_HANDLER_QUEUE_DEPTH,
 };
 use crate::pipeline::network::PushWorkHandler;
+use crate::{protocols::EndpointId, transports::tcp::instance_path};
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -87,13 +88,6 @@ struct WorkItem {
     namespace: String,
     component_name: String,
     endpoint_name: String,
-}
-
-/// Handler-map key and request path for one endpoint instance. Several instances in one process
-/// share this server, so the key must carry the instance id; register and unregister must agree on
-/// the format or a teardown removes the wrong handler, or none.
-fn instance_path(endpoint_name: &str, instance_id: u64) -> String {
-    format!("{instance_id:x}/{endpoint_name}")
 }
 
 /// Shared TCP server that handles multiple endpoints on a single port
@@ -744,8 +738,13 @@ impl super::unified_server::RequestPlaneServer for SharedTcpServer {
         component_name: String,
         system_health: Arc<Mutex<SystemHealth>>,
     ) -> Result<()> {
+        let endpoint_id = EndpointId {
+            namespace: namespace.clone(),
+            component: component_name.clone(),
+            name: endpoint_name.clone(),
+        };
         self.register_endpoint(
-            instance_path(&endpoint_name, instance_id),
+            instance_path(&endpoint_id, instance_id),
             service_handler,
             instance_id,
             namespace,
@@ -757,8 +756,30 @@ impl super::unified_server::RequestPlaneServer for SharedTcpServer {
     }
 
     async fn unregister_endpoint(&self, endpoint_name: &str, instance_id: u64) -> Result<()> {
-        // Other instances in this process may serve the same endpoint name; remove only ours.
-        self.remove_handler(&instance_path(endpoint_name, instance_id), endpoint_name)
+        let path = {
+            let mut matches = self.handlers.iter().filter(|entry| {
+                entry.value().endpoint_name == endpoint_name
+                    && entry.value().instance_id == instance_id
+            });
+            let path = matches.next().map(|entry| entry.key().clone());
+            anyhow::ensure!(
+                matches.next().is_none(),
+                "Ambiguous endpoint {endpoint_name}/{instance_id:x}; use unregister_endpoint_instance"
+            );
+            path
+        };
+        if let Some(path) = path {
+            self.remove_handler(&path, endpoint_name).await;
+        }
+        Ok(())
+    }
+
+    async fn unregister_endpoint_instance(
+        &self,
+        endpoint_id: &EndpointId,
+        instance_id: u64,
+    ) -> Result<()> {
+        self.remove_handler(&instance_path(endpoint_id, instance_id), &endpoint_id.name)
             .await;
         Ok(())
     }
@@ -1003,70 +1024,153 @@ mod tests {
         tracing::info!("Test passed: unregister_endpoint properly waited for inflight TCP request");
     }
 
-    async fn send_ack(client: &TcpRequestClient, addr: SocketAddr, path: &str) -> Bytes {
+    async fn send_ack(client: &TcpRequestClient, address: &str) -> Bytes {
         tokio::time::timeout(
             Duration::from_secs(5),
             client.send_request(
-                format!("{addr}/{path}"),
+                address.to_string(),
                 Bytes::from_static(b"payload"),
                 Headers::new(),
             ),
         )
         .await
-        .unwrap_or_else(|_| panic!("no ACK within 5s for {path}"))
+        .unwrap_or_else(|_| panic!("no ACK within 5s for {address}"))
         .expect("request-plane send should succeed")
     }
 
     #[tokio::test]
-    async fn unregister_endpoint_removes_only_the_callers_instance() {
-        crate::logging::init();
+    async fn unregister_endpoint_removes_only_the_matching_endpoint_instance() {
+        let endpoint = EndpointId {
+            namespace: "test_namespace".into(),
+            component: "test_component".into(),
+            name: "generate".into(),
+        };
+        let survivors = [
+            (endpoint.clone(), 0xb),
+            (
+                EndpointId {
+                    namespace: "other_namespace".into(),
+                    ..endpoint.clone()
+                },
+                0xa,
+            ),
+            (
+                EndpointId {
+                    component: "other_component".into(),
+                    ..endpoint.clone()
+                },
+                0xa,
+            ),
+            (
+                EndpointId {
+                    name: "other_endpoint".into(),
+                    ..endpoint.clone()
+                },
+                0xa,
+            ),
+        ];
 
-        let cancellation_token = CancellationToken::new();
-        let server =
-            SharedTcpServer::new("127.0.0.1:0".parse().unwrap(), cancellation_token.clone())
-                .unwrap();
-        let addr = server.clone().bind_and_start().await.unwrap();
+        let id = |namespace: &str, component: &str, name: &str| EndpointId {
+            namespace: namespace.into(),
+            component: component.into(),
+            name: name.into(),
+        };
+        let cases = survivors
+            .into_iter()
+            .map(|(survivor, instance_id)| (endpoint.clone(), survivor, instance_id))
+            .chain([
+                (id("a/b", "c", "d"), id("a", "b/c", "d"), 0xa),
+                (id("a", "b/c", "d"), id("a", "b", "c/d"), 0xa),
+                (id("a/b", "c", "d"), id("a%2Fb", "c", "d"), 0xa),
+            ]);
 
-        let system_health = ready_system_health();
-        let plane: &dyn RequestPlaneServer = server.as_ref();
-        let removed = Arc::new(SlowMockHandler::new(Duration::ZERO));
-        let survivor = Arc::new(SlowMockHandler::new(Duration::ZERO));
-        for (instance_id, handler) in [(0xa_u64, removed), (0xb_u64, survivor.clone())] {
+        for (endpoint, survivor_endpoint, survivor_id) in cases {
+            let cancel = CancellationToken::new();
+            let server =
+                SharedTcpServer::new("127.0.0.1:0".parse().unwrap(), cancel.clone()).unwrap();
+            let addr = server.clone().bind_and_start().await.unwrap();
+            let plane: &dyn RequestPlaneServer = server.as_ref();
+            let removed = Arc::new(SlowMockHandler::new(Duration::ZERO));
+            let survivor = Arc::new(SlowMockHandler::new(Duration::ZERO));
+            for (id, instance_id, handler) in [
+                (&endpoint, 0xa, removed.clone()),
+                (&survivor_endpoint, survivor_id, survivor.clone()),
+            ] {
+                plane
+                    .register_endpoint(
+                        id.name.clone(),
+                        handler,
+                        instance_id,
+                        id.namespace.clone(),
+                        id.component.clone(),
+                        ready_system_health(),
+                    )
+                    .await
+                    .unwrap();
+            }
+
+            if survivor_id == 0xa && survivor_endpoint.name == endpoint.name {
+                assert!(
+                    plane
+                        .unregister_endpoint(&endpoint.name, 0xa)
+                        .await
+                        .is_err()
+                );
+            }
+
+            // The second registration must not redirect requests for the first.
+            let client = TcpRequestClient::new().unwrap();
+            let removed_address = format!("{addr}/{}", instance_path(&endpoint, 0xa));
+            assert!(send_ack(&client, &removed_address).await.is_empty());
+            let delivered_to_removed = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::select! {
+                    _ = removed.request_started.notified() => true,
+                    _ = survivor.request_started.notified() => false,
+                }
+            })
+            .await
+            .expect("a registered handler should receive the request");
+            assert!(
+                delivered_to_removed,
+                "request redirected to {survivor_endpoint:?}/{survivor_id:x}"
+            );
+
+            // Removing one registration must preserve every distinct endpoint instance.
             plane
-                .register_endpoint(
-                    "generate".to_string(),
-                    handler as Arc<dyn PushWorkHandler>,
-                    instance_id,
-                    "test_namespace".to_string(),
-                    "test_component".to_string(),
-                    system_health.clone(),
-                )
+                .unregister_endpoint_instance(&endpoint, 0xa)
                 .await
                 .unwrap();
+            let address = format!("{addr}/{}", instance_path(&survivor_endpoint, survivor_id));
+            let ack = send_ack(&client, &address).await;
+            assert!(
+                ack.is_empty(),
+                "survivor {survivor_endpoint:?}/{survivor_id:x} rejected: {ack:?}"
+            );
+            tokio::time::timeout(Duration::from_secs(5), survivor.request_started.notified())
+                .await
+                .expect("surviving handler should receive the request");
+
+            let ack = send_ack(&client, &removed_address).await;
+            assert!(
+                ack.starts_with(crate::pipeline::network::ACK_UNAVAILABLE_PREFIX.as_bytes()),
+                "removed endpoint must reject new requests: {ack:?}"
+            );
+            // With one match left, the original API must still remove that registration.
+            plane
+                .unregister_endpoint(&survivor_endpoint.name, survivor_id)
+                .await
+                .unwrap();
+            assert!(
+                send_ack(&client, &address)
+                    .await
+                    .starts_with(crate::pipeline::network::ACK_UNAVAILABLE_PREFIX.as_bytes())
+            );
+            plane
+                .unregister_endpoint(&survivor_endpoint.name, survivor_id)
+                .await
+                .unwrap();
+            cancel.cancel();
         }
-
-        plane.unregister_endpoint("generate", 0xa).await.unwrap();
-
-        let client = TcpRequestClient::new().unwrap();
-
-        let ack = send_ack(&client, addr, "b/generate").await;
-        assert!(
-            ack.is_empty(),
-            "surviving instance should return the success ACK, got {:?}",
-            String::from_utf8_lossy(&ack)
-        );
-        tokio::time::timeout(Duration::from_secs(5), survivor.request_started.notified())
-            .await
-            .expect("surviving instance's handler should still receive requests");
-
-        let ack = send_ack(&client, addr, "a/generate").await;
-        assert!(
-            ack.starts_with(crate::pipeline::network::ACK_UNAVAILABLE_PREFIX.as_bytes()),
-            "removed instance should be rejected on the ACK, got {:?}",
-            String::from_utf8_lossy(&ack)
-        );
-
-        cancellation_token.cancel();
     }
 
     ///////////////////// TESTS FOR CONCURRENCY BOUNDING /////////////////////

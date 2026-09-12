@@ -8,9 +8,9 @@
 //! a unified multiplexed approach consistent with TCP server.
 
 use super::*;
-use crate::SystemHealth;
 use crate::config::HealthStatus;
 use crate::pipeline::network::ingress::push_endpoint::PushEndpoint;
+use crate::{SystemHealth, protocols::EndpointId};
 use anyhow::Result;
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 pub struct NatsMultiplexedServer {
     nats_client: async_nats::Client,
     component_registry: crate::component::Registry,
-    handlers: Arc<DashMap<String, EndpointTask>>,
+    handlers: Arc<DashMap<(EndpointId, u64), EndpointTask>>,
     cancellation_token: CancellationToken,
 }
 
@@ -35,9 +35,7 @@ struct EndpointTask {
     join_handle: tokio::task::JoinHandle<()>,
 }
 
-/// NATS subject and handler-map key for one endpoint instance. Several instances in one
-/// process can register the same endpoint name, so the key must carry the instance id;
-/// register and unregister must agree on it or a teardown removes the wrong task, or none.
+/// Subject suffix within a NATS service group; the group supplies the namespace and component.
 fn instance_subject(endpoint_name: &str, instance_id: u64) -> String {
     format!("{endpoint_name}-{instance_id:x}")
 }
@@ -106,6 +104,11 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
         tracing::info!("Successfully retrieved service group");
 
         let endpoint_with_id = instance_subject(&endpoint_name, instance_id);
+        let endpoint_id = EndpointId {
+            namespace: namespace.clone(),
+            component: component_name.clone(),
+            name: endpoint_name.clone(),
+        };
 
         // Create NATS service endpoint with the full subject
         let service_endpoint = service_group
@@ -181,7 +184,7 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
 
         // Store task info for later cleanup
         self.handlers.insert(
-            endpoint_with_id,
+            (endpoint_id, instance_id),
             EndpointTask {
                 cancel_token: endpoint_cancel,
                 join_handle,
@@ -192,8 +195,32 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
     }
 
     async fn unregister_endpoint(&self, endpoint_name: &str, instance_id: u64) -> Result<()> {
+        let endpoint_id = {
+            let mut matches = self.handlers.iter().filter(|entry| {
+                entry.key().0.name == endpoint_name && entry.key().1 == instance_id
+            });
+            let endpoint_id = matches.next().map(|entry| entry.key().0.clone());
+            anyhow::ensure!(
+                matches.next().is_none(),
+                "Ambiguous endpoint {endpoint_name}/{instance_id:x}; use unregister_endpoint_instance"
+            );
+            endpoint_id
+        };
+        if let Some(endpoint_id) = endpoint_id {
+            self.unregister_endpoint_instance(&endpoint_id, instance_id)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn unregister_endpoint_instance(
+        &self,
+        endpoint_id: &EndpointId,
+        instance_id: u64,
+    ) -> Result<()> {
+        let endpoint_name = &endpoint_id.name;
         let endpoint_with_id = instance_subject(endpoint_name, instance_id);
-        if let Some((_, task)) = self.handlers.remove(&endpoint_with_id) {
+        if let Some((_, task)) = self.handlers.remove(&(endpoint_id.clone(), instance_id)) {
             tracing::info!(
                 endpoint_name = %endpoint_name,
                 endpoint_with_id = %endpoint_with_id,
@@ -249,7 +276,7 @@ mod tests {
         assert_ne!(
             instance_subject("generate", 0xa),
             instance_subject("generate", 0xb),
-            "two instances of one endpoint name must not share a handler-map key"
+            "two instances of one endpoint name must not share a subject suffix"
         );
     }
 }
