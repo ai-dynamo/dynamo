@@ -15,6 +15,18 @@ For the full list of TLS/mTLS environment variables and CLI flags, and for the
 per-component configuration method, see the
 [TLS reference](../../reference/components/tls-configuration.mdx).
 
+## Frontend HTTP TLS
+
+Operator-level TLS settings inject `DYN_TCP_TLS_*` and `NATS_TLS_*` for internal
+transports. They do not inject the frontend's `DYN_TLS_*` HTTP settings.
+
+To enable HTTPS or HTTP mTLS, explicitly set `DYN_TLS_CERT_PATH`,
+`DYN_TLS_KEY_PATH`, and, for mTLS, `DYN_TLS_CLIENT_CA_CERT_PATH` in the frontend
+container's `podTemplate` environment. Mount the server certificate, private
+key, and trusted client CA at those paths. See the
+[HTTP TLS reference](../../reference/components/tls-configuration.mdx#http-tls-and-mtls)
+for the configuration requirements.
+
 ## Operator-level TLS configuration
 
 Set the values in the operator Helm chart. When installing the operator as

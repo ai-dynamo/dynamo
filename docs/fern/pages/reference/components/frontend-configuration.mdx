@@ -39,6 +39,20 @@ Every CLI argument has a corresponding environment variable. The CLI argument ta
   Environment variable: `DYN_TLS_KEY_PATH`
 </ParamField>
 
+<ParamField path="--tls-client-ca-cert-path" type="string" default="null">
+  Trusted client CA certificates in PEM format. Enables mutual TLS (mTLS) for the
+  HTTP server: clients must present a certificate signed by a trusted CA.
+  Requires both `--tls-cert-path` and `--tls-key-path`.
+
+  Environment variable: `DYN_TLS_CLIENT_CA_CERT_PATH`
+</ParamField>
+
+HTTP client authentication is configured independently of internal TCP and NATS
+mTLS. These HTTP options do not configure either internal transport.
+
+For certificate rotation behavior and the HTTP TLS configuration overview,
+see the [TLS reference](tls-configuration.mdx#http-tls-and-mtls).
+
 The Rust HTTP server also reads these environment variables, which are not exposed as CLI arguments:
 
 <ParamField path="DYN_HTTP_BODY_LIMIT_MB" type="integer" default="192">
