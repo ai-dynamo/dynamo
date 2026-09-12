@@ -220,8 +220,7 @@ impl SystemHealth {
     /// operation finishing cannot uncover another that is still running.
     pub fn begin_canary_maintenance(&mut self, max_duration: Duration) -> CanaryMaintenanceLease {
         let now = Instant::now();
-        self.canary_maintenance
-            .retain(|_, deadline| now < *deadline);
+        self.prune_expired_canary_maintenance(now);
         let lease = self.next_canary_lease;
         self.next_canary_lease += 1;
         self.canary_maintenance.insert(lease, now + max_duration);
@@ -234,9 +233,16 @@ impl SystemHealth {
         self.canary_maintenance.remove(&lease);
     }
 
+    /// Drop expired leases before checking whether canary probes are suppressed.
+    fn prune_expired_canary_maintenance(&mut self, now: Instant) {
+        self.canary_maintenance
+            .retain(|_, deadline| now < *deadline);
+    }
+
     /// Whether canary probes are currently suppressed.
-    pub fn canary_suppressed(&self) -> bool {
+    pub fn canary_suppressed(&mut self) -> bool {
         let now = Instant::now();
+        self.prune_expired_canary_maintenance(now);
         self.canary_maintenance
             .values()
             .any(|deadline| now < *deadline)
@@ -244,7 +250,7 @@ impl SystemHealth {
 
     /// Apply a canary-derived health status, dropping a `NotReady` write while a
     /// maintenance window is open. `Ready` always applies.
-    pub fn set_canary_health_status(&self, endpoint: &str, status: HealthStatus) {
+    pub fn set_canary_health_status(&mut self, endpoint: &str, status: HealthStatus) {
         if status == HealthStatus::NotReady && self.canary_suppressed() {
             tracing::debug!(
                 "Canary maintenance window open; ignoring NotReady for endpoint '{}'",
