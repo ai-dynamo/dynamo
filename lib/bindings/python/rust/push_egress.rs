@@ -740,10 +740,12 @@ mod tests {
     use super::{EncodeBuffer, PushFrame};
     use crate::engine::RESPONSE_CHANNEL_DEPTH;
     use bytes::BufMut;
+    use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
     use dynamo_runtime::pipeline::network::{
         NetworkStreamWrapper, RequestPlanePayloadCodec, ResponseFrameKind,
     };
     use dynamo_runtime::protocols::annotated::Annotated;
+    use dynamo_runtime::protocols::maybe_error::MaybeError;
     use tokio::sync::mpsc;
 
     // ── EncodeBuffer ─────────────────────────────────────────────────────────
@@ -947,18 +949,37 @@ mod tests {
     // take_sender; stream end via drop) are pinned against mpsc below.
 
     /// A terminal frame must reach the caller as a decodable error frame with
-    /// no data, and must be classified as an error so the ingress does not treat it
-    /// as evidence the engine is healthy.
+    /// no data, and must be classified as an error so the ingress does not treat
+    /// it as evidence the engine is healthy.
     #[test]
     fn terminal_frame_encodes_an_error_with_no_data() {
         let frame = PushFrame::error(Annotated::from_error("fatal"));
-        assert!(frame.kind.is_error(), "terminal frames must be classified as errors");
+        assert_eq!(
+            frame.kind,
+            ResponseFrameKind::EngineError,
+            "an untyped terminal error is an engine failure"
+        );
 
         let wrapper = decode(&frame.bytes, frame.codec);
         assert!(!wrapper.complete_final, "not the end-of-stream marker");
         let annotated = wrapper.data.expect("terminal frame carries data");
         assert!(annotated.error.is_some(), "expected an error field");
         assert!(annotated.data.is_none(), "error frames carry no data");
+    }
+
+    #[test]
+    fn terminal_frame_from_engine_shutdown_is_a_cancellation() {
+        let shutdown = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+            .message("engine shutting down")
+            .build();
+        let frame = PushFrame::error(Annotated::from_err(shutdown));
+        assert_eq!(frame.kind, ResponseFrameKind::Cancellation);
+
+        let codec = frame.codec;
+        let encoded = frame.into_encoded(codec).expect("forward must succeed");
+        assert_eq!(encoded.kind, ResponseFrameKind::Cancellation);
+        assert!(encoded.is_error());
     }
 
     /// Matching codecs are the whole point: the bytes encoded under the GIL go
@@ -1090,7 +1111,11 @@ mod tests {
         let encoded = frame
             .into_encoded(RequestPlanePayloadCodec::Json)
             .expect("re-encode must succeed");
-        assert!(encoded.is_error(), "frame kind must survive re-encode");
+        assert_eq!(
+            encoded.kind,
+            ResponseFrameKind::EngineError,
+            "the frame kind must survive re-encode"
+        );
         assert!(
             !encoded.stop_stream,
             "stop_stream must remain false after re-encode"

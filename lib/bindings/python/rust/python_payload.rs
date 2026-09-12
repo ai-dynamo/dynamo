@@ -9,7 +9,9 @@ use dynamo_runtime::pipeline::network::{
     EncodedResponseFrame, IngressRequestDecoder, IngressResponseEncoder, NetworkStreamWrapper,
     RESPONSE_ENCODE_CAPACITY_HINT, RequestPlanePayloadCodec, ResponseFrameKind,
 };
-use dynamo_runtime::protocols::annotated::Annotated;
+    use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+    use dynamo_runtime::protocols::annotated::Annotated;
+    use dynamo_runtime::protocols::maybe_error::MaybeError;
 use dynamo_runtime::protocols::maybe_error::MaybeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
@@ -427,9 +429,9 @@ mod tests {
     // serde_json::Value is used as the concrete payload type because it is
     // Serialize without touching the Python C API.
 
-    /// The frame kind must reflect `annotated.is_error()` — true when the envelope
-    /// carries `event: "error"`, false otherwise. A swap of the two would let
-    /// error frames be forwarded as healthy responses and vice versa.
+    /// The frame kind must reflect `annotated.is_error()` — an error envelope
+    /// carries `event: "error"`, a data envelope does not. A swap of the two
+    /// would let error frames be forwarded as healthy responses and vice versa.
     #[test]
     fn encode_annotated_response_is_error_true_for_error_annotated() {
         let (_, kind) = encode_annotated_response(
@@ -447,7 +449,48 @@ mod tests {
             Annotated::from_data(serde_json::json!({"ok": true})),
         )
         .unwrap();
-        assert_eq!(kind, ResponseFrameKind::Data);
+        assert!(!kind.is_error());
+    }
+
+    /// An untyped error frame is an engine failure: nothing about it says the
+    /// request was torn down.
+    #[test]
+    fn encode_annotated_response_classifies_untyped_error_as_engine_error() {
+        let (_, kind) = encode_annotated_response(
+            RequestPlanePayloadCodec::Json,
+            Annotated::<serde_json::Value>::from_error("upstream returned 503"),
+        )
+        .unwrap();
+        assert_eq!(kind, ResponseFrameKind::EngineError);
+    }
+
+    #[test]
+    fn encode_annotated_response_classifies_engine_shutdown_as_cancellation() {
+        let shutdown = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+            .message("engine shutting down")
+            .build();
+        let (_, kind) = encode_annotated_response(
+            RequestPlanePayloadCodec::Json,
+            Annotated::<serde_json::Value>::from_err(shutdown),
+        )
+        .unwrap();
+        assert_eq!(kind, ResponseFrameKind::Cancellation);
+        assert!(kind.is_error());
+    }
+
+    #[test]
+    fn encode_annotated_response_classifies_cancelled_as_cancellation() {
+        let cancelled = DynamoError::builder()
+            .error_type(ErrorType::Cancelled)
+            .message("client went away")
+            .build();
+        let (_, kind) = encode_annotated_response(
+            RequestPlanePayloadCodec::Json,
+            Annotated::<serde_json::Value>::from_err(cancelled),
+        )
+        .unwrap();
+        assert_eq!(kind, ResponseFrameKind::Cancellation);
     }
 
     /// Non-terminal frames must have `complete_final: false` on the wire.
@@ -478,7 +521,7 @@ mod tests {
             Annotated::from_data(payload.clone()),
         )
         .unwrap();
-        assert_eq!(kind, ResponseFrameKind::Data);
+        assert!(!kind.is_error());
         let wrapper: NetworkStreamWrapper<Annotated<serde_json::Value>> =
             RequestPlanePayloadCodec::Json.decode(&bytes).unwrap();
         let data = wrapper.data.unwrap().data.unwrap();
