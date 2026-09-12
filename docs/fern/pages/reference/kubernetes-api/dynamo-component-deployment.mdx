@@ -67,7 +67,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 <ParamField path="replicas" type="integer">
   Desired number of complete component instances. For a single-node component, each instance is one pod. For a multinode component, each instance contains all of its roles. Minimum `0`. When `scalingAdapter` is set, this field is owned by the [DynamoGraphDeploymentScalingAdapter](full-api-reference.mdx#dynamographdeploymentscalingadapter) and should not be modified directly.
 
-  For a single `type: lpx` component in a DGD, this counts complete engine replicas, not individual role Pods. Hybrid engines support `1–9` fixed replicas; LPU-only requires `1`. In a speculative pair, draft replicas count model instances (`1–8`), and target replicas must be `1`. LPX does not support scaling adapters or scale-to-zero.
+  For a single `type: lpx` component in a DGD, this counts complete engine replicas, not individual role Pods. Hybrid and LPU-only engines allow up to `2496` replicas within the 512 KiB scheduling-status budget; generated Pod hostname limits may lower that maximum. In a speculative pair, draft replicas count model instances (`1–8`), and target replicas must be `1`. LPX does not support scaling adapters or scale-to-zero.
 </ParamField>
 
 <ParamField path="podTemplate" type="core/v1.PodTemplateSpec">
