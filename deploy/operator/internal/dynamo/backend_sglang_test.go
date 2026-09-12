@@ -663,6 +663,9 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 		"nixl": 19090, "nixl-1": 19091, "nixl-2": 19092, "nixl-3": 19093,
 		"nixl-4": 19094, "nixl-5": 19095, "nixl-6": 19096, "nixl-7": 19097,
 	}
+	firstFourPorts := map[string]int32{
+		"nixl": 19090, "nixl-1": 19091, "nixl-2": 19092, "nixl-3": 19093,
+	}
 
 	tests := []struct {
 		name               string
@@ -692,6 +695,27 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 			telemetryEnable: "y",
 			containerGPUs:   8,
 			expectedPorts:   allEightPorts,
+		},
+		{
+			name:            "a non-y truthy enable value reserves rank ports",
+			ports:           workerPorts,
+			telemetryEnable: "true",
+			containerGPUs:   4,
+			expectedPorts:   firstFourPorts,
+		},
+		{
+			name:            "a leading-space enable value reserves no additional ports",
+			ports:           workerPorts,
+			telemetryEnable: " y",
+			containerGPUs:   -1,
+			expectedPorts:   map[string]int32{"nixl": 19090},
+		},
+		{
+			name:            "a trailing-space enable value reserves no additional ports",
+			ports:           workerPorts,
+			telemetryEnable: "y ",
+			containerGPUs:   -1,
+			expectedPorts:   map[string]int32{"nixl": 19090},
 		},
 		{
 			name:            "more ranks than the reserved range is rejected",
@@ -855,9 +879,15 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 			telemetryEnable: "y",
 			telemetryPort:   "0x4A92",
 			containerGPUs:   4,
-			expectedPorts: map[string]int32{
-				"nixl": 19090, "nixl-1": 19091, "nixl-2": 19092, "nixl-3": 19093,
-			},
+			expectedPorts:   firstFourPorts,
+		},
+		{
+			name:            "a signed base is rejected",
+			ports:           workerPorts,
+			telemetryEnable: "y",
+			telemetryPort:   "+19090",
+			containerGPUs:   4,
+			expectedError:   `is set to "+19090", which is not a number`,
 		},
 		{
 			name:            "a base written as words is rejected",
