@@ -862,6 +862,16 @@ class ModelDeploymentCard:
         """Return the runtime configuration as a dict."""
         ...
 
+    def for_aggregated_proxy(
+        self, model_name: str, model_type: ModelType
+    ) -> "ModelDeploymentCard":
+        """Clone all metadata and replace only aggregated-proxy identity fields."""
+        ...
+
+    async def register(self, endpoint: Endpoint) -> None:
+        """Register this exact model card on an endpoint."""
+        ...
+
 class ModelRuntimeConfig:
     """
     A model runtime configuration is a collection of runtime information

@@ -58,11 +58,10 @@ chat/completions surface; if the wrapped backend also advertises that surface
 for the same model, the frontend may route requests directly to the backend and
 bypass ThunderAgent lifecycle handling such as `x-dynamo-session-final`.
 
-For clients that require SGLang's native `/generate` API, add
-`--publish-sglang-generate` to ThunderAgent. This advertises the existing
-SGLang-native frontend route through ThunderAgent while the wrapped worker
-continues to use `--endpoint-types none`. This option requires `--model-name`
-so ThunderAgent can register the native capability for that model.
+ThunderAgent copies the complete model card from its backing workers and changes
+only the public name, input type, surface, and worker role. Startup fails if the
+backing workers publish different cards. The copied card preserves the backend's
+token limits, parsers, capabilities, and other runtime metadata.
 
 The control-loop knobs (`--pause-threshold`, `--pause-target`,
 `--resume-hysteresis`, `--scheduler-interval-seconds`, …) and their defaults are
@@ -116,7 +115,7 @@ agent.
 
 ## Harbor/Pi A/B walkthrough
 
-This walkthrough runs the same SWE-bench Verified task through ThunderAgent and the stock Dynamo KV router. Harbor owns the task container, Pi runs inside it, and the model stack runs on the host. ThunderAgent is backend-agnostic and works with Dynamo's vLLM and SGLang backends; this example uses one 8-GPU node and two TP4 vLLM workers loading `MiniMaxAI/MiniMax-M2.7` from Hugging Face and serving the API alias `MiniMaxAI/MiniMax-M2`. There is no HiCache, Mooncake, shared cache, or frontend admission control in either arm.
+This walkthrough runs the same SWE-bench Verified task through ThunderAgent and the stock Dynamo KV router. Harbor owns the task container, Pi runs inside it, and the model stack runs on the host. ThunderAgent is backend-agnostic and works with Dynamo's vLLM and SGLang backends; this example uses one 8-GPU node and two TP4 vLLM workers loading `MiniMaxAI/MiniMax-M2.7` from Hugging Face and serving the API alias `MiniMaxAI/MiniMax-M2`. There is no HiCache, Mooncake, or shared cache in either arm.
 
 The [agent-plugins `DynamoPi` adapter](https://github.com/ai-dynamo/agent-plugins/blob/main/pi-plugin/harbor/dynamo_pi.py) is required. It installs the Dynamo provider in each Harbor task container and maps Harbor's per-trial ID to one stable `x-dynamo-session-id` across all Pi turns. The ThunderAgent arm also sends one terminal session request so the router can release the completed program; the stock KV arm disables that request because it has no lifecycle consumer.
 

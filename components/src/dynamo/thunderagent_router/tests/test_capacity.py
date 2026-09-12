@@ -33,14 +33,18 @@ class _FakeClient:
     def instance_ids(self) -> list[int]:
         return list(self._worker_ids)
 
+    async def wait_for_instances(self) -> list[int]:
+        return list(self._worker_ids)
+
 
 def _make_provider(
     cards: Optional[dict[str, str]],
+    worker_ids: Optional[list[int]] = None,
 ) -> tuple[WorkerCapacityProvider, Optional[_FakeSubscriber]]:
     """Build a provider over *cards*; ``None`` leaves the subscriber unset."""
     provider = WorkerCapacityProvider(  # type: ignore[arg-type]
         endpoint=None,
-        client=_FakeClient(),
+        client=_FakeClient(worker_ids),
     )
     if cards is None:
         return provider, None
@@ -156,3 +160,36 @@ def test_live_worker_ids_uses_endpoint_client():
         client=_FakeClient([1, 2]),
     )
     assert provider.live_worker_ids() == {1, 2}
+
+
+@pytest.mark.asyncio
+async def test_wait_for_consistent_model_card_returns_the_complete_card():
+    card = _card(16, 1_000, host_total_tokens=300)
+    same_card_different_encoding = json.dumps(
+        json.loads(card), indent=2, sort_keys=True
+    )
+    provider, _ = _make_provider(
+        {"1": card, "2": same_card_different_encoding}, worker_ids=[1, 2]
+    )
+
+    inherited = await provider.wait_for_consistent_model_card()
+
+    assert json.loads(inherited) == json.loads(card)
+
+
+@pytest.mark.asyncio
+async def test_wait_for_consistent_model_card_rejects_any_difference():
+    provider, _ = _make_provider(
+        {"1": _card(16, 1_000), "2": _card(16, 999)}, worker_ids=[1, 2]
+    )
+
+    with pytest.raises(RuntimeError, match="different model cards"):
+        await provider.wait_for_consistent_model_card()
+
+
+@pytest.mark.asyncio
+async def test_wait_for_consistent_model_card_requires_backing_workers():
+    provider, _ = _make_provider({}, worker_ids=[])
+
+    with pytest.raises(RuntimeError, match="no backing workers"):
+        await provider.wait_for_consistent_model_card()
