@@ -159,6 +159,13 @@ async def test_validate_url_accepts_data_url_by_default() -> None:
     await validate_url("data:image/png;base64,iVBORw0KGgoAAAA=", STRICT_HTTPS)
 
 
+async def test_validate_url_rejects_oversized_data_url() -> None:
+    # An inline data: payload past the cap is rejected before the worker holds it.
+    oversized = "data:image/png;base64," + "A" * (url_validator._MAX_DATA_URL_BYTES + 1)
+    with pytest.raises(UrlValidationError, match="exceeds"):
+        await validate_url(oversized, STRICT_HTTPS)
+
+
 async def test_validate_url_http_allowed_when_opted_in() -> None:
     policy = PERMISSIVE
     # With public hostname + allow_private_ips=True (keeps DNS out of the test)

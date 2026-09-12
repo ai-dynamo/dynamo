@@ -22,9 +22,25 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
+from dynamo.common.configuration.utils import env_or_default
+
 
 class UrlValidationError(ValueError):
     """Raised when a URL or filesystem path fails the configured policy."""
+
+
+# Cap on the raw length of an inline ``data:`` URL. A client can otherwise inline
+# an arbitrarily large payload in a single request and force the worker to hold
+# it (and its base64-decoded form) in memory. Default 16 MiB, overridable via
+# ``DYN_MM_MAX_DATA_URL_MB``.
+try:
+    _MAX_DATA_URL_MB = env_or_default("DYN_MM_MAX_DATA_URL_MB", 16, int)
+except ValueError:
+    # A bad value must not crash every worker importing this module at startup.
+    _MAX_DATA_URL_MB = 16
+if _MAX_DATA_URL_MB <= 0:  # a non-positive cap would reject every data: URL
+    _MAX_DATA_URL_MB = 16
+_MAX_DATA_URL_BYTES = _MAX_DATA_URL_MB * 1024 * 1024
 
 
 # IP ranges that must never be reachable from a user-controlled URL.
@@ -120,6 +136,11 @@ async def validate_url(url: str, policy: UrlValidationPolicy) -> str:
     scheme = parsed.scheme.lower()
 
     if scheme == "data":
+        if len(url) > _MAX_DATA_URL_BYTES:
+            raise UrlValidationError(
+                f"data: URL is {len(url)} bytes, exceeds the "
+                f"{_MAX_DATA_URL_BYTES}-byte limit"
+            )
         return url
 
     if scheme not in ("http", "https"):
