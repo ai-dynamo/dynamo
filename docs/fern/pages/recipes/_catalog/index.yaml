@@ -11,6 +11,7 @@
 schema_version: 1
 recipes:
 - gemma4-31b
+- deepseek-v4-1-flash
 - glm-5-3-flash
 - kimi-k3
 - qwen-3-8-flash-next
