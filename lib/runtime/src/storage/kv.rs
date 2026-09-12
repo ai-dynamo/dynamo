@@ -333,48 +333,91 @@ impl Manager {
         }
     }
 
-    /// Returns a receiver that will receive all the existing keys, and
-    /// then block and receive new keys as they are created.
-    /// Starts a task that runs forever, watches the store.
-    pub fn watch(
+    /// Returns a receiver for all the existing keys of a bucket, and then for every later change.
+    ///
+    /// This method establishes the watch before it returns: [`Bucket::watch`] has captured the
+    /// initial snapshot, so every change that follows reaches the receiver. A caller that also
+    /// reads the bucket directly must read it after this returns. A read before the watch can
+    /// show a key that a delete removes before the snapshot, and the receiver never reports that
+    /// delete.
+    ///
+    /// The spawned task runs until `cancel_token` cancels, the receiver drops, or the backend
+    /// stream ends.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the bucket is unavailable, when the backend cannot establish the
+    /// watch, or when `cancel_token` cancels first.
+    pub async fn watch(
         self: Arc<Self>,
         bucket_name: &str,
         bucket_ttl: Option<Duration>,
         cancel_token: CancellationToken,
-    ) -> (
-        tokio::task::JoinHandle<Result<(), StoreError>>,
-        tokio::sync::mpsc::Receiver<WatchEvent>,
-    ) {
+    ) -> Result<
+        (
+            tokio::task::JoinHandle<()>,
+            tokio::sync::mpsc::Receiver<WatchEvent>,
+        ),
+        StoreError,
+    > {
         let bucket_name = bucket_name.to_string();
         // Backpressure is intentional: discovery state events must never be dropped.
         let (tx, rx) = tokio::sync::mpsc::channel(16384);
-        let watch_task = tokio::spawn(async move {
-            // Start listening for changes but don't poll this yet
-            let bucket = self
-                .0
-                .get_or_create_bucket(&bucket_name, bucket_ttl)
-                .await?;
-            // Bucket::watch atomically establishes its initial snapshot and incremental
-            // stream. A separate entries() read here could replay an older buffered update
-            // after a newer snapshot.
-            let mut stream = bucket.watch().await?;
-
-            loop {
-                let event = tokio::select! {
-                    _ = cancel_token.cancelled() => break,
-                    result = stream.next() => match result {
-                        Some(event) => event,
-                        None => break,
+        let (established_tx, established_rx) = tokio::sync::oneshot::channel();
+        let watch_task = tokio::spawn({
+            let bucket_name = bucket_name.clone();
+            let cancel_token = cancel_token.clone();
+            async move {
+                // Start listening for changes but don't poll this yet
+                let bucket = match self.0.get_or_create_bucket(&bucket_name, bucket_ttl).await {
+                    Ok(bucket) => bucket,
+                    Err(error) => {
+                        let _ = established_tx.send(Err(error));
+                        return;
                     }
                 };
-                if !Self::forward_watch_event(&tx, event, &cancel_token, &bucket_name).await {
-                    break;
+                // Bucket::watch atomically establishes its initial snapshot and incremental
+                // stream. A separate entries() read here could replay an older buffered update
+                // after a newer snapshot.
+                let mut stream = match bucket.watch().await {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        let _ = established_tx.send(Err(error));
+                        return;
+                    }
+                };
+                // The caller stopped waiting, so no receiver reconciles against this snapshot.
+                if established_tx.send(Ok(())).is_err() {
+                    return;
+                }
+
+                loop {
+                    let event = tokio::select! {
+                        () = cancel_token.cancelled() => break,
+                        result = stream.next() => match result {
+                            Some(event) => event,
+                            None => break,
+                        }
+                    };
+                    if !Self::forward_watch_event(&tx, event, &cancel_token, &bucket_name).await {
+                        break;
+                    }
                 }
             }
-
-            Ok::<(), StoreError>(())
         });
-        (watch_task, rx)
+
+        let established = tokio::select! {
+            biased;
+            () = cancel_token.cancelled() => return Err(StoreError::WatchCancelled(bucket_name)),
+            established = established_rx => established,
+        };
+        established.map_err(|_| {
+            StoreError::ProviderError(format!(
+                "the watch task for bucket '{bucket_name}' ended before it established the watch"
+            ))
+        })??;
+
+        Ok((watch_task, rx))
     }
 
     pub async fn publish<T: Serialize + Versioned + Send + Sync>(
@@ -495,6 +538,11 @@ pub enum StoreError {
     #[error("Key Value Error: {0} for bucket '{1}'")]
     KeyValueError(String, String),
 
+    /// The caller cancelled before the backend established the watch, so no snapshot exists to
+    /// reconcile against.
+    #[error("Watch on bucket '{0}' was cancelled before it was established")]
+    WatchCancelled(String),
+
     #[error("Error decoding bytes: {0}")]
     JSONDecodeError(#[from] serde_json::error::Error),
 
@@ -564,7 +612,9 @@ mod tests {
         let cancel_token = CancellationToken::new();
         let (watch_task, mut rx) = manager
             .clone()
-            .watch(BUCKET_NAME, None, cancel_token.clone());
+            .watch(BUCKET_NAME, None, cancel_token.clone())
+            .await
+            .unwrap();
 
         let first = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
@@ -590,7 +640,85 @@ mod tests {
         );
 
         cancel_token.cancel();
-        watch_task.await.unwrap().unwrap();
+        watch_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn manager_watch_reports_a_delete_that_follows_establishment() {
+        let manager = Arc::new(Manager::memory());
+        let bucket = manager
+            .get_or_create_bucket(BUCKET_NAME, None)
+            .await
+            .unwrap();
+        let key = Key::new("ns/worker/generate/1".to_string());
+        bucket.insert(&key, "value".into(), 1).await.unwrap();
+
+        let cancel_token = CancellationToken::new();
+        let (watch_task, mut rx) = manager
+            .clone()
+            .watch(BUCKET_NAME, None, cancel_token.clone())
+            .await
+            .unwrap();
+        // watch() returned, so the snapshot is captured and this delete is newer than it.
+        bucket.delete(&key).await.unwrap();
+
+        let first = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let WatchEvent::Put(first) = first else {
+            panic!("expected the existing key in the initial snapshot, got {first:?}");
+        };
+        assert_eq!(first.key_str(), key.as_ref());
+
+        let second = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            second,
+            WatchEvent::Delete(key),
+            "a delete after establishment must reach the receiver"
+        );
+
+        cancel_token.cancel();
+        watch_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn manager_watch_reports_an_unavailable_bucket() {
+        // A file as the store root makes every bucket directory unreachable.
+        let root = tempfile::NamedTempFile::new().unwrap();
+        let cancel_token = CancellationToken::new();
+        let manager = Arc::new(Manager::file(cancel_token.clone(), root.path()));
+
+        let error = manager
+            .watch(BUCKET_NAME, None, cancel_token.clone())
+            .await
+            .expect_err("a bucket under a file cannot be created");
+
+        assert!(
+            matches!(error, StoreError::FilesystemError(_)),
+            "expected a filesystem error, got {error:?}"
+        );
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn manager_watch_reports_cancellation_before_establishment() {
+        let manager = Arc::new(Manager::memory());
+        let cancel_token = CancellationToken::new();
+        cancel_token.cancel();
+
+        let error = manager
+            .watch(BUCKET_NAME, None, cancel_token)
+            .await
+            .expect_err("a cancelled watch establishes no snapshot");
+
+        assert!(
+            matches!(&error, StoreError::WatchCancelled(bucket) if bucket == BUCKET_NAME),
+            "expected a cancelled watch, got {error:?}"
+        );
     }
 
     #[tokio::test]

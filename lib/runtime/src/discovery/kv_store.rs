@@ -725,12 +725,17 @@ impl Discovery for KVStoreDiscovery {
         // Use the provided cancellation token, or fall back to the default token
         let cancel_token = cancel_token.unwrap_or_else(|| self.cancel_token.clone());
 
-        // Use the kv::Manager's watch mechanism
-        let (_, mut rx) = self.store.clone().watch(
-            bucket_name,
-            None, // No TTL
-            cancel_token,
-        );
+        // kv::Manager::watch establishes the backend watch before it returns, so the stream this
+        // method hands back reports every change that follows.
+        let (_, mut rx) = self
+            .store
+            .clone()
+            .watch(
+                bucket_name,
+                None, // No TTL
+                cancel_token,
+            )
+            .await?;
 
         // Create a stream that filters and transforms WatchEvents to DiscoveryEvents
         let stream = async_stream::stream! {
@@ -1212,6 +1217,47 @@ mod tests {
 
         register_task.await.unwrap();
         cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn watch_reports_an_unregister_that_follows_establishment() {
+        let client = KVStoreDiscovery::new(kv::Manager::memory(), CancellationToken::new());
+        let instance = client
+            .register(DiscoverySpec::Endpoint {
+                namespace: "ns".to_string(),
+                component: "comp".to_string(),
+                endpoint: "ep".to_string(),
+                device_type: None,
+                request_plane_codec: None,
+                transport: TransportType::Nats("nats://127.0.0.1:4222".to_string()),
+            })
+            .await
+            .unwrap();
+
+        let mut stream = client
+            .list_and_watch(DiscoveryQuery::AllEndpoints, None)
+            .await
+            .unwrap();
+        // list_and_watch returned, so the watch is established and this unregister is newer.
+        client.unregister(instance.clone()).await.unwrap();
+
+        let added = tokio::time::timeout(tokio::time::Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(added, DiscoveryEvent::Added(instance.clone()));
+
+        let removed = tokio::time::timeout(tokio::time::Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            removed,
+            DiscoveryEvent::Removed(instance.id()),
+            "an unregister after establishment must reach the stream"
+        );
     }
 
     fn model_spec(taint: &str) -> DiscoverySpec {
