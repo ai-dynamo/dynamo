@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from prometheus_api_client import PrometheusApiClientException
+from requests import ConnectionError as RequestsConnectionError
 
 from dynamo import prometheus_names
 from dynamo.planner.core.throughput_scaling import ThroughputScalingMixin
@@ -439,6 +440,51 @@ def test_get_avg_request_count_falls_back_to_completed_when_started_missing():
     queries = [call.kwargs["query"] for call in mock_query.call_args_list]
     assert "dynamo_frontend_requests_started_total" in queries[0]
     assert "dynamo_frontend_requests_total" in queries[1]
+
+
+def test_get_avg_request_count_returns_none_when_no_data():
+    """No data is UNKNOWN demand, not zero demand.
+
+    A frontend whose metrics are not being scraped -- a PodMonitor pointing at the
+    wrong path, say -- looks exactly like a frontend nobody is sending requests to.
+    Returning 0 makes the planner size the pools for no traffic while traffic is
+    flowing; only min_endpoint then stands between a busy pool and its floor.
+    """
+    client = PrometheusAPIClient("http://localhost:9090", "target_namespace")
+
+    with patch.object(client.prom, "custom_query") as mock_query:
+        mock_query.side_effect = [[], []]
+
+        result = client.get_avg_request_count("30s", "target_model")
+
+    assert result is None
+
+
+def test_get_avg_request_count_returns_none_when_prometheus_is_unreachable():
+    client = PrometheusAPIClient("http://localhost:9090", "target_namespace")
+
+    with patch.object(client.prom, "custom_query") as mock_query:
+        mock_query.side_effect = RequestsConnectionError("connection refused")
+
+        result = client.get_avg_request_count("30s", "target_model")
+
+    assert result is None
+
+
+def test_get_avg_request_count_returns_none_on_unexpected_errors():
+    """A malformed response is unknown demand, and must not kill the planner.
+
+    The tick loop catches only GPUShapeUnavailableError (core/base.py:1042), so
+    anything raised here would shut the planner down instead of skipping a tick.
+    """
+    client = PrometheusAPIClient("http://localhost:9090", "target_namespace")
+
+    with patch.object(client.prom, "custom_query") as mock_query:
+        mock_query.side_effect = ValueError("malformed payload")
+
+        result = client.get_avg_request_count("30s", "target_model")
+
+    assert result is None
 
 
 def test_vllm_spec_decode_accept_length_query_derives_from_counters():
