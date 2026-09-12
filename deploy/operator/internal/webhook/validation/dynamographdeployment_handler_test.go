@@ -98,7 +98,10 @@ func TestDynamoGraphDeploymentHandlerValidateUpdate(t *testing.T) {
 		invalid := newBetaDGDForValidation()
 		invalid.Spec.Components = nil
 		_, err := handler.ValidateUpdate(ctx, newBetaDGDForValidation(), invalid)
-		assertBetaValidationErrors(t, err, []string{"spec.components: Required value: must have at least one component"})
+		assertBetaValidationErrors(t, err, []string{
+			"spec.components: Required value: must have at least one component",
+			"spec.components: Forbidden: component topology is immutable and cannot be modified after creation: components removed: [frontend worker]",
+		})
 	})
 
 	t.Run("stateful validation failure", func(t *testing.T) {

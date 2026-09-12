@@ -118,6 +118,7 @@ type admissionTestCase struct {
 	wantCELError      string
 	wantAdmissionErrs []string
 	wantWebhookErrors []string
+	wantWebhookCauses []metav1.StatusCause
 	wantWarnings      []string
 	notWantError      string
 }
@@ -171,9 +172,10 @@ func runAdmissionTest(t *testing.T, test admissionTestCase) *unstructured.Unstru
 	}
 
 	t.Log("Compare the API server admission result with the table expectations")
-	wantErrors := expectedAdmissionErrors(t, test)
+	wantErrors, wantCauses := expectedAdmissionErrors(t, test)
 	wantErrors = rewriteExpectedNamespace(wantErrors, originalNamespace, env.Namespace())
-	assertAdmissionErrors(t, err, wantErrors, test.notWantError)
+	wantCauses = rewriteExpectedCauseNamespaces(wantCauses, originalNamespace, env.Namespace())
+	assertAdmissionErrors(t, err, wantErrors, wantCauses, test.notWantError)
 	wantWarnings := rewriteExpectedNamespace(test.wantWarnings, originalNamespace, env.Namespace())
 	if got := warnings.list(); !slices.Equal(got, wantWarnings) {
 		t.Fatalf("warnings = %v, want %v", got, wantWarnings)
@@ -486,7 +488,7 @@ func createTestClusterTopology(t *testing.T, env *operatorenv.TestEnv) {
 	})
 }
 
-func expectedAdmissionErrors(t *testing.T, test admissionTestCase) []string {
+func expectedAdmissionErrors(t *testing.T, test admissionTestCase) ([]string, []metav1.StatusCause) {
 	t.Helper()
 	categories := 0
 	if test.wantSchemaError != "" {
@@ -501,31 +503,37 @@ func expectedAdmissionErrors(t *testing.T, test admissionTestCase) []string {
 	if len(test.wantWebhookErrors) != 0 {
 		categories++
 	}
+	if len(test.wantWebhookCauses) != 0 {
+		categories++
+	}
 	if categories > 1 {
 		t.Fatal("one admission stage cannot have multiple error expectations")
 	}
 	if test.wantSchemaError != "" {
-		return []string{test.wantSchemaError}
+		return []string{test.wantSchemaError}, nil
 	}
 	if test.wantCELError != "" {
-		return []string{test.wantCELError}
+		return []string{test.wantCELError}, nil
 	}
 	if len(test.wantAdmissionErrs) != 0 {
-		return test.wantAdmissionErrs
+		return test.wantAdmissionErrs, nil
 	}
-	return test.wantWebhookErrors
+	if len(test.wantWebhookCauses) != 0 {
+		return nil, test.wantWebhookCauses
+	}
+	return test.wantWebhookErrors, nil
 }
 
-func assertAdmissionErrors(t *testing.T, err error, want []string, notWant string) {
+func assertAdmissionErrors(t *testing.T, err error, want []string, wantCauses []metav1.StatusCause, notWant string) {
 	t.Helper()
-	if len(want) == 0 {
+	if len(want) == 0 && len(wantCauses) == 0 {
 		if err != nil {
 			t.Fatalf("admission error = %v, want none", err)
 		}
 		return
 	}
 	if err == nil {
-		t.Fatalf("admission error = nil, want %v", want)
+		t.Fatalf("admission error = nil, want errors %v or causes %#v", want, wantCauses)
 	}
 	if notWant != "" && strings.Contains(err.Error(), notWant) {
 		t.Fatalf("admission error = %q, must not contain %q", err, notWant)
@@ -539,6 +547,7 @@ func assertAdmissionErrors(t *testing.T, err error, want []string, notWant strin
 		t.Fatalf("admission error = %v, want field causes", err)
 	}
 	got := make([]string, 0, len(details.Causes))
+	gotCauses := make([]metav1.StatusCause, 0, len(details.Causes))
 	for _, cause := range details.Causes {
 		if (cause.Field == "" || cause.Field == "<nil>") && strings.Contains(cause.Message, "some validation rules were not checked because the object was invalid") {
 			continue
@@ -549,6 +558,13 @@ func assertAdmissionErrors(t *testing.T, err error, want []string, notWant strin
 		message := strings.Replace(cause.Message, `Invalid value: "object": `, "Invalid value: ", 1)
 		message = strings.Replace(message, `Invalid value: "array": `, "Invalid value: ", 1)
 		got = append(got, fmt.Sprintf("%s: %s", cause.Field, message))
+		gotCauses = append(gotCauses, metav1.StatusCause{Type: cause.Type, Field: cause.Field, Message: message})
+	}
+	if len(wantCauses) != 0 {
+		if !slices.Equal(gotCauses, wantCauses) {
+			t.Fatalf("admission causes = %#v, want %#v; full error: %v", gotCauses, wantCauses, err)
+		}
+		return
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("admission errors = %v, want %v; full error: %v", got, want, err)
@@ -562,6 +578,18 @@ func rewriteExpectedNamespace(values []string, oldNamespace, newNamespace string
 	rewritten := make([]string, len(values))
 	for i, value := range values {
 		rewritten[i] = strings.ReplaceAll(value, oldNamespace+"-", newNamespace+"-")
+	}
+	return rewritten
+}
+
+func rewriteExpectedCauseNamespaces(causes []metav1.StatusCause, oldNamespace, newNamespace string) []metav1.StatusCause {
+	if oldNamespace == "" || oldNamespace == newNamespace {
+		return causes
+	}
+	rewritten := make([]metav1.StatusCause, len(causes))
+	for i, cause := range causes {
+		rewritten[i] = cause
+		rewritten[i].Message = strings.ReplaceAll(cause.Message, oldNamespace+"-", newNamespace+"-")
 	}
 	return rewritten
 }

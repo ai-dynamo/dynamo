@@ -724,7 +724,6 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 	fldPath *field.Path,
 	canModifyReplicas bool,
 	ownerKind schema.GroupKind,
-	validateGPUMemoryServiceNewState bool,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 
@@ -794,13 +793,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 			newComponent.Experimental,
 			oldComponent.Experimental,
 			fldPath.Child("experimental"),
-			experimentalSpecUpdateValidationOptions{
-				ownerKind:                        ownerKind,
-				componentType:                    newComponent.ComponentType,
-				resources:                        dynamo.GetMainContainerResources(newComponent),
-				containers:                       podTemplateContainers(newComponent.PodTemplate),
-				validateGPUMemoryServiceNewState: validateGPUMemoryServiceNewState,
-			},
+			ownerKind,
 		)...)
 	} else if oldComponent.Experimental != nil {
 		oldGMS := gpuMemoryServiceForExperimental(oldComponent.Experimental)
@@ -982,40 +975,22 @@ func (v *sharedValidation) validateTopologyConstraintUpdate(
 	)}
 }
 
-type experimentalSpecUpdateValidationOptions struct {
-	ownerKind                        schema.GroupKind
-	componentType                    nvidiacomv1beta1.ComponentType
-	resources                        corev1.ResourceRequirements
-	containers                       []corev1.Container
-	validateGPUMemoryServiceNewState bool
-}
-
 // validateExperimentalSpecUpdate validates an experimental spec update.
-// newExperimental and fldPath must not be nil; oldExperimental may be nil for an addition and options.ownerKind.Kind must not be empty.
+// newExperimental and fldPath must not be nil; oldExperimental may be nil for an addition and ownerKind.Kind must not be empty.
 func (v *sharedValidation) validateExperimentalSpecUpdate(
 	newExperimental *nvidiacomv1beta1.ExperimentalSpec,
 	oldExperimental *nvidiacomv1beta1.ExperimentalSpec,
 	fldPath *field.Path,
-	options experimentalSpecUpdateValidationOptions,
+	ownerKind schema.GroupKind,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	newGMS := newExperimental.GPUMemoryService
-	if newGMS != nil && options.validateGPUMemoryServiceNewState {
-		allErrs = append(allErrs, v.validateGPUMemoryServiceSpec(
-			newGMS,
-			fldPath.Child("gpuMemoryService"),
-			options.componentType,
-			options.resources,
-			options.containers,
-		)...)
-	}
-
 	oldGMS := gpuMemoryServiceForExperimental(oldExperimental)
 	if isInterPodGMS(newGMS) != isInterPodGMS(oldGMS) {
 		allErrs = append(allErrs, field.Invalid(
 			fldPath.Child("gpuMemoryService", "mode"),
 			k8sptr.Deref(newGMS, nvidiacomv1beta1.GPUMemoryServiceSpec{}).Mode,
-			fmt.Sprintf("the inter-pod GMS layout cannot be toggled after creation; delete and recreate the %s", options.ownerKind.Kind),
+			fmt.Sprintf("the inter-pod GMS layout cannot be toggled after creation; delete and recreate the %s", ownerKind.Kind),
 		))
 	}
 
@@ -1025,7 +1000,7 @@ func (v *sharedValidation) validateExperimentalSpecUpdate(
 		allErrs = append(allErrs, field.Invalid(
 			fldPath.Child("failover"),
 			newFailover,
-			fmt.Sprintf("inter-pod GMS failover cannot be toggled after creation; delete and recreate the %s", options.ownerKind.Kind),
+			fmt.Sprintf("inter-pod GMS failover cannot be toggled after creation; delete and recreate the %s", ownerKind.Kind),
 		))
 	}
 	if isInterPodFailover(newFailover) && isInterPodFailover(oldFailover) &&
@@ -1033,7 +1008,7 @@ func (v *sharedValidation) validateExperimentalSpecUpdate(
 		allErrs = append(allErrs, field.Invalid(
 			fldPath.Child("failover", "numShadows"),
 			newFailover.NumShadows,
-			fmt.Sprintf("is immutable for inter-pod GMS failover; delete and recreate the %s to change it", options.ownerKind.Kind),
+			fmt.Sprintf("is immutable for inter-pod GMS failover; delete and recreate the %s to change it", ownerKind.Kind),
 		))
 	}
 
@@ -1043,13 +1018,13 @@ func (v *sharedValidation) validateExperimentalSpecUpdate(
 			newExperimental.Grove,
 			oldGrove,
 			fldPath.Child("grove"),
-			options.ownerKind,
+			ownerKind,
 		)...)
 	} else if oldGrove != nil && k8sptr.Deref(oldGrove.ForceScalingGroup, false) {
 		allErrs = append(allErrs, field.Invalid(
 			fldPath.Child("grove", "forceScalingGroup"),
 			nil,
-			fmt.Sprintf("cannot be toggled after creation; delete and recreate the %s to change it", options.ownerKind.Kind),
+			fmt.Sprintf("cannot be toggled after creation; delete and recreate the %s to change it", ownerKind.Kind),
 		))
 	}
 	return allErrs

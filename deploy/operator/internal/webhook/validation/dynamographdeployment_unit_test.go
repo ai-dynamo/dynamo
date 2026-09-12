@@ -7,10 +7,17 @@ package validation
 
 import (
 	"context"
+	_ "embed"
+	"encoding/csv"
 	"fmt"
+	"io"
+	"math"
 	"slices"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
+	"unicode"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -29,7 +36,24 @@ import (
 	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 )
 
-const sglangBackendFramework = "sglang"
+const (
+	sglangBackendFramework = "sglang"
+
+	// bringUpBoardSuffix names the internal boards excluded from the admission
+	// catalog; a careless merge must not reintroduce one.
+	bringUpBoardSuffix = "-bring-up-board"
+
+	// examplePowerAwareGPUProduct is the product examples/power-aware-budget pins,
+	// and examplePowerAwareCapsW are the per-GPU caps it authors.
+	examplePowerAwareGPUProduct = "NVIDIA-H100-80GB-HBM3"
+)
+
+// examplePowerAwareCapsW mirrors the prefill and decode caps in
+// examples/power-aware-budget/dgd.yaml.
+var examplePowerAwareCapsW = []int64{350, 300}
+
+//go:embed gpu_power_limits.csv
+var gpuPowerLimitsCSV string
 
 func TestDynamoGraphDeploymentConversionFailureIsFatal(t *testing.T) {
 	dgd := newBetaDGDForValidation()
@@ -43,6 +67,62 @@ func TestDynamoGraphDeploymentConversionFailureIsFatal(t *testing.T) {
 	}
 	if k8serrors.IsInvalid(err) {
 		t.Fatalf("Validate() error = %v, want fatal conversion error rather than field validation error", err)
+	}
+}
+
+// TestRatchetDGDGPUProductErrorsSuppressesExactMatchesOnly proves the update
+// adapter removes a ratcheted product violation from the accumulated stateless
+// result only on a one-to-one match, and otherwise fails closed. The admission
+// chain always produces exactly one stateless error per candidate, so a missing
+// or duplicated match is only reachable from here.
+func TestRatchetDGDGPUProductErrorsSuppressesExactMatchesOnly(t *testing.T) {
+	dgd := newBetaDGDForValidation()
+	worker := &dgd.Spec.Components[1]
+	worker.PodTemplate.Annotations = map[string]string{consts.KubeAnnotationGPUPowerLimit: "300"}
+	workerPath := field.NewPath("spec", "components").Index(1)
+
+	candidates := dgdComponentGPUProductRuleErrors(worker, workerPath)
+	if len(candidates) != 1 {
+		t.Fatalf("candidate errors = %v, want exactly one", candidates)
+	}
+	candidate := candidates[0]
+	unrelated := field.Invalid(workerPath.Child("replicas"), int32(2), "is immutable")
+
+	tests := []struct {
+		name         string
+		allErrs      field.ErrorList
+		wantRetained []string
+		wantWarnings int
+	}{
+		{
+			name:         "an exact match is suppressed and every other error is retained",
+			allErrs:      field.ErrorList{candidate, unrelated},
+			wantRetained: []string{unrelated.Field},
+			wantWarnings: 1,
+		},
+		{
+			name:         "a missing match retains every error",
+			allErrs:      field.ErrorList{unrelated},
+			wantRetained: []string{unrelated.Field},
+		},
+		{
+			name:         "a duplicated match retains every error",
+			allErrs:      field.ErrorList{candidate, unrelated, candidate},
+			wantRetained: []string{candidate.Field, unrelated.Field, candidate.Field},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Ratchet the GPU-product rule against the accumulated stateless result")
+			validation := &dynamoGraphDeploymentValidation{}
+			retained := validation.ratchetDGDGPUProductErrors(tt.allErrs, dgd, dgd)
+
+			t.Log("Compare the retained errors and emitted warnings with the expectations")
+			assertFieldPaths(t, retained, tt.wantRetained)
+			if len(validation.warnings) != tt.wantWarnings {
+				t.Fatalf("warnings = %v, want %d", validation.warnings, tt.wantWarnings)
+			}
+		})
 	}
 }
 
@@ -248,5 +328,166 @@ func TestDynamoGraphDeploymentRejectsElasticEPWithoutCommand(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "requires an explicit container command") {
 		t.Fatalf("Validate() error = %v, want elastic-EP command requirement", err)
+	}
+}
+
+// TestGPUProductPowerRanges audits the admission catalog. The admission chain
+// cannot reach an unexported package-level map, so this is the one focused unit
+// test the structural contract allows alongside the DGD admission table.
+func TestGPUProductPowerRanges(t *testing.T) {
+	t.Log("Assert the structural invariants every shipped catalog entry must satisfy")
+	for product, productRange := range powerRanges {
+		if product == "" {
+			t.Errorf("catalog contains an empty product key with range %+v", productRange)
+			continue
+		}
+		if strings.ContainsFunc(product, unicode.IsSpace) {
+			t.Errorf("product %q contains whitespace; keys must be exact GFD label values", product)
+		}
+		if strings.HasSuffix(product, bringUpBoardSuffix) {
+			t.Errorf("product %q is an internal bring-up board name, not a public GFD label", product)
+		}
+		if productRange.Min <= 0 || productRange.Min > productRange.Max {
+			t.Errorf("product %q has range %+v, want 0 < Min <= Max", product, productRange)
+		}
+	}
+
+	t.Log("Derive the complete expected catalog from the reviewed CSV")
+	reader := csv.NewReader(strings.NewReader(gpuPowerLimitsCSV))
+	reader.Comment = '#'
+	header, err := reader.Read()
+	if err != nil {
+		t.Fatalf("read CSV header: %v", err)
+	}
+	wantHeader := []string{"gpu_product", "Min_W", "Default_W", "Max_W", "Curr_W"}
+	if !slices.Equal(header, wantHeader) {
+		t.Fatalf("CSV header = %v, want %v", header, wantHeader)
+	}
+
+	expected := make(map[string]powerRangeW)
+	seen := make(map[string]struct{})
+	for rowNumber := 2; ; rowNumber++ {
+		record, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("read CSV row %d: %v", rowNumber, err)
+		}
+		// Run the confidentiality guard before any check that echoes the product
+		// name: this repository is public, so a CI failure message must never
+		// reproduce an internal identifier. Report the matched suffix, not the row.
+		if strings.HasSuffix(record[0], bringUpBoardSuffix) {
+			t.Fatalf(
+				"CSV row %d carries the internal pre-release board suffix %q; internal hardware must not enter this file",
+				rowNumber,
+				bringUpBoardSuffix,
+			)
+		}
+
+		if _, exists := seen[record[0]]; exists {
+			t.Fatalf("CSV row %d duplicates product %q", rowNumber, record[0])
+		}
+		seen[record[0]] = struct{}{}
+
+		product, productRange, include, err := gpuPowerRangeFromCSVRow(record)
+		if err != nil {
+			t.Fatalf("derive CSV row %d: %v", rowNumber, err)
+		}
+		if include {
+			expected[product] = productRange
+		}
+	}
+
+	t.Log("Compare every expected and production catalog key in stable order")
+	keys := make(map[string]struct{}, len(expected)+len(powerRanges))
+	for product := range expected {
+		keys[product] = struct{}{}
+	}
+	for product := range powerRanges {
+		keys[product] = struct{}{}
+	}
+	products := make([]string, 0, len(keys))
+	for product := range keys {
+		products = append(products, product)
+	}
+	sort.Strings(products)
+	for _, product := range products {
+		want, wantExists := expected[product]
+		got, gotExists := powerRanges[product]
+		switch {
+		case !gotExists:
+			t.Errorf("production catalog is missing %q with range %+v", product, want)
+		case !wantExists:
+			t.Errorf("production catalog has unexpected product %q with range %+v", product, got)
+		case got != want:
+			t.Errorf("production catalog[%q] = %+v, want %+v", product, got, want)
+		}
+	}
+
+	t.Log("Tie the shipped example's authored caps to the product it selects")
+	exampleRange := powerRanges[examplePowerAwareGPUProduct]
+	for _, watts := range examplePowerAwareCapsW {
+		if watts < exampleRange.Min || watts > exampleRange.Max {
+			t.Errorf(
+				"examples/power-aware-budget authors %d W, outside %+v for %q",
+				watts,
+				exampleRange,
+				examplePowerAwareGPUProduct,
+			)
+		}
+	}
+}
+
+// gpuPowerRangeFromCSVRow applies the reviewed import rules. Bounds round
+// inward because admission must never accept a whole-watt value outside a
+// fractional hardware interval, and Max_W rather than Default_W is the
+// settable upper bound.
+func gpuPowerRangeFromCSVRow(record []string) (string, powerRangeW, bool, error) {
+	if len(record) != 5 {
+		return "", powerRangeW{}, false, fmt.Errorf("got %d columns, want 5", len(record))
+	}
+	product := record[0]
+	if strings.HasSuffix(product, bringUpBoardSuffix) {
+		return product, powerRangeW{}, false, nil
+	}
+
+	minW, err := strconv.ParseFloat(record[1], 64)
+	if err != nil {
+		return product, powerRangeW{}, false, fmt.Errorf("parse Min_W %q: %w", record[1], err)
+	}
+	maxW, err := strconv.ParseFloat(record[3], 64)
+	if err != nil {
+		return product, powerRangeW{}, false, fmt.Errorf("parse Max_W %q: %w", record[3], err)
+	}
+	productRange := powerRangeW{Min: int64(math.Ceil(minW)), Max: int64(math.Floor(maxW))}
+	if productRange.Min <= 0 || productRange.Min > productRange.Max {
+		return product, powerRangeW{}, false, fmt.Errorf("derived malformed range %+v", productRange)
+	}
+	return product, productRange, true, nil
+}
+
+func TestGPUPowerRangeFromCSVRow(t *testing.T) {
+	tests := []struct {
+		name        string
+		record      []string
+		wantProduct string
+		wantRange   powerRangeW
+		wantInclude bool
+	}{
+		{name: "bring-up board is excluded", record: []string{"example-bring-up-board", "100", "200", "300", "250"}, wantProduct: "example-bring-up-board"},
+		{name: "fractional bounds round inward", record: []string{"example-fractional", "48.75", "60", "62.5", "60"}, wantProduct: "example-fractional", wantRange: powerRangeW{Min: 49, Max: 62}, wantInclude: true},
+		{name: "maximum rather than default feeds catalog", record: []string{"example-distinct-maximum", "100", "200", "300", "250"}, wantProduct: "example-distinct-maximum", wantRange: powerRangeW{Min: 100, Max: 300}, wantInclude: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			product, productRange, include, err := gpuPowerRangeFromCSVRow(tt.record)
+			if err != nil {
+				t.Fatalf("gpuPowerRangeFromCSVRow() error = %v", err)
+			}
+			if product != tt.wantProduct || productRange != tt.wantRange || include != tt.wantInclude {
+				t.Fatalf("gpuPowerRangeFromCSVRow() = (%q, %+v, %t), want (%q, %+v, %t)", product, productRange, include, tt.wantProduct, tt.wantRange, tt.wantInclude)
+			}
+		})
 	}
 }
