@@ -244,7 +244,7 @@ TensorRT-LLM workers are configured through command-line arguments in the deploy
 
 ## Testing the Deployment
 
-Send a test request to verify your deployment. See the [client section](../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/vllm/overview.md#client) for detailed instructions.
+Send a test request to verify your deployment. See the [Send a request step of the Kubernetes quickstart](../../../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx#send-a-request) for detailed instructions.
 
 **Note:** For multi-node deployments, target the node running `python3 -m dynamo.frontend <args>`.
 
