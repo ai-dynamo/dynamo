@@ -636,7 +636,6 @@ mod tests {
         );
     }
 
-    /// A verified endpoint, ready and probed by the canary.
     fn verified_health() -> SystemHealth {
         let health = system_health(true);
         health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
