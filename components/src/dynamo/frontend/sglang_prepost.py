@@ -32,6 +32,7 @@ from dynamo.common.utils.engine_response import trailing_stop_prefix_len
 from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.llm.exceptions import InvalidArgument
 
+from .structural_tag_policy import effective_tool_strict, should_attempt_structural_tag
 from .thinking import apply_default_thinking_mode_to_template_kwargs
 from .utils import PreprocessError, legacy_guided_decoding, random_call_id
 
@@ -199,13 +200,24 @@ def _client_wants_separate_reasoning(request: dict[str, Any]) -> bool:
     return bool(value)
 
 
-def convert_tools(tools: list[dict[str, Any]] | None) -> list[SglangTool] | None:
-    """Convert OpenAI tool dicts to SGLang Tool objects."""
+def convert_tools(
+    tools: list[dict[str, Any]] | None,
+    *,
+    structural_tag_schema: str | None = None,
+) -> list[SglangTool] | None:
+    """Convert OpenAI tool dicts to SGLang Tool objects.
+
+    ``structural_tag_schema`` is set only for the guidance copy. Prompt and
+    parser copies retain SGLang's existing omitted-strict representation.
+    """
     if not tools:
         return None
     sglang_tools = []
     for tool in tools:
         func = tool.get("function", {})
+        strict = func.get("strict", False)
+        if structural_tag_schema is not None:
+            strict = effective_tool_strict(func.get("strict"), structural_tag_schema)
         sglang_tools.append(
             SglangTool(
                 type=tool.get("type", "function"),
@@ -213,7 +225,7 @@ def convert_tools(tools: list[dict[str, Any]] | None) -> list[SglangTool] | None
                     name=func.get("name", ""),
                     description=func.get("description"),
                     parameters=func.get("parameters"),
-                    strict=func.get("strict", False),
+                    strict=strict,
                 ),
             )
         )
@@ -562,11 +574,30 @@ def _call_with_optional_parallel_tool_calls(
     return func(*args)
 
 
+def _call_structure_constraint(
+    func: Any,
+    *args: Any,
+    parallel_tool_calls: Any,
+    thinking_mode: bool,
+) -> Any:
+    """Call SGLang parser APIs across supported signature versions."""
+    kwargs: dict[str, Any] = {}
+    if _callable_accepts_kwarg(func, "parallel_tool_calls"):
+        kwargs["parallel_tool_calls"] = parallel_tool_calls
+    if _callable_accepts_kwarg(func, "thinking_mode"):
+        kwargs["thinking_mode"] = thinking_mode
+    return func(*args, **kwargs)
+
+
 def build_tool_call_guided_decoding(
     request: dict[str, Any],
     *,
     tool_call_parser_name: str | None,
     sglang_tools: list[SglangTool] | None,
+    structural_tag_mode: str = "off",
+    structural_tag_scope: str = "auto",
+    structural_tag_schema: str = "auto",
+    force_reasoning: bool = False,
 ) -> dict[str, Any] | None:
     """Build native-SGLang-like tool call constraints for guided decoding."""
     if not sglang_tools:
@@ -579,7 +610,74 @@ def build_tool_call_guided_decoding(
     parallel_tool_calls = request.get("parallel_tool_calls")
     constraint: Any = None
 
-    if tool_choice == "required" or _is_named_tool_choice(tool_choice):
+    is_named_choice = _is_named_tool_choice(tool_choice)
+    is_forced_choice = tool_choice == "required" or is_named_choice
+    sglang_tool_choice: Any = tool_choice
+    if is_named_choice:
+        sglang_tool_choice = SglangToolChoice(
+            type="function",
+            function=SglangToolChoiceFuncName(
+                name=tool_choice["function"]["name"],
+            ),
+        )
+    tool_choice_kind = (
+        "required"
+        if tool_choice == "required"
+        else "named"
+        if is_named_choice
+        else "auto"
+        if tool_choice == "auto"
+        else "other"
+    )
+    raw_tools = request.get("tools") or []
+    attempt_structural_tag = should_attempt_structural_tag(
+        mode=structural_tag_mode,
+        scope=structural_tag_scope,
+        tool_choice_kind=tool_choice_kind,
+        has_tools=bool(raw_tools),
+        any_explicit_strict=any(
+            tool.get("function", {}).get("strict") is True for tool in raw_tools
+        ),
+        parallel_tool_calls_explicitly_false=(
+            "parallel_tool_calls" in request and parallel_tool_calls is False
+        ),
+    )
+
+    if attempt_structural_tag and tool_call_parser_name:
+        guidance_tools = convert_tools(
+            raw_tools,
+            structural_tag_schema=structural_tag_schema,
+        )
+        tool_call_parser_name = _normalize_sglang_parser_name(tool_call_parser_name)
+        try:
+            parser = FunctionCallParser(
+                tools=guidance_tools,
+                tool_call_parser=tool_call_parser_name,
+            )
+            constraint = _call_structure_constraint(
+                parser.get_structure_constraint,
+                sglang_tool_choice,
+                parallel_tool_calls=parallel_tool_calls,
+                thinking_mode=force_reasoning,
+            )
+        except (
+            AttributeError,
+            KeyError,
+            NotImplementedError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ):
+            # This is a third-party capability probe. Unsupported parser/schema
+            # combinations retain the existing forced-choice JSON fallback or,
+            # for auto, unconstrained generation.
+            constraint = None
+
+    guided_decoding = _serialize_tool_constraint(constraint)
+    if guided_decoding is not None:
+        return guided_decoding
+
+    if is_forced_choice:
         if named_closed_zero_arg_tool(request) is not None:
             return {"regex": r"\{\}"}
 
@@ -587,14 +685,6 @@ def build_tool_call_guided_decoding(
         # ToolChoice) for the named-function case — passing our raw dict
         # would silently fall through and return None, disabling guided
         # decoding and letting the model omit required fields.
-        sglang_tool_choice: Any = tool_choice
-        if _is_named_tool_choice(tool_choice):
-            sglang_tool_choice = SglangToolChoice(
-                type="function",
-                function=SglangToolChoiceFuncName(
-                    name=tool_choice["function"]["name"],
-                ),
-            )
         constraint = (
             "json_schema",
             _call_with_optional_parallel_tool_calls(
@@ -604,42 +694,24 @@ def build_tool_call_guided_decoding(
                 parallel_tool_calls=parallel_tool_calls,
             ),
         )
-    # TODO: this applies a structural-tag constraint for tool_choice="auto"
-    # whenever a tool-call parser is configured, and reads NONE of
-    # structural_tag_mode / structural_tag_scope / structural_tag_schema. Those
-    # knobs are accepted on the CLI and published into the model card by
-    # sglang/register.py, so an operator setting the mode to "off" still gets a
-    # constraint on this path. prepost.py requires structural_tag_mode == "on"
-    # (_should_build_tool_call_guidance) and preprocessor/structural_tag.rs
-    # requires StructuralTagMode != Off, so at the default mode ("off") the same
-    # request is unconstrained on both of those paths and constrained here.
-    # Also unlike them, "auto" is never gated on scope/strict, so this behaves as
-    # scope="always" with no way to narrow it.
-    elif tool_call_parser_name:
-        tool_call_parser_name = _normalize_sglang_parser_name(tool_call_parser_name)
-        parser = FunctionCallParser(
-            tools=sglang_tools,
-            tool_call_parser=tool_call_parser_name,
-        )
-        constraint = _call_with_optional_parallel_tool_calls(
-            parser.get_structure_constraint,
-            tool_choice,
-            parallel_tool_calls=parallel_tool_calls,
-        )
+    return _serialize_tool_constraint(constraint)
 
-    if isinstance(constraint, tuple) and len(constraint) == 2:
-        if constraint[0] == "json_schema":
-            return {"json": constraint[1]}
-        if constraint[0] == "structural_tag":
-            tag_value = constraint[1]
-            # SGLang returns a Pydantic model (LegacyStructuralTagResponseFormat)
-            # here.  Convert to a plain dict before it hits the RPC layer —
-            # msgpack/serde_json cannot serialize BaseModel instances.
-            if hasattr(tag_value, "model_dump"):
-                tag_value = tag_value.model_dump()
-            return {"structural_tag": tag_value}
 
-    return None
+def _serialize_tool_constraint(constraint: Any) -> dict[str, Any] | None:
+    if not (isinstance(constraint, tuple) and len(constraint) == 2):
+        return None
+    if constraint[0] == "json_schema":
+        return {"json": constraint[1]}
+    if constraint[0] != "structural_tag":
+        return None
+
+    tag_value = constraint[1]
+    # SGLang returns a Pydantic model (LegacyStructuralTagResponseFormat)
+    # here. Convert to a plain dict before it hits the RPC layer because
+    # msgpack/serde_json cannot serialize BaseModel instances.
+    if hasattr(tag_value, "model_dump"):
+        tag_value = tag_value.model_dump()
+    return {"structural_tag": tag_value}
 
 
 def build_response_format_guided_decoding(
@@ -736,6 +808,9 @@ def preprocess_chat_request(
     exclude_tools_when_tool_choice_none: bool = True,
     template_force_reasoning: bool = False,
     default_thinking_mode: str | None = None,
+    structural_tag_mode: str = "off",
+    structural_tag_scope: str = "auto",
+    structural_tag_schema: str = "auto",
 ) -> SglangPreprocessResult:
     """Preprocess a chat request using SGLang tokenizer and parser APIs.
 
@@ -848,6 +923,10 @@ def preprocess_chat_request(
         request,
         tool_call_parser_name=tool_call_parser_name,
         sglang_tools=sglang_tools,
+        structural_tag_mode=structural_tag_mode,
+        structural_tag_scope=structural_tag_scope,
+        structural_tag_schema=structural_tag_schema,
+        force_reasoning=force_reasoning,
     )
     # This path also never reads the legacy guided_json / guided_regex /
     # guided_grammar / guided_choice fields at all, so those are dropped silently

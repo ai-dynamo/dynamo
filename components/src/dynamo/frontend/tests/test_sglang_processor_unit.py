@@ -1279,6 +1279,8 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
             tokenizer=tokenizer,
             tool_call_parser_name="kimi_k2",
             reasoning_parser_name=None,
+            structural_tag_mode="on",
+            structural_tag_scope="always",
         )
 
         assert (
@@ -1321,17 +1323,16 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
         )
 
     def test_auto_tool_guidance_normalizes_minimax_m3_alias(self, monkeypatch):
-        tools = convert_tools(
-            [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "get_weather",
-                        "parameters": {"type": "object", "properties": {}},
-                    },
-                }
-            ]
-        )
+        raw_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+        tools = convert_tools(raw_tools)
         seen = {}
 
         # Test double: capture the parser name used for guided decoding setup.
@@ -1350,9 +1351,11 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
         )
 
         guided = build_tool_call_guided_decoding(
-            {"tool_choice": "auto"},
+            {"tool_choice": "auto", "tools": raw_tools},
             tool_call_parser_name="minimax_m3_nom",
             sglang_tools=tools,
+            structural_tag_mode="on",
+            structural_tag_scope="always",
         )
 
         assert seen["tool_call_parser"] == "minimax-m3"
@@ -1469,21 +1472,20 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
     def test_auto_tool_choice_supports_older_structure_constraint_signature(
         self, monkeypatch
     ):
-        tools = convert_tools(
-            [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "get_weather",
-                        "strict": True,
-                        "parameters": {
-                            "type": "object",
-                            "properties": {"city": {"type": "string"}},
-                        },
+        raw_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "strict": True,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
                     },
-                }
-            ]
-        )
+                },
+            }
+        ]
+        tools = convert_tools(raw_tools)
 
         class OldFunctionCallParser:
             def __init__(self, *, tools, tool_call_parser):
@@ -1501,39 +1503,155 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
         )
 
         guided = build_tool_call_guided_decoding(
-            {"tool_choice": "auto", "parallel_tool_calls": False},
+            {
+                "tool_choice": "auto",
+                "parallel_tool_calls": False,
+                "tools": raw_tools,
+            },
             tool_call_parser_name="kimi_k2",
             sglang_tools=tools,
+            structural_tag_mode="on",
         )
 
         assert guided == {"structural_tag": {"type": "object"}}
 
     def test_auto_strict_tools_can_build_structural_tag_guidance(self):
-        tools = convert_tools(
-            [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "get_weather",
-                        "strict": True,
-                        "parameters": {
-                            "type": "object",
-                            "properties": {"city": {"type": "string"}},
-                            "required": ["city"],
-                        },
+        raw_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "strict": True,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
                     },
-                }
-            ]
-        )
+                },
+            }
+        ]
+        tools = convert_tools(raw_tools)
 
         guided = build_tool_call_guided_decoding(
-            {"tool_choice": "auto"},
+            {"tool_choice": "auto", "tools": raw_tools},
             tool_call_parser_name="kimi_k2",
             sglang_tools=tools,
+            structural_tag_mode="on",
+            structural_tag_scope="auto",
         )
 
         assert isinstance(guided, dict)
         assert "structural_tag" in guided
+
+    @pytest.mark.parametrize(
+        ("request_strict", "include_strict", "schema_mode", "expected_strict"),
+        [
+            (None, False, "auto", True),
+            (True, True, "auto", True),
+            (False, True, "auto", False),
+            (False, True, "strict", True),
+        ],
+    )
+    def test_structural_tag_guidance_uses_effective_schema_policy(
+        self,
+        monkeypatch,
+        request_strict,
+        include_strict,
+        schema_mode,
+        expected_strict,
+    ):
+        function = {
+            "name": "get_weather",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+            },
+        }
+        if include_strict:
+            function["strict"] = request_strict
+        raw_tools = [{"type": "function", "function": function}]
+        seen = {}
+
+        class CapturingFunctionCallParser:
+            def __init__(self, *, tools, tool_call_parser):
+                del tool_call_parser
+                seen["strict"] = tools[0].function.strict
+
+            def get_structure_constraint(
+                self, tool_choice, *, parallel_tool_calls=None, thinking_mode=False
+            ):
+                del tool_choice, parallel_tool_calls
+                seen["thinking_mode"] = thinking_mode
+                return "structural_tag", {"type": "object"}
+
+        monkeypatch.setattr(
+            sglang_prepost_module,
+            "FunctionCallParser",
+            CapturingFunctionCallParser,
+        )
+
+        guided = build_tool_call_guided_decoding(
+            {"tool_choice": "auto", "tools": raw_tools},
+            tool_call_parser_name="kimi_k2",
+            sglang_tools=convert_tools(raw_tools),
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+            structural_tag_schema=schema_mode,
+            force_reasoning=True,
+        )
+
+        assert guided == {"structural_tag": {"type": "object"}}
+        assert seen == {"strict": expected_strict, "thinking_mode": True}
+        assert function.get("strict") is request_strict
+
+    def test_mode_off_does_not_probe_auto_structural_tag(self, monkeypatch):
+        raw_tools = [parity_tool()]
+
+        class UnexpectedFunctionCallParser:
+            def __init__(self, **kwargs):
+                raise AssertionError(f"unexpected structural-tag probe: {kwargs}")
+
+        monkeypatch.setattr(
+            sglang_prepost_module,
+            "FunctionCallParser",
+            UnexpectedFunctionCallParser,
+        )
+
+        assert (
+            build_tool_call_guided_decoding(
+                {"tool_choice": "auto", "tools": raw_tools},
+                tool_call_parser_name="kimi_k2",
+                sglang_tools=convert_tools(raw_tools),
+                structural_tag_mode="off",
+                structural_tag_scope="always",
+            )
+            is None
+        )
+
+    def test_builder_error_uses_required_json_fallback(self, monkeypatch):
+        raw_tools = [parity_tool()]
+
+        class RaisingFunctionCallParser:
+            def __init__(self, **kwargs):
+                del kwargs
+                raise ValueError("unsupported schema")
+
+        monkeypatch.setattr(
+            sglang_prepost_module,
+            "FunctionCallParser",
+            RaisingFunctionCallParser,
+        )
+
+        guided = build_tool_call_guided_decoding(
+            {"tool_choice": "required", "tools": raw_tools},
+            tool_call_parser_name="kimi_k2",
+            sglang_tools=convert_tools(raw_tools),
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+        )
+
+        assert guided is not None
+        assert set(guided) == {"json"}
 
     def test_tool_parser_requires_tools(self):
         """Tool parser is not created if no tools in request."""
@@ -2456,9 +2574,15 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
             exclude_tools_when_tool_choice_none=True,
             chat_template="custom template",
             default_thinking_mode="disabled",
+            structural_tag_mode="on",
+            structural_tag_scope="always",
+            structural_tag_schema="strict",
         )
         assert sglang_processor_module._w_tokenizer.chat_template == "custom template"
         assert sglang_processor_module._w_default_thinking_mode == "disabled"
+        assert sglang_processor_module._w_structural_tag_mode == "on"
+        assert sglang_processor_module._w_structural_tag_scope == "always"
+        assert sglang_processor_module._w_structural_tag_schema == "strict"
 
     def test_with_reasoning_parser(self, tokenizer):
         """Reasoning parser is attached to result."""
