@@ -56,6 +56,10 @@ to it — edit only the canonical copy. Reach for the right group first:
 - `repo-codeowners` — who reviews a change, fixing a failing `codeowners` check, changing review routing
 - `visual-review` — interactive HTML code-review dashboards with diagrams and annotated diffs
 
+When reviewing frontend or runtime changes, also read the corresponding
+[frontend review prompt](.github/review-prompts/frontend.md) or
+[runtime review prompt](.github/review-prompts/runtime.md) for additional CODEOWNERS guidance.
+
 **For deploying and operating Dynamo:**
 
 - `synthesize-user-workload` — interview the user, capture their confirmed baseline DGD, and create the canonical workload contract

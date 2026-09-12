@@ -628,10 +628,12 @@ requirements.txt                                                                
 /lib/kvbm-config/src/messenger.rs                                                                       @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/src/system_health.rs                                                                       @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /tests/serve/multimodal_profiles/                                                                       @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/.github/review-prompts/runtime.md                                                                      @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-runtime-codeowners
 /docs/fern/pages/use-cases/agents/                                                                      @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-agents-codeowners
 /examples/deployments/**/sglang/**                                                                      @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners
 /lib/backend-common/src/metrics.rs                                                                      @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /recipes/**/sglang/**/*Dockerfile*                                                                      @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-ops-codeowners
+/.github/review-prompts/frontend.md                                                                     @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-frontend-codeowners
 /benchmarks/frontend/dgd/templates/                                                                     @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-operator-codeowners
 /components/src/dynamo/vllm/main.py                                                                     @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-observability-codeowners
 /deploy/inference-gateway/ext-proc/                                                                     @ai-dynamo/dynamo-epp-codeowners @ai-dynamo/dynamo-router-codeowners

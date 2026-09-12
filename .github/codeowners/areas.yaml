@@ -538,6 +538,14 @@ required_owners:
   owners:
   - operator
 shared:
+- glob: .github/review-prompts/frontend.md
+  owners:
+  - ops
+  - frontend
+- glob: .github/review-prompts/runtime.md
+  owners:
+  - ops
+  - runtime
 # CODEOWNERS is a generated artifact, so co-ownership here is about who may
 # approve it, not who reviews its contents. Every area is listed because under
 # "any one approves" any single team satisfies the gate: without this, adding a
