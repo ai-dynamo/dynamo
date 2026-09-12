@@ -112,7 +112,7 @@ repos:
       # correct for a pure CSS literal and wrong for ordinary TSX, and a
       # components/.*\.tsx pattern fails on FeatureHeatmap, ModelEABuildCards
       # and TerminalDemo, all of which interpolate legitimately.
-      files: ^docs/fern/(components/(.*Styles|ReleaseSupportMatrix|FeatureInteractions)\.tsx|scripts/check_style_components\.py)$
+      files: ^docs/fern/(components/(.*Styles|ReleaseSupportMatrix|FeatureInteractions)\.tsx|scripts/check_style_components\.py|pages/reference/.*\.mdx)$
     - id: check-agent-twins
       name: Check component-rendered data has an agent-readable twin
       entry: python3 docs/fern/scripts/check_agent_twins.py
