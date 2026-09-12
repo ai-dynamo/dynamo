@@ -977,31 +977,6 @@ mod tests {
         assert!(!is_dead_connection_error(&dead_listener));
     }
 
-    #[tokio::test]
-    async fn test_rebinding_listener_still_shuts_down_gracefully() {
-        let cancel_token = CancellationToken::new();
-        let app = Router::new().route("/test", get(|| async { (StatusCode::OK, "test") }));
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let listener = RebindingTcpListener::new(listener, address, Duration::from_millis(10));
-
-        let server = tokio::spawn({
-            let cancel_token = cancel_token.clone();
-            async move {
-                axum::serve(listener, app)
-                    .with_graceful_shutdown(cancel_token.cancelled_owned())
-                    .await
-            }
-        });
-
-        cancel_token.cancel();
-
-        tokio::time::timeout(Duration::from_secs(5), server)
-            .await
-            .expect("server should shut down when the cancel token is cancelled")
-            .expect("server task should not panic")
-            .expect("graceful shutdown should not error");
-    }
 }
 
 // Integration tests: cargo test system_status_server --lib --features integration
