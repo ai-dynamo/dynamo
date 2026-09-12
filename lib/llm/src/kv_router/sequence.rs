@@ -809,4 +809,76 @@ mod tests {
         distributed.shutdown();
         Ok(())
     }
+
+    /// Replica sync is scoped to the endpoint: an ingress on endpoint B never
+    /// sees events published on endpoint A, even once both planes are live.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn active_sequence_replica_sync_isolated_by_endpoint() -> Result<()> {
+        let runtime = dynamo_runtime::Runtime::from_current()?;
+        let distributed = dynamo_runtime::DistributedRuntime::new(
+            runtime,
+            dynamo_runtime::distributed::DistributedConfig::process_local(),
+        )
+        .await?;
+        let component = distributed
+            .namespace(format!(
+                "active-sequence-endpoint-isolation-{}",
+                uuid::Uuid::new_v4()
+            ))?
+            .component("workers")?;
+        let endpoint_a = component.endpoint("generate-a");
+        let endpoint_b = component.endpoint("generate-b");
+        let cancel = CancellationToken::new();
+        let (mut channels_a, ingress_a) =
+            host_replica_channels(&endpoint_a, 1, false, cancel.child_token()).await?;
+        let (mut channels_b, ingress_b) =
+            host_replica_channels(&endpoint_b, 2, false, cancel.child_token()).await?;
+        ingress_a.start().await;
+        ingress_b.start().await;
+
+        // Publish on both planes until each ingress has received something, so
+        // B's silence about A cannot be blamed on B's subscription not being up.
+        let publisher_a = ActiveSequenceEventPublisher::for_endpoint(&endpoint_a, 16).await?;
+        let publisher_b = ActiveSequenceEventPublisher::for_endpoint(&endpoint_b, 16).await?;
+        let mut received_a = Vec::new();
+        let mut received_b = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while received_a.is_empty() || received_b.is_empty() {
+                publisher_a.mark_prefill_completed("endpoint-a-mark".to_string(), 42, 0)?;
+                publisher_b.mark_prefill_completed("endpoint-b-mark".to_string(), 42, 0)?;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                while let Ok(event) = channels_a.inbound_rx.try_recv() {
+                    received_a.push(event.request_id);
+                }
+                while let Ok(event) = channels_b.inbound_rx.try_recv() {
+                    received_b.push(event.request_id);
+                }
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await??;
+        // Give late A events 250ms of silence to leak into B before judging.
+        while let Ok(Some(event)) = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            channels_b.inbound_rx.recv(),
+        )
+        .await
+        {
+            received_b.push(event.request_id);
+        }
+        assert!(
+            received_a.iter().all(|id| id == "endpoint-a-mark"),
+            "endpoint A received endpoint B sequence state: {received_a:?}"
+        );
+        assert!(
+            received_b.iter().all(|id| id == "endpoint-b-mark"),
+            "endpoint B received endpoint A sequence state: {received_b:?}"
+        );
+
+        drop((publisher_a, publisher_b));
+        cancel.cancel();
+        distributed.shutdown();
+        Ok(())
+    }
 }

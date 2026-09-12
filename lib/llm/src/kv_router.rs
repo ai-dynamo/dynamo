@@ -2130,11 +2130,40 @@ mod tests {
         metric_label: &'static str,
         config: KvRouterConfig,
     ) -> Result<KvRouter> {
+        make_router_with_watch(
+            name,
+            workers,
+            block_size,
+            policy,
+            shared_cache,
+            worker_role,
+            metric_label,
+            config,
+        )
+        .await
+        .map(|(router, _tx)| router)
+    }
+
+    /// [`make_router`] that also hands back the worker-config watch sender.
+    #[allow(clippy::too_many_arguments)]
+    async fn make_router_with_watch(
+        name: &str,
+        workers: HashMap<WorkerId, ModelRuntimeConfig>,
+        block_size: u32,
+        policy: SelectionPolicySource,
+        shared_cache: Option<Arc<dyn SharedKvCache>>,
+        worker_role: Option<WorkerType>,
+        metric_label: &'static str,
+        config: KvRouterConfig,
+    ) -> Result<(
+        KvRouter,
+        watch::Sender<HashMap<WorkerId, ModelRuntimeConfig>>,
+    )> {
         let component = make_test_component(name).await;
         let endpoint = component.endpoint("backend");
         let client = endpoint.client().await?;
-        let (_tx, rx) = watch::channel(workers);
-        KvRouter::new_with_worker_role(
+        let (tx, rx) = watch::channel(workers);
+        let router = KvRouter::new_with_worker_role(
             endpoint,
             client,
             rx,
@@ -2150,7 +2179,56 @@ mod tests {
             shared_cache,
             None,
         )
+        .await?;
+        Ok((router, tx))
+    }
+
+    /// Workers that appear on the config watch after construction become
+    /// routable even when the router did not wait for an initial worker.
+    #[tokio::test]
+    async fn skip_initial_worker_wait_still_monitors_worker_config_updates() {
+        let (router, tx) = make_router_with_watch(
+            "skip-initial-worker-watch",
+            HashMap::from([(0, ModelRuntimeConfig::default())]),
+            2,
+            SelectionPolicySource::Registry,
+            None,
+            Some(WorkerType::Decode),
+            "decode",
+            KvRouterConfig {
+                skip_initial_worker_wait: true,
+                use_kv_events: false,
+                router_track_active_blocks: false,
+                ..Default::default()
+            },
+        )
         .await
+        .unwrap();
+        // Catalog upserts reach the scheduler's slots asynchronously.
+        async fn wait_for_worker(router: &KvRouter, worker_id: WorkerId) -> Vec<PotentialLoad> {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let loads = router
+                        .get_potential_loads(&[1, 2, 3, 4], None, None, None, None)
+                        .await
+                        .unwrap();
+                    if loads.iter().any(|load| load.worker_id == worker_id) {
+                        return loads;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("worker {worker_id} never became routable"))
+        }
+        assert_eq!(wait_for_worker(&router, 0).await.len(), 1);
+
+        tx.send(HashMap::from([
+            (0, ModelRuntimeConfig::default()),
+            (1, ModelRuntimeConfig::default()),
+        ]))
+        .unwrap();
+        assert_eq!(wait_for_worker(&router, 1).await.len(), 2);
     }
 
     /// Three default-config workers under the registry policy, with
