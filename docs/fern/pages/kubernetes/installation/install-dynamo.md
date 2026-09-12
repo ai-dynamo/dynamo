@@ -121,11 +121,13 @@ For a complete deployment, see [Deploy on Intel GPUs with DRA](../model-deployme
 
 <Step title="Install the Dynamo Platform">
 
-Set your environment variables:
+Set `RELEASE_VERSION` to the Dynamo release you plan to install. The following example matches the
+current [Kubernetes Quickstart](../getting-started/quickstart.mdx). See
+[Release Artifacts](../../reference/general/release-artifacts.mdx) for the available versions.
 
 ```bash
 export NAMESPACE=dynamo-system
-export RELEASE_VERSION=1.2.1  # match a version from https://github.com/ai-dynamo/dynamo/releases
+export RELEASE_VERSION=1.4.1
 ```
 
 ```bash
