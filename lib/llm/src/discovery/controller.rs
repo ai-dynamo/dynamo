@@ -513,8 +513,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         if !matches!(
             &old_status,
             GroupStatus::Ready { .. } | GroupStatus::BlockedReady { .. }
-        ) || (fingerprint_changed && retained_commit.is_some())
-        {
+        ) || (fingerprint_changed && retained_commit.is_some()) {
             group.admission_tx.send_replace(admitted);
         }
 
