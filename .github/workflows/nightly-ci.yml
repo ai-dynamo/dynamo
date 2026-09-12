@@ -526,6 +526,18 @@ jobs:
       copy_timeout_minutes: 20
     secrets: inherit
 
+  frontend-copy-to-acr:
+    name: dynamo-frontend-nightly
+    needs: [compute-release-mode, frontend-build]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    uses: $/.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ format('{0}-nightly', needs.frontend-build.outputs.target_tag_plain) }}
+      cuda_version: '[""]'
+      override_arch: amd64
+      copy_timeout_minutes: 10
+    secrets: inherit
+
   sglang-copy-to-acr:
     name: sglang-runtime-nightly
     needs: [compute-release-mode, sglang-build]
@@ -594,6 +606,24 @@ jobs:
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
     secrets: inherit
 
+  deploy-test-lora-churn-vllm:
+    name: vLLM LoRA Churn Nightly Deploy Test
+    needs: [compute-release-mode, deploy-operator, vllm-build, vllm-copy-to-acr, frontend-build, frontend-copy-to-acr]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    uses: $/.github/workflows/shared-deploy-test.yml
+    with:
+      framework: vllm
+      profiles: '["lora_churn"]'
+      image_tag: ${{ needs.vllm-copy-to-acr.outputs.image_tag }}
+      namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+      operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+      test_file: tests/deploy/test_lora_churn.py
+      test_name: lora_churn
+      frontend_image_tag: ${{ needs.frontend-copy-to-acr.outputs.image_tag }}
+      timeout_minutes: 40
+    secrets: inherit
+
   deploy-test-sglang:
     name: sglang Nightly Deploy Test
     needs: [compute-release-mode, deploy-operator, sglang-build, sglang-copy-to-acr]
@@ -625,7 +655,7 @@ jobs:
   deploy-cleanup:
     name: Nightly Deploy Cleanup
     if: always()
-    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
+    needs: [deploy-operator, deploy-test-vllm, deploy-test-lora-churn-vllm, deploy-test-sglang, deploy-test-trtllm]
     runs-on: prod-deploy-tester-v1
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
