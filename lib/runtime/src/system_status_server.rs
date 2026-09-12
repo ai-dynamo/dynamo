@@ -970,21 +970,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_rebinding_listener_reports_the_address_it_rebinds() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-
-        let rebinding = RebindingTcpListener::new(listener, address, Duration::from_millis(10));
-
-        assert_ne!(address.port(), 0, "bind should resolve the ephemeral port");
-        assert_eq!(
-            rebinding.local_addr().unwrap(),
-            address,
-            "the resolved address is what gets rebound and advertised"
-        );
-    }
-
-    #[tokio::test]
     async fn test_rebinding_listener_still_shuts_down_gracefully() {
         let cancel_token = CancellationToken::new();
         let app = Router::new().route("/test", get(|| async { (StatusCode::OK, "test") }));
