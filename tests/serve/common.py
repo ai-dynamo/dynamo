@@ -222,8 +222,6 @@ def _prepare_deployment(
                 merged_env[f"DYN_SYSTEM_PORT{idx}"] = str(port)
                 merged_env[f"DYN_SYSTEM_PORT_WORKER{idx}"] = str(port)
 
-        # KV-event ports are allocated with the rest of the deployment and have
-        # the same worker cardinality as system ports.
         if len(ports.kv_event_ports) != len(dynamic_system_ports):
             raise ValueError(
                 "KV-event port count must match system port count: "

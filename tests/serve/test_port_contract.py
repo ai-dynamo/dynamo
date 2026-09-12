@@ -237,3 +237,29 @@ def test_dyn_port_rejects_out_of_range_fallback() -> None:
 
     assert result.returncode != 0
     assert "DYN_SYSTEM_PORT1" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("prefix", "variable"),
+    [
+        ("DYN_VLLM_KV_EVENT_PORT", "DYN_VLLM_KV_EVENT_PORT1"),
+        ("DYN_VLLM_NIXL_SIDE_CHANNEL_PORT", "DYN_VLLM_NIXL_SIDE_CHANNEL_PORT1"),
+    ],
+)
+def test_dyn_port_accepts_high_non_system_port(prefix: str, variable: str) -> None:
+    """Allow valid TCP ports above the system-status server's signed range."""
+    launch_utils = Path(__file__).parents[2] / "examples/common/launch_utils.sh"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"source {launch_utils}; dyn_port {prefix} 1 20000",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={variable: "40000"},
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "40000"
