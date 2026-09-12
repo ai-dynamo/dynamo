@@ -42,6 +42,14 @@ where
             let _ = tx.send(record);
         }
     }
+
+    pub fn publish_ref(&self, record: &T) {
+        if let Some(tx) = self.sender.get()
+            && tx.receiver_count() > 0
+        {
+            let _ = tx.send(record.clone());
+        }
+    }
 }
 
 impl<T> Default for TelemetryBus<T>
