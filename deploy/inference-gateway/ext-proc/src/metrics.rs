@@ -18,7 +18,11 @@ use axum::{
     routing::get,
 };
 use dynamo_llm::http::service::metrics::generate_log_buckets;
-use prometheus::{Encoder, HistogramOpts, HistogramVec, Registry, TEXT_FORMAT, TextEncoder};
+use prometheus::{
+    Encoder, HistogramOpts, HistogramVec, IntCounterVec, Opts, Registry, TEXT_FORMAT, TextEncoder,
+};
+
+use crate::admission::RouterRejection;
 
 /// Port the `/metrics` endpoint binds to unless `DYN_EPP_METRICS_PORT` says
 /// otherwise. Distinct from the ext_proc gRPC port (9002) and the health port
@@ -87,6 +91,41 @@ pub fn observe_cached_tokens(cached_tokens: u64) {
     CACHED_TOKENS
         .with_label_values(&[served_model_label()])
         .observe(cached_tokens as f64);
+}
+
+/// Requests the embedded KV router refused to place, by reason.
+///
+/// Counterpart to the Dynamo Frontend's rejection accounting: without it, a
+/// gateway deployment can shed load steadily with nothing to show for it, since
+/// a rejection never reaches the response body the EPP samples for
+/// [`observe_cached_tokens`].
+///
+/// `reason` is bounded by [`RouterRejection`]'s variants rather than any
+/// request-derived string, so cardinality is fixed at compile time — the same
+/// discipline `model` follows above.
+static ROUTER_REJECTIONS: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    let counter = IntCounterVec::new(
+        Opts::new(
+            "dynamo_epp_router_rejections_total",
+            "Requests the embedded KV router refused to place, by rejection reason",
+        ),
+        &["model", "reason"],
+    )
+    .expect("router_rejections counter options are statically valid");
+    REGISTRY
+        .register(Box::new(counter.clone()))
+        .expect("router_rejections is the only registrant of its name");
+    counter
+});
+
+/// Count one router rejection against the model bound by [`set_served_model`].
+///
+/// Cheap and non-blocking: an atomic increment on a pre-registered series, safe
+/// to call inline on the `pick()` path.
+pub fn inc_router_rejection(rejection: RouterRejection) {
+    ROUTER_REJECTIONS
+        .with_label_values(&[served_model_label(), rejection.metric_label()])
+        .inc();
 }
 
 /// Serve `/metrics` until the process exits.

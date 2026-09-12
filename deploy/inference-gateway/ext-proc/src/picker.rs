@@ -175,6 +175,34 @@ pub enum PickError {
     /// The in-flight-request limit is saturated: the request is shed (not queued)
     /// as retryable backpressure → 503. A load-shed guardrail, since HTTP/2 stream
     /// multiplexing means the connection cap does not bound concurrent requests.
+    ///
+    /// This is the EPP's own front-door cap, distinct from
+    /// [`Self::RouterOverloaded`], which reports saturation the embedded router
+    /// observed downstream.
     #[error("endpoint picker overloaded")]
     Overloaded,
+    /// Downstream worker capacity is saturated, as reported by the embedded KV
+    /// router → 429.
+    ///
+    /// 429 rather than 503 to match the router's own mapping in
+    /// `lib/kv-router/src/services/selection/error.rs`, so the same rejection
+    /// means the same thing whether it reached the client through the EPP or
+    /// through the Dynamo Frontend.
+    #[error("all eligible workers are overloaded")]
+    RouterOverloaded,
+    /// A router policy-class queue-depth limit refused the request → 503.
+    ///
+    /// Distinct from [`Self::RouterOverloaded`]: the workers may have capacity
+    /// while the class's queue is full, and the router maps queue rejection to
+    /// 503 rather than 429.
+    #[error("router queue is full")]
+    RouterQueueRejected,
+    /// The request contradicted existing router state, such as a duplicate
+    /// booking for the same request id → 409.
+    #[error("conflicting router state for this request")]
+    RouterConflict,
+    /// A router-internal invariant failed, such as a worker-selection policy
+    /// error → 500. Not a client error and not retryable.
+    #[error("internal routing error")]
+    RouterInternal,
 }

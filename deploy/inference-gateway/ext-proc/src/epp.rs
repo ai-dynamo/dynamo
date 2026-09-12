@@ -35,6 +35,7 @@ use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 use uuid::Uuid;
 
+use crate::admission::{RouterRejection, classify_router_error};
 use crate::epp_router::{endpoint_in_subset, requested_policy_class};
 use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo, ResponseUsage};
 
@@ -518,7 +519,7 @@ impl Router {
         policy_class: Option<String>,
         allowed_worker_ids: Option<HashSet<u64>>,
         routing_constraints: RoutingConstraints,
-    ) -> Result<(WorkerWithDpRank, u32)> {
+    ) -> std::result::Result<(WorkerWithDpRank, u32), PickError> {
         if let Some(ref ids) = allowed_worker_ids {
             self.decode_router.register_workers(ids);
         }
@@ -546,7 +547,20 @@ impl Router {
                 routing_constraints,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Decode query failed: {:?}", e))?;
+            .map_err(|error| {
+                // Classify at the boundary, where the router's typed error is
+                // still intact. Stringifying here is what previously collapsed
+                // every rejection into one 503 and leaked the router's `Debug`
+                // text to the client.
+                let rejection = classify_router_error(&error);
+                tracing::warn!(
+                    rejection = rejection.metric_label(),
+                    error = %error,
+                    "Decode selection rejected by the router"
+                );
+                crate::metrics::inc_router_rejection(rejection);
+                rejection.into_pick_error()
+            })?;
 
         match outcome {
             FindBestMatchOutcome::Routed {
@@ -554,8 +568,20 @@ impl Router {
                 overlap_blocks,
                 ..
             } => Ok((worker, overlap_blocks)),
+            // A queue rejection is an outcome rather than an error, so it never
+            // reaches `classify_router_error`; classify it explicitly and to the
+            // same status the router's own mapping uses (503).
             FindBestMatchOutcome::QueueRejected { rejection } => {
-                Err(anyhow::anyhow!("Decode query failed: {rejection}"))
+                tracing::warn!(
+                    rejection = RouterRejection::QueueRejected.metric_label(),
+                    policy_class = %rejection.policy_class,
+                    limit_kind = %rejection.limit_kind,
+                    current = rejection.current,
+                    limit = rejection.limit,
+                    "Decode selection rejected by a policy-class queue limit"
+                );
+                crate::metrics::inc_router_rejection(RouterRejection::QueueRejected);
+                Err(RouterRejection::QueueRejected.into_pick_error())
             }
         }
     }
@@ -1491,8 +1517,7 @@ impl EndpointPicker for Router {
                 allowed_worker_ids,
                 routing_constraints,
             )
-            .await
-            .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
+            .await?;
 
         // TODO(epp-endpoint-reconciliation): Reconcile Dynamo discovery with the
         // pod reflector and retry selection when the chosen worker has no endpoint.
