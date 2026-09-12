@@ -216,9 +216,8 @@ class MultimodalRequestProcessor:
                 raise RuntimeError(f"Unsupported URL scheme: {parsed.scheme}")
             try:
                 timeout = aiohttp.ClientTimeout(total=300.0)
-                # trust_env=True preserves the proxy behavior the previous
-                # httpx.Client had by default (HTTP_PROXY / HTTPS_PROXY / NO_PROXY);
-                # aiohttp otherwise ignores those.
+                # trust_env=True honors HTTP_PROXY / HTTPS_PROXY / NO_PROXY, which
+                # aiohttp ignores by default.
                 async with aiohttp.ClientSession(
                     timeout=timeout, trust_env=True
                 ) as client:
