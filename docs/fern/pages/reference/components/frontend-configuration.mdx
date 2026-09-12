@@ -513,6 +513,53 @@ See the [KServe gRPC Frontend](../../developer-guide/knowledge-base/modular-comp
   Environment variable: `DYN_DUMP_CONFIG_TO`
 </ParamField>
 
+### Histogram buckets
+
+The frontend's six latency and size histograms use log-spaced buckets, rounded to two significant figures, always starting with a `0` edge. Each histogram is tuned by three environment variables that share a prefix: `_MIN` and `_MAX` bound the range, and `_COUNT` is the total number of bucket edges **including** that leading `0`, so `COUNT - 1` edges are spread across the range. The inter-token latency default of `13` therefore means `0` plus twelve log-spaced edges. Every edge, including the top one, is rounded to two significant figures, so the highest exported edge is `MAX` rounded rather than `MAX` itself — see the `Top le` column below. These have no CLI equivalent, and they are read once while the frontend builds its metrics, so changing one requires a restart.
+
+| Histogram | Variable prefix | Min | Max | Count | Top `le` |
+|---|---|---|---|---|---|
+| `dynamo_frontend_request_duration_seconds` | `DYN_METRICS_REQUEST_DURATION` | `1.0` | `512.0` | `10` | `510` |
+| `dynamo_frontend_input_sequence_tokens` | `DYN_METRICS_INPUT_SEQUENCE` | `50.0` | `128000.0` | `12` | `130000` |
+| `dynamo_frontend_output_sequence_tokens` | `DYN_METRICS_OUTPUT_SEQUENCE` | `50.0` | `32000.0` | `10` | `32000` |
+| `dynamo_frontend_time_to_first_token_seconds` | `DYN_METRICS_TTFT` | `0.001` | `480.0` | `18` | `480` |
+| `dynamo_frontend_inter_token_latency_seconds` | `DYN_METRICS_ITL` | `0.001` | `2.0` | `13` | `2` |
+| `dynamo_frontend_embedding_latency_seconds` | `DYN_METRICS_EMBEDDING_LATENCY` | `0.001` | `10.0` | `14` | `10` |
+
+For example, to raise the inter-token latency ceiling from 2 seconds to 80:
+
+```bash
+export DYN_METRICS_ITL_MAX=80
+export DYN_METRICS_ITL_COUNT=20
+```
+
+Rounding can move the top edge either way, so pick a `MAX` that is already two significant figures if you need an exact ceiling. `MAX=123` exports `le=120` and sends observations from 120 to 123 into `+Inf`; `MAX=131072` exports `le=130000`. Two of the defaults above are affected: request duration is set to `512` but exports `510`, and input sequence is set to `128000` but exports `130000`.
+
+`dynamo_frontend_cached_tokens` shares the input sequence buckets, so `DYN_METRICS_INPUT_SEQUENCE_*` changes both histograms.
+
+A histogram's configuration is validated as a set: `MIN` must be above zero, below `MAX`, and `COUNT` must be between 1 and 512. If any part fails, the frontend warns and reverts **all three** values for that histogram together — setting `DYN_METRICS_ITL_MIN=5` against the default `MAX` of `2.0` also discards a perfectly valid `DYN_METRICS_ITL_COUNT=20`.
+
+A value that cannot be parsed at all is handled per variable, not as a set: it warns, that one variable falls back to its default, and the others still apply.
+
+Use `COUNT` of at least 2. `COUNT=1` passes validation but produces the leading `0` edge and nothing else, which ignores `MIN` and `MAX` and puts every observation in `+Inf`. Because rounding to two significant figures can collapse neighboring edges, a high `COUNT` over a narrow range also yields fewer buckets than requested; the frontend warns when that removes more than a tenth of them.
+
+Bucket edges appear directly in the `le` label, which is the only reliable way to confirm a setting took effect. These histograms are labeled by `model`, so a series exists only after a request has populated it — on a freshly restarted frontend the command below prints nothing, which means "no data yet", not "the setting was ignored". Send a request first:
+
+```bash
+curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"<model>","messages":[{"role":"user","content":"hi"}],"max_tokens":8}' > /dev/null
+
+curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_seconds_bucket
+```
+
+<Warning>
+  Changing any of these values makes new data non-comparable with data already scraped. `histogram_quantile` still returns a number when a query spans two different `le` layouts, but aggregating incompatible bucket layouts yields misleading quantiles rather than an error, so dashboards show a discontinuity at the restart that is easy to misread as a real latency change. Bucket count also drives cardinality: each edge is a separate series per value of the `model` label.
+</Warning>
+
+<Note>
+  From v0.8.0 until this release these variables were read under a doubled prefix, as in `DYN_HISTOGRAM_DYN_METRICS_ITL_MAX`, so the names in the table above had no effect on those versions. The doubled names still work but now log a deprecation warning, and support for them will be removed in a future release. Rename them to the forms above. Configurations written against v0.7.1 or earlier work again without change.
+</Note>
+
 ## Tokenizer
 
 <ParamField path="--tokenizer" type="string" default="default">
