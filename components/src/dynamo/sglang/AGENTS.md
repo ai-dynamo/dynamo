@@ -319,12 +319,27 @@ text-to-video-diffusion.sh  # 1-2 GPUs - Text-to-video (Wan2.1)
   metadata arrays positionally aligned when adapting the response.
 - **Zombie GPU processes**: `sgl_diffusion::scheduler` spawns a child process that
   survives parent kill. Always check `nvidia-smi` after teardown.
-- **Session identity**: SGLang 0.5.15 supports passive session-aware radix
-  ownership through the top-level `session_id` request field, but Dynamo does
-  not forward `agent_context.session_id` to it yet. Do not pass that value as
-  `session_params.id`; SGLang treats that field as an explicit session lifecycle
-  and rejects IDs that were not created through `open_session`. Session headers
-  remain available for tracing and router affinity.
+- **Session identity**: SGLang has *two* unrelated request fields whose names both say
+  "session", with opposite registration rules, and picking the wrong one is the trap:
+  - **top-level `session_id`** (sglang >= 0.5.15) is radix-native and *self-registering*.
+    When `--enable-session-radix-cache` is on, the scheduler calls
+    `ensure_session_generation`, which opens the session the first time it sees the id,
+    so an id the server has never heard of is fine. With the flag off (the default) the
+    id is stored on the request and nothing reads it.
+  - **`session_params.id`** is an explicit lifecycle handle. A request naming an id that
+    `open_session` did not create is rejected with "session id ... does not exist".
+
+  `agent_session.py` forwards `agent_context.session_id` and
+  `agent_context.parent_session_id` as top-level kwargs of the same name -- never as
+  `session_params.id`. That is why forwarding an arbitrary agent session id is safe:
+  the self-registering field has no "unknown id" failure mode.
+
+  Both kwargs are filtered against the engine signature, so a build declaring neither
+  receives neither -- `parent_session_id` is only consumed by builds implementing parent
+  keepalive. `GenerateReqInput` rejects `session_id` and `session_params` set together;
+  this backend never sends `session_params`, and anything that starts to must suppress
+  `session_id` on those requests. The native `sglang_tito` passthrough is excluded: that
+  body is client-owned, so a native caller sets the fields itself.
 
 For troubleshooting (CuDNN, config.json errors, OOM, disagg connectivity), see
 `docs/backends/sglang/sglang-examples.md#troubleshooting`.
@@ -373,6 +388,7 @@ Checklist for adding a new worker (e.g., a new modality or serving mode):
 ```text
 sglang/
   _compat.py               # SGLang version compat shim (signature probing for async_generate kwargs)
+  agent_session.py         # agent_context session ids -> async_generate kwargs
   __main__.py              # Entry point
   main.py                  # Worker dispatch
   args.py                  # Config parsing (ServerArgs vs SimpleNamespace)

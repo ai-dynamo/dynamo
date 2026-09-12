@@ -26,6 +26,7 @@ from dynamo.sglang._compat import (
     require_reasoning_kwargs,
 )
 from dynamo.sglang._disagg import validate_disagg_parallel_sampling
+from dynamo.sglang.agent_session import agent_session_kwargs
 from dynamo.sglang.args import Config
 from dynamo.sglang.engine_generate import (
     build_native_generate_request,
@@ -545,6 +546,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 lora_path=lora_path,
                 **logprob_kwargs,
                 **priority_kwargs,
+                **agent_session_kwargs(self.engine, request),
             )
             if not self.use_sglang_tokenizer:
                 async for out in self._process_token_stream(
@@ -628,6 +630,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 lora_path=lora_path,
                 **logprob_kwargs,
                 **priority_kwargs,
+                **agent_session_kwargs(self.engine, request),
             )
             if not self.use_sglang_tokenizer:
                 async for out in self._process_token_stream(

@@ -12,6 +12,7 @@ from dynamo._core import Context
 from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.sglang._compat import require_reasoning_kwargs
 from dynamo.sglang._disagg import validate_disagg_parallel_sampling
+from dynamo.sglang.agent_session import agent_session_kwargs
 from dynamo.sglang.args import Config
 from dynamo.sglang.engine_generate import (
     build_native_generate_request,
@@ -201,6 +202,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 data_parallel_rank=dp_rank,
                 lora_path=lora_path,
                 **priority_kwargs,
+                **agent_session_kwargs(self.engine, inner_request),
             )
         if inner_request.get(HEALTH_CHECK_KEY):
             # Canary: stream engine output so the Rust canary sees scheduler output.
