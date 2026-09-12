@@ -269,7 +269,7 @@ async fn streaming_backend_error_closes_partial_output_and_counts_failure() {
         );
         assert_eq!(
             failed.data["response"]["error"]["message"],
-            ERROR_MESSAGE
+            "Invalid request"
         );
         assert!(
             events
@@ -282,7 +282,7 @@ async fn streaming_backend_error_closes_partial_output_and_counts_failure() {
                 &Endpoint::Responses,
                 &RequestType::Stream,
                 &Status::Error,
-                &ErrorType::Internal,
+                &ErrorType::Validation,
             ),
             1
         );

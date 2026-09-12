@@ -483,6 +483,7 @@ impl
                     DynamoError::builder()
                         .error_type(DynErrorType::Backend(BackendError::InvalidArgument))
                         .message("Received multimodal data but multimodal processing is not enabled")
+                        .public_message("Received multimodal data but multimodal processing is not enabled")
                         .build(),
                 ),
             };
@@ -506,6 +507,7 @@ impl
         Err(DynamoError::builder()
             .error_type(DynamoErrorType::InvalidArgument)
             .message("request exceeds strict token budget")
+            .public_message("request exceeds strict token budget")
             .build()
             .into())
     }
@@ -2003,6 +2005,7 @@ impl
                             "ValidationError: 1 validation error for NvCreateAudioSpeechRequest \
                              task_type Input should be 'CustomVoice', 'VoiceDesign', 'Base'",
                         )
+                        .public_message("Invalid task_type")
                         .build(),
                 ),
             };

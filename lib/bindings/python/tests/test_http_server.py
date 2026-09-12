@@ -265,11 +265,4 @@ async def test_chat_completion_http_error(
                 "type": expected_type,
                 "code": status,
             }
-            # A backend-asserted 500 that carries no retry semantics tunnels
-            # its own status into `details` so it survives for debugging,
-            # while the backend's own message text stays server-side. See
-            # `BackendStatusAction::CoerceToInternal` in
-            # lib/llm/src/http/service/openai.rs.
-            if status == 500:
-                expected_body["details"] = {"backend_status": 500}
             assert error_json == expected_body
