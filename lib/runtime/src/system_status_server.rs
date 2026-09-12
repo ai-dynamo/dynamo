@@ -146,13 +146,12 @@ pub async fn spawn_system_status_server(
 
     let initial_bind_address = format!("{}:{}", host, port);
     tracing::info!("[spawn_system_status_server] binding to: {initial_bind_address}");
-    let (listener, actual_address) =
-        bind_system_status_listener(initial_bind_address.clone())
-            .await
-            .map_err(|error| {
-                tracing::error!("Failed to bind to address {initial_bind_address}: {error}");
-                error
-            })?;
+    let (listener, actual_address) = bind_system_status_listener(initial_bind_address.clone())
+        .await
+        .map_err(|error| {
+            tracing::error!("Failed to bind to address {initial_bind_address}: {error}");
+            error
+        })?;
     tracing::info!("[spawn_system_status_server] system status server bound to: {actual_address}");
 
     // Reuse the concrete address so an ephemeral port remains stable across rebinds.
@@ -290,11 +289,7 @@ struct RebindingTcpListener {
 }
 
 impl RebindingTcpListener {
-    fn new(
-        listener: TcpListener,
-        address: std::net::SocketAddr,
-        rebind_backoff: Duration,
-    ) -> Self {
+    fn new(listener: TcpListener, address: std::net::SocketAddr, rebind_backoff: Duration) -> Self {
         Self {
             address,
             listener: Some(listener),
@@ -877,11 +872,9 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
 
-        let shutdown_result =
-            socket2::SockRef::from(&listener).shutdown(std::net::Shutdown::Both);
+        let shutdown_result = socket2::SockRef::from(&listener).shutdown(std::net::Shutdown::Both);
 
-        let mut rebinding =
-            RebindingTcpListener::new(listener, address, Duration::from_millis(10));
+        let mut rebinding = RebindingTcpListener::new(listener, address, Duration::from_millis(10));
 
         if let Err(error) = shutdown_result {
             eprintln!("skipping: this platform refused shutdown on a listening socket: {error}");
@@ -925,8 +918,7 @@ mod tests {
         let contested_address = holder.local_addr().unwrap();
 
         let broken = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let shutdown_result =
-            socket2::SockRef::from(&broken).shutdown(std::net::Shutdown::Both);
+        let shutdown_result = socket2::SockRef::from(&broken).shutdown(std::net::Shutdown::Both);
 
         let mut rebinding =
             RebindingTcpListener::new(broken, contested_address, Duration::from_millis(10));
