@@ -13,6 +13,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Unified interface for request plane servers
 ///
@@ -85,7 +86,16 @@ pub trait RequestPlaneServer: Send + Sync {
     ///
     /// Returns `Ok(())` if unregistration succeeds or endpoint doesn't exist.
     /// Errors are only returned for transport-specific failures.
-    async fn unregister_endpoint(&self, endpoint_name: &str, instance_id: u64) -> Result<()>;
+    /// * `drain_timeout` - Bound on waiting for this endpoint's in-flight
+    ///   requests. Passed in rather than read from the environment here: during
+    ///   shutdown it must be the same value Phase 2 is waiting with, or Phase 3
+    ///   tears down the transports while this drain is still running.
+    async fn unregister_endpoint(
+        &self,
+        endpoint_name: &str,
+        instance_id: u64,
+        drain_timeout: Duration,
+    ) -> Result<()>;
 
     /// Get server bind address or identifier
     ///
