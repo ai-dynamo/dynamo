@@ -14,6 +14,12 @@ frontend inference output) are encrypted using
 provider. When no TLS configuration is provided, these transports operate in
 plaintext exactly as before.
 
+<Note>
+  This page covers Dynamo's internal TCP request plane and NATS connections.
+  Frontend HTTPS uses the separate `--tls-cert-path` and `--tls-key-path`
+  options documented in [Frontend Configuration](frontend-configuration.mdx#client-authentication-and-exposure).
+</Note>
+
 The `DYN_TCP_TLS_*` environment variables encrypt the frontend↔worker TCP
 request and response streams; NATS traffic is encrypted separately via NATS TLS
 (see the NATS TLS section below). The KV event plane is a separate transport:
@@ -48,9 +54,9 @@ frontend dials worker). All TLS env vars should be set on every pod.
 ## CLI flags
 
 The same configuration is available via command-line flags on all backends
-(vllm, sglang, trtllm, tokenspeed) through `DynamoRuntimeArgGroup`:
+(vLLM, SGLang, TensorRT-LLM, and TokenSpeed) through `DynamoRuntimeArgGroup`:
 
-```
+```text
 --tcp-tls-cert-path PATH      Server certificate (PEM)
 --tcp-tls-key-path PATH       Server private key (PEM)
 --tcp-tls-ca-cert-path PATH   CA certificate for server verification (PEM)
@@ -143,9 +149,10 @@ automatically — instead of setting env vars on each component — see
 
 ## NATS TLS
 
-NATS carries JetStream indexer recovery/replay, the audit sink, and — when the
-request plane is set to NATS (`--request-plane nats`) — inference request
-distribution. TLS is configured separately from TCP:
+NATS carries event-plane messages such as KV events and router replica sync,
+JetStream indexer recovery/replay, the audit sink, and—when the request plane is
+set to NATS (`--request-plane nats`)—inference request distribution. TLS is
+configured separately from TCP:
 
 | Variable | Description |
 | --- | --- |
@@ -246,6 +253,30 @@ dynamo-operator:
 See the [NATS TLS documentation](https://docs.nats.io/running-a-nats-service/configuration/securing_nats/tls)
 for the full server-side TLS schema.
 
+TLS encrypts the connection but does not by itself authorize NATS subjects.
+Configure a NATS authentication method and server-side permissions as described
+in [event-plane security](../../developer-guide/knowledge-base/concepts/system-architecture/architecture.md#event-plane-security).
+
+## Trust Domain and Peer Verification
+
+Production TLS clients must verify both parts of the server identity:
+
+- The certificate chains to a trust root whose scope matches the intended
+  service peers. Prefer a dedicated internal CA over a broad shared trust root.
+- The certificate's DNS or IP Subject Alternative Name (SAN) matches the
+  expected server identity. TCP clients verify the discovered host or IP by
+  default. Set `DYN_TCP_TLS_SERVER_NAME` only when the certificate uses a
+  different DNS SAN. NATS clients verify the hostname in `NATS_SERVER`.
+
+For mTLS, configure `DYN_TCP_TLS_CLIENT_CA_CERT_PATH` with a CA restricted to the
+intended client workloads. Trusting a broad client CA can admit an unintended
+workload with a certificate from that CA. Certificate validation establishes
+cryptographic identity; it does not replace application authorization or network
+isolation.
+
+Do not set `DYN_TCP_TLS_INSECURE` or `NATS_TLS_INSECURE` in production. These
+options bypass certificate and server-identity verification.
+
 ## Mutual TLS (mTLS)
 
 By default only the server is authenticated (the client verifies the server's
@@ -282,11 +313,13 @@ required is enforced by the **NATS server** configuration (e.g.
 | `NATS_TLS_CLIENT_CERT_PATH` | Client | PEM client certificate presented to the NATS server. Set with `NATS_TLS_CLIENT_KEY_PATH`. |
 | `NATS_TLS_CLIENT_KEY_PATH` | Client | PEM private key for the NATS client certificate. |
 
-> **Note:** Dynamo cannot detect whether the NATS broker actually requests a
-> client certificate. If you set `NATS_TLS_CLIENT_CERT_PATH`/`_KEY_PATH` but the
-> broker is not configured to verify client certs, the connection silently
-> falls back to ordinary one-way TLS. Enable verification on the NATS server
-> (`verify: true`) to make NATS mTLS effective.
+<Note>
+  Dynamo cannot detect whether the NATS broker actually requests a client
+  certificate. If you set `NATS_TLS_CLIENT_CERT_PATH` and
+  `NATS_TLS_CLIENT_KEY_PATH` but the broker does not verify client certificates,
+  the connection provides only one-way TLS. Enable client-certificate
+  verification on the NATS server to make NATS mTLS effective.
+</Note>
 
 Client certificate and key must be set **together**, and a client identity
 requires a server CA (`*_CA_CERT_PATH`) — or insecure mode for development — so
@@ -344,3 +377,9 @@ plane is not covered):
   but client does not), a warning is logged at startup.
 - An empty CA certificate file is detected at load time and rejected with a
   clear error message.
+
+## Related Documentation
+
+- [Secure Deployment Guidelines](../../developer-guide/security/secure-deployment-guidelines.md) — Deployment trust model and checklist
+- [Request Plane](../../developer-guide/knowledge-base/concepts/system-architecture/architecture.md#request-plane) — Request transport behavior
+- [Event Plane](../../developer-guide/knowledge-base/concepts/system-architecture/architecture.md#event-plane) — Event transport and NATS authentication
