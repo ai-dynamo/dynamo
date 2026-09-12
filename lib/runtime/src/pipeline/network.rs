@@ -787,7 +787,7 @@ mod tests {
                     codec.name()
                 );
                 assert_eq!(
-                    frame.is_error(),
+                    frame.is_error,
                     expect_error,
                     "codec={} case={case}",
                     codec.name()
@@ -826,23 +826,26 @@ pub enum ResponseFrameKind {
     /// The request was torn down rather than failing: the caller cancelled it,
     /// or the worker is shutting down.
     Cancellation,
+    /// A local response serialization failure after the engine has produced a
+    /// response. It remains an error frame but is not an engine failure.
+    SerializationError,
 }
 
 /// Error types that mean "this request was torn down", not "the engine failed".
 ///
-/// `Backend(EngineShutdown)` is what `PyGeneratorExit` maps to, which is how a
+/// `Backend(EngineDraining)` is what `PyGeneratorExit` maps to, which is how a
 /// draining Python worker ends its open streams.
 const TEARDOWN_ERROR_TYPES: &[crate::error::ErrorType] = &[
     crate::error::ErrorType::Cancelled,
     crate::error::ErrorType::Backend(crate::error::BackendError::Cancelled),
-    crate::error::ErrorType::Backend(crate::error::BackendError::EngineShutdown),
+    crate::error::ErrorType::Backend(crate::error::BackendError::EngineDraining),
 ];
 
 impl ResponseFrameKind {
-    /// Whether this frame is an error frame on the wire. Both error variants
+    /// Whether this frame is an error frame on the wire. All non-data variants
     /// are; they differ only in how the request is accounted for.
     pub fn is_error(self) -> bool {
-        matches!(self, Self::EngineError | Self::Cancellation)
+        !matches!(self, Self::Data)
     }
 
     /// Classify an error frame from the error it carries, walking the cause
@@ -868,20 +871,10 @@ impl ResponseFrameKind {
 /// Result of encoding one response item for the request plane.
 pub struct EncodedResponseFrame {
     pub bytes: Bytes,
-    /// Required rather than defaulted: every construction site has to state
-    /// what it is producing, so a new egress path cannot silently inherit
-    /// "engine error" for a shutdown frame.
-    pub kind: ResponseFrameKind,
+    pub is_error: bool,
     /// Stop consuming the engine stream after publishing this frame. The
     /// normal complete-final frame is still sent.
     pub stop_stream: bool,
-}
-
-impl EncodedResponseFrame {
-    /// Whether this frame is an error frame on the wire.
-    pub fn is_error(&self) -> bool {
-        self.kind.is_error()
-    }
 }
 
 /// Converts request-plane bytes into the item consumed by an ingress engine.
@@ -907,6 +900,31 @@ where
         response: Option<U>,
         complete_final: bool,
     ) -> impl std::future::Future<Output = std::result::Result<EncodedResponseFrame, PipelineError>> + Send;
+
+    /// Encode a response and return its ingress accounting classification.
+    ///
+    /// Existing adapters can keep implementing only [`Self::encode_response`].
+    /// Their legacy error flag supplies the conservative default classification.
+    fn encode_response_classified(
+        &self,
+        payload_codec: RequestPlanePayloadCodec,
+        response: Option<U>,
+        complete_final: bool,
+    ) -> impl std::future::Future<
+        Output = std::result::Result<(EncodedResponseFrame, ResponseFrameKind), PipelineError>,
+    > + Send {
+        async move {
+            let frame = self
+                .encode_response(payload_codec, response, complete_final)
+                .await?;
+            let kind = if frame.is_error {
+                ResponseFrameKind::EngineError
+            } else {
+                ResponseFrameKind::Data
+            };
+            Ok((frame, kind))
+        }
+    }
 }
 
 /// Complete request/response payload adapter for an ingress engine.
@@ -985,9 +1003,31 @@ where
             });
         std::future::ready(encoded.map(|bytes| EncodedResponseFrame {
             bytes: bytes.into(),
-            kind,
+            is_error: kind.is_error(),
             stop_stream: false,
         }))
+    }
+
+    #[inline]
+    fn encode_response_classified(
+        &self,
+        payload_codec: RequestPlanePayloadCodec,
+        response: Option<U>,
+        complete_final: bool,
+    ) -> impl std::future::Future<
+        Output = std::result::Result<(EncodedResponseFrame, ResponseFrameKind), PipelineError>,
+    > + Send {
+        let err = response.as_ref().and_then(|response| response.err());
+        let kind = ResponseFrameKind::classify(
+            err.as_ref()
+                .map(|err| err as &(dyn std::error::Error + 'static)),
+        );
+        async move {
+            let frame = self
+                .encode_response(payload_codec, response, complete_final)
+                .await?;
+            Ok((frame, kind))
+        }
     }
 }
 

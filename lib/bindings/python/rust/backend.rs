@@ -1708,7 +1708,7 @@ fn py_err_to_dynamo(err: PyErr) -> DynamoError {
         } else if err.is_instance_of::<pyo3::exceptions::asyncio::CancelledError>(py) {
             BackendError::Cancelled
         } else if err.is_instance_of::<pyo3::exceptions::PyGeneratorExit>(py) {
-            BackendError::EngineShutdown
+            BackendError::EngineDraining
         } else {
             BackendError::Unknown
         };

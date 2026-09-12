@@ -121,9 +121,42 @@ impl IngressResponseEncoder<PythonResponseItem> for PythonIngressPayloadAdapter 
         if complete_final {
             return Ok(EncodedResponseFrame {
                 bytes: terminal_frame_bytes(payload_codec)?,
-                kind: ResponseFrameKind::Data,
+                is_error: false,
                 stop_stream: false,
             });
+        }
+
+        let response = response.ok_or_else(|| {
+            PipelineError::SerializationError(
+                "request-plane response item missing before final frame".to_string(),
+            )
+        })?;
+        tokio::task::spawn_blocking(move || encode_python_response(payload_codec, response))
+            .await
+            .map_err(|error| {
+                PipelineError::SerializationError(format!(
+                    "failed to offload {} Python response encode: {error}",
+                    payload_codec.name()
+                ))
+            })?
+            .map(|(frame, _)| frame)
+    }
+
+    async fn encode_response_classified(
+        &self,
+        payload_codec: RequestPlanePayloadCodec,
+        response: Option<PythonResponseItem>,
+        complete_final: bool,
+    ) -> Result<(EncodedResponseFrame, ResponseFrameKind), PipelineError> {
+        if complete_final {
+            return Ok((
+                EncodedResponseFrame {
+                    bytes: terminal_frame_bytes(payload_codec)?,
+                    is_error: false,
+                    stop_stream: false,
+                },
+                ResponseFrameKind::Data,
+            ));
         }
 
         let response = response.ok_or_else(|| {
@@ -163,7 +196,7 @@ impl IngressResponseEncoder<crate::push_egress::PushFrame> for PythonIngressPayl
         if complete_final {
             return Ok(EncodedResponseFrame {
                 bytes: terminal_frame_bytes(payload_codec)?,
-                kind: ResponseFrameKind::Data,
+                is_error: false,
                 stop_stream: false,
             });
         }
@@ -174,6 +207,25 @@ impl IngressResponseEncoder<crate::push_egress::PushFrame> for PythonIngressPayl
             )
         })?;
         frame.into_encoded(payload_codec)
+    }
+
+    async fn encode_response_classified(
+        &self,
+        payload_codec: RequestPlanePayloadCodec,
+        response: Option<crate::push_egress::PushFrame>,
+        complete_final: bool,
+    ) -> Result<(EncodedResponseFrame, ResponseFrameKind), PipelineError> {
+        let kind = if complete_final {
+            ResponseFrameKind::Data
+        } else {
+            response
+                .as_ref()
+                .map(crate::push_egress::PushFrame::kind)
+                .unwrap_or(ResponseFrameKind::SerializationError)
+        };
+        self.encode_response(payload_codec, response, complete_final)
+            .await
+            .map(|frame| (frame, kind))
     }
 }
 
@@ -251,7 +303,7 @@ fn terminal_frame_bytes(codec: RequestPlanePayloadCodec) -> Result<Bytes, Pipeli
 fn encode_python_response(
     payload_codec: RequestPlanePayloadCodec,
     response: PythonResponseItem,
-) -> Result<EncodedResponseFrame, PipelineError> {
+) -> Result<(EncodedResponseFrame, ResponseFrameKind), PipelineError> {
     let (annotated, stop_stream) = match response.into_result() {
         Ok(item) => match Python::with_gil(|py| parse_python_response(item, py)) {
             Ok(annotated) => (annotated, false),
@@ -267,11 +319,14 @@ fn encode_python_response(
     };
 
     match encode_annotated_response(payload_codec, annotated) {
-        Ok((bytes, kind)) => Ok(EncodedResponseFrame {
-            bytes: bytes.into(),
+        Ok((bytes, kind)) => Ok((
+            EncodedResponseFrame {
+                bytes: bytes.into(),
+                is_error: kind.is_error(),
+                stop_stream,
+            },
             kind,
-            stop_stream,
-        }),
+        )),
         Err(error) => {
             let fallback = NetworkStreamWrapper {
                 data: Some(Annotated::<()>::from_error(format!(
@@ -286,11 +341,14 @@ fn encode_python_response(
                     payload_codec.name()
                 ))
             })?;
-            Ok(EncodedResponseFrame {
-                bytes: bytes.into(),
-                kind: ResponseFrameKind::EngineError,
-                stop_stream: true,
-            })
+            Ok((
+                EncodedResponseFrame {
+                    bytes: bytes.into(),
+                    is_error: true,
+                    stop_stream: true,
+                },
+                ResponseFrameKind::SerializationError,
+            ))
         }
     }
 }
@@ -465,9 +523,9 @@ mod tests {
     }
 
     #[test]
-    fn encode_annotated_response_classifies_engine_shutdown_as_cancellation() {
+    fn encode_annotated_response_classifies_engine_draining_as_cancellation() {
         let shutdown = DynamoError::builder()
-            .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+            .error_type(ErrorType::Backend(BackendError::EngineDraining))
             .message("engine shutting down")
             .build();
         let (_, kind) = encode_annotated_response(

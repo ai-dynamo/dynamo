@@ -208,6 +208,10 @@ impl std::fmt::Debug for PushFrame {
 }
 
 impl PushFrame {
+    pub(crate) fn kind(&self) -> ResponseFrameKind {
+        self.kind
+    }
+
     /// Encode one Python response object, with the GIL held by the caller.
     ///
     /// Both steps are shared with the pull path — `parse_python_response`
@@ -318,7 +322,7 @@ impl PushFrame {
         if self.codec == target {
             return Ok(EncodedResponseFrame {
                 bytes: self.bytes,
-                kind: self.kind,
+                is_error: self.kind.is_error(),
                 stop_stream: false,
             });
         }
@@ -348,7 +352,7 @@ impl PushFrame {
         })?;
         Ok(EncodedResponseFrame {
             bytes: bytes.into(),
-            kind: self.kind,
+            is_error: self.kind.is_error(),
             stop_stream: false,
         })
     }
@@ -465,8 +469,8 @@ impl ResponseSink {
     /// Terminate the stream with a typed backend error frame. Not exposed to
     /// Python; used by the Rust-side safety net when the handler's generator
     /// raises instead of closing the sender itself. Preserving the type matters
-    /// downstream — `BackendError::EngineShutdown` is what triggers request
-    /// migration and marks the worker inhibited.
+    /// downstream — engine shutdown and controlled draining both trigger request
+    /// migration and mark the worker inhibited.
     fn close_with_dynamo_error(&self, error: DynamoError) {
         let Some(tx) = self.take_sender() else {
             return;
@@ -968,9 +972,9 @@ mod tests {
     }
 
     #[test]
-    fn terminal_frame_from_engine_shutdown_is_a_cancellation() {
+    fn terminal_frame_from_engine_draining_is_a_cancellation() {
         let shutdown = DynamoError::builder()
-            .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+            .error_type(ErrorType::Backend(BackendError::EngineDraining))
             .message("engine shutting down")
             .build();
         let frame = PushFrame::error(Annotated::from_err(shutdown));
@@ -978,8 +982,7 @@ mod tests {
 
         let codec = frame.codec;
         let encoded = frame.into_encoded(codec).expect("forward must succeed");
-        assert_eq!(encoded.kind, ResponseFrameKind::Cancellation);
-        assert!(encoded.is_error());
+        assert!(encoded.is_error);
     }
 
     /// Matching codecs are the whole point: the bytes encoded under the GIL go
@@ -991,7 +994,7 @@ mod tests {
 
         let encoded = frame.into_encoded(codec).expect("forward must succeed");
         assert_eq!(encoded.bytes, expected, "bytes must not be re-encoded");
-        assert!(encoded.is_error());
+        assert!(encoded.is_error);
         assert!(!encoded.stop_stream);
     }
 
@@ -1026,7 +1029,7 @@ mod tests {
             Some("hi"),
             "payload must survive the re-encode"
         );
-        assert!(!encoded.is_error(), "the frame kind must be preserved");
+        assert!(!encoded.is_error, "the error flag must be preserved");
     }
 
     /// Pins the channel-level protocol: one error frame then end-of-stream.
@@ -1085,7 +1088,7 @@ mod tests {
         let frame = PushFrame::error(Annotated::from_error("fatal"));
         let codec = frame.codec;
         let encoded = frame.into_encoded(codec).expect("forward must succeed");
-        assert!(encoded.is_error(), "error frame must be classified as one");
+        assert!(encoded.is_error, "error frame must be classified as one");
         assert!(
             !encoded.stop_stream,
             "push-path error frames must have stop_stream: false (stream ends when sender drops)"
@@ -1111,11 +1114,7 @@ mod tests {
         let encoded = frame
             .into_encoded(RequestPlanePayloadCodec::Json)
             .expect("re-encode must succeed");
-        assert_eq!(
-            encoded.kind,
-            ResponseFrameKind::EngineError,
-            "the frame kind must survive re-encode"
-        );
+        assert!(encoded.is_error, "is_error must survive re-encode");
         assert!(
             !encoded.stop_stream,
             "stop_stream must remain false after re-encode"

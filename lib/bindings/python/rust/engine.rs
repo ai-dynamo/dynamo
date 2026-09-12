@@ -408,7 +408,7 @@ pub(crate) fn map_python_exception(error: PyErr) -> DynamoError {
 
         if error.is_instance_of::<pyo3::exceptions::PyGeneratorExit>(py) {
             return DynamoError::builder()
-                .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+                .error_type(ErrorType::Backend(BackendError::EngineDraining))
                 .message("engine shutting down")
                 .build();
         }

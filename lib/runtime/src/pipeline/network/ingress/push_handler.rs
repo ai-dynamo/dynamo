@@ -241,7 +241,7 @@ where
             tracing::trace!("Sending response: {:?}", resp);
             let encoded = match self
                 .payload_adapter
-                .encode_response(payload_codec, Some(resp), false)
+                .encode_response_classified(payload_codec, Some(resp), false)
                 .await
             {
                 Ok(encoded) => encoded,
@@ -257,11 +257,12 @@ where
                     break;
                 }
             };
-            let is_error = encoded.is_error();
+            let (encoded, kind) = encoded;
+            let is_error = encoded.is_error;
             saw_error_response |= is_error;
             // Counted here rather than at the engine adapter because every
             // backend reaches this pump; `generate` covers setup failure.
-            if encoded.kind == ResponseFrameKind::EngineError && !counted_engine_stream_error {
+            if kind == ResponseFrameKind::EngineError && !counted_engine_stream_error {
                 counted_engine_stream_error = true;
                 if let Some(m) = self.metrics() {
                     m.error_counter

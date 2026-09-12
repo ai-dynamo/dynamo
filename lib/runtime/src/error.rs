@@ -115,6 +115,8 @@ pub enum BackendError {
     Cancelled,
     /// The engine process has shut down or crashed.
     EngineShutdown,
+    /// The worker is draining and closed an in-flight generator.
+    EngineDraining,
     /// The response stream was terminated before completion (e.g., engine dropped mid-stream).
     StreamIncomplete,
 }
@@ -130,6 +132,7 @@ impl fmt::Display for BackendError {
             BackendError::ResponseTimeout => write!(f, "ResponseTimeout"),
             BackendError::Cancelled => write!(f, "Cancelled"),
             BackendError::EngineShutdown => write!(f, "EngineShutdown"),
+            BackendError::EngineDraining => write!(f, "EngineDraining"),
             BackendError::StreamIncomplete => write!(f, "StreamIncomplete"),
         }
     }
