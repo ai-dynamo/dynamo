@@ -127,6 +127,11 @@ class TestNixlPrometheusBasePort:
         env = {**OPERATOR_ENV, "NIXL_TELEMETRY_PROMETHEUS_PORT": port_value}
         assert nixl_prometheus_base_port(env) is None
 
+    def test_oversized_decimal_port_is_not_recognized(self):
+        # This exceeds Python's default integer-string conversion limit.
+        env = {**OPERATOR_ENV, "NIXL_TELEMETRY_PROMETHEUS_PORT": "9" * 5000}
+        assert nixl_prometheus_base_port(env) is None
+
     @pytest.mark.parametrize(
         "override",
         [
