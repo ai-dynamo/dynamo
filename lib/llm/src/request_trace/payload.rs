@@ -25,31 +25,98 @@ pub(crate) fn http_header_capture_active() -> bool {
 
 /// Collect the allowlisted request headers (case-insensitive, comma-joined on
 /// repeats). `None` unless payload capture is active and the allowlist is non-empty.
+///
+/// A capture entry ending in `*` matches every header name carrying that prefix, so a
+/// gateway-injected family can be captured without enumerating it. Denylist entries take
+/// the same syntax and subtract from whatever the capture list matched.
 pub fn capture_http_headers(headers: &HeaderMap) -> Option<BTreeMap<String, String>> {
     if !http_header_capture_active() {
         return None;
     }
-    capture_http_headers_with_list(headers, &super::policy().http_header_capture_list)
+    let policy = super::policy();
+    capture_http_headers_with_lists(
+        headers,
+        &policy.http_header_capture_list,
+        &policy.http_header_deny_list,
+    )
 }
 
-fn capture_http_headers_with_list(
+/// True when `entry` ends in `*`, which is the one form that cannot be resolved by a
+/// direct name lookup.
+fn is_prefix_pattern(entry: &str) -> bool {
+    entry.len() > 1 && entry.ends_with('*')
+}
+
+/// Match one configured entry against a header name. Both sides are already lowercased.
+fn entry_matches(entry: &str, name: &str) -> bool {
+    match entry.strip_suffix('*') {
+        // A zero-length prefix never matches, so an all-`*` entry cannot turn into
+        // capture-all here. The deny list keeps such an entry and handles it in
+        // `denied`; the capture list drops it when the list is parsed.
+        Some(prefix) => !prefix.is_empty() && name.starts_with(prefix),
+        None => entry == name,
+    }
+}
+
+fn any_entry_matches(entries: &[String], name: &str) -> bool {
+    entries.iter().any(|entry| entry_matches(entry, name))
+}
+
+/// True when every character is `*`. Only the deny list keeps such an entry, where it
+/// means "deny everything"; the capture list drops it at config load.
+fn is_star_sentinel(entry: &str) -> bool {
+    !entry.is_empty() && entry.chars().all(|c| c == '*')
+}
+
+/// Deny entries match like capture entries, plus the all-`*` "deny everything" sentinel.
+fn denied(deny_list: &[String], name: &str) -> bool {
+    deny_list
+        .iter()
+        .any(|entry| is_star_sentinel(entry) || entry_matches(entry, name))
+}
+
+/// Comma-join the non-empty values recorded under `name`.
+fn joined_values(headers: &HeaderMap, name: &str) -> Option<String> {
+    let joined = headers
+        .get_all(name)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ");
+    (!joined.is_empty()).then_some(joined)
+}
+
+fn capture_http_headers_with_lists(
     headers: &HeaderMap,
     capture_list: &[String],
+    deny_list: &[String],
 ) -> Option<BTreeMap<String, String>> {
     if capture_list.is_empty() {
         return None;
     }
     let mut out = BTreeMap::new();
-    for name in capture_list {
-        let joined = headers
-            .get_all(name.as_str())
-            .iter()
-            .filter_map(|value| value.to_str().ok())
-            .filter(|value| !value.is_empty())
-            .collect::<Vec<_>>()
-            .join(", ");
-        if !joined.is_empty() {
-            out.insert(name.clone(), joined);
+    if capture_list.iter().any(|entry| is_prefix_pattern(entry)) {
+        // A prefix entry has no single name to look up, so walk the request's headers
+        // once. Keys come off the request, because that is where the matched name lives.
+        for name in headers.keys() {
+            let name = name.as_str();
+            if !any_entry_matches(capture_list, name) || denied(deny_list, name) {
+                continue;
+            }
+            if let Some(joined) = joined_values(headers, name) {
+                out.insert(name.to_string(), joined);
+            }
+        }
+    } else {
+        // Every entry is a literal name, so keep the direct per-entry lookup.
+        for name in capture_list {
+            if denied(deny_list, name) {
+                continue;
+            }
+            if let Some(joined) = joined_values(headers, name.as_str()) {
+                out.insert(name.clone(), joined);
+            }
         }
     }
     (!out.is_empty()).then_some(out)
@@ -208,7 +275,7 @@ mod tests {
         headers.insert("NVCF-Function-Id", "fn-9".parse().unwrap());
         headers.insert("authorization", "Bearer secret".parse().unwrap());
 
-        let captured = capture_http_headers_with_list(&headers, &capture_list)
+        let captured = capture_http_headers_with_lists(&headers, &capture_list, &[])
             .expect("allowlisted headers are captured");
         assert_eq!(
             captured.get("x-request-id").map(String::as_str),
@@ -230,7 +297,7 @@ mod tests {
         headers.insert("x-request-id", "abc-123".parse().unwrap());
 
         assert!(
-            capture_http_headers_with_list(&headers, &[]).is_none(),
+            capture_http_headers_with_lists(&headers, &[], &[]).is_none(),
             "empty allowlist must capture nothing"
         );
     }
@@ -243,7 +310,7 @@ mod tests {
         headers.append("x-tag", "a".parse().unwrap());
         headers.append("x-tag", "b".parse().unwrap());
 
-        let captured = capture_http_headers_with_list(&headers, &capture_list)
+        let captured = capture_http_headers_with_lists(&headers, &capture_list, &[])
             .expect("repeated header is captured");
         assert_eq!(captured.get("x-tag").map(String::as_str), Some("a, b"));
     }
@@ -257,7 +324,7 @@ mod tests {
         headers.append("x-tag", "".parse().unwrap());
 
         assert!(
-            capture_http_headers_with_list(&headers, &capture_list).is_none(),
+            capture_http_headers_with_lists(&headers, &capture_list, &[]).is_none(),
             "repeated empty values must be omitted, not joined into \", \""
         );
     }
@@ -270,9 +337,177 @@ mod tests {
         headers.append("x-tag", "".parse().unwrap());
         headers.append("x-tag", "tenant-a".parse().unwrap());
 
-        let captured = capture_http_headers_with_list(&headers, &capture_list)
+        let captured = capture_http_headers_with_lists(&headers, &capture_list, &[])
             .expect("non-empty value is captured");
         assert_eq!(captured.get("x-tag").map(String::as_str), Some("tenant-a"));
+    }
+
+    #[test]
+    fn capture_http_headers_matches_a_prefix_family() {
+        let capture_list = vec!["x-someplatform-*".to_string(), "x-request-id".to_string()];
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-someplatform-tenant", "acme".parse().unwrap());
+        headers.insert("x-someplatform-region", "us-east".parse().unwrap());
+        headers.insert("x-request-id", "abc-123".parse().unwrap());
+        headers.insert("x-unrelated", "nope".parse().unwrap());
+
+        let captured = capture_http_headers_with_lists(&headers, &capture_list, &[])
+            .expect("prefix entry captures the family");
+        assert_eq!(
+            captured.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec![
+                "x-request-id",
+                "x-someplatform-region",
+                "x-someplatform-tenant"
+            ],
+            "a prefix entry captures every matching name and nothing else"
+        );
+        assert_eq!(
+            captured.get("x-someplatform-tenant").map(String::as_str),
+            Some("acme"),
+            "keys are the header names off the request, not the configured entry"
+        );
+    }
+
+    #[test]
+    fn capture_http_headers_denylist_subtracts_from_a_prefix_match() {
+        let capture_list = vec!["x-someplatform-*".to_string()];
+        let deny_list = vec!["x-someplatform-internal-token".to_string()];
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-someplatform-tenant", "acme".parse().unwrap());
+        headers.insert("x-someplatform-internal-token", "secret".parse().unwrap());
+
+        let captured = capture_http_headers_with_lists(&headers, &capture_list, &deny_list)
+            .expect("the rest of the family is still captured");
+        assert_eq!(
+            captured.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["x-someplatform-tenant"]
+        );
+        assert!(
+            !captured.contains_key("x-someplatform-internal-token"),
+            "a denied name must not reach the record"
+        );
+    }
+
+    #[test]
+    fn capture_http_headers_denylist_accepts_prefix_entries() {
+        let capture_list = vec!["x-someplatform-*".to_string()];
+        let deny_list = vec!["x-someplatform-internal-*".to_string()];
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-someplatform-tenant", "acme".parse().unwrap());
+        headers.insert("x-someplatform-internal-token", "secret".parse().unwrap());
+        headers.insert("x-someplatform-internal-trace", "secret".parse().unwrap());
+
+        let captured = capture_http_headers_with_lists(&headers, &capture_list, &deny_list)
+            .expect("the non-denied name is still captured");
+        assert_eq!(
+            captured.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["x-someplatform-tenant"]
+        );
+    }
+
+    #[test]
+    fn capture_http_headers_denylist_applies_to_literal_entries() {
+        let capture_list = vec!["x-request-id".to_string(), "x-tenant".to_string()];
+        let deny_list = vec!["x-tenant".to_string()];
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-request-id", "abc-123".parse().unwrap());
+        headers.insert("x-tenant", "acme".parse().unwrap());
+
+        let captured = capture_http_headers_with_lists(&headers, &capture_list, &deny_list)
+            .expect("the allowed literal is still captured");
+        assert_eq!(
+            captured.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["x-request-id"],
+            "the denylist subtracts on the literal path too, not just under a prefix"
+        );
+    }
+
+    #[test]
+    fn capture_http_headers_denylist_only_subtracts() {
+        let capture_list = vec!["x-request-id".to_string()];
+        let deny_list = vec!["x-tenant".to_string()];
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-request-id", "abc-123".parse().unwrap());
+        headers.insert("x-tenant", "acme".parse().unwrap());
+
+        let captured = capture_http_headers_with_lists(&headers, &capture_list, &deny_list)
+            .expect("capture list still applies");
+        assert_eq!(
+            captured.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["x-request-id"],
+            "naming an uncaptured header in the denylist changes nothing"
+        );
+    }
+
+    #[test]
+    fn capture_http_headers_bare_star_entry_captures_nothing() {
+        // The capture-all sentinel is deferred until captured values are redacted. If a
+        // bare `*` survives config parsing it must not silently become capture-all.
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer secret".parse().unwrap());
+        headers.insert("x-request-id", "abc-123".parse().unwrap());
+
+        for capture_list in [vec!["*".to_string()], vec!["**".to_string()]] {
+            assert!(
+                capture_http_headers_with_lists(&headers, &capture_list, &[]).is_none(),
+                "an all-`*` capture entry must not capture every header"
+            );
+        }
+    }
+
+    #[test]
+    fn capture_http_headers_deny_all_sentinel_subtracts_everything() {
+        // Deny-all only ever subtracts, so it is honoured rather than dropped. Failing
+        // open on an explicit denial would be the dangerous direction here.
+        let capture_list = vec!["x-someplatform-*".to_string(), "x-request-id".to_string()];
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-someplatform-tenant", "acme".parse().unwrap());
+        headers.insert("x-request-id", "abc-123".parse().unwrap());
+
+        for deny in [vec!["*".to_string()], vec!["**".to_string()]] {
+            assert!(
+                capture_http_headers_with_lists(&headers, &capture_list, &deny).is_none(),
+                "an all-`*` deny entry must subtract every captured header"
+            );
+        }
+    }
+
+    #[test]
+    fn capture_http_headers_interior_star_is_matched_literally() {
+        let capture_list = vec!["x-*-id".to_string()];
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-request-id", "abc-123".parse().unwrap());
+
+        assert!(
+            capture_http_headers_with_lists(&headers, &capture_list, &[]).is_none(),
+            "`*` is only a trailing prefix marker, so an interior one matches no real name"
+        );
+    }
+
+    #[test]
+    fn capture_http_headers_joins_repeats_matched_by_a_prefix() {
+        let capture_list = vec!["x-someplatform-*".to_string()];
+
+        let mut headers = HeaderMap::new();
+        headers.append("x-someplatform-tag", "tenant-a".parse().unwrap());
+        headers.append("x-someplatform-tag", "".parse().unwrap());
+        headers.append("x-someplatform-tag", "tenant-b".parse().unwrap());
+
+        let captured = capture_http_headers_with_lists(&headers, &capture_list, &[])
+            .expect("prefix match captures repeats");
+        assert_eq!(
+            captured.get("x-someplatform-tag").map(String::as_str),
+            Some("tenant-a, tenant-b"),
+            "repeats join and empty values drop, same as the literal path"
+        );
     }
 
     /// Test-only constructor. `create_handle` gates on env vars + a cached
