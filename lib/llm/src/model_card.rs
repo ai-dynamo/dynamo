@@ -906,12 +906,15 @@ pub struct ModelDeploymentCard {
     /// Orthogonal to `model_type` (which describes endpoints exposed).
     ///
     /// Every worker must set this explicitly. `None` means the worker has
-    /// not declared a worker type and is treated as misconfiguration:
-    /// `Model::ws_type_and_needs` returns `None`, the serving-readiness
-    /// gate refuses to vouch for the namespace, and `register_model`
-    /// rejects such cards outright. The `Option<>` type and
-    /// `#[serde(default)]` are kept so older cards still deserialize, but
-    /// downstream readers treat them as not-ready.
+    /// not declared a worker type: `Model::ws_type_and_needs` returns
+    /// `None`, which puts the namespace on the cross-version compat path in
+    /// `evaluate_readiness`, and `register_model` rejects the card when
+    /// `require_typed_worker_role` is set. The `Option<>` type and
+    /// `#[serde(default)]` are kept so older cards still deserialize.
+    ///
+    /// Note that the compat path *relaxes* readiness rather than failing it:
+    /// one legacy card disables strict per-type gating for the whole
+    /// namespace, which is then ready as soon as any worker is live.
     #[serde(default)]
     pub worker_type: Option<crate::worker_type::WorkerType>,
 
