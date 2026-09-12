@@ -49,7 +49,7 @@ on:
 jobs:
   build:
     name: Build multi-arch cpu
-    runs-on: prod-builder-v3
+    runs-on: prod-builder-v3-east-canary
     timeout-minutes: ${{ inputs.build_timeout_minutes }}
     permissions:
       actions: read
