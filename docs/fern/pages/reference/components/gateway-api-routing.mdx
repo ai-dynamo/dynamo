@@ -118,7 +118,8 @@ Gateway topology.
   Publishes and consumes best-effort active-sequence state across EPP replicas through the Dynamo event
   plane. For a native Rust EPP, the operator defaults it to `true` when `replicas` is above `1`, and a
   value set in `podTemplate` takes precedence. The deprecated Go EPP never receives it and cannot be
-  replicated. It has no peer to synchronize with at one replica. See
+  replicated. It has no peer to synchronize with at one replica. It reduces cross-replica divergence
+  rather than removing it. See
   [EPP Replication and Routing Accuracy](#epp-replication-and-routing-accuracy).
 </ParamField>
 
@@ -161,6 +162,14 @@ no acknowledgement, replay, or resynchronization, and replicas can disagree for 
 Output-block growth is never shared, because it changes at a frequency that would consume
 disproportionate bandwidth, so decode-side load estimates drift between replicas whenever
 `DYN_ROUTER_TRACK_OUTPUT_BLOCKS` is on.
+
+Enabling it does not make active-load accounting correct. It changes the error from permanent to
+transient. Left off, each replica scores workers from its own slice of the traffic and understates load
+by roughly the replica count, and every replica is wrong in the same direction, so the errors compound
+rather than averaging out. Turned on, replicas converge on a fleet-wide view between the gaps above.
+Those gaps are not symmetric when the outbound queue drops an event: a dropped `add` hides a request
+from a peer for that request's lifetime, while a dropped `free` leaves a phantom booking on the peer
+until the reaper clears it.
 
 ### Booking Ownership on Disconnect and Retry
 
