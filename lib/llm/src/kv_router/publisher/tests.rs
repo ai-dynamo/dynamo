@@ -2145,7 +2145,9 @@ mod worker_metrics_tests {
     use anyhow::Result;
     use dynamo_kv_router::protocols::ActiveLoad;
 
-    use super::super::worker_metrics::{WorkerMetricsPublisher, WorkerMetricsSink};
+    use super::super::worker_metrics::{
+        HEARTBEAT_INTERVAL, WorkerMetricsPublisher, WorkerMetricsSink,
+    };
 
     struct ChannelSink(tokio::sync::mpsc::UnboundedSender<ActiveLoad>);
 
@@ -2192,6 +2194,28 @@ mod worker_metrics_tests {
                 .is_err(),
             "same-rank updates should be coalesced"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unchanged_ranks_republish_on_the_heartbeat() {
+        let publisher = WorkerMetricsPublisher::new().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        publisher.start_metrics_publishing_with(ChannelSink(tx), 42);
+
+        publisher.publish(Some(0), None, Some(100)).unwrap();
+        let first = rx.recv().await.expect("metrics publishing task stopped");
+        assert_eq!(first.kv_used_blocks, Some(100));
+
+        // Nothing changes from here. The rank has to keep saying so, or a consumer that starts
+        // now cannot tell it from a rank that never reported.
+        tokio::time::sleep(HEARTBEAT_INTERVAL + Duration::from_millis(1)).await;
+        let beat = tokio::time::timeout(HEARTBEAT_INTERVAL, rx.recv())
+            .await
+            .expect("an unchanged rank went silent instead of repeating itself")
+            .expect("metrics publishing task stopped");
+        assert_eq!(beat.worker_id, 42);
+        assert_eq!(beat.dp_rank, 0);
+        assert_eq!(beat.kv_used_blocks, Some(100));
     }
 }
 

@@ -15,6 +15,20 @@ use crate::kv_router::KV_METRICS_SUBJECT;
 
 const PUBLISH_DEBOUNCE: Duration = Duration::from_millis(1);
 
+/// How often each rank republishes its newest metrics while nothing changes.
+///
+/// Publication is edge-triggered, so without this a rank whose load stops changing goes silent
+/// and its last value is the only evidence it ever existed. A consumer that starts later, resets,
+/// or loses its connection has no way to tell that rank from one that never reported: both are
+/// absent. `KvWorkerMonitor` reads that as an instance with no load state, and the DC Relay's
+/// `PoolLoadSnapshot` reports degraded coverage until the rank happens to move again, which on an
+/// idle pool can be indefinitely.
+///
+/// Short enough that a consumer recovers within one scrape or reconnect, long enough that a large
+/// DP group's steady-state chatter stays negligible next to the per-change traffic that dominates
+/// under load.
+pub(super) const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+
 #[derive(Debug, Clone, Default, PartialEq)]
 struct WorkerMetrics {
     dp_rank: DpRank,
@@ -60,6 +74,21 @@ impl WorkerMetricsDebouncer {
                     deadline: now + self.debounce,
                 },
             );
+        }
+    }
+
+    /// Re-queue the newest metrics for every rank with nothing already pending.
+    ///
+    /// A rank with a pending update is left alone: that update is newer and is about to go out
+    /// regardless, so replacing it would only move its deadline.
+    fn refresh(&mut self, now: tokio::time::Instant) {
+        for (&dp_rank, metrics) in &self.last_metrics {
+            self.pending
+                .entry(dp_rank)
+                .or_insert_with(|| PendingMetrics {
+                    metrics: metrics.clone(),
+                    deadline: now,
+                });
         }
     }
 
@@ -159,6 +188,10 @@ impl WorkerMetricsPublisher {
             let mut debouncer = WorkerMetricsDebouncer::new(PUBLISH_DEBOUNCE);
             let publish_timer = tokio::time::sleep(tokio::time::Duration::ZERO);
             tokio::pin!(publish_timer);
+            let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
+            // A slow sink should delay the next heartbeat, never bank ticks and then emit a burst
+            // of them once it drains.
+            heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
             loop {
                 tokio::select! {
@@ -172,6 +205,12 @@ impl WorkerMetricsPublisher {
 
                         let now = tokio::time::Instant::now();
                         debouncer.observe(&rx.borrow_and_update(), now);
+                        if let Some(deadline) = debouncer.next_deadline() {
+                            publish_timer.as_mut().reset(deadline);
+                        }
+                    }
+                    _ = heartbeat.tick() => {
+                        debouncer.refresh(tokio::time::Instant::now());
                         if let Some(deadline) = debouncer.next_deadline() {
                             publish_timer.as_mut().reset(deadline);
                         }
