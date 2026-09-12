@@ -530,6 +530,7 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
                 "nvext": {
                     "metadata_upload": {
                         "url": "s3://bucket/root/rollouts",
+                        "fallback_url": "file:///var/tmp/rollouts",
                     },
                 },
             },
@@ -540,6 +541,7 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
 
         assert result["extra_args"]["nvext"]["metadata_upload"] == {
             "url": "s3://bucket/root/rollouts",
+            "fallback_url": "file:///var/tmp/rollouts",
         }
 
     def test_model_name_and_token_ids(self):
