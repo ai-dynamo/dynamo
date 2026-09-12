@@ -1620,6 +1620,21 @@ pub struct OpenAIPreprocessor {
 
 pub(crate) const LORA_NAME_CONTEXT_KEY: &str = "discovery.lora_name";
 
+/// Reject token ids `>= vocab_size` (client 400). `None` vocab is unenforceable.
+fn ensure_token_ids_in_vocab(
+    tokens: &[crate::protocols::TokenIdType],
+    vocab_size: Option<usize>,
+) -> anyhow::Result<()> {
+    if let Some(vocab_size) = vocab_size {
+        if let Some(&bad) = tokens.iter().find(|&&t| t as usize >= vocab_size) {
+            return Err(invalid_argument_error(format!(
+                "nvext.token_data token id {bad} is out of range (must be < vocab_size {vocab_size})"
+            )));
+        }
+    }
+    Ok(())
+}
+
 impl OpenAIPreprocessor {
     fn omitted_max_tokens_default(
         prompt_len: usize,
@@ -4215,6 +4230,9 @@ impl OpenAIPreprocessor {
                             let (tokens_vec, skip_token_annotation) = if let Some(tokens) =
                                 token_data
                             {
+                                // token_data skips the tokenizer; re-check the vocab bound
+                                // it enforces (an out-of-range id crashes the backend).
+                                ensure_token_ids_in_vocab(tokens, self.model_info.vocab_size())?;
                                 tracing::info!(
                                     token_count = tokens.len(),
                                     first_tokens = ?&tokens[..std::cmp::min(5, tokens.len())],
@@ -7249,6 +7267,25 @@ impl
 }
 
 // Note: tests for jailing and parser detection live in `lib/llm/tests/test_jail.rs`
+
+#[cfg(test)]
+mod token_data_tests {
+    use super::ensure_token_ids_in_vocab;
+
+    #[test]
+    fn rejects_out_of_range_token() {
+        // UINT32_MAX (the reported payload) is far past any vocab -> rejected.
+        assert!(ensure_token_ids_in_vocab(&[1, 2, u32::MAX], Some(1000)).is_err());
+        assert!(ensure_token_ids_in_vocab(&[1000], Some(1000)).is_err());
+    }
+
+    #[test]
+    fn accepts_in_range_or_unknown_vocab() {
+        assert!(ensure_token_ids_in_vocab(&[0, 999], Some(1000)).is_ok());
+        // No vocab size on the card -> unenforceable, must not reject.
+        assert!(ensure_token_ids_in_vocab(&[u32::MAX], None).is_ok());
+    }
+}
 
 #[cfg(test)]
 mod strip_tests {
