@@ -203,6 +203,34 @@ fn service_rejects_non_vllm_or_multi_rank_engines() {
     );
 }
 
+/// Regression: a mocker without RL capabilities could classify an unsupported
+/// RPC as a caller or runtime-state error, causing clients to mis-handle
+/// capability absence; this test catches it at the Control RPC boundary.
+#[tokio::test]
+async fn unsupported_rl_control_reports_unimplemented() {
+    let service =
+        VllmMockerService::new(MockerServerConfig::default(), MockEngineArgs::default()).unwrap();
+    let server_info = pb::control_server::Control::get_server_info(
+        &service,
+        Request::new(pb::GetServerInfoRequest {}),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert!(server_info.rl_capabilities.is_none());
+
+    let error = pb::control_server::Control::pause_generation(
+        &service,
+        Request::new(pb::PauseGenerationRequest {
+            mode: pb::PauseMode::Keep as i32,
+            clear_cache: Some(false),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::Unimplemented);
+}
+
 #[tokio::test]
 async fn unary_generate_maps_capacity_rejection_to_resource_exhausted() {
     let args = MockEngineArgs::builder()

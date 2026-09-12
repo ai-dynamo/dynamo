@@ -34,6 +34,7 @@ from gpu_memory_service.common.utils import (
     get_socket_path,
     is_scratch_kv_enabled,
 )
+from gpu_memory_service.common.vmm import get_vmm_device_type
 from gpu_memory_service.integrations.common import patch_empty_cache
 from gpu_memory_service.integrations.common.utils import (
     get_gms_lock_mode,
@@ -99,8 +100,15 @@ if os.environ.get("MX_ENABLED", "0") == "1":
         ) from e
 
 
-# Import Worker after patches are applied
-from vllm.v1.worker.gpu_worker import Worker  # noqa: E402
+# Import the correct base Worker class for the active platform.
+# XPUWorker provides XPU device init, oneCCL, and XPUModelRunner;
+# Worker (gpu_worker) is the CUDA default.
+from vllm.platforms import current_platform as _cp  # noqa: E402
+
+if _cp.is_xpu():
+    from vllm.v1.worker.xpu_worker import XPUWorker as _BaseWorker  # noqa: E402
+else:
+    from vllm.v1.worker.gpu_worker import Worker as _BaseWorker  # noqa: E402
 
 
 def _get_dp_adjusted_local_rank(local_rank: int, parallel_config) -> int:
@@ -141,7 +149,7 @@ def _get_dp_adjusted_local_rank(local_rank: int, parallel_config) -> int:
     return adjusted_local_rank
 
 
-class GMSWorker(Worker):
+class GMSWorker(_BaseWorker):
     """vLLM Worker subclass with GMS integration."""
 
     def init_device(self) -> None:
@@ -155,7 +163,9 @@ class GMSWorker(Worker):
         # Set CUDA device first. Do not mutate self.local_rank here; the parent
         # Worker will apply the same DP adjustment during super().init_device().
         device = _get_dp_adjusted_local_rank(self.local_rank, self.parallel_config)
-        current_platform.set_device(torch.device(f"cuda:{device}"))
+        current_platform.set_device(
+            torch.device(f"{get_vmm_device_type().value}:{device}")
+        )
 
         # Establish weights GMS connection (so MemorySnapshot can query committed bytes).
         # Lock type is determined by model_loader_extra_config, set upstream by
@@ -314,7 +324,9 @@ class GMSWorker(Worker):
                 mode=RequestedLockType.RW,
                 tag="kv_cache",
             )
-            with gms_use_mem_pool("kv_cache", torch.device(f"cuda:{device}")):
+            with gms_use_mem_pool(
+                "kv_cache", torch.device(f"{get_vmm_device_type().value}:{device}")
+            ):
                 self.model_runner.initialize_kv_cache(kv_cache_config)
         else:
             self.model_runner.initialize_kv_cache(kv_cache_config)
@@ -495,11 +507,9 @@ class GMSWorker(Worker):
         """Fire the NixlConnector KV-cache registration after deferred KV swap.
 
         During scratch phase the patches.patch_register_kv_caches gate intercepts
-        register_kv_caches(dict) and stashes the dict on the connector as
-        self._scratch_kv_pending. We replay that here, NOT
-        self.model_runner.kv_caches — the latter is the list-of-tensors view
-        set by vLLM, and NixlConnector.register_kv_caches does kv_caches.values()
-        which requires the dict form.
+        either register_kv_caches(dict) or register_cross_layers_kv_cache(...)
+        and stashes the original arguments on the connector. We replay those
+        arguments here after the real KV backing has been remapped.
 
         Imports from the package root (vllm.distributed.kv_transfer) — the
         kv_connector.v1.base re-exports were unreliable across vLLM versions
@@ -516,20 +526,30 @@ class GMSWorker(Worker):
             return
         group = get_kv_transfer_group()
         pending = getattr(group, "_scratch_kv_pending", None)
-        if not pending:
+        pending_cross_layers = getattr(group, "_scratch_cross_layers_kv_pending", None)
+        if pending is not None and pending_cross_layers is not None:
+            raise RuntimeError(
+                "NIXL connector deferred both normal and cross-layer KV registration"
+            )
+        if pending is None and pending_cross_layers is None:
             # Nothing was stashed — either no deferred registration, or a
             # non-NixlConnector connector that didn't hit the patched path.
             return
-        group.register_kv_caches(pending)
-        # Drop the stash so a second call is a no-op.
-        try:
+        if pending is not None:
+            group.register_kv_caches(pending)
             delattr(group, "_scratch_kv_pending")
-        except AttributeError:
-            pass
-        logger.info(
-            "[GMS] Registered %d kv_cache tensors with KV transfer group",
-            len(pending),
-        )
+            logger.info(
+                "[GMS] Registered %d kv_cache tensors with KV transfer group",
+                len(pending),
+            )
+        else:
+            assert pending_cross_layers is not None
+            kv_cache, attn_backend = pending_cross_layers
+            group.register_cross_layers_kv_cache(kv_cache, attn_backend)
+            delattr(group, "_scratch_cross_layers_kv_pending")
+            logger.info(
+                "[GMS] Registered cross-layer kv_cache tensor with KV transfer group"
+            )
 
     def _maybe_get_memory_pool_context(self, tag: str):
         """Route tag-scoped runtime allocations to the right allocator.
@@ -545,5 +565,7 @@ class GMSWorker(Worker):
             logger.debug("[GMS] Skipping CuMemAllocator for weights")
             return nullcontext()
         if tag == "kv_cache":
-            return gms_use_mem_pool("kv_cache", torch.device("cuda", self.local_rank))
+            return gms_use_mem_pool(
+                "kv_cache", torch.device(get_vmm_device_type().value, self.local_rank)
+            )
         return super()._maybe_get_memory_pool_context(tag)

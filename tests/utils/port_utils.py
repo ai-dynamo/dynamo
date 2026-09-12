@@ -15,6 +15,8 @@ import random
 import socket
 import tempfile
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -334,6 +336,16 @@ def allocate_port(start_port: int) -> int:
         int: An available port number between start_port and 32767 (i16 max)
     """
     return allocate_ports(1, start_port)[0]
+
+
+@contextmanager
+def reserved_ports(count: int, start_port: int) -> Iterator[list[int]]:
+    """Reserve ports for a context and always release their registry entries."""
+    ports = allocate_ports(count, start_port)
+    try:
+        yield ports
+    finally:
+        deallocate_ports(ports)
 
 
 def deallocate_ports(ports: list[int]) -> None:

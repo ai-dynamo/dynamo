@@ -176,6 +176,10 @@ class OverridesSpec(BaseModel):
         default=None,
         description="ProfilingJob allows overriding the profiling Job specification. Fields set here are merged into the controller-generated Job spec.",
     )
+    trustRemoteCode: bool = Field(
+        default=False,
+        description="TrustRemoteCode explicitly permits generated vLLM and SGLang workers to execute custom code from the configured model repository. When enabled, the profiler adds --trust-remote-code to every generated worker component after the deployment topology has been generated. Enable this setting only for model repositories you trust.",
+    )
     dgd: Optional[Dict[str, Any]] = Field(
         default=None,
         description="DGD provides a partial, versioned DynamoGraphDeployment override for the profiler-generated deployment. Set apiVersion to nvidia.com/v1alpha1 or nvidia.com/v1beta1 and kind to DynamoGraphDeployment.  The profiler merges the override using the schema for its declared version. If the generated DGD uses another supported version, the complete DGD is converted before the merge and converted back afterward. The final DGD selected or created by a DGDR is nvidia.com/v1beta1.  The override can update DGD fields, but topology entries are limited to services or components already present in the generated DGD. Metadata labels and annotations are merged, metadata.name selects the final DGD name, and other identity or runtime metadata is ignored. V1alpha1 worker argument lists retain legacy append behavior. V1beta1 follows structural schema merge behavior, including map-list merging and atomic-list replacement.  The raw embedded resource preserves either supported schema. The API server validates that it has apiVersion and kind; override processing validates the DGD kind, supported version, and field schema.",
@@ -206,6 +210,10 @@ class FeaturesSpec(BaseModel):
     planner: Optional[PlannerConfig] = Field(
         default=None,
         description="Planner contains the raw Planner configuration passed to the Planner service. Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig. See https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/planner/planner-guide#plannerconfig-reference. DGDR passes this object through without field-level validation; the Planner service validates it at startup. The presence of this field (non-null) enables the planner in the generated DGD.",
+    )
+    kvRouter: Optional[KVRouterSpec] = Field(
+        default=None,
+        description="KVRouter configures KV-cache-aware routing for the generated deployment. When enabled, DGDR sets DYN_ROUTER_MODE=kv on the generated Frontend. Settings in spec.overrides.dgd take precedence: an override can replace DYN_ROUTER_MODE or pass --router-mode. The flag takes precedence over the environment variable when both are present.",
     )
     mocker: Optional[MockerSpec] = Field(
         default=None,

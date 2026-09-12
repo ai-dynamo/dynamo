@@ -3,11 +3,12 @@
 
 """DC-scoped, multi-endpoint Dynamo KV Relay component."""
 
-import argparse
 import asyncio
 import hashlib
 import logging
 import os
+import sys
+from collections.abc import Mapping
 
 import uvloop
 
@@ -15,22 +16,10 @@ from dynamo.llm import KvDcRelay
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
+from .cli import monitor_relay, parse_args, schedule_awaitable
+
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Dynamo DC-scoped KV Relay")
-    parser.add_argument(
-        "--namespace-filter",
-        help="Optional discovery namespace filter; the default watches all namespaces",
-    )
-    parser.add_argument(
-        "--endpoint-prefix",
-        help="Optional prefix filter over namespace.component.endpoint",
-    )
-    parser.add_argument("--dc-id", required=True)
-    return parser.parse_args()
 
 
 class KvDcRelayDiagnostics:
@@ -38,16 +27,42 @@ class KvDcRelayDiagnostics:
         self._relay = relay
 
     async def stats(self, _request):
-        yield await getattr(self._relay, "stats")()
+        yield await self._relay.stats()
 
     async def snapshot(self, request):
         serving_endpoint = request.get("serving_endpoint")
         if not serving_endpoint:
             raise ValueError("snapshot requests require serving_endpoint")
-        yield await getattr(self._relay, "snapshot")(serving_endpoint)
+        yield await self._relay.snapshot(serving_endpoint)
 
     async def health(self, _request):
         yield await self._relay.health()
+
+
+def _handle_relay_shutdown(health: Mapping[str, object]) -> None:
+    host_error = health.get("host_last_error")
+    wan_error = health.get("wan_last_error")
+    if host_error is None and wan_error is None:
+        logger.info("KV DC Relay host stopped during runtime shutdown")
+        return
+
+    terminal_error = host_error if host_error is not None else wan_error
+    logger.error("KV DC Relay stopped after terminal failure: %s", terminal_error)
+    raise SystemExit(1)
+
+
+async def _shutdown_relay(relay: KvDcRelay, *, classify_host_failure: bool) -> None:
+    try:
+        await relay.shutdown()
+    except BaseException:
+        if classify_host_failure:
+            raise
+        logger.exception(
+            "KV DC Relay shutdown also failed while preserving an endpoint exception"
+        )
+        return
+    if classify_host_failure:
+        _handle_relay_shutdown(await relay.health())
 
 
 @dynamo_worker()
@@ -58,8 +73,12 @@ async def worker(runtime: DistributedRuntime) -> None:
     relay = KvDcRelay(
         relay_endpoint,
         args.dc_id,
-        args.namespace_filter,
-        args.endpoint_prefix,
+        namespaces=list(args.namespaces),
+        endpoint_prefixes=list(args.endpoint_prefixes),
+        watch_all=args.watch_all,
+        expected_unique_blocks=args.expected_unique_blocks,
+        bind=args.bind,
+        tuning=dict(args.tuning) or None,
     )
     await relay.start()
     diagnostics = KvDcRelayDiagnostics(relay)
@@ -67,16 +86,22 @@ async def worker(runtime: DistributedRuntime) -> None:
     diagnostics_component = f"kv_dc_relay_{relay_identity}"
 
     logger.info(
-        "KV DC Relay started for dc_id=%s namespace_filter=%s endpoint_prefix=%s",
+        "KV DC Relay started for dc_id=%s namespaces=%s watch_all=%s "
+        "endpoint_prefixes=%s wan_bind=%s",
         args.dc_id,
-        args.namespace_filter,
-        args.endpoint_prefix,
+        args.namespaces,
+        args.watch_all,
+        args.endpoint_prefixes,
+        args.bind,
     )
-    endpoint_tasks = []
+    endpoint_tasks: list[asyncio.Future[object]] = []
+    # A terminal host failure only resolves wait_for_shutdown(); the diagnostics
+    # endpoints would otherwise keep the process alive and answering health checks
+    # for a relay that is no longer ingesting anything.
     try:
         if hasattr(relay, "stats") and hasattr(relay, "snapshot"):
             endpoint_tasks.append(
-                asyncio.ensure_future(
+                schedule_awaitable(
                     runtime.endpoint(
                         f"{namespace}.{diagnostics_component}.stats"
                     ).serve_endpoint(
@@ -87,7 +112,7 @@ async def worker(runtime: DistributedRuntime) -> None:
                 )
             )
             endpoint_tasks.append(
-                asyncio.ensure_future(
+                schedule_awaitable(
                     runtime.endpoint(
                         f"{namespace}.{diagnostics_component}.snapshot"
                     ).serve_endpoint(
@@ -103,7 +128,7 @@ async def worker(runtime: DistributedRuntime) -> None:
                 "enable the ckf-diagnostics Cargo feature to expose them"
             )
         endpoint_tasks.append(
-            asyncio.ensure_future(
+            schedule_awaitable(
                 runtime.endpoint(
                     f"{namespace}.{diagnostics_component}.health"
                 ).serve_endpoint(
@@ -114,12 +139,13 @@ async def worker(runtime: DistributedRuntime) -> None:
                 )
             )
         )
-        await asyncio.gather(*endpoint_tasks)
+        await monitor_relay(relay, endpoint_tasks)
     finally:
+        classify_host_failure = sys.exc_info()[0] is None
         for task in endpoint_tasks:
             task.cancel()
         await asyncio.gather(*endpoint_tasks, return_exceptions=True)
-        await relay.shutdown()
+        await _shutdown_relay(relay, classify_host_failure=classify_host_failure)
         logger.info("KV DC Relay stopped")
 
 

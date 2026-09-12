@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use socket2::{Domain, SockAddr, Socket, Type};
+use socket2::{Domain, SockAddr, SockRef, Socket, Type};
 use std::{
     collections::{HashMap, HashSet},
     net::{IpAddr, SocketAddr, TcpListener},
@@ -22,7 +22,7 @@ const TOMBSTONE_TTL: Duration = Duration::from_secs(5);
 use bytes::Bytes;
 use derive_builder::Builder;
 use futures::{SinkExt, StreamExt};
-use local_ip_address::{Error, list_afinet_netifas, local_ip, local_ipv6};
+use local_ip_address::Error;
 use parking_lot::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -47,26 +47,10 @@ use crate::pipeline::{
         tcp::StreamType,
     },
 };
-use anyhow::{Context, Result, anyhow as error};
+use crate::utils::ip_resolver::resolve_host_or_interface;
+use anyhow::{Result, anyhow as error};
 
-// Trait for IP address resolution - allows dependency injection for testing
-pub trait IpResolver {
-    fn local_ip(&self) -> Result<std::net::IpAddr, Error>;
-    fn local_ipv6(&self) -> Result<std::net::IpAddr, Error>;
-}
-
-// Default implementation using the real local_ip_address crate
-pub struct DefaultIpResolver;
-
-impl IpResolver for DefaultIpResolver {
-    fn local_ip(&self) -> Result<std::net::IpAddr, Error> {
-        local_ip()
-    }
-
-    fn local_ipv6(&self) -> Result<std::net::IpAddr, Error> {
-        local_ipv6()
-    }
-}
+pub use crate::utils::ip_resolver::{DefaultIpResolver, IpResolver};
 
 #[allow(dead_code)]
 type ResponseType = TwoPartMessage;
@@ -76,6 +60,8 @@ pub struct ServerOptions {
     #[builder(default = "0")]
     pub port: u16,
 
+    /// IP literal or exact network interface name used to bind and advertise the server.
+    /// When unset, Dynamo selects a local address automatically.
     #[builder(default)]
     pub interface: Option<String>,
 }
@@ -90,7 +76,7 @@ impl ServerOptions {
 /// A Response connection is a connection that is established by a client with the intention of sending
 /// specific data back to the server.
 pub struct TcpStreamServer {
-    local_ip: String,
+    local_ip: IpAddr,
     local_port: u16,
     state: Arc<Mutex<State>>,
 }
@@ -173,6 +159,10 @@ fn prune_tombstones(tombstones: &mut HashMap<EndpointInstanceId, Instant>, now: 
 }
 
 impl TcpStreamServer {
+    pub fn local_address(&self) -> Result<SocketAddr> {
+        Ok(SocketAddr::new(self.local_ip, self.local_port))
+    }
+
     pub fn options_builder() -> ServerOptionsBuilder {
         ServerOptionsBuilder::default()
     }
@@ -185,19 +175,12 @@ impl TcpStreamServer {
         options: ServerOptions,
         resolver: R,
     ) -> Result<Arc<Self>, PipelineError> {
-        let local_ip = match options.interface {
-            Some(interface) => {
-                let interfaces: HashMap<String, std::net::IpAddr> =
-                    list_afinet_netifas()?.into_iter().collect();
-
-                interfaces
-                    .get(&interface)
-                    .ok_or(PipelineError::Generic(format!(
-                        "Interface not found: {}",
-                        interface
-                    )))?
-                    .to_string()
-            }
+        let local_ip = match options.interface.as_deref() {
+            Some(host) => resolve_host_or_interface(host, &resolver).map_err(|error| {
+                PipelineError::Generic(format!(
+                    "Failed to resolve configured TCP host '{host}': {error}"
+                ))
+            })?,
             None => {
                 let resolved_ip = resolver.local_ip().or_else(|err| match err {
                     Error::LocalIpAddressNotFound => resolver.local_ipv6(),
@@ -222,7 +205,6 @@ impl TcpStreamServer {
                         )));
                     }
                 }
-                .to_string()
             }
         };
 
@@ -233,13 +215,14 @@ impl TcpStreamServer {
             PipelineError::Generic(format!("Failed to build TCP TLS acceptor: {}", e))
         })?;
 
-        let local_port = Self::start(local_ip.clone(), options.port, state.clone(), tls_acceptor)
+        let local_port = Self::start(local_ip, options.port, state.clone(), tls_acceptor)
             .await
             .map_err(|e| {
                 PipelineError::Generic(format!("Failed to start TcpStreamServer: {}", e))
             })?;
 
-        tracing::debug!("tcp transport service on {local_ip}:{local_port}");
+        let local_addr = SocketAddr::new(local_ip, local_port);
+        tracing::debug!("tcp transport service on {local_addr}");
 
         Ok(Arc::new(Self {
             local_ip,
@@ -297,6 +280,27 @@ impl TcpStreamServer {
         if let Some(s) = send_subject {
             entry.insert((StreamType::Request, s.to_string()));
         }
+        true
+    }
+
+    /// Associate a request-only callback registration with a backend instance.
+    /// QUIC response mode still uses TCP for bidirectional request callbacks.
+    pub async fn associate_request_instance(&self, subject: &str, id: &EndpointInstanceId) -> bool {
+        let mut state = self.state.lock();
+        let now = Instant::now();
+        prune_tombstones(&mut state.removed_instances, now);
+        if state.removed_instances.contains_key(id) {
+            state.tx_subjects.remove(subject);
+            return false;
+        }
+        state
+            .subject_instance
+            .insert(subject.to_string(), id.clone());
+        state
+            .instance_subjects
+            .entry(id.clone())
+            .or_default()
+            .insert((StreamType::Request, subject.to_string()));
         true
     }
 
@@ -369,48 +373,30 @@ impl TcpStreamServer {
     }
 
     /// Build a TLS acceptor from env vars if `DYN_TCP_TLS_CERT_PATH` and
-    /// `DYN_TCP_TLS_KEY_PATH` are set.
-    fn build_tls_acceptor() -> anyhow::Result<Option<Arc<TlsAcceptor>>> {
+    /// `DYN_TCP_TLS_KEY_PATH` are set. Validation and diagnostics are shared with
+    /// the request-plane server via
+    /// [`crate::tls_utils::server_tls_acceptor_config`]; a client CA enables mTLS.
+    fn build_tls_acceptor() -> anyhow::Result<Option<TlsAcceptor>> {
         use crate::config::environment_names::tcp_response_stream::tls as env;
         let cert_path = std::env::var(env::DYN_TCP_TLS_CERT_PATH).ok();
         let key_path = std::env::var(env::DYN_TCP_TLS_KEY_PATH).ok();
-        match (cert_path, key_path) {
-            (Some(cert), Some(key)) => {
-                let server_config =
-                    crate::tls_utils::server_tls_config(cert.as_ref(), key.as_ref())?;
-                tracing::info!("TCP server: TLS enabled");
-                Ok(Some(Arc::new(TlsAcceptor::from(Arc::new(server_config)))))
-            }
-            (None, None) => {
-                // Warn if the client side has TLS configured — mixing plaintext server with
-                // TLS client (or vice versa) results in failed connections that are hard to debug.
-                let client_tls_set = std::env::var(env::DYN_TCP_TLS_CA_CERT_PATH).is_ok()
-                    || crate::config::env_is_truthy(env::DYN_TCP_TLS_INSECURE);
-                if client_tls_set {
-                    tracing::warn!(
-                        "TCP server is running in plaintext mode but client TLS env vars are set. \
-                         Set {} and {} to enable server-side TLS, or unset client TLS vars.",
-                        env::DYN_TCP_TLS_CERT_PATH,
-                        env::DYN_TCP_TLS_KEY_PATH,
-                    );
-                }
-                Ok(None)
-            }
-            _ => anyhow::bail!(
-                "Both {} and {} must be set to enable TCP TLS",
-                env::DYN_TCP_TLS_CERT_PATH,
-                env::DYN_TCP_TLS_KEY_PATH
-            ),
-        }
+        let client_ca = std::env::var(env::DYN_TCP_TLS_CLIENT_CA_CERT_PATH).ok();
+        Ok(crate::tls_utils::server_tls_acceptor_config(
+            "TCP server",
+            cert_path.as_deref().map(std::path::Path::new),
+            key_path.as_deref().map(std::path::Path::new),
+            client_ca.as_deref().map(std::path::Path::new),
+        )?
+        .map(|config| TlsAcceptor::from(Arc::new(config))))
     }
 
     async fn start(
-        local_ip: String,
+        local_ip: IpAddr,
         local_port: u16,
         state: Arc<Mutex<State>>,
-        tls_acceptor: Option<Arc<TlsAcceptor>>,
+        tls_acceptor: Option<TlsAcceptor>,
     ) -> Result<u16> {
-        let addr = format!("{}:{}", local_ip, local_port);
+        let addr = SocketAddr::new(local_ip, local_port);
         let state_clone = state.clone();
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<u16>>();
         {
@@ -495,7 +481,7 @@ impl ResponseService for TcpStreamServer {
     async fn register(&self, options: StreamOptions) -> PendingConnections {
         // oneshot channels to pass back the sender and receiver objects
 
-        let address = format!("{}:{}", self.local_ip, self.local_port);
+        let address = SocketAddr::new(self.local_ip, self.local_port).to_string();
         tracing::debug!("Registering new TcpStream on {address}");
 
         let send_stream = if options.enable_request_stream {
@@ -598,6 +584,184 @@ impl ResponseService for TcpStreamServer {
     }
 }
 
+/// First retry delay applied after an `AcceptFailure::Exhaustion`.
+const ACCEPT_BACKOFF_INITIAL_DELAY: Duration = Duration::from_millis(5);
+/// Ceiling the retry delay saturates at, so the listener keeps polling often
+/// enough to notice recovery while no longer spinning.
+const ACCEPT_BACKOFF_MAX_DELAY: Duration = Duration::from_secs(1);
+/// Minimum wall-clock interval between two emitted exhaustion summaries.
+const ACCEPT_BACKOFF_LOG_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How the listener loop must treat a failed `accept()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AcceptFailure {
+    /// The process or the host is out of file descriptors or kernel memory
+    /// — see `AcceptBackoff::classify` for the exact errno set. Retrying
+    /// immediately cannot succeed, so the loop must back off.
+    Exhaustion,
+    /// Anything else — a per-connection error that the client is expected to
+    /// retry. Keeps the historical warn-and-retry-immediately behavior.
+    Ordinary,
+}
+
+/// What the caller should do about one exhaustion failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AcceptBackoffAction {
+    /// How long to sleep before calling `accept()` again.
+    delay: Duration,
+    /// `Some(n)` when the caller should emit one summary line, where `n` is the
+    /// number of failures suppressed since the previous emission. `None` means
+    /// this failure is inside the current rate-limit window and must stay silent.
+    log_suppressed: Option<u64>,
+}
+
+/// Bounded exponential retry policy for the accept loop, kept deliberately pure:
+/// it reads no clock, performs no I/O and never sleeps. The caller supplies the
+/// current `Instant` and performs the sleep, which is what lets the retry
+/// schedule and the log-rate decision be unit-tested without reproducing the
+/// host's file-descriptor limit. Vocabulary mirrors `transports::etcd::connector`'s
+/// `BackoffState`.
+#[derive(Debug)]
+struct AcceptBackoff {
+    initial_delay: Duration,
+    max_delay: Duration,
+    log_interval: Duration,
+    current_delay: Duration,
+    suppressed: u64,
+    last_log_at: Option<std::time::Instant>,
+    /// Whether the loop is currently inside an exhaustion episode — the flag
+    /// `record_success` checks to tell a real recovery from an ordinary
+    /// steady-state accept.
+    in_backoff: bool,
+}
+
+impl Default for AcceptBackoff {
+    fn default() -> Self {
+        Self {
+            initial_delay: ACCEPT_BACKOFF_INITIAL_DELAY,
+            max_delay: ACCEPT_BACKOFF_MAX_DELAY,
+            log_interval: ACCEPT_BACKOFF_LOG_INTERVAL,
+            current_delay: ACCEPT_BACKOFF_INITIAL_DELAY,
+            suppressed: 0,
+            last_log_at: None,
+            in_backoff: false,
+        }
+    }
+}
+
+impl AcceptBackoff {
+    /// Classify an `accept()` error. Only descriptor or kernel-memory exhaustion
+    /// gets the backoff treatment; everything else stays on the pre-existing
+    /// path so genuinely unexpected failures are not hidden or slowed down.
+    fn classify(err: &std::io::Error) -> AcceptFailure {
+        #[cfg(unix)]
+        {
+            // `std::io::ErrorKind` has no stable variant for these errnos, so
+            // the raw value is the portable-with-cfg way to recognize them.
+            // `EMFILE`/`ENFILE` are descriptor exhaustion; `ENOBUFS`/`ENOMEM`
+            // are kernel out-of-memory for the socket. All four make an
+            // immediate retry deterministic, so they get the backoff path.
+            if matches!(
+                err.raw_os_error(),
+                Some(libc::EMFILE) | Some(libc::ENFILE) | Some(libc::ENOBUFS) | Some(libc::ENOMEM)
+            ) {
+                return AcceptFailure::Exhaustion;
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = err;
+        }
+        AcceptFailure::Ordinary
+    }
+
+    /// Record one exhaustion failure and return the delay to sleep plus the
+    /// rate-limited logging decision. The delay doubles per consecutive failure
+    /// and saturates at `max_delay`.
+    fn record_exhaustion(&mut self, now: std::time::Instant) -> AcceptBackoffAction {
+        self.in_backoff = true;
+
+        let delay = self.current_delay;
+        self.current_delay = self.current_delay.saturating_mul(2).min(self.max_delay);
+
+        let due = match self.last_log_at {
+            None => true,
+            Some(prev) => now.saturating_duration_since(prev) >= self.log_interval,
+        };
+
+        let log_suppressed = if due {
+            self.last_log_at = Some(now);
+            Some(std::mem::take(&mut self.suppressed))
+        } else {
+            self.suppressed += 1;
+            None
+        };
+
+        AcceptBackoffAction {
+            delay,
+            log_suppressed,
+        }
+    }
+
+    /// Record a successful accept. `Some(suppressed)` only when this success
+    /// both ended an exhaustion episode and the shared log-rate window allows
+    /// a line — so a listener flapping at the descriptor ceiling cannot emit
+    /// an unbounded stream of recovery lines, and a suppressed recovery keeps
+    /// its count for the next emission rather than discarding it. The clock
+    /// arrives as a closure, not an `Instant`, so the steady-state accept
+    /// (every ordinary connection) hits the early return below without
+    /// reading a clock at all.
+    fn record_success(&mut self, now: impl FnOnce() -> std::time::Instant) -> Option<u64> {
+        if !self.in_backoff {
+            return None;
+        }
+        self.current_delay = self.initial_delay;
+        self.in_backoff = false;
+        let now = now();
+
+        let due = match self.last_log_at {
+            None => true,
+            Some(prev) => now.saturating_duration_since(prev) >= self.log_interval,
+        };
+        if !due {
+            return None;
+        }
+        self.last_log_at = Some(now);
+        Some(std::mem::take(&mut self.suppressed))
+    }
+}
+
+/// Apply the accept-loop error policy to one failed `accept()`. Returns the
+/// delay that was actually slept — `Duration::ZERO` for ordinary errors, which
+/// keep the historical immediate-retry behavior.
+async fn handle_accept_error(err: &std::io::Error, backoff: &mut AcceptBackoff) -> Duration {
+    match AcceptBackoff::classify(err) {
+        AcceptFailure::Ordinary => {
+            // the client should retry, so we don't need to abort
+            tracing::warn!(error = %err, "failed to accept tcp connection");
+            // Gated like the sibling in `handle_connection`: an unconditional
+            // stderr write here doubles the log volume of any accept-error storm.
+            #[cfg(debug_assertions)]
+            eprintln!("failed to accept tcp connection: {}", err);
+            Duration::ZERO
+        }
+        AcceptFailure::Exhaustion => {
+            crate::metrics::transport_metrics::TCP_ACCEPT_BACKOFF_TOTAL.inc();
+            let action = backoff.record_exhaustion(std::time::Instant::now());
+            if let Some(suppressed) = action.log_suppressed {
+                tracing::warn!(
+                    error = %err,
+                    retry_delay_ms = action.delay.as_millis() as u64,
+                    suppressed_failures = suppressed,
+                    "tcp accept failed: out of file descriptors or kernel memory; backing off before retry"
+                );
+            }
+            time::sleep(action.delay).await;
+            action.delay
+        }
+    }
+}
+
 // Type aliases for boxed split halves used throughout the nested handlers below.
 type BoxRead = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
 type BoxWrite = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
@@ -609,12 +773,12 @@ type BoxWrite = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
 // the sender, then we spawn a task to forward all bytes from the tcp stream
 // to the sender
 async fn tcp_listener(
-    addr: String,
+    addr: SocketAddr,
     state: Arc<Mutex<State>>,
-    tls_acceptor: Option<Arc<TlsAcceptor>>,
+    tls_acceptor: Option<TlsAcceptor>,
     read_tx: tokio::sync::oneshot::Sender<Result<u16>>,
 ) -> Result<()> {
-    let listener = tokio::net::TcpListener::bind(&addr)
+    let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to start TcpListender on {}: {}", addr, e));
 
@@ -637,6 +801,8 @@ async fn tcp_listener(
         }
     };
 
+    let mut accept_backoff = AcceptBackoff::default();
+
     loop {
         // todo - add instrumentation
         // todo - add counter for all accepted connections
@@ -644,11 +810,17 @@ async fn tcp_listener(
         // todo - add counter for incoming bytes
         // todo - add counter for outgoing bytes
         let (stream, _addr) = match listener.accept().await {
-            Ok((stream, _addr)) => (stream, _addr),
+            Ok((stream, _addr)) => {
+                if let Some(suppressed) = accept_backoff.record_success(std::time::Instant::now) {
+                    tracing::warn!(
+                        suppressed_failures = suppressed,
+                        "tcp accept recovered from resource exhaustion"
+                    );
+                }
+                (stream, _addr)
+            }
             Err(e) => {
-                // the client should retry, so we don't need to abort
-                tracing::warn!("failed to accept tcp connection: {e}");
-                eprintln!("failed to accept tcp connection: {}", e);
+                handle_accept_error(&e, &mut accept_backoff).await;
                 continue;
             }
         };
@@ -660,7 +832,7 @@ async fn tcp_listener(
             }
         }
 
-        match stream.set_linger(Some(std::time::Duration::from_secs(0))) {
+        match SockRef::from(&stream).set_linger(Some(std::time::Duration::from_secs(0))) {
             Ok(_) => (),
             Err(e) => {
                 tracing::warn!("failed to set tcp stream to linger: {e}");
@@ -1155,36 +1327,29 @@ mod tests {
     use crate::pipeline::Context;
     use crate::pipeline::network::DEFAULT_SEND_BUFFER_COUNT;
     use crate::pipeline::network::tcp::client::TcpClient;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
+    use crate::tls_utils::test_certs::self_signed_pair;
     use tokio::io::{AsyncWriteExt, ReadHalf, WriteHalf};
     use tokio::net::TcpStream;
 
-    fn make_cert_files() -> (NamedTempFile, NamedTempFile) {
-        let key_pair = rcgen::KeyPair::generate().unwrap();
-        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
-            .unwrap()
-            .self_signed(&key_pair)
-            .unwrap();
-        let mut cert_file = NamedTempFile::new().unwrap();
-        cert_file.write_all(cert.pem().as_bytes()).unwrap();
-        let mut key_file = NamedTempFile::new().unwrap();
-        key_file
-            .write_all(key_pair.serialize_pem().as_bytes())
-            .unwrap();
-        (cert_file, key_file)
-    }
-
     #[test]
     fn build_tls_acceptor_no_env_vars_is_plaintext() {
-        temp_env::with_vars_unset(["DYN_TCP_TLS_CERT_PATH", "DYN_TCP_TLS_KEY_PATH"], || {
-            assert!(TcpStreamServer::build_tls_acceptor().unwrap().is_none());
-        });
+        // Also clear the client-CA var: ambient it would turn this into an error
+        // (client CA without a server cert/key) instead of plaintext.
+        temp_env::with_vars_unset(
+            [
+                "DYN_TCP_TLS_CERT_PATH",
+                "DYN_TCP_TLS_KEY_PATH",
+                "DYN_TCP_TLS_CLIENT_CA_CERT_PATH",
+            ],
+            || {
+                assert!(TcpStreamServer::build_tls_acceptor().unwrap().is_none());
+            },
+        );
     }
 
     #[test]
     fn build_tls_acceptor_partial_config_errors() {
-        let (cert, key) = make_cert_files();
+        let (cert, key) = self_signed_pair();
         let cert_str = cert.path().to_str().unwrap();
         let key_str = key.path().to_str().unwrap();
         // only cert
@@ -1207,13 +1372,46 @@ mod tests {
 
     #[test]
     fn build_tls_acceptor_both_paths_is_tls() {
-        let (cert, key) = make_cert_files();
+        let (cert, key) = self_signed_pair();
         temp_env::with_vars(
             [
                 ("DYN_TCP_TLS_CERT_PATH", Some(cert.path().to_str().unwrap())),
                 ("DYN_TCP_TLS_KEY_PATH", Some(key.path().to_str().unwrap())),
             ],
             || assert!(TcpStreamServer::build_tls_acceptor().unwrap().is_some()),
+        );
+    }
+
+    #[test]
+    fn build_tls_acceptor_with_client_ca_is_mtls() {
+        // A client CA turns the response-stream server into an mTLS acceptor.
+        let (cert, key) = self_signed_pair();
+        temp_env::with_vars(
+            [
+                ("DYN_TCP_TLS_CERT_PATH", Some(cert.path().to_str().unwrap())),
+                ("DYN_TCP_TLS_KEY_PATH", Some(key.path().to_str().unwrap())),
+                (
+                    "DYN_TCP_TLS_CLIENT_CA_CERT_PATH",
+                    Some(cert.path().to_str().unwrap()),
+                ),
+            ],
+            || assert!(TcpStreamServer::build_tls_acceptor().unwrap().is_some()),
+        );
+    }
+
+    #[test]
+    fn build_tls_acceptor_client_ca_without_server_identity_errors() {
+        let (cert, _key) = self_signed_pair();
+        temp_env::with_vars(
+            [
+                ("DYN_TCP_TLS_CERT_PATH", None),
+                ("DYN_TCP_TLS_KEY_PATH", None),
+                (
+                    "DYN_TCP_TLS_CLIENT_CA_CERT_PATH",
+                    Some(cert.path().to_str().unwrap()),
+                ),
+            ],
+            || assert!(TcpStreamServer::build_tls_acceptor().is_err()),
         );
     }
 
@@ -1384,6 +1582,51 @@ mod tests {
 
         // The server should work with the fallback IP
         assert!(socket_addr.port() > 0, "Server should have a valid port");
+    }
+
+    #[tokio::test]
+    async fn configured_ip_literals_bind_and_format_addresses() {
+        let ipv6_available = TcpListener::bind("[::1]:0").is_ok();
+
+        for (host, expected_ip) in [
+            ("127.0.0.1", "127.0.0.1".parse::<IpAddr>().unwrap()),
+            ("::1", "::1".parse::<IpAddr>().unwrap()),
+        ] {
+            if expected_ip.is_ipv6() && !ipv6_available {
+                eprintln!("skipping IPv6 bind because this host does not support IPv6 loopback");
+                continue;
+            }
+
+            let server = TcpStreamServer::new_with_resolver(
+                ServerOptions {
+                    port: 0,
+                    interface: Some(host.to_string()),
+                },
+                FailingIpResolver,
+            )
+            .await
+            .unwrap();
+            let context = Context::new(());
+            let pending = server
+                .register(
+                    StreamOptions::builder()
+                        .context(context.context())
+                        .enable_request_stream(false)
+                        .enable_response_stream(true)
+                        .build()
+                        .unwrap(),
+                )
+                .await;
+            let connection_info = pending.recv_stream.unwrap().connection_info;
+            let tcp_info: TcpStreamConnectionInfo = connection_info.try_into().unwrap();
+            let address = tcp_info.address.parse::<SocketAddr>().unwrap();
+
+            assert_eq!(address.ip(), expected_ip);
+            assert_ne!(address.port(), 0);
+            if expected_ip.is_ipv6() {
+                assert!(tcp_info.address.starts_with('['));
+            }
+        }
     }
 
     /// Create a test server using the failing IP resolver (falls back to loopback).
@@ -2309,6 +2552,139 @@ mod tests {
         assert!(
             matches!(ctrl, ControlMessage::Stop),
             "context.stop() should emit Stop, got {ctrl:?}"
+        );
+    }
+
+    // ---- accept-loop backoff under resource exhaustion (issue #11822) ----
+
+    #[cfg(unix)]
+    fn emfile_error() -> std::io::Error {
+        std::io::Error::from_raw_os_error(libc::EMFILE)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn accept_backoff_classifies_all_exhaustion_errnos() {
+        for errno in [libc::EMFILE, libc::ENFILE, libc::ENOBUFS, libc::ENOMEM] {
+            let err = std::io::Error::from_raw_os_error(errno);
+            assert_eq!(
+                AcceptBackoff::classify(&err),
+                AcceptFailure::Exhaustion,
+                "errno {errno} must classify as exhaustion"
+            );
+        }
+        // Ordinary errors stay on the immediate-retry path.
+        let ordinary = std::io::Error::from(std::io::ErrorKind::ConnectionAborted);
+        assert_eq!(AcceptBackoff::classify(&ordinary), AcceptFailure::Ordinary,);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn accept_backoff_grows_resets_and_rate_limits() {
+        let mut backoff = AcceptBackoff::default();
+        let now = std::time::Instant::now();
+
+        // Delay doubles per consecutive failure and saturates at the ceiling.
+        let delays: Vec<Duration> = (0..12)
+            .map(|_| backoff.record_exhaustion(now).delay)
+            .collect();
+        assert!(delays[0] > Duration::ZERO);
+        let sat = delays
+            .iter()
+            .position(|d| *d == ACCEPT_BACKOFF_MAX_DELAY)
+            .expect("delay reaches the ceiling");
+        for pair in delays[..=sat].windows(2) {
+            assert!(
+                pair[1] > pair[0],
+                "delay must grow: {:?} -> {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+        assert!(delays[sat..].iter().all(|d| *d == ACCEPT_BACKOFF_MAX_DELAY));
+
+        // A successful accept resets the schedule to the initial delay.
+        backoff.record_success(|| now);
+        assert_eq!(
+            backoff.record_exhaustion(now).delay,
+            ACCEPT_BACKOFF_INITIAL_DELAY,
+        );
+
+        // The summary is rate-limited: one emission per interval, carrying the
+        // count of failures suppressed since the previous one.
+        let t0 = std::time::Instant::now();
+        let mut backoff = AcceptBackoff::default();
+        let emitted: Vec<Option<u64>> = (0..50)
+            .map(|_| backoff.record_exhaustion(t0).log_suppressed)
+            .collect();
+        assert_eq!(emitted.iter().filter(|e| e.is_some()).count(), 1);
+        assert_eq!(emitted[0], Some(0));
+
+        let t1 = t0 + ACCEPT_BACKOFF_LOG_INTERVAL + Duration::from_millis(1);
+        assert_eq!(
+            backoff.record_exhaustion(t1).log_suppressed,
+            Some(49),
+            "next emission reports every failure suppressed since the last one",
+        );
+
+        // Recovery shares the rate-limit window with the failure summary, so a
+        // flapping listener cannot emit a recovery line per accept.
+        let mut backoff = AcceptBackoff::default();
+        let t0 = std::time::Instant::now();
+        assert_eq!(backoff.record_exhaustion(t0).log_suppressed, Some(0));
+        backoff.record_exhaustion(t0);
+        backoff.record_exhaustion(t0);
+        assert_eq!(
+            backoff.record_success(|| t0),
+            None,
+            "recovery inside the log window must not emit",
+        );
+        backoff.record_exhaustion(t0);
+        assert_eq!(
+            backoff.record_success(|| t0 + ACCEPT_BACKOFF_LOG_INTERVAL),
+            Some(3),
+            "after the window elapses the recovery emits with the rolled-forward count",
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn accept_backoff_socket_recovers_after_injected_exhaustion() {
+        use crate::metrics::transport_metrics::TCP_ACCEPT_BACKOFF_TOTAL;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral listener");
+        let addr = listener.local_addr().expect("local_addr");
+
+        let mut backoff = AcceptBackoff::default();
+        let counter_before = TCP_ACCEPT_BACKOFF_TOTAL.get();
+
+        let started = std::time::Instant::now();
+        let mut expected_total = Duration::ZERO;
+        for _ in 0..3 {
+            expected_total += handle_accept_error(&emfile_error(), &mut backoff).await;
+        }
+        assert!(expected_total >= ACCEPT_BACKOFF_INITIAL_DELAY * 3);
+        assert!(
+            started.elapsed() >= expected_total,
+            "the accept loop must sleep, not spin; elapsed {:?}",
+            started.elapsed(),
+        );
+        assert!(TCP_ACCEPT_BACKOFF_TOTAL.get() >= counter_before + 3.0);
+
+        let client = tokio::spawn(async move { tokio::net::TcpStream::connect(addr).await });
+        let (accepted, _peer) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .expect("listener should still accept after backing off")
+            .expect("accept should succeed");
+        let _client = client.await.expect("client task").expect("client connect");
+        drop(accepted);
+
+        backoff.record_success(std::time::Instant::now);
+        assert_eq!(
+            backoff.record_exhaustion(std::time::Instant::now()).delay,
+            ACCEPT_BACKOFF_INITIAL_DELAY,
         );
     }
 }

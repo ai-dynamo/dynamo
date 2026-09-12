@@ -161,7 +161,7 @@ impl MooncakeIndexerConfig {
                         )
                     })
                     .collect();
-                Arc::new(BranchShardedIndexer::new_with_options(
+                Arc::new(BranchShardedIndexer::new(
                     shards,
                     self.prefix_depth,
                     block_size,
@@ -327,7 +327,14 @@ fn merge_event_worker_trace(
             let request = requests.next().expect("peeked request must exist");
             merged.push(WorkerTrace {
                 timestamp_us: request.timestamp_us,
-                entry: WorkerTraceEntry::Request(request.replay_hashes.local_block_hashes),
+                entry: WorkerTraceEntry::Request(
+                    request
+                        .replay_hashes
+                        .local_block_hashes
+                        .into_iter()
+                        .map(LocalBlockHash)
+                        .collect(),
+                ),
             });
         } else {
             let event = events.next().expect("peeked event must exist");

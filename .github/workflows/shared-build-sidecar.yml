@@ -1,0 +1,183 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Shared Build Sidecar
+
+on:
+  workflow_call:
+    inputs:
+      builder_name:
+        description: 'BuildKit builder name'
+        required: true
+        type: string
+      build_timeout_minutes:
+        description: 'Timeout in minutes for the sidecar build'
+        required: false
+        type: number
+        default: 60
+      extra_tags:
+        description: 'Additional ECR tags (newline-separated)'
+        required: false
+        type: string
+        default: ''
+      artifact_retention_days:
+        description: 'Retention in days for compliance artifacts'
+        required: false
+        type: string
+        default: '30'
+      diff_event_context:
+        description: 'Compliance diff context (pr or push); empty disables baseline resolution'
+        required: false
+        type: string
+        default: ''
+      diff_current_branch:
+        description: 'Current branch used to resolve the compliance baseline'
+        required: false
+        type: string
+        default: ''
+      diff_base_branch:
+        description: 'Base branch used to resolve the compliance baseline'
+        required: false
+        type: string
+        default: ''
+      diff_merge_base_sha:
+        description: 'Merge-base SHA used to resolve the compliance baseline'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  build:
+    name: Build multi-arch cpu
+    runs-on: prod-builder-v3
+    timeout-minutes: ${{ inputs.build_timeout_minutes }}
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Docker Login
+        uses: $/.github/actions/docker-login
+        with:
+          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+          ecr_registry: ${{ vars.ECR_REGISTRY }}
+
+      - name: Calculate target tag
+        id: calculate-target-tag
+        shell: bash
+        env:
+          ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+        run: |
+          set -euo pipefail
+          target_tag_plain="dynamo-sidecar"
+          echo "target_tag_plain=${target_tag_plain}" >> "${GITHUB_OUTPUT}"
+          echo "image_uri=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}-${target_tag_plain}" >> "${GITHUB_OUTPUT}"
+
+      - name: Initialize Dynamo Builder
+        uses: $/.github/actions/init-dynamo-builder
+        with:
+          builder_name: ${{ inputs.builder_name }}
+          flavor: general
+          arch: linux/amd64,linux/arm64
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
+
+      - name: Calculate extra tags
+        id: extra-tags
+        shell: bash
+        env:
+          ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          EXTRA_TAGS: ${{ inputs.extra_tags }}
+        run: |
+          set -euo pipefail
+          {
+            echo 'tags<<EOF'
+            while IFS= read -r tag; do
+              if [[ -n "${tag}" ]]; then
+                echo "${ECR_REGISTRY}/${ECR_REPOSITORY}:${tag}"
+              fi
+            done <<< "${EXTRA_TAGS}"
+            echo 'EOF'
+          } >> "${GITHUB_OUTPUT}"
+
+      # TODO: Align the sidecar with the standard shared-build-image.yml path
+      # once it supports this handwritten, CPU-only, multi-binary Dockerfile.
+      # That should consolidate tagging, caching, publishing, and compliance
+      # orchestration instead of maintaining a parallel container build path.
+      - name: Build and Push Image
+        uses: $/.github/actions/docker-remote-build
+        with:
+          image_tag: ${{ steps.calculate-target-tag.outputs.image_uri }}
+          framework: dynamo-sidecar
+          target: runtime
+          build_target: runtime
+          dockerfile: ./lib/sidecar/Dockerfile
+          platform: linux/amd64,linux/arm64
+          cuda_version: ''
+          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+          extra_tags: ${{ steps.extra-tags.outputs.tags }}
+          push_image: true
+          no_load: true
+          use_sccache: false
+
+      - name: Resolve diff baseline
+        id: resolve-diff-base
+        if: ${{ inputs.diff_event_context != '' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DIFF_EVENT_CONTEXT: ${{ inputs.diff_event_context }}
+          DIFF_CURRENT_BRANCH: ${{ inputs.diff_current_branch }}
+          DIFF_BASE_BRANCH: ${{ inputs.diff_base_branch }}
+          DIFF_MERGE_BASE_SHA: ${{ inputs.diff_merge_base_sha }}
+          DIFF_CURRENT_SHA: ${{ github.sha }}
+          DIFF_REPO: ${{ github.repository }}
+          DIFF_RUN_ID: ${{ github.run_id }}
+          DIFF_ARTIFACT_PREFIX: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
+        run: |
+          git fetch --deepen=30 --quiet || true
+          git fetch --tags --quiet || true
+          if [ "${DIFF_BASE_BRANCH}" = "main" ] \
+            && [ -n "${DIFF_MERGE_BASE_SHA}" ]; then
+            git fetch --no-tags --depth=30 origin "${DIFF_MERGE_BASE_SHA}" --quiet || true
+          fi
+          CURRENT_VERSION=$(grep -m1 -E '^version[[:space:]]*=' pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/' || true)
+          python3 container/compliance/resolve_diff_base.py \
+            --event-context "${DIFF_EVENT_CONTEXT}" \
+            --current-branch "${DIFF_CURRENT_BRANCH}" \
+            --base-branch "${DIFF_BASE_BRANCH}" \
+            --merge-base-sha "${DIFF_MERGE_BASE_SHA}" \
+            --current-sha "${DIFF_CURRENT_SHA}" \
+            --current-version "${CURRENT_VERSION}" \
+            --artifact-prefix "${DIFF_ARTIFACT_PREFIX}" \
+            --repo "${DIFF_REPO}" \
+            --current-run-id "${DIFF_RUN_ID}" \
+            >> "${GITHUB_OUTPUT}"
+
+      - name: Refresh BuildKit builder
+        uses: $/.github/actions/builder-refresher
+        with:
+          builder_name: ${{ inputs.builder_name }}
+          flavor: general
+          arch: linux/amd64,linux/arm64
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
+
+      - name: Compliance extract
+        uses: $/.github/actions/compliance-extract
+        with:
+          diff_base_sha: ${{ steps.resolve-diff-base.outputs.base_sha }}
+          diff_base_label: ${{ steps.resolve-diff-base.outputs.base_label }}
+          diff_base_artifact_id: ${{ steps.resolve-diff-base.outputs.base_artifact_id }}
+          diff_base_run_id: ${{ steps.resolve-diff-base.outputs.base_run_id }}
+          gh_token: ${{ secrets.GITHUB_TOKEN }}
+          framework: dynamo-sidecar
+          target: runtime
+          dockerfile: lib/sidecar/Dockerfile
+          platform: linux/amd64,linux/arm64
+          builder_name: ${{ inputs.builder_name }}
+          artifact_name_prefix: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
+          git_sha: ${{ github.sha }}
+          artifact_retention_days: ${{ inputs.artifact_retention_days }}
