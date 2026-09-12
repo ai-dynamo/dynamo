@@ -240,8 +240,6 @@ def _racer(
 @pytest.mark.timeout(90)
 async def test_cross_process_race(lock_path):
     """Two processes contend for the lock; the kernel serializes their holds."""
-    import fcntl
-
     acquired_queue = multiprocessing.Queue()
     result_queue = multiprocessing.Queue()
 
