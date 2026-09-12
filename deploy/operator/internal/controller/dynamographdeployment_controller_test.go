@@ -779,6 +779,10 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 					grovecommon.LabelPodCliqueScalingGroupReplicaIndex: fmt.Sprint(replica),
 					commonconsts.KubeLabelDynamoComponent:              component,
 				},
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: grovev1alpha1.SchemeGroupVersion.String(), Kind: "PodCliqueScalingGroup",
+					Name: pcsg, UID: types.UID(pcsg), Controller: ptr.To(true),
+				}},
 			},
 			Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1},
 			Status: grovev1alpha1.PodCliqueStatus{
@@ -1186,9 +1190,20 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 
 			pcs := &grovev1alpha1.PodCliqueSet{}
 			g.Expect(fakeKubeClient.Get(ctx, client.ObjectKey{Name: "test-dgd", Namespace: "default"}, pcs)).To(gomega.Succeed())
+			pcs.UID = "current-pcs"
 			pcs.Status.ObservedGeneration = ptr.To(pcs.Generation)
 			pcs.Status.CurrentGenerationHash = ptr.To("current")
 			g.Expect(fakeKubeClient.Update(ctx, pcs)).To(gomega.Succeed())
+
+			t.Log("Record the current PCS controller identity on Grove's scaling groups")
+			for _, object := range tt.existingGroveResources {
+				if group, ok := object.(*grovev1alpha1.PodCliqueScalingGroup); ok {
+					g.Expect(fakeKubeClient.Get(ctx, client.ObjectKeyFromObject(group), group)).To(gomega.Succeed())
+					group.UID = types.UID(group.Name)
+					group.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(pcs, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueSet"))}
+					g.Expect(fakeKubeClient.Update(ctx, group)).To(gomega.Succeed())
+				}
+			}
 
 			result, err = reconciler.newGroveProgram().workloads.Reconcile(
 				ctx,

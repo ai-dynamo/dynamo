@@ -152,15 +152,18 @@ func observeComponentPCSGReadiness(
 ) (groveComponentReadiness, error) {
 	logger := log.FromContext(ctx)
 	pcsg := &grovev1alpha1.PodCliqueScalingGroup{}
-	if err := reader.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: namespace}, pcsg); err != nil {
-		if errors.IsNotFound(err) {
-			status := v1beta1.ComponentReplicaStatus{
-				ComponentKind:  v1beta1.ComponentKindPodCliqueScalingGroup,
-				ComponentNames: []string{resourceName},
-			}
-			return groveComponentReadiness{status: status}.withResult(false, groveResourceNotFoundReason, v1beta1.DGDReadyReasonSomeResourcesNotReady), nil
-		}
+	err := reader.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: namespace}, pcsg)
+	if err != nil && !errors.IsNotFound(err) {
 		return groveComponentReadiness{}, fmt.Errorf("failed to get PodCliqueScalingGroup %s/%s: %w", namespace, resourceName, err)
+	}
+
+	// A cached group from a previous PCS instance cannot contribute readiness or status.
+	if errors.IsNotFound(err) || pcs == nil || !metav1.IsControlledBy(pcsg, pcs) {
+		status := v1beta1.ComponentReplicaStatus{
+			ComponentKind:  v1beta1.ComponentKindPodCliqueScalingGroup,
+			ComponentNames: []string{resourceName},
+		}
+		return groveComponentReadiness{status: status}.withResult(false, groveResourceNotFoundReason, v1beta1.DGDReadyReasonSomeResourcesNotReady), nil
 	}
 
 	// Reuse the native observation while retaining the component's requested capacity for cutover.
@@ -206,6 +209,11 @@ func observeComponentPCSGReadiness(
 	podCliquesByReplica := make(map[int][]grovev1alpha1.PodClique)
 
 	for _, clique := range podCliqueList.Items {
+		// Matching labels do not establish ownership of a recreated group's children.
+		if !metav1.IsControlledBy(&clique, pcsg) {
+			continue
+		}
+
 		index, err := strconv.Atoi(clique.Labels[grovecommon.LabelPodCliqueScalingGroupReplicaIndex])
 		if err != nil {
 			logger.V(1).Info("Failed to read PodClique metadata", "error", err, "resourceName", clique.Name)
