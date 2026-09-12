@@ -37,6 +37,7 @@ from dynamo.common.configuration.groups.http_args import (
 
 from .aiohttp_client import AiohttpClient
 from .base import (
+    HttpBodyTooLargeError,
     HttpClient,
     HttpConnectionError,
     HttpError,
@@ -79,9 +80,11 @@ def get_default_client() -> HttpClient:
     return _default
 
 
-async def fetch_bytes(url, timeout, *, policy=None) -> bytes:
+async def fetch_bytes(url, timeout, *, policy=None, max_bytes=None) -> bytes:
     """Singleton-backed convenience wrapper over :meth:`HttpClient.fetch_bytes`."""
-    return await get_default_client().fetch_bytes(url, timeout, policy=policy)
+    return await get_default_client().fetch_bytes(
+        url, timeout, policy=policy, max_bytes=max_bytes
+    )
 
 
 async def close_http_client() -> None:
@@ -105,6 +108,7 @@ __all__ = [
     "HttpError",
     "HttpTimeoutError",
     "HttpConnectionError",
+    "HttpBodyTooLargeError",
     "HttpStatusError",
     "HttpConfigBase",
     "HttpArgGroup",
