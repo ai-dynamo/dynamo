@@ -372,28 +372,18 @@ func (r *disaggregatedSetWorkloadsReconciler) reconcileDisaggregatedSetResources
 	resources = append(resources, nonSelectedResources...)
 	desiredServiceNames := selectedServiceNames
 
-	// Project the worker hash only after the informer cache observes every
-	// workload carrying that generation. This keeps metadata from getting ahead
-	// of the DisaggregatedSet and any DCD-backed worker components.
-	if workerHashTransition.needsCommit() && !dsModified && !nonSelectedDCDsModified {
-		observed, err := disaggregatedSetPathwayObservesWorkerHash(
-			dgd,
-			syncedDS,
-			selection,
-			dcds,
-			rollingUpdateCtx.NewWorkerHash,
-		)
-		if err != nil {
-			return ReconcileResult{}, failWorkloadProgram(reasonRollingUpdateFailed, err)
-		}
-		if observed {
-			if err := r.rollout.commitUnsupportedWorkerHashTransition(ctx, dgd, workerHashTransition, false); err != nil {
-				return ReconcileResult{}, failWorkloadProgram(
-					reasonRollingUpdateFailed,
-					fmt.Errorf("project observed DisaggregatedSet worker hash: %w", err),
-				)
-			}
-		}
+	if err := r.commitDisaggregatedSetWorkerHashTransitionIfObserved(
+		ctx,
+		dgd,
+		workerHashTransition,
+		dsModified,
+		nonSelectedDCDsModified,
+		syncedDS,
+		selection,
+		dcds,
+		rollingUpdateCtx.NewWorkerHash,
+	); err != nil {
+		return ReconcileResult{}, err
 	}
 
 	if dsReady {
@@ -409,6 +399,47 @@ func (r *disaggregatedSetWorkloadsReconciler) reconcileDisaggregatedSetResources
 		}
 	}
 	return result, nil
+}
+
+// commitDisaggregatedSetWorkerHashTransitionIfObserved projects the worker
+// hash only after the informer cache observes every workload carrying that
+// generation. This keeps metadata from getting ahead of the DisaggregatedSet
+// and any DCD-backed worker components.
+func (r *disaggregatedSetWorkloadsReconciler) commitDisaggregatedSetWorkerHashTransitionIfObserved(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	transition unsupportedWorkerHashTransition,
+	dsModified bool,
+	nonSelectedDCDsModified bool,
+	syncedDS *unstructured.Unstructured,
+	selection disaggregatedSetSelection,
+	dcds map[string]*nvidiacomv1beta1.DynamoComponentDeployment,
+	workerHash string,
+) error {
+	if !transition.needsCommit() || dsModified || nonSelectedDCDsModified {
+		return nil
+	}
+
+	observed, err := disaggregatedSetPathwayObservesWorkerHash(
+		dgd,
+		syncedDS,
+		selection,
+		dcds,
+		workerHash,
+	)
+	if err != nil {
+		return failWorkloadProgram(reasonRollingUpdateFailed, err)
+	}
+	if !observed {
+		return nil
+	}
+	if err := r.rollout.commitUnsupportedWorkerHashTransition(ctx, dgd, transition, false); err != nil {
+		return failWorkloadProgram(
+			reasonRollingUpdateFailed,
+			fmt.Errorf("project observed DisaggregatedSet worker hash: %w", err),
+		)
+	}
+	return nil
 }
 
 func (r *disaggregatedSetWorkloadsReconciler) getExistingRestartAnnotationsDisaggregatedSet(
