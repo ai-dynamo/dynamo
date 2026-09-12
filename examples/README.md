@@ -64,7 +64,7 @@ End-to-end examples that connect Dynamo to adjacent inference services:
 
 Low-level runtime examples for developers using Python<>Rust bindings:
 
-- **[Hello World](custom_backend/hello_world/README.md)** - Minimal Dynamo runtime service demonstrating basic concepts
+- **[Hello World](custom_backend/hello_world/README.md)** - Two-stage introduction to custom backends: a minimal runtime service (`basic/`), then a complete custom engine on the unified backend contract with OpenAI-compatible serving and KV-aware routing (`engine/`) — no GPU, no model, no downloads
 
 ## Getting Started
 
@@ -82,8 +82,8 @@ Low-level runtime examples for developers using Python<>Rust bindings:
 Before running any examples, ensure you have:
 
 - **Docker & Docker Compose** - For containerized services
-- **CUDA-compatible GPU** - For LLM inference (except hello_world, which is non-GPU aware)
-- **Python 3.9+** - For client scripts and utilities
+- **CUDA-compatible GPU** - For LLM inference (except `hello_world/basic` and `hello_world/engine`, which are non-GPU aware)
+- **Python 3.10+** - For client scripts and utilities
 
 ### For Kubernetes Deployments
 

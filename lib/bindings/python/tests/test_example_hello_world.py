@@ -26,7 +26,7 @@ def example_dir():
     test_dir = os.path.dirname(os.path.abspath(__file__))
     # Navigate to the hello_world example directory relative to this test
     return os.path.normpath(
-        os.path.join(test_dir, "../../../../examples/custom_backend/hello_world")
+        os.path.join(test_dir, "../../../../examples/custom_backend/hello_world/basic")
     )
 
 
