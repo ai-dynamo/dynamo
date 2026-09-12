@@ -1719,7 +1719,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 			wantWarnings: []string{
 				`spec.services[worker].dynamoNamespace is deprecated and ignored. Value "legacy-namespace" will be replaced with "default-test-graph". Remove this field from your configuration`,
-				"spec.services[worker].autoscaling is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md",
+				"spec.services[worker].autoscaling is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter with HPA, KEDA, or Planner for autoscaling instead. See https://docs.nvidia.com/dynamo/dev/reference/kubernetes-api/full-api-reference#v1beta1-dynamographdeploymentscalingadapter",
 			},
 		},
 		{
