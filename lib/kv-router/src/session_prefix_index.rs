@@ -2,10 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Session lineage retained independently of physical cache eviction.
-//!
-//! Final-session removal and an LRU session cap bound retention.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use parking_lot::RwLock;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -15,9 +13,6 @@ use crate::protocols::ExternalSequenceBlockHash;
 
 /// Logical session identity as owned by this index.
 pub type SessionId = String;
-
-/// Default tracked-session ceiling before LRU eviction.
-pub const DEFAULT_MAX_SESSIONS: usize = 16_384;
 
 new_key_type! {
     /// Generational handle to a [`LogicalNode`] in the arena.
@@ -73,54 +68,21 @@ pub struct SessionPrefixIndexer {
     state: RwLock<IndexState>,
 }
 
-// None distinguishes an untouched entry from touch sequence zero.
 #[derive(Debug, Default)]
 struct SessionEntry {
     frontiers: FxHashSet<NodeId>,
-    last_touch: Option<u64>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct IndexState {
     nodes: SlotMap<NodeId, LogicalNode>,
     hash_to_node: FxHashMap<ExternalSequenceBlockHash, NodeId>,
     sessions: HashMap<SessionId, SessionEntry>,
-    // Kept in lockstep with SessionEntry::last_touch.
-    lru: BTreeMap<u64, SessionId>,
-    next_touch: u64,
-    max_sessions: usize,
-}
-
-impl Default for IndexState {
-    fn default() -> Self {
-        Self {
-            nodes: SlotMap::default(),
-            hash_to_node: FxHashMap::default(),
-            sessions: HashMap::default(),
-            lru: BTreeMap::default(),
-            next_touch: 0,
-            max_sessions: DEFAULT_MAX_SESSIONS,
-        }
-    }
 }
 
 impl SessionPrefixIndexer {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Creates an index and clamps a zero session cap to one.
-    pub fn with_max_sessions(max_sessions: usize) -> Self {
-        Self {
-            state: RwLock::new(IndexState {
-                max_sessions: max_sessions.max(1),
-                ..IndexState::default()
-            }),
-        }
-    }
-
-    pub fn max_sessions(&self) -> usize {
-        self.state.read().max_sessions
     }
 
     pub fn get_node_from_hash(&self, block_hash: ExternalSequenceBlockHash) -> Option<NodeId> {
@@ -299,52 +261,15 @@ impl IndexState {
         Ok(())
     }
 
-    // Public removal and capacity eviction share this reclamation path.
+    // Explicit session removal reclaims unshared lineage nodes.
     fn drop_session(&mut self, session_id: &str) -> bool {
         let Some(entry) = self.sessions.remove(session_id) else {
             return false;
         };
-        if let Some(last_touch) = entry.last_touch {
-            self.lru.remove(&last_touch);
-        }
         for frontier in entry.frontiers {
             self.release_frontier(frontier);
         }
         true
-    }
-
-    fn touch_session(&mut self, session_id: &str) {
-        let seq = self.next_touch;
-        let Some(entry) = self.sessions.get_mut(session_id) else {
-            return;
-        };
-        let previous = entry.last_touch.replace(seq);
-        self.next_touch += 1;
-        if let Some(previous) = previous {
-            self.lru.remove(&previous);
-        }
-        self.lru.insert(seq, session_id.to_string());
-    }
-
-    // Enforce the cap after touching the newly recorded session.
-    fn enforce_session_cap(&mut self) {
-        while self.sessions.len() > self.max_sessions {
-            let Some((_, victim)) = self.lru.pop_first() else {
-                // Avoid a hang if LRU bookkeeping is ever inconsistent.
-                debug_assert!(false, "lru is empty while sessions is over capacity");
-                break;
-            };
-            if let Some(entry) = self.sessions.remove(&victim) {
-                for frontier in entry.frontiers {
-                    self.release_frontier(frontier);
-                }
-            }
-            tracing::debug!(
-                session_id = %victim,
-                max_sessions = self.max_sessions,
-                "session prefix index evicted its least recently used session"
-            );
-        }
     }
 
     fn resolve_or_insert_root(&mut self, block_hash: ExternalSequenceBlockHash) -> NodeId {
@@ -400,8 +325,6 @@ impl IndexState {
                 .any(|&frontier| self.is_ancestor_or_self(node, frontier))
         });
         if already_reached {
-            // Repeated matches still refresh LRU order.
-            self.touch_session(session_id);
             return false;
         }
 
@@ -428,9 +351,6 @@ impl IndexState {
             entry.frontiers.remove(&frontier);
         }
         entry.frontiers.insert(node);
-
-        self.touch_session(session_id);
-        self.enforce_session_cap();
         true
     }
 
@@ -748,69 +668,6 @@ mod tests {
         assert!(
             indexer.get_node(stale).is_none(),
             "a handle to a removed node must not resolve to its replacement"
-        );
-    }
-
-    #[test]
-    fn passing_the_session_cap_evicts_the_least_recently_used_session() {
-        let chain = hashes(vec![1, 2, 3]);
-        let indexer = SessionPrefixIndexer::with_max_sessions(2);
-        assert_eq!(indexer.max_sessions(), 2);
-
-        indexer.update_session_from_match("s1", chain[0]).unwrap();
-        indexer.update_session_from_match("s2", chain[1]).unwrap();
-        indexer.update_session_from_match("s1", chain[1]).unwrap();
-
-        indexer.update_session_from_match("s3", chain[2]).unwrap();
-
-        assert!(
-            lineage_of(&indexer, "s2").is_empty(),
-            "the least recently touched session is the one evicted"
-        );
-        assert!(
-            !lineage_of(&indexer, "s1").is_empty(),
-            "a recently touched session survives the eviction"
-        );
-        assert!(
-            !lineage_of(&indexer, "s3").is_empty(),
-            "the session that triggered the eviction is retained"
-        );
-    }
-
-    #[test]
-    fn eviction_releases_the_evicted_session_arena_nodes() {
-        let chain = hashes(vec![1, 2]);
-        let indexer = SessionPrefixIndexer::with_max_sessions(1);
-
-        indexer.update_session_from_match("s1", chain[0]).unwrap();
-        let evicted = indexer.get_node_from_hash(chain[0]).unwrap();
-
-        indexer.update_session_from_match("s2", chain[1]).unwrap();
-
-        assert!(
-            indexer.get_node(evicted).is_none(),
-            "eviction must reclaim the arena exactly as remove_session does"
-        );
-        assert!(
-            indexer.get_node_from_hash(chain[0]).is_none(),
-            "the evicted session's hash index entry must go with its node"
-        );
-    }
-
-    #[test]
-    fn a_zero_session_cap_is_clamped_to_one_tracked_session() {
-        let chain = hashes(vec![1]);
-        let indexer = SessionPrefixIndexer::with_max_sessions(0);
-
-        assert_eq!(
-            indexer.max_sessions(),
-            1,
-            "a cap of zero would track nothing"
-        );
-        indexer.update_session_from_match("s1", chain[0]).unwrap();
-        assert!(
-            !lineage_of(&indexer, "s1").is_empty(),
-            "the sole tracked session must survive its own insertion"
         );
     }
 
