@@ -179,6 +179,63 @@ func TestGroveWorkloadsReconcilerUsesStableReadinessWithoutOrdinaryPodCliqueSet(
 	require.Empty(t, pcsList.Items)
 }
 
+func TestReconcilePodCliqueSetAbsent(t *testing.T) {
+	const deleting = "deleting"
+	for _, state := range []string{"absent", "owned", deleting, "foreign", "stale"} {
+		t.Run(state, func(t *testing.T) {
+			t.Log("Observe an ordinary PCS that is no longer desired")
+			source := &nvidiacomv1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{
+				Name: "graph", Namespace: "default", UID: "dgd-uid",
+			}}
+			observed := &grovev1alpha1.PodCliqueSet{ObjectMeta: metav1.ObjectMeta{
+				Name: "graph", Namespace: source.Namespace, UID: "pcs-uid", ResourceVersion: "1",
+				Finalizers:      []string{"hold-deletion"},
+				OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(source, nvidiacomv1beta1.DynamoGraphDeploymentGVK)},
+			}}
+			if state == deleting {
+				observed.DeletionTimestamp = ptr.To(metav1.Now())
+			}
+			if state == "foreign" {
+				observed.OwnerReferences[0].UID = "another-dgd"
+			}
+			builder := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t))
+			if state == "absent" {
+				observed = nil
+			} else {
+				builder.WithObjects(observed)
+			}
+			kube := builder.Build()
+			if state == "stale" {
+				observed.ResourceVersion = "0"
+			}
+			before := observed.DeepCopy()
+			reconciler := &groveWorkloadsReconciler{syncer: newDGDResourceSyncer(kube, nil)}
+
+			t.Log("Converge absence in the PCS reconciler without changing the observation")
+			pcs, _, err := reconciler.reconcilePodCliqueSet(t.Context(), source, &grovePodCliqueSetRender{existing: observed})
+			require.Equal(t, before, observed)
+			if state == "foreign" {
+				require.ErrorContains(t, err, "foreign")
+			} else if state == "stale" {
+				require.True(t, apierrors.IsConflict(err), "expected deletion precondition conflict, got %v", err)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, observed, pcs)
+			}
+
+			t.Log("Only an owned current observation may start deletion")
+			live := &grovev1alpha1.PodCliqueSet{}
+			err = kube.Get(t.Context(), client.ObjectKeyFromObject(source), live)
+			if state == "absent" {
+				require.True(t, apierrors.IsNotFound(err))
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, state == "owned" || state == deleting, !live.DeletionTimestamp.IsZero())
+			}
+		})
+	}
+}
+
 func TestGroveWorkloadsReconciler_DoesNotCommitWorkerHashWhenPodCliqueSetSyncFails(t *testing.T) {
 	tests := []struct {
 		name        string
