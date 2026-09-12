@@ -154,10 +154,10 @@ func reconcileAutomaticSnapshotJobForTest(
 	t *testing.T,
 	reconciler *DynamoGraphDeploymentReconciler,
 	dgd *v1beta1.DynamoGraphDeployment,
-	componentName string,
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 ) *snapshotv1alpha1.SnapshotJob {
 	t.Helper()
+	const componentName = "worker"
 	workerHash, err := checkpointWorkerHashForComponent(dgd, componentName)
 	require.NoError(t, err)
 	checkpointReconciler := newTestDGDCheckpointsReconciler(reconciler)
@@ -260,7 +260,7 @@ func TestDGDCheckpointsReconciler_SnapshotJobPreservesGMSSaverClient(t *testing.
 	}
 
 	t.Log("Create the GMS-backed SnapshotJob")
-	job := reconcileAutomaticSnapshotJobForTest(t, reconciler, dgd, "worker", betaComponent(t, component))
+	job := reconcileAutomaticSnapshotJobForTest(t, reconciler, dgd, betaComponent(t, component))
 
 	t.Log("Verify GMS clients, containers, claims, and templates are preserved")
 	saver := findContainer(job.Spec.PodTemplate.Spec.Containers, "gms-saver")
@@ -426,7 +426,7 @@ func TestDGDCheckpointsReconciler_SnapshotJobAppliesDGDDefaults(t *testing.T) {
 	}
 
 	t.Log("Create the SnapshotJob pod template")
-	job := reconcileAutomaticSnapshotJobForTest(t, reconciler, dgd, "worker", component)
+	job := reconcileAutomaticSnapshotJobForTest(t, reconciler, dgd, component)
 
 	t.Log("Verify graph defaults reach the SnapshotJob")
 	main := findContainer(job.Spec.PodTemplate.Spec.Containers, commonconsts.MainContainerName)
@@ -492,12 +492,12 @@ func TestDGDCheckpointsReconciler_CompatibilityHashChangeRecaptures(t *testing.T
 	require.NotNil(t, component)
 
 	t.Log("Create the first immutable capture job")
-	first := reconcileAutomaticSnapshotJobForTest(t, reconciler, dgd, "worker", component)
+	first := reconcileAutomaticSnapshotJobForTest(t, reconciler, dgd, component)
 	firstHash := first.Spec.PodSnapshotTemplate.Metadata.Annotations[commonconsts.SnapshotCompatibilityHashAnnotation]
 
 	t.Log("Change an operator-rendered process input outside the DGD worker hash")
 	reconciler.Config.Infrastructure.NATSTLSCAPath = "/etc/dynamo/tls/new-nats-ca.pem"
-	second := reconcileAutomaticSnapshotJobForTest(t, reconciler, dgd, "worker", component)
+	second := reconcileAutomaticSnapshotJobForTest(t, reconciler, dgd, component)
 	secondHash := second.Spec.PodSnapshotTemplate.Metadata.Annotations[commonconsts.SnapshotCompatibilityHashAnnotation]
 
 	t.Log("Verify the new compatibility contract selects a fresh job")
@@ -560,7 +560,7 @@ func TestDGDCheckpointsReconciler_SnapshotJobUsesTargetContainer(t *testing.T) {
 	}
 
 	t.Log("Create the target-container SnapshotJob")
-	job := reconcileAutomaticSnapshotJobForTest(t, reconciler, dgd, "worker", component)
+	job := reconcileAutomaticSnapshotJobForTest(t, reconciler, dgd, component)
 
 	t.Log("Verify target and GMS containers are retained")
 	assert.Equal(t, []string{"snapshot-me"}, job.Spec.PodSnapshotTemplate.TargetContainers)
