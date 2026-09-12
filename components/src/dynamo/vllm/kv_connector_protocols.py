@@ -17,6 +17,7 @@ entry.
 from __future__ import annotations
 
 import copy
+import os
 import uuid
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional, Tuple, Type
@@ -73,10 +74,9 @@ class MooncakeConnectorProtocol(KvConnectorProtocol):
         super().__init__(vllm_config)
         # Resolve vLLM's canonical bootstrap-addr helper at construction so
         # missing-mooncake / renamed-path errors surface at request setup
-        # rather than after the prefill has already run. Used over get_ip()
-        # because the helper accounts for local_engines_only and
-        # data_parallel_master_ip; an arbitrary local NIC only coincidentally
-        # matches the bootstrap server.
+        # rather than after the prefill has already run. The helper supplies
+        # the configured port and default host; local_engines_only may select
+        # loopback, requiring an advertised-host override for remote decoders.
         try:
             from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (  # noqa: E501
                 get_mooncake_bootstrap_addr,
@@ -102,6 +102,11 @@ class MooncakeConnectorProtocol(KvConnectorProtocol):
         self, prefill_response: Any
     ) -> Optional[Dict[str, Any]]:
         host, port = self._get_bootstrap_addr(self._vllm_config)
+        # vLLM may return loopback for local registration under external/hybrid
+        # load balancing. Only the address advertised to remote decoders changes.
+        advertised_host = os.environ.get("DYN_VLLM_MOONCAKE_BOOTSTRAP_ADVERTISE_HOST")
+        if advertised_host:
+            host = advertised_host
         return {
             "do_remote_decode": False,
             "do_remote_prefill": True,

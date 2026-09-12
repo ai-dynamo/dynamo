@@ -31,6 +31,7 @@ from dynamo.vllm.kv_connector_protocols import (
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
@@ -38,6 +39,11 @@ pytestmark = [
 _MOONCAKE_MOD = (
     "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector"
 )
+
+
+@pytest.fixture(autouse=True)
+def clear_mooncake_advertise_host(monkeypatch):
+    monkeypatch.delenv("DYN_VLLM_MOONCAKE_BOOTSTRAP_ADVERTISE_HOST", raising=False)
 
 
 def _config(connector: Optional[str], **kv_extra) -> SimpleNamespace:
@@ -160,6 +166,28 @@ def test_mooncake_decode_uses_vllm_bootstrap_helper_and_prefixes_http(monkeypatc
         "remote_bootstrap_addr": "http://192.168.0.110:8998",
         "remote_engine_id": "eng-prefill-0",
     }
+
+
+@pytest.mark.parametrize("advertised_host", ["10.42.1.17", None, ""])
+@pytest.mark.parametrize("port", [8998, 9123])
+def test_mooncake_decode_advertised_host_preserves_helper_port(
+    monkeypatch, advertised_host, port
+):
+    # These ports are only serialized into URLs; no sockets are opened.
+    _install_fake_mooncake(monkeypatch, "127.0.0.1", port)
+    if advertised_host is not None:
+        monkeypatch.setenv(
+            "DYN_VLLM_MOONCAKE_BOOTSTRAP_ADVERTISE_HOST", advertised_host
+        )
+    cfg = _config("MooncakeConnector", engine_id="eng-prefill-0")
+    proto = MooncakeConnectorProtocol(cfg)
+    params = proto.decode_request_kv_transfer_params(
+        SimpleNamespace(kv_transfer_params=None)
+    )
+    expected_host = advertised_host or "127.0.0.1"
+    assert params["remote_bootstrap_addr"] == f"http://{expected_host}:{port}"
+    assert params["remote_engine_id"] == "eng-prefill-0"
+    assert proto._get_bootstrap_addr(cfg) == ("127.0.0.1", port)
 
 
 def test_mooncake_decode_ignores_engine_kv_transfer_params(fake_mooncake):
