@@ -9,9 +9,7 @@ use dynamo_runtime::pipeline::network::{
     EncodedResponseFrame, IngressRequestDecoder, IngressResponseEncoder, NetworkStreamWrapper,
     RESPONSE_ENCODE_CAPACITY_HINT, RequestPlanePayloadCodec, ResponseFrameKind,
 };
-    use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
-    use dynamo_runtime::protocols::annotated::Annotated;
-    use dynamo_runtime::protocols::maybe_error::MaybeError;
+use dynamo_runtime::protocols::annotated::Annotated;
 use dynamo_runtime::protocols::maybe_error::MaybeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
@@ -378,6 +376,8 @@ mod tests {
         Annotated, NetworkStreamWrapper, RequestPlanePayloadCodec, ResponseFrameKind,
         encode_annotated_response, terminal_frame_bytes,
     };
+    use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+    use dynamo_runtime::protocols::maybe_error::MaybeError;
 
     /// Each codec's terminal frame must decode back to `data: None,
     /// complete_final: true` — the contract both egress paths rely on to
