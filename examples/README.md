@@ -58,7 +58,8 @@ Platform-specific manifests and templates for production environments. Deploymen
 
 End-to-end examples that connect Dynamo to adjacent inference services:
 
-- **[llm-d Batch Gateway](deployments/llm-d-batch-gateway/README.md)** - Experimental OpenAI Batch lifecycle on a dedicated Dynamo worker pool
+- **[llm-d Batch Gateway](deployments/llm-d-batch-gateway/README.md)** provides an experimental OpenAI Batch lifecycle on a dedicated Dynamo worker pool.
+- **[Slime External Rollouts](rl/slime/README.md)** connects a fixed Slime worker set to stock SGLang engines and Dynamo sidecars.
 
 ## Runtime Examples
 
