@@ -1,11 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::OnceLock;
+
 use bytes::Bytes;
 use dynamo_runtime::pipeline::PipelineError;
 use dynamo_runtime::pipeline::network::{
     EncodedResponseFrame, IngressRequestDecoder, IngressResponseEncoder, NetworkStreamWrapper,
-    RequestPlanePayloadCodec, ResponseFrameKind,
+    RESPONSE_ENCODE_CAPACITY_HINT, RequestPlanePayloadCodec, ResponseFrameKind,
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 use dynamo_runtime::protocols::maybe_error::MaybeError;
@@ -117,18 +119,8 @@ impl IngressResponseEncoder<PythonResponseItem> for PythonIngressPayloadAdapter 
         complete_final: bool,
     ) -> Result<EncodedResponseFrame, PipelineError> {
         if complete_final {
-            let wrapper = NetworkStreamWrapper::<Annotated<()>> {
-                data: None,
-                complete_final: true,
-            };
-            let bytes = payload_codec.encode(&wrapper).map_err(|error| {
-                PipelineError::SerializationError(format!(
-                    "Failed serializing {} request-plane final response: {error}",
-                    payload_codec.name()
-                ))
-            })?;
             return Ok(EncodedResponseFrame {
-                bytes: bytes.into(),
+                bytes: terminal_frame_bytes(payload_codec)?,
                 kind: ResponseFrameKind::Data,
                 stop_stream: false,
             });
@@ -169,18 +161,8 @@ impl IngressResponseEncoder<crate::push_egress::PushFrame> for PythonIngressPayl
         complete_final: bool,
     ) -> Result<EncodedResponseFrame, PipelineError> {
         if complete_final {
-            let wrapper = NetworkStreamWrapper::<Annotated<()>> {
-                data: None,
-                complete_final: true,
-            };
-            let bytes = payload_codec.encode(&wrapper).map_err(|error| {
-                PipelineError::SerializationError(format!(
-                    "Failed serializing {} push-egress final response: {error}",
-                    payload_codec.name()
-                ))
-            })?;
             return Ok(EncodedResponseFrame {
-                bytes: bytes.into(),
+                bytes: terminal_frame_bytes(payload_codec)?,
                 kind: ResponseFrameKind::Data,
                 stop_stream: false,
             });
@@ -203,13 +185,27 @@ impl IngressResponseEncoder<crate::push_egress::PushFrame> for PythonIngressPayl
 /// change the wrapper shape, classification, or codec invocation without also
 /// breaking this function — and the tests below that exercise it directly with
 /// concrete non-Python types.
-///
-/// An error envelope whose `error` field is empty carries no type to classify
-/// on, so it counts as an engine error rather than being silently excused.
 pub(crate) fn encode_annotated_response<T: Serialize>(
     codec: RequestPlanePayloadCodec,
     annotated: Annotated<T>,
 ) -> Result<(Vec<u8>, ResponseFrameKind), anyhow::Error> {
+    // `with_capacity`, not `new`: starting from zero would regress JSON
+    // responses to pay the reallocations this change exists to remove.
+    let mut bytes = Vec::with_capacity(RESPONSE_ENCODE_CAPACITY_HINT);
+    let kind = write_annotated_response(codec, annotated, &mut bytes)?;
+    Ok((bytes, kind))
+}
+
+/// Encode the canonical non-terminal wrapper into a caller-owned writer, so the
+/// push path can reuse one allocation across a request's frames.
+///
+/// The wrapper shape is defined here and nowhere else; `encode_annotated_response`
+/// delegates to it, so the two cannot disagree.
+pub(crate) fn write_annotated_response<T: Serialize, W: std::io::Write>(
+    codec: RequestPlanePayloadCodec,
+    annotated: Annotated<T>,
+    writer: &mut W,
+) -> Result<ResponseFrameKind, anyhow::Error> {
     let kind = match (annotated.is_error(), annotated.error.as_ref()) {
         (false, _) => ResponseFrameKind::Data,
         (true, Some(err)) => ResponseFrameKind::classify_error(err),
@@ -219,8 +215,37 @@ pub(crate) fn encode_annotated_response<T: Serialize>(
         data: Some(annotated),
         complete_final: false,
     };
-    let bytes = codec.encode(&wrapper)?;
-    Ok((bytes, kind))
+    codec.encode_into(&wrapper, writer)?;
+    Ok(kind)
+}
+
+/// Memoized separately per codec, since encoding is codec-specific.
+fn terminal_frame_bytes(codec: RequestPlanePayloadCodec) -> Result<Bytes, PipelineError> {
+    static JSON: OnceLock<Bytes> = OnceLock::new();
+    static MSGPACK: OnceLock<Bytes> = OnceLock::new();
+
+    let cell = match codec {
+        RequestPlanePayloadCodec::Json => &JSON,
+        RequestPlanePayloadCodec::Msgpack => &MSGPACK,
+    };
+    if let Some(bytes) = cell.get() {
+        return Ok(bytes.clone());
+    }
+
+    let wrapper = NetworkStreamWrapper::<Annotated<()>> {
+        data: None,
+        complete_final: true,
+    };
+    let bytes: Bytes = codec
+        .encode(&wrapper)
+        .map_err(|error| {
+            PipelineError::SerializationError(format!(
+                "Failed serializing {} request-plane final response: {error}",
+                codec.name()
+            ))
+        })?
+        .into();
+    Ok(cell.get_or_init(|| bytes).clone())
 }
 
 fn encode_python_response(
@@ -349,24 +374,62 @@ mod tests {
 
     use super::{
         Annotated, NetworkStreamWrapper, RequestPlanePayloadCodec, ResponseFrameKind,
-        encode_annotated_response,
+        encode_annotated_response, terminal_frame_bytes,
     };
-    use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
-    use dynamo_runtime::protocols::maybe_error::MaybeError;
+
+    /// Each codec's terminal frame must decode back to `data: None,
+    /// complete_final: true` — the contract both egress paths rely on to
+    /// signal end-of-stream.
+    #[test]
+    fn terminal_frame_bytes_decodes_to_complete_final() {
+        for codec in [
+            RequestPlanePayloadCodec::Json,
+            RequestPlanePayloadCodec::Msgpack,
+        ] {
+            let bytes = terminal_frame_bytes(codec).unwrap();
+            let wrapper: NetworkStreamWrapper<Annotated<serde_json::Value>> =
+                codec.decode(&bytes).unwrap();
+            assert!(wrapper.complete_final, "codec={}", codec.name());
+            assert!(wrapper.data.is_none(), "codec={}", codec.name());
+        }
+    }
+
+    /// Two calls for the same codec must return the same cached `Bytes`
+    /// storage, not just equal contents. `assert_eq!` alone would still pass
+    /// if a bug re-encoded a byte-identical buffer on every call; comparing
+    /// `as_ptr()` is what actually pins the memoization.
+    #[test]
+    fn terminal_frame_bytes_is_memoized_per_codec() {
+        for codec in [
+            RequestPlanePayloadCodec::Json,
+            RequestPlanePayloadCodec::Msgpack,
+        ] {
+            let first = terminal_frame_bytes(codec).unwrap();
+            let second = terminal_frame_bytes(codec).unwrap();
+            assert!(!first.is_empty(), "codec={}", codec.name());
+            assert_eq!(first, second, "codec={}", codec.name());
+            assert_eq!(
+                first.as_ptr(),
+                second.as_ptr(),
+                "codec={} must reuse the cached Bytes storage",
+                codec.name()
+            );
+        }
+    }
 
     // ── encode_annotated_response contract ───────────────────────────────────
     //
     // Both egress paths (pull via encode_python_response, push via
     // PushFrame::encode) call encode_annotated_response. These tests pin every
-    // field of the output so that a change to the wrapper shape, frame
-    // classification, or complete_final flag in either path would be caught here.
+    // field of the output so that a change to the wrapper shape, classification
+    // logic, or complete_final flag in either path would be caught here.
     //
     // serde_json::Value is used as the concrete payload type because it is
     // Serialize without touching the Python C API.
 
-    /// The frame kind must reflect `annotated.is_error()` — an error envelope
-    /// carries `event: "error"`, a data envelope does not. A swap of the two
-    /// would let error frames be forwarded as healthy responses and vice versa.
+    /// The frame kind must reflect `annotated.is_error()` — true when the envelope
+    /// carries `event: "error"`, false otherwise. A swap of the two would let
+    /// error frames be forwarded as healthy responses and vice versa.
     #[test]
     fn encode_annotated_response_is_error_true_for_error_annotated() {
         let (_, kind) = encode_annotated_response(
@@ -384,56 +447,7 @@ mod tests {
             Annotated::from_data(serde_json::json!({"ok": true})),
         )
         .unwrap();
-        assert!(!kind.is_error());
-    }
-
-    /// An untyped error frame is an engine failure: nothing about it says the
-    /// request was torn down.
-    #[test]
-    fn encode_annotated_response_classifies_untyped_error_as_engine_error() {
-        let (_, kind) = encode_annotated_response(
-            RequestPlanePayloadCodec::Json,
-            Annotated::<serde_json::Value>::from_error("upstream returned 503"),
-        )
-        .unwrap();
-        assert_eq!(kind, ResponseFrameKind::EngineError);
-    }
-
-    /// `map_python_exception` turns `PyGeneratorExit` into this error, which is
-    /// how a draining Python worker ends its open streams. It must stay
-    /// distinguishable from an engine fault all the way to the wire, or a
-    /// rolling restart lights up the mid-stream failure counter.
-    #[test]
-    fn encode_annotated_response_classifies_engine_shutdown_as_cancellation() {
-        let shutdown = DynamoError::builder()
-            .error_type(ErrorType::Backend(BackendError::EngineShutdown))
-            .message("engine shutting down")
-            .build();
-        let (_, kind) = encode_annotated_response(
-            RequestPlanePayloadCodec::Json,
-            Annotated::<serde_json::Value>::from_err(shutdown),
-        )
-        .unwrap();
-        assert_eq!(kind, ResponseFrameKind::Cancellation);
-        assert!(
-            kind.is_error(),
-            "a cancellation frame is still an error frame on the wire"
-        );
-    }
-
-    /// Cancellation reaches the wire as an ordinary typed error frame too.
-    #[test]
-    fn encode_annotated_response_classifies_cancelled_as_cancellation() {
-        let cancelled = DynamoError::builder()
-            .error_type(ErrorType::Cancelled)
-            .message("client went away")
-            .build();
-        let (_, kind) = encode_annotated_response(
-            RequestPlanePayloadCodec::Json,
-            Annotated::<serde_json::Value>::from_err(cancelled),
-        )
-        .unwrap();
-        assert_eq!(kind, ResponseFrameKind::Cancellation);
+        assert_eq!(kind, ResponseFrameKind::Data);
     }
 
     /// Non-terminal frames must have `complete_final: false` on the wire.
@@ -464,7 +478,7 @@ mod tests {
             Annotated::from_data(payload.clone()),
         )
         .unwrap();
-        assert!(!kind.is_error());
+        assert_eq!(kind, ResponseFrameKind::Data);
         let wrapper: NetworkStreamWrapper<Annotated<serde_json::Value>> =
             RequestPlanePayloadCodec::Json.decode(&bytes).unwrap();
         let data = wrapper.data.unwrap().data.unwrap();

@@ -1,0 +1,144 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSeek-V4.1-Flash on SGLang, aggregated. Two workers, TP4 each, 8x GB200.
+# KV-aware routing, DSpark speculative decoding, up to 1M tokens of context.
+#
+# Do not set the attention, MoE, or GEMM backend flags. SGLang resolves them for
+# this model. A hand-set backend flag selects a slower fallback.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: deepseek-v41-flash-sglang-gb200-agg-sglang-config
+data:
+  worker.yaml: |-
+    model-path: deepseek-ai/DeepSeek-V4.1-Flash
+    served-model-name: deepseek-ai/DeepSeek-V4.1-Flash
+    trust-remote-code: true
+    tp-size: 4
+    ep-size: 4
+    page-size: 256
+    mem-fraction-static: 0.8
+    max-running-requests: 256
+    speculative-algorithm: DSPARK
+    speculative-dspark-block-size: 5
+    # The native parser gates guided decoding. Dynamo builds the response from
+    # --dyn-reasoning-parser. Both are needed.
+    reasoning-parser: auto
+    enable-metrics: true
+    watchdog-timeout: 3600
+    host: 0.0.0.0
+    port: 30000
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: deepseek-v41-flash-sglang-gb200-agg
+spec:
+  backendFramework: sglang
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0-deepseek-v4.1-flash-dev.1
+              imagePullPolicy: IfNotPresent
+              command: [python3, -m, dynamo.frontend]
+              args:
+                - --http-port
+                - "8000"
+              env:
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+                - name: DYN_ROUTER_MODE
+                  value: kv
+              ports:
+                - name: http
+                  containerPort: 8000
+                  protocol: TCP
+              resources:
+                requests:
+                  cpu: "16"
+                  memory: 128Gi
+    - name: Worker
+      type: worker
+      replicas: 2
+      sharedMemorySize: 200Gi
+      podTemplate:
+        spec:
+          terminationGracePeriodSeconds: 60
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0-deepseek-v4.1-flash-dev.1
+              imagePullPolicy: IfNotPresent
+              command: [python3, -m, dynamo.sglang]
+              args:
+                - --config
+                - /etc/sglang/worker.yaml
+                # The KV router scores workers from these events.
+                - --kv-events-config
+                - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
+                - --dyn-reasoning-parser
+                - deepseek_v41
+                - --dyn-tool-call-parser
+                - deepseek_v41
+                - --dyn-enable-structural-tag
+                - --cuda-graph-max-bs-decode
+                - "64"
+              env:
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+                - name: HF_HOME
+                  value: /shared-model-cache
+                # Without these two, every start pays minutes of DeepGEMM JIT.
+                - name: SGLANG_JIT_DEEPGEMM_PRECOMPILE
+                  value: "0"
+                - name: SGLANG_JIT_DEEPGEMM_FAST_WARMUP
+                  value: "1"
+                # Thinking is off by default. Then reasoning_content is empty.
+                - name: SGLANG_DEFAULT_THINKING
+                  value: "true"
+                # Keep --enable-metrics on, but turn the forward-pass publisher
+                # off. It crashes this model on a null seq_lens_cpu.
+                - name: DYN_FORWARDPASS_METRIC_PORT
+                  value: ""
+              ports:
+                - name: system
+                  containerPort: 9090
+                  protocol: TCP
+                - name: kv-events
+                  containerPort: 5557
+                  protocol: TCP
+              resources:
+                requests:
+                  cpu: "16"
+                  memory: 512Gi
+                  ephemeral-storage: 64Gi
+                  nvidia.com/gpu: "4"
+                limits:
+                  nvidia.com/gpu: "4"
+              securityContext:
+                runAsUser: 0
+                runAsGroup: 0
+                capabilities:
+                  add: [IPC_LOCK, SYS_PTRACE, SYS_RESOURCE]
+              volumeMounts:
+                - name: shared-model-cache
+                  mountPath: /shared-model-cache
+                - name: sglang-config
+                  mountPath: /etc/sglang
+                  readOnly: true
+          volumes:
+            - name: shared-model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache
+            - name: sglang-config
+              configMap:
+                name: deepseek-v41-flash-sglang-gb200-agg-sglang-config

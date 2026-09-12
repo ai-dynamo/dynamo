@@ -34,6 +34,7 @@ use dynamo_llm::local_model::runtime_config::{
 use dynamo_llm::model_type::ModelInput as RsModelInput;
 use dynamo_runtime as rs;
 use dynamo_runtime::logging::{DistributedTraceContext, get_distributed_tracing_context};
+use dynamo_sidecar_common::SidecarStartupError;
 use futures::stream::{BoxStream, StreamExt};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
@@ -47,11 +48,25 @@ use crate::llm::kv::KvEventPublisher as PyKvEventPublisher;
 use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
 use crate::to_pyerr;
 
+fn sidecar_startup_to_pyerr(error: SidecarStartupError) -> PyErr {
+    match error {
+        SidecarStartupError::Cli(error) => {
+            let _ = error.print();
+            pyo3::exceptions::PySystemExit::new_err(error.exit_code())
+        }
+        SidecarStartupError::Dynamo(error) => {
+            pyo3::exceptions::PyValueError::new_err(error.to_string())
+        }
+    }
+}
+
 /// Register `dynamo._core.backend` and its classes on the parent `_core` module.
 pub fn add_to_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = parent.py();
     let m = PyModule::new(py, "backend")?;
     m.add_function(wrap_pyfunction!(_run_sglang_sidecar, &m)?)?;
+    m.add_function(wrap_pyfunction!(_run_trtllm_sidecar, &m)?)?;
+    m.add_function(wrap_pyfunction!(_run_vllm_sidecar, &m)?)?;
     m.add_class::<DisaggregationMode>()?;
     m.add_class::<EngineConfig>()?;
     m.add_class::<LlmRegistration>()?;
@@ -87,10 +102,60 @@ fn sglang_sidecar_argv(argv: Vec<String>) -> Vec<String> {
 fn _run_sglang_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let cli_argv = sglang_sidecar_argv(argv.unwrap_or_default());
     let (engine, config) = py
-        .allow_threads(move || {
-            dynamo_sglang_sidecar::SglangSidecarEngine::from_args(Some(cli_argv))
-        })
-        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+        .allow_threads(move || dynamo_sglang_sidecar::SglangSidecarEngine::try_from_args(cli_argv))
+        .map_err(sidecar_startup_to_pyerr)?;
+
+    py.allow_threads(move || dynamo_backend_common::run(Arc::new(engine), config))
+        .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))
+}
+
+const VLLM_SIDECAR_PROGRAM_NAME: &str = "dynamo-vllm-sidecar";
+
+fn vllm_sidecar_argv(argv: Vec<String>) -> Vec<String> {
+    let mut cli_argv = Vec::with_capacity(argv.len() + 1);
+    cli_argv.push(VLLM_SIDECAR_PROGRAM_NAME.to_string());
+    cli_argv.extend(argv);
+    cli_argv
+}
+
+/// Run the native vLLM sidecar in the current process.
+///
+/// Python's module launcher passes only option arguments, while clap's
+/// `try_parse_from` expects the program name at index zero. Add that stable
+/// name here so Python callers use ordinary `sys.argv[1:]` semantics.
+#[pyfunction]
+#[pyo3(signature = (argv=None))]
+fn _run_vllm_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
+    let cli_argv = vllm_sidecar_argv(argv.unwrap_or_default());
+    let (engine, config) = py
+        .allow_threads(move || dynamo_vllm_sidecar::VllmSidecarEngine::try_from_args(cli_argv))
+        .map_err(sidecar_startup_to_pyerr)?;
+
+    py.allow_threads(move || dynamo_backend_common::run(Arc::new(engine), config))
+        .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))
+}
+
+const TRTLLM_SIDECAR_PROGRAM_NAME: &str = "dynamo-trtllm-sidecar";
+
+fn trtllm_sidecar_argv(argv: Vec<String>) -> Vec<String> {
+    let mut cli_argv = Vec::with_capacity(argv.len() + 1);
+    cli_argv.push(TRTLLM_SIDECAR_PROGRAM_NAME.to_string());
+    cli_argv.extend(argv);
+    cli_argv
+}
+
+/// Run the native TensorRT-LLM sidecar in the current process.
+///
+/// Python's module launcher passes only option arguments, while clap's
+/// `try_parse_from` expects the program name at index zero. Add that stable
+/// name here so Python callers use ordinary `sys.argv[1:]` semantics.
+#[pyfunction]
+#[pyo3(signature = (argv=None))]
+fn _run_trtllm_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
+    let cli_argv = trtllm_sidecar_argv(argv.unwrap_or_default());
+    let (engine, config) = py
+        .allow_threads(move || dynamo_trtllm_sidecar::TrtllmSidecarEngine::try_from_args(cli_argv))
+        .map_err(sidecar_startup_to_pyerr)?;
 
     py.allow_threads(move || dynamo_backend_common::run(Arc::new(engine), config))
         .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))
@@ -150,6 +215,9 @@ pub struct LlmRegistration {
 
 #[pymethods]
 impl LlmRegistration {
+    // TODO(rank-aware-kv-capacity): append any rank-capacity arguments so existing positional
+    // callers do not shift, and update the Python dataclass, duck-typed extraction, stub, and
+    // Rust-to-MDC copy as one compatibility boundary.
     #[new]
     #[pyo3(signature = (
         context_length = None,
@@ -161,6 +229,7 @@ impl LlmRegistration {
         data_parallel_start_rank = None,
         bootstrap_host = None,
         bootstrap_port = None,
+        enable_eagle = false,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -173,6 +242,7 @@ impl LlmRegistration {
         data_parallel_start_rank: Option<u32>,
         bootstrap_host: Option<String>,
         bootstrap_port: Option<u16>,
+        enable_eagle: bool,
     ) -> Self {
         Self {
             inner: RsLlmRegistration {
@@ -183,6 +253,7 @@ impl LlmRegistration {
                 max_num_batched_tokens,
                 data_parallel_size,
                 data_parallel_start_rank,
+                enable_eagle,
                 bootstrap_host,
                 bootstrap_port,
             },
@@ -224,6 +295,11 @@ impl LlmRegistration {
     #[getter]
     fn bootstrap_port(&self) -> Option<u16> {
         self.inner.bootstrap_port
+    }
+
+    #[getter]
+    fn enable_eagle(&self) -> bool {
+        self.inner.enable_eagle
     }
 }
 
@@ -469,6 +545,7 @@ impl WorkerConfig {
                 // Python vLLM owns and serves its existing `.rl` endpoint.
                 // The shared Rust endpoint is opt-in for Rust sidecars only.
                 enable_rl: false,
+                rl_metadata: None,
                 media_decoder: media_decoder.map(|decoder| decoder.inner),
                 media_fetcher: media_fetcher.map(|fetcher| fetcher.inner),
             },
@@ -485,11 +562,6 @@ pub struct Worker {
     engine: Arc<PyObject>,
     event_loop: Arc<PyObject>,
     config: RsWorkerConfig,
-    /// `true` if this `Worker` instance constructed the dynamo runtime
-    /// itself (no `DistributedRuntime` already existed in this process).
-    /// Determines whether `run()` should call `runtime.shutdown()` at the
-    /// end — we only want to tear down a runtime we own.
-    owns_runtime: bool,
     /// Single-shot guard — flipped to `true` on the first `run()` call.
     /// The Rust `Worker` underneath consumes `self`; calling `run()`
     /// twice from Python would build a second `RsWorker` and call
@@ -505,6 +577,8 @@ pub struct Worker {
 
 #[pymethods]
 impl Worker {
+    /// Create a single-use worker and offer the process runtime to the PyO3 bridge.
+    /// Transport overrides are resolved when the worker starts, without env writes.
     #[new]
     #[pyo3(signature = (engine, config, event_loop, raw = false))]
     fn new(
@@ -513,43 +587,16 @@ impl Worker {
         event_loop: PyObject,
         raw: bool,
     ) -> PyResult<Self> {
-        // True existing-only check — `runtime_from_existing()` would
-        // synthesize a fresh runtime here and falsely mark us as shared.
-        let owns_runtime = !rs::Worker::has_existing_runtime();
-
-        if owns_runtime {
-            // Apply RuntimeConfig env overrides synchronously, on the
-            // calling thread, before any tokio worker threads spawn.
-            // Setting env vars from inside the future-into-py block would
-            // race with concurrent env reads in already-running tokio
-            // tasks (NATS / etcd setup).
-            config.inner.runtime.apply_to_env();
-
-            let worker = rs::Worker::from_settings().map_err(to_pyerr)?;
-            let primary = worker.tokio_runtime().map_err(to_pyerr)?;
-            // `init_with_runtime` errors if already initialized; that case
-            // means someone called us in a process where the OnceCell was
-            // populated between our check and now. Idempotent — ignore.
-            let _ = pyo3_async_runtimes::tokio::init_with_runtime(primary);
-        } else if config.inner.runtime.has_overrides() {
-            // The shared runtime was constructed before our caller, so its
-            // env-driven config (`DYN_DISCOVERY_BACKEND` etc.) is already
-            // baked in. Setting env vars now wouldn't change the runtime
-            // — surface the silent-drop loudly so operators don't assume
-            // their override took effect.
-            tracing::warn!(
-                "Worker received RuntimeConfig overrides but the dynamo \
-                 runtime was already constructed elsewhere; overrides ignored. \
-                 Set DYN_DISCOVERY_BACKEND / DYN_REQUEST_PLANE / DYN_EVENT_PLANE \
-                 in the environment instead."
-            );
-        }
+        // Fetching may already have initialized Tokio. Transport options belong
+        // to the worker's DistributedRuntime, not the process-wide executor, and
+        // are resolved directly by RsWorker without changing environment vars.
+        let primary = rs::Worker::ensure_process_runtime().map_err(to_pyerr)?;
+        let _ = pyo3_async_runtimes::tokio::init_with_runtime(primary);
 
         Ok(Self {
             engine: Arc::new(engine),
             event_loop: Arc::new(event_loop),
             config: config.inner,
-            owns_runtime,
             consumed: AtomicBool::new(false),
             raw,
         })
@@ -576,7 +623,6 @@ impl Worker {
         let engine = self.engine.clone();
         let event_loop = self.event_loop.clone();
         let config = self.config.clone();
-        let owns_runtime = self.owns_runtime;
         let raw = self.raw;
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -626,18 +672,11 @@ impl Worker {
 
             let result = worker.run(runtime.clone()).await.map_err(to_pyerr);
 
-            // Only tear the runtime down if we constructed it. When a
-            // `DistributedRuntime` was already in scope (HTTP frontend,
-            // tests, etc.) it owns the shutdown lifecycle and we'd be
-            // pulling the rug out from other tasks if we called shutdown.
-            if owns_runtime {
-                runtime.shutdown();
-            } else {
-                tracing::debug!(
-                    "Worker.run skipping runtime.shutdown(); runtime is \
-                     shared with another caller"
-                );
-            }
+            // runtime_from_existing() shares Tokio but creates independent
+            // cancellation tokens and a graceful-shutdown tracker. This run
+            // owns that wrapper, including cleanup on engine startup failure;
+            // shutting it down does not cancel another DistributedRuntime.
+            runtime.shutdown();
 
             result
         })
@@ -859,6 +898,7 @@ impl PyEngineCore {
                     max_num_batched_tokens: opt_attr::<u64>(&v, "max_num_batched_tokens")?,
                     data_parallel_size: opt_attr::<u32>(&v, "data_parallel_size")?,
                     data_parallel_start_rank: opt_attr::<u32>(&v, "data_parallel_start_rank")?,
+                    enable_eagle: opt_attr::<bool>(&v, "enable_eagle")?.unwrap_or(false),
                     bootstrap_host: opt_attr::<String>(&v, "bootstrap_host")?,
                     bootstrap_port: opt_attr::<u16>(&v, "bootstrap_port")?,
                 }),

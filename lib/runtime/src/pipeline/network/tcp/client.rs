@@ -17,6 +17,7 @@ type BoxRead = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
 type BoxWrite = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
 
 use prometheus::IntCounter;
+use tracing::Instrument;
 
 use super::{CallHomeHandshake, ControlMessage, TcpStreamConnectionInfo};
 use crate::engine::AsyncEngineContext;
@@ -30,6 +31,18 @@ use anyhow::{Context, Result, anyhow as error}; // Import SinkExt to use the `se
 #[allow(dead_code)]
 pub struct TcpClient {
     worker_id: String,
+}
+
+fn record_upstream_cancellation(context: &dyn AsyncEngineContext, signal: &'static str) {
+    tracing::info!(
+        target: "request_span",
+        {
+            request_id = context.id(),
+            { "cancellation.signal" } = signal,
+            { "cancellation.source" } = "upstream"
+        },
+        "request cancellation received"
+    );
 }
 
 impl Default for TcpClient {
@@ -136,12 +149,16 @@ impl TcpClient {
         // captured by the monitor task
         let (alive_tx, alive_rx) = tokio::sync::oneshot::channel::<()>();
 
-        let reader_task = tokio::spawn(handle_reader(
-            framed_reader,
-            context.clone(),
-            alive_tx,
-            cancellation_counter,
-        ));
+        let reader_span = tracing::Span::current();
+        let reader_task = tokio::spawn(
+            handle_reader(
+                framed_reader,
+                context.clone(),
+                alive_tx,
+                cancellation_counter,
+            )
+            .instrument(reader_span),
+        );
 
         // transport specific handshake message
         let handshake = CallHomeHandshake {
@@ -262,12 +279,11 @@ impl TcpClient {
 
         let (bytes_tx, bytes_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(64);
 
-        tokio::spawn(handle_request_reader(
-            framed_reader,
-            bytes_tx,
-            context,
-            cancellation_counter,
-        ));
+        let reader_span = tracing::Span::current();
+        tokio::spawn(
+            handle_request_reader(framed_reader, bytes_tx, context, cancellation_counter)
+                .instrument(reader_span),
+        );
 
         Ok(StreamReceiver { rx: bytes_rx })
     }
@@ -424,11 +440,13 @@ async fn handle_request_reader(
                                 match ctrl {
                                     ControlMessage::Stop => {
                                         cancellation_seen = true;
+                                        record_upstream_cancellation(context.as_ref(), "stop");
                                         context.stop();
                                         break;
                                     }
                                     ControlMessage::Kill => {
                                         cancellation_seen = true;
+                                        record_upstream_cancellation(context.as_ref(), "kill");
                                         context.kill();
                                         break;
                                     }
@@ -611,10 +629,12 @@ async fn handle_reader(
                                 match msg {
                                     ControlMessage::Stop => {
                                         cancellation_seen = true;
+                                        record_upstream_cancellation(context.as_ref(), "stop");
                                         context.stop();
                                     }
                                     ControlMessage::Kill => {
                                         cancellation_seen = true;
+                                        record_upstream_cancellation(context.as_ref(), "kill");
                                         context.kill();
                                     }
                                     ControlMessage::Sentinel => {
@@ -647,7 +667,6 @@ async fn handle_reader(
                     }
                     None => {
                         tracing::debug!("tcp stream closed by server");
-                        cancellation_seen = true;
                         break;
                     }
                 }
@@ -731,13 +750,89 @@ mod tests {
     use super::*;
     use crate::pipeline::context::Controller;
     use crate::pipeline::network::tcp::test_utils::create_tcp_pair;
+    use crate::tls_utils::test_certs::{mtls_chain, self_signed_pair};
     use bytes::Bytes;
     use futures::StreamExt;
-    use std::sync::Arc;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
     use tokio::sync::{mpsc, oneshot};
     use tokio_util::codec::FramedRead;
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::Layer;
+    use tracing_subscriber::layer::{Context as TraceContext, SubscriberExt};
+    use tracing_subscriber::registry::LookupSpan;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    type CapturedCancellationEvent = (HashMap<String, String>, Option<String>);
+
+    #[derive(Default)]
+    struct CancellationEventCapture(Mutex<Vec<CapturedCancellationEvent>>);
+
+    struct EventFieldVisitor<'a>(&'a mut HashMap<String, String>);
+
+    impl Visit for EventFieldVisitor<'_> {
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+    }
+
+    struct CancellationEventLayer(Arc<CancellationEventCapture>);
+
+    impl<S> Layer<S> for CancellationEventLayer
+    where
+        S: tracing::Subscriber + for<'lookup> LookupSpan<'lookup>,
+    {
+        fn on_event(&self, event: &tracing::Event<'_>, ctx: TraceContext<'_, S>) {
+            if event.metadata().target() != "request_span" {
+                return;
+            }
+            let mut fields = HashMap::new();
+            event.record(&mut EventFieldVisitor(&mut fields));
+            if fields
+                .get("message")
+                .is_none_or(|message| message.trim_matches('"') != "request cancellation received")
+            {
+                return;
+            }
+            let parent = ctx.event_span(event).map(|span| span.name().to_string());
+            self.0.0.lock().unwrap().push((fields, parent));
+        }
+    }
+
+    #[tokio::test]
+    async fn upstream_cancellation_event_is_parented_to_worker_request_span() {
+        let captured = Arc::new(CancellationEventCapture::default());
+        let _subscriber = tracing_subscriber::registry()
+            .with(CancellationEventLayer(captured.clone()))
+            .set_default();
+        let controller = Arc::new(Controller::new("request-123".to_string()));
+        let span = tracing::info_span!(target: "request_span", "handle_payload");
+
+        async {
+            record_upstream_cancellation(controller.as_ref(), "stop");
+        }
+        .instrument(span)
+        .await;
+
+        let events = captured.0.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].0.get("cancellation.signal").map(String::as_str),
+            Some("stop")
+        );
+        assert_eq!(
+            events[0].0.get("cancellation.source").map(String::as_str),
+            Some("upstream")
+        );
+        assert_eq!(events[0].1.as_deref(), Some("handle_payload"));
+    }
 
     struct WriterHarness {
         server: tokio::net::TcpStream,
@@ -897,6 +992,56 @@ mod tests {
                 .any(|w| w == sentinel_json.as_slice()),
             "Buffer should contain sentinel message. Buffer: {:?}",
             String::from_utf8_lossy(&buffer[..n])
+        );
+    }
+
+    /// A normally completed response stream sends Sentinel, receives the
+    /// server's FIN, and leaves the cancellation metric unchanged.
+    #[tokio::test]
+    async fn test_normal_response_stream_completion_does_not_count_cancellation() {
+        let (client, server) = create_tcp_pair().await;
+        let (read_half, write_half) = tokio::io::split(client);
+        let framed_reader =
+            FramedRead::new(Box::new(read_half) as BoxRead, TwoPartCodec::default());
+        let framed_writer =
+            FramedWrite::new(Box::new(write_half) as BoxWrite, TwoPartCodec::default());
+        let (bytes_tx, bytes_rx) = mpsc::channel(64);
+        let (alive_tx, alive_rx) = oneshot::channel::<()>();
+        let controller = Arc::new(Controller::default());
+        let cancellation_counter = IntCounter::new(
+            "tcp_client_normal_completion_cancellations_test",
+            "test cancellation counter",
+        )
+        .unwrap();
+
+        let reader_context = controller.clone();
+        let counter_clone = cancellation_counter.clone();
+        let reader_task = tokio::spawn(async move {
+            handle_reader(framed_reader, reader_context, alive_tx, Some(counter_clone)).await
+        });
+        let writer_context = controller.clone();
+        let writer_task = tokio::spawn(async move {
+            handle_writer(framed_writer, bytes_rx, alive_rx, writer_context).await
+        });
+
+        drop(bytes_tx);
+
+        let mut server_reader = FramedRead::new(server, TwoPartCodec::default());
+        let sentinel = recv_msg(&mut server_reader).await;
+        assert_sentinel_message(sentinel);
+        drop(server_reader);
+
+        writer_task.await.unwrap().unwrap();
+        reader_task.await.unwrap();
+
+        assert!(
+            !controller.is_stopped() && !controller.is_killed(),
+            "normal response completion must not cancel the context"
+        );
+        assert_eq!(
+            cancellation_counter.get(),
+            0,
+            "normal response completion must not increment the cancellation counter"
         );
     }
 
@@ -1395,9 +1540,10 @@ mod tests {
         );
     }
 
-    /// Test that handle_reader exits when TCP stream is closed
+    /// Response-stream EOF is the normal server FIN after a closing Sentinel.
+    /// It must not be counted as a cancellation by itself.
     #[tokio::test]
-    async fn test_handle_reader_exits_on_stream_closed() {
+    async fn test_handle_reader_eof_does_not_count_cancellation() {
         let ReaderHarness {
             mut framed_server,
             framed_reader,
@@ -1405,12 +1551,24 @@ mod tests {
             alive_rx: _alive_rx,
             controller,
         } = reader_harness().await;
+        let cancellation_counter = IntCounter::new(
+            "tcp_client_reader_clean_eof_cancellations_test",
+            "test cancellation counter",
+        )
+        .unwrap();
 
         // Spawn the reader task
-        let reader_handle =
-            tokio::spawn(
-                async move { handle_reader(framed_reader, controller, alive_tx, None).await },
-            );
+        let counter_clone = cancellation_counter.clone();
+        let controller_clone = controller.clone();
+        let reader_handle = tokio::spawn(async move {
+            handle_reader(
+                framed_reader,
+                controller_clone,
+                alive_tx,
+                Some(counter_clone),
+            )
+            .await
+        });
 
         // Close the framed server to signal EOF to the client
         framed_server.close().await.unwrap();
@@ -1421,6 +1579,15 @@ mod tests {
         assert!(
             result.is_ok(),
             "handle_reader should exit when stream is closed"
+        );
+        assert!(
+            !controller.is_stopped() && !controller.is_killed(),
+            "response-stream EOF must not cancel the context"
+        );
+        assert_eq!(
+            cancellation_counter.get(),
+            0,
+            "response-stream EOF must not increment the cancellation counter"
         );
     }
 
@@ -1958,18 +2125,6 @@ mod tests {
 
     // ── TLS connector and SNI tests ──────────────────────────────────────────
 
-    fn make_ca_file() -> tempfile::NamedTempFile {
-        use std::io::Write;
-        let key_pair = rcgen::KeyPair::generate().unwrap();
-        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
-            .unwrap()
-            .self_signed(&key_pair)
-            .unwrap();
-        let mut f = tempfile::NamedTempFile::new().unwrap();
-        f.write_all(cert.pem().as_bytes()).unwrap();
-        f
-    }
-
     #[test]
     fn connector_no_env_vars_is_plaintext() {
         // Clear every var the builder reads, incl. the client-identity vars, so
@@ -2000,7 +2155,7 @@ mod tests {
 
     #[test]
     fn connector_with_ca_is_tls() {
-        let ca = make_ca_file();
+        let (ca, _) = self_signed_pair();
         temp_env::with_vars(
             [(
                 "DYN_TCP_TLS_CA_CERT_PATH",
@@ -2008,74 +2163,6 @@ mod tests {
             )],
             || assert!(build_tls_connector_from_env().unwrap().is_some()),
         );
-    }
-
-    // Self-signed cert + matching key, for use as a client identity.
-    fn make_identity_files() -> (tempfile::NamedTempFile, tempfile::NamedTempFile) {
-        use std::io::Write;
-        let key_pair = rcgen::KeyPair::generate().unwrap();
-        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
-            .unwrap()
-            .self_signed(&key_pair)
-            .unwrap();
-        let mut cert_file = tempfile::NamedTempFile::new().unwrap();
-        cert_file.write_all(cert.pem().as_bytes()).unwrap();
-        let mut key_file = tempfile::NamedTempFile::new().unwrap();
-        key_file
-            .write_all(key_pair.serialize_pem().as_bytes())
-            .unwrap();
-        (cert_file, key_file)
-    }
-
-    // CA + server leaf (SAN=localhost, serverAuth) + client leaf (clientAuth),
-    // both signed by the CA. Returns (ca, server_cert, server_key, client_cert,
-    // client_key) PEM temp files.
-    #[allow(clippy::type_complexity)]
-    fn make_mtls_chain() -> (
-        tempfile::NamedTempFile,
-        tempfile::NamedTempFile,
-        tempfile::NamedTempFile,
-        tempfile::NamedTempFile,
-        tempfile::NamedTempFile,
-    ) {
-        use std::io::Write;
-        fn write_pem(contents: &str) -> tempfile::NamedTempFile {
-            let mut f = tempfile::NamedTempFile::new().unwrap();
-            f.write_all(contents.as_bytes()).unwrap();
-            f
-        }
-        let ca_key = rcgen::KeyPair::generate().unwrap();
-        let mut ca_params = rcgen::CertificateParams::new(Vec::new()).unwrap();
-        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
-
-        let server_key = rcgen::KeyPair::generate().unwrap();
-        let mut server_params =
-            rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
-        server_params
-            .extended_key_usages
-            .push(rcgen::ExtendedKeyUsagePurpose::ServerAuth);
-        let server_cert = server_params
-            .signed_by(&server_key, &ca_cert, &ca_key)
-            .unwrap();
-
-        let client_key = rcgen::KeyPair::generate().unwrap();
-        let mut client_params =
-            rcgen::CertificateParams::new(vec!["dynamo-client".to_string()]).unwrap();
-        client_params
-            .extended_key_usages
-            .push(rcgen::ExtendedKeyUsagePurpose::ClientAuth);
-        let client_cert = client_params
-            .signed_by(&client_key, &ca_cert, &ca_key)
-            .unwrap();
-
-        (
-            write_pem(&ca_cert.pem()),
-            write_pem(&server_cert.pem()),
-            write_pem(&server_key.serialize_pem()),
-            write_pem(&client_cert.pem()),
-            write_pem(&client_key.serialize_pem()),
-        )
     }
 
     /// Live mTLS handshake over the **real** response-stream client path:
@@ -2087,7 +2174,7 @@ mod tests {
     async fn response_stream_client_mtls_handshake() {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-        let (ca, server_cert, server_key, client_cert, client_key) = make_mtls_chain();
+        let (ca, server_cert, server_key, client_cert, client_key) = mtls_chain();
 
         // mTLS server acceptor: requires a client cert signed by the CA.
         let server_config = crate::tls_utils::server_tls_config(
@@ -2138,8 +2225,8 @@ mod tests {
     #[test]
     fn connector_partial_client_identity_errors() {
         // A client cert without its key must fail closed (pair validation).
-        let ca = make_ca_file();
-        let (client_cert, _client_key) = make_identity_files();
+        let (ca, _) = self_signed_pair();
+        let (client_cert, _client_key) = self_signed_pair();
         temp_env::with_vars(
             [
                 (

@@ -124,17 +124,17 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::epp_standalone_config::TokenizerProtocol;
+    use crate::epp_standalone_config::RendererProtocol;
 
     fn config() -> EppStandaloneConfig {
         EppStandaloneConfig {
             selector_threads: 1,
-            peer_service: None,
+            peer_replication: None,
             inference_pool_name: "test-pool".to_string(),
             namespace: "test-ns".to_string(),
             model_name: "Qwen/Qwen3-0.6B".to_string(),
             tokenizer_service_url: "http://vllm-render:8000".to_string(),
-            tokenizer_protocol: TokenizerProtocol::VllmRender,
+            renderer_protocol: RendererProtocol::VllmRender,
             tokenizer_max_response_bytes: 16 * 1024 * 1024,
             tokenization_timeout_ms: 5_000,
             block_size: 16,

@@ -5,6 +5,7 @@
 set -euo pipefail
 
 readonly OUTPUT_DIR="${1:-/opt/dynamo/nixl-ucx-compat}"
+readonly CAPI_OUTPUT_DIR="${2:-/opt/dynamo/nixl-capi}"
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 die() {
@@ -202,13 +203,59 @@ echo "nixl-ucx-compat: installed ${#ALIASES[@]} aliases for" \
     die "missing ${NIXL_CAPI_DIR}/libnixl_capi.so; NIXL wheel layout changed"
 [[ -d "${NIXL_CAPI_DIR}/plugins" ]] || \
     die "missing ${NIXL_CAPI_DIR}/plugins; NIXL wheel layout changed"
+
+# Expose the C API directory under a stable image path so the Dockerfile can put
+# it on LD_LIBRARY_PATH without knowing the wheel's private layout. A directory
+# symlink (not a per-file one) is required: ld.so expands $ORIGIN from the
+# resolved path, so libnixl_capi.so still finds its siblings through the link,
+# whereas a lone symlinked file would strand libnixl.so.
+if [[ -e "${CAPI_OUTPUT_DIR}" || -L "${CAPI_OUTPUT_DIR}" ]]; then
+    [[ -L "${CAPI_OUTPUT_DIR}" && "$(readlink -f "${CAPI_OUTPUT_DIR}")" == "${NIXL_CAPI_DIR}" ]] || \
+        die "refusing to replace existing output path: ${CAPI_OUTPUT_DIR}"
+else
+    mkdir -p "$(dirname "${CAPI_OUTPUT_DIR}")"
+    ln -s "${NIXL_CAPI_DIR}" "${CAPI_OUTPUT_DIR}"
+fi
+
 echo "${NIXL_CAPI_DIR}" > /etc/ld.so.conf.d/nixl.conf
 ldconfig
 
-# ld.so.cache is keyed by DT_SONAME. A soversioned rebuild would leave the
-# dlopen name uncached while the unversioned development symlink still exists,
-# so assert the name resolves rather than that the file is present.
-ldconfig -p | grep -qE '^[[:space:]]*libnixl_capi[.]so[[:space:]]' || \
-    die "libnixl_capi.so is not resolvable by SONAME after ldconfig"
+# Assert loadability, not cache membership. ld.so.cache is not a reliable oracle
+# inside an image build: ldconfig silently drops a directory whose (st_dev,
+# st_ino) matches one it already queued ("given more than once"), and it reuses
+# /var/cache/ldconfig/aux-cache entries keyed on (st_dev, st_ino, st_size,
+# st_ctime) -- this base image ships that cache pre-populated. Overlayfs recycles
+# those fields across layers, so a correct install can be skipped
+# nondeterministically, and BuildKit then caches the bad layer. Resolution does
+# not depend on the cache because the Dockerfile puts CAPI_OUTPUT_DIR on
+# LD_LIBRARY_PATH after this script runs; this check exercises the exact bare
+# dlopen nixl-sys performs, and proves the transitive NIXL deps resolve too.
+LD_LIBRARY_PATH="${CAPI_OUTPUT_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+    python3 -c 'import ctypes; ctypes.CDLL("libnixl_capi.so")' || \
+    die "libnixl_capi.so could not be dlopened by SONAME via ${CAPI_OUTPUT_DIR}"
 
-echo "nixl-ucx-compat: registered ${NIXL_CAPI_DIR} with the runtime linker"
+# A caller that clears or overrides the environment falls back to ld.so.cache,
+# so that route has to work too. Enforce it: a NIXL that silently drops to
+# stub mode is exactly the failure this step exists to catch, and a warning in a
+# build log that nobody reads does not prevent it.
+#
+# Retry once with the aux-cache dropped first. That cache is keyed on (st_dev,
+# st_ino, st_size, st_ctime) and this base image ships it pre-populated, so a
+# stale entry inherited across an overlayfs layer can make ldconfig skip a file
+# it has already "seen" -- the one mechanism repairable from here.
+if ! env -u LD_LIBRARY_PATH python3 -c 'import ctypes; ctypes.CDLL("libnixl_capi.so")' 2>/dev/null; then
+    rm -f /var/cache/ldconfig/aux-cache
+    ldconfig
+    if ! env -u LD_LIBRARY_PATH python3 -c 'import ctypes; ctypes.CDLL("libnixl_capi.so")' 2>/dev/null; then
+        # Surface the other known mechanism rather than making the next reader
+        # rediscover it: ldconfig drops a directory whose (st_dev, st_ino)
+        # matches one it already queued, and overlayfs recycles both.
+        # ldconfig writes these to stderr, so keep stderr and drop stdout.
+        ldconfig -v 2>&1 >/dev/null | grep -F "given more than once" >&2 || true
+        die "ldconfig will not cache libnixl_capi.so from ${NIXL_CAPI_DIR};" \
+            "if a 'given more than once' line above names that directory," \
+            "ldconfig dropped it as a (st_dev, st_ino) duplicate"
+    fi
+fi
+
+echo "nixl-ucx-compat: published ${NIXL_CAPI_DIR} via ${CAPI_OUTPUT_DIR}"

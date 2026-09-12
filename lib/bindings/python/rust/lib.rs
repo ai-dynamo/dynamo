@@ -6,6 +6,7 @@ use dynamo_llm::local_model::{
 };
 use dynamo_runtime::discovery::EventTransportKind;
 use dynamo_runtime::distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode};
+use dynamo_runtime::pipeline::network::ResponsePlaneMode;
 use dynamo_runtime::storage::kv;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
@@ -235,6 +236,7 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::entrypoint::AicPerfConfig>()?;
     m.add_class::<llm::entrypoint::RouterConfig>()?;
     m.add_class::<llm::entrypoint::KvRouterConfig>()?;
+    m.add_class::<llm::kv::LoadThresholdConfig>()?;
     m.add_class::<llm::replay::ReasoningConfig>()?;
     m.add_class::<llm::replay::SglangArgs>()?;
     m.add_class::<llm::replay::TrtllmArgs>()?;
@@ -330,6 +332,10 @@ pub(crate) fn linked_worker_selection_policy_registry() -> WorkerSelectionPolicy
 #[cfg(feature = "custom-policy")]
 fn register_core_with_custom_worker_selection_policy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let mut registry = WorkerSelectionPolicyRegistry::default();
+    // The policies Dynamo ships register first, so a replaced catalog that reuses one of their
+    // type names fails here instead of silently overriding it.
+    dynamo_custom_policy_builtin::register(&mut registry)
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
     dynamo_worker_selection_policy_catalog::register(&mut registry)
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
 
@@ -386,6 +392,19 @@ fn resolve_event_transport_kind(
         Some("") | None => Ok(discovery_backend.resolve_event_transport_kind()),
         Some(other) => Err(PyValueError::new_err(format!(
             "Invalid event_plane value '{other}'. Valid values: 'nats', 'zmq'"
+        ))),
+    }
+}
+
+fn resolve_response_plane_mode(
+    response_plane: Option<&str>,
+) -> PyResult<Option<ResponsePlaneMode>> {
+    match response_plane {
+        Some("tcp") => Ok(Some(ResponsePlaneMode::Tcp)),
+        Some("quic") => Ok(Some(ResponsePlaneMode::Quic)),
+        Some("") | None => Ok(None),
+        Some(other) => Err(PyValueError::new_err(format!(
+            "Invalid response_plane value '{other}'. Valid values: 'tcp', 'quic'"
         ))),
     }
 }
@@ -823,6 +842,34 @@ fn update_model_taints<'p>(
     })
 }
 
+static FETCH_MODEL_RUNTIME_MISMATCH_WARNING: std::sync::Once = std::sync::Once::new();
+
+/// Return Dynamo's process runtime and register it with an uninitialized PyO3 bridge.
+/// Preserve an already selected bridge runtime, warning once if its identity differs.
+fn ensure_fetch_model_runtime() -> anyhow::Result<&'static tokio::runtime::Runtime> {
+    let primary = rs::Worker::ensure_process_runtime()?;
+
+    // `Err(())` only means that the bridge runtime was already selected. It may already be
+    // borrowing `primary`, so identity has to be checked independently.
+    let _ = pyo3_async_runtimes::tokio::init_with_runtime(primary);
+    let bridge = pyo3_async_runtimes::tokio::get_runtime();
+
+    if !std::ptr::eq(bridge, primary) {
+        FETCH_MODEL_RUNTIME_MISMATCH_WARNING.call_once(|| {
+            tracing::warn!(
+                operation = "fetch_model",
+                runtime_bridge_mismatch = true,
+                pyo3_runtime_id = ?bridge.handle().id(),
+                dynamo_runtime_id = ?primary.handle().id(),
+                "the pyo3 async bridge was initialized before fetch_model and uses a different \
+                 Tokio runtime; model fetch will continue with separate runtimes"
+            );
+        });
+    }
+
+    Ok(primary)
+}
+
 /// Download a model from Hugging Face, returning its local path
 /// Example: `model_path = await fetch_model("Qwen/Qwen3-0.6B")`
 #[pyfunction]
@@ -832,8 +879,10 @@ fn fetch_model<'p>(
     remote_name: &str,
     ignore_weights: bool,
 ) -> PyResult<Bound<'p, PyAny>> {
+    let locals = pyo3_async_runtimes::tokio::get_current_locals(py)?;
     let repo = remote_name.to_string();
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    ensure_fetch_model_runtime().map_err(to_pyerr)?;
+    pyo3_async_runtimes::tokio::future_into_py_with_locals(py, locals, async move {
         LocalModel::fetch(&repo, ignore_weights)
             .await
             .map_err(to_pyerr)
@@ -1143,13 +1192,14 @@ impl From<llm_rs::worker_type::WorkerType> for WorkerType {
 #[pymethods]
 impl DistributedRuntime {
     #[new]
-    #[pyo3(signature = (event_loop, discovery_backend, request_plane, enable_nats=None, *, event_plane=None))]
+    #[pyo3(signature = (event_loop, discovery_backend, request_plane, enable_nats=None, *, event_plane=None, response_plane=None))]
     fn new(
         event_loop: PyObject,
         discovery_backend: String,
         request_plane: String,
         enable_nats: Option<bool>,
         event_plane: Option<String>,
+        response_plane: Option<String>,
     ) -> PyResult<Self> {
         if enable_nats.is_some() {
             Python::with_gil(|py| {
@@ -1173,6 +1223,7 @@ impl DistributedRuntime {
             }
         };
         let request_plane: RequestPlaneMode = request_plane.parse().map_err(to_pyerr)?;
+        let response_plane = resolve_response_plane_mode(response_plane.as_deref())?;
         let explicit_event_plane = event_plane.as_deref().filter(|value| !value.is_empty());
         let event_transport_kind =
             resolve_event_transport_kind(&discovery_backend_config, event_plane.as_deref())?;
@@ -1219,6 +1270,7 @@ impl DistributedRuntime {
                 None
             },
             request_plane,
+            response_plane,
             event_transport_kind,
         };
         let inner = runtime

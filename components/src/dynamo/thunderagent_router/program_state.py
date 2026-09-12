@@ -15,6 +15,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
+# Scheduling identity of one engine replica: ``total_kv_blocks`` is per rank, so the worker
+# id alone is not a unit of capacity. Any ``--dp-size N>1`` worker advertises N global ranks.
+ReplicaKey = tuple[int, int]  # (worker_id, dp_rank)
+
 
 class ProgramStatus(Enum):
     REASONING = "reasoning"
@@ -34,7 +38,9 @@ class Program:
     status: ProgramStatus = ProgramStatus.REASONING
     lifecycle: ProgramLifecycle = ProgramLifecycle.ACTIVE
 
-    assigned_worker_id: Optional[int] = None
+    # One value, not two Optionals: a half-known ``(worker, None)`` matches no replica, so
+    # it goes uncounted while the worker id suppresses re-placement -- an absorbing state.
+    assigned_replica: Optional[ReplicaKey] = None
 
     token_total: int = 0
 
@@ -58,7 +64,7 @@ class RequestSnapshot:
     program: Program
     status: ProgramStatus
     lifecycle: ProgramLifecycle
-    assigned_worker_id: Optional[int]
+    assigned_replica: Optional[ReplicaKey]
     token_total: int
     step_count: int
     marked_for_pause: bool
@@ -72,7 +78,7 @@ class RequestSnapshot:
 @dataclass
 class ProgramTable:
     programs: dict[str, Program] = field(default_factory=dict)
-    # Insertion-ordered: ties in `_greedy_resume`'s sort resolve oldest-paused
+    # Insertion-ordered: ties in `_greedy_resume_locked`'s sort resolve oldest-paused
     # first, mirroring upstream TA. Values are unused.
     paused: dict[str, None] = field(default_factory=dict)
 
@@ -100,7 +106,7 @@ class ProgramTable:
             program=program,
             status=program.status,
             lifecycle=program.lifecycle,
-            assigned_worker_id=program.assigned_worker_id,
+            assigned_replica=program.assigned_replica,
             token_total=program.token_total,
             step_count=program.step_count,
             marked_for_pause=program.marked_for_pause,
@@ -126,7 +132,7 @@ class ProgramTable:
 
         program.status = snapshot.status
         program.lifecycle = snapshot.lifecycle
-        program.assigned_worker_id = snapshot.assigned_worker_id
+        program.assigned_replica = snapshot.assigned_replica
         program.token_total = snapshot.token_total
         program.step_count = snapshot.step_count
         program.marked_for_pause = snapshot.marked_for_pause

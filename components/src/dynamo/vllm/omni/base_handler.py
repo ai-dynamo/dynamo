@@ -124,7 +124,7 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
             omni_kwargs["output_modalities"] = config.output_modalities
 
         if config.stage_configs_path:
-            omni_kwargs["stage_configs_path"] = config.stage_configs_path
+            omni_kwargs["deploy_config"] = config.stage_configs_path
 
         for field, value in dataclasses.asdict(config.diffusion).items():
             if value is not None:

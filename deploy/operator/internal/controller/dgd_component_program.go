@@ -68,6 +68,7 @@ func (p *componentProgram) Reconcile(
 	req workloadProgramRequest,
 ) (programResult workloadProgramResult, retErr error) {
 	programResult = newWorkloadProgramResult(req.DGD)
+	clearComponentGPUShapes(programResult.Status.Components)
 	defer func() {
 		if retErr == nil {
 			return
@@ -124,6 +125,10 @@ func (p *componentProgram) Reconcile(
 		checkpoints.Infos,
 	)
 	if err != nil {
+		// Preserve newly observed component status while leaving the generation unobserved.
+		if result.ComponentStatus != nil {
+			programResult.Status.Components = result.ComponentStatus
+		}
 		return programResult, fmt.Errorf("failed to reconcile Dynamo components deployments: %w", err)
 	}
 	result = applyCheckpointStartupReadiness(result, checkpoints.Infos)
@@ -147,11 +152,37 @@ func (p *componentProgram) reconcileWorkerRollout(
 		log.FromContext(ctx).Error(err, "Failed to migrate worker hash")
 		return failWorkloadProgram(reasonFailedToMigrateWorkerHash, err)
 	}
-
 	if supportsManagedRollingUpdate(dgd) {
 		return p.reconcileManagedWorkerRollout(ctx, dgd, status)
 	}
-	return p.rollout.ReconcileUnsupported(ctx, dgd, false)
+	return p.reconcileMultinodeWorkerRollout(ctx, dgd)
+}
+
+// reconcileMultinodeWorkerRollout gates hash projection on informer observation of the target DCD.
+func (p *componentProgram) reconcileMultinodeWorkerRollout(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) error {
+	transition, err := p.rollout.planUnsupportedWorkerHashTransition(dgd)
+	if err != nil {
+		return failWorkloadProgram(reasonRollingUpdateFailed, err)
+	}
+	if !transition.needsCommit() {
+		return nil
+	}
+
+	observed, err := p.rollout.dcdObservesWorkerHash(ctx, dgd, transition.next.v2)
+	if err != nil {
+		return failWorkloadProgram(reasonRollingUpdateFailed, err)
+	}
+	if !observed {
+		return nil
+	}
+
+	if err := p.rollout.commitUnsupportedWorkerHashTransition(ctx, dgd, transition, false); err != nil {
+		return failWorkloadProgram(reasonRollingUpdateFailed, err)
+	}
+	return nil
 }
 
 // supportsManagedRollingUpdate checks whether the component pathway can use

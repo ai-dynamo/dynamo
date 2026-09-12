@@ -455,6 +455,8 @@ impl MediaLoader {
     }
 
     pub fn new(media_decoder: MediaDecoder, media_fetcher: Option<MediaFetcher>) -> Result<Self> {
+        media_decoder.warn_if_unavailable_backends();
+
         // Fall back to env-aware defaults so `DYN_MM_ALLOW_INTERNAL=1` is
         // honored even when the caller doesn't pass an explicit fetcher.
         let media_fetcher = media_fetcher.unwrap_or_else(MediaFetcher::from_env);
@@ -514,6 +516,16 @@ impl MediaLoader {
         &self,
         oai_content_part: &ChatCompletionRequestUserMessageContentPart,
         media_io_kwargs: Option<&MediaDecoder>,
+    ) -> Result<RdmaMediaDataDescriptor> {
+        self.fetch_and_decode_media_part_with_video_hash(oai_content_part, media_io_kwargs, false)
+            .await
+    }
+
+    pub(crate) async fn fetch_and_decode_media_part_with_video_hash(
+        &self,
+        oai_content_part: &ChatCompletionRequestUserMessageContentPart,
+        media_io_kwargs: Option<&MediaDecoder>,
+        _hash_video: bool,
     ) -> Result<RdmaMediaDataDescriptor> {
         // Image-only fast path: cache lookup keyed by URL/datauri string.
         // Video/audio aren't cached yet (their lifetime/content semantics
@@ -589,7 +601,9 @@ impl MediaLoader {
                     // Use runtime decoder if provided, with MDC limits enforced
                     let decoder =
                         mdc_decoder.with_runtime(media_io_kwargs.and_then(|k| k.video.as_ref()));
-                    decoder.decode_async(data).await?
+                    decoder
+                        .decode_async_with_video_hash(data, _hash_video)
+                        .await?
                 }
             }
             ChatCompletionRequestUserMessageContentPart::AudioUrl(_) => {

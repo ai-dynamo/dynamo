@@ -8,6 +8,7 @@
 
 mod handoff;
 mod metrics;
+mod sglang;
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -20,6 +21,7 @@ use std::time::{Duration, Instant};
 use crate::backend::ExecutionContext;
 use crate::kv_router::publisher::{KvEventPublisher, KvEventSourceConfig, WorkerMetricsPublisher};
 use crate::protocols::TokenIdType;
+use crate::protocols::common::FinishReason;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 use anyhow::{Context, Result, bail};
 use dynamo_kv_router::protocols::{KvCacheEvent, StorageTier};
@@ -152,8 +154,8 @@ impl ResponseReplayTable {
         Ok(Self { rows })
     }
 
-    fn get(&self, key: &str) -> Option<Vec<TokenIdType>> {
-        self.rows.get(key).cloned()
+    fn get(&self, key: &str) -> Option<&[TokenIdType]> {
+        self.rows.get(key).map(Vec::as_slice)
     }
 
     #[cfg(test)]
@@ -242,20 +244,16 @@ fn no_bootstrap_handoff_delay(
     Some(Duration::from_secs_f64(delay_ms.max(0.0) / 1000.0))
 }
 
-async fn send_response(
+fn send_response(
     stream_tx: &mpsc::UnboundedSender<LLMEngineOutput>,
     output: LLMEngineOutput,
     context: &Arc<dyn AsyncEngineContext>,
 ) -> bool {
-    tokio::select! {
-        biased;
-        _ = stream_tx.closed() => false,
-        _ = context.stopped() => {
-            let _ = stream_tx.send(LLMEngineOutput::cancelled());
-            false
-        }
-        result = async { stream_tx.send(output) } => result.is_ok(),
+    if context.is_stopped() {
+        let _ = stream_tx.send(LLMEngineOutput::cancelled());
+        return false;
     }
+    stream_tx.send(output).is_ok()
 }
 
 struct MockerExecutionContext {
@@ -648,6 +646,7 @@ impl MockerExecutionContext {
                                 endpoint: format!("tcp://127.0.0.1:{zmq_port}"),
                                 topic: String::new(),
                                 image_token_id: None,
+                                video_token_id: None,
                             });
                             match KvEventPublisher::new_with_local_indexer(
                                 endpoint.clone(),
@@ -795,6 +794,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let (request, ctx) = input.into_parts();
         let request_start = Instant::now();
+        let native_sglang = sglang::response_metadata(&request, ctx.id()).map_err(Error::from)?;
+        let native_sglang_terminal = native_sglang.is_some();
 
         let dp_rank = self.resolve_dp_rank(&request);
 
@@ -821,9 +822,19 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 .ok_or_else(|| Error::msg("max_output_tokens must be specified for mocker"))?
                 as usize
         };
-        let replay_key = (!is_prefill)
-            .then(|| request.get_annotation_value(OUTPUT_REPLAY_ID_ANNOTATION_KEY))
-            .flatten();
+        let replay_key = request
+            .get_annotation_value(OUTPUT_REPLAY_ID_ANNOTATION_KEY)
+            .or_else(|| {
+                // A native SGLang decode request has no replay annotation, so fall back to its
+                // rid. Only do so when a trace is loaded, otherwise every native request would
+                // warn below about a replay it never asked for.
+                if is_prefill {
+                    return None;
+                }
+                let metadata = native_sglang.as_ref()?;
+                self.response_replay_table.as_ref()?;
+                Some(metadata.request_id().to_string())
+            });
         let planned_output_token_ids = replay_key.as_deref().and_then(|key| {
             let Some(table) = self.response_replay_table.as_ref() else {
                 tracing::warn!(
@@ -833,7 +844,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 return None;
             };
             match table.get(key) {
-                Some(tokens) => Some(tokens),
+                Some(tokens) if is_prefill => Some(tokens[..tokens.len().min(1)].to_vec()),
+                Some(tokens) => Some(tokens.to_vec()),
                 None => {
                     tracing::warn!(
                         replay_key = key,
@@ -863,7 +875,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let direct_request = DirectRequest {
             tokens: request.token_ids.clone(),
             max_output_tokens,
-            output_token_ids: planned_output_token_ids.clone(),
+            output_token_ids: planned_output_token_ids,
             uuid: Some(request_uuid),
             dp_rank,
             arrival_timestamp_ms: request.request_timestamp_ms,
@@ -1027,6 +1039,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 .as_ref()
                 .map(|cfg| cfg.num_thinking_tokens(max_output_tokens))
                 .unwrap_or(0);
+            let mut context_stopped = async_context.stopped();
+            let stream_closed = stream_tx.closed();
+            tokio::pin!(stream_closed);
 
             loop {
                 tokio::select! {
@@ -1044,8 +1059,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                     &stream_tx,
                                     LLMEngineOutput::error(error),
                                     &async_context,
-                                )
-                                .await;
+                                );
                                 break;
                             }
                             Err(_) => {
@@ -1055,8 +1069,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                         "source handoff session ended without completion".to_string(),
                                     ),
                                     &async_context,
-                                )
-                                .await;
+                                );
                                 break;
                             }
                         }
@@ -1073,8 +1086,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                     &stream_tx,
                                     LLMEngineOutput::error(error),
                                     &async_context,
-                                )
-                                .await;
+                                );
                                 break;
                             }
                             None => destination_error_rx = None,
@@ -1086,7 +1098,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                 &stream_tx,
                                 LLMEngineOutput::error("All output transmitters closed".to_string()),
                                 &async_context,
-                            ).await;
+                            );
                             break;
                         };
 
@@ -1102,8 +1114,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                     "request rejected: request exceeds worker admission limits".to_string(),
                                 ),
                                 &async_context,
-                            )
-                            .await;
+                            );
                             break;
                         }
 
@@ -1141,16 +1152,20 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                     "Completion signal received before max tokens reached".to_string(),
                                 ),
                                 &async_context,
-                            )
-                            .await;
+                            );
                             break;
                         }
 
                         if signal.completed {
-                            if !send_response(&stream_tx, output, &async_context).await {
-                                break;
-                            }
-                            native_timing.record_tokens(1);
+                            let mut terminal_output = if native_sglang_terminal {
+                                Some(output)
+                            } else {
+                                if !send_response(&stream_tx, output, &async_context) {
+                                    break;
+                                }
+                                native_timing.record_tokens(1);
+                                None
+                            };
 
                             let delay_completed = tokio::select! {
                                 _ = wait_for_no_bootstrap_handoff_delay(
@@ -1158,8 +1173,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                     has_handoff_session,
                                     signal.handoff_delay_ms,
                                 ) => true,
-                                _ = stream_tx.closed() => false,
-                                _ = async_context.stopped() => {
+                                _ = &mut stream_closed => false,
+                                _ = &mut context_stopped => {
                                     handoff_cancel.cancel();
                                     let _ = stream_tx.send(LLMEngineOutput::cancelled());
                                     false
@@ -1174,11 +1189,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             {
                                 let completion = tokio::select! {
                                     completion = completion_rx => completion,
-                                    _ = stream_tx.closed() => {
+                                    _ = &mut stream_closed => {
                                         handoff_cancel.cancel();
                                         break;
                                     }
-                                    _ = async_context.stopped() => {
+                                    _ = &mut context_stopped => {
                                         handoff_cancel.cancel();
                                         let _ = stream_tx.send(LLMEngineOutput::cancelled());
                                         break;
@@ -1191,8 +1206,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                             &stream_tx,
                                             LLMEngineOutput::error(error),
                                             &async_context,
-                                        )
-                                        .await;
+                                        );
                                         break;
                                     }
                                     Err(_) => {
@@ -1203,42 +1217,60 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                                     .to_string(),
                                             ),
                                             &async_context,
-                                        )
-                                        .await;
+                                        );
                                         break;
                                     }
                                 }
                             }
 
-                            let mut final_output = LLMEngineOutput::length();
-                            if let Some(cached) = cached_prefix_tokens {
-                                final_output.completion_usage = Some(usage_with_cached_tokens(
-                                    prompt_tokens_count,
-                                    token_count,
-                                    cached,
-                                ));
-                            }
-                            if !send_response(&stream_tx, final_output, &async_context).await {
-                                break;
+                            if native_sglang_terminal {
+                                // Native SGLang carries terminal metadata on the final token.
+                                let mut output = terminal_output
+                                    .take()
+                                    .expect("native SGLang request has a terminal token");
+                                output.finish_reason = Some(FinishReason::Length);
+                                if let Some(cached) = cached_prefix_tokens {
+                                    output.completion_usage = Some(usage_with_cached_tokens(
+                                        prompt_tokens_count,
+                                        token_count,
+                                        cached,
+                                    ));
+                                }
+                                if !send_response(&stream_tx, output, &async_context) {
+                                    break;
+                                }
+                                native_timing.record_tokens(1);
+                            } else {
+                                let mut final_output = LLMEngineOutput::length();
+                                if let Some(cached) = cached_prefix_tokens {
+                                    final_output.completion_usage = Some(usage_with_cached_tokens(
+                                        prompt_tokens_count,
+                                        token_count,
+                                        cached,
+                                    ));
+                                }
+                                if !send_response(&stream_tx, final_output, &async_context) {
+                                    break;
+                                }
                             }
                             native_timing.record_normal_completion();
                             request_completed_normally = true;
                             break;
+                        } else {
+                            if !send_response(&stream_tx, output, &async_context) {
+                                break;
+                            }
+                            native_timing.record_tokens(1);
                         }
-
-                        if !send_response(&stream_tx, output, &async_context).await {
-                            break;
-                        }
-                        native_timing.record_tokens(1);
                     }
 
-                    _ = async_context.stopped() => {
+                    _ = &mut context_stopped => {
                         handoff_cancel.cancel();
                         let _ = stream_tx.send(LLMEngineOutput::cancelled());
                         break;
                     }
 
-                    _ = stream_tx.closed() => {
+                    _ = &mut stream_closed => {
                         handoff_cancel.cancel();
                         break;
                     }
@@ -1259,7 +1291,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             tokio::spawn(response_task);
         }
 
-        let stream = UnboundedReceiverStream::new(stream_rx).map(Annotated::from_data);
+        let mut completion_tokens = 0_usize;
+        let stream = UnboundedReceiverStream::new(stream_rx).map(move |mut output| {
+            if let Some(metadata) = native_sglang.as_ref() {
+                completion_tokens = completion_tokens.saturating_add(output.token_ids.len());
+                sglang::adapt(metadata, &mut output, completion_tokens);
+            }
+            Annotated::from_data(output)
+        });
         Ok(ResponseStream::new(Box::pin(stream), ctx.context()))
     }
 }
@@ -1312,12 +1351,44 @@ mod tests {
     use super::*;
     use crate::protocols::common::llm_backend::PreprocessedRequest;
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
-    use dynamo_mocker::common::protocols::{MockEngineArgs, WorkerType};
+    use dynamo_mocker::common::protocols::{EngineType, MockEngineArgs, WorkerType};
+    use dynamo_runtime::pipeline::context::Controller;
     use dynamo_runtime::pipeline::{AsyncEngine, SingleIn};
     use futures::StreamExt;
     use std::collections::BTreeMap;
     use std::io::Write;
     use std::time::Duration;
+
+    #[test]
+    fn response_send_handles_stopped_and_closed_streams() {
+        let context: Arc<dyn AsyncEngineContext> = Arc::new(Controller::default());
+        let (stream_tx, mut stream_rx) = mpsc::unbounded_channel();
+        let output = LLMEngineOutput {
+            token_ids: vec![42],
+            ..Default::default()
+        };
+
+        assert!(send_response(&stream_tx, output.clone(), &context));
+        assert_eq!(stream_rx.try_recv().unwrap(), output);
+
+        context.stop();
+        assert!(!send_response(
+            &stream_tx,
+            LLMEngineOutput::length(),
+            &context
+        ));
+        assert_eq!(stream_rx.try_recv().unwrap(), LLMEngineOutput::cancelled());
+        assert!(stream_rx.try_recv().is_err());
+
+        let (closed_tx, closed_rx) = mpsc::unbounded_channel();
+        drop(closed_rx);
+        let active_context: Arc<dyn AsyncEngineContext> = Arc::new(Controller::default());
+        assert!(!send_response(
+            &closed_tx,
+            LLMEngineOutput::length(),
+            &active_context
+        ));
+    }
 
     fn prefill_request() -> PreprocessedRequest {
         PreprocessedRequest::builder()
@@ -1423,6 +1494,39 @@ mod tests {
         let mut expected_finish = LLMEngineOutput::length();
         expected_finish.completion_usage = Some(usage_with_cached_tokens(3, 1, 0));
         assert_eq!(stream.next().await.unwrap().data.unwrap(), expected_finish);
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn native_sglang_completion_attaches_length_to_final_token() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(64)
+            .max_num_batched_tokens(Some(64))
+            .speedup_ratio(1000.0)
+            .build()
+            .unwrap();
+        let live = LiveEngine::start(args.clone(), 0).unwrap();
+        let engine = MockerExecutionContext::new(args);
+        assert!(engine.engines.set(vec![live]).is_ok());
+
+        let mut request = decode_request(3, 1);
+        request.extra_args = Some(serde_json::json!({"sglang_tito": {"rid": "native"}}));
+
+        let mut stream = engine.generate(SingleIn::new(request)).await.unwrap();
+        let output = stream.next().await.unwrap().data.unwrap();
+        assert_eq!(output.token_ids.len(), 1);
+        assert_eq!(
+            output.finish_reason,
+            LLMEngineOutput::length().finish_reason
+        );
+        let response = &output.engine_data.as_ref().unwrap()["sglang_response"];
+        assert_eq!(response["output_ids"], serde_json::json!(output.token_ids));
+        assert_eq!(response["meta_info"]["completion_tokens"], 1);
+        assert_eq!(
+            response["meta_info"]["finish_reason"],
+            serde_json::json!({"type": "length"})
+        );
         assert!(stream.next().await.is_none());
     }
 
@@ -1611,6 +1715,45 @@ mod tests {
         file
     }
 
+    #[tokio::test]
+    async fn response_replay_prefill_uses_only_first_planned_token() {
+        let file = write_replay_trace(&[serde_json::json!({
+            "request_id": "planned",
+            "output_length": 2,
+            "output_token_ids": [7, 8],
+        })]);
+
+        for engine_type in [EngineType::Vllm, EngineType::Sglang] {
+            for (worker_type, expected) in [
+                (WorkerType::Prefill, &[7][..]),
+                (WorkerType::Decode, &[7, 8][..]),
+            ] {
+                let args = MockEngineArgs::builder()
+                    .engine_type(engine_type)
+                    .worker_type(worker_type)
+                    .block_size(4)
+                    .num_gpu_blocks(64)
+                    .max_num_batched_tokens(Some(64))
+                    .speedup_ratio(1000.0)
+                    .response_replay_trace_path(Some(file.path().to_path_buf()))
+                    .build()
+                    .unwrap();
+                let live = LiveEngine::start(args.clone(), 0).unwrap();
+                let engine = MockerExecutionContext::new(args);
+                assert!(engine.engines.set(vec![live]).is_ok());
+
+                let mut request = decode_request(3, 2);
+                request.annotations = vec!["output_replay_id:planned".to_string()];
+                let mut stream = engine.generate(SingleIn::new(request)).await.unwrap();
+                let mut output_token_ids = Vec::new();
+                while let Some(output) = stream.next().await {
+                    output_token_ids.extend(output.data.unwrap().token_ids);
+                }
+                assert_eq!(output_token_ids, expected);
+            }
+        }
+    }
+
     #[test]
     fn response_replay_table_derives_keys_and_validates_lengths() {
         let file = write_replay_trace(&[
@@ -1633,9 +1776,9 @@ mod tests {
 
         let table = ResponseReplayTable::from_path(file.path()).unwrap();
         assert_eq!(table.len(), 3);
-        assert_eq!(table.get("explicit").as_deref(), Some(&[7, 8][..]));
-        assert_eq!(table.get("s:1").as_deref(), Some(&[9][..]));
-        assert_eq!(table.get("line:2").as_deref(), Some(&[10][..]));
+        assert_eq!(table.get("explicit"), Some(&[7, 8][..]));
+        assert_eq!(table.get("s:1"), Some(&[9][..]));
+        assert_eq!(table.get("line:2"), Some(&[10][..]));
 
         let invalid = write_replay_trace(&[serde_json::json!({
             "output_length": 2,
