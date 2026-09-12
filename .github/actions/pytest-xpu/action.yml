@@ -1,0 +1,242 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: 'Pytest (XPU)'
+description: |
+  Run pytest inside an XPU runtime container. This is the Intel GPU
+  counterpart to .github/actions/pytest, which targets NVIDIA GPUs via
+  --gpus all. The two actions are intentionally kept separate during the
+  initial XPU CI rollout so that this contribution is purely additive.
+  A follow-up PR can unify them once the XPU pipeline is stable.
+
+  This action does NOT bind-mount the host's test-results directory into
+  the test container. Instead, pytest writes results inside the container
+  and we extract them with `docker cp` afterward. This avoids permission
+  issues when the container's non-root user (e.g. 'dynamo') cannot write
+  to a host-owned mount, and works in both standard and Docker-in-Docker
+  runner setups.
+
+inputs:
+  image_tag:
+    description: 'Container image tag to run tests in'
+    required: true
+  pytest_marks:
+    description: 'Pytest -m marker expression'
+    required: true
+  test_suite_name:
+    description: 'Test suite name (used in artifact names)'
+    required: false
+    default: 'vllm-xpu'
+  test_type:
+    description: 'Test type label (e.g. pre_merge_cpu, pre_merge_gpu_1)'
+    required: false
+    default: 'pre_merge'
+  parallel_mode:
+    description: 'Parallelization mode: auto (use all cores), none/0 (sequential), or a number of workers'
+    required: false
+    default: 'auto'
+  hf_token:
+    description: 'HuggingFace token (passed into container as HF_TOKEN)'
+    required: false
+  docker_device_flags:
+    description: 'docker run flags from setup-xpu (e.g. --device /dev/dri -v /dev/dri:/dev/dri)'
+    required: false
+    default: ''
+  docker_group_flags:
+    description: 'docker run --group-add flags from setup-xpu'
+    required: false
+    default: ''
+  docker_env_flags:
+    description: 'docker run -e flags from setup-xpu (e.g. UR_ADAPTERS_FORCE_LOAD)'
+    required: false
+    default: ''
+  pytest_ignore:
+    description: |
+      Space-separated list of pytest --ignore=PATH arguments. Use this to
+      skip test files (or whole directories) that fail at collection time
+      due to known upstream issues (e.g. version mismatches between
+      ai-dynamo and vllm in the built image).
+    required: false
+    default: ''
+  pytest_deselect:
+    description: |
+      Space-separated list of pytest --deselect=NODEID arguments. Use this
+      to skip individual tests within a file when --ignore would be too
+      broad. Each entry must be a full pytest node ID, e.g.
+      "components/src/dynamo/vllm/tests/test_vllm_unit.py::test_foo".
+    required: false
+    default: ''
+  dynamo_compat_wheels_path:
+    description: |
+      Host path to a directory containing ai-dynamo and ai-dynamo-runtime
+      wheel files that are compatible with the vllm version in the XPU
+      image. When set, the action replaces the installed ai-dynamo
+      packages with these wheels before running tests. This is a
+      workaround for the ai-dynamo 1.0.0 / vllm 0.17.1+xpu version
+      mismatch (MultiModalUUIDDict import error).
+      Leave empty to skip the downgrade (use the image's default).
+    required: false
+    default: ''
+  hf_cache_path:
+    description: |
+      Host path to a pre-populated HuggingFace model cache directory.
+      When set, this is mounted read-only into the container at
+      /home/dynamo/.cache/huggingface/hub so that tests can load models
+      without downloading from huggingface.co. The path must exist on
+      the HOST (not inside the runner container) and contain models in
+      HF hub cache layout (models--ORG--NAME/snapshots/...).
+      Leave empty to skip the mount (tests that need models will error).
+    required: false
+    default: ''
+
+runs:
+  using: "composite"
+  steps:
+    - name: Run pytest in XPU container
+      shell: bash
+      env:
+        CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_pytest
+        PYTEST_XML_FILE: pytest_test_report.xml
+        HF_TOKEN: ${{ inputs.hf_token }}
+      run: |
+        set +e
+
+        mkdir -p test-results
+
+        # Determine parallelization based on parallel_mode input
+        case "${{ inputs.parallel_mode }}" in
+          "auto")
+            PARALLEL_OPTS="-n auto"
+            ;;
+          "none"|"0")
+            PARALLEL_OPTS="-n 0"
+            ;;
+          *)
+            PARALLEL_OPTS="-n ${{ inputs.parallel_mode }}"
+            ;;
+        esac
+
+        # Build --ignore and --deselect arguments
+        IGNORE_ARGS=""
+        for p in ${{ inputs.pytest_ignore }}; do
+          IGNORE_ARGS="${IGNORE_ARGS} --ignore=${p}"
+        done
+        DESELECT_ARGS=""
+        for n in ${{ inputs.pytest_deselect }}; do
+          DESELECT_ARGS="${DESELECT_ARGS} --deselect=${n}"
+        done
+
+        PYTEST_CMD="mkdir -p /workspace/test-results /workspace/test-results/allure-results && pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${PYTEST_XML_FILE} --alluredir=/workspace/test-results/allure-results --durations=10 ${IGNORE_ARGS} ${DESELECT_ARGS} -m \"${{ inputs.pytest_marks }}\""
+
+        echo "Pytest command: ${PYTEST_CMD}"
+
+        DOCKER_ENV_FLAGS=()
+        if [[ -n "${HF_TOKEN:-}" ]]; then
+          DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
+        fi
+        DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_FRAMEWORK=vllm")
+        DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_PLATFORM=xpu")
+        DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
+        DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_WORKFLOW=${GITHUB_WORKFLOW}")
+        DOCKER_ENV_FLAGS+=(--env "VLLM_TARGET_DEVICE=xpu")
+
+        # Build optional HF cache mount. When a cache is provided, also set
+        # HF_HUB_OFFLINE=1 so that huggingface_hub never tries to reach the
+        # HF API (which times out behind corporate proxies). The tests will
+        # load models exclusively from the mounted cache.
+        HF_CACHE_MOUNT=""
+        HF_OFFLINE_FLAG=""
+        if [[ -n "${{ inputs.hf_cache_path }}" ]]; then
+          HF_CACHE_MOUNT="-v ${{ inputs.hf_cache_path }}:/home/dynamo/.cache/huggingface/hub"
+          HF_OFFLINE_FLAG="-e HF_HUB_OFFLINE=1"
+          echo "Mounting HF cache from ${{ inputs.hf_cache_path }} (offline mode)"
+        fi
+
+        # Build optional dynamo compat wheels mount and pre-install command.
+        # When ai-dynamo in the image is incompatible with vllm-xpu, we
+        # replace it at container startup before running tests.
+        WHEELS_MOUNT=""
+        WHEELS_INSTALL=""
+        if [[ -n "${{ inputs.dynamo_compat_wheels_path }}" ]]; then
+          WHEELS_MOUNT="-v ${{ inputs.dynamo_compat_wheels_path }}:/dynamo-wheels:ro"
+          WHEELS_INSTALL="source /opt/dynamo/venv/bin/activate 2>/dev/null; uv pip uninstall ai-dynamo ai-dynamo-runtime 2>/dev/null; rm -rf /opt/dynamo/venv/lib/python3.12/site-packages/dynamo /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo*; uv pip install --no-deps /dynamo-wheels/ai_dynamo_runtime-*.whl /dynamo-wheels/ai_dynamo-*.whl 2>&1 | tail -3; "
+          echo "Mounting dynamo compat wheels from ${{ inputs.dynamo_compat_wheels_path }}"
+        fi
+
+        # Run WITHOUT --rm so we can docker cp results out after pytest exits.
+        docker rm -f "${CONTAINER_ID}" 2>/dev/null || true
+        docker run \
+          ${{ inputs.docker_device_flags }} \
+          ${{ inputs.docker_group_flags }} \
+          ${{ inputs.docker_env_flags }} \
+          ${HF_CACHE_MOUNT} \
+          ${HF_OFFLINE_FLAG} \
+          ${WHEELS_MOUNT} \
+          --shm-size=200m \
+          --ulimit memlock=-1 \
+          --ulimit stack=67108864 \
+          -w /workspace \
+          --network host \
+          "${DOCKER_ENV_FLAGS[@]}" \
+          --name "${CONTAINER_ID}" \
+          ${{ inputs.image_tag }} \
+          sh -c "umask 0022 && ${WHEELS_INSTALL}${PYTEST_CMD}"
+
+        TEST_EXIT_CODE=$?
+        # pytest exit code 5 = "no tests collected". This is not a failure —
+        # it means the marker/ignore combination yielded zero matching tests.
+        # Treat it as success so the pipeline stays green.
+        if [ "${TEST_EXIT_CODE}" -eq 5 ]; then
+          echo "No tests were selected for this marker — treating as success"
+          TEST_EXIT_CODE=0
+        fi
+        echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> "${GITHUB_ENV}"
+        echo "Tests completed with exit code: ${TEST_EXIT_CODE}"
+
+        # Extract results from the (now-stopped) container, then remove it.
+        docker cp "${CONTAINER_ID}:/workspace/test-results/." test-results/ 2>&1 || \
+          echo "WARNING: failed to docker cp test-results out of container"
+        docker rm -f "${CONTAINER_ID}" 2>/dev/null || true
+
+        ls -la test-results/ || true
+        exit 0
+
+    - name: Process test results
+      shell: bash
+      run: |
+        STR_TEST_TYPE=$(echo "${{ inputs.test_type }}" | tr ', ' '_')
+        echo "STR_TEST_TYPE=${STR_TEST_TYPE}" >> "${GITHUB_ENV}"
+
+        JUNIT_FILE="test-results/pytest_test_report.xml"
+        if [[ -f "${JUNIT_FILE}" ]]; then
+          TOTAL_TESTS=$(grep -o 'tests="[0-9]*"' "${JUNIT_FILE}" | grep -o '[0-9]*' | head -1 || echo "0")
+          FAILED_TESTS=$(grep -o 'failures="[0-9]*"' "${JUNIT_FILE}" | grep -o '[0-9]*' | head -1 || echo "0")
+          ERROR_TESTS=$(grep -o 'errors="[0-9]*"' "${JUNIT_FILE}" | grep -o '[0-9]*' | head -1 || echo "0")
+          echo "${TOTAL_TESTS} tests completed (${FAILED_TESTS} failed, ${ERROR_TESTS} errors)"
+
+          JUNIT_NAME="pytest_test_report_${{ inputs.test_suite_name }}_${STR_TEST_TYPE}_xpu_${{ github.run_id }}.xml"
+          mv "${JUNIT_FILE}" "test-results/${JUNIT_NAME}"
+          echo "Renamed XML file to: ${JUNIT_NAME}"
+        else
+          echo "WARNING: JUnit XML file not found"
+          FAILED_TESTS=1
+        fi
+
+        exit ${TEST_EXIT_CODE}
+
+    - name: Upload test results
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      if: always()
+      with:
+        name: test-results-${{ inputs.test_suite_name }}-${{ env.STR_TEST_TYPE }}-xpu-${{ github.run_id }}
+        path: test-results/pytest_test_report_${{ inputs.test_suite_name }}_${{ env.STR_TEST_TYPE }}_xpu_${{ github.run_id }}.xml
+        retention-days: 7
+
+    - name: Upload allure results
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      if: always()
+      with:
+        name: allure-results-vllm-xpu-${{ env.STR_TEST_TYPE }}-${{ github.run_id }}
+        path: test-results/allure-results/
+        retention-days: 7
+        if-no-files-found: ignore
