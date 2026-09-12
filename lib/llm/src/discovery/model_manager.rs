@@ -1688,6 +1688,9 @@ impl ModelManager {
         engine: OpenAIAudiosStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        if self.alias_to_primary.contains_key(model) {
+            return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
+        }
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_audios_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));

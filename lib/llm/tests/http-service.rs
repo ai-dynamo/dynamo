@@ -1949,13 +1949,8 @@ async fn test_audio_speech_alias_meters_under_primary_model() {
         .manager()
         .add_audios_model(PRIMARY, card.mdcsum(), engine.clone())
         .unwrap();
-    // `register_alias` refuses a name that is already a live primary, so the
-    // alias claims its mapping before it gains a registration of its own.
+    // Audio requests resolve an alias through its primary model registration.
     assert!(state.manager().register_alias(ALIAS, PRIMARY));
-    state
-        .manager()
-        .add_audios_model(ALIAS, card.mdcsum(), engine.clone())
-        .unwrap();
 
     let token = CancellationToken::new();
     let task = service.spawn_with_listener(token.clone(), listener).await;
