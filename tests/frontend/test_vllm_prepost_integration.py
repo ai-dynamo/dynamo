@@ -313,3 +313,56 @@ def test_vllm_chat_processor_forwards_max_thinking_tokens(
     captured = _read_captured_request(capture_path)
 
     assert captured["stop_conditions"]["max_thinking_tokens"] == 16
+
+
+@pytest.mark.timeout(180)
+def test_vllm_chat_processor_forwards_thinking_token_budget(
+    start_services: tuple[int, Path],
+) -> None:
+    """Root-level `thinking_token_budget` reaches the worker as
+    stop_conditions.max_thinking_tokens after the Python frontend processes it."""
+    frontend_port, capture_path = start_services
+
+    payload = {
+        "model": TEST_MODEL,
+        "messages": [{"role": "user", "content": "Solve: 1+1."}],
+        "max_tokens": 32,
+        "thinking_token_budget": 32,
+    }
+
+    response = requests.post(
+        f"http://localhost:{frontend_port}/v1/chat/completions",
+        json=payload,
+        timeout=60,
+    )
+    response.raise_for_status()
+    captured = _read_captured_request(capture_path)
+
+    assert captured["stop_conditions"]["max_thinking_tokens"] == 32
+
+
+@pytest.mark.timeout(180)
+def test_vllm_chat_processor_thinking_token_budget_overrides_nvext(
+    start_services: tuple[int, Path],
+) -> None:
+    """Root-level `thinking_token_budget` takes precedence over the legacy
+    nvext.max_thinking_tokens field."""
+    frontend_port, capture_path = start_services
+
+    payload = {
+        "model": TEST_MODEL,
+        "messages": [{"role": "user", "content": "Solve: 1+1."}],
+        "max_tokens": 32,
+        "thinking_token_budget": 32,
+        "nvext": {"max_thinking_tokens": 16},
+    }
+
+    response = requests.post(
+        f"http://localhost:{frontend_port}/v1/chat/completions",
+        json=payload,
+        timeout=60,
+    )
+    response.raise_for_status()
+    captured = _read_captured_request(capture_path)
+
+    assert captured["stop_conditions"]["max_thinking_tokens"] == 32
