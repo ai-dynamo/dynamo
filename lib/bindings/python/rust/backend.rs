@@ -1677,7 +1677,9 @@ where
 /// subclasses go through the shared mapping table; built-in Python
 /// exceptions fall back to the closest category.
 fn py_err_to_dynamo(err: PyErr) -> DynamoError {
-    if Python::with_gil(|py| err.is_instance_of::<pyo3::exceptions::PyGeneratorExit>(py)) {
+    if Python::with_gil(|py| {
+        err.is_instance_of::<pyo3::exceptions::PyGeneratorExit>(py)
+    }) {
         return DynamoError::builder()
             .error_type(ErrorType::Backend(BackendError::Cancelled))
             .message("Python generator closed")
