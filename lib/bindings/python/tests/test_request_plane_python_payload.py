@@ -3,8 +3,12 @@
 
 import asyncio
 import contextlib
+from typing import Any
+from uuid import uuid4
 
 import pytest
+
+from dynamo._core import RouterMode
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -150,3 +154,14 @@ async def test_python_request_plane_plain_annotated_error_and_malformed_frames(
         with pytest.raises(ValueError, match=message):
             async for _ in stream:
                 pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(30)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+async def test_client_generate_honors_configured_router_mode(runtime: Any) -> None:
+    endpoint = runtime.endpoint(f"configured-direct-{uuid4().hex}.backend.generate")
+    client = await endpoint.client(RouterMode.Direct)
+
+    with pytest.raises(Exception, match="Direct routing should not call generate"):
+        await client.generate({"value": "hello"})
