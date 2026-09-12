@@ -32,7 +32,7 @@ from .sglang_prepost import (
     ToolCallParserType,
     _client_wants_separate_reasoning,
     _get_history_tool_calls_count,
-    _guided_tool_choice_requires_reasoning,
+    _guided_output_requires_reasoning,
     convert_tools,
     create_parsers,
     detect_force_reasoning_from_template,
@@ -357,8 +357,8 @@ def _preprocess_worker(
         pre.guided_decoding,
         pre.tool_call_parser,
         pre.reasoning_parser,
-        require_reasoning=_guided_tool_choice_requires_reasoning(
-            request, pre.force_reasoning
+        require_reasoning=_guided_output_requires_reasoning(
+            request, pre.force_reasoning, _w_reasoning_parser_name
         ),
     )
 
@@ -599,8 +599,8 @@ class SglangProcessor:
                 pre.guided_decoding,
                 pre.tool_call_parser,
                 pre.reasoning_parser,
-                require_reasoning=_guided_tool_choice_requires_reasoning(
-                    request, pre.force_reasoning
+                require_reasoning=_guided_output_requires_reasoning(
+                    request, pre.force_reasoning, self.reasoning_parser_name
                 ),
             )
         except PreprocessError as exc:
