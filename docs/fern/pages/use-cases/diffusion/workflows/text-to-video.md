@@ -90,6 +90,8 @@ container/run.sh \
   -e DYN_H3_MODEL_PATH \
   -e DYN_H3_MODEL_REVISION \
   -e DYN_H3_FASTH3_LORA_PATH \
+  -e DYN_H3_FASTH3_VARIANT \
+  -e DYN_H3_FASTVIDEO_VSA_TOPK \
   -e HF_TOKEN \
   -it
 ```
@@ -125,6 +127,28 @@ The qualification script verifies the adapter SHA-256, requests four inference
 steps, omits request scheduler-shift overrides, and records request duration and
 adapter provenance. FastH3 v1 is T2VA-only and does not support CPU or layerwise
 offload.
+
+To use FastH3 with Variable Sparse Attention (VSA), download a VSA adapter and
+identify the variant to the launcher and qualification script:
+
+```bash
+export DYN_H3_FASTH3_VARIANT=vsa-datafree
+export DYN_H3_FASTH3_LORA_PATH="$(hf download \
+  FastVideo/FastVideo-FastH3-4-step-Preview-v1-LoRA \
+  vsa-datafree/adapter_model.safetensors \
+  --revision bcf40ca6f457ed66f8badf13514943e390205fca)"
+```
+
+This path requires vLLM-Omni `v0.29.0rc1` or later. The video-audio overlay
+pins `fastvideo-kernel==0.3.5`. For a `vsa-*` adapter, the launcher selects
+`FASTVIDEO_VSA` and retains 64 key/value blocks per query block. The published
+kernel wheel defaults to the portable Triton route used on B300/SM103. On a
+B200/SM100 system with a source-built wheel containing the native SM100a
+extension, set `DYN_H3_FASTVIDEO_VSA_SM100A=1` to opt into that forward.
+Override the top-k value with `DYN_H3_FASTVIDEO_VSA_TOPK`. FastH3 VSA supports
+pure Ulysses sequence parallelism; ring and all-gather degrees must remain 1.
+Check the first-forward worker logs for `FASTVIDEO_VSA H3 routing` and verify
+that it does not fall back to dense SDPA.
 
 Run the supplied end-to-end qualification against the same worker. It requests
 a 10-second clip, then verifies a non-empty H.264 stream at 24 FPS and a

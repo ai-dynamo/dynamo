@@ -400,7 +400,7 @@ RUN set -eu; \
 # The vllm-openai base sets UV_CACHE_DIR=/opt/uv/cache and used to bake a uv
 # cache there (v0.27.1 carried archived wheel copies, including mooncake, that
 # duplicated installed packages and kept stale versions on disk after floors
-# refreshed them). The pinned v0.28.0 base mounts a cache over that path in
+# refreshed them). The pinned v0.29.0 base mounts a cache over that path in
 # every uv RUN and ships only the empty directory, so the rm below is a no-op
 # today. It stays as a guard against a base that bakes the cache again: the
 # cache would sit in an inherited layer, so removing it here does not shrink
