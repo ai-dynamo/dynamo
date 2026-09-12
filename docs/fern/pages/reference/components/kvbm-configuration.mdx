@@ -7,14 +7,18 @@ subtitle: Field reference for the KV Block Manager environment variables and the
 
 The KV Block Manager (KVBM) is configured through two layers:
 
-- **`DYN_KVBM_*` runtime environment variables** — the primary, user-facing controls for cache tier sizing, offload behavior, object storage, distributed (leader/worker) mode, and metrics. Set these in the worker container `env`. This is what most deployments use.
+- **`DYN_KVBM_*` runtime environment variables** — the primary, user-facing controls for cache tier sizing, offload behavior, distributed (leader/worker) mode, and metrics. Set these in the worker container `env`. This is what most deployments use.
 - **The `KVBM_*` / TOML figment system** — a lower-level, layered configuration for the KVBM runtime (Tokio/Rayon threads, messenger transport, NixL backends, offload policies, event publishing). Used for advanced tuning and for vLLM's `kv_connector_extra_config`.
 
 Names and defaults on this page come from [`environment_names.rs`](https://github.com/ai-dynamo/dynamo/blob/main/lib/runtime/src/config/environment_names.rs) and the [`kvbm-config`](https://github.com/ai-dynamo/dynamo/tree/main/lib/kvbm-config) crate.
 
 ## Cache tiers
 
-KVBM offloads KV blocks GPU (G1) → host/CPU (G2) → disk (G3) → object storage (G4). Enable a tier by giving it a size; each tier accepts either a size in GB or an explicit block count (the block-count override wins).
+KVBM offloads KV blocks GPU (G1) → host/CPU (G2) → disk (G3). Enable a tier by giving it a size; each tier accepts either a size in GB or an explicit block count (the block-count override wins).
+
+<Note>
+  Object storage (G4) has no runtime environment variables yet. The tier appears in the offload simulator and in in-flight work, but nothing in the runtime reads an object-storage variable today.
+</Note>
 
 <Warning>
   Set the CPU cache larger than the engine's GPU KV cache — a good rule of thumb is `DYN_KVBM_CPU_CACHE_GB >= 100` and `DYN_KVBM_DISK_CACHE_GB >= DYN_KVBM_CPU_CACHE_GB`. If the CPU cache is smaller than the device cache, KVBM churns (offloading blocks after every forward pass) and you may see performance *degradation*. Consult your engine's KV-cache configuration for the minimum useful value.
@@ -80,38 +84,6 @@ KVBM offloads KV blocks GPU (G1) → host/CPU (G2) → disk (G3) → object stor
   Fall back to zero-filling when preallocating disk cache files is not supported.
 </ParamField>
 
-## Object storage (G4)
-
-The G4 tier stores blocks in an S3-compatible object store. Enable it with `DYN_KVBM_OBJECT_ENABLED=1` and supply the bucket and credentials.
-
-<ParamField path="DYN_KVBM_OBJECT_ENABLED" type="boolean" default="false">
-  Enable object storage. Set to `1` to enable.
-</ParamField>
-
-<ParamField path="DYN_KVBM_OBJECT_BUCKET" type="string" default="unset">
-  Bucket name for the object-storage cache. Supports a `{worker_id}` template for per-worker buckets, for example `kv-cache-{worker_id}`.
-</ParamField>
-
-<ParamField path="DYN_KVBM_OBJECT_ENDPOINT" type="string" default="unset">
-  Endpoint URL for the object store. Set for S3-compatible services such as MinIO.
-</ParamField>
-
-<ParamField path="DYN_KVBM_OBJECT_REGION" type="string" default="unset">
-  Region for the object store.
-</ParamField>
-
-<ParamField path="DYN_KVBM_OBJECT_ACCESS_KEY" type="string" default="unset">
-  Access key for object-store authentication.
-</ParamField>
-
-<ParamField path="DYN_KVBM_OBJECT_SECRET_KEY" type="string" default="unset">
-  Secret key for object-store authentication.
-</ParamField>
-
-<ParamField path="DYN_KVBM_OBJECT_NUM_BLOCKS" type="integer" default="unset">
-  Number of blocks to store in object storage.
-</ParamField>
-
 ## Distributed (leader/worker)
 
 In multi-worker deployments, one KVBM leader coordinates the worker cache tiers over ZMQ.
@@ -120,7 +92,7 @@ In multi-worker deployments, one KVBM leader coordinates the worker cache tiers 
   Timeout in seconds for KVBM leader and worker initialization. Raise it for large multi-node deployments that take longer to come up.
 </ParamField>
 
-<ParamField path="DYN_KVBM_LEADER_ZMQ_HOST" type="string" default="unset">
+<ParamField path="DYN_KVBM_LEADER_ZMQ_HOST" type="string" default="127.0.0.1">
   ZMQ host for the KVBM leader.
 </ParamField>
 
@@ -128,7 +100,7 @@ In multi-worker deployments, one KVBM leader coordinates the worker cache tiers 
   ZMQ publish port for the KVBM leader. The TRT-LLM integration derives its port from this value.
 </ParamField>
 
-<ParamField path="DYN_KVBM_LEADER_ZMQ_ACK_PORT" type="string" default="unset">
+<ParamField path="DYN_KVBM_LEADER_ZMQ_ACK_PORT" type="integer" default="56002">
   ZMQ acknowledgment port for the KVBM leader.
 </ParamField>
 
@@ -160,7 +132,7 @@ Enable individual NixL transfer backends with the `DYN_KVBM_NIXL_BACKEND_<backen
   Enable the KVBM metrics endpoint.
 </ParamField>
 
-<ParamField path="DYN_KVBM_METRICS_PORT" type="integer" default="unset">
+<ParamField path="DYN_KVBM_METRICS_PORT" type="integer" default="6880">
   Port for the KVBM metrics endpoint.
 </ParamField>
 
