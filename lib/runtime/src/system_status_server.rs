@@ -145,7 +145,16 @@ pub async fn spawn_system_status_server(
     let app = build_system_status_router(server_state);
 
     let initial_bind_address = format!("{}:{}", host, port);
-    let (listener, actual_address) = bind_system_status_listener(initial_bind_address).await?;
+    tracing::info!("[spawn_system_status_server] binding to: {initial_bind_address}");
+    let (listener, actual_address) = bind_system_status_listener(initial_bind_address.clone())
+        .await
+        .map_err(|error| {
+            tracing::error!("Failed to bind to address {initial_bind_address}: {error}");
+            error
+        })?;
+    tracing::info!(
+        "[spawn_system_status_server] system status server bound to: {actual_address}"
+    );
 
     // Reuse the concrete address so an ephemeral port remains stable across rebinds.
     let listener =
@@ -264,18 +273,11 @@ fn build_system_status_router(server_state: Arc<SystemStatusState>) -> Router {
 async fn bind_system_status_listener(
     address: String,
 ) -> anyhow::Result<(TcpListener, std::net::SocketAddr)> {
-    tracing::info!("[spawn_system_status_server] binding to: {address}");
-
-    let listener = TcpListener::bind(&address).await.map_err(|e| {
-        tracing::error!("Failed to bind to address {}: {}", address, e);
-        anyhow::anyhow!("Failed to bind to address: {}", e)
-    })?;
+    let listener = TcpListener::bind(&address)
+        .await
+        .map_err(|error| anyhow::anyhow!("Failed to bind to address: {error}"))?;
 
     let actual_address = listener.local_addr()?;
-    tracing::info!(
-        "[spawn_system_status_server] system status server bound to: {}",
-        actual_address
-    );
 
     Ok((listener, actual_address))
 }
@@ -309,8 +311,12 @@ impl Listener for RebindingTcpListener {
     async fn accept(&mut self) -> (Self::Io, Self::Addr) {
         loop {
             let Some(listener) = self.listener.as_ref() else {
+                tracing::info!("System status server rebinding to {}", self.address);
                 match bind_system_status_listener(self.address.to_string()).await {
-                    Ok((listener, _)) => self.listener = Some(listener),
+                    Ok((listener, actual_address)) => {
+                        tracing::info!("System status server rebound to {actual_address}");
+                        self.listener = Some(listener);
+                    }
                     Err(error) => {
                         tracing::error!(
                             "System status server failed to rebind {}; retrying after {:?}: {error}",
@@ -886,30 +892,30 @@ mod tests {
         let accepted = tokio::spawn(async move { rebinding.accept().await });
 
         let mut accepted = accepted;
-        let (peer, client_addr) =
-            tokio::time::timeout(Duration::from_secs(5), async {
-                loop {
-                    let Ok(stream) = tokio::net::TcpStream::connect(address).await else {
-                        tokio::time::sleep(Duration::from_millis(10)).await;
-                        continue;
-                    };
-                    let client_addr = stream.local_addr().unwrap();
-                    tokio::select! {
-                        result = &mut accepted => {
-                            let (_io, peer) = result.expect("accept task should not panic");
-                            return (peer, client_addr);
-                        }
-                        _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+        let mut clients = Vec::new();
+        let peer = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let Ok(stream) = tokio::net::TcpStream::connect(address).await else {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    continue;
+                };
+                let client_addr = stream.local_addr().unwrap();
+                clients.push((stream, client_addr));
+                tokio::select! {
+                    result = &mut accepted => {
+                        let (_io, peer) = result.expect("accept task should not panic");
+                        return peer;
                     }
+                    _ = tokio::time::sleep(Duration::from_millis(50)) => {}
                 }
-            })
-            .await
-            .expect("listener should rebind and accept connections again");
+            }
+        })
+        .await
+        .expect("listener should rebind and accept connections again");
 
-        assert_eq!(
-            peer,
-            client_addr,
-            "accepted connection should be the one we opened"
+        assert!(
+            clients.iter().any(|(_, client_addr)| *client_addr == peer),
+            "accepted connection should be one we opened"
         );
     }
 
