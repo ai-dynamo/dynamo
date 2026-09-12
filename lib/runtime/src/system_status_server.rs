@@ -976,7 +976,6 @@ mod tests {
         assert!(!is_resource_exhaustion_error(&dead_listener));
         assert!(!is_dead_connection_error(&dead_listener));
     }
-
 }
 
 // Integration tests: cargo test system_status_server --lib --features integration
