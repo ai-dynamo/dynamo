@@ -245,7 +245,7 @@ pub struct RoutingHost {
 
 /// An admitted KV route awaiting dispatch.
 pub(crate) struct RoutePlan {
-    signals: RoutePlanSignals,
+    pub(crate) signals: RoutePlanSignals,
     selection: WorkerSelection,
     cleanup: KvRequestCleanup,
     affinity: Option<Hold>,
@@ -258,7 +258,7 @@ pub(crate) struct RoutePlan {
 pub(crate) struct RoutePreview {
     request_id: String,
     phase: RequestPhase,
-    signals: RoutePlanSignals,
+    pub(crate) signals: RoutePlanSignals,
     /// Starts here because the conditional route's first stage is the preview.
     budget: CleanupBudget,
 }
@@ -273,10 +273,6 @@ pub(crate) struct RoutePlanSignals {
 }
 
 impl RoutePreview {
-    pub(crate) fn signals(&self) -> RoutePlanSignals {
-        self.signals
-    }
-
     /// Starts the budget's clock and reports what is left, so a test can follow
     /// one budget across the real preview/plan/dispatch chain.
     #[cfg(test)]
@@ -293,10 +289,6 @@ impl RoutePlanSignals {
 }
 
 impl RoutePlan {
-    pub(crate) fn signals(&self) -> RoutePlanSignals {
-        self.signals
-    }
-
     #[cfg(test)]
     pub(crate) fn cleanup_budget_remaining(&self) -> std::time::Duration {
         self.budget.remaining()

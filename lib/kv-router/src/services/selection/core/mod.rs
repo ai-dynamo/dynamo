@@ -101,10 +101,6 @@ impl SelectionPartition {
         &self.0.key
     }
 
-    pub fn block_size(&self) -> u32 {
-        self.0.block_size
-    }
-
     pub fn scheduler(&self) -> &SelectionScheduler {
         &self.0.scheduler
     }

@@ -12,15 +12,15 @@ use std::{
 
 use dynamo_kv_router::{
     multi_worker_sequence::{ReplicaRequestLeaseObserver, active_request_expiry_duration},
-    scheduling::AttemptId,
+    scheduling::{
+        AttemptId,
+        queue::{SchedulerBookingCleanup, SchedulerBookingDescriptor},
+    },
 };
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use super::{
-    indexer::ApproximateRequestLease,
-    scheduler::{SchedulerBookingCleanup, SchedulerBookingDescriptor},
-};
+use super::indexer::ApproximateRequestLease;
 
 const LEASE_QUIET: u8 = 0;
 const LEASE_TOUCHED: u8 = 1;

@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use dynamo_kv_router::{
     PrefillLoadEstimator, conditional_disagg::ConditionalDisaggPolicy,
-    config::RouterConfigOverride, protocols::RoutingConstraints, scheduling::QueueRejection,
+    config::RouterConfigOverride, protocols::RoutingConstraints,
 };
 use dynamo_runtime::{
     pipeline::{
@@ -154,17 +154,6 @@ struct PreparedPrefill {
     worker_id: u64,
     bootstrap_info: Option<BootstrapInfo>,
     topology_constraints: Option<RoutingConstraints>,
-}
-
-/// Advisory prefill worker selection result.
-pub enum PrefillQueryOutcome {
-    Routed {
-        worker_id: u64,
-        dp_rank: Option<u32>,
-    },
-    QueueRejected {
-        rejection: QueueRejection,
-    },
 }
 
 enum PrefillCompletion {
@@ -339,7 +328,7 @@ impl
                 .await
             {
                 Ok(Some(decision)) => {
-                    let signals = decision.plan.signals();
+                    let signals = decision.plan.signals;
                     tracing::info!(
                         request_id = %request_id,
                         worker_id = signals.worker.worker_id,

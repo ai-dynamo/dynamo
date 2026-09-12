@@ -116,24 +116,18 @@ impl AffinityCoordinator {
         session_id: &SessionAffinityId,
         requested_target: Option<AffinityTarget>,
     ) -> Result<Hold, Error> {
-        self.acquire_inner(session_id, requested_target, None).await
+        self.inner
+            .table
+            .acquire(session_id.as_str(), requested_target.map(to_table))
+            .await
+            .map_err(affinity_error)
     }
 
     pub(crate) async fn acquire_with_context(
         &self,
         session_id: &SessionAffinityId,
         requested_target: Option<AffinityTarget>,
-        request_context: &dyn AsyncEngineContext,
-    ) -> Result<Hold, Error> {
-        self.acquire_inner(session_id, requested_target, Some(request_context))
-            .await
-    }
-
-    async fn acquire_inner(
-        &self,
-        session_id: &SessionAffinityId,
-        requested_target: Option<AffinityTarget>,
-        request_context: Option<&dyn AsyncEngineContext>,
+        context: &dyn AsyncEngineContext,
     ) -> Result<Hold, Error> {
         let requested = requested_target.map(to_table);
         loop {
@@ -144,17 +138,14 @@ impl AffinityCoordinator {
                 .map_err(affinity_error)?
             {
                 AcquireStep::Held(hold) => return Ok(hold),
-                AcquireStep::Wait(notified) => match request_context {
-                    Some(context) => {
-                        tokio::select! {
-                            biased;
-                            _ = context.stopped() => return Err(cancelled(context.id())),
-                            _ = context.killed() => return Err(cancelled(context.id())),
-                            _ = notified => {}
-                        }
+                AcquireStep::Wait(notified) => {
+                    tokio::select! {
+                        biased;
+                        _ = context.stopped() => return Err(cancelled(context.id())),
+                        _ = context.killed() => return Err(cancelled(context.id())),
+                        _ = notified => {}
                     }
-                    None => notified.await,
-                },
+                }
             }
         }
     }

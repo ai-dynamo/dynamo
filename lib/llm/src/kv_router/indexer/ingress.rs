@@ -134,14 +134,6 @@ impl RuntimeIngress {
             subscription.set_task_guard(task_guard);
         }
     }
-
-    /// Stop event ingestion and wait for it to drain.
-    pub(crate) async fn shutdown(&self) {
-        let subscription = self.subscription.lock().take();
-        if let Some(subscription) = subscription {
-            subscription.shutdown().await;
-        }
-    }
 }
 
 #[async_trait::async_trait]

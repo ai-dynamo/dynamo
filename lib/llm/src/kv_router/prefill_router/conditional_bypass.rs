@@ -67,7 +67,7 @@ impl PrefillRouter {
         let preview = decode_host
             .preview_kv_route(request, RequestPhase::Decode)
             .await?;
-        let signals = preview.signals();
+        let signals = preview.signals;
         let mut input =
             ConditionalDisaggDecisionInput::new(routing_token_ids.len(), signals.cached_tokens);
         if self.conditional_disagg_policy.needs_prefill_worker_busy() {

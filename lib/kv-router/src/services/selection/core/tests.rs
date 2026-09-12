@@ -25,6 +25,92 @@ fn test_config(use_kv_events: bool) -> crate::config::KvRouterConfig {
     }
 }
 
+fn local_core(config: crate::config::KvRouterConfig) -> SelectionCore {
+    local_core_with(config, 1, CancellationToken::new())
+}
+
+fn local_core_with(
+    config: crate::config::KvRouterConfig,
+    indexer_threads: usize,
+    cancel_token: CancellationToken,
+) -> SelectionCore {
+    SelectionCore::try_new_local(
+        config,
+        indexer_threads,
+        cancel_token,
+        SelectionCacheConfig::default(),
+    )
+    .expect("valid test config")
+}
+
+/// `new_inner` with the test defaults; `remote_indexer` swaps the primary for
+/// the standalone indexer at that URL.
+fn core_with(
+    config: crate::config::KvRouterConfig,
+    host: SelectionHost,
+    policy_factory: Option<WorkerSelectionPolicyFactory>,
+    worker_type: WorkerType,
+    remote_indexer: Option<String>,
+    affinity: Option<SessionAffinityConfig>,
+) -> SelectionCore {
+    let tracking_hash = Arc::new(
+        TrackingHashContext::from_config(&config).expect("valid tracking hash configuration"),
+    );
+    let mut indexer_policy = IndexerPolicy::from_router_config(&config).expect("indexer policy");
+    if let Some(base_url) = remote_indexer {
+        indexer_policy = indexer_policy
+            .with_remote_indexer(base_url)
+            .expect("remote policy");
+    }
+    SelectionCore::new_inner(
+        config,
+        1,
+        CancellationToken::new(),
+        None,
+        policy_factory,
+        host,
+        worker_type,
+        true,
+        SelectionCacheConfig::default(),
+        tracking_hash,
+        indexer_policy,
+        affinity,
+    )
+}
+
+fn core_with_host(host: SelectionHost) -> SelectionCore {
+    core_with_host_and_policy(host, None)
+}
+
+fn core_with_host_and_policy(
+    host: SelectionHost,
+    policy_factory: Option<WorkerSelectionPolicyFactory>,
+) -> SelectionCore {
+    core_with(
+        test_config(false),
+        host,
+        policy_factory,
+        WorkerType::Aggregated,
+        None,
+        None,
+    )
+}
+
+fn replay_reservation(selection_id: &str) -> ReservationRequest {
+    ReservationRequest {
+        model_name: "model".to_string(),
+        routing_group: "default".to_string(),
+        selection_id: selection_id.to_string(),
+        worker_id: None,
+        dp_rank: None,
+        prompt: PromptRequest::default(),
+        router_config_override: None,
+        expected_output_tokens: None,
+        effective_prefill_tokens: None,
+        track_prefill_tokens: None,
+    }
+}
+
 fn worker(worker_id: WorkerId) -> WorkerRequest {
     WorkerRequest {
         worker_id,
@@ -140,13 +226,7 @@ fn assert_shutdown_error(error: SelectionError) {
 #[test]
 fn parent_cancel_cancels_core() {
     let parent = CancellationToken::new();
-    let core = SelectionCore::try_new_local(
-        test_config(false),
-        1,
-        parent.clone(),
-        SelectionCacheConfig::default(),
-    )
-    .expect("valid test config");
+    let core = local_core_with(test_config(false), 1, parent.clone());
 
     assert!(!core.cancel_token.is_cancelled());
     parent.cancel();
@@ -161,22 +241,12 @@ async fn selection_setup_uses_worker_type_label() {
         (WorkerType::Encode, "encode"),
         (WorkerType::Aggregated, "aggregated"),
     ] {
-        let config = test_config(false);
-        let tracking_hash = Arc::new(
-            TrackingHashContext::from_config(&config).expect("valid tracking hash configuration"),
-        );
-        let core = SelectionCore::new_inner(
-            config,
-            1,
-            CancellationToken::new(),
-            None,
-            None,
+        let core = core_with(
+            test_config(false),
             SelectionHost::default(),
+            None,
             worker_type,
-            true,
-            SelectionCacheConfig::default(),
-            tracking_hash,
-            IndexerPolicy::from_router_config(&test_config(false)).expect("indexer policy"),
+            None,
             None,
         );
 
@@ -190,35 +260,6 @@ async fn selection_setup_uses_worker_type_label() {
             "{worker_type}"
         );
     }
-}
-
-fn core_with_host(host: SelectionHost) -> SelectionCore {
-    core_with_host_and_policy(host, None)
-}
-
-fn core_with_host_and_policy(
-    host: SelectionHost,
-    policy_factory: Option<WorkerSelectionPolicyFactory>,
-) -> SelectionCore {
-    let config = test_config(false);
-    let tracking_hash = Arc::new(
-        TrackingHashContext::from_config(&config).expect("valid tracking hash configuration"),
-    );
-    let indexer_policy = IndexerPolicy::from_router_config(&config).expect("indexer policy");
-    SelectionCore::new_inner(
-        config,
-        1,
-        CancellationToken::new(),
-        None,
-        policy_factory,
-        host,
-        WorkerType::Aggregated,
-        true,
-        SelectionCacheConfig::default(),
-        tracking_hash,
-        indexer_policy,
-        None,
-    )
 }
 
 async fn wait_for_overlap(
@@ -241,13 +282,7 @@ async fn wait_for_overlap(
 #[tokio::test]
 async fn bookings_populate_the_approximate_primary_without_kv_events() {
     // use_kv_events=false: the primary is approximate and bookings feed it.
-    let core = SelectionCore::try_new_local(
-        test_config(false),
-        1,
-        CancellationToken::new(),
-        SelectionCacheConfig::default(),
-    )
-    .expect("valid test config");
+    let core = local_core(test_config(false));
     core.upsert_worker(worker(1)).await.expect("worker upsert");
     core.upsert_worker(worker(2)).await.expect("worker upsert");
 
@@ -279,20 +314,9 @@ async fn bookings_populate_the_approximate_primary_without_kv_events() {
     request.selection_id = Some("cached".to_string());
     request.allowed_worker_ids = Some(HashSet::from([2]));
     core.select(request).await.expect("select");
-    core.create_reservation(ReservationRequest {
-        model_name: "model".to_string(),
-        routing_group: "default".to_string(),
-        selection_id: "cached".to_string(),
-        worker_id: None,
-        dp_rank: None,
-        prompt: PromptRequest::default(),
-        router_config_override: None,
-        expected_output_tokens: None,
-        effective_prefill_tokens: None,
-        track_prefill_tokens: None,
-    })
-    .await
-    .expect("cached reservation");
+    core.create_reservation(replay_reservation("cached"))
+        .await
+        .expect("cached reservation");
     let credited = wait_for_overlap(&core, || {
         let mut request = select_request();
         request.prompt = prompt_b();
@@ -308,16 +332,9 @@ async fn bookings_populate_the_approximate_primary_without_kv_events() {
         ..PromptRequest::default()
     };
     core.create_reservation(ReservationRequest {
-        model_name: "model".to_string(),
-        routing_group: "default".to_string(),
-        selection_id: "explicit".to_string(),
         worker_id: Some(1),
-        dp_rank: None,
         prompt: prompt_c(),
-        router_config_override: None,
-        expected_output_tokens: None,
-        effective_prefill_tokens: None,
-        track_prefill_tokens: None,
+        ..replay_reservation("explicit")
     })
     .await
     .expect("explicit reservation");
@@ -336,26 +353,12 @@ async fn unreachable_remote_indexer_is_reported_not_ready() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let base_url = format!("http://{}", listener.local_addr().expect("addr"));
     drop(listener);
-    let config = test_config(true);
-    let tracking_hash = Arc::new(
-        TrackingHashContext::from_config(&config).expect("valid tracking hash configuration"),
-    );
-    let indexer_policy = IndexerPolicy::from_router_config(&config)
-        .expect("indexer policy")
-        .with_remote_indexer(base_url)
-        .expect("remote policy");
-    let core = SelectionCore::new_inner(
-        config,
-        1,
-        CancellationToken::new(),
-        None,
-        None,
+    let core = core_with(
+        test_config(true),
         SelectionHost::default(),
+        None,
         WorkerType::Aggregated,
-        true,
-        SelectionCacheConfig::default(),
-        tracking_hash,
-        indexer_policy,
+        Some(base_url),
         None,
     );
     core.upsert_worker(worker(1)).await.expect("worker upsert");
@@ -394,26 +397,12 @@ async fn remote_indexer_serves_selection_without_local_kv_listeners() {
 
     // use_kv_events=true, but the primary is remote: workers need no
     // kv_events endpoints and no ZMQ listener is started here.
-    let config = test_config(true);
-    let tracking_hash = Arc::new(
-        TrackingHashContext::from_config(&config).expect("valid tracking hash configuration"),
-    );
-    let indexer_policy = IndexerPolicy::from_router_config(&config)
-        .expect("indexer policy")
-        .with_remote_indexer(base_url)
-        .expect("remote policy");
-    let core = SelectionCore::new_inner(
-        config,
-        1,
-        CancellationToken::new(),
-        None,
-        None,
+    let core = core_with(
+        test_config(true),
         SelectionHost::default(),
+        None,
         WorkerType::Aggregated,
-        true,
-        SelectionCacheConfig::default(),
-        tracking_hash,
-        indexer_policy,
+        Some(base_url),
         None,
     );
     assert!(!core.listens_for_kv_events);
@@ -444,13 +433,7 @@ async fn hint_fixture(
     use crate::indexer::KvIndexerInterface;
     use crate::protocols::{BlockHashOptions, compute_block_hash_for_seq};
 
-    let core = SelectionCore::try_new_local(
-        test_config(true),
-        1,
-        CancellationToken::new(),
-        SelectionCacheConfig::default(),
-    )
-    .expect("valid test config");
+    let core = local_core(test_config(true));
     for worker_id in [1, 2] {
         let mut request = worker_with_kv_events(worker_id);
         configure(&mut request);
@@ -549,13 +532,7 @@ async fn router_hint_needs_capable_workers() {
 
 #[tokio::test]
 async fn event_driven_indexer_does_not_record_bookings() {
-    let core = SelectionCore::try_new_local(
-        test_config(true),
-        1,
-        CancellationToken::new(),
-        SelectionCacheConfig::default(),
-    )
-    .expect("valid test config");
+    let core = local_core(test_config(true));
     core.upsert_worker(worker_with_kv_events(1))
         .await
         .expect("worker upsert");
@@ -677,28 +654,14 @@ async fn injected_lora_filter_narrows_candidates() {
     core.upsert_worker(worker(1)).await.expect("worker upsert");
     core.upsert_worker(worker(2)).await.expect("worker upsert");
 
-    // LoRA request: only the filter's worker is eligible.
+    // LoRA request: only the filter's worker is eligible. Allow-set and
+    // pinned-worker interplay is pinned by the `lora_filter` unit tests.
     for _ in 0..4 {
         let mut request = select_request();
         request.prompt.lora_name = Some("adapter-a".to_string());
         let response = core.select(request).await.expect("select");
         assert_eq!(response.worker_id, 2);
     }
-
-    // The filter never widens the caller's allow-set: an allow-set that
-    // excludes the filter's worker is preserved as-is.
-    let mut request = select_request();
-    request.prompt.lora_name = Some("adapter-a".to_string());
-    request.allowed_worker_ids = Some(HashSet::from([1]));
-    let response = core.select(request).await.expect("select");
-    assert_eq!(response.worker_id, 1);
-
-    // A pinned worker inside the universe survives the filter.
-    let mut request = select_request();
-    request.prompt.lora_name = Some("adapter-a".to_string());
-    request.pinned_worker = Some(WorkerWithDpRank::new(1, 0));
-    let response = core.select(request).await.expect("select");
-    assert_eq!(response.worker_id, 1);
 }
 
 #[tokio::test]
@@ -805,13 +768,7 @@ async fn session_context_reaches_worker_selection() {
 
 #[tokio::test]
 async fn full_affinity_table_routes_without_pinning() {
-    let core = SelectionCore::try_new_local(
-        test_config(false),
-        1,
-        CancellationToken::new(),
-        SelectionCacheConfig::default(),
-    )
-    .expect("valid test config");
+    let core = local_core(test_config(false));
     core.upsert_worker(worker(1)).await.expect("worker upsert");
     let entry = core
         .entry(&RoutingPartitionId::new("model", "default"))
@@ -841,22 +798,34 @@ async fn full_affinity_table_routes_without_pinning() {
     );
 }
 
+/// Both `HostLoad` providers reach the scheduler; their semantics are pinned
+/// by the `scheduling::queue` unit tests.
 #[tokio::test]
-async fn injected_availability_provider_restricts_selection() {
+async fn injected_load_providers_restrict_selection() {
     let available: Arc<parking_lot::Mutex<Option<Arc<HashSet<WorkerId>>>>> =
         Arc::new(parking_lot::Mutex::new(None));
     let provider_state = Arc::clone(&available);
     let core = core_with_host(SelectionHost {
         load: HostLoad {
             available_workers: Some(Arc::new(move || provider_state.lock().clone())),
+            overloaded_workers: Some(Arc::new(|| Some(HashSet::from([1])))),
             ..HostLoad::default()
         },
         ..SelectionHost::default()
     });
-    core.upsert_worker(worker(1)).await.expect("worker upsert");
-    core.upsert_worker(worker(2)).await.expect("worker upsert");
+    for worker_id in [1, 2, 3] {
+        core.upsert_worker(worker(worker_id))
+            .await
+            .expect("worker upsert");
+    }
 
-    for only in [1, 2] {
+    // The overloaded worker is excluded while availability is unrestricted.
+    for _ in 0..4 {
+        let response = core.select(select_request()).await.expect("select");
+        assert_ne!(response.worker_id, 1);
+    }
+    // The availability provider narrows the remaining candidates.
+    for only in [2, 3] {
         *available.lock() = Some(Arc::new(HashSet::from([only])));
         for _ in 0..4 {
             let response = core.select(select_request()).await.expect("select");
@@ -866,33 +835,9 @@ async fn injected_availability_provider_restricts_selection() {
 }
 
 #[tokio::test]
-async fn injected_overload_provider_excludes_worker() {
-    let core = core_with_host(SelectionHost {
-        load: HostLoad {
-            overloaded_workers: Some(Arc::new(|| Some(HashSet::from([1])))),
-            ..HostLoad::default()
-        },
-        ..SelectionHost::default()
-    });
-    core.upsert_worker(worker(1)).await.expect("worker upsert");
-    core.upsert_worker(worker(2)).await.expect("worker upsert");
-
-    for _ in 0..4 {
-        let response = core.select(select_request()).await.expect("select");
-        assert_eq!(response.worker_id, 2);
-    }
-}
-
-#[tokio::test]
 async fn shutdown_cancels_listeners_but_keeps_parent_alive() {
     let parent = CancellationToken::new();
-    let core = SelectionCore::try_new_local(
-        test_config(true),
-        1,
-        parent.clone(),
-        SelectionCacheConfig::default(),
-    )
-    .expect("valid test config");
+    let core = local_core_with(test_config(true), 1, parent.clone());
 
     let record = core
         .upsert_worker(worker_with_kv_events(1))
@@ -912,13 +857,7 @@ async fn shutdown_cancels_listeners_but_keeps_parent_alive() {
 #[case(2)]
 #[tokio::test]
 async fn selection_sees_cache_after_last_worker_replacement(#[case] indexer_threads: usize) {
-    let core = SelectionCore::try_new_local(
-        test_config(true),
-        indexer_threads,
-        CancellationToken::new(),
-        SelectionCacheConfig::default(),
-    )
-    .expect("valid test config");
+    let core = local_core_with(test_config(true), indexer_threads, CancellationToken::new());
     let key = RoutingPartitionId::new("model", "default");
     let request = || {
         let mut request = select_request();
@@ -972,13 +911,7 @@ async fn selection_sees_cache_after_last_worker_replacement(#[case] indexer_thre
 
 #[tokio::test]
 async fn multi_rank_worker_with_replay_endpoint_is_incomplete() {
-    let core = SelectionCore::try_new_local(
-        test_config(true),
-        1,
-        CancellationToken::new(),
-        SelectionCacheConfig::default(),
-    )
-    .expect("valid test config");
+    let core = local_core(test_config(true));
 
     let record = core
         .upsert_worker(WorkerRequest {
@@ -1000,13 +933,7 @@ async fn multi_rank_worker_with_replay_endpoint_is_incomplete() {
 async fn reupsert_recreates_a_listener_lost_to_a_cancelled_update() {
     use crate::indexer::KvIndexerInterface;
 
-    let core = SelectionCore::try_new_local(
-        test_config(true),
-        1,
-        CancellationToken::new(),
-        SelectionCacheConfig::default(),
-    )
-    .expect("valid test config");
+    let core = local_core(test_config(true));
     core.upsert_worker(worker_with_kv_events(1))
         .await
         .expect("worker upsert");
@@ -1052,13 +979,7 @@ async fn reupsert_recreates_a_listener_lost_to_a_cancelled_update() {
 
 #[tokio::test]
 async fn upsert_moves_global_worker_id_between_routing_groups() {
-    let core = SelectionCore::try_new_local(
-        test_config(true),
-        1,
-        CancellationToken::new(),
-        SelectionCacheConfig::default(),
-    )
-    .expect("valid test config");
+    let core = local_core(test_config(true));
     let mut group_a = worker_with_kv_events(1);
     group_a.routing_group = "group-a".to_string();
     core.upsert_worker(group_a).await.expect("group A upsert");
@@ -1107,13 +1028,7 @@ async fn upsert_moves_global_worker_id_between_routing_groups() {
 
 #[tokio::test]
 async fn shutdown_reports_not_ready_and_rejects_new_work() {
-    let core = SelectionCore::try_new_local(
-        test_config(false),
-        1,
-        CancellationToken::new(),
-        SelectionCacheConfig::default(),
-    )
-    .expect("valid test config");
+    let core = local_core(test_config(false));
     core.upsert_worker(worker(1)).await.expect("worker upsert");
     assert!(core.ready().ready);
 
@@ -1147,16 +1062,9 @@ async fn shutdown_reports_not_ready_and_rejects_new_work() {
 
     let reservation_error = core
         .create_reservation(ReservationRequest {
-            model_name: "model".to_string(),
-            routing_group: "default".to_string(),
-            selection_id: "res-after-shutdown".to_string(),
             worker_id: Some(1),
-            dp_rank: None,
             prompt: prompt(),
-            router_config_override: None,
-            expected_output_tokens: None,
-            effective_prefill_tokens: None,
-            track_prefill_tokens: None,
+            ..replay_reservation("res-after-shutdown")
         })
         .await
         .expect_err("reservation should fail after shutdown");
@@ -1175,15 +1083,7 @@ async fn shutdown_reports_not_ready_and_rejects_new_work() {
 async fn queued_selection_errors_on_shutdown() {
     let mut config = test_config(false);
     config.router_queue_threshold = Some(0.0);
-    let core = Arc::new(
-        SelectionCore::try_new_local(
-            config,
-            1,
-            CancellationToken::new(),
-            SelectionCacheConfig::default(),
-        )
-        .expect("valid test config"),
-    );
+    let core = Arc::new(local_core(config));
 
     let record = core.upsert_worker(worker(1)).await.expect("worker upsert");
     assert_eq!(record.lifecycle, WorkerLifecycle::Schedulable);
@@ -1212,15 +1112,7 @@ async fn queued_selection_errors_on_shutdown() {
 async fn booking_is_freed_when_selected_worker_drained_while_queued() {
     let mut config = test_config(false);
     config.router_queue_threshold = Some(0.0);
-    let core = Arc::new(
-        SelectionCore::try_new_local(
-            config,
-            1,
-            CancellationToken::new(),
-            SelectionCacheConfig::default(),
-        )
-        .expect("valid test config"),
-    );
+    let core = Arc::new(local_core(config));
     core.upsert_worker(worker(1)).await.expect("worker upsert");
     let key = RoutingPartitionId::new("model", "default");
     let entry = core.entry(&key).expect("entry");
@@ -1260,15 +1152,7 @@ async fn booking_is_freed_when_selected_worker_drained_while_queued() {
 async fn lease_admission_keeps_a_selection_whose_worker_drained_while_queued() {
     let mut config = test_config(false);
     config.router_queue_threshold = Some(0.0);
-    let core = Arc::new(
-        SelectionCore::try_new_local(
-            config,
-            1,
-            CancellationToken::new(),
-            SelectionCacheConfig::default(),
-        )
-        .expect("valid test config"),
-    );
+    let core = Arc::new(local_core(config));
     core.upsert_worker(worker(1)).await.expect("worker upsert");
     let key = RoutingPartitionId::new("model", "default");
     let entry = core.entry(&key).expect("entry");
@@ -1333,13 +1217,7 @@ async fn lease_admission_keeps_a_selection_whose_worker_drained_while_queued() {
 /// `Book` feeds.
 #[tokio::test]
 async fn lease_admission_installs_no_index_row_and_records_nothing() {
-    let core = SelectionCore::try_new_local(
-        test_config(false),
-        1,
-        CancellationToken::new(),
-        SelectionCacheConfig::default(),
-    )
-    .expect("valid test config");
+    let core = local_core(test_config(false));
     core.upsert_worker(worker(1)).await.expect("worker upsert");
     let key = RoutingPartitionId::new("model", "default");
     let entry = core.entry(&key).expect("entry");
@@ -1400,13 +1278,7 @@ async fn lease_admission_installs_no_index_row_and_records_nothing() {
 
 #[tokio::test]
 async fn dropped_selection_future_frees_its_booking() {
-    let core = SelectionCore::try_new_local(
-        test_config(false),
-        1,
-        CancellationToken::new(),
-        SelectionCacheConfig::default(),
-    )
-    .expect("valid test config");
+    let core = local_core(test_config(false));
     core.upsert_worker(worker(1)).await.expect("worker upsert");
     let key = RoutingPartitionId::new("model", "default");
     let entry = core.entry(&key).expect("entry");
@@ -1491,17 +1363,8 @@ async fn dropped_book_selection_during_routing_record_frees_booking_and_claim() 
         entered: AtomicBool::new(false),
         release: tokio::sync::Notify::new(),
     });
-    let config = test_config(false);
-    let tracking_hash = Arc::new(
-        TrackingHashContext::from_config(&config).expect("valid tracking hash configuration"),
-    );
-    let indexer_policy = IndexerPolicy::from_router_config(&config).expect("indexer policy");
-    let core = SelectionCore::new_inner(
-        config,
-        1,
-        CancellationToken::new(),
-        None,
-        None,
+    let core = core_with(
+        test_config(false),
         SelectionHost {
             cache: HostCache {
                 index: KvIndexSource::Owned(Arc::new(PausedRecordIngress(record.clone()))),
@@ -1509,11 +1372,9 @@ async fn dropped_book_selection_during_routing_record_frees_booking_and_claim() 
             },
             ..SelectionHost::default()
         },
+        None,
         WorkerType::Aggregated,
-        true,
-        SelectionCacheConfig::default(),
-        tracking_hash,
-        indexer_policy,
+        None,
         Some(
             SessionAffinityConfig::new(Duration::from_secs(10))
                 .with_mode(SessionAffinityMode::Hard),
@@ -1564,13 +1425,7 @@ async fn dropped_book_selection_during_routing_record_frees_booking_and_claim() 
 
 #[tokio::test]
 async fn same_selection_id_in_two_partitions_is_a_conflict() {
-    let core = SelectionCore::try_new_local(
-        test_config(false),
-        1,
-        CancellationToken::new(),
-        SelectionCacheConfig::default(),
-    )
-    .expect("valid test config");
+    let core = local_core(test_config(false));
     for (worker_id, routing_group) in [(1, "group-a"), (2, "group-b")] {
         let mut request = worker(worker_id);
         request.routing_group = routing_group.to_string();
@@ -1604,29 +1459,16 @@ async fn same_selection_id_in_two_partitions_is_a_conflict() {
 
 #[tokio::test]
 async fn explicit_reservation_of_a_live_id_is_a_conflict() {
-    let core = SelectionCore::try_new_local(
-        test_config(false),
-        1,
-        CancellationToken::new(),
-        SelectionCacheConfig::default(),
-    )
-    .expect("valid test config");
+    let core = local_core(test_config(false));
     core.upsert_worker(worker(1)).await.expect("worker upsert");
     core.select_and_reserve(reserve_request("taken"))
         .await
         .expect("booking");
     let err = core
         .create_reservation(ReservationRequest {
-            model_name: "model".to_string(),
-            routing_group: "default".to_string(),
-            selection_id: "taken".to_string(),
             worker_id: Some(1),
-            dp_rank: None,
             prompt: prompt(),
-            router_config_override: None,
-            expected_output_tokens: None,
-            effective_prefill_tokens: None,
-            track_prefill_tokens: None,
+            ..replay_reservation("taken")
         })
         .await
         .expect_err("explicit booking of a live id");
@@ -1694,15 +1536,7 @@ fn index_observer_replaces_stale_and_claimed_rows_of_its_partition() {
 async fn free_of_an_in_flight_reservation_is_not_found() {
     let mut config = test_config(false);
     config.router_queue_threshold = Some(0.0);
-    let core = Arc::new(
-        SelectionCore::try_new_local(
-            config,
-            1,
-            CancellationToken::new(),
-            SelectionCacheConfig::default(),
-        )
-        .expect("valid test config"),
-    );
+    let core = Arc::new(local_core(config));
     core.upsert_worker(worker(1)).await.expect("worker upsert");
     core.select_and_reserve(reserve_request("res-a"))
         .await
@@ -1737,13 +1571,7 @@ async fn free_of_an_in_flight_reservation_is_not_found() {
 async fn prefill_complete_is_idempotent_for_a_live_booking() {
     let mut config = test_config(false);
     config.router_track_prefill_tokens = true;
-    let core = SelectionCore::try_new_local(
-        config,
-        1,
-        CancellationToken::new(),
-        SelectionCacheConfig::default(),
-    )
-    .expect("valid test config");
+    let core = local_core(config);
     core.upsert_worker(worker(1)).await.expect("worker upsert");
     core.select_and_reserve(reserve_request("live"))
         .await
@@ -1833,13 +1661,7 @@ async fn mirrored_replica_bookings_are_indexed_until_freed() {
 async fn lifecycle_operations_resolve_through_the_index() {
     let mut config = test_config(false);
     config.router_track_prefill_tokens = true;
-    let core = SelectionCore::try_new_local(
-        config,
-        1,
-        CancellationToken::new(),
-        SelectionCacheConfig::default(),
-    )
-    .expect("valid test config");
+    let core = local_core(config);
 
     for (worker_id, routing_group) in [(1, "group-a"), (2, "group-b")] {
         let mut request = worker(worker_id);
@@ -1893,13 +1715,7 @@ async fn advisory_select_reports_worker_load_and_busy_evaluation() {
     let mut config = test_config(false);
     config.conditional_disagg_prefill_busy_threshold = Some(0.5);
     config.conditional_disagg_decode_busy_threshold = Some(0.0);
-    let core = SelectionCore::try_new_local(
-        config,
-        1,
-        CancellationToken::new(),
-        SelectionCacheConfig::default(),
-    )
-    .expect("valid test config");
+    let core = local_core(config);
     let mut request = worker(1);
     request.total_kv_blocks = Some(1000);
     core.upsert_worker(request).await.expect("worker upsert");
@@ -1937,13 +1753,7 @@ async fn advisory_select_reports_worker_load_and_busy_evaluation() {
 
 #[tokio::test]
 async fn busy_evaluation_is_absent_without_thresholds_or_capacity() {
-    let core = SelectionCore::try_new_local(
-        test_config(false),
-        1,
-        CancellationToken::new(),
-        SelectionCacheConfig::default(),
-    )
-    .expect("valid test config");
+    let core = local_core(test_config(false));
     core.upsert_worker(worker(1)).await.expect("worker upsert");
     let mut request = select_request();
     request.advisory = true;
@@ -1956,13 +1766,7 @@ async fn busy_evaluation_is_absent_without_thresholds_or_capacity() {
 
 #[tokio::test]
 async fn reservation_index_tracks_bookings_until_freed() {
-    let core = SelectionCore::try_new_local(
-        test_config(false),
-        1,
-        CancellationToken::new(),
-        SelectionCacheConfig::default(),
-    )
-    .expect("valid test config");
+    let core = local_core(test_config(false));
     for (worker_id, routing_group) in [(1, "group-a"), (2, "group-b")] {
         let mut request = worker(worker_id);
         request.routing_group = routing_group.to_string();
@@ -1996,16 +1800,8 @@ async fn reservation_index_tracks_bookings_until_freed() {
     core.select(request).await.expect("select");
     assert!(core.reservation_index.read().get("cached").is_none());
     core.create_reservation(ReservationRequest {
-        model_name: "model".to_string(),
         routing_group: "group-b".to_string(),
-        selection_id: "cached".to_string(),
-        worker_id: None,
-        dp_rank: None,
-        prompt: PromptRequest::default(),
-        router_config_override: None,
-        expected_output_tokens: None,
-        effective_prefill_tokens: None,
-        track_prefill_tokens: None,
+        ..replay_reservation("cached")
     })
     .await
     .expect("cached reservation");
@@ -2036,13 +1832,7 @@ async fn reservation_index_tracks_bookings_until_freed() {
 
 #[tokio::test]
 async fn reservation_index_sweep_drops_bookings_released_out_of_band() {
-    let core = SelectionCore::try_new_local(
-        test_config(false),
-        1,
-        CancellationToken::new(),
-        SelectionCacheConfig::default(),
-    )
-    .expect("valid test config");
+    let core = local_core(test_config(false));
     core.upsert_worker(worker(1)).await.expect("worker upsert");
     core.select_and_reserve(reserve_request("live"))
         .await
@@ -2075,15 +1865,7 @@ async fn reservation_index_sweep_drops_bookings_released_out_of_band() {
 async fn lifecycle_lookup_does_not_nest_reservation_index_inside_entries() {
     // Three parties: a sweep holding `entries` and wanting `reservation_index`,
     // a lifecycle call, and a partition creation queued on `entries.write()`.
-    let core = Arc::new(
-        SelectionCore::try_new_local(
-            test_config(false),
-            1,
-            CancellationToken::new(),
-            SelectionCacheConfig::default(),
-        )
-        .expect("valid test config"),
-    );
+    let core = Arc::new(local_core(test_config(false)));
     core.upsert_worker(worker(1)).await.expect("worker upsert");
     core.select_and_reserve(reserve_request("live"))
         .await
@@ -2134,15 +1916,7 @@ async fn lifecycle_lookup_does_not_nest_reservation_index_inside_entries() {
 async fn queued_selection_returns_refreshed_overlap_snapshot() {
     let mut config = test_config(false);
     config.router_queue_threshold = Some(0.0);
-    let core = Arc::new(
-        SelectionCore::try_new_local(
-            config,
-            1,
-            CancellationToken::new(),
-            SelectionCacheConfig::default(),
-        )
-        .expect("valid test config"),
-    );
+    let core = Arc::new(local_core(config));
 
     for worker_id in [1, 2] {
         let mut request = worker(worker_id);
@@ -2160,9 +1934,6 @@ async fn queued_selection_returns_refreshed_overlap_snapshot() {
 
     for worker_id in [1, 2] {
         core.create_reservation(ReservationRequest {
-            model_name: "model".to_string(),
-            routing_group: "default".to_string(),
-            selection_id: format!("occupy-{worker_id}"),
             worker_id: Some(worker_id),
             dp_rank: Some(0),
             prompt: PromptRequest {
@@ -2176,10 +1947,8 @@ async fn queued_selection_returns_refreshed_overlap_snapshot() {
                 cache_namespace: None,
                 is_eagle: None,
             },
-            router_config_override: None,
-            expected_output_tokens: None,
             effective_prefill_tokens: Some(8),
-            track_prefill_tokens: None,
+            ..replay_reservation(&format!("occupy-{worker_id}"))
         })
         .await
         .expect("occupy worker");
@@ -2241,23 +2010,12 @@ async fn queued_selection_returns_refreshed_overlap_snapshot() {
 }
 
 fn core_with_session_affinity_mode(mode: SessionAffinityMode) -> SelectionCore {
-    let config = test_config(false);
-    let tracking_hash = Arc::new(
-        TrackingHashContext::from_config(&config).expect("valid tracking hash configuration"),
-    );
-    let indexer_policy = IndexerPolicy::from_router_config(&config).expect("indexer policy");
-    SelectionCore::new_inner(
-        config,
-        1,
-        CancellationToken::new(),
-        None,
-        None,
+    core_with(
+        test_config(false),
         SelectionHost::default(),
+        None,
         WorkerType::Aggregated,
-        true,
-        SelectionCacheConfig::default(),
-        tracking_hash,
-        indexer_policy,
+        None,
         Some(SessionAffinityConfig::new(Duration::from_secs(10)).with_mode(mode)),
     )
 }
@@ -2329,7 +2087,8 @@ async fn session_worker_departing_after_the_hold_reinitializes_the_session() {
 
 #[tokio::test]
 async fn concurrent_holds_on_a_departed_worker_both_land_on_the_replacement() {
-    let table = SessionAffinity::new(Duration::from_secs(60)).expect("affinity table");
+    let table = SessionAffinity::with_config(SessionAffinityConfig::new(Duration::from_secs(60)))
+        .expect("affinity table");
     let departed = WorkerAffinityTarget::new(1, Some(0));
     let replacement = WorkerAffinityTarget::new(2, Some(0));
     let Hold::Initialize(init) = table.acquire("s", None).await.expect("acquire") else {
@@ -2376,21 +2135,6 @@ async fn concurrent_holds_on_a_departed_worker_both_land_on_the_replacement() {
         table.query_target("s", None).expect("query"),
         Some(replacement)
     );
-}
-
-fn replay_reservation(selection_id: &str) -> ReservationRequest {
-    ReservationRequest {
-        model_name: "model".to_string(),
-        routing_group: "default".to_string(),
-        selection_id: selection_id.to_string(),
-        worker_id: None,
-        dp_rank: None,
-        prompt: PromptRequest::default(),
-        router_config_override: None,
-        expected_output_tokens: None,
-        effective_prefill_tokens: None,
-        track_prefill_tokens: None,
-    }
 }
 
 #[tokio::test]
@@ -2510,34 +2254,6 @@ async fn soft_mode_follows_the_dispatch() {
 }
 
 #[tokio::test]
-async fn session_stays_on_its_first_worker_across_bookings() {
-    let core = core_with_session_affinity();
-    core.upsert_worker(worker(1)).await.expect("worker upsert");
-    core.upsert_worker(worker(2)).await.expect("worker upsert");
-
-    let first = core
-        .select_and_reserve(session_reservation("r1", "chat-a"))
-        .await
-        .expect("first booking");
-    for index in 0..4 {
-        let response = core
-            .select_and_reserve(session_reservation(&format!("r-{index}"), "chat-a"))
-            .await
-            .expect("booking");
-        assert_eq!(response.worker_id, first.worker_id, "session must stay put");
-        core.free_reservation(&format!("r-{index}"))
-            .await
-            .expect("free");
-    }
-    // A read-only select sees the binding too.
-    let mut advisory = select_request();
-    advisory.session_id = Some("chat-a".to_string());
-    let response = core.select(advisory).await.expect("select");
-    assert_eq!(response.worker_id, first.worker_id);
-    core.free_reservation("r1").await.expect("free");
-}
-
-#[tokio::test]
 async fn replicated_binding_steers_a_new_session_and_frees_with_the_booking() {
     let core = core_with_session_affinity();
     core.upsert_worker(worker(1)).await.expect("worker upsert");
@@ -2638,13 +2354,7 @@ async fn partition_sessions_keep_independent_bindings() {
 async fn rejoined_worker_feeds_partition_index() {
     use crate::protocols::{BlockHashOptions, compute_block_hash_for_seq};
     for update_only in [false, true] {
-        let core = SelectionCore::try_new_local(
-            test_config(true),
-            1,
-            CancellationToken::new(),
-            SelectionCacheConfig::default(),
-        )
-        .unwrap();
+        let core = local_core(test_config(true));
         let request = worker_with_kv_events(1);
         core.upsert_worker(request.clone()).await.unwrap();
         let key = RoutingPartitionId::new("model", "default");

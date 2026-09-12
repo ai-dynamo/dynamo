@@ -209,10 +209,6 @@ pub enum AcquireStep {
 }
 
 impl SessionAffinity {
-    pub fn new(ttl: Duration) -> Result<Self, AffinityError> {
-        Self::with_config(SessionAffinityConfig::new(ttl))
-    }
-
     pub(crate) fn validate_ttl(ttl: Duration) -> Result<(), AffinityError> {
         if !(Duration::from_secs(1)..=Duration::from_secs(MAX_SESSION_AFFINITY_TTL_SECS))
             .contains(&ttl)
@@ -516,7 +512,26 @@ impl SessionAffinity {
         self.inner.apply_replica_update(session_id, target, version)
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    fn validate_session_id(&self, session_id: &str) -> Result<(), AffinityError> {
+        if session_id.len() > self.inner.max_session_id_bytes {
+            return Err(AffinityError::InvalidArgument(format!(
+                "session affinity ID must not exceed {} bytes",
+                self.inner.max_session_id_bytes
+            )));
+        }
+        Ok(())
+    }
+
+    fn reserve_entry(&self) -> Result<(), AffinityError> {
+        self.inner.reserve_entry().then_some(()).ok_or_else(|| {
+            AffinityError::ResourceExhausted("session affinity entry limit reached".to_string())
+        })
+    }
+}
+
+/// Test hooks, also consumed by dependent crates' tests via `testing`.
+#[cfg(any(test, feature = "testing"))]
+impl SessionAffinity {
     pub fn entry_count(&self) -> usize {
         self.inner.entry_count.load(Ordering::Relaxed)
     }
@@ -526,17 +541,14 @@ impl SessionAffinity {
         self.inner.cancel.clone()
     }
 
-    #[cfg(any(test, feature = "testing"))]
     pub async fn wait_for_reaper(&self) {
         self.inner.reaper_started.notified().await;
     }
 
-    #[cfg(any(test, feature = "testing"))]
     pub async fn wait_for_initializing_waiter(&self) {
         self.inner.waiter_observed.notified().await;
     }
 
-    #[cfg(any(test, feature = "testing"))]
     pub fn expire_for_test(&self, session_id: &str) {
         let Some(mut entry) = self.inner.entries.get_mut(session_id) else {
             panic!("session affinity entry missing");
@@ -555,22 +567,6 @@ impl SessionAffinity {
 
     pub fn next_version(&self) -> AffinityVersion {
         self.inner.next_version()
-    }
-
-    fn validate_session_id(&self, session_id: &str) -> Result<(), AffinityError> {
-        if session_id.len() > self.inner.max_session_id_bytes {
-            return Err(AffinityError::InvalidArgument(format!(
-                "session affinity ID must not exceed {} bytes",
-                self.inner.max_session_id_bytes
-            )));
-        }
-        Ok(())
-    }
-
-    fn reserve_entry(&self) -> Result<(), AffinityError> {
-        self.inner.reserve_entry().then_some(()).ok_or_else(|| {
-            AffinityError::ResourceExhausted("session affinity entry limit reached".to_string())
-        })
     }
 }
 
@@ -689,10 +685,6 @@ pub struct AffinityInitialization {
 }
 
 impl AffinityInitialization {
-    pub fn session_id(&self) -> &str {
-        &self.session_id
-    }
-
     /// Bind the session to the worker the request was dispatched to.
     pub fn commit(mut self, target: AffinityTarget) -> Result<AffinityLease, AffinityError> {
         validate_bound_target(&self.session_id, target, self.requested_target)?;

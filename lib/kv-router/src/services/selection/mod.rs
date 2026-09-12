@@ -25,16 +25,14 @@ mod tests;
 pub use crate::WorkerSelectionPolicyFactory;
 pub use crate::services::common::replica_sync::{
     HostReplicaChannels, HostReplicaSyncFactory, ReplicaPeerError, SchedulerLoadSink,
-    ScopedSequencePublisher,
 };
 pub use core::{
-    HostCache, HostEligibility, HostLoad, HostReplication, HostTelemetry, KvIndexSource,
-    LookupTimings, Selected, SelectionAdmission, SelectionCore, SelectionHost, SelectionOperation,
-    SelectionOutcome, SelectionPartition, SelectionRun, SelectionScheduler, SelectionServiceConfig,
-    SessionBinding,
+    HostCache, HostEligibility, HostLoad, HostReplication, HostTelemetry, KvIndexSource, Selected,
+    SelectionAdmission, SelectionCore, SelectionHost, SelectionOperation, SelectionOutcome,
+    SelectionPartition, SelectionRun, SelectionServiceConfig, SessionBinding,
 };
 pub use error::SelectionError;
-pub use ingress::{KvEventIngress, ZmqDirectIngress};
+pub use ingress::KvEventIngress;
 pub use input::{PromptRequest, PromptView};
 pub use membership::{CatalogObserver, CatalogReconciler, WorkerCatalogSource};
 pub use pending::SelectionCacheConfig;

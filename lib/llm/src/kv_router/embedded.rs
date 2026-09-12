@@ -471,16 +471,6 @@ impl EmbeddedSelection {
         self.worker_type
     }
 
-    pub(crate) fn add_output_block(
-        &self,
-        request_id: &str,
-        decay_fraction: Option<f64>,
-    ) -> Result<(), SequenceError> {
-        self.partition
-            .scheduler()
-            .add_output_block(request_id, decay_fraction)
-    }
-
     pub(crate) async fn enqueue_output_block_if_booking(
         &self,
         booking: &SchedulerBookingDescriptor,

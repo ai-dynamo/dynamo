@@ -628,11 +628,6 @@ impl PrefillRouter {
         }
     }
 
-    /// Whether the inner router has initialized.
-    pub fn is_activated(&self) -> bool {
-        self.binding.load().is_some()
-    }
-
     pub(super) fn lifecycle_state(&self) -> PrefillLifecycleState {
         PrefillLifecycleState::from_atomic(self.lifecycle.load(Ordering::Acquire))
     }
@@ -947,8 +942,9 @@ mod tests {
         admissions.send_replace(vec![ids[1]]);
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                let outcome = router
-                    .query_prefill_worker(
+                let reservation = router
+                    .reserve_prefill_worker(
+                        "admitted-probe",
                         &[1; 128],
                         None,
                         None,
@@ -956,16 +952,13 @@ mod tests {
                         0.0,
                         0,
                         None,
+                        None,
                         RoutingConstraints::default(),
                     )
                     .await
-                    .unwrap();
-                let crate::kv_router::prefill_router::PrefillQueryOutcome::Routed {
-                    worker_id, ..
-                } = outcome
-                else {
-                    panic!("prefill query must remain routable");
-                };
+                    .expect("prefill reservation must remain routable");
+                let worker_id = reservation.worker_id();
+                reservation.release().await.unwrap();
                 assert!(
                     ids[..2].contains(&worker_id),
                     "rejected prefill worker became selectable"

@@ -339,13 +339,6 @@ impl SelectionService {
         &self.core
     }
 
-    /// Scheduler and indexer handle for `key`, once a worker has been upserted
-    /// into that partition. Embedding hosts that keep their own index drive
-    /// the partition scheduler through this handle.
-    pub fn partition(&self, key: &RoutingPartitionId) -> Option<SelectionPartition> {
-        self.core.partition(key)
-    }
-
     /// Create (or fetch) the partition for `key` ahead of worker registration.
     pub fn ensure_partition(
         &self,
@@ -494,10 +487,6 @@ impl SelectionService {
 
     pub async fn recover_indexer_from_peers(&self, peers: &[String]) -> anyhow::Result<bool> {
         self.core.recover_indexer_from_peers(peers).await
-    }
-
-    pub async fn cancelled(&self) {
-        self.cancel_token.cancelled().await;
     }
 
     pub async fn shutdown(&self) {

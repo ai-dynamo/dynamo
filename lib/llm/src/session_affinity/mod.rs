@@ -14,8 +14,7 @@ pub use coordinator::{AffinityCoordinator, AffinityTarget, explicit_target};
 pub(crate) use coordinator::{affinity_id, from_table, invalid_argument};
 pub(crate) use dynamo_kv_router::services::selection::affinity::Hold;
 pub use dynamo_kv_router::services::selection::affinity::{
-    MAX_SESSION_AFFINITY_ENTRIES, MAX_SESSION_AFFINITY_ID_BYTES, MAX_SESSION_AFFINITY_TTL_SECS,
-    SessionAffinityMode,
+    MAX_SESSION_AFFINITY_TTL_SECS, SessionAffinityMode,
 };
 
 pub type LlmResponse =

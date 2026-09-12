@@ -293,8 +293,7 @@ impl SelectionCore {
             }
             (SessionBinding::Query { session_id }, Some(table)) => table
                 .query_target(session_id, None)
-                .map_err(affinity_error)?
-                .map(|target| WorkerAffinityTarget::new(target.worker_id, target.dp_rank)),
+                .map_err(affinity_error)?,
             _ => affinity_target,
         };
         // Router hints are attached to bookings only, and only when a worker in
