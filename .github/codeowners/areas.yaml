@@ -1049,7 +1049,7 @@ shared:
   owners:
   - router
   - kv-memory
-- glob: lib/llm/src/preprocessor/lightseek_mm.rs
+- glob: lib/llm/src/preprocessor/mm_routing/
   owners:
   - frontend
   - multimodal

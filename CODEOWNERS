@@ -641,6 +641,7 @@ requirements.txt                                                                
 /lib/llm/src/http/service/metrics.rs                                                                    @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-observability-codeowners
 /container/deps/requirements.vllm.txt                                                                   @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
 /deploy/operator/internal/checkpoint/                                                                   @ai-dynamo/dynamo-gms-codeowners @ai-dynamo/dynamo-operator-codeowners
+/lib/llm/src/preprocessor/mm_routing/                                                                   @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-router-codeowners
 /lib/llm/src/protocols/openai/audios/                                                                   @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /lib/llm/src/protocols/openai/images/                                                                   @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /lib/llm/src/protocols/openai/videos/                                                                   @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-diffusion-codeowners
@@ -676,7 +677,6 @@ requirements.txt                                                                
 /container/deps/requirements.frontend.txt                                                               @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-frontend-codeowners
 /lib/kv-router/src/services/shared_cache/                                                               @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/kv-router/src/zmq_wire/extra_keys.rs                                                               @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-multimodal-codeowners
-/lib/llm/src/preprocessor/lightseek_mm.rs                                                               @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-router-codeowners
 /lib/runtime/src/metrics/frontend_perf.rs                                                               @ai-dynamo/dynamo-observability-codeowners @ai-dynamo/dynamo-frontend-codeowners
 /tests/fault_tolerance/migration/utils.py                                                               @ai-dynamo/dynamo-fault-tolerance-codeowners @ai-dynamo/dynamo-observability-codeowners
 /tests/test_generate_kustomize_openapi.py                                                               @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-ops-codeowners
