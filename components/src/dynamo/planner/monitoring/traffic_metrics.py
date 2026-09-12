@@ -397,10 +397,27 @@ class PrometheusAPIClient:
                 query=f"increase({requests_total_metric}[{interval}])"
             )
             completed_count = self._sum_frontend_metric(completed_res, model_name)
-            return completed_count or 0
-        except Exception as e:
-            logger.error(f"Error getting avg request count: {e}")
-            return 0
+            if completed_count is None:
+                logger.warning(
+                    "No prometheus metric data available for %s or %s with model "
+                    "%s and dynamo namespace %s; demand is UNKNOWN, not zero",
+                    requests_started_metric,
+                    requests_total_metric,
+                    model_name,
+                    self.dynamo_namespace,
+                )
+                return None
+            return completed_count
+        except (
+            PrometheusApiClientException,
+            RequestsConnectionError,
+            RequestsTimeout,
+        ) as e:
+            logger.error("Error getting avg request count; demand is UNKNOWN: %s", e)
+            return None
+        except Exception:
+            logger.exception("Unexpected error getting avg request count")
+            raise
 
     def get_avg_input_sequence_tokens(self, interval: str, model_name: str):
         if self.metrics_source == "router":
