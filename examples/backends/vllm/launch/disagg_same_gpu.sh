@@ -57,7 +57,8 @@ fi
 if [[ -n "${DYN_ROUTER_MODE:-}" ]]; then
     FRONTEND_ARGS+=(--router-mode "$DYN_ROUTER_MODE")
 fi
-python3 -m dynamo.frontend "${FRONTEND_ARGS[@]}" &
+env -u DYN_SYSTEM_PORT -u DYN_SYSTEM_PORT1 -u DYN_SYSTEM_PORT2 -u DYN_SYSTEM_PORT3 \
+    python3 -m dynamo.frontend "${FRONTEND_ARGS[@]}" &
 
 # run decode worker with metrics on port 8081
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
