@@ -31,7 +31,7 @@ Every night, the [Nightly CI pipeline](https://github.com/ai-dynamo/dynamo/blob/
 
 The runtime images and the wheels gate the release: if any of them fails to build, that night publishes nothing. The component images, the EFA variants, and the Helm chart stage fail-soft, so a flake in one of them skips that artifact for the night without holding back the rest.
 
-Nightly does not publish Rust crates — for those, use a [stable or pre-release build](release-artifacts.mdx).
+Nightly does not publish Rust crates — for those, use a [stable or prerelease build](release-artifacts.mdx).
 
 ## Installing Nightly Containers
 
@@ -72,7 +72,7 @@ Backend extras such as `ai-dynamo[vllm]` and `ai-dynamo[sglang]` use the same fl
 
 ## Backend Versions
 
-Nightlies track `main`, so the backend versions they ship change as `main` advances. To find which nightly or stable build ships a given backend version, and get the exact pull or install command, use the build selector in the [Kubernetes Quickstart](../../kubernetes/getting-started/quickstart.mdx#install-dynamo).
+Nightlies track `main`, so the backend versions they ship change as `main` advances. The build selector in [Install Dynamo](../../cli/installation/install-dynamo.mdx) lists the last three versions of each backend and the newest nightly that shipped each one, with the exact install command. For Kubernetes image variables, use the selector in the [Kubernetes Quickstart](../../kubernetes/getting-started/quickstart.mdx#install-dynamo).
 
 To confirm the exact versions a specific nightly shipped, read them from the pulled image:
 

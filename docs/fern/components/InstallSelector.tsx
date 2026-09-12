@@ -122,6 +122,7 @@ export function InstallSelector({ hardware = "all" }: { hardware?: "all" | "nvid
   const entries = INSTALL_DATA[backend][channel];
   const entry = entries[versionIndex] ?? entries[0];
   const command = entry?.commands[form] ?? entry?.commands.container ?? "";
+  const unavailable = !entry;
 
   function chooseHardware(next: Hardware) {
     setSelectedHardware(next);
@@ -160,17 +161,19 @@ export function InstallSelector({ hardware = "all" }: { hardware?: "all" | "nvid
     : channel === "nightly"
       ? entry?.latest
         ? "Latest nightly"
-        : `Nightly ${entry?.dynamo}`
+        : `Nightly ${entry?.commands.wheel ? entry?.dynamo : entry?.backend_version}`
       : "Build Dynamo from source";
   const role = channel === "stable"
     ? "Latest stable release that supports this version"
     : channel === "nightly"
       ? entry?.latest
         ? "Latest nightly build"
-        : "Pinned nightly wheel build"
+        : entry?.commands.wheel
+          ? "Pinned nightly wheel build"
+          : "Pinned nightly container build"
       : "Intel XPU local runtime";
   const hardwareLabel = activeHardware === "nvidia" ? "NVIDIA GPU" : "Intel XPU";
-  const versionRowLabel = channel === "nightly" ? "Dynamo nightly" : `${INSTALL_DATA[backend].label} version`;
+  const versionRowLabel = `${INSTALL_DATA[backend].label} version`;
 
   return (
     <>
@@ -215,7 +218,7 @@ export function InstallSelector({ hardware = "all" }: { hardware?: "all" | "nvid
               {entries.map((version, index) => {
                 const hasContainer = Boolean(version.commands.container);
                 const hasWheel = Boolean(version.commands.wheel);
-                const displayVersion = channel === "nightly" && version.dynamo ? version.dynamo : version.backend_version;
+                const displayVersion = version.backend_version;
                 const displayMeta = version.source
                   ? "from main"
                   : channel === "nightly"
@@ -252,27 +255,33 @@ export function InstallSelector({ hardware = "all" }: { hardware?: "all" | "nvid
           disabledTitle={(option) => disabledReason("form", activeHardware, option.label)}
         />
 
-        {entry && (
-          <div className="lqs-output">
-            <div className={`lqs-rec lqs-rec--${channel}`}>
-              <div className="lqs-eyebrow">{role}</div>
-              <div className="lqs-title">
-                <span className="lqs-badge">{badge}</span>
-                {title}
-              </div>
-              <div className="lqs-support">
-                {hardwareLabel} · {INSTALL_DATA[backend].label} {entry.backend_version}
-              </div>
+        <div className="lqs-output">
+          <div className={`lqs-rec lqs-rec--${channel}`}>
+            <div className="lqs-eyebrow">{unavailable ? "Not currently available" : role}</div>
+            <div className="lqs-title">
+              <span className="lqs-badge">{badge}</span>
+              {unavailable ? "No matching build" : title}
             </div>
-            <div className="lqs-command">
-              <button type="button" className="lqs-copy" onClick={copyCommand}>
-                {copyLabel}
-              </button>
-              <pre>{command}</pre>
-              {entry.note && <p className="lqs-hint">{entry.note}</p>}
+            <div className="lqs-support">
+              {unavailable
+                ? `No ${INSTALL_DATA[backend].label} ${badge.toLowerCase()} build is currently published for this combination.`
+                : `${hardwareLabel} · ${INSTALL_DATA[backend].label} ${entry?.backend_version}`}
             </div>
           </div>
-        )}
+          <div className="lqs-command">
+            {unavailable ? (
+              <p className="lqs-hint">No install command is available for this selection.</p>
+            ) : (
+              <>
+                <button type="button" className="lqs-copy" onClick={copyCommand}>
+                  {copyLabel}
+                </button>
+                <pre>{command}</pre>
+                {entry?.note && <p className="lqs-hint">{entry.note}</p>}
+              </>
+            )}
+          </div>
+        </div>
       </section>
     </>
   );
