@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from types import SimpleNamespace
@@ -1963,9 +1964,11 @@ def decode_cancellation_case(monkeypatch):
 )
 @pytest.mark.parametrize("signal", ["cancel", "shutdown"])
 async def test_decode_cancels_before_first_response(
-    decode_cancellation_case, output_mode, phase, signal, disaggregated
+    decode_cancellation_case, output_mode, phase, signal, disaggregated, caplog
 ):
+    caplog.set_level(logging.INFO)
     case = decode_cancellation_case
+    abort_message = f"Aborted Request ID: {case.context.id()}"
     if phase == "before_dispatch":
         case.allow_dispatch.clear()
     expected_id = case.context.trace_id
@@ -1993,11 +1996,13 @@ async def test_decode_cancels_before_first_response(
         if phase == "before_registration":
             await asyncio.wait_for(case.polling.get(), timeout=1)
             assert not case.abort_calls
+            assert abort_message not in caplog.messages
             case.allow_registration.set()
         elif phase == "before_dispatch":
             # The monitor must wait for dispatch without sending an early abort.
             await asyncio.wait_for(case.polling.get(), timeout=1)
             assert not case.abort_calls
+            assert abort_message not in caplog.messages
             assert not case.aborted.is_set()
             assert case.registry
             case.allow_dispatch.set()
@@ -2008,6 +2013,7 @@ async def test_decode_cancels_before_first_response(
         else:
             assert await asyncio.wait_for(consumer, timeout=1) == []
         assert case.abort_calls == [(expected_id, False)]
+        assert caplog.messages.count(abort_message) == 1
         assert case.dispatched.is_set()
         assert case.aborted.is_set()
         assert case.drained.is_set()
@@ -2075,12 +2081,55 @@ async def test_decode_cancellation_drains_buffered_empty_chunk(
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(5)
+@pytest.mark.parametrize(
+    "state_kind", ["no_registry", "missing", "no_stats", "null_stats"]
+)
+@pytest.mark.parametrize("abort_fails", [False, True])
+async def test_cancellation_monitor_logs_only_submitted_abort(
+    decode_cancellation_case, caplog, state_kind, abort_fails
+):
+    """Fallback paths log the context ID only after a successful abort call."""
+    caplog.set_level(logging.INFO)
+    case = decode_cancellation_case
+    rid = case.context.trace_id
+    registry = None if state_kind == "no_registry" else case.registry
+    if state_kind == "no_stats":
+        case.registry[rid] = object()
+    elif state_kind == "null_stats":
+        case.registry[rid] = SimpleNamespace(time_stats=None)
+
+    def abort_request(*, rid, abort_all):
+        assert f"Aborted Request ID: {case.context.id()}" not in caplog.messages
+        if abort_fails:
+            raise RuntimeError("abort failed")
+        case.abort_calls.append((rid, abort_all))
+        case.registry.pop(rid, None)
+
+    manager = case.handler.engine.tokenizer_manager
+    manager.abort_request = abort_request
+    abort = case.handler._abort_sglang_request(
+        manager, rid, registry, case.context.id()
+    )
+    if abort_fails:
+        with pytest.raises(RuntimeError, match="abort failed"):
+            await abort
+    else:
+        await abort
+    assert case.abort_calls == ([] if abort_fails else [(rid, False)])
+    assert caplog.messages.count(f"Aborted Request ID: {case.context.id()}") == (
+        0 if abort_fails else 1
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
 @pytest.mark.parametrize("reuse_rid", [False, True])
 @pytest.mark.parametrize("waiting_for", ["dispatch", "retry"])
 async def test_cancellation_monitor_stops_when_request_finishes(
-    decode_cancellation_case, monkeypatch, reuse_rid, waiting_for
+    decode_cancellation_case, monkeypatch, reuse_rid, waiting_for, caplog
 ):
     """Neither a dispatch wait nor a retry may abort a replacement request."""
+    caplog.set_level(logging.INFO)
     case = decode_cancellation_case
     rid = case.context.trace_id
     case.registry[rid] = (
@@ -2114,6 +2163,9 @@ async def test_cancellation_monitor_stops_when_request_finishes(
         await asyncio.wait_for(monitor, timeout=1)
         expected = [(rid, False)] if waiting_for == "retry" else []
         assert case.abort_calls == expected
+        assert caplog.messages.count(f"Aborted Request ID: {case.context.id()}") == len(
+            expected
+        )
         assert not request_id_future.done()
     finally:
         monitor.cancel()

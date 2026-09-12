@@ -1315,7 +1315,7 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             # Call abort_request on the tokenizer_manager through the engine
             if tokenizer_manager is not None:
                 await self._abort_sglang_request(
-                    tokenizer_manager, sglang_request_id, registry
+                    tokenizer_manager, sglang_request_id, registry, context.id()
                 )
                 logging.debug(
                     "Cancellation monitor finished for SGLang Request ID %s",
@@ -1357,15 +1357,17 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         tokenizer_manager: Any,
         request_id: str,
         registry: dict[str, Any] | None,
+        context_id: str,
     ) -> None:
         state = registry.get(request_id) if registry is not None else None
         if registry is None or state is None:
             tokenizer_manager.abort_request(rid=request_id, abort_all=False)
+            logging.info("Aborted Request ID: %s", context_id)
             return
 
         time_stats = getattr(state, "time_stats", None)
         has_dispatch_time = hasattr(time_stats, "api_server_dispatch_finish_time")
-        if has_dispatch_time:
+        if time_stats is not None and has_dispatch_time:
             # SGLang writes this after sending on the scheduler socket, even
             # with metrics disabled. Registration alone can precede dispatch.
             while registry.get(request_id) is state:
@@ -1376,6 +1378,10 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
                 return
 
         tokenizer_manager.abort_request(rid=request_id, abort_all=False)
+        # Preserve the cancellation log consumed by integration tests. This
+        # records the abort submission, not scheduler completion, and must not
+        # be emitted when the captured request disappears before dispatch.
+        logging.info("Aborted Request ID: %s", context_id)
         server_args = resolved_server_args(self.config.server_args)
         # DP attention's global control broadcast can overtake a request sent
         # to another DP leader. Retain best-effort retries for that topology,
