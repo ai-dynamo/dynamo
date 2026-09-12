@@ -18,9 +18,6 @@ import logging
 from collections.abc import Mapping
 from typing import Optional
 
-from kubernetes import client, config
-from kubernetes.config.config_exception import ConfigException
-
 from dynamo.planner.errors import DynamoGraphDeploymentNotFoundError, RolloutFailedError
 from dynamo.planner.monitoring.dgd_services import (
     POWER_ANNOTATION_KEY,
@@ -30,6 +27,8 @@ from dynamo.planner.monitoring.dgd_services import (
     resolve_power_component_names,
 )
 from dynamo.runtime.logging import configure_dynamo_logging
+from kubernetes import client, config
+from kubernetes.config.config_exception import ConfigException
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -128,30 +127,88 @@ class KubernetesAPI:
             service_name: Name of the component in DGD.spec.components
             replicas: Desired number of replicas
         """
-        # DGDSA naming convention: <dgd-name>-<lowercase-service-name>
-        adapter_name = f"{graph_deployment_name}-{service_name.lower()}"
-
         try:
             # Try to scale via DGDSA Scale subresource
-            self.custom_api.patch_namespaced_custom_object_scale(
-                group=NVIDIA_API_GROUP,
-                version=DYNAMO_API_VERSION,
-                namespace=self.current_namespace,
-                plural=DGDSA_PLURAL,
-                name=adapter_name,
-                body={"spec": {"replicas": replicas}},
+            self.update_scaling_adapter_replicas(
+                graph_deployment_name, service_name, replicas
             )
-            logger.info(f"Scaled DGDSA {adapter_name} to {replicas} replicas")
 
         except client.ApiException as e:
             if e.status == 404:
                 # DGDSA doesn't exist - fall back to a direct DGD patch.
+                adapter_name = self.scaling_adapter_name(
+                    graph_deployment_name, service_name
+                )
                 logger.info(
                     f"DGDSA {adapter_name} not found, falling back to DGD update"
                 )
                 self._update_dgd_replicas(graph_deployment_name, service_name, replicas)
             else:
                 raise
+
+    @staticmethod
+    def scaling_adapter_name(graph_deployment_name: str, service_name: str) -> str:
+        """Return the operator-defined DGDSA name for one DGD component."""
+        return f"{graph_deployment_name}-{service_name.lower()}"
+
+    def get_service_scaling_adapter(
+        self, graph_deployment_name: str, service_name: str
+    ) -> dict:
+        """Read the DGDSA that owns a component's desired replica count.
+
+        Callers use this only when the DGD component explicitly declares the
+        ``scalingAdapter`` key. A missing adapter is therefore an operator
+        reconciliation error and is intentionally returned as a 404 rather
+        than being hidden behind the legacy DGD fallback.
+        """
+        return self.custom_api.get_namespaced_custom_object(
+            group=NVIDIA_API_GROUP,
+            version=DYNAMO_API_VERSION,
+            namespace=self.current_namespace,
+            plural=DGDSA_PLURAL,
+            name=self.scaling_adapter_name(graph_deployment_name, service_name),
+        )
+
+    @staticmethod
+    def get_scaling_adapter_desired_replicas(adapter: dict) -> int:
+        """Return a validated authoritative replica target from a DGDSA."""
+        replicas = adapter.get("spec", {}).get("replicas")
+        if isinstance(replicas, bool) or not isinstance(replicas, int) or replicas < 0:
+            adapter_name = adapter.get("metadata", {}).get("name", "<unknown>")
+            raise ValueError(
+                f"DGDSA {adapter_name!r} spec.replicas must be a non-negative integer"
+            )
+        return replicas
+
+    def update_scaling_adapter_replicas(
+        self,
+        graph_deployment_name: str,
+        service_name: str,
+        replicas: int,
+        *,
+        resource_version: str | None = None,
+    ) -> None:
+        """Strictly patch a declared DGDSA through its Scale subresource.
+
+        Unlike :meth:`update_service_replicas`, this method never falls back to
+        mutating the DGD. Components that declare ``scalingAdapter`` have made
+        the DGDSA desired state authoritative, so a missing adapter must fail
+        loudly instead of creating a second replica owner.
+        """
+        adapter_name = self.scaling_adapter_name(graph_deployment_name, service_name)
+        body = {"spec": {"replicas": replicas}}
+        if resource_version is not None:
+            body["metadata"] = {"resourceVersion": resource_version}
+
+        self.custom_api.patch_namespaced_custom_object_scale(
+            group=NVIDIA_API_GROUP,
+            version=DYNAMO_API_VERSION,
+            namespace=self.current_namespace,
+            plural=DGDSA_PLURAL,
+            name=adapter_name,
+            body=body,
+        )
+        logger.info(f"Scaled DGDSA {adapter_name} to {replicas} replicas")
 
     def _update_dgd_replicas(
         self, graph_deployment_name: str, service_name: str, replicas: int
