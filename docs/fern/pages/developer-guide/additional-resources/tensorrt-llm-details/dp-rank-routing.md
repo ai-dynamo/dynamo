@@ -70,10 +70,12 @@ python3 -m dynamo.frontend --router-mode kv
 
 The `--enable-attention-dp` flag sets `attention_dp_size = tensor_parallel_size` and configures Dynamo to publish KV events per DP rank. The router automatically creates routing targets for each `(worker_id, dp_rank)` combination.
 
-`--publish-kv-events` enables KV-event generation and publication. Add
-`--publish-metrics` when the worker should also publish TensorRT-LLM iteration
-and Prometheus metrics. The deprecated `--publish-events-and-metrics` flag
-enables both controls for one compatibility release.
+`--publish-kv-events` enables KV-event generation and publication and nothing
+else. Add `--publish-metrics` when the worker should also expose TensorRT-LLM
+metrics on its own Prometheus endpoint, and `--fpm-trace` or
+`DYN_FORWARDPASS_METRIC_PORT` when the Planner needs the worker's forward-pass
+metrics. The deprecated `--publish-events-and-metrics` flag enables both
+publishing controls for one compatibility release.
 
 > [!NOTE]
 > Attention DP requires TRT-LLM's PyTorch backend. AutoDeploy does not support attention DP.

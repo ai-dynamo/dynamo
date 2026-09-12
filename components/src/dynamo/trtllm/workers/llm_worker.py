@@ -64,6 +64,7 @@ from dynamo.trtllm.args import Config
 from dynamo.trtllm.constants import DisaggregationMode, Modality
 from dynamo.trtllm.engine import Backend, TensorRTLLMEngine, get_llm_engine
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
+from dynamo.trtllm.metrics import AdditionalMetricsCollector
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import (
     DYNAMO_COMPONENT_REGISTRY,
@@ -425,9 +426,14 @@ async def init_llm_worker(
         # and `--override-engine-args` are merged over `arg_map` below and can set
         # it back to true for custom instrumentation.
         "return_perf_metrics": False,
-        # Iteration stats drive the metrics-publishing path but are independent
-        # of KV-event publication. TensorRT backend always has this enabled.
-        "enable_iter_perf_stats": config.publish_metrics,
+        # Iteration stats feed the Prometheus surface and the Planner's
+        # forward-pass metrics, so either opt-in needs them. KV events do not:
+        # the engine only produces iteration stats under this flag, at a
+        # measurable per-iteration throughput cost. TensorRT backend always
+        # has this enabled.
+        "enable_iter_perf_stats": (
+            config.publish_metrics or config.publish_forward_pass_metrics
+        ),
         "kv_connector_config": kv_connector_config,
     }
 
@@ -829,58 +835,44 @@ async def init_llm_worker(
         metrics_collector = None
         additional_metrics = None
         if config.publish_metrics:
-            try:
-                model_name_for_metrics = config.served_model_name or config.model
-                metrics_collector = MetricsCollector(
-                    {"model_name": model_name_for_metrics, "engine_type": "trtllm"}
-                )
-                logging.info("TensorRT-LLM MetricsCollector initialized")
+            # A setup failure propagates: the operator asked for these metrics,
+            # and a worker that silently serves without them is the outcome
+            # this path exists to prevent. Matches the vLLM backend.
+            metrics_collector = MetricsCollector(
+                {"model_name": model_name_for_metrics, "engine_type": "trtllm"}
+            )
+            logging.info("TensorRT-LLM MetricsCollector initialized")
 
-                # Prefix filter: all TRT-LLM metrics (engine + additional) use "trtllm_" prefix
-                _metric_prefixes = ["trtllm_"]
+            disagg_mode_str = (
+                config.disaggregation_mode.value
+                if hasattr(config.disaggregation_mode, "value")
+                else str(config.disaggregation_mode)
+            )
+            additional_metrics = AdditionalMetricsCollector(
+                labels={
+                    "model_name": model_name_for_metrics,
+                    "disaggregation_mode": disagg_mode_str,
+                    "engine_type": "trtllm",
+                },
+            )
+            logging.info(
+                "Additional metrics initialized (disagg_mode=%s)", disagg_mode_str
+            )
 
-                # Additional metrics (abort tracking, request types, KV transfer perf).
-                # Wrapped in try/except because AdditionalMetricsCollector depends on
-                # prometheus_names which may not be available in all packaging variants.
-                try:
-                    from dynamo.trtllm.metrics import AdditionalMetricsCollector
-
-                    disagg_mode_str = (
-                        config.disaggregation_mode.value
-                        if hasattr(config.disaggregation_mode, "value")
-                        else str(config.disaggregation_mode)
-                    )
-                    additional_metrics = AdditionalMetricsCollector(
-                        labels={
-                            "model_name": model_name_for_metrics,
-                            "disaggregation_mode": disagg_mode_str,
-                            "engine_type": "trtllm",
-                        },
-                    )
-                    logging.info(
-                        "Additional metrics initialized (disagg_mode=%s)",
-                        disagg_mode_str,
-                    )
-                except Exception as e:
-                    logging.warning("Failed to initialize additional metrics: %s", e)
-
-                # Single callback for all Python-side metrics (trtllm_ + additional)
-                register_engine_metrics_callback(
-                    endpoint=endpoint,
-                    registry=REGISTRY,
-                    metric_prefix_filters=_metric_prefixes,
-                    namespace_name=config.namespace,
-                    component_name=config.component,
-                    endpoint_name="generate",
-                    model_name=model_name_for_metrics,
-                )
-                logging.info(
-                    "Prometheus metrics registered (prefixes: %s)", _metric_prefixes
-                )
-            except Exception as e:
-                logging.warning(
-                    f"Failed to initialize TensorRT-LLM Prometheus metrics: {e}"
-                )
+            # Prefix filter: all TRT-LLM metrics (engine + additional) use "trtllm_" prefix
+            metric_prefixes = ["trtllm_"]
+            register_engine_metrics_callback(
+                endpoint=endpoint,
+                registry=REGISTRY,
+                metric_prefix_filters=metric_prefixes,
+                namespace_name=config.namespace,
+                component_name=config.component,
+                endpoint_name="generate",
+                model_name=model_name_for_metrics,
+            )
+            logging.info(
+                "Prometheus metrics registered (prefixes: %s)", metric_prefixes
+            )
 
         # Register callback for Dynamo component metrics using dedicated registry
         register_engine_metrics_callback(
@@ -986,91 +978,84 @@ async def init_llm_worker(
             disaggregation_mode=config.disaggregation_mode,
         ).to_dict()
 
+        metrics_labels = [
+            (
+                prometheus_names.labels.MODEL,
+                model_name_for_metrics,
+            ),  # OpenAI standard
+            (
+                prometheus_names.labels.MODEL_NAME,
+                model_name_for_metrics,
+            ),  # Native engine compatibility
+        ]
+
+        # Worker-side publisher for consolidated KV events. It subscribes to the
+        # consolidator's ZMQ output and republishes to NATS tagged with this
+        # worker_id. Only polling routes events through the consolidator, so it
+        # exists only for that mode.
+        consolidator_publisher = None
         if (
-            kv_event_publication_mode is not KvEventPublicationMode.DISABLED
-            or config.publish_metrics
+            kv_event_publication_mode is KvEventPublicationMode.POLLING
+            and consolidator_output_endpoint
         ):
-            # Initialize the independently gated KV-event and metrics publishers.
-            # Use model as fallback if served_model_name is not provided
-            model_name_for_metrics = config.served_model_name or config.model
-            metrics_labels = [
-                (
-                    prometheus_names.labels.MODEL,
-                    model_name_for_metrics,
-                ),  # OpenAI standard
-                (
-                    prometheus_names.labels.MODEL_NAME,
-                    model_name_for_metrics,
-                ),  # Native engine compatibility
-            ]
-
-            # Create worker-side publisher for consolidated events if consolidator is enabled
-            # This subscribes to consolidator's ZMQ output and publishes to NATS with worker_id
-            consolidator_publisher = None
-            if (
-                kv_event_publication_mode is KvEventPublicationMode.POLLING
-                and consolidator_output_endpoint
-            ):
-                # Use the connect endpoint directly (already provided by get_consolidator_endpoints)
-                consolidator_publisher = KvEventPublisher(
-                    endpoint=endpoint,
-                    kv_block_size=kv_cache_block_size,
-                    zmq_endpoint=consolidator_output_connect_endpoint,
-                    zmq_topic="",
-                    enable_local_indexer=config.enable_local_indexer,
-                    kv_state_endpoint=config.kv_state_endpoint,
-                    image_token_id=image_token_id,
-                )
-                logging.info(
-                    f"Created worker-side publisher for consolidated events: "
-                    f"subscribing to {consolidator_output_connect_endpoint}, worker_id={endpoint.connection_id()}"
-                )
-
-            async with get_publisher(
-                endpoint,
-                engine,
-                int(endpoint.connection_id()),
-                kv_cache_block_size,
-                metrics_labels,
-                component_gauges=component_gauges,
-                additional_metrics=additional_metrics,
-                event_buffer_max_size=event_buffer_max_size,
-                zmq_endpoint=trtllm_zmq_bind_endpoint,
+            # Use the connect endpoint directly (already provided by get_consolidator_endpoints)
+            consolidator_publisher = KvEventPublisher(
+                endpoint=endpoint,
+                kv_block_size=kv_cache_block_size,
+                zmq_endpoint=consolidator_output_connect_endpoint,
+                zmq_topic="",
                 enable_local_indexer=config.enable_local_indexer,
-                metrics_collector=metrics_collector,
                 kv_state_endpoint=config.kv_state_endpoint,
                 image_token_id=image_token_id,
-                publish_metrics=config.publish_metrics,
-                kv_event_publication_mode=kv_event_publication_mode,
-                streaming_kv_events_config=streaming_kv_events_config,
-                streaming_kv_events_gpus_per_node=gpus_per_node,
-            ) as publisher:
-                handler_config.publisher = publisher
-                handler = RequestHandlerFactory().get_request_handler(handler_config)
-                if config.load_format == "gms":
-                    _register_memory_routes(runtime, handler)
+            )
+            logging.info(
+                "Created worker-side publisher for consolidated events: "
+                "subscribing to %s, worker_id=%s",
+                consolidator_output_connect_endpoint,
+                endpoint.connection_id(),
+            )
 
-                encoder_cache = getattr(handler, "_encoder_cache", None)
-                if encoder_cache is not None:
-                    register_embedding_cache_metrics(
-                        endpoint=endpoint,
-                        cache=encoder_cache,
-                        model_name=model_name_for_metrics,
-                        component_name=config.component,
-                    )
-                await endpoint.serve_endpoint(
-                    handler.generate,
-                    metrics_labels=metrics_labels,
-                    health_check_payload=health_check_payload,
-                )
-
-            # Shutdown consolidator publisher if it was created
-            if consolidator_publisher:
-                consolidator_publisher.shutdown()
-        else:
+        # The Publisher builds nothing and starts no thread when KV events,
+        # metrics and forward-pass metrics are all off, so it wraps the serving
+        # path unconditionally.
+        async with get_publisher(
+            endpoint,
+            engine,
+            int(endpoint.connection_id()),
+            kv_cache_block_size,
+            metrics_labels,
+            component_gauges=component_gauges,
+            additional_metrics=additional_metrics,
+            event_buffer_max_size=event_buffer_max_size,
+            zmq_endpoint=trtllm_zmq_bind_endpoint,
+            enable_local_indexer=config.enable_local_indexer,
+            metrics_collector=metrics_collector,
+            kv_state_endpoint=config.kv_state_endpoint,
+            image_token_id=image_token_id,
+            publish_metrics=config.publish_metrics,
+            publish_forward_pass_metrics=config.publish_forward_pass_metrics,
+            kv_event_publication_mode=kv_event_publication_mode,
+            streaming_kv_events_config=streaming_kv_events_config,
+            streaming_kv_events_gpus_per_node=gpus_per_node,
+        ) as publisher:
+            handler_config.publisher = publisher
             handler = RequestHandlerFactory().get_request_handler(handler_config)
             if config.load_format == "gms":
                 _register_memory_routes(runtime, handler)
+
+            encoder_cache = getattr(handler, "_encoder_cache", None)
+            if encoder_cache is not None:
+                register_embedding_cache_metrics(
+                    endpoint=endpoint,
+                    cache=encoder_cache,
+                    model_name=model_name_for_metrics,
+                    component_name=config.component,
+                )
             await endpoint.serve_endpoint(
-                handler.generate, health_check_payload=health_check_payload
+                handler.generate,
+                metrics_labels=metrics_labels,
+                health_check_payload=health_check_payload,
             )
+
+        if consolidator_publisher:
+            consolidator_publisher.shutdown()

@@ -183,7 +183,9 @@ class DynamoTrtllmArgGroup(ArgGroup):
             default=False,
             help=(
                 "Publish KV cache events to the KV router. This does not enable "
-                "TensorRT-LLM metric reporting; use --publish-metrics for that."
+                "TensorRT-LLM iteration statistics: use --publish-metrics for "
+                "Prometheus metrics, and --fpm-trace or DYN_FORWARDPASS_METRIC_PORT "
+                "for the Planner's forward-pass metrics."
             ),
             dest="publish_kv_events",
         )
@@ -193,8 +195,9 @@ class DynamoTrtllmArgGroup(ArgGroup):
             env_var="DYN_TRTLLM_PUBLISH_METRICS",
             default=False,
             help=(
-                "Publish TensorRT-LLM iteration and Prometheus metrics. This does "
-                "not publish KV cache events; use --publish-kv-events for that."
+                "Expose TensorRT-LLM iteration and request metrics on this "
+                "worker's Prometheus endpoint. This does not publish KV cache "
+                "events; use --publish-kv-events for that."
             ),
             dest="publish_metrics",
         )
