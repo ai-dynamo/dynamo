@@ -1218,15 +1218,25 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         token_sequence: Option<&[SequenceHash]>,
         decay_now: Instant,
     ) -> FxHashMap<WorkerWithDpRank, WorkerLoadProjection> {
+        let mut projections = FxHashMap::default();
+        self.project_worker_loads_into(token_sequence, decay_now, &mut projections);
+        projections
+    }
+
+    pub(crate) fn project_worker_loads_into(
+        &self,
+        token_sequence: Option<&[SequenceHash]>,
+        decay_now: Instant,
+        projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    ) {
         #[cfg(feature = "bench")]
         let start = tokio::time::Instant::now();
 
         #[cfg(feature = "bench")]
         let num_workers = self.workers.read().slots.len();
 
-        let result = self
-            .prompt_registry
-            .project_worker_loads(token_sequence, decay_now);
+        self.prompt_registry
+            .project_worker_loads_into(token_sequence, decay_now, projections);
 
         #[cfg(feature = "bench")]
         {
@@ -1237,8 +1247,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 "project_worker_loads completed"
             );
         }
-
-        result
     }
 
     /// Query all workers for their current number of active blocks.
@@ -2683,6 +2691,18 @@ mod tests {
             decay_now,
         );
         let projections = sequences.project_worker_loads(Some(&prompt), decay_now);
+
+        let mut reused = FxHashMap::default();
+        reused.insert(
+            WorkerWithDpRank::new(u64::MAX, 0),
+            WorkerLoadProjection::default(),
+        );
+        sequences.project_worker_loads_into(Some(&prompt), decay_now, &mut reused);
+        assert_eq!(reused, projections);
+        let capacity = reused.capacity();
+        sequences.project_worker_loads_into(None, decay_now, &mut reused);
+        assert_eq!(reused, sequences.project_worker_loads(None, decay_now));
+        assert_eq!(reused.capacity(), capacity);
 
         assert_eq!(actual.0, expected.0);
         assert_eq!(actual.1, expected.1);

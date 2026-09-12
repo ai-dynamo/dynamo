@@ -170,6 +170,7 @@ impl<'a> MaterializedSelectionInput<'a> {
         )
     }
 
+    #[inline(always)]
     fn row_with_device_overlap(
         &self,
         worker: WorkerWithDpRank,
@@ -459,7 +460,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
 
 #[cfg(test)]
 mod test_support {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashSet;
 
     use rustc_hash::FxHashMap;
 
@@ -502,8 +503,8 @@ mod test_support {
             isl_tokens,
             overlap: OverlapSignals {
                 tier_overlap_blocks: Default::default(),
-                effective_overlap_blocks: HashMap::default(),
-                effective_cached_tokens: HashMap::default(),
+                effective_overlap_blocks: Default::default(),
+                effective_cached_tokens: Default::default(),
             },
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,

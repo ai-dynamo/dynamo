@@ -2159,7 +2159,7 @@ where
         Ok(self.scheduler.get_potential_loads(
             maybe_seq_hashes,
             isl_tokens,
-            cache_hit_estimates.cached_tokens.into_iter().collect(),
+            cache_hit_estimates.cached_tokens,
             track_prefill_tokens,
         ))
     }

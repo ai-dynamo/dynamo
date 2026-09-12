@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::config::{KvRouterConfig, RouterConfigOverride};
 use crate::indexer::TieredMatchDetails;
@@ -23,8 +23,8 @@ pub struct CacheHitEstimates {
 #[derive(Debug, Clone, Default)]
 pub struct OverlapSignals {
     pub tier_overlap_blocks: TierOverlapBlocks,
-    pub effective_overlap_blocks: HashMap<WorkerWithDpRank, f64>,
-    pub effective_cached_tokens: HashMap<WorkerWithDpRank, usize>,
+    pub effective_overlap_blocks: FxHashMap<WorkerWithDpRank, f64>,
+    pub effective_cached_tokens: FxHashMap<WorkerWithDpRank, usize>,
 }
 
 impl OverlapSignals {
@@ -141,8 +141,8 @@ impl<'a> OverlapAnalysis<'a> {
             cache_hit_estimates_from_tiered_matches(self.config, self.block_size, self.tiered);
         OverlapSignals {
             tier_overlap_blocks: tier_overlap_blocks_from_tiered_matches(self.tiered),
-            effective_overlap_blocks: estimates.effective_overlap_blocks.into_iter().collect(),
-            effective_cached_tokens: estimates.cached_tokens.into_iter().collect(),
+            effective_overlap_blocks: estimates.effective_overlap_blocks,
+            effective_cached_tokens: estimates.cached_tokens,
         }
     }
 
