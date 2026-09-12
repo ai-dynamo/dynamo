@@ -429,7 +429,6 @@ func (v *sharedValidation) validateComponentRoles(
 					workloadProvider:           workloadProvider,
 					scope:                      scope,
 					component:                  component,
-					podTemplateAllowed:         component.IsLPX(),
 				},
 			)...)
 		}
@@ -455,19 +454,13 @@ type componentRoleSpecValidationOptions struct {
 }
 
 // validateComponentRoleSpec validates role. role and fldPath must not be nil;
-// the optional provider override and PodTemplate may be nil.
+// options.component and optional role fields may be nil.
 func (v *sharedValidation) validateComponentRoleSpec(
 	role *nvidiacomv1beta1.ComponentRoleSpec,
 	fldPath *field.Path,
 	options componentRoleSpecValidationOptions,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
-	if role.PodTemplate != nil && !options.podTemplateAllowed {
-		allErrs = append(allErrs, field.Forbidden(
-			fldPath.Child("podTemplate"),
-			"is not supported for this component role",
-		))
-	}
 
 	// LPX renders role templates directly and has no provider-override lowering.
 	if options.component != nil && options.component.IsLPX() {
@@ -482,21 +475,28 @@ func (v *sharedValidation) validateComponentRoleSpec(
 		return allErrs
 	}
 
-	if role.ProviderOverride == nil {
-		return allErrs
+	if role.PodTemplate != nil && !options.podTemplateAllowed {
+		allErrs = append(allErrs, field.Forbidden(
+			fldPath.Child("podTemplate"),
+			"is not supported for this component role",
+		))
 	}
 
 	// Validate the provider fragment against this exact multinode role.
-	return append(allErrs, v.validateProviderOverride(
-		role.ProviderOverride,
-		fldPath.Child("providerOverride"),
-		providerOverrideValidationOptions{
-			supported:        options.providerOverridesSupported,
-			workloadProvider: options.workloadProvider,
-			scope:            options.scope,
-			component:        options.component,
-		},
-	)...)
+	if role.ProviderOverride != nil {
+		allErrs = append(allErrs, v.validateProviderOverride(
+			role.ProviderOverride,
+			fldPath.Child("providerOverride"),
+			providerOverrideValidationOptions{
+				supported:        options.providerOverridesSupported,
+				workloadProvider: options.workloadProvider,
+				scope:            options.scope,
+				component:        options.component,
+			},
+		)...)
+	}
+
+	return allErrs
 }
 
 // validateEPPConfig validates deprecated Go-EPP config. config and fldPath must not be nil.
@@ -785,6 +785,8 @@ func (v *sharedValidation) validateComponentCheckpointJobConfig(
 
 // validateDynamoComponentDeploymentSharedSpecUpdate validates a component update.
 // newComponent, oldComponent, and fldPath must not be nil; ownerKind.Kind must not be empty.
+//
+//nolint:gocyclo // Update validation reports the combined upstream and LPX contracts in one pass.
 func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 	newComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	oldComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
@@ -824,11 +826,13 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 				apivalidation.FieldImmutableErrorMsg,
 			))
 		}
-		allErrs = append(allErrs, validateComponentRolesUpdate(
-			newComponent,
-			oldComponent,
-			fldPath.Child("roles"),
-		)...)
+		if !newComponent.IsLPX() && !oldComponent.IsLPX() {
+			allErrs = append(allErrs, validateComponentRolesUpdate(
+				newComponent,
+				oldComponent,
+				fldPath.Child("roles"),
+			)...)
+		}
 	}
 
 	if newComponent.IsLPX() != oldComponent.IsLPX() {
@@ -939,9 +943,6 @@ func validateComponentRolesUpdate(
 	oldComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
 ) field.ErrorList {
-	if newComponent.IsLPX() || oldComponent.IsLPX() {
-		return nil
-	}
 	// Permit representation-only implicit/explicit migrations, but require
 	// role-specific configuration changes to happen in a subsequent update.
 	if (newComponent.Roles == nil) != (oldComponent.Roles == nil) {

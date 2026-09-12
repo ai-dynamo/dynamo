@@ -134,16 +134,15 @@ type ComponentRoleSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	Replicas *int32 `json:"replicas,omitempty"`
 
+	// podTemplate configures Pods for this role. The enclosing component
+	// defines whether the template is required or may be inherited.
+	// +optional
+	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
+
 	// providerOverride configures the provider workload unit generated for this
 	// role. It is supported only for components embedded in a DGD.
 	// +optional
 	ProviderOverride *ProviderOverride `json:"providerOverride,omitempty"`
-
-	// podTemplate defines the Pod configuration for this role. Admission permits
-	// it only when the enclosing component type explicitly supports role-specific
-	// Pod templates. LPX components support role-specific Pod templates.
-	// +optional
-	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 }
 
 // ComponentRole returns the authored role, or nil when the component does not declare it.

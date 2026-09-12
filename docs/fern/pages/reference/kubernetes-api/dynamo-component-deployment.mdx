@@ -89,26 +89,24 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 </Indent>
 
 <ParamField path="roles" type="[]ComponentRoleSpec">
-  Optional explicit structure of a compound component. Multinode components must contain exactly one `leader` and one `worker`. Omit the field to retain the implicit leader/worker layout.
+  Named Pod-producing parts of a compound component, keyed by `name`. Multinode components must contain exactly one `leader` and one `worker`; omitted role counts default to `1` and `multinode.nodeCount - 1`, respectively. Omit the field to retain the implicit leader/worker layout.
 
   LPX components use `agent` for Agent Pods and `conductor` for the conductor. With one LPX component, the conductor role is optional. In a speculative pair, the draft has only an agent role and the target declares both roles. Hybrid execution may also create Nova Pods from Agent configuration.
 
-  Standalone DCD roles accept `name` and `replicas`. See [ComponentRoleSpec](full-api-reference.mdx#componentrolespec).
+  Standalone DCD roles cannot use LPX templates or DGD-only provider overrides. See [ComponentRoleSpec](full-api-reference.mdx#componentrolespec).
 </ParamField>
 
 <Indent>
   <ParamField path="name" type="string" required={true}>
     Semantic role name: `leader` or `worker` for ordinary multinode components, `conductor` or `agent` for LPX components. Names must be unique within the component.
   </ParamField>
+  <ParamField path="replicas" type="integer">
+    Logical cardinality of this role in one complete component instance; minimum `1`. For ordinary multinode components, admission defaults and persists an omitted value as `leader: 1` or `worker: multinode.nodeCount - 1`; an explicit value must match that fixed shape. For LPX, omitted conductor replicas use `1`, subject to runtime-specific limits. Agent replicas are derived from the model build; an explicit count must match the build.
+  </ParamField>
   <ParamField path="podTemplate" type="core/v1.PodTemplateSpec">
     Native Pod template for this role. LPX-only; required for the agent. Each supplied template requires a `main` container with an explicit image. An omitted conductor template reuses the same component's agent template; a single LPX component also uses this fallback when its conductor role is omitted. A speculative pair uses the target's conductor. An explicit conductor template merges with shared defaults independently, without inheriting the agent template.
 
     <a href="https://pkg.go.dev/k8s.io/api/core/v1#PodTemplateSpec" target="_blank">core/v1.PodTemplateSpec</a>
-  </ParamField>
-  <ParamField path="replicas" type="integer">
-    Logical cardinality of the role in one complete component instance. For multinode, admission defaults and persists an omitted value as `leader: 1` or `worker: multinode.nodeCount - 1`; an explicit value must match that fixed shape.
-
-    For LPX, omitted conductor replicas use `1`, subject to runtime-specific limits. Agent replicas are derived from the model build; an explicit count must match the build.
   </ParamField>
   <ParamField path="providerOverride" type="ProviderOverride">
     Provider configuration for the workload unit generated for this role. Available only on ordinary multinode components embedded in a DGD. LPX roles do not support it; standalone DCD OpenAPI omits this field.
@@ -326,7 +324,7 @@ The upgrade does not delete the legacy `DynamoCheckpoint` CRD, instances, `PodSn
     <ParamField path="backendFramework" type="string" required={true} deprecated={true}>
       Runtime framework.
 
-      <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>sglang</Badge> <Badge intent="note" minimal>trtllm</Badge></span>
+      <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>sglang</Badge> <Badge intent="note" minimal>trtllm</Badge> <Badge intent="note" minimal>lpu</Badge></span>
     </ParamField>
     <ParamField path="dynamoVersion" type="string" deprecated={true}>
       Dynamo platform version.

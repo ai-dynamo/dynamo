@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
@@ -61,7 +62,7 @@ func ApplySelectedCyborgContainerDefaults(
 	// SWA cache IDs depend on the final, user-overridable batch size and are
 	// bound only after the main-container override is merged.
 	applyCyborgRuntimeIO(container, cyborgBatchSize, ioFPGACount)
-	lpxContainer := findMainContainer(lpxPodSpec.Containers)
+	lpxContainer := common.FindContainerByName(lpxPodSpec.Containers, commonconsts.MainContainerName)
 	mountIndex := slices.IndexFunc(lpxContainer.VolumeMounts, func(mount corev1.VolumeMount) bool {
 		return mount.Name == commonconsts.ModelStorageVolumeName
 	})

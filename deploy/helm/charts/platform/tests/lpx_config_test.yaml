@@ -15,7 +15,7 @@ tests:
       dynamo-operator.lpx.enabled: true
     asserts:
       - failedTemplate:
-          errorPattern: "bundled Grove v0.1.0-alpha.13 does not support"
+          errorPattern: "bundled Grove chart does not support"
 
   - it: rejects LPX without Grove integration
     template: charts/dynamo-operator/templates/validate-values.yaml

@@ -151,7 +151,7 @@ kai-scheduler:
   (index .Values "dynamo-operator").lpx.enabled
 }}
   {{- fail `
-CONFIGURATION ERROR: The bundled Grove v0.1.0-alpha.13 does not support
+CONFIGURATION ERROR: The bundled Grove chart does not support
 the scheduler-scoped PodGangs required by LPX workloads.
 
 Install the scheduler-scoped Grove build separately, then configure:

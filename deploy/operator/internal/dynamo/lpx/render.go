@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/thirdparty/lpxscheduler/v1alpha1"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -252,7 +253,7 @@ func configureLPURolePods(agentPodSpec, conductorPodSpec *corev1.PodSpec, worklo
 		}
 	}
 	if workload.Pipeline() == PipelineSpecDecode || workload.Pipeline() == PipelineLPX {
-		agent := findMainContainer(agentPodSpec.Containers)
+		agent := common.FindContainerByName(agentPodSpec.Containers, commonconsts.MainContainerName)
 		setContainerEnv(agent, false, corev1.EnvVar{Name: lpuModelNameEnvVar})
 	}
 

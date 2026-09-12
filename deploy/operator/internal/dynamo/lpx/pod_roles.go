@@ -8,6 +8,7 @@ package lpx
 import (
 	"strings"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -31,7 +32,7 @@ func configureAgentScheduling(
 	// Preserve Agent placement while replacing authored LPU resources with the selected device.
 	stripLPUResources(agent)
 	agent.SchedulerName = SchedulerName
-	container := findMainContainer(agent.Containers)
+	container := common.FindContainerByName(agent.Containers, commonconsts.MainContainerName)
 	// Model projection has already restricted the target family to XT or HX.
 	name, amount := v2LPUResourceName, resource.MustParse("8")
 	if targetFamily == BuildFamilyHX {
@@ -44,16 +45,6 @@ func configureAgentScheduling(
 		container.Resources.Limits = make(corev1.ResourceList)
 	}
 	container.Resources.Requests[name], container.Resources.Limits[name] = amount, amount
-}
-
-// findMainContainer returns the main container, or nil when absent.
-func findMainContainer(containers []corev1.Container) *corev1.Container {
-	for i := range containers {
-		if containers[i].Name == commonconsts.MainContainerName {
-			return &containers[i]
-		}
-	}
-	return nil
 }
 
 func stripLPUResources(spec *corev1.PodSpec) {

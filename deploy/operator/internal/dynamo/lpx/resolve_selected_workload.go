@@ -16,6 +16,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	dynamov1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
@@ -151,7 +152,7 @@ func validateSelectedConductor(
 		if conductor != nil && conductor.PodTemplate != nil {
 			template = conductor.PodTemplate
 		}
-		container := findMainContainer(template.Spec.Containers)
+		container := common.FindContainerByName(template.Spec.Containers, commonconsts.MainContainerName)
 		count, err := EffectiveCyborgGPUCount(container.Resources)
 		if err != nil {
 			return fmt.Errorf("component %q conductor resources: %w", component.ComponentName, err)

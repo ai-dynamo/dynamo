@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -115,7 +116,7 @@ func configureDirectHybridAgentRuntime(
 		return fmt.Errorf("direct hybrid agent runtime requires an MPI SSH secret name")
 	}
 
-	agent := findMainContainer(agentPodSpec.Containers)
+	agent := common.FindContainerByName(agentPodSpec.Containers, commonconsts.MainContainerName)
 	// Drop Nova-only flags before applying the direct Agent identity and worker defaults.
 	agent.Args, _ = stripNovaOnlyArgs(agent.Args)
 	hasCustomStartup := len(agent.Command) != 0 || len(agent.Args) != 0
@@ -283,7 +284,7 @@ func runtimeMainContainer(
 	if targetFamily == BuildFamilyHX && len(podSpec.Containers) != 1 {
 		return nil, fmt.Errorf("PodSpec requires exactly one %q container", commonconsts.MainContainerName)
 	}
-	return findMainContainer(podSpec.Containers), nil
+	return common.FindContainerByName(podSpec.Containers, commonconsts.MainContainerName), nil
 }
 
 func configureNodeLocalAgentWorkerContainer(

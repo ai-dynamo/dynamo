@@ -154,15 +154,15 @@ Replicas is the logical cardinality of this role in one complete component insta
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="providerOverride" type="ProviderOverride">
-ProviderOverride configures the provider workload unit generated for this role. It is supported only for components embedded in a DGD.
-See [ProviderOverride](#provideroverride).
+<ParamField path="podTemplate" type="PodTemplateSpec">
+PodTemplate configures Pods for this role. The enclosing component defines whether the template is required or may be inherited.
+See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="podTemplate" type="PodTemplateSpec">
-PodTemplate defines the Pod configuration for this role. Admission permits it only when the enclosing component type explicitly supports role-specific Pod templates. LPX components support role-specific Pod templates.
-See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
+<ParamField path="providerOverride" type="ProviderOverride">
+ProviderOverride configures the provider workload unit generated for this role. It is supported only for components embedded in a DGD.
+See [ProviderOverride](#provideroverride).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -2532,15 +2532,15 @@ replicas is the logical cardinality of this role in one complete component insta
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="providerOverride" type="ProviderOverride">
-providerOverride configures the provider workload unit generated for this role. It is supported only for components embedded in a DGD.
-See [ProviderOverride](#v1beta1-provideroverride).
+<ParamField path="podTemplate" type="PodTemplateSpec">
+podTemplate configures Pods for this role. The enclosing component defines whether the template is required or may be inherited.
+See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="podTemplate" type="PodTemplateSpec">
-podTemplate defines the Pod configuration for this role. Admission permits it only when the enclosing component type explicitly supports role-specific Pod templates. LPX components support role-specific Pod templates.
-See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
+<ParamField path="providerOverride" type="ProviderOverride">
+providerOverride configures the provider workload unit generated for this role. It is supported only for components embedded in a DGD.
+See [ProviderOverride](#v1beta1-provideroverride).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>

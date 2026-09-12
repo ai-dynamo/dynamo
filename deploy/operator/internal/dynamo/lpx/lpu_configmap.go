@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	controllercommon "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/pelletier/go-toml/v2"
@@ -139,7 +140,7 @@ func LPUConfigMapHash(configMap *corev1.ConfigMap) string {
 }
 
 func lpuModelStorageBinding(spec corev1.PodSpec) (lpuModelStorage, error) {
-	container := findMainContainer(spec.Containers)
+	container := common.FindContainerByName(spec.Containers, commonconsts.MainContainerName)
 	mountIndex := slices.IndexFunc(container.VolumeMounts, func(mount corev1.VolumeMount) bool {
 		return mount.Name == commonconsts.ModelStorageVolumeName
 	})
@@ -441,7 +442,7 @@ func withLPUConfigVolume(spec *corev1.PodSpec, configMapName string, allowOverri
 			}},
 		})
 	}
-	container := findMainContainer(spec.Containers)
+	container := common.FindContainerByName(spec.Containers, commonconsts.MainContainerName)
 	found = false
 	for _, mount := range container.VolumeMounts {
 		if mount.Name == lpuConfigVolumeName || mount.MountPath == lpuConfigMountPath {

@@ -46,6 +46,8 @@ CONTAINER_TOOL ?= docker
 SHELL = /usr/bin/env bash -o pipefail
 .SHELLFLAGS = -ec
 
+PYTHON ?= uv run --no-project --python '3.10' --with pydantic --with pyyaml --with black python3
+
 .PHONY: all
 all: build
 
@@ -282,20 +284,20 @@ manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and C
 			$(YQ) eval '.metadata.annotations."helm.sh/resource-policy" = "keep"' -i "$$file"; \
 		fi; \
 	done
-	# Remove DGD-only LPX fields and rules from the standalone DCD schema.
-	$(YQ) --from-file api/scripts/lpx-crd-schema.yq -i --indent 2 config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml
-
+	# Compact LPX schemas last: subsequent schema edits could change an aliased role.
+	for file in config/crd/bases/nvidia.com_dynamographdeployments.yaml config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml; do \
+		$(YQ) --from-file api/scripts/lpx-crd-schema.yq -i --indent 2 $$file || exit 1; \
+	done
 .PHONY: generate
 generate: controller-gen generate-pydantic ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
 	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt_" paths="./..."
 
 .PHONY: generate-pydantic
 generate-pydantic: ## Generate Python Pydantic models from v1beta1 Go types (requires Python 3 + pydantic)
-	@python3 -c "import pydantic" 2>/dev/null || { echo "Error: pydantic not found. Install with: pip install pydantic"; exit 1; }
 	@echo "Generating Pydantic models from v1beta1 DGDR types..."
-	@python3 api/scripts/generate_pydantic_from_go.py
+	$(PYTHON) api/scripts/generate_pydantic_from_go.py
 	@echo "Running Pydantic validation tests..."
-	@python3 api/scripts/validate_pydantic_models.py
+	$(PYTHON) api/scripts/validate_pydantic_models.py
 
 .PHONY: fmt
 fmt: ## Run go fmt against code.
@@ -662,7 +664,7 @@ generate-api-docs: crd-ref-docs ## Generate API reference documentation from CRD
 	rm ./docs/api_reference.md
 	@echo "✅ Concatenated header.md, api_reference.md, and footer.md"
 	# Post-process duplicate anchors and fields pruned from standalone DCD CRDs.
-	python3 docs/fix-api-anchors.py ../../docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md
+	$(PYTHON) docs/fix-api-anchors.py ../../docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md
 
 HELM_CHART_DIR := ../helm/charts/platform
 

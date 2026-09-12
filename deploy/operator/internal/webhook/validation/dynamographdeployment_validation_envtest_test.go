@@ -1105,6 +1105,16 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{"spec.components[1].roles: Forbidden: roles are supported only for component shapes that define a role schema; this release supports multinode and LPX components"},
 		},
 		{
+			name: "ordinary multinode roles accept matching replicas but reject role PodTemplates",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				setBetaExplicitMultinodeRoles(worker, 4)
+				worker.Roles[0].Replicas = k8sptr.To(int32(1))
+				worker.Roles[1].PodTemplate = worker.PodTemplate.DeepCopy()
+			}),
+			wantWebhookErrs: []string{"spec.components[1].roles[1].podTemplate: Forbidden: is not supported for this component role"},
+		},
+		{
 			name: "explicit multinode roles require the complete role set",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)

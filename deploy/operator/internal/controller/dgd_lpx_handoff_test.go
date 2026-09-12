@@ -729,12 +729,13 @@ func TestLPXPendingDownloadDoesNotBlockOrdinaryWorkloads(t *testing.T) {
 	require.Equal(t, "enabled", service.Annotations["example.com/model-discovery"])
 	require.True(t, metav1.IsControlledBy(service, source))
 
-	t.Log("Observe the created PCS before committing its worker hash")
-	require.Empty(t, source.Annotations[consts.AnnotationCurrentWorkerHashV2])
-	_, err = program.Reconcile(t.Context(), workloadProgramRequest{DGD: source})
+	t.Log("Observe the ordinary PCS from a fresh parent reconcile before committing its worker hash")
+	freshSource := &v1beta1.DynamoGraphDeployment{}
+	require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(source), freshSource))
+	result, err = program.Reconcile(t.Context(), workloadProgramRequest{DGD: freshSource})
 	require.NoError(t, err)
-	require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(source), source))
-	require.NotEmpty(t, source.Annotations[consts.AnnotationCurrentWorkerHashV2])
+	require.Equal(t, v1beta1.DGDStatePending, result.Status.State)
+	source = freshSource
 
 	t.Log("A pending ordinary checkpoint retains its startup and scaling gates alongside the pending child")
 	prefill := source.GetComponentByName("prefill")

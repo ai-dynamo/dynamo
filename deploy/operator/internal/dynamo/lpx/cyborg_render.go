@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/thirdparty/lpxscheduler/v1alpha1"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -26,7 +27,7 @@ func configureHybridCyborg(
 	plan *MaterializationPlan,
 	cyborgConfigMap *corev1.ConfigMap,
 ) error {
-	container := findMainContainer(cyborg.Spec.PodSpec.Containers)
+	container := common.FindContainerByName(cyborg.Spec.PodSpec.Containers, commonconsts.MainContainerName)
 
 	// Apply manifest-aware runtime bindings to the selected Cyborg container.
 	if err := withLPUModelStorage(&cyborg.Spec.PodSpec, container, modelStorage); err != nil {

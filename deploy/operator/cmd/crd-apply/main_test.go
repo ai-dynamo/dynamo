@@ -106,11 +106,17 @@ func TestCRDApplyInstallsGeneratedSchemas(t *testing.T) {
 		if name == "dynamocomponentdeployments.nvidia.com" {
 			t.Log("Retain ordinary template schemas and documentation in both served DCD versions")
 			for _, version := range crd.Spec.Versions {
+				spec := version.Schema.OpenAPIV3Schema.Properties["spec"]
+				roles := spec.Properties["roles"]
+				require.Contains(t, roles.Items.Schema.Properties, "replicas")
+				require.Contains(t, roles.Items.Schema.Properties, "podTemplate")
+				require.NotContains(t, spec.Properties, "lpx")
+
 				templateField := "podTemplate"
 				if version.Name == "v1alpha1" {
 					templateField = "extraPodSpec"
 				}
-				template := version.Schema.OpenAPIV3Schema.Properties["spec"].Properties[templateField]
+				template := spec.Properties[templateField]
 				if template.Type != objectType || template.Description == "" {
 					t.Errorf("%s %s is missing the documented %s schema", name, version.Name, templateField)
 				}
