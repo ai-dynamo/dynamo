@@ -23,6 +23,13 @@ use crate::request_trace::{RequestTraceRecord, RequestTraceToolEventIngress};
 /// Relay from local tool-event ZMQ PUSH producers to the Dynamo event plane.
 pub struct ToolEventRelay {
     cancel: CancellationToken,
+    /// Fired once `relay_loop` has returned and dropped its PULL socket.
+    ///
+    /// [`Self::shutdown`] only asks the loop to stop. The socket lives in the
+    /// spawned loop task, so the endpoint stays bound until that task is polled
+    /// to completion. Anything that rebinds the same endpoint has to wait for
+    /// this rather than for `shutdown`, or it can hit an address already in use.
+    finished: CancellationToken,
 }
 
 impl ToolEventRelay {
@@ -47,15 +54,30 @@ impl ToolEventRelay {
 
         let publisher = EventPublisher::for_namespace(&namespace, topic).await?;
 
+        let finished = CancellationToken::new();
+        let finished_clone = finished.clone();
         rt.spawn(async move {
+            // `relay_loop` owns the socket, so returning from it drops the
+            // socket and unbinds the endpoint before this fires.
             Self::relay_loop(socket, zmq_topic, publisher, cancel_clone).await;
+            finished_clone.cancel();
         });
 
-        Ok(Self { cancel })
+        Ok(Self { cancel, finished })
     }
 
     pub fn shutdown(&self) {
         self.cancel.cancel();
+    }
+
+    /// Wait until the relay loop has exited and released its endpoint.
+    ///
+    /// Resolves immediately if the loop has already stopped on its own. If the
+    /// owning runtime is torn down before the loop is polled again, the loop
+    /// task is dropped along with its socket, so a caller awaiting this is
+    /// released by that drop rather than waiting forever.
+    pub async fn wait_finished(&self) {
+        self.finished.cancelled().await;
     }
 
     async fn relay_loop(
@@ -150,7 +172,7 @@ mod tests {
         RequestTraceEventSource, RequestTraceEventType, RequestTraceSchema, RequestTraceToolEvent,
         RequestTraceToolStatus,
     };
-    use crate::utils::zmq::{connect_push_socket, send_multipart_direct};
+    use crate::utils::zmq::{bind_pull_socket, connect_push_socket, send_multipart_direct};
 
     fn reserve_open_port() -> TcpListener {
         TcpListener::bind("127.0.0.1:0").expect("failed to reserve TCP port")
@@ -418,6 +440,58 @@ mod tests {
                 );
 
                 relay.shutdown();
+                drt.shutdown();
+                Ok(())
+            },
+        )
+        .await
+    }
+
+    /// `shutdown` only signals the relay loop; the PULL socket is owned by that
+    /// loop's task and stays bound until it is polled to completion. Anything
+    /// that rebinds the endpoint has to wait for `wait_finished`, otherwise it
+    /// can hit an address already in use and fail to start.
+    #[tokio::test]
+    async fn wait_finished_resolves_only_once_the_endpoint_is_released() -> Result<()> {
+        temp_env::async_with_vars(
+            [
+                (broker_env::DYN_ZMQ_BROKER_URL, None::<&str>),
+                (broker_env::DYN_ZMQ_BROKER_ENABLED, None::<&str>),
+            ],
+            async {
+                let reserved = reserve_open_port();
+                let endpoint = endpoint_from_listener(&reserved);
+                drop(reserved);
+
+                let runtime = Runtime::from_current()?;
+                let drt =
+                    DistributedRuntime::new(runtime, DistributedConfig::process_local()).await?;
+                let namespace =
+                    drt.namespace(format!("agent-tool-relay-{}", uuid::Uuid::new_v4()))?;
+                let component = namespace.component("worker")?;
+
+                let relay =
+                    ToolEventRelay::start(component, endpoint.clone(), None, None, None).await?;
+
+                // Still serving, so nothing should be signalled yet.
+                assert!(
+                    timeout(Duration::from_millis(100), relay.wait_finished())
+                        .await
+                        .is_err(),
+                    "relay reported itself finished while it was still running"
+                );
+
+                relay.shutdown();
+                timeout(Duration::from_secs(5), relay.wait_finished())
+                    .await
+                    .expect("relay did not report finished after shutdown");
+
+                // The point of the signal: the endpoint is now rebindable, which
+                // is what a replacement runtime does next.
+                bind_pull_socket(&endpoint)
+                    .await
+                    .expect("endpoint was still bound after the relay reported finished");
+
                 drt.shutdown();
                 Ok(())
             },
