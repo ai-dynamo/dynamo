@@ -217,6 +217,26 @@ curl --silent --show-error http://localhost:8000/v1/chat/completions \
 - Created either a DGDR that generated a DGD, or a DGD directly.
 - Sent an OpenAI-compatible request to the deployed model.
 
+## Next Steps
+
+Use the running deployment for observability or benchmarking. To choose another deployment path or
+plan a production environment, review the corresponding guides.
+
+<CardGroup cols={2}>
+  <Card title="Choose a Deployment Workflow" icon="regular circle-info" href="../model-deployment/introduction.mdx">
+    Compare direct DGD deployment with DGDR auto deployment.
+  </Card>
+  <Card title="Review Production Prerequisites" icon="regular gears" href="../installation/install-dynamo.md#overview">
+    Review networking, storage, scheduling, and observability requirements before creating a production environment.
+  </Card>
+  <Card title="Observe the Deployment" icon="regular chart-line" href="../operations/observability.mdx">
+    Collect metrics, logs, traces, and health status.
+  </Card>
+  <Card title="Benchmark the Deployment" icon="regular stopwatch" href="../operations/benchmarking-with-aiperf.mdx">
+    Measure latency and throughput with AIPerf.
+  </Card>
+</CardGroup>
+
 ## Clean Up
 
 Stop the port-forward and remove the quickstart deployment:
