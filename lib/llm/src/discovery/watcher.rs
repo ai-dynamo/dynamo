@@ -1233,9 +1233,7 @@ where
             .map(|name| {
                 (
                     name.clone(),
-                    self.manager
-                        .get_committed_model(&name)
-                        .is_some(),
+                    self.manager.get_committed_model(&name).is_some(),
                 )
             })
             .collect::<HashMap<_, _>>();
