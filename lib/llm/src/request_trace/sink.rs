@@ -359,7 +359,24 @@ pub async fn spawn_workers_from_env(shutdown: CancellationToken) -> anyhow::Resu
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
-        return Ok(());
+        let workers = {
+            let mut slot = WORKERS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !slot
+                .as_ref()
+                .is_some_and(|workers| workers.token.is_cancelled())
+            {
+                return Ok(());
+            }
+            slot.take().expect("cancelled workers must be retained")
+        };
+        // The last input can only cancel from `Drop`, where it cannot await a
+        // drain. A later lifecycle owns the join: retire that cancelled
+        // generation before it installs a replacement.
+        workers.shutdown(SHUTDOWN_TIMEOUT).await;
+        WORKERS_STARTED.store(false, Ordering::Release);
+        WORKERS_STARTED.store(true, Ordering::Release);
     }
 
     let sinks = match parse_sinks_from_env().await {
