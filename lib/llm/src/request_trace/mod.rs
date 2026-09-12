@@ -78,6 +78,7 @@ pub async fn init_from_env_with_shutdown(shutdown: CancellationToken) -> anyhow:
         sinks = ?policy.sink_names(),
         file_format = policy.file_format.as_str(),
         records = ?policy.record_names(),
+        redact_media = policy.redact_media,
         "Request trace initialized"
     );
     Ok(())
