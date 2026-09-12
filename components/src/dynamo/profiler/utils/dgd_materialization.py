@@ -38,14 +38,15 @@ def materialize_dgd(
     tolerations: list[dict[str, Any]] | None = None,
     runtime_backend: str | None = None,
     model_name_or_path: str | None = None,
+    trust_remote_code: bool = False,
 ) -> Any:
     """Return an independent DGD with all consumer-facing transforms applied.
 
     Transform order is fixed because DGD overrides are not necessarily
-    idempotent: override, model runtime constraints, then tolerations. For a
-    multi-document final configuration, only the last DGD document is
-    materialized; preceding resources are copied unchanged. Callers must pass
-    the clean blueprint rather than a previously materialized result.
+    idempotent: override, model runtime constraints, tolerations, then remote
+    code trust. For a multi-document final configuration, only the last DGD
+    document is materialized; preceding resources are copied unchanged. Callers
+    must pass the clean blueprint rather than a previously materialized result.
     """
     if blueprint is None:
         return None
@@ -61,6 +62,7 @@ def materialize_dgd(
             tolerations=tolerations,
             runtime_backend=runtime_backend,
             model_name_or_path=model_name_or_path,
+            trust_remote_code=trust_remote_code,
         )
         return materialized
 
@@ -71,6 +73,7 @@ def materialize_dgd(
         tolerations=tolerations,
         runtime_backend=runtime_backend,
         model_name_or_path=model_name_or_path,
+        trust_remote_code=trust_remote_code,
     )
 
 
@@ -82,6 +85,7 @@ def _materialize_dgd_document(
     tolerations: list[dict[str, Any]] | None,
     runtime_backend: str | None,
     model_name_or_path: str | None,
+    trust_remote_code: bool,
 ) -> dict[str, Any]:
     if not isinstance(blueprint, dict):
         raise TypeError(f"{purpose.value} DGD blueprint must be an object")
@@ -108,10 +112,16 @@ def _materialize_dgd_document(
         materialized = inject_tolerations_into_dgd(materialized, tolerations)
         applied_transforms.append("tolerations")
 
-    # Auto-inject --trust-remote-code for vLLM/SGLang workers when the model
-    # ships custom Python (auto_map in config.json). Runs after overrides so
-    # an explicit user --trust-remote-code wins and is not duplicated.
-    if (
+    # Explicit DGDR trust applies after the component topology is known, so every
+    # worker receives the flag without naming aggregate/disaggregated variants.
+    if trust_remote_code and runtime_backend in _TRUST_REMOTE_CODE_BACKENDS:
+        _inject_trust_remote_code_flag(materialized)
+        applied_transforms.append("trust-remote-code")
+
+    # Otherwise, auto-inject for immutable local snapshots whose model config
+    # declares custom Python. Component-level overrides remain a manual escape
+    # hatch for existing callers and are detected after the override merge.
+    elif (
         runtime_backend in _TRUST_REMOTE_CODE_BACKENDS
         and model_name_or_path
         and model_has_auto_map(model_name_or_path)
@@ -122,8 +132,8 @@ def _materialize_dgd_document(
         elif not model_ref_allows_implicit_trust_remote_code(model_name_or_path):
             raise RuntimeError(
                 "Refusing to auto-inject --trust-remote-code for mutable remote "
-                f"model ref {model_name_or_path!r}. Set --trust-remote-code "
-                "explicitly via overrides if this ref is intended."
+                f"model ref {model_name_or_path!r}. Set "
+                "spec.overrides.trustRemoteCode=true if this ref is intended."
             )
         else:
             _inject_trust_remote_code_flag(materialized)
