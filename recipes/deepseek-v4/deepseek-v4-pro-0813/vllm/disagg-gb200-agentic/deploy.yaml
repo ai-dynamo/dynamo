@@ -203,6 +203,24 @@ spec:
                     configMapKeyRef:
                       name: dsv4-pro-0813-disagg-gb200-agentic-config
                       key: speculative-config
+              # The operator's default worker liveness probe allows a single
+              # failed check at a 4 s timeout. vLLM JIT-compiles the large
+              # prefill kernels (mhc_pre_big_fuse_*_tilelang, and the Triton
+              # _prepare_dflash_inputs_kernel) the first time it sees a new
+              # prompt shape, which stalls the engine for 30-70 s -- long
+              # enough for kubelet to kill the container. Killing the leader
+              # then orphans the multinode worker, whose probes the operator
+              # strips, so the replacement leader waits out the full 10-minute
+              # init_process_group timeout and dies too. Tolerate the stall
+              # rather than restart into it. Upstream warmup that would remove
+              # the stall is tracked in vllm-project/vllm#49627.
+              livenessProbe:
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 10
+                timeoutSeconds: 5
+                failureThreshold: 30
               startupProbe:
                 httpGet:
                   path: /health
