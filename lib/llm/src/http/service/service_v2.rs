@@ -21,14 +21,11 @@ use super::frontend_extension::{
     FrontendExtensionContext, FrontendRouteExtension, FrontendRouteSet,
 };
 use super::metrics;
-use super::metrics::{
-    register_lora_allocation_metrics, register_model_ready_metric, register_worker_timing_metrics,
-};
+use super::metrics::{register_lora_allocation_metrics, register_model_ready_metric};
+use super::worker_metrics::register_worker_metrics;
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
-use crate::kv_router::metrics::{
-    RoutingOverheadMetrics, register_router_queue_metrics, register_worker_load_metrics,
-};
+use crate::kv_router::metrics::{RoutingOverheadMetrics, register_router_queue_metrics};
 use crate::reasoning_field::ReasoningField;
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
@@ -1192,17 +1189,7 @@ impl HttpServiceConfigBuilder {
         // Readiness is evaluated from the live routing catalog at scrape time.
         register_model_ready_metric(&registry, state.manager_clone(), model_ready_metrics_prefix)?;
 
-        // Register worker load metrics (active_decode_blocks, active_prefill_tokens per worker)
-        // These are updated by KvWorkerMonitor when receiving ActiveLoad events
-        if let Err(e) = register_worker_load_metrics(&registry) {
-            tracing::warn!("Failed to register worker load metrics: {}", e);
-        }
-
-        // Register worker timing metrics (last_ttft, last_itl per worker)
-        // These are updated by ResponseMetricCollector when observing TTFT/ITL
-        if let Err(e) = register_worker_timing_metrics(&registry) {
-            tracing::warn!("Failed to register worker timing metrics: {}", e);
-        }
+        register_worker_metrics(&registry, state.manager_clone())?;
 
         // Register router queue metrics (pending requests per worker_type)
         // These are updated by KvScheduler on enqueue/update/free

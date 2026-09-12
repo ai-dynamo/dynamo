@@ -19,7 +19,7 @@ use dynamo_runtime::{
         Context, ManyOut, Operator, PushRouter, RouterMode, ServerStreamingEngine, SingleIn,
         async_trait,
     },
-    protocols::{annotated::Annotated, maybe_error::MaybeError},
+    protocols::{EndpointId, annotated::Annotated, maybe_error::MaybeError},
 };
 
 use crate::discovery::{WorkerSetTarget, WorkerSetTargetId};
@@ -77,6 +77,32 @@ impl Drop for EncoderRouter {
 }
 
 impl EncoderRouter {
+    pub(crate) fn available_worker_ids_for(
+        &self,
+        endpoint: &EndpointId,
+    ) -> Option<std::collections::HashSet<u64>> {
+        // Target changes and activation publish binding/lifecycle under this same lock.
+        let _target = self.target.lock();
+        let binding = self.binding.load();
+        let binding = binding
+            .as_ref()
+            .filter(|binding| &binding.router.client.endpoint.id() == endpoint)?;
+        Some(
+            if self.cancel_token.is_cancelled()
+                || self.lifecycle_state() != EncoderLifecycleState::Active
+            {
+                std::collections::HashSet::new()
+            } else {
+                binding
+                    .router
+                    .client
+                    .available_instance_ids()
+                    .map(|ids| ids.as_ref().clone())
+                    .unwrap_or_default()
+            },
+        )
+    }
+
     /// Create a permanently-disabled passthrough router.
     pub fn disabled() -> Arc<Self> {
         Arc::new(Self {
@@ -595,6 +621,10 @@ mod tests {
         })
         .await
         .expect("committed encoder must activate");
+        assert_eq!(
+            router.available_worker_ids_for(&endpoint.id()),
+            Some(HashSet::from([ids[0]]))
+        );
         for _ in 0..6 {
             assert_eq!(encoded_worker(&router).await, Some(ids[0]));
         }
@@ -618,8 +648,13 @@ mod tests {
         admissions.send_replace(Vec::new());
         drop(admissions);
         router.set_target(None);
+        assert_eq!(
+            router.available_worker_ids_for(&endpoint.id()),
+            Some(HashSet::new())
+        );
         let (_successor_admissions, successor_ids) = watch::channel(vec![ids[2]]);
         router.set_target(Some(target(2, successor_ids)));
+        assert!(router.available_worker_ids_for(&endpoint.id()).is_none());
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if let Some(worker) = encoded_worker(&router).await {
@@ -631,6 +666,10 @@ mod tests {
         })
         .await
         .expect("same-endpoint successor must activate with its own admission");
+        assert_eq!(
+            router.available_worker_ids_for(&endpoint.id()),
+            Some(HashSet::from([ids[2]]))
+        );
         for _ in 0..6 {
             assert_eq!(encoded_worker(&router).await, Some(ids[2]));
         }
@@ -650,6 +689,128 @@ mod tests {
         for worker in workers {
             worker.shutdown().await.unwrap();
         }
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn binding_availability_tracks_local_inhibition_and_cancellation() {
+        use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+        use std::collections::HashSet;
+
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let endpoint = distributed
+            .namespace("encoder-availability")
+            .unwrap()
+            .component("workers")
+            .unwrap()
+            .endpoint("generate");
+        let router = EncoderRouter::disabled();
+        assert!(router.available_worker_ids_for(&endpoint.id()).is_none());
+        let binding = Arc::new(
+            EncoderRouter::build(
+                WorkerSetTarget::Legacy(endpoint.clone()),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap(),
+        );
+        binding
+            .router
+            .client
+            .override_discovered_instances(vec![1, 2]);
+        router.binding.store(Some(binding.clone()));
+        router
+            .lifecycle
+            .store(EncoderLifecycleState::Active as u8, Ordering::Release);
+        assert_eq!(
+            router.available_worker_ids_for(&endpoint.id()),
+            Some(HashSet::from([1, 2]))
+        );
+        binding.router.client.report_instance_down(1);
+        assert_eq!(
+            router.available_worker_ids_for(&endpoint.id()),
+            Some(HashSet::from([2]))
+        );
+        let mut other = endpoint.id();
+        other.name = "other".into();
+        assert!(router.available_worker_ids_for(&other).is_none());
+        router.cancel_token.cancel();
+        assert_eq!(
+            router.available_worker_ids_for(&endpoint.id()),
+            Some(HashSet::new())
+        );
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn binding_availability_waits_for_rebind_publication() {
+        use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+        use std::{sync::mpsc, time::Duration};
+
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let component = distributed
+            .namespace("encoder-rebind")
+            .unwrap()
+            .component("workers")
+            .unwrap();
+        let original = component.endpoint("original");
+        let replacement = Arc::new(
+            EncoderRouter::build(
+                WorkerSetTarget::Legacy(component.endpoint("replacement")),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap(),
+        );
+        let router = EncoderRouter::disabled();
+        let binding = Arc::new(
+            EncoderRouter::build(
+                WorkerSetTarget::Legacy(original.clone()),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap(),
+        );
+        binding.router.client.override_discovered_instances(vec![1]);
+        router.binding.store(Some(binding));
+        router
+            .lifecycle
+            .store(EncoderLifecycleState::Active as u8, Ordering::Release);
+        let mut target = router.target.lock();
+        *target = Some(WorkerSetTargetId::Legacy(original.id()));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let reader_router = router.clone();
+        let reader = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            result_tx
+                .send(reader_router.available_worker_ids_for(&original.id()))
+                .unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(
+            result_rx.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        *target = Some(replacement.target_id.clone());
+        router.binding.store(Some(replacement));
+        router
+            .lifecycle
+            .store(EncoderLifecycleState::Active as u8, Ordering::Release);
+        drop(target);
+        assert_eq!(
+            result_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            None
+        );
+        reader.join().unwrap();
         runtime.shutdown();
     }
 
