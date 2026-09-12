@@ -198,6 +198,12 @@ repos:
       # be a second copy to keep in sync. Full scan is well under 0.1s.
       files: ^\.github/
       pass_filenames: false
+    - id: compliance-extract-selftest
+      name: Test compliance export retries
+      entry: python3 .github/actions/compliance-extract/test_extract_with_retry.py
+      language: python
+      pass_filenames: false
+      files: ^(\.github/actions/compliance-extract/|\.pre-commit-config\.yaml$)
     - id: check-action-pins-selftest
       name: Self-test the action-pin matcher
       entry: python3 scripts/check_action_pins.py --test
