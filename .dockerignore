@@ -25,12 +25,22 @@
 **/*.libtorch_model_store/*
 **/.git
 **/.github
+# Planner test images exercise the version-stamping script without copying the
+# rest of the GitHub metadata into every Docker build context.
+!.github
+.github/*
+!.github/scripts
+.github/scripts/*
+!.github/scripts/apply_dev_version.py
 **/*backup*/
 .dockerignore
 **/target/*
 **/*safetensors
 container/Dockerfile*
 container/**/*.Dockerfile
+# The AISimulate dependency contract test reads this template from runtime test
+# images; keep every other generated/template Dockerfile excluded.
+!container/templates/wheel_builder.Dockerfile
 container/render.py
 container/context.yaml
 # container/compliance/ is now COPY'd into each image's `licenses` Dockerfile
@@ -79,7 +89,6 @@ htmlcov/
 
 # Docs
 docs/_build/
-aisimulate/docs/
 
 # AI
 .cursor/

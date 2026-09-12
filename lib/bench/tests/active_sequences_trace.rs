@@ -20,6 +20,8 @@ use dynamo_kv_router::protocols::{PrefillLoadHint, WorkerWithDpRank};
 use dynamo_kv_router::{ActiveSequencesMultiWorker, SequenceRequest};
 
 const BLOCK_SIZE: u32 = 128;
+// mooncake_trace_1000.jsonl records one hash per 512-token trace block.
+const TRACE_BLOCK_SIZE: u32 = 512;
 const NUM_GPU_BLOCKS: usize = 16384;
 const TRACE_SIMULATION_DURATION_MS: Option<u64> = None;
 const BENCHMARK_DURATION_MS: u64 = 4000;
@@ -31,8 +33,14 @@ async fn active_sequences_trace_replays_without_warnings_or_leaks() -> anyhow::R
     support::reset_warning_count(&warning_count);
 
     let fixture = support::fixture_path("mooncake_trace_1000.jsonl")?;
-    let traces =
-        process_mooncake_trace(&fixture, BLOCK_SIZE, 1, 1, NUM_UNIQUE_INFERENCE_WORKERS, 42)?;
+    let traces = process_mooncake_trace(
+        &fixture,
+        TRACE_BLOCK_SIZE,
+        1,
+        1,
+        NUM_UNIQUE_INFERENCE_WORKERS,
+        42,
+    )?;
     let sequence_traces = generate_sequence_events(
         &traces,
         NUM_GPU_BLOCKS,

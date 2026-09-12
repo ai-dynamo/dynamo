@@ -2,8 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import importlib
 import importlib.util
 import json
+import sys
+from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +16,7 @@ import pytest
 from dynamo.llm import EngineType, EntrypointArgs
 from dynamo.mocker import MockEngineArgs
 from dynamo.mocker.args import parse_args
+from dynamo.mocker.utils import kv_cache
 
 MODULE_PATH = Path(__file__).resolve().parents[2] / "config.py"
 SPEC = importlib.util.spec_from_file_location("dynamo_mocker_config", MODULE_PATH)
@@ -39,7 +43,6 @@ def make_args(**overrides):
         "max_num_seqs": 256,
         "max_num_batched_tokens": 8192,
         "enable_prefix_caching": True,
-        "g1_backend": None,
         "enable_chunked_prefill": True,
         "preemption_mode": "lifo",
         "speedup_ratio": 1.0,
@@ -56,6 +59,7 @@ def make_args(**overrides):
         "sglang_chunked_prefill_size": None,
         "sglang_clip_max_new_tokens": None,
         "sglang_schedule_conservativeness": None,
+        "sglang_generate": False,
         "trtllm_capacity_scheduler_policy": None,
         "aic_perf_model": False,
         "aic_system": None,
@@ -79,6 +83,16 @@ def make_args(**overrides):
     return SimpleNamespace(**defaults)
 
 
+def _load_replay_main():
+    try:
+        distribution("aisimulate")
+    except PackageNotFoundError:
+        pytest.skip(
+            "Dynamo replay CLI tests require the optional AISimulate distribution"
+        )
+    return importlib.import_module("dynamo.replay.config")
+
+
 def test_build_runtime_config_uses_normalized_sglang_page_size_alias():
     engine_args = CONFIG.build_mocker_engine_args(
         make_args(engine_type="sglang", block_size=None, sglang_page_size=16)
@@ -92,6 +106,11 @@ def test_build_runtime_config_uses_normalized_sglang_page_size_alias():
     assert runtime_config.max_num_seqs == 256
     assert runtime_config.max_num_batched_tokens == 8192
     assert runtime_config.runtime_data["output_replay_consumer"] == "true"
+
+
+def test_sglang_generate_capability_is_opt_in():
+    assert parse_args([]).sglang_generate is False
+    assert parse_args(["--sglang-generate"]).sglang_generate is True
 
 
 def test_build_mocker_engine_args_rejects_mismatched_sglang_sizes():
@@ -135,77 +154,15 @@ def test_build_mocker_engine_args_trtllm_accepts_guaranteed_no_evict():
     assert engine_args.block_size == 32
 
 
-def test_build_mocker_engine_args_trtllm_accepts_native_g1():
-    engine_args = CONFIG.build_mocker_engine_args(
-        make_args(engine_type="trtllm", g1_backend="native")
-    )
-
-    assert engine_args.g1_backend == "native"
-    assert engine_args.block_size == 32
-
-
-def test_mocker_defaults_to_native_g1_across_python_entrypoints():
-    cli_args = parse_args([])
-    assert cli_args.g1_backend is None
-    assert CONFIG.build_mocker_engine_args(cli_args).g1_backend == "native"
-    assert MockEngineArgs().g1_backend == "native"
-    assert MockEngineArgs.from_json("{}").g1_backend == "native"
-
-
-@pytest.mark.parametrize(
-    "offload",
-    [
-        {"num_g2_blocks": 8},
-        {"num_g2_blocks": 8, "num_g3_blocks": 16},
-        {"num_g2_blocks": 8, "enable_g4_storage": True},
-    ],
-)
-def test_mocker_offload_automatically_selects_kvbm_g1(offload):
-    engine_args = MockEngineArgs(**offload)
-
-    assert engine_args.g1_backend == "kvbm"
-
-
 @pytest.mark.parametrize("engine_type", ["vllm", "trtllm"])
-def test_mocker_explicit_native_with_offload_is_rejected(engine_type):
-    with pytest.raises(Exception, match="omit g1_backend"):
-        MockEngineArgs(
-            engine_type=engine_type,
-            g1_backend="native",
-            num_g2_blocks=8,
-        )
-
-
-def test_mocker_explicit_native_accepts_disabled_offload():
-    engine_args = MockEngineArgs(
-        g1_backend="native",
-        num_g2_blocks=0,
-        num_g3_blocks=0,
-    )
-
-    assert engine_args.g1_backend == "native"
-
-
-@pytest.mark.parametrize("engine_type", ["VLLM", "TRTLLM"])
-def test_mocker_uppercase_json_offload_selects_kvbm_g1(engine_type):
-    engine_args = MockEngineArgs.from_json(
-        json.dumps({"engine_type": engine_type, "num_g2_blocks": 8})
-    )
-
-    assert engine_args.g1_backend == "kvbm"
-
-
-@pytest.mark.parametrize("engine_type", ["vllm", "trtllm"])
-def test_build_mocker_engine_args_accepts_native_g1_with_mtp(engine_type):
+def test_build_mocker_engine_args_accepts_mtp(engine_type):
     engine_args = CONFIG.build_mocker_engine_args(
         make_args(
             engine_type=engine_type,
-            g1_backend="native",
             aic_nextn=1,
         )
     )
 
-    assert engine_args.g1_backend == "native"
     assert engine_args.aic_nextn == 1
 
 
@@ -236,7 +193,13 @@ def test_load_mocker_engine_args_from_json_file_accepts_trtllm(tmp_path):
     assert engine_args.block_size == 32
 
 
-def test_worker_overrides_drive_runtime_config_for_prefill_worker():
+def test_worker_overrides_drive_runtime_config_for_prefill_worker(monkeypatch):
+    monkeypatch.setenv("DYN_HTTP_RPC_HOST", "127.0.0.1")
+
+    def unexpected_dns_lookup(_hostname):
+        raise AssertionError("explicit RPC host must bypass hostname lookup")
+
+    monkeypatch.setattr(CONFIG.socket, "gethostbyname", unexpected_dns_lookup)
     engine_args = CONFIG.build_mocker_engine_args(make_args(is_prefill_worker=True))
     worker_args = CONFIG.apply_worker_engine_args_overrides(
         engine_args,
@@ -249,53 +212,7 @@ def test_worker_overrides_drive_runtime_config_for_prefill_worker():
     assert block_size == 64
     assert worker_args.bootstrap_port == 9001
     assert runtime_config.bootstrap_port == 9001
-    assert runtime_config.bootstrap_host is not None
-
-
-def test_g3_args_allow_kv_bytes_per_token_worker_override():
-    engine_args = CONFIG.build_mocker_engine_args(
-        make_args(
-            model_path="/models/mock",
-            kv_bytes_per_token=None,
-            num_g2_blocks=8192,
-            num_g3_blocks=16384,
-        )
-    )
-    assert engine_args.kv_bytes_per_token is None
-    assert engine_args.num_g2_blocks == 8192
-    assert engine_args.num_g3_blocks == 16384
-
-    worker_args = CONFIG.apply_worker_engine_args_overrides(
-        engine_args,
-        kv_bytes_per_token=131072,
-    )
-    assert worker_args.kv_bytes_per_token == 131072
-    assert worker_args.num_g3_blocks == 16384
-
-
-def test_g4_args_allow_kv_bytes_per_token_worker_override():
-    engine_args = CONFIG.build_mocker_engine_args(
-        make_args(
-            model_path="/models/mock",
-            kv_bytes_per_token=None,
-            num_g2_blocks=8192,
-            enable_g4_storage=True,
-            bandwidth_g2_to_g4_gbps=4.0,
-            bandwidth_g4_to_g2_gbps=4.0,
-        )
-    )
-    assert engine_args.kv_bytes_per_token is None
-    assert engine_args.num_g2_blocks == 8192
-    assert engine_args.enable_g4_storage is True
-    assert engine_args.bandwidth_g2_to_g4_gbps == 4.0
-    assert engine_args.bandwidth_g4_to_g2_gbps == 4.0
-
-    worker_args = CONFIG.apply_worker_engine_args_overrides(
-        engine_args,
-        kv_bytes_per_token=131072,
-    )
-    assert worker_args.kv_bytes_per_token == 131072
-    assert worker_args.enable_g4_storage is True
+    assert runtime_config.bootstrap_host == "127.0.0.1"
 
 
 def test_runtime_config_disables_local_indexer_for_decode_worker():
@@ -350,13 +267,6 @@ def test_build_mocker_engine_args_preserves_cli_mapped_fields(tmp_path):
         kv_transfer_bandwidth=123.0,
         kv_transfer_timing_mode="destination_missing",
         response_replay_trace_path=None,
-        num_g2_blocks=8192,
-        num_g3_blocks=16384,
-        offload_batch_size=32,
-        bandwidth_g1_to_g2_gbps=14.0,
-        bandwidth_g2_to_g1_gbps=14.0,
-        bandwidth_g2_to_g3_gbps=7.0,
-        bandwidth_g3_to_g2_gbps=7.0,
         reasoning=json.dumps(
             {
                 "start_thinking_token_id": 11,
@@ -400,13 +310,6 @@ def test_build_mocker_engine_args_preserves_cli_mapped_fields(tmp_path):
     assert engine_args.aic_attention_dp_size is None
     assert engine_args.bootstrap_port is None
     assert engine_args.kv_transfer_timing_mode == "destination_missing"
-    assert engine_args.num_g2_blocks == 8192
-    assert engine_args.num_g3_blocks == 16384
-    assert engine_args.offload_batch_size == 32
-    assert engine_args.bandwidth_g1_to_g2_gbps == 14.0
-    assert engine_args.bandwidth_g2_to_g1_gbps == 14.0
-    assert engine_args.bandwidth_g2_to_g3_gbps == 7.0
-    assert engine_args.bandwidth_g3_to_g2_gbps == 7.0
 
 
 def test_aic_backend_override_decouples_from_engine_type():
@@ -469,43 +372,6 @@ def test_mocker_cli_accepts_mtp_configuration():
     assert args.aic_mtp_seed == 99
 
 
-def test_mocker_cli_accepts_native_g1_for_trtllm():
-    args = parse_args(["--engine-type", "trtllm", "--g1-backend", "native"])
-
-    assert args.engine_type == "trtllm"
-    assert args.g1_backend == "native"
-
-
-@pytest.mark.parametrize("engine_type", ["vllm", "trtllm"])
-def test_mocker_cli_rejects_explicit_native_g1_with_offload(engine_type, capsys):
-    with pytest.raises(SystemExit):
-        parse_args(
-            [
-                "--engine-type",
-                engine_type,
-                "--g1-backend",
-                "native",
-                "--num-g2-blocks",
-                "8",
-            ]
-        )
-
-    assert "omit --g1-backend" in capsys.readouterr().err
-
-
-def test_mocker_cli_ignores_explicit_g1_backend_for_sglang():
-    args = parse_args(
-        [
-            "--engine-type",
-            "sglang",
-            "--g1-backend",
-            "native",
-        ]
-    )
-
-    assert args.g1_backend == "native"
-
-
 def test_mocker_cli_accepts_max_model_len():
     args = parse_args(["--max-model-len", "32768"])
 
@@ -542,10 +408,11 @@ def test_build_mocker_engine_args_preserves_explicit_max_model_len():
     assert engine_args.max_model_len == 32768
 
 
+@pytest.mark.planner
 def test_replay_engine_args_keeps_max_model_len_explicit_only():
-    import dynamo.replay.main as replay_main
+    replay_main = _load_replay_main()
 
-    engine_args = replay_main._load_engine_args(
+    engine_args = replay_main.load_engine_args(
         json.dumps(
             {
                 "num_gpu_blocks": 4096,
@@ -557,10 +424,11 @@ def test_replay_engine_args_keeps_max_model_len_explicit_only():
     assert engine_args.max_model_len is None
 
 
+@pytest.mark.planner
 def test_replay_engine_args_preserves_explicit_max_model_len():
-    import dynamo.replay.main as replay_main
+    replay_main = _load_replay_main()
 
-    engine_args = replay_main._load_engine_args(
+    engine_args = replay_main.load_engine_args(
         json.dumps(
             {
                 "num_gpu_blocks": 4096,
@@ -573,10 +441,11 @@ def test_replay_engine_args_preserves_explicit_max_model_len():
     assert engine_args.max_model_len == 32768
 
 
+@pytest.mark.planner
 def test_replay_attention_dp_sets_rank_topology_with_explicit_kv_capacity():
-    import dynamo.replay.main as replay_main
+    replay_main = _load_replay_main()
 
-    engine_args = replay_main._load_engine_args(
+    engine_args = replay_main.load_engine_args(
         json.dumps(
             {
                 "num_gpu_blocks": 4096,
@@ -589,11 +458,12 @@ def test_replay_attention_dp_sets_rank_topology_with_explicit_kv_capacity():
     assert engine_args.dp_size == 4
 
 
+@pytest.mark.planner
 def test_replay_rejects_mismatched_dp_topology():
-    import dynamo.replay.main as replay_main
+    replay_main = _load_replay_main()
 
     with pytest.raises(ValueError, match="dp_size must match"):
-        replay_main._load_engine_args(
+        replay_main.load_engine_args(
             json.dumps(
                 {
                     "num_gpu_blocks": 4096,
@@ -604,11 +474,12 @@ def test_replay_rejects_mismatched_dp_topology():
         )
 
 
+@pytest.mark.planner
 def test_replay_rejects_dp_topology_without_aic_attention_dp():
-    import dynamo.replay.main as replay_main
+    replay_main = _load_replay_main()
 
     with pytest.raises(ValueError, match="dp_size must match"):
-        replay_main._load_engine_args(
+        replay_main.load_engine_args(
             json.dumps(
                 {
                     "num_gpu_blocks": 4096,
@@ -619,68 +490,10 @@ def test_replay_rejects_dp_topology_without_aic_attention_dp():
         )
 
 
-def test_replay_engine_args_compute_kv_bytes_for_g3_before_validation(monkeypatch):
-    import dynamo.replay.main as replay_main
-
-    calls = []
-
-    def fake_compute_kv_bytes_per_token(model_path, kv_cache_dtype="auto"):
-        calls.append((model_path, kv_cache_dtype))
-        return 131072
-
-    monkeypatch.setattr(
-        replay_main, "compute_kv_bytes_per_token", fake_compute_kv_bytes_per_token
-    )
-
-    engine_args = replay_main._load_engine_args(
-        json.dumps(
-            {
-                "num_gpu_blocks": 4096,
-                "num_g2_blocks": 8192,
-                "num_g3_blocks": 16384,
-                "aic_model_path": "/models/mock",
-            }
-        )
-    )
-
-    assert engine_args.num_g2_blocks == 8192
-    assert engine_args.num_g3_blocks == 16384
-    assert calls == [("/models/mock", "auto")]
-
-
-def test_replay_engine_args_compute_kv_bytes_for_g4_before_validation(monkeypatch):
-    import dynamo.replay.main as replay_main
-
-    calls = []
-
-    def fake_compute_kv_bytes_per_token(model_path, kv_cache_dtype="auto"):
-        calls.append((model_path, kv_cache_dtype))
-        return 131072
-
-    monkeypatch.setattr(
-        replay_main, "compute_kv_bytes_per_token", fake_compute_kv_bytes_per_token
-    )
-
-    engine_args = replay_main._load_engine_args(
-        json.dumps(
-            {
-                "num_gpu_blocks": 4096,
-                "num_g2_blocks": 8192,
-                "enable_g4_storage": True,
-                "aic_model_path": "/models/mock",
-            }
-        )
-    )
-
-    assert engine_args.num_g2_blocks == 8192
-    assert engine_args.enable_g4_storage is True
-    assert calls == [("/models/mock", "auto")]
-
-
 def test_get_kv_cache_dtype_bytes_supports_int8():
     # AIC KVCacheQuantMode allows int8; the byte map must size it at 1 byte
-    # instead of silently falling back to 2, or offload KV-byte estimates and
-    # transfer latency are overstated.
+    # instead of silently falling back to 2, or KV-transfer latency is
+    # overstated.
     from types import SimpleNamespace
 
     from dynamo.mocker.utils.kv_cache import get_kv_cache_dtype_bytes
@@ -691,10 +504,47 @@ def test_get_kv_cache_dtype_bytes_supports_int8():
     assert get_kv_cache_dtype_bytes(cfg, "auto") == 2  # model default dtype
 
 
-def test_compute_kv_bytes_uses_transformers_text_config(monkeypatch):
-    """Use the language-model config when Transformers exposes a multimodal wrapper."""
-    from dynamo.mocker.utils import kv_cache
+def test_compute_kv_bytes_reads_local_config_json_without_transformers(
+    monkeypatch, tmp_path
+):
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "num_hidden_layers": 2,
+                "num_key_value_heads": 4,
+                "num_attention_heads": 8,
+                "hidden_size": 64,
+                "torch_dtype": "bfloat16",
+            }
+        )
+    )
+    monkeypatch.setitem(sys.modules, "transformers", None)
 
+    assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) == 256
+
+
+def test_compute_kv_bytes_unwraps_multimodal_text_config_json(tmp_path):
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "some_vlm",
+                "vision_config": {"hidden_size": 1},
+                "text_config": {
+                    "num_hidden_layers": 2,
+                    "num_key_value_heads": 4,
+                    "num_attention_heads": 8,
+                    "hidden_size": 64,
+                    "dtype": "bfloat16",
+                },
+            }
+        )
+    )
+
+    assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) == 256
+
+
+def test_compute_kv_bytes_uses_transformers_text_config_for_hub_ids(monkeypatch):
+    """A bare hub ID still resolves through transformers, unwrapping wrappers."""
     text_config = SimpleNamespace(
         num_hidden_layers=2,
         num_key_value_heads=4,
@@ -703,43 +553,108 @@ def test_compute_kv_bytes_uses_transformers_text_config(monkeypatch):
         dtype="bfloat16",
     )
     config = SimpleNamespace(get_text_config=lambda: text_config)
-    monkeypatch.setattr(
-        kv_cache.AutoConfig,
-        "from_pretrained",
-        lambda *args, **kwargs: config,
+
+    class FakeAutoConfig:
+        @staticmethod
+        def from_pretrained(model_path, **kwargs):
+            assert model_path == "org/model"
+            return config
+
+    monkeypatch.setitem(
+        sys.modules, "transformers", SimpleNamespace(AutoConfig=FakeAutoConfig)
     )
 
-    assert kv_cache.compute_kv_bytes_per_token("model") == 256
+    assert kv_cache.compute_kv_bytes_per_token("org/model") == 256
 
 
-def test_replay_engine_args_forwards_aic_kv_cache_dtype(monkeypatch):
-    # Offload KV-byte estimation must use the configured (normalized) KV dtype,
-    # not always "auto".
-    import dynamo.replay.main as replay_main
+_KV_TEXT_CONFIG = {
+    "num_hidden_layers": 2,
+    "num_key_value_heads": 4,
+    "num_attention_heads": 8,
+    "hidden_size": 64,
+    "torch_dtype": "bfloat16",
+}
 
-    calls = []
 
-    def fake_compute_kv_bytes_per_token(model_path, kv_cache_dtype="auto"):
-        calls.append((model_path, kv_cache_dtype))
-        return 131072
+def _fake_transformers(from_pretrained):
+    return SimpleNamespace(AutoConfig=SimpleNamespace(from_pretrained=from_pretrained))
 
-    monkeypatch.setattr(
-        replay_main, "compute_kv_bytes_per_token", fake_compute_kv_bytes_per_token
-    )
 
-    replay_main._load_engine_args(
+def test_compute_kv_bytes_unwraps_nested_thinker_text_config(monkeypatch, tmp_path):
+    # Qwen2.5-Omni keeps the serving LLM under thinker_config.text_config.
+    (tmp_path / "config.json").write_text(
         json.dumps(
             {
-                "num_gpu_blocks": 4096,
-                "num_g2_blocks": 8192,
-                "num_g3_blocks": 16384,
-                "aic_model_path": "/models/mock",
-                "aic_kv_cache_dtype": "fp8",
+                "model_type": "qwen2_5_omni",
+                "thinker_config": {
+                    "model_type": "qwen2_5_omni_thinker",
+                    "audio_config": {"d_model": 1},
+                    "vision_config": {"hidden_size": 1},
+                    "text_config": _KV_TEXT_CONFIG,
+                },
+                "talker_config": {"hidden_size": 1, "num_hidden_layers": 1},
             }
         )
     )
+    monkeypatch.setitem(sys.modules, "transformers", None)
 
-    assert calls == [("/models/mock", "fp8")]
+    assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) == 256
+
+
+def test_compute_kv_bytes_falls_back_to_transformers_for_gpt2_style_config(
+    monkeypatch, tmp_path
+):
+    # GPT-2 stores n_layer/n_head/n_embd; only transformers' attribute_map maps
+    # them, so the raw config.json must not be trusted for this layout.
+    (tmp_path / "config.json").write_text(
+        json.dumps({"model_type": "gpt2", "n_layer": 2, "n_head": 8, "n_embd": 64})
+    )
+    seen = []
+
+    def from_pretrained(model_path, **kwargs):
+        seen.append(model_path)
+        return SimpleNamespace(
+            num_hidden_layers=2, num_attention_heads=8, hidden_size=64
+        )
+
+    monkeypatch.setitem(
+        sys.modules, "transformers", _fake_transformers(from_pretrained)
+    )
+
+    # No num_key_value_heads: defaults to num_attention_heads; no dtype: float16.
+    assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) == 2 * 2 * 8 * 8 * 2
+    assert seen == [str(tmp_path)]
+
+
+def test_compute_kv_bytes_returns_none_for_unreadable_or_incomplete_config(
+    monkeypatch, tmp_path
+):
+    def from_pretrained(model_path, **kwargs):
+        return SimpleNamespace(model_type="unknown")  # no size fields
+
+    monkeypatch.setitem(
+        sys.modules, "transformers", _fake_transformers(from_pretrained)
+    )
+
+    assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) is None  # no config
+
+    (tmp_path / "config.json").write_text("{not json")
+    assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) is None
+
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "unknown"}))
+    assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) is None
+
+
+def test_compute_kv_bytes_propagates_unexpected_errors(monkeypatch):
+    def from_pretrained(model_path, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setitem(
+        sys.modules, "transformers", _fake_transformers(from_pretrained)
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        kv_cache.compute_kv_bytes_per_token("org/model")
 
 
 def test_build_mocker_engine_args_estimates_aic_blocks(monkeypatch):
@@ -913,3 +828,15 @@ def test_mock_engine_args_from_json_ignores_legacy_has_perf_model_field():
     assert engine_args.max_num_seqs is None
     assert engine_args.max_num_batched_tokens is None
     assert engine_args.worker_type == "decode"
+
+
+def test_response_plane_defaults_to_tcp_and_accepts_quic(monkeypatch):
+    monkeypatch.delenv("DYN_RESPONSE_PLANE", raising=False)
+
+    assert parse_args([]).response_plane == "tcp"
+    assert parse_args(["--response-plane", "quic"]).response_plane == "quic"
+    monkeypatch.setenv("DYN_RESPONSE_PLANE", "quic")
+    assert parse_args([]).response_plane == "quic"
+
+    with pytest.raises(SystemExit):
+        parse_args(["--response-plane", "invalid"])

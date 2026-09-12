@@ -12,7 +12,7 @@ The NVIDIA Dynamo project uses containerized development and deployment to maint
 
 ### Core Components
 
-- **`render.py`** - A render script used to generate Dockerfiles for AI inference frameworks (vLLM, TensorRT-LLM, SGLang) and the frontend image. The generated Dockerfile includes the needed multi-stage steps for development vs production configurations.
+- **`render.py`** - A render script used to generate Dockerfiles for AI inference frameworks (vLLM, TensorRT-LLM, SGLang, Triton Inference Server) and the frontend image. The generated Dockerfile includes the needed multi-stage steps for development vs production configurations.
 
 - **`run.sh`** - A container runtime manager that launches Docker containers with proper GPU access, volume mounts, and environment configurations. It supports different development workflows from root-based legacy setups to user-based development environments.
 
@@ -249,6 +249,13 @@ docker build -t dynamo:latest-trtllm-runtime -f container/rendered.Dockerfile .
 # Build SGLang runtime image for Intel XPU (instead of the default CUDA device)
 container/render.py --framework=sglang --device=xpu --target=runtime
 docker build -t dynamo:latest-sglang-xpu-runtime -f container/sglang-runtime-xpu-amd64-rendered.Dockerfile .
+
+# Build Triton runtime image (prebuilt Dynamo wheels from PyPI on the upstream
+# Triton release image). --network=host lets the build reach PyPI.
+# The Triton release is selected with --build-arg RUNTIME_IMAGE_TAG=<tag>
+# (defaults to 26.07-py3); pick any nvcr.io/nvidia/tritonserver:<tag>.
+container/render.py --framework=triton --target=runtime --output-short-filename
+docker build --network=host --build-arg RUNTIME_IMAGE_TAG=26.07-py3 -t dynamo:latest-triton-runtime -f container/rendered.Dockerfile .
 ```
 
 The `--device` flag selects the accelerator backend. It defaults to `cuda`; pass `--device=xpu`
@@ -266,14 +273,7 @@ The frontend image is a specialized container that includes the Dynamo component
 
 **Build EPP Image**
 ```bash
-sudo apt-get update && sudo apt-get install -y git build-essential protobuf-compiler libclang-dev
-curl --retry 5 --retry-delay 3 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-. "$HOME/.cargo/env"
-cargo install cbindgen
-
-pushd deploy/inference-gateway/epp
-make all
-popd
+make -C deploy/inference-gateway/ext-proc all
 
 EPP_GIT_TAG=$(git describe --tags --dirty --always 2>/dev/null || echo "dev")
 EPP_IMAGE="dynamo/dynamo-epp:${EPP_GIT_TAG}"
@@ -284,12 +284,15 @@ EPP_IMAGE="dynamo/dynamo-epp:${EPP_GIT_TAG}"
 # Build the frontend image (automatically builds EPP image as a dependency)
 container/render.py --framework=dynamo --target=frontend --output-short-filename
 docker build -t dynamo:frontend --build-arg EPP_IMAGE=${EPP_IMAGE} -f container/rendered.Dockerfile .
+
+# NIXL comes from PyPI; override the release with --build-arg NIXL_REF=v1.4.0
 ```
 
+**Note on `EPP_IMAGE`**: it must be an image built from `deploy/inference-gateway/ext-proc/Dockerfile`, not an arbitrary EPP image. Beyond the `/epp` binary, the frontend's compliance stages read `/sbom-rust-epp.cdx.json` and `/rust-licenses` out of it, and only that Dockerfile places them there. Pointing `EPP_IMAGE` at an older release or a third-party EPP fails the build on the `COPY --from=epp` of those paths, with a message (`lstat /sbom-rust-epp.cdx.json: no such file or directory`) that mentions neither EPP nor SBOMs. CI is unaffected: it builds the EPP image in the same workflow and feeds that URI straight through.
+
 The build process automatically:
-1. Builds the Dynamo static library for EPP KV-aware routing
-2. Builds the custom EPP Docker image using `make all` from `deploy/inference-gateway/epp/Makefile`
-3. Builds the frontend image with the EPP binary and Dynamo runtime components
+1. Builds the native Rust EPP Docker image using `make all` from `deploy/inference-gateway/ext-proc/Makefile`
+2. Builds the frontend image with the EPP binary and Dynamo runtime components
 
 For more details, see [`deploy/inference-gateway/README.md`](../deploy/inference-gateway/README.md).
 
@@ -574,4 +577,3 @@ DYN_SYSTEM_PORT=8081 python -m dynamo.trtllm --model Qwen/Qwen3-0.6B --free-gpu-
 - **vLLM**: `--gpu-memory-utilization 0.20` (use 20% GPU memory), `--enforce-eager` (disable CUDA graphs), `--no-enable-prefix-caching` (save memory), `--max-num-seqs 64` (max concurrent sequences)
 - **SGLang**: `--mem-fraction-static 0.20` (20% GPU memory for static allocation), `--max-running-requests 64` (max concurrent requests)
 - **TensorRT-LLM**: `--free-gpu-memory-fraction 0.20` (reserve 20% GPU memory), `--max-num-tokens 8192` (max tokens in batch), `--max-batch-size 64` (max batch size)
-

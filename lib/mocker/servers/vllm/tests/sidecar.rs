@@ -87,7 +87,7 @@ fn fast_engine_args() -> MockEngineArgs {
 async fn sidecar(endpoint: &str, mode: DisaggregationMode) -> VllmSidecarEngine {
     let mut argv = vec![
         "dynamo-vllm-sidecar".to_string(),
-        "--vllm-endpoint".to_string(),
+        "--grpc-endpoint".to_string(),
         endpoint.to_string(),
         "--grpc-connections".to_string(),
         "1".to_string(),

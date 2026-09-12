@@ -41,6 +41,28 @@ def test_profiler_blueprints_are_private_and_component_shaped(
     assert all(component.get("type") for component in components)
 
 
+@pytest.mark.parametrize(
+    ("backend", "mode"),
+    [
+        ("vllm", "agg"),
+        ("vllm", "disagg"),
+        ("sglang", "agg"),
+        ("sglang", "disagg"),
+        ("trtllm", "agg"),
+        ("trtllm", "disagg"),
+        ("mocker", "disagg"),
+    ],
+)
+def test_profiler_blueprints_materialize_frontend_cli_defaults(
+    backend: str, mode: str
+) -> None:
+    config = load_dgd_template(backend, mode)
+
+    frontend = _main_container(config, "Frontend")
+    assert frontend["command"] == ["python3"]
+    assert frontend["args"] == ["-m", "dynamo.frontend"]
+
+
 def _main_container(config: dict, component_name: str) -> dict:
     component = next(
         component
@@ -70,8 +92,8 @@ def test_production_frontend_has_hf_token_secret(backend: str, mode: str) -> Non
 def test_vllm_decode_blueprint_does_not_enable_kv_transfer() -> None:
     config = load_dgd_template("vllm", "disagg")
 
-    assert "--kv-transfer-config" not in _component_args(config, "VllmDecodeWorker")
-    assert "--kv-transfer-config" in _component_args(config, "VllmPrefillWorker")
+    assert "--kv-transfer-config" not in _component_args(config, "decode")
+    assert "--kv-transfer-config" in _component_args(config, "prefill")
 
 
 def test_mocker_blueprint_does_not_reference_unmounted_profile_data() -> None:

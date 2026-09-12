@@ -19,6 +19,17 @@ pub struct NvExt {
     #[builder(default, setter(strip_option))]
     pub annotations: Option<Vec<String>>,
 
+    /// Internal frontend-to-worker compatibility signal.
+    ///
+    /// New frontends set this before forwarding `/v1/audio/speech`. When absent
+    /// or false, workers must return one aggregated response so older frontends
+    /// do not decode only the first chunk during rolling upgrades.
+    ///
+    /// TODO(v1.7): Remove after v1.4 leaves the N-2 compatibility window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub frontend_accepts_audio_chunks: Option<bool>,
+
     /// Language: Auto, Chinese, English, Japanese, Korean, German, French, etc.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]

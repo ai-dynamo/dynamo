@@ -22,6 +22,7 @@ import (
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -51,7 +52,8 @@ func (r *dgdGroveTopologyConditionReconciler) Reconcile(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	result *workloadProgramResult,
 ) {
-	if result == nil || !dgd.HasAnyTopologyConstraint() {
+	// Project status only when typed or provider-native topology is configured.
+	if result == nil || (!dgd.HasAnyTopologyConstraint() && !provideroverride.HasGroveTopologyOverrides(dgd)) {
 		return
 	}
 	status := &result.Status

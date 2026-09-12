@@ -11,10 +11,13 @@
 //! large request payloads as Bytes instead of copying them into flattened buffers.
 
 use super::unified_client::{ClientStats, Headers, RequestPlaneClient};
+use crate::error::{DynamoError, ErrorType};
 use crate::metrics::transport_metrics::{
     TCP_BYTES_RECEIVED_TOTAL, TCP_BYTES_SENT_TOTAL, TCP_ERRORS_TOTAL,
 };
-use crate::pipeline::network::codec::TcpRequestFrame;
+use crate::pipeline::network::codec::{
+    TcpRequestFrame, TcpRequestMessage, check_tcp_request_max_message_size,
+};
 use crate::pipeline::network::get_tcp_max_message_size;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -43,6 +46,9 @@ use tokio_util::codec::FramedRead;
 
 /// Default timeout for TCP request acknowledgment
 const DEFAULT_TCP_REQUEST_TIMEOUT_SECS: u64 = 5;
+
+const MAX_MESSAGE_SIZE_USER_MESSAGE: &str = "Request payload is too large for this deployment. Reduce the input size or metadata size and retry.";
+const INVALID_REQUEST_USER_MESSAGE: &str = "Request cannot be encoded for this deployment. Reduce the endpoint path, metadata, or payload size and retry.";
 
 /// Default connection pool size per host.
 /// Ceiling: DEFAULT_POOL_SIZE(100) x REQUEST_CHANNEL_BUFFER(1024) = 102,400 concurrent
@@ -389,21 +395,57 @@ fn get_request_plane_tls_connector() -> anyhow::Result<&'static Option<TlsConnec
 }
 
 /// Build the request-plane client TLS connector from the `DYN_TCP_TLS_*`
-/// environment. Returns `None` when no TLS is requested (no CA and not
-/// insecure). Split out from the `OnceCell` init so the env parsing can be
-/// unit-tested directly.
+/// environment. Returns `None` when no TLS is requested (no CA, not insecure,
+/// no client identity). Split out from the `OnceCell` init so the env parsing
+/// can be unit-tested directly.
 fn build_request_plane_tls_connector_from_env() -> anyhow::Result<Option<TlsConnector>> {
     use crate::config::environment_names::tcp_response_stream::tls as env;
     let ca_cert_path = std::env::var(env::DYN_TCP_TLS_CA_CERT_PATH).ok();
     let insecure = crate::config::env_is_truthy(env::DYN_TCP_TLS_INSECURE);
-    let tls_requested = ca_cert_path.is_some() || insecure;
+    let client_cert = std::env::var(env::DYN_TCP_TLS_CLIENT_CERT_PATH).ok();
+    let client_key = std::env::var(env::DYN_TCP_TLS_CLIENT_KEY_PATH).ok();
+    build_request_plane_tls_connector(
+        ca_cert_path.as_deref().map(std::path::Path::new),
+        insecure,
+        client_cert.as_deref().map(std::path::Path::new),
+        client_key.as_deref().map(std::path::Path::new),
+    )
+}
+
+/// Build the request-plane client TLS connector from explicit paths. Presents
+/// the client certificate/key for mTLS and fails closed on incomplete TLS
+/// settings. Returns `None` when no TLS is requested.
+fn build_request_plane_tls_connector(
+    ca_cert_path: Option<&std::path::Path>,
+    insecure: bool,
+    client_cert: Option<&std::path::Path>,
+    client_key: Option<&std::path::Path>,
+) -> anyhow::Result<Option<TlsConnector>> {
+    let tls_requested =
+        ca_cert_path.is_some() || insecure || client_cert.is_some() || client_key.is_some();
     if !tls_requested {
         return Ok(None);
     }
-    let tls_config = crate::tls_utils::client_tls_config(
-        ca_cert_path.as_deref().map(std::path::Path::new),
-        insecure,
-    )?;
+    use crate::config::environment_names::tcp_response_stream::tls as env;
+    // Validate the client identity pair before the CA check so a lone cert/key
+    // produces the accurate "set both" error rather than a misleading CA error.
+    if client_cert.is_some() != client_key.is_some() {
+        anyhow::bail!(
+            "both {} and {} must be set together to present a client identity",
+            env::DYN_TCP_TLS_CLIENT_CERT_PATH,
+            env::DYN_TCP_TLS_CLIENT_KEY_PATH,
+        );
+    }
+    if !insecure && ca_cert_path.is_none() {
+        anyhow::bail!(
+            "Request plane TLS is enabled but {} is not set and {} is not true; \
+             provide a CA cert or set insecure mode for development",
+            env::DYN_TCP_TLS_CA_CERT_PATH,
+            env::DYN_TCP_TLS_INSECURE,
+        );
+    }
+    let tls_config =
+        crate::tls_utils::client_tls_config(ca_cert_path, insecure, client_cert, client_key)?;
     Ok(Some(TlsConnector::from(std::sync::Arc::new(tls_config))))
 }
 
@@ -848,21 +890,14 @@ impl TcpConnection {
         Ok(())
     }
 
-    /// Send a request via lock-free SegQueue push (~20-40ns)
-    async fn send_request(&self, payload: Bytes, headers: &Headers) -> Result<Bytes> {
-        use crate::pipeline::network::codec::TcpRequestMessage;
-
+    /// Send an already-validated request.
+    async fn send_request_message(&self, request: TcpRequestMessage) -> Result<Bytes> {
         if !self.healthy.load(Ordering::Relaxed) {
             anyhow::bail!("Connection unhealthy (tasks failed)");
         }
         if self.closed.load(Ordering::Acquire) {
             anyhow::bail!("Connection closed (writer exited)");
         }
-
-        let endpoint_path = headers
-            .get("x-endpoint-path")
-            .ok_or_else(|| anyhow::anyhow!("Missing x-endpoint-path header for TCP request"))?
-            .to_string();
 
         let trace = latency_trace_enabled();
         let e2e_start = if trace {
@@ -871,25 +906,18 @@ impl TcpConnection {
             None
         };
 
-        // Bounded admission: block until a slot is free (channel_buffer hard limit).
-        // The permit is held for the duration of this call and released on drop,
-        // whether the caller returns normally, errors out, or the enclosing
-        // tokio::time::timeout drops this future mid-flight.
-        // This prevents unbounded SegQueue growth and heap OOM under overload.
-        // encode() runs AFTER acquire so callers blocked on the semaphore do not
-        // hold a pre-allocated encoded frame, bounding peak memory to
-        // channel_buffer * frame_size per connection.
+        // Bounded admission keeps queued and in-flight frames at or below
+        // channel_buffer. The permit is released on every return, error, and
+        // cancellation path.
         let _permit = self
             .admission
             .acquire()
             .await
             .map_err(|_| anyhow::anyhow!("Connection closed (admission gate shut)"))?;
 
-        // Header framing happens after admission is granted so callers blocked
-        // on the semaphore do not hold queued frame state. The payload remains
-        // a Bytes chunk and is not copied into a flattened request frame.
-        let request_msg = TcpRequestMessage::with_headers(endpoint_path, headers.clone(), payload);
-        let frame = request_msg.into_frame()?;
+        // Header serialization stays inside the admission bound. The payload
+        // remains in its original Bytes allocation.
+        let frame = request.into_frame().map_err(invalid_request_error)?;
 
         let (response_tx, response_rx) = oneshot::channel();
 
@@ -952,6 +980,12 @@ impl TcpConnection {
         result
     }
 
+    #[cfg(test)]
+    async fn send_request(&self, payload: Bytes, headers: &Headers) -> Result<Bytes> {
+        let request = prepare_request(payload, headers.clone(), get_tcp_max_message_size())?;
+        self.send_request_message(request).await
+    }
+
     /// Check if connection is healthy
     fn is_healthy(&self) -> bool {
         self.healthy.load(Ordering::Relaxed)
@@ -977,6 +1011,50 @@ fn cannot_connect_error(addr: SocketAddr, error: anyhow::Error) -> anyhow::Error
             .cause(cause)
             .build()
     )
+}
+
+fn validate_request_frame_size(frame_len: usize, max_message_size: usize) -> Result<()> {
+    if let Err(cause) = check_tcp_request_max_message_size(frame_len, max_message_size) {
+        return Err(anyhow::anyhow!(
+            DynamoError::builder()
+                .error_type(ErrorType::InvalidArgument)
+                .message(MAX_MESSAGE_SIZE_USER_MESSAGE)
+                .cause(cause)
+                .build()
+        ));
+    }
+
+    Ok(())
+}
+
+fn invalid_request_error(cause: std::io::Error) -> anyhow::Error {
+    anyhow::anyhow!(
+        DynamoError::builder()
+            .error_type(ErrorType::InvalidArgument)
+            .message(INVALID_REQUEST_USER_MESSAGE)
+            .cause(cause)
+            .build()
+    )
+}
+
+fn prepare_request(
+    payload: Bytes,
+    headers: Headers,
+    max_message_size: usize,
+) -> Result<TcpRequestMessage> {
+    let endpoint_path = headers
+        .get("x-endpoint-path")
+        .ok_or_else(|| {
+            invalid_request_error(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Missing x-endpoint-path header for TCP request",
+            ))
+        })?
+        .to_string();
+    let request = TcpRequestMessage::with_headers(endpoint_path, headers, payload);
+    let encoded_len = request.encoded_len().map_err(invalid_request_error)?;
+    validate_request_frame_size(encoded_len, max_message_size)?;
+    Ok(request)
 }
 
 /// Per-host connection pool with LRU lifecycle and ArcSwap-based snapshot.
@@ -1506,6 +1584,7 @@ impl TcpConnectionPool {
 pub struct TcpRequestClient {
     pool: Arc<TcpConnectionPool>,
     config: TcpRequestConfig,
+    max_message_size: usize,
     stats: Arc<TcpClientStats>,
 }
 
@@ -1530,6 +1609,7 @@ impl TcpRequestClient {
         Ok(Self {
             pool,
             config,
+            max_message_size: get_tcp_max_message_size(),
             stats: Arc::new(TcpClientStats {
                 requests_sent: AtomicU64::new(0),
                 responses_received: AtomicU64::new(0),
@@ -1597,16 +1677,24 @@ impl RequestPlaneClient for TcpRequestClient {
         mut headers: Headers,
     ) -> Result<Bytes> {
         tracing::debug!("TCP client sending request to address: {}", address);
-        self.stats.requests_sent.fetch_add(1, Ordering::Relaxed);
-        self.stats
-            .bytes_sent
-            .fetch_add(payload.len() as u64, Ordering::Relaxed);
+        let payload_len = payload.len();
 
         let (addr, endpoint_name) = Self::parse_address(&address)?;
 
         if let Some(endpoint_name) = endpoint_name {
             headers.insert("x-endpoint-path".to_string(), endpoint_name.clone());
         }
+
+        let request = prepare_request(payload, headers, self.max_message_size).map_err(|e| {
+            self.stats.errors.fetch_add(1, Ordering::Relaxed);
+            TCP_ERRORS_TOTAL.inc();
+            tracing::warn!(%addr, error = ?e, "TCP request validation failed");
+            e
+        })?;
+        self.stats.requests_sent.fetch_add(1, Ordering::Relaxed);
+        self.stats
+            .bytes_sent
+            .fetch_add(payload_len as u64, Ordering::Relaxed);
 
         // Get shared connection from pool (Arc, not exclusive borrow). Actual connection
         // failures are classified at the dial site; local pool errors retain their type.
@@ -1619,7 +1707,7 @@ impl RequestPlaneClient for TcpRequestClient {
 
         let result = tokio::time::timeout(
             self.config.request_timeout,
-            conn.send_request(payload, &headers),
+            conn.send_request_message(request),
         )
         .await;
 
@@ -1639,16 +1727,7 @@ impl RequestPlaneClient for TcpRequestClient {
                 self.stats.errors.fetch_add(1, Ordering::Relaxed);
                 TCP_ERRORS_TOTAL.inc();
                 tracing::warn!("TCP request failed to {}: {}", addr, e);
-                let cause = crate::error::DynamoError::from(
-                    e.into_boxed_dyn_error() as Box<dyn std::error::Error + 'static>
-                );
-                Err(anyhow::anyhow!(
-                    crate::error::DynamoError::builder()
-                        .error_type(crate::error::ErrorType::CannotConnect)
-                        .message(format!("TCP request to {addr} failed"))
-                        .cause(cause)
-                        .build()
-                ))
+                Err(cannot_connect_error(addr, e))
             }
             Err(_) => {
                 self.stats.errors.fetch_add(1, Ordering::Relaxed);
@@ -1698,26 +1777,73 @@ impl RequestPlaneClient for TcpRequestClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::match_error_chain;
+    use crate::tls_utils::test_certs::{mtls_chain, self_signed_pair};
     use std::pin::Pin;
     use std::sync::atomic::AtomicUsize;
     use std::task::{Context, Poll};
     use tokio::io::{AsyncReadExt, AsyncWrite};
     use tokio::net::{TcpListener, TcpStream};
 
-    fn make_cert_files() -> (tempfile::NamedTempFile, tempfile::NamedTempFile) {
-        use std::io::Write as _;
-        let key_pair = rcgen::KeyPair::generate().unwrap();
-        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
-            .unwrap()
-            .self_signed(&key_pair)
-            .unwrap();
-        let mut cert_file = tempfile::NamedTempFile::new().unwrap();
-        cert_file.write_all(cert.pem().as_bytes()).unwrap();
-        let mut key_file = tempfile::NamedTempFile::new().unwrap();
-        key_file
-            .write_all(key_pair.serialize_pem().as_bytes())
-            .unwrap();
-        (cert_file, key_file)
+    // mTLS enforcement: a server built with a client CA must reject a client
+    // that presents no certificate and one whose certificate is signed by an
+    // untrusted CA. The accepted case is covered by `request_plane_mtls_end_to_end`.
+    // Assertions are made server-side because a TLS 1.3 client may finish its
+    // flight before observing the server's rejection.
+    #[tokio::test]
+    async fn request_plane_mtls_rejects_untrusted_clients() {
+        let (ca, server_cert, server_key, _client_cert, _client_key) = mtls_chain();
+        let server_config = crate::tls_utils::server_tls_config(
+            server_cert.path(),
+            server_key.path(),
+            Some(ca.path()),
+        )
+        .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(server_config));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (no_cert, _) = listener.accept().await.unwrap();
+            let no_cert_ok = acceptor.accept(no_cert).await.is_ok();
+            let (wrong_ca, _) = listener.accept().await.unwrap();
+            let wrong_ca_ok = acceptor.accept(wrong_ca).await.is_ok();
+            (no_cert_ok, wrong_ca_ok)
+        });
+
+        let sni = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+
+        // No client identity presented.
+        let no_identity =
+            crate::tls_utils::client_tls_config(Some(ca.path()), false, None, None).unwrap();
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let _ = tokio_rustls::TlsConnector::from(std::sync::Arc::new(no_identity))
+            .connect(sni.clone(), stream)
+            .await;
+
+        // Client cert signed by an untrusted (self-signed) CA, not the server's.
+        let (wrong_cert, wrong_key) = self_signed_pair();
+        let untrusted = crate::tls_utils::client_tls_config(
+            Some(ca.path()),
+            false,
+            Some(wrong_cert.path()),
+            Some(wrong_key.path()),
+        )
+        .unwrap();
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let _ = tokio_rustls::TlsConnector::from(std::sync::Arc::new(untrusted))
+            .connect(sni, stream)
+            .await;
+
+        let (no_cert_ok, wrong_ca_ok) = server.await.unwrap();
+        assert!(
+            !no_cert_ok,
+            "server must reject a client that presents no cert"
+        );
+        assert!(
+            !wrong_ca_ok,
+            "server must reject a client cert signed by an untrusted CA"
+        );
     }
 
     #[test]
@@ -1773,6 +1899,99 @@ mod tests {
         let client = client.unwrap();
         assert_eq!(client.transport_name(), "tcp");
         assert!(client.is_healthy());
+    }
+
+    #[test]
+    fn test_request_frame_size_validation() {
+        assert!(validate_request_frame_size(1024, 1024).is_ok());
+
+        let err = validate_request_frame_size(1025, 1024).unwrap_err();
+        assert!(match_error_chain(
+            err.as_ref(),
+            &[ErrorType::InvalidArgument],
+            &[]
+        ));
+        let typed = err.downcast_ref::<DynamoError>().unwrap();
+        assert_eq!(typed.message(), MAX_MESSAGE_SIZE_USER_MESSAGE);
+        assert!(err.chain().any(|cause| cause.to_string().contains("1025")));
+    }
+
+    #[tokio::test]
+    async fn test_oversized_request_is_rejected_before_connect() {
+        let mut client = TcpRequestClient::with_config(TcpRequestConfig {
+            request_timeout: Duration::from_secs(1),
+            connect_timeout: Duration::from_secs(1),
+            pool_size: 1,
+            channel_buffer: 1,
+        })
+        .unwrap();
+        client.max_message_size = 64;
+
+        let err = client
+            .send_request(
+                "127.0.0.1:1/generate".to_string(),
+                Bytes::from(vec![0; 64]),
+                Headers::new(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(match_error_chain(
+            err.as_ref(),
+            &[ErrorType::InvalidArgument],
+            &[]
+        ));
+        assert!(!match_error_chain(
+            err.as_ref(),
+            &[ErrorType::CannotConnect],
+            &[]
+        ));
+        assert!(client.pool.hosts.is_empty());
+        assert_eq!(client.stats.requests_sent.load(Ordering::Relaxed), 0);
+        assert_eq!(client.stats.bytes_sent.load(Ordering::Relaxed), 0);
+        assert_eq!(client.stats.errors.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn test_unencodable_request_is_rejected_before_connect() {
+        let client = TcpRequestClient::with_config(TcpRequestConfig {
+            request_timeout: Duration::from_secs(1),
+            connect_timeout: Duration::from_secs(1),
+            pool_size: 1,
+            channel_buffer: 1,
+        })
+        .unwrap();
+        let endpoint = "x".repeat(u16::MAX as usize + 1);
+
+        let err = client
+            .send_request(
+                format!("127.0.0.1:1/{endpoint}"),
+                Bytes::from_static(b"ping"),
+                Headers::new(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(match_error_chain(
+            err.as_ref(),
+            &[ErrorType::InvalidArgument],
+            &[]
+        ));
+        assert!(!match_error_chain(
+            err.as_ref(),
+            &[ErrorType::CannotConnect],
+            &[]
+        ));
+        let typed = err.downcast_ref::<DynamoError>().unwrap();
+        assert_eq!(typed.message(), INVALID_REQUEST_USER_MESSAGE);
+        assert!(
+            err.chain()
+                .any(|cause| cause.to_string().contains("Endpoint path too long"))
+        );
+        assert!(client.pool.hosts.is_empty());
+        assert_eq!(client.stats.requests_sent.load(Ordering::Relaxed), 0);
+        assert_eq!(client.stats.bytes_sent.load(Ordering::Relaxed), 0);
+        assert_eq!(client.stats.errors.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
@@ -1911,14 +2130,25 @@ mod tests {
     /// connector built.
     #[test]
     fn request_plane_tls_connector_from_env_parses() {
-        let (cert, _key) = make_cert_files();
-        temp_env::with_vars_unset(["DYN_TCP_TLS_CA_CERT_PATH", "DYN_TCP_TLS_INSECURE"], || {
-            assert!(
-                build_request_plane_tls_connector_from_env()
-                    .unwrap()
-                    .is_none()
-            );
-        });
+        let (cert, key) = self_signed_pair();
+        // Clear every var the builder reads (incl. the client-identity vars) so
+        // ambient mTLS settings can't flip the "no TLS -> plaintext" assertion.
+        temp_env::with_vars_unset(
+            [
+                "DYN_TCP_TLS_CA_CERT_PATH",
+                "DYN_TCP_TLS_INSECURE",
+                "DYN_TCP_TLS_CLIENT_CERT_PATH",
+                "DYN_TCP_TLS_CLIENT_KEY_PATH",
+            ],
+            || {
+                assert!(
+                    build_request_plane_tls_connector_from_env()
+                        .unwrap()
+                        .is_none()
+                );
+            },
+        );
+        // CA only -> TLS.
         temp_env::with_vars(
             [
                 (
@@ -1926,6 +2156,8 @@ mod tests {
                     Some(cert.path().to_str().unwrap()),
                 ),
                 ("DYN_TCP_TLS_INSECURE", None),
+                ("DYN_TCP_TLS_CLIENT_CERT_PATH", None),
+                ("DYN_TCP_TLS_CLIENT_KEY_PATH", None),
             ],
             || {
                 assert!(
@@ -1935,10 +2167,38 @@ mod tests {
                 );
             },
         );
+        // Insecure only -> TLS.
         temp_env::with_vars(
             [
                 ("DYN_TCP_TLS_CA_CERT_PATH", None),
                 ("DYN_TCP_TLS_INSECURE", Some("1")),
+                ("DYN_TCP_TLS_CLIENT_CERT_PATH", None),
+                ("DYN_TCP_TLS_CLIENT_KEY_PATH", None),
+            ],
+            || {
+                assert!(
+                    build_request_plane_tls_connector_from_env()
+                        .unwrap()
+                        .is_some()
+                );
+            },
+        );
+        // CA + client identity -> mTLS connector.
+        temp_env::with_vars(
+            [
+                (
+                    "DYN_TCP_TLS_CA_CERT_PATH",
+                    Some(cert.path().to_str().unwrap()),
+                ),
+                ("DYN_TCP_TLS_INSECURE", None),
+                (
+                    "DYN_TCP_TLS_CLIENT_CERT_PATH",
+                    Some(cert.path().to_str().unwrap()),
+                ),
+                (
+                    "DYN_TCP_TLS_CLIENT_KEY_PATH",
+                    Some(key.path().to_str().unwrap()),
+                ),
             ],
             || {
                 assert!(
@@ -1950,52 +2210,67 @@ mod tests {
         );
     }
 
+    #[test]
+    fn request_plane_tls_connector_rejects_client_identity_without_ca() {
+        let (cert, key) = self_signed_pair();
+        // A client identity without a server CA (and not insecure) must fail closed.
+        let error =
+            build_request_plane_tls_connector(None, false, Some(cert.path()), Some(key.path()))
+                .err()
+                .expect("a client identity without a server CA must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("DYN_TCP_TLS_CA_CERT_PATH is not set")
+        );
+    }
+
+    // Accept one TLS connection, read a single request-plane frame, and echo its
+    // payload back as a response frame. Shared by the TLS and mTLS e2e tests.
+    async fn tls_echo_one_request(listener: TcpListener, acceptor: tokio_rustls::TlsAcceptor) {
+        use crate::pipeline::network::codec::TcpResponseMessage;
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let (tcp, _) = listener.accept().await.unwrap();
+        let tls = acceptor.accept(tcp).await.expect("server TLS handshake");
+        let (mut r, mut w) = tokio::io::split(tls);
+        let mut path_len = [0u8; 2];
+        r.read_exact(&mut path_len).await.unwrap();
+        let mut path = vec![0u8; u16::from_be_bytes(path_len) as usize];
+        r.read_exact(&mut path).await.unwrap();
+        let mut headers_len = [0u8; 2];
+        r.read_exact(&mut headers_len).await.unwrap();
+        let mut headers = vec![0u8; u16::from_be_bytes(headers_len) as usize];
+        r.read_exact(&mut headers).await.unwrap();
+        let mut payload_len = [0u8; 4];
+        r.read_exact(&mut payload_len).await.unwrap();
+        let mut payload = vec![0u8; u32::from_be_bytes(payload_len) as usize];
+        r.read_exact(&mut payload).await.unwrap();
+        let resp = TcpResponseMessage::new(Bytes::from(payload));
+        w.write_all(&resp.encode().unwrap()).await.unwrap();
+        w.flush().await.unwrap();
+    }
+
     /// End-to-end encrypted request through the **real** request-plane client
     /// path: `TcpConnection::connect_with_connector` performs the TLS handshake
     /// (SNI from `DYN_TCP_TLS_SERVER_NAME`), spawns the reader/writer tasks over
     /// boxed TLS I/O, and `send_request` frames a request that a TLS-wrapped echo
-    /// server (built from the production `server_tls_config`) reads and replies
-    /// to. This exercises handshake + SNI + boxed I/O + reader/writer + framing,
-    /// not just a `tls_utils` round-trip.
+    /// server reads and replies to. Exercises handshake + SNI + boxed I/O +
+    /// reader/writer + framing, not just a `tls_utils` round-trip.
     #[tokio::test]
     async fn request_plane_tls_end_to_end() {
-        use crate::pipeline::network::codec::TcpResponseMessage;
-        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
         // Self-signed cert (SAN=localhost), trusted as the CA by the client.
-        let (cert, key) = make_cert_files();
-        let server_config = crate::tls_utils::server_tls_config(cert.path(), key.path()).unwrap();
+        let (cert, key) = self_signed_pair();
+        let server_config =
+            crate::tls_utils::server_tls_config(cert.path(), key.path(), None).unwrap();
         let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(server_config));
-        let client_config = crate::tls_utils::client_tls_config(Some(cert.path()), false).unwrap();
+        let client_config =
+            crate::tls_utils::client_tls_config(Some(cert.path()), false, None, None).unwrap();
         let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(client_config));
 
         // TLS-wrapped echo server speaking the request-plane wire framing.
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let (tcp, _) = listener.accept().await.unwrap();
-            let tls = acceptor.accept(tcp).await.expect("server TLS handshake");
-            let (mut r, mut w) = tokio::io::split(tls);
-            // path
-            let mut l2 = [0u8; 2];
-            r.read_exact(&mut l2).await.unwrap();
-            let mut path = vec![0u8; u16::from_be_bytes(l2) as usize];
-            r.read_exact(&mut path).await.unwrap();
-            // headers
-            let mut hl = [0u8; 2];
-            r.read_exact(&mut hl).await.unwrap();
-            let mut headers = vec![0u8; u16::from_be_bytes(hl) as usize];
-            r.read_exact(&mut headers).await.unwrap();
-            // payload
-            let mut l4 = [0u8; 4];
-            r.read_exact(&mut l4).await.unwrap();
-            let mut payload = vec![0u8; u32::from_be_bytes(l4) as usize];
-            r.read_exact(&mut payload).await.unwrap();
-            // echo the payload back as a response frame
-            let resp = TcpResponseMessage::new(Bytes::from(payload));
-            w.write_all(&resp.encode().unwrap()).await.unwrap();
-            w.flush().await.unwrap();
-        });
+        tokio::spawn(tls_echo_one_request(listener, acceptor));
 
         // Drive the real client path with an explicit connector (no OnceCell) and
         // SNI supplied via env so it matches the cert's `localhost` SAN.
@@ -2024,6 +2299,62 @@ mod tests {
         assert_eq!(
             response, expected,
             "payload should round-trip through the encrypted request plane"
+        );
+    }
+
+    /// Same production path as `request_plane_tls_end_to_end`, but mutually
+    /// authenticated: the server requires a client certificate (built with a
+    /// client CA) and the real client path presents a CA-signed identity. Proves
+    /// `TcpConnection::connect_with_connector` + `send_request` work end-to-end
+    /// when the server enforces mTLS.
+    #[tokio::test]
+    async fn request_plane_mtls_end_to_end() {
+        let (ca, server_cert, server_key, client_cert, client_key) = mtls_chain();
+        let server_config = crate::tls_utils::server_tls_config(
+            server_cert.path(),
+            server_key.path(),
+            Some(ca.path()),
+        )
+        .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(server_config));
+        let client_config = crate::tls_utils::client_tls_config(
+            Some(ca.path()),
+            false,
+            Some(client_cert.path()),
+            Some(client_key.path()),
+        )
+        .unwrap();
+        let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(client_config));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(tls_echo_one_request(listener, acceptor));
+
+        let payload = Bytes::from_static(b"encrypted-mtls-request-plane-payload");
+        let expected = payload.clone();
+        let response = temp_env::async_with_vars(
+            [("DYN_TCP_TLS_SERVER_NAME", Some("localhost"))],
+            async move {
+                let conn = TcpConnection::connect_with_connector(
+                    addr,
+                    Duration::from_secs(5),
+                    10,
+                    Some(&connector),
+                )
+                .await
+                .expect("client connect + mTLS handshake");
+                let mut headers = Headers::new();
+                headers.insert("x-endpoint-path".to_string(), "test".to_string());
+                conn.send_request(payload, &headers)
+                    .await
+                    .expect("send_request over mTLS")
+            },
+        )
+        .await;
+
+        assert_eq!(
+            response, expected,
+            "payload should round-trip through the mutually-authenticated request plane"
         );
     }
 
