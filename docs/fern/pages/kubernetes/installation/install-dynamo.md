@@ -57,13 +57,13 @@ Every Dynamo deployment requires accelerator support and the **Dynamo Platform**
 | kube-prometheus-stack | Autoscaling, metrics dashboards, or the Planner | Planner `sla` mode, KEDA/HPA autoscaling |
 | Shared storage (model cache) | Large models (>70B) or many replicas | Avoiding per-pod downloads and HuggingFace rate limits |
 
-**Grove + KAI Scheduler** — Grove is the default multinode orchestrator. The operator returns a hard error on multinode deployments if neither Grove nor [LeaderWorkerSet (LWS)](https://github.com/kubernetes-sigs/lws#installation) is available. KAI Scheduler is optional but recommended alongside Grove for GPU-aware scheduling. See [Grove](../../developer-guide/knowledge-base/kubernetes/multinode/grove.md) for details.
+**Grove + KAI Scheduler** — Grove is the default multinode orchestrator. The operator returns a hard error on multinode deployments if neither Grove nor [LeaderWorkerSet (LWS)](https://github.com/kubernetes-sigs/lws#installation) is available. KAI Scheduler is optional but recommended alongside Grove for GPU-aware scheduling. See [Multinode Orchestration](multinode-orchestration.md) for details.
 
-**Network Operator / RDMA** — Without RDMA, disaggregated inference falls back to TCP automatically, but with severe performance degradation (~98s TTFT vs ~200-500ms with RDMA). Required for any production disaggregated deployment. Setup is cloud-provider-specific — see the [Disaggregated Communication Guide](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/disagg-communication.md) and your cloud provider guide.
+**Network Operator / RDMA** — Without RDMA, disaggregated inference falls back to TCP automatically, but with severe performance degradation (~98s TTFT vs ~200-500ms with RDMA). Required for any production disaggregated deployment. Setup is cloud-provider-specific — see [RDMA Setup](rdma-setup/overview.md) and your cloud provider guide.
 
 **kube-prometheus-stack** — Required for the Planner's `sla` optimization mode (it reads live TTFT/ITL metrics from Prometheus). Also required for KEDA/HPA-based autoscaling. The Planner's `throughput` mode can function without it using internal queue depth signals, but metrics-driven features will not work. See [Metrics](../operations/observability.mdx) for details.
 
-**Shared storage** — Prevents each pod from downloading model weights independently. Without it, large models (>70B) take hours to download per pod, and many replicas will hit HuggingFace rate limits. Not enforced by the operator — this is an operational concern. See [Model Caching](../model-deployment/model-loading/model-caching.mdx) for the full walkthrough.
+**Shared storage** — Prevents each pod from downloading model weights independently. Without it, large models (>70B) take hours to download per pod, and many replicas will hit HuggingFace rate limits. Not enforced by the operator — this is an operational concern. See the [Model Storage Overview](model-storage/overview.md) to choose a storage backend.
 
 <Steps toc={true} tocDepth={2}>
 
@@ -139,6 +139,7 @@ helm install dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
   # Option A (install=true): Dynamo installs and manages Grove/KAI as bundled subcharts (dev/testing):
   # --set "global.grove.install=true" \
   # --set "global.kai-scheduler.install=true" \
+  # --set-string "kai-scheduler.scheduler.args.default-staleness-grace-period=-1s" \
   # Option B (enabled=true): Grove/KAI are already installed externally (production):
   # --set "global.grove.enabled=true" \
   # --set "global.kai-scheduler.enabled=true" \
@@ -160,8 +161,8 @@ helm install dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
 
 > [!WARNING]
 > **Namespace-restricted mode** (`namespaceRestriction.enabled=true`) is only for development and
-> testing. It is not supported for production. Set `dynamo-operator.upgradeCRD=false`; see
-> [Dynamo Operator](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/dynamo-operator.md#namespace-restricted-mode).
+> testing. It is not supported for production. Set `dynamo-operator.upgradeCRD=false` when you
+> enable this mode.
 
 Verify the Dynamo platform is running:
 
@@ -183,7 +184,7 @@ The Dynamo install command above includes commented flags for each optional comp
 
 ### Multinode:
 
-Multinode deployments require either Grove + KAI Scheduler or an alternative orchestrator setup (LeaderWorkerSet + Volcano) to enable gang scheduling for workloads that span multiple nodes. See the [Multinode Deployment Guide](../model-deployment/multinode-deployments.md) for details on orchestrator selection and configuration.
+Multinode deployments require either Grove + KAI Scheduler or an alternative orchestrator setup (LeaderWorkerSet + Volcano) to enable gang scheduling for workloads that span multiple nodes. See [Multinode Orchestration](multinode-orchestration.md) for details on orchestrator selection and configuration.
 
 DisaggregatedSet is an opt-in multinode pathway below Grove. To request it for a new DGD, install an LWS release that serves `disaggregatedset.x-k8s.io/v1` and set `nvidia.com/enable-disaggregatedset: "true"`. When Grove is available and enabled, also set `nvidia.com/enable-grove: "false"`. Dynamo persists the selected provider in `nvidia.com/workload-provider`; installing the DS API or changing the enable annotations does not change existing deployments. If the selected provider becomes unavailable, Dynamo reports `Ready=False` instead of silently switching providers. Delete and recreate the DGD to choose a different pathway.
 
@@ -205,6 +206,7 @@ For the `enabled=true` path, install Grove and KAI Scheduler separately first. S
 > | 1.1.x           | >= v0.13.4    | >= v0.1.0-alpha.8 |
 > | 1.3.x           | >= v0.13.4    | >= v0.1.0-alpha.8, < v0.1.0-alpha.9 |
 > | 1.4.x           | >= v0.13.4    | >= v0.1.0-alpha.10 |
+> | 1.5.x           | >= v0.17.0    | >= v0.1.0-alpha.13 |
 >
 > Upgrade Grove in lockstep with Dynamo while the Grove APIs remain unstable. Dynamo 1.3.x expects
 > Grove's earlier `ClusterTopology` API and is incompatible with the newer
@@ -234,14 +236,14 @@ helm install lws oci://registry.k8s.io/lws/charts/lws \
   --wait --timeout 300s
 ```
 
-See the [LWS docs](https://lws.sigs.k8s.io/docs/) and [Volcano docs](https://github.com/volcano-sh/volcano#quick-start-guide) for configuration options, and the [Multinode Deployment Guide](../model-deployment/multinode-deployments.md) for orchestrator selection.
+See the [LWS docs](https://lws.sigs.k8s.io/docs/) and [Volcano docs](https://github.com/volcano-sh/volcano#quick-start-guide) for configuration options. See [Multinode Orchestration](multinode-orchestration.md) to compare the supported orchestrators.
 
 ### Network Operator / RDMA
 
-RDMA setup is cloud-provider-specific. See the [Disaggregated Communication Guide](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/disagg-communication.md) for transport options, UCX configuration, and performance expectations, and your cloud provider guide for setup instructions:
+RDMA setup is cloud-provider-specific. See [RDMA Setup](rdma-setup/overview.md) for requirements and platform-specific instructions:
 
 - [AKS — InfiniBand + Network Operator](rdma-setup/infiniband-on-azure.mdx)
-- [EKS — EFA device plugin](managed-kubernetes/eks/eks-setup.mdx) (also see the [EFA configuration guide](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/disagg-communication.md#aws-efa-configuration))
+- [EKS — EFA device plugin](managed-kubernetes/eks/eks-setup.mdx) (also see [EFA on AWS](rdma-setup/efa-on-aws.mdx))
 - [GKE — GPUDirect-TCPXO](managed-kubernetes/gcp/gke-setup.mdx)
 
 ### kube-prometheus-stack
@@ -269,7 +271,7 @@ Set up a `ReadWriteMany` PVC so all pods share downloaded model weights instead 
 - [EKS — EFS](model-storage/efs.mdx)
 - GKE — Cloud Filestore (see [GKE guide](managed-kubernetes/gcp/gke-setup.mdx))
 
-For large clusters with frequent model updates, consider [ModelExpress](../model-deployment/model-loading/model-caching.mdx#option-2-modelexpress-p2p-distribution) for P2P model distribution and ModelStreamer for direct streaming from object storage. See [Model Caching](../model-deployment/model-loading/model-caching.mdx) for the full walkthrough including the download Job, mount configuration, and ModelExpress setup.
+For large clusters with frequent model updates, consider [ModelExpress](model-storage/overview.md) for P2P model distribution and ModelStreamer for direct streaming from object storage. See [Model Caching](model-storage/overview.md) for the full walkthrough including the download Job, mount configuration, and ModelExpress setup.
 
 </Step>
 
@@ -399,5 +401,5 @@ kubectl delete crd <crd-name>
 
 - [Helm Chart Configuration](https://github.com/ai-dynamo/dynamo/tree/main/deploy/helm/charts/platform/README.md)
 - [Deploy with DGD](../model-deployment/deploy-with-dgd.md)
-- [Dynamo Operator Details](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/dynamo-operator.md)
+- [Kubernetes API Reference](../../reference/kubernetes-api/full-api-reference.mdx)
 - [ModelExpress Server](https://github.com/ai-dynamo/modelexpress)

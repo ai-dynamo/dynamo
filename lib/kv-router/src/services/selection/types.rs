@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::identity::{RoutingPartitionId, default_routing_group};
 use crate::protocols::{
-    DpRank, KvTransferEnforcement, RoutingConstraints, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+    DpRank, KvTransferEnforcement, RoutingConstraints, WorkerAffinityTarget, WorkerConfigLike,
+    WorkerId, WorkerWithDpRank,
 };
 use crate::scheduling::PotentialLoad;
 use crate::scheduling::config::RouterConfigOverride;
@@ -17,7 +18,6 @@ use crate::services::overlap::MooncakeOverlapSummary;
 use super::input::PromptRequest;
 
 const DEFAULT_MODEL_NAME: &str = "default";
-pub(super) const WORKER_TYPE: &str = "select";
 pub(super) const REQUEST_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 
 fn default_model_name() -> String {
@@ -266,78 +266,52 @@ pub struct WorkerRequest {
     pub model_name: String,
     #[serde(default = "default_routing_group")]
     pub routing_group: String,
-    #[serde(default)]
     pub endpoint: Option<String>,
-    #[serde(default)]
     pub kv_events_endpoint: Option<String>,
     #[serde(default)]
     pub kv_events_endpoints: HashMap<u32, String>,
-    #[serde(default)]
     pub replay_endpoint: Option<String>,
-    #[serde(default)]
     pub block_size: Option<u32>,
-    #[serde(default)]
     pub data_parallel_start_rank: Option<u32>,
-    #[serde(default)]
     pub data_parallel_size: Option<u32>,
-    #[serde(default)]
     pub max_num_batched_tokens: Option<u64>,
-    #[serde(default)]
     pub total_kv_blocks: Option<u64>,
-    #[serde(default)]
     pub stable_routing_id: Option<String>,
-    #[serde(default)]
     pub is_eagle: Option<bool>,
     #[serde(default)]
     pub taints: HashSet<String>,
     #[serde(default)]
     pub topology_domains: HashMap<String, String>,
-    #[serde(default)]
     pub kv_transfer_domain: Option<String>,
-    #[serde(default)]
     pub kv_transfer_enforcement: Option<KvTransferEnforcement>,
-    #[serde(default)]
     pub kv_transfer_preferred_weight: Option<f32>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct WorkerPatchRequest {
-    #[serde(default)]
     pub endpoint: Option<String>,
-    #[serde(default)]
     pub kv_events_endpoint: Option<String>,
-    #[serde(default)]
     pub kv_events_endpoints: Option<HashMap<u32, String>>,
-    #[serde(default)]
     pub replay_endpoint: Option<String>,
-    #[serde(default)]
     pub block_size: Option<u32>,
-    #[serde(default)]
     pub data_parallel_start_rank: Option<u32>,
-    #[serde(default)]
     pub data_parallel_size: Option<u32>,
-    #[serde(default)]
     pub max_num_batched_tokens: Option<u64>,
-    #[serde(default)]
     pub total_kv_blocks: Option<u64>,
-    #[serde(default)]
     pub stable_routing_id: Option<String>,
-    #[serde(default)]
     pub is_eagle: Option<bool>,
-    #[serde(default)]
     pub taints: Option<HashSet<String>>,
-    #[serde(default)]
     pub topology_domains: Option<HashMap<String, String>>,
-    #[serde(default)]
     pub kv_transfer_domain: Option<String>,
-    #[serde(default)]
     pub kv_transfer_enforcement: Option<KvTransferEnforcement>,
-    #[serde(default)]
     pub kv_transfer_preferred_weight: Option<f32>,
 }
 
 impl WorkerCatalogRecord {
     pub(super) fn apply_patch(&mut self, patch: WorkerPatchRequest) {
+        // TODO(rank-aware-kv-capacity): when the rank map is added, treat rank range, map,
+        // scalar fallback, and provenance as one replace-only snapshot. A legacy scalar/range
+        // patch must clear stale exact data rather than leave it winning lookup precedence.
         if patch.endpoint.is_some() {
             self.endpoint = patch.endpoint;
         }
@@ -395,23 +369,16 @@ pub struct SelectRequest {
     pub model_name: String,
     #[serde(default = "default_routing_group")]
     pub routing_group: String,
-    #[serde(default)]
     pub selection_id: Option<String>,
     #[serde(flatten)]
     pub prompt: PromptRequest,
-    #[serde(default)]
     pub router_config_override: Option<RouterConfigOverride>,
-    #[serde(default)]
     pub expected_output_tokens: Option<u32>,
-    #[serde(default)]
     pub priority_jump: Option<f64>,
-    #[serde(default)]
     pub strict_priority: Option<u32>,
-    #[serde(default)]
     pub session_id: Option<String>,
-    #[serde(default)]
+    pub affinity_target: Option<WorkerAffinityTarget>,
     pub pinned_worker: Option<WorkerWithDpRank>,
-    #[serde(default)]
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
     #[serde(default)]
     pub routing_constraints: RoutingConstraints,
@@ -423,23 +390,16 @@ pub struct SelectAndReserveRequest {
     pub model_name: String,
     #[serde(default = "default_routing_group")]
     pub routing_group: String,
-    #[serde(default)]
     pub selection_id: Option<String>,
     #[serde(flatten)]
     pub prompt: PromptRequest,
-    #[serde(default)]
     pub router_config_override: Option<RouterConfigOverride>,
-    #[serde(default)]
     pub expected_output_tokens: Option<u32>,
-    #[serde(default)]
     pub priority_jump: Option<f64>,
-    #[serde(default)]
     pub strict_priority: Option<u32>,
-    #[serde(default)]
     pub session_id: Option<String>,
-    #[serde(default)]
+    pub affinity_target: Option<WorkerAffinityTarget>,
     pub pinned_worker: Option<WorkerWithDpRank>,
-    #[serde(default)]
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
     #[serde(default)]
     pub routing_constraints: RoutingConstraints,
@@ -459,25 +419,18 @@ pub struct ReservationRequest {
     pub selection_id: String,
     /// Explicit, self-contained form: books under `selection_id` on this worker
     /// without a cached select. Omit to replay the cached `selection_id`.
-    #[serde(default)]
     pub worker_id: Option<WorkerId>,
-    #[serde(default)]
     pub dp_rank: Option<DpRank>,
     #[serde(flatten)]
     pub prompt: PromptRequest,
-    #[serde(default)]
     pub router_config_override: Option<RouterConfigOverride>,
-    #[serde(default)]
     pub expected_output_tokens: Option<u32>,
-    #[serde(default)]
     pub effective_prefill_tokens: Option<usize>,
-    #[serde(default)]
     pub track_prefill_tokens: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct OutputBlockRequest {
-    #[serde(default)]
     pub decay_fraction: Option<f64>,
 }
 
@@ -489,7 +442,6 @@ pub struct PotentialLoadsRequest {
     pub routing_group: String,
     #[serde(flatten)]
     pub prompt: PromptRequest,
-    #[serde(default)]
     pub router_config_override: Option<RouterConfigOverride>,
 }
 
@@ -501,7 +453,6 @@ pub struct OverlapScoresRequest {
     pub routing_group: String,
     #[serde(flatten)]
     pub prompt: PromptRequest,
-    #[serde(default)]
     pub router_config_override: Option<RouterConfigOverride>,
 }
 

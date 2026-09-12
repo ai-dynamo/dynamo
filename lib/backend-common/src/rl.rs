@@ -1,9 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
+use std::{num::NonZeroU32, sync::Arc};
 
 use async_trait::async_trait;
+pub use dynamo_rl::RlAdminBaseUrl;
 use dynamo_runtime::component::{Endpoint, StartedEndpoint};
 use dynamo_runtime::engine_routes::EngineRouteRegistry;
 use dynamo_runtime::pipeline::network::Ingress;
@@ -24,6 +25,24 @@ pub(crate) struct RlServeEndpoint {
 pub(crate) struct RlEndpointConfig {
     endpoint_name: String,
     system_url: String,
+    metadata: Option<RlWorkerMetadata>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RlWorkerMetadata {
+    world_size: NonZeroU32,
+    admin_base_url: Option<RlAdminBaseUrl>,
+}
+
+impl RlWorkerMetadata {
+    pub fn new(world_size: u32, admin_base_url: Option<RlAdminBaseUrl>) -> anyhow::Result<Self> {
+        let world_size = NonZeroU32::new(world_size)
+            .ok_or_else(|| anyhow::anyhow!("RL worker world size must be positive"))?;
+        Ok(Self {
+            world_size,
+            admin_base_url,
+        })
+    }
 }
 
 impl RlServeEndpoint {
@@ -32,7 +51,10 @@ impl RlServeEndpoint {
     }
 }
 
-pub(crate) fn prepare_endpoint(primary: &Endpoint) -> anyhow::Result<RlEndpointConfig> {
+pub(crate) fn prepare_endpoint(
+    primary: &Endpoint,
+    metadata: Option<RlWorkerMetadata>,
+) -> anyhow::Result<RlEndpointConfig> {
     let endpoint_name = resolve_endpoint_name(&primary.id().name)?;
     let system_url = self_host_base_url(primary.drt()).ok_or_else(|| {
         anyhow::anyhow!(
@@ -42,6 +64,7 @@ pub(crate) fn prepare_endpoint(primary: &Endpoint) -> anyhow::Result<RlEndpointC
     Ok(RlEndpointConfig {
         endpoint_name,
         system_url,
+        metadata,
     })
 }
 
@@ -53,6 +76,7 @@ pub(crate) async fn serve_endpoint(
     let handler = Arc::new(RlRouteHandler {
         routes: primary.drt().engine_routes().clone(),
         system_url: config.system_url,
+        metadata: config.metadata,
     });
     let ingress = Ingress::for_engine(handler)?;
     let started = endpoint
@@ -100,6 +124,7 @@ fn validate_endpoint_name(endpoint_name: &str, primary_name: &str) -> anyhow::Re
 struct RlRouteHandler {
     routes: EngineRouteRegistry,
     system_url: String,
+    metadata: Option<RlWorkerMetadata>,
 }
 
 impl RlRouteHandler {
@@ -122,11 +147,18 @@ impl RlRouteHandler {
         let mut routes = self.routes.routes().into_iter().collect::<Vec<_>>();
         routes.sort();
         routes.dedup();
-        json!({
+        let mut response = json!({
             "status": "ok",
             "routes": routes,
             "system_url": self.system_url,
-        })
+        });
+        if let Some(metadata) = &self.metadata {
+            response["world_size"] = json!(metadata.world_size.get());
+            if let Some(url) = &metadata.admin_base_url {
+                response["admin_base_url"] = json!(url.as_str());
+            }
+        }
+        response
     }
 }
 
@@ -156,6 +188,16 @@ mod tests {
         let handler = RlRouteHandler {
             routes,
             system_url: "http://worker:8080".to_string(),
+            metadata: Some(
+                RlWorkerMetadata::new(
+                    4,
+                    Some(
+                        RlAdminBaseUrl::parse(" http://worker:8120 ")
+                            .expect("valid admin base URL"),
+                    ),
+                )
+                .expect("valid metadata"),
+            ),
         };
 
         assert_eq!(
@@ -164,11 +206,31 @@ mod tests {
                 "status": "ok",
                 "routes": ["control/pause_generation"],
                 "system_url": "http://worker:8080",
+                "admin_base_url": "http://worker:8120",
+                "world_size": 4,
             })
         );
         assert_eq!(
             handler.dispatch(&json!({"method": "control/pause_generation"}))["status"],
             "error"
         );
+    }
+
+    #[test]
+    fn rl_worker_metadata_rejects_invalid_values() {
+        assert!(RlWorkerMetadata::new(0, None).is_err());
+        for admin_base_url in [
+            "   ",
+            "worker:8120",
+            "ftp://worker:8120",
+            "https://user:token@worker.example.com/admin",
+            "https://worker.example.com/admin?token=secret",
+            "https://worker.example.com/admin#fragment",
+        ] {
+            assert!(
+                RlAdminBaseUrl::parse(admin_base_url).is_err(),
+                "accepted invalid admin base URL: {admin_base_url}"
+            );
+        }
     }
 }

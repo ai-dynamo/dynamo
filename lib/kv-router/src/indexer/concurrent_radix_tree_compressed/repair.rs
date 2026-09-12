@@ -61,7 +61,7 @@ impl ConcurrentRadixTreeCompressed {
         let mut changed_entries_total = 0u64;
 
         for (&worker, worker_lookup) in lookup.iter_mut() {
-            let _changed_entries = update_arc_lookup_for_keys(
+            let _changed_entries = update_existing_arc_lookup_for_keys(
                 worker_lookup,
                 resolved.lookup_hashes_for_worker_repair(worker, hash, direction),
                 resolved,

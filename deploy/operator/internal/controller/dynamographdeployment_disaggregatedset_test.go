@@ -32,6 +32,8 @@ import (
 	disaggregatedsetutils "sigs.k8s.io/lws/pkg/utils/disaggregatedset"
 )
 
+const disaggregatedSetUnitTestNamespace = "default"
+
 func TestDisaggregatedSetEligibilityDoesNotSelectAProvider(t *testing.T) {
 	dgd := newEnvtestDSHappyPathDGD("selection-eligibility")
 	tests := []struct {
@@ -476,7 +478,7 @@ func TestCheckDisaggregatedSetChildLWSReadinessWaitsForRemovedRoles(t *testing.T
 
 func TestCheckDisaggregatedSetReadinessTracksEverySlice(t *testing.T) {
 	typedDS := &disaggregatedsetv1.DisaggregatedSet{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: testNamespace, UID: "demo-uid"},
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: disaggregatedSetUnitTestNamespace, UID: "demo-uid"},
 		Spec: disaggregatedsetv1.DisaggregatedSetSpec{
 			Slices: ptr.To[int32](2),
 			Roles: []disaggregatedsetv1.DisaggregatedRoleSpec{
@@ -561,10 +563,62 @@ func TestCheckDisaggregatedSetReadinessTracksEverySlice(t *testing.T) {
 	require.Contains(t, reason, "slice 1")
 }
 
+func TestDisaggregatedSetPathwayObservesWorkerHash(t *testing.T) {
+	const targetHash = "target12"
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "prefill", ComponentType: consts.ComponentTypePrefill},
+				{ComponentName: "decode", ComponentType: consts.ComponentTypeDecode},
+				{ComponentName: "aux-worker", ComponentType: consts.ComponentTypeWorker},
+			},
+		},
+	}
+	selection := disaggregatedSetSelection{componentToRole: map[string]string{
+		"prefill": "prefill",
+		"decode":  "decode",
+	}}
+	role := func(name string) disaggregatedsetv1.DisaggregatedRoleSpec {
+		labels := map[string]string{consts.KubeLabelDynamoWorkerHash: targetHash}
+		return disaggregatedsetv1.DisaggregatedRoleSpec{
+			Name: name,
+			LeaderWorkerSetTemplateSpec: leaderworkersetv1.LeaderWorkerSetTemplateSpec{
+				Spec: leaderworkersetv1.LeaderWorkerSetSpec{
+					LeaderWorkerTemplate: leaderworkersetv1.LeaderWorkerTemplate{
+						LeaderTemplate: &corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: maps.Clone(labels)}},
+						WorkerTemplate: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: maps.Clone(labels)}},
+					},
+				},
+			},
+		}
+	}
+	typedDS := &disaggregatedsetv1.DisaggregatedSet{Spec: disaggregatedsetv1.DisaggregatedSetSpec{
+		Roles: []disaggregatedsetv1.DisaggregatedRoleSpec{role("prefill"), role("decode")},
+	}}
+	dsObject, err := runtime.DefaultUnstructuredConverter.ToUnstructured(typedDS)
+	require.NoError(t, err)
+	ds := newDisaggregatedSetObject()
+	ds.Object = dsObject
+	dcds := map[string]*nvidiacomv1beta1.DynamoComponentDeployment{
+		"aux-worker": {ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{consts.KubeLabelDynamoWorkerHash: targetHash}}},
+	}
+
+	observed, err := disaggregatedSetPathwayObservesWorkerHash(dgd, ds, selection, dcds, targetHash)
+	require.NoError(t, err)
+	require.True(t, observed)
+
+	typedDS.Spec.Roles[0].Spec.LeaderWorkerTemplate.WorkerTemplate.Labels[consts.KubeLabelDynamoWorkerHash] = "stale"
+	ds.Object, err = runtime.DefaultUnstructuredConverter.ToUnstructured(typedDS)
+	require.NoError(t, err)
+	observed, err = disaggregatedSetPathwayObservesWorkerHash(dgd, ds, selection, dcds, targetHash)
+	require.NoError(t, err)
+	require.False(t, observed)
+}
+
 func TestDisaggregatedSetWatchMapperMapsNonzeroSlice(t *testing.T) {
 	ds := newDisaggregatedSetObject()
 	ds.SetName("demo-ds")
-	ds.SetNamespace(testNamespace)
+	ds.SetNamespace(disaggregatedSetUnitTestNamespace)
 	ds.SetOwnerReferences([]metav1.OwnerReference{{
 		APIVersion: nvidiacomv1beta1.GroupVersion.String(),
 		Kind:       dynamoGraphDeploymentKind,
@@ -577,7 +631,7 @@ func TestDisaggregatedSetWatchMapperMapsNonzeroSlice(t *testing.T) {
 	mapper := newDisaggregatedSetWatchMapper(fake.NewClientBuilder().WithScheme(scheme).WithObjects(ds).Build())
 	child := &leaderworkersetv1.LeaderWorkerSet{ObjectMeta: metav1.ObjectMeta{
 		Name:      "demo-ds-1-abc12345-prefill",
-		Namespace: testNamespace,
+		Namespace: disaggregatedSetUnitTestNamespace,
 		Labels: map[string]string{
 			disaggregatedsetv1.SetNameLabelKey: "demo-ds",
 			disaggregatedsetv1.SliceLabelKey:   "1",
@@ -585,14 +639,14 @@ func TestDisaggregatedSetWatchMapperMapsNonzeroSlice(t *testing.T) {
 	}}
 
 	require.Equal(t, []ctrl.Request{{NamespacedName: types.NamespacedName{
-		Name: "demo", Namespace: testNamespace,
+		Name: "demo", Namespace: disaggregatedSetUnitTestNamespace,
 	}}}, mapper.MapChildLWSToDGD(t.Context(), child))
 }
 
 func TestDisaggregatedSetStatusReadinessWaitsForRemovedRoleChildren(t *testing.T) {
 	ds := newDisaggregatedSetObject()
 	ds.SetName("demo")
-	ds.SetNamespace(testNamespace)
+	ds.SetNamespace(disaggregatedSetUnitTestNamespace)
 	ds.SetUID("demo-uid")
 	ds.SetGeneration(2)
 	ds.Object["status"] = map[string]any{
@@ -605,7 +659,7 @@ func TestDisaggregatedSetStatusReadinessWaitsForRemovedRoleChildren(t *testing.T
 	removed := &leaderworkersetv1.LeaderWorkerSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "demo-old-legacy-worker",
-			Namespace: testNamespace,
+			Namespace: disaggregatedSetUnitTestNamespace,
 			Labels: map[string]string{
 				disaggregatedsetv1.SetNameLabelKey: "demo",
 				disaggregatedsetv1.RoleLabelKey:    "legacy-worker",

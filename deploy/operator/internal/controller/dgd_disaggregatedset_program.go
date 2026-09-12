@@ -175,5 +175,5 @@ func (p *disaggregatedSetProgram) reconcileWorkerRollout(
 		log.FromContext(ctx).Error(err, "Failed to migrate worker hash")
 		return failWorkloadProgram(reasonFailedToMigrateWorkerHash, err)
 	}
-	return p.rollout.ReconcileUnsupported(ctx, dgd, false)
+	return nil
 }

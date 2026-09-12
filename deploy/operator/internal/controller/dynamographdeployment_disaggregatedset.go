@@ -266,6 +266,10 @@ func (r *disaggregatedSetWorkloadsReconciler) reconcileDisaggregatedSetResources
 	resources := []Resource{}
 	logger := log.FromContext(ctx)
 
+	workerHashTransition, err := r.rollout.planUnsupportedWorkerHashTransition(dgd)
+	if err != nil {
+		return ReconcileResult{}, failWorkloadProgram(reasonRollingUpdateFailed, err)
+	}
 	rollingUpdateCtx, err := r.rollout.buildRollingUpdateContext(ctx, dgd)
 	if err != nil {
 		return ReconcileResult{}, fmt.Errorf("failed to build rolling update context: %w", err)
@@ -302,7 +306,7 @@ func (r *disaggregatedSetWorkloadsReconciler) reconcileDisaggregatedSetResources
 		return ReconcileResult{}, err
 	}
 
-	desiredDS, err := r.generateDisaggregatedSetFromNormalized(ctx, dgd, normalizedComponents, selection, rollingUpdateCtx)
+	desiredDS, err := r.generateDisaggregatedSetFromNormalized(ctx, dgd, normalizedComponents, selection, rollingUpdateCtx, checkpointInfos)
 	if err != nil {
 		return ReconcileResult{}, err
 	}
@@ -361,12 +365,36 @@ func (r *disaggregatedSetWorkloadsReconciler) reconcileDisaggregatedSetResources
 	}
 	resources = append(resources, syncedDSResource)
 
-	nonSelectedResources, err := r.reconcileDisaggregatedSetNonSelectedDCDs(ctx, dgd, dcds, selection)
+	nonSelectedResources, nonSelectedDCDsModified, err := r.reconcileDisaggregatedSetNonSelectedDCDs(ctx, dgd, dcds, selection)
 	if err != nil {
 		return ReconcileResult{}, err
 	}
 	resources = append(resources, nonSelectedResources...)
 	desiredServiceNames := selectedServiceNames
+
+	// Project the worker hash only after the informer cache observes every
+	// workload carrying that generation. This keeps metadata from getting ahead
+	// of the DisaggregatedSet and any DCD-backed worker components.
+	if workerHashTransition.needsCommit() && !dsModified && !nonSelectedDCDsModified {
+		observed, err := disaggregatedSetPathwayObservesWorkerHash(
+			dgd,
+			syncedDS,
+			selection,
+			dcds,
+			rollingUpdateCtx.NewWorkerHash,
+		)
+		if err != nil {
+			return ReconcileResult{}, failWorkloadProgram(reasonRollingUpdateFailed, err)
+		}
+		if observed {
+			if err := r.rollout.commitUnsupportedWorkerHashTransition(ctx, dgd, workerHashTransition, false); err != nil {
+				return ReconcileResult{}, failWorkloadProgram(
+					reasonRollingUpdateFailed,
+					fmt.Errorf("project observed DisaggregatedSet worker hash: %w", err),
+				)
+			}
+		}
+	}
 
 	if dsReady {
 		if err := r.deleteOwnedSelectedDCDs(ctx, dgd, selection); err != nil {
@@ -490,26 +518,69 @@ func (r *disaggregatedSetWorkloadsReconciler) reconcileDisaggregatedSetNonSelect
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	dcds map[string]*nvidiacomv1beta1.DynamoComponentDeployment,
 	selection disaggregatedSetSelection,
-) ([]Resource, error) {
+) ([]Resource, bool, error) {
 	resources := []Resource{}
+	modified := false
 	for _, componentName := range sortedDCDKeys(dcds) {
 		dcd := dcds[componentName]
 		if _, selected := selection.componentToRole[componentName]; selected {
 			continue
 		}
 		if err := preserveExistingBackendFramework(ctx, r.Client, dcd); err != nil {
-			return nil, fmt.Errorf("failed to preserve existing DynamoComponentDeployment backendFramework: %w", err)
+			return nil, false, fmt.Errorf("failed to preserve existing DynamoComponentDeployment backendFramework: %w", err)
 		}
-		_, syncedDCD, err := commoncontroller.SyncResource(ctx, r, dgd, func(context.Context) (*nvidiacomv1beta1.DynamoComponentDeployment, bool, error) {
+		wasModified, syncedDCD, err := commoncontroller.SyncResource(ctx, r, dgd, func(context.Context) (*nvidiacomv1beta1.DynamoComponentDeployment, bool, error) {
 			return dcd, false, nil
 		})
 		if err != nil {
-			return nil, fmt.Errorf("failed to sync non-DisaggregatedSet DynamoComponentDeployment %s: %w", dcd.Name, err)
+			return nil, false, fmt.Errorf("failed to sync non-DisaggregatedSet DynamoComponentDeployment %s: %w", dcd.Name, err)
 		}
+		modified = modified || wasModified
 		dcds[componentName] = syncedDCD
 		resources = append(resources, syncedDCD)
 	}
-	return resources, nil
+	return resources, modified, nil
+}
+
+func disaggregatedSetPathwayObservesWorkerHash(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	ds *unstructured.Unstructured,
+	selection disaggregatedSetSelection,
+	dcds map[string]*nvidiacomv1beta1.DynamoComponentDeployment,
+	targetHash string,
+) (bool, error) {
+	typedDS := &disaggregatedsetv1.DisaggregatedSet{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(ds.Object, typedDS); err != nil {
+		return false, fmt.Errorf("decode DisaggregatedSet while observing worker hash: %w", err)
+	}
+	roles := make(map[string]*disaggregatedsetv1.DisaggregatedRoleSpec, len(typedDS.Spec.Roles))
+	for i := range typedDS.Spec.Roles {
+		role := &typedDS.Spec.Roles[i]
+		roles[role.Name] = role
+	}
+
+	for i := range dgd.Spec.Components {
+		component := &dgd.Spec.Components[i]
+		if !dynamo.IsWorkerComponent(string(component.ComponentType)) {
+			continue
+		}
+		if roleName, selected := selection.componentToRole[component.ComponentName]; selected {
+			role := roles[roleName]
+			if role == nil || role.Spec.LeaderWorkerTemplate.WorkerTemplate.Labels[consts.KubeLabelDynamoWorkerHash] != targetHash {
+				return false, nil
+			}
+			if leader := role.Spec.LeaderWorkerTemplate.LeaderTemplate; leader != nil &&
+				leader.Labels[consts.KubeLabelDynamoWorkerHash] != targetHash {
+				return false, nil
+			}
+			continue
+		}
+		dcd := dcds[component.ComponentName]
+		if dcd == nil || dcd.Labels[consts.KubeLabelDynamoWorkerHash] != targetHash {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // generateDisaggregatedSet keeps the narrow legacy test/helper API for callers
@@ -536,7 +607,12 @@ func (r *disaggregatedSetWorkloadsReconciler) generateDisaggregatedSetFromNormal
 	components map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	selection disaggregatedSetSelection,
 	rollingUpdateCtx dynamo.RollingUpdateContext,
+	checkpointInfos ...map[string]*checkpoint.CheckpointInfo,
 ) (*unstructured.Unstructured, error) {
+	var resolvedCheckpoints map[string]*checkpoint.CheckpointInfo
+	if len(checkpointInfos) > 0 {
+		resolvedCheckpoints = checkpointInfos[0]
+	}
 	ds := newDisaggregatedSetObject()
 	ds.SetName(disaggregatedSetName(dgd))
 	ds.SetNamespace(dgd.Namespace)
@@ -572,6 +648,7 @@ func (r *disaggregatedSetWorkloadsReconciler) generateDisaggregatedSetFromNormal
 			workloadName,
 			dynamo.GetDynamoNamespace(dgd, component),
 			backendFramework,
+			resolvedCheckpoints[componentName],
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to build DisaggregatedSet role %q: %w", roleName, err)
@@ -630,6 +707,7 @@ func (r *disaggregatedSetWorkloadsReconciler) buildDisaggregatedSetRole(
 	workloadName string,
 	dynamoNamespace string,
 	backendFramework dynamo.BackendFramework,
+	checkpointInfo *checkpoint.CheckpointInfo,
 ) (map[string]any, error) {
 	leaderPodTemplateSpec, workerPodTemplateSpec, err := r.renderer.renderMultinodePodTemplateSpecsForDGDComponent(
 		ctx,
@@ -639,6 +717,7 @@ func (r *disaggregatedSetWorkloadsReconciler) buildDisaggregatedSetRole(
 		workloadName,
 		dynamoNamespace,
 		backendFramework,
+		checkpointInfo,
 	)
 	if err != nil {
 		return nil, err
