@@ -205,7 +205,7 @@ export function KubernetesContainerSelector() {
         ? "Latest nightly container"
         : "Pinned nightly build"
       : "Intel XPU Kubernetes runtime";
-  const versionRowLabel = channel === "nightly" ? "Dynamo nightly" : `${INSTALL_DATA[backend].label} version`;
+  const versionRowLabel = `${INSTALL_DATA[backend].label} version`;
 
   function chooseHardware(next: Hardware) {
     setHardware(next);
@@ -282,14 +282,16 @@ export function KubernetesContainerSelector() {
             <span className="lqs-label">{versionRowLabel}</span>
             <div className="lqs-options" role="group" aria-label={versionRowLabel}>
               {entries.map((version, index) => {
-                const displayVersion = channel === "nightly" && version.dynamo ? version.dynamo : version.backend_version;
+                // Engine version leads on every channel, Dynamo version beneath
+                // it, so a nightly chip reads the same way as a stable one.
+                const displayVersion = version.backend_version;
                 const displayMeta = version.source
                   ? "from main"
-                  : channel === "nightly"
-                    ? version.latest
+                  : version.dynamo
+                    ? `Dynamo ${version.dynamo}`
+                    : version.latest
                       ? "latest nightly"
-                      : version.date ?? "nightly"
-                    : `Dynamo ${version.dynamo}`;
+                      : version.date ?? "nightly";
                 return (
                   <button
                     key={`${version.backend_version}-${version.dynamo ?? index}`}
