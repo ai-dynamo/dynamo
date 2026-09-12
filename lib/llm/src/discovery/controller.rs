@@ -483,13 +483,14 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             status_checksum(&old_status).is_some_and(|previous| previous != fingerprint);
         let mut retained_commit = status_committed_members(&old_status).cloned();
         if fingerprint_changed {
-            retained_commit = retained_commit.filter(|_| {
-                status_checksum(&old_status) == Some(mdc_checksum.as_str())
-                    || status_checksum(&old_status).is_some_and(|previous| {
-                        previous
-                            .strip_prefix(mdc_checksum.as_str())
-                            .is_some_and(|suffix| suffix.starts_with("\0video_contract\0"))
-                    })
+            retained_commit = retained_commit.filter(|committed_members| {
+                committed_members == &member_keys
+                    && (status_checksum(&old_status) == Some(mdc_checksum.as_str())
+                        || status_checksum(&old_status).is_some_and(|previous| {
+                            previous
+                                .strip_prefix(mdc_checksum.as_str())
+                                .is_some_and(|suffix| suffix.starts_with("\0video_contract\0"))
+                        }))
             });
             cancel_build(&old_status);
             if retained_commit.is_some() {
