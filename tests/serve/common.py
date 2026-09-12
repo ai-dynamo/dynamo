@@ -189,7 +189,6 @@ def _prepare_deployment(
             logger.info("Staggering startup by %ds (xdist %s)", stagger_s, worker_id)
             time.sleep(stagger_s)
 
-    # Track additional ports allocated for multi-GPU tests (for cleanup in finally)
     extra_allocated_ports: list[int] = []
 
     if ports is not None:
@@ -223,19 +222,33 @@ def _prepare_deployment(
                 merged_env[f"DYN_SYSTEM_PORT{idx}"] = str(port)
                 merged_env[f"DYN_SYSTEM_PORT_WORKER{idx}"] = str(port)
 
-        # Unique ZMQ port for vLLM KV event publishing (avoids xdist collisions).
-        if ports.kv_event_port:
-            merged_env["DYN_VLLM_KV_EVENT_PORT"] = str(ports.kv_event_port)
-            # For multi-worker scripts (xpu_2 router tests), allocate separate
-            # KV event ports for each worker to avoid ZMQ bind collisions.
-            if len(dynamic_system_ports) >= 2:
-                kv_port1 = ports.kv_event_port
-                kv_port2 = allocate_port(ports.kv_event_port + 1)
-                extra_allocated_ports.append(kv_port2)
-                merged_env["DYN_VLLM_KV_EVENT_PORT1"] = str(kv_port1)
-                merged_env["DYN_VLLM_KV_EVENT_PORT2"] = str(kv_port2)
+        if len(ports.kv_event_ports) != len(dynamic_system_ports):
+            raise ValueError(
+                "KV-event port count must match system port count: "
+                f"{len(ports.kv_event_ports)} != {len(dynamic_system_ports)}"
+            )
+        for key in list(merged_env):
+            if key == "DYN_VLLM_KV_EVENT_PORT":
+                merged_env.pop(key)
+                continue
+            if key.startswith("DYN_VLLM_KV_EVENT_PORT"):
+                suffix = key.removeprefix("DYN_VLLM_KV_EVENT_PORT")
+                if suffix.isdigit():
+                    merged_env.pop(key)
+        for idx, port in enumerate(ports.kv_event_ports, start=1):
+            merged_env[f"DYN_VLLM_KV_EVENT_PORT{idx}"] = str(port)
 
         # Per-worker NIXL side-channel ports (avoids xdist collisions on 20097).
+        if len(ports.nixl_side_channel_ports) != len(dynamic_system_ports):
+            raise ValueError(
+                "NIXL side-channel port count must match system port count: "
+                f"{len(ports.nixl_side_channel_ports)} != {len(dynamic_system_ports)}"
+            )
+        for key in list(merged_env):
+            if key.startswith("DYN_VLLM_NIXL_SIDE_CHANNEL_PORT"):
+                suffix = key.removeprefix("DYN_VLLM_NIXL_SIDE_CHANNEL_PORT")
+                if suffix.isdigit():
+                    merged_env.pop(key)
         for idx, port in enumerate(ports.nixl_side_channel_ports, start=1):
             merged_env[f"DYN_VLLM_NIXL_SIDE_CHANNEL_PORT{idx}"] = str(port)
 
@@ -258,6 +271,9 @@ def _prepare_deployment(
         ]
 
     config = _with_endpoint_readiness_checks(config, dynamic_frontend_port)
+
+    if ports is not None:
+        merged_env["DYN_MANAGED_PORTS"] = "1"
 
     # Disagg scripts need a unique bootstrap port so parallel runs don't collide.
     disagg_bootstrap_port: int | None = None

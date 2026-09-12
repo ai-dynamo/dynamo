@@ -82,7 +82,18 @@ print_launch_banner --multimodal "Launching Disaggregated Multimodal E/P/D ($GPU
 # Start frontend (no router mode)
 echo "Starting frontend..."
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
-python -m dynamo.frontend &
+env -u DYN_SYSTEM_PORT -u DYN_SYSTEM_PORT1 -u DYN_SYSTEM_PORT2 -u DYN_SYSTEM_PORT3 \
+    python -m dynamo.frontend &
+
+NIXL_PORT_ENCODE="$(dyn_port DYN_VLLM_NIXL_SIDE_CHANNEL_PORT 1 20097)"
+NIXL_PORT_PREFILL="$(dyn_port DYN_VLLM_NIXL_SIDE_CHANNEL_PORT 2 20098)"
+NIXL_PORT_DECODE="$(dyn_port DYN_VLLM_NIXL_SIDE_CHANNEL_PORT 3 20099)"
+KV_PORT_ENCODE="$(dyn_port DYN_VLLM_KV_EVENT_PORT 1 20080)"
+KV_PORT_PREFILL="$(dyn_port DYN_VLLM_KV_EVENT_PORT 2 20081)"
+KV_PORT_DECODE="$(dyn_port DYN_VLLM_KV_EVENT_PORT 3 20082)"
+SYSTEM_PORT_ENCODE="$(dyn_port DYN_SYSTEM_PORT 1 8081)"
+SYSTEM_PORT_PREFILL="$(dyn_port DYN_SYSTEM_PORT 2 8082)"
+SYSTEM_PORT_DECODE="$(dyn_port DYN_SYSTEM_PORT 3 8083)"
 
 EXTRA_ARGS=""
 PD_EXTRA_ARGS=""
@@ -125,21 +136,24 @@ fi
 
 # Start encode worker
 echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU (GPU mem: $DYN_ENCODE_GPU_MEM)..."
-VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
+DYN_SYSTEM_PORT=$SYSTEM_PORT_ENCODE \
+VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT_ENCODE \
 env $DEVICE_AFFINITY_ENV=$DYN_ENCODE_WORKER_GPU \
-python -m dynamo.vllm --enable-multimodal --disaggregation-mode encode --enable-mm-embeds --model $MODEL_NAME --gpu-memory-utilization $DYN_ENCODE_GPU_MEM $EXTRA_ARGS --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device": "'"$DEVICE_PLATFORM"'"}' --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080"}' &
+python -m dynamo.vllm --enable-multimodal --disaggregation-mode encode --enable-mm-embeds --model $MODEL_NAME --gpu-memory-utilization $DYN_ENCODE_GPU_MEM $EXTRA_ARGS --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device": "'"$DEVICE_PLATFORM"'"}' --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_PORT_ENCODE}\"}" &
 
 # Start prefill worker (also handles encode routing via --route-to-encoder)
 echo "Starting prefill worker on GPU $DYN_PREFILL_WORKER_GPU (GPU mem: $DYN_PREFILL_GPU_MEM)..."
-VLLM_NIXL_SIDE_CHANNEL_PORT=20098 \
+DYN_SYSTEM_PORT=$SYSTEM_PORT_PREFILL \
+VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT_PREFILL \
 env $DEVICE_AFFINITY_ENV=$DYN_PREFILL_WORKER_GPU \
-python -m dynamo.vllm --route-to-encoder --disaggregation-mode prefill --enable-multimodal --enable-mm-embeds --model $MODEL_NAME --gpu-memory-utilization $DYN_PREFILL_GPU_MEM $EXTRA_ARGS $PD_EXTRA_ARGS --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device": "'"$DEVICE_PLATFORM"'"}' --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081"}' &
+python -m dynamo.vllm --route-to-encoder --disaggregation-mode prefill --enable-multimodal --enable-mm-embeds --model $MODEL_NAME --gpu-memory-utilization $DYN_PREFILL_GPU_MEM $EXTRA_ARGS $PD_EXTRA_ARGS --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device": "'"$DEVICE_PLATFORM"'"}' --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_PORT_PREFILL}\"}" &
 
 # Start decode worker
 echo "Starting decode worker on GPU $DYN_DECODE_WORKER_GPU (GPU mem: $DYN_DECODE_GPU_MEM)..."
-VLLM_NIXL_SIDE_CHANNEL_PORT=20099 \
+DYN_SYSTEM_PORT=$SYSTEM_PORT_DECODE \
+VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT_DECODE \
 env $DEVICE_AFFINITY_ENV=$DYN_DECODE_WORKER_GPU \
-python -m dynamo.vllm --disaggregation-mode decode --enable-multimodal --enable-mm-embeds --model $MODEL_NAME --gpu-memory-utilization $DYN_DECODE_GPU_MEM $EXTRA_ARGS $PD_EXTRA_ARGS --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device": "'"$DEVICE_PLATFORM"'"}' --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20082"}' &
+python -m dynamo.vllm --disaggregation-mode decode --enable-multimodal --enable-mm-embeds --model $MODEL_NAME --gpu-memory-utilization $DYN_DECODE_GPU_MEM $EXTRA_ARGS $PD_EXTRA_ARGS --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device": "'"$DEVICE_PLATFORM"'"}' --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_PORT_DECODE}\"}" &
 
 
 echo "=================================================="
