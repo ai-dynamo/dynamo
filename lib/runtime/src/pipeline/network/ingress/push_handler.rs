@@ -260,12 +260,10 @@ where
             let (encoded, kind) = encoded;
             let is_error = encoded.is_error;
             saw_error_response |= is_error;
-            if kind == ResponseFrameKind::SerializationError {
-                if let Some(m) = self.metrics() {
-                    m.error_counter
-                        .with_label_values(&[work_handler::error_types::SERIALIZATION])
-                        .inc();
-                }
+            if kind == ResponseFrameKind::SerializationError && let Some(m) = self.metrics() {
+                m.error_counter
+                    .with_label_values(&[work_handler::error_types::SERIALIZATION])
+                    .inc();
             }
             // Counted here rather than at the engine adapter because every
             // backend reaches this pump; `generate` covers setup failure.
