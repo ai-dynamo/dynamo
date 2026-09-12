@@ -149,9 +149,20 @@ Name identifies the role within the enclosing component independently of generat
 **Validation:** MaxLength: 63  MinLength: 1  Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`  Required: \&#123;\&#125;
 </ParamField>
 
+<ParamField path="replicas" type="integer">
+Replicas is the logical cardinality of this role in one complete component instance. The enclosing component type defines the cardinality. For multinode components, admission defaults and persists omitted values from Multinode.NodeCount; leader must be 1 and worker must be Multinode.NodeCount minus 1.
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+
 <ParamField path="providerOverride" type="ProviderOverride">
 ProviderOverride configures the provider workload unit generated for this role. It is supported only for components embedded in a DGD.
 See [ProviderOverride](#provideroverride).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="podTemplate" type="PodTemplateSpec">
+PodTemplate defines the Pod configuration for this role. Admission permits it only when the enclosing component type explicitly supports role-specific Pod templates. No component type supports it in this release.
+See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -455,12 +466,12 @@ MinAvailable maps to Grove PodClique minAvailable for single-node and Grove PodC
 </ParamField>
 
 <ParamField path="multinode" type="MultinodeSpec">
-Multinode is the configuration for multinode components.
+Multinode configures worker, prefill, or decode components that span multiple Pods.
 See [MultinodeSpec](#multinodespec).
 </ParamField>
 
 <ParamField path="roles" type="ComponentRoleSpec array">
-Roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Their cardinality is derived from multinode.nodeCount. Omission preserves the implicit multinode role layout.
+Roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Admission defaults omitted replicas to 1 for leader and multinode.nodeCount minus 1 for worker. Omitting the roles list preserves the implicit multinode role layout.
 See [ComponentRoleSpec](#componentrolespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -622,12 +633,12 @@ MinAvailable maps to Grove PodClique minAvailable for single-node and Grove PodC
 </ParamField>
 
 <ParamField path="multinode" type="MultinodeSpec">
-Multinode is the configuration for multinode components.
+Multinode configures worker, prefill, or decode components that span multiple Pods.
 See [MultinodeSpec](#multinodespec).
 </ParamField>
 
 <ParamField path="roles" type="object array">
-Roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Their cardinality is derived from multinode.nodeCount. Omission preserves the implicit multinode role layout. Standalone DCD roles accept only `name`; `providerOverride` is a DGD-only provider context.
+Roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Admission defaults omitted replicas to 1 for leader and multinode.nodeCount minus 1 for worker. Omitting the roles list preserves the implicit multinode role layout. Standalone DCD roles accept only `name` and `replicas`; `providerOverride` is a DGD-only provider context.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
@@ -1514,7 +1525,7 @@ URI is the model source URI Supported formats: - S3: s3://bucket/path/to/model -
 **Appears in:** [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 <ParamField path="nodeCount" type="integer" default="2">
-Indicates the number of nodes to deploy for multinode components. Total number of GPUs is NumberOfNodes * GPU limit. Must be greater than 1.
+Indicates the number of nodes to deploy for multinode components. Total number of GPUs is NumberOfNodes * GPU limit. Must be greater than 1 and is immutable after creation.
 **Validation:** Minimum: 2
 </ParamField>
 </Accordion>
@@ -2408,9 +2419,20 @@ name identifies the role within the enclosing component independently of generat
 **Validation:** MaxLength: 63  MinLength: 1  Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`  Required: \&#123;\&#125;
 </ParamField>
 
+<ParamField path="replicas" type="integer">
+replicas is the logical cardinality of this role in one complete component instance. The enclosing component type defines the cardinality. For multinode components, admission defaults and persists omitted values from multinode.nodeCount; leader must be 1 and worker must be multinode.nodeCount minus 1.
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+
 <ParamField path="providerOverride" type="ProviderOverride">
 providerOverride configures the provider workload unit generated for this role. It is supported only for components embedded in a DGD.
 See [ProviderOverride](#v1beta1-provideroverride).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="podTemplate" type="PodTemplateSpec">
+podTemplate defines the Pod configuration for this role. Admission permits it only when the enclosing component type explicitly supports role-specific Pod templates. No component type supports it in this release.
+See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -2632,13 +2654,13 @@ minAvailable maps to Grove PodCliqueScalingGroup minAvailable for components ren
 </ParamField>
 
 <ParamField path="multinode" type="MultinodeSpec">
-multinode configures multinode components.
+multinode configures worker, prefill, or decode components that span multiple Pods.
 See [MultinodeSpec](#v1beta1-multinodespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="roles" type="ComponentRoleSpec array">
-roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Their cardinality is derived from multinode.nodeCount. Omission preserves the implicit multinode role layout.
+roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Admission defaults omitted replicas to 1 for leader and multinode.nodeCount minus 1 for worker. Omitting the roles list preserves the implicit multinode role layout.
 See [ComponentRoleSpec](#v1beta1-componentrolespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -2741,13 +2763,13 @@ minAvailable maps to Grove PodCliqueScalingGroup minAvailable for components ren
 </ParamField>
 
 <ParamField path="multinode" type="MultinodeSpec">
-multinode configures multinode components.
+multinode configures worker, prefill, or decode components that span multiple Pods.
 See [MultinodeSpec](#v1beta1-multinodespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="roles" type="object array">
-roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Their cardinality is derived from multinode.nodeCount. Omission preserves the implicit multinode role layout. Standalone DCD roles accept only `name`; `providerOverride` is a DGD-only provider context.
+roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Admission defaults omitted replicas to 1 for leader and multinode.nodeCount minus 1 for worker. Omitting the roles list preserves the implicit multinode role layout. Standalone DCD roles accept only `name` and `replicas`; `providerOverride` is a DGD-only provider context.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
@@ -3639,7 +3661,7 @@ MultinodeSpec configures a multinode component.
 **Appears in:** [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSpec](#v1beta1-dynamocomponentdeploymentspec)
 
 <ParamField path="nodeCount" type="integer" default="2">
-nodeCount is the number of nodes to deploy for the multinode component. Total GPUs used is `nodeCount * container GPU request`.
+nodeCount is the number of nodes to deploy for the multinode component. Total GPUs used is `nodeCount * container GPU request`. The value is immutable after creation.
 **Validation:** Minimum: 2  Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -3669,6 +3691,11 @@ OverridesSpec allows customizing the profiling job and the generated DynamoGraph
 <ParamField path="profilingJob" type="JobSpec">
 ProfilingJob allows overriding the profiling Job specification. Fields set here are merged into the controller-generated Job spec.
 See [JobSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#jobspec-v1-batch).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="trustRemoteCode" type="boolean" default="false">
+TrustRemoteCode explicitly permits generated vLLM and SGLang workers to execute custom code from the configured model repository. When enabled, the profiler adds --trust-remote-code to every generated worker component after the deployment topology has been generated. Enable this setting only for model repositories you trust.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
