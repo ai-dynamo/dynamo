@@ -975,13 +975,7 @@ mod tests {
     fn terminal_frame_from_controlled_drain_is_a_cancellation() {
         let shutdown = DynamoError::builder()
             .error_type(ErrorType::Backend(BackendError::Cancelled))
-            .message("engine draining")
-            .cause(
-                DynamoError::builder()
-                    .error_type(ErrorType::Backend(BackendError::EngineShutdown))
-                    .message("engine shutting down")
-                    .build(),
-            )
+            .message("Python generator closed")
             .build();
         let frame = PushFrame::error(Annotated::from_err(shutdown));
         assert_eq!(frame.kind, ResponseFrameKind::Cancellation);

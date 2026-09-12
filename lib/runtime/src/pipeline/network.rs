@@ -834,8 +834,8 @@ pub enum ResponseFrameKind {
 
 /// Error types that mean "this request was torn down", not "the engine failed".
 ///
-/// `PyGeneratorExit` maps to `Backend(Cancelled)` with an `EngineShutdown`
-/// cause, which is how a draining Python worker ends its open streams.
+/// `PyGeneratorExit` maps to `Backend(Cancelled)`, because generator closure
+/// alone does not establish that the engine is shutting down.
 const TEARDOWN_ERROR_TYPES: &[crate::error::ErrorType] = &[
     crate::error::ErrorType::Cancelled,
     crate::error::ErrorType::Backend(crate::error::BackendError::Cancelled),

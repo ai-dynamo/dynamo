@@ -1680,13 +1680,7 @@ fn py_err_to_dynamo(err: PyErr) -> DynamoError {
     if Python::with_gil(|py| err.is_instance_of::<pyo3::exceptions::PyGeneratorExit>(py)) {
         return DynamoError::builder()
             .error_type(ErrorType::Backend(BackendError::Cancelled))
-            .message("engine draining")
-            .cause(
-                DynamoError::builder()
-                    .error_type(ErrorType::Backend(BackendError::EngineShutdown))
-                    .message("engine shutting down")
-                    .build(),
-            )
+            .message("Python generator closed")
             .build();
     }
 

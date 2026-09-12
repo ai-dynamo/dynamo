@@ -526,13 +526,7 @@ mod tests {
     fn encode_annotated_response_classifies_controlled_drain_as_cancellation() {
         let shutdown = DynamoError::builder()
             .error_type(ErrorType::Backend(BackendError::Cancelled))
-            .message("engine draining")
-            .cause(
-                DynamoError::builder()
-                    .error_type(ErrorType::Backend(BackendError::EngineShutdown))
-                    .message("engine shutting down")
-                    .build(),
-            )
+            .message("Python generator closed")
             .build();
         let (_, kind) = encode_annotated_response(
             RequestPlanePayloadCodec::Json,
