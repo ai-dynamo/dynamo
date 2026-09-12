@@ -1467,6 +1467,31 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 											},
 										},
 									},
+									{
+										Name: "wait-leader-script",
+										VolumeSource: corev1.VolumeSource{
+											ConfigMap: &corev1.ConfigMapVolumeSource{
+												LocalObjectReference: corev1.LocalObjectReference{
+													Name: "test-lws-deploy-wait-leader-script",
+												},
+											},
+										},
+									},
+								},
+								InitContainers: []corev1.Container{
+									{
+										Name:  "wait-for-leader",
+										Image: "test-image:1.5.0",
+										Command: []string{"sh", "-c",
+											`export LEADER_HOST="${LWS_LEADER_ADDRESS}" LEADER_PORT="6379" && bash /scripts/wait-for-ray-leader.sh`},
+										VolumeMounts: []corev1.VolumeMount{
+											{
+												Name:      "wait-leader-script",
+												MountPath: "/scripts",
+												ReadOnly:  true,
+											},
+										},
+									},
 								},
 								RestartPolicy: corev1.RestartPolicyAlways,
 								Containers: []corev1.Container{
