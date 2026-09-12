@@ -1155,10 +1155,12 @@ func TestGenerateGrovePodCliqueSet_ImplicitV2HybridPreservesAgentRuntime(t *test
 	require.NoError(t, err)
 	require.Empty(t, plan.ConductorTemplate)
 	require.Len(t, plan.Agents, 1)
+	require.Equal(t, 6, plan.Agents[0].Replicas)
 	request := projection.RequestSpec(dgd.Namespace, "test", nil)
-	require.Len(t, request.Partitions, 2)
-	require.Equal(t, int64(1), request.Partitions[0].CompilerPartitionID)
-	require.Equal(t, int64(2), request.Partitions[1].CompilerPartitionID)
+	require.Len(t, request.Partitions, 3)
+	for index, partition := range request.Partitions {
+		require.Equal(t, int64(index), partition.CompilerPartitionID)
+	}
 
 	controllerConfig := &configv1alpha1.OperatorConfiguration{
 		Infrastructure: configv1alpha1.InfrastructureConfiguration{ETCDAddress: "etcd", NATSAddress: "nats"},
@@ -1316,9 +1318,9 @@ func TestGenerateGrovePodCliqueSet_ImplicitV2HybridPreservesAgentRuntime(t *test
 	require.Equal(t, decodeConfigName, tokenizerEnv.ValueFrom.ConfigMapKeyRef.Name)
 	require.Equal(t, "tokenizer_dir", tokenizerEnv.ValueFrom.ConfigMapKeyRef.Key)
 
-	t.Log("Verify the preserved runtime and LPX projection use the same filtered physical partition view")
+	t.Log("Keep partition zero as the collapsed runtime root for all three physical partitions")
 	lpuConfig := getResource[*corev1.ConfigMap](t, extraResources, lpuConfigName)
-	require.Equal(t, "1", lpuConfig.Data["partition_ids"])
+	require.Equal(t, "0", lpuConfig.Data["partition_ids"])
 	require.Equal(t, "/nfs/node-local-v2-cpu-embeddings", lpuConfig.Data["gas_dir"])
 
 	t.Log("Verify generated Cyborg and LPU config resource order and contents")

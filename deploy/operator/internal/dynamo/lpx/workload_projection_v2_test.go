@@ -162,7 +162,7 @@ func TestProjectModelV2SingleEmbeddingPlacementFromModelSettings(t *testing.T) {
 	require.Equal(t, int64(0), onLPU.RequestSpec("test", "agents", nil).Partitions[0].CompilerPartitionID)
 }
 
-func TestProjectModelV2StrictHybridForcesCPUEmbeddingsAfterValidation(t *testing.T) {
+func TestProjectModelV2StrictHybridPreservesPartitionZero(t *testing.T) {
 	t.Log("Prepare a hybrid V2 build with a standalone embedding partition")
 	normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
 	build := normalized.build
@@ -173,21 +173,21 @@ func TestProjectModelV2StrictHybridForcesCPUEmbeddingsAfterValidation(t *testing
 	build.SupportsCPUEmbeddings = true
 	build.SelectedPropSyncChains = nil
 
-	t.Log("Force strict-hybrid CPU embeddings after accepting an explicit false setting")
-	projectionBatch, err := appendModelProjections(nil, ModelProjectionInput{
-		Pipeline:      PipelineLPX,
-		Models:        []string{"default"},
-		BuildSnapshot: normalized,
-		ModelSettings: json.RawMessage(`{"cpu_embeddings":false}`),
-	})
-	require.NoError(t, err)
-	projection := projectionBatch[0]
-	spec := projection.RequestSpec("test", "agents", nil)
-	require.Equal(t, lpxv1alpha1.WorkloadModeV2StrictHybrid, spec.WorkloadMode)
-	require.Equal(t, int64(1), spec.Partitions[0].CompilerPartitionID)
+	t.Log("Keep Cyborg's partition zero regardless of the Nova CPU-embedding setting")
+	for _, settings := range []string{"", `{"cpu_embeddings":false}`, `{"cpu_embeddings":true}`} {
+		projection := projectTestBuild(t, normalized, PipelineLPX, settings)
+		spec := projection.RequestSpec("test", "agents", nil)
+		require.Equal(t, lpxv1alpha1.WorkloadModeV2StrictHybrid, spec.WorkloadMode)
+		require.Len(t, spec.Partitions, 2)
+		require.Equal(t, int64(0), spec.Partitions[0].CompilerPartitionID)
+		require.Equal(t, 4, projection.agentReplicas)
+		data := resolvedPartitionData([]*ModelProjection{projection})
+		require.Equal(t, "0\n1", data["partition_ids"])
+		require.Equal(t, "0\n2", data["partition_node_offsets"])
+	}
 
-	t.Log("Reject a malformed setting before applying the strict-hybrid override")
-	_, err = appendModelProjections(nil, ModelProjectionInput{
+	t.Log("Still reject a malformed setting")
+	_, err := appendModelProjections(nil, ModelProjectionInput{
 		Pipeline:      PipelineLPX,
 		Models:        []string{"default"},
 		BuildSnapshot: normalized,
@@ -287,13 +287,13 @@ func TestProjectModelV2PrioritizesSelectedChainWhenPropSyncIsEnabled(t *testing.
 	require.NotSame(t, connectors[0].Requirement.MaxInterPartitionOffset, connectors[1].Requirement.MaxInterPartitionOffset)
 }
 
-func TestProjectModelV2CollapsesSelectedChainAfterOmittingEmbeddingPrefix(t *testing.T) {
+func TestProjectModelV2CollapsesSelectedChainIncludingPartitionZero(t *testing.T) {
 	t.Parallel()
 	normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
 	build := normalized.build
 	build.CompilationMode = BuildCompilationModeHybrid
 
-	t.Log("Model the normalized adjacent 0/1/2 chain whose standalone embedding root is omitted")
+	t.Log("Model a selected chain starting at Cyborg's standalone embedding partition")
 	topology, err := build.Partitions[0].Topology.withChipCount(8)
 	require.NoError(t, err)
 	partitions := make([]BuildPartition, 3)
@@ -308,21 +308,22 @@ func TestProjectModelV2CollapsesSelectedChainAfterOmittingEmbeddingPrefix(t *tes
 	build.StandaloneTokenEmbeddings = true
 	build.SupportsCPUEmbeddings = true
 
-	t.Log("Project after omitting the standalone embedding prefix")
+	t.Log("Project without applying Nova's CPU-embedding partition omission")
 	projection := projectTestBuild(t, normalized, PipelineLPX, "")
 
-	t.Log("Keep physical scheduler partitions 1/2 while collapsing their Agent runtime projection")
+	t.Log("Keep all physical scheduler partitions while collapsing their Agent runtime projection")
 	spec := projection.RequestSpec("test", "agents", nil)
-	require.Len(t, spec.Partitions, 2)
-	require.Equal(t, int64(1), spec.Partitions[0].CompilerPartitionID)
-	require.Equal(t, int64(2), spec.Partitions[1].CompilerPartitionID)
-	require.Len(t, spec.PropSyncConnectors, 1)
-	require.Equal(t, 2, projection.agentReplicas)
+	require.Len(t, spec.Partitions, 3)
+	for index, partition := range spec.Partitions {
+		require.Equal(t, int64(index), partition.CompilerPartitionID)
+	}
+	require.Len(t, spec.PropSyncConnectors, 2)
+	require.Equal(t, 3, projection.agentReplicas)
 	data := resolvedPartitionData([]*ModelProjection{projection})
-	require.Equal(t, "1", data["partition_ids"])
-	require.Equal(t, "2", data["nodes_per_partition"])
-	require.Equal(t, "part-1", data["partition_paths"])
-	require.Equal(t, 16, projection.configuredBuild.Partitions[0].Topology.ChipCount)
+	require.Equal(t, "0", data["partition_ids"])
+	require.Equal(t, "3", data["nodes_per_partition"])
+	require.Equal(t, "part-0", data["partition_paths"])
+	require.Equal(t, 24, projection.configuredBuild.Partitions[0].Topology.ChipCount)
 	require.Empty(t, projection.configuredBuild.SelectedPropSyncChains)
 	require.Equal(t, [][]int{{0, 1, 2}}, build.SelectedPropSyncChains)
 }

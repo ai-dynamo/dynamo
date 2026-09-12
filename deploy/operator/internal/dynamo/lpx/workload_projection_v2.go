@@ -56,17 +56,13 @@ func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 		if err := normalizeLegacyNovaSettings(modelSettings); err != nil {
 			return nil, fmt.Errorf("resolving configured V2 build: %w", err)
 		}
-		configured.runtimeSettings = modelSettings
-	}
-	allocationMetadata := json.RawMessage(`{}`)
-
-	// Hybrid embeddings always come from Cyborg, after validating authored settings.
-	if !usesResolvedRuntime {
+		// Validate the Nova setting without removing Cyborg's required partition zero.
 		if _, err := boolSetting(modelSettings, "cpu_embeddings"); err != nil {
 			return nil, fmt.Errorf("model settings.%w", err)
 		}
-		configured.omitStandaloneEmbeddingPartition()
+		configured.runtimeSettings = modelSettings
 	}
+	allocationMetadata := json.RawMessage(`{}`)
 
 	// Bind the V2 workload and runtime contract into projection identity before partition validation.
 	transcripts := newModelProjectionTranscripts(intent, v2ProjectionVersion)
@@ -105,16 +101,9 @@ func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 	}
 	// Preserve physical scheduler partitions while collapsing selected chains only in LPU runtime state.
 	if intent.Pipeline == PipelineLPX && len(configured.SelectedPropSyncChains) != 0 {
-		omittedSourceZero := len(partitions) < len(connectorBuild.Partitions)
 		runtimeChainByRoot := make(map[int][]int, len(connectorBuild.SelectedPropSyncChains))
 		for _, chain := range connectorBuild.SelectedPropSyncChains {
-			runtimeChain := chain
-			if omittedSourceZero && runtimeChain[0] == 0 {
-				runtimeChain = runtimeChain[1:]
-			}
-			if len(runtimeChain) >= 2 {
-				runtimeChainByRoot[runtimeChain[0]] = runtimeChain
-			}
+			runtimeChainByRoot[chain[0]] = chain
 		}
 		collapsed := make([]BuildPartition, 0, len(partitions))
 		for partitionIndex := 0; partitionIndex < len(partitions); {
