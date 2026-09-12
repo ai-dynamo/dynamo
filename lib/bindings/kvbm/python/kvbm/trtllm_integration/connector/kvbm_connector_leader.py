@@ -193,6 +193,22 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
             str(request.request_id), block_ids, request.context_current_position
         )
 
+    def on_rewind(self, request: LlmRequest, live_block_ids: List[int]):
+        """Notify the KVBM leader that a request's KV state was rewound.
+
+        Called after speculative-decoding rewinds KV state for rejected draft
+        tokens.  The live block id list may be unchanged (when the rewind stays
+        within the last live block) or shorter (when whole blocks were freed).
+        The Rust leader trims its per-request slot ``device_blocks`` (and clamps
+        ``current_position`` / ``evaluated_blocks``) accordingly.
+        ``num_tokens`` is the exact post-rewind token count
+        (``len(request.get_tokens(0))``) so the leader can truncate the
+        token sequence correctly when the rewind lands inside the last
+        live block.
+        """
+        num_tokens = len(request.get_tokens(0))
+        self._connector.on_rewind(str(request.request_id), live_block_ids, num_tokens)
+
     @nvtx_annotate(category="scheduler")
     def request_finished(self, request: LlmRequest, cache_block_ids: list[int]) -> bool:
         """
