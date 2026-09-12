@@ -52,6 +52,7 @@ def _make_handler(stage_types=("diffusion",)):
     config.model = "test-model"
     config.served_model_name = None
     config.output_modalities = ["text"]
+    config.default_video_fps = 16
     config.enable_lora = False  # Disable LoRA for tests unless explicitly set
     config.engine_args = SimpleNamespace(enable_lora=False)
     handler.config = config
@@ -265,6 +266,102 @@ class TestI2VEngineInputs:
         assert sp.boundary_ratio == 0.875
         assert sp.guidance_scale_2 == 1.0
         assert sp.num_inference_steps == 40
+
+    @pytest.mark.asyncio
+    async def test_video_preserves_each_stage_default_and_merges_passthrough(self):
+        handler = _make_handler(stage_types=("diffusion", "diffusion"))
+        (
+            first_default,
+            second_default,
+        ) = handler.engine_client.default_sampling_params_list
+        first_default.num_frames = 209
+        first_default.seed = 7
+        first_default.extra_args = {"stage": "first", "flow_shift": 11.0}
+        second_default.num_frames = 243
+        second_default.seed = 8
+        second_default.extra_args = {"stage": "second", "flow_shift": 10.0}
+        req = NvCreateVideoRequest(
+            prompt="cat playing piano",
+            model="video-model",
+            nvext=VideoNvExt(num_inference_steps=50),
+            extra_args={
+                "media_passthrough": {
+                    "task": "t2va",
+                    "duration": 10.0,
+                    "flow_shift": 12.0,
+                    "audio_flow_shift": 3.0,
+                }
+            },
+        )
+
+        result = await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+        first, second = result.sampling_params_list
+
+        assert (first.num_frames, first.seed) == (209, 7)
+        assert (second.num_frames, second.seed) == (243, 8)
+        assert first.extra_args == {
+            "stage": "first",
+            "flow_shift": 12.0,
+            "task": "t2va",
+            "duration": 10.0,
+            "audio_flow_shift": 3.0,
+        }
+        assert second.extra_args == {
+            "stage": "second",
+            "flow_shift": 12.0,
+            "task": "t2va",
+            "duration": 10.0,
+            "audio_flow_shift": 3.0,
+        }
+        assert first_default.extra_args == {"stage": "first", "flow_shift": 11.0}
+        assert second_default.extra_args == {"stage": "second", "flow_shift": 10.0}
+
+    @pytest.mark.asyncio
+    async def test_video_passthrough_does_not_leak_between_requests(self):
+        handler = _make_handler()
+        first = NvCreateVideoRequest(
+            prompt="first",
+            model="video-model",
+            extra_args={"media_passthrough": {"task": "t2va"}},
+        )
+        second = NvCreateVideoRequest(prompt="second", model="video-model")
+
+        first_inputs = await handler.build_engine_inputs(
+            first, RequestType.VIDEO_GENERATION
+        )
+        second_inputs = await handler.build_engine_inputs(
+            second, RequestType.VIDEO_GENERATION
+        )
+
+        assert first_inputs.sampling_params_list[0].extra_args == {"task": "t2va"}
+        assert second_inputs.sampling_params_list[0].extra_args == {}
+
+    @pytest.mark.asyncio
+    async def test_explicit_video_fields_override_model_defaults(self):
+        handler = _make_handler()
+        model_defaults = handler.engine_client.default_sampling_params_list[0]
+        model_defaults.width = 1024
+        model_defaults.height = 576
+        model_defaults.num_frames = 209
+        model_defaults.fps = None
+        model_defaults.seed = 7
+        req = NvCreateVideoRequest(
+            prompt="cat",
+            model="video-model",
+            size="448x256",
+            seconds=10,
+            nvext=VideoNvExt(fps=24, seed=42),
+        )
+
+        result = await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+        sp = result.sampling_params_list[0]
+
+        assert (sp.width, sp.height) == (448, 256)
+        assert sp.num_frames == 240
+        assert sp.fps == 24
+        assert sp.frame_rate == 24.0
+        assert sp.seed == 42
+        assert result.fps == 24
 
     async def test_media_passthrough_reaches_sampling_params(self):
         """A top-level SDK extra_body field, nested by the frontend under

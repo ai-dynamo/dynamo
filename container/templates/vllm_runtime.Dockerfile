@@ -184,7 +184,7 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 {% set vllm_rs_required = "1" if device == "cuda" else "0" %}
 
 # The vLLM 0.28.0 release images resolve the unbounded `transformers>=5.5.3`
-# requirement to 5.15.1, but vLLM-Omni 0.28.0rc1 caps Transformers below 5.15.
+# requirement to 5.15.1, but vLLM-Omni 0.28.0 caps Transformers below 5.15.
 # Omni is layered against the installed Transformers version, so install the
 # compatible release first and its dependency solve sees the final Transformers
 # invariant instead of resolving against 5.15.1.
