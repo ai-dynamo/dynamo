@@ -810,5 +810,7 @@ class OmniHandler(BaseOmniHandler):
             sampling_params_list=sampling_params_list,
             request_type=RequestType.VIDEO_GENERATION,
             fps=fps,
+            response_format=req.response_format,
+            output_format=req.output_format,
             lora_request=lora_request,
         )
