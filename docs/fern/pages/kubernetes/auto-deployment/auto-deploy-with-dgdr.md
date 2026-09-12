@@ -452,6 +452,32 @@ replacement behavior and requires the complete desired argument list.
 For the complete merge, metadata, and validation rules, see
 [DGDR Reference — Generated DGD overrides](../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx#generated-dgd-overrides).
 
+### Profiling job overrides and the trust boundary
+
+`spec.overrides.profilingJob` accepts a partial Kubernetes `JobSpec` that the operator merges
+into the profiling Job it launches (for example, to add tolerations or adjust resources). Because
+the operator creates that Job on your behalf, treat this the way Kubernetes treats any
+workload-creation API:
+
+> [!IMPORTANT]
+> Any principal that can create workloads in a namespace where Dynamo runs — a `Pod` directly, or
+> any resource that creates Pods (`Job`, `Deployment`, `DynamoGraphDeploymentRequest`, …) — is
+> inside that namespace's trust boundary: it can run code with the Secrets and ServiceAccount
+> tokens mounted in that namespace. Creating a DGDR is one such path and is no more privileged than
+> creating a `Job` or `Pod` there — including through `overrides.profilingJob`. This is by design
+> and matches how Kubernetes treats every Pod-spawning resource.
+>
+> Enforce Pod-level security **centrally on the resulting Pods** with
+> [Pod Security Admission](https://kubernetes.io/docs/concepts/security/pod-security-admission/)
+> (and any admission webhooks) on the namespace, exactly as you would for any workload. The
+> operator does not re-implement those checks. Grant `create`/`update` on DGDRs — and on workload
+> resources generally — only to principals you would trust to create Pods in that namespace, and use
+> namespaces as the tenancy boundary — see
+> [Kubernetes RBAC good practices](https://kubernetes.io/docs/concepts/security/rbac-good-practices/#workload-creation).
+
+The profiling Job always runs in the DGDR's own namespace; overrides cannot relocate it, so a DGDR
+cannot escape its namespace.
+
 ## Next steps
 
 | Goal | Guide |
