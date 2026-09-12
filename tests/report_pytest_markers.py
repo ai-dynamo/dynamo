@@ -263,6 +263,7 @@ STUB_MODULES = [
     "nixl._api",
     "nixl._bindings",
     "aiohttp.web",
+    "aiohttp.test_utils",
     "aiconfigurator.generator",
     "aiconfigurator.generator.naive",
     "aiconfigurator.sdk",
