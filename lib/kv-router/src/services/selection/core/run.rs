@@ -596,9 +596,6 @@ impl SelectionCore {
     /// Bind the held session to `dispatched`. A `Hard` rejection whose bound
     /// worker departed after [`Self::hold_session`] checked it is not a client
     /// fault: the session is re-initialized on the dispatched worker instead.
-    /// This runs with the booking held, so it never waits on another request's
-    /// initialization (which may itself be queued behind this booking); when
-    /// one is in flight the booking stands unbound, `None`.
     pub(super) fn commit_session(
         &self,
         table: &SessionAffinity,
@@ -644,7 +641,7 @@ impl SelectionCore {
         }
         if let Err(error) = entry
             .indexer
-            .record_routing_decision(
+            .record_routing_decision_hashes(
                 worker,
                 RoutingDecisionHashes::from_local_hashes(block_hashes),
             )

@@ -223,6 +223,46 @@ fn assert_shutdown_error(error: SelectionError) {
     ));
 }
 
+fn default_key() -> RoutingPartitionId {
+    RoutingPartitionId::new("model", "default")
+}
+
+/// A core whose queue threshold is zero, so a second booking queues behind
+/// the first.
+fn saturated_core() -> Arc<SelectionCore> {
+    let mut config = test_config(false);
+    config.router_queue_threshold = Some(0.0);
+    Arc::new(local_core(config))
+}
+
+fn lease_operation<'a>(
+    prompt: PromptView<'a>,
+    request_id: &str,
+    track_active_blocks: bool,
+) -> SelectionOperation<'a> {
+    SelectionOperation {
+        key: default_key(),
+        prompt,
+        router_config_override: None,
+        expected_output_tokens: None,
+        priority_jump: 0.0,
+        strict_priority: 0,
+        policy_class: None,
+        session_context: None,
+        session: SessionBinding::None,
+        affinity_target: None,
+        pinned_worker: None,
+        allowed_worker_ids: None,
+        routing_constraints: RoutingConstraints::default(),
+        admission: SelectionAdmission::Lease {
+            request_id: request_id.to_string(),
+        },
+        track_active_blocks,
+        return_routing_hashes: false,
+        replay_id: None,
+    }
+}
+
 #[test]
 fn parent_cancel_cancels_core() {
     let parent = CancellationToken::new();
@@ -251,9 +291,7 @@ async fn selection_setup_uses_worker_type_label() {
         );
 
         core.upsert_worker(worker(1)).await.expect("worker upsert");
-        let entry = core
-            .entry(&RoutingPartitionId::new("model", "default"))
-            .expect("selection entry");
+        let entry = core.entry(&default_key()).expect("selection entry");
         assert_eq!(
             entry.scheduler.worker_type(),
             expected_label,
@@ -378,7 +416,7 @@ async fn remote_indexer_serves_selection_without_local_kv_listeners() {
     use crate::services::indexer::server::spawn_test_indexer_server;
 
     // The standalone indexer holds worker 2's cache for the test prompt.
-    let key = RoutingPartitionId::new("model", "default");
+    let key = default_key();
     let served = Arc::new(WorkerRegistry::new(1));
     let served_indexer = served.get_or_create_indexer(key.clone(), 4);
     let hashes: Vec<u64> =
@@ -439,9 +477,7 @@ async fn hint_fixture(
         configure(&mut request);
         core.upsert_worker(request).await.expect("worker upsert");
     }
-    let entry = core
-        .entry(&RoutingPartitionId::new("model", "default"))
-        .expect("entry");
+    let entry = core.entry(&default_key()).expect("entry");
     let tokens: Vec<u32> = (1..=8).collect();
     let hashes: Vec<u64> = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default())
         .into_iter()
@@ -770,9 +806,7 @@ async fn session_context_reaches_worker_selection() {
 async fn full_affinity_table_routes_without_pinning() {
     let core = local_core(test_config(false));
     core.upsert_worker(worker(1)).await.expect("worker upsert");
-    let entry = core
-        .entry(&RoutingPartitionId::new("model", "default"))
-        .expect("entry");
+    let entry = core.entry(&default_key()).expect("entry");
     let table = SessionAffinity::with_config(SessionAffinityConfig {
         max_entries: 1,
         max_session_id_bytes: 256,
@@ -858,7 +892,7 @@ async fn shutdown_cancels_listeners_but_keeps_parent_alive() {
 #[tokio::test]
 async fn selection_sees_cache_after_last_worker_replacement(#[case] indexer_threads: usize) {
     let core = local_core_with(test_config(true), indexer_threads, CancellationToken::new());
-    let key = RoutingPartitionId::new("model", "default");
+    let key = default_key();
     let request = || {
         let mut request = select_request();
         request.prompt.token_ids = None;
@@ -937,9 +971,7 @@ async fn reupsert_recreates_a_listener_lost_to_a_cancelled_update() {
     core.upsert_worker(worker_with_kv_events(1))
         .await
         .expect("worker upsert");
-    let entry = core
-        .entry(&RoutingPartitionId::new("model", "default"))
-        .expect("entry");
+    let entry = core.entry(&default_key()).expect("entry");
     let hashes = [11u64, 12];
     entry
         .indexer
@@ -983,12 +1015,12 @@ async fn upsert_moves_global_worker_id_between_routing_groups() {
     let mut group_a = worker_with_kv_events(1);
     group_a.routing_group = "group-a".to_string();
     core.upsert_worker(group_a).await.expect("group A upsert");
-    assert_eq!(
+    let indexed = |group: &str| {
         core.indexer_registry
-            .list_filtered(Some("model"), Some("group-a"))
-            .len(),
-        1
-    );
+            .list_filtered(Some("model"), Some(group))
+            .len()
+    };
+    assert_eq!(indexed("group-a"), 1);
 
     let mut group_b = worker_with_kv_events(1);
     group_b.routing_group = "group-b".to_string();
@@ -996,17 +1028,8 @@ async fn upsert_moves_global_worker_id_between_routing_groups() {
 
     assert!(core.list_workers(Some("model"), Some("group-a")).is_empty());
     assert_eq!(core.list_workers(Some("model"), Some("group-b")).len(), 1);
-    assert!(
-        core.indexer_registry
-            .list_filtered(Some("model"), Some("group-a"))
-            .is_empty()
-    );
-    assert_eq!(
-        core.indexer_registry
-            .list_filtered(Some("model"), Some("group-b"))
-            .len(),
-        1
-    );
+    assert_eq!(indexed("group-a"), 0);
+    assert_eq!(indexed("group-b"), 1);
 
     let mut select_a = select_request();
     select_a.routing_group = "group-a".to_string();
@@ -1019,11 +1042,7 @@ async fn upsert_moves_global_worker_id_between_routing_groups() {
     assert_eq!(core.select(select_b).await.unwrap().worker_id, 1);
 
     core.delete_worker(1).await.expect("delete group B worker");
-    assert!(
-        core.indexer_registry
-            .list_filtered(Some("model"), Some("group-b"))
-            .is_empty()
-    );
+    assert_eq!(indexed("group-b"), 0);
 }
 
 #[tokio::test]
@@ -1081,9 +1100,7 @@ async fn shutdown_reports_not_ready_and_rejects_new_work() {
 
 #[tokio::test]
 async fn queued_selection_errors_on_shutdown() {
-    let mut config = test_config(false);
-    config.router_queue_threshold = Some(0.0);
-    let core = Arc::new(local_core(config));
+    let core = saturated_core();
 
     let record = core.upsert_worker(worker(1)).await.expect("worker upsert");
     assert_eq!(record.lifecycle, WorkerLifecycle::Schedulable);
@@ -1110,12 +1127,9 @@ async fn queued_selection_errors_on_shutdown() {
 
 #[tokio::test]
 async fn booking_is_freed_when_selected_worker_drained_while_queued() {
-    let mut config = test_config(false);
-    config.router_queue_threshold = Some(0.0);
-    let core = Arc::new(local_core(config));
+    let core = saturated_core();
     core.upsert_worker(worker(1)).await.expect("worker upsert");
-    let key = RoutingPartitionId::new("model", "default");
-    let entry = core.entry(&key).expect("entry");
+    let entry = core.entry(&default_key()).expect("entry");
     core.select_and_reserve(reserve_request("res-a"))
         .await
         .expect("initial reservation");
@@ -1150,12 +1164,9 @@ async fn booking_is_freed_when_selected_worker_drained_while_queued() {
 /// only thing missing.
 #[tokio::test]
 async fn lease_admission_keeps_a_selection_whose_worker_drained_while_queued() {
-    let mut config = test_config(false);
-    config.router_queue_threshold = Some(0.0);
-    let core = Arc::new(local_core(config));
+    let core = saturated_core();
     core.upsert_worker(worker(1)).await.expect("worker upsert");
-    let key = RoutingPartitionId::new("model", "default");
-    let entry = core.entry(&key).expect("entry");
+    let entry = core.entry(&default_key()).expect("entry");
     core.select_and_reserve(reserve_request("res-a"))
         .await
         .expect("initial reservation");
@@ -1164,27 +1175,7 @@ async fn lease_admission_keeps_a_selection_whose_worker_drained_while_queued() {
     let queued = tokio::spawn(async move {
         let req = reserve_request("queued");
         let run = queued_core
-            .run_selection(SelectionOperation {
-                key: RoutingPartitionId::new("model", "default"),
-                prompt: req.prompt.view(),
-                router_config_override: None,
-                expected_output_tokens: None,
-                priority_jump: 0.0,
-                strict_priority: 0,
-                policy_class: None,
-                session_context: None,
-                session: SessionBinding::None,
-                affinity_target: None,
-                pinned_worker: None,
-                allowed_worker_ids: None,
-                routing_constraints: RoutingConstraints::default(),
-                admission: SelectionAdmission::Lease {
-                    request_id: "queued".to_string(),
-                },
-                track_active_blocks: false,
-                return_routing_hashes: false,
-                replay_id: None,
-            })
+            .run_selection(lease_operation(req.prompt.view(), "queued", false))
             .await;
         match run.result {
             Ok(SelectionOutcome::Selected(selected)) => (
@@ -1219,32 +1210,12 @@ async fn lease_admission_keeps_a_selection_whose_worker_drained_while_queued() {
 async fn lease_admission_installs_no_index_row_and_records_nothing() {
     let core = local_core(test_config(false));
     core.upsert_worker(worker(1)).await.expect("worker upsert");
-    let key = RoutingPartitionId::new("model", "default");
+    let key = default_key();
     let entry = core.entry(&key).expect("entry");
 
     let req = reserve_request("leased");
     let run = core
-        .run_selection(SelectionOperation {
-            key: key.clone(),
-            prompt: req.prompt.view(),
-            router_config_override: None,
-            expected_output_tokens: None,
-            priority_jump: 0.0,
-            strict_priority: 0,
-            policy_class: None,
-            session_context: None,
-            session: SessionBinding::None,
-            affinity_target: None,
-            pinned_worker: None,
-            allowed_worker_ids: None,
-            routing_constraints: RoutingConstraints::default(),
-            admission: SelectionAdmission::Lease {
-                request_id: "leased".to_string(),
-            },
-            track_active_blocks: true,
-            return_routing_hashes: false,
-            replay_id: None,
-        })
+        .run_selection(lease_operation(req.prompt.view(), "leased", true))
         .await;
     let Ok(SelectionOutcome::Selected(selected)) = run.result else {
         panic!("lease selection failed");
@@ -1280,7 +1251,7 @@ async fn lease_admission_installs_no_index_row_and_records_nothing() {
 async fn dropped_selection_future_frees_its_booking() {
     let core = local_core(test_config(false));
     core.upsert_worker(worker(1)).await.expect("worker upsert");
-    let key = RoutingPartitionId::new("model", "default");
+    let key = default_key();
     let entry = core.entry(&key).expect("entry");
 
     // Drive the selection by hand so the actor's response is delivered but
@@ -1381,7 +1352,7 @@ async fn dropped_book_selection_during_routing_record_frees_booking_and_claim() 
         ),
     );
     core.upsert_worker(worker(1)).await.expect("worker upsert");
-    let key = RoutingPartitionId::new("model", "default");
+    let key = default_key();
     let entry = core.entry(&key).expect("entry");
 
     // Poll by hand until the booking exists and the record is awaited.
@@ -1479,7 +1450,7 @@ async fn explicit_reservation_of_a_live_id_is_a_conflict() {
 fn index_observer_replaces_stale_and_claimed_rows_of_its_partition() {
     use crate::scheduling::AttemptId;
     let index = Arc::new(RwLock::new(HashMap::new()));
-    let partition = RoutingPartitionId::new("model", "default");
+    let partition = default_key();
     let observer = ReservationIndexObserver {
         index: Arc::clone(&index),
         partition: partition.clone(),
@@ -1534,9 +1505,7 @@ fn index_observer_replaces_stale_and_claimed_rows_of_its_partition() {
 
 #[tokio::test]
 async fn free_of_an_in_flight_reservation_is_not_found() {
-    let mut config = test_config(false);
-    config.router_queue_threshold = Some(0.0);
-    let core = Arc::new(local_core(config));
+    let core = saturated_core();
     core.upsert_worker(worker(1)).await.expect("worker upsert");
     core.select_and_reserve(reserve_request("res-a"))
         .await
@@ -1609,9 +1578,7 @@ async fn mirrored_replica_bookings_are_indexed_until_freed() {
         .await
         .expect("warm booking");
     core.free_reservation("warm").await.expect("free warm");
-    let entry = core
-        .entry(&RoutingPartitionId::new("model", "default"))
-        .expect("entry");
+    let entry = core.entry(&default_key()).expect("entry");
     let peer_event = |request_id: &str, data| ActiveSequenceEvent {
         request_id: request_id.to_string(),
         worker: WorkerWithDpRank::new(1, 0),
@@ -1847,9 +1814,7 @@ async fn reservation_index_sweep_drops_bookings_released_out_of_band() {
     );
 
     // Release directly through the scheduler, as force-expiry would.
-    let entry = core
-        .entry(&RoutingPartitionId::new("model", "default"))
-        .expect("entry");
+    let entry = core.entry(&default_key()).expect("entry");
     entry.scheduler.free("stale").await.expect("scheduler free");
 
     assert_eq!(
@@ -1914,16 +1879,14 @@ async fn lifecycle_lookup_does_not_nest_reservation_index_inside_entries() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn queued_selection_returns_refreshed_overlap_snapshot() {
-    let mut config = test_config(false);
-    config.router_queue_threshold = Some(0.0);
-    let core = Arc::new(local_core(config));
+    let core = saturated_core();
 
     for worker_id in [1, 2] {
         let mut request = worker(worker_id);
         request.max_num_batched_tokens = Some(8);
         core.upsert_worker(request).await.expect("worker upsert");
     }
-    let key = RoutingPartitionId::new("model", "default");
+    let key = default_key();
     let entry = core.entry(&key).expect("entry");
     entry
         .indexer
@@ -1937,15 +1900,9 @@ async fn queued_selection_returns_refreshed_overlap_snapshot() {
             worker_id: Some(worker_id),
             dp_rank: Some(0),
             prompt: PromptRequest {
-                token_ids: None,
-                mm_routing_info: None,
-                block_mm_infos: None,
-                block_hashes: None,
                 sequence_hashes: Some(vec![1, 2]),
                 isl_tokens: Some(8),
-                lora_name: None,
-                cache_namespace: None,
-                is_eagle: None,
+                ..PromptRequest::default()
             },
             effective_prefill_tokens: Some(8),
             ..replay_reservation(&format!("occupy-{worker_id}"))
@@ -1958,30 +1915,13 @@ async fn queued_selection_returns_refreshed_overlap_snapshot() {
     let queued = tokio::spawn(async move {
         queued_core
             .select_and_reserve(SelectAndReserveRequest {
-                model_name: "model".to_string(),
-                routing_group: "default".to_string(),
-                selection_id: Some("refresh-selection".to_string()),
                 prompt: PromptRequest {
-                    token_ids: None,
-                    mm_routing_info: None,
-                    block_mm_infos: None,
                     block_hashes: Some(vec![11, 12]),
                     sequence_hashes: Some(vec![101, 102]),
                     isl_tokens: Some(8),
-                    lora_name: None,
-                    cache_namespace: None,
-                    is_eagle: None,
+                    ..PromptRequest::default()
                 },
-                router_config_override: None,
-                expected_output_tokens: None,
-                priority_jump: None,
-                strict_priority: None,
-                session_id: None,
-                session_context: None,
-                affinity_target: None,
-                pinned_worker: None,
-                allowed_worker_ids: None,
-                routing_constraints: RoutingConstraints::default(),
+                ..reserve_request("refresh-selection")
             })
             .await
     });
@@ -2024,10 +1964,14 @@ fn core_with_session_affinity() -> SelectionCore {
     core_with_session_affinity_mode(SessionAffinityMode::Hard)
 }
 
+/// The worker `session_id` is bound to; panics if the partition has no
+/// affinity table, so `None` means unbound rather than unconfigured.
 fn bound_worker(core: &SelectionCore, session_id: &str) -> Option<WorkerId> {
-    core.entry(&RoutingPartitionId::new("model", "default"))
-        .and_then(|entry| entry.affinity.get().cloned())
-        .and_then(|table| table.query_target(session_id, None).expect("query"))
+    let entry = core.entry(&default_key()).expect("default partition");
+    let table = entry.affinity.get().expect("affinity table configured");
+    table
+        .query_target(session_id, None)
+        .expect("query")
         .map(|target| target.worker_id)
 }
 
@@ -2037,9 +1981,9 @@ fn session_reservation(selection_id: &str, session_id: &str) -> SelectAndReserve
     request
 }
 
-#[tokio::test]
-async fn departed_session_worker_reinitializes_the_session() {
-    let core = core_with_session_affinity();
+/// Two workers, session `s` bound by booking `r1` (already freed).
+async fn bound_session(mode: SessionAffinityMode) -> (SelectionCore, SelectResponse) {
+    let core = core_with_session_affinity_mode(mode);
     core.upsert_worker(worker(1)).await.expect("worker upsert");
     core.upsert_worker(worker(2)).await.expect("worker upsert");
     let first = core
@@ -2047,6 +1991,12 @@ async fn departed_session_worker_reinitializes_the_session() {
         .await
         .expect("first booking");
     core.free_reservation("r1").await.expect("free");
+    (core, first)
+}
+
+#[tokio::test]
+async fn departed_session_worker_reinitializes_the_session() {
+    let (core, first) = bound_session(SessionAffinityMode::Hard).await;
     core.delete_worker(first.worker_id).await.expect("delete");
 
     let second = core
@@ -2059,15 +2009,8 @@ async fn departed_session_worker_reinitializes_the_session() {
 
 #[tokio::test]
 async fn session_worker_departing_after_the_hold_reinitializes_the_session() {
-    let core = core_with_session_affinity();
-    core.upsert_worker(worker(1)).await.expect("worker upsert");
-    core.upsert_worker(worker(2)).await.expect("worker upsert");
-    let first = core
-        .select_and_reserve(session_reservation("r1", "s"))
-        .await
-        .expect("first booking");
-    core.free_reservation("r1").await.expect("free");
-    let key = RoutingPartitionId::new("model", "default");
+    let (core, first) = bound_session(SessionAffinityMode::Hard).await;
+    let key = default_key();
 
     // One poll takes the hold (the bound worker still passes the check)
     // and hands the request to the scheduler actor, which has not run yet.
@@ -2076,7 +2019,7 @@ async fn session_worker_departing_after_the_hold_reinitializes_the_session() {
     assert!(second.as_mut().poll(&mut context).is_pending());
     core.catalog
         .set_lifecycle(first.worker_id, WorkerLifecycle::Draining, Vec::new());
-    core.publish_scheduler_config(&key).expect("publish");
+    core.publish_scheduler_config(&key);
 
     let second = second
         .await
@@ -2186,9 +2129,7 @@ async fn two_phase_replay_rejects_a_worker_the_session_left() {
         .await
         .expect_err("hard affinity rejects the stale cached worker");
     assert!(matches!(err, SelectionError::BadRequest(_)), "{err:?}");
-    let entry = core
-        .entry(&RoutingPartitionId::new("model", "default"))
-        .expect("entry");
+    let entry = core.entry(&default_key()).expect("entry");
     wait_until("rejected booking release", || {
         !entry.scheduler.has_request("pending")
     })
@@ -2198,14 +2139,7 @@ async fn two_phase_replay_rejects_a_worker_the_session_left() {
 
 #[tokio::test]
 async fn hard_mode_rejects_dispatch_away_from_a_live_binding() {
-    let core = core_with_session_affinity();
-    core.upsert_worker(worker(1)).await.expect("worker upsert");
-    core.upsert_worker(worker(2)).await.expect("worker upsert");
-    let first = core
-        .select_and_reserve(session_reservation("r1", "s"))
-        .await
-        .expect("first booking");
-    core.free_reservation("r1").await.expect("free");
+    let (core, first) = bound_session(SessionAffinityMode::Hard).await;
     let other = if first.worker_id == 1 { 2 } else { 1 };
 
     // Steering cannot reach the bound worker, so selection lands elsewhere.
@@ -2216,9 +2150,7 @@ async fn hard_mode_rejects_dispatch_away_from_a_live_binding() {
         .await
         .expect_err("hard affinity rejects a dispatch away from the binding");
     assert!(matches!(err, SelectionError::BadRequest(_)), "{err:?}");
-    let entry = core
-        .entry(&RoutingPartitionId::new("model", "default"))
-        .expect("entry");
+    let entry = core.entry(&default_key()).expect("entry");
     wait_until("rejected booking release", || {
         !entry.scheduler.has_request("r2")
     })
@@ -2236,14 +2168,7 @@ async fn hard_mode_rejects_dispatch_away_from_a_live_binding() {
 
 #[tokio::test]
 async fn soft_mode_follows_the_dispatch() {
-    let core = core_with_session_affinity_mode(SessionAffinityMode::Soft);
-    core.upsert_worker(worker(1)).await.expect("worker upsert");
-    core.upsert_worker(worker(2)).await.expect("worker upsert");
-    let first = core
-        .select_and_reserve(session_reservation("r1", "s"))
-        .await
-        .expect("first booking");
-    core.free_reservation("r1").await.expect("free");
+    let (core, first) = bound_session(SessionAffinityMode::Soft).await;
     let other = if first.worker_id == 1 { 2 } else { 1 };
 
     let mut request = session_reservation("r2", "s");
@@ -2260,7 +2185,7 @@ async fn replicated_binding_steers_a_new_session_and_frees_with_the_booking() {
     core.upsert_worker(worker(2)).await.expect("worker upsert");
 
     core.dispatch_affinity_event(AffinityBindingEvent {
-        partition: RoutingPartitionId::new("model", "default"),
+        partition: default_key(),
         session_id: "chat-b".to_string(),
         worker_id: 2,
         dp_rank: Some(0),
@@ -2291,7 +2216,7 @@ async fn expired_booking_releases_affinity_lease() {
     core.select_and_reserve(session_reservation("abandoned", "session"))
         .await
         .unwrap();
-    let key = RoutingPartitionId::new("model", "default");
+    let key = default_key();
     core.entry(&key)
         .unwrap()
         .scheduler
@@ -2304,16 +2229,7 @@ async fn expired_booking_releases_affinity_lease() {
     );
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(11)).await;
-    assert_eq!(
-        core.entry(&RoutingPartitionId::new("model", "default"))
-            .unwrap()
-            .affinity
-            .get()
-            .unwrap()
-            .query_target("session", None)
-            .unwrap(),
-        None
-    );
+    assert_eq!(bound_worker(&core, "session"), None);
 }
 
 #[tokio::test]
@@ -2331,18 +2247,7 @@ async fn partition_sessions_keep_independent_bindings() {
     let mut request = session_reservation("other", "shared-session");
     request.routing_group = "other".to_string();
     assert_eq!(core.select_and_reserve(request).await.unwrap().worker_id, 3);
-    assert_eq!(
-        core.entry(&RoutingPartitionId::new("model", "default"))
-            .unwrap()
-            .affinity
-            .get()
-            .unwrap()
-            .query_target("shared-session", None)
-            .unwrap()
-            .unwrap()
-            .worker_id,
-        first.worker_id
-    );
+    assert_eq!(bound_worker(&core, "shared-session"), Some(first.worker_id));
     let again = core
         .select_and_reserve(session_reservation("again", "shared-session"))
         .await
@@ -2357,7 +2262,7 @@ async fn rejoined_worker_feeds_partition_index() {
         let core = local_core(test_config(true));
         let request = worker_with_kv_events(1);
         core.upsert_worker(request.clone()).await.unwrap();
-        let key = RoutingPartitionId::new("model", "default");
+        let key = default_key();
         let partition = core.partition(&key).unwrap();
         let tokens: Vec<u32> = (1..=8).collect();
         let hashes: Vec<u64> = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default())
@@ -2443,9 +2348,7 @@ async fn host_lease_manager_owns_expiry() {
         tokio::task::yield_now().await;
         tokio::time::advance(active_request_expiry_duration() * 3).await;
         tokio::task::yield_now().await;
-        let entry = core
-            .entry(&RoutingPartitionId::new("model", "default"))
-            .unwrap();
+        let entry = core.entry(&default_key()).unwrap();
         assert_eq!(entry.scheduler.has_request("live"), host_owned);
         if host_owned {
             core.free_reservation("live").await.unwrap();
@@ -2545,13 +2448,7 @@ async fn catalog_updates_commit_in_order_without_exposing_candidates() {
         1,
         "deletion detaches the worker"
     );
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while entry.scheduler.has_request("live") {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    wait_until("booking release", || !entry.scheduler.has_request("live")).await;
 }
 
 #[tokio::test]
@@ -2573,9 +2470,7 @@ async fn affinity_configuration_rejects_invalid_or_conflicting_config() {
     }
     let core = core_with_session_affinity();
     core.upsert_worker(worker(1)).await.unwrap();
-    let partition = core
-        .partition(&RoutingPartitionId::new("model", "default"))
-        .unwrap();
+    let partition = core.partition(&default_key()).unwrap();
     assert!(matches!(
         partition.session_affinity(SessionAffinityConfig::new(Duration::from_secs(20))),
         Err(SelectionError::Conflict(_))

@@ -24,8 +24,8 @@ pub enum HashInput<'a> {
 impl<'a> HashInput<'a> {
     pub fn as_slice(&self) -> &[LocalBlockHash] {
         match self {
-            Self::Borrowed(hashes) => hashes,
-            Self::Owned(hashes) => hashes.as_slice(),
+            Self::Borrowed(sequence) => sequence,
+            Self::Owned(sequence) => sequence,
         }
     }
 
@@ -35,20 +35,22 @@ impl<'a> HashInput<'a> {
 
     pub(super) fn into_owned_at_boundary(self) -> Vec<LocalBlockHash> {
         match self {
-            Self::Borrowed(hashes) => hashes.to_vec(),
-            Self::Owned(hashes) => hashes,
+            Self::Borrowed(sequence) => sequence.to_vec(),
+            Self::Owned(sequence) => sequence,
         }
     }
 }
 
+#[derive(Clone, Copy)]
 pub(super) struct LookupPipeline<'a> {
     primary: PrimaryLookup<'a>,
     lower_tier: Option<&'a LowerTierIndexers>,
     side: Option<&'a SideIndexer>,
 }
 
+#[derive(Clone, Copy)]
 enum PrimaryLookup<'a> {
-    Single(&'a KvIndexer),
+    KvIndexer(&'a KvIndexer),
     Concurrent(&'a ThreadPoolIndexer<ConcurrentRadixTreeCompressed>),
     Remote(&'a dyn RemotePrimary),
     None,
@@ -63,7 +65,7 @@ impl Indexer {
                 approx,
                 ..
             } => LookupPipeline {
-                primary: PrimaryLookup::Single(primary),
+                primary: PrimaryLookup::KvIndexer(primary),
                 lower_tier: Some(lower_tier),
                 side: approx.as_ref(),
             },
@@ -188,7 +190,7 @@ impl<'a> LookupPipeline<'a> {
         lower_tier_options: LowerTierQueryOptions,
     ) -> Result<TieredMatchDetails, KvRouterError> {
         match self.primary {
-            PrimaryLookup::Single(_) | PrimaryLookup::Concurrent(_) => {
+            PrimaryLookup::KvIndexer(_) | PrimaryLookup::Concurrent(_) => {
                 let Some(lower_tier) = self.lower_tier else {
                     return Ok(TieredMatchDetails::default());
                 };
@@ -220,7 +222,7 @@ impl<'a> LookupPipeline<'a> {
             PrimaryLookup::Remote(primary) => {
                 if lower_tier_options.retain_kv_transfer_chain {
                     tracing::warn!(
-                        "router_hint chain retention is not supported with remote primary indexer; proceeding without router hints"
+                        "KV transfer chain retention is not supported with remote primary indexer; proceeding without KV transfer hints"
                     );
                 }
                 let Some(side) = self.side else {
@@ -251,7 +253,7 @@ impl<'a> LookupPipeline<'a> {
         sequence: HashInput<'_>,
     ) -> Result<TieredMatchDetails, KvRouterError> {
         match self.primary {
-            PrimaryLookup::Single(_) | PrimaryLookup::Concurrent(_) => {
+            PrimaryLookup::KvIndexer(_) | PrimaryLookup::Concurrent(_) => {
                 let Some(lower_tier) = self.lower_tier else {
                     return Ok(TieredMatchDetails::default());
                 };
@@ -285,7 +287,7 @@ impl<'a> PrimaryLookup<'a> {
         sequence: HashInput<'_>,
     ) -> Result<MatchDetails, KvRouterError> {
         let primary_details = match self {
-            Self::Single(primary) => {
+            Self::KvIndexer(primary) => {
                 primary
                     .find_match_details(sequence.into_owned_at_boundary())
                     .await?
@@ -323,7 +325,7 @@ impl<'a> PrimaryLookup<'a> {
         retain_kv_transfer_chain: bool,
     ) -> Result<MatchDetails, KvRouterError> {
         let primary_details = match self {
-            Self::Single(primary) => {
+            Self::KvIndexer(primary) => {
                 primary
                     .find_match_details_with_options(
                         sequence.clone_for_boundary(),
@@ -354,21 +356,19 @@ impl<'a> PrimaryLookup<'a> {
 }
 
 /// Merge a side-indexer's `OverlapScores` into the primary's `MatchDetails`
-/// by per-worker max. The side indexer covers the window before the engine's
-/// first KV event arrives; `last_matched_hashes`, `frequencies`, and
-/// `tree_sizes` stay the primary's.
+/// by taking the per-worker max overlap. The side indexer covers the window
+/// before the engine's first KV event arrives; for workers it knows about,
+/// we use whichever indexer saw the longer prefix. `last_matched_hashes`,
+/// `frequencies`, and `tree_sizes` come from the primary -- the side
+/// indexer's short-TTL view isn't meaningful for those signals.
 ///
-/// The result no longer satisfies the `scores` <-> `last_matched_hashes`
-/// lockstep (side-only workers gain a score with no paired hash), so it must
-/// not seed `query_lower_tiers`; callers run the lower-tier query against the
-/// primary-only details first.
-///
-/// NOTE: when this merged `MatchDetails` is combined with lower-tier hits
-/// seeded from the primary-only anchor (e.g. in `find_matches_by_tier`), the
-/// total cached-token signal can overcount: the device score is raised by the
-/// side indexer but the lower-tier walk used the lower primary depth. Accepted
-/// since side scores are short-TTL approximations and the overcount is bounded
-/// and rare in practice.
+/// IMPORTANT: the returned `MatchDetails` is no longer guaranteed to satisfy
+/// `overlap_scores.scores` <-> `last_matched_hashes` lockstep. Side-only
+/// workers gain a score with no paired hash by design. The result is safe
+/// for scheduling / cache-hit signal but MUST NOT be used to seed
+/// `query_lower_tiers`, which assumes the lockstep invariant. The local
+/// arm of `find_matches_by_tier` enforces this by running the lower-tier
+/// query against primary-only `MatchDetails` before merging side scores.
 fn merge_overlap_scores(mut primary: MatchDetails, side: OverlapScores) -> MatchDetails {
     for (worker, side_score) in side.scores {
         primary
@@ -385,9 +385,18 @@ fn merge_overlap_scores(mut primary: MatchDetails, side: OverlapScores) -> Match
     primary
 }
 
-/// Query the side indexer (if present) and merge its scores into `primary`.
-/// On query error, warn and return `primary` unchanged so the caller still has
-/// a usable scheduling signal.
+/// Query the predict-on-route side indexer (if present) and merge its scores
+/// into the primary device match details. Side scores never feed lower-tier
+/// or shared-cache scoring. On query error, log a warning and return `primary`
+/// unchanged so the caller still has a usable scheduling signal. See
+/// [`merge_overlap_scores`] for the lockstep caveat on the returned shape.
+///
+/// NOTE: when this merged `MatchDetails` is combined with lower-tier hits
+/// seeded from the primary-only anchor (e.g. in `find_matches_by_tier`), the
+/// total cached-token signal can in theory overcount: the device score is
+/// raised by the side indexer but the lower-tier walk used the lower primary
+/// depth. Accepted as edge for now since side scores are short-TTL
+/// approximations and the overcount is bounded and rare in practice.
 pub(super) async fn merge_side_or_warn(
     side: Option<&SideIndexer>,
     primary: MatchDetails,
@@ -825,7 +834,7 @@ mod tests {
         let local_hashes = vec![LocalBlockHash(91), LocalBlockHash(92)];
         let sequence_hashes = compute_seq_hash_for_block(&local_hashes);
         indexer
-            .record_routing_decision(
+            .record_routing_decision_hashes(
                 worker,
                 RoutingDecisionHashes {
                     local_hashes: local_hashes.clone(),
@@ -1044,7 +1053,7 @@ mod tests {
 
         let side_hashes = vec![LocalBlockHash(11), LocalBlockHash(12), LocalBlockHash(13)];
         indexer
-            .record_routing_decision(
+            .record_routing_decision_hashes(
                 side_worker,
                 RoutingDecisionHashes {
                     local_hashes: side_hashes.clone(),

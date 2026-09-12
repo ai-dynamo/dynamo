@@ -2173,10 +2173,7 @@ mod tests {
     }
 
     /// Under pod discovery a worker registers under its pod identity alone, so
-    /// a pod's ready sidecars must contribute no worker ids. Emitting them
-    /// would name workers no backend registered under; the scheduler filters
-    /// them out, so the pod's real worker would be the subset's only survivor
-    /// only by accident of the id set.
+    /// a pod's ready sidecars must contribute no worker ids.
     #[test]
     fn pod_worker_ids_ignores_containers_under_pod_discovery() {
         let pod = pod_mode_worker_pod();

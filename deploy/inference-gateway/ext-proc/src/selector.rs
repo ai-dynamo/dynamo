@@ -15,8 +15,8 @@ use anyhow::{Context, Result, anyhow};
 use dynamo_kv_router::config::{KvRouterConfig, try_kv_router_config_from_dynamo_env};
 use dynamo_kv_router::protocols::RoutingConstraints;
 use dynamo_kv_router::services::selection::{
-    PromptRequest, SelectAndReserveRequest as CoreSelectAndReserveRequest, SelectionCore,
-    SelectionError, SelectionService, SelectionServiceBuilder, WorkerSelectionPolicyRegistry,
+    PromptRequest, SelectAndReserveRequest as CoreSelectAndReserveRequest, SelectionError,
+    SelectionService, SelectionServiceBuilder, WorkerSelectionPolicyRegistry,
     warn_for_unserved_worker_selection_policies,
 };
 use dynamo_kv_router::{DEFAULT_ROUTING_GROUP, WorkerType};
@@ -66,7 +66,7 @@ pub struct SelectResponse {
 
 /// In-process runtime-free selector wrapping a [`SelectionService`].
 pub struct Selector {
-    service: Arc<SelectionService>,
+    pub(crate) service: Arc<SelectionService>,
     /// Cancels the peer-discovery watch on drop. The `SelectionService`'s own
     /// `Drop` tears down its core + replica-sync tasks.
     cancel: CancellationToken,
@@ -164,11 +164,6 @@ impl Selector {
             );
         }
         Ok(())
-    }
-
-    /// The selection core whose catalog the topology adapter feeds.
-    pub(crate) fn core(&self) -> &Arc<SelectionCore> {
-        self.service.core()
     }
 
     /// Select a worker for a prompt and book its load in one operation. Takes the
@@ -401,7 +396,7 @@ models:
     }
 
     async fn register(selector: &Selector, workers: Vec<WorkerRequest>) {
-        CatalogReconciler::new(Arc::clone(selector.core()))
+        CatalogReconciler::new(Arc::clone(selector.service.core()))
             .apply(workers)
             .await
             .expect("reconcile should succeed");
@@ -748,7 +743,7 @@ worker_selection:
             .expect("selector should build");
         let duplicate = incomplete_registration(1);
 
-        let error = CatalogReconciler::new(Arc::clone(selector.core()))
+        let error = CatalogReconciler::new(Arc::clone(selector.service.core()))
             .apply(vec![duplicate.clone(), duplicate])
             .await
             .expect_err("duplicate IDs must be rejected");

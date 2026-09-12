@@ -9,10 +9,8 @@ use crate::protocols::{WorkerId, WorkerWithDpRank};
 
 /// Host-owned knowledge of which workers can serve a LoRA adapter.
 ///
-/// The frontend implements this over its LoRA routing table and state tracker;
-/// a runtime-free host may back it with a static map. Implementations return a
-/// subset of `available`, ordered arbitrarily. Returning `available` unchanged
-/// means "no LoRA-specific preference".
+/// Implementations return a subset of `available`, ordered arbitrarily.
+/// Returning `available` unchanged means "no LoRA-specific preference".
 pub trait LoraWorkerFilter: Send + Sync {
     fn filter_worker_ids_for_lora(&self, lora_name: &str, available: &[WorkerId]) -> Vec<WorkerId>;
 }
@@ -22,11 +20,13 @@ pub trait LoraWorkerFilter: Send + Sync {
 ///
 /// - Without a LoRA name the caller's allow-set is returned untouched.
 /// - The universe is the caller's allow-set when present, else `all_workers`.
-/// - A pinned worker inside the universe is always retained, even if the filter
-///   dropped it, so the pin still wins for cache correctness. A pin outside the
-///   universe is not re-added: the caller's constraint stands.
-/// - An empty narrowing falls back to the caller's allow-set rather than
-///   producing an unroutable request.
+/// - Pinned worker: KV-cache correctness wins. A pin inside the universe is
+///   always retained even if not in the LoRA replica set (the worker lazy-loads
+///   the adapter); a pin outside the universe is not re-added, the caller's
+///   constraint stands.
+/// - If narrowing would exclude every candidate, falls back to the caller's
+///   allow-set so the request stays routable (lazy-load path) rather than
+///   failing.
 #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
 pub fn narrow_allowed_worker_ids_by_lora(
     filter: &dyn LoraWorkerFilter,

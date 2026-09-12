@@ -44,7 +44,6 @@ pub type AffinityTarget = dynamo_runtime::pipeline::RouteTarget;
 
 type TableTarget = dynamo_kv_router::services::selection::affinity::AffinityTarget;
 
-/// The table-side form of a pipeline routing target.
 pub(crate) fn to_table(target: AffinityTarget) -> TableTarget {
     TableTarget::new(target.worker_id, target.dp_rank)
 }
@@ -162,7 +161,6 @@ impl AffinityCoordinator {
             .map_err(affinity_error)
     }
 
-    /// The mode the table binds sessions with.
     pub(crate) fn mode(&self) -> SessionAffinityMode {
         self.inner.table.mode()
     }

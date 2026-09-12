@@ -306,12 +306,6 @@ impl RoutePlan {
 /// removed only in a 2.0.0 (or later) breaking release.
 pub type KvPushRouter = RoutingHost;
 
-/// The host steers and retries by the same mode its table commits with; a
-/// host without session affinity never reads it.
-fn affinity_mode(affinity: Option<&AffinityCoordinator>) -> SessionAffinityMode {
-    affinity.map(AffinityCoordinator::mode).unwrap_or_default()
-}
-
 impl RoutingHost {
     pub fn new(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
@@ -382,7 +376,10 @@ impl RoutingHost {
             inner,
             policy: RoutingPolicy::Kv(kv_router),
             request_metrics,
-            session_affinity_mode: affinity_mode(affinity.as_ref()),
+            session_affinity_mode: affinity
+                .as_ref()
+                .map(AffinityCoordinator::mode)
+                .unwrap_or_default(),
             affinity,
             hosted_occupancy: None,
             lora: None,
@@ -456,7 +453,10 @@ impl RoutingHost {
             inner,
             policy,
             request_metrics,
-            session_affinity_mode: affinity_mode(affinity.as_ref()),
+            session_affinity_mode: affinity
+                .as_ref()
+                .map(AffinityCoordinator::mode)
+                .unwrap_or_default(),
             affinity,
             hosted_occupancy,
             lora: lora

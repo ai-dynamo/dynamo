@@ -83,7 +83,6 @@ use crate::WorkerSelectionPolicyFactory;
 use crate::WorkerType;
 use crate::services::common::replica_sync::AffinityBindingEvent;
 
-/// The scheduler type every partition runs.
 pub type SelectionScheduler = LocalScheduler<
     ScopedSequencePublisher,
     SelectionWorkerConfig,
@@ -162,10 +161,7 @@ impl SelectionEntry {
 
 /// What an embedding host supplies to every partition the core creates,
 /// grouped by purpose. Each group defaults to the standalone service's
-/// behavior, so a host overrides only the groups it owns: the frontend
-/// `KvRouter` feeds load and availability from its request client, points
-/// overlap refresh at its own index, and carries replica sync on its own
-/// transport.
+/// behavior, so a host overrides only the groups it owns.
 #[derive(Clone, Default)]
 pub struct SelectionHost {
     pub load: HostLoad,
@@ -199,8 +195,7 @@ pub struct HostCache {
 pub enum KvIndexSource {
     /// The ingress builds each partition's index and feeds it with worker KV
     /// events; it also decides what metadata a worker needs to be schedulable
-    /// and what happens to the index when a worker leaves. Defaults to
-    /// [`ZmqDirectIngress`]; the frontend supplies its runtime-backed ingress.
+    /// and what happens to the index when a worker leaves.
     Owned(Arc<dyn KvEventIngress>),
     /// A standalone indexer at this base URL serves the primary index; this
     /// core does not subscribe to worker KV events.
@@ -210,15 +205,6 @@ pub enum KvIndexSource {
 impl Default for KvIndexSource {
     fn default() -> Self {
         Self::Owned(Arc::new(ZmqDirectIngress))
-    }
-}
-
-impl std::fmt::Debug for KvIndexSource {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Owned(_) => formatter.write_str("Owned"),
-            Self::Remote(url) => formatter.debug_tuple("Remote").field(url).finish(),
-        }
     }
 }
 
@@ -247,36 +233,12 @@ pub struct HostReplication {
     pub request_leases: Option<Arc<dyn ReplicaRequestLeaseObserver>>,
 }
 
-impl std::fmt::Debug for SelectionHost {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("SelectionHost")
-            .field("prefill_estimator", &self.load.prefill_estimator.is_some())
-            .field(
-                "overloaded_workers",
-                &self.load.overloaded_workers.is_some(),
-            )
-            .field("available_workers", &self.load.available_workers.is_some())
-            .field("shared_cache", &self.cache.shared.is_some())
-            .field("index", &self.cache.index)
-            .field(
-                "lora_worker_filter",
-                &self.eligibility.lora_worker_filter.is_some(),
-            )
-            .field("scheduler_load", &self.telemetry.scheduler_load.is_some())
-            .field("replication", &self.replication.channels.is_some())
-            .finish()
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct SelectionServiceConfig {
     pub port: u16,
     pub threads: usize,
     pub indexer_peers: Vec<String>,
     /// Base URL of a standalone indexer that serves the primary KV index.
-    /// When set, this service does not listen for worker KV events and
-    /// `indexer_peers` recovery is skipped.
     pub remote_indexer_url: Option<String>,
     pub replica_sync_port: Option<u16>,
     pub replica_sync_peers: Vec<String>,
@@ -368,8 +330,6 @@ impl SelectionCore {
         ))
     }
 
-    /// Scheduler and indexer handle for `key`, once a worker has been upserted
-    /// into that partition.
     pub fn partition(&self, key: &RoutingPartitionId) -> Option<SelectionPartition> {
         self.entry(key).map(SelectionPartition)
     }

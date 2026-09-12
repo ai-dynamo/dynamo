@@ -143,7 +143,7 @@ struct Inner {
     #[cfg(any(test, feature = "testing"))]
     reaper_started: Arc<Notify>,
     #[cfg(any(test, feature = "testing"))]
-    waiter_observed: Notify,
+    waiter_observed: Arc<Notify>,
 }
 
 impl Drop for Inner {
@@ -184,7 +184,6 @@ pub enum Hold {
 }
 
 impl Hold {
-    /// The worker a bound session steers to; `None` while initializing.
     pub fn target(&self) -> Option<AffinityTarget> {
         match self {
             Self::Initialize(_) => None,
@@ -192,8 +191,6 @@ impl Hold {
         }
     }
 
-    /// `AffinityLease::invalidate` for a bound session; an initializing hold
-    /// just releases.
     pub fn invalidate(self) {
         if let Self::Bound { mut lease, .. } = self {
             lease.invalidate();
@@ -242,7 +239,7 @@ impl SessionAffinity {
             #[cfg(any(test, feature = "testing"))]
             reaper_started: Arc::new(Notify::new()),
             #[cfg(any(test, feature = "testing"))]
-            waiter_observed: Notify::new(),
+            waiter_observed: Arc::new(Notify::new()),
         });
         Self::spawn_reaper(&inner);
         tracing::debug!(
@@ -328,8 +325,8 @@ impl SessionAffinity {
             Entry::Vacant(entry) => {
                 self.reserve_entry()?;
                 tracing::debug!(
-                    session_id,
-                    "Session affinity miss: new session, pinning after worker selection"
+                    session_id = %session_id,
+                    "session affinity miss: new session, pinning after worker selection"
                 );
                 let revision = self.inner.next_revision.fetch_add(1, Ordering::Relaxed);
                 let notify = Arc::new(Notify::new());
@@ -339,7 +336,7 @@ impl SessionAffinity {
                 });
                 Ok(AcquireStep::Held(Hold::Initialize(
                     AffinityInitialization {
-                        table: Arc::downgrade(&self.inner),
+                        coordinator: Arc::downgrade(&self.inner),
                         session_id: session_id.to_string(),
                         revision,
                         notify,
@@ -364,8 +361,8 @@ impl SessionAffinity {
                     ..
                 } if *active_leases == 0 && *idle_deadline <= now => {
                     tracing::debug!(
-                        session_id,
-                        "Session affinity miss: pin expired (idle past TTL), re-selecting worker"
+                        session_id = %session_id,
+                        "session affinity miss: pin expired (idle past TTL), re-selecting worker"
                     );
                     let revision = self.inner.next_revision.fetch_add(1, Ordering::Relaxed);
                     let notify = Arc::new(Notify::new());
@@ -375,7 +372,7 @@ impl SessionAffinity {
                     };
                     Ok(AcquireStep::Held(Hold::Initialize(
                         AffinityInitialization {
-                            table: Arc::downgrade(&self.inner),
+                            coordinator: Arc::downgrade(&self.inner),
                             session_id: session_id.to_string(),
                             revision,
                             notify,
@@ -393,7 +390,7 @@ impl SessionAffinity {
                 } => {
                     validate_bound_target(session_id, *target, requested_target)?;
                     tracing::debug!(
-                        session_id,
+                        session_id = %session_id,
                         worker_id = target.worker_id,
                         dp_rank = ?target.dp_rank,
                         active_leases = *active_leases + 1,
@@ -403,7 +400,7 @@ impl SessionAffinity {
                     Ok(AcquireStep::Held(Hold::Bound {
                         target: *target,
                         lease: AffinityLease {
-                            table: Arc::downgrade(&self.inner),
+                            coordinator: Arc::downgrade(&self.inner),
                             session_id: session_id.to_string(),
                             revision: *revision,
                             version: *version,
@@ -489,7 +486,7 @@ impl SessionAffinity {
         }
         validate_bound_target(session_id, *target, requested_target)?;
         tracing::debug!(
-            session_id,
+            session_id = %session_id,
             worker_id = target.worker_id,
             dp_rank = ?target.dp_rank,
             "Session affinity hit: reusing pinned worker"
@@ -497,12 +494,10 @@ impl SessionAffinity {
         Ok(Some(*target))
     }
 
-    /// Advance the local sequence past one seen from a replica.
     pub fn observe_replica_sequence(&self, sequence: u64) {
         self.inner.observe_replica_sequence(sequence);
     }
 
-    /// Apply a binding published by a replica.
     pub fn apply_replica_update(
         &self,
         session_id: String,
@@ -536,7 +531,6 @@ impl SessionAffinity {
         self.inner.entry_count.load(Ordering::Relaxed)
     }
 
-    /// Cancelled when the last handle drops.
     pub fn cancellation_token(&self) -> CancellationToken {
         self.inner.cancel.clone()
     }
@@ -676,7 +670,7 @@ impl Inner {
 /// A session this request is the first to bind. Dropping it uncommitted
 /// releases the slot and wakes waiters so they re-acquire.
 pub struct AffinityInitialization {
-    table: Weak<Inner>,
+    coordinator: Weak<Inner>,
     session_id: String,
     revision: u64,
     notify: Arc<Notify>,
@@ -688,7 +682,7 @@ impl AffinityInitialization {
     /// Bind the session to the worker the request was dispatched to.
     pub fn commit(mut self, target: AffinityTarget) -> Result<AffinityLease, AffinityError> {
         validate_bound_target(&self.session_id, target, self.requested_target)?;
-        let Some(inner) = self.table.upgrade() else {
+        let Some(inner) = self.coordinator.upgrade() else {
             return Err(AffinityError::Dropped);
         };
         let Some(mut entry) = inner.entries.get_mut(&self.session_id) else {
@@ -716,7 +710,7 @@ impl AffinityInitialization {
         self.active = false;
         self.notify.notify_waiters();
         Ok(AffinityLease {
-            table: Arc::downgrade(&inner),
+            coordinator: Arc::downgrade(&inner),
             session_id: self.session_id.clone(),
             revision: self.revision,
             version,
@@ -730,7 +724,7 @@ impl Drop for AffinityInitialization {
         if !self.active {
             return;
         }
-        let Some(inner) = self.table.upgrade() else {
+        let Some(inner) = self.coordinator.upgrade() else {
             return;
         };
         let removed = inner.entries.remove_if(&self.session_id, |_, entry| {
@@ -749,7 +743,7 @@ impl Drop for AffinityInitialization {
 /// A live use of a bound session. Dropping it releases the use and refreshes
 /// the idle deadline.
 pub struct AffinityLease {
-    table: Weak<Inner>,
+    coordinator: Weak<Inner>,
     session_id: String,
     revision: u64,
     version: AffinityVersion,
@@ -761,17 +755,16 @@ impl AffinityLease {
         &self.session_id
     }
 
-    /// Publish the binding to replicas.
-    pub fn publish(&self, target: AffinityTarget) {
-        if let Some(inner) = self.table.upgrade() {
+    fn publish(&self, target: AffinityTarget) {
+        if let Some(inner) = self.coordinator.upgrade() {
             inner.publish_replica_update(&self.session_id, target, self.version);
         }
     }
 
     /// Move the binding from `expected` to `target` if nothing changed it since
     /// this lease was taken.
-    pub fn rebind(&mut self, expected: AffinityTarget, target: AffinityTarget) -> bool {
-        let Some(inner) = self.table.upgrade() else {
+    fn rebind(&mut self, expected: AffinityTarget, target: AffinityTarget) -> bool {
+        let Some(inner) = self.coordinator.upgrade() else {
             return false;
         };
         let Some(mut entry) = inner.entries.get_mut(&self.session_id) else {
@@ -813,7 +806,7 @@ impl AffinityLease {
             return;
         }
         self.active = false;
-        let Some(inner) = self.table.upgrade() else {
+        let Some(inner) = self.coordinator.upgrade() else {
             return;
         };
         let (target, version) = {
@@ -849,7 +842,7 @@ impl AffinityLease {
         if !self.active {
             return;
         }
-        let Some(inner) = self.table.upgrade() else {
+        let Some(inner) = self.coordinator.upgrade() else {
             self.active = false;
             return;
         };

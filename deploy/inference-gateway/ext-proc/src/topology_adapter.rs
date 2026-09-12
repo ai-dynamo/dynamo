@@ -95,7 +95,8 @@ impl TopologyAdapter {
             closed: false,
         };
         tokio::spawn(
-            CatalogReconciler::new(Arc::clone(selector.core())).run(source, cancel.child_token()),
+            CatalogReconciler::new(Arc::clone(selector.service.core()))
+                .run(source, cancel.child_token()),
         );
         Self { cancel }
     }

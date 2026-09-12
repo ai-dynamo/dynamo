@@ -256,8 +256,7 @@ mod tests {
             .unwrap()
     }
 
-    /// The advisory builtin-host peek `reserve_prefill_worker`'s non-KV arm
-    /// routes through.
+    /// The advisory builtin-host peek used by `reserve_prefill_worker`'s non-KV arm.
     fn query_worker(router: &PrefillRouter) -> u64 {
         router
             .binding

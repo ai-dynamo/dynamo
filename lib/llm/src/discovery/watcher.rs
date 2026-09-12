@@ -203,7 +203,7 @@ pub struct ModelWatcher {
     /// Keep raw pipelines out of default-off and backend-mismatched paths.
     generate_engine_capabilities: Vec<&'static str>,
     selection_policy: SelectionPolicySource,
-    /// Custom policy dispatch cannot infer whether an untyped legacy card is decode or aggregated.
+    /// Custom selector dispatch cannot infer whether an untyped legacy card is decode or aggregated.
     require_typed_worker_role: bool,
 }
 

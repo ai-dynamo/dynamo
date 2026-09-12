@@ -1949,7 +1949,7 @@ impl ModelManager {
         .await
     }
 
-    /// Construct a KV chooser whose partition runs the given selection policy.
+    /// Construct a KV chooser with a selector resolved by the router host at startup.
     #[allow(clippy::too_many_arguments)]
     pub async fn kv_chooser_for_with_policy(
         &self,
@@ -2033,7 +2033,7 @@ impl ModelManager {
         .await
     }
 
-    /// Construct a managed KV router whose partition runs the given selection policy.
+    /// Construct a managed KV router with a selector resolved by the routing host at startup.
     #[allow(clippy::too_many_arguments)]
     pub async fn managed_kv_router_for_with_policy(
         &self,
@@ -2132,32 +2132,32 @@ impl ModelManager {
         );
         // A policy that does not consume cache input must not create a shared-cache client or
         // subscribe to its updates.
-        let shared_cache: Option<Arc<dyn dynamo_kv_router::SharedKvCache>> =
-            if required_worker_inputs.contains(WorkerInputs::CACHE) {
-                match kv_router_config
-                    .as_ref()
-                    .map(|c| c.shared_cache_type)
-                    .unwrap_or_default()
-                {
-                    dynamo_kv_router::SharedCacheType::None => None,
-                    dynamo_kv_router::SharedCacheType::Hicache => {
-                        let worker_component_name = &endpoint.id().component;
-                        tracing::info!(
-                            worker_component = worker_component_name,
-                            "Using HiCache shared KV cache"
-                        );
-                        Some(Arc::new(
-                            self.hicache_cache_for(&endpoint, workers_with_configs.clone()),
-                        ))
-                    }
+        let wants_cache = required_worker_inputs.contains(WorkerInputs::CACHE);
+        let shared_cache: Option<Arc<dyn dynamo_kv_router::SharedKvCache>> = if wants_cache {
+            match kv_router_config
+                .as_ref()
+                .map(|c| c.shared_cache_type)
+                .unwrap_or_default()
+            {
+                dynamo_kv_router::SharedCacheType::None => None,
+                dynamo_kv_router::SharedCacheType::Hicache => {
+                    let worker_component_name = &endpoint.id().component;
+                    tracing::info!(
+                        worker_component = worker_component_name,
+                        "Using HiCache shared KV cache"
+                    );
+                    Some(Arc::new(
+                        self.hicache_cache_for(&endpoint, workers_with_configs.clone()),
+                    ))
                 }
-            } else {
-                None
-            };
+            }
+        } else {
+            None
+        };
 
         let kv_event_source_requirement =
             KvEventSourceRequirement::derive(worker_role, &effective_kv_router_config);
-        let cache_required = required_worker_inputs.contains(WorkerInputs::CACHE)
+        let cache_required = wants_cache
             || effective_kv_router_config.serve_indexer
             || matches!(
                 kv_event_source_requirement,

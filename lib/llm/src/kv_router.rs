@@ -744,8 +744,6 @@ impl KvRouter {
         let available_worker_provider: WorkerAvailabilityProvider =
             Arc::new(move || client_for_availability.available_instance_ids());
 
-        // The manager is the partition's lease observer, so it exists before
-        // the scheduler; its scheduler cleanup is set once the scheduler does.
         let request_leases =
             request_lease::RequestLeaseManager::new(cancellation_token.child_token());
         let (selection, replica_ingress) = embedded::EmbeddedSelection::start(
@@ -1031,7 +1029,9 @@ impl KvRouter {
         hashes: RoutingDecisionHashes,
         worker: WorkerWithDpRank,
     ) -> Result<(), KvRouterError> {
-        self.indexer.record_routing_decision(worker, hashes).await
+        self.indexer
+            .record_routing_decision_hashes(worker, hashes)
+            .await
     }
 
     /// Give these tokens, find the worker with the best weighted cache hit.
@@ -1332,19 +1332,18 @@ impl KvRouter {
         let prefill_load_hint =
             self.prefill_load_hint_for(isl_tokens, cached_tokens, track_prefill_tokens);
 
-        let sequence_request = SequenceRequest {
-            request_id: request_id.clone(),
-            token_sequence: maybe_seq_hashes,
-            track_prefill_tokens,
-            expected_output_tokens,
-            prefill_load_hint,
-            worker,
-            lora_name,
-        };
         let admission = self
             .selection
             .scheduler()
-            .add_request_admitted(sequence_request)
+            .add_request_admitted(SequenceRequest {
+                request_id: request_id.clone(),
+                token_sequence: maybe_seq_hashes,
+                track_prefill_tokens,
+                expected_output_tokens,
+                prefill_load_hint,
+                worker,
+                lora_name,
+            })
             .await;
         let attempt_id = match admission {
             Ok(attempt_id) => attempt_id,
@@ -1552,12 +1551,10 @@ impl KvRouter {
         let tiered_matches = self.indexer.find_matches_by_tier(block_hashes).await?;
         let cache_hit_estimates = self.cache_hit_estimates_from_tiered_matches(&tiered_matches);
 
-        let effective_cached_tokens: HashMap<WorkerWithDpRank, usize> =
-            cache_hit_estimates.cached_tokens.into_iter().collect();
         Ok(self.selection.scheduler().get_potential_loads(
             maybe_seq_hashes,
             isl_tokens,
-            effective_cached_tokens,
+            cache_hit_estimates.cached_tokens.into_iter().collect(),
             track_prefill_tokens,
         ))
     }
@@ -2053,31 +2050,19 @@ mod tests {
     }
 
     async fn make_router_without_membership(worker_role: Option<WorkerType>) -> Result<KvRouter> {
-        let component = make_test_component("role-aware-subscription").await;
-        let endpoint = component.endpoint("backend");
-        let client = endpoint.client().await?;
-        let (_tx, workers) = watch::channel(HashMap::from([(7, ModelRuntimeConfig::default())]));
-        let config = KvRouterConfig {
-            skip_initial_worker_wait: true,
-            router_event_threads: 1,
-            ..Default::default()
-        };
-
-        KvRouter::new_with_worker_role(
-            endpoint,
-            client,
-            workers,
-            None,
+        make_router(
+            "role-aware-subscription",
+            HashMap::from([(7, ModelRuntimeConfig::default())]),
             16,
             SelectionPolicySource::Registry,
-            Some(config),
             None,
             worker_role,
             "decode",
-            None,
-            false,
-            None,
-            None,
+            KvRouterConfig {
+                skip_initial_worker_wait: true,
+                router_event_threads: 1,
+                ..Default::default()
+            },
         )
         .await
     }
@@ -2102,34 +2087,22 @@ mod tests {
 
     #[tokio::test]
     async fn load_only_selector_skips_cache_inputs() {
-        let component = make_test_component("load-only-capability").await;
-        let endpoint = component.endpoint("backend");
-        let client = endpoint.client().await.unwrap();
-        let (_tx, workers) = watch::channel(HashMap::from([(7, ModelRuntimeConfig::default())]));
-        let config = KvRouterConfig {
-            skip_initial_worker_wait: true,
-            router_event_threads: 1,
-            ..Default::default()
-        };
-
-        let router = KvRouter::new_with_worker_role(
-            endpoint,
-            client,
-            workers,
-            None,
+        let router = make_router(
+            "load-only-capability",
+            HashMap::from([(7, ModelRuntimeConfig::default())]),
             16,
             picker_policy(|| Box::new(LoadOnlyPicker)),
-            Some(config),
-            None,
-            Some(WorkerType::Prefill),
-            "prefill",
-            None,
-            false,
             Some(Arc::new(FakeSharedCache {
                 hits: None,
                 should_error: false,
             })),
-            None,
+            Some(WorkerType::Prefill),
+            "prefill",
+            KvRouterConfig {
+                skip_initial_worker_wait: true,
+                router_event_threads: 1,
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -2144,36 +2117,40 @@ mod tests {
         ));
     }
 
-    /// One block-size-2 router over `workers`, no KV event subscription.
+    /// One router over `workers`, no KV event subscription; `role` is the
+    /// worker role and its metric label.
+    #[allow(clippy::too_many_arguments)]
     async fn make_router(
         name: &str,
         workers: HashMap<WorkerId, ModelRuntimeConfig>,
+        block_size: u32,
         policy: SelectionPolicySource,
         shared_cache: Option<Arc<dyn SharedKvCache>>,
+        worker_role: Option<WorkerType>,
+        metric_label: &'static str,
         config: KvRouterConfig,
-    ) -> KvRouter {
+    ) -> Result<KvRouter> {
         let component = make_test_component(name).await;
         let endpoint = component.endpoint("backend");
-        let client = endpoint.client().await.unwrap();
+        let client = endpoint.client().await?;
         let (_tx, rx) = watch::channel(workers);
         KvRouter::new_with_worker_role(
             endpoint,
             client,
             rx,
             None,
-            2,
+            block_size,
             policy,
             Some(config),
             None,
-            None,
-            "decode",
+            worker_role,
+            metric_label,
             None,
             false,
             shared_cache,
             None,
         )
         .await
-        .unwrap()
     }
 
     /// Three default-config workers under the registry policy, with
@@ -2190,7 +2167,18 @@ mod tests {
         let workers = (0..3)
             .map(|worker_id| (worker_id, ModelRuntimeConfig::default()))
             .collect();
-        make_router(name, workers, SelectionPolicySource::Registry, None, config).await
+        make_router(
+            name,
+            workers,
+            2,
+            SelectionPolicySource::Registry,
+            None,
+            None,
+            "decode",
+            config,
+        )
+        .await
+        .unwrap()
     }
 
     /// Advisory best-match query with default routing arguments.
@@ -2312,9 +2300,8 @@ mod tests {
     );
 
     /// The selection procedure, run over the corpus with tracked bookings, must
-    /// match the trace frozen from the frontend's pre-unification procedure.
-    /// Regenerate the trace with `SELECTION_GOLDEN_UPDATE=1` only for an
-    /// intended behavior change.
+    /// match the frozen trace. Regenerate it with `SELECTION_GOLDEN_UPDATE=1`
+    /// only for an intended behavior change.
     #[tokio::test]
     async fn selection_matches_frozen_frontend_trace() {
         let router = tracked_router("golden").await;
@@ -2536,7 +2523,18 @@ mod tests {
             (0, ModelRuntimeConfig::default()),
             (1, ModelRuntimeConfig::default()),
         ]);
-        make_router("shared-cache-router", workers, policy, shared_cache, config).await
+        make_router(
+            "shared-cache-router",
+            workers,
+            2,
+            policy,
+            shared_cache,
+            None,
+            "decode",
+            config,
+        )
+        .await
+        .unwrap()
     }
 
     #[tokio::test]

@@ -7,6 +7,8 @@
 //! implementations that wire the runtime-agnostic business logic (in `dynamo_kv_router`)
 //! to the configured event transport and Prometheus metrics.
 
+mod direct_zmq;
+
 pub use dynamo_kv_router::multi_worker_sequence::{
     ActiveSequencesMultiWorker, ReplicaRequestLeaseObserver, SchedulerLoadSnapshot, SequenceError,
     SequencePublishQueueError, SequencePublisher, SequenceRequest, SequenceSubscriber,
@@ -30,8 +32,6 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-mod direct_zmq;
-
 use crate::kv_router::ACTIVE_SEQUENCES_SUBJECT;
 #[cfg(test)]
 use dynamo_runtime::transports::event_plane::MsgpackCodec;
@@ -41,7 +41,7 @@ use dynamo_runtime::transports::event_plane::MsgpackCodec;
 const REPLICA_EVENT_CHANNEL_CAPACITY: usize = 100_000;
 
 /// How active-sequence events are framed on the wire for a transport.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActiveSequenceEventWireFormat {
     Singleton,
     Batch,
@@ -345,14 +345,11 @@ impl SequenceSubscriber for RuntimeSequenceSubscriber {
     }
 }
 
-/// Replica-sync channels for an embedded selection partition, carried over the
-/// runtime event plane exactly like the runtime scheduler's replica sync:
-/// peer and worker events on `ACTIVE_SEQUENCES_SUBJECT` are always forwarded
-/// to the partition (worker-origin completion marks are needed even without
-/// router-to-router sync); outbound events are published only when
-/// `publishes_outbound` is set. The outbound publisher runs from here; the
-/// inbound leg runs when the returned [`ReplicaIngress`] is started, so the
-/// caller can install every consumer of lifecycle events first.
+/// Replica-sync channels for an embedded selection partition over the runtime
+/// event plane. Inbound events on `ACTIVE_SEQUENCES_SUBJECT` are always
+/// forwarded; outbound events are published only when `publishes_outbound` is
+/// set. The inbound leg runs when the returned [`ReplicaIngress`] is started,
+/// so the caller can install every consumer of lifecycle events first.
 pub(crate) async fn host_replica_channels(
     endpoint: &Endpoint,
     router_id: u64,
@@ -363,8 +360,9 @@ pub(crate) async fn host_replica_channels(
     ReplicaIngress,
 )> {
     let transport_kind = endpoint.drt().default_event_transport_kind();
-    let outbound = if publishes_outbound {
-        let (outbound, outbound_rx) = mpsc::channel(REPLICA_EVENT_CHANNEL_CAPACITY);
+    let event_sender = if publishes_outbound {
+        let (event_sender, event_rx) = mpsc::channel(REPLICA_EVENT_CHANNEL_CAPACITY);
+        let publisher_cancellation_token = cancellation_token.clone();
         let event_publisher = EventPublisher::for_endpoint_with_transport(
             endpoint,
             ACTIVE_SEQUENCES_SUBJECT,
@@ -375,19 +373,19 @@ pub(crate) async fn host_replica_channels(
             ActiveSequenceEventWireFormat::Singleton => {
                 tokio::spawn(run_replica_singleton_publisher(
                     event_publisher,
-                    outbound_rx,
-                    cancellation_token.clone(),
+                    event_rx,
+                    publisher_cancellation_token,
                 ));
             }
             ActiveSequenceEventWireFormat::Batch => {
                 tokio::spawn(run_replica_batch_publisher(
                     event_publisher,
-                    outbound_rx,
-                    cancellation_token.clone(),
+                    event_rx,
+                    publisher_cancellation_token,
                 ));
             }
         }
-        Some(outbound)
+        Some(event_sender)
     } else {
         None
     };
@@ -400,7 +398,7 @@ pub(crate) async fn host_replica_channels(
     };
     Ok((
         dynamo_kv_router::services::selection::HostReplicaChannels {
-            outbound,
+            outbound: event_sender,
             inbound_tx,
             inbound_rx,
             process_id: router_id,

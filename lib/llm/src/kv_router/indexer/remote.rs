@@ -85,41 +85,6 @@ impl RemoteIndexer {
         })
     }
 
-    pub(super) async fn fetch_matches_by_tier(
-        &self,
-        block_hashes: Vec<LocalBlockHash>,
-        device_only: bool,
-    ) -> Result<TieredMatchDetails> {
-        self.validate_topology_if_ready().await.inspect_err(|_| {
-            self.metrics.increment_query_failures();
-        })?;
-
-        let request = IndexerQueryRequest {
-            model_name: self.model_name.clone(),
-            block_hashes,
-            device_only,
-        };
-        let mut stream: ManyOut<IndexerQueryResponse> = self
-            .query_router
-            .round_robin(SingleIn::new(request))
-            .await
-            .inspect_err(|_| {
-                self.metrics.increment_query_failures();
-            })?;
-
-        match stream.next().await {
-            Some(IndexerQueryResponse::TieredScores(wire)) => Ok(wire.into()),
-            Some(IndexerQueryResponse::Error(msg)) => {
-                self.metrics.increment_query_failures();
-                Err(anyhow::anyhow!("Remote indexer error: {}", msg))
-            }
-            None => {
-                self.metrics.increment_query_failures();
-                Err(anyhow::anyhow!("Remote indexer returned empty response"))
-            }
-        }
-    }
-
     pub(super) async fn record_hashed_routing_decision(
         &self,
         worker: WorkerWithDpRank,
@@ -207,7 +172,34 @@ impl dynamo_kv_router::services::indexer::backend::RemotePrimary for RemoteIndex
         block_hashes: Vec<LocalBlockHash>,
         device_only: bool,
     ) -> Result<TieredMatchDetails> {
-        self.fetch_matches_by_tier(block_hashes, device_only).await
+        self.validate_topology_if_ready().await.inspect_err(|_| {
+            self.metrics.increment_query_failures();
+        })?;
+
+        let request = IndexerQueryRequest {
+            model_name: self.model_name.clone(),
+            block_hashes,
+            device_only,
+        };
+        let mut stream: ManyOut<IndexerQueryResponse> = self
+            .query_router
+            .round_robin(SingleIn::new(request))
+            .await
+            .inspect_err(|_| {
+                self.metrics.increment_query_failures();
+            })?;
+
+        match stream.next().await {
+            Some(IndexerQueryResponse::TieredScores(wire)) => Ok(wire.into()),
+            Some(IndexerQueryResponse::Error(msg)) => {
+                self.metrics.increment_query_failures();
+                Err(anyhow::anyhow!("Remote indexer error: {}", msg))
+            }
+            None => {
+                self.metrics.increment_query_failures();
+                Err(anyhow::anyhow!("Remote indexer returned empty response"))
+            }
+        }
     }
 
     async fn record_routing_decision(
@@ -604,7 +596,7 @@ mod tests {
                 Arc::new(KvIndexerMetrics::new_unregistered()),
             ),
             lower_tier: LowerTierIndexers::new(1, 4),
-            approx: Some(SideIndexer::Single(side)),
+            approx: Some(SideIndexer::KvIndexer(side)),
             primary_records_routing_decisions: false,
         };
 

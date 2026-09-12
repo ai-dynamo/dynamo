@@ -396,8 +396,6 @@ pub(super) struct KvRequestCleanup {
 }
 
 impl KvRequestCleanup {
-    /// Takes the booking over from `booking`: from here the request's cleanup
-    /// owns it.
     pub(super) fn new(
         chooser: Arc<KvRouter>,
         context_id: String,

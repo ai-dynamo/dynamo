@@ -640,7 +640,6 @@ impl SelectionCacheConfig {
     }
 }
 
-#[cfg(feature = "select-service")]
 fn session_affinity_ttl_from_secs(ttl: f64) -> Result<Duration, String> {
     if !(1.0..=MAX_SESSION_AFFINITY_TTL_SECS as f64).contains(&ttl) {
         return Err(format!(
@@ -648,6 +647,13 @@ fn session_affinity_ttl_from_secs(ttl: f64) -> Result<Duration, String> {
         ));
     }
     Ok(Duration::from_secs_f64(ttl))
+}
+
+/// Range check for a whole-second TTL; `None` passes.
+pub(crate) fn check_session_affinity_ttl_secs(ttl: Option<u64>) -> PyResult<()> {
+    ttl.map(|ttl| session_affinity_ttl_from_secs(ttl as f64).map_err(PyValueError::new_err))
+        .transpose()?;
+    Ok(())
 }
 
 /// In-process handle to a managed Dynamo `SelectionService`.
@@ -2230,13 +2236,7 @@ impl KvRouter {
         load_threshold_config: Option<&LoadThresholdConfig>,
         session_affinity_mode: &str,
     ) -> PyResult<Self> {
-        if session_affinity_ttl_secs
-            .is_some_and(|ttl| !(1..=MAX_SESSION_AFFINITY_TTL_SECS).contains(&ttl))
-        {
-            return Err(PyValueError::new_err(format!(
-                "session_affinity_ttl_secs must be between 1 and {MAX_SESSION_AFFINITY_TTL_SECS}"
-            )));
-        }
+        check_session_affinity_ttl_secs(session_affinity_ttl_secs)?;
         let session_affinity_mode = session_affinity_mode
             .parse::<RsSessionAffinityMode>()
             .map_err(PyValueError::new_err)?;

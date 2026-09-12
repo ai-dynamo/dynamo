@@ -485,8 +485,7 @@ impl SelectAndReserveRequest {
     }
 }
 
-/// Session metadata handed to worker selection, mirroring the frontend's
-/// agent-context extension field for field.
+/// Session metadata handed to worker selection.
 ///
 /// `session_context` supersedes the flat `session_id`: when both are present
 /// the structured form wins.
@@ -629,7 +628,7 @@ pub struct SelectResponse {
 }
 
 /// Load snapshot of the chosen worker, as the scheduler projected it for this
-/// request. Mirrors the frontend's advisory selection load.
+/// request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct SelectionWorkerLoad {
     pub active_prefill_tokens: usize,

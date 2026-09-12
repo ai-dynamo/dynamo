@@ -188,8 +188,6 @@ impl IndexerPolicy {
         }
     }
 
-    /// Whether the primary is served by a remote indexer service. Such a
-    /// service does not listen for worker KV events itself.
     pub fn is_remote(&self) -> bool {
         matches!(self.primary, PrimaryRetention::Remote(_))
     }
@@ -256,7 +254,7 @@ impl IndexerPolicy {
 /// replayed, and never used to seed lower-tier lookups.
 #[derive(Clone)]
 pub enum SideIndexer {
-    Single(KvIndexer),
+    KvIndexer(KvIndexer),
     Concurrent(Arc<ThreadPoolIndexer<ConcurrentRadixTreeCompressed>>),
 }
 
@@ -279,7 +277,7 @@ impl SideIndexer {
                 prune_config,
             )));
         }
-        Self::Single(KvIndexer::new_with_pruning(
+        Self::KvIndexer(KvIndexer::new_with_pruning(
             cancel,
             block_size,
             metrics,
@@ -292,7 +290,7 @@ impl SideIndexer {
         sequence: HashInput<'_>,
     ) -> std::result::Result<OverlapScores, KvRouterError> {
         match self {
-            Self::Single(indexer) => {
+            Self::KvIndexer(indexer) => {
                 indexer
                     .find_matches(sequence.into_owned_at_boundary())
                     .await
@@ -309,7 +307,7 @@ impl SideIndexer {
         hashes: RoutingDecisionHashes,
     ) -> std::result::Result<(), KvRouterError> {
         match self {
-            Self::Single(indexer) => {
+            Self::KvIndexer(indexer) => {
                 indexer
                     .process_routing_decision_with_hashes(
                         worker,
@@ -336,7 +334,7 @@ impl SideIndexer {
         dp_rank: DpRank,
     ) -> std::result::Result<(), KvRouterError> {
         match self {
-            Self::Single(indexer) => {
+            Self::KvIndexer(indexer) => {
                 indexer
                     .reset_worker_dp_rank_and_wait(worker_id, dp_rank)
                     .await
@@ -351,14 +349,14 @@ impl SideIndexer {
 
     async fn remove_worker(&self, worker_id: WorkerId) {
         match self {
-            Self::Single(indexer) => indexer.remove_worker(worker_id).await,
+            Self::KvIndexer(indexer) => indexer.remove_worker(worker_id).await,
             Self::Concurrent(indexer) => indexer.remove_worker(worker_id).await,
         }
     }
 
     async fn remove_worker_dp_rank(&self, worker_id: WorkerId, dp_rank: u32) {
         match self {
-            Self::Single(indexer) => indexer.remove_worker_dp_rank(worker_id, dp_rank).await,
+            Self::KvIndexer(indexer) => indexer.remove_worker_dp_rank(worker_id, dp_rank).await,
             Self::Concurrent(indexer) => indexer.remove_worker_dp_rank(worker_id, dp_rank).await,
         }
     }
@@ -453,17 +451,15 @@ impl Indexer {
         }
     }
 
-    pub fn is_remote(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_remote(&self) -> bool {
         matches!(self, Self::Remote { .. })
     }
 
-    /// Dequeue-time overlap refresh needs a local primary.
     pub fn supports_overlap_refresh(&self) -> bool {
         matches!(self, Self::Single { .. } | Self::Concurrent { .. })
     }
 
-    /// Router-hint chain retention needs a local primary whose hashes come
-    /// only from engine events.
     pub fn supports_kv_transfer_chain_retention(&self) -> bool {
         matches!(
             self,
@@ -1279,7 +1275,7 @@ mod tests {
 
     async fn flush_side(approx: &Option<SideIndexer>) {
         match approx {
-            Some(SideIndexer::Single(side)) => {
+            Some(SideIndexer::KvIndexer(side)) => {
                 let _ = side.flush().await;
             }
             Some(SideIndexer::Concurrent(side)) => {
@@ -1310,8 +1306,6 @@ mod tests {
     }
 
     impl Indexer {
-        /// Test-only: wait until every locally enqueued event and routing
-        /// decision is applied.
         pub(crate) async fn flush(&self) {
             flush(self).await
         }
@@ -1324,7 +1318,7 @@ mod tests {
         assert!(indexer.supports_kv_transfer_chain_retention());
         let worker = WorkerWithDpRank::new(7, 0);
         indexer
-            .record_routing_decision(
+            .record_routing_decision_hashes(
                 worker,
                 RoutingDecisionHashes::from_local_hashes(vec![LocalBlockHash(11)]),
             )
@@ -1352,7 +1346,7 @@ mod tests {
             assert!(!indexer.supports_kv_transfer_chain_retention());
             let worker = WorkerWithDpRank::new(7, 0);
             indexer
-                .record_routing_decision(
+                .record_routing_decision_hashes(
                     worker,
                     RoutingDecisionHashes::from_local_hashes(vec![
                         LocalBlockHash(11),
@@ -1408,7 +1402,7 @@ mod tests {
             // Routing decisions: worker 8 was just routed [11, 12, 13]; worker 7
             // was routed [11] (shorter than what the engine confirmed).
             indexer
-                .record_routing_decision(
+                .record_routing_decision_hashes(
                     predicted,
                     RoutingDecisionHashes::from_local_hashes(vec![
                         LocalBlockHash(11),
@@ -1419,7 +1413,7 @@ mod tests {
                 .await
                 .unwrap();
             indexer
-                .record_routing_decision(
+                .record_routing_decision_hashes(
                     confirmed,
                     RoutingDecisionHashes::from_local_hashes(vec![LocalBlockHash(11)]),
                 )
@@ -1495,13 +1489,7 @@ mod tests {
         .with_remote_indexer(base_url.clone())
         .unwrap();
         assert!(policy.is_remote());
-        let indexer = create_indexer_with_policy(
-            &key,
-            4,
-            1,
-            Arc::new(KvIndexerMetrics::new_unregistered()),
-            &policy,
-        );
+        let indexer = policy_indexer(1, policy.clone());
         assert!(indexer.is_remote());
         assert!(indexer.records_routing_decisions());
         assert!(!indexer.supports_kv_transfer_chain_retention());
@@ -1523,7 +1511,7 @@ mod tests {
         // A routing decision lands in the local side indexer only.
         let predicted = WorkerWithDpRank::new(8, 0);
         indexer
-            .record_routing_decision(
+            .record_routing_decision_hashes(
                 predicted,
                 RoutingDecisionHashes::from_local_hashes(vec![LocalBlockHash(11)]),
             )

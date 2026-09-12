@@ -46,64 +46,74 @@ pub(crate) struct RuntimeIngress {
 
 impl RuntimeIngress {
     pub(crate) async fn start(args: RuntimeIngressArgs<'_>) -> Result<Arc<Self>> {
-        let component = args.endpoint.component();
-        let indexer = if args.cache_required {
+        let RuntimeIngressArgs {
+            endpoint,
+            kv_router_config,
+            block_size,
+            model_name,
+            worker_role,
+            metric_worker_type,
+            cache_required,
+            kv_event_source_requirement,
+            kv_source_membership,
+            cancellation_token,
+        } = args;
+        let component = endpoint.component();
+        let indexer = if cache_required {
             super::build(
                 component,
-                args.kv_router_config,
-                args.block_size,
-                args.model_name,
-                args.cancellation_token.child_token(),
+                kv_router_config,
+                block_size,
+                model_name,
+                cancellation_token.child_token(),
             )
             .await?
         } else {
             Indexer::None
         };
 
-        let subscription = if args.cache_required
-            && args
-                .kv_event_source_requirement
-                .should_subscribe(args.kv_router_config)
+        let subscription = if cache_required
+            && kv_event_source_requirement.should_subscribe(kv_router_config)
         {
-            let membership_watch = args.kv_source_membership.ok_or_else(|| {
+            let membership_watch = kv_source_membership.ok_or_else(|| {
                 anyhow::anyhow!(
                     "KV source membership watch is required when local KV event subscription is enabled"
                 )
             })?;
             Some(
                 start_subscriber(
-                    args.endpoint.clone(),
+                    endpoint.clone(),
                     indexer.clone(),
                     membership_watch,
-                    args.block_size,
-                    args.model_name.unwrap_or("unknown").to_string(),
-                    args.worker_role,
-                    args.kv_event_source_requirement,
-                    args.metric_worker_type,
-                    args.cancellation_token.child_token(),
+                    block_size,
+                    model_name.unwrap_or("unknown").to_string(),
+                    worker_role,
+                    kv_event_source_requirement,
+                    metric_worker_type,
+                    cancellation_token.child_token(),
                 )
                 .await?,
             )
         } else {
             tracing::info!(
-                requirement = %args.kv_event_source_requirement,
-                cache_required = args.cache_required,
-                use_kv_events = args.kv_router_config.use_kv_events,
-                overlap_score_credit = args.kv_router_config.overlap_score_credit,
-                use_remote_indexer = args.kv_router_config.use_remote_indexer,
+                requirement = %kv_event_source_requirement,
+                cache_required = cache_required,
+                use_kv_events = kv_router_config.use_kv_events,
+                overlap_score_credit = kv_router_config.overlap_score_credit,
+                use_remote_indexer = kv_router_config.use_remote_indexer,
                 "Skipping KV event subscription"
             );
             None
         };
 
-        let served = if args.kv_router_config.serve_indexer {
-            let model_name = args.model_name.ok_or_else(|| {
+        let served = if kv_router_config.serve_indexer {
+            let model_name = model_name.ok_or_else(|| {
                 anyhow::anyhow!("model_name is required when serve_indexer is configured")
             })?;
             Some(
                 ensure_served_indexer_service(
                     component.clone(),
-                    ServedIndexerMode::from_use_kv_events(args.kv_router_config.use_kv_events),
+                    ServedIndexerMode::from_use_kv_events(kv_router_config.use_kv_events),
                     model_name.to_string(),
                     indexer.clone(),
                 )

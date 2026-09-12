@@ -123,24 +123,30 @@ impl WorkerFilter for RejectWorker {
     }
 }
 
+/// Block size 4, partition `model/default`, hashes tracked through `context`.
+fn normalize_with(
+    request: &PromptRequest,
+    context: &TrackingHashContext,
+    assume_kv_reuse: bool,
+) -> Result<super::input::NormalizedPrompt, SelectionError> {
+    request.view().normalize_for_selection(
+        4,
+        false,
+        Some(TrackingHashInput {
+            context,
+            scope: TrackingHashScope {
+                partition: RoutingPartitionRef::new("model", "default"),
+                block_size: 4,
+            },
+            assume_kv_reuse,
+        }),
+    )
+}
+
 fn normalize_prompt(request: &PromptRequest) -> super::input::NormalizedPrompt {
     let config = test_config();
     let context = TrackingHashContext::from_config(&config).unwrap();
-    request
-        .view()
-        .normalize_for_selection(
-            4,
-            false,
-            Some(TrackingHashInput {
-                context: &context,
-                scope: TrackingHashScope {
-                    partition: RoutingPartitionRef::new("model", "default"),
-                    block_size: 4,
-                },
-                assume_kv_reuse: true,
-            }),
-        )
-        .expect("normalize prompt")
+    normalize_with(request, &context, true).expect("normalize prompt")
 }
 
 async fn response_json(response: Response) -> serde_json::Value {
@@ -567,21 +573,7 @@ fn keyed_prompt_tracking_leaves_indexer_hashes_public() {
     }))
     .unwrap();
 
-    let normalized = request
-        .view()
-        .normalize_for_selection(
-            4,
-            false,
-            Some(TrackingHashInput {
-                context: &context,
-                scope: TrackingHashScope {
-                    partition: RoutingPartitionRef::new("model", "default"),
-                    block_size: 4,
-                },
-                assume_kv_reuse: true,
-            }),
-        )
-        .unwrap();
+    let normalized = normalize_with(&request, &context, true).unwrap();
     let public_blocks = compute_block_hash_for_seq(
         &[1, 2, 3, 4, 5, 6, 7, 8],
         4,
@@ -606,23 +598,7 @@ fn disabled_kv_reuse_keeps_public_indexer_hashes_and_randomizes_tracking() {
         "token_ids": [1, 2, 3, 4, 5, 6, 7, 8]
     }))
     .unwrap();
-    let normalize = || {
-        request
-            .view()
-            .normalize_for_selection(
-                4,
-                false,
-                Some(TrackingHashInput {
-                    context: &context,
-                    scope: TrackingHashScope {
-                        partition: RoutingPartitionRef::new("model", "default"),
-                        block_size: 4,
-                    },
-                    assume_kv_reuse: false,
-                }),
-            )
-            .unwrap()
-    };
+    let normalize = || normalize_with(&request, &context, false).unwrap();
 
     let first = normalize();
     let second = normalize();
@@ -703,18 +679,7 @@ fn keyed_hash_only_inputs_remain_trusted_for_selection_and_reservation() {
         block_size: 4,
     };
 
-    let selection = request
-        .view()
-        .normalize_for_selection(
-            4,
-            false,
-            Some(TrackingHashInput {
-                context: &context,
-                scope,
-                assume_kv_reuse: true,
-            }),
-        )
-        .unwrap();
+    let selection = normalize_with(&request, &context, true).unwrap();
     let reservation = request
         .view()
         .normalize_for_reservation(

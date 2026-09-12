@@ -7,8 +7,7 @@ use super::*;
 
 /// Pick the best router-hint source for `target`: a same-role worker (or
 /// cache owner) holding a longer root-aligned prefix than the target's own
-/// `target_cached_prefix_blocks`, with a non-empty control endpoint. Both hosts
-/// reach it through `run_selection`.
+/// `target_cached_prefix_blocks`, with a non-empty control endpoint.
 pub(super) fn transfer_hint_for_selection(
     configs: &HashMap<WorkerId, SelectionWorkerConfig>,
     target: WorkerWithDpRank,

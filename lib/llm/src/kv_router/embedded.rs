@@ -55,7 +55,7 @@ pub(crate) struct EmbeddedSelectionArgs {
     /// takes its index from it.
     pub ingress: Arc<dyn KvEventIngress>,
     /// Scheduler-owned load snapshots for the worker monitor's overload
-    /// detection, the same feed the runtime scheduler publishes.
+    /// detection.
     pub scheduler_load: crate::kv_router::routing_load::SchedulerLoadSender,
     /// Endpoint whose event plane carries replica sync when
     /// `router_replica_sync` is set.

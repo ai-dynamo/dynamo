@@ -54,13 +54,13 @@ impl SelectionCore {
         let key = previous.key();
         self.catalog
             .set_lifecycle(worker_id, WorkerLifecycle::Draining, Vec::new());
-        self.publish_scheduler_config(&key)?;
+        self.publish_scheduler_config(&key);
         self.cleanup_indexer_registration(&previous).await;
         let record = self
             .catalog
             .set_lifecycle(worker_id, WorkerLifecycle::Unschedulable, Vec::new())
             .ok_or_else(|| SelectionError::NotFound(format!("worker {worker_id} not found")))?;
-        self.publish_scheduler_config(&key)?;
+        self.publish_scheduler_config(&key);
         Ok(record)
     }
 
@@ -115,7 +115,7 @@ impl SelectionCore {
         {
             self.catalog
                 .set_lifecycle(old.worker_id, WorkerLifecycle::Draining, Vec::new());
-            self.publish_scheduler_config(&old.key())?;
+            self.publish_scheduler_config(&old.key());
             self.cleanup_indexer_registration(old).await;
             None
         } else {
@@ -141,7 +141,7 @@ impl SelectionCore {
         // Readers see only committed metadata. A valid capacity/topology update preserves
         // live bookings on ranks present in both the old and new snapshots.
         self.catalog.replace(record.clone());
-        self.publish_scheduler_config(&record.key())?;
+        self.publish_scheduler_config(&record.key());
         Ok(record)
     }
 
@@ -335,12 +335,9 @@ impl SelectionCore {
         remove_worker_from_index(&self.indexer_registry, record).await;
     }
 
-    pub(super) fn publish_scheduler_config(
-        &self,
-        key: &RoutingPartitionId,
-    ) -> Result<(), SelectionError> {
+    pub(super) fn publish_scheduler_config(&self, key: &RoutingPartitionId) {
         let Some(entry) = self.entry(key) else {
-            return Ok(());
+            return;
         };
         let workers = self.catalog.scheduler_configs_for_key(key);
         // Lifecycle transitions between non-schedulable states publish the same
@@ -353,6 +350,5 @@ impl SelectionCore {
                 true
             }
         });
-        Ok(())
     }
 }

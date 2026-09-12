@@ -226,13 +226,11 @@ async fn builtin_direct_without_worker_is_invalid_argument() {
     let inner = PushRouter::from_client(client, RouterMode::Direct)
         .await
         .unwrap();
-    let affinity = AffinityCoordinator::new(
-        Duration::from_secs(10),
+    let (host, _) = builtin_host_with_affinity(
+        inner,
+        load_context,
         crate::session_affinity::SessionAffinityMode::Hard,
-    )
-    .unwrap();
-    let host =
-        RoutingHost::new_builtin_with_coordinator(inner, load_context, Some(affinity)).unwrap();
+    );
 
     let error = host
         .generate(affinity_request("direct-unbound", None))
@@ -272,14 +270,11 @@ async fn builtin_direct_uses_bound_soft_affinity_as_exact_target() {
     )
     .await
     .unwrap();
-    let affinity = AffinityCoordinator::new(
-        Duration::from_secs(10),
+    let (host, _) = builtin_host_with_affinity(
+        inner,
+        load_context,
         crate::session_affinity::SessionAffinityMode::Soft,
-    )
-    .unwrap();
-    let host =
-        RoutingHost::new_builtin_with_coordinator(inner, load_context, Some(affinity.clone()))
-            .unwrap();
+    );
     let session_id = SessionAffinityId::new("direct-soft-bound");
     bind_affinity_target(&host, &session_id, AffinityTarget::worker(worker_id)).await;
 
@@ -358,26 +353,14 @@ async fn builtin_hard_affinity_ignores_local_inhibition() {
     )
     .await
     .unwrap();
-    let affinity = AffinityCoordinator::new(
-        Duration::from_secs(10),
+    let (host, affinity) = builtin_host_with_affinity(
+        inner,
+        load_context,
         crate::session_affinity::SessionAffinityMode::Hard,
-    )
-    .unwrap();
-    let host =
-        RoutingHost::new_builtin_with_coordinator(inner, load_context, Some(affinity.clone()))
-            .unwrap();
+    );
 
     let session_id = SessionAffinityId::new("local-inhibition");
-    let Hold::Initialize(initializer) = affinity.acquire(&session_id, None).await.unwrap() else {
-        panic!("new affinity session must initialize");
-    };
-    drop(
-        initializer
-            .commit(crate::session_affinity::to_table(AffinityTarget::worker(
-                worker_id,
-            )))
-            .unwrap(),
-    );
+    bind_affinity_target(&host, &session_id, AffinityTarget::worker(worker_id)).await;
 
     client.report_instance_down(worker_id);
     assert!(client.instance_ids().contains(&worker_id));
@@ -514,14 +497,11 @@ async fn builtin_affinity_uses_common_host_for_every_policy() {
         )
         .await
         .unwrap();
-        let affinity = AffinityCoordinator::new(
-            Duration::from_secs(10),
+        let (host, affinity) = builtin_host_with_affinity(
+            inner,
+            load_context,
             crate::session_affinity::SessionAffinityMode::Hard,
-        )
-        .unwrap();
-        let host =
-            RoutingHost::new_builtin_with_coordinator(inner, load_context, Some(affinity.clone()))
-                .unwrap();
+        );
         let session_id = format!("session-{index}");
         let affinity_id = SessionAffinityId::new(session_id.clone());
         let explicit_worker = (mode == RouterMode::Direct).then_some(worker_id);
@@ -621,14 +601,11 @@ async fn builtin_direct_fallback_stays_disabled_for_affinity() {
     )
     .await
     .unwrap();
-    let affinity = AffinityCoordinator::new(
-        Duration::from_secs(10),
+    let (host, affinity) = builtin_host_with_affinity(
+        inner,
+        load_context,
         crate::session_affinity::SessionAffinityMode::Hard,
-    )
-    .unwrap();
-    let host =
-        RoutingHost::new_builtin_with_coordinator(inner, load_context, Some(affinity.clone()))
-            .unwrap();
+    );
 
     let mut standalone = request();
     standalone.routing_mut().backend_instance_id = Some(stale_worker);
@@ -640,16 +617,7 @@ async fn builtin_direct_fallback_stays_disabled_for_affinity() {
     );
 
     let session_id = SessionAffinityId::new("direct-affinity");
-    let Hold::Initialize(initializer) = affinity.acquire(&session_id, None).await.unwrap() else {
-        panic!("new affinity session must initialize");
-    };
-    drop(
-        initializer
-            .commit(crate::session_affinity::to_table(AffinityTarget::worker(
-                stale_worker,
-            )))
-            .unwrap(),
-    );
+    bind_affinity_target(&host, &session_id, AffinityTarget::worker(stale_worker)).await;
     assert!(
         host.generate(affinity_request("direct-affinity", Some(stale_worker)))
             .await
@@ -1897,6 +1865,20 @@ async fn session_affinity_existing_selection_cancellation_preserves_binding_with
 
     drop(router);
     runtime.shutdown();
+}
+
+/// A builtin host over `inner` whose session-affinity coordinator has a 10s
+/// TTL and binds in `mode`.
+fn builtin_host_with_affinity(
+    inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+    load_context: Arc<RoutingLoadContext>,
+    mode: crate::session_affinity::SessionAffinityMode,
+) -> (RoutingHost, AffinityCoordinator) {
+    let affinity = AffinityCoordinator::new(Duration::from_secs(10), mode).unwrap();
+    let host =
+        RoutingHost::new_builtin_with_coordinator(inner, load_context, Some(affinity.clone()))
+            .unwrap();
+    (host, affinity)
 }
 
 async fn bind_affinity_target(

@@ -666,6 +666,7 @@ mod tests {
 
     #[test]
     fn rebuild_index_keeps_only_ready_selected_pods() {
+        let kp = single_rank(5557);
         let store = store_from_pods(vec![
             pod(
                 "vllm-0",
@@ -683,17 +684,11 @@ mod tests {
         ]);
 
         let index = RwLock::new(WorkerIndex::new());
-        assert!(rebuild_index(
-            &store,
-            Some(&pool()),
-            single_rank(5557),
-            Some(5560),
-            &index
-        ));
+        assert!(rebuild_index(&store, Some(&pool()), kp, Some(5560), &index));
         assert!(!rebuild_index(
             &store,
             Some(&pool()),
-            single_rank(5557),
+            kp,
             Some(5560),
             &index
         ));
@@ -710,6 +705,7 @@ mod tests {
 
     #[test]
     fn rebuild_index_is_empty_without_pool() {
+        let kp = single_rank(5557);
         let store = store_from_pods(vec![pod(
             "vllm-0",
             Some("10.0.0.1"),
@@ -717,18 +713,13 @@ mod tests {
             &[("app", "vllm-qwen")],
         )]);
         let index = RwLock::new(WorkerIndex::new());
-        assert!(!rebuild_index(
-            &store,
-            None,
-            single_rank(5557),
-            None,
-            &index
-        ));
+        assert!(!rebuild_index(&store, None, kp, None, &index));
         assert!(index.read().unwrap().is_empty());
     }
 
     #[test]
     fn upsert_and_remove_pod_mutate_index_incrementally() {
+        let kp = single_rank(5557);
         let index = RwLock::new(WorkerIndex::new());
         let id = hash_pod_name("vllm-0");
         let ready = pod(
@@ -739,20 +730,8 @@ mod tests {
         );
 
         // Ready + selected -> inserted, with a pre-stripped endpoint.
-        assert!(upsert_pod(
-            &index,
-            &ready,
-            Some(&pool()),
-            single_rank(5557),
-            None
-        ));
-        assert!(!upsert_pod(
-            &index,
-            &ready,
-            Some(&pool()),
-            single_rank(5557),
-            None
-        ));
+        assert!(upsert_pod(&index, &ready, Some(&pool()), kp, None));
+        assert!(!upsert_pod(&index, &ready, Some(&pool()), kp, None));
         assert_eq!(
             index.read().unwrap().get(&id).map(|e| e.endpoint.as_str()),
             Some("10.0.0.1:8000")
@@ -765,30 +744,12 @@ mod tests {
             Some(false),
             &[("app", "vllm-qwen")],
         );
-        assert!(upsert_pod(
-            &index,
-            &not_ready,
-            Some(&pool()),
-            single_rank(5557),
-            None
-        ));
-        assert!(!upsert_pod(
-            &index,
-            &not_ready,
-            Some(&pool()),
-            single_rank(5557),
-            None
-        ));
+        assert!(upsert_pod(&index, &not_ready, Some(&pool()), kp, None));
+        assert!(!upsert_pod(&index, &not_ready, Some(&pool()), kp, None));
         assert!(!index.read().unwrap().contains_key(&id));
 
         // Re-add, then a Delete removes it.
-        assert!(upsert_pod(
-            &index,
-            &ready,
-            Some(&pool()),
-            single_rank(5557),
-            None
-        ));
+        assert!(upsert_pod(&index, &ready, Some(&pool()), kp, None));
         assert!(index.read().unwrap().contains_key(&id));
         assert!(remove_pod(&index, &ready));
         assert!(!remove_pod(&index, &ready));
@@ -796,17 +757,12 @@ mod tests {
 
         // An unrelated namespace pod does not change the derived worker index.
         let unselected = pod("other-0", Some("10.0.0.2"), Some(true), &[("app", "other")]);
-        assert!(!upsert_pod(
-            &index,
-            &unselected,
-            Some(&pool()),
-            single_rank(5557),
-            None
-        ));
+        assert!(!upsert_pod(&index, &unselected, Some(&pool()), kp, None));
     }
 
     #[test]
     fn upsert_pod_without_pool_drops_entry() {
+        let kp = single_rank(5557);
         // A `None` pool (unresolved or deleted) means nothing is routable, so an
         // upsert must evict any existing entry rather than leave stale routing.
         let index = RwLock::new(WorkerIndex::new());
@@ -818,22 +774,17 @@ mod tests {
             &[("app", "vllm-qwen")],
         );
 
-        assert!(upsert_pod(
-            &index,
-            &ready,
-            Some(&pool()),
-            single_rank(5557),
-            None
-        ));
+        assert!(upsert_pod(&index, &ready, Some(&pool()), kp, None));
         assert!(index.read().unwrap().contains_key(&id));
 
-        assert!(upsert_pod(&index, &ready, None, single_rank(5557), None));
-        assert!(!upsert_pod(&index, &ready, None, single_rank(5557), None));
+        assert!(upsert_pod(&index, &ready, None, kp, None));
+        assert!(!upsert_pod(&index, &ready, None, kp, None));
         assert!(!index.read().unwrap().contains_key(&id));
     }
 
     #[test]
     fn pool_edit_during_relist_rebuilds_at_init_done_from_completed_store() {
+        let kp = single_rank(5557);
         use kube::runtime::watcher;
 
         let vllm_0 = pod(
@@ -857,13 +808,7 @@ mod tests {
         writer.apply_watcher_event(&watcher::Event::InitApply(vllm_1.clone()));
         writer.apply_watcher_event(&watcher::Event::InitDone);
         let index = RwLock::new(WorkerIndex::new());
-        assert!(rebuild_index(
-            &store,
-            Some(&pool()),
-            single_rank(5557),
-            None,
-            &index
-        ));
+        assert!(rebuild_index(&store, Some(&pool()), kp, None, &index));
         assert_eq!(index.read().unwrap().len(), 2);
 
         // During the next LIST, vllm-1 has disappeared. The reflector buffers
@@ -889,13 +834,7 @@ mod tests {
         // InitDone makes the staged list live. Its single rebuild uses both the
         // completed one-pod Store and the latest PoolState.
         writer.apply_watcher_event(&watcher::Event::InitDone);
-        assert!(rebuild_index(
-            &store,
-            Some(&updated_pool),
-            single_rank(5557),
-            None,
-            &index
-        ));
+        assert!(rebuild_index(&store, Some(&updated_pool), kp, None, &index));
         let index = index.read().unwrap();
         assert_eq!(index.len(), 1);
         assert_eq!(
@@ -912,6 +851,7 @@ mod tests {
 
     #[test]
     fn rebuild_index_drops_workers_absent_from_the_store() {
+        let kp = single_rank(5557);
         // A relist arrives as a fresh snapshot with no `Delete` events for pods
         // that disappeared during the disconnect, so the `InitDone`/pool-change
         // rebuild must *replace* the index, not merge into it — otherwise dead
@@ -927,7 +867,7 @@ mod tests {
                 &[("app", "vllm-qwen")],
             ),
             Some(&pool()),
-            single_rank(5557),
+            kp,
             None,
         );
         upsert_pod(
@@ -939,7 +879,7 @@ mod tests {
                 &[("app", "vllm-qwen")],
             ),
             Some(&pool()),
-            single_rank(5557),
+            kp,
             None,
         );
         assert_eq!(index.read().unwrap().len(), 2);
@@ -951,13 +891,7 @@ mod tests {
             Some(true),
             &[("app", "vllm-qwen")],
         )]);
-        assert!(rebuild_index(
-            &store,
-            Some(&pool()),
-            single_rank(5557),
-            None,
-            &index
-        ));
+        assert!(rebuild_index(&store, Some(&pool()), kp, None, &index));
 
         let index = index.read().unwrap();
         assert_eq!(index.len(), 1);

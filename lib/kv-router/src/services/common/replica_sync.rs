@@ -264,7 +264,6 @@ impl ScopedSequencePublisher {
         }
     }
 
-    /// Publish through an embedding host's outbound channel.
     pub(crate) fn host(outbound: mpsc::Sender<ActiveSequenceEvent>) -> Self {
         Self {
             replica: None,
@@ -273,7 +272,6 @@ impl ScopedSequencePublisher {
         }
     }
 
-    /// Forward scheduler load snapshots to `sink` in addition to replica sync.
     pub(crate) fn with_load_sink(mut self, sink: Option<Arc<dyn SchedulerLoadSink>>) -> Self {
         self.load_sink = sink;
         self
@@ -598,8 +596,6 @@ impl PeerManager {
         )
     }
 
-    /// Like [`Self::start`], also subscribing to session-affinity bindings
-    /// when `handle_affinity` is given.
     pub(crate) fn start_with_affinity<F, A>(
         initial_peers: Vec<String>,
         cancel_token: CancellationToken,

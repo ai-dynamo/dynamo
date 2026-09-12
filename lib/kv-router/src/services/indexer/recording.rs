@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Routing-decision recording: which physical index a booked routing decision
@@ -117,7 +117,6 @@ impl Indexer {
         })
     }
 
-    /// Whether booked routing decisions should be written into this indexer.
     pub fn records_routing_decisions(&self) -> bool {
         !matches!(self.recording_target(), RouteRecordingTarget::Disabled)
     }
@@ -162,9 +161,24 @@ impl Indexer {
         }
     }
 
-    /// Record a booked routing decision. Writes to the side indexer when one
-    /// is attached, else to an approximate primary, else is a no-op.
-    pub async fn record_routing_decision(
+    pub async fn record_hashed_routing_decision(
+        &self,
+        worker: WorkerWithDpRank,
+        local_hashes: Vec<LocalBlockHash>,
+        sequence_hashes: Vec<SequenceHash>,
+    ) -> Result<(), KvRouterError> {
+        self.recording_target()
+            .record_routing_hashes(
+                worker,
+                RoutingDecisionHashes {
+                    local_hashes,
+                    sequence_hashes,
+                },
+            )
+            .await
+    }
+
+    pub async fn record_routing_decision_hashes(
         &self,
         worker: WorkerWithDpRank,
         hashes: RoutingDecisionHashes,
@@ -172,22 +186,6 @@ impl Indexer {
         self.recording_target()
             .record_routing_hashes(worker, hashes)
             .await
-    }
-
-    pub async fn record_hashed_routing_decision(
-        &self,
-        worker: WorkerWithDpRank,
-        local_hashes: Vec<LocalBlockHash>,
-        sequence_hashes: Vec<SequenceHash>,
-    ) -> Result<(), KvRouterError> {
-        self.record_routing_decision(
-            worker,
-            RoutingDecisionHashes {
-                local_hashes,
-                sequence_hashes,
-            },
-        )
-        .await
     }
 
     pub async fn process_routing_decision_for_request(

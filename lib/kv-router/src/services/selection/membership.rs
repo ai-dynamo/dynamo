@@ -113,6 +113,7 @@ impl CatalogReconciler {
                         observer.removed(&record);
                     }
                 }
+                // A worker that was never registered is not an error (idempotent).
                 Err(SelectionError::NotFound(_)) => {}
                 Err(error) => return Err(error),
             }

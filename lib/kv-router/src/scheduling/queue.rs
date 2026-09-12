@@ -383,10 +383,6 @@ impl std::fmt::Debug for BookingHandle {
 }
 
 impl BookingHandle {
-    pub fn descriptor(&self) -> &SchedulerBookingDescriptor {
-        &self.booking
-    }
-
     /// Hand the booking to a longer-lived owner; the handle stops guarding it.
     #[must_use]
     pub fn commit(mut self) -> SchedulerBookingDescriptor {
