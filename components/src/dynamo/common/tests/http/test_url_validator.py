@@ -111,6 +111,48 @@ def test_is_blocked_ip_allows_public(ip: str) -> None:
     assert is_blocked_ip(ip) is False
 
 
+@pytest.mark.parametrize(
+    ("ip", "reaches"),
+    [
+        ("64:ff9b::a9fe:a9fe", "169.254.169.254"),
+        ("2002:a9fe:a9fe::", "169.254.169.254"),
+        ("2001:0:808:808:0:0:5601:5601", "169.254.169.254"),
+    ],
+)
+def test_is_blocked_ip_blocks_ipv4_smuggled_through_transition_formats(
+    ip: str, reaches: str
+) -> None:
+    """A blocked IPv4 must stay blocked when wrapped in a transition format.
+
+    NAT64 and 6to4 carry an IPv4 destination inside the IPv6 address, so an
+    IPv6-only cluster routes them to that IPv4. Matching only the IPv6 form
+    against the range list let the metadata and loopback addresses through.
+
+    One row per format, since the format is what this protects; blocklist
+    membership of each IPv4 is asserted directly in
+    `test_is_blocked_ip_ranges`. The Teredo client is stored bitwise negated,
+    so 5601:5601 is 169.254.169.254.
+    """
+    assert is_blocked_ip(reaches) is True, "fixture expects a blocked target"
+    assert is_blocked_ip(ip) is True
+
+
+@pytest.mark.parametrize(
+    "ip",
+    [
+        "64:ff9b::808:808",  # NAT64 to 8.8.8.8
+        "2002:808:808::",  # 6to4 to 8.8.8.8
+        "2001:0:808:808:0:0:f7f7:f7f7",  # Teredo, server and client both 8.8.8.8
+    ],
+)
+def test_is_blocked_ip_allows_transition_formats_reaching_public_ipv4(
+    ip: str,
+) -> None:
+    """An IPv6-only cluster reaches public IPv4 through NAT64, so do not
+    block the prefixes wholesale."""
+    assert is_blocked_ip(ip) is False
+
+
 def test_is_blocked_ip_non_ip_literal_returns_false() -> None:
     # A hostname, not an IP — is_blocked_ip only classifies literals.
     assert is_blocked_ip("example.com") is False
