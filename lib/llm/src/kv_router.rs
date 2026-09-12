@@ -399,25 +399,6 @@ pub enum FindBestMatchOutcome {
     },
 }
 
-/// For probes that return best-match routing decisions plus selected-worker
-/// scheduler-load snapshots, without admitting the request into scheduler state.
-/// `FindBestMatchInnerOutcome` keeps this advisory shape internal so admitted
-/// routing can keep using `FindBestMatchOutcome` unchanged.
-pub enum FindBestMatchAdvisoryOutcome {
-    Routed {
-        worker: WorkerWithDpRank,
-        overlap_blocks: u32,
-        effective_overlap_blocks: f64,
-        cached_tokens: usize,
-        potential_decode_blocks: u64,
-        selected_worker_load: scheduling::AdvisoryWorkerLoad,
-        routing_hashes: Option<RoutingDecisionHashes>,
-    },
-    QueueRejected {
-        rejection: scheduling::QueueRejection,
-    },
-}
-
 #[derive(Debug, Clone, Copy)]
 pub(super) enum FindBestMatchAdmission {
     WithAdmission,
@@ -431,6 +412,9 @@ pub(super) enum FindBestMatchAdmission {
 pub struct AdmittedFindBestMatchOutcome {
     pub(super) outcome: FindBestMatchOutcome,
     pub(super) booking: Option<BookingHandle>,
+    /// The selected worker's scheduler-load snapshot; set only by advisory
+    /// probes (`FindBestMatchAdmission::WithoutAdmission`), which never book.
+    pub(super) advisory_load: Option<scheduling::AdvisoryWorkerLoad>,
 }
 
 impl AdmittedFindBestMatchOutcome {
@@ -438,11 +422,6 @@ impl AdmittedFindBestMatchOutcome {
     pub fn into_parts(self) -> (FindBestMatchOutcome, Option<BookingHandle>) {
         (self.outcome, self.booking)
     }
-}
-
-pub(super) enum FindBestMatchInnerOutcome {
-    WithAdmission(AdmittedFindBestMatchOutcome),
-    WithoutAdmission(FindBestMatchAdvisoryOutcome),
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -533,7 +512,7 @@ pub fn router_endpoint_id(namespace: String, component: String) -> EndpointId {
 /// TODO: Rename this to indicate it only selects a worker, it does not route.
 pub struct KvRouter {
     indexer: Indexer,
-    scheduler: embedded::EmbeddedSelection,
+    selection: embedded::EmbeddedSelection,
     required_worker_inputs: dynamo_kv_router::selector::WorkerInputs,
     workers_with_configs: RuntimeConfigWatch,
     block_size: u32,
@@ -769,7 +748,7 @@ impl KvRouter {
         // the scheduler; its scheduler cleanup is set once the scheduler does.
         let request_leases =
             request_lease::RequestLeaseManager::new(cancellation_token.child_token());
-        let (scheduler, replica_ingress) = embedded::EmbeddedSelection::start(
+        let (selection, replica_ingress) = embedded::EmbeddedSelection::start(
             embedded::EmbeddedSelectionArgs {
                 kv_router_config: kv_router_config.clone(),
                 worker_role,
@@ -796,7 +775,7 @@ impl KvRouter {
             cancellation_token.child_token(),
         )
         .await?;
-        request_leases.set_scheduler(scheduler.booking_cleanup());
+        request_leases.set_scheduler(selection.scheduler().booking_cleanup());
         // Inbound lifecycle events start only now that their consumer can
         // release bookings.
         replica_ingress.start().await;
@@ -804,7 +783,7 @@ impl KvRouter {
         let cancellation_token = cancellation_guard.disarm();
         Ok(Self {
             indexer,
-            scheduler,
+            selection,
             required_worker_inputs,
             workers_with_configs,
             block_size,
@@ -1132,34 +1111,27 @@ impl KvRouter {
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
     ) -> anyhow::Result<AdmittedFindBestMatchOutcome> {
-        match self
-            .find_best_match_details_with_policy_class_inner(
-                context_id,
-                tokens,
-                block_mm_infos,
-                router_config_override,
-                update_states,
-                return_routing_hashes,
-                lora_name,
-                cache_namespace,
-                priority_jump,
-                strict_priority,
-                policy_class,
-                session_context,
-                expected_output_tokens,
-                None,
-                pinned_worker,
-                allowed_worker_ids,
-                routing_constraints,
-                FindBestMatchAdmission::WithAdmission,
-            )
-            .await?
-        {
-            FindBestMatchInnerOutcome::WithAdmission(admitted) => Ok(admitted),
-            FindBestMatchInnerOutcome::WithoutAdmission(_) => {
-                unreachable!("with-admission routing returned advisory outcome")
-            }
-        }
+        self.find_best_match_details_with_policy_class_inner(
+            context_id,
+            tokens,
+            block_mm_infos,
+            router_config_override,
+            update_states,
+            return_routing_hashes,
+            lora_name,
+            cache_namespace,
+            priority_jump,
+            strict_priority,
+            policy_class,
+            session_context,
+            expected_output_tokens,
+            None,
+            pinned_worker,
+            allowed_worker_ids,
+            routing_constraints,
+            FindBestMatchAdmission::WithAdmission,
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1183,7 +1155,7 @@ impl KvRouter {
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
         admission: FindBestMatchAdmission,
-    ) -> anyhow::Result<FindBestMatchInnerOutcome> {
+    ) -> anyhow::Result<AdmittedFindBestMatchOutcome> {
         let start = Instant::now();
         if update_states && context_id.is_none() {
             anyhow::bail!("context_id must be provided if update_states is true");
@@ -1204,9 +1176,9 @@ impl KvRouter {
             result: outcome,
             lookup,
         } = self
-            .scheduler
+            .selection
             .run_selection(SelectionOperation {
-                key: self.scheduler.partition_key().clone(),
+                key: self.selection.partition_key().clone(),
                 prompt: PromptView {
                     token_ids: Some(tokens),
                     mm_routing_info: None,
@@ -1243,18 +1215,10 @@ impl KvRouter {
         let selected = match outcome {
             Ok(SelectionOutcome::Selected(selected)) => selected,
             Ok(SelectionOutcome::QueueRejected { rejection }) => {
-                return Ok(match admission {
-                    FindBestMatchAdmission::WithAdmission => {
-                        FindBestMatchInnerOutcome::WithAdmission(AdmittedFindBestMatchOutcome {
-                            outcome: FindBestMatchOutcome::QueueRejected { rejection },
-                            booking: None,
-                        })
-                    }
-                    FindBestMatchAdmission::WithoutAdmission => {
-                        FindBestMatchInnerOutcome::WithoutAdmission(
-                            FindBestMatchAdvisoryOutcome::QueueRejected { rejection },
-                        )
-                    }
+                return Ok(AdmittedFindBestMatchOutcome {
+                    outcome: FindBestMatchOutcome::QueueRejected { rejection },
+                    booking: None,
+                    advisory_load: None,
                 });
             }
             Err(SelectionError::Scheduler(error)) => return Err(map_scheduler_error(error)),
@@ -1309,33 +1273,25 @@ impl KvRouter {
             }
         }
 
-        Ok(match admission {
-            FindBestMatchAdmission::WithAdmission => {
-                FindBestMatchInnerOutcome::WithAdmission(AdmittedFindBestMatchOutcome {
-                    outcome: FindBestMatchOutcome::Routed {
-                        worker: response.best_worker,
-                        overlap_blocks,
-                        effective_overlap_blocks: response.effective_overlap_blocks,
-                        cached_tokens: response.cached_tokens,
-                        potential_decode_blocks: response.potential_decode_blocks as u64,
-                        routing_hashes,
-                        kv_hint,
-                    },
-                    booking,
-                })
-            }
-            FindBestMatchAdmission::WithoutAdmission => {
-                FindBestMatchInnerOutcome::WithoutAdmission(FindBestMatchAdvisoryOutcome::Routed {
-                    worker: response.best_worker,
-                    overlap_blocks,
-                    effective_overlap_blocks: response.effective_overlap_blocks,
-                    cached_tokens: response.cached_tokens,
-                    potential_decode_blocks: response.potential_decode_blocks as u64,
-                    selected_worker_load: advisory_load
-                        .expect("without-admission selection returns advisory load"),
-                    routing_hashes,
-                })
-            }
+        // Advisory selections carry no booking or hint and always a load
+        // snapshot; admitted ones the reverse (`SelectionCore::select_or_reject`).
+        debug_assert_eq!(
+            advisory_load.is_some(),
+            !is_admitted_routing,
+            "advisory load is set exactly for without-admission selection"
+        );
+        Ok(AdmittedFindBestMatchOutcome {
+            outcome: FindBestMatchOutcome::Routed {
+                worker: response.best_worker,
+                overlap_blocks,
+                effective_overlap_blocks: response.effective_overlap_blocks,
+                cached_tokens: response.cached_tokens,
+                potential_decode_blocks: response.potential_decode_blocks as u64,
+                routing_hashes,
+                kv_hint,
+            },
+            booking,
+            advisory_load,
         })
     }
 
@@ -1385,7 +1341,11 @@ impl KvRouter {
             worker,
             lora_name,
         };
-        let admission = self.scheduler.add_request_admitted(sequence_request).await;
+        let admission = self
+            .selection
+            .scheduler()
+            .add_request_admitted(sequence_request)
+            .await;
         let attempt_id = match admission {
             Ok(attempt_id) => attempt_id,
             Err(error) => {
@@ -1406,7 +1366,10 @@ impl KvRouter {
     }
 
     pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {
-        self.scheduler.mark_prefill_completed(request_id).await?;
+        self.selection
+            .scheduler()
+            .mark_prefill_completed(request_id)
+            .await?;
         self.request_leases.touch_request(request_id);
         Ok(())
     }
@@ -1415,7 +1378,7 @@ impl KvRouter {
         if self.request_leases.finish_request(request_id).await {
             return Ok(());
         }
-        self.scheduler.free(request_id).await
+        self.selection.scheduler().free(request_id).await
     }
 
     pub(crate) fn affinity_coordinator(
@@ -1423,7 +1386,7 @@ impl KvRouter {
         ttl: std::time::Duration,
         mode: crate::session_affinity::SessionAffinityMode,
     ) -> anyhow::Result<crate::session_affinity::AffinityCoordinator> {
-        self.scheduler.affinity_coordinator(ttl, mode)
+        self.selection.affinity_coordinator(ttl, mode)
     }
 
     pub(crate) fn request_lease_manager(&self) -> &request_lease::RequestLeaseManager {
@@ -1434,7 +1397,8 @@ impl KvRouter {
         &self,
         booking: &SchedulerBookingDescriptor,
     ) -> Result<(), KvSchedulerError> {
-        self.scheduler
+        self.selection
+            .scheduler()
             .mark_prefill_completed_if_booking(booking)
             .await
             .map(|_| ())
@@ -1442,12 +1406,12 @@ impl KvRouter {
 
     /// Number of requests currently parked in the scheduler queue.
     pub fn pending_count(&self) -> usize {
-        self.scheduler.pending_count()
+        self.selection.scheduler().pending_count()
     }
 
     /// Sum of ISL tokens for requests currently parked in the scheduler queue.
     pub fn pending_isl_tokens(&self) -> usize {
-        self.scheduler.pending_isl_tokens()
+        self.selection.scheduler().pending_isl_tokens()
     }
 
     fn prefill_load_hint_for(
@@ -1490,7 +1454,7 @@ impl KvRouter {
     /// Get the worker type for this router ("prefill" or "decode").
     /// Used for Prometheus metric labeling.
     pub fn worker_type(&self) -> &'static str {
-        self.scheduler.worker_type()
+        self.selection.worker_type()
     }
 
     /// Return the worker's unique global DP rank when it owns exactly one rank.
@@ -1505,7 +1469,8 @@ impl KvRouter {
         booking: &SchedulerBookingDescriptor,
         decay_fraction: Option<f64>,
     ) -> Result<(), KvSchedulerError> {
-        self.scheduler
+        self.selection
+            .scheduler()
             .enqueue_output_block_if_booking(booking, decay_fraction)
             .await
     }
@@ -1589,7 +1554,7 @@ impl KvRouter {
 
         let effective_cached_tokens: HashMap<WorkerWithDpRank, usize> =
             cache_hit_estimates.cached_tokens.into_iter().collect();
-        Ok(self.scheduler.get_potential_loads(
+        Ok(self.selection.scheduler().get_potential_loads(
             maybe_seq_hashes,
             isl_tokens,
             effective_cached_tokens,
@@ -2357,7 +2322,7 @@ mod tests {
         let mut trace = Vec::new();
         for (index, tokens) in golden_corpus().iter().enumerate() {
             let context_id = format!("golden-{index}");
-            let FindBestMatchInnerOutcome::WithAdmission(admitted) = router
+            let admitted = router
                 .find_best_match_details_with_policy_class_inner(
                     Some(&context_id),
                     tokens,
@@ -2379,10 +2344,7 @@ mod tests {
                     FindBestMatchAdmission::WithAdmission,
                 )
                 .await
-                .unwrap()
-            else {
-                panic!("admitted routing returned advisory outcome");
-            };
+                .unwrap();
             let FindBestMatchOutcome::Routed { routing_hashes, .. } = &admitted.outcome else {
                 panic!("golden corpus must route");
             };
@@ -2420,7 +2382,7 @@ mod tests {
 
         let router = tracked_router("lease-manager").await;
         let worker = WorkerWithDpRank::from_worker_id(1);
-        let scheduler = &router.scheduler;
+        let scheduler = router.selection.scheduler();
         let book = |request_id: &'static str| async move {
             let attempt_id = scheduler
                 .add_request_admitted(SequenceRequest {
@@ -2446,15 +2408,15 @@ mod tests {
         let before = manager.register_local(book("before").await, None);
         drop(before);
         assert!(
-            router.scheduler.has_request("before"),
+            router.selection.scheduler().has_request("before"),
             "no scheduler to release through yet"
         );
 
-        manager.set_scheduler(router.scheduler.booking_cleanup());
+        manager.set_scheduler(router.selection.scheduler().booking_cleanup());
         let after = manager.register_local(book("after").await, None);
         after.finish().await;
-        assert!(!router.scheduler.has_request("after"));
-        assert!(router.scheduler.has_request("before"));
+        assert!(!router.selection.scheduler().has_request("after"));
+        assert!(router.selection.scheduler().has_request("before"));
         cancel.cancel();
     }
 
@@ -2531,9 +2493,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let FindBestMatchInnerOutcome::WithAdmission(admitted) = outcome else {
-            panic!("admitted routing returned advisory outcome");
-        };
+        let admitted = outcome;
         let booking = admitted
             .booking
             .expect("tracked selection carries its booking handle");
@@ -2547,10 +2507,10 @@ mod tests {
             record.entered.load(Ordering::Acquire),
             "routing update is in flight"
         );
-        assert!(router.scheduler.has_request("cancelled"));
+        assert!(router.selection.scheduler().has_request("cancelled"));
         drop(enroll);
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            while router.scheduler.has_request("cancelled") {
+            while router.selection.scheduler().has_request("cancelled") {
                 tokio::task::yield_now().await;
             }
         })

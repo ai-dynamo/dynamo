@@ -200,7 +200,7 @@ impl WorkerCatalogRecord {
         self.data_parallel_size.unwrap_or(1)
     }
 
-    pub(super) fn dp_ranks(&self) -> impl Iterator<Item = u32> {
+    pub fn dp_ranks(&self) -> impl Iterator<Item = u32> {
         let start = self.dp_start();
         let size = self.dp_size();
         start..start.saturating_add(size)

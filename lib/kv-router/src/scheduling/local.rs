@@ -301,8 +301,7 @@ where
     /// Schedule a request and return an armed handle for its booking: dropping
     /// the handle frees the booking, `commit` hands it to a longer-lived owner.
     /// The handle is `None` unless the mode is `TrackedWithLifecycle`.
-    #[doc(hidden)]
-    pub async fn schedule_request_with_booking(
+    pub(crate) async fn schedule_request_with_booking(
         &self,
         request: ScheduleRequest,
     ) -> Result<(AdmittedSchedulingResponse, Option<BookingHandle>), KvSchedulerError> {

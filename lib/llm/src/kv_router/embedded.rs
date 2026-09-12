@@ -9,7 +9,6 @@
 //! frontend retains transport, stream leases, and request-expiry ownership.
 
 use std::collections::HashMap;
-use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -18,24 +17,19 @@ use dynamo_kv_router::WorkerType;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::identity::RoutingPartitionId;
 use dynamo_kv_router::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
-use dynamo_kv_router::scheduling::queue::{
-    ClassQueueStats, DEFAULT_MAX_BATCHED_TOKENS, SchedulerBookingCleanup,
-    SchedulerBookingDescriptor,
-};
+use dynamo_kv_router::scheduling::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::scheduling::{
-    AttemptId, KvSchedulerError, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider,
-    PotentialLoad, QueueLimitKind, QueueRejection, WorkerAvailabilityProvider,
+    NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, QueueLimitKind, QueueRejection,
+    WorkerAvailabilityProvider,
 };
-use dynamo_kv_router::sequences::{SequenceError, SequenceRequest};
 use dynamo_kv_router::services::selection::{
     CatalogObserver, CatalogReconciler, DEFAULT_MODEL_NAME, HostCache, HostEligibility, HostLoad,
     HostReplication, HostTelemetry, KvEventIngress, KvIndexSource, SelectionHost,
-    SelectionOperation, SelectionOutcome, SelectionPartition, SelectionRun, SelectionService,
-    SelectionServiceBuilder, WorkerCatalogRecord, WorkerCatalogSource, WorkerRequest,
-    WorkerSelectionPolicyRegistry,
+    SelectionOperation, SelectionOutcome, SelectionPartition, SelectionRun, SelectionScheduler,
+    SelectionService, SelectionServiceBuilder, WorkerCatalogRecord, WorkerCatalogSource,
+    WorkerRequest, WorkerSelectionPolicyRegistry,
 };
 use dynamo_kv_router::{DEFAULT_ROUTING_GROUP, PrefillLoadEstimator, WorkerSelectionPolicyFactory};
-use dynamo_tokens::SequenceHash;
 use tokio_util::sync::CancellationToken;
 
 use crate::discovery::RuntimeConfigWatch;
@@ -91,12 +85,9 @@ fn record_queue_rejection(
     }
 }
 
-fn update_queue_metrics(
-    per_class: &[RouterQueueMetricHandles],
-    mut stats_for: impl FnMut(usize) -> Option<ClassQueueStats>,
-) {
+fn update_queue_metrics(per_class: &[RouterQueueMetricHandles], scheduler: &SelectionScheduler) {
     for (class_index, handles) in per_class.iter().enumerate() {
-        let Some(stats) = stats_for(class_index) else {
+        let Some(stats) = scheduler.class_queue_stats(class_index) else {
             debug_assert!(
                 false,
                 "missing queue counters for policy class {class_index}"
@@ -124,9 +115,7 @@ fn spawn_queue_metrics_updater(
         let period = Duration::from_secs(60);
         let mut recheck = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
         loop {
-            update_queue_metrics(&handles, |index| {
-                partition.scheduler().class_queue_stats(index)
-            });
+            update_queue_metrics(&handles, partition.scheduler());
             tokio::select! {
                 _ = cancellation_token.cancelled() => break,
                 changed = queue_updates.changed() => {
@@ -175,20 +164,6 @@ pub(crate) struct EmbeddedSelection {
     queue_metric_indices: HashMap<String, usize>,
 }
 
-/// The partition's inbound replica ingress, not yet running. The caller starts
-/// it only after the lease manager it passed as `request_leases` has its
-/// scheduler set, so no lifecycle event reaches the manager before it can
-/// release the booking.
-pub(crate) struct PendingReplicaIngress {
-    ingress: crate::kv_router::sequence::ReplicaIngress,
-}
-
-impl PendingReplicaIngress {
-    pub(crate) async fn start(self) {
-        self.ingress.start().await;
-    }
-}
-
 static INSTALLED_POLICY_REGISTRY: OnceLock<WorkerSelectionPolicyRegistry> = OnceLock::new();
 
 /// Install the process-wide worker-selection policy registry (linked custom
@@ -232,12 +207,16 @@ impl dynamo_kv_router::services::selection::SchedulerLoadSink for SenderLoadSink
 }
 
 impl EmbeddedSelection {
+    /// Returns the partition's inbound replica ingress, not yet running. The
+    /// caller starts it only after the lease manager it passed as
+    /// `request_leases` has its scheduler set, so no lifecycle event reaches
+    /// the manager before it can release the booking.
     pub(crate) async fn start(
         args: EmbeddedSelectionArgs,
         workers_with_configs: RuntimeConfigWatch,
         request_leases: Option<Arc<dyn dynamo_kv_router::sequences::ReplicaRequestLeaseObserver>>,
         cancellation_token: CancellationToken,
-    ) -> Result<(Self, PendingReplicaIngress)> {
+    ) -> Result<(Self, crate::kv_router::sequence::ReplicaIngress)> {
         let worker_type = args.worker_role.unwrap_or(WorkerType::Aggregated);
         let key = RoutingPartitionId::new(
             args.model_name
@@ -301,6 +280,7 @@ impl EmbeddedSelection {
         .context("failed to start embedded selection service")?;
         let service = Arc::new(service);
         let partition = service
+            .core()
             .ensure_partition(key.clone(), args.block_size, args.is_eagle)
             .context("failed to create embedded selection partition")?;
 
@@ -373,9 +353,7 @@ impl EmbeddedSelection {
                 queue_metrics,
                 queue_metric_indices,
             },
-            PendingReplicaIngress {
-                ingress: replica_ingress,
-            },
+            replica_ingress,
         ))
     }
 
@@ -383,9 +361,7 @@ impl EmbeddedSelection {
         if let Some(rejection) = rejection {
             record_queue_rejection(&self.queue_metrics, &self.queue_metric_indices, rejection);
         }
-        update_queue_metrics(&self.queue_metrics, |index| {
-            self.partition.scheduler().class_queue_stats(index)
-        });
+        update_queue_metrics(&self.queue_metrics, self.partition.scheduler());
     }
 
     pub(crate) fn affinity_coordinator(
@@ -418,83 +394,13 @@ impl EmbeddedSelection {
         run
     }
 
-    pub(crate) async fn add_request_admitted(
-        &self,
-        req: SequenceRequest,
-    ) -> Result<AttemptId, SequenceError> {
-        self.partition.scheduler().add_request_admitted(req).await
-    }
-
-    pub(crate) async fn mark_prefill_completed(
-        &self,
-        request_id: &str,
-    ) -> Result<(), SequenceError> {
-        self.partition
-            .scheduler()
-            .mark_prefill_completed(request_id)
-            .await
-    }
-
-    pub(crate) async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
-        self.partition.scheduler().free(request_id).await
-    }
-
-    pub(crate) fn booking_cleanup(&self) -> SchedulerBookingCleanup {
-        self.partition.scheduler().booking_cleanup()
-    }
-
-    pub(crate) async fn mark_prefill_completed_if_booking(
-        &self,
-        booking: &SchedulerBookingDescriptor,
-    ) -> Result<(), KvSchedulerError> {
-        self.partition
-            .scheduler()
-            .mark_prefill_completed_if_booking(booking)
-            .await
-            .map(|_| ())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn has_request(&self, request_id: &str) -> bool {
-        self.partition.scheduler().has_request(request_id)
-    }
-
-    pub(crate) fn pending_count(&self) -> usize {
-        self.partition.scheduler().pending_count()
-    }
-
-    pub(crate) fn pending_isl_tokens(&self) -> usize {
-        self.partition.scheduler().pending_isl_tokens()
-    }
-
     pub(crate) fn worker_type(&self) -> &'static str {
         self.worker_type
     }
 
-    pub(crate) async fn enqueue_output_block_if_booking(
-        &self,
-        booking: &SchedulerBookingDescriptor,
-        decay_fraction: Option<f64>,
-    ) -> Result<(), KvSchedulerError> {
-        self.partition
-            .scheduler()
-            .enqueue_output_block_if_booking(booking, decay_fraction)
-            .await
-    }
-
-    pub(crate) fn get_potential_loads(
-        &self,
-        token_seq: Option<Vec<SequenceHash>>,
-        isl_tokens: usize,
-        effective_cached_tokens: HashMap<WorkerWithDpRank, usize>,
-        track_prefill_tokens: bool,
-    ) -> Vec<PotentialLoad> {
-        self.partition.scheduler().get_potential_loads(
-            token_seq,
-            isl_tokens,
-            effective_cached_tokens,
-            track_prefill_tokens,
-        )
+    /// The partition's scheduler, for bookings and load queries.
+    pub(crate) fn scheduler(&self) -> &SelectionScheduler {
+        self.partition.scheduler()
     }
 }
 
@@ -538,21 +444,16 @@ struct RegisteredGauge {
     worker_label: &'static str,
 }
 
-fn dp_ranks(record: &WorkerCatalogRecord) -> Range<u32> {
-    let start = record.data_parallel_start_rank.unwrap_or(0);
-    start..start.saturating_add(record.data_parallel_size.unwrap_or(1))
-}
-
 impl CatalogObserver for RegisteredGauge {
     fn upserted(&self, record: &WorkerCatalogRecord) {
-        for dp_rank in dp_ranks(record) {
+        for dp_rank in record.dp_ranks() {
             self.metrics
                 .set_registered(record.worker_id, dp_rank, self.worker_label);
         }
     }
 
     fn removed(&self, record: &WorkerCatalogRecord) {
-        for dp_rank in dp_ranks(record) {
+        for dp_rank in record.dp_ranks() {
             self.metrics
                 .remove_worker(record.worker_id, dp_rank, self.worker_label);
         }
@@ -586,9 +487,6 @@ pub(crate) fn worker_request_from_runtime_config(
         model_name: key.model_name.clone(),
         routing_group: key.routing_group.clone(),
         endpoint: Some(format!("dyn://{worker_id}")),
-        kv_events_endpoint: None,
-        kv_events_endpoints: HashMap::new(),
-        replay_endpoint: None,
         block_size: Some(block_size),
         data_parallel_start_rank: Some(dp_start),
         data_parallel_size: Some(dp_size),
@@ -610,6 +508,7 @@ pub(crate) fn worker_request_from_runtime_config(
         router_hint_worker_type,
         router_hint_source_control_endpoints,
         kv_event_source_mode: config.kv_event_source_mode.clone(),
+        ..WorkerRequest::default()
     }
 }
 

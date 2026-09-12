@@ -6,6 +6,7 @@
 
 use super::reservations::{ReservationIndexObserver, spawn_reservation_index_sweep};
 use super::*;
+use crate::services::selection::ingress::remove_worker_from_index;
 
 impl SelectionCore {
     pub async fn upsert_worker(
@@ -331,15 +332,7 @@ impl SelectionCore {
             ingress.detach(&self.indexer_registry, record).await;
             return;
         }
-
-        let key = record.key();
-        let indexer = self
-            .indexer_registry
-            .get_indexer(&key)
-            .map(|entry| entry.indexer.clone());
-        if let Some(indexer) = indexer {
-            indexer.remove_worker(record.worker_id).await;
-        }
+        remove_worker_from_index(&self.indexer_registry, record).await;
     }
 
     pub(super) fn publish_scheduler_config(

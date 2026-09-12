@@ -13,7 +13,7 @@ use crate::protocols::{RoutingConstraints, StorageTier};
 use crate::services::common::replica_sync::HostReplicaChannels;
 use crate::services::indexer::backend::test_util::store_event;
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -2417,51 +2417,6 @@ async fn rejoined_worker_feeds_partition_index() {
         );
     }
 }
-#[tokio::test]
-async fn metadata_update_preserves_live_booking() {
-    struct SuspendedDetach(tokio::sync::Notify);
-    #[async_trait::async_trait]
-    impl KvEventIngress for SuspendedDetach {
-        fn open(
-            &self,
-            registry: &WorkerRegistry,
-            key: &RoutingPartitionId,
-            block_size: u32,
-        ) -> Indexer {
-            registry.get_or_create_indexer(key.clone(), block_size)
-        }
-        async fn detach(&self, _registry: &WorkerRegistry, _record: &WorkerCatalogRecord) {
-            self.0.notify_one();
-            std::future::pending().await
-        }
-    }
-    let ingress = Arc::new(SuspendedDetach(tokio::sync::Notify::new()));
-    let core = core_with_host(SelectionHost {
-        cache: HostCache {
-            index: KvIndexSource::Owned(ingress.clone()),
-            shared: None,
-        },
-        ..SelectionHost::default()
-    });
-    core.upsert_worker(worker(1)).await.unwrap();
-    core.select_and_reserve(reserve_request("live"))
-        .await
-        .unwrap();
-    let entry = core
-        .entry(&RoutingPartitionId::new("model", "default"))
-        .unwrap();
-    let mut updated = worker(1);
-    updated.max_num_batched_tokens = Some(2048);
-    tokio::select! {
-        result = core.upsert_worker(updated) => { result.unwrap(); },
-        _ = ingress.0.notified() => {
-            // A capacity update must not temporarily withdraw this worker.
-            panic!("capacity update detached the worker");
-        }
-    }
-    assert!(entry.scheduler.has_request("live"));
-    core.free_reservation("live").await.unwrap();
-}
 
 #[tokio::test(start_paused = true)]
 async fn host_lease_manager_owns_expiry() {
@@ -2504,6 +2459,7 @@ async fn catalog_updates_commit_in_order_without_exposing_candidates() {
     struct PausedUpdate {
         entered: tokio::sync::Notify,
         release: tokio::sync::Notify,
+        detaches: AtomicUsize,
     }
     #[async_trait::async_trait]
     impl KvEventIngress for PausedUpdate {
@@ -2527,10 +2483,14 @@ async fn catalog_updates_commit_in_order_without_exposing_candidates() {
             }
             Ok(())
         }
+        async fn detach(&self, _: &WorkerRegistry, _: &WorkerCatalogRecord) {
+            self.detaches.fetch_add(1, Ordering::SeqCst);
+        }
     }
     let ingress = Arc::new(PausedUpdate {
         entered: tokio::sync::Notify::new(),
         release: tokio::sync::Notify::new(),
+        detaches: AtomicUsize::new(0),
     });
     let mut core = core_with_host(SelectionHost {
         cache: HostCache {
@@ -2568,10 +2528,22 @@ async fn catalog_updates_commit_in_order_without_exposing_candidates() {
     );
     ingress.release.notify_one();
     assert_eq!(update.await.unwrap().max_num_batched_tokens, Some(2048));
+    // A capacity update must not temporarily withdraw this worker; only the
+    // pending deletion detaches it.
+    assert_eq!(
+        ingress.detaches.load(Ordering::SeqCst),
+        0,
+        "capacity update detached the worker"
+    );
     assert!(entry.scheduler.has_request("live"));
     assert_eq!(
         deletion.await.unwrap().lifecycle,
         WorkerLifecycle::Unschedulable
+    );
+    assert_eq!(
+        ingress.detaches.load(Ordering::SeqCst),
+        1,
+        "deletion detaches the worker"
     );
     tokio::time::timeout(Duration::from_secs(1), async {
         while entry.scheduler.has_request("live") {

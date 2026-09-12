@@ -8,7 +8,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::WorkerSelectionPolicyFactory;
 use crate::config::KvRouterConfig;
-use crate::identity::RoutingPartitionId;
 use crate::protocols::WorkerId;
 use crate::scheduling::PotentialLoad;
 use crate::services::common::replica_sync::{
@@ -18,9 +17,7 @@ use crate::services::indexer::backend::IndexerPolicy;
 use crate::tracking_hash::TrackingHashContext;
 
 use super::affinity::SessionAffinityConfig;
-use super::core::{
-    KvIndexSource, SelectionCore, SelectionHost, SelectionPartition, SelectionServiceConfig,
-};
+use super::core::{KvIndexSource, SelectionCore, SelectionHost, SelectionServiceConfig};
 use super::error::SelectionError;
 use super::pending::SelectionCacheConfig;
 use super::policy_registry::WorkerSelectionPolicyRegistry;
@@ -337,16 +334,6 @@ impl SelectionService {
     /// The core this service wraps, for hosts that drive its catalog directly.
     pub fn core(&self) -> &Arc<SelectionCore> {
         &self.core
-    }
-
-    /// Create (or fetch) the partition for `key` ahead of worker registration.
-    pub fn ensure_partition(
-        &self,
-        key: RoutingPartitionId,
-        block_size: u32,
-        is_eagle: bool,
-    ) -> Result<SelectionPartition, SelectionError> {
-        self.core.ensure_partition(key, block_size, is_eagle)
     }
 
     /// The port this service uses for replica synchronization, if enabled.

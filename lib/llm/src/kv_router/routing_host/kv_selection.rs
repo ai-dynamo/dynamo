@@ -15,10 +15,7 @@ use dynamo_kv_router::{
 use dynamo_runtime::{dynamo_nvtx_range, pipeline::Error};
 
 use crate::{
-    kv_router::{
-        FindBestMatchAdmission, FindBestMatchInnerOutcome, FindBestMatchOutcome,
-        routing_host::RoutingHost,
-    },
+    kv_router::{FindBestMatchAdmission, FindBestMatchOutcome, routing_host::RoutingHost},
     preprocessor::PreprocessedRequest,
     protocols::{
         TokenIdType,
@@ -103,7 +100,7 @@ struct BestMatchArgs<'a> {
 
 impl RoutingHost {
     async fn select_best_match(&self, args: BestMatchArgs<'_>) -> Result<SelectionOutcome, Error> {
-        let outcome = self
+        let admitted = self
             .kv_router()
             .find_best_match_details_with_policy_class_inner(
                 Some(args.context_id),
@@ -126,55 +123,29 @@ impl RoutingHost {
                 args.admission,
             )
             .await?;
-        match outcome {
-            FindBestMatchInnerOutcome::WithAdmission(admitted) => match admitted.outcome {
-                FindBestMatchOutcome::Routed {
-                    worker,
-                    overlap_blocks,
-                    effective_overlap_blocks,
-                    cached_tokens,
-                    potential_decode_blocks,
-                    routing_hashes,
-                    kv_hint,
-                } => Ok(SelectionOutcome::Routed(WorkerSelection {
-                    worker,
-                    booking: admitted.booking,
-                    overlap_amount: overlap_blocks,
-                    effective_overlap_blocks,
-                    cached_tokens,
-                    potential_decode_blocks,
-                    selected_worker_load: None,
-                    routing_hashes,
-                    kv_hint,
-                })),
-                FindBestMatchOutcome::QueueRejected { rejection } => {
-                    Ok(SelectionOutcome::QueueRejected(rejection))
-                }
-            },
-            FindBestMatchInnerOutcome::WithoutAdmission(outcome) => match outcome {
-                crate::kv_router::FindBestMatchAdvisoryOutcome::Routed {
-                    worker,
-                    overlap_blocks,
-                    effective_overlap_blocks,
-                    cached_tokens,
-                    potential_decode_blocks,
-                    selected_worker_load,
-                    routing_hashes,
-                } => Ok(SelectionOutcome::Routed(WorkerSelection {
-                    worker,
-                    booking: None,
-                    overlap_amount: overlap_blocks,
-                    effective_overlap_blocks,
-                    cached_tokens,
-                    potential_decode_blocks,
-                    selected_worker_load: Some(selected_worker_load),
-                    routing_hashes,
-                    kv_hint: None,
-                })),
-                crate::kv_router::FindBestMatchAdvisoryOutcome::QueueRejected { rejection } => {
-                    Ok(SelectionOutcome::QueueRejected(rejection))
-                }
-            },
+        match admitted.outcome {
+            FindBestMatchOutcome::Routed {
+                worker,
+                overlap_blocks,
+                effective_overlap_blocks,
+                cached_tokens,
+                potential_decode_blocks,
+                routing_hashes,
+                kv_hint,
+            } => Ok(SelectionOutcome::Routed(WorkerSelection {
+                worker,
+                booking: admitted.booking,
+                overlap_amount: overlap_blocks,
+                effective_overlap_blocks,
+                cached_tokens,
+                potential_decode_blocks,
+                selected_worker_load: admitted.advisory_load,
+                routing_hashes,
+                kv_hint,
+            })),
+            FindBestMatchOutcome::QueueRejected { rejection } => {
+                Ok(SelectionOutcome::QueueRejected(rejection))
+            }
         }
     }
 
