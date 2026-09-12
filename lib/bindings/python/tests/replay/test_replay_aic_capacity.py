@@ -99,7 +99,7 @@ def test_load_engine_args_materializes_unset_aic_blocks(monkeypatch):
             "gpu_memory_utilization": 0.8,
             "mem_fraction_static": None,
             "free_gpu_memory_fraction": None,
-            "backend_version": None,
+            "backend_version": "current",
             "pp_size": 1,
             "moe_tp_size": None,
             "moe_ep_size": None,

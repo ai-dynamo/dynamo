@@ -461,7 +461,9 @@ struct MockEngineArgsSerde {
     enable_local_indexer: OptionalConfigValue<bool>,
     bootstrap_port: OptionalConfigValue<u16>,
     handoff_session_timeout_ms: OptionalConfigValue<u64>,
+    #[serde(alias = "kv_transfer_bytes_per_token")]
     kv_bytes_per_token: OptionalConfigValue<usize>,
+    kv_cache_bytes_per_token: OptionalConfigValue<usize>,
     kv_transfer_bandwidth: OptionalConfigValue<f64>,
     kv_transfer_timing_mode: OptionalConfigValue<String>,
     reasoning: OptionalConfigValue<ReasoningConfig>,
@@ -703,10 +705,15 @@ pub struct MockEngineArgs {
     #[validate(range(min = 1))]
     pub handoff_session_timeout_ms: u64,
 
-    /// KV cache bytes per token, auto-computed from model config by Python CLI.
+    /// Bytes transferred per token, auto-computed from model config by Python CLI.
     /// Formula: num_layers * 2 * num_kv_heads * head_dim * dtype_bytes
     #[builder(default = "None")]
     pub kv_bytes_per_token: Option<usize>,
+
+    /// Physical KV-cache bytes occupied by one token, independent of transfer geometry.
+    #[builder(default = "None")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kv_cache_bytes_per_token: Option<usize>,
 
     /// KV cache transfer bandwidth in GB/s for disaggregated serving latency simulation.
     /// Default: 64.0 (inter-node InfiniBand). Set to 0 to disable KV transfer delay.
@@ -1046,6 +1053,9 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         }
         if let Some(kv_bytes_per_token) = compat.kv_bytes_per_token.into_nullable() {
             builder = builder.kv_bytes_per_token(kv_bytes_per_token);
+        }
+        if let Some(kv_cache_bytes_per_token) = compat.kv_cache_bytes_per_token.into_nullable() {
+            builder = builder.kv_cache_bytes_per_token(kv_cache_bytes_per_token);
         }
         if let Some(kv_transfer_bandwidth) = compat.kv_transfer_bandwidth.into_nullable() {
             builder = builder.kv_transfer_bandwidth(kv_transfer_bandwidth);

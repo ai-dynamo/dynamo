@@ -154,6 +154,7 @@ pub(crate) struct WorkerAdmission {
     uuid: Uuid,
     worker_idx: usize,
     overlap_blocks: u32,
+    best_available_overlap_blocks: u32,
     isl_blocks: u32,
 }
 
@@ -169,6 +170,7 @@ pub(crate) struct RouterEffects {
 struct AdmitOutcome {
     worker_idx: usize,
     overlap_blocks: u32,
+    best_available_overlap_blocks: u32,
     isl_blocks: u32,
 }
 
@@ -368,10 +370,12 @@ impl KvRouterPlacement {
         Placement {
             request_id: admission.uuid,
             scheduler_id: admission.worker_idx,
+            placement_replica_id: None,
             reported_overlap_tokens: admission.overlap_blocks as usize
                 * self.router.block_size as usize,
             cache_sample: Some(PlacementCacheSample {
                 overlap_blocks: admission.overlap_blocks,
+                best_available_overlap_blocks: admission.best_available_overlap_blocks,
                 isl_blocks: admission.isl_blocks,
             }),
         }
@@ -662,6 +666,7 @@ impl OfflineReplayRouter {
                 uuid,
                 worker_idx: outcome.worker_idx,
                 overlap_blocks: outcome.overlap_blocks,
+                best_available_overlap_blocks: outcome.best_available_overlap_blocks,
                 isl_blocks: outcome.isl_blocks,
             }],
         })
@@ -927,6 +932,19 @@ impl OfflineReplayRouter {
             .project_worker_loads(request.token_seq.as_deref(), decay_now);
         let scheduling_request = request.scheduling_request(self.block_size as usize, worker_loads);
         let eligibility = scheduling_request.eligibility();
+        let best_available_overlap_blocks = request
+            .overlaps
+            .scores
+            .iter()
+            .filter(|(worker, _)| {
+                self.workers_with_configs
+                    .get(&worker.worker_id)
+                    .is_some_and(|config| eligibility.allows_worker(worker.worker_id, config))
+                    && worker.dp_rank < self.dp_size
+            })
+            .map(|(_, overlap)| *overlap)
+            .max()
+            .unwrap_or(0);
         let selection = self
             .selector
             .select_worker(WorkerSelectionInput::configured(
@@ -972,6 +990,7 @@ impl OfflineReplayRouter {
         Ok(AdmitOutcome {
             worker_idx,
             overlap_blocks,
+            best_available_overlap_blocks,
             isl_blocks,
         })
     }
@@ -993,6 +1012,7 @@ impl OfflineReplayRouter {
                 uuid,
                 worker_idx: outcome.worker_idx,
                 overlap_blocks: outcome.overlap_blocks,
+                best_available_overlap_blocks: outcome.best_available_overlap_blocks,
                 isl_blocks: outcome.isl_blocks,
             });
         }
@@ -1419,6 +1439,7 @@ mod tests {
                 uuid: Uuid::from_u128(1),
                 worker_idx: 1,
                 overlap_blocks: 1,
+                best_available_overlap_blocks: 1,
                 isl_blocks: 1,
             }]
         );
@@ -1804,9 +1825,35 @@ policy_classes:
                 uuid: Uuid::from_u128(1),
                 worker_idx: 3,
                 overlap_blocks: 0,
+                best_available_overlap_blocks: 0,
                 isl_blocks: 1,
             }]
         );
+    }
+
+    #[test]
+    fn cache_telemetry_excludes_removed_workers() {
+        let mut router =
+            OfflineReplayRouter::new(&replay_args(), Some(router_config()), None, 2).unwrap();
+        let target = request(1, 7);
+        let hashes = ReplayRequestHashes::from_tokens(&target.tokens, router.block_size);
+        router
+            .on_kv_events(vec![store_event(
+                1,
+                1,
+                hashes.local_block_hashes[0],
+                StorageTier::Device,
+            )])
+            .unwrap();
+        router.remove_worker(1).unwrap();
+
+        let effects = router
+            .on_request_arrival(&target, Some(hashes), 0.0)
+            .unwrap();
+        assert_eq!(effects.admissions.len(), 1);
+        assert_eq!(effects.admissions[0].worker_idx, 0);
+        assert_eq!(effects.admissions[0].overlap_blocks, 0);
+        assert_eq!(effects.admissions[0].best_available_overlap_blocks, 0);
     }
 
     #[test]
@@ -1901,6 +1948,7 @@ policy_classes:
                 uuid: Uuid::from_u128(2),
                 worker_idx: 1,
                 overlap_blocks: 0,
+                best_available_overlap_blocks: 0,
                 isl_blocks: 1,
             }]
         );

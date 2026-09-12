@@ -31,7 +31,7 @@ def test_rapid_task_v2_build_and_execute_contract() -> None:
         total_gpus=2,
         system="h200_sxm",
         backend="vllm",
-        backend_version="0.19.0",
+        backend_version="0.24.0",
         isl=128,
         osl=8,
         ttft=100_000.0,
