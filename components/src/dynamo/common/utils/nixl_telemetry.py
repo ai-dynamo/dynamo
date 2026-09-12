@@ -89,7 +89,10 @@ def configured_nixl_uint16(
     if not digits or any(character not in valid_digits for character in digits):
         return None
 
-    value = int(digits, base)
+    try:
+        value = int(digits, base)
+    except ValueError:
+        return None
     return value if 0 < value <= MAX_PORT else None
 
 
