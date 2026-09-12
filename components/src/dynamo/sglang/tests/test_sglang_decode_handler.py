@@ -63,7 +63,9 @@ async def test_cancellation_monitor_rechecks_shutdown_after_cleanup():
     handler._handle_cancellation = set_shutdown_when_cancelled
     request_id_future = asyncio.get_running_loop().create_future()
     request_id_future.set_result("sglang-request-id")
-    context = SimpleNamespace(id=lambda: "request-id")
+    context = SimpleNamespace(
+        id=lambda: "request-id", trace_id=None, is_stopped=lambda: False
+    )
 
     with pytest.raises(EngineShutdown, match="shut down during token generation"):
         async with handler._cancellation_monitor(request_id_future, context):
@@ -268,7 +270,9 @@ async def test_shutdown_abort_chunk_raises_engine_shutdown(processor_name):
     handler = _new_decode_handler()
     handler.shutdown_event = asyncio.Event()
     handler.shutdown_event.set()
-    context = SimpleNamespace(id=lambda: "request-id")
+    context = SimpleNamespace(
+        id=lambda: "request-id", trace_id=None, is_stopped=lambda: False
+    )
 
     async def stream():
         yield {
@@ -296,6 +300,7 @@ async def test_shutdown_during_abort_metadata_upload_raises_engine_shutdown(
     handler.shutdown_event = asyncio.Event()
     context = SimpleNamespace(
         id=lambda: "request-id",
+        trace_id=None,
         is_stopped=lambda: False,
         notify_first_token=lambda: None,
     )
@@ -663,6 +668,11 @@ async def _stream(items):
 
 
 class _Context:
+    trace_id = "decode-trace"
+
+    def id(self):
+        return "decode-context"
+
     def is_stopped(self):
         return False
 

@@ -892,6 +892,10 @@ async def register_vllm_model(
     runtime_config.kv_state_endpoint = config.kv_state_endpoint
     if state_agent_enabled:
         runtime_config.kv_event_source_mode = "state_agent_v2"
+    # vLLM aborts a prefill promptly at any point the router can reach, and
+    # releases KV it had already committed for a decode worker that never
+    # collects it, so there is no window the router needs to avoid.
+    runtime_config.prefill_cancel_until = "anytime"
 
     # Add tool/reasoning parsers for decode/aggregated workers. Prefill
     # workers have no OpenAI surface and don't run a parser — key off

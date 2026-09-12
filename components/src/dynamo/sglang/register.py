@@ -401,6 +401,13 @@ async def get_runtime_config(
     runtime_config = ModelRuntimeConfig()
     runtime_config.kv_state_endpoint = dynamo_args.kv_state_endpoint
     runtime_config.context_length = server_args.context_length
+    # Safe only because both legs are now cancellable: SGLang's decode leg
+    # parks on the bootstrap room as soon as prefill hands back bootstrap info,
+    # and aborting the prefill while that receiver waits wedges the pair. Both
+    # handlers submit under an ID known before their first output, so a client
+    # disconnect tears down prefill and decode together. The abort is
+    # best-effort -- work already admitted to the scheduler still drains.
+    runtime_config.prefill_cancel_until = "anytime"
     # Multimodal encode workers have no tokenizer manager and delegate
     # generation overflow handling to their downstream backend.
     if engine is not None:

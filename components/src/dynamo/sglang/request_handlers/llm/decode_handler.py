@@ -4,7 +4,7 @@
 import asyncio
 import logging
 import time
-from typing import Any, AsyncGenerator, AsyncIterator, Dict, List, Mapping, Optional
+from typing import Any, AsyncGenerator, Dict, List, Mapping, Optional
 
 import numpy as np
 import sglang as sgl
@@ -416,8 +416,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         input_param: Dict[str, Any],
         context: Context,
         priority: int | None,
-    ) -> AsyncIterator[Dict[str, Any]]:
-        """Build and dispatch one native SGLang request."""
+    ) -> tuple[str, AsyncGenerator[Dict[str, Any], None]]:
+        """Build and dispatch one native SGLang request.
+
+        Returns the ID the request was submitted under together with its
+        stream, so cancellation aborts exactly what was submitted rather than
+        a separately derived guess at it.
+        """
         raise_if_unextracted_multimodal(request)
         input_ids = input_param.get("input_ids")
         if not isinstance(input_ids, list):
@@ -435,7 +440,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         native_request = build_native_generate_request(
             native_payload,
             input_ids=input_ids,
-            fallback_rid=context.trace_id or context.id(),
+            fallback_rid=self._submitted_request_id(context),
             priority=self._priority_kwargs(priority).get("priority"),
             bootstrap_host=bootstrap_info.get("bootstrap_host"),
             bootstrap_port=bootstrap_info.get("bootstrap_port"),
@@ -446,7 +451,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             routed_dp_rank=routing.get("dp_rank"),
             lora_path=self._resolve_lora(request),
         )
-        return native_generate_stream(self.engine, native_request)
+        if not isinstance(native_request.rid, str):
+            # A caller may supply its own rid in the opaque native payload.
+            # abort_request takes a single key, so anything else would leave
+            # the request uncancellable; the prefill handler rejects it too.
+            raise ValueError(
+                "SGLang decode requires a single request ID to remain cancellable"
+            )
+        return native_request.rid, native_generate_stream(self.engine, native_request)
 
     async def generate(
         self, request: Dict[str, Any], context: Context
@@ -470,24 +482,35 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         if self._first_token_source is not None:
             self._first_token_source.bind(context, routing.get("dp_rank"))
         _raise_if_conditional_disagg_bypass(request)
-        trace_id = context.trace_id
+        sglang_request_id = self._submitted_request_id(context)
         input_param = self._get_input_param(request)
         priority = (request.get("routing") or {}).get("priority")
         native_payload = native_generate_payload(request)
         if native_payload is not None:
-            stream = self._native_generate_stream(
+            native_rid, stream = self._native_generate_stream(
                 request,
                 native_payload,
                 input_param,
                 context,
                 priority,
             )
-            async for output in self._process_native_generate_stream(stream, context):
+            # The native payload carries its own sampling params, so the
+            # sample count comes from there rather than from the Dynamo view.
+            native_sampling = native_payload.get("sampling_params")
+            native_samples = 1
+            if isinstance(native_sampling, Mapping):
+                native_samples = native_sampling.get("n") or 1
+            async for output in self._process_native_generate_stream(
+                stream, context, native_rid, native_samples
+            ):
                 yield output
             return
 
         priority_kwargs = self._priority_kwargs(priority)
         sampling_params = self._build_sampling_params(request)
+        # SGLang expands one submitted ID into one per sample, so the
+        # monitor has to know how many to abort.
+        sample_count = sampling_params.get("n") or 1
         logprob_kwargs = self._build_logprob_kwargs(request)
         metadata_uploader = self._metadata_uploader_from_request(request)
 
@@ -540,7 +563,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 bootstrap_port=bootstrap_info["bootstrap_port"],
                 bootstrap_room=bootstrap_info["bootstrap_room"],
                 external_trace_header=trace_header,
-                rid=trace_id,
+                rid=sglang_request_id,
                 data_parallel_rank=dp_rank,
                 lora_path=lora_path,
                 **logprob_kwargs,
@@ -623,7 +646,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **self._routed_experts_kwargs,
                 **mm_hashes_kwargs,
                 external_trace_header=trace_header,
-                rid=trace_id,
+                rid=sglang_request_id,
                 data_parallel_rank=dp_rank,
                 lora_path=lora_path,
                 **logprob_kwargs,
@@ -636,6 +659,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     return_tokens_as_token_ids,
                     user_stop_token_ids=user_stop_token_ids,
                     metadata_uploader=metadata_uploader,
+                    sample_count=sample_count,
                 ):
                     yield out
             else:
@@ -645,18 +669,39 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     request=request,
                     user_stop_token_ids=user_stop_token_ids,
                     metadata_uploader=metadata_uploader,
+                    sample_count=sample_count,
                 ):
                     yield out
 
+    @staticmethod
+    def _submitted_request_id(context: Context) -> str:
+        """The ID this worker's request was submitted to SGLang under.
+
+        Must match what ``generate`` passes as ``rid``; deriving it from the
+        context rather than from a response is the point, since a decode leg
+        whose KV transfer never completes emits no response to read it from.
+        """
+        return context.trace_id or context.id()
+
     async def _process_native_generate_stream(
         self,
-        stream_source: AsyncIterator[Dict[str, Any]],
+        stream_source: AsyncGenerator[Dict[str, Any], None],
         context: Context,
+        sglang_request_id: str | None = None,
+        sample_count: int = 1,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Forward opaque SGLang chunks while retaining engine cancellation."""
         request_id_future: asyncio.Future[str] = asyncio.Future()
         first_output_seen = False
         async with self._cancellation_monitor(request_id_future, context):
+            # Armed from the submitted ID so a request that never produces
+            # output stays cancellable; falling back to the first response
+            # would leave a decode leg awaiting a KV handoff unabortable.
+            if sglang_request_id and not self._arm_cancellation(
+                request_id_future, context, sglang_request_id, sample_count
+            ):
+                await stream_source.aclose()
+                return
             async for chunk in stream_source:
                 native_response = chunk["engine_data"]["sglang_response"]
                 if not request_id_future.done():
@@ -674,11 +719,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
     async def _process_token_stream(
         self,
-        stream_source: AsyncIterator[Dict[str, Any]],
+        stream_source: AsyncGenerator[Dict[str, Any], None],
         context: Context,
         return_tokens_as_token_ids: bool = False,
         user_stop_token_ids: set[int] | None = None,
         metadata_uploader: MetadataUploader | None = None,
+        sample_count: int = 1,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Process token-based stream output.
 
@@ -692,18 +738,29 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         Yields:
             Dict with token_ids and optional finish_reason.
         """
-        # Use Future pattern for request ID - will be set when first response arrives
+        # Armed from the submitted ID so the monitor can abort a request that
+        # never produces output -- which is exactly what a decode leg does when
+        # its prefill was cancelled and the KV handoff never lands.
         request_id_future: asyncio.Future[str] = asyncio.Future()
         first_output_seen = False
+        engine_id_logged = False
         async with self._cancellation_monitor(request_id_future, context):
+            if not self._arm_cancellation(
+                request_id_future,
+                context,
+                self._submitted_request_id(context),
+                sample_count,
+            ):
+                await stream_source.aclose()
+                return
             async for res in stream_source:
                 meta_info = res.get("meta_info", {})
-                # Extract SGLang request ID from the first response and set the future
-                if not request_id_future.done():
-                    sglang_request_id = meta_info.get("id")
-                    if sglang_request_id:
-                        request_id_future.set_result(sglang_request_id)
-                        logging.debug(f"New SGLang Request ID: {sglang_request_id}")
+                if not engine_id_logged:
+                    engine_id_logged = True
+                    logging.debug(
+                        "New SGLang Request ID: "
+                        f"{meta_info.get('id') or self._submitted_request_id(context)}"
+                    )
 
                 # Check cancellation before yielding to allow proper cleanup.
                 # This lets SGLang proceed to the second token generation, which will
@@ -818,6 +875,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         request: Dict[str, Any] | None = None,
         user_stop_token_ids: set[int] | None = None,
         metadata_uploader: MetadataUploader | None = None,
+        sample_count: int = 1,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Process text-based stream output in OpenAI format.
 
@@ -830,18 +888,26 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         """
         request = request or {}
 
-        # Use Future pattern for request ID - will be set when first response arrives
         request_id_future: asyncio.Future[str] = asyncio.Future()
         first_output_seen = False
+        engine_id_logged = False
         async with self._cancellation_monitor(request_id_future, context):
+            if not self._arm_cancellation(
+                request_id_future,
+                context,
+                self._submitted_request_id(context),
+                sample_count,
+            ):
+                await stream_source.aclose()
+                return
             async for res in stream_source:
                 meta_info = res.get("meta_info", {})
-                # Extract SGLang request ID from the first response and set the future
-                if not request_id_future.done():
-                    sglang_request_id = meta_info.get("id")
-                    if sglang_request_id:
-                        request_id_future.set_result(sglang_request_id)
-                        logging.debug(f"New SGLang Request ID: {sglang_request_id}")
+                if not engine_id_logged:
+                    engine_id_logged = True
+                    logging.debug(
+                        "New SGLang Request ID: "
+                        f"{meta_info.get('id') or self._submitted_request_id(context)}"
+                    )
 
                 # Check cancellation before yielding to allow proper cleanup.
                 # This lets SGLang proceed to the second token generation, which will

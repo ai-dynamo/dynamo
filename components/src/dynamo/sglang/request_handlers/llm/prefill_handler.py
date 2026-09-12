@@ -3,7 +3,6 @@
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
 from typing import Any, AsyncGenerator, Dict, Optional
 
 import sglang as sgl
@@ -87,6 +86,10 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         validate_disagg_parallel_sampling(request)
         logging.debug(f"New Request ID: {context.id()}")
         trace_id = context.trace_id
+        # Submit under an ID we already know. A prefill worker's first output
+        # only arrives after prefill and the KV handoff, so deriving the ID
+        # from that output leaves the whole prefill uncancellable.
+        sglang_request_id = trace_id or context.id()
 
         if "request" in request:
             # DisaggPreprocessedRequest format
@@ -175,7 +178,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             native_request = build_native_generate_request(
                 native_payload,
                 input_ids=input_ids,
-                fallback_rid=trace_id or context.id(),
+                fallback_rid=sglang_request_id,
                 priority=priority_kwargs.get("priority"),
                 sampling_overrides={"n": 1, "max_new_tokens": 1},
                 bootstrap_host=bootstrap_host,
@@ -185,6 +188,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 routed_dp_rank=dp_rank,
                 lora_path=lora_path,
             )
+            if not isinstance(native_request.rid, str):
+                raise ValueError(
+                    "SGLang prefill requires a single request ID to remain cancellable"
+                )
+            sglang_request_id = native_request.rid
             results = native_generate_stream(self.engine, native_request)
         else:
             results = await self.engine.async_generate(
@@ -197,7 +205,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 bootstrap_port=bootstrap_port,
                 bootstrap_room=bootstrap_room,
                 external_trace_header=trace_header,
-                rid=trace_id,
+                rid=sglang_request_id,
                 data_parallel_rank=dp_rank,
                 lora_path=lora_path,
                 **priority_kwargs,
@@ -218,33 +226,42 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             "disaggregated_params": bootstrap_info,
         }
 
-        task = asyncio.create_task(self._consume_results(results, context))
+        task = asyncio.create_task(
+            self._consume_results(results, sglang_request_id, context)
+        )
         self._consume_tasks.add(task)
         task.add_done_callback(self._consume_tasks.discard)
 
         await task
 
     async def _consume_results(
-        self, results: AsyncIterator[Any], context: Context
+        self,
+        results: AsyncGenerator[Any, None],
+        sglang_request_id: str,
+        context: Context,
     ) -> None:
         """Consume async generator results without processing.
 
         Args:
             results: Async generator from engine.async_generate.
+            sglang_request_id: The ID this request was submitted under.
             context: Context object for cancellation handling.
         """
-        # Use Future pattern for request ID - will be set when first response arrives
+        # Armed from the ID the request was submitted under, not from the first
+        # response: a prefill worker's first output only arrives after prefill
+        # and the KV handoff, so reading the ID from it would leave the whole
+        # prefill uncancellable.
         request_id_future: asyncio.Future[str] = asyncio.Future()
         async with self._cancellation_monitor(request_id_future, context):
-            async for res in results:
-                # Extract SGLang request ID from the first response and set the future
-                if not request_id_future.done():
-                    meta_info = res.get("meta_info", {})
-                    sglang_request_id = meta_info.get("id")
-                    if sglang_request_id:
-                        request_id_future.set_result(sglang_request_id)
-                        logging.debug(f"New Prefill Request ID: {sglang_request_id}")
-
-                # Note: No explicit cancellation checks needed here.
-                # When abort_request is called by the cancellation monitor,
-                # SGLang will terminate this async generator automatically.
+            if not self._arm_cancellation(
+                request_id_future, context, sglang_request_id
+            ):
+                await results.aclose()
+                return
+            # Drained, not inspected: the prefill worker's output is only the
+            # handoff, which the router already read. Keeping the drain running
+            # lets an accepted transfer finish. No explicit cancellation check
+            # is needed -- once the monitor calls abort_request, SGLang ends
+            # this generator itself.
+            async for _ in results:
+                pass

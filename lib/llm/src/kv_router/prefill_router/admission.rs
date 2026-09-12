@@ -32,6 +32,7 @@ where
         mut prefill_response: ManyOut<Annotated<LLMEngineOutput>>,
         tracker: Option<Arc<RequestTracker>>,
         task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
+        cancel_link: Option<std::sync::Arc<super::PrefillCancelLink>>,
     ) -> Result<PrefillCompletion, PrefillError> {
         let Some(first_output) = prefill_response.next().await else {
             return Err(PrefillError::PrefillError(
@@ -87,6 +88,11 @@ where
         } else {
             tokio::spawn(async move {
                 let _task_guard = task_guard;
+                // Held here, not by the caller: this drain is what actually
+                // outlives PrefillRouter::generate on the bootstrap path, so a
+                // client disconnect has to keep reaching the prefill worker for
+                // as long as it runs.
+                let _cancel_link = cancel_link;
                 while prefill_response.next().await.is_some() {}
             });
         }
@@ -152,13 +158,16 @@ where
         prefill_stream: ManyOut<Annotated<LLMEngineOutput>>,
         tracker: Option<Arc<RequestTracker>>,
         phase_transition_permit: OwnedSemaphorePermit,
+        cancel_link: Option<std::sync::Arc<super::PrefillCancelLink>>,
     ) {
         let span = tracing::Span::current();
         let task_guard = self.task_guard.clone();
         tokio::spawn(
             async move {
                 drop(phase_transition_permit);
-                match Self::consume_prefill_stream(prefill_stream, tracker, task_guard).await {
+                match Self::consume_prefill_stream(prefill_stream, tracker, task_guard, cancel_link)
+                    .await
+                {
                     Ok(_) => tracing::debug!("Prefill background task completed"),
                     Err(error) => tracing::warn!("Prefill background task error: {error:?}"),
                 }
@@ -174,7 +183,9 @@ mod tests {
     use futures::stream;
     use serde_json::json;
 
-    use dynamo_runtime::pipeline::{ResponseStream, context::Controller};
+    use dynamo_runtime::pipeline::{
+        AsyncEngineContextProvider, Context, ResponseStream, context::Controller,
+    };
 
     use super::*;
 
@@ -192,6 +203,57 @@ mod tests {
             disaggregated_params: Some(json!({})),
             ..Default::default()
         })
+    }
+
+    #[tokio::test]
+    async fn bootstrap_drain_keeps_cancellation_reaching_the_prefill_worker() {
+        // consume_prefill_stream returns as soon as it sees the handoff and
+        // leaves an inner task draining the rest, so that inner task is what
+        // outlives PrefillRouter::generate. A link held by the caller instead
+        // dies milliseconds after dispatch and the prefill silently stops being
+        // cancellable -- which is not visible in end-to-end latency, because the
+        // decode side tears the request down anyway.
+        let first = Annotated::from_data(LLMEngineOutput {
+            disaggregated_params: Some(json!({
+                "bootstrap_host": "127.0.0.1",
+                "bootstrap_port": 1,
+                "bootstrap_room": "test",
+                "ctx_request_id": 42,
+            })),
+            ..Default::default()
+        });
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let stream = stream::iter([first]).chain(stream::once(async move {
+            let _ = release_rx.await;
+            Annotated::from_data(LLMEngineOutput::default())
+        }));
+        let response = ResponseStream::new(Box::pin(stream), Arc::new(Controller::default()));
+
+        let client = Context::new(()).context();
+        let prefill = Context::new(()).context();
+        let link = Arc::new(super::super::PrefillCancelLink::new(
+            client.clone(),
+            prefill.clone(),
+        ));
+
+        PrefillRouter::<DefaultWorkerSelector>::consume_prefill_stream(
+            response,
+            None,
+            None,
+            Some(link),
+        )
+        .await
+        .unwrap();
+
+        // The handoff has been returned and the caller has moved on, but the
+        // drain is still running, so a disconnect now must still reach prefill.
+        client.stop_generating();
+        tokio::time::timeout(std::time::Duration::from_secs(1), prefill.stopped())
+            .await
+            .expect("cancellation stopped reaching prefill once the drain took over");
+        assert!(prefill.is_stopped());
+
+        release_tx.send(()).unwrap();
     }
 
     #[tokio::test]
@@ -220,6 +282,7 @@ mod tests {
             response,
             None,
             Some(task_guard),
+            None,
         )
         .await
         .unwrap();
@@ -242,6 +305,7 @@ mod tests {
             prefill_stream(vec![Annotated::from_error("prefill failed")]),
             Some(tracker.clone()),
             None,
+            None,
         )
         .await;
 
@@ -262,6 +326,7 @@ mod tests {
                 Annotated::from_error("prefill stream failed"),
             ]),
             Some(tracker.clone()),
+            None,
             None,
         )
         .await;
@@ -291,6 +356,7 @@ mod tests {
                 prefill_stream(vec![Annotated::from_data(output)]),
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -317,6 +383,7 @@ mod tests {
             prefill_stream(vec![Annotated::from_data(output)]),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -336,6 +403,7 @@ mod tests {
         };
         let result = PrefillRouter::<DefaultWorkerSelector>::consume_prefill_stream(
             prefill_stream(vec![Annotated::from_data(output)]),
+            None,
             None,
             None,
         )
@@ -361,6 +429,7 @@ mod tests {
             };
             let result = PrefillRouter::<DefaultWorkerSelector>::consume_prefill_stream(
                 prefill_stream(vec![Annotated::from_data(output)]),
+                None,
                 None,
                 None,
             )

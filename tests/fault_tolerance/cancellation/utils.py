@@ -179,6 +179,25 @@ class CancellableRequest:
                 f"HTTP {status_code}: {response_body}"
             )
 
+    def wait(self, timeout_s: float = 60.0) -> None:
+        """Block until the request has finished.
+
+        ``post`` runs on a background thread, so a non-streaming caller has
+        nothing to read until it finishes; ``get_response`` would return None.
+        A streaming caller does not need this, since requests populates the
+        response once the headers arrive.
+
+        Raises:
+            AssertionError: if the request has not finished within timeout_s,
+                which is what a wedged worker looks like from the client side.
+        """
+        thread = self._request_thread
+        if thread is None:
+            raise RuntimeError("wait() called before post()")
+        thread.join(timeout_s)
+        if thread.is_alive():
+            raise AssertionError(f"Request did not complete within {timeout_s}s")
+
     def get_response(self):
         """Get the response or raise exception if there was one"""
         if self._cancelled:
@@ -578,6 +597,42 @@ def strip_ansi_codes(text: str) -> str:
     """Remove ANSI color codes from text"""
     ansi_escape = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
     return ansi_escape.sub("", text)
+
+
+def poll_for_any_pattern(
+    process: ManagedProcess,
+    patterns: list[str],
+    log_offset: int = 0,
+    max_wait_ms: int = 500,
+    poll_interval_ms: int = 5,
+) -> tuple[str, int]:
+    """Poll a process log until any one of *patterns* appears.
+
+    For assertions where several distinct log lines are all correct outcomes,
+    so requiring one specific line would make the test depend on a race rather
+    than on the property under test.
+
+    Returns:
+        Tuple of (matched pattern, new log offset).
+    """
+    max_iterations = max_wait_ms // poll_interval_ms
+    current_offset = log_offset
+
+    for iteration in range(max_iterations):
+        log_content = read_log_content(process.log_path)
+        for line in log_content[current_offset:].split("\n"):
+            clean_line = strip_ansi_codes(line).strip()
+            for pattern in patterns:
+                if pattern in clean_line:
+                    logger.info(f"Found pattern '{pattern}' at iteration {iteration}")
+                    return pattern, len(log_content)
+        current_offset = len(log_content)
+        time.sleep(poll_interval_ms / 1000.0)
+
+    raise AssertionError(
+        f"Failed to find any of {patterns} after {max_iterations} "
+        f"iterations ({max_wait_ms}ms)"
+    )
 
 
 def poll_for_pattern(

@@ -39,8 +39,8 @@ use crate::{
         shared_cache::HicacheSharedKvCache,
     },
     local_model::runtime_config::{
-        DisaggregatedEndpoint, ModelRuntimeConfig, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
-        topology_taint,
+        DisaggregatedEndpoint, ModelRuntimeConfig, PrefillCancelUntil,
+        VLLM_INFERENCE_V1_GENERATE_CAPABILITY, topology_taint,
     },
     lora::state_tracker::LoraWorkerProjection,
     lora::{LoraFilter, LoraRoutingTable, LoraStateTracker, load_estimator::LoadEstimator},
@@ -2561,6 +2561,21 @@ impl ModelManager {
         let rx = self.runtime_configs.get(endpoint_id)?;
         let configs = rx.borrow();
         Some(configs.get(&worker_id)?.data_parallel_size)
+    }
+
+    /// How a specific prefill worker wants client cancellation handled.
+    ///
+    /// Returns the worker's declared policy, or `None` when the worker is
+    /// unknown or predates the capability. Callers must treat `None` as "do not
+    /// cancel", so that a legacy worker keeps its existing behaviour.
+    pub fn get_prefill_cancel_policy(
+        &self,
+        endpoint_id: &EndpointId,
+        worker_id: WorkerId,
+    ) -> Option<PrefillCancelUntil> {
+        let rx = self.runtime_configs.get(endpoint_id)?;
+        let configs = rx.borrow();
+        configs.get(&worker_id)?.prefill_cancel_until
     }
 
     /// Whether any worker on this endpoint advertises a required KV-transfer topology policy.

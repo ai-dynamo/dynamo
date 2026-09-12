@@ -891,6 +891,9 @@ class ModelRuntimeConfig:
     kv_transfer_preferred_weight: float | None
     bootstrap_host: str | None
     bootstrap_port: int | None
+    prefill_cancel_until: str | None
+    """How long a remote prefill stays cancellable: "anytime", "pre_handoff",
+    or "never". None means undeclared and is treated as "never"."""
 
     def __init__(self) -> None: ...
 

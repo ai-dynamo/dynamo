@@ -31,7 +31,7 @@ use futures::stream::{self, StreamExt};
 use crate::{
     discovery::{ModelManager, WorkerSetTarget, WorkerSetTargetId},
     kv_router::{RoutingHost, WorkerSelectorFactory},
-    local_model::runtime_config::ModelRuntimeConfig,
+    local_model::runtime_config::{ModelRuntimeConfig, PrefillCancelUntil},
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
@@ -43,9 +43,12 @@ use crate::{
 
 mod activation;
 mod admission;
+mod cancellation;
 mod conditional_bypass;
 mod query;
 pub use query::PrefillReservation;
+
+use cancellation::PrefillCancelLink;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -459,24 +462,56 @@ where
 
         let router = &binding.router;
         let endpoint_id = &binding.endpoint_id;
+
+        // Propagating client cancellation into the remote prefill request is a
+        // per-worker decision, so the link cannot be armed before the worker is
+        // known: arming first would make a worker that declares nothing -- and
+        // is therefore treated as never cancellable -- cancellable during
+        // prefill, which is exactly the window this is about. Arming after
+        // selection costs nothing, because `stopped()` is level-triggered: a
+        // client that already went away fires as soon as the link exists.
+        let prefill_ctx = prefill_context.context();
+        let cancel_link: std::sync::Mutex<Option<(PrefillCancelUntil, Arc<PrefillCancelLink>)>> =
+            std::sync::Mutex::new(None);
         let prefill_result: Result<(PrefillOutcome, Option<RoutingConstraints>)> = async {
             let (prepared, prefill_stream) = router
                 .select_and_dispatch_prefill(prefill_context, |request, target| {
                     self.prepare_prefill_dispatch(request, target, endpoint_id)
                 })
                 .await?;
+            let cancel_policy = self
+                .model_manager
+                .get_prefill_cancel_policy(endpoint_id, prepared.worker_id)
+                .unwrap_or(PrefillCancelUntil::Never);
+            let link =
+                cancellation::arm_for(cancel_policy, engine_ctx.clone(), prefill_ctx.clone());
+            if let Some(link) = &link {
+                *cancel_link.lock().unwrap() = Some((cancel_policy, link.clone()));
+            }
             let topology_constraints = prepared.topology_constraints;
             let outcome = if let Some(bootstrap_info) = prepared.bootstrap_info {
-                self.spawn_prefill_task(prefill_stream, tracker, prefill_phase_barrier);
+                // The drain gets its own reference rather than ownership: a
+                // PreHandoff worker still has to be revocable from the routing
+                // side once the handoff parameters come back.
+                self.spawn_prefill_task(prefill_stream, tracker, prefill_phase_barrier, link);
                 PrefillOutcome::Bootstrap {
                     bootstrap_info,
                     worker_id: prepared.worker_id,
                 }
             } else {
                 drop(prefill_phase_barrier);
-                let completion =
-                    Self::consume_prefill_stream(prefill_stream, tracker, self.task_guard.clone())
-                        .await?;
+                // The link goes to the drain too: when bootstrap is detected
+                // from the first response rather than at dispatch,
+                // consume_prefill_stream spawns a background drain that
+                // outlives this call, and cancellation has to keep reaching
+                // prefill for as long as that runs.
+                let completion = Self::consume_prefill_stream(
+                    prefill_stream,
+                    tracker,
+                    self.task_guard.clone(),
+                    link,
+                )
+                .await?;
 
                 match completion {
                     PrefillCompletion::Handoff {
@@ -504,6 +539,7 @@ where
             Ok((outcome, topology_constraints))
         }
         .await;
+
         let (outcome, topology_constraints) = match prefill_result {
             Ok(result) => result,
             Err(error) => {
@@ -523,6 +559,23 @@ where
                 return Err(error);
             }
         };
+
+        // The prefill request has now returned its handoff parameters, so the
+        // worker has committed KV for the decode leg to collect. Workers that
+        // declare PreHandoff stop being cancellable here: aborting past this
+        // point orphans that KV until a transfer timeout reclaims it, which
+        // costs far more than letting the prefill finish. Revoking works even
+        // though a drain task may hold the same link, which is why it is shared
+        // rather than moved.
+        if let Some((cancel_policy, link)) = cancel_link.lock().unwrap().take()
+            && cancel_policy != PrefillCancelUntil::Anytime
+        {
+            link.revoke();
+        }
+        // Any link still held here belongs to a path where prefill already
+        // finished, so dropping it ends the propagation task rather than
+        // leaving it waiting on a request that will never be cancelled.
+        drop(cancel_link);
 
         // A prefill request can terminate before the backend establishes a KV
         // handoff (for example, EOS on the one-token context step). Native
