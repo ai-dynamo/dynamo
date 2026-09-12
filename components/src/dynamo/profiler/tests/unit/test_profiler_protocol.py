@@ -237,6 +237,95 @@ def test_convert_vllm_disagg_decode_removes_disaggregation_role() -> None:
     )
 
 
+def _use_equals_spelling(args: list[str], flag: str) -> None:
+    index = args.index(flag)
+    args[index : index + 2] = [f"{flag}={args[index + 1]}"]
+
+
+def test_convert_vllm_prefill_to_aggregated_drops_equals_spelled_role() -> None:
+    modifier = CONFIG_MODIFIERS["vllm"]
+    config = modifier.load_default_config("disagg")
+    prefill_args = _main_container(_component_by_type(config, "prefill"))["args"]
+    _use_equals_spelling(prefill_args, "--disaggregation-mode")
+
+    converted = modifier.convert_config(config, target=EngineType.PREFILL)
+    converted_args = _main_container(_worker_components(converted)[0])["args"]
+
+    assert not any("--disaggregation-mode" in arg for arg in converted_args)
+
+
+def test_sglang_tp_sweep_drops_equals_spelled_parallelism_args() -> None:
+    """A TP sweep point must not inherit the user's DP/EP settings.
+
+    set_config_tp_size strips --dp/--ep so the point is pure tensor parallel, and
+    nothing later re-sets them, so a surviving copy silently changes what was
+    measured while GPU resources are still sized for tp_size alone.
+    """
+    from dynamo.planner.config.defaults import SubComponentType
+
+    modifier = CONFIG_MODIFIERS["sglang"]
+    config = modifier.load_default_config("agg")
+    worker = next(
+        component
+        for component in config["spec"]["components"]
+        if component.get("type") == "worker"
+    )
+    _main_container(worker)["args"].extend(["--dp-size=4", "--ep-size=8"])
+
+    converted = modifier.set_config_tp_size(
+        config, 2, component_type=SubComponentType.DECODE
+    )
+    converted_worker = next(
+        component
+        for component in converted["spec"]["components"]
+        if component.get("type") == "worker"
+    )
+    converted_args = _main_container(converted_worker)["args"]
+
+    assert not any("--dp" in arg or "--ep" in arg for arg in converted_args)
+
+
+@pytest.mark.parametrize(
+    ("target", "source_type"),
+    [(EngineType.PREFILL, "prefill"), (EngineType.DECODE, "decode")],
+)
+def test_convert_trtllm_drops_equals_spelled_disaggregation_args(
+    target: EngineType, source_type: str
+) -> None:
+    modifier = CONFIG_MODIFIERS["trtllm"]
+    config = modifier.load_default_config("disagg")
+    source_args = _main_container(_component_by_type(config, source_type))["args"]
+    _use_equals_spelling(source_args, "--disaggregation-mode")
+
+    converted = modifier.convert_config(config, target=target)
+    converted_args = _main_container(_worker_components(converted)[0])["args"]
+
+    assert not any("--disaggregation" in arg for arg in converted_args)
+
+
+@pytest.mark.parametrize(
+    ("target", "source_type"),
+    [(EngineType.PREFILL, "prefill"), (EngineType.DECODE, "decode")],
+)
+def test_convert_sglang_drops_equals_spelled_disaggregation_args(
+    target: EngineType, source_type: str
+) -> None:
+    modifier = CONFIG_MODIFIERS["sglang"]
+    config = modifier.load_default_config("disagg")
+    source_args = _main_container(_component_by_type(config, source_type))["args"]
+    for flag in (
+        "--disaggregation-mode",
+        "--disaggregation-transfer-backend",
+        "--disaggregation-bootstrap-port",
+    ):
+        _use_equals_spelling(source_args, flag)
+
+    converted = modifier.convert_config(config, target=target)
+    converted_args = _main_container(_worker_components(converted)[0])["args"]
+
+    assert not any("--disaggregation" in arg for arg in converted_args)
+
+
 def test_build_dgd_config_vllm_disagg_restores_runtime_args() -> None:
     """AIC tuning args must not remove Dynamo's vLLM disaggregation contract."""
     modifier = CONFIG_MODIFIERS["vllm"]

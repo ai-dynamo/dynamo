@@ -18,7 +18,7 @@ from dynamo.profiler.utils.config import (
     get_main_container,
     get_worker_component_from_config,
     parse_override_engine_args,
-    remove_valued_arguments,
+    remove_all_argument_occurrences,
     setup_worker_component_resources,
     update_image,
     validate_and_get_worker_args,
@@ -325,8 +325,8 @@ class TrtllmConfigModifier(BaseConfigModifier):
             args = break_arguments(args)
 
             # Remove disaggregation args
-            args = remove_valued_arguments(args, "--disaggregation-mode")
-            args = remove_valued_arguments(args, "--disaggregation-strategy")
+            args = remove_all_argument_occurrences(args, "--disaggregation-mode")
+            args = remove_all_argument_occurrences(args, "--disaggregation-strategy")
 
             args = _merge_overrides_into_args(
                 args,
@@ -368,8 +368,8 @@ class TrtllmConfigModifier(BaseConfigModifier):
             args = break_arguments(args)
 
             # Remove disaggregation args
-            args = remove_valued_arguments(args, "--disaggregation-mode")
-            args = remove_valued_arguments(args, "--disaggregation-strategy")
+            args = remove_all_argument_occurrences(args, "--disaggregation-mode")
+            args = remove_all_argument_occurrences(args, "--disaggregation-strategy")
 
             args = _merge_overrides_into_args(
                 args,
