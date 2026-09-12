@@ -1,0 +1,183 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: Cross-version compatibility
+on:
+  workflow_dispatch:
+    inputs:
+      frontend_tag:
+        description: Candidate frontend image tag in ACR
+        type: string
+        required: true
+      worker_tag:
+        description: Candidate SGLang image tag in ACR
+        type: string
+        required: true
+      operator_tag:
+        description: Candidate operator tag in ACR
+        type: string
+        required: true
+      release_line:
+        description: Target release line (empty derives it from checkout)
+        type: string
+        default: ''
+  workflow_call:
+    inputs:
+      frontend_tag:
+        type: string
+        required: true
+      worker_tag:
+        type: string
+        required: true
+      operator_tag:
+        type: string
+        required: true
+      release_line:
+        type: string
+        default: ''
+      source_ref:
+        type: string
+        default: ''
+    secrets:
+      AZURE_ACR_HOSTNAME:
+        required: true
+      AZURE_ACR_USER:
+        required: true
+      AZURE_ACR_PASSWORD:
+        required: true
+      HF_TOKEN:
+        required: true
+      DOCKERHUB_LOGIN_USER:
+        required: false
+      DOCKERHUB_ACCESS_TOKEN:
+        required: false
+permissions:
+  contents: read
+jobs:
+  compatibility:
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
+      - name: Require shared model cache
+        env:
+          CACHE_SERVER: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
+          CACHE_PATH: ${{ vars.AZURE_MODEL_CACHE_PATH }}
+        run: test -n "$CACHE_SERVER" && test -n "$CACHE_PATH"
+      - name: Create isolated vCluster with candidate operator
+        uses: $/.github/actions/setup-dynamo-operator
+        with:
+          reset_existing: 'true'
+          model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
+          model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
+          vcluster_name: ci-${{ github.run_id }}-${{ github.run_attempt }}-n2-static
+          vcluster_namespace: gh-id-${{ github.run_id }}-${{ github.run_attempt }}-n2-static-dt
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          repository: ${{ vars.ACR_REPOSITORY }}
+          operator_tag: ${{ inputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+      - name: Allow the bounded compatibility suite to finish before namespace expiry
+        env:
+          HOST_NAMESPACE: gh-id-${{ github.run_id }}-${{ github.run_attempt }}-n2-static-dt
+        run: kubectl label namespace "$HOST_NAMESPACE" nscleanup/ttl=21600 --overwrite
+      - name: Connect to vCluster
+        id: connect
+        uses: $/.github/actions/connect-vcluster
+        with:
+          vcluster_name: ci-${{ github.run_id }}-${{ github.run_attempt }}-n2-static
+          vcluster_namespace: gh-id-${{ github.run_id }}-${{ github.run_attempt }}-n2-static-dt
+      - name: Prepare fixed model snapshots on the shared cache
+        env:
+          KUBECONFIG_B64: ${{ steps.connect.outputs.kubeconfig_base64 }}
+          WORKER_IMAGE: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ inputs.worker_tag }}
+        run: |
+          set -euo pipefail
+          export KUBECONFIG="${RUNNER_TEMP}/n2-kubeconfig"
+          printf '%s' "$KUBECONFIG_B64" | base64 --decode > "$KUBECONFIG"
+          kubectl -n default get pvc model-cache
+          kubectl -n default create -f tests/deploy/n2/model-download.yaml --dry-run=client -o json |
+            jq --arg image "$WORKER_IMAGE" '.spec.template.spec.containers[0].image = $image' |
+            kubectl -n default apply -f -
+          kubectl -n default wait --for=condition=complete job/n2-model-download --timeout=920s
+      - name: Run candidate chat control for manual validation
+        if: github.event_name == 'workflow_dispatch'
+        uses: $/.github/actions/dynamo-deploy-test
+        with:
+          kubeconfig_base64: ${{ steps.connect.outputs.kubeconfig_base64 }}
+          namespace: default
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ inputs.operator_tag }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ inputs.worker_tag }}
+          framework: sglang
+          profile: agg
+          model_cache_pvc: model-cache
+          test_name: n2-candidate-chat
+          extra_pytest_args: >-
+            --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ inputs.frontend_tag }}
+            -m framework_only -n 0
+          cleanup_deployment: 'false'
+      - name: Run candidate embedding control for manual validation
+        if: github.event_name == 'workflow_dispatch'
+        uses: $/.github/actions/dynamo-deploy-test
+        with:
+          kubeconfig_base64: ${{ steps.connect.outputs.kubeconfig_base64 }}
+          namespace: default
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ inputs.operator_tag }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ inputs.worker_tag }}
+          framework: sglang
+          profile: agg_embed
+          model_cache_pvc: model-cache
+          test_name: n2-candidate-embedding
+          extra_pytest_args: >-
+            --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ inputs.frontend_tag }}
+            -m framework_only -n 0
+          cleanup_deployment: 'false'
+      - name: Test four mixed version pairs for embedding and chat
+        uses: $/.github/actions/dynamo-deploy-test
+        env:
+          N2_RELEASE_LINE: ${{ inputs.release_line }}
+        with:
+          kubeconfig_base64: ${{ steps.connect.outputs.kubeconfig_base64 }}
+          namespace: default
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ inputs.operator_tag }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ inputs.worker_tag }}
+          model_cache_pvc: model-cache
+          test_name: n2-compatibility
+          test_file: tests/deploy/test_n2_compatibility.py
+          extra_pytest_args: --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ inputs.frontend_tag }} -m k8s -n 0
+          # Each parameter owns one Frontend and one GPU Worker. The outer
+          # cleanup also runs on a job timeout or interrupted pytest process.
+          cleanup_deployment: 'false'
+      - name: Collect model preparation evidence
+        if: always() && steps.connect.outcome == 'success'
+        env:
+          KUBECONFIG: ${{ runner.temp }}/n2-kubeconfig
+        run: |
+          mkdir -p test-output/n2-model-download
+          kubectl -n default get job n2-model-download -o yaml > test-output/n2-model-download/job.yaml
+          kubectl -n default logs job/n2-model-download --all-containers > test-output/n2-model-download/download.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        if: always()
+        with:
+          name: n2-model-download-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test-output/n2-model-download/
+
+  cleanup:
+    needs: compatibility
+    if: always()
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: $/.github/actions/teardown-dynamo-operator
+        with:
+          vcluster_name: ci-${{ github.run_id }}-${{ github.run_attempt }}-n2-static
+          vcluster_namespace: gh-id-${{ github.run_id }}-${{ github.run_attempt }}-n2-static-dt
