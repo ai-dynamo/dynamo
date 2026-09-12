@@ -33,7 +33,7 @@ from vllm.tool_parsers.utils import get_json_schema_from_tools
 from vllm.utils.async_utils import make_async
 
 from dynamo.common.utils.guided_json import admits_only_empty_object
-from dynamo.llm.exceptions import InvalidArgument
+from dynamo.llm.exceptions import HttpError, InvalidArgument
 
 from .thinking import apply_default_thinking_mode_to_template_kwargs
 from .utils import legacy_guided_decoding
@@ -102,6 +102,50 @@ def _is_forced_tool_choice(tool_choice: Any) -> bool:
     return tool_choice == "required" or _is_named_tool_choice(tool_choice)
 
 
+def _named_tool_choice_name(tool_choice: Any) -> str:
+    """The requested tool name. Only call once _is_named_tool_choice has passed."""
+    if isinstance(tool_choice, ChatCompletionNamedToolChoiceParam):
+        return tool_choice.function.name
+    return tool_choice["function"]["name"]
+
+
+def _tool_names(tools: Any) -> set[str]:
+    """Names of the supplied tools.
+
+    The fast path builds the request with ``model_construct``, so tools and
+    their function bodies can still be the client's raw dicts here.
+    """
+    names: set[str] = set()
+    for tool in tools or ():
+        function = tool["function"] if isinstance(tool, dict) else tool.function
+        name = function["name"] if isinstance(function, dict) else function.name
+        if name:
+            names.add(name)
+    return names
+
+
+def _forced_tool_choice_error(request: Any) -> HttpError | None:
+    """The 400 a forced tool_choice deserves, or None if it can be satisfied.
+
+    Mirrors ``validate_tool_choice`` in protocols/openai/validate.rs, which
+    rejects both an empty tools list and a named choice naming a tool that is
+    not in a non-empty list, with exactly these two messages.
+    """
+    tool_choice = request.tool_choice
+    if not _is_forced_tool_choice(tool_choice):
+        return None
+    if _is_named_tool_choice(tool_choice):
+        name = _named_tool_choice_name(tool_choice)
+        if name not in _tool_names(request.tools):
+            return HttpError(
+                400, f'tool named "{name}" in tool_choice is not present in tools'
+            )
+        return None
+    if not request.tools:
+        return HttpError(400, 'tool_choice is "required" but tools is empty')
+    return None
+
+
 def _typed_tool_choice(tool_choice: Any) -> Any:
     """Normalize a raw named tool choice into the type vLLM's helpers expect.
 
@@ -164,13 +208,9 @@ def _should_build_tool_call_guidance(
     structural_tag_scope: str,
 ) -> bool:
     tool_choice = request.tool_choice or "auto"
-    # TODO: a forced tool_choice with no tools is unsatisfiable and should be a
-    # 400, not an unconstrained request. preprocessor/tool_choice.rs rejects it
-    # (ToolChoiceError::EmptyTools via get_json_schema_from_tools); here and in
-    # sglang_prepost.py it returns no constraint and the caller gets a plausible
-    # answer that can never contain the tool call they required. vLLM's own
-    # "when using tool_choice, tools must be set" validator does not run because
-    # the DYN_VLLM_SKIP_REQUEST_VALIDATION fast path uses model_construct.
+    # A forced tool_choice with no tools is rejected in preprocess_chat_request,
+    # so reaching here without tools means the choice was not forced and there is
+    # nothing to constrain.
     if not request.tools:
         return False
 
@@ -604,6 +644,13 @@ async def preprocess_chat_request(
     structural_tag_schema: str = "auto",
 ) -> PreprocessResult:
     validated_request = _validate_chat_completion_request(request)
+    # A forced tool_choice the tools list cannot satisfy has no valid answer, and
+    # vLLM's own check for it is skipped on the DYN_VLLM_SKIP_REQUEST_VALIDATION
+    # fast path. Without this the caller gets a plausible reply that can never
+    # contain the tool call they required.
+    forced_tool_choice_error = _forced_tool_choice_error(validated_request)
+    if forced_tool_choice_error is not None:
+        raise forced_tool_choice_error
     assistant_guided_decoding = _build_assistant_guided_decoding(validated_request)
     client_structured_guidance = deepcopy(
         _guided_decoding_from_structured_outputs(
