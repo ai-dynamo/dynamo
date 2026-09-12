@@ -9,11 +9,9 @@ Callers catch the unified exception classes (``HttpTimeoutError``,
 ``ImageLoader``) pass a ``UrlValidationPolicy`` — :func:`fetch_bytes` then
 follows redirects manually and revalidates each hop against the policy.
 
-``DYN_HTTP_BACKEND`` is retained for back-compat but only ``aiohttp`` is
-supported; any other value logs a warning and uses aiohttp. The former httpx
-backend was removed — aiohttp scales better under fan-out (httpx hit
-``PoolTimeout``; see README) and has a native DNS-resolver hook for SSRF
-pinning that httpx lacks.
+``DYN_HTTP_BACKEND`` accepts only ``aiohttp``; any other value logs a warning
+and uses aiohttp. aiohttp scales well under fan-out and exposes a native
+DNS-resolver hook used for SSRF pinning (see README).
 """
 
 from __future__ import annotations
@@ -56,8 +54,7 @@ def _create_client() -> HttpClient:
     name = os.environ.get("DYN_HTTP_BACKEND", "aiohttp").lower()
     if name not in ("", "aiohttp"):
         logger.warning(
-            "DYN_HTTP_BACKEND=%r is no longer supported (the httpx backend was "
-            "removed); using aiohttp.",
+            "DYN_HTTP_BACKEND=%r is not supported; using aiohttp.",
             name,
         )
     return AiohttpClient()
