@@ -11,7 +11,7 @@ from kvbm.trtllm_integration.consolidator_config import get_consolidator_mode, i
 from kvbm.trtllm_integration.rust import KvbmRequest
 from kvbm.trtllm_integration.rust import KvConnectorLeader as RustKvConnectorLeader
 from kvbm.trtllm_integration.rust import SchedulerOutput as RustSchedulerOutput
-from kvbm.utils import is_dyn_runtime_enabled, nvtx_annotate
+from kvbm.utils import derive_consolidator_port, is_dyn_runtime_enabled, nvtx_annotate
 from tensorrt_llm._torch.pyexecutor.connectors.kv_cache_connector import (
     KvCacheConnectorScheduler,
     SchedulerOutput,
@@ -66,15 +66,7 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
                 try:
                     port_num = int(zmq_port)
                     trtllm_ep = f"tcp://127.0.0.1:{port_num}"
-                    # Calculate consolidator output endpoint
-                    # Derive from KVBM leader port (default 56001) + 1000 offset
-                    kvbm_pub_port_str = os.getenv(
-                        "DYN_KVBM_LEADER_ZMQ_PUB_PORT", "56001"
-                    )
-                    kvbm_pub_port = int(kvbm_pub_port_str)
-                    # Use 1000 as the offset. This needs to be aligned with the offset used in the consolidator config.
-                    consolidator_port_offset = 1000
-                    output_port = kvbm_pub_port + consolidator_port_offset
+                    kvbm_pub_port, output_port = derive_consolidator_port()
                     consolidator_output_ep = f"tcp://0.0.0.0:{output_port}"
 
                     logger.info(
