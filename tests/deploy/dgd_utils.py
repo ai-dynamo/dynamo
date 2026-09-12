@@ -299,6 +299,22 @@ class ServiceSpec:
         return self._spec["extraPodSpec"]["mainContainer"]
 
     @staticmethod
+    def _is_shell_command_flag(flag) -> bool:
+        """True for a short-option cluster that ends in ``c``, i.e. one that
+        makes a shell read its command from the next word.
+
+        Covers ``-c`` and the equally common ``-lc``/``-ec``; rejects long
+        options so ``--config`` is never mistaken for one.
+        """
+        return (
+            isinstance(flag, str)
+            and len(flag) >= 2
+            and flag.startswith("-")
+            and not flag.startswith("--")
+            and flag.endswith("c")
+        )
+
+    @staticmethod
     def _is_shell_style(container: dict) -> bool:
         """Detect ``command: [..., "-c"]`` + ``args: ["<shell-string>"]``.
 
@@ -308,9 +324,31 @@ class ServiceSpec:
         breaks the shell's contract — ``sh -c`` takes exactly one command
         string; everything after it becomes ``$0``/``$1``/…, so the rest of
         the flags would be silently dropped at runtime.
+
+        The trailing flag is not always exactly ``-c``. Across ``recipes/`` and
+        ``examples/`` this predicate now matches 184 shell-invoked containers;
+        matching only ``-c`` found 84. The other 100, spread over 51 manifests,
+        use ``-lc`` and were classified as argv-style, which failed silently in
+        *both* directions:
+
+        * reads — :meth:`_get_args` returned ``["<the entire command string>"]``,
+          so every scan for a flag by token equality found nothing. ``.model``
+          reported ``None`` for a worker that plainly declares ``--model``;
+        * writes — :meth:`_set_args` wrote argv tokens back as a list.
+          ``add_arg_to_service()`` therefore produced
+          ``args: ["<command string>", "--max-model-len", "1024"]``, and a shell
+          binds everything after its command string to ``$0``/``$1``, so the
+          flag never reached the worker. The ``.model`` setter failed the other
+          way: finding no ``--model`` token, it returned without writing at all.
+
+        Both directions are silent, so a test that reconfigures a ``-lc`` worker
+        and then asserts on it passes while measuring the unmodified
+        deployment.
         """
         cmd = container.get("command")
-        if not isinstance(cmd, list) or len(cmd) < 2 or cmd[-1] != "-c":
+        if not isinstance(cmd, list) or len(cmd) < 2:
+            return False
+        if not ServiceSpec._is_shell_command_flag(cmd[-1]):
             return False
         args = container.get("args", [])
         return (
@@ -342,10 +380,51 @@ class ServiceSpec:
             container["args"] = args
             return args
         if self._is_shell_style(container):
-            import shlex
-
-            return shlex.split(args[0]) if args[0].strip() else []
+            return self._split_shell_command(args[0])
         return args
+
+    @staticmethod
+    def _strip_shell_comments(command: str) -> str:
+        """Drop whole-line ``#`` comments from a shell command string.
+
+        ``shlex`` has no notion of comments, so an apostrophe inside one — as in
+        ``# Dynamo's forward-pass metrics adapter`` — opens a quote that never
+        closes and tokenisation dies with ``No closing quotation``. 17 containers
+        in the corpus carry comment lines and four of them died on exactly this.
+        bash ignores those lines entirely, so we do too.
+
+        Only lines whose first non-blank character is ``#`` are removed. A ``#``
+        appearing mid-line is left alone: it may be inside a quoted argument
+        (JSON values, URLs with fragments), where bash would not treat it as a
+        comment either.
+        """
+        kept = [
+            line for line in command.splitlines() if not line.lstrip().startswith("#")
+        ]
+        return "\n".join(kept)
+
+    @classmethod
+    def _split_shell_command(cls, command: str) -> list[str]:
+        """Tokenise a shell command string into argv-ish tokens.
+
+        Shell operators (``&&``, ``|``, ``;``, redirections) survive as their own
+        tokens so that :meth:`_set_args` can put them back unquoted.
+        """
+        if not command.strip():
+            return []
+        import shlex
+
+        return shlex.split(cls._strip_shell_comments(command))
+
+    # Shell control operators. ``shlex`` returns these as ordinary tokens, so
+    # without an explicit carve-out the quoter below would emit ``'&&'`` and turn
+    # ``ulimit -l unlimited && exec python3 …`` into a single ``ulimit`` call with
+    # a literal ``&&`` argument. 47 of the 184 shell-invoked containers under
+    # ``recipes/`` and ``examples/`` contain at least one of these; none of them
+    # ever quotes one, so emitting them bare is lossless for the whole corpus.
+    _SHELL_OPERATORS = frozenset(
+        {"&&", "||", "|", ";", "&", "<", ">", ">>", "<<", "2>&1", ">&2", "2>"}
+    )
 
     # Bare-safe characters for re-joining shell-style argv tokens. Includes ``$``
     # so that ``$MODEL_PATH``-style references survive the round-trip without
@@ -359,12 +438,20 @@ class ServiceSpec:
         ``$VAR`` expansion when the variable name uses safe characters.
 
         Tokens that are entirely composed of safe characters (alnum, ``-_./
-        :=,@%+`` and ``$``) are left bare; everything else is wrapped in
-        single quotes (with embedded single quotes escaped via the standard
-        ``'\\''`` trick) to preserve literal contents.
+        :=,@%+`` and ``$``) are left bare, as are shell control operators
+        (:data:`_SHELL_OPERATORS`); everything else is wrapped in single quotes
+        (with embedded single quotes escaped via the standard ``'\\''`` trick)
+        to preserve literal contents.
+
+        The operator carve-out means a token that was a *literal* ``&&`` in the
+        source is re-emitted as an operator. ``shlex`` discards the quoting that
+        would distinguish the two, so this cannot be decided at write time; the
+        corpus contains no such token.
         """
         if not tok:
             return "''"
+        if tok in cls._SHELL_OPERATORS:
+            return tok
         if cls._SHELL_BARE_SAFE.match(tok):
             return tok
         return "'" + tok.replace("'", "'\\''") + "'"
