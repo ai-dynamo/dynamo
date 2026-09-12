@@ -9,7 +9,7 @@ use derive_builder::Builder;
 use derive_getters::Dissolve;
 use futures::StreamExt;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::{RwLock, mpsc};
 use validator::Validate;
 
@@ -864,7 +864,12 @@ pub struct ClientOptions {
     #[builder(default = "true")]
     pub attach_lease: bool,
 
-    /// Lease TTL in seconds
+    /// Lease TTL in seconds requested from etcd for discovery liveness.
+    ///
+    /// Defaults to `ETCD_LEASE_TTL` (read once per process) or
+    /// `DEFAULT_LEASE_TTL_SECS` when unset or invalid. The keep-alive cadence
+    /// always derives from the TTL etcd actually grants, not from this
+    /// requested value.
     #[builder(default = "default_lease_ttl()")]
     pub lease_ttl: u64,
 
@@ -918,27 +923,54 @@ fn default_servers() -> Vec<String> {
     }
 }
 
+/// Default lease TTL (seconds) used when `ETCD_LEASE_TTL` is unset or invalid.
+const DEFAULT_LEASE_TTL_SECS: u64 = 10;
+
+/// Default requested lease TTL, read from the environment once per process.
+/// Clients using the default share this cached value even if the environment
+/// changes; explicit `ClientOptions::lease_ttl` overrides may differ.
+static LEASE_TTL_SECS: OnceLock<u64> = OnceLock::new();
+
+/// Lease TTL in seconds to request from etcd.
+///
+/// Resolves `ETCD_LEASE_TTL` once per process; see [`resolve_lease_ttl`] for
+/// the invalid-value policy.
 fn default_lease_ttl() -> u64 {
-    match std::env::var(env_etcd::ETCD_LEASE_TTL) {
-        Ok(raw) => match raw.parse::<u64>() {
+    *LEASE_TTL_SECS
+        .get_or_init(|| resolve_lease_ttl(std::env::var(env_etcd::ETCD_LEASE_TTL).ok().as_deref()))
+}
+
+/// Resolve a raw `ETCD_LEASE_TTL` value into a requested lease TTL.
+///
+/// A valid value parses as `u64` and is >= 1. Unset, zero, negative,
+/// non-numeric, or empty values fall back to [`DEFAULT_LEASE_TTL_SECS`] with a
+/// warning — a documented default rather than a hard failure, so one bad value
+/// cannot take down an otherwise healthy deployment.
+fn resolve_lease_ttl(raw: Option<&str>) -> u64 {
+    match raw {
+        None => DEFAULT_LEASE_TTL_SECS,
+        Some(raw) => match raw.parse::<u64>() {
             Ok(ttl) if ttl > 0 => ttl,
             Ok(_) => {
                 tracing::warn!(
-                    "{} must be >= 1; got 0. Falling back to 10.",
-                    env_etcd::ETCD_LEASE_TTL
+                    env_var = env_etcd::ETCD_LEASE_TTL,
+                    value = %raw,
+                    default = DEFAULT_LEASE_TTL_SECS,
+                    "lease TTL must be >= 1 second; falling back to default"
                 );
-                10
+                DEFAULT_LEASE_TTL_SECS
             }
             Err(err) => {
                 tracing::warn!(
-                    "Invalid {}='{}' ({err}). Falling back to 10.",
-                    env_etcd::ETCD_LEASE_TTL,
-                    raw
+                    env_var = env_etcd::ETCD_LEASE_TTL,
+                    value = %raw,
+                    error = %err,
+                    default = DEFAULT_LEASE_TTL_SECS,
+                    "invalid lease TTL; falling back to default"
                 );
-                10
+                DEFAULT_LEASE_TTL_SECS
             }
         },
-        Err(_) => 10,
     }
 }
 
@@ -1243,6 +1275,58 @@ mod unit_tests {
         let err = anyhow::anyhow!("missing header during watch resync");
         assert!(!Client::is_etcd_connection_error(&err));
     }
+
+    #[test]
+    fn resolves_valid_lease_ttl() {
+        assert_eq!(resolve_lease_ttl(Some("1")), 1);
+        assert_eq!(resolve_lease_ttl(Some("30")), 30);
+        assert_eq!(resolve_lease_ttl(Some("900")), 900);
+    }
+
+    #[test]
+    fn unset_lease_ttl_falls_back_to_default() {
+        assert_eq!(resolve_lease_ttl(None), DEFAULT_LEASE_TTL_SECS);
+        assert_eq!(DEFAULT_LEASE_TTL_SECS, 10);
+    }
+
+    #[test]
+    fn invalid_lease_ttl_falls_back_to_default() {
+        for raw in ["0", "", " 30", "30s", "abc", "-1", "1.5"] {
+            assert_eq!(
+                resolve_lease_ttl(Some(raw)),
+                DEFAULT_LEASE_TTL_SECS,
+                "raw value {raw:?} must fall back to the default"
+            );
+        }
+    }
+
+    /// `default_lease_ttl` must resolve the environment exactly once per
+    /// process: a later environment change must not give a differently aged
+    /// client a different requested TTL. Both calls return the cached value,
+    /// so they are equal regardless of which test initialized the lock first.
+    #[test]
+    fn default_lease_ttl_is_read_once_per_process() {
+        let first =
+            temp_env::with_vars([(env_etcd::ETCD_LEASE_TTL, Some("41"))], default_lease_ttl);
+        let second =
+            temp_env::with_vars([(env_etcd::ETCD_LEASE_TTL, Some("59"))], default_lease_ttl);
+        assert_eq!(
+            first, second,
+            "lease TTL must be pinned by the process-wide OnceLock"
+        );
+    }
+
+    #[test]
+    fn client_options_default_and_builder_carry_lease_ttl() {
+        assert_eq!(ClientOptions::default().lease_ttl, default_lease_ttl());
+
+        let options = Client::builder()
+            .etcd_url(vec!["http://localhost:2379".to_string()])
+            .lease_ttl(29)
+            .build()
+            .unwrap();
+        assert_eq!(options.lease_ttl, 29);
+    }
 }
 
 #[cfg(feature = "integration")]
@@ -1314,6 +1398,43 @@ mod tests {
         rt_clone.primary().block_on(async move {
             let drt = DistributedRuntime::new(rt, config).await.unwrap();
             test_kv_cache_operations(drt).await.unwrap();
+        });
+    }
+
+    /// The lease TTL requested through `ClientOptions::lease_ttl` must reach
+    /// etcd's lease grant (issue #12312). etcd reports the initially granted
+    /// TTL, so it must equal the requested value rather than the default.
+    #[test]
+    fn test_requested_lease_ttl_is_granted() {
+        const REQUESTED_TTL: u64 = 29;
+
+        let rt = Runtime::single_threaded().unwrap();
+        let rt_clone = rt.clone();
+
+        rt_clone.primary().block_on(async move {
+            let options = ClientOptions {
+                lease_ttl: REQUESTED_TTL,
+                ..ClientOptions::default()
+            };
+            let client = Client::new(options, rt.clone())
+                .await
+                .expect("etcd client should be available");
+            let lease_id = client.lease_id();
+
+            let mut lease_client = client.etcd_client().lease_client();
+            let resp = lease_client
+                .time_to_live(lease_id as i64, None)
+                .await
+                .expect("lease time-to-live query should succeed");
+
+            assert_eq!(
+                resp.granted_ttl() as u64,
+                REQUESTED_TTL,
+                "granted TTL must match the requested TTL, not the default"
+            );
+
+            // Cleanup so nothing lingers past the keep-alive task shutdown.
+            let _ = lease_client.revoke(lease_id as i64).await;
         });
     }
 
