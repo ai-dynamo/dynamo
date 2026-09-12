@@ -2111,8 +2111,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     "Set 'reset_prefix_cache' to false or pause generation first."
                 ),
             }
+        rpc = body.get("engine_rpc", "update_weights_from_path")
         async with self._pause_lock:
             if not self._paused and not allow_unpaused:
+                if rpc == "finish_weight_update":
+                    # A rejected finish still terminates its transfer. Do not
+                    # leave the canary suppressed until the lease expires.
+                    self._end_rl_maintenance()
                 return {
                     "status": "error",
                     "message": (
@@ -2122,7 +2127,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     ),
                 }
             version = body.get("weight_version", "unknown")
-            rpc = body.get("engine_rpc", "update_weights_from_path")
             rpc_kwargs = {
                 k: v
                 for k, v in body.items()
