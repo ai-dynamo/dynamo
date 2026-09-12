@@ -123,7 +123,7 @@ Markers are required for all tests. They are used for test selection in CI and l
 | Lifecycle [required]    | pre_merge, post_merge, nightly                                   | When the test should run. Aggregate pipeline budgets: pre_merge < 30 min, post_merge < 1 hr, nightly < 3 hr. See [Pipeline Time Budgets](#pipeline-time-budgets). |
 | Test Type [required]    | unit, integration, e2e, benchmark, performance, stress | Nature of the test               |
 | Hardware [required]     | gpu_0, gpu_1, gpu_2, gpu_4, gpu_8, h100                         | Number/type of GPUs required       |
-| VRAM (profiled)         | profiled_vram_gib(N)                                                         | Actual peak VRAM observed by nvidia-smi during profiling (includes CUDA overhead). Used for `--max-vram-gib=N` filtering and GPU-parallel scheduler budget tracking. |
+| VRAM (profiled)         | profiled_vram_gib(N)                                                         | Actual peak VRAM observed by nvidia-smi during profiling (includes CUDA overhead). Used for `--max-vram-gib=N` filtering and GPU-parallel scheduler budget tracking. **Per GPU**: on a multi-GPU test this is the maximum per-device peak, and the scheduler reserves it on every device the test is given. |
 | vLLM KV cache bytes     | requested_vllm_kv_cache_bytes(N)                                             | (vLLM only) Exact KV cache bytes. Sets `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES` → `--kv-cache-memory-bytes`. Deterministic, parallel-safe. |
 | SGLang KV tokens        | requested_sglang_kv_tokens(N)                                                          | (SGLang only) Max KV cache tokens. Sets `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS` → `--max-total-tokens`. Deterministic, parallel-safe. |
 | SGLang VRAM GiB         | requested_sglang_vram_gib(N)                                                           | (SGLang only) Max VRAM in GiB. For non-text workloads (video/image diffusion) where token-based control doesn't apply. |
@@ -212,7 +212,7 @@ Markers differ by engine:
 - **`requested_trtllm_vram_gib(N)`** — max VRAM in GiB for non-text workloads (video/image diffusion). Sets `_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES` → `KvCacheConfig.max_gpu_total_bytes` via `--override-engine-args` JSON. Note: diffusion models don't use KV cache, so this parameter may have no effect — `profiled_vram_gib` alone is sufficient for scheduler budget tracking.
 - TRT-LLM requires JSON merging for `--override-engine-args`, handled by `build_trtllm_override_args_with_mem` in `gpu_utils.sh` (separate from `build_vllm_gpu_mem_args` / `build_sglang_gpu_mem_args`).
 
-`--max-vram-gib=N` deselects tests whose `profiled_vram_gib` exceeds N. Tests without a VRAM marker are also deselected (unknown VRAM = unsafe for parallel). To add a test to the pool, profile it with `tests/utils/profile_pytest.py` (see [GPU VRAM Profiler](#gpu-vram-profiler-profile_pytestpy)).
+`--max-vram-gib=N` deselects tests whose `profiled_vram_gib` exceeds N (per GPU -- see [Multi-GPU tests](#multi-gpu-tests)). Tests without a VRAM marker are also deselected (unknown VRAM = unsafe for parallel). To add a test to the pool, profile it with `tests/utils/profile_pytest.py` (see [GPU VRAM Profiler](#gpu-vram-profiler-profile_pytestpy)).
 
 ### GPU-Parallel Execution
 
@@ -259,6 +259,35 @@ GPU parallel: 6 tests, 7 concurrent slots, GPU0 (48 GiB, 43 GiB multi-proc budge
 ...
 =============== 6 passed in 111.00s (1:51) (vs 228s seq, 2.1x) ===============
 ```
+
+#### Multi-GPU tests
+
+The scheduler understands each test's GPU count, taken from its `gpu_N` hardware marker
+(`gpu_1`, `gpu_2`, `gpu_4`, `gpu_8`; a test with none defaults to one GPU). A `gpu_2` test
+is scheduled as a **gang**: two distinct devices reserved atomically, or none at all.
+
+- `profiled_vram_gib(N)` is the **maximum per-device peak**, and `N` is reserved on *every*
+  device the test is given. Asymmetric per-device profiles are not modelled -- profile the
+  heaviest device.
+- `CUDA_VISIBLE_DEVICES` is set to the whole gang in ascending order (`0,1`), so the child's
+  logical device *i* is a stable physical GPU across runs.
+- A gang costs **one** concurrency slot (`-n`), not one per device -- it is a single pytest
+  subprocess.
+- Both the VRAM budget and the live nvidia-smi gate must pass on *every* member, and the
+  vLLM launch stagger applies to every device the gang touches.
+- Single- and multi-GPU tests co-schedule: a `gpu_1` test can pack into the budget left on a
+  card a `gpu_2` test is already using, as long as no device is over-committed.
+- A test that can never fit -- more GPUs than the node has, or a profile larger than any card
+  -- is reported and the run exits non-zero, rather than waiting for memory that is never
+  coming.
+
+```bash
+# Single- and dual-GPU vLLM tests through the same VRAM-aware stage
+python3 -m pytest --max-vram-gib=80 -n auto -m "vllm and (gpu_1 or gpu_2)" tests/serve/
+```
+
+Unprofiled tests (no `profiled_vram_gib`) are deselected from this stage and keep running in
+the sequential one, `gpu_2` included.
 
 ### Lifecycle Marker Note
 Use the marker for the earliest pipeline stage where the test must run (e.g., `@pytest.mark.pre_merge`). This ensures the test is included in that stage and all subsequent ones (e.g., nightly, release), as CI pipelines select tests marked for earlier stages.
@@ -401,7 +430,7 @@ pytest -m "pre_merge and parallel and not (vllm or sglang or trtllm) and gpu_0" 
 pytest -m "pre_merge and not parallel and not (vllm or sglang or trtllm) and gpu_0" -v --tb=short
 ```
 
-> **Parallel vs sequential:** CPU-only tests (`gpu_0`) marked `parallel` run with `pytest-xdist` (`-n auto` or `-n <workers>`, `--dist=loadscope`). GPU tests (`gpu_1`, `gpu_2`, etc.) run sequentially by default, but can run in parallel with `--max-vram-gib=N -n auto` (uses a custom VRAM-aware scheduler, not xdist). See [`.github/actions/pytest/action.yml`](../.github/actions/pytest/action.yml).
+> **Parallel vs sequential:** CPU-only tests (`gpu_0`) marked `parallel` run with `pytest-xdist` (`-n auto` or `-n <workers>`, `--dist=loadscope`). GPU tests (`gpu_1`, `gpu_2`, etc.) run sequentially by default, but profiled ones can run in parallel with `--max-vram-gib=N -n auto` (uses a custom VRAM-aware scheduler, not xdist, which reserves a whole gang of devices for multi-GPU tests -- see [Multi-GPU tests](#multi-gpu-tests)). See [`.github/actions/pytest/action.yml`](../.github/actions/pytest/action.yml).
 
 **Full E2E suite** -- launches engines for every test configuration; slowest, requires GPU and a framework container (typically <30min depending on framework and model):
 ```bash
@@ -661,6 +690,8 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 ```
 
 Then pass the variable to each worker: `CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES python3 -m dynamo.vllm ...`. For multi-GPU scripts that assign distinct GPUs per worker, use named env vars with defaults (e.g. `PREFILL_CUDA_VISIBLE_DEVICES="${PREFILL_CUDA_VISIBLE_DEVICES:-0}"`).
+
+> **Multi-GPU scripts must index into the gang, never name absolute devices.** The scheduler hands a `gpu_2` test a gang of *any* two devices -- `2,3` as readily as `0,1` -- in `CUDA_VISIBLE_DEVICES`. A script that writes `CUDA_VISIBLE_DEVICES=0` and `=1` for its two workers therefore lands on devices reserved for other tests and silently double-books their VRAM. Split the inherited value and index it (`IFS=',' read -r -a _GPUS <<< "${CUDA_VISIBLE_DEVICES-0,1}"`, then use `${_GPUS[0]}` / `${_GPUS[1]}`), as `examples/backends/vllm/launch/agg_embed_multiworker.sh` does.
 
 ### Engine-specific mapping
 
