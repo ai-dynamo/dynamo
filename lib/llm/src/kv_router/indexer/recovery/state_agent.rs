@@ -52,6 +52,7 @@ use crate::discovery::kv_state_agent::{
 use crate::{
     discovery::{KvSourceMembershipView, KvSourceMembershipWatch, KvSourceStatus},
     kv_router::Indexer,
+    local_model::runtime_config::worker_event_source_eligible,
 };
 
 use super::{
@@ -361,12 +362,7 @@ fn source_mode_suppressed_workers(view: &KvSourceMembershipView) -> HashSet<Work
     view.sources
         .keys()
         .copied()
-        .filter(|worker| {
-            !matches!(
-                view.kv_event_source_mode(worker.worker_id),
-                None | Some("framework_v1")
-            )
-        })
+        .filter(|worker| !worker_event_source_eligible(view.kv_event_source_mode(worker.worker_id)))
         .collect()
 }
 

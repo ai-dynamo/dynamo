@@ -349,6 +349,17 @@ pub struct ModelRuntimeConfig {
     pub max_gpu_lora_count: Option<u32>,
 }
 
+/// Whether a worker's declared [`ModelRuntimeConfig::kv_event_source_mode`] makes it
+/// eligible for the Worker KV event path.
+///
+/// `None` is the legacy Worker-only source and `framework_v1` is the only accepted
+/// explicit value. Per that field's contract, any other explicit value must disable
+/// KV-aware routing rather than falling back within the same worker lifecycle, so an
+/// unrecognized mode is deliberately treated as ineligible rather than as legacy.
+pub fn worker_event_source_eligible(mode: Option<&str>) -> bool {
+    matches!(mode, None | Some("framework_v1"))
+}
+
 const fn default_data_parallel_start_rank() -> u32 {
     0
 }

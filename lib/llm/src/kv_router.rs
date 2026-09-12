@@ -86,7 +86,7 @@ use crate::{
         scheduler::{DefaultWorkerSelector, KvScheduler, PotentialLoad},
         sequence::{SequenceError, SequenceRequest},
     },
-    local_model::runtime_config::ModelRuntimeConfig,
+    local_model::runtime_config::{ModelRuntimeConfig, worker_event_source_eligible},
     worker_type::WorkerType,
 };
 use route_lookup::{
@@ -1039,7 +1039,7 @@ where
                     KvTransferCandidateSource::Worker(worker) => {
                         worker != target
                             && configs.get(&worker.worker_id).is_some_and(|config| {
-                                config.kv_event_source_mode.as_deref() != Some("state_agent_v2")
+                                worker_event_source_eligible(config.kv_event_source_mode.as_deref())
                                     && config
                                         .kv_hint_transfer_metadata_for_dp_rank(worker.dp_rank)
                                         .is_some_and(|source_metadata| {
@@ -3107,6 +3107,63 @@ mod tests {
         let mut stale_source_config =
             transfer_hint_runtime_config(Some("tcp://stale-worker-endpoint:23280"));
         stale_source_config.kv_event_source_mode = Some("state_agent_v2".to_string());
+        workers.insert(8, stale_source_config);
+        let router = make_test_router_with_workers(
+            InspectingSelector {
+                expected_hits: None,
+                selected_worker: target,
+            },
+            None,
+            workers,
+        )
+        .await;
+        let owner = router_hint_cache_owner();
+        let owner_key = ResidencyOwner::cache_owner(owner).compact_key();
+        let candidates = KvTransferCandidates {
+            block_hashes: vec![
+                ExternalSequenceBlockHash(101),
+                ExternalSequenceBlockHash(102),
+            ],
+            owner_prefix_blocks: vec![
+                (KvTransferCandidateSource::Worker(stale_source), 2),
+                (KvTransferCandidateSource::CacheOwner(owner_key), 2),
+            ],
+            routing_snapshot: Some(Arc::new(ResidencyRoutingSnapshot::new(
+                ResidencyProjection::default(),
+                [(
+                    owner,
+                    RouterHintSourceMetadata {
+                        source_control_endpoint: "tcp://persistent-owner:23280".to_string(),
+                        worker_type: "prefill".to_string(),
+                    },
+                    None,
+                )],
+            ))),
+        };
+
+        assert_eq!(
+            router.transfer_hint_for_selection(target, 0, Some(&candidates)),
+            Some(KvSourceLocationsPayload {
+                source_control_endpoint: "tcp://persistent-owner:23280".to_string(),
+                block_hashes: vec![
+                    ExternalSequenceBlockHash(101),
+                    ExternalSequenceBlockHash(102),
+                ],
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn kv_transfer_ignores_worker_source_with_unrecognized_event_source_mode() {
+        let target = WorkerWithDpRank::new(7, 0);
+        let stale_source = WorkerWithDpRank::new(8, 0);
+        let mut workers = HashMap::new();
+        workers.insert(7, transfer_hint_runtime_config(None));
+        let mut stale_source_config =
+            transfer_hint_runtime_config(Some("tcp://stale-worker-endpoint:23280"));
+        // An unrecognized explicit mode must disable KV-aware routing rather than
+        // falling back to the legacy Worker path (see `kv_event_source_mode`).
+        stale_source_config.kv_event_source_mode = Some("framework_v2".to_string());
         workers.insert(8, stale_source_config);
         let router = make_test_router_with_workers(
             InspectingSelector {
