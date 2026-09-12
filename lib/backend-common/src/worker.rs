@@ -2138,6 +2138,7 @@ async fn build_local_model(
         structural_tag_scope: config.structural_tag_scope,
         structural_tag_schema: config.structural_tag_schema,
         enable_local_indexer,
+        enable_eagle: llm.enable_eagle,
         kv_state_endpoint: config.kv_state_endpoint.clone(),
         disaggregated_endpoint,
         runtime_data,

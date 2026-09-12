@@ -245,6 +245,14 @@ impl NativeHttp {
     ) -> BoxStream<'static, Result<LLMEngineOutput, DynamoError>> {
         Box::pin(async_stream::stream! {
             let is_prefill = request.is_prefill;
+            let mut prefill_handoff = request.prefill_handoff;
+            if ctx.is_stopped() || cancel.is_cancelled() {
+                yield Err(client::cancelled(format!(
+                    "SGLang native request {} was cancelled",
+                    ctx.id()
+                )));
+                return;
+            }
             tracing::debug!(request_id = %ctx.id(), endpoint = %self.endpoint.with_path("/generate"), "sending native request to SGLang HTTP");
             let opened = tokio::select! {
                 biased;
@@ -266,11 +274,25 @@ impl NativeHttp {
                     return;
                 }
             };
+            if is_prefill {
+                let Some(handoff) = prefill_handoff.take() else {
+                    yield Err(client::protocol_error(
+                        "SGLang native prefill request is missing disaggregated params",
+                    ));
+                    return;
+                };
+                // Publish the handoff only after SGLang accepts the prefill request.
+                // Decode can then rendezvous while this response is drained without
+                // racing a bootstrap room that the backend has not seen yet.
+                yield Ok(LLMEngineOutput {
+                    disaggregated_params: Some(handoff),
+                    ..Default::default()
+                });
+            }
 
             let bytes = response.bytes_stream().map_err(io::Error::other);
             let reader = StreamReader::new(bytes);
             let mut lines = FramedRead::new(reader, LinesCodec::new_with_max_length(MAX_EVENT_BYTES));
-            let mut prefill_handoff = request.prefill_handoff;
             let mut first_output_seen = false;
             loop {
                 let selected = tokio::select! {
@@ -587,6 +609,30 @@ mod tests {
         assert!(stream.next().await.unwrap().is_ok());
         assert!(*first_token_seen.borrow());
         assert!(stream.next().await.unwrap().is_ok());
+        assert!(stream.next().await.is_none());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn prefill_stream_rejects_backend_error_before_bootstrap() {
+        let (port, server) = serve_once("rejected".to_string(), "500 Internal Server Error").await;
+        let ctx = GenerateContext::new(dynamo_backend_common::testing::mock_context(), None);
+        let mut stream = native_http(port).generate(
+            NativeRequest {
+                body: json!({"input_ids": [1], "stream": true}),
+                is_prefill: true,
+                prefill_handoff: Some(json!({
+                    "bootstrap_host": "prefill",
+                    "bootstrap_port": 5000,
+                    "bootstrap_room": 7
+                })),
+            },
+            ctx,
+            CancellationToken::new(),
+        );
+
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("HTTP 500"));
         assert!(stream.next().await.is_none());
         server.await.unwrap();
     }

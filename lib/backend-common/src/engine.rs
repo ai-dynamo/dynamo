@@ -141,6 +141,9 @@ pub struct LlmRegistration {
     pub max_num_seqs: Option<u64>,
     /// Maximum tokens the engine will process in a single batched step.
     pub max_num_batched_tokens: Option<u64>,
+    /// Whether the engine's KV cache uses Eagle's overlapping block-hash format.
+    /// The router must use the same format or every KV-event lookup will miss.
+    pub enable_eagle: bool,
     /// DP ranks this worker hosts (default 1); the router enumerates per-rank
     /// load from it.
     pub data_parallel_size: Option<u32>,
