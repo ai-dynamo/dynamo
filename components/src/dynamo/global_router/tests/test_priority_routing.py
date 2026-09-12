@@ -269,6 +269,14 @@ class TestLoadConfigWithPriorityRetry:
         assert config.prefill_pool_priorities == [10, 0]
         assert config.decode_pool_priorities == [5, 1]
 
+    def test_loads_output_reservation_flag(self, tmp_path):
+        config_data = _base_config()
+        config_data["reserve_output_tokens_for_context"] = True
+
+        config = load_config(_write_config(tmp_path, config_data))
+
+        assert config.reserve_output_tokens_for_context is True
+
 
 # --- Validation tests ---
 
