@@ -777,6 +777,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     input_tokens = meta_info.get("prompt_tokens")
                     completion_tokens = meta_info.get("completion_tokens")
                     cached_tokens = meta_info.get("cached_tokens")
+                    reasoning_tokens = meta_info.get("reasoning_tokens")
                     prefill_prompt_tokens_details = None
                     if cached_tokens is not None and cached_tokens > 0:
                         prefill_prompt_tokens_details = {"cached_tokens": cached_tokens}
@@ -786,6 +787,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             "completion_tokens": completion_tokens,
                             "total_tokens": input_tokens + completion_tokens,
                         }
+                        if reasoning_tokens is not None:
+                            completion_usage["completion_tokens_details"] = {
+                                "reasoning_tokens": reasoning_tokens
+                            }
                         if prefill_prompt_tokens_details is not None:
                             completion_usage[
                                 "prompt_tokens_details"
