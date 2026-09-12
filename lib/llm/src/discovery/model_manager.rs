@@ -15,12 +15,13 @@ use dynamo_kv_router::{
     PrefillLoadEstimator,
     config::KvRouterConfig,
     protocols::{KvTransferEnforcement, RoutingConstraints, WorkerId, WorkerWithDpRank},
-    selector::WorkerSelector,
+    selector::{WorkerInputs, WorkerSelector},
 };
+use tokio_util::sync::CancellationToken;
 
 use super::worker_monitor::LoadThresholdConfig;
 use super::{
-    KvSourceMembershipWatch, Model, RuntimeConfigWatch, WorkerSet,
+    GenerateEngineSelection, KvSourceMembershipWatch, Model, RuntimeConfigWatch, WorkerSet,
     kv_source_watch::KvSourceMembershipCoordinator, runtime_config_watch,
 };
 
@@ -44,6 +45,7 @@ use crate::{
     lora::state_tracker::LoraWorkerProjection,
     lora::{LoraFilter, LoraRoutingTable, LoraStateTracker, load_estimator::LoadEstimator},
     model_card::{LoraInfo, ModelDeploymentCard},
+    model_type::ModelType,
     types::{
         RealtimeBidirectionalEngine,
         generic::tensor::TensorStreamingEngine,
@@ -701,6 +703,10 @@ impl ModelManager {
         }
         self.validate_adapter_claims(&primary, adapters.iter().map(|(_, card)| card))?;
 
+        let role = representative
+            .worker_type
+            .map_or("unspecified", |worker_type| worker_type.as_str());
+
         let worker_set = Arc::new(worker_set);
         self.get_or_create_model(&primary)
             .add_worker_set(worker_set_key.to_string(), worker_set.clone());
@@ -708,6 +714,15 @@ impl ModelManager {
             self.alias_to_primary.insert(alias.clone(), primary.clone());
             self.get_or_create_model(alias)
                 .add_worker_set(worker_set_key.to_string(), worker_set.clone());
+            // Emitted from the claim itself so the event cannot report an alias
+            // that was not registered, and once per role so a disaggregated
+            // deployment shows which roles claimed the name.
+            tracing::info!(
+                model_name = %primary,
+                alias = %alias,
+                role = %role,
+                "Registering model alias"
+            );
         }
         for (_, adapter) in &adapters {
             let adapter_view = Arc::new(worker_set.adapter_view(adapter.clone()));
@@ -1030,6 +1045,22 @@ impl ModelManager {
             .is_some_and(|m| m.is_ready_to_serve())
     }
 
+    /// Snapshot the serving readiness of every registered model.
+    ///
+    /// Each value is derived from [`Model::is_ready_to_serve`], the same
+    /// selection gate used by request routing and KServe model readiness.
+    /// Results are sorted by model name so scrape output is deterministic.
+    pub(crate) fn registered_model_readiness(&self) -> Vec<(String, bool)> {
+        let catalog = self.catalog.load();
+        let mut readiness = catalog
+            .models
+            .iter()
+            .map(|(name, model)| (name.clone(), model.is_ready_to_serve()))
+            .collect::<Vec<_>>();
+        readiness.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        readiness
+    }
+
     /// Whether any registered model can serve at least one inference request
     /// right now. See [`Model::is_ready_to_serve`].
     pub fn has_any_ready_model(&self) -> bool {
@@ -1197,6 +1228,30 @@ impl ModelManager {
             .collect()
     }
 
+    /// True when at least one registered model still serves `model_type`.
+    ///
+    /// A combined [`ModelType`] is occupied when any of its units is occupied. A unit
+    /// with no backing model list is never occupied; [`ModelType::Prefill`] is such a
+    /// unit, being a cross-version marker rather than a served surface.
+    ///
+    /// This is the only place that maps a [`ModelType`] onto the models behind it, and it
+    /// must stay aligned with endpoint retraction: a unit answered wrongly here either
+    /// disables an endpoint that still has models or leaves one enabled with none.
+    pub fn has_models_of_type(&self, model_type: ModelType) -> bool {
+        self.catalog.load().models.values().any(|model| {
+            (model_type.contains(ModelType::Chat) && model.has_chat_engine())
+                || (model_type.contains(ModelType::Completions) && model.has_completions_engine())
+                || (model_type.contains(ModelType::Embedding) && model.has_embeddings_engine())
+                || (model_type.contains(ModelType::Images) && model.has_images_engine())
+                || (model_type.contains(ModelType::Audios) && model.has_audios_engine())
+                || (model_type.contains(ModelType::Videos) && model.has_videos_engine())
+                || (model_type.contains(ModelType::TensorBased) && model.has_tensor_engine())
+                || (model_type.contains(ModelType::Realtime) && model.has_realtime_engine())
+                || (model_type.contains(ModelType::Classify) && model.has_classify_engine())
+                || (model_type.contains(ModelType::Pooling) && model.has_pooling_engine())
+        })
+    }
+
     pub fn get_embeddings_engine(
         &self,
         model: &str,
@@ -1340,6 +1395,21 @@ impl ModelManager {
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_generate_engine_for_capability(capability)
+    }
+
+    /// Select a Generate engine and its routing metadata from one worker set
+    /// that advertises `capability`.
+    pub(crate) fn get_generate_engine_for_capability_with_routing(
+        &self,
+        model: &str,
+        capability: &str,
+    ) -> Result<GenerateEngineSelection, ModelManagerError> {
+        self.catalog
+            .load()
+            .models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_generate_engine_for_capability_with_routing(capability)
     }
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
@@ -1898,9 +1968,68 @@ impl ModelManager {
         Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
     {
         let client = endpoint.client().await?;
+        let source = crate::kv_router::RouterLoadSource::from_worker_role_or_metric(
+            worker_role,
+            metric_worker_type,
+        );
+        let parent_token = endpoint.component().drt().child_token();
+        let scheduler_load =
+            crate::kv_router::SchedulerLoadSender::disabled(source, parent_token.child_token());
         self.kv_chooser_for_with_selector_and_client(
-            endpoint,
             client,
+            kv_cache_block_size,
+            selector,
+            kv_router_config,
+            prefill_load_estimator,
+            worker_role,
+            metric_worker_type,
+            model_name,
+            is_eagle,
+            scheduler_load,
+            parent_token,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn managed_kv_router_for(
+        &self,
+        endpoint: &Endpoint,
+        kv_cache_block_size: u32,
+        kv_router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        metric_worker_type: &'static str,
+        model_name: Option<String>,
+        is_eagle: bool,
+    ) -> anyhow::Result<crate::kv_router::ManagedKvRouter> {
+        self.managed_kv_router_for_with_worker_role(
+            endpoint,
+            kv_cache_block_size,
+            kv_router_config,
+            prefill_load_estimator,
+            None,
+            metric_worker_type,
+            model_name,
+            is_eagle,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn managed_kv_router_for_with_worker_role(
+        &self,
+        endpoint: &Endpoint,
+        kv_cache_block_size: u32,
+        kv_router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        worker_role: Option<WorkerType>,
+        metric_worker_type: &'static str,
+        model_name: Option<String>,
+        is_eagle: bool,
+    ) -> anyhow::Result<crate::kv_router::ManagedKvRouter> {
+        let selector = DefaultWorkerSelector::new(kv_router_config.clone(), metric_worker_type);
+        self.managed_kv_router_for_with_selector(
+            endpoint,
             kv_cache_block_size,
             selector,
             kv_router_config,
@@ -1913,10 +2042,57 @@ impl ModelManager {
         .await
     }
 
+    /// Construct a managed KV router with a selector resolved by the routing host at startup.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn kv_chooser_for_with_selector_and_client<Sel>(
+    pub async fn managed_kv_router_for_with_selector<Sel>(
         &self,
         endpoint: &Endpoint,
+        kv_cache_block_size: u32,
+        selector: Sel,
+        kv_router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        worker_role: Option<WorkerType>,
+        metric_worker_type: &'static str,
+        model_name: Option<String>,
+        is_eagle: bool,
+    ) -> anyhow::Result<crate::kv_router::ManagedKvRouter<Sel>>
+    where
+        Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+    {
+        let client = endpoint.client().await?;
+        let source = crate::kv_router::RouterLoadSource::from_worker_role_or_metric(
+            worker_role,
+            metric_worker_type,
+        );
+        let load_context = crate::kv_router::RoutingLoadContext::start(
+            client.clone(),
+            source,
+            crate::discovery::LoadThresholdHandle::new(Default::default()),
+            &endpoint.component().drt().child_token(),
+            None,
+        )
+        .await?;
+        let router = self
+            .kv_chooser_for_with_selector_and_client(
+                client,
+                kv_cache_block_size,
+                selector,
+                kv_router_config,
+                prefill_load_estimator,
+                worker_role,
+                metric_worker_type,
+                model_name,
+                is_eagle,
+                load_context.scheduler_load_sender(),
+                load_context.cancellation_token(),
+            )
+            .await?;
+        Ok(crate::kv_router::ManagedKvRouter::new(load_context, router))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn kv_chooser_for_with_selector_and_client<Sel>(
+        &self,
         client: Client,
         kv_cache_block_size: u32,
         selector: Sel,
@@ -1926,10 +2102,13 @@ impl ModelManager {
         metric_worker_type: &'static str,
         model_name: Option<String>,
         is_eagle: bool,
+        scheduler_load: crate::kv_router::SchedulerLoadSender,
+        cancellation_token: CancellationToken,
     ) -> anyhow::Result<Arc<KvRouter<Sel>>>
     where
         Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
     {
+        let endpoint = client.endpoint.clone();
         let lora_domain = self.lora_domain(&endpoint.id());
 
         // Register router via discovery mechanism.
@@ -1940,7 +2119,7 @@ impl ModelManager {
         // Use the worker's component name so each target pool gets its own router discovery group
         let router_endpoint_id =
             router_endpoint_id(endpoint.id().namespace, endpoint.id().component);
-        let transport = build_transport_type(endpoint, &router_endpoint_id, instance_id).await?;
+        let transport = build_transport_type(&endpoint, &router_endpoint_id, instance_id).await?;
 
         let discovery_spec = DiscoverySpec::Endpoint {
             namespace: router_endpoint_id.namespace.clone(),
@@ -1954,41 +2133,59 @@ impl ModelManager {
         let registration = drt.register_endpoint_lease(discovery_spec).await?;
 
         // Get of create runtime config watcher for this endpoint
-        let workers_with_configs = self.get_or_create_runtime_config_watcher(endpoint).await?;
+        let workers_with_configs = self.get_or_create_runtime_config_watcher(&endpoint).await?;
 
-        // Build shared cache client based on shared_cache_type.
-        let shared_cache: Option<Box<dyn dynamo_kv_router::SharedKvCache>> = match kv_router_config
-            .as_ref()
-            .map(|c| c.shared_cache_type)
-            .unwrap_or_default()
+        // A selector that does not consume cache input must not create a shared-cache client or
+        // subscribe to its updates.
+        let shared_cache: Option<Box<dyn dynamo_kv_router::SharedKvCache>> = if selector
+            .required_worker_inputs()
+            .contains(WorkerInputs::CACHE)
         {
-            dynamo_kv_router::SharedCacheType::None => None,
-            dynamo_kv_router::SharedCacheType::Hicache => {
-                let worker_component_name = &endpoint.id().component;
-                tracing::info!(
-                    worker_component = worker_component_name,
-                    "Using HiCache shared KV cache"
-                );
-                Some(Box::new(
-                    self.hicache_cache_for(endpoint, workers_with_configs.clone()),
-                ))
+            match kv_router_config
+                .as_ref()
+                .map(|c| c.shared_cache_type)
+                .unwrap_or_default()
+            {
+                dynamo_kv_router::SharedCacheType::None => None,
+                dynamo_kv_router::SharedCacheType::Hicache => {
+                    let worker_component_name = &endpoint.id().component;
+                    tracing::info!(
+                        worker_component = worker_component_name,
+                        "Using HiCache shared KV cache"
+                    );
+                    Some(Box::new(
+                        self.hicache_cache_for(&endpoint, workers_with_configs.clone()),
+                    ))
+                }
             }
+        } else {
+            None
         };
 
         let effective_kv_router_config = kv_router_config.clone().unwrap_or_default();
         let kv_event_source_requirement =
             KvEventSourceRequirement::derive(worker_role, &effective_kv_router_config);
-        let kv_source_membership =
-            if kv_event_source_requirement.should_subscribe(&effective_kv_router_config) {
-                Some(
-                    self.get_or_create_kv_source_membership_watch(endpoint)
-                        .await?,
-                )
-            } else {
-                None
-            };
+        let cache_required = selector
+            .required_worker_inputs()
+            .contains(WorkerInputs::CACHE)
+            || effective_kv_router_config.serve_indexer
+            || matches!(
+                kv_event_source_requirement,
+                KvEventSourceRequirement::ConditionalDisaggDecodeCache
+                    | KvEventSourceRequirement::Unknown
+            );
+        let kv_source_membership = if cache_required
+            && kv_event_source_requirement.should_subscribe(&effective_kv_router_config)
+        {
+            Some(
+                self.get_or_create_kv_source_membership_watch(&endpoint)
+                    .await?,
+            )
+        } else {
+            None
+        };
 
-        let mut chooser = KvRouter::new_with_worker_role(
+        let mut chooser = KvRouter::new_with_worker_role_and_scheduler_load(
             endpoint.clone(),
             client,
             workers_with_configs,
@@ -2003,6 +2200,8 @@ impl ModelManager {
             is_eagle,
             shared_cache,
             self.lora_enabled.then(|| lora_domain.filter.clone()),
+            scheduler_load,
+            cancellation_token,
         )
         .await?;
         chooser.set_endpoint_registration(registration);
@@ -2178,7 +2377,7 @@ impl ModelManager {
         let prefill_providers = worker_sets
             .iter()
             .filter(|worker_set| worker_set.card().worker_type == Some(WorkerType::Prefill))
-            .filter_map(|worker_set| worker_set.topology_endpoint().cloned())
+            .filter_map(|worker_set| worker_set.topology_target().cloned())
             .collect::<Vec<_>>();
         let decode_consumers = worker_sets
             .iter()
@@ -2188,7 +2387,11 @@ impl ModelManager {
             .then(|| prefill_providers[0].clone());
         for worker_set in &decode_consumers {
             if let Some(router) = &worker_set.prefill_router {
-                router.set_target(prefill_target.clone());
+                router.set_target(
+                    prefill_target
+                        .clone()
+                        .map(super::WorkerSetTarget::Committed),
+                );
             }
         }
 
@@ -2198,7 +2401,7 @@ impl ModelManager {
                 worker_set.card().worker_type == Some(WorkerType::Encode)
                     && worker_set.card().model_type.is_empty()
             })
-            .filter_map(|worker_set| worker_set.topology_endpoint().cloned())
+            .filter_map(|worker_set| worker_set.topology_target().cloned())
             .collect::<Vec<_>>();
         let unique_encode = (encode_providers.len() == 1).then(|| encode_providers[0].clone());
         let capable_prefill = (prefill_providers.len() == 1)
@@ -2218,7 +2421,12 @@ impl ModelManager {
                     Self::supports_encoder_result_handoff(worker_set.card())
                 }
             };
-            router.set_target(routing_enabled.then(|| unique_encode.clone()).flatten());
+            router.set_target(
+                routing_enabled
+                    .then(|| unique_encode.clone())
+                    .flatten()
+                    .map(super::WorkerSetTarget::Committed),
+            );
         }
     }
 
@@ -3168,6 +3376,152 @@ mod tests {
         assert_eq!(manager.resolve_canonical_name("alias"), "alias");
     }
 
+    #[derive(Debug, Clone)]
+    struct CapturedEvent {
+        message: String,
+        fields: HashMap<String, String>,
+    }
+
+    impl CapturedEvent {
+        fn field(&self, name: &str) -> &str {
+            self.fields
+                .get(name)
+                .map(String::as_str)
+                .unwrap_or_default()
+        }
+    }
+
+    struct CaptureLayer(Arc<std::sync::Mutex<Vec<CapturedEvent>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::layer::Layer<S> for CaptureLayer {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            struct Visitor(CapturedEvent);
+
+            impl Visitor {
+                fn put(&mut self, name: &str, value: String) {
+                    if name == "message" {
+                        self.0.message = value;
+                    } else {
+                        self.0.fields.insert(name.to_string(), value);
+                    }
+                }
+            }
+
+            impl tracing::field::Visit for Visitor {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    self.put(field.name(), format!("{value:?}"));
+                }
+
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    self.put(field.name(), value.to_string());
+                }
+            }
+
+            let mut visitor = Visitor(CapturedEvent {
+                message: String::new(),
+                fields: HashMap::new(),
+            });
+            event.record(&mut visitor);
+            self.0.lock().unwrap().push(visitor.0);
+        }
+    }
+
+    fn capture_events<T>(body: impl FnOnce() -> T) -> (T, Vec<CapturedEvent>) {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CaptureLayer(Arc::clone(&captured)));
+        let out = tracing::subscriber::with_default(subscriber, body);
+        let events = captured.lock().unwrap().clone();
+        (out, events)
+    }
+
+    fn alias_claim_events(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {
+        events
+            .iter()
+            .filter(|event| event.message == "Registering model alias")
+            .collect()
+    }
+
+    /// A card for one role of a two-role prefill/decode topology. `needs` names the
+    /// peer role, so neither role is ready on its own.
+    fn alias_role_card(role: WorkerType, aliases: &[&str]) -> ModelDeploymentCard {
+        let mut card = ModelDeploymentCard::with_name_only("alias-topology-model");
+        card.worker_type = Some(role);
+        card.model_type = match role {
+            WorkerType::Prefill => crate::model_type::ModelType::empty(),
+            _ => crate::model_type::ModelType::Chat,
+        };
+        card.needs = match role {
+            WorkerType::Prefill => vec![vec![WorkerType::Decode]],
+            WorkerType::Decode => vec![vec![WorkerType::Prefill]],
+            _ => Vec::new(),
+        };
+        card.aliases = aliases.iter().map(|alias| alias.to_string()).collect();
+        card
+    }
+
+    fn commit_alias_role(manager: &ModelManager, role: WorkerType, aliases: &[&str]) {
+        let namespace = "alias-deployment";
+        let card = alias_role_card(role, aliases);
+        let worker_set = WorkerSet::new(
+            namespace.to_string(),
+            card.mdcsum().to_string(),
+            card.clone(),
+        );
+        manager
+            .commit_discovery_group(
+                &format!("alias-group-{namespace}-{role}"),
+                &format!("{namespace}-{role}"),
+                worker_set,
+                vec![(format!("alias-instance-{namespace}-{role}"), card)],
+                Vec::new(),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn disaggregated_pair_sharing_an_alias_reports_one_claim_per_role() {
+        let manager = ModelManager::new();
+
+        let (_, events) = capture_events(|| {
+            commit_alias_role(&manager, WorkerType::Prefill, &["shared-alias"]);
+            commit_alias_role(&manager, WorkerType::Decode, &["shared-alias"]);
+        });
+
+        let claims = alias_claim_events(&events);
+        assert_eq!(claims.len(), 2, "expected one claim per role: {events:#?}");
+        let mut roles = claims
+            .iter()
+            .map(|event| event.field("role"))
+            .collect::<Vec<_>>();
+        roles.sort_unstable();
+        assert_eq!(roles, ["decode", "prefill"]);
+        for claim in &claims {
+            assert_eq!(claim.field("model_name"), "alias-topology-model");
+            assert_eq!(claim.field("alias"), "shared-alias");
+        }
+
+        assert_eq!(
+            manager.resolve_canonical_name("shared-alias"),
+            "alias-topology-model"
+        );
+        assert!(
+            manager
+                .get_model("shared-alias")
+                .unwrap()
+                .has_ready_workers()
+        );
+    }
+
     #[test]
     fn discovery_group_derives_adapter_model_and_lora_projection() {
         let manager = ModelManager::new();
@@ -3268,9 +3622,18 @@ mod tests {
         Option<Arc<crate::kv_router::EncoderRouter>>,
     ) {
         let card = topology_card(role);
-        let mut worker_set =
-            WorkerSet::new(endpoint.id().namespace, card.mdcsum().to_string(), card);
-        worker_set.set_topology_endpoint(endpoint);
+        let mut worker_set = WorkerSet::new(
+            endpoint.id().namespace,
+            card.mdcsum().to_string(),
+            card.clone(),
+        );
+        worker_set.set_topology_target(crate::discovery::CommittedWorkerSetTarget {
+            group: endpoint.id().to_string(),
+            endpoint,
+            generation: 1,
+            card: Arc::new(card),
+            admitted_ids: tokio::sync::watch::channel(Vec::new()).1,
+        });
         if role != WorkerType::Decode {
             return (worker_set, None, None);
         }
@@ -3284,11 +3647,11 @@ mod tests {
             None,
             None,
             None,
-            None,
+            crate::session_affinity::SessionAffinityMode::Hard,
             "topology-model".to_string(),
             worker_set.namespace().to_string(),
-            false,
-            None,
+            crate::discovery::LoadThresholdHandle::new(Default::default()),
+            CancellationToken::new(),
         );
         let encoder = crate::kv_router::EncoderRouter::new(
             "topology-model".to_string(),
@@ -3594,5 +3957,94 @@ mod tests {
             ),
             "incomplete-but-engine-present model must be ModelUnavailable (503), not 404"
         );
+    }
+
+    struct UncalledEngine;
+
+    #[async_trait::async_trait]
+    impl<Req, Resp>
+        dynamo_runtime::engine::AsyncEngine<
+            dynamo_runtime::pipeline::SingleIn<Req>,
+            dynamo_runtime::pipeline::ManyOut<Resp>,
+            dynamo_runtime::pipeline::Error,
+        > for UncalledEngine
+    where
+        Req: Send + Sync + 'static,
+        Resp: dynamo_runtime::engine::Data,
+    {
+        async fn generate(
+            &self,
+            _request: dynamo_runtime::pipeline::SingleIn<Req>,
+        ) -> Result<dynamo_runtime::pipeline::ManyOut<Resp>, dynamo_runtime::pipeline::Error>
+        {
+            anyhow::bail!("engine is never invoked by this test")
+        }
+    }
+
+    /// Registers one model that occupies `model_type`. Returns false when this test has no
+    /// way to occupy that unit, which is the signal the caller turns into a failure.
+    fn register_model_occupying(manager: &ModelManager, model_type: ModelType) -> bool {
+        let name = "occupancy-probe";
+        let outcome = if model_type == ModelType::Chat {
+            manager.add_chat_completions_model(name, "ck", Arc::new(UncalledEngine))
+        } else if model_type == ModelType::Completions {
+            manager.add_completions_model(name, "ck", Arc::new(UncalledEngine))
+        } else if model_type == ModelType::Embedding {
+            manager.add_embeddings_model(name, "ck", Arc::new(UncalledEngine))
+        } else if model_type == ModelType::Images {
+            manager.add_images_model(name, "ck", Arc::new(UncalledEngine))
+        } else if model_type == ModelType::Audios {
+            manager.add_audios_model(name, "ck", Arc::new(UncalledEngine))
+        } else if model_type == ModelType::Videos {
+            manager.add_videos_model(name, "ck", Arc::new(UncalledEngine))
+        } else if model_type == ModelType::TensorBased {
+            manager.add_tensor_model(name, "ck", Arc::new(UncalledEngine))
+        } else if model_type == ModelType::Realtime {
+            manager.add_realtime_model(
+                name,
+                "ck",
+                Arc::new(crate::engines::EchoBidirectionalEngine),
+            )
+        } else if model_type == ModelType::Classify {
+            manager.add_classify_model(name, "ck", Arc::new(UncalledEngine))
+        } else if model_type == ModelType::Pooling {
+            manager.add_pooling_model(name, "ck", Arc::new(UncalledEngine))
+        } else {
+            return false;
+        };
+        outcome.expect("registering the occupancy probe model failed");
+        true
+    }
+
+    /// `ModelType` is a `bitflags!` type, so a unit left out of the hand-maintained
+    /// `has_models_of_type` chain draws no exhaustiveness error and is silently reported as
+    /// never occupied. Every unit that maps onto an `EndpointType` must therefore be
+    /// registrable here and answered as occupied once a model of it exists.
+    #[test]
+    fn has_models_of_type_answers_every_endpoint_backed_model_type() {
+        for unit in ModelType::all().units() {
+            // Units that serve no HTTP endpoint carry no such obligation: ModelType::Prefill
+            // is a cross-version marker, and ModelType::TensorBased has no endpoint mapping.
+            if unit.as_endpoint_types_with_anthropic(true).is_empty() {
+                continue;
+            }
+
+            let manager = ModelManager::new();
+            assert!(
+                !manager.has_models_of_type(unit),
+                "{unit:?} must not be reported as occupied in an empty manager"
+            );
+            assert!(
+                register_model_occupying(&manager, unit),
+                "{unit:?} maps onto an HTTP endpoint but this test cannot register a model \
+                 that occupies it; add a branch to register_model_occupying, and a term to \
+                 ModelManager::has_models_of_type if it lacks one"
+            );
+            assert!(
+                manager.has_models_of_type(unit),
+                "ModelManager::has_models_of_type does not answer {unit:?}, so the frontend \
+                 would retract that endpoint while a model of that type is still registered"
+            );
+        }
     }
 }

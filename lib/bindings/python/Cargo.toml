@@ -22,10 +22,13 @@ name = "_core"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = []
-# Links a policy catalog selected by the dependency alias below. Private images replace
-# that dependency with their catalog crate; the stock image does not enable this feature.
+default = ["custom-policy"]
+# Links the worker-selection policies Dynamo ships plus the replaceable catalog selected by the
+# dependency alias below. Enabled by default so a deployment can select a shipped policy through
+# router-policy YAML without rebuilding. A private image replaces only the catalog dependency, so
+# its policies are added alongside the shipped ones rather than displacing them.
 custom-policy = [
+  "dep:dynamo-custom-policy-builtin",
   "dep:dynamo-worker-selection-policy-catalog",
   "dynamo-kv-router/standalone-selection",
 ]
@@ -38,7 +41,7 @@ slot-tracker = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standalo
 select-service = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standalone-selection"]
 # Stable request identities and deterministic replay tie-breaking for parity builds.
 replay-bench = ["dynamo-mocker/replay-bench"]
-aic-forward-pass = ["dep:aiconfigurator-core"]
+aic-forward-pass = ["dep:aisimulate-core"]
 nvtx = ["dynamo-runtime/nvtx"]
 # Enable in-process MM-aware KV routing
 # (per-image token-count + placeholder expansion + block-level mm_hash).
@@ -55,18 +58,19 @@ request-trace-s3 = ["dynamo-llm/request-trace-s3"]
 tokio-console = ["dynamo-runtime/tokio-console"]
 
 [dependencies]
-# AIC perf model: pure-Rust hot-path latency engine. Pinned to the matching
-# aiconfigurator-core 0.11 dev release. `extension-module` is
-# NOT enabled on aiconfigurator-core (its `default = []`), so this extension's
-# own interpreter is used; AicEngineBuilder::build() crosses into Python once at
-# startup while AicEngine::{prefill,decode}_latency_ms() are pure Rust (no GIL)
-# on the predict hot path.
-aiconfigurator-core = { version = "=0.11.0-dev20260728", optional = true }
+# AIC perf model: pure-Rust hot-path latency engine. AISimulate owns the
+# former AIC crate surface. The `python` feature is required for
+# AicEngineBuilder; this extension supplies the interpreter, so the dependency
+# must not enable `extension-module`.
+aisimulate-core = { version = "=0.1.0-dev.2", optional = true, features = ["python"] }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
-dynamo-parsers = { version = "8.0.0" }
+dynamo-parsers = { version = "8.1.0" }
 dynamo-backend-common = { path = "../../backend-common" }
+dynamo-sidecar-common = { path = "../../sidecar/common" }
 dynamo-sglang-sidecar = { path = "../../sidecar/sglang" }
+dynamo-trtllm-sidecar = { path = "../../sidecar/trtllm" }
+dynamo-vllm-sidecar = { path = "../../sidecar/vllm" }
 
 anyhow = { version = "1" }
 async-stream = { version = "0.3" }
@@ -96,6 +100,7 @@ uuid = { version = "1.18.1" }
 
 # kv-indexer / slot-tracker / shared kv-router types
 dynamo-kv-router = { path = "../../kv-router" }
+dynamo-custom-policy-builtin = { path = "../../router-plugins/builtin", optional = true }
 dynamo-worker-selection-policy-catalog = { path = "../../router-plugins/catalog", optional = true }
 clap = { version = "4.5", features = ["derive"], optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }

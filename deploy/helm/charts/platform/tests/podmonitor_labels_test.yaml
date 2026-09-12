@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: PodMonitor labels
+templates:
+  - charts/dynamo-operator/templates/prometheus.yaml
+tests:
+  - it: adds configured labels to every PodMonitor
+    set:
+      dynamo-operator.dynamo.metrics.podMonitors.enabled: true
+      dynamo-operator.dynamo.metrics.podMonitors.labels.release: kube-prometheus-stack
+    asserts:
+      - hasDocuments:
+          count: 5
+      - equal:
+          path: metadata.labels.release
+          value: kube-prometheus-stack
+        documentSelector:
+          path: metadata.name
+          value: dynamo-frontend
+      - equal:
+          path: metadata.labels.release
+          value: kube-prometheus-stack
+        documentSelector:
+          path: metadata.name
+          value: dynamo-worker
+      - equal:
+          path: metadata.labels.release
+          value: kube-prometheus-stack
+        documentSelector:
+          path: metadata.name
+          value: dynamo-planner
+      - equal:
+          path: metadata.labels.release
+          value: kube-prometheus-stack
+        documentSelector:
+          path: metadata.name
+          value: dynamo-epp
+      - equal:
+          path: metadata.labels.release
+          value: kube-prometheus-stack
+        documentSelector:
+          path: metadata.name
+          value: dynamo-router

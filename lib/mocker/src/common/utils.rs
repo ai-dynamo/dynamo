@@ -5,6 +5,9 @@ use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
+use std::sync::Once;
+
 use aisimulate_core::engine::{WorkerType as EngineWorkerType, prefill_handoff_delay_ms};
 
 use crate::common::handoff::HandoffTransferTiming;
@@ -288,21 +291,193 @@ pub async fn sleep_precise(duration: Duration) {
     sleep_until_precise(Instant::now() + duration).await;
 }
 
+#[cfg(target_os = "linux")]
+enum PreciseTimerState {
+    Uninitialized,
+    Ready(tokio_timerfd::Delay),
+    // A timerfd error permanently selects Tokio for this timer instance.
+    Disabled,
+}
+
+#[cfg(target_os = "linux")]
+static TIMERFD_FALLBACK_WARNING: Once = Once::new();
+
+#[cfg(all(test, target_os = "linux"))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TimerTestMode {
+    Tokio,
+    TimerFd,
+    FailCreation,
+}
+
+pub(crate) struct ReusablePreciseTimer {
+    backend: SleepBackend,
+    #[cfg(target_os = "linux")]
+    state: PreciseTimerState,
+    #[cfg(all(test, target_os = "linux"))]
+    test_mode: TimerTestMode,
+    #[cfg(all(test, target_os = "linux"))]
+    timerfd_create_attempts: usize,
+}
+
+impl Default for ReusablePreciseTimer {
+    fn default() -> Self {
+        Self {
+            backend: configured_sleep_backend(),
+            #[cfg(target_os = "linux")]
+            state: PreciseTimerState::Uninitialized,
+            #[cfg(all(test, target_os = "linux"))]
+            test_mode: TimerTestMode::Tokio,
+            #[cfg(all(test, target_os = "linux"))]
+            timerfd_create_attempts: 0,
+        }
+    }
+}
+
+impl ReusablePreciseTimer {
+    pub(crate) async fn sleep_until(&mut self, deadline: Instant) {
+        if sleep_drift_enabled() {
+            let started = Instant::now();
+            let requested = deadline.saturating_duration_since(started);
+            if let Some(backend) = self.sleep_until_inner(deadline).await {
+                let actual = started.elapsed();
+                record_sleep_drift(&SleepDriftRecord {
+                    backend,
+                    requested,
+                    actual,
+                    drift: actual.saturating_sub(requested),
+                });
+            }
+        } else {
+            self.sleep_until_inner(deadline).await;
+        }
+    }
+
+    async fn sleep_until_inner(&mut self, deadline: Instant) -> Option<SleepBackend> {
+        if deadline <= Instant::now() {
+            tokio::task::yield_now().await;
+            return None;
+        }
+
+        #[cfg(all(test, target_os = "linux"))]
+        if self.test_mode == TimerTestMode::Tokio {
+            sleep_until_tokio(deadline).await;
+            return Some(SleepBackend::TimeDriver);
+        }
+
+        #[cfg(target_os = "linux")]
+        if self.backend.resolve() == SleepBackend::Timerfd {
+            match self.arm_timerfd(deadline) {
+                Ok(true) => {}
+                Ok(false) => {
+                    sleep_until_tokio(deadline).await;
+                    return Some(SleepBackend::TimeDriver);
+                }
+                Err(error) => {
+                    self.disable_timerfd(&error);
+                    sleep_until_tokio(deadline).await;
+                    return Some(SleepBackend::TimeDriver);
+                }
+            }
+
+            let result = match &mut self.state {
+                PreciseTimerState::Ready(delay) => Some(delay.await),
+                PreciseTimerState::Uninitialized | PreciseTimerState::Disabled => None,
+            };
+            match result {
+                Some(Ok(())) => return Some(SleepBackend::Timerfd),
+                Some(Err(error)) => {
+                    self.disable_timerfd(&error);
+                    sleep_until_tokio(deadline).await;
+                    return Some(SleepBackend::TimeDriver);
+                }
+                None => {
+                    sleep_until_tokio(deadline).await;
+                    return Some(SleepBackend::TimeDriver);
+                }
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = self.backend;
+
+        sleep_until_tokio(deadline).await;
+        Some(SleepBackend::TimeDriver)
+    }
+
+    fn with_backend(backend: SleepBackend) -> Self {
+        Self { backend, ..Self::default() }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn arm_timerfd(&mut self, deadline: Instant) -> std::io::Result<bool> {
+        match &mut self.state {
+            PreciseTimerState::Uninitialized => {
+                #[cfg(test)]
+                {
+                    self.timerfd_create_attempts += 1;
+                    if self.test_mode == TimerTestMode::FailCreation {
+                        return Err(std::io::Error::other("injected timerfd creation failure"));
+                    }
+                }
+                self.state = PreciseTimerState::Ready(tokio_timerfd::Delay::new(deadline)?);
+                Ok(true)
+            }
+            PreciseTimerState::Ready(delay) => {
+                delay.reset(deadline);
+                Ok(true)
+            }
+            PreciseTimerState::Disabled => Ok(false),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn disable_timerfd(&mut self, error: &std::io::Error) {
+        self.state = PreciseTimerState::Disabled;
+        TIMERFD_FALLBACK_WARNING.call_once(|| {
+            tracing::warn!(
+                error = %error,
+                "precise timerfd failed; using Tokio for this timer"
+            );
+        });
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn with_timerfd_for_test() -> Self {
+        Self {
+            test_mode: TimerTestMode::TimerFd,
+            ..Self::default()
+        }
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    fn with_timerfd_creation_failure() -> Self {
+        Self {
+            test_mode: TimerTestMode::FailCreation,
+            ..Self::default()
+        }
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn timerfd_create_attempts(&self) -> usize {
+        self.timerfd_create_attempts
+    }
+}
+
+async fn sleep_until_tokio(deadline: Instant) {
+    if deadline <= Instant::now() {
+        tokio::task::yield_now().await;
+    } else {
+        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+    }
+}
+
 /// Sleep until the specified deadline using timerfd on Linux for precision.
 ///
 /// Unlike `sleep_precise`, this accounts for time already elapsed since the
 /// deadline's reference point, making it suitable for simulation loops where
 /// computation time should be subtracted from the sleep.
 pub async fn sleep_until_precise(deadline: Instant) {
-    if sleep_drift_enabled() {
-        if let Some(record) =
-            sleep_until_precise_measured(deadline, configured_sleep_backend()).await
-        {
-            record_sleep_drift(&record);
-        }
-        return;
-    }
-    sleep_until_backend(deadline, configured_sleep_backend()).await;
+    ReusablePreciseTimer::default().sleep_until(deadline).await;
 }
 
 /// Sleeps until `deadline` and returns timing data, or `None` if it has expired.
@@ -312,7 +487,8 @@ pub async fn sleep_until_precise_measured(
 ) -> Option<SleepDriftRecord> {
     let started = Instant::now();
     let requested = deadline.saturating_duration_since(started);
-    let used = sleep_until_backend(deadline, backend).await?;
+    let mut timer = ReusablePreciseTimer::with_backend(backend);
+    let used = timer.sleep_until_inner(deadline).await?;
     let actual = started.elapsed();
     Some(SleepDriftRecord {
         backend: used,
@@ -322,35 +498,6 @@ pub async fn sleep_until_precise_measured(
     })
 }
 
-async fn sleep_until_backend(deadline: Instant, backend: SleepBackend) -> Option<SleepBackend> {
-    // Scheduler work may consume the modeled delay, especially at high speedup ratios. Avoid
-    // allocating and registering a timerfd when there is no remaining time to sleep. Preserve
-    // the scheduler loop's cooperative yield so other tasks on the runtime can make progress.
-    if deadline <= Instant::now() {
-        tokio::task::yield_now().await;
-        return None;
-    }
-
-    #[cfg(target_os = "linux")]
-    if backend.resolve() == SleepBackend::Timerfd {
-        // Creation and read failures both fall back to the time driver.
-        let timerfd_served = match tokio_timerfd::Delay::new(deadline) {
-            Ok(delay) => delay.await.is_ok(),
-            Err(_) => false,
-        };
-        if timerfd_served {
-            return Some(SleepBackend::Timerfd);
-        }
-        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
-        return Some(SleepBackend::TimeDriver);
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    let _ = backend;
-
-    tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
-    Some(SleepBackend::TimeDriver)
-}
 
 #[cfg(test)]
 mod tests {
@@ -366,6 +513,70 @@ mod tests {
 
         assert!(matches!(first_poll, Poll::Pending));
         sleep.await;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn reusable_precise_timer_reuses_its_timerfd() {
+        let mut timer = ReusablePreciseTimer::with_timerfd_for_test();
+
+        for _ in 0..2 {
+            let started = Instant::now();
+            let deadline = started + Duration::from_millis(5);
+            tokio::time::timeout(Duration::from_secs(1), timer.sleep_until(deadline))
+                .await
+                .expect("reusable precise timer did not complete");
+            assert!(started.elapsed() >= Duration::from_millis(1));
+        }
+
+        assert_eq!(timer.timerfd_create_attempts(), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn reusable_precise_timer_rearms_after_cancelled_wait_expires() {
+        let mut timer = ReusablePreciseTimer::with_timerfd_for_test();
+        let cancelled_deadline = Instant::now() + Duration::from_millis(50);
+        {
+            let wait = timer.sleep_until(cancelled_deadline);
+            tokio::pin!(wait);
+            tokio::select! {
+                biased;
+                _ = tokio::time::sleep(Duration::from_millis(2)) => {}
+                _ = &mut wait => panic!("the cancelled wait completed early"),
+            }
+        }
+
+        tokio::time::sleep_until(tokio::time::Instant::from_std(
+            cancelled_deadline + Duration::from_millis(5),
+        ))
+        .await;
+
+        let rearmed_at = Instant::now();
+        let rearmed_deadline = rearmed_at + Duration::from_millis(30);
+        tokio::time::timeout(Duration::from_secs(1), timer.sleep_until(rearmed_deadline))
+            .await
+            .expect("rearmed precise timer did not complete");
+
+        assert!(
+            rearmed_at.elapsed() >= Duration::from_millis(20),
+            "the old unread expiration completed the rearmed wait early"
+        );
+        assert_eq!(timer.timerfd_create_attempts(), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn reusable_precise_timer_latches_creation_failure() {
+        let mut timer = ReusablePreciseTimer::with_timerfd_creation_failure();
+
+        for _ in 0..2 {
+            let started = Instant::now();
+            timer.sleep_until(started + Duration::from_millis(2)).await;
+            assert!(started.elapsed() >= Duration::from_millis(1));
+        }
+
+        assert_eq!(timer.timerfd_create_attempts(), 1);
     }
 
     #[test]

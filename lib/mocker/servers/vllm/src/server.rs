@@ -106,6 +106,7 @@ impl VllmMockerService {
                 data_parallel_size: engine_args.dp_size,
                 data_parallel_rank: DP_RANK,
                 decode_context_parallel_size: 1,
+                world_size: 1,
             }),
             max_model_len: engine_args
                 .max_model_len
@@ -132,6 +133,7 @@ impl VllmMockerService {
                 })?
                 .unwrap_or_default(),
             rl_capabilities: None,
+            supports_native_sampling_params_json: false,
         };
         Ok(Self {
             config: Arc::new(config),

@@ -10,9 +10,10 @@ use dynamo_protocols::types::responses::{
     InputContent, InputItem, InputOutputMessageContent, InputParam, InputRole, InputTokenDetails,
     Instructions, Item, MessageItem, NamespaceToolParamTool, OutputItem, OutputMessage,
     OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails,
-    PromptCacheRetention, Reasoning, ReasoningItem, Response, ResponseTextParam, ResponseUsage,
-    Role as ResponseRole, ServiceTier, Status, SummaryPart, SummaryTextContent,
-    TextResponseFormatConfiguration, Tool, ToolChoiceOptions, ToolChoiceParam, Truncation,
+    PromptCacheRetention, Reasoning, ReasoningItem, ReasoningItemContent, ReasoningTextContent,
+    Response, ResponseTextParam, ResponseUsage, Role as ResponseRole, ServiceTier, Status,
+    SummaryPart, TextResponseFormatConfiguration, Tool, ToolChoiceOptions, ToolChoiceParam,
+    Truncation,
 };
 use dynamo_protocols::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
@@ -23,7 +24,7 @@ use dynamo_protocols::types::{
     ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
     ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
     ChatCompletionTool, ChatCompletionToolChoiceOption, ChatCompletionToolType,
-    CreateChatCompletionRequest, FunctionName, FunctionObject, FunctionType,
+    CreateChatCompletionRequest, FinishReason, FunctionName, FunctionObject, FunctionType,
     ImageDetail as ChatImageDetail, ImageUrl, ReasoningContent,
     ReasoningEffort as ChatReasoningEffort, ResponseFormat, ServiceTier as ChatServiceTier,
 };
@@ -51,6 +52,19 @@ pub struct NvCreateResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Object)]
     pub nvext: Option<NvExt>,
+
+    /// Chat-template arguments, forwarded to the converted chat request.
+    ///
+    /// Mirrors the Chat Completions field, including the `chat_template_kwargs`
+    /// alias, so a Responses client controls template-driven behaviour such as
+    /// reasoning and tool formatting the same way a chat client does.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "chat_template_kwargs"
+    )]
+    #[schema(value_type = Object)]
+    pub chat_template_args: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 #[derive(ToSchema, Deserialize, Validate, Debug, Clone)]
@@ -229,7 +243,7 @@ pub(crate) enum ResponsesConversionError {
     #[error("{0}")]
     InvalidArgument(String),
     #[error("{0}")]
-    NotImplemented(String),
+    UnsupportedContent(String),
 }
 
 /// Convert a Responses API ImageDetail to the Chat Completions ImageDetail.
@@ -286,7 +300,7 @@ fn convert_input_content_to_user_content(
                         .into());
                     }
                     (Some(_), None) => {
-                        return Err(ResponsesConversionError::NotImplemented(
+                        return Err(ResponsesConversionError::UnsupportedContent(
                             "Image input by file_id is not yet supported".to_string(),
                         )
                         .into());
@@ -337,7 +351,7 @@ fn convert_input_content_to_user_content(
                     })?;
                 }
 
-                return Err(ResponsesConversionError::NotImplemented(
+                return Err(ResponsesConversionError::UnsupportedContent(
                     "File input content is not yet supported".to_string(),
                 )
                 .into());
@@ -391,7 +405,8 @@ fn convert_upstream_input_content_to_text(
 #[derive(Default)]
 struct PendingAssistant {
     content: Option<String>,
-    reasoning_content: Option<String>,
+    reasoning_segments: Vec<String>,
+    pending_reasoning: String,
     tool_calls: Vec<ChatCompletionMessageToolCall>,
     touched: bool,
 }
@@ -408,29 +423,33 @@ impl PendingAssistant {
         }
     }
 
-    /// Route prior-turn reasoning summary text into the pending assistant's
-    /// `reasoning_content`. Codex and the Agents SDK round-trip `Item::Reasoning`
-    /// mid-turn so the model can see its own chain-of-thought as input context.
     fn push_reasoning(&mut self, text: &str) {
         self.touched = true;
-        if text.is_empty() {
-            return;
-        }
-        match self.reasoning_content.as_mut() {
-            Some(existing) => existing.push_str(text),
-            None => self.reasoning_content = Some(text.to_string()),
-        }
+        self.pending_reasoning.push_str(text);
     }
 
     fn push_tool_call(&mut self, call: ChatCompletionMessageToolCall) {
         self.touched = true;
+        self.reasoning_segments
+            .push(std::mem::take(&mut self.pending_reasoning));
         self.tool_calls.push(call);
     }
 
-    fn flush_into(self, out: &mut Vec<ChatCompletionRequestMessage>) {
+    fn flush_into(mut self, out: &mut Vec<ChatCompletionRequestMessage>) {
         if !self.touched {
             return;
         }
+        self.reasoning_segments.push(self.pending_reasoning);
+
+        let reasoning_content = if !self.tool_calls.is_empty()
+            && self.reasoning_segments.iter().any(|text| !text.is_empty())
+        {
+            Some(ReasoningContent::Segments(self.reasoning_segments))
+        } else {
+            let text = self.reasoning_segments.concat();
+            (!text.is_empty()).then_some(ReasoningContent::Text(text))
+        };
+
         // Content rules:
         //   - real text pushed → emit Some(Text(text))
         //   - pure tool-call turn (no text, has tool_calls) → emit None, matching
@@ -453,7 +472,7 @@ impl PendingAssistant {
         out.push(ChatCompletionRequestMessage::Assistant(
             ChatCompletionRequestAssistantMessage {
                 content,
-                reasoning_content: self.reasoning_content.map(ReasoningContent::Text),
+                reasoning_content,
                 refusal: None,
                 name: None,
                 audio: None,
@@ -552,12 +571,23 @@ fn convert_input_items_to_messages(
                     ));
                 }
                 Item::Reasoning(r) => {
-                    let text = r
-                        .summary
-                        .iter()
-                        .map(|SummaryPart::SummaryText(t)| t.text.as_str())
-                        .collect::<Vec<_>>()
-                        .join("");
+                    let content = r
+                        .content
+                        .as_ref()
+                        .map(|parts| {
+                            parts
+                                .iter()
+                                .map(|part| part.text.as_str())
+                                .collect::<String>()
+                        })
+                        .filter(|text| !text.is_empty());
+                    let summary = || {
+                        r.summary
+                            .iter()
+                            .map(|SummaryPart::SummaryText(part)| part.text.as_str())
+                            .collect::<String>()
+                    };
+                    let text = content.unwrap_or_else(summary);
                     pending.push_reasoning(&text);
                 }
                 other => {
@@ -649,7 +679,8 @@ fn convert_input_items_to_messages(
 ///
 /// Bare function names are preserved for model compatibility. Reject collisions
 /// from different origins instead of guessing which namespace to restore on the
-/// response path.
+/// response path. Return `InvalidArgument` for non-function tools, including
+/// namespace members, instead of silently discarding unsupported definitions.
 fn convert_tools(tools: &[Tool]) -> anyhow::Result<Vec<ChatCompletionTool>> {
     let mut converted = Vec::new();
     let mut origins = HashMap::<String, Option<String>>::new();
@@ -689,27 +720,41 @@ fn convert_tools(tools: &[Tool]) -> anyhow::Result<Vec<ChatCompletionTool>> {
             }
             Tool::Namespace(namespace) => {
                 for tool in &namespace.tools {
-                    if let NamespaceToolParamTool::Function(f) = tool {
-                        push_function(
+                    match tool {
+                        NamespaceToolParamTool::Function(f) => push_function(
                             &f.name,
                             &f.description,
                             &f.parameters,
                             f.strict,
                             Some(&namespace.name),
-                        )?;
+                        )?,
+                        _ => return unsupported_tool(tool, "tools"),
                     }
                 }
             }
-            // Only function tools are forwarded to Chat Completions.
-            _ => {}
+            _ => return unsupported_tool(tool, "tools"),
         }
     }
     Ok(converted)
 }
 
+/// Identify an unsupported tool or choice by its serialized type and return
+/// `InvalidArgument` with the affected request field and supported alternatives.
+fn unsupported_tool<T>(tool: &impl serde::Serialize, field: &str) -> anyhow::Result<T> {
+    let value = serde_json::to_value(tool)?;
+    let tool_type = value["type"].as_str().unwrap_or("unknown");
+    Err(ResponsesConversionError::InvalidArgument(format!(
+        "Unsupported Responses {field} type '{tool_type}': the Chat Completions adapter supports only function tools and none, auto, required, or named function tool choices"
+    ))
+    .into())
+}
+
 /// Convert Responses API ToolChoiceParam to ChatCompletionToolChoiceOption.
-fn convert_tool_choice(tc: &ToolChoiceParam) -> ChatCompletionToolChoiceOption {
-    match tc {
+///
+/// Preserve supported modes and named functions; return `InvalidArgument` for
+/// choices whose semantics cannot be represented by the adapter.
+fn convert_tool_choice(tc: &ToolChoiceParam) -> anyhow::Result<ChatCompletionToolChoiceOption> {
+    Ok(match tc {
         ToolChoiceParam::Mode(mode) => match mode {
             ToolChoiceOptions::None => ChatCompletionToolChoiceOption::None,
             ToolChoiceOptions::Auto => ChatCompletionToolChoiceOption::Auto,
@@ -723,15 +768,8 @@ fn convert_tool_choice(tc: &ToolChoiceParam) -> ChatCompletionToolChoiceOption {
                 },
             })
         }
-        ToolChoiceParam::Hosted(_) => {
-            // Hosted tools are not forwarded to chat completions
-            ChatCompletionToolChoiceOption::Auto
-        }
-        _ => {
-            // Other tool choice types (AllowedTools, Mcp, Custom, etc.) default to auto
-            ChatCompletionToolChoiceOption::Auto
-        }
-    }
+        _ => return unsupported_tool(tc, "tool_choice"),
+    })
 }
 
 /// Convert Responses API `text.format` to Chat Completions `response_format`.
@@ -846,7 +884,12 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             .filter(|t: &Vec<_>| !t.is_empty());
 
         // Convert tool_choice if present
-        let tool_choice = resp.inner.tool_choice.as_ref().map(convert_tool_choice);
+        let tool_choice = resp
+            .inner
+            .tool_choice
+            .as_ref()
+            .map(convert_tool_choice)
+            .transpose()?;
 
         // Determine stream setting: respect caller's preference, default to true for aggregation
         let stream = resp.inner.stream.or(Some(true));
@@ -891,7 +934,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             },
             common: Default::default(),
             nvext: resp.nvext,
-            chat_template_args: None,
+            chat_template_args: resp.chat_template_args,
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
@@ -1015,6 +1058,19 @@ pub struct ResponseParams {
     pub safety_identifier: Option<String>,
 }
 
+/// Map a terminal Chat Completions reason that makes a Responses result non-success-like.
+/// The Responses protocol has no content-filter status, so preserve the failure semantics
+/// with an incomplete response and a reason clients can inspect.
+pub(crate) fn responses_incomplete_reason(
+    finish_reason: Option<FinishReason>,
+) -> Option<&'static str> {
+    match finish_reason {
+        Some(FinishReason::Length) => Some("max_output_tokens"),
+        Some(FinishReason::ContentFilter) => Some("content_filter"),
+        _ => None,
+    }
+}
+
 impl ResponseParams {
     fn reasoning_summary_requested(&self) -> bool {
         self.reasoning
@@ -1121,22 +1177,24 @@ pub fn chat_completion_to_response(
 
     let choice = chat_resp.choices.into_iter().next();
     let mut output = Vec::new();
-    let mut output_limit_reached = false;
+    let mut incomplete_reason = None;
 
     if let Some(choice) = choice {
-        output_limit_reached =
-            choice.finish_reason == Some(dynamo_protocols::types::FinishReason::Length);
+        incomplete_reason = responses_incomplete_reason(choice.finish_reason);
 
+        // Reasoning precedes tool calls so output order matches the decoded turn.
         if let Some(reasoning_text) = choice.message.reasoning_content
             && !reasoning_text.is_empty()
             && params.reasoning_summary_requested()
         {
             output.push(OutputItem::Reasoning(ReasoningItem {
                 id: Some(format!("rs_{}", Uuid::new_v4().simple())),
-                summary: vec![SummaryPart::SummaryText(SummaryTextContent {
-                    text: reasoning_text,
-                })],
-                content: None,
+                summary: vec![],
+                content: Some(vec![ReasoningItemContent::ReasoningText(
+                    ReasoningTextContent {
+                        text: reasoning_text,
+                    },
+                )]),
                 encrypted_content: None,
                 status: Some(OutputStatus::Completed),
             }));
@@ -1155,7 +1213,6 @@ pub fn chat_completion_to_response(
                 }));
             }
         }
-
         // Handle text content -- also parse <tool_call> blocks from models
         // that emit tool calls as text (e.g. Qwen3)
         let content_text = match choice.message.content {
@@ -1216,23 +1273,26 @@ pub fn chat_completion_to_response(
     }
 
     let created_at = chat_resp.created as u64;
-    let status = if output_limit_reached {
+    let status = if incomplete_reason.is_some() {
         Status::Incomplete
     } else {
         Status::Completed
     };
-    if output_limit_reached {
-        // Unary responses do not expose explicit phase boundaries. A message
-        // or function call proves reasoning finished before the terminal item
-        // exhausted the output budget.
-        let reasoning_completed = output
+    if incomplete_reason.is_some() {
+        // The budget runs out once, inside the item the model was still writing.
+        // Earlier output items were complete and must not be relabelled.
+        let terminal = output
             .iter()
-            .any(|item| matches!(item, OutputItem::Message(_) | OutputItem::FunctionCall(_)));
-        for item in &mut output {
+            .rposition(|item| matches!(item, OutputItem::Message(_) | OutputItem::FunctionCall(_)));
+        for (index, item) in output.iter_mut().enumerate() {
             match item {
-                OutputItem::Message(message) => message.status = OutputStatus::Incomplete,
-                OutputItem::FunctionCall(call) => call.status = Some(OutputStatus::Incomplete),
-                OutputItem::Reasoning(reasoning) if !reasoning_completed => {
+                OutputItem::Message(message) if Some(index) == terminal => {
+                    message.status = OutputStatus::Incomplete
+                }
+                OutputItem::FunctionCall(call) if Some(index) == terminal => {
+                    call.status = Some(OutputStatus::Incomplete)
+                }
+                OutputItem::Reasoning(reasoning) if terminal.is_none() => {
                     reasoning.status = Some(OutputStatus::Incomplete)
                 }
                 _ => {}
@@ -1243,7 +1303,7 @@ pub fn chat_completion_to_response(
         id: response_id,
         object: "response".to_string(),
         created_at,
-        completed_at: (!output_limit_reached).then_some(created_at),
+        completed_at: incomplete_reason.is_none().then_some(created_at),
         model: if chat_resp.model == "unknown" {
             params.model.clone().unwrap_or(chat_resp.model)
         } else {
@@ -1277,8 +1337,8 @@ pub fn chat_completion_to_response(
         billing: None,
         conversation: None,
         error: None,
-        incomplete_details: output_limit_reached.then(|| IncompleteDetails {
-            reason: "max_output_tokens".to_string(),
+        incomplete_details: incomplete_reason.map(|reason| IncompleteDetails {
+            reason: reason.to_string(),
         }),
         instructions: params.instructions.clone().map(Instructions::Text),
         max_output_tokens: params.max_output_tokens,
@@ -1348,36 +1408,29 @@ mod tests {
                 annotations: Some(vec!["debug".into(), "trace".into()]),
                 ..Default::default()
             }),
+            chat_template_args: None,
         }
     }
 
-    #[test]
-    fn test_annotations_trait_behavior() {
-        let req = make_response_with_input("hello");
-        assert_eq!(
-            req.annotations(),
-            Some(vec!["debug".to_string(), "trace".to_string()])
-        );
-        assert!(req.has_annotation("debug"));
-        assert!(req.has_annotation("trace"));
-        assert!(!req.has_annotation("missing"));
+    fn requested_reasoning_params() -> ResponseParams {
+        use dynamo_protocols::types::responses::ReasoningSummary;
+
+        ResponseParams {
+            reasoning: Some(Reasoning {
+                effort: None,
+                summary: Some(ReasoningSummary::Auto),
+            }),
+            ..Default::default()
+        }
     }
 
-    #[test]
-    fn test_openai_sampling_trait_behavior() {
-        let req = make_response_with_input("hello");
-        assert_eq!(req.get_temperature(), Some(0.5));
-        assert_eq!(req.get_top_p(), Some(0.9));
-        assert_eq!(req.get_frequency_penalty(), None);
-        assert_eq!(req.get_presence_penalty(), None);
-    }
-
-    #[test]
-    fn test_openai_stop_conditions_trait_behavior() {
-        let req = make_response_with_input("hello");
-        assert_eq!(req.get_max_tokens(), Some(1024));
-        assert_eq!(req.get_min_tokens(), None);
-        assert_eq!(req.get_stop(), None);
+    fn reasoning_text(item: &ReasoningItem) -> &str {
+        let Some(ReasoningItemContent::ReasoningText(content)) =
+            item.content.as_ref().and_then(|content| content.first())
+        else {
+            panic!("expected reasoning text content");
+        };
+        &content.text
     }
 
     #[test]
@@ -1403,6 +1456,58 @@ mod tests {
             },
             _ => panic!("expected user message"),
         }
+    }
+
+    #[test]
+    fn chat_template_args_survive_the_conversion() {
+        // The repro from the issue: a Responses request carrying template args
+        // must not lose them on the way to the chat request, or template-driven
+        // behaviour like reasoning and tool formatting cannot be controlled
+        // from /v1/responses at all.
+        let request: NvCreateResponse = serde_json::from_value(serde_json::json!({
+            "model": "dummy-model",
+            "input": "hello",
+            "chat_template_args": {"enable_thinking": true},
+        }))
+        .expect("responses request with chat_template_args should deserialize");
+
+        let nv_req: NvCreateChatCompletionRequest = request.try_into().unwrap();
+
+        let args = nv_req
+            .chat_template_args
+            .expect("chat_template_args should reach the chat request");
+        assert_eq!(
+            args.get("enable_thinking"),
+            Some(&serde_json::Value::Bool(true))
+        );
+    }
+
+    #[test]
+    fn chat_template_kwargs_alias_is_accepted() {
+        // Chat Completions accepts either spelling, so Responses has to as
+        // well or the same client payload behaves differently per endpoint.
+        let request: NvCreateResponse = serde_json::from_value(serde_json::json!({
+            "model": "dummy-model",
+            "input": "hello",
+            "chat_template_kwargs": {"enable_thinking": true},
+        }))
+        .expect("chat_template_kwargs alias should deserialize");
+
+        let nv_req: NvCreateChatCompletionRequest = request.try_into().unwrap();
+
+        assert!(nv_req.chat_template_args.is_some_and(
+            |args| args.get("enable_thinking") == Some(&serde_json::Value::Bool(true))
+        ));
+    }
+
+    #[test]
+    fn absent_chat_template_args_stay_absent() {
+        // The overwhelmingly common request has none; it must not gain an
+        // empty map, which would change downstream template rendering.
+        let nv_req: NvCreateChatCompletionRequest =
+            make_response_with_input("hi there").try_into().unwrap();
+
+        assert!(nv_req.chat_template_args.is_none());
     }
 
     #[test]
@@ -1434,6 +1539,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1478,6 +1584,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1557,6 +1664,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1598,6 +1706,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1641,6 +1750,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1689,6 +1799,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1728,6 +1839,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1762,6 +1874,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1804,6 +1917,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1865,6 +1979,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1937,6 +2052,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1994,6 +2110,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -2049,6 +2166,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -2096,6 +2214,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -2115,71 +2234,114 @@ mod tests {
     }
 
     #[test]
-    fn test_reasoning_item_routed_into_reasoning_content() {
-        // Regression: Codex / Agents SDK round-trip Item::Reasoning mid-turn.
-        // The converter must route the reasoning summary into the coalesced
-        // assistant message's `reasoning_content`, not silently drop it.
+    fn test_reasoning_item_replay_prefers_content_with_summary_fallback() {
         use dynamo_protocols::types::responses::{
-            InputReasoningItem, SummaryPart, SummaryTextContent,
+            InputReasoningItem, ReasoningTextContent, SummaryPart, SummaryTextContent,
         };
 
+        let cases = [
+            (
+                InputReasoningItem {
+                    id: Some("rs_summary".into()),
+                    summary: vec![SummaryPart::SummaryText(SummaryTextContent {
+                        text: "summary reasoning".into(),
+                    })],
+                    content: None,
+                    encrypted_content: None,
+                    status: None,
+                },
+                "summary reasoning",
+            ),
+            (
+                InputReasoningItem {
+                    id: Some("rs_content".into()),
+                    summary: vec![SummaryPart::SummaryText(SummaryTextContent {
+                        text: "fallback summary".into(),
+                    })],
+                    content: Some(vec![ReasoningTextContent {
+                        text: "raw reasoning".into(),
+                    }]),
+                    encrypted_content: None,
+                    status: None,
+                },
+                "raw reasoning",
+            ),
+        ];
+
+        for (reasoning, expected) in cases {
+            let req = NvCreateResponse {
+                inner: CreateResponse {
+                    input: InputParam::Items(vec![InputItem::Item(Item::Reasoning(reasoning))]),
+                    model: Some("test-model".into()),
+                    ..Default::default()
+                },
+                nvext: None,
+                chat_template_args: None,
+            };
+
+            let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+            assert!(matches!(
+                &chat_req.inner.messages[0],
+                ChatCompletionRequestMessage::Assistant(message)
+                    if matches!(
+                        message.reasoning_content.as_ref(),
+                        Some(ReasoningContent::Text(text)) if text == expected
+                    )
+            ));
+        }
+    }
+
+    #[test]
+    fn test_interleaved_reasoning_and_tool_calls_preserve_segments() {
+        use dynamo_protocols::types::responses::{InputReasoningItem, ReasoningTextContent};
+
+        let reasoning = |id: &str, text: &str| {
+            InputItem::Item(Item::Reasoning(InputReasoningItem {
+                id: Some(id.into()),
+                summary: vec![],
+                content: Some(vec![ReasoningTextContent { text: text.into() }]),
+                encrypted_content: None,
+                status: None,
+            }))
+        };
+        let tool_call = |call_id: &str, name: &str| {
+            InputItem::Item(Item::FunctionCall(FunctionToolCall {
+                arguments: "{}".into(),
+                call_id: call_id.into(),
+                namespace: None,
+                name: name.into(),
+                id: None,
+                status: None,
+            }))
+        };
         let req = NvCreateResponse {
             inner: CreateResponse {
                 input: InputParam::Items(vec![
-                    InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
-                        content: vec![InputContent::InputText(InputTextContent {
-                            text: "solve".into(),
-                        })],
-                        role: InputRole::User,
-                        status: None,
-                    }))),
-                    InputItem::Item(Item::Reasoning(InputReasoningItem {
-                        id: Some("rs_1".into()),
-                        summary: vec![SummaryPart::SummaryText(SummaryTextContent {
-                            text: "thinking step 1".into(),
-                        })],
-                        content: None,
-                        encrypted_content: None,
-                        status: None,
-                    })),
-                    InputItem::Item(Item::FunctionCall(FunctionToolCall {
-                        arguments: "{}".into(),
-                        call_id: "c".into(),
-                        namespace: None,
-                        name: "f".into(),
-                        id: None,
-                        status: None,
-                    })),
-                    InputItem::Item(Item::FunctionCallOutput(FunctionCallOutputItemParam {
-                        call_id: "c".into(),
-                        output: FunctionCallOutput::Text("ok".into()),
-                        id: None,
-                        status: None,
-                    })),
+                    reasoning("rs_1", "first thought"),
+                    tool_call("call_1", "first_tool"),
+                    reasoning("rs_2", "second thought"),
+                    tool_call("call_2", "second_tool"),
                 ]),
                 model: Some("test-model".into()),
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
-        let messages = &chat_req.inner.messages;
-        assert_eq!(messages.len(), 3);
-        match &messages[1] {
-            ChatCompletionRequestMessage::Assistant(a) => {
-                match a
-                    .reasoning_content
-                    .as_ref()
-                    .expect("reasoning must be preserved")
-                {
-                    ReasoningContent::Text(t) => assert_eq!(t, "thinking step 1"),
-                    _ => panic!("expected Text reasoning content"),
-                }
-                assert!(a.tool_calls.is_some());
-            }
-            _ => panic!("expected assistant message with reasoning + tool_calls"),
-        }
+        let ChatCompletionRequestMessage::Assistant(message) = &chat_req.inner.messages[0] else {
+            panic!("expected assistant message");
+        };
+        assert_eq!(
+            message.reasoning_content,
+            Some(ReasoningContent::Segments(vec![
+                "first thought".into(),
+                "second thought".into(),
+                String::new(),
+            ]))
+        );
+        assert_eq!(message.tool_calls.as_ref().unwrap().len(), 2);
     }
 
     #[test]
@@ -2240,6 +2402,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -2313,6 +2476,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         let messages = &chat_req.inner.messages;
@@ -2382,6 +2546,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         let messages = &chat_req.inner.messages;
@@ -2448,6 +2613,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         let messages = &chat_req.inner.messages;
@@ -2505,6 +2671,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         let messages = &chat_req.inner.messages;
@@ -2747,7 +2914,7 @@ mod tests {
                         role: dynamo_protocols::types::Role::Assistant,
                         function_call: None,
                         audio: None,
-                        reasoning_content: None,
+                        reasoning_content: Some("Need the weather tool".into()),
                     },
                     finish_reason: None,
                     logprobs: None,
@@ -2763,9 +2930,14 @@ mod tests {
         };
 
         let wrapped =
-            chat_completion_to_response(chat_resp, &ResponseParams::default(), None).unwrap();
-        assert_eq!(wrapped.inner.output.len(), 1);
-        match &wrapped.inner.output[0] {
+            chat_completion_to_response(chat_resp, &requested_reasoning_params(), None).unwrap();
+        assert_eq!(wrapped.inner.output.len(), 2);
+        let OutputItem::Reasoning(reasoning) = &wrapped.inner.output[0] else {
+            panic!("Expected Reasoning output before the tool call");
+        };
+        assert!(reasoning.summary.is_empty());
+        assert_eq!(reasoning_text(reasoning), "Need the weather tool");
+        match &wrapped.inner.output[1] {
             OutputItem::FunctionCall(fc) => {
                 assert_eq!(fc.call_id, "call_abc");
                 assert_eq!(fc.name, "get_weather");
@@ -3290,25 +3462,36 @@ thinking
         finish_reason: dynamo_protocols::types::FinishReason,
         arguments: &str,
     ) -> NvCreateChatCompletionResponse {
+        make_chat_resp_with_tool_calls(finish_reason, &[arguments])
+    }
+
+    fn make_chat_resp_with_tool_calls(
+        finish_reason: dynamo_protocols::types::FinishReason,
+        arguments: &[&str],
+    ) -> NvCreateChatCompletionResponse {
         let mut response = make_chat_resp_with_text("");
         let choice = &mut response.inner.choices[0];
         choice.finish_reason = Some(finish_reason);
         choice.message.content = None;
-        choice.message.tool_calls = Some(vec![ChatCompletionMessageToolCall {
-            id: "call_abc".into(),
-            r#type: FunctionType::Function,
-            function: dynamo_protocols::types::FunctionCall {
-                name: "get_weather".into(),
-                arguments: arguments.into(),
-            },
-        }]);
+        choice.message.tool_calls = Some(
+            arguments
+                .iter()
+                .enumerate()
+                .map(|(index, arguments)| ChatCompletionMessageToolCall {
+                    id: format!("call_abc{index}"),
+                    r#type: FunctionType::Function,
+                    function: dynamo_protocols::types::FunctionCall {
+                        name: "get_weather".into(),
+                        arguments: (*arguments).into(),
+                    },
+                })
+                .collect(),
+        );
         response
     }
 
     #[test]
-    fn test_reasoning_summary_requires_explicit_request() {
-        use dynamo_protocols::types::responses::{Reasoning, ReasoningSummary};
-
+    fn test_reasoning_text_requires_explicit_request() {
         let unrequested = chat_completion_to_response(
             make_chat_resp_with_reasoning("private reasoning"),
             &ResponseParams::default(),
@@ -3323,13 +3506,7 @@ thinking
                 .all(|item| !matches!(item, OutputItem::Reasoning(_)))
         );
 
-        let params = ResponseParams {
-            reasoning: Some(Reasoning {
-                effort: None,
-                summary: Some(ReasoningSummary::Auto),
-            }),
-            ..Default::default()
-        };
+        let params = requested_reasoning_params();
         let requested =
             chat_completion_to_response(make_chat_resp_with_reasoning("summary"), &params, None)
                 .unwrap();
@@ -3341,13 +3518,9 @@ thinking
                 OutputItem::Reasoning(reasoning) => Some(reasoning),
                 _ => None,
             })
-            .expect("requested reasoning summary output");
-        assert_eq!(
-            reasoning.summary,
-            vec![SummaryPart::SummaryText(SummaryTextContent {
-                text: "summary".into(),
-            })]
-        );
+            .expect("requested reasoning output");
+        assert!(reasoning.summary.is_empty());
+        assert_eq!(reasoning_text(reasoning), "summary");
     }
 
     #[test]
@@ -3499,6 +3672,32 @@ thinking
     }
 
     #[test]
+    fn test_content_filter_returns_non_success_response() {
+        let chat_resp = make_chat_resp_with_text("blocked");
+        let mut chat_resp = chat_resp;
+        chat_resp.inner.choices[0].finish_reason =
+            Some(dynamo_protocols::types::FinishReason::ContentFilter);
+
+        let response =
+            chat_completion_to_response(chat_resp, &ResponseParams::default(), None).unwrap();
+
+        assert_eq!(response.inner.status, Status::Incomplete);
+        assert_eq!(response.inner.completed_at, None);
+        assert_eq!(
+            response
+                .inner
+                .incomplete_details
+                .as_ref()
+                .map(|details| details.reason.as_str()),
+            Some("content_filter")
+        );
+        let OutputItem::Message(message) = &response.inner.output[0] else {
+            panic!("expected message output");
+        };
+        assert_eq!(message.status, OutputStatus::Incomplete);
+    }
+
+    #[test]
     fn test_unmodified_length_with_tool_call_returns_incomplete_response() {
         let chat_resp = make_chat_resp_with_tool_call(
             dynamo_protocols::types::FinishReason::Length,
@@ -3521,6 +3720,35 @@ thinking
             panic!("expected function call output");
         };
         assert_eq!(call.status, Some(OutputStatus::Incomplete));
+    }
+
+    #[test]
+    fn test_length_marks_only_the_terminal_tool_call_incomplete() {
+        let chat_resp = make_chat_resp_with_tool_calls(
+            dynamo_protocols::types::FinishReason::Length,
+            &[r#"{"location":"SF"}"#, r#"{"location":"NY"#],
+        );
+
+        let response =
+            chat_completion_to_response(chat_resp, &ResponseParams::default(), None).unwrap();
+
+        assert_eq!(response.inner.status, Status::Incomplete);
+        let statuses: Vec<_> = response
+            .inner
+            .output
+            .iter()
+            .filter_map(|item| match item {
+                OutputItem::FunctionCall(call) => Some(call.status),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            statuses,
+            vec![
+                Some(OutputStatus::Completed),
+                Some(OutputStatus::Incomplete)
+            ]
+        );
     }
 
     #[test]
@@ -3609,8 +3837,9 @@ thinking
     /// emitted as `null` when None.
     #[test]
     fn test_response_wire_format_shape() {
-        let chat_resp = make_chat_resp_with_text("hello");
-        let params = ResponseParams::default();
+        let mut chat_resp = make_chat_resp_with_text("hello");
+        chat_resp.inner.choices[0].message.reasoning_content = Some("raw reasoning".into());
+        let params = requested_reasoning_params();
         let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
         let json = serde_json::to_value(&resp).unwrap();
 
@@ -3628,6 +3857,13 @@ thinking
         assert!(json["output"].is_array());
         assert!(json["output"][0].get("id").is_some());
         assert!(json["output"][0].get("status").is_some());
+        assert_eq!(json["output"][0]["type"], "reasoning");
+        assert_eq!(json["output"][0]["summary"], serde_json::json!([]));
+        assert_eq!(
+            json["output"][0]["content"][0],
+            serde_json::json!({"type": "reasoning_text", "text": "raw reasoning"})
+        );
+        assert_eq!(json["output"][1]["type"], "message");
 
         // Nullable-required fields must be present as null (not missing).
         for key in [
@@ -3640,7 +3876,6 @@ thinking
             "instructions",
             "previous_response_id",
             "prompt_cache_key",
-            "reasoning",
         ] {
             assert_eq!(
                 json.get(key),

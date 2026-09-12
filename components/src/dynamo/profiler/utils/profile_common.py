@@ -202,6 +202,15 @@ def is_mocker_enabled(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
     )
 
 
+def is_kv_router_enabled(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
+    """True when the DGDR spec explicitly enables KV-cache-aware routing."""
+    return (
+        dgdr.features is not None
+        and dgdr.features.kvRouter is not None
+        and dgdr.features.kvRouter.enabled is True
+    )
+
+
 def needs_mocker_aic_perf_model(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
     """True when mocker workers should load performance data from AIC.
 

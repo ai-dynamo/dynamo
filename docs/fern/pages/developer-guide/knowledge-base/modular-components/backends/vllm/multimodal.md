@@ -59,11 +59,7 @@ The main multimodal vLLM launchers in this repo are:
 
 ### Custom Vision Encoders
 
-The aggregated vLLM worker can load an author-provided vision tower in
-process, batch images across concurrent requests, and splice the resulting
-embeddings into the language-model prompt. See [Custom Vision
-Encoders](../../../../advanced-customizations/custom-vision-encoders.md) for the backend contract, launch instructions,
-batch sizing guidance, and current limitations.
+The aggregated vLLM worker can load an author-provided vision tower in process, batch images across concurrent requests, and adapt the ordered results into decoder-compatible prompt input. See [Custom Vision Encoders](../../../../../use-cases/multimodal-serving/custom-vision-encoders.md) for the backend contract, launch instructions, batch sizing guidance, and current limitations.
 
 ## Multimodal KV Routing
 
@@ -213,11 +209,10 @@ curl http://localhost:8000/v1/chat/completions \
 ### Reuse vLLM multimodal processor cache entries
 
 vLLM can cache processed multimodal inputs under a client-provided opaque UUID.
-Dynamo currently exposes this behavior for images only. The extension is
-specific to vLLM; it is not part of the OpenAI Chat Completions API and is not
-supported by Dynamo's other backends. Dynamo rejects UUIDs on audio or video,
-and its SGLang and TensorRT-LLM backends reject image UUIDs rather than silently
-ignoring unsupported cache semantics.
+Dynamo forwards UUIDs with URL-backed image, video, and audio inputs.
+The extension is specific to vLLM; it is not part of the OpenAI Chat Completions
+API and is not supported by Dynamo's other backends. Dynamo's SGLang and
+TensorRT-LLM backends reject cache UUIDs rather than silently ignoring them.
 
 To enable the cache, pass a nonzero `--mm-processor-cache-gb` value to the vLLM
 worker.
@@ -238,6 +233,13 @@ cache. Keep both caches enabled; the embedding cache alone cannot reconstruct a
 UUID-only input. Both caches are local to one vLLM engine, so the fill and reuse
 requests must reach the same aggregated worker.
 
+With the Python vLLM chat processor, requests that include client UUIDs defer
+multimodal processing to the worker so the same local vLLM cache handles both
+population and reuse. With the default Rust frontend, URL-backed media can still
+be decoded by the frontend when frontend decoding is enabled; Dynamo forwards
+the aligned UUIDs with the decoded media. UUID-only image slots reach the vLLM
+worker for cache resolution.
+
 Populate an entry by adding `uuid` beside the media field:
 
 ```json
@@ -247,6 +249,19 @@ Populate an entry by adding `uuid` beside the media field:
     "url": "https://example.com/image.png"
   },
   "uuid": "catalog-image-42"
+}
+```
+
+The same shape works for video and audio. For example, a video URL with a UUID
+provides a stable identity for the corresponding vLLM cache entry:
+
+```json
+{
+  "type": "video_url",
+  "video_url": {
+    "url": "https://example.com/video.mp4"
+  },
+  "uuid": "catalog-video-42"
 }
 ```
 
@@ -260,6 +275,9 @@ sending the same top-level UUID:
   "uuid": "catalog-image-42"
 }
 ```
+
+UUID-only cache reuse is currently limited to images in Dynamo. Audio and video
+parts must include a URL even when they also provide a UUID.
 
 UUIDs are opaque nonempty strings and must use the top-level field shown above.
 A UUID-only request fails on a cache miss because it contains no media payload
