@@ -1072,13 +1072,6 @@ pub(crate) fn responses_incomplete_reason(
 }
 
 impl ResponseParams {
-    fn reasoning_summary_requested(&self) -> bool {
-        self.reasoning
-            .as_ref()
-            .and_then(|reasoning| reasoning.summary)
-            .is_some()
-    }
-
     fn namespace_for_function(&self, name: &str) -> Option<String> {
         let tools = self.tools.as_deref()?;
         if tools
@@ -1183,9 +1176,13 @@ pub fn chat_completion_to_response(
         incomplete_reason = responses_incomplete_reason(choice.finish_reason);
 
         // Reasoning precedes tool calls so output order matches the decoded turn.
+        //
+        // Raw reasoning_content is preserved whenever the backend returns it, whether
+        // or not the caller asked for reasoning.summary: the backend/parser already did
+        // the work, and dropping it silently loses information the caller can otherwise
+        // only get via reasoning.summary. See issue #14069.
         if let Some(reasoning_text) = choice.message.reasoning_content
             && !reasoning_text.is_empty()
-            && params.reasoning_summary_requested()
         {
             output.push(OutputItem::Reasoning(ReasoningItem {
                 id: Some(format!("rs_{}", Uuid::new_v4().simple())),
@@ -3491,20 +3488,24 @@ thinking
     }
 
     #[test]
-    fn test_reasoning_text_requires_explicit_request() {
+    fn test_reasoning_text_preserved_without_explicit_summary_request() {
         let unrequested = chat_completion_to_response(
             make_chat_resp_with_reasoning("private reasoning"),
             &ResponseParams::default(),
             None,
         )
         .unwrap();
-        assert!(
-            unrequested
-                .inner
-                .output
-                .iter()
-                .all(|item| !matches!(item, OutputItem::Reasoning(_)))
-        );
+        let reasoning = unrequested
+            .inner
+            .output
+            .iter()
+            .find_map(|item| match item {
+                OutputItem::Reasoning(reasoning) => Some(reasoning),
+                _ => None,
+            })
+            .expect("reasoning output even without a requested summary");
+        assert!(reasoning.summary.is_empty());
+        assert_eq!(reasoning_text(reasoning), "private reasoning");
 
         let params = requested_reasoning_params();
         let requested =
