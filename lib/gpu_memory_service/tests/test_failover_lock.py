@@ -195,30 +195,21 @@ async def test_owner_separate_instance(lock_path):
 # half of it, a 2x margin on an exact bound.
 HOLD_S = 0.2
 
-# Delays p2 past the whole of p1's hold, so a test that has lost the parent's
-# gate below sees no contention at all and fails on its first run instead of on
-# roughly one run in fifty. Must stay greater than HOLD_S for that to hold.
-START_STAGGER_S = 0.3
-
-
 def _racer(
     lock_path: str,
     engine_id: str,
-    ready_queue: multiprocessing.Queue,
+    acquired_queue: multiprocessing.Queue,
     result_queue: multiprocessing.Queue,
 ):
-    """Announce readiness, acquire the lock, report timing, hold, release."""
+    """Acquire the lock, announce it, report timing, hold, and release."""
     import fcntl
 
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
 
-    # t0 is stamped before the ready announcement, so it precedes the parent's
-    # release and the second acquirer's wait is at least HOLD_S.
     t0 = time.monotonic()
-    ready_queue.put(engine_id)
-
     fcntl.flock(fd, fcntl.LOCK_EX)
     t1 = time.monotonic()
+    acquired_queue.put(engine_id)
 
     os.ftruncate(fd, 0)
     os.lseek(fd, 0, os.SEEK_SET)
@@ -251,35 +242,20 @@ async def test_cross_process_race(lock_path):
     """Two processes contend for the lock; the kernel serializes their holds."""
     import fcntl
 
-    ready_queue = multiprocessing.Queue()
+    acquired_queue = multiprocessing.Queue()
     result_queue = multiprocessing.Queue()
 
     p1 = multiprocessing.Process(
-        target=_racer, args=(lock_path, "p1", ready_queue, result_queue)
+        target=_racer, args=(lock_path, "p1", acquired_queue, result_queue)
     )
     p2 = multiprocessing.Process(
-        target=_racer, args=(lock_path, "p2", ready_queue, result_queue)
+        target=_racer, args=(lock_path, "p2", acquired_queue, result_queue)
     )
 
     try:
-        # Hold the lock here until both children are parked in flock(), so the
-        # contention under test is structural rather than a start-order race.
-        gate_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
-        try:
-            fcntl.flock(gate_fd, fcntl.LOCK_EX)
-
-            p1.start()
-            time.sleep(START_STAGGER_S)
-            p2.start()
-
-            ready_queue.get(timeout=10)
-            ready_queue.get(timeout=10)
-        finally:
-            # LOCK_UN, not os.close(): forked children inherit a duplicate of
-            # gate_fd on the same open file description, so a close leaves it
-            # held.
-            fcntl.flock(gate_fd, fcntl.LOCK_UN)
-            os.close(gate_fd)
+        p1.start()
+        assert acquired_queue.get(timeout=10) == "p1"
+        p2.start()
 
         # Blocking gets rather than Queue.empty(): empty() is not a
         # synchronization primitive, and joining a child before draining its
@@ -299,7 +275,7 @@ async def test_cross_process_race(lock_path):
                 p.terminate()
             if p.pid is not None:  # None when start() was never reached
                 p.join(timeout=10)
-        ready_queue.close()
+        acquired_queue.close()
         result_queue.close()
 
     # CLOCK_MONOTONIC is system-wide on Linux, so the two children's stamps are
@@ -311,7 +287,6 @@ async def test_cross_process_race(lock_path):
     # one let go.
     assert second["acquired_at"] >= first["released_at"]
 
-    # And it really blocked for the duration of the first one's hold.
     assert second["wait_s"] >= 0.1
 
     # Both finished — both eventually acquired
