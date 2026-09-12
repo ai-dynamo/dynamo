@@ -2498,8 +2498,10 @@ fn preprocessed_multimodal_features_are_forwarded_to_vllm_grpc() {
         other => panic!("expected preprocessed features, got {other:?}"),
     };
     assert!(feature.identifier.starts_with("grpc-mm:"));
-    assert_ne!(feature.identifier, "image-hash-a");
-    assert_eq!(feature.mm_hash.as_deref(), Some("image-hash-a"));
+    assert_eq!(
+        feature.mm_hash.as_deref(),
+        Some(feature.identifier.as_str())
+    );
     assert_eq!((feature.offset, feature.length), (1, 2));
     assert_eq!(feature.kwargs.as_ref().map(Vec::len), Some(64));
 }
@@ -2528,7 +2530,10 @@ fn multimodal_routing_hashes_are_consumed_for_preprocessed_features() {
         other => panic!("expected preprocessed features, got {other:?}"),
     };
     assert!(feature.identifier.starts_with("grpc-mm:"));
-    assert_eq!(feature.mm_hash.as_deref(), Some("image-hash-a"));
+    assert_eq!(
+        feature.mm_hash.as_deref(),
+        Some(feature.identifier.as_str())
+    );
 }
 
 #[test]
@@ -2601,11 +2606,15 @@ fn preprocessed_multimodal_identifier_is_bound_to_inline_content() {
     )
     .expect("second feature should be forwarded");
 
-    let identifier = |request: &pb::GenerateRequest| match request.media[0].source.as_ref() {
-        Some(pb::media_item::Source::Features(feature)) => feature.identifier.clone(),
+    let receiver_cache_key = |request: &pb::GenerateRequest| match request.media[0].source.as_ref()
+    {
+        Some(pb::media_item::Source::Features(feature)) => feature
+            .mm_hash
+            .clone()
+            .unwrap_or_else(|| feature.identifier.clone()),
         other => panic!("expected preprocessed features, got {other:?}"),
     };
-    assert_ne!(identifier(&first), identifier(&second));
+    assert_ne!(receiver_cache_key(&first), receiver_cache_key(&second));
 }
 
 #[test]
