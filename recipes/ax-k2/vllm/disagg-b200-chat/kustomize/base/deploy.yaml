@@ -1,0 +1,385 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: axk2-disagg-b200-chat-config
+  labels:
+    app.kubernetes.io/name: axk2-disagg-b200-chat
+    app.kubernetes.io/part-of: ax-k2
+data:
+  kv-transfer-config-prefill: |-
+    {
+      "kv_connector": "NixlConnector",
+      "kv_role": "kv_producer",
+      "kv_buffer_device": "cuda",
+      "kv_connector_extra_config": {
+        "backends": ["UCX"],
+        "num_threads": 8
+      }
+    }
+  kv-transfer-config-decode: |-
+    {
+      "kv_connector": "NixlConnector",
+      "kv_role": "kv_consumer",
+      "kv_buffer_device": "cuda",
+      "kv_connector_extra_config": {
+        "backends": ["UCX"],
+        "num_threads": 8
+      }
+    }
+  speculative-config-prefill: |-
+    {
+      "method": "eagle3",
+      "model": "skt/A.X-K2-EAGLE3",
+      "revision": "24958e91737d760908f73a8af4b6e06080fc5c1d",
+      "num_speculative_tokens": 3
+    }
+  speculative-config-decode: |-
+    {
+      "method": "eagle3",
+      "model": "skt/A.X-K2-EAGLE3",
+      "revision": "24958e91737d760908f73a8af4b6e06080fc5c1d",
+      "num_speculative_tokens": 3
+    }
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: axk2-disagg-b200-chat
+  labels:
+    app.kubernetes.io/name: axk2-disagg-b200-chat
+    app.kubernetes.io/part-of: ax-k2
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      runtimeVersionOverride: 1.4.1
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            axk2.nvidia.com/role: frontend
+            axk2.nvidia.com/routing: kv-aware
+        spec:
+          imagePullSecrets:
+            - name: runtime-imagepullsecret
+          schedulerName: default-scheduler
+          containers:
+            - name: main
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-cb301ba93943e0165deda36f65a8fd291b89beb2-vllm-runtime
+              imagePullPolicy: IfNotPresent
+              workingDir: /workspace
+              command:
+                - /bin/bash
+                - -lc
+              args:
+                - |
+                  set -Eeuo pipefail
+                  exec python3 -m dynamo.frontend \
+                    --router-mode kv \
+                    --router-kv-events \
+                    --kv-cache-block-size 64 \
+                    --http-host 0.0.0.0 \
+                    --http-port 8000
+              env:
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+              ports:
+                - name: http
+                  containerPort: 8000
+              readinessProbe:
+                httpGet:
+                  path: /health
+                  port: http
+                periodSeconds: 10
+                timeoutSeconds: 3
+                failureThreshold: 6
+              resources:
+                requests:
+                  cpu: "4"
+                  memory: 16Gi
+                limits:
+                  cpu: "16"
+                  memory: 32Gi
+
+    - name: prefill
+      type: prefill
+      runtimeVersionOverride: 1.4.1
+      replicas: 2
+      sharedMemorySize: 64Gi
+      podTemplate:
+        metadata:
+          labels:
+            axk2.nvidia.com/role: prefill-worker
+            axk2.nvidia.com/routing: kv-aware
+        spec:
+          imagePullSecrets:
+            - name: runtime-imagepullsecret
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: nvidia.com/gpu.product
+                        operator: In
+                        values:
+                          - NVIDIA-B200
+            podAffinity:
+              preferredDuringSchedulingIgnoredDuringExecution:
+                - weight: 100
+                  podAffinityTerm:
+                    labelSelector:
+                      matchExpressions:
+                        - key: nvidia.com/dynamo-graph-deployment-name
+                          operator: In
+                          values:
+                            - axk2-disagg-b200-chat
+                    topologyKey: kubernetes.io/hostname
+          containers:
+            - name: main
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-cb301ba93943e0165deda36f65a8fd291b89beb2-vllm-runtime
+              imagePullPolicy: IfNotPresent
+              workingDir: /workspace
+              command:
+                - /bin/bash
+                - -lc
+              args:
+                - |
+                  set -Eeuo pipefail
+                  ulimit -l unlimited
+                  exec python3 -m dynamo.vllm \
+                    --model skt/A.X-K2-NVFP4 \
+                    --revision 9e2e804e80f8d1b3afba5d7938173cec1ed46b49 \
+                    --tokenizer-revision 9e2e804e80f8d1b3afba5d7938173cec1ed46b49 \
+                    --served-model-name skt/A.X-K2-NVFP4 \
+                    --tensor-parallel-size 4 \
+                    --data-parallel-size 1 \
+                    --attention-backend FLASHINFER_MLA_SPARSE \
+                    --kernel-config '{"enable_flashinfer_autotune": false}' \
+                    --kv-cache-dtype fp8 \
+                    --block-size 64 \
+                    --max-model-len 262144 \
+                    --enable-prefix-caching \
+                    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}' \
+                    --kv-transfer-config="${KV_TRANSFER_CONFIG}" \
+                    --disaggregation-mode prefill \
+                    --speculative-config="${SPECULATIVE_CONFIG}" \
+                    --no-async-scheduling \
+                    --dyn-tool-call-parser hermes \
+                    --dyn-reasoning-parser deepseek_v3 \
+                    --reasoning-parser deepseek_v3
+              env:
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: HF_HOME
+                  value: /model-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: KV_TRANSFER_CONFIG
+                  valueFrom:
+                    configMapKeyRef:
+                      name: axk2-disagg-b200-chat-config
+                      key: kv-transfer-config-prefill
+                # Keep the EAGLE3 model and draft length identical to decode so
+                # the draft-model state and KV layout match across the NIXL handoff.
+                - name: SPECULATIVE_CONFIG
+                  valueFrom:
+                    configMapKeyRef:
+                      name: axk2-disagg-b200-chat-config
+                      key: speculative-config-prefill
+                - name: NIXL_LOG_LEVEL
+                  value: INFO
+                # NIXL is imported before vLLM can set this UCX registration-cache
+                # safety limit, so make the recommended value explicit.
+                - name: UCX_RCACHE_MAX_UNRELEASED
+                  value: "1024"
+                - name: UCX_TLS
+                  value: rc_x,rc,cuda_copy,cuda_ipc
+              resources:
+                requests:
+                  nvidia.com/gpu: "4"
+                  rdma/shared_ib: "1"
+                  memory: 400Gi
+                limits:
+                  nvidia.com/gpu: "4"
+                  rdma/shared_ib: "1"
+              securityContext:
+                runAsUser: 0
+                capabilities:
+                  add:
+                    - IPC_LOCK
+                    - SYS_RESOURCE
+              startupProbe:
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 20
+                failureThreshold: 60
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /model-cache
+                - name: runtime-tmp
+                  mountPath: /tmp
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache
+            - name: runtime-tmp
+              emptyDir: {}
+          schedulerName: default-scheduler
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+
+    - name: decode
+      type: decode
+      runtimeVersionOverride: 1.4.1
+      replicas: 1
+      sharedMemorySize: 64Gi
+      podTemplate:
+        metadata:
+          labels:
+            axk2.nvidia.com/role: decode-worker
+            axk2.nvidia.com/routing: kv-aware
+        spec:
+          imagePullSecrets:
+            - name: runtime-imagepullsecret
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: nvidia.com/gpu.product
+                        operator: In
+                        values:
+                          - NVIDIA-B200
+            podAffinity:
+              preferredDuringSchedulingIgnoredDuringExecution:
+                - weight: 100
+                  podAffinityTerm:
+                    labelSelector:
+                      matchExpressions:
+                        - key: nvidia.com/dynamo-graph-deployment-name
+                          operator: In
+                          values:
+                            - axk2-disagg-b200-chat
+                    topologyKey: kubernetes.io/hostname
+          containers:
+            - name: main
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-cb301ba93943e0165deda36f65a8fd291b89beb2-vllm-runtime
+              imagePullPolicy: IfNotPresent
+              workingDir: /workspace
+              command:
+                - /bin/bash
+                - -lc
+              args:
+                - |
+                  set -Eeuo pipefail
+                  ulimit -l unlimited
+                  exec python3 -m dynamo.vllm \
+                    --model skt/A.X-K2-NVFP4 \
+                    --revision 9e2e804e80f8d1b3afba5d7938173cec1ed46b49 \
+                    --tokenizer-revision 9e2e804e80f8d1b3afba5d7938173cec1ed46b49 \
+                    --served-model-name skt/A.X-K2-NVFP4 \
+                    --tensor-parallel-size 4 \
+                    --data-parallel-size 1 \
+                    --attention-backend FLASHINFER_MLA_SPARSE \
+                    --kernel-config '{"enable_flashinfer_autotune": false}' \
+                    --kv-cache-dtype fp8 \
+                    --block-size 64 \
+                    --max-model-len 262144 \
+                    --enable-prefix-caching \
+                    --kv-transfer-config="${KV_TRANSFER_CONFIG}" \
+                    --disaggregation-mode decode \
+                    --speculative-config="${SPECULATIVE_CONFIG}" \
+                    --async-scheduling \
+                    --dyn-tool-call-parser hermes \
+                    --dyn-reasoning-parser deepseek_v3 \
+                    --reasoning-parser deepseek_v3
+              env:
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: HF_HOME
+                  value: /model-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: KV_TRANSFER_CONFIG
+                  valueFrom:
+                    configMapKeyRef:
+                      name: axk2-disagg-b200-chat-config
+                      key: kv-transfer-config-decode
+                - name: SPECULATIVE_CONFIG
+                  valueFrom:
+                    configMapKeyRef:
+                      name: axk2-disagg-b200-chat-config
+                      key: speculative-config-decode
+                - name: NIXL_LOG_LEVEL
+                  value: INFO
+                # NIXL is imported before vLLM can set this UCX registration-cache
+                # safety limit, so make the recommended value explicit.
+                - name: UCX_RCACHE_MAX_UNRELEASED
+                  value: "1024"
+                - name: UCX_TLS
+                  value: rc_x,rc,cuda_copy,cuda_ipc
+              resources:
+                requests:
+                  nvidia.com/gpu: "4"
+                  rdma/shared_ib: "1"
+                  memory: 400Gi
+                limits:
+                  nvidia.com/gpu: "4"
+                  rdma/shared_ib: "1"
+              securityContext:
+                runAsUser: 0
+                capabilities:
+                  add:
+                    - IPC_LOCK
+                    - SYS_RESOURCE
+              startupProbe:
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 20
+                failureThreshold: 60
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /model-cache
+                - name: runtime-tmp
+                  mountPath: /tmp
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache
+            - name: runtime-tmp
+              emptyDir: {}
+          schedulerName: default-scheduler
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Equal
+              value: "true"
+              effect: NoSchedule

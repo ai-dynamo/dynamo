@@ -1,0 +1,80 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+id: ax-k2
+title: A.X-K2
+page: pages/recipes/model-recipes/ax-k2.mdx
+provider: skt
+model:
+  name: A.X-K2
+  hf_id: skt/A.X-K2-NVFP4
+  precision: NVFP4 weights, FP8 KV cache
+status: experimental
+targets:
+- id: vllm-agg-b200
+  recommended: false
+  hardware:
+    gpu: B200
+    count: 8
+  runtime:
+    framework: vllm
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-cb301ba93943e0165deda36f65a8fd291b89beb2-vllm-runtime
+  topology: aggregated
+  techniques:
+  - nvfp4
+  - fp8-kv-cache
+  - kv-aware-routing
+  - eagle3
+  workload:
+    type: chat
+    traffic: 8K/1K Mooncake chat, 15% trace subset, 70% KV reuse, concurrency 16
+  deploy:
+    asset: recipes/ax-k2/vllm/agg-b200-chat/deploy-generic.yaml
+  expected_performance:
+    available: true
+    summary: 'C=16, chat 15%: 76.49 output toks/sec/GPU, 55.83 mean toks/sec/user, 0.525 s p50 TTFT. Historical
+      synthetic EAGLE3 AL=2.12 run; 1765/1765 successful requests, 0 failed, 20 warmup requests. Predates
+      the pinned CI runtime update.'
+  benchmark:
+    tool: aiperf
+    asset: recipes/ax-k2/perf/perf.yaml
+- id: vllm-disagg-b200
+  recommended: false
+  hardware:
+    gpu: B200
+    count: 12
+  runtime:
+    framework: vllm
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-cb301ba93943e0165deda36f65a8fd291b89beb2-vllm-runtime
+  topology: disaggregated
+  techniques:
+  - nvfp4
+  - fp8-kv-cache
+  - kv-aware-routing
+  - eagle3
+  workload:
+    type: chat
+    traffic: 8K/1K Mooncake chat, 15% trace subset, 70% KV reuse, concurrency 16
+  deploy:
+    asset: recipes/ax-k2/vllm/disagg-b200-chat/deploy-generic.yaml
+  expected_performance:
+    available: true
+    summary: 'C=16, chat 15%: 61.97 output toks/sec/GPU, 83 mean toks/sec/user, 3.879 s p50 TTFT. Historical
+      synthetic EAGLE3 AL=2.12 run; 1755/1765 successful requests, 10 failed, 32 warmup requests. Predates
+      the pinned CI runtime update.'
+related_benchmarks: []
+maintainer: Vanshil Shah
+gaps:
+- Published C16 short-trace results predate the pinned CI runtime; no measurements for this image.
+- Disaggregated C16 run had 10 failed requests out of 1765; warmup differed between topologies.

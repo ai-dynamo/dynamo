@@ -1,0 +1,207 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: A.X-K2
+subtitle: Serve A.X-K2 with Dynamo and vLLM on B200, aggregated or disaggregated.
+---
+
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
+Deploy SK Telecom's [A.X-K2](https://huggingface.co/skt/A.X-K2-NVFP4) with
+NVIDIA Dynamo, NVFP4 weights, FP8 KV cache, KV-aware routing, and EAGLE3
+speculative decoding. Both topologies use four B200 GPUs per worker and
+support text generation, reasoning, and tool calling.
+
+<div className="dynamo-target-picker">
+<p className="dynamo-target-picker-title">Choose your deployment target</p>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Topology</span>
+<input type="radio" id="recipe-variant-agg" name="recipe-variant" value="agg" defaultChecked />
+<label htmlFor="recipe-variant-agg">Aggregated</label>
+<input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" />
+<label htmlFor="recipe-variant-disagg">Disaggregated</label>
+</div>
+<div className="dynamo-target-picker-summary" data-variant="agg">
+<span><b>Checkpoint</b> skt/A.X-K2-NVFP4</span>
+<span><b>Hardware</b> 8x B200, two TP4 aggregate workers</span>
+<span><b>Precision</b> NVFP4 weights, FP8 KV cache</span>
+<span><b>Speculation</b> EAGLE3, 3 tokens</span>
+<span><b>FlashInfer autotuning</b> Disabled</span>
+</div>
+<div className="dynamo-target-picker-summary" data-variant="disagg">
+<span><b>Checkpoint</b> skt/A.X-K2-NVFP4</span>
+<span><b>Hardware</b> 12x B200, two TP4 prefill workers and one TP4 decode worker</span>
+<span><b>Precision</b> NVFP4 weights, FP8 KV cache</span>
+<span><b>Speculation</b> EAGLE3, 3 tokens on both roles</span>
+<span><b>FlashInfer autotuning</b> Disabled on prefill and decode</span>
+</div>
+</div>
+
+## Prerequisites
+
+- A Kubernetes cluster with the [Dynamo platform](../../kubernetes/getting-started/quickstart.mdx) installed.
+- Four B200 GPUs and 400 GiB of host memory per worker: eight GPUs total for
+  aggregated serving or twelve for disaggregated serving.
+- A ReadWriteMany storage class for model weights.
+- A Hugging Face token with access to `skt/A.X-K2-NVFP4` and `skt/A.X-K2-EAGLE3`.
+
+<div data-variant="disagg">
+
+Disaggregated serving also requires InfiniBand with one `rdma/shared_ib`
+device resource available per worker for NIXL/UCX KV transfer.
+
+</div>
+
+## Deploy
+
+Run commands from the repository root. Set `CONTEXT` and `NAMESPACE` to your
+cluster context and namespace, and set `HF_TOKEN`, `REGISTRY_USERNAME`, and
+`REGISTRY_PASSWORD` to your credentials. Create the namespace and secrets:
+
+```bash
+kubectl --context "${CONTEXT}" create namespace "${NAMESPACE}"
+kubectl --context "${CONTEXT}" -n "${NAMESPACE}" create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="${HF_TOKEN}"
+kubectl --context "${CONTEXT}" -n "${NAMESPACE}" create secret docker-registry runtime-imagepullsecret \
+  --docker-server=dynamoci.azurecr.io \
+  --docker-username="${REGISTRY_USERNAME}" \
+  --docker-password="${REGISTRY_PASSWORD}"
+```
+
+Set `storageClassName` in
+[model-cache.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/ax-k2/model-cache/model-cache.yaml)
+to your cluster's ReadWriteMany storage class. Create the PVC and download
+both pinned checkpoints:
+
+```bash
+kubectl --context "${CONTEXT}" -n "${NAMESPACE}" apply -f recipes/ax-k2/model-cache/model-cache.yaml
+kubectl --context "${CONTEXT}" -n "${NAMESPACE}" apply -f recipes/ax-k2/model-cache/model-download.yaml
+kubectl --context "${CONTEXT}" -n "${NAMESPACE}" wait --for=condition=Complete \
+  job/axk2-model-download --timeout=14400s
+```
+
+Both profiles and the download job mount `model-cache`. To use an existing
+populated PVC, set `claimName` in the job and selected deployment source to
+that PVC and skip creating a new claim. Regenerate the selected manifest
+after editing its Kustomize source.
+
+<div data-variant="agg">
+
+Deploy two aggregate workers:
+
+```bash
+export DGD=axk2-agg-b200-chat
+kubectl --context "${CONTEXT}" -n "${NAMESPACE}" apply \
+  -f recipes/ax-k2/vllm/agg-b200-chat/deploy-generic.yaml
+```
+
+The manifest is generated from
+[Kustomize sources](https://github.com/ai-dynamo/dynamo/tree/main/recipes/ax-k2/vllm/agg-b200-chat/kustomize).
+To change a setting, edit `kustomize/base/deploy.yaml` and regenerate:
+
+```bash
+python3 scripts/kustomize-matrix.py unfold recipes/ax-k2/vllm/agg-b200-chat/.kustomize-matrix.yaml
+python3 scripts/kustomize-matrix.py render recipes/ax-k2/vllm/agg-b200-chat/.kustomize-matrix.yaml
+```
+
+</div>
+
+<div data-variant="disagg">
+
+Deploy two prefill workers and one decode worker:
+
+```bash
+export DGD=axk2-disagg-b200-chat
+kubectl --context "${CONTEXT}" -n "${NAMESPACE}" apply \
+  -f recipes/ax-k2/vllm/disagg-b200-chat/deploy-generic.yaml
+```
+
+The manifest is generated from
+[Kustomize sources](https://github.com/ai-dynamo/dynamo/tree/main/recipes/ax-k2/vllm/disagg-b200-chat/kustomize).
+To change a setting, edit `kustomize/base/deploy.yaml` and regenerate:
+
+```bash
+python3 scripts/kustomize-matrix.py unfold recipes/ax-k2/vllm/disagg-b200-chat/.kustomize-matrix.yaml
+python3 scripts/kustomize-matrix.py render recipes/ax-k2/vllm/disagg-b200-chat/.kustomize-matrix.yaml
+```
+
+</div>
+
+## Smoke Test
+
+Wait for the selected deployment, then forward its frontend port:
+
+```bash
+kubectl --context "${CONTEXT}" -n "${NAMESPACE}" wait --for=condition=Ready \
+  "dynamographdeployment/${DGD}" --timeout=7200s
+kubectl --context "${CONTEXT}" -n "${NAMESPACE}" port-forward \
+  "service/${DGD}-frontend" 8000:8000
+```
+
+In another terminal, verify model discovery and a completion:
+
+```bash
+curl --fail http://localhost:8000/v1/models
+curl --fail http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"skt/A.X-K2-NVFP4","messages":[{"role":"user","content":"What is 2 + 2?"}],"temperature":0,"max_tokens":4096,"stream":false}'
+```
+
+Model discovery should list `skt/A.X-K2-NVFP4`; the completion should contain
+a `choices` array. Reasoning uses the `deepseek_v3` parser, and tool calling
+uses the `hermes` parser.
+
+## Benchmark
+
+The [AIPerf workflow](https://github.com/ai-dynamo/dynamo/blob/main/recipes/ax-k2/perf/README.md)
+replays an 8K-input / 1K-output chat trace with 70% KV reuse against the
+aggregated profile at concurrency 32. It preserves expanded configurations,
+raw reports, and frontend metrics. Keep the default real EAGLE3 acceptance
+configuration for accuracy evaluation.
+
+Before starting the benchmark, follow the workflow's
+[trace-staging instructions](https://github.com/ai-dynamo/dynamo/blob/main/recipes/ax-k2/perf/README.md#stage-the-trace)
+to copy the Git LFS chat trace from your checkout onto the model-cache PVC.
+The job reads it through `TRACE_FILE` and verifies its SHA-256 and request
+counts before sending traffic.
+
+<div data-variant="disagg">
+
+The checked-in benchmark job targets the aggregate frontend. To benchmark
+the disaggregated profile, update its endpoint and frontend selector to this
+deployment before applying the job.
+
+</div>
+
+### Performance Results
+
+Benchmarking uses synthetic EAGLE3 acceptance length 2.12.
+
+| Workload | Framework | Recipe | SKU | Concurrency | System output tok/s/GPU | User output tok/s (mean) | TTFT P50 (seconds) |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: |
+| Chat (15% subset) | vLLM | Aggregated (2 workers) | B200 | 16 | 76.49 | 55.83 | 0.525 |
+| Chat (15% subset) | vLLM | Disaggregated (2P1D) | B200 | 16 | 61.97 | 83 | 3.879 |
+
+## Compare All Targets
+
+| Setting | Aggregated | Disaggregated |
+| --- | --- | --- |
+| Workers | 2 aggregate | 2 prefill + 1 decode |
+| Total GPUs | 8x B200 | 12x B200 |
+| Parallelism | TP4, DP1, expert parallelism disabled | Same on both roles |
+| Precision | NVFP4 weights, FP8 KV cache | Same on both roles |
+| Attention | `FLASHINFER_MLA_SPARSE` | Same on both roles |
+| FlashInfer autotuning | Disabled | Disabled on prefill and decode |
+| EAGLE3 | 3 speculative tokens | 3 speculative tokens on both roles |
+| Async scheduling | Enabled | Prefill disabled, decode enabled |
+| Context length | 262,144 tokens | 262,144 tokens |
+| Routing | KV-aware | KV-aware |
+| KV transfer | N/A | NIXL/UCX over InfiniBand |
+
+## Source
+
+- [Recipe and configuration table](https://github.com/ai-dynamo/dynamo/tree/main/recipes/ax-k2)
+- [Aggregated manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/ax-k2/vllm/agg-b200-chat/deploy-generic.yaml)
+- [Disaggregated manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/ax-k2/vllm/disagg-b200-chat/deploy-generic.yaml)
