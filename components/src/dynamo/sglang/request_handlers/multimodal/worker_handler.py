@@ -599,6 +599,8 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
         rng_first = _nvtx.start_range("mm:dec:first_token", color="purple")
         first_token = True
         request_id_future: "asyncio.Future[str]" = asyncio.Future()
+        if context is not None and not request_id_future.done():
+            request_id_future.set_result(context.trace_id)
         try:
             async with self._engine_abort_on_cancel(request_id_future, context):
                 async for output in StreamProcessor.process_sglang_stream(
@@ -669,6 +671,8 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
             rng_first = _nvtx.start_range("mm:dec:first_token", color="purple")
             first_token = True
             request_id_future: "asyncio.Future[str]" = asyncio.Future()
+            if context is not None and not request_id_future.done():
+                request_id_future.set_result(context.trace_id)
             try:
                 async with self._engine_abort_on_cancel(request_id_future, context):
                     async for output in StreamProcessor.process_sglang_stream(
