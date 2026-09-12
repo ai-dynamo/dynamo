@@ -48,6 +48,7 @@ from vllm.v1.engine.exceptions import EngineDeadError
 
 from dynamo._core import Context
 from dynamo.common.backend import logprobs as _shared_logprobs
+from dynamo.common.backend.agent_context import session_id_from_request
 from dynamo.common.lora.manager import LoRAInfo, get_lora_manager
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
@@ -3238,6 +3239,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         priority=0,
         reasoning_ended=None,
         reasoning_parser_kwargs=None,
+        session_id=None,
     ):
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
@@ -3256,6 +3258,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     data_parallel_rank=data_parallel_rank,
                     trace_headers=trace_headers,
                     priority=priority,
+                    session_id=session_id,
                     **_engine_generate_reasoning_kwargs(
                         self.engine_client,
                         reasoning_ended,
@@ -3686,6 +3689,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         trace_headers = context.trace_headers()
         reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
+        session_id = session_id_from_request(request)
 
         # In disagg decode mode, defer engine_client.abort() until the first
         # token so we don't abort while a NIXL KV transfer is still in flight
@@ -3734,6 +3738,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         priority=priority,
                         reasoning_ended=reasoning_ended,
                         reasoning_parser_kwargs=reasoning_parser_kwargs,
+                        session_id=session_id,
                     ):
                         if abort_guard is not None:
                             abort_guard.signal_first_token()
@@ -3784,6 +3789,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         first_token_output_seen = False
 
         trace_headers = context.trace_headers()
+        session_id = session_id_from_request(request)
 
         is_decode_only = self.config.disaggregation_mode == DisaggregationMode.DECODE
         if is_decode_only and BYPASS_REMOTE_PREFILL_ANNOTATION in (
@@ -3817,6 +3823,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     data_parallel_rank=dp_rank,
                     trace_headers=trace_headers,
                     priority=priority,
+                    session_id=session_id,
                 )
 
                 async for res in gen:
@@ -4001,6 +4008,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         trace_headers = context.trace_headers()
         reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
+        session_id = session_id_from_request(request)
 
         async with self._abort_monitor(context, request_id, is_prefill=True):
             try:
@@ -4014,6 +4022,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                         lora_request=admitted_lora_request,
                         trace_headers=trace_headers,
                         priority=priority,
+                        session_id=session_id,
                         **_engine_generate_reasoning_kwargs(
                             self.engine_client,
                             reasoning_ended,
