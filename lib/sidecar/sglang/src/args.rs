@@ -22,4 +22,10 @@ pub struct Args {
     /// wildcard addresses.
     #[arg(long, env = "SGLANG_DISAGGREGATION_BOOTSTRAP_HOST")]
     pub bootstrap_host: Option<String>,
+
+    /// Reachable KV-event publisher host for each global SGLang DP rank.
+    /// Required for multi-node DP because native discovery reports ports by
+    /// rank but cannot identify the node hosting each publisher.
+    #[arg(long, value_delimiter = ',', env = "SGLANG_KV_EVENT_HOSTS")]
+    pub kv_event_hosts: Vec<String>,
 }
