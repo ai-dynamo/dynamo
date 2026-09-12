@@ -200,17 +200,27 @@ def _racer(
     lock_path: str,
     engine_id: str,
     acquired_queue: multiprocessing.Queue,
+    attempt_queue,
+    hold_queue,
     result_queue: multiprocessing.Queue,
 ):
-    """Acquire the lock, announce it, report timing, hold, and release."""
+    """Acquire the lock, coordinate the hold, report timing, and release."""
     import fcntl
 
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+
+    # Announce immediately before flock(), letting the parent ensure the
+    # contender has started its acquisition attempt before the holder's timer.
+    if attempt_queue is not None:
+        attempt_queue.put(engine_id)
 
     t0 = time.monotonic()
     fcntl.flock(fd, fcntl.LOCK_EX)
     t1 = time.monotonic()
     acquired_queue.put(engine_id)
+
+    if hold_queue is not None:
+        hold_queue.get(timeout=10)
 
     os.ftruncate(fd, 0)
     os.lseek(fd, 0, os.SEEK_SET)
@@ -241,19 +251,25 @@ def _racer(
 async def test_cross_process_race(lock_path):
     """Two processes contend for the lock; the kernel serializes their holds."""
     acquired_queue = multiprocessing.Queue()
+    attempt_queue = multiprocessing.Queue()
+    hold_queue = multiprocessing.Queue()
     result_queue = multiprocessing.Queue()
 
     p1 = multiprocessing.Process(
-        target=_racer, args=(lock_path, "p1", acquired_queue, result_queue)
+        target=_racer,
+        args=(lock_path, "p1", acquired_queue, None, hold_queue, result_queue),
     )
     p2 = multiprocessing.Process(
-        target=_racer, args=(lock_path, "p2", acquired_queue, result_queue)
+        target=_racer,
+        args=(lock_path, "p2", acquired_queue, attempt_queue, None, result_queue),
     )
 
     try:
         p1.start()
         assert acquired_queue.get(timeout=10) == "p1"
         p2.start()
+        assert attempt_queue.get(timeout=10) == "p2"
+        hold_queue.put("p1")
 
         # Blocking gets rather than Queue.empty(): empty() is not a
         # synchronization primitive, and joining a child before draining its
@@ -274,6 +290,8 @@ async def test_cross_process_race(lock_path):
             if p.pid is not None:  # None when start() was never reached
                 p.join(timeout=10)
         acquired_queue.close()
+        attempt_queue.close()
+        hold_queue.close()
         result_queue.close()
 
     # CLOCK_MONOTONIC is system-wide on Linux, so the two children's stamps are
