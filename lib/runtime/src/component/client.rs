@@ -3,7 +3,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, LazyLock, Mutex as StdMutex},
+    sync::{Arc, LazyLock, Mutex as StdMutex, Weak},
     time::Duration,
 };
 
@@ -890,19 +890,35 @@ impl Client {
     async fn get_or_create_dynamic_discovery_source(
         endpoint: &Endpoint,
     ) -> Result<Arc<EndpointDiscoverySource>> {
-        let drt = endpoint.drt();
-        let sources = drt.endpoint_discovery_sources();
-        let mut sources = sources.lock().await;
+        let sources = endpoint.drt().endpoint_discovery_sources();
 
-        if let Some(source) = sources.get(endpoint) {
-            if let Some(source) = source.upgrade() {
-                return Ok(source);
-            } else {
-                sources.remove(endpoint);
-            }
+        let existing = sources.lock().await.get(endpoint).and_then(Weak::upgrade);
+        if let Some(source) = existing {
+            return Ok(source);
         }
 
-        let discovery = drt.discovery();
+        // Discovery::list_and_watch establishes the backend watch, so it runs outside the
+        // registry lock. Holding the lock across it serializes every client construction behind
+        // one round trip to the discovery backend.
+        let discovery_source = Self::spawn_dynamic_discovery_source(endpoint).await?;
+
+        let mut sources = sources.lock().await;
+        // Another caller can register a source for this endpoint while this watch is
+        // established. Every later client shares that source, and this one drops, which stops
+        // the watcher task it spawned.
+        if let Some(source) = sources.get(endpoint).and_then(Weak::upgrade) {
+            return Ok(source);
+        }
+        sources.insert(endpoint.clone(), Arc::downgrade(&discovery_source));
+        Ok(discovery_source)
+    }
+
+    /// Establishes the endpoint watch and spawns the task that projects it into the returned
+    /// source. The task stops when the returned source drops.
+    async fn spawn_dynamic_discovery_source(
+        endpoint: &Endpoint,
+    ) -> Result<Arc<EndpointDiscoverySource>> {
+        let discovery = endpoint.drt().discovery();
         let discovery_query = crate::discovery::DiscoveryQuery::Endpoint {
             namespace: endpoint.component.namespace.name.clone(),
             component: endpoint.component.name.clone(),
@@ -968,7 +984,6 @@ impl Client {
             let _ = watch_tx.send(vec![]);
         });
 
-        sources.insert(endpoint.clone(), Arc::downgrade(&discovery_source));
         Ok(discovery_source)
     }
 }
@@ -977,6 +992,7 @@ impl Client {
 mod tests {
     use super::*;
     use crate::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+    use futures::future::try_join_all;
 
     async fn wait_for_discovery_event(
         receiver: &mut DiscoveryEventReceiver,
@@ -1031,6 +1047,34 @@ mod tests {
             inhibited_duration_from_env(|_| Some("invalid".to_string())),
             Duration::from_secs(DEFAULT_INHIBITED_DURATION_SECS)
         );
+    }
+
+    #[tokio::test]
+    async fn concurrent_clients_share_one_discovery_source() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt, DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_shared_discovery_source".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("decode".to_string());
+
+        // Every client passes the registry lookup before the first one establishes its watch, so
+        // they all take the slow path and race on the insert.
+        let clients = try_join_all((0..8).map(|_| endpoint.client()))
+            .await
+            .unwrap();
+
+        let shared = &clients[0].endpoint_discovery_source;
+        for (index, client) in clients.iter().enumerate() {
+            assert!(
+                Arc::ptr_eq(shared, &client.endpoint_discovery_source),
+                "client {index} watches the endpoint through a second discovery source"
+            );
+        }
     }
 
     #[tokio::test]
