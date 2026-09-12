@@ -103,7 +103,7 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 <ParamField path="NIXL_TELEMETRY_EXPORTER" type="string">
   NIXL telemetry exporter to use, e.g. `prometheus`.
 
-  Required for a Prometheus endpoint. NIXL has no default exporter: with this variable unset, enabling telemetry collects metrics in-process and exports nothing, so no port is opened.
+  Required for a Prometheus endpoint, with the exact lowercase value `prometheus`. NIXL has no default exporter: with this variable unset, or set to another value, enabling telemetry collects metrics in-process and opens no Prometheus port.
 
   **Operator preset:** `prometheus` on worker, prefill, and decode pods.
 </ParamField>
