@@ -830,8 +830,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                     self.host
                         .replace_prepared_group(&result.spec, prepared, &members, &adapters)
                 } else {
-                    self.host
-                        .commit_group(&result.spec, prepared, &members, &adapters)
+                    self.host.commit_group(&result.spec, prepared, &members, &adapters)
                 };
                 match commit_result {
                     Ok(()) => {
