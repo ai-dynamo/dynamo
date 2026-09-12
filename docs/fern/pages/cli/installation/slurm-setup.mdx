@@ -1,0 +1,407 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Slurm Setup
+subtitle: Run Dynamo on a single Slurm node with Pyxis and Enroot
+---
+
+**Experimental.** This page records a single-node Slurm path that was exercised on one site. Dynamo's supported deployment target is Kubernetes; nothing here replaces the `recipes/` folder or the Kubernetes operator. Use it when a cluster only offers Slurm with the Pyxis SPANK plugin and Enroot, and read the scope table before assuming a step transfers.
+
+## What This Covers
+
+| Dimension | Exercised path |
+|---|---|
+| Scheduler | Slurm with Pyxis and Enroot; no Kubernetes |
+| Allocation | One node, one GPU for aggregated, two GPUs for disaggregated |
+| Backends | `dynamo.vllm` and `dynamo.trtllm` |
+| Model | `Qwen/Qwen3-0.6B`, tensor parallel 1 |
+| GPU | Blackwell Ultra, compute capability 10.3 |
+| Control plane | etcd and NATS started inside the job |
+| Not covered | Multi-node, tensor parallel above 1, routing, KV-aware routing, other models |
+
+**Record the GPU generation with any result from this path.** The FlashInfer
+workaround below was established on a compute-capability 10.3 GPU, where the fix
+is a newer FlashInfer. It does not generalize: on older architectures the same
+component has been reported to need the opposite treatment, disabling its
+sampler path rather than advancing it, and GPUs in between are not affected at
+all. Confirm the behavior on your own hardware before carrying a workaround
+across generations.
+
+A passing result covers the exercised path, not other models, topologies, Dynamo versions, or Slurm environments.
+
+## Prerequisites
+
+- A Slurm partition whose nodes run the Pyxis SPANK plugin and Enroot
+- **Enroot 4.0 or newer** if you intend to pull a runtime image tagged `1.0.2` or later; see the `enroot import` row in [Troubleshoot](#troubleshoot)
+- A shared filesystem readable from the compute nodes for images, model cache, and job output
+- Enough free space for a squashed image; the runtime images used here are 20-26 GB each
+- On more than one node, the image path has to resolve identically everywhere.
+  Copying an image of this size to node-local disk is usually not an option, so
+  it belongs on the shared filesystem along with the Enroot data directory
+
+## Prepare the Image
+
+Convert the runtime image to a squashfs file once, then reuse it across jobs. Point the Enroot paths at a location you own; the defaults are root-owned on many sites.
+
+```bash
+export ENROOT_CACHE_PATH="$SHARED/enroot/cache"
+export ENROOT_DATA_PATH="$SHARED/enroot/data"
+export ENROOT_TEMP_PATH="$SHARED/enroot/tmp"
+export ENROOT_RUNTIME_PATH="/tmp/enroot-$(id -u)"
+mkdir -p "$ENROOT_CACHE_PATH" "$ENROOT_DATA_PATH" "$ENROOT_TEMP_PATH" "$ENROOT_RUNTIME_PATH"
+
+enroot import -o "$SHARED/images/dynamo-vllm.sqsh" \
+  "docker://nvcr.io#nvidia/ai-dynamo/vllm-runtime:<tag>"
+```
+
+Run this inside a batch job rather than on a login node. The conversion is CPU- and IO-heavy and takes a few minutes per image.
+
+## Run One srun, Not Several
+
+Pyxis creates a new container for each `srun` that passes `--container-image`. A frontend started in one `srun` and a worker started in another cannot reach each other. Two shapes avoid that.
+
+Keep everything in one `srun` and background the processes inside it:
+
+```bash
+srun --container-image="$IMAGE" \
+     --container-mounts="$SHARED:$SHARED" \
+     --container-workdir="$WORK" \
+     bash "$SHARED/serve.sh"
+```
+
+Or name the container once and attach later steps to that name:
+
+```bash
+# Create the container once. This step exits immediately; it exists only so the
+# later steps have a name to attach to.
+srun --container-image="$IMAGE" --container-name=dynamo \
+     --container-mounts="$SHARED:$SHARED" echo "container up"
+
+# The control plane comes first. See the next section for what this script
+# contains and for the health gate it has to pass.
+srun --container-name=dynamo --container-mounts="$SHARED:$SHARED" \
+     bash start_control_plane.sh &
+
+# Workloads follow, and each one waits for the endpoints it was given rather
+# than assuming they are already up.
+srun --container-name=dynamo --container-mounts="$SHARED:$SHARED" \
+     --container-env ETCD_ENDPOINTS,NATS_SERVER \
+     bash launch_frontend.sh &
+srun --container-name=dynamo --container-mounts="$SHARED:$SHARED" \
+     --container-env ETCD_ENDPOINTS,NATS_SERVER \
+     bash launch_worker.sh &
+```
+
+**A shared container name shares the root filesystem, not the process
+namespace.** Each step is still a separate process, so every long-running
+server has to be backgrounded with `&`; a step left in the foreground blocks the
+next one. For the same reason each step needs its own `--container-env`, because
+environment variables do not carry over from a previous step.
+
+Backgrounding the control-plane step is what keeps it alive: the processes it
+starts belong to that step, so they end when it does. Ordering the `srun` calls
+is not enough on its own, because a backgrounded step returns before its
+services are listening. Each workload has to wait on the endpoints it was
+handed.
+
+Two more flags belong on those steps once there is more than one of them:
+
+```bash
+srun --container-name=dynamo ... --kill-on-bad-exit=1 bash launch_worker.sh &
+sleep 5   # let Pyxis finish initializing the container namespace
+```
+
+`--kill-on-bad-exit=1` tears the job down when a step exits badly. Without it a
+worker can die while the rest keep running, and the job reports whatever the
+last step happened to return. The `sleep` is not padding: Pyxis initializes the
+container namespace asynchronously, and launching the next step immediately
+races that setup.
+
+**Use a fixed container name, not one derived from the job ID.** Pyxis does not
+remove a named container when the job ends, so a per-job name leaves one behind
+every run. With images this size that reaches `No space left on device` within a
+handful of jobs. A fixed name also skips the unpack on every run after the
+first.
+
+The named form is the better fit for multiple nodes and for steps that need
+different environment variables. **Everything measured for this page used the
+single-`srun` shape.** The named-container shape, the two flags above, and the
+`sleep` follow
+[`jenkins/scripts/perf/disaggregated/slurm_launch_draft.sh`](https://github.com/NVIDIA/TensorRT-LLM/blob/main/jenkins/scripts/perf/disaggregated/slurm_launch_draft.sh)
+in TensorRT-LLM, which runs this shape at scale; none of it was exercised here.
+
+One thing from that script matters only when steps are split: a step's `&>`
+redirect is owned by that `srun`, so its log is not guaranteed flushed until the
+step is reaped. Anything that parses a worker log has to wait for the step to
+finish, not just for the process to appear done.
+
+Do not pass `--mpi=none` to work around MPI errors. Pyxis mounts the PMIx
+application directory, and suppressing PMI leaves that path missing, so the
+container fails to start before any Dynamo code runs. The MPI errors that
+tempt you toward that flag are addressed in
+[Troubleshoot](#troubleshoot) instead.
+
+Slurm's own MPI plugin is a separate choice from what the container does with
+PMI. The single-node path recorded here clears the PMI and `SLURM_*` variables
+inside the container and leaves `--mpi` at the site default.
+
+Multi-node launchers take the opposite approach and pass `--mpi=pmix`
+explicitly, but they do not pass it everywhere. In
+`slurm_launch_draft.sh` the model-serving steps get `--mpi=pmix
+--kill-on-bad-exit=1`, while the coordinating steps get
+`--kill-on-bad-exit=1 --overlap` and no `--mpi` at all. Whichever approach you
+take, apply it per step rather than uniformly, and do not mix it with clearing
+PMI inside the container — these were not measured against each other here.
+
+## Start the Control Plane Inside the Job
+
+The launch scripts under `examples/backends/*/launch/` assume etcd and NATS are already reachable. On Slurm you usually have to start them yourself, inside the same container, before the workers.
+
+```bash
+etcd --data-dir "$PWD/etcd-data" \
+  --listen-client-urls http://127.0.0.1:2379 \
+  --advertise-client-urls http://127.0.0.1:2379 \
+  --listen-peer-urls http://127.0.0.1:2380 \
+  --initial-advertise-peer-urls http://127.0.0.1:2380 \
+  --initial-cluster "default=http://127.0.0.1:2380" > etcd.log 2>&1 &
+nats-server -js -sd "$PWD/nats-data" > nats.log 2>&1 &
+
+for _ in $(seq 1 40); do
+  curl -sf http://127.0.0.1:2379/health >/dev/null && break
+  sleep 1
+done
+
+# Exhausting the retries is not a failure on its own; check once more and stop
+# here if it did not come up, or the workers start against nothing.
+curl -sf http://127.0.0.1:2379/health >/dev/null || {
+  echo "etcd did not become healthy" >&2
+  exit 1
+}
+```
+
+Wait for the health endpoint before starting a worker. A worker that starts
+first can exit with `Could not connect to etcd`. The check after the loop
+matters as much as the loop: `for ... && break` leaves the same exit status
+whether it broke early or ran out of attempts, so without it the script
+continues as if etcd were up.
+
+Give each job its own working directory. etcd writes `default.etcd/` into the current directory, so a second job that shares a directory fails on the leftover data directory. `--container-workdir` set to a per-job path handles both that and the log files.
+
+## Give the Container a Writable Home
+
+Two libraries write into `$HOME` at runtime, and whether that succeeds depends
+on the site's Enroot configuration rather than on anything in the job script.
+
+- **FlashInfer writes `$HOME/.cache/flashinfer` at import time.** The
+  `os.makedirs` sits at module top level in `flashinfer/jit/core.py`, and vLLM
+  imports the module unconditionally from `topk_topp_sampler.py`, so
+  `VLLM_USE_FLASHINFER_SAMPLER=0` does not prevent it.
+- **Triton writes `$HOME/.triton` on the first inference.** Model registration
+  succeeds before that point, so a readiness check that stops at a registered
+  model reports success on a worker that cannot serve. This is one of the cases
+  the two-stage gate below catches.
+
+Whether you hit this depends on two Enroot settings, both of which default to
+off:
+
+| Setting | Default | Controls |
+| --- | --- | --- |
+| `ENROOT_ROOTFS_WRITABLE` | `no` | whether the container filesystem accepts writes |
+| `ENROOT_MOUNT_HOME` | `no` | whether the host home directory is bind-mounted |
+
+Check `/etc/enroot/enroot.conf` before assuming which case you are in. A
+DeepOps-provisioned cluster turns both on, and the runs behind this page had
+them on: inside the job `HOME` was `/root`, the root filesystem was writable,
+and neither library failed. A hand-built cluster tends to leave them off, and
+both failures above have been reported there.
+
+`enroot start --rw` overrides the writable setting for that one invocation,
+which is why the same image can work by hand and fail under Slurm. Pyxis has
+its own flags for both, so you do not have to edit the config file:
+
+```bash
+srun --container-name=dynamo --container-writable --container-mount-home \
+     --container-env HOME,ETCD_ENDPOINTS,NATS_SERVER \
+     bash launch_worker.sh
+```
+
+Chasing the individual cache variables does not scale, because each library
+picks its own name. The alternative that survives both settings being off is to
+point `HOME` at a bind-mounted path and pass `HOME` through `--container-env`,
+which also keeps the caches out of the container filesystem so a named
+container does not grow every run.
+
+> **Not verified here.** The flags above are present in `srun --help` on
+> Enroot 4.2.1 with Pyxis, but the runs behind this page did not need them, so
+> they are reported from the interface rather than from a passing job.
+
+## Aggregated Serving
+
+```bash
+python3 -m dynamo.frontend > frontend.log 2>&1 &
+python3 -m dynamo.vllm --model "$MODEL" --enforce-eager > worker.log 2>&1 &
+```
+
+For TensorRT-LLM, pass an engine config instead:
+
+```bash
+python3 -m dynamo.trtllm \
+  --model-path "$MODEL" --served-model-name "$MODEL" \
+  --extra-engine-args "$CONFIG_DIR/agg.yaml" > worker.log 2>&1 &
+```
+
+## Disaggregated Serving
+
+Two GPUs, one worker each. **The device assignment differs between backends**, so copy it from the launch script for the backend you use rather than from the other one.
+
+vLLM, following `examples/backends/vllm/launch/disagg.sh`:
+
+```bash
+DYN_SYSTEM_PORT=8081 CUDA_VISIBLE_DEVICES=0 \
+python3 -m dynamo.vllm --model "$MODEL" --enforce-eager \
+  --disaggregation-mode decode \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' > decode.log 2>&1 &
+
+DYN_SYSTEM_PORT=8082 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 CUDA_VISIBLE_DEVICES=1 \
+python3 -m dynamo.vllm --model "$MODEL" --enforce-eager \
+  --disaggregation-mode prefill \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' > prefill.log 2>&1 &
+PREFILL_PID=$!
+```
+
+Record `PREFILL_PID` here rather than later. The verification step below needs
+the PID of *this* worker, and a second worker started for the check would leave
+this one running.
+
+TensorRT-LLM, following `examples/backends/trtllm/launch/disagg.sh`. Prefill takes device 0 here, the opposite of the vLLM script, and the KV transport is configured in the YAML through `cache_transceiver_config` rather than on the command line:
+
+```bash
+unset UCX_TLS   # let UCX pick its transports; a fixed list can omit cuda_copy
+
+CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.trtllm \
+  --model-path "$MODEL" --served-model-name "$MODEL" \
+  --extra-engine-args "$CONFIG_DIR/prefill.yaml" \
+  --disaggregation-mode prefill > prefill.log 2>&1 &
+PREFILL_PID=$!
+
+CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.trtllm \
+  --model-path "$MODEL" --served-model-name "$MODEL" \
+  --extra-engine-args "$CONFIG_DIR/decode.yaml" \
+  --disaggregation-mode decode > decode.log 2>&1 &
+```
+
+## Verify the Run
+
+Do not decide whether a run worked by matching strings in its logs. The strings
+differ between backends and versions, and the tail of a successful run is not
+reliably a success message: once the last request is answered and the job tears
+down, the engine process exits, and vLLM's client watches that process without
+always distinguishing an ordinary exit from a crash, so it logs `Engine core
+proc ... died unexpectedly` and raises `EngineDeadError`. That is why both
+checks below rest on an HTTP response or on an observable change in behavior.
+
+### Gate on a Completion, Not on a Status Code
+
+`/v1/models` answers `200` with an empty `data` array while the worker is still loading. A readiness check that only looks at the status code lets the job finish as `COMPLETED` without having served anything, which is harder to notice than a crash. The Triton cache failure above lands in the same window: registration succeeds and the first inference does not. Require both a registered model and a real completion:
+
+```bash
+ready=0
+for _ in $(seq 1 240); do
+  n=$(curl -sf --max-time 5 "http://127.0.0.1:$PORT/v1/models" \
+      | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("data",[])))')
+  if [ "${n:-0}" -gt 0 ] &&
+     curl -sf --max-time 60 "http://127.0.0.1:$PORT/v1/chat/completions" \
+       -H 'Content-Type: application/json' \
+       -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":8}" \
+       | grep -q '"choices"'; then
+    ready=1
+    break
+  fi
+  sleep 5
+done
+[ "$ready" = "1" ] || { echo "never became ready" >&2; exit 1; }
+```
+
+Read the count into a variable before comparing it. Reading `$?` after a pipe gives the exit status of the last command in the pipe, and appending `|| echo 0` under `set -o pipefail` can emit two lines, which turns the comparison into `integer expression expected`.
+
+### Confirm That Both Workers Are on the Request Path
+
+A successful completion does not by itself prove that both workers took part;
+the decode worker alone can answer, which makes a misconfigured disaggregated
+job look identical to a working one. Counting log lines does not separate the
+two: in one run, `NIXL` appeared 16 times and every line was an initialization
+message, and the same pattern appeared in an aggregated run.
+
+Withdrawing the prefill worker answers the question directly and does not
+depend on any log string:
+
+```bash
+# PREFILL_PID comes from the launch above. Do not start another worker here:
+# killing a second one would leave the first serving, and the check would then
+# report a working setup as broken.
+kill "$PREFILL_PID"
+for _ in $(seq 1 20); do kill -0 "$PREFILL_PID" 2>/dev/null || break; sleep 1; done
+
+after=$(curl -sf --max-time 30 "http://127.0.0.1:$PORT/v1/chat/completions" \
+        -H 'Content-Type: application/json' \
+        -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":8}" \
+        | grep -c '"choices"')
+# after must be 0: the request cannot be served without the prefill worker
+```
+
+Save the PID when the worker starts and kill that PID. A pattern-based `pkill -f` can match the shell that runs the script. Bound the follow-up request with `--max-time`, because a request issued after the worker is gone may otherwise hang until the job's wall clock expires.
+
+### Confirm Which Path the KV Transfer Took
+
+Everything above runs on one node, where prefill and decode reach each other through shared
+memory. The moment they sit on different nodes, a completed request stops being evidence that the
+fabric carried the KV cache: the transport falls back to sockets silently and the request still
+succeeds.
+
+Check in this order. Each step rules out a different cause, and a partition named after your
+fabric is not one of them.
+
+1. `rdma link show` on the host: is there a device at all.
+2. `ls /dev/infiniband` inside the container: `uverbs0` has to be there. Only `rdma_cm` means the
+   host has no device, not that the container is missing a mount.
+3. `ibv_devinfo -d <dev>`: `PORT_ACTIVE`, and a `link_layer` that matches the fabric you
+   believe you are on.
+4. `NCCL_DEBUG=INFO`: `NET/IB` or `NET/Socket`. Collective traffic only, and log strings move
+   between versions, so this narrows the answer rather than settling it.
+5. The device counters, read outside the job before and after the run. This is the one that
+   settles it.
+
+**Read the right counter.** They do not all count the same thing. In a run interrupted during
+inference, `rdma_sends` did not move on either node while `rdma_recvs` rose by 2436 on both, which
+is not a direction traffic can flow; those counters track particular opcodes and miss the RDMA
+WRITEs. In a separate run that completed, `sent_pkts` and `rcvd_pkts` each rose by 1066175 on both
+nodes. Prefer the packet counters for the question "did anything cross this device", and keep the
+error counters (`send_err`, `retry_exceeded_err`, `rcvd_seq_err`) for the question "did it cross
+cleanly". Counter names differ by driver, so list the directory before picking.
+
+**The RDMA device name is not the network interface.** `NCCL_IB_HCA` wants the device
+(`roce0`), `ip addr` shows the interface (`enp1s0`). Passing one where the other belongs drops
+you onto sockets with no error.
+
+> These checks were exercised on a software RoCE (`rdma_rxe`) setup across two VMs. They say
+> nothing about a lossless fabric: PFC, ECN, and DSCP exist only on real adapters, and the `rate`
+> a software device reports is a placeholder rather than a measurement.
+
+## Troubleshoot
+
+| Symptom | Check first |
+|---|---|
+| `MPI_Init_thread` aborts a few seconds in | Slurm's PMI variables reach the container. Unset `PMI*`, `PMIX*` **and** `SLURM_*` inside the container, and set `OMPI_MCA_ess=singleton` with `OMPI_MCA_pmix=isolated`. Open MPI also infers a launcher from `SLURM_JOBID`, so clearing only the PMI variables is not enough |
+| `pyxis: couldn't start container` naming a `spmix_appdir_*` path | `--mpi=none` was passed. Remove it and unset the variables inside the container instead |
+| Worker exits with `Could not connect to etcd` | The control plane was not started, or the worker started before it was healthy. Some backends bring up etcd and NATS on their own and some do not, so do not infer the behavior from a different backend |
+| Job ends `COMPLETED` but nothing was served | The readiness gate accepted a `200` with an empty `data` array. Require a completion as well |
+| Second run fails on the etcd data directory | `default.etcd/` from the previous run is in the working directory. Use a per-job `--container-workdir` |
+| Frontend and worker cannot see each other | They were started in separate `srun` steps with `--container-image`. Use one `srun`, or `--container-name` |
+| Startup is unexpectedly slow | The step received one CPU. Set `--cpus-per-gpu` in the batch header; a cluster-wide default may not apply to the step |
+| Worker dies at import with a permission error under `$HOME/.cache` | FlashInfer creates its cache directory at import time and `VLLM_USE_FLASHINFER_SAMPLER=0` does not stop it. See [writable home](#give-the-container-a-writable-home) |
+| Model registers, then the first inference fails | Triton writes `$HOME/.triton` at that point, not at import. Same cause. Check `ENROOT_ROOTFS_WRITABLE` and `ENROOT_MOUNT_HOME` in `/etc/enroot/enroot.conf`; both default to off |
+| `No space left on device` after a few jobs | Pyxis keeps a named container after the job ends. A container name derived from the job ID leaves one behind per run; use a fixed name |
+| `nats: dead` while etcd reports healthy | Two jobs on the same node are sharing fixed ports. The second process attaches to the first job's control plane instead of failing to bind, so both logs look normal while the measurements are mixed. Run one job per node, or offset every port |
+| `enroot import` fails within seconds on a `404` for a manifest digest | Enroot 3.x sends only the Docker v2 media type in `Accept`, and Dynamo runtime images from `1.0.2` onward are published as OCI image indexes. The manifest list request still succeeds, because the registry ignores the header there, and the `jq` that selects the per-architecture child also succeeds because an OCI index carries the same `.manifests[].platform` shape. The failure lands on the child manifest request, which has no ignore rule. Reproduce it with the child digest, not the index digest: the index answers `200` for any `Accept`. Enroot 4.x sends both media types |
+| Blackwell Ultra worker dies with `PTXAS error: Internal Triton PTX codegen error` | The `ptxas` bundled with Triton in the image is older than the GPU. Calling it directly reports `Value 'sm_103a' is not defined for option 'gpu-name'`. The PTX comes from FlashInfer's JIT autotuner rather than from Triton itself, despite the message. Either point `TRITON_PTXAS_PATH` at a newer `ptxas` present in the same image, or use an image whose FlashInfer does not take that path. Newer images stopped hitting it, but FlashInfer and torch moved together between the two images tested, so the responsible change was not isolated |
+| A job that served every request ends with `EngineDeadError` in the worker log | Teardown, not a crash. The engine process exits when the job stops, and vLLM's client reports an exit it did not initiate as `Engine core proc ... died unexpectedly`. Look for the shutdown line earlier in the same log, and judge the run by whether the requests were answered rather than by the last line |

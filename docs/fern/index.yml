@@ -257,6 +257,8 @@ navigation:
             path: pages/cli/installation/install-dynamo.mdx
           - page: Minikube Setup
             path: pages/cli/installation/minikube-setup.mdx
+          - page: Slurm Setup
+            path: pages/cli/installation/slurm-setup.mdx
           - page: Observability
             path: pages/cli/installation/observability.mdx
 
