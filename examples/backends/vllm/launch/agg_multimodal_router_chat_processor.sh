@@ -173,13 +173,9 @@ COMMON_ENV=(
 # Phase 1: launch all workers in parallel.
 # Under SINGLE_GPU=true, requires the KV-bytes cap (CI sets it via the
 # requested_vllm_kv_cache_bytes marker) — otherwise vLLM's 0.9 default races.
-WORKER_PORTS=()
-KV_EVENTS_PORTS=()
 for i in $(seq 1 "${NUM_WORKERS}"); do
-    WORKER_PORT=$(dyn_port DYN_SYSTEM_PORT "$i" $((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2)))
-    KV_EVENTS_PORT=$(dyn_port DYN_VLLM_KV_EVENT_PORT "$i" $((KV_EVENTS_PORT_BASE + i - 1)))
-    WORKER_PORTS+=("${WORKER_PORT}")
-    KV_EVENTS_PORTS+=("${KV_EVENTS_PORT}")
+    WORKER_PORT=$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))
+    KV_EVENTS_PORT=$((KV_EVENTS_PORT_BASE + i - 1))
 
     if [[ "${SINGLE_GPU}" == "true" ]]; then
         GPU_ID=0
@@ -205,7 +201,8 @@ done
 
 # Phase 2: wait for all workers to be ready.
 for i in $(seq 1 "${NUM_WORKERS}"); do
-    wait_ready "http://127.0.0.1:${WORKER_PORTS[i-1]}/health" "vLLM backend $i" 900
+    WORKER_PORT=$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))
+    wait_ready "http://127.0.0.1:${WORKER_PORT}/health" "vLLM backend $i" 900
 done
 
 echo
@@ -220,8 +217,11 @@ echo "=== Starting frontend (with vLLM processor + KV router) ==="
 #   2. Runs vLLM's process_inputs() → mm_features with hashes + placeholders
 #   3. Builds mm_routing_info from mm_features → passes to KvRouter
 #   4. Forwards mm_hashes to backend for hash consistency
+FRONTEND_SYSTEM_PORT_BASE="${FRONTEND_SYSTEM_PORT_BASE:-9080}"
+
 for f in $(seq 1 "${NUM_FRONTENDS}"); do
     FE_HTTP_PORT=$((HTTP_PORT + f - 1))
+    FE_SYSTEM_PORT=$((FRONTEND_SYSTEM_PORT_BASE + f - 1))
 
     # Enable replica sync when running multiple frontends.
     SYNC_ARGS=""
@@ -230,10 +230,10 @@ for f in $(seq 1 "${NUM_FRONTENDS}"); do
     fi
 
     echo
-    echo "=== Starting frontend replica ${f} (HTTP ${FE_HTTP_PORT}) ==="
-    env -u DYN_SYSTEM_PORT -u DYN_SYSTEM_PORT1 -u DYN_SYSTEM_PORT2 -u DYN_SYSTEM_PORT3 \
-        "${COMMON_ENV[@]}" \
+    echo "=== Starting frontend replica ${f} (HTTP ${FE_HTTP_PORT}, system ${FE_SYSTEM_PORT}) ==="
+    env "${COMMON_ENV[@]}" \
         "DYN_LOG=debug" \
+        "DYN_SYSTEM_PORT=${FE_SYSTEM_PORT}" \
         python -m dynamo.frontend \
             --http-port "${FE_HTTP_PORT}" \
             --dyn-chat-processor vllm \
@@ -271,7 +271,7 @@ for f in $(seq 1 "${NUM_FRONTENDS}"); do
     echo "Frontend ${f}: http://127.0.0.1:$((HTTP_PORT + f - 1))"
 done
 for i in $(seq 1 "${NUM_WORKERS}"); do
-    echo "Worker $i: http://127.0.0.1:${WORKER_PORTS[i-1]}/health"
+    echo "Worker $i: http://127.0.0.1:$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))/health"
 done
 echo
 echo "Architecture: ${NUM_FRONTENDS}x Frontend (vLLM processor + KvRouter) -> ${NUM_WORKERS}x vLLM backend"
