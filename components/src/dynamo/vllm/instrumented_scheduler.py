@@ -4710,24 +4710,178 @@ class InstrumentedScheduler(AsyncScheduler):
                 "points_fake_fallback": 0,
                 "giant_kv_threshold": self._kvwarm_giant_threshold(),
                 "giant_kv_repeats": self._kvwarm_giant_repeats(),
+                # Recurrent-state hand-off on hybrid layouts: the value of
+                # ``DYN_BENCH_KV_WARMUP_STATE`` as set (the gate validates it
+                # only where it matters, ``_kvwarm_state_gate_reason``) and
+                # the mode the shadows use (None until a hybrid point is
+                # injected; one mode per run, ``_kvwarm_state_mode``).
+                "state_mode_requested": self._kvwarm_state_mode_env(),
+                "state_mode": None,
             }
             self._kvwarm_meta = meta
         return meta
 
     def _kvwarm_state_layer_groups(self) -> list[str]:
-        """Names of KV-cache groups backed by recurrent state (Mamba/linear
-        attention). Their per-request state is updated in place, so a borrowed
-        shadow write would corrupt the chain; the warm-up must not run on them
-        until scratch state blocks exist."""
+        """Names of recurrent-state KV-cache groups (Mamba/linear attention)
+        the warm-up cannot serve. Align mode keeps one running-state block per
+        request at a token-derived slot of a null-padded table, which a shadow
+        borrows (``_kvwarm_stage_state_shadow``); the other Mamba cache modes
+        lay the state out differently and stay unsupported.
+
+        The cache mode is read from the spec, the key the managers are built
+        from (``_kvwarm_state_managers`` selects them by the same attribute),
+        so the gate and the registration agree whatever the spec is called; a
+        spec named after Mamba that carries no cache mode is refused too.
+        """
         manager = getattr(self, "kv_cache_manager", None)
         config = getattr(manager, "kv_cache_config", None)
         groups = getattr(config, "kv_cache_groups", None) or []
         names = []
         for group in groups:
-            spec_name = type(getattr(group, "kv_cache_spec", None)).__name__
-            if "Mamba" in spec_name:
+            spec = getattr(group, "kv_cache_spec", None)
+            spec_name = type(spec).__name__
+            mode = getattr(spec, "mamba_cache_mode", None)
+            if mode is None and "Mamba" not in spec_name:
+                continue
+            if mode != "align":
                 names.append(spec_name)
         return names
+
+    _KVWARM_STATE_MODES = ("auto", "copy", "inplace")
+
+    def _kvwarm_state_mode_env(self) -> str:
+        """``DYN_BENCH_KV_WARMUP_STATE`` as set (``auto`` when unset), not
+        validated: recorded in the metadata for every run, parsed only where
+        it matters (``_kvwarm_state_mode_requested``)."""
+        return os.environ.get("DYN_BENCH_KV_WARMUP_STATE", "auto")
+
+    def _kvwarm_state_mode_requested(self) -> str:
+        """``DYN_BENCH_KV_WARMUP_STATE``: how a shadow obtains its recurrent
+        state block on a hybrid layout. ``copy`` forks the chain's state block
+        (copy-on-write, needs a manager with ``_apply_cow``), ``inplace``
+        hands the shadow the chain's own block, ``auto`` (default) copies when
+        the managers can, else runs in place (``_kvwarm_state_mode``). Only
+        layouts with recurrent-state groups consult it; the gate turns an
+        invalid value into a skip there (``_kvwarm_state_gate_reason``), so
+        a typo cannot fail a run the variable does not concern."""
+        mode = self._kvwarm_state_mode_env().strip().lower()
+        if mode not in self._KVWARM_STATE_MODES:
+            raise ValueError(
+                "DYN_BENCH_KV_WARMUP_STATE must be one of "
+                f"{', '.join(self._KVWARM_STATE_MODES)}; got {mode!r}"
+            )
+        return mode
+
+    def _kvwarm_state_managers(self) -> list:
+        """Align-mode Mamba managers of the layout (empty for pure attention)."""
+        coordinator = getattr(
+            getattr(self, "kv_cache_manager", None), "coordinator", None
+        )
+        return [
+            mgr
+            for mgr in getattr(coordinator, "single_type_managers", ()) or ()
+            if getattr(mgr, "mamba_cache_mode", None) == "align"
+        ]
+
+    def _kvwarm_state_copy_supported(self) -> bool:
+        """Whether every state manager can fork a block (``_apply_cow``)."""
+        return all(
+            callable(getattr(mgr, "_apply_cow", None))
+            for mgr in self._kvwarm_state_managers()
+        )
+
+    def _kvwarm_state_inplace_ok(self, mgr) -> bool:
+        """Whether a shadow may hold the chain's own state block in ``mgr``'s
+        table.
+
+        A vLLM whose Mamba manager registers partial-tail prefix entries
+        (``_cache_partial_tail_block``) hashes the block at a request's state
+        slot under the request's own key on every output update once the
+        group's block size exceeds the hash block size (a hybrid layout's
+        default). Done to the chain's block, that stacks the shadow's key on
+        the chain's, cuts the shadow's ``num_cached_block`` back to the state
+        slot and, at the first steady write that reaches the next slot, fails
+        the promotion of the chain's entry to a full one -- so such builds
+        fork instead (``copy``). A manager without the method never hashes a
+        slot the shadow marks cached (``_kvwarm_commit_state_shadow``).
+        """
+        if not callable(getattr(mgr, "_cache_partial_tail_block", None)):
+            return True
+        block_pool = getattr(
+            getattr(self, "kv_cache_manager", None), "block_pool", None
+        )
+        return int(mgr.block_size) == getattr(block_pool, "hash_block_size", None)
+
+    def _kvwarm_state_inplace_supported(self) -> bool:
+        """Whether every state manager admits in-place state
+        (``_kvwarm_state_inplace_ok``)."""
+        return all(
+            self._kvwarm_state_inplace_ok(mgr) for mgr in self._kvwarm_state_managers()
+        )
+
+    def _kvwarm_state_mode(self) -> str | None:
+        """The state mode every shadow of the run uses: None without state
+        groups, the requested mode when explicit; under ``auto``, ``copy``
+        when every state manager forks, else ``inplace`` when every manager
+        admits it, else None (the gate refuses the layout,
+        ``_kvwarm_state_gate_reason``).
+
+        The mode follows from the layout and the vLLM build alone, never from
+        the pool: every attention-DP rank resolves the same mode (a
+        rank-local choice would fork the point digest the ranks compare), and
+        the plan, the stage check and the injection reserve the blocks of one
+        and the same mode. A pool too small for it skips the point
+        (``_kvwarm_shadow_pool_shortfall``) instead of switching modes.
+        """
+        if not self._kvwarm_state_managers():
+            return None
+        requested = self._kvwarm_state_mode_requested()
+        if requested != "auto":
+            return requested
+        if self._kvwarm_state_copy_supported():
+            return "copy"
+        if self._kvwarm_state_inplace_supported():
+            return "inplace"
+        return None
+
+    def _kvwarm_state_gate_reason(self) -> str | None:
+        """Skip reason of the recurrent-state hand-off, None when the layout
+        has no align-mode state groups or serves the requested mode:
+        ``state_mode_invalid`` for an unparseable ``DYN_BENCH_KV_WARMUP_STATE``,
+        ``state_copy_unsupported`` / ``state_inplace_unsupported`` for an
+        explicit mode the managers cannot serve, ``state_hand_off_unsupported``
+        when ``auto`` finds neither. Decided before any chain is built."""
+        if not self._kvwarm_state_managers():
+            return None
+        try:
+            requested = self._kvwarm_state_mode_requested()
+        except ValueError:
+            return "state_mode_invalid"
+        supported = {
+            "copy": self._kvwarm_state_copy_supported(),
+            "inplace": self._kvwarm_state_inplace_supported(),
+        }
+        if requested == "auto":
+            return None if any(supported.values()) else "state_hand_off_unsupported"
+        return None if supported[requested] else f"state_{requested}_unsupported"
+
+    def _kvwarm_stamp_state(self, state_mode: str, depth: int) -> None:
+        """Record the state hand-off of the point being injected: the mode in
+        the KVWARM metadata and, per row, ``kvwarm_state_<mode>`` plus the
+        chain depth the borrowed state summarises (``kvwarm_state_depth=N``;
+        the recurrent layers see that depth, not the injected context)."""
+        meta = self._kvwarm_meta_init()
+        meta["state_mode"] = state_mode
+        point = getattr(self, "_bench_current_point", None)
+        if point is not None:
+            self._bench_current_point = replace(
+                point,
+                sample_reasons=[
+                    *point.sample_reasons,
+                    f"kvwarm_state_{state_mode}",
+                    f"kvwarm_state_depth={depth}",
+                ],
+            )
 
     def _kvwarm_seed_regime(self, point) -> str:
         """Row-level KV seed provenance for artifact consumers.
@@ -4833,6 +4987,11 @@ class InstrumentedScheduler(AsyncScheduler):
                 reason = "prefix_caching_disabled"
             elif self._kvwarm_state_layer_groups():
                 reason = "hybrid_state_layers_unsupported"
+            elif (state_reason := self._kvwarm_state_gate_reason()) is not None:
+                # A state hand-off this vLLM's managers cannot serve (or an
+                # unparseable mode) is refused here, before any chain is
+                # built, instead of failing at injection.
+                reason = state_reason
             else:
                 reason = self._kvwarm_probe_content()
                 eligible = reason is None
@@ -5142,21 +5301,39 @@ class InstrumentedScheduler(AsyncScheduler):
     # ------- Warmup state machine (intercepts before phase dispatch) -------
 
     def _kvwarm_shadow_tail_blocks(self, repeats: int) -> int:
-        """Worst-case private tail blocks one measurement shadow draws from
-        the pool on top of the chain prefix it shares (see
-        ``_kvwarm_register_shadow``): ``ceil((ctx + 1 + headroom) / bs) -
-        ctx // bs`` peaks at ``1 + ceil(headroom / bs)`` when ``ctx`` ends one
-        slot short of a block boundary; the headroom is the giant repeat
-        count (at least 2). Every KV-cache group draws its own tail."""
+        """Worst-case private blocks one measurement shadow draws from the
+        pool on top of what it shares with its chain (see
+        ``_kvwarm_register_shadow``); the headroom is the giant repeat count
+        (at least 2) and every KV-cache group draws its own share.
+
+        Attention groups: ``ceil((ctx + 1 + headroom) / bs) - ctx // bs``
+        peaks at ``1 + ceil(headroom / bs)`` when ``ctx`` ends one slot short
+        of a block boundary. Recurrent-state groups: one fork of the chain's
+        state block in copy mode, a blank block for every state slot the
+        steady writes move into (``(ctx + headroom) // bs - (ctx - 1) // bs``,
+        at most ``ceil((headroom + 1) / bs)``) and the speculative scratch
+        blocks vLLM keeps after the state. The mode is the run's
+        (``_kvwarm_state_mode``, fixed by the layout), so the plan, the
+        stage check and the injection reserve the same blocks.
+        """
         coordinator = getattr(
             getattr(self, "kv_cache_manager", None), "coordinator", None
         )
-        n_groups = max(1, len(getattr(coordinator, "single_type_managers", ()) or ()))
-        block_size = int(
+        managers = list(getattr(coordinator, "single_type_managers", ()) or ())
+        default_bs = int(
             getattr(getattr(self, "cache_config", None), "block_size", 16) or 16
         )
         headroom = max(2, int(repeats))
-        return n_groups * (1 + -(-headroom // block_size))
+        fork = int(self._kvwarm_state_mode() == "copy")
+        total = 0
+        for mgr in managers or [None]:
+            bs = int(getattr(mgr, "block_size", default_bs) or default_bs)
+            if getattr(mgr, "mamba_cache_mode", None) == "align":
+                spec = int(getattr(mgr, "num_speculative_blocks", 0) or 0)
+                total += fork + -(-(headroom + 1) // bs) + spec
+            else:
+                total += 1 + -(-headroom // bs)
+        return total
 
     def _kvwarm_plan_covers(self, point) -> bool:
         """Plan-level coverage decision (independent of live chains): the shared
@@ -5411,8 +5588,10 @@ class InstrumentedScheduler(AsyncScheduler):
         point this stage will serve, with its chains parked (0 when every
         point fits). Same per-point arithmetic as ``_kvwarm_inject_borrowed``
         (``_kvwarm_shadow_pool_shortfall``), with the full repeat count as
-        headroom, so it bounds what injection will ask for."""
+        headroom and the run's state mode (``_kvwarm_state_mode``), so it
+        bounds what injection will ask for."""
         headroom = self._kvwarm_giant_repeats()
+        state_mode = self._kvwarm_state_mode()
         worst = 0
         for point in self._bench_grid:
             if (
@@ -5425,7 +5604,10 @@ class InstrumentedScheduler(AsyncScheduler):
                 point.total_kv_read_tokens, point.batch_size
             )
             injected = [max(1, ctx - 1) for ctx in ctxs]
-            worst = max(worst, self._kvwarm_shadow_pool_shortfall(injected, headroom))
+            worst = max(
+                worst,
+                self._kvwarm_shadow_pool_shortfall(injected, headroom, state_mode),
+            )
         return worst
 
     def _kvwarm_shed_chains(self) -> None:
@@ -5471,23 +5653,31 @@ class InstrumentedScheduler(AsyncScheduler):
         )
 
     def _kvwarm_register_shadow(
-        self, req_id: str, chain_id: str, ctx_len: int, headroom: int
+        self,
+        req_id: str,
+        chain_id: str,
+        ctx_len: int,
+        headroom: int,
+        state_mode: str | None = None,
     ) -> tuple[tuple[list[int], ...], list[int]]:
         """Register a measurement shadow with the KV-cache managers.
 
-        The shadow shares the chain's full prefix blocks (reference-counted,
-        never written) and owns private tail blocks for every position it
-        writes (the admission token plus ``headroom`` steady steps). The tail
-        is a copy-on-write fork of the chain's blocks when the manager offers
-        CoW; otherwise it is zero-filled (the few sub-block slots below
-        ``ctx_len`` then read zeros -- measurement-local, timing-neutral).
+        Attention groups: the shadow shares the chain's full prefix blocks
+        (reference-counted, never written) and owns private tail blocks for
+        every position it writes (the admission token plus ``headroom``
+        steady steps). The tail is a copy-on-write fork of the chain's blocks
+        when the manager offers CoW; otherwise it is zero-filled (the few
+        sub-block slots below ``ctx_len`` then read zeros -- measurement-
+        local, timing-neutral). Recurrent-state groups (align-mode Mamba)
+        borrow the chain's single running-state block in ``state_mode``
+        (``_kvwarm_state_mode``; see ``_kvwarm_stage_state_shadow``).
         Returns the shadow's block table per group and the block ids to zero.
 
         Registration is all-or-nothing across KV-cache groups. Every group's
-        geometry is checked and its private tail taken from the pool before
+        geometry is checked and its private blocks taken from the pool before
         any chain block is referenced or any table written, so a chain too
         shallow for a later group or a pool that cannot supply its tail
-        unwinds to a shadow that holds nothing: the tails already taken go
+        unwinds to a shadow that holds nothing: the blocks already taken go
         back to the pool (``free_blocks`` drops the single reference
         ``get_new_blocks`` gave them) and no group is left with a
         half-registered shadow or an over-referenced chain prefix.
@@ -5498,9 +5688,23 @@ class InstrumentedScheduler(AsyncScheduler):
         manager = self.kv_cache_manager
         block_pool = manager.block_pool
         managers = manager.coordinator.single_type_managers
-        staged: list[tuple[Any, int, list, list, list]] = []
+        # Per manager: ``(mgr, plan)`` with the fresh pool blocks last in the
+        # plan, so a failure can return them whatever the manager kind.
+        staged: list[tuple[Any, tuple]] = []
         try:
             for mgr in managers:
+                cache_mode = getattr(mgr, "mamba_cache_mode", None)
+                if cache_mode is not None:
+                    if cache_mode != "align":
+                        raise RuntimeError(
+                            f"KVWARM: Mamba cache mode {cache_mode!r} unsupported "
+                            f"for shadow {req_id}"
+                        )
+                    plan = self._kvwarm_stage_state_shadow(
+                        mgr, chain_id, req_id, ctx_len, headroom, state_mode
+                    )
+                    staged.append((mgr, plan))
+                    continue
                 chain_blocks = list(mgr.req_to_blocks[chain_id])
                 bs = int(
                     getattr(
@@ -5516,14 +5720,21 @@ class InstrumentedScheduler(AsyncScheduler):
                     )
                 tail_src = chain_blocks[n_shared:n_total]
                 fresh = block_pool.get_new_blocks(len(tail_src))
-                staged.append((mgr, n_shared, chain_blocks[:n_shared], tail_src, fresh))
+                staged.append(
+                    (mgr, (n_shared, chain_blocks[:n_shared], tail_src, fresh))
+                )
         except Exception:
-            for _, _, _, _, fresh in staged:
-                block_pool.free_blocks(fresh)
+            for _, plan in staged:
+                block_pool.free_blocks(plan[-1])
             raise
         table: list[list[int]] = []
         zero_ids: list[int] = []
-        for mgr, n_shared, shared, tail_src, fresh in staged:
+        for mgr, plan in staged:
+            if getattr(mgr, "mamba_cache_mode", None) is not None:
+                blocks = self._kvwarm_commit_state_shadow(mgr, req_id, plan, state_mode)
+                table.append([b.block_id for b in blocks])
+                continue
+            n_shared, shared, tail_src, fresh = plan
             block_pool.touch(shared)
             apply_cow = getattr(mgr, "_apply_cow", None)
             if callable(apply_cow):
@@ -5548,10 +5759,136 @@ class InstrumentedScheduler(AsyncScheduler):
             table.append([b.block_id for b in mgr.req_to_blocks[req_id]])
         return tuple(table), zero_ids
 
-    def _kvwarm_shadow_pool_shortfall(self, context_lengths, headroom: int) -> int:
-        """Free blocks the pool lacks for the private tails of these shadows
-        (0 when they fit). Mirrors the per-group tail arithmetic of
-        ``_kvwarm_register_shadow`` so the check and the allocation agree."""
+    def _kvwarm_stage_state_shadow(
+        self,
+        mgr,
+        chain_id: str,
+        req_id: str,
+        ctx_len: int,
+        headroom: int,
+        state_mode: str | None,
+    ) -> tuple:
+        """Plan a shadow's table for an align-mode recurrent-state group and
+        take its private blocks from the pool (the staging half of
+        ``_kvwarm_register_shadow``; ``_kvwarm_commit_state_shadow`` writes
+        the table).
+
+        vLLM keeps one running-state block per request: the runner reads it
+        at table slot ``(num_computed - 1) // bs`` and writes the step's state
+        at ``(num_computed + scheduled - 1) // bs``, copying the state across
+        when the two differ (``preprocess_mamba``); every slot before the
+        state is a null block and the ``num_speculative_blocks`` slots after
+        it are draft-state scratch. The shadow's table follows that layout
+        for the span it writes: the chain's state block sits at
+        ``prev0 = (ctx_len - 1) // bs`` (in place, or forked by CoW so the
+        chain's own state is never written), a fresh blank block waits at
+        every later slot the ``headroom`` steady writes move into, and the
+        speculative scratch closes the table. The runner fills each blank
+        from the previous slot before reading it, so none is zeroed.
+
+        The chain's state sits at ``(depth - 1) // bs`` for its computed
+        depth: the slot its last step wrote and the one the runner would read
+        next, taken from the request rather than from the table's shape.
+        Lower slots are null or, after a chunked prefill, the still-live
+        earlier state block the chain's own ``last_state_block_idx`` names
+        until its next allocation nulls it (a parked chain never allocates
+        again). Without draft tokens every allocation is exact and the state
+        is the table's last block, which is checked; draft tokens can leave
+        the table over-allocated past the state and its scratch (a rejected
+        draft's blocks stay), so there the tail is only reported. The state
+        summarises the chain's full depth, not ``ctx_len`` (recorded per row
+        by ``_kvwarm_stamp_state``). In place is refused on a manager that
+        hashes partial tails (``_kvwarm_state_inplace_ok``).
+        """
+        if state_mode not in ("copy", "inplace"):
+            raise RuntimeError(
+                f"KVWARM: state mode {state_mode!r} unresolved for shadow {req_id}"
+            )
+        if state_mode == "copy" and not callable(getattr(mgr, "_apply_cow", None)):
+            raise RuntimeError(
+                f"KVWARM: state copy for shadow {req_id} needs a manager with CoW"
+            )
+        if state_mode == "inplace" and not self._kvwarm_state_inplace_ok(mgr):
+            raise RuntimeError(
+                f"KVWARM: in-place state for shadow {req_id} unsupported: the "
+                "manager hashes partial tails at the state slot"
+            )
+        chain_blocks = list(mgr.req_to_blocks[chain_id])
+        bs = int(mgr.block_size)
+        spec = int(getattr(mgr, "num_speculative_blocks", 0) or 0)
+        state_idx = (int(self.requests[chain_id].num_computed_tokens) - 1) // bs
+        if not 0 <= state_idx < len(chain_blocks) or chain_blocks[state_idx].is_null:
+            raise RuntimeError(
+                f"KVWARM: chain {chain_id} holds no recurrent state block for "
+                f"shadow {req_id}"
+            )
+        live = [index for index, block in enumerate(chain_blocks) if not block.is_null]
+        extra = live[-1] - spec - state_idx
+        if extra < 0 or (extra and spec == 0):
+            raise RuntimeError(
+                f"KVWARM: chain {chain_id} table ends {live[-1] - state_idx} "
+                f"block(s) past its state slot {state_idx}, not the {spec} "
+                "speculative block(s) expected"
+            )
+        if extra:
+            logger.warning(
+                "KVWARM: chain %s table ends %d block(s) past its state slot %d "
+                "and %d speculative block(s); trusting the state slot",
+                chain_id,
+                extra,
+                state_idx,
+                spec,
+            )
+        prev0 = (ctx_len - 1) // bs
+        last = (ctx_len + headroom) // bs
+        fresh = self.kv_cache_manager.block_pool.get_new_blocks(
+            int(state_mode == "copy") + (last - prev0) + spec
+        )
+        return (chain_blocks[state_idx], prev0, last + 1 + spec, fresh)
+
+    def _kvwarm_commit_state_shadow(
+        self, mgr, req_id: str, plan: tuple, state_mode: str | None
+    ) -> list:
+        """Write the table planned by ``_kvwarm_stage_state_shadow``.
+
+        The chain's state block takes the shadow's reference
+        (``BlockPool.touch``); in place it stays the shadow's state slot and
+        the shadow's release returns that reference. In copy mode it is the
+        CoW source -- exactly like the attention tail, the reference is the
+        hit-ref the retained release after the copy consumes -- and
+        ``_apply_cow`` swaps the fork into the slot and queues the copy for
+        the admission step. ``num_cached_block`` covers the whole table so
+        vLLM never hashes the null slots or the state as a prefix; a manager
+        that hashes partial tails still registers the block at the state slot
+        under the shadow's key on the admission step's output update, which
+        is why that slot holds a private fork there
+        (``_kvwarm_state_inplace_ok``).
+        """
+        state, prev0, n_slots, fresh = plan
+        block_pool = self.kv_cache_manager.block_pool
+        blocks = [block_pool.null_block] * n_slots
+        blocks[prev0] = state
+        block_pool.touch([state])
+        mgr.req_to_blocks[req_id] = blocks
+        if state_mode == "copy":
+            fork, fresh = fresh[0], fresh[1:]
+            mgr._apply_cow(req_id, prev0, state, fork)
+        for slot, block in enumerate(fresh, start=prev0 + 1):
+            blocks[slot] = block
+        cached = getattr(mgr, "num_cached_block", None)
+        if isinstance(cached, dict):
+            cached[req_id] = n_slots
+        return blocks
+
+    def _kvwarm_shadow_pool_shortfall(
+        self, context_lengths, headroom: int, state_mode: str | None = None
+    ) -> int:
+        """Free blocks the pool lacks for the private blocks of these shadows
+        (0 when they fit). Mirrors the per-group arithmetic of
+        ``_kvwarm_register_shadow`` so the check and the allocation agree:
+        attention tails, and for recurrent-state groups the fork (``copy``
+        only), the blank block of every state slot the steady writes move
+        into and the speculative scratch."""
         manager = self.kv_cache_manager
         free_fn = getattr(manager.block_pool, "get_num_free_blocks", None)
         if not callable(free_fn):
@@ -5561,6 +5898,13 @@ class InstrumentedScheduler(AsyncScheduler):
             bs = int(
                 getattr(mgr, "block_size", getattr(self.cache_config, "block_size", 16))
             )
+            if getattr(mgr, "mamba_cache_mode", None) == "align":
+                spec = int(getattr(mgr, "num_speculative_blocks", 0) or 0)
+                fork = int(state_mode == "copy")
+                for ctx_len in context_lengths:
+                    blanks = (ctx_len + headroom) // bs - (ctx_len - 1) // bs
+                    need += fork + blanks + spec
+                continue
             for ctx_len in context_lengths:
                 need += -(-(ctx_len + 1 + headroom) // bs) - ctx_len // bs
         return max(0, need - int(free_fn()))
@@ -5603,7 +5947,12 @@ class InstrumentedScheduler(AsyncScheduler):
         # which is exactly what ``_kvwarm_point_need`` (1 + repeats) and the
         # plan margin reserve.
         headroom = max(1, int(getattr(self, "_bench_extra_steps_left", 1)))
-        shortfall = self._kvwarm_shadow_pool_shortfall(context_lengths, headroom)
+        # Recurrent-state hand-off (None on pure attention layouts): the run's
+        # mode, the same on every rank and in every pool check.
+        state_mode = self._kvwarm_state_mode()
+        shortfall = self._kvwarm_shadow_pool_shortfall(
+            context_lengths, headroom, state_mode
+        )
         if shortfall > 0:
             # Not enough free blocks for the private tails: register nothing
             # and hand back an empty step; the caller's injection-shortfall
@@ -5626,7 +5975,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 req_id = f"__bench_{self._bench_seq}"
                 self._bench_seq += 1
                 block_ids, req_zero_ids = self._kvwarm_register_shadow(
-                    req_id, chain_id, ctx_len, headroom
+                    req_id, chain_id, ctx_len, headroom, state_mode
                 )
                 zero_ids.extend(req_zero_ids)
                 prompt = list(chain_tokens[: ctx_len + 1])
@@ -5668,6 +6017,14 @@ class InstrumentedScheduler(AsyncScheduler):
             # block left referenced fails the prefix-cache reset).
             self._kvwarm_take_cow_copies()
             raise
+        if state_mode is not None and context_lengths:
+            self._kvwarm_stamp_state(
+                state_mode,
+                max(
+                    len(self._kvwarm_chain_prompts[self._kvwarm_chain_ids[index]])
+                    for index in range(len(context_lengths))
+                ),
+            )
         output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=CachedRequestData.make_empty(),
