@@ -54,7 +54,7 @@ Grove is the default and recommended orchestrator for multinode deployments. It 
 
 ## Option 2: LeaderWorkerSet + Volcano
 
-If you are not using Grove for multinode, you can use [LeaderWorkerSet (LWS)](https://lws.sigs.k8s.io/docs/installation/) (>= v0.7.0) with [Volcano](https://github.com/volcano-sh/volcano#quick-start-guide) for gang scheduling. Both must be installed before deploying multinode workloads.
+If you are not using Grove for multinode, you can use [LeaderWorkerSet (LWS)](https://lws.sigs.k8s.io/docs/installation/) with [Volcano](https://github.com/volcano-sh/volcano#quick-start-guide) for gang scheduling. Use an LWS release that serves `disaggregatedset.x-k8s.io/v1` (the current Dynamo operator dependency is LWS `v0.10.0`) when enabling DS; the standard DCD pathway supports LWS `v0.7.0` or newer. Both must be installed before deploying multinode workloads.
 
 1. Install Volcano:
 
@@ -64,10 +64,10 @@ helm repo update
 helm install volcano volcano-sh/volcano -n volcano-system --create-namespace
 ```
 
-2. Install LWS (>= v0.7.0) with Volcano gang scheduling enabled:
+2. Install LWS with Volcano gang scheduling enabled. Use an LWS release that serves `disaggregatedset.x-k8s.io/v1` (the current Dynamo operator dependency is LWS `v0.10.0`) when enabling DS; the standard DCD pathway supports LWS `v0.7.0` or newer:
 
 ```bash
-export LWS_VERSION=0.8.0
+export LWS_VERSION=0.10.0
 helm install lws oci://registry.k8s.io/lws/charts/lws \
   --version=$LWS_VERSION \
   --namespace lws-system \

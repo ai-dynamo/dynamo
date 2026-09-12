@@ -138,7 +138,11 @@ func readGroveClusterTopology(ctx context.Context, mgr ctrl.Manager, name string
 // implements. Both the create-side and update-side metadata rules read this so
 // the set is stated once.
 func supportedWorkloadProviders() []string {
-	return []string{consts.WorkloadProviderComponent, consts.WorkloadProviderGrove}
+	return []string{
+		consts.WorkloadProviderComponent,
+		consts.WorkloadProviderGrove,
+		consts.WorkloadProviderDisaggregatedSet,
+	}
 }
 
 // isSupportedWorkloadProvider reports whether value names a workload program
@@ -159,6 +163,11 @@ func grovePathwayForDynamoGraphDeployment(
 		case consts.WorkloadProviderGrove:
 			return true, ""
 		case consts.WorkloadProviderComponent:
+			return false, fmt.Sprintf(
+				"requires the Grove pathway, but workload provider %q is selected",
+				provider,
+			)
+		case consts.WorkloadProviderDisaggregatedSet:
 			return false, fmt.Sprintf(
 				"requires the Grove pathway, but workload provider %q is selected",
 				provider,
