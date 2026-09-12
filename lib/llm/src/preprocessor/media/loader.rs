@@ -11,18 +11,7 @@ use ipnet::IpNet;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::redirect::Policy;
 
-use dynamo_memory::nixl::NixlAgent;
-use dynamo_protocols::types::ChatCompletionRequestUserMessageContentPart;
 use dynamo_runtime::error::{DynamoError, ErrorType};
-
-use super::common::EncodedMediaData;
-use super::decoders::{Decoder, MediaDecoder};
-use super::rdma::{DataType, RdmaMediaDataDescriptor, get_nixl_agent};
-use super::require_image_url;
-use lru::LruCache;
-use parking_lot::Mutex;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 const DEFAULT_HTTP_USER_AGENT: &str = "dynamo-ai/dynamo";
 const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -161,6 +150,8 @@ impl MediaFetcher {
 }
 
 impl MediaFetcher {
+    /// Return whether an error chain contains an explicit URL-policy rejection.
+    #[cfg(any(feature = "media-nixl", feature = "mm-routing", test))]
     pub(crate) fn is_policy_rejection(error: &anyhow::Error) -> bool {
         error.chain().any(|cause| {
             cause
@@ -170,6 +161,7 @@ impl MediaFetcher {
     }
 
     /// Restore policy classification when reqwest hides a redirect cause.
+    #[cfg(any(feature = "media-nixl", feature = "mm-routing", test))]
     pub(crate) fn map_fetch_error(error: anyhow::Error) -> anyhow::Error {
         if Self::is_policy_rejection(&error) {
             return error;
@@ -350,295 +342,11 @@ impl Resolve for BlocklistResolver {
     }
 }
 
-/// Byte-budgeted LRU of decoded + NIXL-registered media descriptors.
-///
-/// Capacity is denominated in bytes (raw decoded payload, derived from
-/// `tensor_info.shape * dtype`). Insertion evicts oldest entries until the
-/// running total fits the budget; entries larger than the whole budget are
-/// inserted and immediately evicted (i.e. effectively not cached).
-struct LoaderCache {
-    lru: LruCache<u64, RdmaMediaDataDescriptor>,
-    bytes_used: u64,
-    budget_bytes: u64,
-}
-
-impl LoaderCache {
-    fn new(budget_bytes: u64) -> Self {
-        // `unbounded` capacity — eviction is driven by the byte budget.
-        Self {
-            lru: LruCache::unbounded(),
-            bytes_used: 0,
-            budget_bytes,
-        }
-    }
-
-    fn get(&mut self, key: &u64) -> Option<RdmaMediaDataDescriptor> {
-        self.lru.get(key).cloned()
-    }
-
-    fn put(&mut self, key: u64, val: RdmaMediaDataDescriptor) {
-        let val_bytes = descriptor_bytes(&val);
-        // Re-insert path: drop the old entry's bytes from the running total
-        // before adding the new one.
-        if let Some(old) = self.lru.pop(&key) {
-            self.bytes_used = self.bytes_used.saturating_sub(descriptor_bytes(&old));
-        }
-        self.lru.put(key, val);
-        self.bytes_used = self.bytes_used.saturating_add(val_bytes);
-        while self.bytes_used > self.budget_bytes && !self.lru.is_empty() {
-            if let Some((_, old)) = self.lru.pop_lru() {
-                self.bytes_used = self.bytes_used.saturating_sub(descriptor_bytes(&old));
-            } else {
-                break;
-            }
-        }
-    }
-
-    fn len(&self) -> usize {
-        self.lru.len()
-    }
-}
-
-/// Raw decoded byte size of a descriptor — what the NIXL registration holds.
-/// Per-entry bookkeeping (struct fields, NIXL metadata string) is negligible
-/// compared to a single decoded image.
-fn descriptor_bytes(d: &RdmaMediaDataDescriptor) -> u64 {
-    let elem = match d.tensor_info.dtype {
-        DataType::UINT8 => 1u64,
-    };
-    d.tensor_info
-        .shape
-        .iter()
-        .try_fold(1u64, |acc, &x| acc.checked_mul(x as u64))
-        .unwrap_or(u64::MAX)
-        .saturating_mul(elem)
-}
-
-pub struct MediaLoader {
-    #[allow(dead_code)]
-    media_decoder: MediaDecoder,
-    #[allow(dead_code)]
-    http_client: reqwest::Client,
-    #[allow(dead_code)]
-    media_fetcher: MediaFetcher,
-    nixl_agent: NixlAgent,
-    /// Optional byte-budgeted LRU cache of decoded + NIXL-registered media,
-    /// keyed by URL hash. Each cache entry is shared via Arc; the underlying
-    /// NIXL registration is kept alive as long as any clone (in cache or
-    /// in-flight) holds it. Eviction just drops the cache's reference.
-    /// `None` when caching is disabled (budget = 0).
-    cache: Option<Arc<Mutex<LoaderCache>>>,
-}
-
-impl MediaLoader {
-    fn cache_budget_bytes(value: Option<&str>) -> u64 {
-        let gb = value
-            .and_then(|s| s.parse::<f64>().ok())
-            .filter(|v| v.is_finite() && *v >= 0.0)
-            .unwrap_or(0.0);
-        (gb * (1024.0 * 1024.0 * 1024.0)) as u64
-    }
-
-    /// Read the cache budget (in bytes) from `DYN_MULTIMODAL_LOADER_CACHE_GB`.
-    /// Value parses as a float number of gibibytes (1 GiB = 1024^3 bytes).
-    /// Default `0` (disabled) — opt-in only.
-    fn cache_budget_bytes_from_env() -> u64 {
-        let value = std::env::var("DYN_MULTIMODAL_LOADER_CACHE_GB").ok();
-        Self::cache_budget_bytes(value.as_deref())
-    }
-
-    /// Hash a URL/datauri string into a stable u64 cache key.
-    fn cache_key(url: &str) -> u64 {
-        let mut h = DefaultHasher::new();
-        url.hash(&mut h);
-        h.finish()
-    }
-
-    pub fn new(media_decoder: MediaDecoder, media_fetcher: Option<MediaFetcher>) -> Result<Self> {
-        media_decoder.warn_if_unavailable_backends();
-
-        // Fall back to env-aware defaults so `DYN_MM_ALLOW_INTERNAL=1` is
-        // honored even when the caller doesn't pass an explicit fetcher.
-        let media_fetcher = media_fetcher.unwrap_or_else(MediaFetcher::from_env);
-        let http_client = media_fetcher.build_http_client()?;
-
-        let nixl_agent = get_nixl_agent()?;
-
-        let cache = match Self::cache_budget_bytes_from_env() {
-            0 => {
-                tracing::debug!(
-                    "[mm-cache] frontend media cache disabled (DYN_MULTIMODAL_LOADER_CACHE_GB=0)"
-                );
-                None
-            }
-            budget => {
-                tracing::info!(
-                    budget_bytes = budget,
-                    "[mm-cache] frontend media cache enabled (DYN_MULTIMODAL_LOADER_CACHE_GB)"
-                );
-                Some(Arc::new(Mutex::new(LoaderCache::new(budget))))
-            }
-        };
-
-        Ok(Self {
-            media_decoder,
-            http_client,
-            media_fetcher,
-            nixl_agent,
-            cache,
-        })
-    }
-
-    /// Test-only constructor that lets a unit test build a `MediaLoader` with
-    /// an explicit byte budget (bypassing the env-var read in `new`).
-    /// Pass 0 to disable.
-    #[cfg(test)]
-    pub fn with_cache_budget_bytes(
-        media_decoder: MediaDecoder,
-        media_fetcher: Option<MediaFetcher>,
-        budget_bytes: u64,
-    ) -> Result<Self> {
-        let mut loader = Self::new(media_decoder, media_fetcher)?;
-        loader.cache = if budget_bytes == 0 {
-            None
-        } else {
-            Some(Arc::new(Mutex::new(LoaderCache::new(budget_bytes))))
-        };
-        Ok(loader)
-    }
-
-    /// Number of entries currently held in the cache (test/observability helper).
-    pub fn cache_len(&self) -> usize {
-        self.cache.as_ref().map(|c| c.lock().len()).unwrap_or(0)
-    }
-
-    pub async fn fetch_and_decode_media_part(
-        &self,
-        oai_content_part: &ChatCompletionRequestUserMessageContentPart,
-        media_io_kwargs: Option<&MediaDecoder>,
-    ) -> Result<RdmaMediaDataDescriptor> {
-        self.fetch_and_decode_media_part_with_video_hash(oai_content_part, media_io_kwargs, false)
-            .await
-    }
-
-    pub(crate) async fn fetch_and_decode_media_part_with_video_hash(
-        &self,
-        oai_content_part: &ChatCompletionRequestUserMessageContentPart,
-        media_io_kwargs: Option<&MediaDecoder>,
-        _hash_video: bool,
-    ) -> Result<RdmaMediaDataDescriptor> {
-        // Image-only fast path: cache lookup keyed by URL/datauri string.
-        // Video/audio aren't cached yet (their lifetime/content semantics
-        // are different — easy to add later if profiling justifies it).
-        // The cache stores the post-decode + NIXL-registered descriptor;
-        // a hit short-circuits both the network fetch and the image decode.
-        if let (Some(cache), ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part)) =
-            (self.cache.as_ref(), oai_content_part)
-        {
-            // media_io_kwargs is per-request and could change the decode
-            // output (resize, normalisation). When it's set we skip the
-            // cache to stay correct; in practice it's None on the common
-            // path so the hit rate is unaffected.
-            if media_io_kwargs.is_none()
-                && let Some(url) = image_part.image_url.as_ref().map(|media| &media.url)
-            {
-                let key = Self::cache_key(url.as_str());
-                if let Some(hit) = cache.lock().get(&key) {
-                    tracing::debug!(url_hash = key, "[mm-cache] hit");
-                    return Ok(hit);
-                }
-            }
-        }
-
-        // fetch the media, decode and NIXL-register
-        let decoded = match oai_content_part {
-            ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part) => {
-                let mdc_decoder = self
-                    .media_decoder
-                    .image
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("Model does not support image inputs"))?;
-
-                let url = require_image_url(image_part)?;
-                self.media_fetcher
-                    .check_if_url_allowed_with_dns(url)
-                    .await?;
-                let data = EncodedMediaData::from_url(url, &self.http_client)
-                    .await
-                    .map_err(MediaFetcher::map_fetch_error)?;
-
-                // Use runtime decoder if provided, with MDC limits enforced
-                let decoder =
-                    mdc_decoder.with_runtime(media_io_kwargs.and_then(|k| k.image.as_ref()));
-                decoder.decode_async(data).await?
-            }
-            #[allow(unused_variables)]
-            ChatCompletionRequestUserMessageContentPart::VideoUrl(video_part) => {
-                #[cfg(not(feature = "media-ffmpeg"))]
-                anyhow::bail!("Video decoding requires the 'media-ffmpeg' feature to be enabled");
-
-                #[cfg(feature = "media-ffmpeg")]
-                {
-                    let mdc_decoder =
-                        self.media_decoder.video.as_ref().ok_or_else(|| {
-                            anyhow::anyhow!("Model does not support video inputs")
-                        })?;
-
-                    let url = video_part
-                        .video_url
-                        .as_ref()
-                        .map(|media| &media.url)
-                        .ok_or_else(|| {
-                            anyhow::anyhow!("Cannot decode a video content part without a URL")
-                        })?;
-                    self.media_fetcher
-                        .check_if_url_allowed_with_dns(url)
-                        .await?;
-                    let data = EncodedMediaData::from_url(url, &self.http_client)
-                        .await
-                        .map_err(MediaFetcher::map_fetch_error)?;
-
-                    // Use runtime decoder if provided, with MDC limits enforced
-                    let decoder =
-                        mdc_decoder.with_runtime(media_io_kwargs.and_then(|k| k.video.as_ref()));
-                    decoder
-                        .decode_async_with_video_hash(data, _hash_video)
-                        .await?
-                }
-            }
-            ChatCompletionRequestUserMessageContentPart::AudioUrl(_) => {
-                anyhow::bail!("Audio decoding is not supported yet");
-            }
-            _ => anyhow::bail!("Unsupported media type"),
-        };
-
-        let rdma_descriptor = decoded.into_rdma_descriptor(&self.nixl_agent)?;
-
-        // Insert into the cache on the way out. We only cache image inputs
-        // (matched in the lookup above) and only when no per-request decoder
-        // override is in effect. The descriptor is `Clone` and shares the
-        // underlying NIXL registration via `Arc`, so the cached entry stays
-        // alive across in-flight requests; eviction just drops the cache's
-        // own reference.
-        if let (Some(cache), ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part)) =
-            (self.cache.as_ref(), oai_content_part)
-            && media_io_kwargs.is_none()
-            && let Some(url) = image_part.image_url.as_ref().map(|media| &media.url)
-        {
-            let key = Self::cache_key(url.as_str());
-            let bytes = descriptor_bytes(&rdma_descriptor);
-            cache.lock().put(key, rdma_descriptor.clone());
-            tracing::debug!(url_hash = key, bytes, "[mm-cache] insert");
-        }
-
-        Ok(rdma_descriptor)
-    }
-}
-
-#[cfg(all(test, feature = "testing-nixl"))]
+#[cfg(all(test, feature = "media-nixl", feature = "testing-nixl"))]
 mod tests {
+    use super::super::decoded::DataType;
     use super::super::decoders::ImageDecoder;
-    use super::super::rdma::DataType;
+    use super::super::rdma::MediaLoader;
     use super::*;
     use dynamo_protocols::types::{ChatCompletionRequestMessageContentPartImage, ImageUrl};
 
@@ -946,6 +654,8 @@ mod tests {
 
 #[cfg(test)]
 mod tests_non_nixl {
+    #[cfg(feature = "media-nixl")]
+    use super::super::rdma::MediaLoader;
     use super::*;
 
     fn assert_invalid_argument_in_chain(error: &(dyn std::error::Error + 'static)) {
@@ -961,6 +671,7 @@ mod tests_non_nixl {
         panic!("error chain did not contain InvalidArgument: {error}");
     }
 
+    #[cfg(feature = "media-nixl")]
     #[test]
     fn test_cache_key_is_stable_per_url() {
         // Same URL → same key, every time. Different URLs → different keys.
@@ -979,6 +690,7 @@ mod tests_non_nixl {
         );
     }
 
+    #[cfg(feature = "media-nixl")]
     #[test]
     fn test_cache_budget_from_env_default_zero() {
         const GIB: u64 = 1024 * 1024 * 1024;

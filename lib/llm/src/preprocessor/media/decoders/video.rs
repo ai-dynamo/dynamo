@@ -428,7 +428,7 @@ impl Decoder for VideoDecoder {
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::rdma::DataType;
+    use super::super::super::decoded::DataType;
     use super::*;
     use rstest::rstest;
     use video_rs::Location;
