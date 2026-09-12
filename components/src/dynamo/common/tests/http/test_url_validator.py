@@ -22,8 +22,10 @@ from dynamo.common.http import url_validator
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
+    describe_error_detail,
     is_blocked_ip,
     validate_local_path,
+    validate_media_reference,
     validate_media_url,
     validate_url,
 )
@@ -430,3 +432,136 @@ async def test_validate_media_url_rejects_file_uri_outside_prefix(tmp_path) -> N
 
     with pytest.raises(UrlValidationError, match="outside the allowed directory"):
         await validate_media_url(other.resolve().as_uri(), policy)
+
+
+async def test_validate_media_url_rejects_a_percent_encoded_nul(tmp_path) -> None:
+    """%00 must stay a UrlValidationError, not leak out as a bare ValueError.
+
+    file:// paths are percent-decoded, so %00 reaches Path.resolve() as a real
+    NUL and lstat() raises ValueError rather than OSError. Callers key their
+    4xx-vs-5xx decision on the UrlValidationError type (see image_loader and
+    video_loader), so letting a plain ValueError escape turns a rejected input
+    into a server error.
+    """
+    policy = UrlValidationPolicy(allowed_local_path=str(tmp_path))
+
+    with pytest.raises(UrlValidationError):
+        await validate_media_url(f"file://{tmp_path}/x%00.png", policy)
+
+
+def test_validate_local_path_bounds_the_path_in_its_message(tmp_path) -> None:
+    """The rejected path is client-supplied and unbounded; the message is not.
+
+    It lands in an error response and in a log line, so one request would
+    otherwise amplify into that much text at every sink.
+    """
+    policy = UrlValidationPolicy(allowed_local_path=str(tmp_path))
+    path = "/nope/" + "A" * 200_000 + ".png"
+
+    with pytest.raises(UrlValidationError) as excinfo:
+        validate_local_path(path, policy)
+
+    assert len(str(excinfo.value)) < 500
+    assert "200010 chars" in str(excinfo.value)  # true size stays visible
+
+
+def test_validate_local_path_keeps_an_ordinary_path_intact(tmp_path) -> None:
+    """Control: bounding must not change the message for a normal path."""
+    policy = UrlValidationPolicy(allowed_local_path=str(tmp_path))
+
+    with pytest.raises(UrlValidationError, match=r"Path '/etc/passwd' is outside"):
+        validate_local_path("/etc/passwd", policy)
+
+
+async def test_validate_media_reference_rejects_empty(tmp_path) -> None:
+    """Parity with validate_media_url, which guards the empty string."""
+    policy = UrlValidationPolicy(allowed_local_path=str(tmp_path))
+
+    with pytest.raises(UrlValidationError, match="empty"):
+        await validate_media_reference("", policy)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https:///" + "A" * 200_000,  # no host component
+        "A" * 200_000 + "://x",  # scheme is client-supplied too
+    ],
+)
+async def test_validate_url_bounds_the_url_in_its_message(url) -> None:
+    """These messages became client-visible once the diffusion handlers
+    started mapping UrlValidationError to a 400 that carries the reason."""
+    with pytest.raises(UrlValidationError) as excinfo:
+        await validate_url(url, STRICT_HTTPS)
+
+    assert len(str(excinfo.value)) < 500
+
+
+async def test_redirect_chain_in_the_limit_message_is_bounded() -> None:
+    """The chain is entirely attacker-chosen URLs."""
+    from dynamo.common.http.base import HttpClient
+
+    long_hop = "https://example.com/" + "A" * 200_000
+
+    class _Client(HttpClient):
+        async def _fetch_simple(self, url, timeout, *, max_bytes=None):
+            raise AssertionError("unused")
+
+        async def _fetch_body_or_redirect(self, url, timeout, *, max_bytes=None):
+            return None, long_hop
+
+        async def close(self):
+            return None
+
+    policy = UrlValidationPolicy(allow_http=True, allow_private_ips=True)
+    with pytest.raises(UrlValidationError, match="Too many redirects") as excinfo:
+        await _Client().fetch_bytes(long_hop, 1.0, policy=policy)
+
+    assert len(str(excinfo.value)) < 1000
+
+
+async def test_a_data_uri_does_not_pay_for_a_label_it_cannot_use(monkeypatch) -> None:
+    """describe_media_source copies the source, and a data: URI is the payload.
+
+    The data branch returns before any message is built, so building the label
+    first made validate_url O(payload): 1.35 ms for a 32 MiB URI against
+    0.03 ms after.
+    """
+    calls = []
+    monkeypatch.setattr(
+        url_validator,
+        "describe_media_source",
+        lambda src, *a, **kw: calls.append(src) or src,
+    )
+
+    url = "data:image/png;base64,AAAA"
+    assert await url_validator.validate_url(url, STRICT_HTTPS) == url
+    assert calls == []
+
+
+def test_missing_allowed_dir_does_not_name_it(tmp_path) -> None:
+    """Same disclosure as the 'outside the allowed directory' message below it:
+    this one reaches the client too, on an ordinary misconfiguration."""
+    policy = UrlValidationPolicy(allowed_local_path=str(tmp_path / "gone"))
+    # The input itself must resolve, or "File not found" fires first.
+    media = tmp_path / "x.png"
+    media.write_bytes(b"x")
+
+    with pytest.raises(UrlValidationError, match="does not exist") as excinfo:
+        validate_local_path(str(media), policy)
+
+    assert "gone" not in str(excinfo.value)
+
+
+def test_describe_error_detail_keeps_a_short_detail_intact() -> None:
+    assert describe_error_detail("[Errno 8] not known") == "[Errno 8] not known"
+
+
+def test_describe_error_detail_bounds_from_both_ends() -> None:
+    detail = "head-of-the-message " + "x" * 40_000 + " tail-of-the-message"
+    label = describe_error_detail(detail)
+
+    assert len(label) < 300
+    assert label.startswith("head-of-the-message")
+    assert label.endswith("tail-of-the-message")
+    assert str(len(detail)) in label  # true size stays visible

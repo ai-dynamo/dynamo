@@ -14,7 +14,7 @@ from unittest.mock import patch
 import pytest
 
 from dynamo.common import http as mm_http
-from dynamo.common.http import AiohttpClient, HttpxClient, from_env
+from dynamo.common.http import AiohttpClient, HttpxClient, base, from_env
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 
 pytestmark = [
@@ -94,7 +94,7 @@ async def test_fetch_with_policy_returns_first_response(
 
     call_count = {"n": 0}
 
-    async def _fake(url, timeout):
+    async def _fake(url, timeout, *, max_bytes=None):
         call_count["n"] += 1
         return b"body-bytes", None
 
@@ -115,7 +115,7 @@ async def test_fetch_with_policy_follows_safe_redirect(
 
     hops: list[str] = []
 
-    async def _fake(url, timeout):
+    async def _fake(url, timeout, *, max_bytes=None):
         hops.append(url)
         if url == "https://example.com/x.png":
             return None, "https://example.com/final.png"
@@ -138,7 +138,7 @@ async def test_fetch_with_policy_blocks_redirect_to_private_ip(
 
     strict = UrlValidationPolicy(allow_private_ips=False)
 
-    async def _fake(url, timeout):
+    async def _fake(url, timeout, *, max_bytes=None):
         return None, "http://169.254.169.254/latest/meta-data/"
 
     with patch.object(client, "_fetch_body_or_redirect", _fake):
@@ -161,9 +161,110 @@ async def test_fetch_with_policy_enforces_redirect_limit(
         "https://example.com/d": "https://example.com/e",
     }
 
-    async def _fake(url, timeout):
+    async def _fake(url, timeout, *, max_bytes=None):
         return None, chain[url]
 
     with patch.object(client, "_fetch_body_or_redirect", _fake):
         with pytest.raises(UrlValidationError, match="Too many redirects"):
             await mm_http.fetch_bytes("https://example.com/a", 30.0, policy=_PERMISSIVE)
+
+
+# --- Download cap (collect_capped) ---
+#
+# The cap exists because moving the diffusion download out of SGLang left its
+# media_url_max_file_size_mb behind. It has to hold while the body streams: a
+# declared Content-Length is attacker-controlled and absent when chunked.
+
+
+async def _chunks(*sizes: int):
+    for n in sizes:
+        yield b"x" * n
+
+
+async def test_collect_capped_joins_a_body_under_the_limit() -> None:
+    assert await base.collect_capped(_chunks(4, 4, 2), "u", 100) == b"x" * 10
+
+
+async def test_collect_capped_without_a_limit_reads_everything() -> None:
+    assert len(await base.collect_capped(_chunks(50, 50), "u", None)) == 100
+
+
+async def test_collect_capped_refuses_a_body_over_the_limit() -> None:
+    with pytest.raises(UrlValidationError, match="download limit"):
+        await base.collect_capped(_chunks(60, 60), "u", 100)
+
+
+async def test_collect_capped_counts_across_short_chunks() -> None:
+    """Each chunk is well under the limit; only the running total exceeds it.
+
+    aiohttp's ``read(n)`` returns at most n bytes and in practice returns far
+    fewer, so a single capped read would let this body through.
+    """
+    with pytest.raises(UrlValidationError, match="download limit"):
+        await base.collect_capped(_chunks(*([10] * 20)), "u", 100)
+
+
+async def test_collect_capped_does_not_echo_an_unbounded_url() -> None:
+    url = "https://example.com/" + "a" * 200_000
+    with pytest.raises(UrlValidationError) as excinfo:
+        await base.collect_capped(_chunks(200), url, 100)
+
+    assert len(str(excinfo.value)) < 500
+
+
+async def test_http_status_error_bounds_both_halves_of_its_message() -> None:
+    """The video diffusion handler puts str(exc) straight in its response body,
+    and httpx's own status-error text repeats the URL, so neither the url nor
+    the backend message can go in at full length."""
+    url = "https://example.com/" + "u" * 200_000
+    err = base.HttpStatusError(404, "Not Found " + "m" * 200_000, url)
+
+    # The binding reads .message off this class by name and forwards it
+    # verbatim to the client on a 4xx (errors.rs extract_http_like_error), so
+    # bounding only the rendered string leaves the client-facing path open.
+    assert len(err.message) <= base._MAX_MESSAGE_LENGTH
+    assert len(str(err)) < 2 * base._MAX_MESSAGE_LENGTH
+    # .url is not part of that protocol and keeps its full value.
+    assert err.url == url
+
+
+async def test_http_status_error_keeps_both_ends_of_a_long_detail() -> None:
+    """aiohttp renders the client-supplied host before the errno, so a
+    head-only bound would keep the attacker's string and drop the reason."""
+    detail = "Cannot connect to host " + "h" * 40_000 + ":80 [nodename not known]"
+    err = base.HttpStatusError(400, detail, "https://example.com/x")
+
+    assert "Cannot connect" in err.message
+    assert "nodename not known" in err.message
+
+
+async def test_http_status_error_keeps_a_real_guidance_message_intact() -> None:
+    """Callers build actionable guidance in ``message``; bounding must not eat it.
+
+    The trtllm video-decoder hint is ~480 characters of spec, installer command
+    and vendor cause, and its own test allows 2000. A tight bound here deletes
+    all of that and leaves a truncated prefix, which is how this class was
+    broken once already.
+    """
+    guidance = (
+        "Cannot decode video: this video (an undetected codec) has no decoder "
+        "in this image: shipped images decode only H.264/H.265 (in hardware, "
+        "via NVDEC), and the software decoder 'cv2' is deliberately not "
+        "installed. Re-encode the input to H.264/H.265, or install the "
+        "validated decoder with `pip install --no-deps "
+        "'opencv-python-headless==4.13.0.90'` (or `python -m "
+        "dynamo.common.utils.install_media_decoders trtllm`) "
+        "(decoder reported: OpenCV (cv2) is required for video decoding)"
+    )
+    err = base.HttpStatusError(
+        500, guidance, "data:video/mp4 (90022 chars, payload elided)"
+    )
+
+    assert err.message == guidance, "legitimate guidance must survive untouched"
+    for needle in (
+        "install_media_decoders trtllm",
+        "opencv-python-headless",
+        "OpenCV (cv2) is required for video decoding",
+    ):
+        assert needle in str(err), f"{needle!r} was truncated away"
+    assert len(str(err)) < 2_000

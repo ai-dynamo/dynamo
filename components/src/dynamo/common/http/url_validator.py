@@ -20,7 +20,8 @@ import os
 import socket
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlparse
+from typing import Final
+from urllib.parse import unquote, urlparse
 
 
 class UrlValidationError(ValueError):
@@ -72,6 +73,56 @@ _BLOCKED_HOSTS: frozenset[str] = frozenset(
 )
 
 
+# Longest a media source may render as inside an error message or log line.
+# Generous enough to keep an ordinary URL intact and identifiable.
+SOURCE_LABEL_LIMIT: Final = 120
+
+
+def describe_media_source(source: str, limit: int = SOURCE_LABEL_LIMIT) -> str:
+    """Render ``source`` as a bounded label safe to put in an error or log.
+
+    A ``data:`` URI carries the whole media payload inline, so echoing one into
+    an error message serializes megabytes of base64 -- to the client, and to
+    every log sink that records the failure. Describe those by media type and
+    size instead, never by content. Other sources are truncated, since a URL
+    identifies the request without being unbounded.
+
+    Lives here rather than in ``multimodal.media_source`` so the validators
+    below can bound their own messages: importing that package pulls in torch.
+    """
+    if not isinstance(source, str):
+        return "<non-string media source>"
+    if source.startswith("data:"):
+        meta = source[len("data:") :].partition(",")[0]
+        media_type = meta.split(";")[0] or "application/octet-stream"
+        return f"data:{media_type} ({len(source)} chars, payload elided)"
+    if len(source) > limit:
+        return f"{source[:limit]}... ({len(source)} chars)"
+    return source
+
+
+def describe_error_detail(detail: str, limit: int = SOURCE_LABEL_LIMIT) -> str:
+    """Bound a backend exception's text, keeping both ends.
+
+    Unlike a media source, the useful part of one of these is usually at the
+    end: aiohttp renders the client-supplied host *before* the errno, so a
+    head-only truncation would keep the attacker's string and drop the
+    diagnosis.
+    """
+    if not isinstance(detail, str):
+        return "<non-string error detail>"
+    if len(detail) <= limit:
+        return detail
+    # The marker comes out of the budget, not on top of it: a caller that sizes
+    # a buffer by ``limit`` should not be handed something longer.
+    marker = f"... ({len(detail)} chars) ..."
+    budget = limit - len(marker)
+    if budget <= 0:
+        return marker
+    head = budget // 2
+    return f"{detail[:head]}{marker}{detail[-(budget - head):]}"
+
+
 def is_blocked_ip(ip_text: str) -> bool:
     """Return True if ``ip_text`` parses as an IP inside one of the blocked ranges."""
     try:
@@ -119,11 +170,21 @@ async def validate_url(url: str, policy: UrlValidationPolicy) -> str:
     parsed = urlparse(url)
     scheme = parsed.scheme.lower()
 
+    # Before the label: describe_media_source copies the source, and a data:
+    # URI carries the whole payload inline, so building one for the branch that
+    # returns without using it dominates the call (98% of it at 32 MiB).
     if scheme == "data":
         return url
 
+    # Every message below is surfaced to the caller (the diffusion handlers
+    # turn it into a 400 body) and logged, so nothing client-supplied goes in
+    # at full length.
+    label = describe_media_source(url)
+
     if scheme not in ("http", "https"):
-        raise UrlValidationError(f"URL scheme '{scheme}' not allowed")
+        raise UrlValidationError(
+            f"URL scheme '{describe_media_source(scheme)}' not allowed"
+        )
 
     if scheme == "http" and not policy.allow_http:
         raise UrlValidationError(
@@ -132,11 +193,12 @@ async def validate_url(url: str, policy: UrlValidationPolicy) -> str:
 
     host = (parsed.hostname or "").lower()
     if not host:
-        raise UrlValidationError(f"URL has no host component: {url!r}")
+        raise UrlValidationError(f"URL has no host component: {label!r}")
 
     if not policy.allow_private_ips and host in _BLOCKED_HOSTS:
         raise UrlValidationError(
-            f"Host '{host}' is blocked (resolves to internal service)"
+            f"Host '{describe_media_source(host)}' is blocked "
+            "(resolves to internal service)"
         )
 
     try:
@@ -155,11 +217,15 @@ async def validate_url(url: str, policy: UrlValidationPolicy) -> str:
     try:
         infos = await loop.getaddrinfo(host, None)
     except socket.gaierror as exc:
-        raise UrlValidationError(f"Could not resolve host '{host}': {exc}") from exc
+        raise UrlValidationError(
+            f"Could not resolve host '{describe_media_source(host)}': {exc}"
+        ) from exc
     for info in infos:
         addr = info[4][0]
         if is_blocked_ip(addr):
-            raise UrlValidationError(f"Host '{host}' resolves to blocked IP '{addr}'")
+            raise UrlValidationError(
+                f"Host '{describe_media_source(host)}' resolves to blocked IP '{addr}'"
+            )
     return url
 
 
@@ -178,25 +244,40 @@ def validate_local_path(path: str, policy: UrlValidationPolicy) -> Path:
             "Local media paths are not permitted; set " "DYN_MM_LOCAL_PATH to enable"
         )
 
+    # ``path`` is client-supplied and unbounded: describe_media_source keeps it
+    # out of an error response and a log line at full length. Short, ordinary
+    # paths render unchanged.
+    label = describe_media_source(path)
+
     try:
         resolved = Path(path).expanduser().resolve(strict=True)
     except FileNotFoundError as exc:
-        raise UrlValidationError(f"File not found: {path}") from exc
+        raise UrlValidationError(f"File not found: {label}") from exc
     except OSError as exc:
-        raise UrlValidationError(f"Could not resolve path '{path}': {exc}") from exc
+        raise UrlValidationError(f"Could not resolve path '{label}': {exc}") from exc
+    except ValueError as exc:
+        # An embedded NUL makes lstat() raise ValueError, not OSError. Reachable
+        # since file:// paths are percent-decoded, so %00 becomes a real NUL.
+        # Callers map UrlValidationError to a client error; a bare ValueError
+        # would reach them as a server error instead.
+        raise UrlValidationError(f"Invalid path '{label}': {exc}") from exc
 
     try:
         allowed = Path(policy.allowed_local_path).expanduser().resolve(strict=True)
     except FileNotFoundError as exc:
+        # Same reason as the message below: callers put this in a client
+        # response, and the configured directory is deployment detail.
         raise UrlValidationError(
-            f"Configured allowed_local_path does not exist: {policy.allowed_local_path}"
+            "Configured allowed_local_path does not exist"
         ) from exc
 
     try:
         resolved.relative_to(allowed)
     except ValueError as exc:
+        # The configured directory is deployment detail; naming it here puts
+        # it in the client's error body, since callers surface this message.
         raise UrlValidationError(
-            f"Path '{path}' is outside the allowed directory '{policy.allowed_local_path}'"
+            f"Path '{label}' is outside the allowed directory"
         ) from exc
 
     return resolved
@@ -220,11 +301,28 @@ async def validate_media_url(url: str, policy: UrlValidationPolicy) -> str:
     scheme = parsed.scheme.lower()
 
     if scheme in ("", "file"):
-        raw_path = parsed.path if scheme == "file" else url
+        # file:// paths are percent-encoded; a bare path is literal.
+        raw_path = unquote(parsed.path) if scheme == "file" else url
         resolved = validate_local_path(raw_path, policy)
         return resolved.as_uri()
 
     return await validate_url(url, policy)
+
+
+async def validate_media_reference(reference: str, policy: UrlValidationPolicy) -> str:
+    """Like :func:`validate_media_url` but return a plain filesystem path for
+    local references instead of a ``file://`` URI, for callers that pass the
+    result to a loader expecting a bare path.
+    """
+    if not reference:
+        raise UrlValidationError("Media reference is empty")
+
+    parsed = urlparse(reference)
+    if parsed.scheme.lower() in ("", "file"):
+        # file:// paths are percent-encoded; a bare path is literal.
+        raw_path = unquote(parsed.path) if parsed.scheme else reference
+        return str(validate_local_path(raw_path, policy))
+    return await validate_url(reference, policy)
 
 
 _MAX_REDIRECTS = 3

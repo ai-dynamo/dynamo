@@ -28,9 +28,21 @@ from typing import Optional
 
 import httpx
 
-from .base import HttpClient, HttpConnectionError, HttpStatusError, HttpTimeoutError
+from .base import (
+    HttpClient,
+    HttpConnectionError,
+    HttpStatusError,
+    HttpTimeoutError,
+    collect_capped,
+)
+from .url_validator import describe_error_detail, describe_media_source
 
 logger = logging.getLogger(__name__)
+
+# Matches aiohttp's iter_chunked granularity. Without it, aiter_bytes yields
+# whatever one raw read decompresses to, so the capped reader buffers that much
+# before the running total is checked -- 16 MB for a gzip body, measured.
+_READ_CHUNK = 64 * 1024
 
 
 class HttpxClient(HttpClient):
@@ -95,26 +107,44 @@ class HttpxClient(HttpClient):
                 )
         return self._client
 
-    async def _fetch_simple(self, url: str, timeout: float) -> bytes:
+    async def _fetch_simple(
+        self, url: str, timeout: float, *, max_bytes: Optional[int] = None
+    ) -> bytes:
         client = await self._get_client()
         async with self._get_semaphore():
             try:
-                response = await client.get(
-                    url, timeout=self._per_call_timeout(timeout)
+                # stream=True so collect_capped can stop before an oversized
+                # body is buffered; httpx would otherwise read it all here.
+                request = client.build_request(
+                    "GET", url, timeout=self._per_call_timeout(timeout)
                 )
-                response.raise_for_status()
-                return response.content
+                response = await client.send(
+                    request, follow_redirects=True, stream=True
+                )
+                try:
+                    response.raise_for_status()
+                    return await collect_capped(
+                        response.aiter_bytes(chunk_size=_READ_CHUNK), url, max_bytes
+                    )
+                finally:
+                    await response.aclose()
             except httpx.HTTPStatusError as e:
                 raise HttpStatusError(e.response.status_code, str(e), url) from e
             except httpx.TimeoutException as e:
-                raise HttpTimeoutError(f"Timeout loading {url}") from e
+                raise HttpTimeoutError(
+                    f"Timeout loading {describe_media_source(url)}"
+                ) from e
             except (httpx.ConnectError, httpx.NetworkError) as e:
-                raise HttpConnectionError(f"Connection error loading {url}: {e}") from e
+                raise HttpConnectionError(
+                    f"Connection error loading {describe_media_source(url)}: {describe_error_detail(str(e))}"
+                ) from e
             except httpx.HTTPError as e:
-                raise HttpConnectionError(f"HTTP error loading {url}: {e}") from e
+                raise HttpConnectionError(
+                    f"HTTP error loading {describe_media_source(url)}: {describe_error_detail(str(e))}"
+                ) from e
 
     async def _fetch_body_or_redirect(
-        self, url: str, timeout: float
+        self, url: str, timeout: float, *, max_bytes: Optional[int] = None
     ) -> tuple[bytes | None, str | None]:
         client = await self._get_client()
         async with self._get_semaphore():
@@ -125,13 +155,20 @@ class HttpxClient(HttpClient):
                 response = await client.send(
                     request,
                     follow_redirects=False,
+                    stream=True,
                 )
             except httpx.TimeoutException as e:
-                raise HttpTimeoutError(f"Timeout loading {url}") from e
+                raise HttpTimeoutError(
+                    f"Timeout loading {describe_media_source(url)}"
+                ) from e
             except (httpx.ConnectError, httpx.NetworkError) as e:
-                raise HttpConnectionError(f"Connection error loading {url}: {e}") from e
+                raise HttpConnectionError(
+                    f"Connection error loading {describe_media_source(url)}: {describe_error_detail(str(e))}"
+                ) from e
             except httpx.HTTPError as e:
-                raise HttpConnectionError(f"HTTP error loading {url}: {e}") from e
+                raise HttpConnectionError(
+                    f"HTTP error loading {describe_media_source(url)}: {describe_error_detail(str(e))}"
+                ) from e
 
             try:
                 if response.is_redirect:
@@ -140,13 +177,23 @@ class HttpxClient(HttpClient):
                         next_url = str(response.url.join(location))
                         return None, next_url
                     # 3xx without Location: treat as terminal, surface the body.
-                    return response.content, None
+                    return (
+                        await collect_capped(
+                            response.aiter_bytes(chunk_size=_READ_CHUNK), url, max_bytes
+                        ),
+                        None,
+                    )
 
                 try:
                     response.raise_for_status()
                 except httpx.HTTPStatusError as e:
                     raise HttpStatusError(e.response.status_code, str(e), url) from e
-                return response.content, None
+                return (
+                    await collect_capped(
+                        response.aiter_bytes(chunk_size=_READ_CHUNK), url, max_bytes
+                    ),
+                    None,
+                )
             finally:
                 await response.aclose()
 

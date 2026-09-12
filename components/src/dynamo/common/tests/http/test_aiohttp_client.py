@@ -34,6 +34,17 @@ pytestmark = [
 ]
 
 
+class _FakeContent:
+    """``response.content`` stand-in: the reader the size cap streams from."""
+
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+
+    async def iter_chunked(self, n: int):
+        for i in range(0, len(self._body), n) or [0]:
+            yield self._body[i : i + n]
+
+
 class _FakeResponse:
     """Minimal aiohttp response stand-in for ``async with session.get(...) as r``."""
 
@@ -42,6 +53,7 @@ class _FakeResponse:
         self.headers = headers or {}
         self.url = url
         self._body = body
+        self.content = _FakeContent(body)
 
     def raise_for_status(self) -> None:
         return None
