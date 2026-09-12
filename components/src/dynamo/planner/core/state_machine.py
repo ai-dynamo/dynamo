@@ -101,6 +101,8 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
         self._expected_num_d: Optional[int] = None
         self._prefill_scaling_in_progress: bool = False
         self._decode_scaling_in_progress: bool = False
+        self._pending_num_p = 0
+        self._pending_num_d = 0
 
         self._throughput_lower_bound_p: int = 1
         self._throughput_lower_bound_d: int = 1
@@ -224,7 +226,92 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
             kv_hit_rate=predicted_kv_hit_rate,
             accept_length=predicted_accept_length,
         )
-        return self._advance_load(obs)
+        decision = self._advance_load(obs)
+        if decision is not None and (self._pending_num_p or self._pending_num_d):
+            decision.num_prefill = self._startup_reduction(
+                decision.num_prefill, self._num_p_workers, self._pending_num_p
+            )
+            decision.num_decode = self._startup_reduction(
+                decision.num_decode, self._num_d_workers, self._pending_num_d
+            )
+            if decision.num_prefill is None and decision.num_decode is None:
+                return None
+        return decision
+
+    @staticmethod
+    def _startup_reduction(
+        target: Optional[int], ready: int, pending: int
+    ) -> Optional[int]:
+        # Never turn a scale-up recommendation into a cancellation. Ready-equal
+        # targets are meaningful only when there are pending replicas to cancel.
+        if target is None or target > ready or target >= ready + pending:
+            return None
+        return target
+
+    def _startup_disagg_decision(
+        self,
+        num_p: Optional[int],
+        num_d: Optional[int],
+        *,
+        source: Literal["load", "throughput"],
+    ) -> Optional[ScalingDecision]:
+        """Budget startup reductions against the unchanged peer's desired count.
+
+        Serving counts remain the input to load/consolidation prediction. Only
+        allocation accounting includes pending replicas, and an omitted or up
+        recommendation preserves that role's entire allocation.
+        """
+        targets = (
+            self._startup_reduction(num_p, self._num_p_workers, self._pending_num_p),
+            self._startup_reduction(num_d, self._num_d_workers, self._pending_num_d),
+        )
+        if targets == (None, None):
+            return None
+        p_gpu, d_gpu = self._resolve_disagg_gpu_costs()
+        if p_gpu is not None and d_gpu is not None:
+            # Adjustable roles may retain their serving replicas to respect the
+            # floor; fixed peers retain both serving and pending replicas.
+            current_p = self._num_p_workers + (
+                self._pending_num_p if targets[0] is None else 0
+            )
+            current_d = self._num_d_workers + (
+                self._pending_num_d if targets[1] is None else 0
+            )
+            fitted_p, fitted_d = fit_directional_budget_pair(
+                current_p,
+                current_d,
+                targets[0] if targets[0] is not None else current_p,
+                targets[1] if targets[1] is not None else current_d,
+                p_gpu,
+                d_gpu,
+                self._config.min_gpu_budget,
+                # Reductions cannot need a larger ceiling. The final startup
+                # projection checks the hard ceiling and power budget against
+                # the actual applied pair; using a floor-only fit here keeps
+                # its strict floor (no integer-step tolerance) intact.
+                -1,
+                self._min_endpoint_for("prefill"),
+                self._min_endpoint_for("decode"),
+            )
+            targets = (
+                self._startup_reduction(
+                    fitted_p, self._num_p_workers, self._pending_num_p
+                )
+                if targets[0] is not None
+                else None,
+                self._startup_reduction(
+                    fitted_d, self._num_d_workers, self._pending_num_d
+                )
+                if targets[1] is not None
+                else None,
+            )
+        if targets == (None, None):
+            return None
+        if source == "load":
+            self._diag_load_reason = "scale_down"
+        else:
+            self._diag_throughput_reason = "scale"
+        return ScalingDecision(num_prefill=targets[0], num_decode=targets[1])
 
     def advance_throughput_from_prediction(
         self,
@@ -333,6 +420,18 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
         self._expected_num_d = counts.expected_num_decode
         self._prefill_scaling_in_progress = counts.prefill_scaling_in_progress
         self._decode_scaling_in_progress = counts.decode_scaling_in_progress
+        self._pending_num_p = counts.pending_num_prefill
+        self._pending_num_d = counts.pending_num_decode
+
+    def _pending_startup(self, component: str) -> int:
+        return self._pending_num_p if component == "prefill" else self._pending_num_d
+
+    def _load_scaling_blocked(self, component: str) -> bool:
+        # Startup inventory is only supplied after deployment-wide drain and
+        # rollout checks. Decisions are still bounded to reductions below.
+        return self._scaling_in_progress(component) and not (
+            self._pending_num_p or self._pending_num_d
+        )
 
     def _scaling_in_progress(self, component: str) -> bool:
         if component == "prefill":

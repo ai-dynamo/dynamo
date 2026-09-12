@@ -631,6 +631,8 @@ class NativePlannerBase:
             decode_scaling_in_progress=(
                 self.require_decode and state.decode.replicas.scaling
             ),
+            pending_num_prefill=state.prefill.replicas.pending_startup,
+            pending_num_decode=state.decode.replicas.pending_startup,
         )
 
     async def _gather_tick_input(self, tick: ScheduledTick) -> TickInput:
@@ -862,6 +864,9 @@ class NativePlannerBase:
         diag = effects.diagnostics
 
         current_p, current_d = self._current_worker_counts()
+        if self._last_worker_counts is not None:
+            current_p += self._last_worker_counts.pending_num_prefill
+            current_d += self._last_worker_counts.pending_num_decode
 
         rec_p = decision.num_prefill if decision else None
         rec_d = decision.num_decode if decision else None

@@ -52,6 +52,7 @@ JSON_PATCH_CONTENT_TYPE = "application/json-patch+json"
 # Stable labels the operator stamps on every worker Pod.
 DYNAMO_DGD_NAME_LABEL = "nvidia.com/dynamo-graph-deployment-name"
 DYNAMO_COMPONENT_LABEL = "nvidia.com/dynamo-component"
+GROVE_PCSG_REPLICA_INDEX_LABEL = "grove.io/podcliquescalinggroup-replica-index"
 
 
 def get_current_k8s_namespace() -> str:
@@ -152,6 +153,26 @@ class KubernetesAPI:
                 self._update_dgd_replicas(graph_deployment_name, service_name, replicas)
             else:
                 raise
+
+    def get_service_replica_target(
+        self, graph_deployment_name: str, service_name: str
+    ) -> int:
+        """Read the authoritative scale target, including an unapplied DGDSA write."""
+        try:
+            scale = self.custom_api.get_namespaced_custom_object_scale(
+                group=NVIDIA_API_GROUP,
+                version=DYNAMO_API_VERSION,
+                namespace=self.current_namespace,
+                plural=DGDSA_PLURAL,
+                name=f"{graph_deployment_name}-{service_name.lower()}",
+            )
+            return int(scale["spec"]["replicas"])
+        except client.ApiException as e:
+            if e.status != 404:
+                raise
+        deployment = self.get_graph_deployment(graph_deployment_name)
+        component = get_components_by_name(deployment)[service_name]
+        return Service(name=service_name, service=component).number_replicas()
 
     def _update_dgd_replicas(
         self, graph_deployment_name: str, service_name: str, replicas: int
@@ -324,6 +345,99 @@ class KubernetesAPI:
         is_stable = desired_replicas == updated == traffic_serving_replicas
 
         return traffic_serving_replicas, is_stable
+
+    def pending_startup_replicas(self, deployment: dict, pods: list) -> dict[str, int]:
+        """Identify startup-only scaling; an empty result never authorizes a write.
+
+        A Ready deficit alone is ambiguous: it also occurs during drain, rollout,
+        and stale status. Require observed spec, current worker revisions, and
+        no terminating/failed Pods before exposing pending startup capacity.
+        """
+        if not self.is_spec_generation_observed(deployment):
+            return {}
+        phase = (deployment.get("status", {}).get("rollingUpdate") or {}).get("phase")
+        if phase not in (None, "", "Completed"):
+            return {}
+        pods = self.exclude_checkpoint_capture_pods(pods)
+        if not pods or any(
+            pod.metadata.deletion_timestamp is not None
+            or pod.status is None
+            or pod.status.phase not in ("Pending", "Running")
+            for pod in pods
+        ):
+            return {}
+        if not self.pcsg_pods_within_desired_replicas(deployment, pods):
+            return {}
+        pending: dict[str, int] = {}
+        statuses = deployment.get("status", {}).get("components", {})
+        for name, spec in get_components_by_name(deployment).items():
+            if get_component_type(spec) == "planner":
+                continue
+            status = statuses.get(name, {})
+            desired = Service(name=name, service=spec).number_replicas()
+            ready, stable = self.get_service_replica_status(deployment, name)
+            replicas = status.get("replicas")
+            updated = status.get("updatedReplicas")
+            if (
+                replicas is None
+                or updated is None
+                or not (0 <= ready <= replicas <= desired)
+            ):
+                return {}
+            # Grove PCSG counts a replica as updated only once it is available;
+            # PodClique/Deployment updated counts include unready new Pods.
+            is_pcsg = status.get("componentKind") == "PodCliqueScalingGroup"
+            if updated != (ready if is_pcsg else replicas):
+                return {}
+            if not stable:
+                if get_component_type(spec) not in ("prefill", "decode", "worker"):
+                    return {}
+                if desired <= ready:
+                    return {}
+                pending[name] = desired - ready
+        return pending
+
+    @staticmethod
+    def exclude_checkpoint_capture_pods(pods: list) -> list:
+        """Capture Jobs inherit worker labels but do not serve inference traffic."""
+        return [
+            pod
+            for pod in pods
+            if not (
+                (pod.metadata.labels or {}).get("nvidia.com/snapshot-job-uid")
+                and any(
+                    owner.controller
+                    and owner.api_version == "batch/v1"
+                    and owner.kind == "Job"
+                    and owner.name
+                    == (pod.metadata.labels or {}).get("nvidia.com/snapshot-job")
+                    for owner in (pod.metadata.owner_references or [])
+                )
+            )
+        ]
+
+    def pcsg_pods_within_desired_replicas(self, deployment: dict, pods: list) -> bool:
+        """Reject excess PCSG groups hidden by its spec-derived replica count."""
+        components = get_components_by_name(deployment)
+        pods_by_component = self.partition_pods_by_component(pods)
+        for name, status in deployment.get("status", {}).get("components", {}).items():
+            if status.get("componentKind") != "PodCliqueScalingGroup":
+                continue
+            desired = Service(
+                name=name, service=components.get(name, {})
+            ).number_replicas()
+            for pod in pods_by_component.get(name, []):
+                replica_index = (pod.metadata.labels or {}).get(
+                    GROVE_PCSG_REPLICA_INDEX_LABEL
+                )
+                if replica_index is None:
+                    return False
+                try:
+                    if not 0 <= int(replica_index) < desired:
+                        return False
+                except (TypeError, ValueError):
+                    return False
+        return True
 
     def non_planner_components_stable(self, deployment: dict) -> tuple[bool, list[str]]:
         """Return ``(all_stable, unstable_names)`` for non-planner components."""
