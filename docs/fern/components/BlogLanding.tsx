@@ -5,6 +5,16 @@
 
 const ARTICLES = [
   {
+    title: "Load-Aware LoRA Routing and Placement in Dynamo",
+    description:
+      "How load estimation, deterministic placement, request filtering, and min-cost flow reduce LoRA routing churn in a deterministic simulation.",
+    href: "/dynamo/dev/digest/load-aware-lora-routing",
+    date: "September 8, 2026",
+    readTime: "11 min read",
+    category: "Engineering",
+    art: "frontier",
+  },
+  {
     title: "Dynamo Agent Optimization Skills",
     description:
       "A skillpack that turns coding agents into disciplined performance engineers: objective functions, experimental discipline, and inference domain knowledge.",

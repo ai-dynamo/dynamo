@@ -1237,6 +1237,9 @@ navigation:
         contents:
           # Keep this archive in reverse chronological order. Publication dates are
           # rendered in each article header and on the custom landing page.
+          - page: "Load-Aware LoRA Routing and Placement in Dynamo"
+            path: pages/blog/2026/load-aware-lora-routing.mdx
+            slug: load-aware-lora-routing
           - page: "Dynamo Agent Optimization Skills"
             path: pages/blog/2026/agent-optimization-skills.mdx
             slug: agent-optimization-skills
