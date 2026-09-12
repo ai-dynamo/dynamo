@@ -38,6 +38,10 @@ still define the builtin plugin fire intervals. The base
 `scheduling.scale_interval_seconds` defaults to the greatest common divisor of
 those enabled intervals, so existing load and throughput fire times are preserved.
 
+The following diagram illustrates the four-phase control loop and its data inputs:
+
+![Dynamo Planner control loop showing OBSERVE, PREDICT, PLAN, and EXECUTE phases with input sources and scaling modes](../../../../../assets/img/planner-control-loop.svg)
+
 ![Planner plugin pipeline showing shared builtin state and OBSERVE, PREDICT, PROPOSE, RECONCILE, CONSTRAIN, and EXEC stages](../../../../../assets/img/planner-plugin-pipeline.png)
 
 ### Why Two Scaling Loops?
