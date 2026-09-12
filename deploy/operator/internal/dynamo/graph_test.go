@@ -7809,6 +7809,7 @@ func TestApplyCompilationCacheExistingMount(t *testing.T) {
 	tests := []struct {
 		name           string
 		mounts         []corev1.VolumeMount
+		subpath        string
 		expectedMounts []corev1.VolumeMount
 		expectedError  string
 	}{
@@ -7823,6 +7824,22 @@ func TestApplyCompilationCacheExistingMount(t *testing.T) {
 				Name:      "compilation-cache",
 				MountPath: mountPath,
 				SubPath:   "model",
+			}},
+		},
+		{
+			name: "clears SubPathExpr and adds SubPath",
+			mounts: []corev1.VolumeMount{{
+				Name:        "compilation-cache",
+				MountPath:   mountPath,
+				SubPath:     "",
+				SubPathExpr: "test",
+			}},
+			subpath: "model",
+			expectedMounts: []corev1.VolumeMount{{
+				Name:        "compilation-cache",
+				MountPath:   mountPath,
+				SubPath:     "model",
+				SubPathExpr: "",
 			}},
 		},
 		{
@@ -7850,7 +7867,7 @@ func TestApplyCompilationCacheExistingMount(t *testing.T) {
 			}},
 			expectedMounts: []corev1.VolumeMount{
 				{Name: "compilation-cache", MountPath: "/other-path"},
-				{Name: "compilation-cache", MountPath: mountPath},
+				{Name: "compilation-cache", MountPath: mountPath, SubPath: ""},
 			},
 		},
 	}
@@ -7864,6 +7881,7 @@ func TestApplyCompilationCacheExistingMount(t *testing.T) {
 				CompilationCache: &v1beta1.CompilationCacheConfig{
 					PVCName:   "compilation-cache",
 					MountPath: mountPath,
+					SubPath:   tt.subpath,
 				},
 			}
 

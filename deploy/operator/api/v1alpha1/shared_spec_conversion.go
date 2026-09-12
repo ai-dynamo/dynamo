@@ -200,6 +200,7 @@ func ConvertFromDynamoComponentDeploymentSharedSpec(src *DynamoComponentDeployme
 			dst.CompilationCache = &v1beta1.CompilationCacheConfig{
 				PVCName:   vm.Name,
 				MountPath: vm.MountPoint,
+				SubPath:   vm.SubPath,
 			}
 			break
 		}
@@ -813,6 +814,7 @@ func sparseSharedHubOnlyVolumeMounts(src, projected []corev1.VolumeMount) []core
 		savedMount := corev1.VolumeMount{
 			Name:      srcMount.Name,
 			MountPath: srcMount.MountPath,
+			SubPath:   srcMount.SubPath,
 		}
 		if projectedMount, ok := findPreservedVolumeMount(projected, srcMount); !ok ||
 			!apiequality.Semantic.DeepEqual(srcMount, projectedMount) {
@@ -1022,6 +1024,7 @@ func convertVolumeMountsFromHub(src *v1beta1.DynamoComponentDeploymentSharedSpec
 	dst.VolumeMounts = []VolumeMount{{
 		Name:                  src.CompilationCache.PVCName,
 		MountPoint:            src.CompilationCache.MountPath,
+		SubPath:               src.CompilationCache.SubPath,
 		UseAsCompilationCache: true,
 	}}
 }
@@ -1054,7 +1057,8 @@ func firstPreservedCompilationCacheMatches(compilationCache *v1beta1.Compilation
 func compilationCacheMatchesVolumeMount(compilationCache *v1beta1.CompilationCacheConfig, mount VolumeMount) bool {
 	return compilationCache != nil &&
 		compilationCache.PVCName == mount.Name &&
-		compilationCache.MountPath == mount.MountPoint
+		compilationCache.MountPath == mount.MountPoint &&
+		compilationCache.SubPath == mount.SubPath
 }
 
 func restorablePreservedCompilationCacheMounts(src *v1beta1.DynamoComponentDeploymentSharedSpec, preserved *DynamoComponentDeploymentSharedSpec) []VolumeMount {
@@ -1077,7 +1081,7 @@ func restorablePreservedCompilationCacheMounts(src *v1beta1.DynamoComponentDeplo
 		// beta main container, its matching mount is their observable
 		// representation and absence means deletion. Cache-only alpha objects do
 		// not create a pod template, so those flags remain sparse-preserved state.
-		if !secondaryMountsProjected || nativeVolumeMountHasNamePath(main.VolumeMounts, mount.Name, mount.MountPoint) {
+		if !secondaryMountsProjected || nativeVolumeMountHasNamePath(main.VolumeMounts, mount.Name, mount.MountPoint, mount.SubPath) {
 			live = append(live, mount)
 		}
 	}
@@ -1114,6 +1118,7 @@ func volumeMountsEqual(a, b []VolumeMount) bool {
 	return slices.EqualFunc(a, b, func(left, right VolumeMount) bool {
 		return left.Name == right.Name &&
 			left.MountPoint == right.MountPoint &&
+			left.SubPath == right.SubPath &&
 			left.UseAsCompilationCache == right.UseAsCompilationCache
 	})
 }
@@ -1121,12 +1126,12 @@ func volumeMountsEqual(a, b []VolumeMount) bool {
 func mergePreservedCompilationCacheVolumeMounts(preserved, current []VolumeMount) []VolumeMount {
 	out := make([]VolumeMount, 0, len(preserved)+len(current))
 	for _, mount := range preserved {
-		if mount.UseAsCompilationCache && !flatVolumeMountHasNamePath(out, mount.Name, mount.MountPoint) {
+		if mount.UseAsCompilationCache && !flatVolumeMountHasNamePath(out, mount.Name, mount.MountPoint, mount.SubPath) {
 			out = append(out, mount)
 		}
 	}
 	for _, mount := range current {
-		if !flatVolumeMountHasNamePath(out, mount.Name, mount.MountPoint) {
+		if !flatVolumeMountHasNamePath(out, mount.Name, mount.MountPoint, mount.SubPath) {
 			out = append(out, mount)
 		}
 	}
@@ -1574,6 +1579,7 @@ func buildMainContainerFromDedicated(src *DynamoComponentDeploymentSharedSpec) c
 		ctr.VolumeMounts = append(ctr.VolumeMounts, corev1.VolumeMount{
 			Name:      vm.Name,
 			MountPath: mp,
+			SubPath:   vm.SubPath,
 		})
 	}
 	return ctr
@@ -2487,8 +2493,8 @@ func restorePreservedVolumeMountOrigins(preserved, current []VolumeMount, preser
 	}
 	for _, mount := range current {
 		if !mount.UseAsCompilationCache {
-			if nativeVolumeMountHasNamePath(preservedMain, mount.Name, mount.MountPoint) ||
-				flatVolumeMountHasNamePath(out, mount.Name, mount.MountPoint) {
+			if nativeVolumeMountHasNamePath(preservedMain, mount.Name, mount.MountPoint, mount.SubPath) ||
+				flatVolumeMountHasNamePath(out, mount.Name, mount.MountPoint, mount.SubPath) {
 				continue
 			}
 			out = append(out, mount)
@@ -2509,18 +2515,18 @@ func restorePreservedVolumeMountOrigins(preserved, current []VolumeMount, preser
 	return out
 }
 
-func nativeVolumeMountHasNamePath(mounts []corev1.VolumeMount, name, mountPath string) bool {
+func nativeVolumeMountHasNamePath(mounts []corev1.VolumeMount, name, mountPath, subPath string) bool {
 	for _, mount := range mounts {
-		if mount.Name == name && mount.MountPath == mountPath {
+		if mount.Name == name && mount.MountPath == mountPath && mount.SubPath == subPath {
 			return true
 		}
 	}
 	return false
 }
 
-func flatVolumeMountHasNamePath(mounts []VolumeMount, name, mountPath string) bool {
+func flatVolumeMountHasNamePath(mounts []VolumeMount, name, mountPath, subPath string) bool {
 	for _, mount := range mounts {
-		if mount.Name == name && mount.MountPoint == mountPath {
+		if mount.Name == name && mount.MountPoint == mountPath && mount.SubPath == subPath {
 			return true
 		}
 	}
@@ -2533,7 +2539,7 @@ func withoutCompilationCacheMounts(mounts []corev1.VolumeMount, flat []VolumeMou
 	}
 	out := make([]corev1.VolumeMount, 0, len(mounts))
 	for _, mount := range mounts {
-		if flatVolumeMountHasCompilationCache(flat, mount.Name, mount.MountPath) {
+		if flatVolumeMountHasCompilationCache(flat, mount.Name, mount.MountPath, mount.SubPath) {
 			continue
 		}
 		out = append(out, mount)
@@ -2541,9 +2547,9 @@ func withoutCompilationCacheMounts(mounts []corev1.VolumeMount, flat []VolumeMou
 	return out
 }
 
-func flatVolumeMountHasCompilationCache(mounts []VolumeMount, name, mountPath string) bool {
+func flatVolumeMountHasCompilationCache(mounts []VolumeMount, name, mountPath, subPath string) bool {
 	for _, mount := range mounts {
-		if mount.UseAsCompilationCache && mount.Name == name && mount.MountPoint == mountPath {
+		if mount.UseAsCompilationCache && mount.Name == name && mount.MountPoint == mountPath && mount.SubPath == subPath {
 			return true
 		}
 	}
@@ -2650,6 +2656,7 @@ func volumeMountsFromNative(mounts []corev1.VolumeMount) []VolumeMount {
 		out = append(out, VolumeMount{
 			Name:       mount.Name,
 			MountPoint: mount.MountPath,
+			SubPath:    mount.SubPath,
 		})
 	}
 	return out
