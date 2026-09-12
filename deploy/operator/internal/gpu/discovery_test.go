@@ -1641,3 +1641,29 @@ func TestDetectRDMAFromNode(t *testing.T) {
 		})
 	}
 }
+
+func TestSupportedGPUSKUs(t *testing.T) {
+	skus := SupportedGPUSKUs()
+
+	require.NotEmpty(t, skus)
+
+	seen := make(map[nvidiacomv1beta1.GPUSKUType]struct{}, len(skus))
+	for i, sku := range skus {
+		assert.NotEmpty(t, sku)
+		if _, dup := seen[sku]; dup {
+			t.Errorf("SupportedGPUSKUs returned duplicate entry %q", sku)
+		}
+		seen[sku] = struct{}{}
+		if i > 0 {
+			assert.Less(t, skus[i-1], sku, "SupportedGPUSKUs must be sorted")
+		}
+	}
+
+	// Every SKU InferHardwareSystem can actually return must be listed, so the
+	// error message built from this list is never missing a real answer.
+	for _, product := range []string{"H100-SXM", "H100", "A100-PCIe", "V100-SXM", "L40S", "MI300"} {
+		inferred := InferHardwareSystem(product)
+		require.NotEmpty(t, inferred, "test fixture product %q should be recognized", product)
+		assert.Contains(t, skus, inferred)
+	}
+}

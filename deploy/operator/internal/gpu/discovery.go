@@ -22,6 +22,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -977,6 +978,30 @@ func InferHardwareSystem(gpuProduct string) nvidiacomv1beta1.GPUSKUType {
 	}
 
 	return ""
+}
+
+// SupportedGPUSKUs returns the sorted, deduplicated set of GPUSKU values that
+// InferHardwareSystem can produce from a node's nvidia.com/gpu.product label.
+// It is derived from gpuRules so it can never drift from the actual matching
+// logic; callers use it to build actionable errors when a product string
+// matches no known GPU.
+func SupportedGPUSKUs() []nvidiacomv1beta1.GPUSKUType {
+	seen := make(map[nvidiacomv1beta1.GPUSKUType]struct{})
+	var out []nvidiacomv1beta1.GPUSKUType
+	for _, rule := range gpuRules {
+		for _, sku := range []nvidiacomv1beta1.GPUSKUType{rule.singleSKU, rule.sxmSKU, rule.pcieSKU} {
+			if sku == "" {
+				continue
+			}
+			if _, ok := seen[sku]; ok {
+				continue
+			}
+			seen[sku] = struct{}{}
+			out = append(out, sku)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
 }
 
 // normalize standardizes a GPU product string to simplify matching.
