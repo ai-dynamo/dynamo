@@ -9,6 +9,7 @@ use crate::client;
 use crate::proto as pb;
 
 const SUPPORTED_API_VERSION: &str = "vllm";
+const VLLM_INFERENCE_V1_GENERATE_CAPABILITY: &str = "vllm_inference_v1_generate";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ModelIdentity {
@@ -137,11 +138,21 @@ impl DiscoveredModel {
 
     pub(crate) fn engine_config(&self) -> EngineConfig {
         let parallelism = self.server.parallelism.as_ref();
+        let runtime_data = if self.server.supports_native_sampling_params_json {
+            [(
+                VLLM_INFERENCE_V1_GENERATE_CAPABILITY.to_string(),
+                serde_json::Value::Bool(true),
+            )]
+            .into_iter()
+            .collect()
+        } else {
+            Default::default()
+        };
         EngineConfig {
             model: self.source.clone(),
             served_model_name: Some(self.served_name.clone()),
             model_aliases: self.identity.aliases.clone(),
-            runtime_data: Default::default(),
+            runtime_data,
             llm: Some(LlmRegistration {
                 context_length: nonzero(self.server.max_model_len),
                 kv_cache_block_size: nonzero(self.server.kv_block_size),

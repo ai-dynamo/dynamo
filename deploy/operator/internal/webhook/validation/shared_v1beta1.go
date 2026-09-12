@@ -366,6 +366,20 @@ func (v *sharedValidation) validateComponentRoles(
 			seen[role.Name] = struct{}{}
 		}
 
+		if role.Replicas != nil && knownRole {
+			expected := int32(1)
+			if role.Name == nvidiacomv1beta1.ComponentRoleWorker {
+				expected = component.Multinode.NodeCount - 1
+			}
+			if *role.Replicas != expected {
+				allErrs = append(allErrs, field.Invalid(
+					rolePath.Child("replicas"),
+					*role.Replicas,
+					fmt.Sprintf("must equal %d for multinode role %q", expected, role.Name),
+				))
+			}
+		}
+
 		if knownRole {
 			allErrs = append(allErrs, v.validateComponentRoleSpec(
 				role,
@@ -399,21 +413,29 @@ type componentRoleSpecValidationOptions struct {
 	workloadProvider           string
 	scope                      provideroverride.Scope
 	component                  *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+	podTemplateAllowed         bool
 }
 
 // validateComponentRoleSpec validates role. role and fldPath must not be nil;
-// the optional provider override may be nil.
+// the optional provider override and PodTemplate may be nil.
 func (v *sharedValidation) validateComponentRoleSpec(
 	role *nvidiacomv1beta1.ComponentRoleSpec,
 	fldPath *field.Path,
 	options componentRoleSpecValidationOptions,
 ) field.ErrorList {
+	allErrs := field.ErrorList{}
+	if role.PodTemplate != nil && !options.podTemplateAllowed {
+		allErrs = append(allErrs, field.Forbidden(
+			fldPath.Child("podTemplate"),
+			"is not supported for this component role",
+		))
+	}
 	if role.ProviderOverride == nil {
-		return nil
+		return allErrs
 	}
 
 	// Validate the provider fragment against this exact multinode role.
-	return v.validateProviderOverride(
+	return append(allErrs, v.validateProviderOverride(
 		role.ProviderOverride,
 		fldPath.Child("providerOverride"),
 		providerOverrideValidationOptions{
@@ -422,7 +444,7 @@ func (v *sharedValidation) validateComponentRoleSpec(
 			scope:            options.scope,
 			component:        options.component,
 		},
-	)
+	)...)
 }
 
 // validateEPPConfig validates deprecated Go-EPP config. config and fldPath must not be nil.
@@ -726,6 +748,15 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 			))
 		}
 	} else {
+		if !hasUnsupportedMultinode(newComponent) &&
+			newComponent.Multinode != nil && oldComponent.Multinode != nil &&
+			newComponent.Multinode.NodeCount != oldComponent.Multinode.NodeCount {
+			allErrs = append(allErrs, field.Invalid(
+				fldPath.Child("multinode", "nodeCount"),
+				newComponent.Multinode.NodeCount,
+				apivalidation.FieldImmutableErrorMsg,
+			))
+		}
 		allErrs = append(allErrs, validateComponentRolesUpdate(
 			newComponent,
 			oldComponent,
@@ -837,10 +868,12 @@ func validateComponentRolesUpdate(
 	// role-specific configuration changes to happen in a subsequent update.
 	if (newComponent.Roles == nil) != (oldComponent.Roles == nil) {
 		explicitComponent := newComponent
+		implicitComponent := oldComponent
 		if explicitComponent.Roles == nil {
-			explicitComponent = oldComponent
+			explicitComponent, implicitComponent = implicitComponent, explicitComponent
 		}
-		if dynamo.ExplicitMultinodeRolesMatchImplicit(explicitComponent) {
+		if explicitComponent.Multinode != nil && implicitComponent.Multinode != nil &&
+			dynamo.ExplicitMultinodeRolesMatchImplicit(explicitComponent) {
 			return nil
 		}
 		return field.ErrorList{field.Forbidden(
