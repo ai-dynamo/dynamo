@@ -12,7 +12,6 @@ multimodal UUIDs, and the model-specific prefill/decode handoff.
 from __future__ import annotations
 
 import logging
-import pickle
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -34,6 +33,7 @@ from dynamo.common.multimodal.mm_kwargs_transfer import (
     MmKwargsShmReceiver,
     MmKwargsShmTransferMetadata,
     MmKwargsTransferMetadata,
+    decode_mm_kwargs_item,
 )
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils import nvtx_utils as _nvtx
@@ -713,10 +713,12 @@ class VllmMultimodalRequestProcessor:
 
             kwargs_items = []
             for payload in pickled_items:
-                # The sender is Dynamo's internal frontend transfer service,
-                # which deliberately serializes vLLM's Python-only kwargs
-                # objects. External request payloads never supply these bytes.
-                item = pickle.loads(payload)
+                # Deserialize with vLLM's typed msgpack decoder (pickle-free,
+                # type-restricted). The sender is Dynamo's internal frontend
+                # transfer service; external request payloads never supply these
+                # bytes, and the decoder refuses any pickle extension unless
+                # VLLM_ALLOW_INSECURE_SERIALIZATION is explicitly set.
+                item = decode_mm_kwargs_item(payload)
                 if not isinstance(item, MultiModalKwargsItem):
                     logger.warning(
                         "%s transfer produced %s instead of MultiModalKwargsItem",

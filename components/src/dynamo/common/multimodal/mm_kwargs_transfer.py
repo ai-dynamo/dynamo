@@ -25,7 +25,7 @@ import asyncio
 import logging
 import multiprocessing.shared_memory as shm
 import os
-import pickle
+import struct
 import uuid
 from abc import ABC, abstractmethod
 from queue import Queue
@@ -38,6 +38,64 @@ from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.runtime import run_async
 
 logger = logging.getLogger(__name__)
+
+
+# The mm_kwargs transfer serializes vLLM's Python-only MultiModalKwargsItem
+# objects. We use vLLM's own typed msgpack serializer (vllm.v1.serial_utils)
+# rather than pickle: it is pickle-free and type-restricted by default, so a
+# crafted payload cannot execute code on the receiving worker. vLLM's
+# MsgpackEncoder.encode() returns a sequence of buffers (msgpack + any large
+# tensor "aux" buffers); the SHM/NIXL transport carries a single bytes blob per
+# item, so we frame the sequence with a small length prefix and reverse it on
+# receive. The vllm imports are lazy so non-vLLM code paths that import this
+# module do not require vLLM.
+
+
+def _pack_buffers(bufs) -> bytes:
+    """Frame a sequence of buffers into one bytes blob for the byte transport."""
+    out = bytearray(struct.pack("<I", len(bufs)))
+    for b in bufs:
+        mv = memoryview(b)
+        out += struct.pack("<Q", mv.nbytes)
+        out += mv
+    return bytes(out)
+
+
+def _unpack_buffers(blob) -> list:
+    """Inverse of _pack_buffers: split a framed blob back into buffers."""
+    mv = memoryview(blob)
+    (count,) = struct.unpack_from("<I", mv, 0)
+    offset = 4
+    bufs = []
+    for _ in range(count):
+        (length,) = struct.unpack_from("<Q", mv, offset)
+        offset += 8
+        bufs.append(mv[offset : offset + length])
+        offset += length
+    return bufs
+
+
+def encode_mm_kwargs_item(obj) -> bytes:
+    """Serialize a vLLM ``MultiModalKwargsItem`` to transport bytes with vLLM's
+    typed msgpack encoder (no pickle). Inverse of :func:`decode_mm_kwargs_item`.
+    A fresh encoder is used per call: it accumulates aux-buffer state and is not
+    thread-safe."""
+    from vllm.v1.serial_utils import MsgpackEncoder
+
+    return _pack_buffers(MsgpackEncoder().encode(obj))
+
+
+def decode_mm_kwargs_item(blob):
+    """Deserialize bytes from :func:`encode_mm_kwargs_item` back into a
+    ``MultiModalKwargsItem``. Pickle-free and type-restricted: the decoder only
+    yields the target type, and with ``VLLM_ALLOW_INSECURE_SERIALIZATION`` unset
+    (vLLM's default) it refuses any pickle extension. A fresh decoder is used per
+    call (not thread-safe)."""
+    from vllm.multimodal.inputs import MultiModalKwargsItem
+    from vllm.v1.serial_utils import MsgpackDecoder
+
+    return MsgpackDecoder(MultiModalKwargsItem).decode(_unpack_buffers(blob))
+
 
 # Upper bound on how long cleanup() waits for the backend to read a transferred
 # payload before releasing the NIXL-registered buffer anyway. Unbounded waiting
@@ -161,9 +219,9 @@ class MmKwargsSender(ABC):
                     continue
 
                 with _nvtx.annotate(self._pickle_nvtx_label, color=self._nvtx_color):
-                    pickled = pickle.dumps(feat.data)
+                    serialized = encode_mm_kwargs_item(feat.data)
 
-                encoded, cleanup = await self._encode_item(i, pickled)
+                encoded, cleanup = await self._encode_item(i, serialized)
                 encoded_items.append(encoded)
                 if cleanup is not None:
                     cleanup_items.append(cleanup)
