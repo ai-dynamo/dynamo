@@ -238,6 +238,7 @@ jobs:
           fi
 
       - name: Run CPU-only tests (parallelized)
+        id: cpu-only-tests
         if: ${{ inputs.run_cpu_only_tests }}
         timeout-minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
         uses: $/.github/actions/pytest-local
@@ -253,6 +254,7 @@ jobs:
           enable_coverage: ${{ inputs.enable_coverage }}
           gpu_tests: 'false'
       - name: Run CPU end-to-end tests (isolated)
+        id: cpu-e2e-tests
         # Long-lived deployment tests should not compete with the xdist unit
         # pool or retry until the parent step kills the runner container.
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && inputs.run_cpu_e2e_tests }}
@@ -271,6 +273,7 @@ jobs:
           gpu_tests: 'false'
           dd_flaky_retry_enabled: 'false'
       - name: Run GPU tests (parallel)
+        id: gpu-parallel-tests
         timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
         if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests && inputs.run_gpu_parallel_tests }}
         uses: $/.github/actions/pytest-local
@@ -290,6 +293,7 @@ jobs:
           gpu_tests: 'true'
           verify_gpu: ${{ inputs.verify_gpu }}
       - name: Run GPU tests (sequential)
+        id: gpu-sequential-tests
         timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
         # !cancelled() so a parallel-stage failure doesn't hide sequential results,
         # but require checkout to have succeeded so an infra/prereq failure (e.g. the
@@ -324,3 +328,65 @@ jobs:
           path: test-results/pytest_test_report_*.xml
           retention-days: 7
           if-no-files-found: warn
+
+      # A stage cut off mid-run is still reported as a successful step, so real
+      # test failures go green. Take the verdict only from the status file
+      # pytest-local writes last, never from the step outcome. Placed after the
+      # upload so results survive a failure here, and once per job rather than
+      # per stage to avoid three more container-hook round trips.
+      - name: Verify test stages completed
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        shell: bash
+        env:
+          STAGE_OUTCOMES: |
+            pre_merge_cpu ${{ steps.cpu-only-tests.outcome }}
+            pre_merge_cpu_e2e ${{ steps.cpu-e2e-tests.outcome }}
+            pre_merge_gpu_parallel ${{ steps.gpu-parallel-tests.outcome }}
+            pre_merge_gpu ${{ steps.gpu-sequential-tests.outcome }}
+        run: |
+          set -uo pipefail
+          status_dir="${GITHUB_WORKSPACE}/test-results/status"
+          failed=0
+          checked=""
+
+          while read -r stage outcome; do
+            [[ -z "${stage}" ]] && continue
+            exitcode_file="${status_dir}/${stage}.exitcode"
+
+            case "${outcome}" in
+              ''|skipped)
+                echo "⏭️  ${stage}: did not run"
+                ;;
+              success)
+                if [[ ! -f "${exitcode_file}" ]]; then
+                  echo "❌ ${stage}: reported success but wrote no status file."
+                  echo "   Its script did not run to completion, so the result is"
+                  echo "   unknown and cannot be treated as a pass."
+                  failed=1
+                elif [[ "$(cat "${exitcode_file}")" != "0" ]]; then
+                  echo "❌ ${stage}: pytest exited $(cat "${exitcode_file}")"
+                  failed=1
+                else
+                  echo "✅ ${stage}: pytest exited 0"
+                fi
+                ;;
+              *)
+                echo "❌ ${stage}: step outcome '${outcome}'"
+                failed=1
+                ;;
+            esac
+            checked+=" ${stage}"
+          done <<< "${STAGE_OUTCOMES}"
+
+          # A stage added above but not listed here would escape this check.
+          shopt -s nullglob
+          for f in "${status_dir}"/*.exitcode; do
+            stage=$(basename "${f}" .exitcode)
+            if [[ " ${checked} " != *" ${stage} "* ]]; then
+              echo "❌ ${stage}: ran but is not listed in STAGE_OUTCOMES, so its"
+              echo "   result is unverified. Add it to this step."
+              failed=1
+            fi
+          done
+
+          exit "${failed}"
