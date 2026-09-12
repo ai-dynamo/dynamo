@@ -398,24 +398,25 @@ impl Discovery for KubeDiscoveryClient {
 
         let (out_tx, out_rx) = mpsc::unbounded_channel();
         let stream_id = uuid::Uuid::new_v4();
+
+        // Acquire read lock, subscribe to broadcast, then read initial state.
+        // The write lock (held by the daemon while updating list_state and sending events)
+        // is mutually exclusive with our read lock, so no events can slip between
+        // our subscription point and our initial state read.
+        // This runs before the return, so a caller that lists afterwards cannot observe an
+        // instance that a removal deletes before the subscription.
+        let (initial_instances, mut broadcast_rx) = {
+            let state = self.list_state.read().await;
+            let rx = self.event_tx.subscribe();
+            let initial = state
+                .values()
+                .flat_map(|m| m.filter(&query))
+                .collect::<Vec<_>>();
+            (initial, rx)
+        };
         let list_state = self.list_state.clone();
-        let event_tx = self.event_tx.clone();
 
         tokio::spawn(async move {
-            // Acquire read lock, subscribe to broadcast, then read initial state.
-            // The write lock (held by the daemon while updating list_state and sending events)
-            // is mutually exclusive with our read lock, so no events can slip between
-            // our subscription point and our initial state read.
-            let (initial_instances, mut broadcast_rx) = {
-                let state = list_state.read().await;
-                let rx = event_tx.subscribe();
-                let initial = state
-                    .values()
-                    .flat_map(|m| m.filter(&query))
-                    .collect::<Vec<_>>();
-                (initial, rx)
-            };
-
             tracing::debug!(
                 stream_id = %stream_id,
                 initial_count = initial_instances.len(),
