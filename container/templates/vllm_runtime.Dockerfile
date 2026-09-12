@@ -542,7 +542,9 @@ RUN set -eu; \
             printf '%s\n' \
                 '#!/bin/sh' \
                 '# Keep Omni from changing the EngineCore output schema.' \
-                'VLLM_PLUGINS="${VLLM_PLUGINS-{{ vllm_rs_plugins }}}"' \
+                'if [ "${VLLM_PLUGINS+x}" != x ]; then' \
+                '    VLLM_PLUGINS="{{ vllm_rs_plugins }}"' \
+                'fi' \
                 'export VLLM_PLUGINS' \
                 "exec \"${pkg}/vllm-rs\" \"\$@\"" \
                 > {{ vllm_rs_link }}; \
