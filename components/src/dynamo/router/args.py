@@ -28,6 +28,7 @@ class DynamoRouterConfig(KvRouterConfigBase, AicPerfConfigBase):
     endpoint: str
     router_block_size: int
     serve_indexer: bool = False
+    min_initial_workers: int = 0
 
     def validate(self) -> None:
         """Validate config invariants (aligned with Rust KvRouterConfig where applicable)."""
@@ -120,6 +121,23 @@ class DynamoRouterArgGroup(ArgGroup):
             default=False,
             help="Serve this router's local KV indexer over the request plane.",
             dest="serve_indexer",
+        )
+
+        add_argument(
+            g,
+            flag_name="--router-min-initial-workers",
+            env_var="DYN_ROUTER_MIN_INITIAL_WORKERS",
+            default=0,
+            help=(
+                "Minimum number of workers required before the router starts serving. "
+                "KvRouter tracks workers on a background task, so with 0 the router can "
+                "accept a request before that set is populated and answer it with "
+                "'no endpoints available to route work'. Waiting is event-driven and "
+                "costs nothing per request. Set to 0 to disable the startup wait. "
+                "dynamo.frontend exposes the same flag."
+            ),
+            arg_type=int,
+            dest="min_initial_workers",
         )
 
         # KV router options (shared with dynamo.frontend)

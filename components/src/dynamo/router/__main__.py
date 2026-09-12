@@ -14,6 +14,7 @@ routing decisions.
 
 import asyncio
 import logging
+import os
 from typing import Optional
 
 import uvloop
@@ -30,6 +31,8 @@ from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
+MIN_INITIAL_WORKERS_ENV = "DYN_ROUTER_MIN_INITIAL_WORKERS"
 
 
 class StandaloneRouterHandler:
@@ -223,6 +226,11 @@ async def worker(runtime: DistributedRuntime):
         config.router_ttl_secs,
         config.router_approximate_cache_policy,
     )
+
+    # Read by the Rust router's startup gate, which is the only thing that keeps
+    # KvRouter from serving before its worker set is populated. Must be set
+    # before the KvRouter is constructed. Mirrors dynamo.frontend.
+    os.environ[MIN_INITIAL_WORKERS_ENV] = str(config.min_initial_workers)
 
     kv_router_config = build_kv_router_config(config)
     aic_perf_config = build_aic_perf_config(config)
