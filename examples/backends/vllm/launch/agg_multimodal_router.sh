@@ -135,8 +135,10 @@ GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 # Under SINGLE_GPU=true, requires the KV-bytes cap (CI sets it via the
 # requested_vllm_kv_cache_bytes marker) — otherwise vLLM's 0.9 default races.
 for i in $(seq 1 "${NUM_WORKERS}"); do
-    WORKER_PORT=$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))
-    KV_EVENTS_PORT=$((KV_EVENTS_PORT_BASE + (i - 1)))
+    SYSTEM_PORT_VAR="DYN_SYSTEM_PORT${i}"
+    WORKER_PORT="${!SYSTEM_PORT_VAR:-$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))}"
+    KV_EVENTS_PORT_VAR="DYN_VLLM_KV_EVENT_PORT${i}"
+    KV_EVENTS_PORT="${!KV_EVENTS_PORT_VAR:-$((KV_EVENTS_PORT_BASE + (i - 1)))}"
     if [[ "${SINGLE_GPU}" == "true" ]]; then GPU_ID=0; else GPU_ID=$((i - 1)); fi
 
     KV_EVENTS_CONFIG="{\"enable_kv_cache_events\":true,\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_EVENTS_PORT}\"}"
@@ -157,7 +159,8 @@ done
 
 # Phase 2: wait for all workers to be ready.
 for i in $(seq 1 "${NUM_WORKERS}"); do
-    WORKER_PORT=$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))
+    SYSTEM_PORT_VAR="DYN_SYSTEM_PORT${i}"
+    WORKER_PORT="${!SYSTEM_PORT_VAR:-$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))}"
     wait_ready "http://127.0.0.1:${WORKER_PORT}/health" "vLLM backend $i"
 done
 

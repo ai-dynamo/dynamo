@@ -82,9 +82,8 @@ print_launch_banner --multimodal "Launching Disaggregated Multimodal E/P/D ($GPU
 # Start frontend (no router mode)
 echo "Starting frontend..."
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
-python -m dynamo.frontend &
-
-unset DYN_SYSTEM_PORT
+env -u DYN_SYSTEM_PORT -u DYN_SYSTEM_PORT1 -u DYN_SYSTEM_PORT2 -u DYN_SYSTEM_PORT3 \
+    python -m dynamo.frontend &
 
 NIXL_PORT_ENCODE="$(dyn_port DYN_VLLM_NIXL_SIDE_CHANNEL_PORT 1 20097)"
 NIXL_PORT_PREFILL="$(dyn_port DYN_VLLM_NIXL_SIDE_CHANNEL_PORT 2 20098)"
