@@ -786,6 +786,7 @@ pub mod tcp_response_stream {
     /// IP address or exact interface shared by the TCP request callback and QUIC response
     /// listeners.
     /// Unspecified addresses are rejected.
+    /// Interface addresses that are link-local, multicast, broadcast, or unspecified are skipped.
     /// If unset, the server auto-detects a routable local IP.
     pub const DYN_TCP_RESPONSE_STREAM_HOST: &str = "DYN_TCP_RESPONSE_STREAM_HOST";
 
@@ -857,6 +858,7 @@ pub mod event_plane {
 
     /// IP address or exact interface advertised by direct ZMQ event publishers.
     /// Unspecified addresses are rejected.
+    /// Interface addresses that are link-local, multicast, broadcast, or unspecified are skipped.
     /// If unset, the runtime auto-detects a local IP address.
     pub const DYN_EVENT_PLANE_HOST: &str = "DYN_EVENT_PLANE_HOST";
 

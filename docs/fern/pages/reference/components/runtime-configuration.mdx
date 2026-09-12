@@ -134,7 +134,8 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
 <ParamField path="DYN_TCP_RESPONSE_STREAM_HOST" type="string" default="auto-detected local address">
   IPv4 or IPv6 address, or exact network interface name, used to bind and advertise the TCP response
   stream server. If an interface name occurs more than once in the operating system's interface
-  list, Dynamo uses the last address. Dynamo trims whitespace and treats an empty value as unset.
+  list, Dynamo uses the last usable address, skipping link-local, multicast, broadcast, and
+  unspecified addresses. Dynamo trims whitespace and treats an empty value as unset.
   Unspecified addresses such as `0.0.0.0` and `::` are invalid.
 </ParamField>
 
@@ -156,7 +157,8 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
 <ParamField path="DYN_EVENT_PLANE_HOST" type="string" default="auto-detected local address">
   IPv4 or IPv6 address, or exact network interface name, advertised by direct ZMQ event publishers.
   If an interface name occurs more than once in the operating system's interface list, Dynamo uses
-  the last address. Dynamo trims whitespace and treats an empty value as unset. Unspecified addresses
+  the last usable address, skipping link-local, multicast, broadcast, and unspecified addresses.
+  Dynamo trims whitespace and treats an empty value as unset. Unspecified addresses
   such as `0.0.0.0` and `::` are invalid.
 
   This variable changes the discovery address, not the listener address. Direct ZMQ continues to bind
