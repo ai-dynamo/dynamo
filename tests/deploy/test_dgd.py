@@ -14,6 +14,7 @@ import logging
 import os
 import subprocess
 import time
+from pathlib import Path
 from typing import Any
 
 import kr8s
@@ -21,6 +22,7 @@ import pytest
 import requests
 import yaml
 
+from tests.deploy.api_checks import check_deployment_api
 from tests.deploy.conftest import DeploymentTarget
 from tests.deploy.dgd_utils import (
     DEFAULT_MAX_TOKENS,
@@ -33,7 +35,8 @@ from tests.deploy.dgd_utils import (
     _get_workspace_dir,
     validate_chat_response,
 )
-from tests.utils.client import send_request, wait_for_model_availability
+from tests.utils.client import wait_for_model_availability
+from tests.utils.test_output import resolve_test_output_path
 
 logger = logging.getLogger(__name__)
 
@@ -194,43 +197,35 @@ async def test_deployment(
         base_url = f"http://localhost:{port_forward.local_port}"
         logger.info(f"Port forwarding established: {base_url}")
 
-        # Wait for model to be available
-        endpoint = deployment_spec.endpoint
-        model_ready = wait_for_model_availability(
-            url=base_url,
-            endpoint=endpoint,
-            model=model,
-            logger=logger,
-            max_attempts=30,
+        scenario = "embedding" if profile == "agg_embed" else "chat"
+        endpoint = (
+            "/v1/embeddings" if scenario == "embedding" else deployment_spec.endpoint
         )
-
-        assert (
-            model_ready
-        ), f"Model '{model}' did not become available within the timeout period"
-
-        # Send test request
-        url = f"{base_url}{endpoint}"
-        payload = {
-            "model": model,
-            "messages": [{"role": "user", "content": TEST_PROMPT}],
-            "max_tokens": DEFAULT_MAX_TOKENS,
-            "temperature": DEFAULT_TEMPERATURE,
-            "stream": False,
-        }
+        ready_payload = (
+            {"model": model, "input": "test"} if scenario == "embedding" else None
+        )
+        model_ready = await asyncio.to_thread(
+            wait_for_model_availability,
+            base_url,
+            endpoint,
+            model,
+            logger,
+            max_attempts=30,
+            payload=ready_payload,
+        )
+        assert model_ready, f"Model '{model}' did not become available"
         frontend_log_baseline = (
             len(normalize_log_lines(frontend_pod.logs(container="main")))
             if validate_agg_logging
             else 0
         )
-        response = send_request(
-            url, payload, timeout=float(DEFAULT_REQUEST_TIMEOUT), method="POST"
-        )
-
-        # Validate response
-        validate_chat_response(
-            response=response,
-            expected_model=model,
-            min_content_length=MIN_RESPONSE_CONTENT_LENGTH,
+        await asyncio.to_thread(
+            check_deployment_api,
+            base_url,
+            model,
+            scenario,
+            Path(resolve_test_output_path(request.node.name)) / "responses",
+            endpoint=endpoint,
         )
 
         if validate_agg_logging:

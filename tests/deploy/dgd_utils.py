@@ -20,6 +20,7 @@ from kr8s.objects import Pod, Service
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client import exceptions
 
+from tests.deploy.response_checks import validate_chat
 from tests.utils.test_output import resolve_test_output_path
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,8 @@ def validate_chat_response(
     response: requests.Response,
     expected_model: str,
     min_content_length: int = MIN_RESPONSE_CONTENT_LENGTH,
+    max_tokens: int | None = None,
+    stop: str | None = None,
 ) -> dict[str, Any]:
     """Validate the structure and content of a chat completion response.
 
@@ -62,6 +65,8 @@ def validate_chat_response(
         response: HTTP response from the chat completion endpoint
         expected_model: Expected model name in the response
         min_content_length: Minimum required length for response content
+        max_tokens: Optional requested token cap for the completion contract
+        stop: Stop sequence; permits empty or shortened response content
 
     Returns:
         Parsed response JSON on success
@@ -80,6 +85,9 @@ def validate_chat_response(
     except ValueError as e:
         pytest.fail(f"Response is not valid JSON: {e}. Response: {response.text[:500]}")
 
+    if max_tokens is not None:
+        validate_chat(data, max_tokens, stop)
+
     assert "choices" in data, f"Response missing 'choices' field: {data}"
     assert len(data["choices"]) > 0, f"Response has empty 'choices': {data}"
 
@@ -93,10 +101,14 @@ def validate_chat_response(
     assert "content" in message, f"Message missing 'content' field: {message}"
 
     content = message["content"]
-    assert len(content) >= min_content_length, (
-        f"Response content too short: {len(content)} chars (min: {min_content_length}). "
-        f"Content: {content[:200]}"
-    )
+    if stop is not None and content is None:
+        content = ""
+    assert isinstance(content, str), f"Expected text content: {message}"
+    if stop is None:
+        assert len(content) >= min_content_length, (
+            f"Response content too short: {len(content)} chars (min: {min_content_length}). "
+            f"Content: {content[:200]}"
+        )
 
     assert "model" in data, f"Response missing 'model' field: {data}"
     assert (
