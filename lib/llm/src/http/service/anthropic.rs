@@ -1129,22 +1129,16 @@ fn anthropic_sanitized_error_with_details(
         .into_response()
 }
 
-/// Match `InvalidArgument` at top-level OR under `Backend()` anywhere in the
-/// error chain. Request validation surfaces `InvalidArgument`, while backends
-/// that reject bad input (e.g. Python `ValueError`/`TypeError` wrapped by
-/// `py_err_to_dynamo`) surface `Backend(InvalidArgument)`; both are client
-/// input errors and warrant an HTTP 400 rather than a generic 500.
+/// Find a request or backend invalid-argument error anywhere in the chain.
 fn find_invalid_argument_in_chain<'a>(
     err: &'a (dyn std::error::Error + 'static),
 ) -> Option<&'a dynamo_runtime::error::DynamoError> {
-    use dynamo_runtime::error::{BackendError, ErrorType};
-
     let mut current = Some(err);
     while let Some(error) = current {
         if let Some(dynamo_error) = error.downcast_ref::<dynamo_runtime::error::DynamoError>()
             && matches!(
-                dynamo_error.error_type(),
-                ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument)
+                dynamo_error.reason().as_str(),
+                "backend.invalid_argument" | "request.invalid_argument"
             )
         {
             return Some(dynamo_error);
@@ -1337,19 +1331,32 @@ mod tests {
 
     #[test]
     fn anthropic_invalid_argument_is_found_through_error_context() {
-        use dynamo_runtime::error::{DynamoError, ErrorType};
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
 
-        let error = anyhow::Error::new(
-            DynamoError::builder()
-                .error_type(ErrorType::InvalidArgument)
-                .message("invalid request")
-                .build(),
-        )
-        .context("request validation failed");
-
+        let original = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+            .message("invalid request")
+            .build();
+        let wire = serde_json::to_value(original).unwrap();
+        let normalized: DynamoError = serde_json::from_value(wire).unwrap();
         assert_eq!(
-            find_invalid_argument_in_chain(error.as_ref()).map(|error| error.message()),
+            normalized.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+        assert_eq!(normalized.class(), ErrorType::InvalidRequest);
+
+        let error = anyhow::Error::new(normalized).context("request validation failed");
+        assert_eq!(
+            find_invalid_argument_in_chain(error.as_ref()).map(DynamoError::message),
             Some("invalid request")
         );
+
+        let private_error = anyhow::Error::new(
+            DynamoError::builder()
+                .error_type(ErrorType::InvalidRequest)
+                .message("private diagnostic")
+                .build(),
+        );
+        assert!(find_invalid_argument_in_chain(private_error.as_ref()).is_none());
     }
 }

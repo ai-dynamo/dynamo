@@ -315,7 +315,7 @@ async def test_server_context_cancel(temp_file_store, server, client):
         # Verify the expected cancellation exception is received
         # TODO: Should this be a asyncio.CancelledError?
         assert str(e).startswith(
-            "Disconnected: Stream ended before generation completed"
+            "Unavailable: Stream ended before generation completed"
         )
 
     # Verify server context cancellation status
@@ -342,7 +342,7 @@ async def test_server_raise_cancelled(temp_file_store, server, client):
         # Verify the expected cancellation exception is received
         # TODO: Should this be a asyncio.CancelledError?
         assert "CancelledError" in str(e)
-        assert "BackendCancelled" in str(e)
+        assert str(e).startswith("Cancelled: CancelledError")
 
     # Verify server context cancellation status
     # TODO: Server to gracefully stop the stream?
