@@ -22,6 +22,17 @@ DEFAULT_PREFILL_ENDPOINT = f"dyn://{DYN_NAMESPACE}.prefill.generate"
 logger = logging.getLogger(__name__)
 
 
+KV_CACHE_DTYPE_CHOICES = [
+    "auto",
+    "bfloat16",
+    "fp8",
+    "fp8_ds_mla",
+    "fp8_e4m3",
+    "fp8_e5m2",
+    "fp8_inc",
+]
+
+
 def positive_int(value: str) -> int:
     try:
         parsed = int(value)
@@ -565,15 +576,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--kv-cache-dtype",
         type=str,
         default="auto",
-        choices=[
-            "auto",
-            "bfloat16",
-            "fp8",
-            "fp8_ds_mla",
-            "fp8_e4m3",
-            "fp8_e5m2",
-            "fp8_inc",
-        ],
+        choices=KV_CACHE_DTYPE_CHOICES,
         help="Data type for KV cache, used to compute kv_bytes_per_token. "
         "'auto' uses the model's dtype (default).",
     )

@@ -15,6 +15,7 @@ import pytest
 
 from dynamo.llm import EngineType, EntrypointArgs
 from dynamo.mocker import MockEngineArgs
+from dynamo.mocker import args as mocker_args
 from dynamo.mocker.args import parse_args
 from dynamo.mocker.utils import kv_cache
 
@@ -521,6 +522,22 @@ def test_compute_kv_bytes_reads_local_config_json_without_transformers(
     monkeypatch.setitem(sys.modules, "transformers", None)
 
     assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) == 256
+
+
+@pytest.mark.parametrize(
+    "dtype", [d for d in mocker_args.KV_CACHE_DTYPE_CHOICES if d.startswith("fp8")]
+)
+def test_fp8_kv_cache_dtypes_are_one_byte_end_to_end(dtype):
+    """Every fp8 choice the CLI accepts must map to one byte.
+
+    A choice the table does not know falls through to the 2-byte default, so
+    the mocker sizes its cache for the wrong dtype and says nothing. The cases
+    are read off the CLI choices, so a new fp8 spelling cannot be advertised
+    without a mapping.
+    """
+    args = mocker_args.parse_args(["--model-path", "model", "--kv-cache-dtype", dtype])
+
+    assert kv_cache.get_kv_cache_dtype_bytes({}, args.kv_cache_dtype) == 1
 
 
 def test_compute_kv_bytes_unwraps_multimodal_text_config_json(tmp_path):
