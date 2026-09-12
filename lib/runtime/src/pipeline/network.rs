@@ -787,7 +787,7 @@ mod tests {
                     codec.name()
                 );
                 assert_eq!(
-                    frame.is_error,
+                    frame.is_error(),
                     expect_error,
                     "codec={} case={case}",
                     codec.name()
