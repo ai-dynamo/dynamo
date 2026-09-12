@@ -50,7 +50,6 @@ func (r *DynamoGraphDeploymentReconciler) newGroveProgram() *groveProgram {
 			r.RestConfig,
 			r.DockerSecretRetriever,
 			r.SSHKeyManager,
-			r.RBACManager,
 		),
 		rollout:         rollout,
 		restart:         newDGDRestartReconciler(),
