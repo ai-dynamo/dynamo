@@ -197,7 +197,7 @@ reachable.
   workers. This drops `request.nvext` at handler entry and ignores the
   routing-override headers.
 - **Admin API.** The frontend's HTTP admin API (for example,
-  `GET`/`POST /busy_threshold`) is enabled by default. If the deployer does not need to
+  `GET`/`POST /busy_threshold` and `POST /clear_kv_blocks`) is enabled by default. If the deployer does not need to
   change runtime tunables through it, set `DYN_DISABLE_FRONTEND_ADMIN_API=1`.
   Inference, metrics, models, health, and liveness routes are unaffected.
 - **Metrics endpoint.** The `/metrics` endpoint is intended for scraping by
@@ -207,9 +207,10 @@ reachable.
 ### Internal control and diagnostic interfaces
 
 Dynamo's internal control and diagnostic interfaces — for example the worker
-system server (`/engine/*` on `DYN_SYSTEM_PORT`), the planner live dashboard and
-plugin registration, and the standalone KV router services (indexer, selection,
-and slot tracker) — are designed to be used within the trusted network boundary.
+system server (`/engine/*`, and `/v1/loras` adapter load/unload when LoRA is
+enabled, on `DYN_SYSTEM_PORT`), the planner live dashboard and plugin
+registration, and the standalone KV router services (indexer, selection, and slot
+tracker) — are designed to be used within the trusted network boundary.
 While some provide their own authentication, many do not, and several bind on all
 interfaces.
 
