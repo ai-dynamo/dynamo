@@ -208,13 +208,11 @@ class MultimodalRequestProcessor:
                 400,
                 "Unsafe tensor format: .pt/.pth/.bin files are not allowed. "
                 "Use .safetensors format instead.",
-                path
+                path,
             )
         if not lower_path.endswith(".safetensors"):
             raise HttpStatusError(
-                400,
-                "Only .safetensors embedding files are supported.",
-                path
+                400, "Only .safetensors embedding files are supported.", path
             )
 
         if self.is_url(path):
@@ -222,7 +220,7 @@ class MultimodalRequestProcessor:
                 raise HttpStatusError(
                     400,
                     f"Unsupported URL scheme: {parsed.scheme}. Only http and https are allowed.",
-                    path
+                    path,
                 )
             try:
                 with httpx.Client(timeout=300.0) as client:
@@ -238,7 +236,7 @@ class MultimodalRequestProcessor:
                                 f"File size exceeds limit: "
                                 f"{int(content_length) // (1024*1024)}MB > "
                                 f"{self.max_file_size_mb}MB",
-                                path
+                                path,
                             )
                         chunks = []
                         downloaded = 0
@@ -250,7 +248,7 @@ class MultimodalRequestProcessor:
                                     f"File size exceeds limit: "
                                     f"{downloaded // (1024*1024)}MB > "
                                     f"{self.max_file_size_mb}MB",
-                                    path
+                                    path,
                                 )
                             chunks.append(chunk)
                         content = b"".join(chunks)
@@ -271,7 +269,7 @@ class MultimodalRequestProcessor:
                         500,
                         "Passed in path is a local file path, but allowed_local_media_path is not configured."
                         "Please configure an allowed path for local media.",
-                        path
+                        path,
                     )
 
                 local_path = path.removeprefix("file://")
@@ -287,22 +285,18 @@ class MultimodalRequestProcessor:
                     raise HttpStatusError(
                         400,
                         "Access to file outside allowed path is not permitted.",
-                        path
+                        path,
                     )
 
                 if not resolved_path.exists():
-                    raise HttpStatusError(
-                        400,
-                        "Embedding file not found.",
-                        path
-                    )
+                    raise HttpStatusError(400, "Embedding file not found.", path)
                 file_size = resolved_path.stat().st_size
                 if file_size > self.max_file_size_bytes:
                     raise HttpStatusError(
                         400,
                         f"File size ({file_size // (1024*1024)}MB) exceeds "
                         f"maximum allowed size ({self.max_file_size_bytes // (1024*1024)}MB)",
-                        path
+                        path,
                     )
                 data = safetensors_load_file(str(resolved_path))
                 return self._unwrap_safetensors(data)
@@ -497,7 +491,7 @@ class MultimodalRequestProcessor:
                                     raise HttpStatusError(
                                         400,
                                         f"Malformed embedding file {path}: missing 'mm_embeddings' key",
-                                        str(path)
+                                        str(path),
                                     )
                                 loaded_embeddings.append(emb)
                             else:
