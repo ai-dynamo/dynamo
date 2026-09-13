@@ -91,12 +91,6 @@ python -m dynamo.vllm \
 
 Only the prefill worker is required to set it, but both halves of a NIXL pair must agree on a connector for transfers to succeed. Pass the same `--kv-transfer-config` value to the decode worker, as the [disaggregated vLLM launch script](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg.sh) does.
 
-The earlier `--connector` flag is no longer accepted by the vLLM backend. Setting it — on the command line or through the `DYN_CONNECTOR` environment variable — raises a `ValueError` during argument parsing. The message depends on the value:
-
-- An active connector, such as `--connector nixl` or `DYN_CONNECTOR=nixl`, reports the equivalent `--kv-transfer-config` JSON to use instead.
-- `--connector none` or `--connector null` reports that the flag is no longer needed, because no connector is already the default. There is no equivalent value to migrate to, so none is shown.
-- `DYN_CONNECTOR` set to an empty or whitespace-only value reports that the variable is no longer supported, without an equivalent value.
-
 ## Worker role and disaggregation
 
 These flags control which role this worker plays in a disaggregated deployment. The default when no `--disaggregation-mode` is set is aggregated (`agg`).

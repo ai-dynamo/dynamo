@@ -20,7 +20,6 @@ import pytest
 import dynamo.llm as dynamo_llm
 from dynamo.vllm import envs
 from dynamo.vllm.args import (
-    _connector_to_kv_transfer_json,
     _is_routable,
     _uses_dynamo_connector,
     _uses_nixl_connector,
@@ -234,31 +233,6 @@ def test_removed_multimodal_role_flags_are_rejected(flag, mock_vllm_cli):
         parse_args()
 
 
-# --connector removal tests
-
-
-def test_connector_nixl_raises_error_with_migration_hint(mock_vllm_cli):
-    """Test that --connector nixl raises ValueError with --kv-transfer-config hint."""
-    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--connector", "nixl")
-    with pytest.raises(ValueError, match="--connector is no longer supported"):
-        parse_args()
-
-
-def test_connector_none_raises_error(mock_vllm_cli):
-    """Test that --connector none raises ValueError telling user it's no longer needed."""
-    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--connector", "none")
-    with pytest.raises(ValueError, match="no longer needed"):
-        parse_args()
-
-
-def test_env_var_dyn_connector_raises_error(monkeypatch, mock_vllm_cli):
-    """Test that DYN_CONNECTOR env var raises error for vLLM backend."""
-    monkeypatch.setenv("DYN_CONNECTOR", "nixl")
-    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B")
-    with pytest.raises(ValueError, match="no longer supported"):
-        parse_args()
-
-
 def test_model_express_url_is_accepted_for_compatibility(mock_vllm_cli):
     """Test that legacy ModelExpress manifests still parse."""
     mock_vllm_cli(
@@ -290,22 +264,6 @@ def test_prefill_worker_without_kv_transfer_config_raises(mock_vllm_cli):
     mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--disaggregation-mode", "prefill")
     with pytest.raises(ValueError, match="--kv-transfer-config"):
         parse_args()
-
-
-def test_connector_to_kv_transfer_json_single():
-    """Test _connector_to_kv_transfer_json returns valid JSON for a single connector."""
-    result = json.loads(_connector_to_kv_transfer_json(["nixl"]))
-    assert result == {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
-
-
-def test_connector_to_kv_transfer_json_multi():
-    """Test _connector_to_kv_transfer_json wraps multiple connectors in PdConnector."""
-    result = json.loads(_connector_to_kv_transfer_json(["kvbm", "nixl"]))
-    assert result["kv_connector"] == "PdConnector"
-    nested = result["kv_connector_extra_config"]["connectors"]
-    nested_names = [c["kv_connector"] for c in nested]
-    assert "DynamoConnector" in nested_names
-    assert "NixlConnector" in nested_names
 
 
 # _uses_nixl_connector / _uses_dynamo_connector tests
