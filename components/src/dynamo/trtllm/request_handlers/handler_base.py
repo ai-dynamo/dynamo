@@ -443,11 +443,15 @@ class HandlerBase(BaseGenerativeHandler):
 
     @staticmethod
     def _extract_logprobs(
-        output, num_output_tokens_so_far: int
+        output,
+        num_output_tokens_so_far: int,
+        *,
+        token_ids_delta: list[int] | None = None,
     ) -> tuple[list[float] | None, list[list[dict]] | None]:
         return _shared_logprobs.extract_from_completion_output(
             output,
             num_output_tokens_so_far,
+            token_ids_delta=token_ids_delta,
             fallback_to_first_on_missing=True,
             include_bytes=False,
         )
@@ -1364,9 +1368,13 @@ class HandlerBase(BaseGenerativeHandler):
 
                         # Extract logprobs from the output. Logprobs are
                         # aligned with the cumulative token list, so use the
-                        # same per-choice cursor as token_ids.
+                        # same per-choice cursor as token_ids. Pass the delta
+                        # already built for the response to avoid copying the
+                        # cumulative token history again.
                         log_probs, top_logprobs = self._extract_logprobs(
-                            output, tokens_so_far
+                            output,
+                            tokens_so_far,
+                            token_ids_delta=out["token_ids"],
                         )
                         if log_probs:
                             out["log_probs"] = log_probs
