@@ -145,8 +145,76 @@ fn min_tokens_delays_stop() {
     let mut decoder = make_decoder(None, Some(3), Some(vec![EOS]), None, false);
     let result = decoder.process_token_ids(&[HI, EOS]).unwrap();
 
-    assert_eq!(result.text.as_deref(), Some("hi</s>"));
+    assert_eq!(result.text.as_deref(), Some("hi"));
     assert!(result.stop_trigger.is_none());
+}
+
+#[test]
+fn min_tokens_stops_at_eos_once_floor_is_reached() {
+    let mut decoder = make_decoder(None, Some(2), Some(vec![EOS]), None, false);
+    let result = decoder.process_token_ids(&[HI, THERE, EOS]).unwrap();
+
+    assert_eq!(result.text.as_deref(), Some("hithere"));
+    assert!(matches!(
+        result.stop_trigger,
+        Some(StopTrigger::HiddenStopTokenDetected(id)) if id == EOS
+    ));
+}
+
+/// The floor is a floor on the tokens the caller receives. An end-of-sequence
+/// token arriving on the boundary is not one of them, so with a floor of two it
+/// neither stops the sequence nor counts toward the two.
+#[test]
+fn min_tokens_does_not_count_a_suppressed_eos() {
+    let mut decoder = make_decoder(None, Some(2), Some(vec![EOS]), None, false);
+    let result = decoder.process_token_ids(&[HI, EOS]).unwrap();
+
+    assert_eq!(result.text.as_deref(), Some("hi"));
+    assert!(result.stop_trigger.is_none());
+
+    let result = decoder.process_token_ids(&[THERE, EOS]).unwrap();
+    assert_eq!(result.text.as_deref(), Some("there"));
+    assert!(matches!(
+        result.stop_trigger,
+        Some(StopTrigger::HiddenStopTokenDetected(id)) if id == EOS
+    ));
+}
+
+/// A suppressed token still occupies its slot in `tokens`, so the arrays the
+/// backend indexes alongside it stay aligned with the token ids it was given.
+#[test]
+fn min_tokens_keeps_suppressed_eos_aligned() {
+    let mut decoder = make_decoder(None, Some(3), Some(vec![EOS]), None, false);
+    let result = decoder.process_token_ids(&[HI, EOS, THERE]).unwrap();
+
+    assert_eq!(result.tokens.len(), 3);
+    assert_eq!(result.tokens[1], None);
+    assert_eq!(result.text.as_deref(), Some("hithere"));
+}
+
+/// A visible stop token is part of the output, so below the floor it is emitted
+/// and counted like any other token — only the stop itself waits.
+#[test]
+fn min_tokens_keeps_visible_stop_tokens_below_the_floor() {
+    let tokenizer: Arc<dyn tokenizer_traits::Tokenizer> = Arc::new(TestTokenizer);
+    let decode_stream = tokenizers::DecodeStream::new(tokenizer, &[], false);
+    let stop_conditions = StopConditions {
+        min_tokens: Some(3),
+        stop_token_ids_visible: Some(vec![STOP]),
+        ..Default::default()
+    };
+    let mut decoder = Decoder::new(decode_stream, stop_conditions, false, None, None);
+
+    let result = decoder.process_token_ids(&[HI, STOP]).unwrap();
+    assert_eq!(result.text.as_deref(), Some("hiSTOP"));
+    assert!(result.stop_trigger.is_none());
+
+    let result = decoder.process_token_ids(&[THERE, STOP]).unwrap();
+    assert_eq!(result.text.as_deref(), Some("thereSTOP"));
+    assert!(matches!(
+        result.stop_trigger,
+        Some(StopTrigger::VisibleStopTokenDetected(id)) if id == STOP
+    ));
 }
 
 #[test]

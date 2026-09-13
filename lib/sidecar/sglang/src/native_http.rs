@@ -47,6 +47,11 @@ pub(crate) fn request(
     else {
         return Ok(None);
     };
+    if !mode.is_prefill() && request.stop_conditions.min_tokens.unwrap_or(0) > 0 {
+        // Native HTTP responses bypass Dynamo's Decoder, which owns minimum-token
+        // enforcement when SGLang runs without a tokenizer.
+        return Ok(None);
+    }
     let mut body = payload
         .as_object()
         .cloned()

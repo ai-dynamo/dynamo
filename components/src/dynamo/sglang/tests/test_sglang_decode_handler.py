@@ -242,12 +242,26 @@ def test_openai_stop_sampling_params_maps_token_id_stop_array():
     }
 
 
-def _new_decode_handler(*, use_sglang_tokenizer: bool = False, enable_rl: bool = False):
+def _new_decode_handler(
+    *,
+    use_sglang_tokenizer: bool = False,
+    engine_skips_tokenizer: bool | None = None,
+    enable_rl: bool = False,
+):
+    # The two are separate facts. Default to the common pairing -- Dynamo owning
+    # preprocessing for an engine started with --skip-tokenizer-init -- and let a
+    # test name engine_skips_tokenizer when it wants them to disagree.
+    if engine_skips_tokenizer is None:
+        engine_skips_tokenizer = not use_sglang_tokenizer
     handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
     handler.shutdown_event = None
     handler.use_sglang_tokenizer = use_sglang_tokenizer
+    handler.engine_skips_tokenizer = engine_skips_tokenizer
     handler.config = SimpleNamespace(
-        server_args=SimpleNamespace(served_model_name="test-model"),
+        server_args=SimpleNamespace(
+            served_model_name="test-model",
+            skip_tokenizer_init=engine_skips_tokenizer,
+        ),
         dynamo_args=SimpleNamespace(enable_rl=enable_rl),
     )
     handler._first_token_source = None
@@ -813,7 +827,7 @@ def test_guided_decoding_params_are_accepted_by_sglang(guided_decoding):
     SamplingParams(**sampling_params)
 
 
-def test_build_sampling_params_maps_min_tokens_for_token_requests():
+def test_build_sampling_params_enforces_min_tokens_in_dynamo_for_token_requests():
     handler = _new_decode_handler(use_sglang_tokenizer=False)
 
     sampling_params = handler._build_sampling_params(
@@ -822,13 +836,63 @@ def test_build_sampling_params_maps_min_tokens_for_token_requests():
             "stop_conditions": {
                 "max_tokens": 64,
                 "min_tokens": 64,
-                "ignore_eos": True,
+                "stop_token_ids": [7],
+                "stop_token_ids_hidden": [151643],
             },
         }
     )
 
-    assert sampling_params["min_new_tokens"] == 64
+    # Tokenizer-free: Dynamo's decoder enforces the floor, so the engine is only held
+    # open -- no min_new_tokens, no stop ids, ignore_eos set.
+    assert "min_new_tokens" not in sampling_params
+    assert "stop_token_ids" not in sampling_params
+    assert sampling_params["ignore_eos"] is True
     assert sampling_params["max_new_tokens"] == 64
+
+
+def test_build_sampling_params_holds_engine_open_below_max_tokens():
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {},
+            "stop_conditions": {
+                "max_tokens": 64,
+                "min_tokens": 8,
+                "stop_token_ids": [7],
+                "stop_token_ids_hidden": [151643],
+            },
+        }
+    )
+
+    # A floor below the ceiling is the case that separates the two: the engine still runs
+    # to max_new_tokens, and only Dynamo's decoder knows where the floor is.
+    assert "min_new_tokens" not in sampling_params
+    assert "stop_token_ids" not in sampling_params
+    assert sampling_params["ignore_eos"] is True
+    assert sampling_params["max_new_tokens"] == 64
+
+
+def test_build_sampling_params_holds_engine_open_without_max_tokens():
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {},
+            "stop_conditions": {
+                "min_tokens": 8,
+                "stop_token_ids_hidden": [151643],
+            },
+        }
+    )
+
+    # max_new_tokens is kept as None deliberately -- SGLang reads that as "until EOS or
+    # context length", and omitting it would instead impose a default of 128, which is
+    # below the floor a caller may have asked for. With no ceiling and ignore_eos set,
+    # context length is what bounds the over-generation this buys.
+    assert sampling_params["max_new_tokens"] is None
+    assert "min_new_tokens" not in sampling_params
+    assert "stop_token_ids" not in sampling_params
     assert sampling_params["ignore_eos"] is True
 
 
@@ -843,6 +907,30 @@ def test_build_sampling_params_maps_min_tokens_for_sglang_tokenizer_requests():
     assert sampling_params["max_new_tokens"] == 64
 
 
+def test_build_sampling_params_forwards_min_tokens_to_an_engine_with_a_tokenizer():
+    # Dynamo owns preprocessing, but the engine was started with its tokenizer, so it
+    # accepts min_new_tokens and there is no reason to take its stopping away.
+    handler = _new_decode_handler(
+        use_sglang_tokenizer=False, engine_skips_tokenizer=False
+    )
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {},
+            "stop_conditions": {
+                "max_tokens": 64,
+                "min_tokens": 8,
+                "stop_token_ids": [7],
+            },
+        }
+    )
+
+    assert sampling_params["min_new_tokens"] == 8
+    assert sampling_params["stop_token_ids"] == [7]
+    assert "ignore_eos" not in sampling_params
+    assert sampling_params["max_new_tokens"] == 64
+
+
 def test_build_sampling_params_omits_min_new_tokens_when_min_tokens_absent():
     handler = _new_decode_handler(use_sglang_tokenizer=False)
 
@@ -853,31 +941,76 @@ def test_build_sampling_params_omits_min_new_tokens_when_min_tokens_absent():
     assert "min_new_tokens" not in sampling_params
 
 
-def test_build_sampling_params_forwards_explicit_zero_min_tokens():
+def test_build_sampling_params_leaves_engine_stopping_alone_for_zero_min_tokens():
     handler = _new_decode_handler(use_sglang_tokenizer=False)
 
     sampling_params = handler._build_sampling_params(
-        {"sampling_options": {}, "stop_conditions": {"max_tokens": 8, "min_tokens": 0}}
+        {
+            "sampling_options": {},
+            "stop_conditions": {
+                "max_tokens": 8,
+                "min_tokens": 0,
+                "stop_token_ids": [7],
+            },
+        }
     )
 
-    assert sampling_params["min_new_tokens"] == 0
+    assert "min_new_tokens" not in sampling_params
+    assert sampling_params["stop_token_ids"] == [7]
+    assert "ignore_eos" not in sampling_params
 
 
-def test_multimodal_build_sampling_params_maps_min_tokens():
-    request = SglangMultimodalRequest(
+def _multimodal_min_tokens_request() -> SglangMultimodalRequest:
+    return SglangMultimodalRequest(
         request=PreprocessedRequest(
             token_ids=[1, 2, 3],
-            stop_conditions=StopConditions(
-                max_tokens=64, min_tokens=64, ignore_eos=True
-            ),
+            stop_conditions=StopConditions(max_tokens=64, min_tokens=64),
             sampling_options=SamplingOptions(),
         )
     )
 
-    sampling_params = SglangUtils.build_sampling_params(request)
+
+def test_multimodal_build_sampling_params_holds_engine_open_for_min_tokens():
+    sampling_params = SglangUtils.build_sampling_params(
+        _multimodal_min_tokens_request(), engine_skips_tokenizer=True
+    )
+
+    # Tokenizer-free engine: Dynamo's decoder enforces the floor, so the engine is only
+    # kept from stopping early. Over-generation is bounded by max_tokens.
+    assert "min_new_tokens" not in sampling_params
+    assert sampling_params["ignore_eos"] is True
+    assert sampling_params["max_new_tokens"] == 64
+
+
+def test_multimodal_build_sampling_params_maps_min_tokens_with_engine_tokenizer():
+    sampling_params = SglangUtils.build_sampling_params(
+        _multimodal_min_tokens_request(), engine_skips_tokenizer=False
+    )
 
     assert sampling_params["min_new_tokens"] == 64
     assert sampling_params["max_new_tokens"] == 64
+    assert "ignore_eos" not in sampling_params
+
+
+def test_multimodal_build_sampling_params_keeps_an_omitted_ceiling_open():
+    request = SglangMultimodalRequest(
+        request=PreprocessedRequest(
+            token_ids=[1, 2, 3],
+            stop_conditions=StopConditions(min_tokens=64),
+            sampling_options=SamplingOptions(),
+        )
+    )
+
+    sampling_params = SglangUtils.build_sampling_params(
+        request, engine_skips_tokenizer=True
+    )
+
+    # A caller that asked only for a floor gets no ceiling. max_new_tokens must be
+    # present and None -- SGLang reads that as "until EOS or context length", whereas
+    # omitting the key applies a default of 128 and would cap a larger floor.
+    assert "max_new_tokens" in sampling_params
+    assert sampling_params["max_new_tokens"] is None
+    assert "min_new_tokens" not in sampling_params
     assert sampling_params["ignore_eos"] is True
 
 

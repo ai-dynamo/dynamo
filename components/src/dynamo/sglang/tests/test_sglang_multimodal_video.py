@@ -707,6 +707,7 @@ async def test_multimodal_decode_rejects_parallel_sampling_before_prefill_handof
     """Reject multimodal n greater than one before contacting prefill."""
     handler = MultimodalWorkerHandler.__new__(MultimodalWorkerHandler)
     handler.serving_mode = DisaggregationMode.DECODE
+    handler.engine_skips_tokenizer = True
     prefill_called = False
 
     class _PrefillClient:

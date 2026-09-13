@@ -589,6 +589,14 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             self.kv_publisher = publisher.kv_publisher
         self.serving_mode = config.serving_mode
         self.use_sglang_tokenizer = config.dynamo_args.use_sglang_tokenizer
+        # Whether the engine itself was started without a tokenizer. This is a
+        # different fact from use_sglang_tokenizer, which only records who owns
+        # preprocessing: --dyn-chat-processor sglang leaves preprocessing to
+        # Dynamo while the engine keeps its tokenizer. Read defensively — the
+        # diffusion workers pass a SimpleNamespace stub for server_args.
+        self.engine_skips_tokenizer = bool(
+            getattr(config.server_args, "skip_tokenizer_init", False)
+        )
         self.enable_trace = getattr(config.server_args, "enable_trace", False)
         self._max_input_token_id: Optional[int] = None
 
@@ -1330,6 +1338,22 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
                     await awaitable
                 except (asyncio.CancelledError, Exception):
                     pass
+
+    @asynccontextmanager
+    async def _engine_abort_on_cancel(
+        self, request_id_future: asyncio.Future, context: Optional[Context]
+    ) -> AsyncGenerator[None, None]:
+        """Abort the engine request once the caller stops consuming the stream.
+
+        This is ``_cancellation_monitor`` for callers that want the abort but
+        have no use for the monitoring task, and that may be handed no context
+        at all — in which case there is nothing to watch and nothing to abort.
+        """
+        if context is None:
+            yield
+            return
+        async with self._cancellation_monitor(request_id_future, context):
+            yield
 
     @asynccontextmanager
     async def _cancellation_monitor(
