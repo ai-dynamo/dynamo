@@ -54,14 +54,8 @@ from dynamo.profiler.utils.profile_common import (
     needs_mocker_aic_perf_model,
     needs_profile_data,
 )
-from dynamo.profiler.utils.replay_optimize.constants import AIC_BACKEND_VERSIONS
 
 logger = logging.getLogger(__name__)
-
-_MOCKER_AIC_BACKEND_VERSIONS = {
-    **AIC_BACKEND_VERSIONS,
-    "trtllm": "1.3.0rc10",
-}
 
 
 def _load_latest_database_version() -> Optional[Callable[..., Optional[str]]]:
@@ -75,6 +69,16 @@ def _load_latest_database_version() -> Optional[Callable[..., Optional[str]]]:
 
 
 get_latest_database_version = _load_latest_database_version()
+
+
+def _resolve_mocker_aic_backend_version(system: str, backend: str) -> Optional[str]:
+    """Version recorded on mocker workers, from the installed aisimulate perf
+    database so the DGD shows which data the mocker runs on. ``None`` (SDK
+    missing or no data) omits the flag and the mocker resolves it at startup."""
+    if get_latest_database_version is None:
+        return None
+    return get_latest_database_version(system=system, backend=backend)
+
 
 # ConfigMap name prefixes (a 4-char UUID suffix is appended at runtime
 # so that multiple deployments in the same namespace don't collide)
@@ -447,7 +451,9 @@ def _inject_mocker_aic_args(
     if "--aic-perf-model" not in args_list:
         args_list.append("--aic-perf-model")
     args_list = set_argument_value(args_list, "--aic-backend", aic_spec.backend)
-    backend_version = _MOCKER_AIC_BACKEND_VERSIONS.get(aic_spec.backend)
+    backend_version = _resolve_mocker_aic_backend_version(
+        aic_spec.system, aic_spec.backend
+    )
     if backend_version is not None:
         args_list = set_argument_value(
             args_list, "--aic-backend-version", backend_version

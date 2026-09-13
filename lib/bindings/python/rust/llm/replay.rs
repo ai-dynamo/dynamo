@@ -126,6 +126,7 @@ fn resolve_aic_perf_config<'a>(
                     py,
                     config.backend_name(),
                     config.backend_version(),
+                    config.system(),
                 )?,
             })
         })
@@ -1932,9 +1933,13 @@ fn resolve_aic_backend_version(
     py: Python<'_>,
     backend: &str,
     configured_version: Option<&str>,
+    system: &str,
 ) -> PyResult<String> {
     py.import("dynamo._internal.aic")?
-        .call_method1("resolve_backend_version", (backend, configured_version))?
+        .call_method1(
+            "resolve_backend_version",
+            (backend, configured_version, system),
+        )?
         .extract()
 }
 
@@ -1953,8 +1958,12 @@ fn materialize_replay_mocker_args(
             .aic_model_path
             .clone()
             .ok_or_else(|| PyException::new_err("--aic-perf-model requires --model-path"))?;
-        let backend_version =
-            resolve_aic_backend_version(py, &backend, args.aic_backend_version.as_deref())?;
+        let backend_version = resolve_aic_backend_version(
+            py,
+            &backend,
+            args.aic_backend_version.as_deref(),
+            &system,
+        )?;
         args.aic_backend_version = Some(backend_version.clone());
         let backend_version = Some(backend_version);
         let tp_size = args.aic_tp_size.unwrap_or(1);

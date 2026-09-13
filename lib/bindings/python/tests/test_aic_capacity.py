@@ -264,8 +264,47 @@ def test_estimate_num_gpu_blocks_propagates_transitive_import_error(monkeypatch)
     assert exc_info.value is missing_dependency
 
 
-def test_trtllm_version_resolution():
-    assert resolve_backend_version("trtllm", "0.20.0") == "0.20.0"
+def test_resolve_backend_version_passes_explicit_pin_through():
+    assert resolve_backend_version("trtllm", "0.20.0", "h200_sxm") == "0.20.0"
+
+
+def test_resolve_backend_version_defaults_to_installed_perf_database(monkeypatch):
+    """Unpinned versions come from aisimulate's maintained default for the
+    (system, backend), never from a version table inside Dynamo."""
+    perf_database = pytest.importorskip("aiconfigurator_core.sdk.perf_database")
+    calls = []
+
+    def fake_latest(system, backend, *args, **kwargs):
+        calls.append((system, backend))
+        return "0.24.0"
+
+    monkeypatch.setattr(perf_database, "get_latest_database_version", fake_latest)
+
+    assert resolve_backend_version("vllm", None, "h200_sxm") == "0.24.0"
+    assert calls == [("h200_sxm", "vllm")]
+
+
+def test_resolve_backend_version_rejects_missing_perf_database(monkeypatch):
+    perf_database = pytest.importorskip("aiconfigurator_core.sdk.perf_database")
+    monkeypatch.setattr(
+        perf_database, "get_latest_database_version", lambda *args, **kwargs: None
+    )
+    with pytest.raises(RuntimeError, match="no AIC perf database"):
+        resolve_backend_version("vllm", None, "unknown_system")
+
+
+def test_resolve_backend_version_reports_unavailable_sdk(monkeypatch):
+    real_import = builtins.__import__
+
+    def missing_perf_database(name, *args, **kwargs):
+        if name == "aiconfigurator_core.sdk.perf_database":
+            raise ModuleNotFoundError(name="aiconfigurator_core")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", missing_perf_database)
+
+    with pytest.raises(RuntimeError, match=r"aisimulate.*not installed"):
+        resolve_backend_version("vllm", None, "h200_sxm")
 
 
 def test_pad_nextn_accept_rates_defaults_when_omitted():

@@ -10,8 +10,6 @@ from typing import Any, Literal
 from dynamo.llm import KvRouterConfig
 from dynamo.mocker import MockEngineArgs
 
-from .constants import AIC_BACKEND_VERSIONS
-
 
 def _build_candidate_engine_args(
     *,
@@ -26,7 +24,8 @@ def _build_candidate_engine_args(
     payload["worker_type"] = worker_type
     payload["aic_backend"] = backend
     payload["aic_system"] = system
-    payload["aic_backend_version"] = AIC_BACKEND_VERSIONS[backend]
+    # aic_backend_version: a pin in base_args passes through; otherwise replay
+    # materialization resolves it from the installed aisimulate perf database.
     payload["aic_tp_size"] = tp_size
     payload["aic_model_path"] = model
     # Keep engine args as user-intent data until this boundary. In particular,

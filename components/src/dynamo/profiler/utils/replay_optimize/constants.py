@@ -5,10 +5,10 @@ from __future__ import annotations
 
 import os
 
-AIC_BACKEND_VERSIONS = {
-    "vllm": "0.14.0",
-    "sglang": "0.5.6.post2",
-}
+# Backends replay_optimize can evaluate through the AIC perf model. Versions are
+# not pinned here; replay materialization resolves them from the installed
+# aisimulate perf database (dynamo._internal.aic.resolve_backend_version).
+AIC_REPLAY_BACKENDS = frozenset({"vllm", "sglang"})
 
 DEFAULT_OVERLAP_SCORE_CREDITS = (1.0,)
 DEFAULT_PREFILL_LOAD_SCALES = (0.0, 0.25, 0.5, 1.0, 2.0, 4.0)
