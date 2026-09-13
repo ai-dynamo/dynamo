@@ -870,6 +870,22 @@ impl AffinityLease {
             let Some(mut entry) = inner.entries.get_mut(&self.session_id) else {
                 return;
             };
+            // A joined lease released before its initializer commits must not
+            // be counted by that commit, or the binding never idles out.
+            if let AffinityEntry::Initializing {
+                revision,
+                pending_leases,
+                ..
+            } = entry.value_mut()
+            {
+                if *revision == self.revision
+                    && self.version == AffinityVersion::PENDING
+                    && *pending_leases > 0
+                {
+                    *pending_leases -= 1;
+                }
+                return;
+            }
             let AffinityEntry::Bound {
                 target,
                 revision,
@@ -1019,6 +1035,40 @@ mod tests {
             AcquireStep::Held(Hold::Bound { .. }) => panic!("session is already bound"),
             AcquireStep::Wait(_) => panic!("session is being initialized"),
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn joined_lease_released_before_the_commit_is_not_counted() {
+        let table = table();
+        let target = AffinityTarget::new(2, Some(0));
+        let init = initialize(&table);
+        let joined = table
+            .join_initializing("s")
+            .expect("join an initializing session");
+        assert_eq!(table.lease_count("s"), Some(1));
+
+        // The joiner finishes while the initializer is still queued.
+        drop(joined);
+        assert_eq!(
+            table.lease_count("s"),
+            Some(0),
+            "early release uncounts the join"
+        );
+
+        let lease = init.commit(target).expect("commit");
+        assert_eq!(
+            table.lease_count("s"),
+            Some(1),
+            "commit counts only the initializer"
+        );
+        drop(lease);
+        assert_eq!(table.lease_count("s"), Some(0));
+        tokio::time::advance(TTL + Duration::from_secs(1)).await;
+        assert_eq!(
+            table.query_target("s", None).expect("query"),
+            None,
+            "a binding with no live leases idles out"
+        );
     }
 
     #[tokio::test(start_paused = true)]

@@ -26,9 +26,12 @@
 //!   `try_acquire`. A commit that finds another request initializing the
 //!   session joins that initialization instead of waiting: it takes a lease
 //!   that counts once the initializer commits
-//!   (`failover_commit_behind_an_initializing_hold_keeps_a_lease`). When the
-//!   table is full it returns `Ok(None)` and the request routes unpinned
-//!   rather than waiting on a request queued behind this booking. A rejected
+//!   (`failover_commit_behind_an_initializing_hold_keeps_a_lease`); a joiner
+//!   that finishes first is uncounted again
+//!   (`joined_lease_released_before_the_commit_is_not_counted`). When the
+//!   table is full, or the join misses three times, it returns `Ok(None)` and
+//!   the request routes unpinned rather than waiting on a request queued
+//!   behind this booking. A rejected
 //!   commit frees the booking
 //!   (`two_phase_replay_rejects_a_worker_the_session_left`).
 //! - A `Lease` admission installs no index row and records no routing hashes
@@ -623,8 +626,9 @@ impl SelectionCore {
                 // already be initializing the replacement: join it rather
                 // than wait, so this booking holds a lease on the new
                 // binding. The join misses only if that initialization
-                // resolved between the two calls, so retry once.
-                for _ in 0..2 {
+                // resolved between the two calls, so retry a few times before
+                // routing unpinned.
+                for _ in 0..3 {
                     match table.try_acquire(session_id, None) {
                         Ok(AcquireStep::Held(hold)) => {
                             return table
