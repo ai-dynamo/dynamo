@@ -49,7 +49,7 @@ impl HttpFrontend {
         self
     }
 
-    /// Replace the default worker selector with a statically linked native policy.
+    /// Replace the registry-resolved worker-selection policy with a statically linked native one.
     ///
     /// The factory is called when each decode or prefill worker set is constructed, not per
     /// request. Workers must advertise an explicit typed role; legacy untyped cards are rejected
@@ -84,16 +84,14 @@ impl HttpFrontend {
 
         super::initialize_input(&distributed_runtime, &engine_config).await;
 
-        let (require_typed_worker_role, selection_policy) =
-            match self.worker_selection_policy_factory {
-                Some(factory) => (true, SelectionPolicySource::Factory(factory)),
-                None => (false, SelectionPolicySource::Registry),
-            };
+        let selection_policy = match self.worker_selection_policy_factory {
+            Some(factory) => SelectionPolicySource::Factory(factory),
+            None => SelectionPolicySource::Registry,
+        };
         run_with_selection_policy(
             distributed_runtime,
             engine_config,
             self.frontend_route_extensions,
-            require_typed_worker_role,
             selection_policy,
         )
         .await
@@ -126,7 +124,6 @@ async fn run_with_selection_policy(
     distributed_runtime: DistributedRuntime,
     engine_config: EngineConfig,
     frontend_route_extensions: Vec<FrontendRouteExtension>,
-    require_typed_worker_role: bool,
     selection_policy: SelectionPolicySource,
 ) -> anyhow::Result<()> {
     let local_model = engine_config.local_model();
@@ -215,7 +212,6 @@ async fn run_with_selection_policy(
                 model.runtime_config().tokenizer_backend,
                 model.runtime_config().tokenizer_fallback_enabled,
                 generate_engine_capabilities,
-                require_typed_worker_role,
                 selection_policy.clone(),
             )
             .await?;
@@ -305,7 +301,6 @@ async fn run_watcher(
     tokenizer_backend: Option<TokenizerBackend>,
     tokenizer_fallback_enabled: Option<bool>,
     generate_engine_capabilities: Vec<&'static str>,
-    require_typed_worker_role: bool,
     selection_policy: SelectionPolicySource,
 ) -> anyhow::Result<()> {
     // Start the LoRA allocation controller when LoRA serving is enabled. The
@@ -325,7 +320,6 @@ async fn run_watcher(
         chat_engine_factory,
         prefill_load_estimator,
         metrics.clone(),
-        require_typed_worker_role,
         selection_policy,
     );
     watch_obj.set_local_model_path(local_model_path);

@@ -117,7 +117,7 @@ impl RemoteIndexerClient {
     pub async fn find_tiered_matches(
         &self,
         sequence: &[LocalBlockHash],
-    ) -> std::result::Result<TieredMatchDetails, KvRouterError> {
+    ) -> Result<TieredMatchDetails, KvRouterError> {
         if sequence.is_empty() {
             return Ok(TieredMatchDetails::default());
         }
@@ -288,7 +288,7 @@ impl SideIndexer {
     pub(super) async fn find_matches_input(
         &self,
         sequence: HashInput<'_>,
-    ) -> std::result::Result<OverlapScores, KvRouterError> {
+    ) -> Result<OverlapScores, KvRouterError> {
         match self {
             Self::KvIndexer(indexer) => {
                 indexer
@@ -305,7 +305,7 @@ impl SideIndexer {
         &self,
         worker: WorkerWithDpRank,
         hashes: RoutingDecisionHashes,
-    ) -> std::result::Result<(), KvRouterError> {
+    ) -> Result<(), KvRouterError> {
         match self {
             Self::KvIndexer(indexer) => {
                 indexer
@@ -332,7 +332,7 @@ impl SideIndexer {
         &self,
         worker_id: WorkerId,
         dp_rank: DpRank,
-    ) -> std::result::Result<(), KvRouterError> {
+    ) -> Result<(), KvRouterError> {
         match self {
             Self::KvIndexer(indexer) => {
                 indexer
@@ -512,10 +512,7 @@ impl Indexer {
     /// indexer otherwise. `Cleared` events fan out to their applicable physical
     /// indexes according to the event's reset scope. Failures are logged and
     /// the first one is returned after every tier was attempted.
-    pub async fn apply_event_routed(
-        &self,
-        event: RouterEvent,
-    ) -> std::result::Result<(), KvRouterError> {
+    pub async fn apply_event_routed(&self, event: RouterEvent) -> Result<(), KvRouterError> {
         let targets_primary = match event.targets_primary() {
             Ok(targets_primary) => targets_primary,
             Err(_) => {
@@ -604,10 +601,7 @@ impl Indexer {
     /// device event waits for the primary's queue to accept it, and a lower-tier
     /// event is enqueued. Unlike [`Self::apply_event_routed`], the first failure
     /// stops the fan-out.
-    pub async fn try_apply_event(
-        &self,
-        event: RouterEvent,
-    ) -> std::result::Result<(), KvRouterError> {
+    pub async fn try_apply_event(&self, event: RouterEvent) -> Result<(), KvRouterError> {
         let targets_primary = match event.targets_primary() {
             Ok(targets_primary) => targets_primary,
             Err(_) => {
@@ -683,7 +677,7 @@ impl Indexer {
         &self,
         worker_id: WorkerId,
         dp_rank: DpRank,
-    ) -> std::result::Result<(), KvRouterError> {
+    ) -> Result<(), KvRouterError> {
         match self {
             Self::Single {
                 primary,
@@ -832,7 +826,7 @@ impl Indexer {
     pub async fn find_tiered_matches(
         &self,
         sequence: Vec<LocalBlockHash>,
-    ) -> std::result::Result<TieredMatchDetails, KvRouterError> {
+    ) -> Result<TieredMatchDetails, KvRouterError> {
         self.find_tiered_matches_with_options(sequence, LowerTierQueryOptions::default())
             .await
     }
@@ -844,7 +838,7 @@ impl Indexer {
         &self,
         sequence: Vec<LocalBlockHash>,
         options: LowerTierQueryOptions,
-    ) -> std::result::Result<TieredMatchDetails, KvRouterError> {
+    ) -> Result<TieredMatchDetails, KvRouterError> {
         let options = LowerTierQueryOptions {
             retain_kv_transfer_chain: options.retain_kv_transfer_chain
                 && self.supports_kv_transfer_chain_retention(),
@@ -858,7 +852,7 @@ impl Indexer {
         &self,
         sequence: &[LocalBlockHash],
         options: LowerTierQueryOptions,
-    ) -> std::result::Result<TieredMatchDetails, KvRouterError> {
+    ) -> Result<TieredMatchDetails, KvRouterError> {
         let options = LowerTierQueryOptions {
             retain_kv_transfer_chain: options.retain_kv_transfer_chain
                 && self.supports_kv_transfer_chain_retention(),
@@ -871,7 +865,7 @@ impl Indexer {
     /// peer's [`Self::apply_event_routed`]: the primary device-tier dump first,
     /// then every allocated lower-tier indexer's dump with `storage_tier`
     /// retagged to the tier it lives in.
-    pub async fn dump_events(&self) -> std::result::Result<Vec<RouterEvent>, KvRouterError> {
+    pub async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
         let (primary_events, lower_tier_entries) = match self {
             Indexer::Single {
                 primary,
@@ -917,7 +911,7 @@ impl Indexer {
         worker: WorkerWithDpRank,
         incarnation: ApproximateLruIncarnation,
         capacity: Option<usize>,
-    ) -> std::result::Result<(), KvRouterError> {
+    ) -> Result<(), KvRouterError> {
         match self {
             Self::Single { primary, .. } => {
                 primary.set_approximate_lru_capacity_now(worker, incarnation, capacity)
@@ -929,9 +923,7 @@ impl Indexer {
         }
     }
 
-    pub async fn approximate_lru_stats(
-        &self,
-    ) -> std::result::Result<ApproximateLruStats, KvRouterError> {
+    pub async fn approximate_lru_stats(&self) -> Result<ApproximateLruStats, KvRouterError> {
         match self {
             Self::Single { primary, .. } => primary.approximate_lru_stats().await,
             Self::Concurrent { primary, .. } => primary.approximate_lru_stats().await,
@@ -945,7 +937,7 @@ impl TieredMatchProvider for Indexer {
     async fn find_tiered_matches(
         &self,
         sequence: &[LocalBlockHash],
-    ) -> std::result::Result<TieredMatchDetails, KvRouterError> {
+    ) -> Result<TieredMatchDetails, KvRouterError> {
         self.find_tiered_matches_ref_with_options(sequence, LowerTierQueryOptions::default())
             .await
     }
@@ -954,7 +946,7 @@ impl TieredMatchProvider for Indexer {
         &self,
         sequence: &[LocalBlockHash],
         options: LowerTierQueryOptions,
-    ) -> std::result::Result<TieredMatchDetails, KvRouterError> {
+    ) -> Result<TieredMatchDetails, KvRouterError> {
         self.find_tiered_matches_ref_with_options(sequence, options)
             .await
     }

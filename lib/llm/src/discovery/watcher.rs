@@ -203,8 +203,6 @@ pub struct ModelWatcher {
     /// Keep raw pipelines out of default-off and backend-mismatched paths.
     generate_engine_capabilities: Vec<&'static str>,
     selection_policy: SelectionPolicySource,
-    /// Custom selector dispatch cannot infer whether an untyped legacy card is decode or aggregated.
-    require_typed_worker_role: bool,
 }
 
 pub(crate) struct PreparedWorkerSet {
@@ -281,7 +279,6 @@ impl ModelWatcher {
             chat_engine_factory,
             prefill_load_estimator,
             metrics,
-            false,
             SelectionPolicySource::Registry,
         )
     }
@@ -296,7 +293,6 @@ impl ModelWatcher {
         chat_engine_factory: Option<ChatEngineFactoryCallback>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         metrics: Arc<Metrics>,
-        require_typed_worker_role: bool,
         selection_policy: SelectionPolicySource,
     ) -> Self {
         Self {
@@ -316,7 +312,6 @@ impl ModelWatcher {
             tokenizer_fallback_enabled: None,
             generate_engine_capabilities: Vec::new(),
             selection_policy,
-            require_typed_worker_role,
         }
     }
 
@@ -413,7 +408,7 @@ impl ModelWatcher {
         card.download_config(self.local_model_path.as_deref())
             .await?;
 
-        validate_selector_worker_role(card, self.require_typed_worker_role)?;
+        validate_policy_worker_role(card, &self.selection_policy)?;
 
         // Use per-worker-set router config if the worker provided one in its MDC,
         // otherwise fall back to the frontend-level global config. Policy selections
@@ -1254,11 +1249,13 @@ fn effective_router_config<'a>(
     Cow::Owned(effective)
 }
 
-fn validate_selector_worker_role(
+/// A custom policy factory cannot infer whether an untyped legacy card is
+/// decode or aggregated, so it requires an explicit `worker_type`.
+fn validate_policy_worker_role(
     card: &ModelDeploymentCard,
-    require_typed_worker_role: bool,
+    policy: &SelectionPolicySource,
 ) -> anyhow::Result<()> {
-    if require_typed_worker_role && card.worker_type.is_none() {
+    if matches!(policy, SelectionPolicySource::Factory(_)) && card.worker_type.is_none() {
         anyhow::bail!(
             "custom worker-selection policies require model cards with an explicit worker_type"
         );
@@ -2384,12 +2381,16 @@ mod tests {
 
     #[test]
     fn custom_selector_requires_explicit_worker_type() {
+        let registry = SelectionPolicySource::Registry;
+        let factory = SelectionPolicySource::Factory(Arc::new(|_, _, _| {
+            unreachable!("role validation never constructs the policy")
+        }));
         let mut card = ModelDeploymentCard::with_name_only("model");
-        assert!(validate_selector_worker_role(&card, false).is_ok());
-        assert!(validate_selector_worker_role(&card, true).is_err());
+        assert!(validate_policy_worker_role(&card, &registry).is_ok());
+        assert!(validate_policy_worker_role(&card, &factory).is_err());
 
         card.worker_type = Some(WorkerType::Decode);
-        assert!(validate_selector_worker_role(&card, true).is_ok());
+        assert!(validate_policy_worker_role(&card, &factory).is_ok());
     }
 
     #[test]

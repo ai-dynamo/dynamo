@@ -145,6 +145,8 @@ impl CatalogReconciler {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use crate::config::KvRouterConfig;
     use crate::services::selection::SelectionCacheConfig;
@@ -190,37 +192,81 @@ mod tests {
             .map(|record| record.lifecycle)
     }
 
+    /// Counts observer callbacks so tests can assert convergence (a skipped
+    /// upsert) and stale deletion through the public surface.
+    #[derive(Default)]
+    struct Counter {
+        upserted: AtomicUsize,
+        removed: AtomicUsize,
+    }
+
+    impl Counter {
+        fn upserts(&self) -> usize {
+            self.upserted.load(Ordering::SeqCst)
+        }
+
+        fn removals(&self) -> usize {
+            self.removed.load(Ordering::SeqCst)
+        }
+    }
+
+    impl CatalogObserver for Counter {
+        fn upserted(&self, _record: &WorkerCatalogRecord) {
+            self.upserted.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn removed(&self, _record: &WorkerCatalogRecord) {
+            self.removed.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn reconciler(core: &Arc<SelectionCore>) -> (CatalogReconciler, Arc<Counter>) {
+        let counter = Arc::new(Counter::default());
+        let reconciler = CatalogReconciler::new(Arc::clone(core))
+            .with_observer(Arc::clone(&counter) as Arc<dyn CatalogObserver>);
+        (reconciler, counter)
+    }
+
     #[tokio::test]
     async fn incomplete_worker_is_retried_and_deleted_when_it_leaves() {
         let core = core();
-        let mut reconciler = CatalogReconciler::new(Arc::clone(&core));
+        let (mut reconciler, counter) = reconciler(&core);
 
         reconciler.apply(vec![incomplete(1)]).await.expect("apply");
-        assert!(reconciler.converged.is_empty());
+        assert_eq!(counter.upserts(), 1);
         assert_eq!(lifecycle(&core, 1), Some(WorkerLifecycle::Incomplete));
 
         // The same snapshot re-upserts rather than skipping the unconverged worker.
         reconciler.apply(vec![incomplete(1)]).await.expect("apply");
-        assert!(reconciler.converged.is_empty());
-        assert!(reconciler.tracked.contains(&1));
+        assert_eq!(counter.upserts(), 2);
 
+        // The never-schedulable worker was still tracked, so leaving deletes it.
         reconciler.apply(Vec::new()).await.expect("apply");
         assert_eq!(lifecycle(&core, 1), Some(WorkerLifecycle::Unschedulable));
-        assert!(reconciler.tracked.is_empty());
+        assert_eq!(counter.removals(), 1);
+
+        // Nothing is tracked any more: an empty snapshot deletes nothing.
+        reconciler.apply(Vec::new()).await.expect("apply");
+        assert_eq!(counter.removals(), 1);
     }
 
     #[tokio::test]
     async fn schedulable_worker_converges_and_changed_record_reupserts() {
         let core = core();
-        let mut reconciler = CatalogReconciler::new(Arc::clone(&core));
+        let (mut reconciler, counter) = reconciler(&core);
 
         reconciler.apply(vec![schedulable(1)]).await.expect("apply");
         assert_eq!(lifecycle(&core, 1), Some(WorkerLifecycle::Schedulable));
-        assert!(reconciler.converged.contains_key(&1));
+        assert_eq!(counter.upserts(), 1);
+
+        // An identical desired record is converged and skips its upsert.
+        reconciler.apply(vec![schedulable(1)]).await.expect("apply");
+        assert_eq!(counter.upserts(), 1);
 
         let mut moved = schedulable(1);
         moved.endpoint = Some("http://10.0.0.9:8000".to_string());
         reconciler.apply(vec![moved]).await.expect("apply");
+        assert_eq!(counter.upserts(), 2);
         let record = core
             .list_workers(None, None)
             .into_iter()

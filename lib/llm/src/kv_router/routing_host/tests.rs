@@ -1390,6 +1390,42 @@ async fn track_request(
     (request, selection, guard)
 }
 
+/// Scheduler-reported loads with no prompt, the way the reservation tests read them.
+async fn potential_loads(router: &RoutingHost) -> Vec<dynamo_kv_router::protocols::PotentialLoad> {
+    router
+        .kv_router()
+        .get_potential_loads(&[], None, None, None, None)
+        .await
+        .unwrap()
+}
+
+fn active_requests_for(
+    loads: &[dynamo_kv_router::protocols::PotentialLoad],
+    worker_id: u64,
+    dp_rank: u32,
+) -> usize {
+    loads
+        .iter()
+        .find(|load| load.worker_id == worker_id && load.dp_rank == dp_rank)
+        .expect("selected worker must be reported")
+        .active_requests
+}
+
+/// Preview and admit one decode route, the two stages the plan tests exercise.
+async fn plan_decode_route(
+    router: &RoutingHost,
+    request: &Context<PreprocessedRequest>,
+) -> RoutePlan {
+    let preview = router
+        .preview_kv_route(request, RequestPhase::Decode)
+        .await
+        .expect("decode preview should select one request");
+    router
+        .plan_kv_route_from_preview(request, preview)
+        .await
+        .expect("decode plan should admit one request")
+}
+
 #[tokio::test]
 #[serial_test::serial]
 async fn route_plan_from_preview_holds_and_releases_the_decode_reservation() {
@@ -1397,40 +1433,18 @@ async fn route_plan_from_preview_holds_and_releases_the_decode_reservation() {
     let request = Context::new(request());
     let requests_started_before = router.request_metrics.requests_started_total().get();
 
-    let preview = router
-        .preview_kv_route(&request, RequestPhase::Decode)
-        .await
-        .expect("decode preview should select one request");
-    let plan = router
-        .plan_kv_route_from_preview(&request, preview)
-        .await
-        .expect("decode plan should admit one request");
+    let plan = plan_decode_route(&router, &request).await;
     assert_eq!(plan.signals.worker.worker_id, 7);
     assert_eq!(
         router.request_metrics.requests_started_total().get(),
         requests_started_before,
         "a topology decision is not a started request"
     );
-    let admitted_loads = router
-        .kv_router()
-        .get_potential_loads(&[], None, None, None, None)
-        .await
-        .unwrap();
-    assert_eq!(
-        admitted_loads
-            .iter()
-            .find(|load| load.worker_id == 7 && load.dp_rank == 0)
-            .expect("selected worker must be reported")
-            .active_requests,
-        1
-    );
+    let admitted_loads = potential_loads(&router).await;
+    assert_eq!(active_requests_for(&admitted_loads, 7, 0), 1);
 
     plan.abort().await;
-    let released_loads = router
-        .kv_router()
-        .get_potential_loads(&[], None, None, None, None)
-        .await
-        .unwrap();
+    let released_loads = potential_loads(&router).await;
     assert!(
         released_loads.iter().all(|load| load.active_requests == 0),
         "abandoned plans must release their scheduler reservation: {released_loads:?}"
@@ -1457,11 +1471,7 @@ async fn route_preview_does_not_admit_a_request() {
         .await
         .expect("decode preview should select one request");
     assert_eq!(preview.signals.worker.worker_id, 7);
-    let loads = router
-        .kv_router()
-        .get_potential_loads(&[], None, None, None, None)
-        .await
-        .unwrap();
+    let loads = potential_loads(&router).await;
     assert!(loads.iter().all(|load| load.active_requests == 0));
     assert_eq!(
         router.request_metrics.requests_started_total().get(),
@@ -1488,20 +1498,9 @@ async fn route_plan_from_preview_admits_the_previewed_worker() {
         .await
         .unwrap();
     assert_eq!(plan.signals.worker, previewed_worker);
-    let loads = router
-        .kv_router()
-        .get_potential_loads(&[], None, None, None, None)
-        .await
-        .unwrap();
+    let loads = potential_loads(&router).await;
     assert_eq!(
-        loads
-            .iter()
-            .find(|load| {
-                load.worker_id == previewed_worker.worker_id
-                    && load.dp_rank == previewed_worker.dp_rank
-            })
-            .expect("previewed worker must be reported")
-            .active_requests,
+        active_requests_for(&loads, previewed_worker.worker_id, previewed_worker.dp_rank),
         1
     );
     assert_eq!(
@@ -1547,25 +1546,14 @@ async fn planned_dispatch_transfers_the_reservation_to_request_cleanup() {
     let (router, runtime) = router(None).await;
     let requests_started_before = router.request_metrics.requests_started_total().get();
     let request = Context::new(request());
-    let preview = router
-        .preview_kv_route(&request, RequestPhase::Decode)
-        .await
-        .unwrap();
-    let plan = router
-        .plan_kv_route_from_preview(&request, preview)
-        .await
-        .unwrap();
+    let plan = plan_decode_route(&router, &request).await;
 
     assert!(router.dispatch_kv_plan(request, plan).await.is_err());
     assert_eq!(
         router.request_metrics.requests_started_total().get(),
         requests_started_before + 1
     );
-    let loads = router
-        .kv_router()
-        .get_potential_loads(&[], None, None, None, None)
-        .await
-        .unwrap();
+    let loads = potential_loads(&router).await;
     assert!(loads.iter().all(|load| load.active_requests == 0));
 
     drop(router);
@@ -1580,11 +1568,7 @@ async fn prefill_busy_probe_does_not_admit_a_request() {
     let requests_started_before = router.request_metrics.requests_started_total().get();
 
     assert!(!router.prefill_worker_busy(&request, 0.5).await.unwrap());
-    let loads = router
-        .kv_router()
-        .get_potential_loads(&[], None, None, None, None)
-        .await
-        .unwrap();
+    let loads = potential_loads(&router).await;
     assert!(loads.iter().all(|load| load.active_requests == 0));
     assert_eq!(
         router.request_metrics.requests_started_total().get(),
@@ -1671,11 +1655,7 @@ async fn router_request_counters_follow_admission_and_completion_lifecycle() {
     assert_eq!(metrics.requests_started_total().get(), started_before + 1);
     assert_eq!(metrics.requests_total.get(), completed_before);
     // The booking is held from admission until the guard finishes.
-    let loads = router
-        .kv_router()
-        .get_potential_loads(&[], None, None, None, None)
-        .await
-        .unwrap();
+    let loads = potential_loads(&router).await;
     assert_eq!(
         loads
             .iter()
@@ -1691,11 +1671,7 @@ async fn router_request_counters_follow_admission_and_completion_lifecycle() {
     drop(cancelled_guard);
     assert_eq!(metrics.requests_started_total().get(), started_before + 1);
     assert_eq!(metrics.requests_total.get(), completed_before);
-    let loads = router
-        .kv_router()
-        .get_potential_loads(&[], None, None, None, None)
-        .await
-        .unwrap();
+    let loads = potential_loads(&router).await;
     assert!(
         loads.iter().all(|load| load.active_requests == 0),
         "an aborted guard frees its booking: {loads:?}"
