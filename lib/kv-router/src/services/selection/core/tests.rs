@@ -2173,6 +2173,69 @@ async fn concurrent_holds_on_a_departed_worker_both_land_on_the_replacement() {
     );
 }
 
+/// Leases on session `s` in the default partition's table.
+fn lease_count(core: &SelectionCore, session_id: &str) -> Option<usize> {
+    let entry = core.entry(&default_key()).expect("default partition");
+    let table = entry.affinity.get().expect("affinity table configured");
+    table.lease_count(session_id)
+}
+
+/// r2 holds the departed binding when r3 re-initializes the session; r2's
+/// commit then finds r3's initialization in progress and must join it, not
+/// route without a lease, so the replacement binding cannot idle out while
+/// r2 is still active.
+#[tokio::test]
+async fn failover_commit_behind_an_initializing_hold_keeps_a_lease() {
+    let (core, first) = bound_session(SessionAffinityMode::Hard).await;
+    let key = default_key();
+    let replacement = if first.worker_id == 1 { 2 } else { 1 };
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+
+    // r2 takes `Bound{w1}` and is queued in the scheduler actor.
+    let mut r2 = Box::pin(core.select_and_reserve(session_reservation("r2", "s")));
+    assert!(r2.as_mut().poll(&mut context).is_pending());
+    core.catalog
+        .set_lifecycle(first.worker_id, WorkerLifecycle::Draining, Vec::new());
+    core.publish_scheduler_config(&key);
+
+    // r3 sees w1 unschedulable, invalidates the binding, and holds
+    // `Initialize` for as long as it sits in the actor unpolled.
+    let mut r3 = Box::pin(core.select_and_reserve(session_reservation("r3", "s")));
+    assert!(r3.as_mut().poll(&mut context).is_pending());
+    assert_eq!(bound_worker(&core, "s"), None, "r3 is initializing");
+    assert_eq!(lease_count(&core, "s"), Some(0));
+
+    // r2's `Hard` commit fails, the worker departed, and `try_acquire` finds
+    // r3's initialization: r2 joins it.
+    let r2 = r2
+        .await
+        .expect("a departure after the hold is not a client fault");
+    assert_eq!(r2.worker_id, replacement);
+    assert_eq!(bound_worker(&core, "s"), None, "r3 has not committed yet");
+    assert_eq!(
+        lease_count(&core, "s"),
+        Some(1),
+        "r2 must hold a pending lease on r3's initialization"
+    );
+
+    let r3 = r3.await.expect("r3 binds the replacement");
+    assert_eq!(r3.worker_id, replacement);
+    assert_eq!(bound_worker(&core, "s"), Some(replacement));
+    assert_eq!(lease_count(&core, "s"), Some(2));
+
+    core.free_reservation("r3").await.expect("free r3");
+    wait_until("r3 lease release", || lease_count(&core, "s") == Some(1)).await;
+    assert_eq!(bound_worker(&core, "s"), Some(replacement));
+
+    core.free_reservation("r2").await.expect("free r2");
+    wait_until("r2 lease release", || lease_count(&core, "s") == Some(0)).await;
+    // Idle, not gone: the binding lasts until the TTL.
+    assert_eq!(bound_worker(&core, "s"), Some(replacement));
+    let entry = core.entry(&key).expect("default partition");
+    entry.affinity.get().expect("table").expire_for_test("s");
+    assert_eq!(bound_worker(&core, "s"), None);
+}
+
 #[tokio::test]
 async fn two_phase_reservation_binds_the_session() {
     let core = core_with_session_affinity();

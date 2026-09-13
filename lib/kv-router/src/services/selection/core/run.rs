@@ -23,10 +23,13 @@
 //!   (`session_worker_departing_after_the_hold_reinitializes_the_session`) and
 //!   the binding is committed while the booking is held. The commit never
 //!   waits: `commit_session` is a synchronous fn that re-binds only through
-//!   `try_acquire`, so when the table cannot bind at commit time (`try_acquire`
-//!   returns `Wait`, or the table is full) it returns `Ok(None)` and the
-//!   request routes unpinned rather than waiting on a request queued behind
-//!   this booking. A rejected commit frees the booking
+//!   `try_acquire`. A commit that finds another request initializing the
+//!   session joins that initialization instead of waiting: it takes a lease
+//!   that counts once the initializer commits
+//!   (`failover_commit_behind_an_initializing_hold_keeps_a_lease`). When the
+//!   table is full it returns `Ok(None)` and the request routes unpinned
+//!   rather than waiting on a request queued behind this booking. A rejected
+//!   commit frees the booking
 //!   (`two_phase_replay_rejects_a_worker_the_session_left`).
 //! - A `Lease` admission installs no index row and records no routing hashes
 //!   in the core; the host owns both
@@ -616,15 +619,29 @@ impl SelectionCore {
                 if !departed {
                     return Err(affinity_error(error));
                 }
-                // `commit` invalidated the stale binding.
-                match table.try_acquire(session_id, None) {
-                    Ok(AcquireStep::Held(hold)) => table
-                        .commit(hold, dispatched)
-                        .map(Some)
-                        .map_err(affinity_error),
-                    Ok(AcquireStep::Wait(_)) | Err(AffinityError::ResourceExhausted(_)) => Ok(None),
-                    Err(error) => Err(affinity_error(error)),
+                // `commit` invalidated the stale binding. Another request may
+                // already be initializing the replacement: join it rather
+                // than wait, so this booking holds a lease on the new
+                // binding. The join misses only if that initialization
+                // resolved between the two calls, so retry once.
+                for _ in 0..2 {
+                    match table.try_acquire(session_id, None) {
+                        Ok(AcquireStep::Held(hold)) => {
+                            return table
+                                .commit(hold, dispatched)
+                                .map(Some)
+                                .map_err(affinity_error);
+                        }
+                        Ok(AcquireStep::Wait(_)) => {
+                            if let Some(lease) = table.join_initializing(session_id) {
+                                return Ok(Some(lease));
+                            }
+                        }
+                        Err(AffinityError::ResourceExhausted(_)) => return Ok(None),
+                        Err(error) => return Err(affinity_error(error)),
+                    }
                 }
+                Ok(None)
             }
         }
     }

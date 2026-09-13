@@ -71,6 +71,15 @@ pub struct AffinityVersion {
     pub writer_id: u64,
 }
 
+impl AffinityVersion {
+    /// Version of a lease joined to an initialization that has not committed
+    /// yet; it matches no stored binding, so such a lease can only release.
+    pub const PENDING: Self = Self {
+        sequence: u64::MAX,
+        writer_id: u64::MAX,
+    };
+}
+
 /// Receives every binding this table publishes for its replicas.
 pub trait AffinityReplicaSink: Send + Sync {
     fn publish(&self, session_id: &str, target: AffinityTarget, version: AffinityVersion);
@@ -92,6 +101,9 @@ enum AffinityEntry {
     Initializing {
         revision: u64,
         notify: Arc<Notify>,
+        /// Leases handed out by [`SessionAffinity::join_initializing`]; they
+        /// count as active once the initializer commits.
+        pending_leases: usize,
     },
     Bound {
         target: AffinityTarget,
@@ -333,6 +345,7 @@ impl SessionAffinity {
                 entry.insert(AffinityEntry::Initializing {
                     revision,
                     notify: notify.clone(),
+                    pending_leases: 0,
                 });
                 Ok(AcquireStep::Held(Hold::Initialize(
                     AffinityInitialization {
@@ -369,6 +382,7 @@ impl SessionAffinity {
                     *entry.get_mut() = AffinityEntry::Initializing {
                         revision,
                         notify: notify.clone(),
+                        pending_leases: 0,
                     };
                     Ok(AcquireStep::Held(Hold::Initialize(
                         AffinityInitialization {
@@ -425,6 +439,31 @@ impl SessionAffinity {
                 AcquireStep::Held(hold) => return Ok(hold),
             }
         }
+    }
+
+    /// Take a lease on the binding another request is initializing, so this
+    /// request's use counts once that commit lands and the binding cannot
+    /// idle out under it. `None` when the entry is not initializing (the
+    /// caller falls back to [`Self::try_acquire`]). If the initializer drops
+    /// uncommitted, the lease releases as a no-op.
+    pub fn join_initializing(&self, session_id: &str) -> Option<AffinityLease> {
+        let mut entry = self.inner.entries.get_mut(session_id)?;
+        let AffinityEntry::Initializing {
+            revision,
+            pending_leases,
+            ..
+        } = entry.value_mut()
+        else {
+            return None;
+        };
+        *pending_leases += 1;
+        Some(AffinityLease {
+            coordinator: Arc::downgrade(&self.inner),
+            session_id: session_id.to_string(),
+            revision: *revision,
+            version: AffinityVersion::PENDING,
+            active: true,
+        })
     }
 
     /// Bind the held session to `dispatched`. A `Bound` session dispatched
@@ -562,6 +601,16 @@ impl SessionAffinity {
     pub fn next_version(&self) -> AffinityVersion {
         self.inner.next_version()
     }
+
+    /// Leases on `session_id`: pending joiners while initializing, active
+    /// leases once bound. `None` when there is no entry.
+    pub fn lease_count(&self, session_id: &str) -> Option<usize> {
+        let entry = self.inner.entries.get(session_id)?;
+        Some(match entry.value() {
+            AffinityEntry::Initializing { pending_leases, .. } => *pending_leases,
+            AffinityEntry::Bound { active_leases, .. } => *active_leases,
+        })
+    }
 }
 
 impl Inner {
@@ -690,10 +739,17 @@ impl AffinityInitialization {
                 "session affinity initialization was cancelled".to_string(),
             ));
         };
-        if !matches!(
-            entry.value(),
-            AffinityEntry::Initializing { revision, .. } if *revision == self.revision
-        ) {
+        let AffinityEntry::Initializing {
+            revision,
+            pending_leases,
+            ..
+        } = entry.value()
+        else {
+            return Err(AffinityError::InvalidArgument(
+                "session affinity initialization changed".to_string(),
+            ));
+        };
+        if *revision != self.revision {
             return Err(AffinityError::InvalidArgument(
                 "session affinity initialization changed".to_string(),
             ));
@@ -703,7 +759,8 @@ impl AffinityInitialization {
             target,
             revision: self.revision,
             version,
-            active_leases: 1,
+            // Joined leases become live uses of the binding they waited for.
+            active_leases: 1 + pending_leases,
             idle_deadline: Instant::now() + inner.ttl,
         };
         drop(entry);
@@ -827,7 +884,9 @@ impl AffinityLease {
                 return;
             }
             *active_leases -= 1;
-            if *version != self.version {
+            // A joined lease was a use of whatever binding the initializer
+            // committed, so it refreshes that binding's idle deadline.
+            if *version != self.version && self.version != AffinityVersion::PENDING {
                 return;
             }
             *idle_deadline = Instant::now() + inner.ttl;
@@ -942,4 +1001,94 @@ pub fn validate_dispatch_target(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TTL: Duration = Duration::from_secs(10);
+
+    fn table() -> SessionAffinity {
+        SessionAffinity::with_config(SessionAffinityConfig::new(TTL)).expect("affinity table")
+    }
+
+    fn initialize(table: &SessionAffinity) -> AffinityInitialization {
+        match table.try_acquire("s", None).expect("acquire") {
+            AcquireStep::Held(Hold::Initialize(init)) => init,
+            AcquireStep::Held(Hold::Bound { .. }) => panic!("session is already bound"),
+            AcquireStep::Wait(_) => panic!("session is being initialized"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn joined_lease_counts_once_the_competing_initialization_commits() {
+        let table = table();
+        let target = AffinityTarget::new(2, Some(0));
+        let init = initialize(&table);
+        let joined = table
+            .join_initializing("s")
+            .expect("join an initializing session");
+        assert_eq!(table.lease_count("s"), Some(1));
+        assert!(
+            table.join_initializing("x").is_none(),
+            "no join without an initializer"
+        );
+
+        let lease = init.commit(target).expect("commit");
+        assert_eq!(table.lease_count("s"), Some(2));
+        assert_eq!(table.query_target("s", None).expect("query"), Some(target));
+
+        drop(lease);
+        assert_eq!(table.lease_count("s"), Some(1));
+        // The joiner's release is a use of the binding: it refreshes the idle
+        // deadline, so the binding outlives the initializer's own TTL.
+        tokio::time::advance(TTL - Duration::from_secs(1)).await;
+        drop(joined);
+        assert_eq!(table.lease_count("s"), Some(0));
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            table.query_target("s", None).expect("query"),
+            Some(target),
+            "joined lease release must refresh the idle deadline"
+        );
+        tokio::time::advance(TTL).await;
+        assert_eq!(table.query_target("s", None).expect("query"), None);
+        assert!(
+            matches!(
+                table.try_acquire("s", None).expect("acquire"),
+                AcquireStep::Held(Hold::Initialize(_))
+            ),
+            "an idled binding re-initializes"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn joined_lease_is_a_noop_after_the_initializer_drops() {
+        let table = table();
+        let init = initialize(&table);
+        let joined = table
+            .join_initializing("s")
+            .expect("join an initializing session");
+        assert_eq!(table.entry_count(), 1);
+
+        drop(init);
+        assert_eq!(
+            table.entry_count(),
+            0,
+            "a dropped initializer frees the slot"
+        );
+        assert_eq!(table.lease_count("s"), None);
+        drop(joined);
+        assert_eq!(table.entry_count(), 0);
+
+        // The session is re-initializable and the stale joiner left no count.
+        let init = initialize(&table);
+        let lease = init
+            .commit(AffinityTarget::new(3, Some(0)))
+            .expect("commit");
+        assert_eq!(table.lease_count("s"), Some(1));
+        drop(lease);
+        assert_eq!(table.lease_count("s"), Some(0));
+    }
 }
