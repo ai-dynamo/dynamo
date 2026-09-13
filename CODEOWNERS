@@ -192,6 +192,8 @@
 /tests/basic/                                                                                           @ai-dynamo/dynamo-runtime-codeowners
 /tests/serve/                                                                                           @ai-dynamo/dynamo-runtime-codeowners
 /tests/utils/                                                                                           @ai-dynamo/dynamo-runtime-codeowners
+/lib/AGENTS.md                                                                                          @ai-dynamo/dynamo-runtime-codeowners
+/lib/CLAUDE.md                                                                                          @ai-dynamo/dynamo-runtime-codeowners
 /lib/bindings/                                                                                          @ai-dynamo/dynamo-runtime-codeowners
 /tests/parity/                                                                                          @ai-dynamo/dynamo-runtime-codeowners
 /lib/llm/tests/                                                                                         @ai-dynamo/dynamo-runtime-codeowners
@@ -241,6 +243,8 @@
 /components/src/dynamo/common/                                                                          @ai-dynamo/dynamo-runtime-codeowners
 /tests/test_models_dir_flag.py                                                                          @ai-dynamo/dynamo-runtime-codeowners
 /tests/report_pytest_markers.py                                                                         @ai-dynamo/dynamo-runtime-codeowners
+/components/src/dynamo/AGENTS.md                                                                        @ai-dynamo/dynamo-runtime-codeowners
+/components/src/dynamo/CLAUDE.md                                                                        @ai-dynamo/dynamo-runtime-codeowners
 /examples/backends/tritonserver/                                                                        @ai-dynamo/dynamo-runtime-codeowners
 /tests/serve/multimodal_profiles/                                                                       @ai-dynamo/dynamo-runtime-codeowners
 /tests/test_predownload_models.py                                                                       @ai-dynamo/dynamo-runtime-codeowners
@@ -323,6 +327,8 @@
 # === operator  (@ai-dynamo/dynamo-operator-codeowners) ===
 /deploy/helm/                                                                                           @ai-dynamo/dynamo-operator-codeowners
 /deploy/utils/                                                                                          @ai-dynamo/dynamo-operator-codeowners
+/deploy/AGENTS.md                                                                                       @ai-dynamo/dynamo-operator-codeowners
+/deploy/CLAUDE.md                                                                                       @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/                                                                                       @ai-dynamo/dynamo-operator-codeowners
 /deploy/__init__.py                                                                                     @ai-dynamo/dynamo-operator-codeowners
 /deploy/helm/charts/                                                                                    @ai-dynamo/dynamo-operator-codeowners

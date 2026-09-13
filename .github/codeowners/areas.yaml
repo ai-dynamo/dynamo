@@ -224,6 +224,8 @@ areas:
 - label: runtime
   github_team: '@ai-dynamo/dynamo-runtime-codeowners'
   path_globs:
+  - components/src/dynamo/AGENTS.md
+  - components/src/dynamo/CLAUDE.md
   - components/src/dynamo/common/
   - components/src/dynamo/common/backend/
   - components/src/dynamo/common/config_dump/
@@ -236,6 +238,8 @@ areas:
   - examples/backends/tritonserver/
   - examples/common/
   - examples/custom_backend/
+  - lib/AGENTS.md
+  - lib/CLAUDE.md
   - lib/backend-common/
   - lib/backend-common/examples/
   - lib/sidecar/dynamo-sidecar
@@ -384,6 +388,8 @@ areas:
 - label: operator
   github_team: '@ai-dynamo/dynamo-operator-codeowners'
   path_globs:
+  - deploy/AGENTS.md
+  - deploy/CLAUDE.md
   - deploy/CONTRIBUTING.md
   - deploy/__init__.py
   - deploy/helm/
