@@ -70,7 +70,7 @@ Each target below is an NVIDIA Dynamo + vLLM deployment of Z.AI's GLM-5.3-Flash,
 
 - A Kubernetes cluster with the Dynamo platform installed and GB200 GPUs available: 4x on one ARM64 node for aggregated, or 8x across two ARM64 nodes for disaggregated. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
 - The NVIDIA DRA driver with ComputeDomain support installed. Both GB200 targets require a ComputeDomain spanning the full NVL72 rack.
-- Access to `zai-org/GLM-5.3-Flash` and the `vllm/vllm-openai:glm53-flash` image.
+- Access to `zai-org/GLM-5.3-Flash` and the `vllm/vllm-openai:glm53-flash` image, which the manifests pin by digest.
 - A ReadWriteMany PVC named `model-cache`, populated with the checkpoint in the standard Hugging Face cache layout.
 
 </div>
@@ -79,7 +79,7 @@ Each target below is an NVIDIA Dynamo + vLLM deployment of Z.AI's GLM-5.3-Flash,
 
 - A Kubernetes cluster with the Dynamo platform installed and H200 GPUs available: 8x on one node for aggregated, or 16x across two nodes for disaggregated. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
 - Eight RDMA resource claims on each GPU node for disaggregated serving. Update `rdma/ib` if your device plugin advertises a different resource name.
-- Access to `zai-org/GLM-5.3-Flash` and the `vllm/vllm-openai:glm53-flash` image.
+- Access to `zai-org/GLM-5.3-Flash` and the `vllm/vllm-openai:glm53-flash` image, which the manifests pin by digest.
 - A ReadWriteMany PVC named `model-cache`, populated with the checkpoint in the standard Hugging Face cache layout.
 
 </div>
