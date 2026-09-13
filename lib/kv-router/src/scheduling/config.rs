@@ -936,13 +936,12 @@ pub struct KvRouterConfig {
     /// maximum overlap.
     pub router_predicted_ttl_secs: Option<f64>,
 
-    /// Session-affinity TTL in seconds. Populated by `kv_router_config_from_lookup()`
-    /// via `DYN_ROUTER_SESSION_AFFINITY_TTL_SECS` (EPP path only). The Python/DGD
-    /// path sets session affinity on `RouterConfig` instead.
+    /// Session-affinity TTL in seconds (`DYN_ROUTER_SESSION_AFFINITY_TTL_SECS`).
+    /// `None` disables session affinity. Must be finite and in [1, 31536000].
     #[serde(skip)]
     pub session_affinity_ttl_secs: Option<f64>,
 
-    /// Session-affinity binding mode. EPP path only; see `session_affinity_ttl_secs`.
+    /// Session-affinity binding mode (`DYN_ROUTER_SESSION_AFFINITY_MODE`).
     #[serde(skip)]
     pub session_affinity_mode: SessionAffinityMode,
 
