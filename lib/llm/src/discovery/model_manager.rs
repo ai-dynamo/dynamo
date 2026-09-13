@@ -15,7 +15,7 @@ use dynamo_kv_router::{
     PrefillLoadEstimator,
     config::KvRouterConfig,
     protocols::{KvTransferEnforcement, RoutingConstraints, WorkerId, WorkerWithDpRank},
-    selector::{WorkerInputs, WorkerSelector},
+    selector::WorkerInputs,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -35,7 +35,7 @@ use dynamo_runtime::{
 
 use crate::{
     kv_router::{
-        KvEventSourceRequirement, KvRouter, router_endpoint_id, scheduler::DefaultWorkerSelector,
+        KvEventSourceRequirement, KvRouter, SelectionPolicySource, router_endpoint_id,
         shared_cache::HicacheSharedKvCache,
     },
     local_model::runtime_config::{
@@ -1935,11 +1935,10 @@ impl ModelManager {
         model_name: Option<String>,
         is_eagle: bool,
     ) -> anyhow::Result<Arc<KvRouter>> {
-        let selector = DefaultWorkerSelector::new(kv_router_config.clone(), metric_worker_type);
-        self.kv_chooser_for_with_selector(
+        self.kv_chooser_for_with_policy(
             endpoint,
             kv_cache_block_size,
-            selector,
+            SelectionPolicySource::Registry,
             kv_router_config,
             prefill_load_estimator,
             worker_role,
@@ -1952,33 +1951,26 @@ impl ModelManager {
 
     /// Construct a KV chooser with a selector resolved by the router host at startup.
     #[allow(clippy::too_many_arguments)]
-    pub async fn kv_chooser_for_with_selector<Sel>(
+    pub async fn kv_chooser_for_with_policy(
         &self,
         endpoint: &Endpoint,
         kv_cache_block_size: u32,
-        selector: Sel,
+        policy: SelectionPolicySource,
         kv_router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         worker_role: Option<WorkerType>,
         metric_worker_type: &'static str,
         model_name: Option<String>,
         is_eagle: bool,
-    ) -> anyhow::Result<Arc<KvRouter<Sel>>>
-    where
-        Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-    {
+    ) -> anyhow::Result<Arc<KvRouter>> {
         let client = endpoint.client().await?;
-        let source = crate::kv_router::RouterLoadSource::from_worker_role_or_metric(
-            worker_role,
-            metric_worker_type,
-        );
         let parent_token = endpoint.component().drt().child_token();
         let scheduler_load =
-            crate::kv_router::SchedulerLoadSender::disabled(source, parent_token.child_token());
-        self.kv_chooser_for_with_selector_and_client(
+            crate::kv_router::SchedulerLoadSender::disabled(parent_token.child_token());
+        self.kv_chooser_for_with_policy_and_client(
             client,
             kv_cache_block_size,
-            selector,
+            policy,
             kv_router_config,
             prefill_load_estimator,
             worker_role,
@@ -2027,11 +2019,10 @@ impl ModelManager {
         model_name: Option<String>,
         is_eagle: bool,
     ) -> anyhow::Result<crate::kv_router::ManagedKvRouter> {
-        let selector = DefaultWorkerSelector::new(kv_router_config.clone(), metric_worker_type);
-        self.managed_kv_router_for_with_selector(
+        self.managed_kv_router_for_with_policy(
             endpoint,
             kv_cache_block_size,
-            selector,
+            SelectionPolicySource::Registry,
             kv_router_config,
             prefill_load_estimator,
             worker_role,
@@ -2044,21 +2035,18 @@ impl ModelManager {
 
     /// Construct a managed KV router with a selector resolved by the routing host at startup.
     #[allow(clippy::too_many_arguments)]
-    pub async fn managed_kv_router_for_with_selector<Sel>(
+    pub async fn managed_kv_router_for_with_policy(
         &self,
         endpoint: &Endpoint,
         kv_cache_block_size: u32,
-        selector: Sel,
+        policy: SelectionPolicySource,
         kv_router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         worker_role: Option<WorkerType>,
         metric_worker_type: &'static str,
         model_name: Option<String>,
         is_eagle: bool,
-    ) -> anyhow::Result<crate::kv_router::ManagedKvRouter<Sel>>
-    where
-        Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-    {
+    ) -> anyhow::Result<crate::kv_router::ManagedKvRouter> {
         let client = endpoint.client().await?;
         let source = crate::kv_router::RouterLoadSource::from_worker_role_or_metric(
             worker_role,
@@ -2073,10 +2061,10 @@ impl ModelManager {
         )
         .await?;
         let router = self
-            .kv_chooser_for_with_selector_and_client(
+            .kv_chooser_for_with_policy_and_client(
                 client,
                 kv_cache_block_size,
-                selector,
+                policy,
                 kv_router_config,
                 prefill_load_estimator,
                 worker_role,
@@ -2091,11 +2079,11 @@ impl ModelManager {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub async fn kv_chooser_for_with_selector_and_client<Sel>(
+    pub async fn kv_chooser_for_with_policy_and_client(
         &self,
         client: Client,
         kv_cache_block_size: u32,
-        selector: Sel,
+        policy: SelectionPolicySource,
         kv_router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         worker_role: Option<WorkerType>,
@@ -2104,10 +2092,7 @@ impl ModelManager {
         is_eagle: bool,
         scheduler_load: crate::kv_router::SchedulerLoadSender,
         cancellation_token: CancellationToken,
-    ) -> anyhow::Result<Arc<KvRouter<Sel>>>
-    where
-        Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-    {
+    ) -> anyhow::Result<Arc<KvRouter>> {
         let endpoint = client.endpoint.clone();
         let lora_domain = self.lora_domain(&endpoint.id());
 
@@ -2135,12 +2120,20 @@ impl ModelManager {
         // Get of create runtime config watcher for this endpoint
         let workers_with_configs = self.get_or_create_runtime_config_watcher(&endpoint).await?;
 
-        // A selector that does not consume cache input must not create a shared-cache client or
+        let effective_kv_router_config = kv_router_config.clone().unwrap_or_default();
+        let worker_type = worker_role.unwrap_or(WorkerType::Aggregated);
+        // One construction for the router's partition: the probed instance is
+        // the one `KvRouter` hands to the partition scheduler.
+        let policy = policy.prepare(
+            &effective_kv_router_config,
+            worker_type,
+            metric_worker_type,
+            model_name.as_deref(),
+        )?;
+        // A policy that does not consume cache input must not create a shared-cache client or
         // subscribe to its updates.
-        let shared_cache: Option<Box<dyn dynamo_kv_router::SharedKvCache>> = if selector
-            .required_worker_inputs()
-            .contains(WorkerInputs::CACHE)
-        {
+        let wants_cache = policy.inputs().contains(WorkerInputs::CACHE);
+        let shared_cache: Option<Arc<dyn dynamo_kv_router::SharedKvCache>> = if wants_cache {
             match kv_router_config
                 .as_ref()
                 .map(|c| c.shared_cache_type)
@@ -2153,7 +2146,7 @@ impl ModelManager {
                         worker_component = worker_component_name,
                         "Using HiCache shared KV cache"
                     );
-                    Some(Box::new(
+                    Some(Arc::new(
                         self.hicache_cache_for(&endpoint, workers_with_configs.clone()),
                     ))
                 }
@@ -2162,12 +2155,9 @@ impl ModelManager {
             None
         };
 
-        let effective_kv_router_config = kv_router_config.clone().unwrap_or_default();
         let kv_event_source_requirement =
             KvEventSourceRequirement::derive(worker_role, &effective_kv_router_config);
-        let cache_required = selector
-            .required_worker_inputs()
-            .contains(WorkerInputs::CACHE)
+        let cache_required = wants_cache
             || effective_kv_router_config.serve_indexer
             || matches!(
                 kv_event_source_requirement,
@@ -2191,7 +2181,7 @@ impl ModelManager {
             workers_with_configs,
             kv_source_membership,
             kv_cache_block_size,
-            selector,
+            SelectionPolicySource::Prepared(policy),
             kv_router_config,
             prefill_load_estimator,
             worker_role,
@@ -2298,7 +2288,6 @@ impl ModelManager {
                 buckets_per_second: config.buckets_per_second,
                 predictor_type: config.predictor_type,
                 ema_alpha: config.ema_alpha,
-                ..Default::default()
             });
         let domain_cancel = cancel_token.child_token();
         *domain.controller_cancel.lock() = Some(domain_cancel.clone());

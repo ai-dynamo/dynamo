@@ -12,12 +12,8 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use dynamo_kv_router::{
-    PrefillLoadEstimator,
-    conditional_disagg::ConditionalDisaggPolicy,
-    config::RouterConfigOverride,
-    protocols::RoutingConstraints,
-    scheduling::QueueRejection,
-    selector::{DefaultWorkerSelector, WorkerSelector},
+    PrefillLoadEstimator, conditional_disagg::ConditionalDisaggPolicy,
+    config::RouterConfigOverride, protocols::RoutingConstraints,
 };
 use dynamo_runtime::{
     pipeline::{
@@ -30,8 +26,7 @@ use futures::stream::{self, StreamExt};
 
 use crate::{
     discovery::{ModelManager, WorkerSetTarget, WorkerSetTargetId},
-    kv_router::{RoutingHost, WorkerSelectorFactory},
-    local_model::runtime_config::ModelRuntimeConfig,
+    kv_router::{RoutingHost, SelectionPolicySource},
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
@@ -161,17 +156,6 @@ struct PreparedPrefill {
     topology_constraints: Option<RoutingConstraints>,
 }
 
-/// Advisory prefill worker selection result.
-pub enum PrefillQueryOutcome {
-    Routed {
-        worker_id: u64,
-        dp_rank: Option<u32>,
-    },
-    QueueRejected {
-        rejection: QueueRejection,
-    },
-}
-
 enum PrefillCompletion {
     Handoff {
         result: PrefillResult,
@@ -216,17 +200,14 @@ pub(crate) const BYPASS_REMOTE_PREFILL_ANNOTATION: &str = "x-bypass-remote-prefi
 /// Client-visible logprobs should not be placed in `disaggregated_params`,
 /// which is an engine-owned KV handoff contract rather than a public response
 /// channel.
-pub struct PrefillRouter<Sel = DefaultWorkerSelector>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
-    binding: ArcSwapOption<PrefillBinding<Sel>>,
+pub struct PrefillRouter {
+    binding: ArcSwapOption<PrefillBinding>,
     target: Mutex<Option<WorkerSetTargetId>>,
     target_tx: Option<watch::Sender<Option<WorkerSetTarget>>>,
     /// Decode routing owns conditional-disagg planning and dispatch. This is
     /// installed after the frontend constructs its one decode `RoutingHost`.
-    decode_routing_host: OnceLock<Arc<RoutingHost<Sel>>>,
-    worker_selector_factory: Option<WorkerSelectorFactory<Sel>>,
+    decode_routing_host: OnceLock<Arc<RoutingHost>>,
+    selection_policy: Option<SelectionPolicySource>,
     model_manager: Arc<ModelManager>,
     cancel_token: CancellationToken,
     /// Mode of the decode set that owns this router. Governs decode-side
@@ -253,27 +234,21 @@ where
     activation_task_state: Arc<()>,
 }
 
-struct PrefillBinding<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+struct PrefillBinding {
     target_id: WorkerSetTargetId,
     endpoint_id: EndpointId,
-    router: Arc<RoutingHost<Sel>>,
+    router: Arc<RoutingHost>,
     /// Resolved at activation from the prefill card. Lives here rather than on
     /// `PrefillRouter` because it is unknowable until a target is discovered,
     /// and changes when the binding is rebuilt.
     prefill_router_mode: RouterMode,
 }
 
-struct PrefillBuildContext<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+struct PrefillBuildContext {
     model_manager: Arc<ModelManager>,
     /// Fallback mode for the prefill hop when the prefill card advertises none.
     decode_router_mode: RouterMode,
-    worker_selector_factory: WorkerSelectorFactory<Sel>,
+    selection_policy: SelectionPolicySource,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     session_affinity_ttl: Option<std::time::Duration>,
     session_affinity_mode: SessionAffinityMode,
@@ -287,19 +262,13 @@ pub(crate) trait PrefillRouterLifecycle: Send + Sync {
     fn set_target(&self, target: Option<WorkerSetTarget>);
 }
 
-impl<Sel> PrefillRouterLifecycle for PrefillRouter<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+impl PrefillRouterLifecycle for PrefillRouter {
     fn set_target(&self, target: Option<WorkerSetTarget>) {
         self.set_target(target);
     }
 }
 
-impl<Sel> Drop for PrefillRouter<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+impl Drop for PrefillRouter {
     fn drop(&mut self) {
         tracing::debug!("Dropping PrefillRouter, cancelling background activation task");
         self.cancel_token.cancel();
@@ -307,15 +276,13 @@ where
 }
 
 #[async_trait]
-impl<Sel>
+impl
     Operator<
         SingleIn<PreprocessedRequest>,
         ManyOut<Annotated<LLMEngineOutput>>,
         SingleIn<PreprocessedRequest>,
         ManyOut<Annotated<LLMEngineOutput>>,
-    > for PrefillRouter<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+    > for PrefillRouter
 {
     async fn generate(
         &self,
@@ -361,7 +328,7 @@ where
                 .await
             {
                 Ok(Some(decision)) => {
-                    let signals = decision.plan.signals();
+                    let signals = decision.plan.signals;
                     tracing::info!(
                         request_id = %request_id,
                         worker_id = signals.worker.worker_id,
@@ -581,18 +548,12 @@ where
     }
 }
 
-impl<Sel> PrefillRouter<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+impl PrefillRouter {
     pub(crate) fn conditional_disagg_enabled(&self) -> bool {
         self.conditional_disagg_policy.is_enabled()
     }
 
-    pub(crate) fn set_decode_routing_host(
-        &self,
-        routing_host: Arc<RoutingHost<Sel>>,
-    ) -> Result<()> {
+    pub(crate) fn set_decode_routing_host(&self, routing_host: Arc<RoutingHost>) -> Result<()> {
         match self.decode_routing_host.set(routing_host) {
             Ok(()) => Ok(()),
             Err(routing_host)

@@ -4,6 +4,7 @@
 pub mod config;
 mod filter;
 mod local;
+mod lora_filter;
 pub mod overlap;
 pub mod overlap_refresh;
 pub mod policy;
@@ -19,6 +20,9 @@ mod worker_selection_config;
 mod types;
 pub use filter::*;
 pub use local::LocalScheduler;
+pub use lora_filter::LoraWorkerFilter;
+#[cfg(feature = "standalone-selection")]
+pub(crate) use lora_filter::narrow_allowed_worker_ids_by_lora;
 pub use overlap::{
     CacheHitEstimates, OverlapAnalysis, OverlapScoresResponse, OverlapSignals,
     SelectedWorkerTierSnapshot, SharedCacheOverlapScore, WorkerOverlapScore,

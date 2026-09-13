@@ -475,10 +475,6 @@ impl Router {
         allowed_worker_ids: Option<HashSet<u64>>,
         routing_constraints: RoutingConstraints,
     ) -> Result<PrefillReservation> {
-        if let Some(ref ids) = allowed_worker_ids {
-            self.prefill_router.register_workers(ids);
-        }
-
         self.prefill_router
             .reserve_prefill_worker(
                 reservation_id,
@@ -519,10 +515,6 @@ impl Router {
         allowed_worker_ids: Option<HashSet<u64>>,
         routing_constraints: RoutingConstraints,
     ) -> Result<(WorkerWithDpRank, u32)> {
-        if let Some(ref ids) = allowed_worker_ids {
-            self.decode_router.register_workers(ids);
-        }
-
         let config_override = decode_router_config_override(is_disaggregated);
 
         let outcome = self
@@ -926,8 +918,9 @@ fn indexed_endpoint_address(endpoint: &Endpoint) -> Option<String> {
 /// The mode is exclusive, and so are the identities. A worker process picks one
 /// `KubeDiscoveryTarget` from its own mode, so under container discovery
 /// nothing registers under the bare pod identity — emitting it there would
-/// invent a worker that `register_workers` upserts at zero load and zero KV
-/// overlap, making it the most attractive candidate the scheduler sees.
+/// put a worker id in `allowed_worker_ids` that no backend registered. The
+/// scheduler filters unknown ids out, so the pod contributes nothing, and a
+/// subset made only of such ids selects no worker at all.
 /// `"main"` hashes to the pod identity (`hash_container_name`), so a pod whose
 /// main container is Ready still contributes that id through the container
 /// path; one whose main container is *not* Ready correctly contributes nothing
@@ -1384,11 +1377,9 @@ impl EndpointPicker for Router {
             // Only pod discovery registers a worker under its pod identity.
             // Under container discovery each engine container registers under
             // its own (`KubeDiscoveryTarget::Container`), so a hand-built pod
-            // hash names a worker present in no registry: `register_workers`
-            // would upsert it at zero load and zero KV overlap, making it the
-            // scheduler's most attractive candidate, and the reverse lookup
-            // below would then fail to match and silently forward to
-            // `endpoints[0]`. The index is the one place that knows which
+            // hash names a worker present in no registry, which the scheduler
+            // filters out, leaving the subset short one candidate or empty.
+            // The index is the one place that knows which
             // identity scheme is in effect (see `pod_worker_ids`), so ask it.
             let wm: Vec<(u64, &Endpoint)> = {
                 let index = read_index(&self.worker_index);
@@ -2182,10 +2173,7 @@ mod tests {
     }
 
     /// Under pod discovery a worker registers under its pod identity alone, so
-    /// a pod's ready sidecars must contribute no worker ids. Emitting them
-    /// would invent workers no backend registered under: they miss
-    /// `register_workers`' discovery lookup, default to `(0, 1)` with no load
-    /// and no KV overlap, and so look maximally attractive to the scheduler.
+    /// a pod's ready sidecars must contribute no worker ids.
     #[test]
     fn pod_worker_ids_ignores_containers_under_pod_discovery() {
         let pod = pod_mode_worker_pod();
@@ -2251,7 +2239,7 @@ mod tests {
     }
 
     /// End of the chain that made this matter: the index feeds
-    /// `subset_to_worker_ids` -> `allowed_worker_ids` -> `register_workers`,
+    /// `subset_to_worker_ids` -> `allowed_worker_ids` -> the scheduler,
     /// so one backend pod must contribute exactly one worker id under pod
     /// discovery rather than one per ready container.
     #[test]
@@ -2486,8 +2474,7 @@ mod tests {
     /// An externally supplied endpoint must resolve to the identity the
     /// reflector actually holds. Under container discovery that is the engine
     /// container's id, never `hash_pod_name` -- deriving the latter names a
-    /// worker no registry contains, which `register_workers` then upserts at
-    /// zero load as the scheduler's most attractive candidate.
+    /// worker no registry contains.
     #[test]
     fn external_endpoint_resolves_to_the_indexed_container_identity() {
         let mut index = WorkerEndpointIndex::new(true);

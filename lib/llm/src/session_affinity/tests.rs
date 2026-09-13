@@ -13,8 +13,9 @@ use futures::{StreamExt, stream};
 
 use super::SessionAffinityMode::{Hard, Soft};
 use super::{
-    AffinityAcquire, AffinityCoordinator, AffinityTarget, LlmResponse, affinity_id,
-    coordinator::ReplicaApplyOutcome, explicit_target,
+    AffinityCoordinator, AffinityTarget, Hold, LlmResponse, affinity_id,
+    coordinator::{ReplicaApplyOutcome, tracked_stream},
+    explicit_target, to_table,
 };
 use crate::{
     preprocessor::PreprocessedRequest,
@@ -35,8 +36,19 @@ fn target(worker_id: u64, dp_rank: Option<u32>) -> AffinityTarget {
     AffinityTarget { worker_id, dp_rank }
 }
 
+fn table_target(
+    worker_id: u64,
+    dp_rank: Option<u32>,
+) -> dynamo_kv_router::services::selection::affinity::AffinityTarget {
+    to_table(target(worker_id, dp_rank))
+}
+
 fn coordinator() -> AffinityCoordinator {
-    AffinityCoordinator::new(Duration::from_secs(10)).unwrap()
+    AffinityCoordinator::new(Duration::from_secs(10), Hard).unwrap()
+}
+
+fn soft_coordinator() -> AffinityCoordinator {
+    AffinityCoordinator::new(Duration::from_secs(10), Soft).unwrap()
 }
 
 fn response_stream(items: usize) -> dynamo_runtime::pipeline::ManyOut<LlmResponse> {
@@ -62,8 +74,8 @@ fn cancelled_response_stream() -> dynamo_runtime::pipeline::ManyOut<LlmResponse>
 
 async fn bind(coordinator: &AffinityCoordinator, target: AffinityTarget) {
     let operation = coordinator.acquire(&session_id(), None).await.unwrap();
-    let mut stream = operation
-        .into_stream(target, response_stream(1), Hard)
+    let mut stream = coordinator
+        .commit_to_stream(operation, target, response_stream(1))
         .unwrap();
     while stream.next().await.is_some() {}
 }
@@ -147,7 +159,7 @@ fn session_affinity_context_type_errors_are_preserved() {
 async fn session_affinity_initialization_is_atomic() {
     let coordinator = coordinator();
     let first = coordinator.acquire(&session_id(), None).await.unwrap();
-    let AffinityAcquire::Initialize(first) = first else {
+    let Hold::Initialize(first) = first else {
         panic!("first request must initialize");
     };
 
@@ -156,16 +168,16 @@ async fn session_affinity_initialization_is_atomic() {
     coordinator.wait_for_initializing_waiter().await;
     assert!(!waiter.is_finished());
 
-    let first_lease = first.commit(target(7, Some(0))).unwrap();
+    let first_lease = first.commit(table_target(7, Some(0))).unwrap();
     let second = waiter.await.unwrap().unwrap();
-    let AffinityAcquire::Bound {
+    let Hold::Bound {
         target: second_target,
         lease: second_lease,
     } = second
     else {
         panic!("waiter must acquire the committed binding");
     };
-    assert_eq!(second_target, target(7, Some(0)));
+    assert_eq!(second_target, table_target(7, Some(0)));
     drop(first_lease);
     drop(second_lease);
 }
@@ -174,7 +186,7 @@ async fn session_affinity_initialization_is_atomic() {
 async fn session_affinity_initializer_cancellation_wakes_waiter() {
     let coordinator = coordinator();
     let first = coordinator.acquire(&session_id(), None).await.unwrap();
-    let AffinityAcquire::Initialize(first) = first else {
+    let Hold::Initialize(first) = first else {
         panic!("first request must initialize");
     };
 
@@ -184,12 +196,12 @@ async fn session_affinity_initializer_cancellation_wakes_waiter() {
     drop(first);
 
     let next = waiter.await.unwrap().unwrap();
-    assert!(matches!(&next, AffinityAcquire::Initialize(_)));
+    assert!(matches!(&next, Hold::Initialize(_)));
     drop(next);
     assert_eq!(coordinator.entry_count(), 0);
     assert!(matches!(
         coordinator.acquire(&session_id(), None).await.unwrap(),
-        AffinityAcquire::Initialize(_)
+        Hold::Initialize(_)
     ));
 }
 
@@ -197,7 +209,7 @@ async fn session_affinity_initializer_cancellation_wakes_waiter() {
 async fn session_affinity_wait_stops_when_request_is_cancelled() {
     let coordinator = coordinator();
     let first = coordinator.acquire(&session_id(), None).await.unwrap();
-    let AffinityAcquire::Initialize(first) = first else {
+    let Hold::Initialize(first) = first else {
         panic!("first request must initialize");
     };
 
@@ -226,14 +238,14 @@ async fn session_affinity_wait_stops_when_request_is_cancelled() {
 #[tokio::test(start_paused = true)]
 async fn session_affinity_validates_worker_and_rank_contract() {
     let coordinator = coordinator();
-    let AffinityAcquire::Initialize(initializer) = coordinator
+    let Hold::Initialize(initializer) = coordinator
         .acquire(&session_id(), Some(target(7, None)))
         .await
         .unwrap()
     else {
         panic!("first request must initialize");
     };
-    drop(initializer.commit(target(7, None)).unwrap());
+    drop(initializer.commit(table_target(7, None)).unwrap());
 
     assert!(
         coordinator
@@ -258,36 +270,34 @@ async fn session_affinity_validates_worker_and_rank_contract() {
 #[tokio::test(start_paused = true)]
 async fn session_affinity_failed_bound_operation_invalidates_binding() {
     let coordinator = coordinator();
-    let AffinityAcquire::Initialize(initializer) =
-        coordinator.acquire(&session_id(), None).await.unwrap()
+    let Hold::Initialize(initializer) = coordinator.acquire(&session_id(), None).await.unwrap()
     else {
         panic!("first request must initialize");
     };
-    drop(initializer.commit(target(7, Some(0))).unwrap());
+    drop(initializer.commit(table_target(7, Some(0))).unwrap());
 
     let operation = coordinator.acquire(&session_id(), None).await.unwrap();
-    assert_eq!(operation.target(), Some(target(7, Some(0))));
+    assert_eq!(operation.target(), Some(table_target(7, Some(0))));
     operation.invalidate();
 
     assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
     assert_eq!(coordinator.entry_count(), 0);
     assert!(matches!(
         coordinator.acquire(&session_id(), None).await.unwrap(),
-        AffinityAcquire::Initialize(_)
+        Hold::Initialize(_)
     ));
 }
 
 #[tokio::test(start_paused = true)]
 async fn session_affinity_stream_drop_refreshes_idle_ttl() {
     let coordinator = coordinator();
-    let AffinityAcquire::Initialize(initializer) =
-        coordinator.acquire(&session_id(), None).await.unwrap()
+    let Hold::Initialize(initializer) = coordinator.acquire(&session_id(), None).await.unwrap()
     else {
         panic!("first request must initialize");
     };
-    let lease = initializer.commit(target(7, Some(0))).unwrap();
+    let lease = initializer.commit(table_target(7, Some(0))).unwrap();
     tokio::time::advance(Duration::from_secs(9)).await;
-    let mut stream = lease.into_stream(response_stream(1));
+    let mut stream = tracked_stream(lease, response_stream(1));
     assert!(stream.next().await.is_some());
     drop(stream);
 
@@ -297,14 +307,13 @@ async fn session_affinity_stream_drop_refreshes_idle_ttl() {
 #[tokio::test(start_paused = true)]
 async fn session_affinity_empty_stream_refreshes_idle_ttl() {
     let coordinator = coordinator();
-    let AffinityAcquire::Initialize(initializer) =
-        coordinator.acquire(&session_id(), None).await.unwrap()
+    let Hold::Initialize(initializer) = coordinator.acquire(&session_id(), None).await.unwrap()
     else {
         panic!("first request must initialize");
     };
-    let lease = initializer.commit(target(7, Some(0))).unwrap();
+    let lease = initializer.commit(table_target(7, Some(0))).unwrap();
     tokio::time::advance(Duration::from_secs(9)).await;
-    let mut stream = lease.into_stream(response_stream(0));
+    let mut stream = tracked_stream(lease, response_stream(0));
     assert!(stream.next().await.is_none());
 
     assert_binding_expires_after_refreshed_ttl(&coordinator).await;
@@ -313,23 +322,22 @@ async fn session_affinity_empty_stream_refreshes_idle_ttl() {
 #[tokio::test(start_paused = true)]
 async fn session_affinity_cancelled_stream_refreshes_idle_ttl() {
     let coordinator = coordinator();
-    let AffinityAcquire::Initialize(initializer) =
-        coordinator.acquire(&session_id(), None).await.unwrap()
+    let Hold::Initialize(initializer) = coordinator.acquire(&session_id(), None).await.unwrap()
     else {
         panic!("first request must initialize");
     };
-    drop(initializer.commit(target(7, Some(0))).unwrap());
+    drop(initializer.commit(table_target(7, Some(0))).unwrap());
 
     tokio::time::advance(Duration::from_secs(9)).await;
-    let AffinityAcquire::Bound {
+    let Hold::Bound {
         target: bound_target,
         lease,
     } = coordinator.acquire(&session_id(), None).await.unwrap()
     else {
         panic!("continuation must acquire the existing binding");
     };
-    assert_eq!(bound_target, target(7, Some(0)));
-    let mut stream = lease.into_stream(cancelled_response_stream());
+    assert_eq!(bound_target, table_target(7, Some(0)));
+    let mut stream = tracked_stream(lease, cancelled_response_stream());
     assert!(stream.next().await.is_none());
 
     assert_binding_expires_after_refreshed_ttl(&coordinator).await;
@@ -339,8 +347,8 @@ async fn session_affinity_cancelled_stream_refreshes_idle_ttl() {
 async fn session_affinity_committed_binding_survives_cancelled_stream_until_ttl() {
     let coordinator = coordinator();
     let operation = coordinator.acquire(&session_id(), None).await.unwrap();
-    let mut stream = operation
-        .into_stream(target(7, Some(0)), cancelled_response_stream(), Hard)
+    let mut stream = coordinator
+        .commit_to_stream(operation, target(7, Some(0)), cancelled_response_stream())
         .unwrap();
     tokio::time::advance(Duration::from_secs(9)).await;
     assert!(stream.next().await.is_none());
@@ -351,14 +359,13 @@ async fn session_affinity_committed_binding_survives_cancelled_stream_until_ttl(
 #[tokio::test(start_paused = true)]
 async fn session_affinity_error_stream_refreshes_idle_ttl() {
     let coordinator = coordinator();
-    let AffinityAcquire::Initialize(initializer) =
-        coordinator.acquire(&session_id(), None).await.unwrap()
+    let Hold::Initialize(initializer) = coordinator.acquire(&session_id(), None).await.unwrap()
     else {
         panic!("first request must initialize");
     };
-    let lease = initializer.commit(target(7, Some(0))).unwrap();
+    let lease = initializer.commit(table_target(7, Some(0))).unwrap();
     tokio::time::advance(Duration::from_secs(9)).await;
-    let mut stream = lease.into_stream(error_response_stream());
+    let mut stream = tracked_stream(lease, error_response_stream());
     assert!(stream.next().await.unwrap().is_err());
     assert!(stream.next().await.is_none());
 
@@ -368,14 +375,13 @@ async fn session_affinity_error_stream_refreshes_idle_ttl() {
 #[tokio::test(start_paused = true)]
 async fn session_affinity_stream_eof_refreshes_idle_ttl() {
     let coordinator = coordinator();
-    let AffinityAcquire::Initialize(initializer) =
-        coordinator.acquire(&session_id(), None).await.unwrap()
+    let Hold::Initialize(initializer) = coordinator.acquire(&session_id(), None).await.unwrap()
     else {
         panic!("first request must initialize");
     };
-    let lease = initializer.commit(target(7, Some(0))).unwrap();
+    let lease = initializer.commit(table_target(7, Some(0))).unwrap();
     tokio::time::advance(Duration::from_secs(9)).await;
-    let mut stream = lease.into_stream(response_stream(1));
+    let mut stream = tracked_stream(lease, response_stream(1));
     while stream.next().await.is_some() {}
 
     assert_binding_expires_after_refreshed_ttl(&coordinator).await;
@@ -384,17 +390,14 @@ async fn session_affinity_stream_eof_refreshes_idle_ttl() {
 #[tokio::test(start_paused = true)]
 async fn session_affinity_bound_lease_drop_refreshes_idle_ttl() {
     let coordinator = coordinator();
-    let AffinityAcquire::Initialize(initializer) =
-        coordinator.acquire(&session_id(), None).await.unwrap()
+    let Hold::Initialize(initializer) = coordinator.acquire(&session_id(), None).await.unwrap()
     else {
         panic!("first request must initialize");
     };
-    drop(initializer.commit(target(7, Some(0))).unwrap());
+    drop(initializer.commit(table_target(7, Some(0))).unwrap());
 
     tokio::time::advance(Duration::from_secs(9)).await;
-    let AffinityAcquire::Bound { lease, .. } =
-        coordinator.acquire(&session_id(), None).await.unwrap()
-    else {
+    let Hold::Bound { lease, .. } = coordinator.acquire(&session_id(), None).await.unwrap() else {
         panic!("continuation must acquire the binding");
     };
     tokio::time::advance(Duration::from_secs(2)).await;
@@ -420,12 +423,11 @@ async fn session_affinity_query_is_read_only() {
     drop(initializing);
     assert_eq!(coordinator.entry_count(), 0);
 
-    let AffinityAcquire::Initialize(initializer) =
-        coordinator.acquire(&session_id(), None).await.unwrap()
+    let Hold::Initialize(initializer) = coordinator.acquire(&session_id(), None).await.unwrap()
     else {
         panic!("first request must initialize");
     };
-    drop(initializer.commit(target(7, Some(0))).unwrap());
+    drop(initializer.commit(table_target(7, Some(0))).unwrap());
     assert_eq!(
         coordinator.query_target(&session_id(), None).unwrap(),
         Some(target(7, Some(0)))
@@ -439,12 +441,11 @@ async fn session_affinity_query_is_read_only() {
 async fn session_affinity_reaper_removes_idle_entries_and_stops_on_drop() {
     let coordinator = coordinator();
     let cancellation = coordinator.cancellation_token();
-    let AffinityAcquire::Initialize(initializer) =
-        coordinator.acquire(&session_id(), None).await.unwrap()
+    let Hold::Initialize(initializer) = coordinator.acquire(&session_id(), None).await.unwrap()
     else {
         panic!("first request must initialize");
     };
-    drop(initializer.commit(target(7, Some(0))).unwrap());
+    drop(initializer.commit(table_target(7, Some(0))).unwrap());
 
     coordinator.wait_for_reaper().await;
     tokio::time::advance(Duration::from_secs(10)).await;
@@ -461,7 +462,7 @@ fn session_affinity_rejects_invalid_ttl_before_starting_reaper() {
         Duration::ZERO,
         Duration::from_secs(super::MAX_SESSION_AFFINITY_TTL_SECS + 1),
     ] {
-        let Err(error) = AffinityCoordinator::new(ttl) else {
+        let Err(error) = AffinityCoordinator::new(ttl, Hard) else {
             panic!("invalid TTL must fail coordinator construction");
         };
         assert!(dynamo_runtime::error::match_error_chain(
@@ -503,7 +504,7 @@ async fn session_affinity_enforces_id_and_entry_limits() {
     assert_eq!(coordinator.entry_count(), 0);
     assert!(matches!(
         coordinator.acquire(&second_id, None).await.unwrap(),
-        AffinityAcquire::Initialize(_)
+        Hold::Initialize(_)
     ));
 }
 
@@ -606,8 +607,8 @@ async fn session_affinity_publishes_after_dispatch_and_lease_completion() {
     let mut updates = coordinator.enable_test_replica(99, 4);
     let selected_target = target(7, Some(0));
     let operation = coordinator.acquire(&session_id(), None).await.unwrap();
-    let stream = operation
-        .into_stream(selected_target, response_stream(1), Hard)
+    let stream = coordinator
+        .commit_to_stream(operation, selected_target, response_stream(1))
         .unwrap();
 
     let after_dispatch = updates.recv().await.unwrap();
@@ -637,9 +638,7 @@ async fn session_affinity_republishes_the_stored_replica_version() {
         ReplicaApplyOutcome::Inserted
     );
 
-    let AffinityAcquire::Bound { lease, .. } =
-        coordinator.acquire(&session_id(), None).await.unwrap()
-    else {
+    let Hold::Bound { lease, .. } = coordinator.acquire(&session_id(), None).await.unwrap() else {
         panic!("replicated binding must be acquired");
     };
     drop(lease);
@@ -656,14 +655,14 @@ async fn session_affinity_worker_only_binding_allows_ranked_dispatch_without_nar
 
     let initialization = coordinator.acquire(&session_id(), None).await.unwrap();
     drop(
-        initialization
-            .into_stream(worker_binding, response_stream(1), Hard)
+        coordinator
+            .commit_to_stream(initialization, worker_binding, response_stream(1))
             .unwrap(),
     );
 
     let continuation = coordinator.acquire(&session_id(), None).await.unwrap();
-    let stream = continuation
-        .into_stream(target(7, Some(3)), response_stream(1), Hard)
+    let stream = coordinator
+        .commit_to_stream(continuation, target(7, Some(3)), response_stream(1))
         .expect("worker-only affinity must allow the scheduler to select a DP rank");
 
     assert_eq!(
@@ -675,13 +674,13 @@ async fn session_affinity_worker_only_binding_allows_ranked_dispatch_without_nar
 
 #[tokio::test(start_paused = true)]
 async fn soft_worker_only_binding_stays_worker_scoped_after_ranked_dispatch() {
-    let coordinator = coordinator();
+    let coordinator = soft_coordinator();
     let worker_binding = target(7, None);
     bind(&coordinator, worker_binding).await;
 
     let continuation = coordinator.acquire(&session_id(), None).await.unwrap();
-    let mut stream = continuation
-        .into_stream(target(7, Some(3)), response_stream(1), Soft)
+    let mut stream = coordinator
+        .commit_to_stream(continuation, target(7, Some(3)), response_stream(1))
         .unwrap();
     while stream.next().await.is_some() {}
 
@@ -693,13 +692,13 @@ async fn soft_worker_only_binding_stays_worker_scoped_after_ranked_dispatch() {
 
 #[tokio::test(start_paused = true)]
 async fn soft_ranked_binding_is_not_widened_by_worker_only_dispatch() {
-    let coordinator = coordinator();
+    let coordinator = soft_coordinator();
     let ranked_binding = target(7, Some(2));
     bind(&coordinator, ranked_binding).await;
 
     let continuation = coordinator.acquire(&session_id(), None).await.unwrap();
-    let mut stream = continuation
-        .into_stream(target(8, None), response_stream(1), Soft)
+    let mut stream = coordinator
+        .commit_to_stream(continuation, target(8, None), response_stream(1))
         .unwrap();
     while stream.next().await.is_some() {}
 
@@ -716,15 +715,15 @@ async fn session_affinity_ranked_binding_rejects_mismatched_rank_dispatch() {
 
     let initialization = coordinator.acquire(&session_id(), None).await.unwrap();
     drop(
-        initialization
-            .into_stream(binding, response_stream(1), Hard)
+        coordinator
+            .commit_to_stream(initialization, binding, response_stream(1))
             .unwrap(),
     );
 
     let continuation = coordinator.acquire(&session_id(), None).await.unwrap();
     assert!(
-        continuation
-            .into_stream(target(7, Some(3)), response_stream(1), Hard)
+        coordinator
+            .commit_to_stream(continuation, target(7, Some(3)), response_stream(1))
             .is_err()
     );
     assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
@@ -732,7 +731,7 @@ async fn session_affinity_ranked_binding_rejects_mismatched_rank_dispatch() {
 
 #[tokio::test(start_paused = true)]
 async fn soft_affinity_rebinds_after_dispatch() {
-    let coordinator = coordinator();
+    let coordinator = soft_coordinator();
     let original = target(7, Some(0));
     let replacement = target(8, Some(1));
     bind(&coordinator, original).await;
@@ -745,8 +744,8 @@ async fn soft_affinity_rebinds_after_dispatch() {
     );
 
     let successful_attempt = coordinator.acquire(&session_id(), None).await.unwrap();
-    let stream = successful_attempt
-        .into_stream(replacement, response_stream(1), Soft)
+    let stream = coordinator
+        .commit_to_stream(successful_attempt, replacement, response_stream(1))
         .unwrap();
     assert_eq!(
         coordinator.query_target(&session_id(), None).unwrap(),
@@ -757,7 +756,7 @@ async fn soft_affinity_rebinds_after_dispatch() {
 
 #[tokio::test(start_paused = true)]
 async fn concurrent_soft_rebind_uses_observed_version_cas() {
-    let coordinator = coordinator();
+    let coordinator = soft_coordinator();
     let original = target(7, Some(0));
     let winner = target(8, Some(0));
     let stale = target(9, Some(0));
@@ -765,8 +764,12 @@ async fn concurrent_soft_rebind_uses_observed_version_cas() {
     let first = coordinator.acquire(&session_id(), None).await.unwrap();
     let second = coordinator.acquire(&session_id(), None).await.unwrap();
 
-    let mut first_stream = first.into_stream(winner, response_stream(1), Soft).unwrap();
-    let mut second_stream = second.into_stream(stale, response_stream(1), Soft).unwrap();
+    let mut first_stream = coordinator
+        .commit_to_stream(first, winner, response_stream(1))
+        .unwrap();
+    let mut second_stream = coordinator
+        .commit_to_stream(second, stale, response_stream(1))
+        .unwrap();
     while first_stream.next().await.is_some() {}
     while second_stream.next().await.is_some() {}
     assert_eq!(
@@ -843,8 +846,8 @@ async fn session_affinity_completion_restores_expired_remote_binding() {
     let replica = coordinator();
     let replicated_target = target(7, Some(0));
     let operation = origin.acquire(&session_id(), None).await.unwrap();
-    let stream = operation
-        .into_stream(replicated_target, response_stream(1), Hard)
+    let stream = origin
+        .commit_to_stream(operation, replicated_target, response_stream(1))
         .unwrap();
 
     let after_dispatch = updates.recv().await.unwrap();

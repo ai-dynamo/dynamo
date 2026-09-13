@@ -16,6 +16,7 @@ name = "dynamo-ext-proc"
 path = "src/bin/dynamo-ext-proc.rs"
 
 [dependencies]
+async-trait = { workspace = true }
 dynamo-kv-router = { workspace = true, features = [
     "metrics",
     "runtime-protocols",

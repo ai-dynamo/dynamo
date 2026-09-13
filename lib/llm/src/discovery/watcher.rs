@@ -10,10 +10,7 @@ use tokio::sync::{Notify, mpsc::Sender};
 
 use anyhow::Context as _;
 use async_trait::async_trait;
-use dynamo_kv_router::{
-    DEFAULT_ROUTING_GROUP, PrefillLoadEstimator, RoutingPartitionRef,
-    selector::{DefaultWorkerSelector, WorkerSelector},
-};
+use dynamo_kv_router::PrefillLoadEstimator;
 use dynamo_runtime::{
     DistributedRuntime,
     discovery::{DiscoveryInstance, DiscoveryQuery, DiscoveryStream, ModelCardInstanceId},
@@ -32,11 +29,9 @@ use crate::{
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
     kv_router::{
-        EncoderRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext, WorkerSelectorFactory,
+        EncoderRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext, SelectionPolicySource,
     },
-    local_model::runtime_config::{
-        ModelRuntimeConfig, TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
-    },
+    local_model::runtime_config::{TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY},
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
     preprocessor::{
@@ -183,10 +178,7 @@ pub enum ModelUpdate {
     Removed(ModelDeploymentCard),
 }
 
-pub struct ModelWatcher<Sel = DefaultWorkerSelector>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig>,
-{
+pub struct ModelWatcher {
     manager: Arc<ModelManager>,
     drt: DistributedRuntime,
     router_config: RouterConfig,
@@ -210,9 +202,7 @@ where
     /// Worker capabilities accepted by the frontend's engine-native Generate routes.
     /// Keep raw pipelines out of default-off and backend-mismatched paths.
     generate_engine_capabilities: Vec<&'static str>,
-    worker_selector_factory: WorkerSelectorFactory<Sel>,
-    /// Custom selector dispatch cannot infer whether an untyped legacy card is decode or aggregated.
-    require_typed_worker_role: bool,
+    selection_policy: SelectionPolicySource,
 }
 
 pub(crate) struct PreparedWorkerSet {
@@ -268,7 +258,7 @@ fn removed_model_cards(
         .collect()
 }
 
-impl ModelWatcher<DefaultWorkerSelector> {
+impl ModelWatcher {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         runtime: DistributedRuntime,
@@ -280,7 +270,7 @@ impl ModelWatcher<DefaultWorkerSelector> {
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         metrics: Arc<Metrics>,
     ) -> ModelWatcher {
-        Self::new_with_worker_selector_factory(
+        Self::new_with_selection_policy(
             runtime,
             model_manager,
             router_config,
@@ -289,23 +279,12 @@ impl ModelWatcher<DefaultWorkerSelector> {
             chat_engine_factory,
             prefill_load_estimator,
             metrics,
-            false,
-            Arc::new(|config, worker_type, _partition| {
-                DefaultWorkerSelector::new(
-                    Some(config.clone()),
-                    worker_type.default_selector_label(),
-                )
-            }),
+            SelectionPolicySource::Registry,
         )
     }
-}
 
-impl<Sel> ModelWatcher<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new_with_worker_selector_factory(
+    pub(crate) fn new_with_selection_policy(
         runtime: DistributedRuntime,
         model_manager: Arc<ModelManager>,
         router_config: RouterConfig,
@@ -314,8 +293,7 @@ where
         chat_engine_factory: Option<ChatEngineFactoryCallback>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         metrics: Arc<Metrics>,
-        require_typed_worker_role: bool,
-        worker_selector_factory: WorkerSelectorFactory<Sel>,
+        selection_policy: SelectionPolicySource,
     ) -> Self {
         Self {
             manager: model_manager,
@@ -333,8 +311,7 @@ where
             tokenizer_backend: None,
             tokenizer_fallback_enabled: None,
             generate_engine_capabilities: Vec::new(),
-            worker_selector_factory,
-            require_typed_worker_role,
+            selection_policy,
         }
     }
 
@@ -431,7 +408,7 @@ where
         card.download_config(self.local_model_path.as_deref())
             .await?;
 
-        validate_selector_worker_role(card, self.require_typed_worker_role)?;
+        validate_policy_worker_role(card, &self.selection_policy)?;
 
         // Use per-worker-set router config if the worker provided one in its MDC,
         // otherwise fall back to the frontend-level global config. Policy selections
@@ -577,21 +554,16 @@ where
             // need the shared chooser in KV mode.
             let kv_chooser =
                 if router_config.router_mode == RouterMode::KV && needs_preprocessed_routing {
-                    let selector = (self.worker_selector_factory)(
-                        &router_config.kv_router_config,
-                        effective_worker_type(card.worker_type, card.model_type),
-                        RoutingPartitionRef::new(&card.display_name, DEFAULT_ROUTING_GROUP),
-                    );
                     let mut chooser = self
                         .manager
-                        .kv_chooser_for_with_selector_and_client(
+                        .kv_chooser_for_with_policy_and_client(
                             load_context
                                 .as_ref()
                                 .expect("routing load context must exist")
                                 .client()
                                 .clone(),
                             card.kv_cache_block_size,
-                            selector,
+                            self.selection_policy.clone(),
                             Some(router_config.kv_router_config.clone()),
                             self.prefill_load_estimator.clone(),
                             card.worker_type,
@@ -628,13 +600,13 @@ where
 
                 // Fallback only: a prefill worker that declares its own
                 // `router_config` overrides this at activation time.
-                Some(PrefillRouter::new_with_selector_factory(
+                Some(PrefillRouter::new_with_selection_policy(
                     None,
                     self.manager.clone(),
                     router_config.router_mode,
                     card.kv_cache_block_size,
                     Some(prefill_config),
-                    self.worker_selector_factory.clone(),
+                    self.selection_policy.clone(),
                     self.prefill_load_estimator.clone(),
                     router_config.session_affinity_ttl_secs,
                     router_config.session_affinity_mode,
@@ -667,7 +639,7 @@ where
 
             let preprocessed_routing = if needs_preprocessed_routing {
                 Some(
-                    entrypoint::input::build_preprocessed_routing_with_selector(
+                    entrypoint::input::build_preprocessed_routing_with_session_affinity_mode(
                         &client,
                         self.manager.clone(),
                         router_config.router_mode,
@@ -1014,10 +986,7 @@ where
 }
 
 #[async_trait]
-impl<Sel> ControllerHost for ModelWatcher<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+impl ControllerHost for ModelWatcher {
     type Prepared = PreparedWorkerSet;
 
     fn normalize(
@@ -1280,11 +1249,17 @@ fn effective_router_config<'a>(
     Cow::Owned(effective)
 }
 
-fn validate_selector_worker_role(
+/// A custom policy factory cannot infer whether an untyped legacy card is
+/// decode or aggregated, so it requires an explicit `worker_type`.
+fn validate_policy_worker_role(
     card: &ModelDeploymentCard,
-    require_typed_worker_role: bool,
+    policy: &SelectionPolicySource,
 ) -> anyhow::Result<()> {
-    if require_typed_worker_role && card.worker_type.is_none() {
+    if matches!(
+        policy,
+        SelectionPolicySource::Factory(_) | SelectionPolicySource::Prepared(_)
+    ) && card.worker_type.is_none()
+    {
         anyhow::bail!(
             "custom worker-selection policies require model cards with an explicit worker_type"
         );
@@ -2410,12 +2385,16 @@ mod tests {
 
     #[test]
     fn custom_selector_requires_explicit_worker_type() {
+        let registry = SelectionPolicySource::Registry;
+        let factory = SelectionPolicySource::Factory(Arc::new(|_, _, _| {
+            unreachable!("role validation never constructs the policy")
+        }));
         let mut card = ModelDeploymentCard::with_name_only("model");
-        assert!(validate_selector_worker_role(&card, false).is_ok());
-        assert!(validate_selector_worker_role(&card, true).is_err());
+        assert!(validate_policy_worker_role(&card, &registry).is_ok());
+        assert!(validate_policy_worker_role(&card, &factory).is_err());
 
         card.worker_type = Some(WorkerType::Decode);
-        assert!(validate_selector_worker_role(&card, true).is_ok());
+        assert!(validate_policy_worker_role(&card, &factory).is_ok());
     }
 
     #[test]

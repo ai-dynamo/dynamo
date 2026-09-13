@@ -60,11 +60,11 @@ impl RequestIndex {
         }
     }
 
-    pub(super) fn worker_for(&self, request_id: &RequestId) -> Option<WorkerWithDpRank> {
+    pub(super) fn worker_for(&self, request_id: &str) -> Option<WorkerWithDpRank> {
         self.booking_for(request_id).map(|booking| booking.worker)
     }
 
-    pub(super) fn booking_for(&self, request_id: &RequestId) -> Option<RequestBooking> {
+    pub(super) fn booking_for(&self, request_id: &str) -> Option<RequestBooking> {
         self.request_to_booking.get(request_id).map(|entry| *entry)
     }
 
@@ -172,7 +172,7 @@ mod tests {
             index.try_insert_request("req-1".to_string(), WorkerWithDpRank::new(2, 0), None),
             Err(worker)
         );
-        assert_eq!(index.worker_for(&"req-1".to_string()), Some(worker));
+        assert_eq!(index.worker_for("req-1"), Some(worker));
         assert_eq!(
             index.lora_for(&"req-1".to_string()),
             Some("adapter".to_string())
@@ -222,7 +222,7 @@ mod tests {
         let mut removed = index.remove_worker_requests(worker_a);
         removed.sort();
         assert_eq!(removed, vec!["req-a".to_string(), "req-c".to_string()]);
-        assert_eq!(index.worker_for(&"req-b".to_string()), Some(worker_b));
+        assert_eq!(index.worker_for("req-b"), Some(worker_b));
         assert_eq!(
             index.active_lora_counts(),
             HashMap::from([("adapter-b".to_string(), 1)])

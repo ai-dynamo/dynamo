@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{future::Future, sync::Mutex, time::Duration};
+use std::{future::Future, pin::Pin, sync::Mutex, time::Duration};
 
 // `tokio::time::Instant` rather than the std type so the budget is measured on
 // the same clock as the `tokio::time::timeout` that consumes it.
@@ -108,10 +108,12 @@ pub(super) async fn await_with_cleanup_policy<T>(
     budget: &CleanupBudget,
     operation: impl Future<Output = T>,
 ) -> Result<T, Error> {
+    // Pinned once here and lent to both arms, so the wrapper's state holds the
+    // operation a single time rather than once per arm.
+    tokio::pin!(operation);
     match DispatchCancellation::for_request(phase, staged_kv) {
         DispatchCancellation::CancelWhenStopped => cancel_on_stop(context, operation).await,
         DispatchCancellation::DispatchWhenStopped => {
-            tokio::pin!(operation);
             tokio::select! {
                 biased;
 
@@ -165,9 +167,8 @@ pub(super) fn cancelled_error(context_id: &str) -> Error {
 
 pub(super) async fn cancel_on_stop<T>(
     context: &dyn AsyncEngineContext,
-    operation: impl Future<Output = T>,
+    mut operation: Pin<&mut impl Future<Output = T>>,
 ) -> Result<T, Error> {
-    tokio::pin!(operation);
     tokio::select! {
         biased;
 
@@ -196,7 +197,11 @@ mod tests {
         pipeline::{AsyncEngineContext, context::Controller},
     };
 
-    use super::{CLEANUP_DISPATCH_TIMEOUT, CleanupBudget, cancel_on_stop};
+    use super::{
+        CLEANUP_DISPATCH_TIMEOUT, CleanupBudget, StagedKv, await_with_cleanup_policy,
+        cancel_on_stop,
+    };
+    use crate::protocols::common::timing::RequestPhase;
 
     struct PendingUntilDropped(Arc<AtomicBool>);
 
@@ -247,9 +252,18 @@ mod tests {
         context.stop();
         let dropped = Arc::new(AtomicBool::new(false));
 
-        let error = cancel_on_stop(&context, PendingUntilDropped(dropped.clone()))
-            .await
-            .unwrap_err();
+        // Through the wrapper, which owns the operation: it is gone once the
+        // cancellation error is returned.
+        let error = await_with_cleanup_policy(
+            &context,
+            RequestPhase::Aggregated,
+            StagedKv::Absent,
+            "test",
+            &CleanupBudget::default(),
+            PendingUntilDropped(dropped.clone()),
+        )
+        .await
+        .unwrap_err();
 
         let error = error
             .downcast_ref::<DynamoError>()
@@ -263,9 +277,9 @@ mod tests {
         let context = Controller::new("completed-request".to_string());
         context.stop();
 
-        let result = cancel_on_stop(&context, std::future::ready(42))
-            .await
-            .unwrap();
+        let ready = std::future::ready(42);
+        tokio::pin!(ready);
+        let result = cancel_on_stop(&context, ready).await.unwrap();
 
         assert_eq!(result, 42);
     }

@@ -17,11 +17,11 @@ use tokio_util::sync::CancellationToken;
 use crate::identity::{RoutingPartitionId, default_routing_group};
 #[cfg(feature = "metrics")]
 use crate::indexer::KvIndexerMetrics;
-use crate::indexer::TieredMatchDetails;
+use crate::indexer::{TieredMatchDetails, WireTieredMatchDetails};
 use crate::protocols::{BlockHashOptions, LocalBlockHash, WorkerId, compute_block_hash_for_seq};
 use crate::services::overlap::{MooncakeOverlapSummary, build_mooncake_overlap_summaries};
 
-use super::backend::Indexer;
+use super::backend::{Indexer, TieredQueryByHashRequest, TieredQueryResponse};
 use super::registry::{ListenerControlError, WorkerRegistry};
 
 /// We need to fit one million tokens as JSON text, this should do it.
@@ -119,6 +119,16 @@ struct QueryRequest {
     _tenant_id: String,
     lora_name: Option<String>,
     /// Optional per-request cache salt (Mooncake RFC #1403), mixed into `/query` hashes.
+    cache_salt: Option<String>,
+}
+
+/// Server-side view of `TieredQueryByHashRequest` that also captures the
+/// `cache_salt` some `/query_by_hash` callers send, so it can be rejected here
+/// as well instead of being silently ignored.
+#[derive(Deserialize)]
+struct TieredQueryByHashBody {
+    #[serde(flatten)]
+    inner: TieredQueryByHashRequest,
     cache_salt: Option<String>,
 }
 
@@ -387,6 +397,72 @@ async fn query_by_hash(
     resp
 }
 
+/// Lossless tiered lookup for a remote-primary selection service. Unlike
+/// `/query_by_hash`, which renders the Mooncake score summary, this returns
+/// the wire form of `TieredMatchDetails` so the caller can run its own
+/// overlap analysis and side-indexer merge.
+async fn query_tiered_by_hash(
+    State(state): State<Arc<AppState>>,
+    Json(TieredQueryByHashBody {
+        inner: req,
+        cache_salt,
+    }): Json<TieredQueryByHashBody>,
+) -> Response {
+    let model = req.model_name.clone();
+    if cache_salt.is_some() {
+        let mut resp = (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "cache_salt is not accepted by /query_tiered_by_hash; block_hashes must already include the intended cache salt"
+            })),
+        )
+            .into_response();
+        resp.extensions_mut().insert(AccessLogModel(model));
+        return resp;
+    }
+    let key = RoutingPartitionId::new(req.model_name, req.routing_group);
+    let Some(ie) = state.registry.get_indexer(&key) else {
+        let mut resp = (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!(
+                    "no indexer for model={} routing_group={}",
+                    key.model_name, key.routing_group
+                )
+            })),
+        )
+            .into_response();
+        resp.extensions_mut().insert(AccessLogModel(model));
+        return resp;
+    };
+    let block_size = ie.block_size;
+    let indexer = ie.indexer.clone();
+    drop(ie);
+
+    let block_hashes: Vec<LocalBlockHash> = req
+        .block_hashes
+        .iter()
+        .map(|h| LocalBlockHash(*h as u64))
+        .collect();
+    let mut resp = match indexer.find_tiered_matches(block_hashes).await {
+        Ok(tiered) => (
+            StatusCode::OK,
+            Json(TieredQueryResponse {
+                block_size,
+                tiered: WireTieredMatchDetails::from(&tiered),
+            }),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    };
+    resp.extensions_mut().insert(AccessLogModel(model));
+    resp
+}
+
 #[derive(Deserialize)]
 struct ListenerControlRequest {
     instance_id: WorkerId,
@@ -562,7 +638,14 @@ fn build_router(state: Arc<AppState>, test_endpoints: bool) -> Router {
             "/query",
             post(query).layer(DefaultBodyLimit::max(QUERY_REQUEST_BODY_LIMIT_BYTES)),
         )
-        .route("/query_by_hash", post(query_by_hash))
+        .route(
+            "/query_by_hash",
+            post(query_by_hash).layer(DefaultBodyLimit::max(QUERY_REQUEST_BODY_LIMIT_BYTES)),
+        )
+        .route(
+            "/query_tiered_by_hash",
+            post(query_tiered_by_hash).layer(DefaultBodyLimit::max(QUERY_REQUEST_BODY_LIMIT_BYTES)),
+        )
         .route("/dump", get(dump_events))
         .route("/register_peer", post(register_peer))
         .route("/deregister_peer", post(deregister_peer))
@@ -603,9 +686,32 @@ fn build_router(state: Arc<AppState>, test_endpoints: bool) -> Router {
     router
 }
 
+/// Serve a standalone indexer for `registry` on an ephemeral port. Returns the
+/// base URL and the server task; abort the task to stop serving.
+#[cfg(test)]
+pub(crate) async fn spawn_test_indexer_server(
+    registry: Arc<WorkerRegistry>,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test indexer");
+    let base_url = format!("http://{}", listener.local_addr().expect("local addr"));
+    let app = create_router(Arc::new(AppState {
+        registry,
+        access_log_sink: None,
+        #[cfg(feature = "metrics")]
+        prom_registry: prometheus::Registry::new(),
+    }));
+    let task = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (base_url, task)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::indexer::KvIndexerInterface;
     use axum::body::Body;
     use axum::http::{Request, StatusCode, header};
     use tower::ServiceExt;
@@ -624,6 +730,130 @@ mod tests {
 
         body.push_str(r#"],"model_name":"model"}"#);
         body
+    }
+
+    #[tokio::test]
+    async fn query_tiered_by_hash_rejects_cache_salt() {
+        let app = create_router(Arc::new(AppState {
+            registry: Arc::new(WorkerRegistry::new(1)),
+            access_log_sink: None,
+            #[cfg(feature = "metrics")]
+            prom_registry: prometheus::Registry::new(),
+        }));
+
+        let salted = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/query_tiered_by_hash")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"block_hashes":[1],"model_name":"model","routing_group":"default","cache_salt":"s"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(salted.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn query_tiered_by_hash_returns_wire_tiered_matches() {
+        use super::super::backend::test_util::store_event;
+        use crate::protocols::{StorageTier, WorkerWithDpRank};
+
+        let registry = Arc::new(WorkerRegistry::new(1));
+        let key = RoutingPartitionId::new("model", "default");
+        let indexer = registry.get_or_create_indexer(key, 4);
+        let worker = WorkerWithDpRank::new(7, 0);
+        indexer
+            .apply_event_routed(store_event(7, 0, 1, &[], &[11, 12], StorageTier::Device))
+            .await
+            .unwrap();
+        indexer
+            .apply_event_routed(store_event(
+                7,
+                0,
+                2,
+                &[11, 12],
+                &[13],
+                StorageTier::HostPinned,
+            ))
+            .await
+            .unwrap();
+        if let Indexer::Single {
+            primary,
+            lower_tier,
+            ..
+        } = &indexer
+        {
+            let _ = primary.flush().await;
+            for inner in lower_tier.all() {
+                let _ = inner.dump_events().await.unwrap();
+            }
+        }
+        let app = create_router(Arc::new(AppState {
+            registry,
+            access_log_sink: None,
+            #[cfg(feature = "metrics")]
+            prom_registry: prometheus::Registry::new(),
+        }));
+
+        let body = serde_json::to_vec(&TieredQueryByHashRequest {
+            block_hashes: vec![11, 12, 13],
+            model_name: "model".to_string(),
+            routing_group: "default".to_string(),
+        })
+        .unwrap();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/query_tiered_by_hash")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: TieredQueryResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed.block_size, 4);
+        let tiered: TieredMatchDetails = parsed.tiered.into();
+        assert_eq!(
+            tiered.device.overlap_scores.scores.get(&worker).copied(),
+            Some(2)
+        );
+        assert_eq!(
+            tiered
+                .lower_tier
+                .get(&crate::protocols::StorageTier::HostPinned)
+                .and_then(|d| d.hits.get(&worker).copied()),
+            Some(1)
+        );
+
+        let missing = serde_json::to_vec(&TieredQueryByHashRequest {
+            block_hashes: vec![11],
+            model_name: "other".to_string(),
+            routing_group: "default".to_string(),
+        })
+        .unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/query_tiered_by_hash")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(missing))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

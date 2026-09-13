@@ -20,47 +20,41 @@ use crate::Endpoint;
     feature = "select-service"
 ))]
 use clap::Parser;
-#[cfg(feature = "custom-policy")]
-use dynamo_kv_router::WorkerSelectionPolicy;
 use dynamo_kv_router::WorkerSelectionPolicyFactory;
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::config::try_kv_router_config_from_dynamo_env;
 use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
 use dynamo_kv_router::protocols::compute_block_hash_for_seq;
 use dynamo_kv_router::protocols::*;
-use dynamo_kv_router::scheduling::AdmissionAttempt;
 #[cfg(feature = "kv-indexer")]
 use dynamo_kv_router::services::indexer::{self, IndexerConfig};
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::services::selection::{
-    self, OverlapScoresRequest, PotentialLoadsRequest, ReservationRequest, SelectAndReserveRequest,
-    SelectRequest, SelectionCacheConfig as RsSelectionCacheConfig, SelectionError,
-    SelectionService as RustSelectionService, SelectionServiceBuilder, SelectionServiceConfig,
-    WorkerPatchRequest, WorkerRequest, WorkerSelectionPolicyRegistry,
+    self, KvIndexSource, OverlapScoresRequest, PotentialLoadsRequest, ReservationRequest,
+    SelectAndReserveRequest, SelectRequest, SelectionCacheConfig as RsSelectionCacheConfig,
+    SelectionError, SelectionService as RustSelectionService, SelectionServiceBuilder,
+    SelectionServiceConfig, WorkerPatchRequest, WorkerRequest, WorkerSelectionPolicyRegistry,
     warn_for_unserved_worker_selection_policies,
 };
 #[cfg(feature = "slot-tracker")]
 use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::{TrackingHashAlgorithm, WorkerType};
+use llm_rs::kv_router::SelectionPolicySource;
 use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing;
 
 use llm_rs::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
 use llm_rs::kv_router::RoutingHost;
-#[cfg(not(feature = "custom-policy"))]
 type RsRoutingHost = RoutingHost;
-#[cfg(feature = "custom-policy")]
-type RsRoutingHost = RoutingHost<WorkerSelectionPolicy>;
-#[cfg(not(feature = "custom-policy"))]
 type RsManagedKvRouter = llm_rs::kv_router::ManagedKvRouter;
-#[cfg(feature = "custom-policy")]
-type RsManagedKvRouter = llm_rs::kv_router::ManagedKvRouter<WorkerSelectionPolicy>;
 use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};
 use llm_rs::protocols::common::timing::RequestTracker;
 use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
-use llm_rs::session_affinity::SessionAffinityMode as RsSessionAffinityMode;
+use llm_rs::session_affinity::{
+    MAX_SESSION_AFFINITY_TTL_SECS, SessionAffinityMode as RsSessionAffinityMode,
+};
 
 use super::aic_callback::create_aic_prefill_load_estimator;
 use super::entrypoint::AicPerfConfig;
@@ -364,6 +358,11 @@ struct SelectServiceCli {
     #[arg(long, value_delimiter = ',')]
     indexer_peers: Vec<String>,
 
+    /// Base URL of a standalone indexer that serves the primary KV index; this
+    /// selector then does not subscribe to worker KV events itself
+    #[arg(long)]
+    remote_indexer_url: Option<String>,
+
     /// Local ZMQ PUB port for active-load replica events
     #[arg(long, value_parser = parse_nonzero_port)]
     replica_sync_port: Option<u16>,
@@ -371,6 +370,11 @@ struct SelectServiceCli {
     /// Comma-separated ZMQ PUB endpoints for peer selectors
     #[arg(long, value_delimiter = ',', requires = "replica_sync_port")]
     replica_sync_peers: Vec<String>,
+
+    /// Pin each session id (`session_id` on the request) to the worker that
+    /// served it for this many seconds after its last request
+    #[arg(long)]
+    session_affinity_ttl_secs: Option<f64>,
 
     /// Seconds an unclaimed pending selection lives before eviction
     #[arg(long)]
@@ -552,8 +556,14 @@ where
         port: cli.port,
         threads: cli.threads,
         indexer_peers: cli.indexer_peers,
+        remote_indexer_url: cli.remote_indexer_url,
         replica_sync_port: cli.replica_sync_port,
         replica_sync_peers: cli.replica_sync_peers,
+        session_affinity_ttl: cli
+            .session_affinity_ttl_secs
+            .map(session_affinity_ttl_from_secs)
+            .transpose()
+            .map_err(anyhow::Error::msg)?,
         kv_router_config,
         selection_cache: selection_cache_config_from_overrides(
             cli.selection_cache_ttl_secs,
@@ -630,6 +640,22 @@ impl SelectionCacheConfig {
     }
 }
 
+fn session_affinity_ttl_from_secs(ttl: f64) -> Result<Duration, String> {
+    if !(1.0..=MAX_SESSION_AFFINITY_TTL_SECS as f64).contains(&ttl) {
+        return Err(format!(
+            "session_affinity_ttl_secs must be between 1 and {MAX_SESSION_AFFINITY_TTL_SECS}"
+        ));
+    }
+    Ok(Duration::from_secs_f64(ttl))
+}
+
+/// Range check for a whole-second TTL; `None` passes.
+pub(crate) fn check_session_affinity_ttl_secs(ttl: Option<u64>) -> PyResult<()> {
+    ttl.map(|ttl| session_affinity_ttl_from_secs(ttl as f64).map_err(PyValueError::new_err))
+        .transpose()?;
+    Ok(())
+}
+
 /// In-process handle to a managed Dynamo `SelectionService`.
 #[cfg(feature = "select-service")]
 #[pyclass]
@@ -642,7 +668,8 @@ pub(crate) struct SelectionService {
 impl SelectionService {
     /// Create a selection service. `indexer_threads` sizes the KV indexer pool.
     #[new]
-    #[pyo3(signature = (*, indexer_threads = 4, indexer_peers = None, replica_sync_port = None, replica_sync_peers = None, selection_cache = None))]
+    #[pyo3(signature = (*, indexer_threads = 4, indexer_peers = None, replica_sync_port = None, replica_sync_peers = None, selection_cache = None, remote_indexer_url = None, session_affinity_ttl_secs = None))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
         indexer_threads: usize,
@@ -650,6 +677,8 @@ impl SelectionService {
         replica_sync_port: Option<u16>,
         replica_sync_peers: Option<Vec<String>>,
         selection_cache: Option<SelectionCacheConfig>,
+        remote_indexer_url: Option<String>,
+        session_affinity_ttl_secs: Option<f64>,
     ) -> PyResult<Self> {
         let replica_sync_peers = replica_sync_peers.unwrap_or_default();
         if replica_sync_port.is_none() && !replica_sync_peers.is_empty() {
@@ -671,6 +700,14 @@ impl SelectionService {
         .selection_cache(selection_cache.unwrap_or_default().inner);
         if let Some(port) = replica_sync_port {
             builder = builder.replica_sync(port, replica_sync_peers);
+        }
+        if let Some(url) = remote_indexer_url {
+            builder = builder.kv_index(KvIndexSource::Remote(url));
+        }
+        if let Some(ttl) = session_affinity_ttl_secs {
+            builder = builder.session_affinity(
+                session_affinity_ttl_from_secs(ttl).map_err(PyValueError::new_err)?,
+            );
         }
         let inner = py
             .allow_threads(|| pyo3_async_runtimes::tokio::get_runtime().block_on(builder.build()))
@@ -959,8 +996,10 @@ mod selection_service_lifecycle_tests {
 
     #[test]
     fn idempotent_shutdown() {
+        pyo3::prepare_freethreaded_python();
         let service =
-            Python::with_gil(|py| SelectionService::new(py, 1, None, None, None, None)).unwrap();
+            Python::with_gil(|py| SelectionService::new(py, 1, None, None, None, None, None, None))
+                .unwrap();
         Python::with_gil(|py| {
             service.shutdown(py);
             service.shutdown(py);
@@ -2004,14 +2043,33 @@ async fn create_kv_router_from_endpoint(
     .await?;
 
     #[cfg(not(feature = "custom-policy"))]
+    let selection_policy = SelectionPolicySource::Registry;
+    #[cfg(feature = "custom-policy")]
+    let selection_policy = match worker_selection_policy_factory {
+        None => SelectionPolicySource::Registry,
+        // The policy sees the card's typed role and display name, which can
+        // differ from the metric role and the routing model name.
+        Some(factory) => {
+            let policy_worker_role = policy_worker_role
+                .expect("a configured worker-selection policy waits for a typed model card above");
+            let policy_model_name = policy_model_name.unwrap_or_default();
+            SelectionPolicySource::Factory(Arc::new(move |config, _worker_type, _partition| {
+                factory(
+                    config,
+                    policy_worker_role,
+                    dynamo_kv_router::RoutingPartitionRef::new(
+                        &policy_model_name,
+                        dynamo_kv_router::DEFAULT_ROUTING_GROUP,
+                    ),
+                )
+            }))
+        }
+    };
     let kv_router = model_manager
-        .kv_chooser_for_with_selector_and_client(
+        .kv_chooser_for_with_policy_and_client(
             client,
             block_size as u32,
-            dynamo_kv_router::DefaultWorkerSelector::new(
-                kv_router_config.clone(),
-                metric_worker_type,
-            ),
+            selection_policy,
             kv_router_config,
             prefill_load_estimator,
             worker_role,
@@ -2022,42 +2080,6 @@ async fn create_kv_router_from_endpoint(
             load_context.cancellation_token(),
         )
         .await?;
-
-    #[cfg(feature = "custom-policy")]
-    let kv_router = {
-        let effective_config = kv_router_config.clone().unwrap_or_default();
-        let selector = worker_selection_policy_factory.map_or_else(
-            || WorkerSelectionPolicy::default(effective_config.clone(), metric_worker_type),
-            |factory| {
-                let policy_worker_role = policy_worker_role.expect(
-                    "a configured worker-selection policy waits for a typed model card above",
-                );
-                factory(
-                    &effective_config,
-                    policy_worker_role,
-                    dynamo_kv_router::RoutingPartitionRef::new(
-                        policy_model_name.as_deref().unwrap_or_default(),
-                        dynamo_kv_router::DEFAULT_ROUTING_GROUP,
-                    ),
-                )
-            },
-        );
-        model_manager
-            .kv_chooser_for_with_selector_and_client(
-                client,
-                block_size as u32,
-                selector,
-                kv_router_config,
-                prefill_load_estimator,
-                worker_role,
-                metric_worker_type,
-                model_name,
-                enable_eagle,
-                load_context.scheduler_load_sender(),
-                load_context.cancellation_token(),
-            )
-            .await?
-    };
 
     Ok(llm_rs::kv_router::ManagedKvRouter::new(
         load_context,
@@ -2214,11 +2236,7 @@ impl KvRouter {
         load_threshold_config: Option<&LoadThresholdConfig>,
         session_affinity_mode: &str,
     ) -> PyResult<Self> {
-        if session_affinity_ttl_secs.is_some_and(|ttl| !(1..=31_536_000).contains(&ttl)) {
-            return Err(PyValueError::new_err(
-                "session_affinity_ttl_secs must be between 1 and 31536000",
-            ));
-        }
+        check_session_affinity_ttl_secs(session_affinity_ttl_secs)?;
         let session_affinity_mode = session_affinity_mode
             .parse::<RsSessionAffinityMode>()
             .map_err(PyValueError::new_err)?;
@@ -2505,7 +2523,7 @@ impl KvRouter {
                 )
                 .await
                 .map_err(to_pyerr)?;
-            let (outcome, attempt) = admitted.into_parts();
+            let (outcome, booking) = admitted.into_parts();
             let (best_worker, overlap_blocks) = match outcome {
                 llm_rs::kv_router::FindBestMatchOutcome::Routed {
                     worker,
@@ -2541,19 +2559,9 @@ impl KvRouter {
                 None
             };
 
-            if let Some(request_id) = request_id {
-                let AdmissionAttempt::Tracked(attempt_id) = attempt else {
-                    return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                        "tracked admission returned no attempt identity",
-                    ));
-                };
+            if let Some(booking) = booking {
                 chooser
-                    .enroll_public_request_attempt(
-                        request_id,
-                        best_worker,
-                        attempt_id,
-                        routing_decision,
-                    )
+                    .enroll_public_request_attempt(booking, routing_decision)
                     .await
                     .map_err(to_pyerr)?;
             } else if let Some(tokens_with_hashes) = routing_decision {

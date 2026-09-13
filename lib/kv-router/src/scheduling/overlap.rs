@@ -434,6 +434,35 @@ mod tests {
         assert_eq!(tiers.disk[&worker], 9);
     }
 
+    /// Default tier weights; `worker_2` has lower-tier hits but no device row.
+    #[test]
+    fn weighted_cache_hit_estimates_include_lower_tiers() {
+        let worker_1 = WorkerWithDpRank::new(1, 0);
+        let worker_2 = WorkerWithDpRank::new(2, 0);
+        let mut device = OverlapScores::new();
+        device.scores.insert(worker_1, 2);
+        let mut host = LowerTierMatchDetails::default();
+        host.hits.insert(worker_1, 1);
+        host.hits.insert(worker_2, 1);
+        let mut disk = LowerTierMatchDetails::default();
+        disk.hits.insert(worker_1, 2);
+        let tiered = TieredMatchDetails {
+            device: MatchDetails {
+                overlap_scores: device,
+                ..Default::default()
+            },
+            lower_tier: HashMap::from([(StorageTier::HostPinned, host), (StorageTier::Disk, disk)]),
+        };
+
+        let estimates =
+            cache_hit_estimates_from_tiered_matches(&KvRouterConfig::default(), 16, &tiered);
+
+        assert_eq!(estimates.effective_overlap_blocks[&worker_1], 3.25);
+        assert_eq!(estimates.cached_tokens[&worker_1], 52);
+        assert_eq!(estimates.effective_overlap_blocks[&worker_2], 0.75);
+        assert_eq!(estimates.cached_tokens[&worker_2], 12);
+    }
+
     #[test]
     fn score_response_uses_explicit_block_count_and_shared_credit() {
         let warm = WorkerWithDpRank::new(7, 1);

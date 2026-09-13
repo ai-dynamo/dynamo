@@ -435,6 +435,13 @@ jobs:
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
       run: cargo test --locked --all-targets
+    - name: Check isolated kv-router feature builds
+      if: matrix.dir == '.'
+      working-directory: ${{ matrix.dir }}
+      # Workspace feature unification hides these; check each on its own.
+      run: |
+        cargo check --locked -p dynamo-kv-router --no-default-features --features standalone-slot-tracker
+        cargo check --locked -p dynamo-kv-router --no-default-features --features standalone-indexer
     - name: Run standalone slot-tracker feature tests
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}

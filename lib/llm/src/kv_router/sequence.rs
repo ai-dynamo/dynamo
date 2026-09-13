@@ -17,7 +17,6 @@ use dynamo_kv_router::protocols::{
     ActiveSequenceEvent, ActiveSequenceEventBatch, MAX_REPLICA_BATCH_DURATION,
     MAX_REPLICA_BATCH_EVENTS, WorkerWithDpRank,
 };
-use dynamo_kv_router::scheduling::queue::SchedulerBookingDescriptor;
 pub use dynamo_kv_router::sequence::{ActiveSequences, RequestId};
 
 use anyhow::Result;
@@ -26,20 +25,14 @@ use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::{
     EventPublisher, EventSubscriber, EventTransportKind, TypedEventSubscriber,
 };
-use parking_lot::Mutex;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::future::Future;
-use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::metrics::{RouterWorkerStatusMetrics, WORKER_LOAD_METRICS};
-use crate::kv_router::{ACTIVE_SEQUENCES_SUBJECT, SchedulerLoadSender};
-use crate::local_model::runtime_config::ModelRuntimeConfig;
-#[cfg(test)]
-use dynamo_kv_router::protocols::PrefillLoadHint;
+use crate::kv_router::ACTIVE_SEQUENCES_SUBJECT;
 #[cfg(test)]
 use dynamo_runtime::transports::event_plane::MsgpackCodec;
 
@@ -47,107 +40,7 @@ use dynamo_runtime::transports::event_plane::MsgpackCodec;
 // if the queue is full, the newest event is dropped without blocking the local mutation.
 const REPLICA_EVENT_CHANNEL_CAPACITY: usize = 100_000;
 
-enum DeferredReplicaLeaseEvent {
-    Admitted(SchedulerBookingDescriptor),
-    Progressed(SchedulerBookingDescriptor),
-    Completed(SchedulerBookingDescriptor),
-}
-
-enum DeferredReplicaLeaseState {
-    Buffering(Vec<DeferredReplicaLeaseEvent>),
-    Installing {
-        target: Arc<dyn ReplicaRequestLeaseObserver>,
-        pending: Vec<DeferredReplicaLeaseEvent>,
-    },
-    Installed(Arc<dyn ReplicaRequestLeaseObserver>),
-}
-
-impl Default for DeferredReplicaLeaseState {
-    fn default() -> Self {
-        Self::Buffering(Vec::new())
-    }
-}
-
-/// Buffers the construction-time event window until `KvRouter` installs its
-/// request lease manager. After installation, calls pass through directly.
-#[derive(Default)]
-pub(crate) struct DeferredReplicaRequestLeaseObserver {
-    state: Mutex<DeferredReplicaLeaseState>,
-}
-
-impl DeferredReplicaRequestLeaseObserver {
-    pub(crate) fn install(&self, target: Arc<dyn ReplicaRequestLeaseObserver>) -> bool {
-        let mut pending = {
-            let mut state = self.state.lock();
-            let DeferredReplicaLeaseState::Buffering(pending) = &mut *state else {
-                return false;
-            };
-            let pending = std::mem::take(pending);
-            *state = DeferredReplicaLeaseState::Installing {
-                target: Arc::clone(&target),
-                pending: Vec::new(),
-            };
-            pending
-        };
-
-        loop {
-            for event in pending {
-                Self::notify(&target, event);
-            }
-            let mut state = self.state.lock();
-            let DeferredReplicaLeaseState::Installing {
-                target: installing_target,
-                pending: queued,
-            } = &mut *state
-            else {
-                unreachable!("observer installation state changed unexpectedly");
-            };
-            if queued.is_empty() {
-                *state = DeferredReplicaLeaseState::Installed(Arc::clone(installing_target));
-                return true;
-            }
-            pending = std::mem::take(queued);
-        }
-    }
-
-    fn observe(&self, event: DeferredReplicaLeaseEvent) {
-        let target = {
-            let mut state = self.state.lock();
-            match &mut *state {
-                DeferredReplicaLeaseState::Buffering(pending)
-                | DeferredReplicaLeaseState::Installing { pending, .. } => {
-                    pending.push(event);
-                    return;
-                }
-                DeferredReplicaLeaseState::Installed(target) => Arc::clone(target),
-            }
-        };
-        Self::notify(&target, event);
-    }
-
-    fn notify(target: &Arc<dyn ReplicaRequestLeaseObserver>, event: DeferredReplicaLeaseEvent) {
-        match event {
-            DeferredReplicaLeaseEvent::Admitted(booking) => target.admitted(booking),
-            DeferredReplicaLeaseEvent::Progressed(booking) => target.progressed(&booking),
-            DeferredReplicaLeaseEvent::Completed(booking) => target.completed(&booking),
-        }
-    }
-}
-
-impl ReplicaRequestLeaseObserver for DeferredReplicaRequestLeaseObserver {
-    fn admitted(&self, booking: SchedulerBookingDescriptor) {
-        self.observe(DeferredReplicaLeaseEvent::Admitted(booking));
-    }
-
-    fn progressed(&self, booking: &SchedulerBookingDescriptor) {
-        self.observe(DeferredReplicaLeaseEvent::Progressed(booking.clone()));
-    }
-
-    fn completed(&self, booking: &SchedulerBookingDescriptor) {
-        self.observe(DeferredReplicaLeaseEvent::Completed(booking.clone()));
-    }
-}
-
+/// How active-sequence events are framed on the wire for a transport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActiveSequenceEventWireFormat {
     Singleton,
@@ -253,68 +146,7 @@ impl ActiveSequenceEventPublisher {
     }
 }
 
-fn active_sequence_event_channel(
-    enabled: bool,
-    capacity: usize,
-    cancellation_token: &CancellationToken,
-) -> Option<(
-    ActiveSequenceEventPublisher,
-    mpsc::Receiver<ActiveSequenceEvent>,
-)> {
-    enabled
-        .then(|| ActiveSequenceEventPublisher::channel(capacity, cancellation_token.child_token()))
-}
-
-/// Concrete [`SequencePublisher`] backed by the runtime event plane and Prometheus gauges.
-pub struct RuntimeSequencePublisher {
-    event_sender: Option<ActiveSequenceEventPublisher>,
-    scheduler_load: SchedulerLoadSender,
-    worker_status_metrics: Arc<RouterWorkerStatusMetrics>,
-}
-
-impl SequencePublisher for RuntimeSequencePublisher {
-    fn enqueue_event(&self, event: ActiveSequenceEvent) -> anyhow::Result<()> {
-        let Some(event_sender) = &self.event_sender else {
-            return Ok(());
-        };
-        event_sender.enqueue(event)
-    }
-
-    fn publish_scheduler_load(&self, snapshot: SchedulerLoadSnapshot) {
-        self.scheduler_load.publish(snapshot);
-    }
-
-    fn publish_scheduler_load_batch(&self, snapshots: Vec<SchedulerLoadSnapshot>) {
-        self.scheduler_load.publish_batch(snapshots);
-    }
-
-    fn observe_load(
-        &self,
-        worker: &WorkerWithDpRank,
-        worker_type: &str,
-        blocks: usize,
-        tokens: usize,
-    ) {
-        WORKER_LOAD_METRICS.observe(
-            worker.worker_id,
-            worker.dp_rank,
-            worker_type,
-            blocks,
-            tokens,
-        );
-    }
-
-    fn observe_worker_registered(&self, worker: &WorkerWithDpRank, worker_type: &str) {
-        self.worker_status_metrics
-            .set_registered(worker.worker_id, worker.dp_rank, worker_type);
-    }
-
-    fn observe_worker_removed(&self, worker: &WorkerWithDpRank, worker_type: &str) {
-        self.worker_status_metrics
-            .remove_worker(worker.worker_id, worker.dp_rank, worker_type);
-    }
-}
-
+/// One event per message, for transports that carry singletons.
 trait SingletonEventPublisher: Send + Sync {
     fn publish_event(
         &self,
@@ -513,54 +345,26 @@ impl SequenceSubscriber for RuntimeSequenceSubscriber {
     }
 }
 
-/// Type alias for the runtime-wired multi-worker sequence tracker.
-pub type ActiveSequencesMulti = ActiveSequencesMultiWorker<RuntimeSequencePublisher>;
-
-/// Convenience async constructor that creates the event-plane publishers/subscribers
-/// and returns an `Arc<ActiveSequencesMulti>` with replica sync already running.
-pub async fn create_multi_worker_sequences(
-    endpoint: Endpoint,
-    block_size: usize,
-    workers_with_configs: HashMap<u64, ModelRuntimeConfig>,
-    replica_sync: bool,
+/// Replica-sync channels for an embedded selection partition over the runtime
+/// event plane. Inbound events on `ACTIVE_SEQUENCES_SUBJECT` are always
+/// forwarded; outbound events are published only when `publishes_outbound` is
+/// set. The inbound leg runs when the returned [`ReplicaIngress`] is started,
+/// so the caller can install every consumer of lifecycle events first.
+pub(crate) async fn host_replica_channels(
+    endpoint: &Endpoint,
     router_id: u64,
-    scheduler_load: SchedulerLoadSender,
+    publishes_outbound: bool,
     cancellation_token: CancellationToken,
-) -> Result<Arc<ActiveSequencesMulti>> {
-    create_multi_worker_sequences_with_observer(
-        endpoint,
-        block_size,
-        workers_with_configs,
-        replica_sync,
-        router_id,
-        scheduler_load,
-        None,
-        cancellation_token,
-    )
-    .await
-}
-
-#[expect(clippy::too_many_arguments)]
-pub(crate) async fn create_multi_worker_sequences_with_observer(
-    endpoint: Endpoint,
-    block_size: usize,
-    workers_with_configs: HashMap<u64, ModelRuntimeConfig>,
-    replica_sync: bool,
-    router_id: u64,
-    scheduler_load: SchedulerLoadSender,
-    replica_request_lease_observer: Option<Arc<dyn ReplicaRequestLeaseObserver>>,
-    cancellation_token: CancellationToken,
-) -> Result<Arc<ActiveSequencesMulti>> {
-    let worker_type = scheduler_load.metric_label();
+) -> Result<(
+    dynamo_kv_router::services::selection::HostReplicaChannels,
+    ReplicaIngress,
+)> {
     let transport_kind = endpoint.drt().default_event_transport_kind();
-    let event_sender = if let Some((event_sender, event_rx)) = active_sequence_event_channel(
-        replica_sync,
-        REPLICA_EVENT_CHANNEL_CAPACITY,
-        &cancellation_token,
-    ) {
-        let publisher_cancellation_token = event_sender.cancellation_token.clone();
+    let event_sender = if publishes_outbound {
+        let (event_sender, event_rx) = mpsc::channel(REPLICA_EVENT_CHANNEL_CAPACITY);
+        let publisher_cancellation_token = cancellation_token.clone();
         let event_publisher = EventPublisher::for_endpoint_with_transport(
-            &endpoint,
+            endpoint,
             ACTIVE_SEQUENCES_SUBJECT,
             transport_kind,
         )
@@ -585,109 +389,97 @@ pub(crate) async fn create_multi_worker_sequences_with_observer(
     } else {
         None
     };
-    let worker_status_metrics = RouterWorkerStatusMetrics::from_component(endpoint.component());
 
-    let publisher = RuntimeSequencePublisher {
-        event_sender,
-        scheduler_load,
-        worker_status_metrics,
+    let (inbound_tx, inbound_rx) = mpsc::channel(REPLICA_EVENT_CHANNEL_CAPACITY);
+    let ingress = ReplicaIngress {
+        endpoint: endpoint.clone(),
+        inbound_tx: inbound_tx.clone(),
+        cancellation_token,
     };
+    Ok((
+        dynamo_kv_router::services::selection::HostReplicaChannels {
+            outbound: event_sender,
+            inbound_tx,
+            inbound_rx,
+            process_id: router_id,
+            ingress_observer: None,
+        },
+        ingress,
+    ))
+}
 
-    let dp_range: HashMap<u64, (u32, u32)> = workers_with_configs
-        .into_iter()
-        .map(|(id, config)| {
-            (
-                id,
-                (config.data_parallel_start_rank, config.data_parallel_size),
+/// The inbound leg of [`host_replica_channels`]: peer replica events and
+/// worker-origin completion marks feed `inbound_tx` from the direct-ZMQ
+/// fan-in or the runtime subscriber, whichever the transport selects.
+pub(crate) struct ReplicaIngress {
+    endpoint: Endpoint,
+    inbound_tx: mpsc::Sender<ActiveSequenceEvent>,
+    cancellation_token: CancellationToken,
+}
+
+impl ReplicaIngress {
+    pub(crate) async fn start(self) {
+        let transport_kind = self.endpoint.drt().default_event_transport_kind();
+        let direct = direct_zmq::DirectZmqSequenceConfig::from_env();
+        let ingress_result = if direct.should_use_direct(transport_kind) {
+            direct_zmq::start(
+                self.endpoint,
+                self.inbound_tx,
+                direct.rcvhwm,
+                self.cancellation_token,
             )
-        })
-        .collect();
-
-    let uses_shared_lease_manager = replica_request_lease_observer.is_some();
-    let multi_worker = if uses_shared_lease_manager {
-        // KvRouter's request lease manager owns the single CLOCK reaper for scheduler
-        // and approximate-LRU cleanup. Cache-retention TTL is unrelated.
-        ActiveSequencesMultiWorker::new_without_expiry(
-            publisher,
-            block_size,
-            dp_range,
-            replica_sync,
-            router_id,
-            worker_type,
-        )
-    } else {
-        ActiveSequencesMultiWorker::new(
-            publisher,
-            block_size,
-            dp_range,
-            replica_sync,
-            router_id,
-            worker_type,
-        )
-    };
-
-    let arc = Arc::new(multi_worker);
-    if let Some(observer) = replica_request_lease_observer
-        && !arc.set_replica_request_lease_observer(observer)
-    {
-        anyhow::bail!("replica request lease observer is already installed");
-    }
-    if !uses_shared_lease_manager {
-        arc.start_periodic_force_expiry_across_all_workers(cancellation_token.child_token());
-    }
-
-    // Worker-origin completion marks are consumed even when router-to-router replica sync is
-    // disabled. The tracker filters all other remote lifecycle events in that mode.
-    let direct_config = direct_zmq::DirectZmqSequenceConfig::from_env();
-    let ingress_result = if direct_config.should_use_direct(transport_kind) {
-        direct_zmq::start(
-            endpoint,
-            arc.clone(),
-            direct_config.rcvhwm,
-            cancellation_token.child_token(),
-        )
-        .await
-        .map(|_task| ())
-    } else {
-        match RuntimeSequenceSubscriber::for_endpoint(&endpoint).await {
-            Ok(subscriber) => {
-                arc.start_replica_sync(subscriber, cancellation_token.child_token());
-                Ok(())
-            }
-            Err(error) => Err(error),
+            .await
+            .map(|_supervisor| ())
+        } else {
+            RuntimeSequenceSubscriber::for_endpoint(&self.endpoint)
+                .await
+                .map(|subscriber| {
+                    tokio::spawn(forward_replica_events(
+                        subscriber,
+                        self.inbound_tx,
+                        self.cancellation_token,
+                    ));
+                })
+        };
+        if let Err(error) = ingress_result {
+            tracing::warn!(
+                %error,
+                "active-sequence event ingress unavailable; continuing with response-side cleanup"
+            );
         }
-    };
-    if let Err(error) = ingress_result {
-        tracing::warn!(
-            %error,
-            "active-sequence event ingress unavailable; continuing with response-side cleanup"
-        );
     }
+}
 
-    Ok(arc)
+async fn forward_replica_events(
+    mut subscriber: RuntimeSequenceSubscriber,
+    forward_tx: mpsc::Sender<ActiveSequenceEvent>,
+    cancellation_token: CancellationToken,
+) {
+    loop {
+        let next = tokio::select! {
+            _ = cancellation_token.cancelled() => break,
+            next = subscriber.next_event() => next,
+        };
+        match next {
+            Some(Ok(event)) => {
+                if forward_tx.send(event).await.is_err() {
+                    break;
+                }
+            }
+            Some(Err(error)) => {
+                tracing::warn!(%error, "replica-sync subscriber error; continuing");
+            }
+            None => break,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use dynamo_kv_router::protocols::ActiveSequenceEventData;
-    use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+    use std::sync::Arc;
     use tokio::time::Instant;
-
-    fn scheduler_load_sender() -> SchedulerLoadSender {
-        super::super::routing_load::scheduler_load_channel(
-            super::super::RouterLoadSource::Decode,
-            CancellationToken::new(),
-        )
-        .0
-    }
-
-    fn tracking_hint(tokens: usize) -> Option<PrefillLoadHint> {
-        Some(PrefillLoadHint {
-            initial_effective_prefill_tokens: tokens,
-            expected_prefill_duration: None,
-        })
-    }
 
     fn free_event(request_id: impl Into<String>) -> ActiveSequenceEvent {
         ActiveSequenceEvent {
@@ -797,11 +589,6 @@ mod tests {
         assert!(error.contains("capacity=1"));
         assert_eq!(event_rx.len(), 1);
         assert_eq!(event_rx.try_recv().unwrap().request_id, "accepted");
-    }
-
-    #[test]
-    fn active_sequence_publish_channel_is_absent_when_replica_sync_disabled() {
-        assert!(active_sequence_event_channel(false, 1, &CancellationToken::new()).is_none());
     }
 
     #[test]
@@ -979,102 +766,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn active_sequence_replica_sync_isolated_by_endpoint() -> Result<()> {
-        let runtime = Runtime::from_current()?;
-        let distributed =
-            DistributedRuntime::new(runtime, DistributedConfig::process_local()).await?;
-        let namespace = distributed.namespace(format!(
-            "active-sequence-endpoint-isolation-{}",
-            uuid::Uuid::new_v4()
-        ))?;
-        let component = namespace.component("workers")?;
-        let endpoint_a = component.endpoint("generate-a");
-        let endpoint_b = component.endpoint("generate-b");
-        let workers = HashMap::from([(0, ModelRuntimeConfig::new())]);
-
-        let cancel = CancellationToken::new();
-        let sequences_a = create_multi_worker_sequences(
-            endpoint_a.clone(),
-            4,
-            workers.clone(),
-            true,
-            1,
-            scheduler_load_sender(),
-            cancel.child_token(),
-        )
-        .await?;
-        let sequences_a_peer = create_multi_worker_sequences(
-            endpoint_a,
-            4,
-            workers.clone(),
-            true,
-            3,
-            scheduler_load_sender(),
-            cancel.child_token(),
-        )
-        .await?;
-        let sequences_b = create_multi_worker_sequences(
-            endpoint_b,
-            4,
-            workers,
-            true,
-            2,
-            scheduler_load_sender(),
-            cancel.child_token(),
-        )
-        .await?;
-
-        let worker = WorkerWithDpRank::new(0, 0);
-        tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
-            for request_index in 0..100 {
-                if sequences_a_peer.active_blocks()[&worker] > 0 {
-                    break;
-                }
-
-                sequences_a.add_request(
-                    SequenceRequest {
-                        request_id: format!("endpoint-a-request-{request_index}"),
-                        token_sequence: Some(vec![1, 2, 3, 4]),
-                        track_prefill_tokens: true,
-                        expected_output_tokens: None,
-                        prefill_load_hint: tracking_hint(4),
-                        worker,
-                        lora_name: None,
-                    },
-                    Instant::now(),
-                )?;
-                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-            }
-
-            anyhow::ensure!(sequences_a_peer.active_blocks()[&worker] > 0);
-            Ok::<_, anyhow::Error>(())
-        })
-        .await??;
-        assert!(sequences_a.active_blocks()[&worker] > 0);
-        assert!(sequences_a_peer.active_blocks()[&worker] > 0);
-        let leaked_to_b = tokio::time::timeout(tokio::time::Duration::from_millis(250), async {
-            loop {
-                if sequences_b.active_blocks()[&worker] > 0 {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await;
-        assert!(
-            leaked_to_b.is_err(),
-            "endpoint B received endpoint A sequence state"
-        );
-        assert_eq!(sequences_b.active_blocks()[&worker], 0);
-        cancel.cancel();
-        Ok(())
-    }
-
-    #[tokio::test]
+    #[serial_test::serial]
     async fn worker_completion_ingress_runs_without_router_replica_sync() -> Result<()> {
-        let runtime = Runtime::from_current()?;
-        let distributed =
-            DistributedRuntime::new(runtime, DistributedConfig::process_local()).await?;
+        let runtime = dynamo_runtime::Runtime::from_current()?;
+        let distributed = dynamo_runtime::DistributedRuntime::new(
+            runtime,
+            dynamo_runtime::distributed::DistributedConfig::process_local(),
+        )
+        .await?;
         let endpoint = distributed
             .namespace(format!(
                 "worker-completion-ingress-{}",
@@ -1082,334 +781,105 @@ mod tests {
             ))?
             .component("workers")?
             .endpoint("generate");
-        let worker_id = 42;
-        let worker = WorkerWithDpRank::new(worker_id, 0);
         let cancel = CancellationToken::new();
-        let sequences = create_multi_worker_sequences(
-            endpoint.clone(),
-            4,
-            HashMap::from([(worker_id, ModelRuntimeConfig::new())]),
-            false,
-            99,
-            scheduler_load_sender(),
-            cancel.child_token(),
-        )
-        .await?;
-        let request_id = "worker-origin-mark".to_string();
-        sequences.add_request(
-            SequenceRequest {
-                request_id: request_id.clone(),
-                token_sequence: Some(vec![1, 2, 3]),
-                track_prefill_tokens: true,
-                expected_output_tokens: None,
-                prefill_load_hint: tracking_hint(12),
-                worker,
-                lora_name: None,
-            },
-            Instant::now(),
-        )?;
+        let (mut channels, ingress) =
+            host_replica_channels(&endpoint, 99, false, cancel.child_token()).await?;
+        assert!(channels.outbound.is_none());
+        ingress.start().await;
 
         let publisher = ActiveSequenceEventPublisher::for_endpoint(&endpoint, 16).await?;
-        tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+        let received = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                publisher.mark_prefill_completed(request_id.clone(), worker_id, 0)?;
-                if sequences.active_tokens(Instant::now())[&worker] == 0 {
-                    break;
+                publisher.mark_prefill_completed("worker-origin-mark".to_string(), 42, 0)?;
+                tokio::select! {
+                    event = channels.inbound_rx.recv() => return Ok::<_, anyhow::Error>(event),
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
                 }
-                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await??
+        .expect("inbound channel stays open");
+        assert_eq!(received.request_id, "worker-origin-mark");
+        assert!(matches!(
+            received.data,
+            ActiveSequenceEventData::MarkPrefillCompleted
+        ));
+
+        drop(publisher);
+        cancel.cancel();
+        distributed.shutdown();
+        Ok(())
+    }
+
+    /// Replica sync is scoped to the endpoint: an ingress on endpoint B never
+    /// sees events published on endpoint A, even once both planes are live.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn active_sequence_replica_sync_isolated_by_endpoint() -> Result<()> {
+        let runtime = dynamo_runtime::Runtime::from_current()?;
+        let distributed = dynamo_runtime::DistributedRuntime::new(
+            runtime,
+            dynamo_runtime::distributed::DistributedConfig::process_local(),
+        )
+        .await?;
+        let component = distributed
+            .namespace(format!(
+                "active-sequence-endpoint-isolation-{}",
+                uuid::Uuid::new_v4()
+            ))?
+            .component("workers")?;
+        let endpoint_a = component.endpoint("generate-a");
+        let endpoint_b = component.endpoint("generate-b");
+        let cancel = CancellationToken::new();
+        let (mut channels_a, ingress_a) =
+            host_replica_channels(&endpoint_a, 1, false, cancel.child_token()).await?;
+        let (mut channels_b, ingress_b) =
+            host_replica_channels(&endpoint_b, 2, false, cancel.child_token()).await?;
+        ingress_a.start().await;
+        ingress_b.start().await;
+
+        // Publish on both planes until each ingress has received something, so
+        // B's silence about A cannot be blamed on B's subscription not being up.
+        let publisher_a = ActiveSequenceEventPublisher::for_endpoint(&endpoint_a, 16).await?;
+        let publisher_b = ActiveSequenceEventPublisher::for_endpoint(&endpoint_b, 16).await?;
+        let mut received_a = Vec::new();
+        let mut received_b = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while received_a.is_empty() || received_b.is_empty() {
+                publisher_a.mark_prefill_completed("endpoint-a-mark".to_string(), 42, 0)?;
+                publisher_b.mark_prefill_completed("endpoint-b-mark".to_string(), 42, 0)?;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                while let Ok(event) = channels_a.inbound_rx.try_recv() {
+                    received_a.push(event.request_id);
+                }
+                while let Ok(event) = channels_b.inbound_rx.try_recv() {
+                    received_b.push(event.request_id);
+                }
             }
             Ok::<_, anyhow::Error>(())
         })
         .await??;
+        // Give late A events 250ms of silence to leak into B before judging.
+        while let Ok(Some(event)) = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            channels_b.inbound_rx.recv(),
+        )
+        .await
+        {
+            received_b.push(event.request_id);
+        }
+        assert!(
+            received_a.iter().all(|id| id == "endpoint-a-mark"),
+            "endpoint A received endpoint B sequence state: {received_a:?}"
+        );
+        assert!(
+            received_b.iter().all(|id| id == "endpoint-b-mark"),
+            "endpoint B received endpoint A sequence state: {received_b:?}"
+        );
 
-        drop(publisher);
+        drop((publisher_a, publisher_b));
         cancel.cancel();
-        Ok(())
-    }
-
-    #[tokio::test]
-    #[ignore]
-    async fn test_multi_worker_cross_instance_sync() -> Result<()> {
-        dynamo_runtime::logging::init();
-
-        let block_size = 4;
-
-        let runtime = Runtime::from_current()?;
-        let distributed = DistributedRuntime::from_settings(runtime.clone()).await?;
-
-        let namespace = distributed.namespace("test_cross_instance_sync")?;
-        let endpoint = namespace.component("sequences")?.endpoint("generate");
-
-        let mut workers_with_configs = HashMap::new();
-
-        let mut config_worker_0 = crate::local_model::runtime_config::ModelRuntimeConfig::new();
-        config_worker_0.data_parallel_size = 2;
-        workers_with_configs.insert(0, config_worker_0);
-
-        let config_worker_1 = crate::local_model::runtime_config::ModelRuntimeConfig::new();
-        workers_with_configs.insert(1, config_worker_1);
-
-        let seq_manager_1 = create_multi_worker_sequences(
-            endpoint.clone(),
-            block_size,
-            workers_with_configs.clone(),
-            true,
-            1,
-            scheduler_load_sender(),
-            CancellationToken::new(),
-        )
-        .await?;
-        let seq_manager_2 = create_multi_worker_sequences(
-            endpoint,
-            block_size,
-            workers_with_configs,
-            true,
-            2,
-            scheduler_load_sender(),
-            CancellationToken::new(),
-        )
-        .await?;
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-        let decay_now = Instant::now();
-
-        seq_manager_1.add_request(
-            SequenceRequest {
-                request_id: "request_0".to_string(),
-                token_sequence: Some(vec![0, 1, 2]),
-                track_prefill_tokens: true,
-                expected_output_tokens: None,
-                prefill_load_hint: tracking_hint(12),
-                worker: WorkerWithDpRank::new(0, 0),
-                lora_name: None,
-            },
-            decay_now,
-        )?;
-
-        seq_manager_1.add_request(
-            SequenceRequest {
-                request_id: "request_1".to_string(),
-                token_sequence: Some(vec![3, 4]),
-                track_prefill_tokens: true,
-                expected_output_tokens: None,
-                prefill_load_hint: tracking_hint(8),
-                worker: WorkerWithDpRank::new(0, 1),
-                lora_name: None,
-            },
-            decay_now,
-        )?;
-
-        seq_manager_2.add_request(
-            SequenceRequest {
-                request_id: "request_2".to_string(),
-                token_sequence: Some(vec![0, 1, 2, 3]),
-                track_prefill_tokens: true,
-                expected_output_tokens: None,
-                prefill_load_hint: tracking_hint(16),
-                worker: WorkerWithDpRank::new(1, 0),
-                lora_name: None,
-            },
-            decay_now,
-        )?;
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-
-        let blocks_phase1 = seq_manager_1.active_blocks();
-        let tokens_phase1 = seq_manager_1.active_tokens(Instant::now());
-
-        let worker_0_dp0 = WorkerWithDpRank::new(0, 0);
-        let worker_0_dp1 = WorkerWithDpRank::new(0, 1);
-        let worker_1_dp0 = WorkerWithDpRank::new(1, 0);
-
-        assert_eq!(
-            blocks_phase1[&worker_0_dp0], 3,
-            "Worker 0 dp_rank 0 should have 3 active blocks (from request_0)"
-        );
-        assert_eq!(
-            blocks_phase1[&worker_0_dp1], 2,
-            "Worker 0 dp_rank 1 should have 2 active blocks (from request_1)"
-        );
-        assert_eq!(
-            blocks_phase1[&worker_1_dp0], 4,
-            "Worker 1 dp_rank 0 should have 4 active blocks (from request_2 added by seq_manager_2)"
-        );
-        assert_eq!(
-            tokens_phase1[&worker_0_dp0], 12,
-            "Worker 0 dp_rank 0 should have 12 active tokens"
-        );
-        assert_eq!(
-            tokens_phase1[&worker_0_dp1], 8,
-            "Worker 0 dp_rank 1 should have 8 active tokens"
-        );
-        assert_eq!(
-            tokens_phase1[&worker_1_dp0], 16,
-            "Worker 1 dp_rank 0 should have 16 active tokens (from request_2 added by seq_manager_2)"
-        );
-
-        seq_manager_1.free(&"request_2".to_string(), Instant::now())?;
-
-        seq_manager_2.free(&"request_0".to_string(), Instant::now())?;
-        seq_manager_2.free(&"request_1".to_string(), Instant::now())?;
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-
-        let blocks_phase2 = seq_manager_2.active_blocks();
-        let tokens_phase2 = seq_manager_2.active_tokens(Instant::now());
-
-        let all_workers = vec![
-            WorkerWithDpRank::new(0, 0),
-            WorkerWithDpRank::new(0, 1),
-            WorkerWithDpRank::new(1, 0),
-        ];
-
-        for worker in all_workers {
-            assert_eq!(
-                blocks_phase2[&worker], 0,
-                "Worker (id={}, dp_rank={}) should have 0 active blocks after all requests freed",
-                worker.worker_id, worker.dp_rank
-            );
-            assert_eq!(
-                tokens_phase2[&worker], 0,
-                "Worker (id={}, dp_rank={}) should have 0 active tokens after all requests freed",
-                worker.worker_id, worker.dp_rank
-            );
-        }
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    #[ignore]
-    async fn test_multi_worker_no_token_sequence_sync() -> Result<()> {
-        dynamo_runtime::logging::init();
-
-        let block_size = 4;
-
-        let runtime = Runtime::from_current()?;
-        let distributed = DistributedRuntime::from_settings(runtime.clone()).await?;
-
-        let namespace = distributed.namespace("test_no_token_seq_sync")?;
-        let endpoint = namespace.component("sequences")?.endpoint("generate");
-
-        let mut workers_with_configs = HashMap::new();
-        workers_with_configs.insert(
-            0,
-            crate::local_model::runtime_config::ModelRuntimeConfig::new(),
-        );
-        workers_with_configs.insert(
-            1,
-            crate::local_model::runtime_config::ModelRuntimeConfig::new(),
-        );
-        workers_with_configs.insert(
-            2,
-            crate::local_model::runtime_config::ModelRuntimeConfig::new(),
-        );
-
-        let seq_manager_1 = create_multi_worker_sequences(
-            endpoint.clone(),
-            block_size,
-            workers_with_configs.clone(),
-            true,
-            1,
-            scheduler_load_sender(),
-            CancellationToken::new(),
-        )
-        .await?;
-        let seq_manager_2 = create_multi_worker_sequences(
-            endpoint,
-            block_size,
-            workers_with_configs,
-            true,
-            2,
-            scheduler_load_sender(),
-            CancellationToken::new(),
-        )
-        .await?;
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-        let decay_now = Instant::now();
-
-        seq_manager_1.add_request(
-            SequenceRequest {
-                request_id: "request_0".to_string(),
-                token_sequence: None,
-                track_prefill_tokens: true,
-                expected_output_tokens: None,
-                prefill_load_hint: tracking_hint(12),
-                worker: WorkerWithDpRank::from_worker_id(0),
-                lora_name: None,
-            },
-            decay_now,
-        )?;
-
-        seq_manager_1.add_request(
-            SequenceRequest {
-                request_id: "request_1".to_string(),
-                token_sequence: None,
-                track_prefill_tokens: true,
-                expected_output_tokens: None,
-                prefill_load_hint: tracking_hint(8),
-                worker: WorkerWithDpRank::from_worker_id(1),
-                lora_name: None,
-            },
-            decay_now,
-        )?;
-
-        seq_manager_2.add_request(
-            SequenceRequest {
-                request_id: "request_2".to_string(),
-                token_sequence: None,
-                track_prefill_tokens: true,
-                expected_output_tokens: None,
-                prefill_load_hint: tracking_hint(16),
-                worker: WorkerWithDpRank::from_worker_id(2),
-                lora_name: None,
-            },
-            decay_now,
-        )?;
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-
-        let tokens_phase1 = seq_manager_1.active_tokens(Instant::now());
-
-        let worker_0 = WorkerWithDpRank::from_worker_id(0);
-        let worker_1 = WorkerWithDpRank::from_worker_id(1);
-        let worker_2 = WorkerWithDpRank::from_worker_id(2);
-
-        assert_eq!(
-            tokens_phase1[&worker_0], 12,
-            "Worker 0 should have 12 active tokens"
-        );
-        assert_eq!(
-            tokens_phase1[&worker_1], 8,
-            "Worker 1 should have 8 active tokens"
-        );
-        assert_eq!(
-            tokens_phase1[&worker_2], 16,
-            "Worker 2 should have 16 active tokens (from request_2 added by seq_manager_2)"
-        );
-
-        seq_manager_1.mark_prefill_completed(&"request_2".to_string(), Instant::now())?;
-        seq_manager_1.free(&"request_2".to_string(), Instant::now())?;
-
-        seq_manager_2.mark_prefill_completed(&"request_0".to_string(), Instant::now())?;
-        seq_manager_2.mark_prefill_completed(&"request_1".to_string(), Instant::now())?;
-        seq_manager_2.free(&"request_0".to_string(), Instant::now())?;
-        seq_manager_2.free(&"request_1".to_string(), Instant::now())?;
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-
-        let tokens_phase2 = seq_manager_2.active_tokens(Instant::now());
-
-        for worker_id in 0..=2 {
-            let worker = WorkerWithDpRank::from_worker_id(worker_id);
-            assert_eq!(
-                tokens_phase2[&worker], 0,
-                "Worker {} should have 0 active tokens after all requests freed",
-                worker_id
-            );
-        }
-
+        distributed.shutdown();
         Ok(())
     }
 }

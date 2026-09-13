@@ -18,7 +18,7 @@ use crate::identity::RoutingPartitionId;
 use crate::indexer::KvIndexerMetrics;
 use crate::protocols::WorkerId;
 
-use super::backend::{Indexer, create_indexer_with_metrics};
+use super::backend::{Indexer, IndexerPolicy, create_indexer_with_policy};
 use super::listener::spawn_zmq_listener;
 
 pub struct IndexerEntry {
@@ -317,6 +317,9 @@ pub struct WorkerRegistry {
     watermarks: DashMap<(WorkerId, u32), Arc<AtomicU64>>,
     num_threads: usize,
     indexer_metrics: Arc<KvIndexerMetrics>,
+    /// Shape of every indexer this registry creates. Set before the first
+    /// partition is created; later changes affect only new partitions.
+    indexer_policy: Mutex<IndexerPolicy>,
     ready_tx: watch::Sender<bool>,
     ready_rx: watch::Receiver<bool>,
     root_cancel_token: CancellationToken,
@@ -343,6 +346,7 @@ impl WorkerRegistry {
         Self::new_inner(num_threads, indexer_metrics, CancellationToken::new())
     }
 
+    #[cfg(feature = "metrics")]
     pub(super) fn new_with_indexer_metrics_and_cancel_token(
         num_threads: usize,
         indexer_metrics: Arc<KvIndexerMetrics>,
@@ -365,11 +369,17 @@ impl WorkerRegistry {
             watermarks: DashMap::new(),
             num_threads,
             indexer_metrics,
+            indexer_policy: Mutex::new(IndexerPolicy::event_driven()),
             ready_tx,
             ready_rx,
             root_cancel_token,
             retain_empty_indexers: false,
         }
+    }
+
+    /// Set the shape used for indexers created from now on.
+    pub fn set_indexer_policy(&self, policy: IndexerPolicy) {
+        *self.indexer_policy.lock() = policy;
     }
 
     #[cfg(feature = "standalone-selection")]
@@ -442,6 +452,7 @@ impl WorkerRegistry {
             }
         }
 
+        let indexer_policy = self.indexer_policy.lock().clone();
         let indexer_entry = self.indexers.entry(key.clone()).or_insert_with(|| {
             tracing::info!(
                 model_name = %key.model_name,
@@ -450,10 +461,12 @@ impl WorkerRegistry {
                 "Creating new indexer"
             );
             IndexerEntry {
-                indexer: create_indexer_with_metrics(
+                indexer: create_indexer_with_policy(
+                    &key,
                     block_size,
                     self.num_threads,
                     self.indexer_metrics.clone(),
+                    &indexer_policy,
                 ),
                 block_size,
             }
@@ -682,6 +695,32 @@ impl WorkerRegistry {
         Ok(())
     }
 
+    /// Whether `worker_id` has listeners registered here.
+    pub fn has_worker(&self, worker_id: WorkerId) -> bool {
+        self.workers.contains_key(&worker_id)
+    }
+
+    pub fn has_listener(&self, worker_id: WorkerId, dp_rank: u32) -> bool {
+        self.workers
+            .get(&worker_id)
+            .is_some_and(|entry| entry.listeners.contains_key(&dp_rank))
+    }
+
+    /// Drop what a rank's listener fed into the index after the listener itself
+    /// is gone (its deregistration was cancelled before reaching this step).
+    pub async fn remove_dp_rank_blocks(
+        &self,
+        worker_id: WorkerId,
+        dp_rank: u32,
+        key: &RoutingPartitionId,
+    ) {
+        // Clone the handle so the shard guard drops before the await.
+        let indexer = self.indexers.get(key).map(|ie| ie.indexer.clone());
+        if let Some(indexer) = indexer {
+            indexer.remove_worker_dp_rank(worker_id, dp_rank).await;
+        }
+    }
+
     pub fn list(&self) -> Vec<WorkerInfo> {
         self.list_filtered(None, None)
     }
@@ -756,6 +795,7 @@ impl WorkerRegistry {
     }
 
     pub fn get_or_create_indexer(&self, key: RoutingPartitionId, block_size: u32) -> Indexer {
+        let indexer_policy = self.indexer_policy.lock().clone();
         let entry = self.indexers.entry(key.clone()).or_insert_with(|| {
             tracing::info!(
                 model_name = %key.model_name,
@@ -764,10 +804,12 @@ impl WorkerRegistry {
                 "Creating indexer from recovery dump"
             );
             IndexerEntry {
-                indexer: create_indexer_with_metrics(
+                indexer: create_indexer_with_policy(
+                    &key,
                     block_size,
                     self.num_threads,
                     self.indexer_metrics.clone(),
+                    &indexer_policy,
                 ),
                 block_size,
             }
@@ -795,6 +837,15 @@ impl WorkerRegistry {
                 )
             })
             .collect()
+    }
+
+    /// The state a `deregister_dp_rank` cancelled after removing the listener
+    /// leaves behind: no listener, index entries untouched.
+    #[cfg(test)]
+    pub(crate) fn forget_listener(&self, instance_id: WorkerId, dp_rank: u32) {
+        if let Some(mut entry) = self.workers.get_mut(&instance_id) {
+            entry.listeners.remove(&dp_rank);
+        }
     }
 
     #[cfg(test)]

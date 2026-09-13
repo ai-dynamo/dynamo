@@ -296,6 +296,7 @@ pub(crate) struct ActiveSequenceZmqIngressMetrics {
     payload_decode_errors_total: IntCounter,
     identity_errors_total: IntCounter,
     forced_aborts_total: IntCounter,
+    dropped_events_total: IntCounter,
 }
 
 static ACTIVE_SEQUENCE_ZMQ_INGRESS_METRICS: OnceLock<Arc<ActiveSequenceZmqIngressMetrics>> =
@@ -351,6 +352,10 @@ impl ActiveSequenceZmqIngressMetrics {
                         "router_active_sequence_zmq_ingress_forced_aborts_total",
                         "Direct-ZMQ active-sequence source tasks aborted after join timeout",
                     ),
+                    dropped_events_total: counter(
+                        "router_active_sequence_zmq_ingress_dropped_events_total",
+                        "Direct-ZMQ active-sequence events dropped because the partition's inbound channel was full or closed",
+                    ),
                 })
             })
             .clone()
@@ -394,6 +399,103 @@ impl ActiveSequenceZmqIngressMetrics {
 
     pub(crate) fn record_forced_abort(&self) {
         self.forced_aborts_total.inc();
+    }
+
+    pub(crate) fn record_dropped_event(&self) {
+        self.dropped_events_total.inc();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Active-sequence inbound funnel metrics (per partition)
+// ---------------------------------------------------------------------------
+
+const ROUTING_GROUP_LABEL: &str = "routing_group";
+
+/// Instrumentation for the per-partition inbound replica funnel: one channel
+/// and one apply task per partition, fed by every publisher's ingress source.
+/// Updated once per drain batch from the apply task.
+pub(crate) struct ActiveSequenceIngressMetrics {
+    queue_depth: IntGaugeVec,
+    events_applied_total: IntCounterVec,
+    drain_batches_total: IntCounterVec,
+}
+
+/// Per-partition handles implementing the core's drain observer.
+pub(crate) struct ActiveSequenceIngressMetricHandles {
+    queue_depth: IntGauge,
+    events_applied_total: IntCounter,
+    drain_batches_total: IntCounter,
+}
+
+static ACTIVE_SEQUENCE_INGRESS_METRICS: OnceLock<Arc<ActiveSequenceIngressMetrics>> =
+    OnceLock::new();
+
+impl ActiveSequenceIngressMetrics {
+    pub(crate) fn from_component(component: &Component) -> Arc<Self> {
+        ACTIVE_SEQUENCE_INGRESS_METRICS
+            .get_or_init(|| {
+                let metrics = component.metrics();
+                let labels = [labels::MODEL, ROUTING_GROUP_LABEL, labels::WORKER_TYPE];
+                Arc::new(Self {
+                    queue_depth: metrics
+                        .create_intgaugevec(
+                            "router_active_sequence_ingress_queue_depth",
+                            "Active-sequence events waiting in the partition's inbound channel, sampled after each drain batch",
+                            &labels,
+                            &[],
+                        )
+                        .expect("failed to create router_active_sequence_ingress_queue_depth"),
+                    events_applied_total: metrics
+                        .create_intcountervec(
+                            "router_active_sequence_ingress_events_applied_total",
+                            "Active-sequence events applied from the partition's inbound channel",
+                            &labels,
+                            &[],
+                        )
+                        .expect(
+                            "failed to create router_active_sequence_ingress_events_applied_total",
+                        ),
+                    drain_batches_total: metrics
+                        .create_intcountervec(
+                            "router_active_sequence_ingress_drain_batches_total",
+                            "Drain batches applied from the partition's inbound channel",
+                            &labels,
+                            &[],
+                        )
+                        .expect(
+                            "failed to create router_active_sequence_ingress_drain_batches_total",
+                        ),
+                })
+            })
+            .clone()
+    }
+
+    /// One handle set per router partition. `worker_type` separates the
+    /// prefill and decode routers of the same model, which run separate
+    /// ingress channels.
+    pub(crate) fn handles(
+        &self,
+        model: &str,
+        routing_group: &str,
+        worker_type: &str,
+    ) -> ActiveSequenceIngressMetricHandles {
+        let labels = [model, routing_group, worker_type];
+        ActiveSequenceIngressMetricHandles {
+            queue_depth: self.queue_depth.with_label_values(&labels),
+            events_applied_total: self.events_applied_total.with_label_values(&labels),
+            drain_batches_total: self.drain_batches_total.with_label_values(&labels),
+        }
+    }
+}
+
+impl dynamo_kv_router::services::selection::ReplicaIngressObserver
+    for ActiveSequenceIngressMetricHandles
+{
+    fn observe_drain(&self, queue_depth: usize, applied: usize) {
+        self.queue_depth.set(queue_depth as i64);
+        self.events_applied_total.inc_by(applied as u64);
+        self.drain_batches_total.inc();
     }
 }
 
@@ -448,6 +550,29 @@ impl RouterWorkerStatusMetrics {
                 })
             })
             .clone()
+    }
+
+    /// Gauges on no registry, for observer tests that only read them back.
+    #[cfg(test)]
+    pub(crate) fn unregistered() -> Self {
+        Self {
+            registered: IntGaugeVec::new(
+                Opts::new(router::WORKER_REGISTERED, "registered"),
+                &[ROUTER_WORKER_ID_LABEL, labels::DP_RANK, labels::WORKER_TYPE],
+            )
+            .expect("valid gauge"),
+            kv_event_source_mismatch_workers: IntGaugeVec::new(
+                Opts::new(router::KV_EVENT_SOURCE_MISMATCH_WORKERS, "mismatch"),
+                &[
+                    labels::MODEL,
+                    labels::WORKER_TYPE,
+                    TARGET_NAMESPACE_LABEL,
+                    TARGET_COMPONENT_LABEL,
+                    TARGET_ENDPOINT_LABEL,
+                ],
+            )
+            .expect("valid gauge"),
+        }
     }
 
     pub fn set_registered(&self, worker_id: u64, dp_rank: u32, worker_type: &str) {

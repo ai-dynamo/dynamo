@@ -4,7 +4,7 @@
 //! LORA Load Estimator
 //!
 //! Tracks LORA adapter usage over time to estimate load for allocation decisions.
-//! Supports single-router (polling) and multi-router (event-based) modes.
+//! Event-based: routers report arrivals and completions as they happen.
 //!
 //! The primary load signal is **arrival count in a sliding window**, tracked by
 //! a lock-free [`BucketedRateCounter`] per LoRA. An optional [`LoadPredictor`]
@@ -17,10 +17,9 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use dynamo_kv_router::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
-use dynamo_runtime::component::{Component, Endpoint};
+use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 
-use crate::kv_router::scheduler::KvScheduler;
 use crate::kv_router::sequence::{RuntimeSequenceSubscriber, SequenceSubscriber};
 use crate::lora::config::PredictorType;
 use crate::lora::predictor::{EmaPredictor, LoadPredictor};
@@ -231,7 +230,6 @@ impl std::fmt::Debug for LoraLoadData {
 
 #[derive(Debug, Clone)]
 pub struct LoadEstimatorConfig {
-    pub poll_interval: Duration,
     /// Sliding window size for request-rate calculation.
     pub rate_window: Duration,
     pub buckets_per_second: u64,
@@ -242,7 +240,6 @@ pub struct LoadEstimatorConfig {
 impl Default for LoadEstimatorConfig {
     fn default() -> Self {
         Self {
-            poll_interval: Duration::from_secs(5),
             rate_window: Duration::from_secs(30),
             buckets_per_second: 1,
             predictor_type: PredictorType::Ema,
@@ -454,31 +451,6 @@ impl LoadEstimator {
             .clear();
     }
 
-    pub fn start_polling(
-        self: Arc<Self>,
-        scheduler: Arc<KvScheduler>,
-        component: Component,
-    ) -> tokio::task::JoinHandle<()> {
-        let cancel_token = component.drt().child_token();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(self.config.read().poll_interval);
-            tracing::info!("Started LORA load polling");
-
-            loop {
-                tokio::select! {
-                    _ = cancel_token.cancelled() => {
-                        tracing::debug!("LORA load polling task cancelled");
-                        break;
-                    }
-                    _ = interval.tick() => {
-                        let lora_counts = scheduler.get_active_lora_counts();
-                        self.update_from_counts(lora_counts);
-                    }
-                }
-            }
-        })
-    }
-
     pub fn start_event_subscription(
         self: Arc<Self>,
         endpoint: Endpoint,
@@ -623,54 +595,6 @@ impl LoadEstimator {
         }
     }
 
-    /// Update active counts from a polled snapshot.
-    ///
-    /// **Polling-mode caveat**: arrivals are approximated as the per-poll
-    /// delta `max(0, current - prev)`, since worker snapshots do not expose
-    /// request-start events. This is a *lower bound* on real arrivals:
-    /// in-interval churn (e.g., 10 requests finishing while 10 new ones start
-    /// — net delta 0) is invisible, and sub-interval oscillation is lost.
-    /// Event-based mode (`handle_event` / `increment_load`) gives accurate
-    /// arrival rates; prefer it when arrival precision matters.
-    fn update_from_counts(&self, lora_counts: HashMap<String, usize>) {
-        let now = Instant::now();
-        let cfg = self.config.read();
-        let num_buckets = cfg.num_buckets();
-        let bucket_duration = cfg.bucket_duration();
-        drop(cfg);
-
-        for (lora_name, count) in &lora_counts {
-            self.data
-                .entry(lora_name.clone())
-                .and_modify(|data| {
-                    let prev = data.active_count.load(Ordering::Relaxed);
-                    data.active_count.store(*count, Ordering::Relaxed);
-                    // Record only the delta (new arrivals since the last poll) to
-                    // avoid double-counting sustained requests.  A request active
-                    // for N ticks should contribute 1 arrival, not N.
-                    let arrivals = count.saturating_sub(prev) as u64;
-                    if arrivals > 0 {
-                        data.rate_counter.record_count(arrivals, now);
-                    }
-                })
-                .or_insert_with(|| {
-                    let counter = BucketedRateCounter::new(num_buckets, bucket_duration, now);
-                    // First observation: the entire count represents new arrivals.
-                    counter.record_count(*count as u64, now);
-                    LoraLoadData {
-                        active_count: AtomicUsize::new(*count),
-                        rate_counter: counter,
-                    }
-                });
-        }
-
-        for entry in self.data.iter() {
-            if !lora_counts.contains_key(entry.key()) {
-                entry.value().active_count.store(0, Ordering::Relaxed);
-            }
-        }
-    }
-
     /// Get current load using arrival count in the sliding window.
     pub fn get_current_load(&self) -> HashMap<String, usize> {
         self.get_current_load_at(Instant::now())
@@ -788,6 +712,49 @@ mod tests {
     use dynamo_runtime::{DistributedRuntime, Runtime};
 
     use crate::kv_router::ACTIVE_SEQUENCES_SUBJECT;
+
+    impl LoadEstimator {
+        /// Update active counts from a snapshot; arrivals are approximated as the
+        /// positive delta since the previous snapshot.
+        fn update_from_counts(&self, lora_counts: HashMap<String, usize>) {
+            let now = Instant::now();
+            let cfg = self.config.read();
+            let num_buckets = cfg.num_buckets();
+            let bucket_duration = cfg.bucket_duration();
+            drop(cfg);
+
+            for (lora_name, count) in &lora_counts {
+                self.data
+                    .entry(lora_name.clone())
+                    .and_modify(|data| {
+                        let prev = data.active_count.load(Ordering::Relaxed);
+                        data.active_count.store(*count, Ordering::Relaxed);
+                        // Record only the delta (new arrivals since the last poll) to
+                        // avoid double-counting sustained requests.  A request active
+                        // for N ticks should contribute 1 arrival, not N.
+                        let arrivals = count.saturating_sub(prev) as u64;
+                        if arrivals > 0 {
+                            data.rate_counter.record_count(arrivals, now);
+                        }
+                    })
+                    .or_insert_with(|| {
+                        let counter = BucketedRateCounter::new(num_buckets, bucket_duration, now);
+                        // First observation: the entire count represents new arrivals.
+                        counter.record_count(*count as u64, now);
+                        LoraLoadData {
+                            active_count: AtomicUsize::new(*count),
+                            rate_counter: counter,
+                        }
+                    });
+            }
+
+            for entry in self.data.iter() {
+                if !lora_counts.contains_key(entry.key()) {
+                    entry.value().active_count.store(0, Ordering::Relaxed);
+                }
+            }
+        }
+    }
 
     fn lora_event(
         request_id: &str,

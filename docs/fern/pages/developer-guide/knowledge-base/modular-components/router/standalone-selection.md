@@ -65,9 +65,11 @@ APIs. Those bindings should wrap `SelectionService` rather than construct
 |------|---------|-------------|
 | `--port` | `8092` | HTTP server port. |
 | `--threads` | `4` | KV indexer worker threads. |
-| `--indexer-peers` | none | Comma-separated HTTP URLs used for startup KV recovery through `/dump`. |
+| `--indexer-peers` | none | Comma-separated HTTP URLs used for startup KV recovery through `/dump`. Ignored with `--remote-indexer-url`. |
+| `--remote-indexer-url` | none | Base URL of a [standalone indexer](standalone-indexer.md) that serves the primary KV index. The selector then does not subscribe to worker KV events; workers publish to the indexer instead. Requires `use_kv_events=true`. |
 | `--replica-sync-port` | none | Local ZMQ PUB port for active-load lifecycle events. The selector binds `tcp://*:<port>` internally. |
 | `--replica-sync-peers` | none | Comma-separated ZMQ PUB endpoints for selector peers. Requires `--replica-sync-port`. |
+| `--session-affinity-ttl-secs` | none | Pin each request `session_id` to the worker that served it for this long after its last request (1 to 31,536,000 seconds). When `--replica-sync-port` is configured, bindings replicate to peers over the replica mesh (`dynamo.session-affinity.v1` topic). |
 | `--selection-cache-ttl-secs` | `120` | Seconds an unclaimed pending selection lives before eviction. |
 | `--selection-cache-max-entries` | `4096` | Maximum resident pending selections, evicting oldest first. |
 | `--selection-cache-max-bytes` | `268435456` | Approximate byte budget across resident pending selections. |
@@ -79,6 +81,30 @@ APIs. Those bindings should wrap `SelectionService` rather than construct
 Router scheduling behavior continues to use the standard Dynamo router
 environment configuration.
 
+### KV Indexing Modes
+
+The service resolves its indexer shape from the same router configuration the
+frontend uses, so the two index the same way:
+
+| Configuration | Primary indexer | Routing decisions |
+|---|---|---|
+| `use_kv_events=true` (default) | Event-driven from worker ZMQ events | Not recorded |
+| `use_kv_events=true`, `DYN_ROUTER_PREDICTED_TTL_SECS` set | Event-driven | Recorded into a short-TTL side indexer merged into device scores by per-worker max |
+| `use_kv_events=false` | Approximate: no events, entries expire after `router_ttl_secs` | Recorded into the primary |
+| `--remote-indexer-url` (or `SelectionServiceBuilder::kv_index(KvIndexSource::Remote(..))`) | Served by a standalone indexer, queried through `POST /query_tiered_by_hash` | Recorded into the side indexer when `DYN_ROUTER_PREDICTED_TTL_SECS` is set, else not recorded |
+
+With a remote primary, worker records do not need `kv_events_endpoint(s)` to
+become schedulable, no ZMQ listener is started in the selector, and `/dump`
+returns no primary events (peers recover from the indexer instead). A remote
+lookup failure is reported as an offline indexer for that selection.
+
+A routing decision is recorded when a reservation is booked (`select_and_reserve`,
+or `select` followed by `POST /reservations`), never for a query-only `select`.
+Hash-only reservations that supply `sequence_hashes` without `block_hashes` or
+`token_ids` are not recorded. `router_approximate_cache_policy=lru` is rejected at startup when
+`use_kv_events=true`; with `use_kv_events=false` it falls back to TTL retention
+with a warning.
+
 The standalone expiry guard measures absolute age from admission; output progress does not refresh
 it. Periodic cleanup therefore reclaims stale state approximately five to six minutes after
 admission by default. The embedded `KvRouter` uses the same `300`-second value as its shared
@@ -88,7 +114,10 @@ after the last progress touch.
 ## Worker Registration
 
 Every selector replica must receive the same worker catalog before it serves
-selection traffic. Replica traffic never creates workers.
+selection traffic. Replica traffic never creates workers. When the catalog comes
+from a discovery source (Kubernetes, a workers file), a snapshot whose apply
+fails is retried after 5 seconds unless a newer snapshot arrives first, so a
+stale worker can persist for that long after a failed pass.
 
 ```http
 POST /workers
@@ -105,10 +134,13 @@ Content-Type: application/json
   "kv_events_endpoints": {
     "0": "tcp://worker:5557",
     "1": "tcp://worker:5558"
-  },
-  "replay_endpoint": "tcp://worker:5560"
+  }
 }
 ```
+
+`replay_endpoint` (KV event gap recovery) is accepted only when
+`data_parallel_size` is 1; a multi-rank worker that sets it stays `incomplete`
+because the replay protocol carries no rank.
 
 `worker_id` is service-wide, not scoped by model or routing group. `POST /workers`
 is an upsert and returns `201`: reusing an existing ID replaces its catalog
@@ -116,6 +148,23 @@ record. If the model or routing group changes, the worker is removed from the
 previous partition and moved to the new one, which can leave the previous
 partition not ready. Assign a unique ID to every live worker across the entire
 service.
+
+A worker that can consume router hints registers `router_hint_worker_type`
+(its backend role, used to match hint sources to targets) and, when it can also
+serve as a source, `router_hint_source_control_endpoints` keyed by global DP
+rank:
+
+```json
+{
+  "worker_id": 1,
+  "router_hint_worker_type": "decode",
+  "router_hint_source_control_endpoints": { "0": "tcp://worker:5600", "1": "tcp://worker:5601" }
+}
+```
+
+A worker whose KV events come from a state agent sets
+`"kv_event_source_mode": "state_agent_v2"`; it can receive hints but is never
+chosen as a hint source.
 
 `PATCH /workers/{worker_id}` updates supplied fields, `DELETE
 /workers/{worker_id}` removes the worker, and `GET /workers` lists catalog
@@ -131,12 +180,17 @@ When a worker or its cache-event publisher restarts, update its registration on 
 selector replica. A reconnect at the same address does not reset the existing event
 sequence watermark or invalidate old cache ownership.
 
-With KV events enabled, `POST /workers` for an existing schedulable worker drains it,
-removes its indexer registration, and creates new listeners with fresh sequence
-watermarks. Supply the complete current worker record because this endpoint replaces
-the catalog record. `PATCH /workers/{worker_id}` also reconciles a schedulable worker;
-even an unchanged update can rebuild its cache view, so avoid using registration
-updates as periodic heartbeats. Serialize lifecycle operations for the same worker.
+With KV events enabled, `POST /workers` or `PATCH /workers/{worker_id}` for an
+existing schedulable worker reconciles its indexer registration rank by rank: a rank
+whose event endpoint and replay endpoint are unchanged keeps its listener, its
+sequence watermark, and its indexed blocks, so capacity or topology updates do not
+drain the cache view. A rank whose endpoint changed gets a new listener with a fresh
+watermark. Because an unchanged update keeps the old watermark, it does not recover a
+publisher that restarted at the same address: for that, call
+`DELETE /workers/{worker_id}`, wait for the response, then `POST /workers` with the
+current record, or register the restarted publisher under a new `kv_events_endpoint`.
+Supply the complete current worker record to `POST /workers` because it replaces the
+catalog record. Serialize lifecycle operations for the same worker.
 
 This differs from the standalone indexer's `/register`, which rejects duplicate
 registrations and requires `/unregister` first. See
@@ -201,12 +255,80 @@ globally unique `selection_id`, or allow the service to generate one:
     "cpu": 96,
     "disk": 128
   },
-  "effective_prefill_tokens": 384
+  "effective_prefill_tokens": 384,
+  "potential_decode_blocks": 212,
+  "decode_busy": false
 }
 ```
 
 `select` returns the same selection fields but omits `sequence_hashes`, `isl_tokens`, and
-`track_prefill_tokens`. `selection_id` is omitted when absent. All `overlap`
+`track_prefill_tokens`. `selection_id` is omitted when absent.
+
+`potential_decode_blocks` is the scheduler's projection of KV blocks on the
+chosen worker once this request is decoding, including the request's own
+blocks. `decode_busy` compares it against the worker's `total_kv_blocks` at
+`conditional_disagg_decode_busy_threshold` and is omitted when either the
+threshold or the capacity is unknown.
+
+A booking response may also carry a `kv_hint` when another worker of the same
+`router_hint_worker_type` (the worker capability key is `router_hint`) holds a
+longer cached prefix than the chosen worker and advertises a source control
+endpoint for the matching DP rank. The hint is a versioned action envelope
+whose `message_id` is the `selection_id`:
+
+```json
+{
+  "kv_hint": {
+    "protocol_version": "0.1",
+    "message_id": "select-123",
+    "actions": [
+      {
+        "action_id": "a1",
+        "action_type": "kv.fetch",
+        "action_version": "1.0",
+        "payload": {
+          "source_control_endpoint": "tcp://worker-1:5600",
+          "block_hashes": [8713492873, 1928374650]
+        }
+      }
+    ]
+  }
+}
+```
+
+`block_hashes` are root-aligned external sequence hashes; entry `i` is request
+block `i`, and the target decides which suffix to fetch from the source. Hints
+require a local event-driven primary indexer (no approximate or remote primary)
+and are never attached to query-only `select` responses.
+
+### Advisory selection
+
+`POST /select` accepts `"advisory": true` to select from current scheduler
+state without queue admission. The request never waits in the router queue,
+and the response adds the chosen worker's projected load:
+
+```json
+{
+  "worker_id": 1,
+  "dp_rank": 0,
+  "potential_decode_blocks": 212,
+  "decode_busy": false,
+  "worker_load": {
+    "active_prefill_tokens": 2048,
+    "prefill_token_capacity": 8192,
+    "total_kv_blocks": 4096,
+    "prefill_busy": false
+  }
+}
+```
+
+`prefill_busy` compares `active_prefill_tokens` against
+`prefill_token_capacity` at `conditional_disagg_prefill_busy_threshold` and is
+omitted when that threshold is unset. This is the probe a disaggregation
+coordinator uses to decide whether to bypass remote prefill: one advisory
+`select` against the prefill pool answers "would the prefill worker I'd get be
+busy?" without a separate load read. `advisory` is ignored by
+`select_and_reserve`, which always books. All `overlap`
 values are matched token counts. `gpu`, `cpu`, and `disk` use the cumulative
 Mooncake tier semantics documented in the standalone indexer's
 [per-instance tier breakdown](standalone-indexer.md#per-instance-tier-breakdown).
@@ -231,26 +353,31 @@ hash producer with the same algorithm, key, and key ID as the selector.
 
 ### `session_id`
 
-Both `POST /select` and `POST /select_and_reserve` accept an optional
-`session_id` string. It defaults to absent. Under the built-in selector,
-omitting it does not change selection; a custom policy that reads the field can
-select differently depending on whether it is present. The selector carries the
-value through scheduling and exposes it to worker-selection policy as
-`WorkerSelectionContext::session_id()`, so a custom picker or scorer can
-implement session affinity by preferring the worker a session used previously.
+Both `POST /select` and `POST /select_and_reserve` accept an optional `session_id` string. With `--session-affinity-ttl-secs` enabled, each model and routing group has its own binding table. `/select_and_reserve` binds a new session to the selected worker and holds its lease until the reservation is released or expires. The idle TTL starts when the last lease is released. `/select` can use an existing binding but does not create one.
 
-> [!NOTE]
-> `session_id` is an input to policy, not an affinity mechanism in itself. The
-> built-in selector ignores it, so it changes the chosen worker only when you
-> supply a custom picker or scorer that reads it. See
-> [Write Custom Routing Strategies](custom-worker-selection.mdx).
-> It is also distinct from the frontend's own session affinity, which binds
-> sessions from request headers rather than from this API; see
-> [Configuration and Tuning](configuration-and-tuning.md).
+Bindings replicate over the configured replica mesh. An explicit `affinity_target` or `pinned_worker` takes precedence over the session binding. Without a configured TTL, `session_id` is only policy input: custom policies can read it through `WorkerSelectionContext::session_id()`, while the built-in selector ignores it. See [Write Custom Routing Strategies](custom-worker-selection.mdx).
 
-The selection service does not persist, replicate, or expire `session_id`
-bindings. It is not part of the selection response and is not retained by the
-pending-selection cache, so a `POST /reservations` replay does not carry it.
+The pending-selection cache keeps the session metadata, so a later `POST /reservations` for that selection binds the session to the booked worker, the same as `/select_and_reserve` does. The frontend uses the same table implementation for request-header affinity; see [Configuration and Tuning](configuration-and-tuning.md).
+
+### `session_context`
+
+Both endpoints also accept an optional `session_context` object that carries
+the full session metadata the frontend hands to worker selection. When it is
+present, the flat `session_id` field is ignored.
+
+```json
+{
+  "token_ids": [1, 2, 3, 4],
+  "session_context": {
+    "session_id": "child-session",
+    "parent_session_id": "root-session",
+    "session_final": false,
+    "input_trigger": "tool_result"
+  }
+}
+```
+
+Only `session_id` is required inside the object. `input_trigger` is one of `user_message`, `tool_result`, or `other`. The affinity table uses this session ID when a TTL is configured. Custom policies can read the remaining values through `WorkerSelectionContext::session_context()`.
 
 ## Ray Select-Then-Reserve Flow
 

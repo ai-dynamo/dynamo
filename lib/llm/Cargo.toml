@@ -72,7 +72,7 @@ required-features = ["media-ffmpeg"]
 
 [dependencies]
 # repo
-dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols"] }
+dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols", "standalone-selection"] }
 dynamo-memory = { workspace = true }
 dynamo-mocker = { workspace = true, features = ["zmq-events"] }
 dynamo-rl = { workspace = true }
@@ -230,6 +230,7 @@ llm-multimodal = { version = "=1.9.0", optional = true }
 llm-tokenizer = { version = "=1.6.0", optional = true }
 
 [dev-dependencies]
+dynamo-kv-router = { workspace = true, features = ["testing"] }
 dynamo-runtime = { workspace = true, features = ["testing"] }
 tokio = { workspace = true, features = ["test-util"] }
 approx = "0.5"
