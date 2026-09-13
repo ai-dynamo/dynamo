@@ -9,6 +9,26 @@ Use this reference for a `DynamoGraphDeployment` (DGD) that routes requests thro
 Inference Extension (GAIE) and the Dynamo Endpoint Picker Plugin (EPP). For the procedure and
 topology, see [Using GAIE with Dynamo](../../kubernetes/kv-aware-routing/gateway-api.mdx).
 
+## EPP Modes
+
+The EPP runs in one of two modes, selected by the `DYN_EPP_MODE` environment variable. This reference
+covers Dynamo mode only.
+
+| Concern | Dynamo mode (`dynamo`, default) | Standalone mode (`standalone`) |
+|---|---|---|
+| Deployed by | Dynamo operator, from a DGD `epp` component | User-applied manifests |
+| Dynamo runtime | Required, with etcd and NATS | Not used |
+| Worker discovery | Dynamo runtime discovery | Kubernetes pod watch driven by `InferencePool.spec.selector` |
+| EPP ServiceAccount and RBAC | Created by the operator against the ClusterRole or Role from the `dynamo-platform` chart | Supplied with the deployment manifests |
+| EPP replication | Not available; exactly one replica | Available through `DYN_EPP_PEER_SERVICE` |
+
+Standalone mode does not install or run the Dynamo operator, so no operator-generated resource
+described on this page applies to it, including the EPP ServiceAccount and the chart's EPP RBAC. A
+standalone EPP carries its own ServiceAccount and Role, which grant the permissions that mode needs.
+Do not bind a standalone EPP to the operator's EPP ClusterRole; its rules cover only the resources a
+Dynamo-mode EPP reads. For the standalone path, see
+[Using GAIE with vanilla vLLM](../../kubernetes/kv-aware-routing/vanilla-vllm-onramp.mdx).
+
 ## DGD EPP Fields
 
 The EPP is a DGD component with `type: epp`. The Dynamo operator creates the EPP workload, Service,
@@ -31,7 +51,9 @@ and is configured through `DYN_*` environment variables. It implements the GAIE
 </ParamField>
 
 <ParamField path="spec.components[].replicas" type="integer" default="1">
-  Number of EPP pods. Increase this value when endpoint-picker request volume requires more EPP capacity.
+  Number of EPP pods. Must be exactly `1`. Admission rejects any other value with the message
+  `EPP component must have exactly 1 replica`. EPP replication is not available in Dynamo mode. To run
+  several EPP replicas that share active-load state, use standalone mode.
 </ParamField>
 
 <ParamField path="spec.components[].frontendSidecar" type="string" required={true}>
@@ -89,7 +111,8 @@ Gateway topology.
 
 <ParamField path="DYN_ROUTER_REPLICA_SYNC" type="boolean" default="false">
   Publishes and consumes best-effort active-sequence state across EPP replicas through the Dynamo event
-  plane.
+  plane. A DGD EPP component runs a single replica, so this setting has no peer to synchronize with
+  there.
 </ParamField>
 
 <ParamField path="DYN_ROUTER_TRACK_ACTIVE_BLOCKS" type="boolean" default="true">
