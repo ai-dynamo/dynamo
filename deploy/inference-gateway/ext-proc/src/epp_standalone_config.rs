@@ -13,7 +13,7 @@
 use validator::Validate;
 use validator::ValidationError;
 
-use crate::vllm_render_client::parse_tokenizer_service_base_url;
+use crate::render_http::parse_render_base_url;
 
 const DEFAULT_KV_EVENT_PORT: u16 = 5557;
 const DEFAULT_REPLICA_SYNC_PORT: u16 = 9092;
@@ -67,21 +67,25 @@ impl EppMode {
     }
 }
 
-/// Wire protocol exposed by the configured tokenizer service.
+/// Render protocol spoken by the configured renderer sidecar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TokenizerProtocol {
+pub enum RendererProtocol {
+    /// vLLM's `/v1/chat/completions/render` endpoint; response shape `{"token_ids": [...]}`.
     VllmRender,
+    /// SGLang renderer's `/v1/chat/completions/render` endpoint; response shape `{"input_ids": [...]}`.
+    SglangRenderer,
 }
 
-impl std::str::FromStr for TokenizerProtocol {
+impl std::str::FromStr for RendererProtocol {
     type Err = anyhow::Error;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "vllm-render" => Ok(Self::VllmRender),
+            "sglang-renderer" => Ok(Self::SglangRenderer),
             other => anyhow::bail!(
                 "DYN_EPP_TOKENIZER_PROTOCOL has invalid value {other:?}; \
-                 expected \"vllm-render\""
+                 expected \"vllm-render\" or \"sglang-renderer\""
             ),
         }
     }
@@ -125,8 +129,8 @@ pub struct EppStandaloneConfig {
     #[validate(length(min = 1, message = "DYN_EPP_TOKENIZER_SERVICE_URL is required"))]
     #[validate(custom(function = "validate_tokenizer_service_url"))]
     pub tokenizer_service_url: String,
-    /// Protocol spoken by the configured tokenizer service.
-    pub tokenizer_protocol: TokenizerProtocol,
+    /// Protocol spoken by the configured renderer sidecar.
+    pub renderer_protocol: RendererProtocol,
     /// Deadline for calls to the configured tokenization provider.
     #[validate(range(min = 1, message = "DYN_EPP_TOKENIZATION_TIMEOUT_MS must be >= 1"))]
     pub tokenization_timeout_ms: u64,
@@ -171,7 +175,7 @@ impl EppStandaloneConfig {
     }
 
     fn parse(get: &EnvGet) -> anyhow::Result<Self> {
-        let tokenizer_protocol = trimmed(get("DYN_EPP_TOKENIZER_PROTOCOL"))
+        let renderer_protocol = trimmed(get("DYN_EPP_TOKENIZER_PROTOCOL"))
             .ok_or_else(|| anyhow::anyhow!("DYN_EPP_TOKENIZER_PROTOCOL is required"))?
             .parse()?;
         let peer_service = trimmed(get("DYN_EPP_PEER_SERVICE"));
@@ -203,7 +207,7 @@ impl EppStandaloneConfig {
             model_name: trimmed(get("DYN_MODEL_NAME")).unwrap_or_default(),
             tokenizer_service_url: trimmed(get("DYN_EPP_TOKENIZER_SERVICE_URL"))
                 .unwrap_or_default(),
-            tokenizer_protocol,
+            renderer_protocol,
             tokenization_timeout_ms: opt_parse::<u64>(get, "DYN_EPP_TOKENIZATION_TIMEOUT_MS")?
                 .unwrap_or(DEFAULT_TOKENIZATION_TIMEOUT_MS),
             tokenizer_max_response_bytes: opt_parse::<usize>(
@@ -268,14 +272,12 @@ fn validate_tokenizer_service_url(value: &str) -> Result<(), ValidationError> {
         return Ok(());
     }
 
-    parse_tokenizer_service_base_url(value)
-        .map(|_| ())
-        .map_err(|_| {
-            let mut error = ValidationError::new("tokenizer_service_url_invalid");
-            error.message =
-                Some("DYN_EPP_TOKENIZER_SERVICE_URL must be an absolute HTTP(S) URL".into());
-            error
-        })
+    parse_render_base_url(value).map(|_| ()).map_err(|_| {
+        let mut error = ValidationError::new("tokenizer_service_url_invalid");
+        error.message =
+            Some("DYN_EPP_TOKENIZER_SERVICE_URL must be an absolute HTTP(S) URL".into());
+        error
+    })
 }
 
 /// Trim a raw value and treat empty as absent.
@@ -393,7 +395,7 @@ mod tests {
         assert_eq!(cfg.namespace, "inference");
         assert_eq!(cfg.model_name, "Qwen/Qwen3-0.6B");
         assert_eq!(cfg.tokenizer_service_url, "http://vllm-render:8000");
-        assert_eq!(cfg.tokenizer_protocol, TokenizerProtocol::VllmRender);
+        assert_eq!(cfg.renderer_protocol, RendererProtocol::VllmRender);
         assert_eq!(cfg.tokenization_timeout_ms, DEFAULT_TOKENIZATION_TIMEOUT_MS);
         assert_eq!(
             cfg.tokenizer_max_response_bytes,
@@ -696,7 +698,7 @@ mod tests {
     }
 
     #[test]
-    fn tokenizer_protocol_is_required() {
+    fn renderer_protocol_is_required() {
         assert!(
             parse_cfg(&[
                 ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
@@ -710,7 +712,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_tokenizer_protocol_fails() {
+    fn unsupported_renderer_protocol_fails() {
         assert!(
             parse_cfg(&[
                 ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
@@ -725,5 +727,22 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn sglang_renderer_protocol_is_accepted() {
+        let cfg = parse_cfg(&[
+            ("DYN_EPP_INFERENCE_POOL_NAME", "sglang-qwen-pool"),
+            ("POD_NAMESPACE", "inference"),
+            ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
+            (
+                "DYN_EPP_TOKENIZER_SERVICE_URL",
+                "http://sglang-renderer:30000",
+            ),
+            ("DYN_EPP_TOKENIZER_PROTOCOL", "sglang-renderer"),
+            ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
+        ])
+        .expect("sglang-renderer protocol should be accepted");
+        assert_eq!(cfg.renderer_protocol, RendererProtocol::SglangRenderer);
     }
 }

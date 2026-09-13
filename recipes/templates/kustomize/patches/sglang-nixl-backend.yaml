@@ -13,39 +13,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-- op: test
-  path: /spec/components/1/name
-  value: PrefillWorker
-- op: test
-  path: /spec/components/1/type
-  value: prefill
-- op: test
-  path: /spec/components/1/podTemplate/spec/containers/0/name
-  value: main
-- op: test
-  path: /spec/components/1/podTemplate/spec/containers/0/env/0/name
-  value: SGLANG_DISAGGREGATION_NIXL_BACKEND
-- op: test
-  path: /spec/components/1/podTemplate/spec/containers/0/env/0/value
-  value: UCX
-- op: replace
-  path: /spec/components/1/podTemplate/spec/containers/0/env/0/value
-  value: &sglang-nixl-backend 'your-sglang-nixl-backend'
-- op: test
-  path: /spec/components/2/name
-  value: DecodeWorker
-- op: test
-  path: /spec/components/2/type
-  value: decode
-- op: test
-  path: /spec/components/2/podTemplate/spec/containers/0/name
-  value: main
-- op: test
-  path: /spec/components/2/podTemplate/spec/containers/0/env/0/name
-  value: SGLANG_DISAGGREGATION_NIXL_BACKEND
-- op: test
-  path: /spec/components/2/podTemplate/spec/containers/0/env/0/value
-  value: UCX
-- op: replace
-  path: /spec/components/2/podTemplate/spec/containers/0/env/0/value
-  value: *sglang-nixl-backend
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  # The root patch target selects the DGD by group, version, and kind. Kustomize
+  # ignores this name; it exists only because a strategic merge patch needs one.
+  name: canonical-recipe
+spec:
+  components:
+    - name: Frontend
+    - name: PrefillWorker
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              env:
+                - name: SGLANG_DISAGGREGATION_NIXL_BACKEND
+                  value: &sglang-nixl-backend 'your-sglang-nixl-backend'
+    - name: DecodeWorker
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              env:
+                - name: SGLANG_DISAGGREGATION_NIXL_BACKEND
+                  value: *sglang-nixl-backend

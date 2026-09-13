@@ -62,3 +62,78 @@ async def test_wait_for_deployment_ready_raises_deployment_failed_on_crashloop(
     # Confirm we didn't run out the timeout — there should have been at
     # most one DGD status check before the raise.
     assert client.custom_api.get_namespaced_custom_object.await_count == 1
+
+
+def _mocked_client() -> DynamoDeploymentClient:
+    client = DynamoDeploymentClient(namespace="ns", deployment_name="dgd-test")
+    client._init_kubernetes = AsyncMock()  # type: ignore[method-assign]
+    client.custom_api = MagicMock()
+    client.custom_api.create_namespaced_custom_object = AsyncMock()
+    client.custom_api.delete_namespaced_custom_object = AsyncMock()
+    return client
+
+
+async def test_create_deployment_reads_v1beta1_components():
+    """A v1beta1 candidate must deploy without a KeyError.
+
+    ``materialize_dgd`` has produced ``spec.components`` — a list of objects
+    each carrying a ``name`` — since DGD generation moved to v1beta1, while
+    this client still read the v1alpha1 ``spec.services`` mapping.
+    """
+    client = _mocked_client()
+
+    await client.create_deployment(
+        {
+            "apiVersion": "nvidia.com/v1beta1",
+            "kind": "DynamoGraphDeployment",
+            "metadata": {"name": "candidate", "namespace": "ns"},
+            "spec": {
+                "components": [
+                    {"name": "Frontend"},
+                    {"name": "VllmPrefillWorker"},
+                ]
+            },
+        }
+    )
+
+    # Original case drives the nvidia.com/dynamo-component label selector;
+    # the lowercase projection names the per-component log directory.
+    assert client._original_components == ["Frontend", "VllmPrefillWorker"]
+    assert client.components == ["frontend", "vllmprefillworker"]
+
+    create_kwargs = client.custom_api.create_namespaced_custom_object.await_args.kwargs
+    assert create_kwargs["version"] == "v1beta1"
+
+    await client.delete_deployment()
+    delete_kwargs = client.custom_api.delete_namespaced_custom_object.await_args.kwargs
+    assert delete_kwargs["version"] == "v1beta1"
+
+
+async def test_create_deployment_owner_reference_targets_v1beta1_dgdr(monkeypatch):
+    """The owner reference must name a DGDR version the API server serves.
+
+    Profiling DGDs are garbage-collected through this reference when the
+    owning DynamoGraphDeploymentRequest is deleted. The DGDR CRD stores
+    v1beta1, so a reference declaring v1alpha1 would leak every profiling
+    deployment once v1alpha1 stops being served.
+    """
+    monkeypatch.setenv("DGDR_NAME", "dgdr-test")
+    monkeypatch.setenv("DGDR_NAMESPACE", "ns")
+    monkeypatch.setenv("DGDR_UID", "8f0b0f4e-0000-4000-8000-000000000000")
+
+    client = _mocked_client()
+
+    await client.create_deployment(
+        {
+            "apiVersion": "nvidia.com/v1beta1",
+            "kind": "DynamoGraphDeployment",
+            "metadata": {"name": "candidate", "namespace": "ns"},
+            "spec": {"components": [{"name": "Frontend"}]},
+        }
+    )
+
+    create_kwargs = client.custom_api.create_namespaced_custom_object.await_args.kwargs
+    owner_references = create_kwargs["body"]["metadata"]["ownerReferences"]
+    assert owner_references[0]["apiVersion"] == "nvidia.com/v1beta1"
+    assert owner_references[0]["kind"] == "DynamoGraphDeploymentRequest"
+    assert owner_references[0]["name"] == "dgdr-test"

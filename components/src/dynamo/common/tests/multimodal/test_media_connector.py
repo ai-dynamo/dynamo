@@ -88,3 +88,12 @@ class TestImageLoaderCache:
         loader._cache_put("url1", img)
         loader._cache_put("url1", img)
         assert len(loader._image_cache) == 1
+
+    def test_cache_size_zero_disables_cache(self):
+        """A capacity of zero stores nothing rather than evicting from an empty cache."""
+        loader = ImageLoader(cache_size=0)
+
+        loader._cache_put("url1", _make_pil_image())
+        loader._cache_put("url2", _make_pil_image())
+
+        assert len(loader._image_cache) == 0

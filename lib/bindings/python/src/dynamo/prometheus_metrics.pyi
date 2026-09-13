@@ -4,7 +4,8 @@
 """Type stubs for prometheus metrics callbacks.
 
 This file defines Python type stubs for the RuntimeMetrics class.
-Only register_prometheus_expfmt_callback is exposed for integrating external metrics.
+Two callbacks are exposed for integrating external metrics: exposition text for
+``/metrics`` and typed families for the OTLP export.
 """
 
 from typing import Callable
@@ -27,6 +28,43 @@ class RuntimeMetrics:
         Args:
             callback: A callable that takes no arguments and returns a string
                      in Prometheus text exposition format
+        """
+        ...
+
+    def register_prometheus_typed_callback(
+        self,
+        callback: Callable[
+            [],
+            list[
+                tuple[
+                    str,  # family name
+                    str,  # help text
+                    str,  # Prometheus type word
+                    str,  # UNIT metadata, empty when undeclared
+                    list[
+                        tuple[
+                            str,  # sample name
+                            list[tuple[str, str]],  # labels
+                            float,  # value
+                            float | None,  # sample timestamp, when the source set one
+                        ]
+                    ],
+                ]
+            ],
+        ],
+    ) -> None:
+        """
+        Register a Python callback that returns metric families as a structure.
+
+        These feed the OTLP export, which needs the families typed rather than
+        rendered to text. Independent of the exposition callback above: a
+        registry that should reach both surfaces registers both.
+
+        Args:
+            callback: A callable taking no arguments and returning
+                     ``[(name, help, type, [(sample_name, [(label, value)], value)])]``.
+                     ``dynamo.common.utils.prometheus.get_prometheus_typed``
+                     builds this from a ``CollectorRegistry``.
         """
         ...
 

@@ -19,6 +19,25 @@ from dynamo.common.utils.video_utils import compute_num_frames, parse_size
 
 DEFAULT_IMAGE_SIZE = "1024x1024"
 DEFAULT_VIDEO_SIZE = "832x480"
+MAX_IMAGE_DIMENSION = 4096
+# Longest a client-supplied ``size`` may render as inside an error or log line.
+SIZE_LABEL_LIMIT = 32
+
+
+def _coerce_dimension(value: Any, name: str) -> int:
+    """Convert a client-supplied width/height to a bounded int, rejecting
+    non-numeric or out-of-range values instead of letting ``int()`` raise."""
+    # bool is an int subclass and float truncates silently; reject both so
+    # true/1.5 don't slip through as 1.
+    if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
+        raise ValueError(f"{name} must be an integer")
+    try:
+        dim = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if not 1 <= dim <= MAX_IMAGE_DIMENSION:
+        raise ValueError(f"{name} must be between 1 and {MAX_IMAGE_DIMENSION}")
+    return dim
 
 
 def streaming_sampling_params(
@@ -80,21 +99,73 @@ def image_generation_mm_processor_kwargs(height: int, width: int) -> dict[str, i
     return {"target_h": height, "target_w": width}
 
 
-def image_generation_size_from_request(request: dict) -> tuple[int, int]:
-    """Resolve image output dimensions from OpenAI-style image or chat requests."""
+def _size_dimension_fields(size: Any) -> tuple[str, str]:
+    """Error labels naming ``size`` as the source of a width/height.
+
+    A dimension derived from ``size`` must not be reported as ``width``: the
+    client never sent that field and would have nothing to correct.
+
+    ``size`` is unbounded client input and this label reaches both the error
+    returned to the caller and the log line at the handler, so echo at most
+    ``SIZE_LABEL_LIMIT`` characters of it -- enough to identify a plausible
+    ``WxH`` value, and never a megabyte of it per request.
+    """
+    if isinstance(size, str) and len(size) > SIZE_LABEL_LIMIT:
+        shown: Any = size[:SIZE_LABEL_LIMIT] + "..."
+    else:
+        shown = size
+    return f"width in size={shown!r}", f"height in size={shown!r}"
+
+
+def image_generation_size_from_str(
+    size: str | None, *, default_w: int = 1024, default_h: int = 1024
+) -> tuple[int, int]:
+    """Resolve bounded image dimensions from a ``WxH`` size string.
+
+    ``parse_size`` falls back to the defaults for an unparseable string but does
+    not bound what it does parse, so every entry point that accepts a
+    client-supplied size needs this rather than ``parse_size`` alone.
+    """
+    width, height = parse_size(size, default_w=default_w, default_h=default_h)
+    width_field, height_field = _size_dimension_fields(size)
+    return _coerce_dimension(width, width_field), _coerce_dimension(
+        height, height_field
+    )
+
+
+def resolve_image_dimensions(request: dict) -> tuple[Any, str, Any, str]:
+    """Resolve width/height through the request's precedence chain, uncoerced.
+
+    Returns each value paired with the field it came from. Coercion is left to
+    the caller so that callers with a further override (``nvext``) can resolve
+    the *complete* chain first: a value a later source replaces never reaches
+    the engine, so validating it here would reject a request over a number that
+    was discarded.
+    """
     extra_body = request.get("extra_body")
     if not isinstance(extra_body, dict):
         extra_body = {}
 
     size = request.get("size") or extra_body.get("size") or DEFAULT_IMAGE_SIZE
     width, height = parse_size(size, default_w=1024, default_h=1024)
+    width_field, height_field = _size_dimension_fields(size)
 
     for source in (extra_body, request):
         if source.get("width") is not None:
-            width = int(source["width"])
+            width, width_field = source["width"], "width"
         if source.get("height") is not None:
-            height = int(source["height"])
-    return width, height
+            height, height_field = source["height"], "height"
+    return width, width_field, height, height_field
+
+
+def image_generation_size_from_request(request: dict) -> tuple[int, int]:
+    """Resolve image output dimensions from OpenAI-style image or chat requests."""
+    width, width_field, height, height_field = resolve_image_dimensions(request)
+    # One coercion covers both the size-derived dims and any explicit override,
+    # and reports whichever field the surviving value actually came from.
+    return _coerce_dimension(width, width_field), _coerce_dimension(
+        height, height_field
+    )
 
 
 def image_generation_sampling_overrides(
@@ -197,11 +268,22 @@ async def parse_omni_request(
         if is_video:
             width, height = parse_size(request.get("size", default_size), **size_kwargs)
         else:
-            width, height = image_generation_size_from_request(request)
+            # nvext is the highest-priority source, so resolve the whole chain
+            # before coercing: coercing the helper's result first would reject
+            # a size that nvext goes on to replace, and a bare int() here would
+            # reintroduce every failure the helper rejects.
+            (
+                raw_width,
+                width_field,
+                raw_height,
+                height_field,
+            ) = resolve_image_dimensions(request)
             if nvext.get("width") is not None:
-                width = int(nvext["width"])
+                raw_width, width_field = nvext["width"], "nvext.width"
             if nvext.get("height") is not None:
-                height = int(nvext["height"])
+                raw_height, height_field = nvext["height"], "nvext.height"
+            width = _coerce_dimension(raw_width, width_field)
+            height = _coerce_dimension(raw_height, height_field)
         sp: dict = {**nvext, "height": height, "width": width}
         if is_video:
             sp["num_frames"] = compute_num_frames(

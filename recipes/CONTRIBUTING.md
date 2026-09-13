@@ -113,9 +113,12 @@ the base manifest's API and field paths. The existing public provider matrix
 examples use the legacy alpha shape: their static and template-generated
 Components target `spec.services` and cannot convert or patch a beta
 `spec.components` base. The cluster-owned [beta cluster
-starter](templates/kustomize/README.md) instead uses guarded JSON 6902 patches
-against canonical beta component positions and does not include the central
-OpenAPI Component.
+starter](templates/kustomize/README.md) targets beta `spec.components`: its
+structural Components use guarded JSON 6902 patches against canonical component
+positions, its networking Components and hook patches use strategic merge
+patches addressed by component name, and its root Kustomization selects a
+generated copy of the OpenAPI Component under
+`templates/kustomize/components/dynamo-openapi/`.
 
 Recipe-local bases, Components, and generated public overlays live under
 `<deployment>/kustomize/`. Shared Components reusable by multiple recipes live
@@ -201,13 +204,15 @@ The render convention is:
 - Legacy strategic-merge bases that patch Dynamo CRDs include the central
   `recipes/kustomize/components/dynamo-openapi/` Component. Its generated
   schema is derived from every operator CRD and lets strategic merge patches
-  merge CRD map lists such as `env` by name. Guarded JSON 6902 Components,
-  including the beta cluster starter, do not include it.
+  merge CRD map lists such as `env` by name. The beta cluster starter carries
+  a generated copy of the same schema so that its strategic merge networking
+  Components and hook patches merge by name; its guarded JSON 6902 Components
+  do not depend on it.
 - The central `recipes/kustomize/components/disagg-workers/` Components apply
   to bases containing one DGD with backend-neutral `PrefillWorker` and
   `DecodeWorker` service keys.
 
-Within the legacy alpha matrix path, prefer resource-shaped Kustomize merge patches where possible. For other Custom Resource Definition (CRD) list fields, include the complete intended list in the merge patch unless the schema supplies an OpenAPI merge key. Use guarded JSON 6902 for the beta cluster starter and beta Components whose correctness depends on canonical list positions and fail-loud preconditions.
+Within the legacy alpha matrix path, prefer resource-shaped Kustomize merge patches where possible. For other Custom Resource Definition (CRD) list fields, include the complete intended list in the merge patch unless the schema supplies an OpenAPI merge key. In the beta cluster starter, use guarded JSON 6902 for the structural Components whose correctness depends on canonical list positions and fail-loud preconditions, and strategic merge patches addressed by name for the networking Components and hook patches.
 
 Edit the Kustomize source, not the generated manifests. A recipe matrix is an
 explicit `.kustomize-matrix.yaml` beside the recipe. It names the Kustomize

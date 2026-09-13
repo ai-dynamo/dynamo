@@ -103,7 +103,7 @@ validated for the deployed frontend/backend path.
 | `TRACE_FILE` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` | Mooncake JSONL on PVC |
 | `CONCURRENCY` | `16` | Single value per Job |
 | `REQUEST_TIMEOUT_SECONDS` | `1200` | Long enough for long-context requests |
-| `AIPERF_VERSION` | `0.10.0` | Match local benchmark runs unless updated intentionally |
+| `AIPERF_VERSION` | `0.12.0` | Match local benchmark runs unless updated intentionally |
 
 ## Required Evidence for a Result Row
 

@@ -22,6 +22,14 @@ import psutil
 import pytest
 import requests
 
+# The serve modules imported below reach dynamo.common.multimodal, whose
+# package __init__ eagerly imports torch.
+# Skip the whole module in images that do not ship torch (e.g. Triton).
+try:
+    import torch  # noqa: F401
+except ModuleNotFoundError as e:
+    pytest.skip(f"torch not available in this image: {e}", allow_module_level=True)
+
 from tests.serve.test_sglang import sglang_configs
 from tests.serve.test_trtllm import trtllm_configs
 from tests.serve.test_vllm import vllm_configs

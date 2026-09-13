@@ -219,7 +219,7 @@ impl SnapshotBootstrapError {
                 report_terminal_failure(terminal_failure, &error);
                 error
             }
-            Self::ProgressTimeout(timeout) => PublicationError::resource_exhausted(format!(
+            Self::ProgressTimeout(timeout) => PublicationError::snapshot_progress_timeout(format!(
                 "publication snapshot subscriber made no progress for {} ms; open a fresh stream",
                 timeout.as_millis()
             )),
@@ -477,7 +477,7 @@ mod tests {
         let (terminal_failure, failures) = counting_terminal_failures();
         assert_eq!(
             error.into_publication_error(&terminal_failure).kind(),
-            super::super::source::PublicationErrorKind::ResourceExhausted
+            super::super::source::PublicationErrorKind::SnapshotProgressTimeout
         );
         assert_eq!(failures.load(Ordering::Relaxed), 0);
     }

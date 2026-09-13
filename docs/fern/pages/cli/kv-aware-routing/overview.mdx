@@ -81,6 +81,37 @@ The vLLM and SGLang presets start 2 prefill and 2 decode workers and require 4 G
 Once a routed deployment is running, try adding another worker — the frontend discovers it automatically and starts routing to it.
 </Tip>
 
+## Change the Worker-Selection Policy
+
+By default the frontend ranks workers with Dynamo's built-in cost model. Dynamo also ships
+built-in worker-selection policies with the frontend, so you can swap that ranking step without
+rebuilding.
+
+Write the policy into a YAML file:
+
+```yaml
+# worker-selection.yaml
+worker_selection:
+  aggregated: dynamo-two-tier-cost-fn
+  instances:
+    - name: dynamo-two-tier-cost-fn
+      type: dynamo-two-tier-cost-fn
+```
+
+Then point the frontend at it:
+
+```bash
+python3 -m dynamo.frontend \
+  --router-mode kv \
+  --router-policy-config worker-selection.yaml
+```
+
+To compare against the built-in selector, restart with
+`DYN_ROUTER_WORKER_SELECTION_POLICY=default` — no config change needed.
+
+For the available policy types and per-stage prefill/decode selection, see
+[Worker-Selection Policies](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#worker-selection-policies).
+
 ## Troubleshooting
 
 **Router not routing correctly (vLLM).** Ensure `PYTHONHASHSEED=0` is set for all vLLM processes when using KV-aware routing, so cache-block hashes are consistent across workers. See [Hashing Consistency](../../developer-guide/knowledge-base/modular-components/backends/vllm/reference-guide.md#hashing-consistency-for-kv-events).

@@ -13,6 +13,7 @@ members = [
     "lib/mocker",
     "lib/kv-router",
     "lib/router-plugins/catalog",
+    "lib/router-plugins/builtin",
     "examples/router/custom-policy-example/soft-pin-repin",
     "examples/router/custom-policy-example/simple-filter-score-pick",
     "examples/router/custom-policy-example/catalog",
@@ -61,8 +62,8 @@ aisimulate-core = { version = "=0.1.0-dev.2" }
 dynamo-runtime = { path = "lib/runtime", version = "1.5.0" }
 dynamo-llm = { path = "lib/llm", version = "1.5.0" }
 dynamo-rl = { path = "lib/rl", version = "1.5.0" }
-dynamo-tokenizers = { version = "=1.8.0" }
-dynamo-renderer = { version = "=5.1.0" }
+dynamo-tokenizers = { version = "=1.8.1" }
+dynamo-renderer = { version = "=5.1.2" }
 dynamo-tokens = { path = "lib/tokens", version = "1.5.0" }
 dynamo-truthy = { path = "lib/truthy", version = "1.5.0" }
 dynamo-data-gen = { path = "lib/data-gen", version = "1.5.0" }
@@ -178,6 +179,10 @@ opentelemetry-otlp = { version = "0.31.0", features = [
     "reqwest-rustls",
 ] }
 opentelemetry-appender-tracing = { version = "0.31.0" }
+opentelemetry-proto = { version = "0.31.0", default-features = false, features = [
+    "gen-tonic",
+    "metrics",
+] }
 validator = { version = "0.20.0", features = ["derive"] }
 uuid = { version = "1.18.1", features = ["v4", "serde"] }
 url = { version = "2.5", features = ["serde"] }

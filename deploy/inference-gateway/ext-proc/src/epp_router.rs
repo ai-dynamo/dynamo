@@ -7,8 +7,8 @@
 //! no Dynamo `DistributedRuntime`, no etcd/NATS, and no embedded KV router.
 //! Instead it composes:
 //!
-//! - a [`VllmRenderClient`] tokenization,
-//! - a [`PodDiscovery`] that discovers Ready raw vLLM pods from Kubernetes,
+//! - a [`RenderClient`] that tokenizes prompts via a render sidecar,
+//! - a [`PodDiscovery`] that discovers Ready worker pods from Kubernetes,
 //! - a [`TopologyAdapter`] that registers those pods into the selector, and
 //! - a [`Selector`] (in-process, runtime-free selection service) that picks a
 //!   worker.
@@ -33,27 +33,46 @@ use dynamo_llm::protocols::common::extensions::{
 };
 use serde::Deserialize;
 
-use crate::epp_standalone_config::EppStandaloneConfig;
+use crate::epp_standalone_config::{EppStandaloneConfig, RendererProtocol};
 use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo};
 use crate::pod_discovery::PodDiscovery;
+use crate::render_http::RenderError;
 use crate::selector::{SelectRequest, Selector};
+use crate::sglang_renderer_client::SglangRendererClient;
 use crate::topology_adapter::{RegistrationDefaults, TopologyAdapter};
-use crate::vllm_render_client::{VllmRenderClient, VllmRenderError};
+use crate::vllm_render_client::VllmRenderClient;
 
 /// Resolve the request's scheduling policy class from the Dynamo metadata
 /// headers. Goes through the frontend's metadata extractor (rather than a
 /// hardcoded header name) so custom `DYN_METADATA_HEADER` prefixes, trimming,
 /// and duplicate handling stay aligned with the integrated router.
-fn requested_policy_class(headers: &[(String, String)]) -> Result<Option<String>, PickError> {
+pub(crate) fn requested_policy_class(
+    headers: &[(String, String)],
+) -> Result<Option<String>, PickError> {
     let metadata =
         extract_metadata_from_header_pairs(headers.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-            .map_err(|e| PickError::MetadataHeadersInvalid(e.to_string()))?;
+            .map_err(PickError::MetadataHeadersTooLarge)?;
     Ok(metadata.get("policy-class").cloned())
+}
+
+/// Protocol-dispatched render client for the standalone EPP.
+enum RenderClient {
+    Vllm(VllmRenderClient),
+    Sglang(SglangRendererClient),
+}
+
+impl RenderClient {
+    async fn render_chat(&self, body: bytes::Bytes) -> Result<Vec<u32>, RenderError> {
+        match self {
+            Self::Vllm(c) => c.render_chat(body).await,
+            Self::Sglang(c) => c.render_chat(body).await,
+        }
+    }
 }
 
 /// Standalone endpoint picker backed by the standalone selection service.
 pub struct EppRouter {
-    renderer: VllmRenderClient,
+    renderer: RenderClient,
     reflector: Arc<PodDiscovery>,
     selector: Arc<Selector>,
     // Kept alive for the lifetime of the router; the reconcile loop runs on it.
@@ -76,11 +95,20 @@ impl EppRouter {
         policy_registry: WorkerSelectionPolicyRegistry,
     ) -> Result<Self> {
         let selector = Arc::new(Selector::new(&cfg, policy_registry).await?);
-        let renderer = VllmRenderClient::new(
-            &cfg.tokenizer_service_url,
-            Duration::from_millis(cfg.tokenization_timeout_ms),
-            cfg.tokenizer_max_response_bytes,
-        )?;
+        let timeout = Duration::from_millis(cfg.tokenization_timeout_ms);
+        let max_response_bytes = cfg.tokenizer_max_response_bytes;
+        let renderer = match cfg.renderer_protocol {
+            RendererProtocol::VllmRender => RenderClient::Vllm(VllmRenderClient::new(
+                &cfg.tokenizer_service_url,
+                timeout,
+                max_response_bytes,
+            )?),
+            RendererProtocol::SglangRenderer => RenderClient::Sglang(SglangRendererClient::new(
+                &cfg.tokenizer_service_url,
+                timeout,
+                max_response_bytes,
+            )?),
+        };
         let (reflector, reflector_ready) = PodDiscovery::spawn(&cfg).await?;
         let reflector = Arc::new(reflector);
         let defaults = RegistrationDefaults::from_config(&cfg);
@@ -433,8 +461,8 @@ impl<R: ReservationReleaser> Drop for ReservationGuard<R> {
 enum TokenizeError {
     /// The request body could not be parsed — a genuine client (400) error.
     InvalidBody(serde_json::Error),
-    /// The vLLM render call failed; the specific variant decides the status.
-    Render(VllmRenderError),
+    /// The renderer call failed; the specific variant decides the status.
+    Render(RenderError),
 }
 
 impl TokenizeError {
@@ -445,30 +473,30 @@ impl TokenizeError {
             // The serde message describes the client's own JSON, not our
             // internals, so it is safe to surface as a 400.
             TokenizeError::InvalidBody(e) => {
-                PickError::TokenizationFailed(format!("invalid request body: {e}"))
+                PickError::InvalidRequest(format!("invalid request body: {e}"))
             }
             TokenizeError::Render(e) => {
-                tracing::warn!(request_id, error = %e, "Tokenization Render failed");
-                match e {
-                    VllmRenderError::Unavailable { .. } => PickError::TokenizerUnavailable,
-                    VllmRenderError::Timeout { .. } => PickError::TokenizerTimeout,
-                    // Only the renderer's payload-validation statuses (400/422)
-                    // mean the client's request was bad → surface as a client 400.
-                    // Auth/misconfig (401/403/404), overload (429/503), any other
-                    // 4xx, and 5xx are the renderer's or our own fault — never blame
-                    // the client's payload for those (`is_client_error()` would).
-                    VllmRenderError::UpstreamStatus { status, .. } => match status.as_u16() {
-                        400 | 422 => PickError::TokenizationFailed(
-                            "request rejected by tokenization service".to_string(),
-                        ),
-                        // Renderer overloaded / temporarily unavailable → retryable.
-                        429 | 503 => PickError::TokenizerUnavailable,
-                        _ => PickError::TokenizerUpstreamError,
-                    },
-                    // A too-large or contract-breaking success is the renderer's
-                    // fault (→ 502).
-                    VllmRenderError::InvalidResponse { .. }
-                    | VllmRenderError::ResponseTooLarge { .. } => PickError::TokenizerUpstreamError,
+                tracing::warn!(request_id, error = %e, "Tokenization render failed");
+                match &e {
+                    RenderError::Unavailable { .. } => PickError::TokenizerUnavailable,
+                    RenderError::Timeout { .. } => PickError::TokenizerTimeout,
+                    RenderError::InvalidResponse { .. } | RenderError::ResponseTooLarge { .. } => {
+                        PickError::TokenizerUpstreamError
+                    }
+                    RenderError::UpstreamStatus { status, .. } => {
+                        match status.as_u16() {
+                            // Only payload-validation statuses (400/422) mean the
+                            // client's request was bad → surface as a client 400.
+                            // Auth/misconfig (401/403/404), overload (429/503), any
+                            // other 4xx, and 5xx are the renderer's or our own fault.
+                            400 | 422 => PickError::InvalidRequest(
+                                "request rejected by tokenization service".to_string(),
+                            ),
+                            // Renderer overloaded / temporarily unavailable → retryable.
+                            429 | 503 => PickError::TokenizerUnavailable,
+                            _ => PickError::TokenizerUpstreamError,
+                        }
+                    }
                 }
             }
         }
@@ -515,12 +543,28 @@ mod tests {
     }
 
     #[test]
+    fn requested_policy_class_preserves_typed_limit_error() {
+        use dynamo_llm::http::service::metadata::MetadataHeaderError;
+
+        let headers: Vec<(String, String)> = (0..65)
+            .map(|i| (format!("x-dynamo-meta-key-{i:02}"), "v".to_string()))
+            .collect();
+        let err = requested_policy_class(&headers).expect_err("65 metadata entries must fail");
+        assert!(
+            matches!(
+                err,
+                PickError::MetadataHeadersTooLarge(MetadataHeaderError::TooManyEntries { .. })
+            ),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn render_upstream_status_maps_to_correct_pick_error() {
-        use crate::vllm_render_client::VllmRenderError;
         use reqwest::StatusCode;
 
         let map = |status: StatusCode| {
-            TokenizeError::Render(VllmRenderError::UpstreamStatus {
+            TokenizeError::Render(RenderError::UpstreamStatus {
                 status,
                 body: String::new(),
             })
@@ -530,11 +574,11 @@ mod tests {
         // Renderer validated the client's payload and rejected it → client 400.
         assert!(matches!(
             map(StatusCode::BAD_REQUEST),
-            PickError::TokenizationFailed(_)
+            PickError::InvalidRequest(_)
         ));
         assert!(matches!(
             map(StatusCode::UNPROCESSABLE_ENTITY),
-            PickError::TokenizationFailed(_)
+            PickError::InvalidRequest(_)
         ));
 
         // Auth / misconfiguration is NOT an invalid client payload → upstream 502,

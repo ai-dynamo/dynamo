@@ -27,7 +27,9 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8sptr "k8s.io/utils/ptr"
 	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
@@ -61,6 +63,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		wantWebhookErrs    []string
 		wantWarnings       []string
 		wantPodAnnotations map[string]string
+		wantRoleReplicas   map[string]int32
 	}{
 		// Baseline schema and webhook behavior.
 		{
@@ -79,6 +82,10 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					{Name: nvidiacomv1beta1.ComponentRoleWorker},
 				}
 			}),
+			wantRoleReplicas: map[string]int32{
+				nvidiacomv1beta1.ComponentRoleLeader: 1,
+				nvidiacomv1beta1.ComponentRoleWorker: 3,
+			},
 		},
 		{
 			name: "v1alpha1 explicit multinode roles convert for standalone components",
@@ -89,6 +96,75 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					{Name: nvidiacomv1alpha1.ComponentRoleWorker},
 				}
 			}),
+			wantRoleReplicas: map[string]int32{
+				nvidiacomv1beta1.ComponentRoleLeader: 1,
+				nvidiacomv1beta1.ComponentRoleWorker: 3,
+			},
+		},
+		{
+			name: "v1beta1 explicit multinode role replicas must match node count",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 4}
+				dcd.Spec.Roles = []nvidiacomv1beta1.ComponentRoleSpec{
+					{Name: nvidiacomv1beta1.ComponentRoleLeader, Replicas: k8sptr.To(int32(1))},
+					{Name: nvidiacomv1beta1.ComponentRoleWorker, Replicas: k8sptr.To(int32(2))},
+				}
+			}),
+			wantWebhookErrs: []string{
+				`spec.roles[1].replicas: Invalid value: 2: must equal 3 for multinode role "worker"`,
+			},
+		},
+		{
+			name: "v1beta1 frontend component cannot be multinode",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			wantWebhookErrs: []string{
+				"spec.multinode: Forbidden: multinode is supported only for worker, prefill, or decode components",
+			},
+		},
+		{
+			name: "v1beta1 planner component cannot be multinode",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypePlanner
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			wantWebhookErrs: []string{
+				"spec.multinode: Forbidden: multinode is supported only for worker, prefill, or decode components",
+			},
+		},
+		{
+			name: "v1beta1 role PodTemplates require component-specific support",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+				dcd.Spec.Roles = []nvidiacomv1beta1.ComponentRoleSpec{
+					{
+						Name: nvidiacomv1beta1.ComponentRoleLeader,
+						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+							Name: consts.MainContainerName, Image: "registry.example/leader:1.1.0",
+						}}}},
+					},
+					{Name: nvidiacomv1beta1.ComponentRoleWorker},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.roles[0].podTemplate: Forbidden: is not supported for this component role"},
+		},
+		{
+			name: "v1alpha1 role PodTemplates require component-specific support",
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.Multinode = &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2}
+				dcd.Spec.Roles = []nvidiacomv1alpha1.ComponentRoleSpec{
+					{
+						Name: nvidiacomv1alpha1.ComponentRoleLeader,
+						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+							Name: consts.MainContainerName, Image: "registry.example/leader:1.1.0",
+						}}}},
+					},
+					{Name: nvidiacomv1alpha1.ComponentRoleWorker},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.roles[0].podTemplate: Forbidden: is not supported for this component role"},
 		},
 		{
 			name: "v1beta1 main image is required when pod template is absent on create",
@@ -1006,7 +1082,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				},
 			}),
 			wantWebhookErrs: []string{
-				"spec.multinode: Forbidden: EPP component cannot be multinode",
+				"spec.multinode: Forbidden: multinode is supported only for worker, prefill, or decode components",
 			},
 		},
 		{
@@ -1581,12 +1657,71 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
+			name:               "v1beta1 unchanged legacy frontend multinode survives an unrelated update",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+				dcd.Labels = map[string]string{"updated": "true"}
+			}),
+		},
+		{
+			name:               "v1beta1 legacy frontend multinode can be removed",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+			}),
+		},
+		{
+			name:               "v1beta1 legacy frontend multinode cannot change node count",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 3}
+			}),
+			wantWebhookErrs: []string{
+				"spec.multinode: Forbidden: multinode is supported only for worker, prefill, or decode components",
+			},
+		},
+		{
 			name:          "v1beta1 multinode layout change is rejected by the shared update validator",
 			oldDeployment: betaDCDForAdmission(nil),
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
 			}),
 			wantWebhookErrs: []string{`spec.multinode: Invalid value: {"nodeCount":2}: cannot change node topology between single-node and multi-node after creation`},
+		},
+		{
+			name: "v1beta1 multinode node count is immutable",
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 3}
+			}),
+			wantWebhookErrs: []string{"spec.multinode.nodeCount: Invalid value: 3: " + apivalidation.FieldImmutableErrorMsg},
+		},
+		{
+			name: "v1alpha1 multinode node count is immutable after conversion",
+			oldDeployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.Multinode = &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2}
+			}),
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.Multinode = &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 3}
+			}),
+			wantWebhookErrs: []string{"spec.multinode.nodeCount: Invalid value: 3: " + apivalidation.FieldImmutableErrorMsg},
 		},
 		{
 			name: "v1beta1 implicit to semantically equivalent explicit roles is allowed",
@@ -1666,12 +1801,24 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				test.seedGates = &seedGates
 			}
 			actual := runAdmissionTest(t, test)
-			if tt.wantPodAnnotations != nil {
-				t.Log("Verify the API server preserved embedded pod-template annotations")
-				var actualDCD nvidiacomv1beta1.DynamoComponentDeployment
-				if err := runtime.DefaultUnstructuredConverter.FromUnstructured(actual.Object, &actualDCD); err != nil {
-					t.Fatalf("convert admitted DCD: %v", err)
+			if tt.wantPodAnnotations != nil || tt.wantRoleReplicas != nil {
+				actualDCD := admittedBetaDCD(t, actual)
+				if tt.wantRoleReplicas != nil {
+					t.Log("Verify admission persisted the defaulted multinode role replicas")
+					actualRoleReplicas := make(map[string]int32, len(actualDCD.Spec.Roles))
+					for i := range actualDCD.Spec.Roles {
+						role := &actualDCD.Spec.Roles[i]
+						actualRoleReplicas[role.Name] = k8sptr.Deref(role.Replicas, 0)
+					}
+					if !maps.Equal(actualRoleReplicas, tt.wantRoleReplicas) {
+						t.Fatalf("role replicas = %v, want %v", actualRoleReplicas, tt.wantRoleReplicas)
+					}
 				}
+				if tt.wantPodAnnotations == nil {
+					return
+				}
+
+				t.Log("Verify the API server preserved embedded pod-template annotations")
 				if actualDCD.Spec.PodTemplate == nil {
 					t.Fatal("admitted DCD has no spec.podTemplate")
 				}
@@ -1681,6 +1828,26 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}
 		})
 	}
+}
+
+func admittedBetaDCD(t *testing.T, actual *unstructured.Unstructured) *nvidiacomv1beta1.DynamoComponentDeployment {
+	t.Helper()
+	beta := &nvidiacomv1beta1.DynamoComponentDeployment{}
+	if actual.GetAPIVersion() == nvidiacomv1beta1.GroupVersion.String() {
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(actual.Object, beta); err != nil {
+			t.Fatalf("convert admitted v1beta1 DCD: %v", err)
+		}
+		return beta
+	}
+
+	alpha := &nvidiacomv1alpha1.DynamoComponentDeployment{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(actual.Object, alpha); err != nil {
+		t.Fatalf("convert admitted v1alpha1 DCD: %v", err)
+	}
+	if err := alpha.ConvertTo(beta); err != nil {
+		t.Fatalf("convert admitted DCD to v1beta1: %v", err)
+	}
+	return beta
 }
 
 func alphaDCDForAdmission(

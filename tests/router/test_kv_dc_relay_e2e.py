@@ -81,7 +81,6 @@ def test_kv_dc_relay_deduplicates_workers_and_restores_missed_events(
     mocker_args = {
         "speedup_ratio": 100.0,
         "block_size": BLOCK_SIZE,
-        "durable_kv_events": False,
     }
     with (
         MockerProcess(

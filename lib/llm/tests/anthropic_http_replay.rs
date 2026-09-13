@@ -271,6 +271,121 @@ async fn finish_signal_publishes_tool_block_before_usage_tail() {
 
 #[tokio::test]
 #[serial]
+async fn tool_choice_controls_parallel_calls() {
+    temp_env::async_with_vars(ENV, async {
+        let mut script = load_agent_fixture("parallel-tools.sse").await.unwrap();
+        // Interleave the second call between fragments of the first call.
+        let mut tail = script[1].clone();
+        script[1].inner.choices[0]
+            .delta
+            .tool_calls
+            .as_mut()
+            .unwrap()[0]
+            .function
+            .as_mut()
+            .unwrap()
+            .arguments = Some(r#"{"path":"#.into());
+        let call = &mut tail.inner.choices[0].delta.tool_calls.as_mut().unwrap()[0];
+        call.id = None;
+        call.function.as_mut().unwrap().name = None;
+        call.function.as_mut().unwrap().arguments = Some(r#""/a"}"#.into());
+        script.insert(3, tail);
+
+        for stream in [false, true] {
+            for (choice, parallel) in [
+                (
+                    json!({"type": "auto", "disable_parallel_tool_use": true}),
+                    Some(false),
+                ),
+                (
+                    json!({"type": "any", "disable_parallel_tool_use": true}),
+                    Some(false),
+                ),
+                (
+                    json!({"type": "tool", "name": "read_file", "disable_parallel_tool_use": true}),
+                    Some(false),
+                ),
+                (
+                    json!({"type": "auto", "disable_parallel_tool_use": false}),
+                    Some(true),
+                ),
+                (Value::Null, None),
+            ] {
+                let svc = HarnessService::start([script.clone()]).await;
+                let response = post_messages(
+                    &svc,
+                    &json!({
+                        "model": MODEL, "max_tokens": 128, "stream": stream,
+                        "tools": [tool("read_file")], "tool_choice": choice,
+                        "messages": [{"role": "user", "content": "Read /a and /b"}]
+                    }),
+                )
+                .await;
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                let expected_count = if parallel == Some(false) { 1 } else { 2 };
+                if stream {
+                    let events = parse_json_sse(&response.text().await.unwrap())
+                        .await
+                        .unwrap();
+                    let starts: Vec<_> = events
+                        .iter()
+                        .filter(|event| {
+                            event.event == "content_block_start"
+                                && event.data["content_block"]["type"] == "tool_use"
+                        })
+                        .collect();
+                    assert_eq!(starts.len(), expected_count, "choice={choice}");
+                    assert_eq!(starts[0].data["content_block"]["name"], "read_file");
+                    let mut arguments = BTreeMap::<u64, String>::new();
+                    for event in &events {
+                        if event.data["delta"]["type"] == "input_json_delta" {
+                            arguments
+                                .entry(event.data["index"].as_u64().unwrap())
+                                .or_default()
+                                .push_str(event.data["delta"]["partial_json"].as_str().unwrap());
+                        }
+                    }
+                    assert_eq!(arguments.len(), expected_count);
+                    assert_eq!(arguments[&0], r#"{"path":"/a"}"#);
+                    assert_eq!(
+                        events
+                            .iter()
+                            .filter(|event| event.event == "content_block_stop")
+                            .count(),
+                        expected_count
+                    );
+                    assert_eq!(
+                        events
+                            .iter()
+                            .find(|event| event.event == "message_delta")
+                            .unwrap()
+                            .data["delta"]["stop_reason"],
+                        "tool_use"
+                    );
+                } else {
+                    let body: Value = response.json().await.unwrap();
+                    let calls: Vec<_> = body["content"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|block| block["type"] == "tool_use")
+                        .collect();
+                    assert_eq!(calls.len(), expected_count, "choice={choice}");
+                    assert_eq!(calls[0]["name"], "read_file");
+                    assert_eq!(calls[0]["input"], json!({"path": "/a"}));
+                    assert_eq!(body["stop_reason"], "tool_use");
+                }
+                let requests = svc.engine.take_requests().await;
+                assert_eq!(requests[0].inner.parallel_tool_calls, parallel);
+                svc.shutdown().await;
+            }
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
 async fn parallel_tools_preserve_identity_and_arguments() {
     temp_env::async_with_vars(ENV, async {
         let svc =

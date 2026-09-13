@@ -68,22 +68,25 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 </ParamField>
 
 <ParamField path="multinode" type="MultinodeSpec">
-  Configures a multinode component. See [Multinode Orchestration](../../kubernetes/installation/multinode-orchestration.md).
+  Configures a `worker`, `prefill`, or `decode` component that spans multiple pods. Other component types reject this field. A pre-existing unsupported combination can remain unchanged during unrelated updates or remove `multinode`, but cannot change or reintroduce it. See [Multinode Orchestration](../../kubernetes/installation/multinode-orchestration.md).
 </ParamField>
 
 <Indent>
   <ParamField path="nodeCount" type="integer" default="2">
-    Number of nodes to deploy. Minimum `2`. Total GPUs used is `nodeCount × container GPU request`.
+    Number of nodes to deploy. Minimum `2` and immutable after creation. Total GPUs used is `nodeCount × container GPU request`.
   </ParamField>
 </Indent>
 
 <ParamField path="roles" type="[]ComponentRoleSpec">
-  Optional explicit structure of a compound component. In this release, roles are supported for multinode components and must contain exactly one `leader` and one `worker`. Their cardinality remains derived from `multinode.nodeCount`. Omit the field to retain the implicit leader/worker layout.
+  Optional explicit structure of a compound component. In this release, roles are supported for multinode components and must contain exactly one `leader` and one `worker`. Omit the field to retain the implicit leader/worker layout.
 </ParamField>
 
 <Indent>
   <ParamField path="name" type="string" required={true}>
     Semantic role name. Multinode components allow `leader` and `worker`.
+  </ParamField>
+  <ParamField path="replicas" type="integer">
+    Logical cardinality of the role in one complete component instance. For multinode, admission defaults and persists an omitted value as `leader: 1` or `worker: multinode.nodeCount - 1`; an explicit value must match that fixed shape.
   </ParamField>
   <ParamField path="providerOverride" type="ProviderOverride">
     Provider configuration for the workload unit generated for this role. Available only on components embedded in a DGD; standalone DCD OpenAPI omits this field.

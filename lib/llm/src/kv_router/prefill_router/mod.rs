@@ -29,7 +29,7 @@ use dynamo_runtime::{
 use futures::stream::{self, StreamExt};
 
 use crate::{
-    discovery::ModelManager,
+    discovery::{ModelManager, WorkerSetTarget, WorkerSetTargetId},
     kv_router::{RoutingHost, WorkerSelectorFactory},
     local_model::runtime_config::ModelRuntimeConfig,
     protocols::common::{
@@ -221,8 +221,8 @@ where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     binding: ArcSwapOption<PrefillBinding<Sel>>,
-    target: Mutex<Option<EndpointId>>,
-    target_tx: Option<watch::Sender<Option<dynamo_runtime::component::Endpoint>>>,
+    target: Mutex<Option<WorkerSetTargetId>>,
+    target_tx: Option<watch::Sender<Option<WorkerSetTarget>>>,
     /// Decode routing owns conditional-disagg planning and dispatch. This is
     /// installed after the frontend constructs its one decode `RoutingHost`.
     decode_routing_host: OnceLock<Arc<RoutingHost<Sel>>>,
@@ -257,6 +257,7 @@ struct PrefillBinding<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
+    target_id: WorkerSetTargetId,
     endpoint_id: EndpointId,
     router: Arc<RoutingHost<Sel>>,
     /// Resolved at activation from the prefill card. Lives here rather than on
@@ -283,14 +284,14 @@ where
 }
 
 pub(crate) trait PrefillRouterLifecycle: Send + Sync {
-    fn set_target(&self, target: Option<dynamo_runtime::component::Endpoint>);
+    fn set_target(&self, target: Option<WorkerSetTarget>);
 }
 
 impl<Sel> PrefillRouterLifecycle for PrefillRouter<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
-    fn set_target(&self, target: Option<dynamo_runtime::component::Endpoint>) {
+    fn set_target(&self, target: Option<WorkerSetTarget>) {
         self.set_target(target);
     }
 }

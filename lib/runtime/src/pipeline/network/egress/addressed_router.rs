@@ -899,15 +899,18 @@ impl AddressedPushRouter {
 /// normal responses, including the empty "queued" ACK.
 fn detect_worker_rejection_response(res_bytes: &[u8]) -> Option<DynamoError> {
     const OVERLOAD_PREFIX: &[u8] = b"Server overloaded:";
-    const UNAVAILABLE_PREFIX: &[u8] = b"Server unavailable:";
+    let unavailable_prefix = crate::pipeline::network::ACK_UNAVAILABLE_PREFIX.as_bytes();
 
     let error_type = if res_bytes.starts_with(OVERLOAD_PREFIX) {
         // This ACK came from the one worker addressed by this dispatch. It says
         // nothing about capacity elsewhere in the eligible pool, so preserve
         // worker scope for migration instead of reporting pool exhaustion.
         ErrorType::WorkerOverloaded
-    } else if res_bytes.starts_with(UNAVAILABLE_PREFIX) {
-        ErrorType::Unavailable
+    } else if res_bytes.starts_with(unavailable_prefix) {
+        // Same scope: the addressed server is up but has no handler for this
+        // instance, or is closing its worker pool. Other instances may still
+        // serve the endpoint, so this stays migratable.
+        ErrorType::WorkerUnavailable
     } else {
         return None;
     };
@@ -930,6 +933,13 @@ mod rejection_detection_tests {
         let err = detect_worker_rejection_response(b"Server overloaded: worker at capacity")
             .expect("should detect overload");
         assert_eq!(err.error_type(), ErrorType::WorkerOverloaded);
+    }
+
+    #[test]
+    fn unavailable_payload_maps_to_worker_unavailable() {
+        let err = detect_worker_rejection_response(b"Server unavailable: unknown endpoint x")
+            .expect("should detect unavailable");
+        assert_eq!(err.error_type(), ErrorType::WorkerUnavailable);
     }
 
     #[test]

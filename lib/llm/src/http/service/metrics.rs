@@ -58,9 +58,14 @@ pub fn request_deadline_exceeded(err: &(dyn std::error::Error + 'static)) -> boo
     dynamo_runtime::error::match_error_chain(err, DEADLINE, &[])
 }
 
-/// Check whether an error chain indicates that no backend worker is available.
+/// Check whether an error chain indicates that no backend worker is available
+/// to this request. Both flavors are HTTP 503; they differ only in whether
+/// migration may retry elsewhere.
 pub fn request_was_unavailable(err: &(dyn std::error::Error + 'static)) -> bool {
-    const UNAVAILABLE: &[DynamoErrorType] = &[DynamoErrorType::Unavailable];
+    const UNAVAILABLE: &[DynamoErrorType] = &[
+        DynamoErrorType::Unavailable,
+        DynamoErrorType::WorkerUnavailable,
+    ];
     const AVAILABLE: &[DynamoErrorType] = &[];
     dynamo_runtime::error::match_error_chain(err, UNAVAILABLE, AVAILABLE)
 }

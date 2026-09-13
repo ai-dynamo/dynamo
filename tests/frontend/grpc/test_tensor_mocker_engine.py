@@ -15,7 +15,6 @@ from __future__ import annotations
 import logging
 import os
 import queue
-import shutil
 from functools import partial
 
 import numpy as np
@@ -55,11 +54,6 @@ class MockWorkerProcess(ManagedProcess):
         env["DYN_SYSTEM_PORT"] = str(system_port)
 
         log_dir = f"{request.node.name}_{worker_id}"
-
-        try:
-            shutil.rmtree(log_dir)
-        except FileNotFoundError:
-            pass
 
         super().__init__(
             command=command,

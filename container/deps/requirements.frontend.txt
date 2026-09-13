@@ -4,12 +4,12 @@
 # The experimental AIC router load model is provided by the separately staged
 # AISimulate wheel. Do not install the retired standalone AIC distributions.
 
-# tritonclient<=2.62.0 requires grpcio<1.68 and protobuf<6.0dev; pin here so the
+# tritonclient 2.72.0 accepts modern grpcio and protobuf 6; pin here so the
 # resolver picks compatible versions when installed alongside runtime deps.
-grpcio<1.68,>=1.63.0
-protobuf>=5.29.5,<6.0dev
+grpcio>=1.81.1,<=1.83.1
+protobuf==6.33.6
 # Frontend-specific dependencies — used by the frontend runtime and any test
 # image that needs to run gRPC frontend tests (e.g. dynamo test image).
 
 # Triton client for gRPC frontend tests
-tritonclient[grpc]<=2.62.0  # May have platform-specific builds
+tritonclient[grpc]==2.72.0  # May have platform-specific builds

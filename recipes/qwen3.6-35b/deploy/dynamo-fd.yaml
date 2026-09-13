@@ -59,7 +59,7 @@ spec:
           memory: 32Gi
       subComponentType: null
 
-    VllmWorker:
+    worker:
       componentType: worker
       extraPodSpec:
         nodeSelector: ${HW_NODE_SELECTOR}

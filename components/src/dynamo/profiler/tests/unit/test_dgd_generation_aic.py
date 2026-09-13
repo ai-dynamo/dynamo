@@ -3,7 +3,10 @@
 
 """Unit tests for the AIC-spec integration in profiler DGD generation."""
 
+from pathlib import Path
+
 import pytest
+import yaml
 
 try:
     from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
@@ -606,28 +609,31 @@ class TestEnableVllmBenchmarkMode:
             "spec": {
                 "components": [
                     _component("Frontend", "frontend"),
-                    _component("VllmPrefillWorker", "prefill"),
-                    _component("VllmDecodeWorker", "decode"),
+                    _component("custom-prefill", "prefill"),
+                    _component("custom-decode", "decode"),
                 ]
             }
         }
         enable_vllm_benchmark_mode(cfg)
         components = _component_map(cfg)
-        assert _benchmark_mode(components["VllmPrefillWorker"]) == "prefill"
-        assert _benchmark_mode(components["VllmDecodeWorker"]) == "decode"
+        assert _benchmark_mode(components["custom-prefill"]) == "prefill"
+        assert _benchmark_mode(components["custom-decode"]) == "decode"
         assert "env" not in _main_container(components["Frontend"])
 
-    def test_agg_sets_single_worker(self):
+    @pytest.mark.parametrize(
+        "worker_name", ["worker", "VllmDecodeWorker", "VllmWorker", "custom-worker"]
+    )
+    def test_agg_resolves_worker_by_type(self, worker_name: str):
         cfg = {
             "spec": {
                 "components": [
                     _component("Frontend", "frontend"),
-                    _component("VllmWorker", "worker"),
+                    _component(worker_name, "worker"),
                 ]
             }
         }
         enable_vllm_benchmark_mode(cfg)
-        assert _benchmark_mode(_component_map(cfg)["VllmWorker"]) == "agg"
+        assert _benchmark_mode(_component_map(cfg)[worker_name]) == "agg"
 
     def test_agg_template_sets_single_generic_worker(self):
         cfg = load_dgd_template("vllm", "agg")
@@ -639,8 +645,20 @@ class TestEnableVllmBenchmarkMode:
             for component in cfg["spec"]["components"]
             if component["type"] == "worker"
         )
-        assert worker["name"] == "VllmDecodeWorker"
+        assert worker["name"] == "worker"
         assert _benchmark_mode(worker) == "agg"
+
+    def test_real_agg_template_sets_single_worker(self):
+        repository_root = Path(__file__).resolve().parents[6]
+        template_path = repository_root / "examples/backends/vllm/deploy/agg.yaml"
+        cfg = yaml.safe_load(template_path.read_text(encoding="utf-8"))
+
+        components = _component_map(cfg)
+        assert "worker" in components
+        assert "decode" not in components
+
+        enable_vllm_benchmark_mode(cfg)
+        assert _benchmark_mode(components["worker"]) == "agg"
 
     def test_idempotent_replaces_existing_value(self):
         # Simulates a user override that sets DYN_BENCHMARK_MODE to an
@@ -649,7 +667,7 @@ class TestEnableVllmBenchmarkMode:
             "spec": {
                 "components": [
                     _component(
-                        "VllmDecodeWorker",
+                        "decode",
                         "decode",
                         env=[
                             {"name": "SOMETHING_ELSE", "value": "keep"},
@@ -660,7 +678,7 @@ class TestEnableVllmBenchmarkMode:
             }
         }
         enable_vllm_benchmark_mode(cfg)
-        component = _component_map(cfg)["VllmDecodeWorker"]
+        component = _component_map(cfg)["decode"]
         env = _main_container(component)["env"]
         names = [e["name"] for e in env]
         assert names.count("DYN_BENCHMARK_MODE") == 1
@@ -668,13 +686,13 @@ class TestEnableVllmBenchmarkMode:
         # Unrelated env vars are preserved.
         assert {"name": "SOMETHING_ELSE", "value": "keep"} in env
 
-    def test_non_vllm_components_unchanged(self):
+    def test_non_worker_components_unchanged(self):
         cfg = {
             "spec": {
                 "components": [
-                    _component("prefill", "prefill"),
-                    _component("decode", "decode"),
                     _component("Frontend", "frontend"),
+                    _component("Planner", "planner"),
+                    _component("Gateway", "epp"),
                 ]
             }
         }
@@ -687,7 +705,7 @@ class TestEnableVllmBenchmarkMode:
             "spec": {
                 "components": [
                     _component(
-                        "VllmPrefillWorker",
+                        "prefill",
                         "prefill",
                         image="nvcr.io/foo:1.0",
                         args=["--model-path", "x"],
@@ -696,7 +714,7 @@ class TestEnableVllmBenchmarkMode:
             }
         }
         enable_vllm_benchmark_mode(cfg)
-        component = _component_map(cfg)["VllmPrefillWorker"]
+        component = _component_map(cfg)["prefill"]
         mc = _main_container(component)
         assert mc["image"] == "nvcr.io/foo:1.0"
         assert mc["args"] == ["--model-path", "x"]

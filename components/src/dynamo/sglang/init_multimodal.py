@@ -18,6 +18,7 @@ from dynamo.llm import (
     WorkerType,
 )
 from dynamo.runtime import DistributedRuntime
+from dynamo.sglang._compat import publish_server_args
 from dynamo.sglang.args import Config
 from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
@@ -60,6 +61,7 @@ async def init_multimodal_encode_worker(
         cache_publisher = MultimodalEmbeddingCachePublisher()
         await cache_publisher.create_endpoint(generate_endpoint)
 
+    publish_server_args(server_args, role="encoder")
     handler = MultimodalEncodeWorkerHandler(
         config,
         pd_worker_client,
