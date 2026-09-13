@@ -24,7 +24,7 @@ use tonic::{Request, Response, Status};
 use tonic_health::ServingStatus as HealthServingStatus;
 
 use crate::client::{CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
-use crate::convert::{ResponseState, build_generate_request};
+use crate::convert::{ResponseState, build_generate_request, normalize_response_options};
 use crate::engine::VllmSidecarEngine;
 use crate::json::{json_to_struct, struct_to_json};
 use crate::model::DiscoveredModel;
@@ -32,6 +32,7 @@ use crate::proto as pb;
 
 #[derive(Clone, Default)]
 struct FakeVllm {
+    sequence_outputs: Option<Vec<pb::SequenceOutput>>,
     requests: Arc<Mutex<Vec<pb::GenerateRequest>>>,
     data_parallel_rank_metadata: Arc<Mutex<Vec<Option<String>>>>,
     peers: Arc<Mutex<Vec<SocketAddr>>>,
@@ -169,6 +170,7 @@ impl pb::inference_server::Inference for FakeVllm {
         let first_token_pending = self.first_token_pending.clone();
         let release_first_token = self.release_first_token.clone();
         let dropped = self.server_stream_dropped.clone();
+        let sequence_outputs = self.sequence_outputs.clone();
 
         let stream = async_stream::try_stream! {
             let _drop_signal = DropSignal(dropped);
@@ -219,6 +221,13 @@ impl pb::inference_server::Inference for FakeVllm {
                     json_to_struct(encoder_handoff).expect("encoder handoff")
                 });
                 yield encode_response(ec);
+            } else if let Some(outputs) = sequence_outputs {
+                for output in outputs {
+                    yield pb::GenerateResponse {
+                        prompt_info: None,
+                        outputs: Some(output),
+                    };
+                }
             } else {
                 let kv = is_prefill.then(|| {
                     json_to_struct(handoff.clone()).expect("encode handoff")
@@ -468,7 +477,31 @@ fn server_info() -> pb::ServerInfo {
             sleep_mode_enabled: true,
             draft_weight_updates_enabled: true,
         }),
+        supports_native_sampling_params_json: true,
     }
+}
+
+#[test]
+fn native_generate_capability_requires_worker_support() {
+    let model = DiscoveredModel::from_proto(model_info(), server_info()).expect("valid discovery");
+    assert_eq!(
+        model
+            .engine_config()
+            .runtime_data
+            .get("vllm_inference_v1_generate")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+
+    let mut legacy_server = server_info();
+    legacy_server.supports_native_sampling_params_json = false;
+    let legacy = DiscoveredModel::from_proto(model_info(), legacy_server).expect("valid discovery");
+    assert!(
+        !legacy
+            .engine_config()
+            .runtime_data
+            .contains_key("vllm_inference_v1_generate")
+    );
 }
 
 #[test]
@@ -847,6 +880,240 @@ fn request() -> PreprocessedRequest {
         .expect("request")
 }
 
+#[test]
+fn skip_special_tokens_is_forwarded_without_compatibility_envelope() {
+    let mut request = request();
+    request.output_options.skip_special_tokens = Some(false);
+    let wire = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("native controls should be forwarded");
+
+    assert_eq!(
+        wire.response
+            .and_then(|response| response.skip_special_tokens),
+        Some(false)
+    );
+}
+
+#[test]
+fn compatibility_envelope_projects_skip_special_tokens() {
+    let mut request = request();
+    request
+        .extra_args
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("object extra_args")
+        .insert(
+            "vllm_tito".to_string(),
+            json!({"sampling_params": {"skip_special_tokens": false}}),
+        );
+
+    let wire = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("compatibility option should be projected");
+
+    assert_eq!(
+        wire.response
+            .and_then(|response| response.skip_special_tokens),
+        Some(false)
+    );
+}
+
+#[test]
+fn canonical_controls_override_compatibility_envelope() {
+    let mut request = request();
+    request.output_options.skip_special_tokens = Some(false);
+    request
+        .extra_args
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("object extra_args")
+        .insert(
+            "vllm_tito".to_string(),
+            json!({"sampling_params": {
+                "temperature": 0.7,
+                "seed": 456,
+                "max_tokens": 8,
+                "logprobs": 2,
+                "skip_special_tokens": true,
+                "future_vllm_field": {"preserved": true}
+            }}),
+        );
+
+    let wire = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("canonical controls should override compatibility values");
+    let native: serde_json::Value =
+        serde_json::from_slice(&wire.native_sampling_params_json).expect("native sampling JSON");
+    assert!(
+        (native["temperature"].as_f64().expect("temperature") - f64::from(0.2_f32)).abs()
+            < f64::EPSILON
+    );
+    assert_eq!(native["seed"], json!(123));
+    assert_eq!(native["max_tokens"], json!(1));
+    assert_eq!(native["logprobs"], json!(1));
+    assert_eq!(native["skip_special_tokens"], json!(false));
+    assert_eq!(native["future_vllm_field"], json!({"preserved": true}));
+}
+
+#[test]
+fn released_envelope_preserves_native_sampling_semantics() {
+    let mut request = request();
+    request.sampling_options = SamplingOptions {
+        top_k: Some(-1),
+        ..Default::default()
+    };
+    request.stop_conditions = StopConditions::default();
+    request.output_options = OutputOptions::default();
+    request.extra_args = Some(json!({
+        "skip_reading_prefix_cache": false,
+        "vllm_tito": {"sampling_params": {
+            "top_k": -1,
+            "repetition_penalty": 2.5,
+            "logprobs": -1,
+            "prompt_logprobs": 0,
+            "skip_reading_prefix_cache": true,
+            "skip_special_tokens": false,
+            "return_token_ids": true
+        }}
+    }));
+
+    let request = normalize_response_options(request).expect("normalize response options");
+    assert_eq!(request.output_options.logprobs, Some(u32::MAX));
+    assert_eq!(request.output_options.prompt_logprobs, Some(0));
+    assert_eq!(request.output_options.skip_special_tokens, Some(false));
+    let wire = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("convert released envelope");
+    let native: serde_json::Value =
+        serde_json::from_slice(&wire.native_sampling_params_json).expect("native sampling JSON");
+    assert_eq!(wire.sampling.expect("sampling").top_k, 0);
+    assert!(native.get("temperature").is_none());
+    assert_eq!(native["top_k"], json!(0));
+    assert_eq!(native["repetition_penalty"], json!(2.5));
+    assert_eq!(native["logprobs"], json!(-1));
+    assert_eq!(native["skip_reading_prefix_cache"], json!(false));
+}
+
+#[test]
+fn prefill_does_not_forward_decode_sampling_json() {
+    let mut request = request();
+    request
+        .extra_args
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("object extra_args")
+        .insert(
+            "vllm_tito".to_string(),
+            json!({"sampling_params": {"top_k": 0, "return_token_ids": true}}),
+        );
+
+    let wire = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Prefill,
+    )
+    .expect("convert prefill request");
+    assert!(wire.native_sampling_params_json.is_empty());
+}
+#[test]
+fn explicit_zero_temperature_is_preserved() {
+    let mut request = request();
+    request.sampling_options = SamplingOptions::default();
+    request.extra_args = Some(json!({
+        "vllm_tito": {"sampling_params": {"temperature": 0.0}}
+    }));
+
+    let wire = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("convert explicit zero temperature");
+    let native: serde_json::Value =
+        serde_json::from_slice(&wire.native_sampling_params_json).expect("native sampling JSON");
+    assert_eq!(native["temperature"], json!(0.0));
+}
+
+#[test]
+fn explicit_logprob_token_ids_override_native_logprob_count() {
+    let mut request = request();
+    request.output_options.logprobs = Some(5);
+    request.extra_args = Some(json!({
+        "vllm_tito": {"sampling_params": {"logprob_token_ids": [5000]}}
+    }));
+
+    let wire = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("convert explicit logprob token IDs");
+    let native: serde_json::Value =
+        serde_json::from_slice(&wire.native_sampling_params_json).expect("native sampling JSON");
+    assert!(native.get("logprobs").is_none());
+    assert_eq!(native["logprob_token_ids"], json!([5000]));
+}
+
+#[test]
+fn released_envelope_hydrates_kv_transfer_with_canonical_precedence() {
+    let mut legacy = request();
+    legacy.extra_args = Some(json!({
+        "vllm_tito": {
+            "sampling_params": {},
+            "kv_transfer_params": {"source": "legacy"}
+        }
+    }));
+    let legacy = normalize_response_options(legacy).expect("normalize legacy KV transfer");
+    assert_eq!(
+        legacy.extra_args.as_ref().unwrap()["kv_transfer_params"],
+        json!({"source": "legacy"})
+    );
+
+    let mut canonical = request();
+    canonical.extra_args = Some(json!({
+        "kv_transfer_params": {"source": "canonical"},
+        "vllm_tito": {
+            "sampling_params": {},
+            "kv_transfer_params": {"source": "legacy"}
+        }
+    }));
+    let canonical = normalize_response_options(canonical).expect("normalize canonical KV transfer");
+    assert_eq!(
+        canonical.extra_args.as_ref().unwrap()["kv_transfer_params"],
+        json!({"source": "canonical"})
+    );
+}
+
+#[test]
+fn canonical_dynamo_priority_is_converted_for_vllm() {
+    for (dynamo_priority, vllm_priority) in [(-7, 7), (7, -7), (i32::MIN, i32::MAX)] {
+        let mut request = request();
+        request.routing.as_mut().expect("routing").priority = Some(dynamo_priority);
+
+        let wire = build_generate_request(
+            request,
+            "request-1".to_string(),
+            DisaggregationMode::Aggregated,
+        )
+        .expect("canonical priority should be converted");
+
+        assert_eq!(wire.priority, vllm_priority);
+    }
+}
+
 fn epd_image_request() -> PreprocessedRequest {
     let mut request = request();
     request.output_options.prompt_logprobs = None;
@@ -998,6 +1265,20 @@ fn engine_config_normalizes_total_kv_blocks_per_dp_rank() {
 }
 
 #[test]
+fn engine_config_advertises_vllm_generate_capability() {
+    let model =
+        DiscoveredModel::from_proto(model_info(), server_info()).expect("valid discovery metadata");
+
+    assert_eq!(
+        model
+            .engine_config()
+            .runtime_data
+            .get("vllm_inference_v1_generate"),
+        Some(&json!(true))
+    );
+}
+
+#[test]
 fn engine_config_handles_zero_and_inexact_aggregate_kv_capacity() {
     for (aggregate_blocks, expected_per_rank_blocks) in [(0, None), (4097, Some(2048))] {
         let mut server = server_info();
@@ -1045,6 +1326,73 @@ async fn encode_startup_rejects_non_multimodal_engine() {
             .to_string()
             .contains("encode mode requires a multimodal engine")
     );
+}
+
+#[tokio::test]
+async fn generation_preserves_empty_engine_text_while_stop_text_is_buffered() {
+    // Example: vLLM emits token 42 with `text: ""` while buffering a long,
+    // nonmatching stop string, then emits token 43 with `text: " buffered text"`.
+    // Expect the first delta to remain `Some("")`, so the frontend waits for
+    // vLLM's buffered text instead of detokenizing token 42 and duplicating it.
+    let outputs = [
+        (vec![42], ""),
+        (vec![43], " buffered text"),
+        (Vec::new(), ""),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, (token_ids, text))| pb::SequenceOutput {
+        num_tokens: token_ids.len() as u32,
+        token_ids,
+        text: text.to_string(),
+        finish_info: (index == 2).then_some(pb::FinishInfo {
+            num_output_tokens: 2,
+            finish_reason: pb::finish_info::FinishReason::Length as i32,
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .collect();
+    let server = FakeServer::start(FakeVllm {
+        sequence_outputs: Some(outputs),
+        ..Default::default()
+    })
+    .await;
+
+    for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Decode] {
+        let engine = engine(&server.endpoint, mode, 1, model_info());
+        engine.start(0).await.expect("start");
+        let mut request = if mode.is_decode() {
+            decode_request()
+        } else {
+            request()
+        };
+        request.output_options = OutputOptions::default();
+        request.stop_conditions.max_tokens = Some(2);
+        let outputs = collect(&engine, request).await;
+
+        assert_eq!(
+            outputs
+                .iter()
+                .map(|output| output.text.as_deref())
+                .collect::<Vec<_>>(),
+            [Some(""), Some(" buffered text"), Some("")],
+            "{mode}: preserve engine text presence, including the empty terminal"
+        );
+        assert_eq!(outputs[0].token_ids, [42]);
+        assert_eq!(outputs[1].token_ids, [43]);
+        assert!(outputs[2].token_ids.is_empty());
+        assert_eq!(outputs[2].finish_reason, Some(FinishReason::Length));
+        assert_eq!(
+            outputs[2]
+                .completion_usage
+                .as_ref()
+                .unwrap()
+                .completion_tokens,
+            2
+        );
+        engine.cleanup().await.expect("cleanup");
+    }
 }
 
 #[tokio::test]

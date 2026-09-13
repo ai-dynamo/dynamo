@@ -324,66 +324,64 @@ class CounterWorkerProcess:
         return env, [system_port], []
 
     def __enter__(self):
-        cpu_fd, self._cpu_count_file = tempfile.mkstemp(suffix=".txt")
-        os.close(cpu_fd)
-        gpu_fd, self._gpu_count_file = tempfile.mkstemp(suffix=".txt")
-        os.close(gpu_fd)
+        with contextlib.ExitStack() as stack:
+            cpu_fd, self._cpu_count_file = tempfile.mkstemp(suffix=".txt")
+            os.close(cpu_fd)
+            stack.callback(Path(self._cpu_count_file).unlink, missing_ok=True)
 
-        cpu_env, cpu_health_ports, cpu_health_urls = self._worker_process_options(0)
-        self._cpu_proc = ManagedProcess(
-            command=self._worker_command(
-                self._cpu_count_file,
-                "cpu",
-                self._initial_taints[0],
-            ),
-            env=cpu_env,
-            timeout=60,
-            display_output=True,
-            health_check_ports=cpu_health_ports,
-            health_check_urls=cpu_health_urls,
-            log_dir=self._request.node.name,
-            terminate_all_matching_process_names=False,
-            display_name="counter-worker-cpu",
-        )
-        gpu_env, gpu_health_ports, gpu_health_urls = self._worker_process_options(1)
-        self._gpu_proc = ManagedProcess(
-            command=self._worker_command(
-                self._gpu_count_file,
-                "gpu",
-                self._initial_taints[1],
-            ),
-            env=gpu_env,
-            timeout=60,
-            display_output=True,
-            health_check_ports=gpu_health_ports,
-            health_check_urls=gpu_health_urls,
-            log_dir=self._request.node.name,
-            terminate_all_matching_process_names=False,
-            display_name="counter-worker-gpu",
-        )
-        self._cpu_proc.__enter__()
-        self._gpu_proc.__enter__()
+            gpu_fd, self._gpu_count_file = tempfile.mkstemp(suffix=".txt")
+            os.close(gpu_fd)
+            stack.callback(Path(self._gpu_count_file).unlink, missing_ok=True)
+
+            cpu_env, cpu_health_ports, cpu_health_urls = self._worker_process_options(0)
+            self._cpu_proc = ManagedProcess(
+                command=self._worker_command(
+                    self._cpu_count_file,
+                    "cpu",
+                    self._initial_taints[0],
+                ),
+                env=cpu_env,
+                timeout=60,
+                display_output=True,
+                health_check_ports=cpu_health_ports,
+                health_check_urls=cpu_health_urls,
+                log_dir=self._request.node.name,
+                terminate_all_matching_process_names=False,
+                display_name="counter-worker-cpu",
+            )
+            gpu_env, gpu_health_ports, gpu_health_urls = self._worker_process_options(1)
+            self._gpu_proc = ManagedProcess(
+                command=self._worker_command(
+                    self._gpu_count_file,
+                    "gpu",
+                    self._initial_taints[1],
+                ),
+                env=gpu_env,
+                timeout=60,
+                display_output=True,
+                health_check_ports=gpu_health_ports,
+                health_check_urls=gpu_health_urls,
+                log_dir=self._request.node.name,
+                terminate_all_matching_process_names=False,
+                display_name="counter-worker-gpu",
+            )
+            stack.enter_context(self._cpu_proc)
+            stack.enter_context(self._gpu_proc)
+            self._exit_stack = stack.pop_all()
+
         logger.info(
             f"Started CPU and GPU counter workers, endpoint: {self.endpoint_path}"
         )
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        for proc, name in [
-            (self._cpu_proc, "CPU"),
-            (self._gpu_proc, "GPU"),
-        ]:
-            if proc is not None:
-                try:
-                    proc.__exit__(exc_type, exc_val, exc_tb)
-                except Exception as e:
-                    logger.warning(f"Error stopping {name} counter worker: {e}")
-        for path in [self._cpu_count_file, self._gpu_count_file]:
-            if path:
-                try:
-                    os.unlink(path)
-                except OSError:
-                    pass
+        stack = getattr(self, "_exit_stack", None)
+        if stack is None:
+            return None
+        try:
+            return stack.__exit__(exc_type, exc_val, exc_tb)
+        finally:
+            self._exit_stack = None
 
 
 @pytest.mark.timeout(120)

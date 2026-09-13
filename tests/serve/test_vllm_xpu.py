@@ -7,7 +7,6 @@ import logging
 import os
 import random
 from dataclasses import dataclass, field
-from typing import Optional
 
 import pytest
 
@@ -40,11 +39,12 @@ from tests.utils.payload_builder import (
     completion_payload_default,
     completion_payload_with_logprobs,
     kv_events_metrics_payload,
+    lora_chat_payload,
     metric_payload_default,
     router_cached_tokens_chat_payload,
     router_selection_chat_payload_default,
 )
-from tests.utils.payloads import LoraTestChatPayload, ToolCallingChatPayload
+from tests.utils.payloads import ToolCallingChatPayload
 
 logger = logging.getLogger(__name__)
 
@@ -768,40 +768,6 @@ def test_multimodal_b64_frontend_decoding(
 
 # LoRA Test Directory
 lora_dir = os.path.join(vllm_dir, "launch/lora")
-
-
-def lora_chat_payload(
-    lora_name: str,
-    s3_uri: str,
-    system_port: int = DefaultPort.SYSTEM1.value,
-    repeat_count: int = 2,
-    expected_response: Optional[list] = None,
-    expected_log: Optional[list] = None,
-    max_tokens: int = 100,
-    temperature: float = 0.0,
-) -> LoraTestChatPayload:
-    """Create a LoRA-enabled chat payload for testing"""
-    return LoraTestChatPayload(
-        body={
-            "model": lora_name,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": "What is deep learning? Answer in one sentence.",
-                }
-            ],
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "stream": False,
-        },
-        lora_name=lora_name,
-        s3_uri=s3_uri,
-        system_port=system_port,
-        repeat_count=repeat_count,
-        expected_response=expected_response
-        or ["learning", "neural", "network", "AI", "model"],
-        expected_log=expected_log or [],
-    )
 
 
 @pytest.mark.vllm

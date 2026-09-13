@@ -44,7 +44,7 @@ from dynamo.llm import (
     WorkerType,
     register_model,
 )
-from dynamo.llm.exceptions import EngineShutdown
+from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
 from dynamo.vllm.handlers import get_lora_manager
 from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
 from dynamo.vllm.omni.base_handler import BaseOmniHandler
@@ -58,6 +58,7 @@ from dynamo.vllm.omni.utils import (
     image_generation_negative_prompt_from_request,
     image_generation_sampling_overrides,
     image_generation_size_from_request,
+    image_generation_size_from_str,
     streaming_sampling_params,
 )
 
@@ -380,6 +381,20 @@ class OmniHandler(BaseOmniHandler):
             )
         except (ValueError, NotImplementedError, RuntimeError) as e:
             logger.error(f"Invalid request {request_id}: {e}")
+            if (
+                isinstance(e, ValueError)
+                and request_type == RequestType.IMAGE_GENERATION
+            ):
+                # /v1/images/generations folds worker output into
+                # NvImagesResponse, which has no failure shape, so the
+                # chat.completion.chunk _error_chunk returns is not a rejection
+                # the client can read. Re-raise as InvalidArgument instead: it is
+                # a registered binding exception, so errors.rs takes its message
+                # via .value(py).str() and the client sees the reason alone. A
+                # bare ValueError reaches the same 400 through engine.rs's
+                # fallback, but that path uses PyErr::to_string() and renders as
+                # "ValueError: <reason>", leaking the Python type to the API.
+                raise InvalidArgument(str(e)) from e
             yield self._error_chunk(request_id, str(e), request_type)
             return
 
@@ -687,7 +702,9 @@ class OmniHandler(BaseOmniHandler):
 
     def _engine_inputs_from_image(self, req: NvCreateImageRequest) -> EngineInputs:
         """Build engine inputs from an NvCreateImageRequest."""
-        width, height = parse_size(req.size, default_w=1024, default_h=1024)
+        # req.size is a free-form client string, so it needs the same bound the
+        # chat path applies -- parse_size alone returns whatever it parses.
+        width, height = image_generation_size_from_str(req.size)
         nvext = req.nvext or ImageNvExt()
 
         prompt = build_image_generation_prompt(

@@ -250,7 +250,9 @@ impl EndpointConfigBuilder {
                     error = %e,
                     "Unable to register service for discovery"
                 );
-                let _ = server.unregister_endpoint(&endpoint_name_for_task).await;
+                let _ = server
+                    .unregister_endpoint(&endpoint_name_for_task, connection_id)
+                    .await;
                 if let Some(tracker) = tracker_clone {
                     tracker.unregister_endpoint();
                 }
@@ -283,7 +285,7 @@ impl EndpointConfigBuilder {
             );
 
             if let Err(e) = server_for_cleanup
-                .unregister_endpoint(&endpoint_name_for_cleanup)
+                .unregister_endpoint(&endpoint_name_for_cleanup, connection_id)
                 .await
             {
                 tracing::warn!(

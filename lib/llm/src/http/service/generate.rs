@@ -26,6 +26,7 @@ use serde::Serialize;
 use tracing::Instrument;
 
 use super::disconnect::create_connection_monitor;
+use super::error::SanitizedError;
 use super::metrics::{
     CancellationLabels, ErrorType, HttpQueueGuard, InflightGuard, ResponseMetricCollector,
 };
@@ -37,7 +38,6 @@ use super::{RouteDoc, service_v2};
 use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
 use crate::protocols::common::preprocessor::{MmRoutingInfo, PreprocessedRequest};
 use crate::protocols::common::timing::RequestTracker;
-use crate::protocols::common::{SamplingOptions, StopConditions};
 use crate::protocols::openai::generate::{
     GenerateRequest, GenerateResponse, GenerateResponseOptions, SamplingParams, StreamOptions,
 };
@@ -196,6 +196,14 @@ fn generate_deadline_exceeded_response() -> Response {
         StatusCode::TOO_MANY_REQUESTS,
         "deadline_exceeded",
         super::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE.to_string(),
+    )
+}
+
+fn generate_unavailable_response() -> Response {
+    generate_error_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "service_unavailable",
+        SanitizedError::Unavailable.to_string(),
     )
 }
 
@@ -578,8 +586,13 @@ fn preprocessed_from_generate_with_tracker(
     } = routing_metadata;
     let sampling = &request.sampling_params;
     let max_tokens = sampling.max_tokens();
-    let min_tokens = sampling.min_tokens();
-    let ignore_eos = sampling.ignore_eos();
+    let stop_conditions = sampling.project_stop_conditions();
+    let sampling_options = sampling
+        .project_sampling_options()
+        .map_err(anyhow::Error::msg)?;
+    let output_options = sampling
+        .project_output_options()
+        .map_err(anyhow::Error::msg)?;
     let routing_priority = dynamo_routing_priority(request.priority);
     // With vLLM's default `enable_tower_connector_lora=false`, MM identifiers
     // are adapter-invariant and `lora_name` separately salts LM KV hashes. When
@@ -607,6 +620,18 @@ fn preprocessed_from_generate_with_tracker(
     let vllm_tito = serde_json::to_value(VllmTitoEnvelope::new(&request, request_id))?;
     let mut extra_args = serde_json::Map::new();
     extra_args.insert("vllm_tito".to_string(), vllm_tito);
+    if let Some(kv_transfer_params) = request.kv_transfer_params.as_ref() {
+        extra_args.insert(
+            "kv_transfer_params".to_string(),
+            serde_json::Value::Object(kv_transfer_params.clone()),
+        );
+    }
+    if let Some(skip_reading_prefix_cache) = sampling.skip_reading_prefix_cache() {
+        extra_args.insert(
+            "skip_reading_prefix_cache".to_string(),
+            serde_json::Value::Bool(skip_reading_prefix_cache),
+        );
+    }
     if let Some(projection) = &mm_routing {
         extra_args.insert(
             "dynamo_mm_routing_hashes".to_string(),
@@ -623,17 +648,9 @@ fn preprocessed_from_generate_with_tracker(
     PreprocessedRequest::builder()
         .model(model.to_string())
         .token_ids(token_ids)
-        .stop_conditions(StopConditions {
-            max_tokens,
-            min_tokens,
-            ignore_eos: Some(ignore_eos),
-            ..Default::default()
-        })
-        .sampling_options(SamplingOptions {
-            n: Some(1),
-            ..Default::default()
-        })
-        .output_options(Default::default())
+        .stop_conditions(stop_conditions)
+        .sampling_options(sampling_options)
+        .output_options(output_options)
         .mm_routing_info(mm_routing_info)
         .routing(Some(crate::protocols::common::preprocessor::RoutingHints {
             dp_rank: data_parallel_rank,
@@ -1011,9 +1028,10 @@ async fn generate_dispatch(
             let was_cancelled = request_context.is_killed()
                 || super::metrics::request_was_cancelled(error.as_ref());
             let was_rejected = super::metrics::request_was_rejected(error.as_ref());
+            let was_unavailable = super::metrics::request_was_unavailable(error.as_ref());
             inflight_guard.mark_error(if deadline_exceeded || was_cancelled {
                 ErrorType::Cancelled
-            } else if was_rejected {
+            } else if was_rejected || was_unavailable {
                 ErrorType::Unavailable
             } else {
                 ErrorType::Internal
@@ -1034,6 +1052,14 @@ async fn generate_dispatch(
                     "service_unavailable",
                     "engine rejected the request".to_string(),
                 );
+            }
+            if was_unavailable {
+                tracing::warn!(
+                    %request_id,
+                    error = %format!("{error:#}"),
+                    "no worker available for generate request"
+                );
+                return generate_unavailable_response();
             }
             tracing::error!(%request_id, error = %format!("{error:#}"), "engine generate call failed");
             return generate_internal_error_response();
@@ -1083,6 +1109,11 @@ async fn generate_dispatch(
                 inflight_guard.mark_error(ErrorType::Cancelled);
                 return generate_cancelled_response();
             }
+            if super::metrics::request_was_unavailable(error.as_ref()) {
+                inflight_guard.mark_error(ErrorType::Unavailable);
+                tracing::warn!(%request_id, %error, "generate stream failed: no worker available");
+                return generate_unavailable_response();
+            }
             inflight_guard.mark_error(ErrorType::Internal);
             tracing::error!(%request_id, %error, "failed to fold generate stream");
             generate_internal_error_response()
@@ -1091,7 +1122,7 @@ async fn generate_dispatch(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::{
         future::Future,
         pin::Pin,
@@ -1199,6 +1230,18 @@ mod tests {
 
     struct MetricEngine;
 
+    /// Fails dispatch the way an addressed worker that no longer serves the instance does.
+    pub(crate) struct WorkerUnavailableEngine;
+
+    struct WorkerUnavailableStreamEngine;
+
+    fn worker_unavailable_error() -> dynamo_runtime::error::DynamoError {
+        dynamo_runtime::error::DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::WorkerUnavailable)
+            .message("Server unavailable: unknown endpoint a/generate")
+            .build()
+    }
+
     struct MigrationMetricBackend {
         calls: AtomicU32,
     }
@@ -1242,6 +1285,34 @@ mod tests {
                 .message("router deadline exceeded before stream start")
                 .build()
                 .into())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for WorkerUnavailableEngine
+    {
+        async fn generate(
+            &self,
+            _request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            Err(worker_unavailable_error().into())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for WorkerUnavailableStreamEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            // The dispatch call succeeds and the stream opens; the error arrives mid-stream, the
+            // way an exhausted migration surfaces it.
+            let context = request.context();
+            let stream = futures::stream::iter([Annotated::from_err(worker_unavailable_error())]);
+            Ok(ResponseStream::new(Box::pin(stream), context))
         }
     }
 
@@ -2232,6 +2303,90 @@ mod tests {
     }
 
     #[test]
+    fn generate_projects_training_text_controls() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2],
+            "sampling_params": {
+                "temperature": 0.25,
+                "top_p": 0.9,
+                "top_k": -1,
+                "min_p": 0.05,
+                "seed": 23,
+                "max_tokens": 8,
+                "min_tokens": 2,
+                "presence_penalty": 0.1,
+                "frequency_penalty": 0.2,
+                "repetition_penalty": 1.1,
+                "stop_token_ids": [7, 8],
+                "ignore_eos": true,
+                "logprobs": 1,
+                "prompt_logprobs": 1,
+                "skip_reading_prefix_cache": false,
+                "skip_special_tokens": false
+            },
+            "kv_transfer_params": {
+                "connector_data": {"block_ids": [1, 2]}
+            },
+            "model": "test-model"
+        }))
+        .expect("deserialize request");
+
+        let preprocessed = preprocessed_from_generate(
+            request,
+            "test-model",
+            None,
+            "resolved-request",
+            routing_metadata(16, false, None),
+        )
+        .expect("build request");
+
+        assert_eq!(preprocessed.sampling_options.temperature, Some(0.25));
+        assert_eq!(preprocessed.sampling_options.top_p, Some(0.9));
+        assert_eq!(preprocessed.sampling_options.top_k, Some(-1));
+        assert_eq!(preprocessed.sampling_options.min_p, Some(0.05));
+        assert_eq!(preprocessed.sampling_options.seed, Some(23));
+        assert_eq!(preprocessed.sampling_options.presence_penalty, Some(0.1));
+        assert_eq!(preprocessed.sampling_options.frequency_penalty, Some(0.2));
+        assert_eq!(preprocessed.sampling_options.repetition_penalty, Some(1.1));
+        assert_eq!(preprocessed.stop_conditions.max_tokens, Some(8));
+        assert_eq!(preprocessed.stop_conditions.min_tokens, Some(2));
+        assert_eq!(
+            preprocessed.stop_conditions.stop_token_ids_hidden,
+            Some(vec![7, 8])
+        );
+        assert_eq!(preprocessed.stop_conditions.ignore_eos, Some(true));
+        assert_eq!(preprocessed.output_options.logprobs, Some(1));
+        assert_eq!(preprocessed.output_options.prompt_logprobs, Some(1));
+        assert_eq!(
+            preprocessed
+                .extra_args
+                .as_ref()
+                .and_then(serde_json::Value::as_object)
+                .and_then(|extra| extra.get("skip_reading_prefix_cache")),
+            Some(&serde_json::Value::Bool(false))
+        );
+        assert_eq!(
+            preprocessed
+                .extra_args
+                .as_ref()
+                .and_then(serde_json::Value::as_object)
+                .and_then(|extra| extra.get("kv_transfer_params")),
+            Some(&serde_json::json!({"connector_data": {"block_ids": [1, 2]}}))
+        );
+        assert_eq!(
+            preprocessed
+                .extra_args
+                .as_ref()
+                .and_then(serde_json::Value::as_object)
+                .and_then(|extra| extra.get("vllm_tito"))
+                .and_then(|tito| tito.get("sampling_params"))
+                .and_then(|sampling| sampling.get("top_k")),
+            Some(&serde_json::json!(-1))
+        );
+        assert_eq!(preprocessed.output_options.skip_special_tokens, Some(false));
+    }
+
+    #[test]
     fn generate_request_context_matches_vllm_header_precedence() {
         let mut headers = HeaderMap::new();
         headers.insert(X_REQUEST_ID_HEADER, "header-request".parse().unwrap());
@@ -2285,7 +2440,7 @@ mod tests {
         }
     }
 
-    fn dispatch_test_context() -> Context<PreprocessedRequest> {
+    pub(crate) fn dispatch_test_context() -> Context<PreprocessedRequest> {
         Context::new(
             PreprocessedRequest::builder()
                 .model("test-model".to_string())
@@ -2468,23 +2623,51 @@ mod tests {
         await_cancelled_dispatch(task, dropped.as_ref(), state.as_ref()).await;
     }
 
-    async fn dispatch_terminal_finish_reason(
-        finish_reason: crate::protocols::common::FinishReason,
+    async fn dispatch_engine(
+        engine: crate::types::openai::generate::GenerateStreamingEngine,
+        request_id: &str,
     ) -> (Response, Arc<service_v2::State>) {
-        let engine: crate::types::openai::generate::GenerateStreamingEngine =
-            Arc::new(TerminalEngine(finish_reason));
         let service = HttpService::builder().build().unwrap();
         let state = service.state_clone();
         let response = generate_dispatch_for_test(
             engine,
             dispatch_test_context(),
-            "req-terminal-dispatch".to_string(),
+            request_id.to_string(),
             "test-model".to_string(),
             state.clone(),
             GenerateResponseOptions::default(),
         )
         .await;
         (response, state)
+    }
+
+    async fn dispatch_terminal_finish_reason(
+        finish_reason: crate::protocols::common::FinishReason,
+    ) -> (Response, Arc<service_v2::State>) {
+        dispatch_engine(
+            Arc::new(TerminalEngine(finish_reason)),
+            "req-terminal-dispatch",
+        )
+        .await
+    }
+
+    async fn assert_worker_unavailable_returns_503(
+        engine: crate::types::openai::generate::GenerateStreamingEngine,
+    ) {
+        let (response, state) = dispatch_engine(engine, "req-worker-unavailable").await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let metric_model = state.manager().metric_model_for("test-model");
+        assert_eq!(
+            state.metrics_clone().get_request_counter(
+                metric_model,
+                &Endpoint::Generate,
+                &RequestType::Unary,
+                &Status::Error,
+                &ErrorType::Unavailable,
+            ),
+            1
+        );
     }
 
     #[tokio::test]
@@ -2522,6 +2705,16 @@ mod tests {
 
         assert_eq!(response.status().as_u16(), 499);
         assert_cancelled_dispatch_metrics(state.as_ref(), 0, 0);
+    }
+
+    #[tokio::test]
+    async fn worker_unavailable_dispatch_returns_503() {
+        assert_worker_unavailable_returns_503(Arc::new(WorkerUnavailableEngine)).await;
+    }
+
+    #[tokio::test]
+    async fn worker_unavailable_mid_stream_returns_503() {
+        assert_worker_unavailable_returns_503(Arc::new(WorkerUnavailableStreamEngine)).await;
     }
 
     #[tokio::test]

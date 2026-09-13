@@ -17,11 +17,11 @@ from typing import Any, Generator
 import pytest
 import requests
 
-from tests.conftest import EtcdServer, NatsServer
-from tests.utils.gpu_args import build_gpu_mem_args
-from tests.utils.managed_process import ManagedProcess, check_health_ready
+from tests.mm_router.utils import COMMON_PROCESS_KWARGS, build_vllm_gpu_mem_args
+from tests.utils.http_checks import check_health_ready, model_registered
+from tests.utils.managed_process import ManagedProcess
 from tests.utils.network_canary import ConnectionCanary, running_canary
-from tests.utils.port_utils import allocate_ports
+from tests.utils.port_utils import reserved_ports
 
 VLLM_MM_MODEL = os.getenv("DYN_TEST_VLLM_MM_MODEL", "Qwen/Qwen3-VL-2B-Instruct")
 BLOCK_SIZE = 16
@@ -38,24 +38,6 @@ pytestmark = [
     pytest.mark.requested_vllm_kv_cache_bytes(1_719_075_000),
     pytest.mark.profiled_vram_gib(7.6),
 ]
-
-_COMMON_PROCESS_KWARGS: dict[str, Any] = {
-    "display_output": False,
-    "terminate_all_matching_process_names": False,
-}
-
-
-def _model_registered(response) -> bool:
-    """Returns True once the frontend advertises this worker's model.
-    The ID appears only after the worker's registration is discovered.
-    """
-    try:
-        if response.status_code != 200:
-            return False
-        data = response.json()
-    except ValueError:
-        return False
-    return any(m.get("id") == VLLM_MM_MODEL for m in data.get("data") or [])
 
 
 def _strict_media_env(**extra: str) -> dict[str, str]:
@@ -86,10 +68,7 @@ class _VllmWorkerProcess(ManagedProcess):
             "--block-size",
             str(BLOCK_SIZE),
             "--enforce-eager",
-            *(
-                build_gpu_mem_args("build_vllm_gpu_mem_args")
-                or ["--gpu-memory-utilization", "0.40"]
-            ),
+            *build_vllm_gpu_mem_args("0.40"),
             "--max-model-len",
             "4096",
         ]
@@ -105,7 +84,7 @@ class _VllmWorkerProcess(ManagedProcess):
             timeout=900,
             straggler_commands=["-m dynamo.vllm"],
             log_dir=_log_dir(request, f"worker-{topology}"),
-            **_COMMON_PROCESS_KWARGS,
+            **COMMON_PROCESS_KWARGS,
         )
 
 
@@ -127,37 +106,31 @@ class _FrontendProcess(ManagedProcess):
             command=command,
             env=_strict_media_env(),
             health_check_urls=[
-                (f"http://localhost:{frontend_port}/v1/models", _model_registered)
+                (
+                    f"http://localhost:{frontend_port}/v1/models",
+                    lambda response: model_registered(response, model=VLLM_MM_MODEL),
+                )
             ],
             timeout=240,
             straggler_commands=["-m dynamo.frontend"],
             log_dir=_log_dir(request, f"frontend-{topology}"),
-            **_COMMON_PROCESS_KWARGS,
+            **COMMON_PROCESS_KWARGS,
         )
-
-
-@pytest.fixture(scope="module")
-def runtime_services(request):
-    with (
-        NatsServer(request, port=0) as nats,
-        EtcdServer(request, port=0) as etcd,
-        pytest.MonkeyPatch.context() as mp,
-    ):
-        mp.setenv("NATS_SERVER", f"nats://localhost:{nats.port}")
-        mp.setenv("ETCD_ENDPOINTS", f"http://localhost:{etcd.port}")
-        yield
 
 
 @pytest.fixture(scope="module", params=["vllm_processor", "rust_decoding"])
 def frontend_topology(
-    request, runtime_services, predownload_models
+    request, mm_runtime_services, predownload_models
 ) -> Generator[tuple[str, int], None, None]:
     topology = request.param
-    frontend_port, system_port = allocate_ports(count=2, start_port=13000)
-    # The frontend waits until this worker's model appears in /v1/models.
-    with _VllmWorkerProcess(request, topology=topology, system_port=system_port):
-        with _FrontendProcess(request, topology=topology, frontend_port=frontend_port):
-            yield topology, frontend_port
+    with reserved_ports(count=2, start_port=13000) as ports:
+        frontend_port, system_port = ports
+        # The frontend waits until this worker's model appears in /v1/models.
+        with _VllmWorkerProcess(request, topology=topology, system_port=system_port):
+            with _FrontendProcess(
+                request, topology=topology, frontend_port=frontend_port
+            ):
+                yield topology, frontend_port
 
 
 @pytest.fixture

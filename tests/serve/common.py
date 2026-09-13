@@ -6,8 +6,10 @@
 import dataclasses
 import logging
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
@@ -307,32 +309,63 @@ def managed_serve_deployment(
 # is retained without the shipped image carrying it. No-op when the key is unset.
 TEST_ONLY_PIP_ENV_KEY = "DYN_TEST_ONLY_PIP_INSTALL"
 
-# Session-level guard so the same package set is installed at most once even
+# Session-level cache so the same package set is installed at most once even
 # though every parametrized deployment (and each retry) calls the installer.
-_test_only_pip_done: set[str] = set()
+_test_only_pip_targets: dict[str, str] = {}
 
 
-def _install_test_only_packages(config: EngineConfig) -> None:
+def _install_test_only_packages(
+    config: EngineConfig, extra_env: Optional[Dict[str, str]] = None
+) -> dict[str, str]:
     """Install any test-only pip packages a config requested via its env.
 
-    Runs inside the same runtime container/interpreter the server subprocess
-    inherits, so the worker can import the freshly installed module.
+    Install into a process-isolated temporary directory rather than the runtime
+    interpreter's site-packages. CI may run the image as an arbitrary uid, and
+    some framework venvs are intentionally read-only. The returned environment
+    exposes the directory only to subprocesses launched for this deployment.
     """
+    launch_env = dict(extra_env or {})
     spec = config.env.get(TEST_ONLY_PIP_ENV_KEY, "").strip()
-    if not spec or spec in _test_only_pip_done:
-        return
-    packages = spec.split()
-    logging.getLogger(__name__).info(
-        "Installing test-only package(s) into runtime container: %s",
-        " ".join(packages),
+    if not spec:
+        return launch_env
+
+    target = _test_only_pip_targets.get(spec)
+    if target is None:
+        packages = spec.split()
+        target = tempfile.mkdtemp(prefix="dynamo-test-pip-")
+        logging.getLogger(__name__).info(
+            "Installing test-only package(s) into %s: %s",
+            target,
+            " ".join(packages),
+        )
+        try:
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--target",
+                    target,
+                    "--no-deps",
+                    *packages,
+                ],
+                check=True,
+            )
+        except Exception:
+            shutil.rmtree(target, ignore_errors=True)
+            raise
+        _test_only_pip_targets[spec] = target
+
+    inherited_pythonpath = launch_env.get(
+        "PYTHONPATH", config.env.get("PYTHONPATH", os.environ.get("PYTHONPATH", ""))
     )
-    # --break-system-packages: runtime images use an externally-managed system
-    # python (PEP 668); this is the ephemeral test container, not a shipped image.
-    subprocess.run(
-        [sys.executable, "-m", "pip", "install", "--break-system-packages", *packages],
-        check=True,
+    launch_env["PYTHONPATH"] = (
+        target
+        if not inherited_pythonpath
+        else os.pathsep.join((target, inherited_pythonpath))
     )
-    _test_only_pip_done.add(spec)
+    return launch_env
 
 
 def run_serve_deployment(
@@ -363,7 +396,7 @@ def run_serve_deployment(
 
     # Install any decoder a codec-stripped image needs for this test, before the
     # server launches, so the worker can import it. No-op unless the config opts in.
-    _install_test_only_packages(config)
+    extra_env = _install_test_only_packages(config, extra_env)
 
     prep = _prepare_deployment(config, request, ports=ports, extra_env=extra_env)
     config = prep.config

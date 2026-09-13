@@ -19,6 +19,15 @@ def test_terminal_host_failure_exits_nonzero() -> None:
     assert error.value.code == 1
 
 
+def test_terminal_wan_failure_exits_nonzero() -> None:
+    with pytest.raises(SystemExit) as error:
+        relay_main._handle_relay_shutdown(
+            {"host_last_error": None, "wan_last_error": "WAN transport failed"}
+        )
+
+    assert error.value.code == 1
+
+
 @pytest.mark.asyncio
 async def test_late_host_failure_is_classified_after_shutdown() -> None:
     class LateFailureRelay:

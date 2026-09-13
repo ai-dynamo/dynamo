@@ -622,7 +622,7 @@ impl LowerTierIndexer {
         let indexed_owner = IndexedResidencyOwner::from_exact(owner);
         let remove_worker_entry = {
             let Some(owner_state) = worker_blocks.get_mut(&indexed_owner) else {
-                return Err(KvCacheEventError::BlockNotFound);
+                return Ok(());
             };
             if owner_state.owner != owner {
                 return Err(KvCacheEventError::UnsupportedResidencyDomain);
@@ -631,7 +631,7 @@ impl LowerTierIndexer {
 
             for block_hash in block_hashes {
                 let Some(key) = worker_map.remove(block_hash) else {
-                    return Err(KvCacheEventError::BlockNotFound);
+                    continue;
                 };
 
                 self.remove_owner_from_edge(key, indexed_owner);
@@ -1488,11 +1488,6 @@ mod tests {
             self.index.remove_worker(&mut self.worker_blocks, worker_id);
         }
 
-        fn remove_worker_dp_rank(&mut self, worker_id: u64, dp_rank: u32) {
-            self.index
-                .remove_worker_dp_rank(&mut self.worker_blocks, worker_id, dp_rank);
-        }
-
         fn root_workers(&self, local_hash: LocalBlockHash) -> Vec<WorkerWithDpRank> {
             self.index
                 .root_workers(local_hash, &projection(WorkerWithDpRank::new(7, 0)))
@@ -1659,6 +1654,7 @@ mod tests {
             .apply_event(RouterEvent {
                 worker_id: 7,
                 state_source: None,
+                session_id: None,
                 storage_tier: StorageTier::Device,
                 residency_domain: WireResidencyDomain::default(),
                 event: crate::protocols::KvCacheEvent {
@@ -2015,6 +2011,55 @@ mod tests {
     }
 
     #[test]
+    fn removal_batches_are_idempotent_and_preserve_other_owners() {
+        let mut index = TestLowerTierIndex::new();
+        let removed = WorkerWithDpRank::new(1, 0);
+        let other_rank = WorkerWithDpRank::new(1, 1);
+        let other_worker = WorkerWithDpRank::new(2, 0);
+        for worker in [removed, other_rank, other_worker] {
+            index
+                .apply_event(store_event(
+                    worker.worker_id,
+                    worker.dp_rank,
+                    0,
+                    None,
+                    &[11, 12],
+                    &[101, 102],
+                ))
+                .unwrap();
+        }
+
+        let batch = remove_event(
+            1,
+            1,
+            0,
+            vec![
+                ExternalSequenceBlockHash(999),
+                ExternalSequenceBlockHash(101),
+                ExternalSequenceBlockHash(101),
+                ExternalSequenceBlockHash(102),
+            ],
+        );
+        index.apply_event(batch.clone()).unwrap();
+        index.apply_event(batch).unwrap();
+        index
+            .apply_event(remove_event(99, 2, 0, vec![ExternalSequenceBlockHash(101)]))
+            .unwrap();
+
+        let continuations = [removed, other_rank, other_worker]
+            .into_iter()
+            .map(|worker| (worker, LowerTierContinuation::from_root(0)))
+            .collect::<FxHashMap<_, _>>();
+        let hits = index.query_contiguous_hits(&local_hashes(&[11, 12]), &continuations);
+        assert_eq!(hits.get(&removed), Some(&0));
+        assert_eq!(hits.get(&other_rank), Some(&2));
+        assert_eq!(hits.get(&other_worker), Some(&2));
+        assert!(index.dump_events().iter().all(|event| {
+            event.worker_id != removed.worker_id || event.event.dp_rank != removed.dp_rank
+        }));
+    }
+
+    #[test]
     fn removing_one_owner_preserves_shared_edge_for_other_workers() {
         let mut index = TestLowerTierIndex::new();
         let worker_a = WorkerWithDpRank::new(1, 0);
@@ -2095,21 +2140,21 @@ mod tests {
     }
 
     #[test]
-    fn start_pos_past_end_returns_zero() {
+    fn exhausted_sequence_returns_zero() {
         let mut index = TestLowerTierIndex::new();
         index
             .apply_event(store_event(23, 0, 0, Some(1100), &[91], &[901]))
             .unwrap();
 
-        let query = local_hashes(&[91]);
-        let mut continuations = FxHashMap::default();
-        continuations.insert(
-            WorkerWithDpRank::new(23, 0),
-            LowerTierContinuation::new(1, ExternalSequenceBlockHash(1100)),
-        );
-
-        let hits = index.query_contiguous_hits(&query, &continuations);
-        assert_eq!(hits.get(&WorkerWithDpRank::new(23, 0)), Some(&0));
+        let worker = WorkerWithDpRank::new(23, 0);
+        for query in [local_hashes(&[91]), Vec::new()] {
+            let continuation =
+                LowerTierContinuation::new(query.len(), ExternalSequenceBlockHash(1100));
+            let continuations = FxHashMap::from_iter([(worker, continuation)]);
+            let details = index.query_match_details(&query, &continuations);
+            assert_eq!(details.hits.get(&worker), Some(&0));
+            assert_eq!(details.next_continuations.get(&worker), Some(&continuation));
+        }
     }
 
     #[test]
@@ -2201,9 +2246,8 @@ mod tests {
             .apply_event(store_event(41, 0, 0, Some(3000), &[1], &[301]))
             .unwrap();
         index
-            .apply_event(store_event(41, 1, 1, Some(4000), &[2], &[401]))
+            .apply_event(store_event(41, 1, 1, Some(4000), &[1], &[401]))
             .unwrap();
-        index.remove_worker(41);
 
         let mut continuations = FxHashMap::default();
         continuations.insert(
@@ -2215,35 +2259,14 @@ mod tests {
             LowerTierContinuation::new(0, ExternalSequenceBlockHash(4000)),
         );
 
+        let before = index.query_contiguous_hits(&local_hashes(&[1]), &continuations);
+        assert_eq!(before.get(&WorkerWithDpRank::new(41, 0)), Some(&1));
+        assert_eq!(before.get(&WorkerWithDpRank::new(41, 1)), Some(&1));
+        index.remove_worker(41);
+
         let hits = index.query_contiguous_hits(&local_hashes(&[1]), &continuations);
         assert_eq!(hits.get(&WorkerWithDpRank::new(41, 0)), Some(&0));
         assert_eq!(hits.get(&WorkerWithDpRank::new(41, 1)), Some(&0));
-    }
-
-    #[test]
-    fn remove_worker_dp_rank_keeps_other_ranks() {
-        let mut index = TestLowerTierIndex::new();
-        index
-            .apply_event(store_event(43, 0, 0, Some(5000), &[1], &[501]))
-            .unwrap();
-        index
-            .apply_event(store_event(43, 1, 1, Some(6000), &[2], &[601]))
-            .unwrap();
-        index.remove_worker_dp_rank(43, 0);
-
-        let mut continuations = FxHashMap::default();
-        continuations.insert(
-            WorkerWithDpRank::new(43, 0),
-            LowerTierContinuation::new(0, ExternalSequenceBlockHash(5000)),
-        );
-        continuations.insert(
-            WorkerWithDpRank::new(43, 1),
-            LowerTierContinuation::new(0, ExternalSequenceBlockHash(6000)),
-        );
-
-        let hits = index.query_contiguous_hits(&local_hashes(&[2]), &continuations);
-        assert_eq!(hits.get(&WorkerWithDpRank::new(43, 0)), Some(&0));
-        assert_eq!(hits.get(&WorkerWithDpRank::new(43, 1)), Some(&1));
     }
 
     #[test]
@@ -2624,24 +2647,6 @@ mod tests {
         assert_eq!(details.hits.get(&WorkerWithDpRank::new(101, 0)), Some(&1),);
         assert_eq!(details.hits.get(&WorkerWithDpRank::new(102, 0)), Some(&0),);
         assert_eq!(details.hits.get(&WorkerWithDpRank::new(103, 0)), Some(&0),);
-    }
-
-    /// Empty sequence — every worker should get 0 hits.
-    #[test]
-    fn empty_sequence_returns_zero_hits() {
-        let mut index = TestLowerTierIndex::new();
-        index
-            .apply_event(store_event(111, 0, 0, None, &[1], &[101]))
-            .unwrap();
-
-        let mut continuations = FxHashMap::default();
-        continuations.insert(
-            WorkerWithDpRank::new(111, 0),
-            LowerTierContinuation::from_root(0),
-        );
-
-        let details = index.query_match_details(&local_hashes(&[]), &continuations);
-        assert_eq!(details.hits.get(&WorkerWithDpRank::new(111, 0)), Some(&0));
     }
 
     // --- dump_events tests ---

@@ -15,7 +15,7 @@ one or more sinks. For the capture and replay workflow, see
 | --- | --- | --- | --- |
 | `DYN_REQUEST_TRACE` | unset | Truthy value | Master switch. When enabled and `DYN_REQUEST_TRACE_RECORDS` is unset, emits `request_end,tool`. |
 | `DYN_REQUEST_TRACE_RECORDS` | `request_end,tool` | `request_end`, `request_payload`, `tool` | Comma-separated record types. Setting the variable enables only the listed types. |
-| `DYN_REQUEST_TRACE_SINKS` | `file` | `file`, `stderr`, `nats`, `otel` | Comma-separated sinks. |
+| `DYN_REQUEST_TRACE_SINKS` | `file` | `file`, `stderr`, `nats`, `otel`, `s3` | Comma-separated sinks. |
 | `DYN_REQUEST_TRACE_FILE_PATH` | `/tmp/dynamo-request-trace` | Path or prefix | Literal path for `jsonl`; segment prefix for `jsonl_gz`. |
 | `DYN_REQUEST_TRACE_FILE_FORMAT` | `jsonl_gz` | `jsonl`, `jsonl_gz` | File encoding and rotation mode. |
 | `DYN_REQUEST_TRACE_CAPACITY` | `1024` | Positive integer | Best-effort in-process broadcast capacity. |
@@ -25,6 +25,11 @@ one or more sinks. For the capture and replay workflow, see
 | `DYN_REQUEST_TRACE_FILE_FLUSH_INTERVAL_MS` | `1000` | Integer milliseconds | Periodic file flush interval. |
 | `DYN_REQUEST_TRACE_FILE_ROLL_BYTES` | `268435456` | Positive integer bytes | Gzip roll threshold in uncompressed bytes. |
 | `DYN_REQUEST_TRACE_FILE_ROLL_LINES` | unset | Positive integer records | Optional gzip roll threshold in records. |
+| `DYN_REQUEST_TRACE_S3_BUCKET` | unset | Bucket name | Destination bucket for the `s3` sink. Required when `DYN_REQUEST_TRACE_SINKS` includes `s3`. |
+| `DYN_REQUEST_TRACE_S3_REGION` | unset | Region name | Region override for the `s3` sink. When unset, the client uses `AWS_REGION`, then `AWS_DEFAULT_REGION`, then `us-east-1`. |
+| `DYN_REQUEST_TRACE_S3_PREFIX` | unset | Object key prefix | Key prefix for the `s3` sink. When unset, records land at the bucket root. |
+| `DYN_REQUEST_TRACE_S3_ROLL_UNCOMPRESSED_BYTES` | `67108864` | Positive integer bytes | Batch roll threshold for the `s3` sink in uncompressed bytes. |
+| `DYN_REQUEST_TRACE_S3_FLUSH_INTERVAL_MS` | `10000` | Integer milliseconds | Periodic flush interval for the `s3` sink in milliseconds. |
 | `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` | unset | ZMQ bind address | Optional PULL endpoint for harness tool events. Configure it on only one process. |
 | `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC` | `agent-tool-events` | ZMQ topic | First-frame topic filter. |
 | `DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST` | unset | Header names | Comma- or whitespace-separated allowlist captured only on `request_payload` rows. Values are unredacted. |
@@ -34,6 +39,14 @@ Legacy `jsonl` and `jsonl_gz` sink values, `DYN_REQUEST_TRACE_OUTPUT_PATH`, and
 not wire-compatibility aliases. Prefer `DYN_REQUEST_TRACE_*` for new deployments.
 
 ## Sink Behavior
+
+Request trace initialization is best effort. Sinks are built in one group, so if any sink in
+`DYN_REQUEST_TRACE_SINKS` cannot be constructed — a missing `DYN_REQUEST_TRACE_S3_BUCKET`, an
+unreachable NATS server, or an `s3` sink on a build without the `request-trace-s3` feature — Dynamo
+logs `Request trace initialization failed; continuing without trace sink` with the underlying error,
+starts no sink from that list, and continues serving. Startup does not fail, so detect this from the
+logs rather than from process exit: a successful group logs `Request trace sinks ready` with the
+sink count.
 
 The `otel` sink maps each row to one OTLP `LogRecord` in scope `dynamo.request_trace`. It resolves
 transport settings in this order:

@@ -125,6 +125,26 @@ both default to `"default"` when omitted.
 `GET /health` is process liveness. `GET /ready` returns `200` only after at
 least one worker is schedulable, otherwise `503` with lifecycle details.
 
+### Worker Restarts
+
+When a worker or its cache-event publisher restarts, update its registration on every
+selector replica. A reconnect at the same address does not reset the existing event
+sequence watermark or invalidate old cache ownership.
+
+With KV events enabled, `POST /workers` for an existing schedulable worker drains it,
+removes its indexer registration, and creates new listeners with fresh sequence
+watermarks. Supply the complete current worker record because this endpoint replaces
+the catalog record. `PATCH /workers/{worker_id}` also reconciles a schedulable worker;
+even an unchanged update can rebuild its cache view, so avoid using registration
+updates as periodic heartbeats. Serialize lifecycle operations for the same worker.
+
+This differs from the standalone indexer's `/register`, which rejects duplicate
+registrations and requires `/unregister` first. See
+[Indexer Worker Restarts](standalone-indexer.md#worker-restarts) for cleanup and
+replay limits. Neither a successful catalog update nor `/ready` certifies a complete
+cache view: missed startup events must still be recovered, and expired replay
+history requires another source of complete state.
+
 ## Selection API
 
 ### `POST /select`

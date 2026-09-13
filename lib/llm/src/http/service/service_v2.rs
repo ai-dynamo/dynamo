@@ -1015,6 +1015,11 @@ impl HttpService {
         );
         Ok(())
     }
+
+    #[cfg(test)]
+    pub(crate) fn model_endpoint_enabled(&self, endpoint_type: EndpointType) -> bool {
+        self.state.flags.get(&endpoint_type)
+    }
 }
 
 fn get_graceful_shutdown_timeout() -> usize {

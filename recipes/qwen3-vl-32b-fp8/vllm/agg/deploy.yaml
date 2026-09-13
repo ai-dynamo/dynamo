@@ -33,7 +33,7 @@ spec:
           value: "tcp"
         - name: DYN_TCP_MAX_MESSAGE_SIZE
           value: "67108864"
-    VllmWorker:
+    worker:
       componentType: worker
       envFromSecret: hf-token-secret
       replicas: 1

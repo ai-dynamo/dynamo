@@ -164,7 +164,7 @@ spec:
           - name: TRITON_PTXAS_PATH
             value: "/usr/local/cuda/bin/ptxas"
         components:
-          - name: VllmWorker
+          - name: worker
             podTemplate:
               spec:
                 containers:

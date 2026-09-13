@@ -57,6 +57,7 @@ fn bs_event(
         kv_cache_spec_sliding_window: None,
         locality: None,
         ownership: None,
+        session_id: None,
     }
 }
 

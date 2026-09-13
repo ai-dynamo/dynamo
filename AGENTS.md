@@ -67,6 +67,8 @@ to it — edit only the canonical copy. Reach for the right group first:
 - `configure-aiperf-benchmark` — freeze and render a comparable AIPerf workload for a deployed candidate
 - `run-aiperf-benchmark` — execute and collect one run-scoped AIPerf Kubernetes benchmark
 - `analyze-aiperf-results` — validate AIPerf evidence, evaluate SLOs, and compare valid same-series runs
+- `find-serving-recipe` — walk the ordered recipe catalogs with provenance gates and write a recipe dossier
+- `report-skillpack-issue` — file a sanitized, operator-approved GitHub issue for a defect in the pack itself
 - `dynamo-router-starter` — start/patch router modes with smoke checks
 - `dynamo-interconnect-check` — validate NIXL/UCX/NCCL readiness for disaggregation
 - `troubleshoot-dynamo` — diagnose failed or unhealthy deployments
@@ -81,15 +83,17 @@ a maintainer comments `/nvskills-ci` on the PR.
 
 ## Improving These Instructions
 
-If these skills or instructions misled you, blocked you, or contradicted what you verified live, prepare an issue for
-this repository with the `agent-reported` label and ask your operator to approve filing it — filing is an external
-write and requires operator consent. Rules:
-
-1. Search existing `agent-reported` issues first; propose commenting on a duplicate instead of filing a new one.
-2. Prepare at most one issue per optimization session; batch findings into it.
-3. Identify yourself as an AI agent, including your driver model and the skills commit you were running.
-4. Sanitize completely: no user workload details, traffic numbers, cluster or namespace names, company names, or
-   credentials. Describe the instruction gap, not the engagement. Show the operator the full draft before filing.
+If these skills, instructions, role contracts, or this file misled you, blocked you, contradicted what you verified
+live, or left a component or situation uncovered, do not route around it silently: invoke the
+`report-skillpack-issue` skill (`.agents/skills/report-skillpack-issue/`), which every role contract declares and
+which owns the full procedure. Dispatched roles record drafts in `<EXP_ROOT>/analysis/skillpack-defects.md` and return
+them; only the top-level agent, with operator approval, files, at most one new issue per session with findings
+batched, plus comments on duplicates. If your harness cannot surface the skill, follow this minimum, which the skill
+also enforces: search existing reports by title, body, and comments first; identify yourself as an AI agent with
+your driver model and the skills commit; sanitize every emitted string (title, body, comment, search term: no
+workload details, traffic numbers, cluster or namespace names, company names, or credentials); keep drafts as
+run-scoped files, never in a shared temp path; and show the operator the exact draft and file only on their
+approval, using the `[AGENT]: ` title prefix and verifying the label landed.
 
 ## Optimization Role Dispatch
 

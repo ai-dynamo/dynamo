@@ -14,12 +14,14 @@
 //! - Frame 2: sequence (8 bytes, u64 big-endian) - for fast deduplication
 //! - Frame 3: Binary frame (5-byte header + EventEnvelope payload)
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context as _, Result, anyhow};
 use async_stream::stream;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
-use std::sync::{Arc, OnceLock};
+use once_cell::sync::OnceCell;
+use std::ffi::OsStr;
+use std::sync::Arc;
 use thiserror::Error;
 use tmq::{
     AsZmqSocket, Context, Message, Multipart, SocketBuilder,
@@ -33,9 +35,34 @@ use tokio_util::task::AbortOnDropHandle;
 ///
 /// libzmq spawns background I/O threads per `Context`, so all PUB/SUB sockets
 /// share one. `zmq::Context` is reference-counted; clones drive the same context.
-fn shared_zmq_context() -> Context {
-    static CONTEXT: OnceLock<Context> = OnceLock::new();
-    CONTEXT.get_or_init(Context::new).clone()
+fn shared_zmq_context() -> Result<Context> {
+    static CONTEXT: OnceCell<Context> = OnceCell::new();
+    CONTEXT
+        .get_or_try_init(|| {
+            let value = std::env::var_os("DYN_ZMQ_IO_THREADS");
+            configured_zmq_context(value.as_deref())
+        })
+        .cloned()
+}
+
+fn configured_zmq_context(value: Option<&OsStr>) -> Result<Context> {
+    let io_threads = value
+        .unwrap_or_else(|| OsStr::new("4"))
+        .to_str()
+        .context("DYN_ZMQ_IO_THREADS must be valid UTF-8")?
+        .parse::<i32>()
+        .context("DYN_ZMQ_IO_THREADS must be a positive integer")?;
+    anyhow::ensure!(
+        io_threads > 0,
+        "DYN_ZMQ_IO_THREADS must be a positive integer"
+    );
+    let context = Context::new();
+    // Configure the process-wide context before creating any PUB/SUB sockets.
+    context
+        .set_io_threads(io_threads)
+        .context("failed to apply DYN_ZMQ_IO_THREADS to the event-plane ZMQ context")?;
+    tracing::info!(io_threads, "Configured shared event-plane ZMQ context");
+    Ok(context)
 }
 
 /// High Water Mark (HWM) for ZMQ sockets.
@@ -78,13 +105,6 @@ fn map_socket_creation_error(error: tmq::TmqError) -> anyhow::Error {
     };
 
     match guidance {
-        Some(guidance) => error_with_guidance(error, guidance),
-        None => error.into(),
-    }
-}
-
-fn map_io_socket_creation_error(error: std::io::Error) -> anyhow::Error {
-    match socket_limit_guidance(error.raw_os_error(), PROCESS_FD_LIMIT_GUIDANCE) {
         Some(guidance) => error_with_guidance(error, guidance),
         None => error.into(),
     }
@@ -151,26 +171,24 @@ pub struct ZmqPubTransport {
 impl ZmqPubTransport {
     /// Create a new ZMQ publisher by binding to an endpoint.
     ///
-    /// If port is 0, finds an available port using TcpListener first,
-    /// then binds ZMQ to that port.
+    /// If the TCP port is 0, ZMQ allocates and reserves an ephemeral port
+    /// on the publisher socket itself.
     ///
     /// Returns the transport and the actual bound endpoint.
     pub async fn bind(endpoint: &str, topic: &str) -> Result<(Self, String)> {
-        let actual_endpoint = if endpoint.ends_with(":0") {
-            let listener = tokio::net::TcpListener::bind("0.0.0.0:0")
-                .await
-                .map_err(map_io_socket_creation_error)?;
-            let actual_addr = listener.local_addr()?;
-            let port = actual_addr.port();
-            drop(listener);
-
-            format!("tcp://0.0.0.0:{port}")
+        let bind_endpoint = if endpoint.starts_with("tcp://") && endpoint.ends_with(":0") {
+            format!("{}*", &endpoint[..endpoint.len() - 1])
         } else {
             endpoint.to_string()
         };
 
-        let ctx = shared_zmq_context();
-        let socket = bind_tmq_socket(configure_publish_builder(publish(&ctx)), &actual_endpoint)?;
+        let ctx = shared_zmq_context()?;
+        let socket = bind_tmq_socket(configure_publish_builder(publish(&ctx)), &bind_endpoint)?;
+        let actual_endpoint = socket
+            .get_socket()
+            .get_last_endpoint()
+            .context("Failed to read bound ZMQ publisher endpoint")?
+            .map_err(|_| anyhow!("Bound ZMQ publisher endpoint is not valid UTF-8"))?;
 
         tracing::info!(
             endpoint = %actual_endpoint,
@@ -194,7 +212,7 @@ impl ZmqPubTransport {
 
     /// Connect to single broker XSUB endpoint (broker mode)
     pub async fn connect(xsub_endpoint: &str, topic: &str) -> Result<Self> {
-        let ctx = shared_zmq_context();
+        let ctx = shared_zmq_context()?;
         let socket = connect_tmq_socket(configure_publish_builder(publish(&ctx)), xsub_endpoint)?;
 
         tracing::info!(
@@ -217,7 +235,7 @@ impl ZmqPubTransport {
             anyhow::bail!("Cannot connect to zero endpoints");
         };
 
-        let ctx = shared_zmq_context();
+        let ctx = shared_zmq_context()?;
         let socket = connect_tmq_socket(configure_publish_builder(publish(&ctx)), first_endpoint)?;
 
         for endpoint in endpoints {
@@ -441,7 +459,7 @@ impl ZmqSubTransport {
 
     fn connect_socket_with_rcvhwm(endpoint: &str, topic: &str, rcvhwm: i32) -> Result<Subscribe> {
         anyhow::ensure!(rcvhwm > 0, "ZMQ receive HWM must be greater than zero");
-        let ctx = shared_zmq_context();
+        let ctx = shared_zmq_context()?;
         let socket = connect_tmq_socket(
             configure_subscribe_builder_with_hwm(subscribe(&ctx), rcvhwm),
             endpoint,
@@ -565,7 +583,7 @@ impl ZmqSubTransport {
             anyhow::bail!("Cannot connect to zero endpoints");
         };
 
-        let ctx = shared_zmq_context();
+        let ctx = shared_zmq_context()?;
         let socket =
             connect_tmq_socket(configure_subscribe_builder(subscribe(&ctx)), first_endpoint)?
                 .subscribe(topic.as_bytes())?;
@@ -705,6 +723,22 @@ impl EventTransportRx for ZmqSubTransport {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn configures_zmq_io_threads() {
+        for (value, expected) in [(None, 4), (Some("1"), 1)] {
+            let context = super::configured_zmq_context(value.map(OsStr::new)).unwrap();
+            assert_eq!(context.get_io_threads().unwrap(), expected);
+        }
+        for value in ["0", "invalid", "2147483648"] {
+            assert!(super::configured_zmq_context(Some(OsStr::new(value))).is_err());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            assert!(super::configured_zmq_context(Some(OsStr::from_bytes(b"\xff"))).is_err());
+        }
+    }
+
     use super::*;
     use crate::transports::event_plane::{EventEnvelope, MsgpackCodec};
     use std::collections::HashSet;
@@ -735,16 +769,6 @@ mod tests {
         assert!(message.starts_with(&original));
         assert!(message.contains(PROCESS_FD_LIMIT_GUIDANCE));
         assert!(!message.contains("ZMQ_MAX_SOCKETS"));
-    }
-
-    #[test]
-    fn io_emfile_preserves_error_and_adds_fd_guidance() {
-        let error = std::io::Error::from_raw_os_error(libc::EMFILE);
-        let original = error.to_string();
-        let message = map_io_socket_creation_error(error).to_string();
-
-        assert!(message.starts_with(&original));
-        assert!(message.contains(PROCESS_FD_LIMIT_GUIDANCE));
     }
 
     #[test]
@@ -836,11 +860,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_zmq_pubsub_basic() {
-        let port = 25555;
-        let endpoint = format!("tcp://127.0.0.1:{port}");
         let topic = "test-topic";
 
-        let (publisher, _actual_endpoint) = ZmqPubTransport::bind(&endpoint, topic)
+        let (publisher, endpoint) = ZmqPubTransport::bind("tcp://127.0.0.1:0", topic)
             .await
             .expect("Failed to create publisher");
 

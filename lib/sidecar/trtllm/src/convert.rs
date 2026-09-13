@@ -82,13 +82,19 @@ pub(crate) fn build_generate_request(
 // natural value. We mirror the in-process backend's text-only default,
 // `max(1, context_length - prompt_len)` (components/src/dynamo/trtllm
 // `_default_max_tokens`); the sidecar rejects multimodal before dispatch, so
-// `token_ids.len()` is the true prompt length. `context_length` comes from
-// `--context-length` (GetModelInfo returns zero on current releases).
+// `token_ids.len()` is the true prompt length. `context_length` is resolved in
+// `engine::start`, where `--context-length` wins over the `GetModelInfo` report.
+// Only `/v1/chat/completions` and `/v1/responses` reach this fallback: they set
+// `PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY`, which stops the frontend supplying
+// its own default (`preprocessor::omitted_max_tokens_default`). `/v1/completions`
+// is already defaulted by the frontend and never lands here.
 //
 // Remove when https://github.com/NVIDIA/TensorRT-LLM/issues/16549 lands (gRPC
-// `max_tokens` made optional): drop this fallback, the `--context-length` arg,
-// and the context-length plumbing in `engine.rs`, and forward an omitted
-// `max_tokens` as unset.
+// `max_tokens` made optional): drop this fallback and forward an omitted
+// `max_tokens` as unset. Keep `--context-length` and the plumbing in
+// `engine.rs` — they also feed `LlmRegistration.context_length`, which the
+// frontend registers as the served context window and which this fallback does
+// not govern.
 fn max_tokens(
     request: &PreprocessedRequest,
     context_length: Option<u32>,

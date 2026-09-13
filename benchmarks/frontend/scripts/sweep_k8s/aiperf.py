@@ -71,7 +71,7 @@ apt-get update -qq && apt-get install -y -qq curl jq git procps 2>/dev/null
 if [ "$(uname -m)" = "aarch64" ]; then
     apt-get install -y -qq gcc libc6-dev 2>/dev/null
 fi
-pip install --quiet aiperf==0.10.0
+pip install --quiet aiperf==0.12.0
 echo "aiperf installed"
 
 # Wait for model

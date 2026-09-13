@@ -105,7 +105,7 @@ spec:
             claimName: model-cache
     replicas: 1
     type: frontend
-  - name: VllmPrefillWorker
+  - name: prefill
     podTemplate:
       metadata:
         annotations:
@@ -259,7 +259,7 @@ spec:
     # The operator default (8Gi) is too small for this context length.
     sharedMemorySize: 64Gi
     type: prefill
-  - name: VllmDecodeWorker
+  - name: decode
     podTemplate:
       metadata:
         annotations:
@@ -269,7 +269,7 @@ spec:
         - args:
           - |
             set -euo pipefail
-            # See VllmPrefillWorker for the fabric-discovery rationale.
+            # See prefill for the fabric-discovery rationale.
             hca=""
             for hca_path in /sys/class/infiniband/*; do
               [ -d "${hca_path}/device/net" ] || continue
