@@ -280,6 +280,19 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{"spec.experimental.checkpoint: Forbidden: checkpoint functionality is disabled in the operator configuration"},
 		},
 		{
+			name: "standalone non-worker checkpoint is rejected at admission",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+				dcd.Spec.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{
+						Enabled:       true,
+						CheckpointRef: k8sptr.To("frontend-snapshot"),
+					},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.experimental.checkpoint: Forbidden: checkpoint functionality is supported only for worker, prefill, and decode components"},
+		},
+		{
 			name: "v1beta1 standalone worker checkpointRef is rejected",
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
