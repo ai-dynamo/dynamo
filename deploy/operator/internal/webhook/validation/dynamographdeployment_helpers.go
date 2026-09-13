@@ -31,7 +31,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
-	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -289,10 +288,10 @@ type powerRangeW struct {
 //
 // Membership is not an exhaustive hardware list and not a Dynamo support
 // guarantee: it states only which products this release can range-check a power
-// annotation against. Adding an entry in a later release is strictly additive —
-// it turns rejections into acceptances and never changes an existing object's
-// update contract. The configured NVML or DCGM actuator, not this map, remains
-// authoritative at runtime; the Power Agent does not consume it.
+// annotation against. Every submitted create or update is checked against the
+// catalog in the running operator release. The configured NVML or DCGM actuator,
+// not this map, remains authoritative at runtime; the Power Agent does not
+// consume it.
 var powerRanges = map[string]powerRangeW{
 	"NVIDIA-A10":                     {Min: 100, Max: 150},
 	"NVIDIA-A100-80GB-PCIe":          {Min: 150, Max: 300},
@@ -360,91 +359,6 @@ func dgdGPUProductSelector(
 		return ""
 	}
 	return component.PodTemplate.Spec.NodeSelector[gpuProductNodeSelectorLabel]
-}
-
-// powerProductContract is the complete normalized input set for the GPU-product
-// power rule. What counts as an input depends on whether the component pins a
-// product: an exact product selector bounds the GPU product on its own, so
-// nothing else about placement can change the rule's outcome. Without one, every
-// placement input can move the component to different hardware, so every
-// placement input is a rule input.
-//
-// Compare two contracts with equality.Semantic.DeepEqual rather than ==;
-// corev1.Affinity contains slices and is not comparable. The fields are exported
-// on this unexported type because that comparator walks the struct by reflection
-// and panics on an unexported field.
-type powerProductContract struct {
-	PowerLimit string // annotation value; "" when absent
-	HasPower   bool   // explicit presence boolean; "" is a distinct, invalid state
-	GPUProduct string // nodeSelector["nvidia.com/gpu.product"]; "" when absent or podTemplate is nil
-	NodeName   string
-
-	// NodeSelector and Affinity are populated only when GPUProduct is empty.
-	// A legacy component has no product bound, so its complete placement is part
-	// of the rule input set.
-	//
-	// NodeSelector deliberately retains the nvidia.com/gpu.product key itself.
-	// Pruning it as redundant would make a missing product key and an explicitly
-	// empty one compare equal, so a missing -> "" transition would be ratcheted
-	// instead of rejected. Retaining the key keeps them distinguishable by map
-	// length, which Semantic.DeepEqual does distinguish even though it equates a
-	// nil map with an empty one — and equating those two is correct here, since
-	// both express exactly the same placement.
-	//
-	// Affinity is normalized by normalizedAffinity because Semantic.DeepEqual
-	// does not extend its nil-versus-empty map equivalence to a nil struct
-	// pointer. See that function for why the two must compare equal.
-	NodeSelector map[string]string
-	Affinity     *corev1.Affinity
-}
-
-// normalizedAffinity maps an affinity that constrains nothing onto nil so that
-// an absent affinity and an explicitly empty one compare equal.
-//
-// Semantic.DeepEqual equates a nil map with an empty one, but it does not equate
-// a nil *corev1.Affinity with a pointer to a zero Affinity. Without this, a
-// client that starts serializing "affinity: {}" — a re-render by Argo CD, a Helm
-// chart bump, or any round-trip through a struct-valued template — would flip a
-// stored legacy contract without changing where the component can actually run.
-// The ratchet would then stop suppressing, and an otherwise no-op sync of a DGD
-// that was admitted yesterday would be rejected for a field the user never
-// touched, with no remedy short of deleting and recreating the object.
-//
-// Only a wholly zero Affinity normalizes to nil. A populated-but-vacuous term
-// tree, such as a NodeAffinity holding empty selector terms, is left alone: it
-// is not a shape real clients emit, and treating it as absent here would hide a
-// genuine placement edit.
-func normalizedAffinity(affinity *corev1.Affinity) *corev1.Affinity {
-	if affinity == nil || apiequality.Semantic.DeepEqual(affinity, &corev1.Affinity{}) {
-		return nil
-	}
-	return affinity
-}
-
-// dgdPowerProductContract derives the complete normalized power-product rule
-// inputs for component. component must not be nil.
-//
-// The conditional shape below is entirely internal to this function. Callers
-// compare two returned contracts and nothing else: they must not branch on
-// GPUProduct == "", reconstruct the condition, or reach past the contract into
-// the component to decide what to compare. A caller that needs to know why two
-// contracts differ is a signal that the logic belongs here.
-func dgdPowerProductContract(
-	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
-) powerProductContract {
-	contract := powerProductContract{}
-	contract.PowerLimit, contract.HasPower = dgdPowerLimit(component)
-	if component.PodTemplate == nil {
-		return contract
-	}
-	podSpec := &component.PodTemplate.Spec
-	contract.GPUProduct = podSpec.NodeSelector[gpuProductNodeSelectorLabel]
-	contract.NodeName = podSpec.NodeName
-	if contract.GPUProduct == "" {
-		contract.NodeSelector = podSpec.NodeSelector
-		contract.Affinity = normalizedAffinity(podSpec.Affinity)
-	}
-	return contract
 }
 
 func dgdDRAPath(
