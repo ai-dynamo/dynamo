@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use futures::StreamExt;
 use tokio::sync::watch;
@@ -60,6 +60,15 @@ fn base_runtime_config_watch(
                         }
                     };
                     if id.model_suffix.is_some() || card.lora.is_some() {
+                        tracing::debug!(
+                            instance_id = id.instance_id,
+                            reason = if id.model_suffix.is_some() {
+                                "model_suffix"
+                            } else {
+                                "lora"
+                            },
+                            "Skipping non-base model card; it defines no base runtime config"
+                        );
                         continue;
                     }
                     if let Err(error) = card.runtime_config.data_parallel_rank_range() {
@@ -111,6 +120,32 @@ fn base_runtime_config_watch(
     rx
 }
 
+/// The single predicate deciding which workers a router may route to.
+///
+/// Returns the admitted workers — present in both the endpoint's availability set and the
+/// base model runtime configs — and, separately, the instance ids that were available but
+/// carried no base runtime config. The excluded half exists because a worker dropped here
+/// leaves no trace of its own: the failure surfaces later, in another crate, as
+/// `KvSchedulerError::NoEndpoints`, with nothing naming which side of this join was empty.
+fn join_available_instances_with_configs(
+    instances: &HashSet<WorkerId>,
+    configs: &HashMap<WorkerId, ModelRuntimeConfig>,
+) -> (HashMap<WorkerId, ModelRuntimeConfig>, BTreeSet<WorkerId>) {
+    let mut admitted = HashMap::new();
+    let mut excluded = BTreeSet::new();
+    for id in instances {
+        match configs.get(id) {
+            Some(config) => {
+                admitted.insert(*id, config.clone());
+            }
+            None => {
+                excluded.insert(*id);
+            }
+        }
+    }
+    (admitted, excluded)
+}
+
 /// Join instance availability and config discovery into a single watch.
 ///
 /// Only includes workers that have BOTH an instance registration AND a runtime config.
@@ -154,6 +189,9 @@ pub async fn runtime_config_watch(
     let (tx, rx) = watch::channel(HashMap::new());
 
     tokio::spawn(async move {
+        // Remembered across ticks so the warning below fires on a transition into a new
+        // exclusion set, not on every recomputation of an unchanged one.
+        let mut reported_exclusions = BTreeSet::new();
         loop {
             tokio::select! {
                 _ = cancel_token.cancelled() => break,
@@ -170,10 +208,18 @@ pub async fn runtime_config_watch(
                 .collect();
             let configs = configs_rx.borrow_and_update().clone();
 
-            let ready: HashMap<WorkerId, ModelRuntimeConfig> = instances
-                .into_iter()
-                .filter_map(|id| configs.get(&id).map(|cfg| (id, cfg.clone())))
-                .collect();
+            let (ready, excluded) = join_available_instances_with_configs(&instances, &configs);
+
+            if excluded != reported_exclusions {
+                if !excluded.is_empty() {
+                    tracing::warn!(
+                        endpoint = %eid,
+                        excluded_instance_ids = ?excluded,
+                        "Discovered instances have no base model runtime config and cannot be routed"
+                    );
+                }
+                reported_exclusions = excluded;
+            }
 
             // Only send if the joined result actually changed, to avoid waking
             // downstream consumers (wait_for, changed) on no-op recomputations.
@@ -209,6 +255,84 @@ mod tests {
             card_json: serde_json::to_value(card).unwrap(),
             model_suffix: model_suffix.map(str::to_string),
         }
+    }
+
+    /// A worker registered on the endpoint but with no base model runtime config is
+    /// silently absent from the routable set, and the request that later fails carries no
+    /// hint of which of the two discovery sources was missing it. It must be reported.
+    #[test]
+    fn available_instances_without_a_runtime_config_are_reported_as_excluded() {
+        let instances = HashSet::from([7, 8]);
+        let configs = HashMap::from([(7, ModelRuntimeConfig::default())]);
+
+        let (admitted, excluded) = join_available_instances_with_configs(&instances, &configs);
+
+        assert_eq!(admitted.keys().copied().collect::<HashSet<_>>(), [7].into());
+        assert_eq!(excluded, BTreeSet::from([8]));
+    }
+
+    /// The reported deployment's worker shape: no `--kv_events_config`, so the card
+    /// advertises `kv_event_publishing_enabled: Some(false)` and no `router_config`.
+    /// KV-event capability must never gate admission — such a worker is routable and
+    /// simply scores zero KV overlap.
+    #[test]
+    fn a_worker_that_publishes_no_kv_events_is_still_admitted() {
+        let mut card = ModelDeploymentCard::default();
+        card.runtime_config.kv_event_publishing_enabled = Some(false);
+        assert!(card.router_config.is_none(), "bare worker advertises none");
+        let instances = HashSet::from([0x1a0dcb6265db46]);
+        let configs = HashMap::from([(0x1a0dcb6265db46, card.runtime_config)]);
+
+        let (admitted, excluded) = join_available_instances_with_configs(&instances, &configs);
+
+        assert_eq!(
+            admitted
+                .get(&0x1a0dcb6265db46)
+                .unwrap()
+                .kv_event_publishing_enabled,
+            Some(false)
+        );
+        assert!(excluded.is_empty());
+    }
+
+    /// The join must hand the scheduler the worker's advertised capacity untouched;
+    /// flattening it to defaults would silently corrupt KV-aware scoring.
+    #[test]
+    fn admitted_configs_keep_their_kv_aware_scoring_inputs() {
+        let config = ModelRuntimeConfig {
+            kv_event_publishing_enabled: Some(true),
+            total_kv_blocks: Some(8192),
+            data_parallel_start_rank: 2,
+            data_parallel_size: 4,
+            ..Default::default()
+        };
+        let instances = HashSet::from([11]);
+        let configs = HashMap::from([(11, config)]);
+
+        let (admitted, excluded) = join_available_instances_with_configs(&instances, &configs);
+
+        let admitted = admitted.get(&11).unwrap();
+        assert_eq!(admitted.kv_event_publishing_enabled, Some(true));
+        assert_eq!(admitted.total_kv_blocks, Some(8192));
+        assert_eq!(admitted.data_parallel_start_rank, 2);
+        assert_eq!(admitted.data_parallel_size, 4);
+        assert!(excluded.is_empty());
+    }
+
+    /// The instance side drives the join: a leftover card for a worker that is no longer
+    /// available is neither routable nor an exclusion worth reporting.
+    #[test]
+    fn a_config_without_an_available_instance_is_neither_admitted_nor_reported() {
+        let instances = HashSet::from([7]);
+        let configs = HashMap::from([
+            (7, ModelRuntimeConfig::default()),
+            (12, ModelRuntimeConfig::default()),
+        ]);
+
+        let (admitted, excluded) = join_available_instances_with_configs(&instances, &configs);
+
+        assert_eq!(admitted.keys().copied().collect::<HashSet<_>>(), [7].into());
+        assert!(excluded.is_empty());
     }
 
     /// Regression test for the "WorkerSet churn" leak this fix closes:
