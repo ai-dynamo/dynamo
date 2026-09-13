@@ -1119,6 +1119,7 @@ mod tests {
         applied: std::sync::atomic::AtomicUsize,
         batches: std::sync::atomic::AtomicUsize,
         last_depth: std::sync::atomic::AtomicUsize,
+        max_depth: std::sync::atomic::AtomicUsize,
     }
 
     impl ReplicaIngressObserver for RecordingIngressObserver {
@@ -1127,6 +1128,7 @@ mod tests {
             self.applied.fetch_add(applied, Relaxed);
             self.batches.fetch_add(1, Relaxed);
             self.last_depth.store(queue_depth, Relaxed);
+            self.max_depth.fetch_max(queue_depth, Relaxed);
         }
     }
 
@@ -1191,6 +1193,13 @@ mod tests {
         assert!(observer.batches.load(Relaxed) >= 1);
         assert!(observer.batches.load(Relaxed) <= N);
         assert_eq!(observer.last_depth.load(Relaxed), 0);
+        // All N events were queued before the first drain, whose batch is
+        // capped, so the first sample must show the backlog.
+        assert!(
+            observer.max_depth.load(Relaxed) >= N - crate::protocols::MAX_REPLICA_BATCH_EVENTS,
+            "depth sample reflects the queued backlog: {}",
+            observer.max_depth.load(Relaxed)
+        );
         cancel_token.cancel();
     }
 }

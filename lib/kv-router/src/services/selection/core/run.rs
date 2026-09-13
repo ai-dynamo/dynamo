@@ -29,7 +29,7 @@
 //!   (`failover_commit_behind_an_initializing_hold_keeps_a_lease`); a joiner
 //!   that finishes first is uncounted again
 //!   (`joined_lease_released_before_the_commit_is_not_counted`). When the
-//!   table is full, or the join misses three times, it returns `Ok(None)` and
+//!   table is full, or the join misses twice, it returns `Ok(None)` and
 //!   the request routes unpinned rather than waiting on a request queued
 //!   behind this booking. A rejected
 //!   commit frees the booking
@@ -43,6 +43,10 @@
 //!   `dropped_book_selection_during_routing_record_frees_booking_and_claim`).
 
 use super::hint::{hint_capable_partition, transfer_hint_for_selection};
+
+/// `try_acquire` then `join_initializing` attempts before a commit that finds
+/// the session initializing routes unpinned (see the module doc).
+const JOIN_ATTEMPTS: usize = 2;
 use super::reservations::Reservation;
 use super::*;
 
@@ -626,9 +630,9 @@ impl SelectionCore {
                 // already be initializing the replacement: join it rather
                 // than wait, so this booking holds a lease on the new
                 // binding. The join misses only if that initialization
-                // resolved between the two calls, so retry a few times before
-                // routing unpinned.
-                for _ in 0..3 {
+                // resolved between the two calls; one retry covers that, and
+                // a booking never waits on a request queued behind it.
+                for _ in 0..JOIN_ATTEMPTS {
                     match table.try_acquire(session_id, None) {
                         Ok(AcquireStep::Held(hold)) => {
                             return table

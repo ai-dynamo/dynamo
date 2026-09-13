@@ -436,7 +436,7 @@ impl ActiveSequenceIngressMetrics {
         ACTIVE_SEQUENCE_INGRESS_METRICS
             .get_or_init(|| {
                 let metrics = component.metrics();
-                let labels = [labels::MODEL, ROUTING_GROUP_LABEL];
+                let labels = [labels::MODEL, ROUTING_GROUP_LABEL, labels::WORKER_TYPE];
                 Arc::new(Self {
                     queue_depth: metrics
                         .create_intgaugevec(
@@ -471,12 +471,16 @@ impl ActiveSequenceIngressMetrics {
             .clone()
     }
 
+    /// One handle set per router partition. `worker_type` separates the
+    /// prefill and decode routers of the same model, which run separate
+    /// ingress channels.
     pub(crate) fn handles(
         &self,
         model: &str,
         routing_group: &str,
+        worker_type: &str,
     ) -> ActiveSequenceIngressMetricHandles {
-        let labels = [model, routing_group];
+        let labels = [model, routing_group, worker_type];
         ActiveSequenceIngressMetricHandles {
             queue_depth: self.queue_depth.with_label_values(&labels),
             events_applied_total: self.events_applied_total.with_label_values(&labels),

@@ -243,8 +243,11 @@ impl EmbeddedSelection {
         .await
         .context("start replica sync for the embedded selection partition")?;
         channels.ingress_observer = Some(Arc::new(
-            ActiveSequenceIngressMetrics::from_component(args.endpoint.component())
-                .handles(&key.model_name, &key.routing_group),
+            ActiveSequenceIngressMetrics::from_component(args.endpoint.component()).handles(
+                &key.model_name,
+                &key.routing_group,
+                args.metric_worker_type,
+            ),
         ));
         let slot = std::sync::Mutex::new(Some(channels));
         let replica_sync: Option<dynamo_kv_router::services::selection::HostReplicaSyncFactory> =
