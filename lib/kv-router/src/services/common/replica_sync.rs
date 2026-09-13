@@ -218,6 +218,14 @@ pub trait SchedulerLoadSink: Send + Sync {
     }
 }
 
+/// Observes the partition's inbound replica funnel once per drain batch, after
+/// the batch is applied and flushed. `queue_depth` is the number of events
+/// still waiting in the inbound channel at that moment; `applied` is the batch
+/// size. Called from the apply task, so implementations must be cheap.
+pub trait ReplicaIngressObserver: Send + Sync {
+    fn observe_drain(&self, queue_depth: usize, applied: usize);
+}
+
 /// Replica-sync plumbing an embedding host supplies for one partition when it
 /// carries active-sequence events over its own transport (for example the
 /// Dynamo runtime event plane) instead of the service's ZMQ peer mesh:
@@ -232,6 +240,8 @@ pub struct HostReplicaChannels {
     pub inbound_rx: mpsc::Receiver<ActiveSequenceEvent>,
     /// This replica's id; events carrying it are ignored on receipt.
     pub process_id: u64,
+    /// Optional drain-batch observer for the inbound funnel.
+    pub ingress_observer: Option<Arc<dyn ReplicaIngressObserver>>,
 }
 
 #[cfg(feature = "standalone-selection")]
@@ -370,11 +380,19 @@ impl SequencePublisher for ScopedSequencePublisher {
 
 pub(crate) struct ChannelSequenceSubscriber {
     rx: mpsc::Receiver<ActiveSequenceEvent>,
+    observer: Option<Arc<dyn ReplicaIngressObserver>>,
 }
 
 impl ChannelSequenceSubscriber {
     pub(crate) fn new(rx: mpsc::Receiver<ActiveSequenceEvent>) -> Self {
-        Self { rx }
+        Self { rx, observer: None }
+    }
+
+    pub(crate) fn with_observer(
+        rx: mpsc::Receiver<ActiveSequenceEvent>,
+        observer: Option<Arc<dyn ReplicaIngressObserver>>,
+    ) -> Self {
+        Self { rx, observer }
     }
 }
 
@@ -388,6 +406,12 @@ impl SequenceSubscriber for ChannelSequenceSubscriber {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<ActiveSequenceEvent>>> {
         self.rx.poll_recv(cx).map(|event| event.map(Ok))
+    }
+
+    fn record_drain(&mut self, applied: usize) {
+        if let Some(observer) = &self.observer {
+            observer.observe_drain(self.rx.len(), applied);
+        }
     }
 }
 
@@ -450,7 +474,10 @@ pub(crate) fn setup_scoped_replica_sync(
                 process_id: host.process_id,
                 channel: Some((
                     host.inbound_tx,
-                    ChannelSequenceSubscriber::new(host.inbound_rx),
+                    ChannelSequenceSubscriber::with_observer(
+                        host.inbound_rx,
+                        host.ingress_observer,
+                    ),
                 )),
             };
         }
@@ -1079,10 +1106,91 @@ mod tests {
                 inbound_tx,
                 inbound_rx,
                 process_id: 7,
+                ingress_observer: None,
             }),
         );
         assert!(!scoped.enabled);
         assert_eq!(scoped.process_id, 7);
         assert!(scoped.channel.is_some());
+    }
+
+    #[derive(Default)]
+    struct RecordingIngressObserver {
+        applied: std::sync::atomic::AtomicUsize,
+        batches: std::sync::atomic::AtomicUsize,
+        last_depth: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ReplicaIngressObserver for RecordingIngressObserver {
+        fn observe_drain(&self, queue_depth: usize, applied: usize) {
+            use std::sync::atomic::Ordering::Relaxed;
+            self.applied.fetch_add(applied, Relaxed);
+            self.batches.fetch_add(1, Relaxed);
+            self.last_depth.store(queue_depth, Relaxed);
+        }
+    }
+
+    #[tokio::test]
+    async fn host_ingress_observer_counts_applied_events_and_drains_to_zero() {
+        use crate::sequences::{ActiveSequencesMultiWorker, NoopSequencePublisher};
+        use std::sync::atomic::Ordering::Relaxed;
+
+        const N: usize = 1_000;
+        let observer = Arc::new(RecordingIngressObserver::default());
+        let (inbound_tx, inbound_rx) = mpsc::channel(REPLICA_EVENT_CHANNEL_CAPACITY);
+        let scoped = setup_scoped_replica_sync(
+            None,
+            &RoutingPartitionId::new("model", "default"),
+            16,
+            Some(HostReplicaChannels {
+                outbound: None,
+                inbound_tx,
+                inbound_rx,
+                process_id: 7,
+                ingress_observer: Some(Arc::clone(&observer) as Arc<dyn ReplicaIngressObserver>),
+            }),
+        );
+        let (inbound_tx, subscriber) = scoped.channel.expect("host channel");
+        let tracker = Arc::new(ActiveSequencesMultiWorker::new_without_expiry(
+            NoopSequencePublisher,
+            16,
+            std::collections::HashMap::from([(1_u64, (0_u32, 1_u32))]),
+            true,
+            scoped.process_id,
+            "test",
+        ));
+        let cancel_token = CancellationToken::new();
+        tracker.start_replica_sync(subscriber, cancel_token.clone());
+
+        for index in 0..N {
+            inbound_tx
+                .try_send(ActiveSequenceEvent {
+                    request_id: format!("req-{index}"),
+                    worker: WorkerWithDpRank::new(1, 0),
+                    data: ActiveSequenceEventData::AddRequest {
+                        token_sequence: Some(vec![index as u64]),
+                        track_prefill_tokens: false,
+                        expected_output_tokens: None,
+                        prefill_load_hint: None,
+                    },
+                    router_id: 99,
+                    lora_name: None,
+                })
+                .expect("inbound channel has capacity");
+        }
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while observer.applied.load(Relaxed) < N {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("all events applied");
+
+        assert_eq!(observer.applied.load(Relaxed), N);
+        assert!(observer.batches.load(Relaxed) >= 1);
+        assert!(observer.batches.load(Relaxed) <= N);
+        assert_eq!(observer.last_depth.load(Relaxed), 0);
+        cancel_token.cancel();
     }
 }

@@ -407,6 +407,95 @@ impl ActiveSequenceZmqIngressMetrics {
 }
 
 // ---------------------------------------------------------------------------
+// Active-sequence inbound funnel metrics (per partition)
+// ---------------------------------------------------------------------------
+
+const ROUTING_GROUP_LABEL: &str = "routing_group";
+
+/// Instrumentation for the per-partition inbound replica funnel: one channel
+/// and one apply task per partition, fed by every publisher's ingress source.
+/// Updated once per drain batch from the apply task.
+pub(crate) struct ActiveSequenceIngressMetrics {
+    queue_depth: IntGaugeVec,
+    events_applied_total: IntCounterVec,
+    drain_batches_total: IntCounterVec,
+}
+
+/// Per-partition handles implementing the core's drain observer.
+pub(crate) struct ActiveSequenceIngressMetricHandles {
+    queue_depth: IntGauge,
+    events_applied_total: IntCounter,
+    drain_batches_total: IntCounter,
+}
+
+static ACTIVE_SEQUENCE_INGRESS_METRICS: OnceLock<Arc<ActiveSequenceIngressMetrics>> =
+    OnceLock::new();
+
+impl ActiveSequenceIngressMetrics {
+    pub(crate) fn from_component(component: &Component) -> Arc<Self> {
+        ACTIVE_SEQUENCE_INGRESS_METRICS
+            .get_or_init(|| {
+                let metrics = component.metrics();
+                let labels = [labels::MODEL, ROUTING_GROUP_LABEL];
+                Arc::new(Self {
+                    queue_depth: metrics
+                        .create_intgaugevec(
+                            "router_active_sequence_ingress_queue_depth",
+                            "Active-sequence events waiting in the partition's inbound channel, sampled after each drain batch",
+                            &labels,
+                            &[],
+                        )
+                        .expect("failed to create router_active_sequence_ingress_queue_depth"),
+                    events_applied_total: metrics
+                        .create_intcountervec(
+                            "router_active_sequence_ingress_events_applied_total",
+                            "Active-sequence events applied from the partition's inbound channel",
+                            &labels,
+                            &[],
+                        )
+                        .expect(
+                            "failed to create router_active_sequence_ingress_events_applied_total",
+                        ),
+                    drain_batches_total: metrics
+                        .create_intcountervec(
+                            "router_active_sequence_ingress_drain_batches_total",
+                            "Drain batches applied from the partition's inbound channel",
+                            &labels,
+                            &[],
+                        )
+                        .expect(
+                            "failed to create router_active_sequence_ingress_drain_batches_total",
+                        ),
+                })
+            })
+            .clone()
+    }
+
+    pub(crate) fn handles(
+        &self,
+        model: &str,
+        routing_group: &str,
+    ) -> ActiveSequenceIngressMetricHandles {
+        let labels = [model, routing_group];
+        ActiveSequenceIngressMetricHandles {
+            queue_depth: self.queue_depth.with_label_values(&labels),
+            events_applied_total: self.events_applied_total.with_label_values(&labels),
+            drain_batches_total: self.drain_batches_total.with_label_values(&labels),
+        }
+    }
+}
+
+impl dynamo_kv_router::services::selection::ReplicaIngressObserver
+    for ActiveSequenceIngressMetricHandles
+{
+    fn observe_drain(&self, queue_depth: usize, applied: usize) {
+        self.queue_depth.set(queue_depth as i64);
+        self.events_applied_total.inc_by(applied as u64);
+        self.drain_batches_total.inc();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Router worker status metrics (component-scoped gauges)
 // ---------------------------------------------------------------------------
 

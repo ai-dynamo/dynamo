@@ -24,7 +24,8 @@ mod tests;
 
 pub use crate::WorkerSelectionPolicyFactory;
 pub use crate::services::common::replica_sync::{
-    HostReplicaChannels, HostReplicaSyncFactory, ReplicaPeerError, SchedulerLoadSink,
+    HostReplicaChannels, HostReplicaSyncFactory, ReplicaIngressObserver, ReplicaPeerError,
+    SchedulerLoadSink,
 };
 pub use core::{
     HostCache, HostEligibility, HostLoad, HostReplication, HostTelemetry, KvIndexSource, Selected,

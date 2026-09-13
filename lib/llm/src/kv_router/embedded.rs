@@ -34,7 +34,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::discovery::RuntimeConfigWatch;
 use crate::kv_router::metrics::{
-    ROUTER_QUEUE_METRICS, RouterQueueMetricHandles, RouterRequestMetrics, WORKER_LOAD_METRICS,
+    ActiveSequenceIngressMetrics, ROUTER_QUEUE_METRICS, RouterQueueMetricHandles,
+    RouterRequestMetrics, WORKER_LOAD_METRICS,
 };
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 
@@ -233,7 +234,7 @@ impl EmbeddedSelection {
         // Replica sync rides the runtime event plane. Worker-origin completion
         // marks are consumed even when router-to-router replica sync is
         // disabled; only publishing is gated.
-        let (channels, replica_ingress) = crate::kv_router::sequence::host_replica_channels(
+        let (mut channels, replica_ingress) = crate::kv_router::sequence::host_replica_channels(
             &args.endpoint,
             args.router_id,
             args.kv_router_config.router_replica_sync,
@@ -241,6 +242,10 @@ impl EmbeddedSelection {
         )
         .await
         .context("start replica sync for the embedded selection partition")?;
+        channels.ingress_observer = Some(Arc::new(
+            ActiveSequenceIngressMetrics::from_component(args.endpoint.component())
+                .handles(&key.model_name, &key.routing_group),
+        ));
         let slot = std::sync::Mutex::new(Some(channels));
         let replica_sync: Option<dynamo_kv_router::services::selection::HostReplicaSyncFactory> =
             Some(Arc::new(move |_partition| {

@@ -402,6 +402,7 @@ pub(crate) async fn host_replica_channels(
             inbound_tx,
             inbound_rx,
             process_id: router_id,
+            ingress_observer: None,
         },
         ingress,
     ))

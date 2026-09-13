@@ -265,6 +265,11 @@ pub trait SequenceSubscriber: Send {
     ) -> Poll<Option<anyhow::Result<ActiveSequenceEvent>>> {
         Poll::Pending
     }
+
+    /// Called once after each drain batch is applied and flushed, with the
+    /// number of events in the batch. Implementations may sample their own
+    /// backlog here; the default records nothing.
+    fn record_drain(&mut self, _applied: usize) {}
 }
 
 // ---------------------------------------------------------------------------

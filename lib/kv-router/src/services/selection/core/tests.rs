@@ -1656,6 +1656,7 @@ async fn mirrored_replica_bookings_are_indexed_until_freed() {
         inbound_tx: inbound_tx.clone(),
         inbound_rx,
         process_id: 7,
+        ingress_observer: None,
     }));
     let core = core_with_host(SelectionHost {
         replication: HostReplication {
@@ -2180,6 +2181,9 @@ fn lease_count(core: &SelectionCore, session_id: &str) -> Option<usize> {
     table.lease_count(session_id)
 }
 
+/// Two workers, so both requests must land on the replacement; with more
+/// workers the joiner could book elsewhere while still counting toward the
+/// session's binding, which is the same split a plain `Bound` lease has.
 /// r2 holds the departed binding when r3 re-initializes the session; r2's
 /// commit then finds r3's initialization in progress and must join it, not
 /// route without a lease, so the replacement binding cannot idle out while
