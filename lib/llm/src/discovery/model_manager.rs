@@ -2122,17 +2122,17 @@ impl ModelManager {
 
         let effective_kv_router_config = kv_router_config.clone().unwrap_or_default();
         let worker_type = worker_role.unwrap_or(WorkerType::Aggregated);
-        let policy =
-            policy.resolve(&effective_kv_router_config, worker_type, metric_worker_type)?;
-        let required_worker_inputs = crate::kv_router::policy_worker_inputs(
-            &policy,
+        // One construction for the router's partition: the probed instance is
+        // the one `KvRouter` hands to the partition scheduler.
+        let policy = policy.prepare(
             &effective_kv_router_config,
             worker_type,
+            metric_worker_type,
             model_name.as_deref(),
-        );
+        )?;
         // A policy that does not consume cache input must not create a shared-cache client or
         // subscribe to its updates.
-        let wants_cache = required_worker_inputs.contains(WorkerInputs::CACHE);
+        let wants_cache = policy.inputs().contains(WorkerInputs::CACHE);
         let shared_cache: Option<Arc<dyn dynamo_kv_router::SharedKvCache>> = if wants_cache {
             match kv_router_config
                 .as_ref()
@@ -2181,7 +2181,7 @@ impl ModelManager {
             workers_with_configs,
             kv_source_membership,
             kv_cache_block_size,
-            SelectionPolicySource::Factory(policy),
+            SelectionPolicySource::Prepared(policy),
             kv_router_config,
             prefill_load_estimator,
             worker_role,

@@ -10,9 +10,9 @@ use std::{
 
 use anyhow::Result;
 use dynamo_kv_router::{
-    DEFAULT_ROUTING_GROUP, KvSchedulerError, PrefillLoadEstimator, RoutingPartitionRef,
-    SharedKvCache, TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope,
-    WorkerSelectionPolicy, WorkerSelectionPolicyFactory,
+    DEFAULT_ROUTING_GROUP, KvSchedulerError, PrefillLoadEstimator, RoutingPartitionId,
+    RoutingPartitionRef, SharedKvCache, TrackingHashAlgorithm, TrackingHashContext,
+    TrackingHashScope, WorkerSelectionPolicy, WorkerSelectionPolicyFactory,
     config::{KvRouterConfig, RouterConfigOverride, min_initial_workers_from_env},
     indexer::{
         ApproximateLruIncarnation, ApproximateLruStats, KvRouterError, RoutingDecisionHashes,
@@ -94,6 +94,9 @@ pub enum SelectionPolicySource {
     Registry,
     /// This factory, called once per routing partition.
     Factory(WorkerSelectionPolicyFactory),
+    /// A factory whose instance for the router's own partition is already
+    /// built and probed; see [`PreparedSelectionPolicy`].
+    Prepared(PreparedSelectionPolicy),
 }
 
 impl SelectionPolicySource {
@@ -107,6 +110,7 @@ impl SelectionPolicySource {
     ) -> Result<WorkerSelectionPolicyFactory> {
         match self {
             Self::Factory(factory) => Ok(factory.clone()),
+            Self::Prepared(prepared) => Ok(prepared.factory.clone()),
             Self::Registry => Ok(
                 match worker_selection_policy_registry()
                     .resolve_for_worker_type(config, worker_type)?
@@ -119,22 +123,76 @@ impl SelectionPolicySource {
             ),
         }
     }
+
+    /// Construct the policy instance for the router's own partition (`model_name`
+    /// in [`DEFAULT_ROUTING_GROUP`]) once and read its required inputs. An
+    /// already `Prepared` source is returned as-is, so chained callers never
+    /// invoke the factory a second time for that partition.
+    pub(crate) fn prepare(
+        self,
+        config: &KvRouterConfig,
+        worker_type: WorkerType,
+        label: &'static str,
+        model_name: Option<&str>,
+    ) -> Result<PreparedSelectionPolicy> {
+        if let Self::Prepared(prepared) = self {
+            return Ok(prepared);
+        }
+        let factory = self.resolve(config, worker_type, label)?;
+        Ok(PreparedSelectionPolicy::prepare(
+            factory,
+            config,
+            worker_type,
+            model_name,
+        ))
+    }
 }
 
-/// The optional worker inputs one instance of `factory`'s policy consumes.
-pub(crate) fn policy_worker_inputs(
-    factory: &WorkerSelectionPolicyFactory,
-    config: &KvRouterConfig,
-    worker_type: WorkerType,
-    model_name: Option<&str>,
-) -> WorkerInputs {
-    let partition = RoutingPartitionRef::new(
-        model_name.unwrap_or(dynamo_kv_router::services::selection::DEFAULT_MODEL_NAME),
-        DEFAULT_ROUTING_GROUP,
-    );
-    dynamo_kv_router::selector::WorkerSelector::<ModelRuntimeConfig>::required_worker_inputs(
-        &factory(config, worker_type, partition),
-    )
+/// One constructed policy instance: its required worker inputs, and a factory
+/// that hands this instance to the first request for `partition` (the key
+/// `embedded::EmbeddedSelection::start` builds) and defers every other call to
+/// the wrapped factory. This keeps the one-call-per-partition contract while
+/// letting the router read the inputs of the instance that actually serves.
+#[derive(Clone)]
+pub struct PreparedSelectionPolicy {
+    factory: WorkerSelectionPolicyFactory,
+    inputs: WorkerInputs,
+}
+
+impl PreparedSelectionPolicy {
+    fn prepare(
+        inner: WorkerSelectionPolicyFactory,
+        config: &KvRouterConfig,
+        worker_type: WorkerType,
+        model_name: Option<&str>,
+    ) -> Self {
+        let key = RoutingPartitionId::new(
+            model_name.unwrap_or(dynamo_kv_router::services::selection::DEFAULT_MODEL_NAME),
+            DEFAULT_ROUTING_GROUP,
+        );
+        let policy = inner(config, worker_type, key.as_ref());
+        let inputs =
+            dynamo_kv_router::selector::WorkerSelector::<ModelRuntimeConfig>::required_worker_inputs(
+                &policy,
+            );
+        let slot = Arc::new(parking_lot::Mutex::new(Some(policy)));
+        let factory: WorkerSelectionPolicyFactory = Arc::new(
+            move |config: &KvRouterConfig, worker_type, partition: RoutingPartitionRef<'_>| {
+                if partition == key.as_ref()
+                    && let Some(policy) = slot.lock().take()
+                {
+                    return policy;
+                }
+                inner(config, worker_type, partition)
+            },
+        );
+        Self { factory, inputs }
+    }
+
+    /// The optional worker inputs the prepared instance consumes.
+    pub fn inputs(&self) -> WorkerInputs {
+        self.inputs
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -647,13 +705,14 @@ impl KvRouter {
         let kv_router_config = kv_router_config.unwrap_or_default();
         kv_router_config.validate().map_err(anyhow::Error::msg)?;
         let worker_type = worker_role.unwrap_or(WorkerType::Aggregated);
-        let policy_factory = policy.resolve(&kv_router_config, worker_type, metric_worker_type)?;
-        let required_worker_inputs = policy_worker_inputs(
-            &policy_factory,
+        let prepared = policy.prepare(
             &kv_router_config,
             worker_type,
+            metric_worker_type,
             model_name.as_deref(),
-        );
+        )?;
+        let required_worker_inputs = prepared.inputs();
+        let policy_factory = prepared.factory;
         // ModelManager gates client construction as well, but preserve the capability boundary for
         // direct KvRouter callers.
         let shared_cache = if required_worker_inputs.contains(WorkerInputs::CACHE) {
@@ -2613,6 +2672,84 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    /// Picks worker 0 and records which construction it belongs to. Its
+    /// required inputs differ by tag so the router's probed inputs identify
+    /// the instance they were read from.
+    struct TaggedPicker {
+        tag: usize,
+        picked_tag: Arc<parking_lot::Mutex<Option<usize>>>,
+    }
+
+    impl WorkerPicker for TaggedPicker {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            if self.tag == 1 {
+                WorkerInputs::LOAD
+            } else {
+                WorkerInputs::CACHE | WorkerInputs::LOAD
+            }
+        }
+
+        fn pick(
+            &mut self,
+            _context: &WorkerSelectionContext<'_>,
+            input: WorkerInputView<'_>,
+        ) -> Result<usize, WorkerSelectionPolicyError> {
+            *self.picked_tag.lock() = Some(self.tag);
+            input
+                .candidates()
+                .iter()
+                .position(|candidate| candidate.worker() == WorkerWithDpRank::from_worker_id(0))
+                .ok_or_else(|| WorkerSelectionPolicyError::failed("worker 0 not eligible"))
+        }
+    }
+
+    /// The factory runs once for the router's partition, and the instance
+    /// whose inputs the router read is the instance that serves selections.
+    #[tokio::test]
+    async fn policy_factory_runs_once_and_the_probed_instance_serves() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let constructions = Arc::new(AtomicUsize::new(0));
+        let picked_tag = Arc::new(parking_lot::Mutex::new(None));
+        let counting = {
+            let constructions = Arc::clone(&constructions);
+            let picked_tag = Arc::clone(&picked_tag);
+            SelectionPolicySource::Factory(Arc::new(move |config: &KvRouterConfig, _, _| {
+                let tag = constructions.fetch_add(1, Ordering::SeqCst) + 1;
+                WorkerSelectionPolicy::new(
+                    config.clone(),
+                    "decode",
+                    Vec::new(),
+                    Box::new(TaggedPicker {
+                        tag,
+                        picked_tag: Arc::clone(&picked_tag),
+                    }),
+                )
+            }))
+        };
+
+        let router = make_test_router(counting, None).await;
+        assert_eq!(
+            constructions.load(Ordering::SeqCst),
+            1,
+            "factory must run once for the router's partition"
+        );
+        assert_eq!(router.required_worker_inputs(), WorkerInputs::LOAD);
+
+        let FindBestMatchOutcome::Routed { worker, .. } =
+            find_best_match(&router, &[11, 12], false).await.unwrap()
+        else {
+            panic!("expected routed outcome");
+        };
+        assert_eq!(worker, WorkerWithDpRank::from_worker_id(0));
+        assert_eq!(
+            *picked_tag.lock(),
+            Some(1),
+            "the probed instance must serve the partition"
+        );
+        assert_eq!(constructions.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

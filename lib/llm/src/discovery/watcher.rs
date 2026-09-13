@@ -1255,7 +1255,11 @@ fn validate_policy_worker_role(
     card: &ModelDeploymentCard,
     policy: &SelectionPolicySource,
 ) -> anyhow::Result<()> {
-    if matches!(policy, SelectionPolicySource::Factory(_)) && card.worker_type.is_none() {
+    if matches!(
+        policy,
+        SelectionPolicySource::Factory(_) | SelectionPolicySource::Prepared(_)
+    ) && card.worker_type.is_none()
+    {
         anyhow::bail!(
             "custom worker-selection policies require model cards with an explicit worker_type"
         );
