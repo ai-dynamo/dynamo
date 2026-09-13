@@ -11,6 +11,7 @@ pub use dynamo_kv_router::kv_hints::{
 use dynamo_kv_router::{
     config::RouterConfigOverride,
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId},
+    scheduling::{AbortCause, RequestLifecycle},
 };
 use dynamo_runtime::error::{DynamoError, ErrorType, match_error_chain};
 use serde::{Deserialize, Serialize};
@@ -133,6 +134,7 @@ pub(crate) struct MigrationState {
 struct MigrationStateInner {
     excluded_worker_ids: Vec<WorkerId>,
     last_error: Option<DynamoError>,
+    request_lifecycle: Option<Box<RequestLifecycle>>,
 }
 
 impl MigrationState {
@@ -190,6 +192,54 @@ impl MigrationState {
                 .build(),
         )
     }
+
+    pub(crate) fn take_request_lifecycle(&self) -> Option<Box<RequestLifecycle>> {
+        self.inner
+            .get()?
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .request_lifecycle
+            .take()
+    }
+
+    pub(crate) fn store_request_lifecycle(&self, lifecycle: Box<RequestLifecycle>) {
+        let replaced = self
+            .inner
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .request_lifecycle
+            .replace(lifecycle);
+        if let Some(replaced) = replaced {
+            tracing::warn!(
+                replaced = ?replaced,
+                "Replacing an unclaimed request-classifier migration lifecycle"
+            );
+        }
+    }
+
+    pub(crate) fn abort_request_lifecycle(&self, error: Option<&AbortCause>) {
+        let Some(mut lifecycle) = self.take_request_lifecycle() else {
+            return;
+        };
+        lifecycle.abort(error.map(owned_abort_error));
+    }
+}
+
+/// Owned abort payload for classifier lifecycle events: the typed
+/// [`DynamoError`] from the chain when one exists, else the whole chain
+/// converted so the root cause survives.
+pub(crate) fn owned_abort_error(error: &AbortCause) -> Arc<AbortCause> {
+    let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(current) = cause {
+        if let Some(dynamo_error) = current.downcast_ref::<DynamoError>() {
+            return Arc::new(dynamo_error.clone());
+        }
+        cause = current.source();
+    }
+    Arc::new(DynamoError::from(
+        error as &(dyn std::error::Error + 'static),
+    ))
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -506,6 +556,13 @@ impl PreprocessedRequest {
             return (&self.token_ids, None);
         }
         (tokens, Some(mm.block_mm_infos.as_slice()))
+    }
+
+    pub(crate) fn expanded_prompt_token_count(&self) -> usize {
+        self.mm_routing_info
+            .as_ref()
+            .filter(|mm| !mm.routing_token_ids.is_empty() && mm.expanded_prompt_len > 0)
+            .map_or(self.token_ids.len(), |mm| mm.expanded_prompt_len)
     }
 }
 

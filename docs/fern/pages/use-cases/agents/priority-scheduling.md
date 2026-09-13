@@ -49,10 +49,10 @@ The router queue only matters when requests are held before dispatch. If a reque
 `--router-queue-threshold` controls when the router starts holding requests. A request waits in the router queue while every eligible worker is above the configured threshold. The queue drains when capacity is available, and higher-priority requests are selected according to the queue key:
 
 ```text
-(strict_priority, configured_policy_key)
+(strict_priority, due_at, configured_policy_key)
 ```
 
-The strict tier is compared first. FCFS, LCFS, or Weighted Shortest Processing Time (WSPT) still computes the secondary key and orders requests within the same tier.
+The strict tier is compared first. Within that tier, every request with a classifier-provided `due_at` is scheduled ahead of every request without one (an unset due time sorts last) before FCFS, LCFS, or Weighted Shortest Processing Time (WSPT) applies its configured policy key. Sustained deadline-bearing traffic can therefore starve non-deadline requests in the same class. A `due_at` is set only by a router request classifier; classifiers are not yet user-configurable.
 
 The default policy is `fcfs`, which uses the priority value as a positive arrival-time bump. Higher values move the request earlier in the queue. Negative priority values are clamped to zero for router queueing, so a request cannot be pushed behind normal first-come, first-served ordering by sending a negative priority.
 

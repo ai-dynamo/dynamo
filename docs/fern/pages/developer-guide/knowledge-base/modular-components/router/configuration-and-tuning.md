@@ -93,8 +93,9 @@ For how queue backpressure differs from candidate filtering and busy-threshold o
 YAML accept only `fcfs` and `wspt`.
 
 For each policy, the complete pending-queue key is
-`(strict_priority, policy_key)`. Higher strict tiers always win; the selected
-policy orders requests within a tier.
+`(strict_priority, due_at, policy_key)`. Higher strict tiers always win; see
+[Priority Scheduling](../../../../use-cases/agents/priority-scheduling.md) for how due-time
+ordering applies within a tier.
 
 ### Worker-Selection Policies
 

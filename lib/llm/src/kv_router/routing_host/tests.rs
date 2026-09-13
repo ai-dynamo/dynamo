@@ -5,14 +5,18 @@ use std::{
     collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
 
 use dynamo_kv_router::{
-    DefaultWorkerSelector, WorkerSelectionPolicy, config::KvRouterConfig,
+    DefaultWorkerSelector, WorkerSelectionPolicy,
+    config::KvRouterConfig,
     protocols::RoutingConstraints,
+    scheduling::{
+        ClassifierError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
+    },
 };
 use dynamo_runtime::{
     DistributedRuntime, Runtime,
@@ -27,7 +31,7 @@ use dynamo_runtime::{
     storage::kv::Selector,
     traits::DistributedRuntimeProvider,
 };
-use tokio::sync::watch;
+use tokio::sync::{Notify, mpsc, watch};
 
 use super::*;
 use crate::{
@@ -38,6 +42,7 @@ use crate::{
     migration::Migration,
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+        preprocessor::{MmRoutingInfo, RoutingHints},
         timing::RequestTracker,
     },
 };
@@ -696,6 +701,7 @@ async fn terminal_item_does_not_skip_transport_eof() {
         WorkerWithDpRank::from_worker_id(0),
         dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
         &request(),
+        None,
     );
     let monitored = monitor_response_stream(source, context, guard);
     tokio::pin!(monitored);
@@ -765,6 +771,7 @@ async fn shutdown_cancellation_drains_trailing_engine_shutdown_error() {
         WorkerWithDpRank::from_worker_id(0),
         dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
         &request(),
+        None,
     );
     let monitored = monitor_response_stream(source, context, guard);
     tokio::pin!(monitored);
@@ -811,6 +818,7 @@ async fn client_cancellation_still_ends_stream_without_draining() {
         WorkerWithDpRank::from_worker_id(0),
         dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
         &request(),
+        None,
     );
     let monitored = monitor_response_stream(source, context, guard);
     tokio::pin!(monitored);
@@ -849,6 +857,7 @@ async fn drain_without_trailing_error_gives_up_at_the_deadline() {
         WorkerWithDpRank::from_worker_id(0),
         dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
         &request(),
+        None,
     );
     let monitored = monitor_response_stream(source, context, guard);
     tokio::pin!(monitored);
@@ -904,6 +913,7 @@ async fn trailing_error_within_the_drain_window_still_reaches_migration() {
         WorkerWithDpRank::from_worker_id(0),
         dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
         &request(),
+        None,
     );
     let monitored = monitor_response_stream(source, context, guard);
     tokio::pin!(monitored);
@@ -950,6 +960,7 @@ async fn always_ready_terminals_cannot_starve_the_drain_deadline() {
         WorkerWithDpRank::from_worker_id(0),
         dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
         &request(),
+        None,
     );
     let monitored = monitor_response_stream(source, context, guard);
     tokio::pin!(monitored);
@@ -1155,6 +1166,31 @@ async fn router_with_worker_configs(
     session_affinity_ttl: Option<Duration>,
     workers: HashMap<u64, ModelRuntimeConfig>,
 ) -> (RoutingHost, Runtime) {
+    router_with_worker_configs_and_classifier(
+        session_affinity_ttl,
+        workers,
+        None::<RecordingClassifier>,
+    )
+    .await
+}
+
+async fn router_with_classifier(
+    classifier: impl RequestClassifier,
+    session_affinity_ttl: Option<Duration>,
+) -> (RoutingHost, Runtime) {
+    router_with_worker_configs_and_classifier(
+        session_affinity_ttl,
+        HashMap::from([(7, ModelRuntimeConfig::default())]),
+        Some(classifier),
+    )
+    .await
+}
+
+async fn router_with_worker_configs_and_classifier(
+    session_affinity_ttl: Option<Duration>,
+    workers: HashMap<u64, ModelRuntimeConfig>,
+    classifier: Option<impl RequestClassifier>,
+) -> (RoutingHost, Runtime) {
     let runtime = Runtime::from_current().unwrap();
     let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
         .await
@@ -1174,7 +1210,7 @@ async fn router_with_worker_configs(
         router_track_active_blocks: false,
         ..Default::default()
     };
-    let chooser = KvRouter::new(
+    let mut chooser = KvRouter::new(
         endpoint,
         client.clone(),
         workers,
@@ -1191,6 +1227,9 @@ async fn router_with_worker_configs(
     )
     .await
     .unwrap();
+    if let Some(classifier) = classifier {
+        chooser = chooser.with_request_classifier(classifier).unwrap();
+    }
     let inner = PushRouter::from_client(client, RouterMode::KV)
         .await
         .unwrap();
@@ -1373,6 +1412,488 @@ async fn kv_cancellation_after_admission_still_stops_the_aggregated_dispatch() {
         dispatch.worker_ids.lock().unwrap().is_empty(),
         "no worker should have been asked to serve a cancelled aggregated request"
     );
+
+    drop(router);
+    runtime.shutdown();
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ClassifierObservation {
+    Completed(usize),
+    /// The typed cause the plugin received, if the abort carried one.
+    Aborted {
+        cause: Option<ErrorType>,
+    },
+}
+
+fn abort_cause_type(error: &(dyn std::error::Error + 'static)) -> Option<ErrorType> {
+    let mut cause = Some(error);
+    while let Some(current) = cause {
+        if let Some(typed) = current.downcast_ref::<DynamoError>() {
+            return Some(typed.error_type());
+        }
+        cause = current.source();
+    }
+    None
+}
+
+struct RecordingClassifier {
+    calls: Arc<AtomicUsize>,
+    observations: mpsc::UnboundedSender<ClassifierObservation>,
+}
+
+#[async_trait::async_trait]
+impl RequestClassifier for RecordingClassifier {
+    fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        Box::pin(async move { Ok(request) })
+    }
+
+    async fn on_event(&mut self, event: ClassifyEvent) {
+        let observation = match event {
+            ClassifyEvent::Completed {
+                context_tokens: Some(context_tokens),
+                ..
+            } => Some(ClassifierObservation::Completed(context_tokens)),
+            ClassifyEvent::Aborted { error, .. } => Some(ClassifierObservation::Aborted {
+                cause: error.as_deref().and_then(|error| abort_cause_type(error)),
+            }),
+            _ => None,
+        };
+        if let Some(observation) = observation {
+            self.observations.send(observation).unwrap();
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("classifier rejected request")]
+struct ClassifierRejected;
+
+struct RejectingClassifier {
+    calls: Arc<AtomicUsize>,
+    observations: mpsc::UnboundedSender<Option<(bool, String)>>,
+}
+
+#[async_trait::async_trait]
+impl RequestClassifier for RejectingClassifier {
+    fn classify(&mut self, _request: ClassifyRequest) -> ClassifyFuture {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        Box::pin(async { Err(Box::new(ClassifierRejected) as Box<ClassifierError>) })
+    }
+
+    async fn on_event(&mut self, event: ClassifyEvent) {
+        if let ClassifyEvent::Aborted { error, .. } = event {
+            self.observations
+                .send(error.map(|error| {
+                    (
+                        error.downcast_ref::<ClassifierRejected>().is_some(),
+                        error.to_string(),
+                    )
+                }))
+                .unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn classifier_failure_aborts_once_with_original_error() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (observations_tx, mut observations_rx) = mpsc::unbounded_channel();
+    let (router, runtime) = router_with_classifier(
+        RejectingClassifier {
+            calls: Arc::clone(&calls),
+            observations: observations_tx,
+        },
+        Some(Duration::from_secs(10)),
+    )
+    .await;
+    let session_id = SessionAffinityId::new("classifier-failure-stale-affinity");
+    bind_affinity_target(&router, &session_id, AffinityTarget::new(7, Some(1))).await;
+    let mut request = Context::new(request());
+    request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id);
+
+    let client_error = match router
+        .select_with_affinity(
+            &request,
+            RequestPhase::Aggregated,
+            false,
+            &CleanupBudget::default(),
+        )
+        .await
+    {
+        Ok(_) => panic!("classifier rejection unexpectedly selected a worker"),
+        Err(error) => error,
+    };
+    assert!(!format!("{client_error:#}").contains("classifier rejected request"));
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), observations_rx.recv())
+            .await
+            .expect("classifier abort event timed out"),
+        Some(Some((true, "classifier rejected request".to_string())))
+    );
+    assert!(observations_rx.try_recv().is_err());
+
+    drop(router);
+    runtime.shutdown();
+}
+
+struct TypedRejectingClassifier;
+
+impl RequestClassifier for TypedRejectingClassifier {
+    fn classify(&mut self, _request: ClassifyRequest) -> ClassifyFuture {
+        Box::pin(async {
+            Err(Box::new(
+                DynamoError::builder()
+                    .error_type(ErrorType::ResourceExhausted)
+                    .message("classifier shed load")
+                    .build(),
+            ) as Box<ClassifierError>)
+        })
+    }
+}
+
+#[tokio::test]
+async fn typed_classifier_rejection_reaches_client() {
+    let (router, runtime) = router_with_classifier(TypedRejectingClassifier, None).await;
+    let request = Context::new(request());
+
+    let client_error = match router
+        .select_with_affinity(
+            &request,
+            RequestPhase::Aggregated,
+            false,
+            &CleanupBudget::default(),
+        )
+        .await
+    {
+        Ok(_) => panic!("typed rejection unexpectedly selected a worker"),
+        Err(error) => error,
+    };
+
+    let typed = client_error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<DynamoError>())
+        .expect("typed rejection must stay a DynamoError");
+    assert!(matches!(typed.error_type(), ErrorType::ResourceExhausted));
+    assert!(format!("{client_error:#}").contains("classifier shed load"));
+
+    drop(router);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+async fn stale_affinity_rebind_classifies_once_without_intermediate_abort() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (observations_tx, mut observations_rx) = mpsc::unbounded_channel();
+    let (router, runtime) = router_with_classifier(
+        RecordingClassifier {
+            calls: Arc::clone(&calls),
+            observations: observations_tx,
+        },
+        Some(Duration::from_secs(10)),
+    )
+    .await;
+    let session_id = SessionAffinityId::new("classifier-stale-affinity");
+    bind_affinity_target(&router, &session_id, AffinityTarget::new(7, Some(1))).await;
+    let mut request = Context::new(request());
+    request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id);
+
+    let (mut selection, operation) = router
+        .select_with_affinity(
+            &request,
+            RequestPhase::Aggregated,
+            false,
+            &CleanupBudget::default(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert!(observations_rx.try_recv().is_err());
+    let mut lifecycle = selection.request_lifecycle.take().unwrap();
+    lifecycle.observe_context_tokens(1);
+    lifecycle.complete();
+    assert_eq!(
+        observations_rx.recv().await,
+        Some(ClassifierObservation::Completed(1))
+    );
+    router.kv_router().free(request.id()).await.unwrap();
+
+    drop(operation);
+    drop(router);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+async fn query_only_selection_bypasses_classifier_and_request_lifecycle() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (observations_tx, mut observations_rx) = mpsc::unbounded_channel();
+    let (router, runtime) = router_with_classifier(
+        RecordingClassifier {
+            calls: Arc::clone(&calls),
+            observations: observations_tx,
+        },
+        None,
+    )
+    .await;
+    let request = Context::new(request());
+
+    let (selection, operation) = router
+        .select_with_affinity(
+            &request,
+            RequestPhase::Aggregated,
+            true,
+            &CleanupBudget::default(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert!(selection.request_lifecycle.is_none());
+    assert!(operation.is_none());
+    drop(selection);
+    assert!(!router.prefill_worker_busy(&request, 0.5).await.unwrap());
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert!(observations_rx.try_recv().is_err());
+
+    drop(router);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+async fn planned_route_admission_classifies_and_carries_lifecycle() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (observations_tx, mut observations_rx) = mpsc::unbounded_channel();
+    let (router, runtime) = router_with_classifier(
+        RecordingClassifier {
+            calls: Arc::clone(&calls),
+            observations: observations_tx,
+        },
+        None,
+    )
+    .await;
+    let request = Context::new(request());
+
+    let preview = router
+        .preview_kv_route(&request, RequestPhase::Decode)
+        .await
+        .unwrap();
+    assert_eq!(calls.load(Ordering::Relaxed), 0, "preview is query-only");
+    let mut plan = router
+        .plan_kv_route_from_preview(&request, preview)
+        .await
+        .unwrap();
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+    let mut lifecycle = plan.selection.request_lifecycle.take().unwrap();
+    lifecycle.observe_context_tokens(1);
+    lifecycle.complete();
+    assert_eq!(
+        observations_rx.recv().await,
+        Some(ClassifierObservation::Completed(1))
+    );
+    router.kv_router().free(request.id()).await.unwrap();
+
+    drop(plan);
+    drop(router);
+    runtime.shutdown();
+}
+
+struct PausingClassifier {
+    entered: Arc<Notify>,
+    resumed: Arc<Notify>,
+}
+
+impl RequestClassifier for PausingClassifier {
+    fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+        let entered = Arc::clone(&self.entered);
+        let resumed = Arc::clone(&self.resumed);
+        Box::pin(async move {
+            entered.notify_one();
+            resumed.notified().await;
+            Ok(request)
+        })
+    }
+}
+
+#[tokio::test]
+async fn classifier_pause_defers_admission_until_resumed() {
+    let entered = Arc::new(Notify::new());
+    let resumed = Arc::new(Notify::new());
+    let (router, runtime) = router_with_classifier(
+        PausingClassifier {
+            entered: Arc::clone(&entered),
+            resumed: Arc::clone(&resumed),
+        },
+        None,
+    )
+    .await;
+    let router = Arc::new(router);
+    let request = Context::new(request());
+    let request_id = request.id().to_string();
+    let selection = {
+        let router = Arc::clone(&router);
+        tokio::spawn(async move {
+            router
+                .select_with_affinity(
+                    &request,
+                    RequestPhase::Aggregated,
+                    false,
+                    &CleanupBudget::default(),
+                )
+                .await
+        })
+    };
+
+    entered.notified().await;
+    assert!(!selection.is_finished());
+    resumed.notify_one();
+    let (selection, _) = selection.await.unwrap().unwrap();
+    assert!(selection.request_lifecycle.is_some());
+    router.kv_router().free(&request_id).await.unwrap();
+    drop(selection);
+
+    drop(router);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+async fn tracked_admission_without_lifecycle_bypasses_classifier() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (observations_tx, mut observations_rx) = mpsc::unbounded_channel();
+    let (router, runtime) = router_with_classifier(
+        RecordingClassifier {
+            calls: Arc::clone(&calls),
+            observations: observations_tx,
+        },
+        None,
+    )
+    .await;
+
+    // `find_best_match_details` with `update_states` is a tracked admission
+    // that never calls `begin_request_lifecycle` — the same funnel as the
+    // Python bindings `best_worker` and the standalone `RouterRequest::New`
+    // path. The plugin would receive no lifecycle events for it, so admission
+    // must use the default queue inputs instead of the classifier.
+    let outcome = router
+        .kv_router()
+        .find_best_match_details(
+            Some("unregistered-tracked"),
+            &[1, 2, 3, 4],
+            None,
+            None,
+            true,
+            false,
+            None,
+            None,
+            0.0,
+            0,
+            None,
+            None,
+            None,
+            RoutingConstraints::default(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        crate::kv_router::FindBestMatchOutcome::Routed { .. }
+    ));
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    router
+        .kv_router()
+        .free("unregistered-tracked")
+        .await
+        .unwrap();
+    assert!(observations_rx.try_recv().is_err());
+
+    drop(router);
+    runtime.shutdown();
+}
+
+struct TokenContractClassifier {
+    classified: mpsc::UnboundedSender<usize>,
+    completed: mpsc::UnboundedSender<usize>,
+}
+
+#[async_trait::async_trait]
+impl RequestClassifier for TokenContractClassifier {
+    fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+        self.classified.send(request.input_tokens()).unwrap();
+        Box::pin(async move { Ok(request) })
+    }
+
+    async fn on_event(&mut self, event: ClassifyEvent) {
+        if let ClassifyEvent::Completed {
+            context_tokens: Some(context_tokens),
+            ..
+        } = event
+        {
+            self.completed.send(context_tokens).unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn classifier_uses_scheduler_token_basis() {
+    let (classified_tx, mut classified_rx) = mpsc::unbounded_channel();
+    let (completed_tx, mut completed_rx) = mpsc::unbounded_channel();
+    let (router, runtime) = router_with_classifier(
+        TokenContractClassifier {
+            classified: classified_tx,
+            completed: completed_tx,
+        },
+        None,
+    )
+    .await;
+    let mut content = request();
+    content.mm_routing_info = Some(MmRoutingInfo {
+        routing_token_ids: vec![1, 2, 3, 4, 5, 0, 0, 0],
+        block_mm_infos: vec![None],
+        expanded_prompt_len: 5,
+    });
+    let request = Context::new(content);
+    let (mut selection, _) = router
+        .select_with_affinity(
+            &request,
+            RequestPhase::Aggregated,
+            false,
+            &CleanupBudget::default(),
+        )
+        .await
+        .unwrap();
+    // Classification and the scheduler queue share one token basis: the
+    // routing tokens (`isl_tokens`, 8 here), not the multimodal expanded
+    // prompt length (5), so a pass-through classifier cannot shift queue
+    // bucketing, limits, or DRR cost for multimodal requests.
+    assert_eq!(classified_rx.recv().await, Some(8));
+
+    let mut guard = router
+        .track_selection(
+            &request,
+            &mut selection,
+            RequestPhase::Aggregated,
+            false,
+            &CleanupBudget::default(),
+        )
+        .await
+        .unwrap();
+    guard.mark_dispatched();
+    let output = LLMEngineOutput {
+        completion_usage: Some(dynamo_protocols::types::CompletionUsage {
+            prompt_tokens: 5,
+            completion_tokens: 6,
+            total_tokens: 11,
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+        }),
+        ..Default::default()
+    };
+    guard.on_item(&Annotated::from_data(output)).await;
+    guard.finish().await;
+    assert_eq!(completed_rx.recv().await, Some(11));
 
     drop(router);
     runtime.shutdown();
@@ -2260,6 +2781,7 @@ struct MigrationHarness {
 async fn two_worker_migration_harness(
     namespace: &str,
     dispatch: Arc<dyn StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>>,
+    classifier: Option<RecordingClassifier>,
 ) -> MigrationHarness {
     async fn shared_drt(runtime: Runtime, store_path: &std::path::Path) -> DistributedRuntime {
         DistributedRuntime::new(
@@ -2334,7 +2856,7 @@ async fn two_worker_migration_harness(
         router_track_active_blocks: false,
         ..Default::default()
     };
-    let chooser = KvRouter::new_with_worker_role_and_scheduler_load(
+    let mut chooser = KvRouter::new_with_worker_role_and_scheduler_load(
         endpoint,
         client.clone(),
         workers,
@@ -2354,12 +2876,15 @@ async fn two_worker_migration_harness(
     )
     .await
     .unwrap();
+    if let Some(classifier) = classifier {
+        chooser = chooser.with_request_classifier(classifier).unwrap();
+    }
     let push_router =
         PushRouter::from_client_with_dispatch(client.clone(), RouterMode::KV, dispatch)
             .await
             .unwrap();
     let chooser = Arc::new(chooser);
-    let kv_router = Arc::new(
+    let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> = Arc::new(
         RoutingHost::new_with_load_context(
             push_router,
             chooser.clone(),
@@ -2373,7 +2898,7 @@ async fn two_worker_migration_harness(
     MigrationHarness {
         runtime,
         chooser,
-        engine: kv_router,
+        engine,
         registered_ids,
         _store: store,
         _drts: vec![router_drt, first_worker_drt, second_worker_drt],
@@ -2384,18 +2909,12 @@ async fn two_worker_migration_harness(
 #[serial_test::serial]
 async fn worker_overload_stream_migration_releases_and_reselects() {
     let dispatch = Arc::new(RejectFirstDispatch::default());
-    let harness = two_worker_migration_harness("worker-overload-migration", dispatch.clone()).await;
-    let MigrationHarness {
-        runtime,
-        chooser,
-        engine: next,
-        registered_ids,
-        ..
-    } = &harness;
+    let harness =
+        two_worker_migration_harness("worker-overload-migration", dispatch.clone(), None).await;
     let migration = Migration::new(1, None, "test".to_string(), Arc::new(Metrics::new()));
 
     let responses: Vec<_> = migration
-        .generate(Context::new(request()), next.clone())
+        .generate(Context::new(request()), harness.engine.clone())
         .await
         .unwrap()
         .collect()
@@ -2412,11 +2931,12 @@ async fn worker_overload_stream_migration_releases_and_reselects() {
     let failed_worker = attempts[0].0;
     let retried_worker = attempts[1].0;
     assert_ne!(failed_worker, retried_worker);
-    assert!(registered_ids.contains(&failed_worker));
-    assert!(registered_ids.contains(&retried_worker));
+    assert!(harness.registered_ids.contains(&failed_worker));
+    assert!(harness.registered_ids.contains(&retried_worker));
     assert!(attempts[0].1.is_empty());
     assert_eq!(attempts[1].1, vec![failed_worker]);
-    let loads = chooser
+    let loads = harness
+        .chooser
         .get_potential_loads(&[], None, None, None, None)
         .await
         .unwrap();
@@ -2424,7 +2944,217 @@ async fn worker_overload_stream_migration_releases_and_reselects() {
         loads.iter().all(|load| load.active_requests == 0),
         "all scheduler bookings must be released after migration: {loads:?}"
     );
-    runtime.shutdown();
+    harness.runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn stream_migration_retry_continues_one_classifier_lifecycle() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (observations_tx, mut observations_rx) = mpsc::unbounded_channel();
+    let dispatch = Arc::new(RejectFirstDispatch::default());
+    let harness = two_worker_migration_harness(
+        "stream-migration-classifier-lifecycle",
+        dispatch.clone(),
+        Some(RecordingClassifier {
+            calls: Arc::clone(&calls),
+            observations: observations_tx,
+        }),
+    )
+    .await;
+    let migration = Migration::new(1, None, "test".to_string(), Arc::new(Metrics::new()));
+
+    let responses: Vec<_> = migration
+        .generate(Context::new(request()), harness.engine.clone())
+        .await
+        .unwrap()
+        .collect()
+        .await;
+
+    assert_eq!(responses.len(), 1);
+    assert!(responses[0].error.is_none());
+    let attempts = {
+        let attempts = dispatch.attempts.lock().unwrap();
+        attempts.clone()
+    };
+    assert_eq!(attempts.len(), 2, "the failed stream must be retried once");
+    assert_ne!(attempts[0].0, attempts[1].0);
+
+    // The retry continues the failed attempt's lifecycle, so the plugin must
+    // see exactly one terminal event for the logical request: the retry's
+    // Completed, with no Aborted from the failed stream before it.
+    let observation = tokio::time::timeout(Duration::from_secs(1), observations_rx.recv())
+        .await
+        .expect("classifier terminal event timed out")
+        .expect("classifier event channel closed");
+    assert!(
+        matches!(observation, ClassifierObservation::Completed(_)),
+        "the failed stream must not abort the lifecycle Migration retries: {observation:?}"
+    );
+    assert!(
+        observations_rx.try_recv().is_err(),
+        "the logical request must emit exactly one terminal lifecycle event"
+    );
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        1,
+        "the retry must reuse the cached classification"
+    );
+    harness.runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn pinned_request_stream_failure_aborts_parked_lifecycle_with_cause() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (observations_tx, mut observations_rx) = mpsc::unbounded_channel();
+    let dispatch = Arc::new(RejectFirstDispatch::default());
+    let harness = two_worker_migration_harness(
+        "pinned-stream-failure-classifier-lifecycle",
+        dispatch.clone(),
+        Some(RecordingClassifier {
+            calls: Arc::clone(&calls),
+            observations: observations_tx,
+        }),
+    )
+    .await;
+    let migration = Migration::new(1, None, "test".to_string(), Arc::new(Metrics::new()));
+    let pinned = *harness.registered_ids.iter().next().unwrap();
+    let mut content = request();
+    content.routing = Some(RoutingHints {
+        backend_instance_id: Some(pinned),
+        ..Default::default()
+    });
+
+    let responses: Vec<_> = migration
+        .generate(Context::new(content), harness.engine.clone())
+        .await
+        .unwrap()
+        .collect()
+        .await;
+
+    // The failure is type-migratable so the stream host parks the lifecycle,
+    // but the explicit pin vetoes the retry. The plugin must still receive
+    // exactly one terminal event carrying the failure, not a bare Drop abort.
+    assert_eq!(responses.len(), 1);
+    assert!(responses[0].error.is_some());
+    let attempts = dispatch.attempts.lock().unwrap().len();
+    assert_eq!(
+        attempts, 1,
+        "an explicit pin must block the migration retry"
+    );
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), observations_rx.recv())
+            .await
+            .expect("classifier abort event timed out"),
+        Some(ClassifierObservation::Aborted {
+            cause: Some(ErrorType::WorkerOverloaded),
+        })
+    );
+    assert!(observations_rx.try_recv().is_err());
+    harness.runtime.shutdown();
+}
+
+/// Every attempt fails in-stream with a migratable worker error.
+#[derive(Default)]
+struct AlwaysOverloadedDispatch {
+    attempts: Mutex<Vec<u64>>,
+}
+
+#[async_trait]
+impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>
+    for AlwaysOverloadedDispatch
+{
+    async fn generate(
+        &self,
+        request: SingleIn<AddressedRequest<PreprocessedRequest>>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        let (addressed, context) = request.transfer(());
+        let (_, _, instance) = addressed.into_parts();
+        self.attempts
+            .lock()
+            .unwrap()
+            .push(instance.expect("selected worker instance").id());
+        let output = Annotated {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(
+                DynamoError::builder()
+                    .error_type(ErrorType::WorkerOverloaded)
+                    .message("selected worker is overloaded")
+                    .build(),
+            ),
+        };
+        Ok(ResponseStream::new(
+            Box::pin(stream::once(async move { output })),
+            context.context(),
+        ))
+    }
+
+    async fn generate_bidirectional(
+        &self,
+        _instance: Instance,
+        _address: String,
+        _input: ManyIn<PreprocessedRequest>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        unreachable!("the routing host dispatches unary requests")
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn exhausted_migration_aborts_parked_lifecycle_with_worker_failure() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (observations_tx, mut observations_rx) = mpsc::unbounded_channel();
+    let dispatch = Arc::new(AlwaysOverloadedDispatch::default());
+    let harness = two_worker_migration_harness(
+        "exhausted-migration-classifier-lifecycle",
+        dispatch.clone(),
+        Some(RecordingClassifier {
+            calls: Arc::clone(&calls),
+            observations: observations_tx,
+        }),
+    )
+    .await;
+    let migration = Migration::new(1, None, "test".to_string(), Arc::new(Metrics::new()));
+
+    let responses: Vec<_> = migration
+        .generate(Context::new(request()), harness.engine.clone())
+        .await
+        .unwrap()
+        .collect()
+        .await;
+
+    // Both attempts fail in-stream and the retry budget is spent. The client
+    // receives the final attempt's worker error, so the classifier's single
+    // terminal event must carry that same failure, not the synthetic
+    // "migration limit exhausted" that retry accounting produces.
+    assert_eq!(
+        dispatch.attempts.lock().unwrap().len(),
+        2,
+        "one migration retry must run before the budget is exhausted"
+    );
+    let error = responses
+        .last()
+        .and_then(|response| response.error.as_ref())
+        .expect("the final worker error reaches the client");
+    assert!(match_error_chain(
+        error,
+        &[ErrorType::WorkerOverloaded],
+        &[]
+    ));
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), observations_rx.recv())
+            .await
+            .expect("classifier abort event timed out"),
+        Some(ClassifierObservation::Aborted {
+            cause: Some(ErrorType::WorkerOverloaded),
+        })
+    );
+    assert!(observations_rx.try_recv().is_err());
+    harness.runtime.shutdown();
 }
 
 /// A gracefully shutting-down worker: `Cancelled` data frame, then the reason.
@@ -2491,7 +3221,8 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>
 #[serial_test::serial]
 async fn engine_shutdown_after_cancel_frame_migrates_and_reselects() {
     let dispatch = Arc::new(ShutdownAfterCancelDispatch::default());
-    let harness = two_worker_migration_harness("engine-shutdown-migration", dispatch.clone()).await;
+    let harness =
+        two_worker_migration_harness("engine-shutdown-migration", dispatch.clone(), None).await;
     let migration = Migration::new(1, None, "test".to_string(), Arc::new(Metrics::new()));
 
     let responses: Vec<_> = migration
