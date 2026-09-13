@@ -275,6 +275,17 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   local inhibited set while the selected worker remains in discovery.
 </ParamField>
 
+<ParamField path="DYN_DISCOVERY_GROUP_REMOVAL_GRACE_MS" type="integer" default="2000">
+  Number of milliseconds that the frontend keeps the catalog entry of a model whose last worker has
+  gone away, before withdrawing it. A rolling update withdraws the outgoing worker's model card
+  before its replacement publishes one, and this window spans that gap: the model stays listed on
+  `/v1/models` and requests get a retryable `503` instead of a `404`. The entry admits no workers
+  for the length of the window, and a replacement joining inside it builds a fresh routing pipeline
+  rather than inheriting the departed one. Raise it if your workers take longer than the default to
+  publish a card after startup; set it to `0` to withdraw the model as soon as its last worker
+  leaves. The process reads this value once at startup; restart the frontend after changing it.
+</ParamField>
+
 ## Operations
 
 <ParamField path="--dump-config-to" type="string" default="null">
