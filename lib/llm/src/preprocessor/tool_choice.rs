@@ -218,7 +218,6 @@ pub(crate) fn effective_tools(
         .map_err(|error| invalid_argument(error.to_string()))
 }
 
-/// Parser-facing form of [`effective_tools`].
 pub(crate) fn effective_tool_definitions(
     request: &CreateChatCompletionRequest,
 ) -> Result<Vec<ToolDefinition>, DynamoError> {

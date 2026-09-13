@@ -554,7 +554,6 @@ pub(crate) fn validated_effective_tools(
     Ok(tools)
 }
 
-/// Converts one dynamic system tool into the typed OpenAI function-tool shape.
 fn normalize_dynamic_system_tool(
     tool: &Value,
     index: usize,
@@ -618,7 +617,6 @@ fn normalize_dynamic_system_tool(
     })
 }
 
-/// Reads an optional string field from a dynamic system tool definition.
 fn optional_dynamic_string(
     value: Option<&Value>,
     field: &str,
