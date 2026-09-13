@@ -120,9 +120,6 @@ def parse_args(argv: list[str] | None = None) -> Config:
     # Consume the router flags before the engine parser sees the remainder.
     dynamo_config.router_advertisement, unknown = parse_worker_router_config(unknown)
 
-    # Validate arguments
-    dynamo_config.validate()
-
     vllm_args = vllm_parser.parse_args(unknown)
     # Set the model name from the command line arguments
     # model is defined in AsyncEngineArgs, but when AsyncEngineArgs.from_cli_args is called,
@@ -132,11 +129,19 @@ def parse_args(argv: list[str] | None = None) -> Config:
 
     engine_config = AsyncEngineArgs.from_cli_args(vllm_args)
 
+    # Attach engine_args before validate(): the --enable-lora exclusivity rules
+    # in DynamoVllmConfig.validate() read it, and are dead code without it.
+    dynamo_config.engine_args = engine_config
+
+    # Validate arguments
+    dynamo_config.validate()
+
+    # These run after validate() because they consume what it resolves --
+    # notably the DisaggregationMode enum and the benchmark sampling fields.
     cross_validate_config(dynamo_config, engine_config)
     update_dynamo_config_with_engine(dynamo_config, engine_config)
     update_engine_config_with_dynamo(dynamo_config, engine_config)
 
-    dynamo_config.engine_args = engine_config
     from .state_agent import validate_state_agent_worker
 
     validate_state_agent_worker(dynamo_config)

@@ -179,6 +179,36 @@ func TestBugDGD_SpokeServiceAndExtraVolumeMountsCompose(t *testing.T) {
 	}
 }
 
+func TestBugDGD_HubVolumeMountOrderWithCompilationCacheRoundTrip(t *testing.T) {
+	t.Log("Build a hub component whose non-cache mount precedes its compilation-cache mount")
+	in := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "volume-mount-order", Namespace: "ns"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				CompilationCache: &v1beta1.CompilationCacheConfig{
+					PVCName:   "model-cache",
+					MountPath: "/models",
+				},
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+					Name: "main",
+					VolumeMounts: []corev1.VolumeMount{
+						{Name: "config", MountPath: "/config", ReadOnly: true, SubPath: "settings"},
+						{Name: "model-cache", MountPath: "/models"},
+					},
+				}}}},
+			}},
+		},
+	}
+
+	t.Log("Round-trip the hub component through v1alpha1")
+	out := roundTripFromV1beta1(t, in)
+	if diff := cmp.Diff(in, out); diff != "" {
+		t.Fatalf("round-trip mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func addGeneratedFrontendSidecarHubOnlySecurityContext(t *testing.T, podTemplate *corev1.PodTemplateSpec) {
 	t.Helper()
 	if podTemplate == nil {

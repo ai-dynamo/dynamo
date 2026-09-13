@@ -199,6 +199,7 @@ pub fn error_type_name(error_type: ErrorType) -> &'static str {
         ErrorType::ResourceExhausted => "resource_exhausted",
         ErrorType::Unavailable => "unavailable",
         ErrorType::WorkerOverloaded => "worker_overloaded",
+        ErrorType::WorkerUnavailable => "worker_unavailable",
         ErrorType::Backend(BackendError::Unknown) => "backend_unknown",
         ErrorType::Backend(BackendError::InvalidArgument) => "backend_invalid_argument",
         ErrorType::Backend(BackendError::CannotConnect) => "backend_cannot_connect",
@@ -235,7 +236,7 @@ fn error_outcome(error_type: ErrorType) -> &'static str {
             "rejected"
         }
         ErrorType::ResourceExhausted | ErrorType::WorkerOverloaded => "rejected",
-        ErrorType::Unavailable => "unavailable",
+        ErrorType::Unavailable | ErrorType::WorkerUnavailable => "unavailable",
         // Deadline expiry matches the HTTP metric classification, which labels
         // deadline-exceeded 429 responses as `cancelled`.
         ErrorType::DeadlineExceeded

@@ -182,10 +182,13 @@ creates the workload layer in `$NAMESPACE`:
 - Two standalone EPP replicas and their gRPC and replica-synchronization Service.
 - An `InferencePool` and an `HTTPRoute` that attaches to the cross-namespace Gateway.
 
-Apply the manifest from the repository root using the image you pushed:
+Set `VLLM_IMAGE` to the vLLM image your platform uses, including its release tag or digest. Use a
+digest for reproducible deployments. Apply the manifest from the repository root using that image
+and the EPP image you pushed:
 
 ```bash
-sed "s#dynamo/dynamo-epp:dev#$EPP_IMAGE#" \
+sed -e "s#dynamo/dynamo-epp:dev#${EPP_IMAGE:?Set EPP_IMAGE to the image you pushed}#" \
+  -e "s#<VLLM_IMAGE>#${VLLM_IMAGE:?Set VLLM_IMAGE to your chosen vLLM image}#" \
   deploy/inference-gateway/ext-proc/examples/onramp/agg.yaml |
   kubectl apply -n "$NAMESPACE" -f -
 ```
@@ -238,14 +241,16 @@ kubectl patch deployment/vllm-qwen -n "$NAMESPACE" --type merge \
 Do not use `kubectl label deployment` for this step. That command changes
 `Deployment.metadata.labels`, which does not label the worker pods.
 
-Compare a typical existing vLLM container with the changes required by the on-ramp.
+Compare a typical existing vLLM container with the changes required by the on-ramp. In both
+snippets, replace `<VLLM_IMAGE>` with your existing vLLM image reference, including its release tag
+or digest.
 
 **Before — existing vLLM container:**
 
 ```yaml
 containers:
   - name: vllm
-    image: vllm/vllm-openai:v0.28.0
+    image: <VLLM_IMAGE>
     args:
       - --model
       - Qwen/Qwen3-0.6B
@@ -261,7 +266,7 @@ containers:
 ```yaml
 containers:
   - name: vllm
-    image: vllm/vllm-openai:v0.28.0
+    image: <VLLM_IMAGE>
     args:
       - --model
       - Qwen/Qwen3-0.6B

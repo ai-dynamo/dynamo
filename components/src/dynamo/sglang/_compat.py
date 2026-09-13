@@ -20,23 +20,22 @@ Runtime data-contract notes (not code-level shims):
   >= 0.5.11. Pass through; do not re-encode.
 """
 
+import importlib
 import inspect
 import logging
+import uuid
 from collections.abc import Mapping
 from functools import lru_cache, wraps
+from types import ModuleType
 from typing import Any
 
 try:
-    from sglang.srt.arg_groups.overrides import declare_late_resolution
-except ImportError:
-    # SGLang 0.5.17 and the XPU 0.5.11 pin predate declarations.
-    declare_late_resolution = None
-
-try:
-    from sglang.srt.arg_groups.overrides import resolved_view as sglang_resolved_view
-except ImportError:
-    # SGLang #36255 exposes ServerArgs._resolved() instead.
-    sglang_resolved_view = None
+    from sglang.srt.utils.server_args_config_parser import ConfigArgumentMerger
+except ModuleNotFoundError as exc:
+    if exc.name != "sglang.srt.utils.server_args_config_parser":
+        raise
+    # Keep the CUDA 0.5.18 and XPU 0.5.11 pins working until both move here.
+    from sglang.srt.server_args_config_parser import ConfigArgumentMerger
 
 try:
     from sglang.srt.arg_groups.overrides import (
@@ -56,15 +55,12 @@ except ImportError:
     # Remove when min supported version has the accessor move (sgl #36972).
     sglang_use_mla_backend = None
 
-logger = logging.getLogger(__name__)
-
 try:
-    from sglang.srt.utils.server_args_config_parser import ConfigArgumentMerger
-except ModuleNotFoundError as exc:
-    if exc.name != "sglang.srt.utils.server_args_config_parser":
-        raise
-    # Keep the CUDA 0.5.18 and XPU 0.5.11 pins working until both move here.
-    from sglang.srt.server_args_config_parser import ConfigArgumentMerger
+    from sglang.srt.runtime_context import publish as _sglang_publish
+except ImportError:
+    # Fallback for SGLang 0.5.18 and the XPU 0.5.11 pin. Remove the 0.5.18
+    # portion when minimum supported SGLang is 0.5.19+.
+    _sglang_publish = None
 
 
 def get_sglang_model_config(server_args: Any) -> Any:
@@ -97,6 +93,107 @@ def sglang_uses_mla_backend(server_args: Any) -> bool:
     return bool(sglang_use_mla_backend(server_args))
 
 
+def publish_server_args(server_args: Any, *, role: str) -> None:
+    """Publish process-wide SGLang configuration when the API is available."""
+    if _sglang_publish is not None:
+        _sglang_publish(server_args, role=role)
+
+
+try:
+    from sglang.srt.arg_groups.overrides import declare_late_resolution
+except ImportError:
+    # The separately pinned XPU SGLang 0.5.11 predates declarations. Remove
+    # when the XPU SGLang pin is upgraded to 0.5.18+.
+    declare_late_resolution = None
+
+try:
+    from sglang.srt.arg_groups.model_override_base import (
+        resolved_view as sglang_resolved_view,
+    )
+except ImportError:
+    # Fallback for SGLang 0.5.18. Remove when minimum supported SGLang is 0.5.19+.
+    try:
+        from sglang.srt.arg_groups.overrides import (
+            resolved_view as sglang_resolved_view,
+        )
+    except ImportError:
+        # The separately pinned XPU SGLang 0.5.11 stores effective values on
+        # ServerArgs directly. Remove when that pin is upgraded.
+        sglang_resolved_view = None
+
+logger = logging.getLogger(__name__)
+
+
+def get_mm_encoder_class() -> type[Any]:
+    """Load MMEncoder from the supported SGLang package layout.
+
+    Keep this import deferred because the encoder module imports compiled CUDA
+    operators and this compatibility module is also collected on CPU-only CI
+    hosts.
+    """
+    try:
+        from sglang.srt.disaggregation.encoder.server import MMEncoder
+    except ImportError:
+        # Fallback for SGLang 0.5.18. Remove when minimum supported SGLang is
+        # 0.5.19+.
+        from sglang.srt.disaggregation.encode_server import MMEncoder
+
+    return MMEncoder
+
+
+def get_encoder_preprocessor_modules() -> tuple[ModuleType, ...]:
+    """Return importable encoder modules that bind video preprocessing APIs."""
+    modules: list[ModuleType] = []
+    for module_path in (
+        "sglang.srt.disaggregation.encoder.preprocessor",
+        # Fallback for SGLang 0.5.18. Remove when minimum supported SGLang is
+        # 0.5.19+.
+        "sglang.srt.disaggregation.encode_server",
+    ):
+        try:
+            modules.append(importlib.import_module(module_path))
+        except (ImportError, OSError):
+            continue
+    return tuple(modules)
+
+
+async def mm_encode(
+    encoder: Any, media_inputs: list[Any], modality: Any
+) -> tuple[Any, Any, dict[str, Any]]:
+    """Encode media across the supported SGLang MMEncoder APIs."""
+    legacy_encode = getattr(encoder, "_encode", None)
+    if callable(legacy_encode):
+        # Fallback for SGLang 0.5.18. Remove when minimum supported SGLang is
+        # 0.5.19+.
+        return await legacy_encode(media_inputs, modality)
+
+    prepare = getattr(encoder, "_prepare_encode_context", None)
+    compute = getattr(encoder, "_compute_embedding", None)
+    if not callable(prepare) or not callable(compute):
+        raise RuntimeError("SGLang MMEncoder does not expose an encode API")
+
+    request = {
+        "req_id": f"dynamo-direct-{uuid.uuid4()}",
+        "num_parts": 1,
+        "part_idx": 0,
+        "mm_items": media_inputs,
+        "hashes": None,
+    }
+    encode_context = await prepare(
+        [request],
+        modality,
+        use_global_cache=False,
+    )
+    embeddings = await compute(encode_context, keep_on_gpu=False)
+    if embeddings is None:
+        raise RuntimeError("SGLang MMEncoder returned no embeddings")
+    return (
+        encode_context.preprocess_result.grid_thw,
+        embeddings,
+        encode_context.aux_data,
+    )
+
+
 @lru_cache(maxsize=1)
 def _warn_require_reasoning_unsupported() -> None:
     logger.warning(
@@ -109,9 +206,10 @@ def _warn_require_reasoning_unsupported() -> None:
 def ensure_sglang_tensor_image_size() -> None:
     """Allow SGLang's image-token resolver to handle decoded image tensors.
 
-    SGLang 0.5.13 through 0.5.18 assume every decoded image exposes the PIL
-    ``height``/``width`` attributes. Its CUDA JPEG decoder instead returns a
-    CHW tensor, causing multimodal requests to fall back to retokenization.
+    SGLang 0.5.13 through the 0.5.19 release branch assume every decoded image
+    exposes the PIL ``height``/``width`` attributes. Its CUDA JPEG decoder
+    instead returns a CHW tensor, causing multimodal requests to fall back to
+    retokenization.
 
     Remove this compatibility override once the minimum supported SGLang
     release handles tensor image dimensions itself.
@@ -154,24 +252,12 @@ def override_server_args(server_args: Any, source: str, **fields: Any) -> None:
 
     SGLang 0.5.18+ resolves its effective configuration separately from raw
     ``ServerArgs`` input. Declare pre-engine changes through its resolution API
-    so the engine's resolved projection observes them. SGLang 0.5.17 exposes
-    ``ServerArgs.override`` instead. The separately pinned XPU image still uses
-    SGLang 0.5.11, which predates both APIs; preserve its legacy assignment
-    behavior until its engine pin is upgraded.
+    so the engine's resolved projection observes them. The separately pinned
+    XPU image still uses SGLang 0.5.11, which predates that API; preserve its
+    legacy assignment behavior until its engine pin is upgraded.
     """
     if declare_late_resolution is not None:
         declare_late_resolution(server_args, source, **fields)
-        return
-
-    late_resolution = getattr(server_args, "_late_resolution", None)
-    if callable(late_resolution):
-        late_resolution(source, **fields)
-        return
-
-    # Fallback for SGLang 0.5.17. Remove when minimum supported SGLang is 0.5.18+.
-    override = getattr(server_args, "override", None)
-    if callable(override):
-        override(source, **fields)
         return
 
     # XPU compatibility for SGLang 0.5.11. Remove when the XPU SGLang pin is
@@ -183,14 +269,11 @@ def override_server_args(server_args: Any, source: str, **fields: Any) -> None:
 def resolved_server_args(server_args: Any) -> Any:
     """Return SGLang's effective configuration for one initialized engine.
 
-    SGLang #36255 exposes ``ServerArgs._resolved()``. Current SGLang keeps
-    ``ServerArgs`` raw and exposes the same projection through
-    ``resolved_view()``. Older supported releases and Dynamo's non-LLM argument
-    stubs retain effective values on the object itself.
+    SGLang 0.5.18 and 0.5.19 keep ``ServerArgs`` raw and expose the effective
+    projection through ``resolved_view()``. The separately pinned XPU release
+    and Dynamo's non-LLM argument stubs retain effective values on the object
+    itself.
     """
-    resolve = getattr(server_args, "_resolved", None)
-    if callable(resolve):
-        return resolve()
     if sglang_resolved_view is not None:
         return sglang_resolved_view(server_args)
     return server_args
@@ -269,8 +352,12 @@ __all__ = [
     "ConfigArgumentMerger",
     "ensure_sglang_tensor_image_size",
     "filter_supported_async_generate_kwargs",
+    "get_encoder_preprocessor_modules",
+    "get_mm_encoder_class",
     "get_sglang_model_config",
+    "mm_encode",
     "override_server_args",
+    "publish_server_args",
     "require_reasoning_kwargs",
     "resolved_server_args",
     "sglang_uses_mla_backend",

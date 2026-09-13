@@ -36,18 +36,20 @@ import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from io import BytesIO
 from pathlib import Path
 from typing import Any, Generator
 
 import pytest
 import requests
 
-from tests.conftest import EtcdServer, NatsServer
-from tests.utils.gpu_args import build_gpu_mem_args
+from tests.mm_router.utils import (
+    COMMON_PROCESS_KWARGS,
+    build_vllm_gpu_mem_args,
+    make_png_bytes,
+)
 from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.payloads import check_models_api
-from tests.utils.port_utils import allocate_ports
+from tests.utils.port_utils import reserved_ports
 from tests.utils.router_logs import (
     extract_router_kv_overlap_records,
     wait_for_router_kv_overlap,
@@ -93,20 +95,6 @@ def _prepare_log_dir(request, suffix: str) -> str:
     return tempfile.mkdtemp(prefix=f"{request.node.name}_{suffix}_")
 
 
-_COMMON_PROCESS_KWARGS: dict[str, Any] = {
-    # Keep logs file-only; live tee can lag under GPU-parallel CI while tests poll files.
-    "display_output": False,
-    "terminate_all_matching_process_names": False,
-}
-
-
-def _vllm_gpu_mem_args(default_utilization: str) -> list[str]:
-    return build_gpu_mem_args("build_vllm_gpu_mem_args") or [
-        "--gpu-memory-utilization",
-        default_utilization,
-    ]
-
-
 class VLLMWorkerFrontendDecodeProcess(ManagedProcess):
     """vLLM backend with `--frontend-decoding` so the model card carries a
     `media_decoder` and the frontend's MediaLoader runs in-process."""
@@ -124,7 +112,7 @@ class VLLMWorkerFrontendDecodeProcess(ManagedProcess):
                 "--block-size",
                 str(BLOCK_SIZE),
                 "--enforce-eager",
-                *_vllm_gpu_mem_args("0.40"),
+                *build_vllm_gpu_mem_args("0.40"),
                 "--max-model-len",
                 "4096",
                 "--kv-events-config",
@@ -144,7 +132,7 @@ class VLLMWorkerFrontendDecodeProcess(ManagedProcess):
             timeout=900,
             straggler_commands=["-m dynamo.vllm"],
             log_dir=_prepare_log_dir(request, "vllm-worker-fed"),
-            **_COMMON_PROCESS_KWARGS,
+            **COMMON_PROCESS_KWARGS,
         )
 
 
@@ -171,20 +159,8 @@ class FrontendProcess(ManagedProcess):
             timeout=240,
             straggler_commands=["-m dynamo.frontend"],
             log_dir=_prepare_log_dir(request, "frontend-fed"),
-            **_COMMON_PROCESS_KWARGS,
+            **COMMON_PROCESS_KWARGS,
         )
-
-
-@pytest.fixture(scope="module")
-def mm_runtime_services(request):
-    with (
-        NatsServer(request, port=0) as nats,
-        EtcdServer(request, port=0) as etcd,
-        pytest.MonkeyPatch.context() as mp,
-    ):
-        mp.setenv("NATS_SERVER", f"nats://localhost:{nats.port}")
-        mp.setenv("ETCD_ENDPOINTS", f"http://localhost:{etcd.port}")
-        yield
 
 
 @pytest.fixture(scope="module")
@@ -193,22 +169,14 @@ def start_frontend_decode_services(
 ) -> Generator[tuple[int, ManagedProcess], None, None]:
     # start_port intentionally distinct from the URL-passthrough module's
     # range (11000s) so the two suites don't collide on local ports.
-    frontend_port, vllm_port, kv_event_port = allocate_ports(count=3, start_port=11500)
-    with VLLMWorkerFrontendDecodeProcess(
-        request, system_port=vllm_port, kv_event_port=kv_event_port
-    ):
-        time.sleep(2)  # allow ZMQ publisher to bind
-        with FrontendProcess(request, frontend_port=frontend_port) as fe:
-            yield frontend_port, fe
-
-
-def _make_png_bytes(color: tuple[int, int, int], size: int = 256) -> bytes:
-    from PIL import Image
-
-    img = Image.new("RGB", (size, size), color)
-    buf = BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
+    with reserved_ports(count=3, start_port=11500) as ports:
+        frontend_port, vllm_port, kv_event_port = ports
+        with VLLMWorkerFrontendDecodeProcess(
+            request, system_port=vllm_port, kv_event_port=kv_event_port
+        ):
+            time.sleep(2)  # allow ZMQ publisher to bind
+            with FrontendProcess(request, frontend_port=frontend_port) as frontend:
+                yield frontend_port, frontend
 
 
 def _build_payload(image_uris: list[str]) -> dict[str, Any]:
@@ -316,50 +284,52 @@ def http_image_server_with_alias() -> Generator[dict[str, str], None, None]:
     `/image_A_alias.png`) return *byte-identical* content; the
     content-hash assertion below relies on this. Distinct paths defeat
     URL-string hashing — only content hashing collides them."""
-    (port,) = allocate_ports(count=1, start_port=18600)
-    primary_bytes = _make_png_bytes((180, 30, 90))
-    image_map: dict[str, bytes] = {
-        "/image_A.png": primary_bytes,
-        "/image_A_alias.png": primary_bytes,  # byte-identical, different URL
-    }
-    server = HTTPServer(("127.0.0.1", port), _make_image_handler(image_map))
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield {
-            "primary": f"http://127.0.0.1:{port}/image_A.png",
-            "alias": f"http://127.0.0.1:{port}/image_A_alias.png",
+    with reserved_ports(count=1, start_port=18600) as ports:
+        port = ports[0]
+        primary_bytes = make_png_bytes((180, 30, 90))
+        image_map: dict[str, bytes] = {
+            "/image_A.png": primary_bytes,
+            "/image_A_alias.png": primary_bytes,  # byte-identical, different URL
         }
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
+        server = HTTPServer(("127.0.0.1", port), _make_image_handler(image_map))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield {
+                "primary": f"http://127.0.0.1:{port}/image_A.png",
+                "alias": f"http://127.0.0.1:{port}/image_A_alias.png",
+            }
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
 
 
 @pytest.fixture(scope="module")
 def http_video_server_with_alias() -> Generator[dict[str, str], None, None]:
-    (port,) = allocate_ports(count=1, start_port=18700)
-    media_dir = Path(__file__).resolve().parents[2] / "lib/llm/tests/data/media"
-    video_bytes = (media_dir / "240p_100.mp4").read_bytes()
-    secondary_video_bytes = (media_dir / "triangle_240p_10.mp4").read_bytes()
-    media_map = {
-        "/video_A.mp4": video_bytes,
-        "/video_A_alias.mp4": video_bytes,
-        "/video_B.mp4": secondary_video_bytes,
-    }
-    server = HTTPServer(("127.0.0.1", port), _make_image_handler(media_map))
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield {
-            "primary": f"http://127.0.0.1:{port}/video_A.mp4",
-            "alias": f"http://127.0.0.1:{port}/video_A_alias.mp4",
-            "secondary": f"http://127.0.0.1:{port}/video_B.mp4",
+    with reserved_ports(count=1, start_port=18700) as ports:
+        port = ports[0]
+        media_dir = Path(__file__).resolve().parents[2] / "lib/llm/tests/data/media"
+        video_bytes = (media_dir / "240p_100.mp4").read_bytes()
+        secondary_video_bytes = (media_dir / "triangle_240p_10.mp4").read_bytes()
+        media_map = {
+            "/video_A.mp4": video_bytes,
+            "/video_A_alias.mp4": video_bytes,
+            "/video_B.mp4": secondary_video_bytes,
         }
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
+        server = HTTPServer(("127.0.0.1", port), _make_image_handler(media_map))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield {
+                "primary": f"http://127.0.0.1:{port}/video_A.mp4",
+                "alias": f"http://127.0.0.1:{port}/video_A_alias.mp4",
+                "secondary": f"http://127.0.0.1:{port}/video_B.mp4",
+            }
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
 
 
 @pytest.mark.post_merge

@@ -31,7 +31,7 @@ from PIL import Image
 from transformers import AutoTokenizer
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-EXPECTED_AIPERF_VERSION = "0.10.0"
+EXPECTED_AIPERF_VERSION = "0.12.0"
 TOPOLOGY_ALIASES = {
     "aggregate": "aggregate",
     "agg": "aggregate",

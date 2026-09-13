@@ -26,7 +26,9 @@ COPY --chown=dynamo: launch/ /workspace/launch/
 WORKDIR /workspace
 USER dynamo
 
-RUN uv pip install --no-cache-dir tritonclient[grpc]
-RUN uv pip install /opt/tritonserver/python/triton*.whl
+RUN uv pip install --no-cache-dir \
+        'tritonclient[grpc]==2.72.0' 'protobuf==6.33.6' 'grpcio>=1.81.1,<=1.83.1' \
+        /opt/tritonserver/python/triton*.whl && \
+    uv pip check
 # Validate CUDA ABI compatibility at build time
-RUN python3 -c "import tritonserver"
+RUN python3 -c "import tritonserver; import tritonclient.grpc; from pathlib import Path; from google.protobuf import text_format; from tritonclient.grpc import model_config_pb2; text_format.Parse(Path('model_repo/identity/config.pbtxt').read_text(), model_config_pb2.ModelConfig())"

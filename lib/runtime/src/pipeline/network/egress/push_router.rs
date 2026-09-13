@@ -50,6 +50,9 @@ fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
         // request. Quarantine it, or a migration retry can reselect the same
         // worker before discovery removal catches up.
         ErrorType::Backend(BackendError::StreamIncomplete),
+        // The addressed server has no handler for this instance: discovery is
+        // stale or the worker is shutting down. Same reasoning as above.
+        ErrorType::WorkerUnavailable,
     ];
     match_error_chain(err, INHIBITED, &[])
 }
@@ -620,9 +623,9 @@ where
     /// Create a new PushRouter with an optional worker load monitor.
     ///
     /// The rejection path is gated by `fault_detection_enabled` (true here);
-    /// overload detection itself is driven by the monitor via `client.set_overloaded_instances(...)`.
-    /// If no thresholds are configured on the monitor (or no monitor is provided),
-    /// the routing snapshot reports at least one free instance and the gate never rejects.
+    /// durable overload detection is driven by the monitor through
+    /// `client.set_overloaded_instances(...)`. Worker responses can also create
+    /// bounded request-path overload leases.
     pub async fn from_client_with_monitor(
         client: Client,
         router_mode: RouterMode,
@@ -1941,11 +1944,11 @@ where
                         );
                         self.client.report_instance_down(instance_id);
                     } else if match_error_chain(err.as_ref(), &[ErrorType::WorkerOverloaded], &[]) {
-                        // Backpressure: worker said "my queue is full,
-                        // retry later". Mark overloaded so this FE skips it on
-                        // the next selection; the next ActiveLoad event from the
-                        // worker monitor overwrites the overloaded set from fresh
-                        // metrics. This is NOT report_instance_down (fault path).
+                        // Backpressure: the worker said "my queue is full,
+                        // retry later". A bounded lease prevents an immediate
+                        // retry loop. Fresh monitor data clears the lease early.
+                        // Lease expiry permits a recovery probe when load events
+                        // remain unchanged. This is not a fault quarantine.
                         tracing::debug!(
                             "Marking instance {instance_id} overloaded due to backpressure: {err}"
                         );
@@ -2498,6 +2501,15 @@ mod tests {
             !is_inhibited(&cancelled),
             "client cancellation is not a worker fault"
         );
+    }
+
+    #[test]
+    fn worker_unavailable_quarantines_the_worker() {
+        let err = DynamoError::builder()
+            .error_type(ErrorType::WorkerUnavailable)
+            .message("Server unavailable: unknown endpoint a/generate")
+            .build();
+        assert!(is_inhibited(&err));
     }
 
     #[test]

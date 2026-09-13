@@ -55,13 +55,15 @@ These recipes demonstrate aggregated or disaggregated serving:
 | **[DeepSeek-R1](deepseek-r1/trtllm/disagg/wide_ep/gb200/)** | TensorRT-LLM | Disagg WideEP (GB200) | 36x GB200 | ✅ | ✅ | Multi-node: 8 decode + 1 prefill nodes | ❌ |
 | **[DeepSeek-R1](deepseek-r1/)** | vLLM | Disagg DEP16 | 32x H200 | ✅ | ❌ | Multi-node, data-expert parallel | ❌ |
 | **[DeepSeek-V4-Flash](deepseek-v4/deepseek-v4-flash/)** | vLLM | Agg + Disagg | 4x B200 / 4x H200 | ✅ | ✅ | Text — MoE 284B / 13B active, NVFP4 (B200) / public FP8 (H200) + FP8 KV, agg TP4 (B200) / DP4+TP1+EP (H200), MTP (H200), KV-aware routing, agentic trace profile, reasoning + tool calling; plus disagg 2P1D (12x B200) / 4P3D (28x H200) | ❌ |
+| **[DeepSeek-V4.1-Flash](deepseek-v4.1-flash/)** | SGLang | Agg + Disagg | 8x GB200 | ✅ | ❌ | Day-0, not benchmarked — MoE, FP8 dense + FP4 experts + FP8 KV, 1M ctx, TP4 + EP4, KV-aware routing, DSpark spec dec (agg only), reasoning + tool calling; plus disagg 1P1D with Mooncake KV transfer over MNNVL | ❌ |
 | **[DeepSeek-V4-Pro](deepseek-v4/deepseek-v4-pro/)** | vLLM | Agg + Disagg | 8x B200 / 8x H200 | ✅ | ✅ | Text — MoE 1.6T / 49B active (1M ctx; 86k on H200), NVFP4 (B200) / public FP8 (H200) + FP8 KV, TP8 + EP, MTP-2 (B200), KV-aware routing, agentic trace profile, reasoning + tool calling; plus disagg 1P1D (16x B200) / 1P3D (32x H200) | ❌ |
 | **[DeepSeek-V4-Pro-0813](deepseek-v4/deepseek-v4-pro-0813/)** | vLLM | Agg + Disagg | 8x GB200 / 8x H200 | ✅ | ✅ | Text — MoE 1.6T, MXFP4 experts + FP8 KV, 1M ctx, TP8 + EP, KV-aware routing, DSpark spec dec (GB200), agentic trace validated. Distinct checkpoint from DeepSeek-V4-Pro — do not share a model cache. | ❌ |
 | **[Kimi-K2.5](kimi-k2.5/trtllm/disagg-eagle-kv-router/)** | TensorRT-LLM | Disaggregated | 24x GB200 | ✅ | ✅ | DEP4 prefill + TEP4 decode, TRTLLM-native KV host offload | ❌ |
 | **[Kimi-K3](kimi-k3/vllm/)** | vLLM | Agg + Disagg | 16x GB200 / 16x GB300 | ✅ | ❌ | Multimodal MoE (1M ctx), MXFP4 experts + BF16 dense + FP8 KV, TP16 over MNNVL (GB200) / TP8 (GB300), KV-aware routing, FlashInfer MLA, reasoning + tool calling; plus disagg 1P1D (32x GB200) / 1P2D (24x GB300) | ❌ |
 | **[Kimi-K2.6](kimi-k2.6/vllm/)** | vLLM | Aggregated | 4x B200 / 8x H200 | ✅ | ✅ | MoE, NVFP4+FP8 KV (B200) / INT4 (H200), TP4/TP8, EAGLE3 MLA spec decode, LMCache CPU offload; text+image, chat + agentic profiles | ❌ |
 | **[Nemotron-3-Super](nemotron-3-super/vllm/)** | vLLM | Aggregated | 4x B200 / 4x H200 | ✅ | ✅ | ~120B hybrid Mamba/Attention/MoE (~12B active), NVFP4 (B200) / FP8 (H200) + FP8 KV, TP4+EP, MTP, KV-aware routing; chat + agentic profiles | ❌ |
-| **[Nemotron-3-Ultra](nemotron-3-ultra/vllm/)** | vLLM | Agg + Disagg | B200 / GB200 / H200 | ✅ | ✅ | Optimized agentic profiles for native 256K and opt-in 1M context; NVFP4 + FP8, MTP, and KV-aware routing | ❌ |
+| **[Nemotron-3-Ultra](nemotron-3-ultra/vllm/)** | vLLM | Agg + Disagg | B200 / GB200 / H200 | ✅ | ✅ | Optimized agentic profiles for native 256K and opt-in 1M context; NVFP4 + FP8, MTP, and KV-aware routing |
+| **[Qwen3.8-Flash-Next](qwen3.8-flash-next/)** | vLLM | Agg + Disagg | 4x B200 / 8x B200 / 12x B200 | ✅ | ✅ | Multimodal (text+image+video) ultra-sparse MoE (125B / 6B active) with GDN+QSA hybrid attention, 51B N-gram embedding offload to host RAM, Inferact NVFP4 weights, TP4+EP, MTP3 spec decode, KV-aware routing, reasoning + tool calling (`qwen3_coder`); agentic profile | ❌ |
 
 **Legend:**
 - **Deployment**: ✅ = Complete `deploy.yaml` manifest available
@@ -306,7 +308,7 @@ resources:
 **Scaling:**
 ```yaml
 services:
-  VllmDecodeWorker:
+  decode:
     replicas: 2  # Scale to multiple workers
 ```
 

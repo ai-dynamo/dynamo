@@ -398,7 +398,13 @@ def test_raw_reference_omits_dgd_only_fields_from_standalone_dcd_docs(
         assert "MultinodeSpec" in dcd_multinode.type
         dcd_roles = next(field for field in dcd.fields if field.name == "roles")
         assert dcd_roles.type == "object array"
-        assert "Standalone DCD roles accept only `name`" in dcd_roles.description
+        if (
+            "Standalone DCD roles accept only `name` and `replicas`"
+            not in dcd_roles.description
+        ):
+            raise AssertionError(
+                "standalone DCD roles must document `name` and `replicas`"
+            )
         for type_name in (
             "DynamoComponentDeploymentSharedSpec",
             "ComponentRoleSpec",

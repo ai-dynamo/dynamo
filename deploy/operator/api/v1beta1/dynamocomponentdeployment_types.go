@@ -162,14 +162,16 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	MinAvailable *int32 `json:"minAvailable,omitempty"`
 
-	// multinode configures multinode components.
+	// multinode configures worker, prefill, or decode components that span
+	// multiple Pods.
 	// +optional
 	Multinode *MultinodeSpec `json:"multinode,omitempty"`
 
 	// roles expose the named Pod-producing parts inside a compound component.
 	// When set for a multinode component, this list must contain exactly one
-	// leader and one worker role. Their cardinality is derived from multinode.nodeCount.
-	// Omission preserves the implicit multinode role layout.
+	// leader and one worker role. Admission defaults omitted replicas to 1 for
+	// leader and multinode.nodeCount minus 1 for worker. Omitting the roles list
+	// preserves the implicit multinode role layout.
 	// +optional
 	// +listType=map
 	// +listMapKey=name

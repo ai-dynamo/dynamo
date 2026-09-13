@@ -16,21 +16,22 @@ from __future__ import annotations
 
 import base64
 import os
-import shutil
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from io import BytesIO
 from typing import Any, Generator
 
 import pytest
 import requests
 
-from tests.conftest import EtcdServer, NatsServer
-from tests.utils.gpu_args import build_gpu_mem_args
+from tests.mm_router.utils import (
+    COMMON_PROCESS_KWARGS,
+    build_vllm_gpu_mem_args,
+    make_png_bytes,
+)
 from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.payloads import check_models_api
-from tests.utils.port_utils import allocate_ports
+from tests.utils.port_utils import reserved_ports
 from tests.utils.router_logs import (
     extract_router_kv_overlap_records,
     wait_for_router_kv_overlap,
@@ -78,23 +79,7 @@ def _make_process_env(log_level: str = "debug", **extra) -> dict[str, str]:
 
 
 def _prepare_log_dir(request, suffix: str) -> str:
-    log_dir = f"{request.node.name}_{suffix}"
-    shutil.rmtree(log_dir, ignore_errors=True)
-    return log_dir
-
-
-_COMMON_PROCESS_KWARGS: dict[str, Any] = {
-    # Keep logs file-only; live tee can lag under GPU-parallel CI while tests poll files.
-    "display_output": False,
-    "terminate_all_matching_process_names": False,
-}
-
-
-def _vllm_gpu_mem_args(default_utilization: str) -> list[str]:
-    return build_gpu_mem_args("build_vllm_gpu_mem_args") or [
-        "--gpu-memory-utilization",
-        default_utilization,
-    ]
+    return f"{request.node.name}_{suffix}"
 
 
 class VLLMWorkerProcess(ManagedProcess):
@@ -112,7 +97,7 @@ class VLLMWorkerProcess(ManagedProcess):
                 "--block-size",
                 str(BLOCK_SIZE),
                 "--enforce-eager",
-                *_vllm_gpu_mem_args("0.40"),
+                *build_vllm_gpu_mem_args("0.40"),
                 "--max-model-len",
                 "4096",
                 "--kv-events-config",
@@ -134,7 +119,7 @@ class VLLMWorkerProcess(ManagedProcess):
             timeout=900,
             straggler_commands=["-m dynamo.vllm"],
             log_dir=_prepare_log_dir(request, "vllm-worker"),
-            **_COMMON_PROCESS_KWARGS,
+            **COMMON_PROCESS_KWARGS,
         )
 
 
@@ -175,18 +160,8 @@ class FrontendProcess(ManagedProcess):
             timeout=240,
             straggler_commands=["-m dynamo.frontend"],
             log_dir=_prepare_log_dir(request, f"vllm-mm-frontend-{transfer_mode}"),
-            **_COMMON_PROCESS_KWARGS,
+            **COMMON_PROCESS_KWARGS,
         )
-
-
-@pytest.fixture(scope="module")
-def mm_runtime_services(request):
-    with NatsServer(request, port=0) as nats, EtcdServer(request, port=0) as etcd:
-        os.environ["NATS_SERVER"] = f"nats://localhost:{nats.port}"
-        os.environ["ETCD_ENDPOINTS"] = f"http://localhost:{etcd.port}"
-        yield
-        os.environ.pop("NATS_SERVER", None)
-        os.environ.pop("ETCD_ENDPOINTS", None)
 
 
 @pytest.fixture(scope="module", params=["shm", "nixl", "disabled"])
@@ -194,28 +169,24 @@ def start_vllm_mm_services(
     request, mm_runtime_services
 ) -> Generator[tuple[int, ManagedProcess], None, None]:
     transfer_mode = request.param
-    frontend_port, vllm_port, kv_event_port, fpm_port = allocate_ports(
-        count=4, start_port=10000
-    )
-
-    with VLLMWorkerProcess(
-        request, system_port=vllm_port, kv_event_port=kv_event_port, fpm_port=fpm_port
-    ):
-        # Worker health check passed; wait briefly for ZMQ publisher to bind.
-        time.sleep(2)
-        with FrontendProcess(
-            request, frontend_port=frontend_port, transfer_mode=transfer_mode
-        ) as frontend_proc:
-            yield frontend_port, frontend_proc
+    with reserved_ports(count=4, start_port=10000) as ports:
+        frontend_port, vllm_port, kv_event_port, fpm_port = ports
+        with VLLMWorkerProcess(
+            request,
+            system_port=vllm_port,
+            kv_event_port=kv_event_port,
+            fpm_port=fpm_port,
+        ):
+            # Worker health check passed; wait briefly for ZMQ publisher to bind.
+            time.sleep(2)
+            with FrontendProcess(
+                request, frontend_port=frontend_port, transfer_mode=transfer_mode
+            ) as frontend_proc:
+                yield frontend_port, frontend_proc
 
 
 def _make_png_bytes(color: tuple[int, int, int], size: int = 1024) -> bytes:
-    from PIL import Image
-
-    img = Image.new("RGB", (size, size), color)
-    buf = BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
+    return make_png_bytes(color, size)
 
 
 def _make_data_uri(color: tuple[int, int, int], size: int = 1024) -> str:
@@ -740,26 +711,30 @@ def _make_image_handler(image_map: dict[str, bytes]) -> type:
 @pytest.fixture(scope="module")
 def http_image_server() -> Generator[list[str], None, None]:
     """Serve pre-generated PNG images over HTTP for the duration of the module."""
-    (port,) = allocate_ports(count=1, start_port=18000)
+    with reserved_ports(count=1, start_port=18000) as ports:
+        port = ports[0]
+        image_map: dict[str, bytes] = {}
+        for i, color in enumerate(_HTTP_IMAGE_COLORS):
+            image_map[f"/image_{i}.png"] = _make_png_bytes(color)
+        image_map["/image_data_uri_equivalent.png"] = _make_png_bytes(
+            _HTTP_DATA_URI_COLOR
+        )
 
-    image_map: dict[str, bytes] = {}
-    for i, color in enumerate(_HTTP_IMAGE_COLORS):
-        image_map[f"/image_{i}.png"] = _make_png_bytes(color)
-    image_map["/image_data_uri_equivalent.png"] = _make_png_bytes(_HTTP_DATA_URI_COLOR)
+        server = HTTPServer(("127.0.0.1", port), _make_image_handler(image_map))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
 
-    server = HTTPServer(("127.0.0.1", port), _make_image_handler(image_map))
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-
-    urls = [
-        f"http://127.0.0.1:{port}/image_{i}.png" for i in range(len(_HTTP_IMAGE_COLORS))
-    ]
-    urls.append(f"http://127.0.0.1:{port}/image_data_uri_equivalent.png")
-    yield urls
-
-    server.shutdown()
-    server.server_close()
-    thread.join(timeout=5)
+        urls = [
+            f"http://127.0.0.1:{port}/image_{i}.png"
+            for i in range(len(_HTTP_IMAGE_COLORS))
+        ]
+        urls.append(f"http://127.0.0.1:{port}/image_data_uri_equivalent.png")
+        try:
+            yield urls
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
 
 
 @pytest.mark.timeout(600)

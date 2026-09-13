@@ -65,7 +65,7 @@ func (v *DynamoComponentDeploymentValidator) validate(
 		},
 	}
 
-	allErrs := validation.validateDynamoComponentDeployment(dcd)
+	allErrs := validation.validateDynamoComponentDeployment(dcd, nil)
 	allErrs = append(allErrs, validation.validateWorkerClassCheckpointRefOwnership(dcd)...)
 	alpha, err := alphaDynamoComponentDeploymentForValidation(dcd)
 	if err != nil {
@@ -94,7 +94,7 @@ func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 		},
 	}
 
-	allErrs := validation.validateDynamoComponentDeployment(newDCD)
+	allErrs := validation.validateDynamoComponentDeployment(newDCD, oldDCD)
 	allErrs = append(allErrs, validation.validateWorkerClassCheckpointRefOwnership(newDCD)...)
 	newAlpha, err := alphaDynamoComponentDeploymentForValidation(newDCD)
 	if err != nil {
@@ -161,13 +161,19 @@ func (v *dynamoComponentDeploymentValidation) validateWorkerClassCheckpointRefOw
 // validateDynamoComponentDeployment validates dcd. dcd must not be nil.
 func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeployment(
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+	oldDCD *nvidiacomv1beta1.DynamoComponentDeployment,
 ) field.ErrorList {
-	return v.validateDynamoComponentDeploymentSpec(&dcd.Spec, field.NewPath("spec"))
+	var oldSpec *nvidiacomv1beta1.DynamoComponentDeploymentSpec
+	if oldDCD != nil {
+		oldSpec = &oldDCD.Spec
+	}
+	return v.validateDynamoComponentDeploymentSpec(&dcd.Spec, oldSpec, field.NewPath("spec"))
 }
 
 // validateDynamoComponentDeploymentSpec validates spec. spec and fldPath must not be nil.
 func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentSpec(
 	spec *nvidiacomv1beta1.DynamoComponentDeploymentSpec,
+	oldSpec *nvidiacomv1beta1.DynamoComponentDeploymentSpec,
 	fldPath *field.Path,
 ) field.ErrorList {
 	// Standalone DCDs use neither Grove nor live InferencePool discovery.
@@ -175,6 +181,10 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 		grovePathway                      = false
 		validateInferencePoolAvailability = false
 	)
+	var oldSharedSpec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+	if oldSpec != nil {
+		oldSharedSpec = &oldSpec.DynamoComponentDeploymentSharedSpec
+	}
 	allErrs := validateElasticEPRequiresCommand(spec.BackendFramework, &spec.DynamoComponentDeploymentSharedSpec, fldPath)
 	allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpec(
 		&spec.DynamoComponentDeploymentSharedSpec,
@@ -182,6 +192,7 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 		dynamoComponentDeploymentSharedSpecValidationOptions{
 			grovePathway:                      grovePathway,
 			validateInferencePoolAvailability: validateInferencePoolAvailability,
+			oldComponent:                      oldSharedSpec,
 		},
 	)...)
 	return allErrs

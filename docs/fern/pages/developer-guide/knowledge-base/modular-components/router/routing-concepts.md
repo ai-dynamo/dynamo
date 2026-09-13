@@ -91,13 +91,13 @@ For detailed CLI arguments and advanced configuration options, see [Configuratio
 
 Dynamo supports several routing strategies when sending requests from one component to another component's endpoint.
 
-First, create a client tied to a component endpoint. Here we get a client tied to the `generate` endpoint of the `VllmWorker` component.
+First, create a client tied to a component endpoint. Here we get a client tied to the `generate` endpoint of the `worker` component.
 
 ```python
-client = await runtime.endpoint("dynamo.VllmWorker.generate").client()
+client = await runtime.endpoint("dynamo.worker.generate").client()
 ```
 
-You can then use the default routing methods exposed by the client class to send requests to the `VllmWorker` component.
+You can then use the default routing methods exposed by the client class to send requests to the `worker` component.
 
 - **Round-robin routing**: Default strategy, available through `client.generate()` on a standard endpoint client or explicitly through `client.round_robin()`
 - **Random routing**: Selects a random worker through `client.random()`

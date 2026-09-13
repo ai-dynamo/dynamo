@@ -3232,6 +3232,9 @@ pub fn validate_chat_completion_fields_generic(
     request: &NvCreateChatCompletionRequest,
 ) -> Result<(), ErrorResponse> {
     request.validate().map_err(|e| {
+        if find_invalid_argument_in_chain(e.as_ref()).is_some() {
+            return ErrorMessage::from_anyhow(e, "Invalid chat completion request");
+        }
         ErrorMessage::from_http_error(HttpError {
             code: 400,
             message: VALIDATION_PREFIX.to_string() + &e.to_string(),
@@ -3263,6 +3266,9 @@ pub fn validate_completion_fields_generic(
     request: &NvCreateCompletionRequest,
 ) -> Result<(), ErrorResponse> {
     request.validate().map_err(|e| {
+        if find_invalid_argument_in_chain(e.as_ref()).is_some() {
+            return ErrorMessage::from_anyhow(e, "Invalid completion request");
+        }
         ErrorMessage::from_http_error(HttpError {
             code: 400,
             message: VALIDATION_PREFIX.to_string() + &e.to_string(),
@@ -4400,8 +4406,14 @@ async fn images_with_request(
     let response = NvImagesResponse::from_annotated_stream(stream)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to fold images stream for {}: {:?}", request_id, e);
-            let err_response = ErrorMessage::internal_server_error("Failed to fold images stream");
+            // Route the stream error through from_anyhow so typed errors keep
+            // their semantics: an InvalidArgument raised by the worker (e.g.
+            // request validation) surfaces as HTTP 400 with its message,
+            // while internal errors remain sanitized 500s (and are logged by
+            // the sanitization path). No pre-classification logging here:
+            // expected 400s would show up at error level.
+            let err_response =
+                ErrorMessage::from_anyhow(anyhow::Error::new(e), "Failed to generate images");
             inflight.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
@@ -5429,6 +5441,28 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_chat_completion_request_accepts_media_url_with_uuid() {
+        for (part_type, media_url, uuid) in [
+            ("video_url", "https://example.com/video.mp4", "video-42"),
+            ("audio_url", "https://example.com/audio.wav", "audio-42"),
+        ] {
+            let body = format!(
+                r#"{{"model":"test-model","messages":[{{"role":"user","content":[{{"type":"{part_type}","{part_type}":{{"url":"{media_url}"}},"uuid":"{uuid}"}}]}}]}}"#
+            );
+
+            let request: NvCreateChatCompletionRequest =
+                parse_json_request("chat completions", body.as_bytes())
+                    .expect("request should parse");
+            let request = serde_json::to_value(request).expect("request should serialize");
+            assert_eq!(request["messages"][0]["content"][0]["uuid"], uuid);
+            assert_eq!(
+                request["messages"][0]["content"][0][part_type]["url"],
+                media_url
+            );
+        }
+    }
+
+    #[test]
     fn test_parse_chat_completion_request_accepts_empty_uuid_url_after_tolerant_parse() {
         let body = b"{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"raw \xff \x1b data\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"\"},\"uuid\":\"image-42\"}]}]}";
 
@@ -6058,16 +6092,29 @@ mod tests {
     fn unavailable_error_response_from_anyhow() {
         use dynamo_runtime::error::{DynamoError, ErrorType};
 
-        let err: anyhow::Error = DynamoError::builder()
-            .error_type(ErrorType::Unavailable)
-            .message("No workers available for endpoint test/worker/generate")
-            .build()
-            .into();
-        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+        // The pool-scoped and worker-scoped flavors both reach the client as 503
+        // when migration cannot retry them.
+        for (error_type, message) in [
+            (
+                ErrorType::Unavailable,
+                "No workers available for endpoint test/worker/generate",
+            ),
+            (
+                ErrorType::WorkerUnavailable,
+                "Server unavailable: unknown endpoint a/generate",
+            ),
+        ] {
+            let err: anyhow::Error = DynamoError::builder()
+                .error_type(error_type)
+                .message(message)
+                .build()
+                .into();
+            let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
 
-        assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(response.1.code, StatusCode::SERVICE_UNAVAILABLE.as_u16());
-        assert_eq!(response.1.message, "Service temporarily unavailable");
+            assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE, "{error_type}");
+            assert_eq!(response.1.code, StatusCode::SERVICE_UNAVAILABLE.as_u16());
+            assert_eq!(response.1.message, "Service temporarily unavailable");
+        }
     }
 
     #[test]

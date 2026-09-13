@@ -601,9 +601,8 @@ class VllmProcessor:
 
         messages = request.get("messages") or []
         _normalize_vllm_image_parts(messages)
-        # Validate cache-UUID modality support before vLLM downloads or
-        # processes media. Dynamo currently exposes vLLM cache UUIDs for
-        # images only.
+        # Preserve user cache UUIDs alongside URL-backed media. UUID-only image
+        # slots are resolved by the worker-side vLLM processor cache.
         mm_data, mm_uuids = extract_mm_urls(messages)
 
         # Images are fetched by vLLM's renderer via DynamoMediaConnector,

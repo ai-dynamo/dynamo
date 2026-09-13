@@ -79,7 +79,7 @@ spec:
           volumes:
             - {name: model-cache, persistentVolumeClaim: {claimName: model-cache}}
 
-    - name: VllmPrefillWorker
+    - name: prefill
       replicas: 1
       type: prefill
       # tmpfs at /dev/shm for the vLLM multiprocess executor's TP4 IPC buffers.
@@ -207,7 +207,7 @@ spec:
           volumes: &workerVolumes
             - {name: model-cache, persistentVolumeClaim: {claimName: model-cache}}
 
-    - name: VllmDecodeWorker
+    - name: decode
       replicas: 1
       type: decode
       sharedMemorySize: 64Gi
@@ -236,7 +236,7 @@ spec:
               args:
                 - |
                   set -euo pipefail
-                  # See VllmPrefillWorker for the fabric-discovery rationale.
+                  # See prefill for the fabric-discovery rationale.
                   hca=""
                   for hca_path in /sys/class/infiniband/*; do
                     [ -d "${hca_path}/device/net" ] || continue

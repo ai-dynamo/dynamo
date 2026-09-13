@@ -303,6 +303,44 @@ impl DistributedRuntime {
                 }));
         }
 
+        // Opt-in OTLP metrics export. Deliberately not tied to the system
+        // status server: that server is disabled by default
+        // (DYN_SYSTEM_PORT=-1), and gating export on it would make
+        // OTEL_METRICS_EXPORTER=otlp a silent no-op in the default
+        // configuration. Traces and logs are set up in logging::init() for the
+        // same reason -- an OTEL_* variable should mean the same thing for
+        // every signal. Metrics cannot join them there because the exporter
+        // needs the registry, which only exists once the runtime does.
+        match crate::metrics::otlp_export::ExportConfig::from_env() {
+            Ok(Some(export_config)) => {
+                tracing::info!(
+                    endpoint = %export_config.endpoint,
+                    interval_ms = export_config.interval.as_millis(),
+                    "exporting metrics over OTLP"
+                );
+                // Hold a graceful-shutdown guard for the task's life so the
+                // final export is not abandoned mid-RPC. `child_token()`
+                // derives from the endpoint shutdown token, which Phase 1
+                // cancels *before* the Phase 2 wait, so the exporter is told to
+                // stop and then waited for -- it cannot deadlock the wait on a
+                // token that only fires in Phase 3.
+                let shutdown_guard = distributed_runtime
+                    .runtime
+                    .graceful_shutdown_tracker()
+                    .register_task();
+                let registry = distributed_runtime.metrics_registry.clone();
+                let cancel = distributed_runtime.runtime.child_token();
+                tokio::spawn(async move {
+                    crate::metrics::otlp_export::run(registry, export_config, cancel).await;
+                    drop(shutdown_guard);
+                });
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::error!(%error, "OTLP metrics export is misconfigured; not exporting");
+            }
+        }
+
         // Handle system status server initialization
         if let Some(cancel_token) = cancel_token {
             // System server is enabled - start both the state and HTTP server
@@ -796,13 +834,33 @@ pub struct DistributedConfig {
 }
 
 impl DistributedConfig {
+    /// Build distributed runtime configuration from environment defaults.
+    ///
+    /// # Panics
+    /// Panics if a discovery or transport setting is invalid.
     pub fn from_settings() -> DistributedConfig {
-        let request_plane = RequestPlaneMode::from_env();
+        Self::from_settings_with_overrides(None, None, None)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// Resolve per-worker options before environment defaults, without mutating
+    /// the process environment. Safe to use after the Tokio runtime has started.
+    pub fn from_settings_with_overrides(
+        discovery_backend: Option<&str>,
+        request_plane: Option<&str>,
+        event_plane: Option<&str>,
+    ) -> Result<DistributedConfig> {
+        let request_plane = match request_plane {
+            Some(value) => value.parse()?,
+            None => RequestPlaneMode::from_env(),
+        };
 
         // Determine the discovery backend first — we need it to compute the NATS default below.
         // Valid values for DYN_DISCOVERY_BACKEND: "kubernetes", "etcd" (default), "file", "mem"
-        let backend_str =
-            std::env::var("DYN_DISCOVERY_BACKEND").unwrap_or_else(|_| "etcd".to_string());
+        let backend_str = discovery_backend
+            .map(str::to_owned)
+            .or_else(|| std::env::var("DYN_DISCOVERY_BACKEND").ok())
+            .unwrap_or_else(|| "etcd".to_string());
 
         let discovery_backend = match backend_str.as_str() {
             "kubernetes" => {
@@ -810,12 +868,12 @@ impl DistributedConfig {
                 DiscoveryBackend::Kubernetes
             }
             other => {
-                let selector: kv::Selector = other.parse().unwrap_or_else(|_| {
-                    panic!(
+                let selector: kv::Selector = other.parse().map_err(|_| {
+                    anyhow::anyhow!(
                         "Unknown DYN_DISCOVERY_BACKEND value: '{other}'. \
                          Valid options: kubernetes, etcd, file, mem"
                     )
-                });
+                })?;
                 DiscoveryBackend::KvStore(selector)
             }
         };
@@ -823,7 +881,14 @@ impl DistributedConfig {
         // Resolve event transport kind once — the single source of truth used both to
         // decide whether to open a NATS connection and to answer
         // `DistributedRuntime::default_event_transport_kind()` later.
-        let event_transport_kind = discovery_backend.resolve_event_transport_kind();
+        let event_transport_kind = match event_plane {
+            Some("nats") => crate::discovery::EventTransportKind::Nats,
+            Some("zmq" | "") => crate::discovery::EventTransportKind::Zmq,
+            Some(other) => {
+                anyhow::bail!("Invalid event plane '{other}'. Valid options are: 'nats', 'zmq'")
+            }
+            None => discovery_backend.resolve_event_transport_kind(),
+        };
 
         // NATS is used for more than just NATS request-plane RPC:
         // - KV router events (NATS core event plane)
@@ -840,7 +905,7 @@ impl DistributedConfig {
                 crate::discovery::EventTransportKind::Nats
             );
 
-        DistributedConfig {
+        Ok(DistributedConfig {
             discovery_backend,
             nats_config: if nats_enabled {
                 Some(nats::ClientOptions::default())
@@ -850,7 +915,7 @@ impl DistributedConfig {
             request_plane,
             response_plane: None,
             event_transport_kind,
-        }
+        })
     }
 
     pub fn for_cli() -> DistributedConfig {

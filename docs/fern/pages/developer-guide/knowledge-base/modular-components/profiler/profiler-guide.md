@@ -683,7 +683,9 @@ overrides:
 The replacement image must include `kubectl` and a shell at `/bin/sh` that supports
 `set -o pipefail` (for example bash; a dash-only `/bin/sh` is not sufficient), plus the
 utilities used by the sidecar script: `grep`, `awk`, `tr`, `sed`, `date`, `cat`, and
-`sleep`. For `output-copier`, only `image` and `resources` are merged; other fields
+`sleep`. If `kubectl` is missing from the image, the sidecar exits immediately with an error
+instead of polling forever, so the profiling job fails and the DGDR moves to `Failed`.
+For `output-copier`, only `image` and `resources` are merged; other fields
 (`env`, `envFrom`, `volumeMounts`, `securityContext`, `command`/`args`) are ignored so
 controller-owned mounts such as `profiling-output` at `/data` stay intact.
 

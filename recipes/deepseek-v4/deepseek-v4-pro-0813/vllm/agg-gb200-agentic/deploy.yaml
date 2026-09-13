@@ -59,7 +59,7 @@ spec:
                     --trust-remote-code \
                     --http-host 0.0.0.0 \
                     --http-port 8000
-    - name: VllmDecodeWorker
+    - name: worker
       type: worker
       replicas: 1
       multinode:
