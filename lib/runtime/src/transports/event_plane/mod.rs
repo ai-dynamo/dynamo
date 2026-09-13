@@ -30,7 +30,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use lru::LruCache;
@@ -476,21 +476,17 @@ impl EventPublisher {
                     let advertised_host = event_plane_host_from_env()?;
                     let (pub_transport, actual_bind_endpoint) = std::thread::spawn({
                         let topic = topic.clone();
-                        move || {
+                        move || -> Result<(ZmqPubTransport, String)> {
                             let rt = tokio::runtime::Builder::new_current_thread()
                                 .enable_all()
                                 .build()
-                                .expect("Failed to create Tokio runtime for ZMQ");
+                                .context("Failed to create Tokio runtime for ZMQ")?;
 
-                            rt.block_on(async move {
-                                zmq_transport::ZmqPubTransport::bind("tcp://0.0.0.0:0", &topic)
-                                    .await
-                                    .expect("Failed to bind ZMQ publisher")
-                            })
+                            rt.block_on(ZmqPubTransport::bind("tcp://0.0.0.0:0", &topic))
                         }
                     })
                     .join()
-                    .expect("Failed to join ZMQ initialization thread");
+                    .map_err(|_| anyhow::anyhow!("ZMQ initialization thread panicked"))??;
 
                     let public_endpoint =
                         direct_zmq_public_endpoint(advertised_host, &actual_bind_endpoint)?;

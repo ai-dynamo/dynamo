@@ -18,12 +18,15 @@ try:
     from dynamo.common.protocols.image_protocol import NvCreateImageRequest
     from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
     from dynamo.common.utils.output_modalities import RequestType
+    from dynamo.llm.exceptions import InvalidArgument
     from dynamo.vllm.lora_state import LoRAState
     from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
     from dynamo.vllm.omni.main import _register_lora_engine_routes
     from dynamo.vllm.omni.omni_handler import EngineInputs, OmniHandler
     from dynamo.vllm.omni.utils import (
+        MAX_IMAGE_DIMENSION,
         build_original_prompt,
+        image_generation_size_from_request,
         parse_omni_request,
         streaming_sampling_params,
     )
@@ -691,6 +694,147 @@ class TestParseOmniRequest:
             "width": 512,
             "guidance_scale": 1.5,
         }
+
+    @pytest.mark.parametrize("bad", ["abc", [1, 2], {"w": 1}, 1.5, True])
+    def test_nvext_dimensions_reject_non_integers(self, bad):
+        # nvext is applied after image_generation_size_from_request and wins, so
+        # it needs its own bound or it reopens every case that helper rejects.
+        request = {"prompt": "x", "size": "512x512", "nvext": {"width": bad}}
+        with pytest.raises(ValueError, match=r"nvext\.width must be an integer"):
+            asyncio.run(parse_omni_request(request, ["image"]))
+
+    @pytest.mark.parametrize("bad", [0, -1, MAX_IMAGE_DIMENSION + 1])
+    def test_nvext_dimensions_reject_out_of_range(self, bad):
+        request = {"prompt": "x", "size": "512x512", "nvext": {"height": bad}}
+        with pytest.raises(ValueError, match=r"nvext\.height must be between"):
+            asyncio.run(parse_omni_request(request, ["image"]))
+
+    def test_nvext_overrides_an_out_of_range_size(self):
+        # nvext is the highest-priority source, so the size it replaces never
+        # reaches the engine and must not be validated on the way past.
+        request = {
+            "prompt": "x",
+            "size": "99999x99999",
+            "nvext": {"width": 512, "height": 512},
+        }
+        result = asyncio.run(parse_omni_request(request, ["image"]))
+        sp = result["sampling_params_list"]
+        assert (sp["width"], sp["height"]) == (512, 512)
+        assert result["engine_inputs"]["mm_processor_kwargs"] == {
+            "target_h": 512,
+            "target_w": 512,
+        }
+
+    def test_nvext_partial_override_still_validates_the_surviving_size(self):
+        # Only width is replaced, so the height that survives from `size` is
+        # still the value that reaches the engine, and still has to be bounded.
+        request = {"prompt": "x", "size": "512x99999", "nvext": {"width": 512}}
+        with pytest.raises(ValueError, match=r"height in size='512x99999'"):
+            asyncio.run(parse_omni_request(request, ["image"]))
+
+
+class TestImageGenerationSizeValidation:
+    """Client-supplied image dimensions are bounded wherever they enter."""
+
+    @pytest.mark.parametrize("bad", ["not-a-number", [1], {"w": 1}, 1.5, True])
+    def test_rejects_non_integer_width(self, bad):
+        with pytest.raises(ValueError, match="width must be an integer"):
+            image_generation_size_from_request({"width": bad})
+
+    @pytest.mark.parametrize("bad", [0, -1, MAX_IMAGE_DIMENSION + 1])
+    def test_rejects_out_of_range_width(self, bad):
+        with pytest.raises(ValueError, match="width must be between"):
+            image_generation_size_from_request({"width": bad})
+
+    @pytest.mark.parametrize("size", ["0x0", "-1x-1", "8192x8192"])
+    def test_rejects_out_of_range_size(self, size):
+        # The message must name ``size``: the client never sent ``width`` and
+        # would have no field to correct.
+        with pytest.raises(ValueError, match=r"width in size='"):
+            image_generation_size_from_request({"size": size})
+
+    def test_unparseable_size_still_falls_back_to_defaults(self):
+        # parse_size's documented contract: only what it does parse is bounded.
+        assert image_generation_size_from_request({"size": "not-a-size"}) == (
+            1024,
+            1024,
+        )
+
+    def test_explicit_width_overrides_an_out_of_range_size(self):
+        # The size value is discarded, so it must not be validated on its way out.
+        request = {"size": "99999x99999", "width": 512, "height": 512}
+        assert image_generation_size_from_request(request) == (512, 512)
+
+    def test_a_discarded_extra_body_width_is_not_validated(self):
+        # Same rule one level down: the top-level field wins over extra_body, so
+        # the extra_body value never reaches the engine and must not fail the
+        # request. Only the value that survives the precedence chain is checked.
+        request = {"extra_body": {"width": "abc"}, "width": 512}
+        assert image_generation_size_from_request(request) == (512, 1024)
+
+    def test_extra_body_width_still_applies_when_not_overridden(self):
+        request = {"extra_body": {"width": 100, "height": 100}}
+        assert image_generation_size_from_request(request) == (100, 100)
+
+    def test_accepts_the_maximum(self):
+        maximum = f"{MAX_IMAGE_DIMENSION}x{MAX_IMAGE_DIMENSION}"
+        assert image_generation_size_from_request({"size": maximum}) == (
+            MAX_IMAGE_DIMENSION,
+            MAX_IMAGE_DIMENSION,
+        )
+
+    def test_a_long_size_is_truncated_in_the_error(self):
+        # size is unbounded client input and this message reaches both the
+        # caller and the handler's log line, so it must not echo all of it.
+        long_size = "9" * 100 + "x1"
+        with pytest.raises(ValueError) as excinfo:
+            image_generation_size_from_request({"size": long_size})
+        message = str(excinfo.value)
+        assert long_size not in message
+        assert "..." in message and len(message) < 120
+
+    def test_non_string_size_falls_back_to_defaults(self):
+        # parse_size tolerates a non-string size; the error label must too.
+        assert image_generation_size_from_request({"size": 1024}) == (1024, 1024)
+
+
+class TestImageEndpointSizeValidation:
+    """/v1/images/generations takes the same bound as the chat path."""
+
+    def test_rejects_out_of_range_size(self):
+        handler = _make_handler()
+        req = NvCreateImageRequest(prompt="x", size="99999x99999")
+        with pytest.raises(ValueError, match=r"width in size='99999x99999'"):
+            handler._engine_inputs_from_image(req)
+
+    def test_accepts_a_supported_size(self):
+        handler = _make_handler()
+        req = NvCreateImageRequest(prompt="x", size="1024x768")
+        inputs = handler._engine_inputs_from_image(req)
+        assert inputs.prompt["mm_processor_kwargs"] == {
+            "target_h": 768,
+            "target_w": 1024,
+        }
+
+    @pytest.mark.asyncio
+    async def test_rejection_propagates_instead_of_yielding_a_chat_chunk(self):
+        """The images route has no failure shape, so a rejection must not be
+        yielded as a chat.completion.chunk. It leaves the handler as
+        InvalidArgument, the registered binding exception the HTTP layer answers
+        with a 400."""
+        handler = _make_handler()
+        handler.config.output_modalities = ["image"]
+        request = {"prompt": "x", "size": "99999x99999"}
+
+        with pytest.raises(InvalidArgument) as excinfo:
+            async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                pass
+
+        # The client-facing message is the reason alone: errors.rs reads a
+        # registered exception's .value(py).str(), so no "ValueError: " prefix.
+        assert str(excinfo.value) == (
+            "width in size='99999x99999' must be between 1 and 4096"
+        )
 
 
 # ---------------------------------------------------------------------------

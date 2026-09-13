@@ -144,7 +144,7 @@ spec:
                 - --tensor-parallel-size
                 - "1"
                 - --max-batch-size
-                - "32"
+                - "24"
                 - --max-num-tokens
                 - "12288"
                 - --max-seq-len

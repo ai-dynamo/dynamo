@@ -5,6 +5,7 @@ import argparse
 import importlib
 import importlib.util
 import json
+import sys
 from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ import pytest
 from dynamo.llm import EngineType, EntrypointArgs
 from dynamo.mocker import MockEngineArgs
 from dynamo.mocker.args import parse_args
+from dynamo.mocker.utils import kv_cache
 
 MODULE_PATH = Path(__file__).resolve().parents[2] / "config.py"
 SPEC = importlib.util.spec_from_file_location("dynamo_mocker_config", MODULE_PATH)
@@ -57,6 +59,7 @@ def make_args(**overrides):
         "sglang_chunked_prefill_size": None,
         "sglang_clip_max_new_tokens": None,
         "sglang_schedule_conservativeness": None,
+        "sglang_generate": False,
         "trtllm_capacity_scheduler_policy": None,
         "aic_perf_model": False,
         "aic_system": None,
@@ -103,6 +106,11 @@ def test_build_runtime_config_uses_normalized_sglang_page_size_alias():
     assert runtime_config.max_num_seqs == 256
     assert runtime_config.max_num_batched_tokens == 8192
     assert runtime_config.runtime_data["output_replay_consumer"] == "true"
+
+
+def test_sglang_generate_capability_is_opt_in():
+    assert parse_args([]).sglang_generate is False
+    assert parse_args(["--sglang-generate"]).sglang_generate is True
 
 
 def test_build_mocker_engine_args_rejects_mismatched_sglang_sizes():
@@ -496,10 +504,47 @@ def test_get_kv_cache_dtype_bytes_supports_int8():
     assert get_kv_cache_dtype_bytes(cfg, "auto") == 2  # model default dtype
 
 
-def test_compute_kv_bytes_uses_transformers_text_config(monkeypatch):
-    """Use the language-model config when Transformers exposes a multimodal wrapper."""
-    from dynamo.mocker.utils import kv_cache
+def test_compute_kv_bytes_reads_local_config_json_without_transformers(
+    monkeypatch, tmp_path
+):
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "num_hidden_layers": 2,
+                "num_key_value_heads": 4,
+                "num_attention_heads": 8,
+                "hidden_size": 64,
+                "torch_dtype": "bfloat16",
+            }
+        )
+    )
+    monkeypatch.setitem(sys.modules, "transformers", None)
 
+    assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) == 256
+
+
+def test_compute_kv_bytes_unwraps_multimodal_text_config_json(tmp_path):
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "some_vlm",
+                "vision_config": {"hidden_size": 1},
+                "text_config": {
+                    "num_hidden_layers": 2,
+                    "num_key_value_heads": 4,
+                    "num_attention_heads": 8,
+                    "hidden_size": 64,
+                    "dtype": "bfloat16",
+                },
+            }
+        )
+    )
+
+    assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) == 256
+
+
+def test_compute_kv_bytes_uses_transformers_text_config_for_hub_ids(monkeypatch):
+    """A bare hub ID still resolves through transformers, unwrapping wrappers."""
     text_config = SimpleNamespace(
         num_hidden_layers=2,
         num_key_value_heads=4,
@@ -508,13 +553,108 @@ def test_compute_kv_bytes_uses_transformers_text_config(monkeypatch):
         dtype="bfloat16",
     )
     config = SimpleNamespace(get_text_config=lambda: text_config)
-    monkeypatch.setattr(
-        kv_cache.AutoConfig,
-        "from_pretrained",
-        lambda *args, **kwargs: config,
+
+    class FakeAutoConfig:
+        @staticmethod
+        def from_pretrained(model_path, **kwargs):
+            assert model_path == "org/model"
+            return config
+
+    monkeypatch.setitem(
+        sys.modules, "transformers", SimpleNamespace(AutoConfig=FakeAutoConfig)
     )
 
-    assert kv_cache.compute_kv_bytes_per_token("model") == 256
+    assert kv_cache.compute_kv_bytes_per_token("org/model") == 256
+
+
+_KV_TEXT_CONFIG = {
+    "num_hidden_layers": 2,
+    "num_key_value_heads": 4,
+    "num_attention_heads": 8,
+    "hidden_size": 64,
+    "torch_dtype": "bfloat16",
+}
+
+
+def _fake_transformers(from_pretrained):
+    return SimpleNamespace(AutoConfig=SimpleNamespace(from_pretrained=from_pretrained))
+
+
+def test_compute_kv_bytes_unwraps_nested_thinker_text_config(monkeypatch, tmp_path):
+    # Qwen2.5-Omni keeps the serving LLM under thinker_config.text_config.
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "qwen2_5_omni",
+                "thinker_config": {
+                    "model_type": "qwen2_5_omni_thinker",
+                    "audio_config": {"d_model": 1},
+                    "vision_config": {"hidden_size": 1},
+                    "text_config": _KV_TEXT_CONFIG,
+                },
+                "talker_config": {"hidden_size": 1, "num_hidden_layers": 1},
+            }
+        )
+    )
+    monkeypatch.setitem(sys.modules, "transformers", None)
+
+    assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) == 256
+
+
+def test_compute_kv_bytes_falls_back_to_transformers_for_gpt2_style_config(
+    monkeypatch, tmp_path
+):
+    # GPT-2 stores n_layer/n_head/n_embd; only transformers' attribute_map maps
+    # them, so the raw config.json must not be trusted for this layout.
+    (tmp_path / "config.json").write_text(
+        json.dumps({"model_type": "gpt2", "n_layer": 2, "n_head": 8, "n_embd": 64})
+    )
+    seen = []
+
+    def from_pretrained(model_path, **kwargs):
+        seen.append(model_path)
+        return SimpleNamespace(
+            num_hidden_layers=2, num_attention_heads=8, hidden_size=64
+        )
+
+    monkeypatch.setitem(
+        sys.modules, "transformers", _fake_transformers(from_pretrained)
+    )
+
+    # No num_key_value_heads: defaults to num_attention_heads; no dtype: float16.
+    assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) == 2 * 2 * 8 * 8 * 2
+    assert seen == [str(tmp_path)]
+
+
+def test_compute_kv_bytes_returns_none_for_unreadable_or_incomplete_config(
+    monkeypatch, tmp_path
+):
+    def from_pretrained(model_path, **kwargs):
+        return SimpleNamespace(model_type="unknown")  # no size fields
+
+    monkeypatch.setitem(
+        sys.modules, "transformers", _fake_transformers(from_pretrained)
+    )
+
+    assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) is None  # no config
+
+    (tmp_path / "config.json").write_text("{not json")
+    assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) is None
+
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "unknown"}))
+    assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) is None
+
+
+def test_compute_kv_bytes_propagates_unexpected_errors(monkeypatch):
+    def from_pretrained(model_path, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setitem(
+        sys.modules, "transformers", _fake_transformers(from_pretrained)
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        kv_cache.compute_kv_bytes_per_token("org/model")
 
 
 def test_build_mocker_engine_args_estimates_aic_blocks(monkeypatch):
@@ -688,3 +828,15 @@ def test_mock_engine_args_from_json_ignores_legacy_has_perf_model_field():
     assert engine_args.max_num_seqs is None
     assert engine_args.max_num_batched_tokens is None
     assert engine_args.worker_type == "decode"
+
+
+def test_response_plane_defaults_to_tcp_and_accepts_quic(monkeypatch):
+    monkeypatch.delenv("DYN_RESPONSE_PLANE", raising=False)
+
+    assert parse_args([]).response_plane == "tcp"
+    assert parse_args(["--response-plane", "quic"]).response_plane == "quic"
+    monkeypatch.setenv("DYN_RESPONSE_PLANE", "quic")
+    assert parse_args([]).response_plane == "quic"
+
+    with pytest.raises(SystemExit):
+        parse_args(["--response-plane", "invalid"])

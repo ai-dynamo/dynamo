@@ -764,11 +764,12 @@ def preprocess_chat_request(
     # Convert tools to SGLang format (done once, shared with parser creation)
     sglang_tools = convert_tools(request.get("tools"))
 
-    # Reject a named tool_choice whose function is missing from tools —
-    # otherwise the chat template would render with zero tools while
-    # guided decoding still constrains the output to that function's
-    # schema, producing confusing model behavior.
+    # Reject a forced tool_choice that cannot be satisfied by the provided tools.
+    # Otherwise the chat template and guided decoding cannot enforce the request.
     tool_choice = request.get("tool_choice", "auto")
+    forced_tool_choice = tool_choice == "required" or _is_named_tool_choice(tool_choice)
+    if tool_choice == "required" and not sglang_tools:
+        raise PreprocessError('tool_choice is "required" but tools is empty')
     if _is_named_tool_choice(tool_choice):
         chosen_name = tool_choice["function"]["name"]
         available_names = {t.function.name for t in (sglang_tools or [])}
@@ -777,6 +778,17 @@ def preprocess_chat_request(
                 f"tool_choice names function {chosen_name!r}, but it is not "
                 f"present in tools (available: {sorted(available_names) or 'none'})"
             )
+
+    response_format = request.get("response_format")
+    if (
+        forced_tool_choice
+        and isinstance(response_format, dict)
+        and response_format.get("type") == "structural_tag"
+    ):
+        raise PreprocessError(
+            "tool_choice forces a tool call and cannot be combined with a "
+            "structural_tag response format"
+        )
 
     template_tools = _filter_template_tools(
         request,
@@ -837,22 +849,22 @@ def preprocess_chat_request(
         tool_call_parser_name=tool_call_parser_name,
         sglang_tools=sglang_tools,
     )
-    # TODO: response_format wins here even when tool_choice is "required" or names
-    # a function, so a request that demanded a tool call can come back with none
-    # -- the tool constraint is dropped and only logged. The other two paths do
-    # the opposite: preprocessor/tool_choice.rs clears the response_format JSON
-    # and keeps the tool constraint, and prepost.py does the same after narrowing
-    # its conflict check. response_format is scoped by the OpenAI spec to the
-    # message the model returns to the user, not to tool calls, so the tool
-    # constraint is the one that must survive.
-    #
+    # This path also never reads the legacy guided_json / guided_regex /
+    # guided_grammar / guided_choice fields at all, so those are dropped silently
+    # while both other paths honor them (and reject them against a forced choice).
     if (
         response_format_guided_decoding is not None
         and tool_call_guided_decoding is not None
     ):
-        logger.warning(
-            "Tool-call guided decoding will be ignored because of response_format already exists."
-        )
+        if forced_tool_choice:
+            logger.warning(
+                "response_format guided decoding will be ignored because tool_choice is forced."
+            )
+        else:
+            logger.warning(
+                "Tool-call guided decoding will be ignored because response_format already exists."
+            )
+
     # A forced tool choice and a legacy guided_* constrain the same token stream,
     # so honoring the guided_* would drop the tool constraint while the forced-tool
     # parser stays selected. Reject that rather than drop one silently, matching
@@ -863,24 +875,23 @@ def preprocess_chat_request(
     # guided_regex; nothing is displaced, and named_zero_arg_tool below still
     # recognizes it. Rejecting an identical constraint would refuse a request the
     # two paths agree on.
-    tool_choice = request.get("tool_choice", "auto")
     if (
         legacy_guidance
         and tool_call_guided_decoding is not None
         and legacy_guidance != tool_call_guided_decoding
-        and (tool_choice == "required" or _is_named_tool_choice(tool_choice))
+        and forced_tool_choice
     ):
         raise InvalidArgument(
             "tool_choice forces a tool call and cannot be combined with an "
             "explicit guided_* constraint."
         )
 
-    # Explicit legacy constraints outrank automatic guidance, matching the vLLM
-    # processor. response_format is NOT covered by the check above -- see the TODO
-    # further up: it still wins over a forced tool choice here, unlike the other
-    # two paths.
     guided_decoding = (
-        legacy_guidance or response_format_guided_decoding or tool_call_guided_decoding
+        tool_call_guided_decoding
+        if forced_tool_choice
+        else legacy_guidance
+        or response_format_guided_decoding
+        or tool_call_guided_decoding
     )
 
     return SglangPreprocessResult(
@@ -991,6 +1002,13 @@ def _try_parse_json_array(text: str) -> list | None:
     return None
 
 
+def resolve_skip_special_tokens(requested: bool | None, *, has_parser: bool) -> bool:
+    """Honor explicit decoding options without hiding parser delimiters."""
+    if has_parser:
+        return False
+    return True if requested is None else requested
+
+
 class SglangStreamingPostProcessor:
     """Streaming post-processor using SGLang parsers and HF tokenizer detokenization.
 
@@ -1013,6 +1031,8 @@ class SglangStreamingPostProcessor:
         eos_token_ids: list[int] | None = None,
         prompt_token_ids: list[int] | None = None,
         stop_strings: set[str] | None = None,
+        stop_token_ids: set[int] | None = None,
+        skip_special_tokens: bool | None = None,
     ) -> None:
         self.tokenizer = tokenizer
         self.tool_call_parser = tool_call_parser
@@ -1026,7 +1046,9 @@ class SglangStreamingPostProcessor:
         self._fast_plain_text = tool_call_parser is None and reasoning_parser is None
         # Preserve special tokens when a parser is active so tool-call and
         # reasoning delimiters remain visible during incremental decoding.
-        self._skip_special_tokens = self._fast_plain_text
+        self._skip_special_tokens = resolve_skip_special_tokens(
+            skip_special_tokens, has_parser=not self._fast_plain_text
+        )
         self._is_json_array_parser = isinstance(tool_call_parser, JsonArrayParser)
         # Required/named guided output may be either bare JSON or
         # reasoning followed by JSON. Delay only the ambiguous bracket-leading
@@ -1034,7 +1056,11 @@ class SglangStreamingPostProcessor:
         self._pending_guided_reasoning_parts: list[str] | None = (
             [] if self._is_json_array_parser and reasoning_parser is not None else None
         )
+        # The frontend owns text shaping. Keep every stop token in the raw
+        # engine stream, but exclude a matched stop suffix when decoding
+        # user-visible text.
         self._eos_token_ids = set(eos_token_ids or [])
+        self._request_stop_token_ids = set(stop_token_ids or [])
         self._stop_strings = stop_strings or set()
         self._pending_stop_text = ""
         self._locally_finished = False
@@ -1063,11 +1089,35 @@ class SglangStreamingPostProcessor:
         # Full text accumulator for robust finish-time re-parse.
         self._tool_text_parts: list[str] = []
 
-    def _strip_trailing_eos_token_ids(self, token_ids: list[int]) -> list[int]:
-        if not self._eos_token_ids:
+    def _strip_matched_stop_token_ids(
+        self, token_ids: list[int], stop_reason: Any
+    ) -> list[int]:
+        """Remove only the engine-reported token-stop suffix from display IDs."""
+        if not token_ids:
             return token_ids
-        while token_ids and token_ids[-1] in self._eos_token_ids:
-            token_ids.pop()
+
+        known_stop_ids = self._eos_token_ids | self._request_stop_token_ids
+        if isinstance(stop_reason, int) and not isinstance(stop_reason, bool):
+            matched_ids = [stop_reason] if stop_reason in known_stop_ids else []
+        elif (
+            isinstance(stop_reason, list)
+            and stop_reason
+            and all(
+                isinstance(token_id, int)
+                and not isinstance(token_id, bool)
+                and token_id in known_stop_ids
+                for token_id in stop_reason
+            )
+        ):
+            matched_ids = stop_reason
+        elif stop_reason is None and token_ids[-1] in self._eos_token_ids:
+            # Model EOS is intentionally omitted from the public stop_reason.
+            matched_ids = [token_ids[-1]]
+        else:
+            matched_ids = []
+
+        if matched_ids and token_ids[-len(matched_ids) :] == matched_ids:
+            del token_ids[-len(matched_ids) :]
         return token_ids
 
     def _tool_call_id(self, name: str, index: int) -> str:
@@ -1391,9 +1441,12 @@ class SglangStreamingPostProcessor:
         stop_reason = engine_response.get("stop_reason")
         log_probs = engine_response.get("log_probs")
         top_logprobs = engine_response.get("top_logprobs")
-        if finish_reason is not None:
+        stop_terminated = engine_response.get(
+            "stop_terminated", finish_reason == "stop"
+        )
+        if stop_terminated:
             raw_token_count = len(token_ids)
-            token_ids = self._strip_trailing_eos_token_ids(list(token_ids))
+            token_ids = self._strip_matched_stop_token_ids(list(token_ids), stop_reason)
             retained_token_count = len(token_ids)
             if log_probs is not None and len(log_probs) == raw_token_count:
                 log_probs = log_probs[:retained_token_count]

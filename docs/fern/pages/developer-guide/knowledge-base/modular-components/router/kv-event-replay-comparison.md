@@ -68,7 +68,7 @@ When the router queries a worker, the local indexer can return six response vari
 |----------|------|--------------|
 | `Events` | Requested start is available in the buffer | Returns retained events and a real-event watermark |
 | `TreeDump` | Initial/full recovery or retained events cannot cover the request | Returns a full RadixTree snapshot as synthetic events plus the latest real-event watermark |
-| `TreeDumpFailed` | The worker cannot construct an exact snapshot and the client opted into explicit failure | Returns the failure and watermark so the router can reset the rank and continue in degraded mode |
+| `TreeDumpFailed` | The worker cannot construct an exact snapshot and the client opted into explicit failure | Reports a non-authoritative failure; the router retries within its existing bounds and preserves state and cursor if no snapshot becomes available |
 | `TooNew` | Requested range begins after the newest available event | Reports the available watermark without applying state |
 | `InvalidRange` | The requested end precedes the start | Rejects the malformed range |
 | `Error` | The worker query itself fails | Returns a serialized query error |
@@ -88,9 +88,13 @@ if last_seq >= 0 and seq > last_seq + 1:
 ```
 
 **Dynamo** (from `lib/llm/src/kv_router/indexer/recovery/worker_query_state.rs`):
-The router tracks an admission cursor per worker and data-parallel rank. Discovering and activating a source with a recovery target starts an initial full recovery immediately; live events arriving during recovery are admitted or buffered according to the rank state. A later gap buffers the live event, resets that rank, and requests a full snapshot with both range bounds unset. This deliberately favors a current, self-contained snapshot over trying to splice a bounded missing range into potentially stale state.
+The router tracks an admission cursor per worker and data-parallel rank. Discovering and activating a source with a recovery target starts an initial full recovery immediately; live events arriving during recovery are admitted or buffered according to the rank state. A later gap buffers the live event and requests events from the next expected ID (`start_event_id=Some(expected)`, `end_event_id=None`), preserving the existing rank and cursor.
 
-On success, the router transactionally replaces the rank from `TreeDump`, advances to the worker's real-event watermark, then drains buffered live events. If snapshot construction or transport fails, the router resets or fences the affected rank as appropriate and continues with degraded live-event processing. A later gap or source change can trigger another recovery.
+The worker selects the recovery response when handling the query: retained history produces `Events`; expired or unavailable history requires `TreeDump`. Buffered events update the existing index, while a successful tree dump transactionally replaces the rank. The client does not preselect snapshot recovery for an ordinary gap.
+
+After applying the response, the router sorts and deduplicates its local pending events, discards those covered by the response watermark, and admits the remaining suffix in order. Missing IDs, including events evicted from the bounded pending buffer, produce a structured warning; the router continues through the gaps and finishes recovery without another catch-up RPC. This can leave stale or missing advisory cache hints. The cursor advances only after successful queue admission, and source fencing and clear ordering still apply.
+
+Snapshot construction failures preserve existing state and cursor after bounded retries. Other query failures retain degraded live-event processing; admission failures fence the rank. A later independent live-stream gap or source change can trigger another recovery.
 
 ## When to Use Which
 
