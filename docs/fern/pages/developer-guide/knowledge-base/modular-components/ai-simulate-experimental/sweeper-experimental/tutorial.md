@@ -1,5 +1,5 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Sweeper Tutorial
 subtitle: Configure, execute, and inspect a replay-backed search
@@ -8,6 +8,12 @@ subtitle: Configure, execute, and inspect a replay-backed search
 > [!WARNING]
 > **Experimental.** Sweeper's API and search behavior may change without a standard deprecation
 > period.
+
+> [!NOTE]
+> **Retained Python SDK.** The YAML fragments in this tutorial build a `SmartSearchConfig` for
+> `Sweeper.run`. For `aisimulate recommend --stack dynamo`, use the [public recommendation
+> walkthrough](../../../../../cli/operations/simulation-with-dynosim/dynosim-sweeps.mdx) instead.
+> See [SDK and CLI configuration](overview.md#sdk-and-cli-configuration) for the schema boundary.
 
 ## 1. Define the Backend Search
 
