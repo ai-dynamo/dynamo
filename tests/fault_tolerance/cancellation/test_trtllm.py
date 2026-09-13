@@ -6,13 +6,12 @@ Test Execution Times (Last Run: 2025-12-13):
 - test_request_cancellation_trtllm_aggregated: ~45s (gpu_1)
 - test_request_cancellation_trtllm_decode_cancel: ~65s (gpu_1)
 - test_request_cancellation_trtllm_prefill_cancel: ~65s (gpu_1)
-- test_request_cancellation_trtllm_kv_transfer_cancel: ~65s (gpu_1)
+- test_request_cancellation_trtllm_decode_handoff_cancel: ~65s (gpu_1)
 - Total: ~240s x2 request planes = ~480s (0:08:00)
 """
 
 import logging
 import os
-import shutil
 import time
 
 import pytest
@@ -65,6 +64,7 @@ class DynamoWorkerProcess(ManagedProcess):
         request.addfinalizer(lambda port=system_port: deallocate_port(port))
         self.system_port = system_port
         self.frontend_port = frontend_port
+        tmp_path = request.getfixturevalue("tmp_path")
 
         command = [
             "python3",
@@ -80,16 +80,14 @@ class DynamoWorkerProcess(ManagedProcess):
             "16384",
         ]
         if mode != "agg":
-            with open("test_request_cancellation_trtllm_config.yaml", "w") as f:
+            config_file = tmp_path / f"trtllm_cancel_config_{system_port}.yaml"
+            with config_file.open("w") as f:
                 f.write(
                     "cache_transceiver_config:\n  backend: DEFAULT\n  max_tokens_in_buffer: 16384\n"
                 )
                 f.write("disable_overlap_scheduler: true\n")
                 f.write("kv_cache_config:\n  max_tokens: 16384\n")
-            command += [
-                "--extra-engine-args",
-                "test_request_cancellation_trtllm_config.yaml",
-            ]
+            command += ["--extra-engine-args", str(config_file)]
 
         health_check_urls = [
             (f"http://localhost:{frontend_port}/v1/models", check_models_api),
@@ -115,16 +113,7 @@ class DynamoWorkerProcess(ManagedProcess):
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = str(system_port)
 
-        # Set log directory based on worker type
-        log_dir = f"{request.node.name}_{mode}_worker"
-
-        # Clean up any existing log directory from previous runs
-        try:
-            shutil.rmtree(log_dir)
-            logger.info(f"Cleaned up existing log directory: {log_dir}")
-        except FileNotFoundError:
-            # Directory doesn't exist, which is fine
-            pass
+        log_dir = tmp_path / f"{mode}_worker"
 
         super().__init__(
             command=command,
@@ -133,7 +122,7 @@ class DynamoWorkerProcess(ManagedProcess):
             timeout=300,
             display_output=True,
             terminate_all_matching_process_names=False,
-            log_dir=log_dir,
+            log_dir=str(log_dir),
         )
 
         self.mode = mode
@@ -346,7 +335,9 @@ def test_request_cancellation_trtllm_decode_cancel(
                 )
 
 
-@pytest.mark.skip(reason="TRT-LLM prefill cancellation is disabled due to reliability")
+@pytest.mark.skip(
+    reason="Cancellation does not reach TRT-LLM before prefill completes (1.3.0rc25)"
+)
 @pytest.mark.timeout(195)  # 3x average
 def test_request_cancellation_trtllm_prefill_cancel(
     request, runtime_services_dynamic_ports, predownload_models
@@ -456,20 +447,20 @@ def test_request_cancellation_trtllm_prefill_cancel(
                 )
 
 
-@pytest.mark.skip(reason="Test fails only on CI")
-@pytest.mark.timeout(195)  # 3x average
-def test_request_cancellation_trtllm_kv_transfer_cancel(
+@pytest.mark.timeout(350)  # 3x average
+def test_request_cancellation_trtllm_decode_handoff_cancel(
     request, runtime_services_dynamic_ports, predownload_models
 ):
     """
-    End-to-end test for request cancellation during prefill to decode KV transfer phase.
+    End-to-end test for request cancellation after the decode worker accepts it.
 
-    This test verifies that when a request is cancelled by the client during the KV transfer phase,
-    the system properly handles the cancellation and cleans up resources on the workers.
+    The decode-entry log is emitted before KV transfer begins, so this test does not prove that
+    TRT-LLM supports an engine abort during transfer. It verifies Dynamo's deferred-abort behavior:
+    the engine abort fires after the handoff and both workers remain usable.
 
     Timing (Last Run: 2025-12-09): ~115s total (2 workers at 45% GPU each)
     - Engine initialization: ~92s (frontend: 2s, prefill worker: 45s, decode worker: 45s sequential)
-    - Testing KV transfer cancellation: ~20s
+    - Testing decode handoff cancellation: ~20s
     - Teardown: ~3s
     """
 
@@ -492,9 +483,8 @@ def test_request_cancellation_trtllm_kv_transfer_cancel(
                 # TODO: Why wait after worker ready fixes frontend 404 / 500 flakiness?
                 time.sleep(2)
 
-                # Step 4: Test request cancellation during KV transfer phase
                 logger.info(
-                    "Testing completion request cancellation during KV transfer phase..."
+                    "Testing completion request cancellation after decode handoff..."
                 )
 
                 # Send request with long prompt
@@ -509,24 +499,36 @@ def test_request_cancellation_trtllm_kv_transfer_cancel(
                     match_type="contains",
                 )
 
-                # Poll for decode worker entry signaling start of KV transfer phase
+                # Wait for decode admission. This log precedes KV transfer, and normal
+                # handoff can take longer than poll_for_pattern's 500 ms default.
                 _, decode_log_offset = poll_for_pattern(
                     process=decode_worker,
                     pattern=f"Decode Request ID: {request_id}",
+                    max_wait_ms=30_000,
                     poll_interval_ms=2,
+                    cancellable_request=cancellable_req,
                 )
 
-                # Cancel during KV transfer phase in decode worker
+                # Dynamo defers the engine abort until the first result completes.
                 cancellable_req.cancel()
-                logger.info(
-                    f"Cancelled request ID: {request_id} at beginning of decode"
-                )
+                logger.info(f"Cancelled request ID: {request_id} after decode handoff")
 
                 # Poll for "Aborted Request ID" in decode worker
-                _, decode_log_offset = poll_for_pattern(
+                poll_for_pattern(
                     process=decode_worker,
                     pattern=f"Aborted Request ID: {request_id}",
                     log_offset=decode_log_offset,
+                    max_wait_ms=10_000,
+                )
+
+                # The request-level abort log above is emitted when the wrapper is
+                # invoked. Require the later engine-abort signal so a stuck deferred
+                # task cannot masquerade as successful cancellation.
+                _, decode_log_offset = poll_for_pattern(
+                    process=decode_worker,
+                    pattern="Deferred abort: engine abort fired",
+                    log_offset=decode_log_offset,
+                    max_wait_ms=30_000,
                 )
 
                 # Verify frontend log has kill message
@@ -536,23 +538,33 @@ def test_request_cancellation_trtllm_kv_transfer_cancel(
                 )
 
                 logger.info(
-                    "Completion request cancellation at beginning of decode detected successfully"
+                    "Completion request cancellation after decode handoff detected successfully"
                 )
 
                 # Verify the workers are still functional
                 cancellable_req = send_cancellable_request(
-                    frontend.frontend_port, "chat_completion_stream"
+                    frontend.frontend_port,
+                    "chat_completion_stream",
+                    max_tokens=8,
+                    timeout_s=30,
                 )
                 _, decode_log_offset = poll_for_pattern(
                     process=decode_worker,
                     pattern="Decode Request ID: ",
                     log_offset=decode_log_offset,
+                    max_wait_ms=30_000,
                     match_type="contains",
+                    cancellable_request=cancellable_req,
                 )
-                read_streaming_responses(cancellable_req, expected_count=5)
+                read_streaming_responses(
+                    cancellable_req,
+                    expected_count=1,
+                    deadline_s=30,
+                    drain=True,
+                )
 
                 logger.info(
-                    "Workers are functional after cancellation during KV transfer"
+                    "Workers are functional after cancellation following decode handoff"
                 )
 
                 # Verify cancellation metrics

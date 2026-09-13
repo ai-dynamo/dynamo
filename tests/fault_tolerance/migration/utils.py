@@ -2,16 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
+import os
 import re
 import threading
 import time
 from collections.abc import Callable, Iterator
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 
 import pytest
 import requests
-from openai import APIError, OpenAI
+from openai import APIError
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.managed_process import (
@@ -19,6 +20,8 @@ from tests.utils.managed_process import (
 )
 from tests.utils.managed_process import ManagedProcess, terminate_process_tree
 from tests.utils.prometheus import sum_metric_samples
+
+from .request_utils import start_request, validate_response, wait_for_response
 
 logger = logging.getLogger(__name__)
 
@@ -33,24 +36,68 @@ def managed_processes_concurrently(
         return
 
     entered: list[ManagedProcess | None] = [None] * len(processes)
-    startup_error: BaseException | None = None
-    with ThreadPoolExecutor(max_workers=len(processes)) as executor:
-        futures = [executor.submit(process.__enter__) for process in processes]
-        for index, future in enumerate(futures):
+    startup_cancelled = threading.Event()
+    entered_lock = threading.Lock()
+
+    def enter_process(index: int, process: ManagedProcess) -> ManagedProcess:
+        entered_process = process.__enter__()
+        with entered_lock:
+            if startup_cancelled.is_set():
+                cleanup_immediately = True
+            else:
+                entered[index] = entered_process
+                cleanup_immediately = False
+
+        if cleanup_immediately:
             try:
-                entered[index] = future.result()
-            except BaseException as error:
-                if startup_error is None:
-                    startup_error = error
+                entered_process.__exit__(None, None, None)
+            except Exception:
+                logger.exception("Failed to clean up a late-starting process")
+        return entered_process
+
+    executor = ThreadPoolExecutor(max_workers=len(processes))
+    futures = [
+        executor.submit(enter_process, index, process)
+        for index, process in enumerate(processes)
+    ]
+
+    def cancel_startup() -> None:
+        startup_cancelled.set()
+        for future in futures:
+            future.cancel()
+        with entered_lock:
+            started = [process for process in entered if process is not None]
+            entered[:] = [None] * len(processes)
+        for process in reversed(started):
+            try:
+                process.__exit__(None, None, None)
+            except Exception:
+                logger.exception("Failed to clean up a concurrently started process")
+        for process, future in zip(processes, futures, strict=True):
+            if future.done() or process in started:
+                continue
+            process.cancel_startup()
+        # Wait until every startup task has either observed the terminated child
+        # or cleaned up a late start. This prevents fixture/port teardown from
+        # racing a worker that is still inside ManagedProcess.__enter__().
+        executor.shutdown(wait=True, cancel_futures=True)
+
+    try:
+        for future in as_completed(futures):
+            future.result()
+    except Exception:
+        cancel_startup()
+        raise
+    except BaseException:
+        cancel_startup()
+        raise
+    else:
+        executor.shutdown(wait=True)
 
     with ExitStack() as stack:
         for process in entered:
             if process is not None:
                 stack.callback(process.__exit__, None, None, None)
-
-        if startup_error is not None:
-            raise startup_error
-
         yield tuple(process for process in entered if process is not None)
 
 
@@ -83,197 +130,11 @@ class DynamoFrontendProcess(BaseDynamoFrontendProcess):
         self.timeout = startup_timeout_s
 
 
-def _make_client(frontend_port: int) -> OpenAI:
-    """Build an OpenAI client pointed at the test frontend.
-
-    max_retries=0 so fault-tolerance tests see the first error instead of
-    silent retries; api_key is a placeholder since the frontend doesn't auth.
-    """
-    return OpenAI(
-        base_url=f"http://localhost:{frontend_port}/v1",
-        api_key="not-needed",
-        max_retries=0,
-        timeout=240,
-    )
-
-
-def start_completion_request(
-    frontend_port: int,
-    stream: bool,
-    use_long_prompt: bool = False,
-    max_tokens: int | None = None,
-    long_prompt_repetitions: int = 8_000,
-    force_max_output_tokens: bool = False,
-) -> tuple:
-    """
-    Start a long-running completion request in a separate thread.
-
-    Responses are processed internally to extract content. First entry is (None, start_time)
-    to mark when request was sent. Subsequent entries contain extracted content or exceptions.
-
-    Args:
-        frontend_port: Port where the frontend is running
-        stream: Whether to use streaming responses
-        use_long_prompt: Whether to use a long prompt (~8000 tokens)
-        max_tokens: Explicit output-token cap, or the backend default when unset
-        long_prompt_repetitions: Number of repeated words in the long prompt
-        force_max_output_tokens: Disable EOS and require the full output-token
-            budget. Requires max_tokens.
-
-    Returns:
-        tuple: (request_thread, response_list) where response_list contains
-               (str | None | Exception, float) tuples.
-               - For streaming: each entry is (content_word, timestamp)
-               - For non-streaming: single entry is (full_content, timestamp)
-    """
-    response_list: list[tuple[str | None | Exception, float]] = []
-
-    def send_request():
-        prompt = "Tell me a long long long story about yourself?"
-        if use_long_prompt:
-            prompt += " Make sure it is" + " long" * long_prompt_repetitions + "!"
-
-        logger.info(
-            "Sending completion request (stream=%s) with prompt: '%s...'",
-            stream,
-            prompt[:50],
-        )
-
-        response_list.append((None, time.monotonic()))  # start observation
-
-        try:
-            client = _make_client(frontend_port)
-            request_args = {
-                "model": FAULT_TOLERANCE_MODEL_NAME,
-                "prompt": prompt,
-                "stream": stream,
-                "temperature": 0,
-                "seed": 0,
-            }
-            if max_tokens is not None:
-                request_args["max_tokens"] = max_tokens
-            if force_max_output_tokens:
-                if max_tokens is None:
-                    raise ValueError("force_max_output_tokens requires max_tokens")
-                request_args["extra_body"] = {
-                    "ignore_eos": True,
-                    "min_tokens": max_tokens,
-                }
-            if stream:
-                for chunk in client.completions.create(**request_args):
-                    text = chunk.choices[0].text if chunk.choices else None
-                    # Match the original hand-rolled parser: keep empty strings,
-                    # drop only None. Empty chunks (e.g. the first stream frame)
-                    # still count as a response arrival for delay measurement.
-                    if text is not None:
-                        response_list.append((text, time.monotonic()))
-            else:
-                resp = client.completions.create(**request_args)
-                response_list.append((resp.choices[0].text, time.monotonic()))
-        except Exception as error:
-            # openai.APIError subclasses cover HTTP non-200, mid-stream
-            # structured `data: {"error": {...}}` frames, connection failures,
-            # and timeouts. Non-openai exceptions (network, etc.) also bubble.
-            logger.error("Request failed with error: %s", error)
-            response_list.append((error, time.monotonic()))
-
-    request_thread = threading.Thread(target=send_request, daemon=True)
-    request_thread.start()
-
-    return request_thread, response_list
-
-
-def start_chat_completion_request(
-    frontend_port: int,
-    stream: bool,
-    use_long_prompt: bool = False,
-    max_tokens: int | None = None,
-    long_prompt_repetitions: int = 8_000,
-    force_max_output_tokens: bool = False,
-) -> tuple:
-    """
-    Start a long-running chat completion request in a separate thread.
-
-    Responses are processed internally to extract content. First entry is (None, start_time)
-    to mark when request was sent. Subsequent entries contain extracted content or exceptions.
-
-    Args:
-        frontend_port: Port where the frontend is running
-        stream: Whether to use streaming responses
-        use_long_prompt: Whether to use a long prompt (~8000 tokens)
-        max_tokens: Explicit output-token cap, or the backend default when unset
-        long_prompt_repetitions: Number of repeated words in the long prompt
-        force_max_output_tokens: Disable EOS and require the full output-token
-            budget. Requires max_tokens.
-
-    Returns:
-        tuple: (request_thread, response_list) where response_list contains
-               (str | None | Exception, float) tuples.
-               - For streaming: each entry is (content_word, timestamp)
-               - For non-streaming: single entry is (full_content, timestamp)
-    """
-    response_list: list[tuple[str | None | Exception, float]] = []
-
-    def send_request():
-        prompt = "Tell me a long long long story about yourself?"
-        if use_long_prompt:
-            prompt += " Make sure it is" + " long" * long_prompt_repetitions + "!"
-
-        logger.info(
-            "Sending chat completion request (stream=%s) with prompt: '%s...'",
-            stream,
-            prompt[:50],
-        )
-
-        response_list.append((None, time.monotonic()))  # start observation
-
-        try:
-            client = _make_client(frontend_port)
-            request_args = {
-                "model": FAULT_TOLERANCE_MODEL_NAME,
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": stream,
-                "temperature": 0,
-                "seed": 0,
-            }
-            if max_tokens is not None:
-                request_args["max_tokens"] = max_tokens
-            if force_max_output_tokens:
-                if max_tokens is None:
-                    raise ValueError("force_max_output_tokens requires max_tokens")
-                request_args["extra_body"] = {
-                    "ignore_eos": True,
-                    "min_tokens": max_tokens,
-                }
-            if stream:
-                for chunk in client.chat.completions.create(**request_args):
-                    content = chunk.choices[0].delta.content if chunk.choices else None
-                    # Match the original hand-rolled parser: keep empty strings,
-                    # drop only None. Empty chunks (e.g. the first `role`-only
-                    # stream frame) still count as a response arrival for delay
-                    # measurement.
-                    if content is not None:
-                        response_list.append((content, time.monotonic()))
-            else:
-                resp = client.chat.completions.create(**request_args)
-                response_list.append(
-                    (resp.choices[0].message.content, time.monotonic())
-                )
-        except Exception as error:
-            # openai.APIError subclasses cover HTTP non-200, mid-stream
-            # structured `data: {"error": {...}}` frames, connection failures,
-            # and timeouts. Non-openai exceptions also bubble for visibility.
-            logger.error("Request failed with error: %s", error)
-            response_list.append((error, time.monotonic()))
-
-    request_thread = threading.Thread(target=send_request, daemon=True)
-    request_thread.start()
-
-    return request_thread, response_list
-
-
 def determine_request_receiving_worker(
-    worker1: ManagedProcess, worker2: ManagedProcess, receiving_pattern: str
+    worker1: ManagedProcess,
+    worker2: ManagedProcess,
+    receiving_pattern: str,
+    log_offsets: tuple[int, int] = (0, 0),
 ) -> tuple[ManagedProcess, str, str]:
     """
     Determine which worker received the request while inspecting both logs together.
@@ -297,10 +158,11 @@ def determine_request_receiving_worker(
     request_re = re.compile(re.escape(receiving_pattern) + r"(?P<request_id>\S+)")
     poll_event = threading.Event()
 
-    def request_ids(worker: ManagedProcess) -> list[str]:
+    def request_ids(worker: ManagedProcess, log_offset: int) -> list[str]:
         try:
-            with open(worker.log_path, "r") as log_file:
-                return request_re.findall(log_file.read())
+            with open(worker.log_path, "rb") as log_file:
+                log_file.seek(log_offset)
+                return request_re.findall(log_file.read().decode(errors="ignore"))
         except FileNotFoundError:
             return []
         except OSError as error:
@@ -311,8 +173,8 @@ def determine_request_receiving_worker(
     last_worker1_ids: list[str] = []
     last_worker2_ids: list[str] = []
     while time.monotonic() < deadline:
-        last_worker1_ids = request_ids(worker1)
-        last_worker2_ids = request_ids(worker2)
+        last_worker1_ids = request_ids(worker1, log_offsets[0])
+        last_worker2_ids = request_ids(worker2, log_offsets[1])
 
         if last_worker1_ids and last_worker2_ids:
             pytest.fail(
@@ -463,47 +325,36 @@ def wait_for_endpoint_instance_reduction(
     )
 
 
-def wait_for_response(
-    response_list: list[tuple[str | None | Exception, float]],
-    num_responses: int = 5,
-    max_wait_time: float = 10.0,
-) -> None:
-    """
-    Block until at least ``num_responses`` non-empty payload chunks exist.
-
-    Args:
-        response_list: List being populated by background thread
-        num_responses: Absolute minimum number of non-empty payload chunks (default 5)
-        max_wait_time: Maximum time to wait in seconds (default 10s)
-    """
-    poll_interval = 0.001  # 1ms
-    deadline = time.monotonic() + max_wait_time
-
-    while time.monotonic() < deadline:
-        content_count = sum(
-            1 for response, _ in response_list if isinstance(response, str) and response
-        )
-        if content_count >= num_responses:
-            return
-        time.sleep(poll_interval)
-
-    content_count = sum(
-        1 for response, _ in response_list if isinstance(response, str) and response
-    )
-    pytest.fail(
-        f"Only observed {content_count}/{num_responses} non-empty response chunks "
-        f"within {max_wait_time}s"
+def read_worker_generate_metrics(
+    worker_system_port: int,
+    component: str = "backend",
+) -> tuple[float, float]:
+    """Read completed-request and response-byte totals for one worker endpoint."""
+    response = requests.get(f"http://localhost:{worker_system_port}/metrics", timeout=1)
+    response.raise_for_status()
+    labels = {"dynamo_component": component, "dynamo_endpoint": "generate"}
+    return (
+        sum_metric_samples(
+            response.text,
+            "dynamo_component_request_duration_seconds_count",
+            labels,
+        ),
+        sum_metric_samples(
+            response.text,
+            "dynamo_component_response_bytes_total",
+            labels,
+        ),
     )
 
 
 def wait_for_worker_generate_completion(
     worker_system_port: int,
+    baseline_duration_count: float,
+    baseline_response_bytes: float,
     component: str = "backend",
     max_wait_time: float = 10.0,
 ) -> None:
-    """Prove the replacement worker drained one request and emitted response bytes."""
-    metrics_url = f"http://localhost:{worker_system_port}/metrics"
-    labels = {"dynamo_component": component, "dynamo_endpoint": "generate"}
+    """Prove the replacement worker drained one new request with response bytes."""
     deadline = time.monotonic() + max_wait_time
     duration_count = 0.0
     response_bytes = 0.0
@@ -512,22 +363,17 @@ def wait_for_worker_generate_completion(
 
     while time.monotonic() < deadline:
         try:
-            response = requests.get(metrics_url, timeout=1)
-            response.raise_for_status()
-            duration_count = sum_metric_samples(
-                response.text,
-                "dynamo_component_request_duration_seconds_count",
-                labels,
+            duration_count, response_bytes = read_worker_generate_metrics(
+                worker_system_port,
+                component,
             )
-            response_bytes = sum_metric_samples(
-                response.text,
-                "dynamo_component_response_bytes_total",
-                labels,
-            )
-            if duration_count == 1 and response_bytes > 0:
+            if (
+                duration_count - baseline_duration_count == 1
+                and response_bytes - baseline_response_bytes > 0
+            ):
                 logger.info(
-                    "Replacement worker completed one request with %s response bytes",
-                    response_bytes,
+                    "Replacement worker completed one new request with %s response bytes",
+                    response_bytes - baseline_response_bytes,
                 )
                 return
         except (requests.RequestException, ValueError) as error:
@@ -536,53 +382,12 @@ def wait_for_worker_generate_completion(
         poll_event.wait(timeout=0.1)
 
     pytest.fail(
-        "Replacement worker did not complete exactly one generate request with "
-        f"response bytes within {max_wait_time}s; duration_count={duration_count}, "
+        "Replacement worker did not complete exactly one new generate request with "
+        f"response bytes within {max_wait_time}s; "
+        f"baseline_duration_count={baseline_duration_count}, "
+        f"duration_count={duration_count}, "
+        f"baseline_response_bytes={baseline_response_bytes}, "
         f"response_bytes={response_bytes}, last_error={last_error}"
-    )
-
-
-def validate_response(
-    request_thread: threading.Thread,
-    response_list: list[tuple[str | None | Exception, float]],
-) -> None:
-    """
-    Wait for and validate the response after migration.
-    Timing observations are logged for diagnosis, but they are not correctness
-    assertions. Loaded CI nodes and concurrent GPU tests can legitimately change
-    TTFT/TPOT without changing migration behavior.
-
-    Args:
-        request_thread: The thread running the request
-        response_list: List of (content_string | None | Exception, timestamp) tuples.
-                       Content is already parsed - no SSE format parsing needed.
-    """
-    request_thread.join(timeout=240)
-    assert not request_thread.is_alive(), "Request did not complete within 240 seconds"
-
-    assert len(response_list) > 0, "Missing first entry with start timestamp"
-    assert response_list[0][0] is None, "First entry should be start timestamp only"
-    prev_timestamp = response_list[0][1]
-
-    response_words: list[str] = []
-    for res, timestamp in response_list[1:]:
-        delay = timestamp - prev_timestamp
-        if delay > 2.0:
-            logger.info("Observed %.3fs before the next response chunk", delay)
-        prev_timestamp = timestamp
-
-        assert res is not None, "Response entry should not be None"
-        if isinstance(res, Exception):
-            raise res
-
-        # Content is already parsed - just collect it
-        response_words.append(res)
-
-    assert response_words, "Request completed without any response content"
-    logger.info(
-        "Received %s response(s): %s...",
-        len(response_words),
-        "".join(response_words)[:100],
     )
 
 
@@ -728,7 +533,8 @@ def run_migration_test(
     verify_replacement_worker: bool = False,
     before_worker_fault: Callable[[], None] | None = None,
     force_max_output_tokens: bool = False,
-) -> None:
+    expected_output_prefix: str | None = None,
+) -> tuple[ManagedProcess, str | None]:
     """
     Run the common migration test flow after frontend and workers are started.
 
@@ -761,42 +567,71 @@ def run_migration_test(
         force_max_output_tokens: Disable EOS and require the request's full
             max_tokens budget so state-based fault synchronization cannot race
             an early EOS.
+        expected_output_prefix: Stable fault-free output prefix used to prove
+            the content oracle extends beyond the fault boundary.
+
+    Returns:
+        The surviving replacement worker and the completed response output.
+            Failed migration cases return None for the output.
     """
+    # Ignore requests already present in the worker logs so the receiving-worker
+    # lookup only considers the request started below.
+    log_offsets = tuple(
+        os.path.getsize(worker.log_path) if worker.log_path else 0
+        for worker in (worker1, worker2)
+    )
+
     # Step 1: Send the request
-    if use_chat_completion:
-        request_thread, response_list = start_chat_completion_request(
-            frontend.frontend_port,
-            stream=stream,
-            use_long_prompt=use_long_prompt,
-            max_tokens=max_tokens,
-            long_prompt_repetitions=long_prompt_repetitions,
-            force_max_output_tokens=force_max_output_tokens,
-        )
-    else:
-        request_thread, response_list = start_completion_request(
-            frontend.frontend_port,
-            stream=stream,
-            use_long_prompt=use_long_prompt,
-            max_tokens=max_tokens,
-            long_prompt_repetitions=long_prompt_repetitions,
-            force_max_output_tokens=force_max_output_tokens,
-        )
+    request_thread, response = start_request(
+        frontend.frontend_port,
+        use_chat_completion=use_chat_completion,
+        stream=stream,
+        use_long_prompt=use_long_prompt,
+        max_tokens=max_tokens,
+        long_prompt_repetitions=long_prompt_repetitions,
+        force_max_output_tokens=force_max_output_tokens,
+    )
 
     # Step 2: Determine which worker received the request
     worker, worker_name, request_id = determine_request_receiving_worker(
-        worker1, worker2, receiving_pattern=receiving_pattern
+        worker1,
+        worker2,
+        receiving_pattern=receiving_pattern,
+        log_offsets=log_offsets,
     )
     replacement_worker = worker2 if worker is worker1 else worker1
     assert (
         request_thread.is_alive()
     ), "Request completed before the migration fault could be injected"
 
+    replacement_generate_baseline: tuple[float, float] | None = None
+    if verify_replacement_worker:
+        worker_system_port = getattr(replacement_worker, "system_port", None)
+        assert isinstance(
+            worker_system_port, int
+        ), "Replacement-worker verification requires an integer system_port"
+        replacement_generate_baseline = read_worker_generate_metrics(worker_system_port)
+
     # Step 3: Optionally wait for new response before stop (for decode tests)
     if wait_for_new_response_before_stop:
-        wait_for_response(response_list)
+        wait_for_response(response)
         assert (
             request_thread.is_alive()
         ), "Request completed before the worker fault was injected"
+        if expected_output_prefix is not None:
+            output_before_fault = "".join(
+                content
+                for content, _ in response.observations
+                if isinstance(content, str)
+            )
+            assert expected_output_prefix.startswith(output_before_fault), (
+                "Fault-free reference does not match the output emitted before "
+                "the fault; the content oracle is not stable"
+            )
+            assert len(expected_output_prefix) >= len(output_before_fault) + 32, (
+                "Fault-free stable prefix must cover at least 32 characters "
+                "after the fault boundary"
+            )
 
     if before_worker_fault is not None:
         before_worker_fault()
@@ -832,18 +667,29 @@ def run_migration_test(
                     receiving_pattern,
                     request_id,
                 )
-            validate_response(request_thread, response_list)
+            completed_output = validate_response(
+                request_thread,
+                response,
+                expected_completion_tokens=(
+                    max_tokens if force_max_output_tokens else None
+                ),
+            )
             if verify_replacement_worker:
                 worker_system_port = getattr(replacement_worker, "system_port", None)
                 assert isinstance(
                     worker_system_port, int
                 ), "Replacement-worker verification requires an integer system_port"
-                wait_for_worker_generate_completion(worker_system_port)
+                assert replacement_generate_baseline is not None
+                wait_for_worker_generate_completion(
+                    worker_system_port,
+                    *replacement_generate_baseline,
+                )
         else:
             # openai.APIError covers both mid-stream structured error frames and
             # HTTP non-200 responses.
             with pytest.raises(APIError):
-                validate_response(request_thread, response_list)
+                validate_response(request_thread, response)
+            completed_output = None
 
     # Step 6: Verify that migration behaved as expected via the frontend's
     # Prometheus metrics (a stable structured surface) instead of asserting on
@@ -862,3 +708,5 @@ def run_migration_test(
         expected_max_seq_len_exceeded_count=1 if migration_max_seq_len == 1 else 0,
         exact_counts=exact_metric_counts,
     )
+
+    return replacement_worker, completed_output

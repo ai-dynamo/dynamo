@@ -211,6 +211,31 @@ class TestOverrideSamplingParams:
         mock_post_init.assert_called_once()
 
 
+class TestNormalizeRequestFormat:
+    def test_moves_openai_stop_fields_without_overwriting_internal_values(self):
+        request = {
+            "max_tokens": 64,
+            "min_tokens": 32,
+            "ignore_eos": True,
+            "temperature": 0.5,
+            "stop_conditions": {"min_tokens": 16},
+            "sampling_options": {"temperature": 0.25},
+        }
+
+        HandlerBase._normalize_request_format(request)
+
+        assert request["stop_conditions"] == {
+            "max_tokens": 64,
+            "min_tokens": 16,
+            "ignore_eos": True,
+        }
+        assert "max_tokens" not in request
+        assert "min_tokens" not in request
+        assert "ignore_eos" not in request
+        assert request["sampling_options"] == {"temperature": 0.25}
+        assert "temperature" not in request
+
+
 class TestGuidedDecodingFromToolChoice:
     """Tests that guided_decoding dicts from Rust are converted to GuidedDecodingParams.
 

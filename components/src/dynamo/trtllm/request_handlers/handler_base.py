@@ -208,7 +208,7 @@ class _DeferredAbort:
         """Abort immediately if first token received, otherwise defer."""
         if self._first_token_received:
             self._generation_result.abort()
-            logging.debug("Deferred abort: first token already received, aborting now")
+            logging.debug("Deferred abort: engine abort fired")
         else:
             logging.debug(
                 "Deferred abort: first token not received, spawning background task"
@@ -223,7 +223,7 @@ class _DeferredAbort:
         except Exception:
             pass
         self._generation_result.abort()
-        logging.debug("Deferred abort: background task completed, abort fired")
+        logging.debug("Deferred abort: engine abort fired")
 
 
 @dataclass
@@ -906,12 +906,15 @@ class HandlerBase(BaseGenerativeHandler):
                         return True
         return False
 
-    def _normalize_request_format(self, request: dict) -> None:
+    @staticmethod
+    def _normalize_request_format(request: dict) -> None:
         """
         Convert OpenAI request format to TRT-LLM internal format.
 
         Moves fields from OpenAI locations to where TRT-LLM expects them:
         - max_tokens: top-level → stop_conditions.max_tokens
+        - min_tokens: top-level → stop_conditions.min_tokens
+        - ignore_eos: top-level → stop_conditions.ignore_eos
         - temperature: top-level → sampling_options.temperature
 
         Note: The Rust frontend's PrefillRouter handles the *value* of max_tokens
@@ -924,17 +927,17 @@ class HandlerBase(BaseGenerativeHandler):
         # Ensure stop_conditions exists
         if "stop_conditions" not in request:
             request["stop_conditions"] = {}
-        if "max_tokens" in request and "max_tokens" not in request["stop_conditions"]:
-            request["stop_conditions"]["max_tokens"] = request.pop("max_tokens")
+        for field in ("max_tokens", "min_tokens", "ignore_eos"):
+            if field in request:
+                value = request.pop(field)
+                request["stop_conditions"].setdefault(field, value)
 
         # Ensure sampling_options exists
         if "sampling_options" not in request:
             request["sampling_options"] = {}
-        if (
-            "temperature" in request
-            and "temperature" not in request["sampling_options"]
-        ):
-            request["sampling_options"]["temperature"] = request.pop("temperature")
+        if "temperature" in request:
+            temperature = request.pop("temperature")
+            request["sampling_options"].setdefault("temperature", temperature)
 
     async def _initiate_shutdown(self, error: Exception):
         """Initiate graceful shutdown after fatal error"""

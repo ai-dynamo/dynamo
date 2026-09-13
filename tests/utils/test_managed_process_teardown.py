@@ -19,6 +19,7 @@ Always use unique markers scoped to the test invocation.
 import os
 import signal
 import subprocess
+import threading
 import time
 import uuid
 
@@ -91,6 +92,46 @@ def _bash_sleep_cmd(marker: str, tag: str = "") -> list[str]:
     The trailing `: noexit` prevents bash from exec-ing into sleep
     (which would lose the marker from the cmdline)."""
     return ["bash", "-c", f": {marker}{tag}; sleep 300; : noexit"]
+
+
+def test_cancel_startup_is_owned_by_startup_thread(tmp_path):
+    """Cancelling startup must stop the child without a cross-thread __exit__."""
+    mp = ManagedProcess(
+        command=_bash_sleep_cmd(_unique_marker()),
+        health_check_funcs=[lambda: False],
+        timeout=30,
+        display_output=False,
+        terminate_all_matching_process_names=False,
+        log_dir=str(tmp_path),
+    )
+    startup_errors: list[BaseException] = []
+
+    def start() -> None:
+        try:
+            mp.__enter__()
+        except BaseException as error:
+            startup_errors.append(error)
+
+    startup_thread = threading.Thread(target=start)
+    startup_thread.start()
+
+    try:
+        deadline = time.monotonic() + 5
+        while mp.proc is None:
+            assert time.monotonic() < deadline, "Managed process did not start"
+            time.sleep(0.01)
+        pid = mp.proc.pid
+    finally:
+        mp.cancel_startup()
+        # Cancellation exits through normal cleanup, whose process-group grace
+        # period is eight seconds before forceful termination.
+        startup_thread.join(timeout=15)
+
+    assert not startup_thread.is_alive(), "Cancelled startup did not return"
+    assert len(startup_errors) == 1
+    assert isinstance(startup_errors[0], RuntimeError)
+    assert "startup was cancelled" in str(startup_errors[0])
+    assert _wait_for_pid_death(pid), "Cancelled startup left its child running"
 
 
 # ---------------------------------------------------------------------------
