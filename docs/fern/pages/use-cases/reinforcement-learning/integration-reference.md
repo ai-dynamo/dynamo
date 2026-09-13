@@ -142,6 +142,22 @@ Check `protocol_version` before reading the worker list. In protocol version `1`
 
 Refresh discovery before each control phase and require the complete capability set for the selected update path. Do not cache membership indefinitely or interpret list position as worker identity.
 
+### Namespace Scoping
+
+The RL listener reads the set of Dynamo namespaces it searches from its own process environment. Three variables decide that scope, and the first one that applies wins:
+
+| Variable | Effect when it applies |
+|---|---|
+| `DYN_NAMESPACE_PREFIX` | Match this namespace and the worker generations under it, so `ns` matches `ns` and `ns-abc123` but not the separate deployment `ns2` |
+| `DYN_NAMESPACE_WORKER_SUFFIX` | Match the single namespace `{DYN_NAMESPACE}-{DYN_NAMESPACE_WORKER_SUFFIX}` |
+| `DYN_NAMESPACE` | Match this exact namespace. It falls back to `dynamo` only when unset, so setting it to an empty value searches the same empty namespace the workers register under |
+
+An empty `DYN_NAMESPACE_PREFIX` or `DYN_NAMESPACE_WORKER_SUFFIX` counts as absent, exactly as an unset one does. An empty `DYN_NAMESPACE` does not: it is the namespace to search.
+
+This ordering matters because a worker that is given `DYN_NAMESPACE_WORKER_SUFFIX` registers under `{DYN_NAMESPACE}-{suffix}`, not under `{DYN_NAMESPACE}`. A listener configured for the bare namespace would find none of those workers.
+
+On Kubernetes the operator sets `DYN_NAMESPACE_PREFIX` on the frontend container for you, so the listener matches every worker generation at once — including the two generations that coexist during a rolling update. Set `DYN_NAMESPACE_WORKER_SUFFIX` on the listener yourself only outside Kubernetes, when the listener and the workers share one environment.
+
 ## Coordinate Policy Refresh
 
 The framework owns the fleet-level lifecycle:

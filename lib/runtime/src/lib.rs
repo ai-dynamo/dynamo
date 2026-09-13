@@ -36,6 +36,7 @@ pub mod distributed;
 pub mod instances;
 pub mod logging;
 pub mod metrics;
+pub mod namespace;
 pub mod nvtx;
 pub mod pipeline;
 pub mod prelude;
