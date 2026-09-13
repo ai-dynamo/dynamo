@@ -106,9 +106,8 @@ inclusive settable Total Graphics Power range, so a value the hardware would
 silently clamp — in either direction — is rejected at admission instead of
 skewing the Planner's projection. Both range boundaries are accepted.
 
-Four rules follow from this, and all four apply **only** to power-annotated
-components. A component without the annotation is unaffected: it may set
-`nodeName`, select any product, and change its placement exactly as before.
+Three rules follow from this, and all three apply **only** to power-annotated
+components. A component without the annotation is unaffected.
 
 - **The selector is required.** A power-annotated component without a non-empty
   exact `nvidia.com/gpu.product` selector is rejected. Node affinity does not
@@ -119,37 +118,13 @@ components. A component without the annotation is unaffected: it may set
   or a Dynamo support statement — it records which products this release can
   range-check a cap against. A later release can add products; doing so only
   turns rejections into acceptances.
-- **`nodeName` is rejected.** Pinning a Pod to a node bypasses the scheduler and
-  invalidates the product the selector chose.
 - **The selector is immutable.** Like the cap, the GPU count, and the node count,
   it is fixed for the life of the DGD. Moving a component to another GPU product
   means deleting and recreating the DGD with a cap valid for that product.
 
-Compatibility depends on the stored component shape, not when the DGD was
-created. A power-annotated component without a non-empty exact GPU product
-selector is legacy-shaped. Unrelated updates to that component, including the
-Planner's replica writes, remain admissible only while its power value, complete
-node selector, `nodeName`, and affinity remain unchanged.
-
-A component with a non-empty exact GPU product selector is product-aware. Other
-selector keys and affinity do not affect the selected-product rule, but the exact
-product remains immutable. Admission ratchets an unchanged pre-existing product,
-range, or `nodeName` violation only while every normalized input to that rule
-remains identical.
-
-Of those three, only `nodeName` can be repaired in place: clearing it changes the
-rule inputs, so the ratchet lifts, and the repaired component has nothing left to
-reject. A pre-existing product or range violation cannot be repaired that way,
-because the exact product selector and the cap are both immutable — recreate the
-DGD instead.
-
-A ratcheted violation is admitted but not silent: admission returns a
-`Retained pre-existing GPU power violation` warning on every write to that
-component, so `kubectl apply` and `kubectl edit` surface it. Treat it as a
-standing defect rather than a notice, because the Planner keeps projecting the
-stored cap. Note the warning reaches only clients that surface warning headers —
-the Planner's own replica writes do not report it — so it is a best-effort
-signal, not an alerting mechanism.
+Admission applies these rules to creates and updates. An existing component with
+a missing or unknown product selector or an out-of-range cap rejects subsequent
+updates. Delete and recreate the DGD with valid values.
 
 Components may select different products; the budget still sums their projected
 watts. This example uses one product for both workers only for brevity.
