@@ -1051,7 +1051,6 @@ mod tests {
         assert!(request.inner.has_effective_tools());
         assert!(request.inner.effective_tool_contains("lookup"));
 
-        // This checks protocol preservation, not cache routing or continuation parsing.
         let serialized = serde_json::to_value(&request).unwrap();
         assert_eq!(serialized["messages"][0]["tools"][0]["name"], "lookup");
         assert_eq!(serialized["messages"][2]["partial"], true);
