@@ -28,7 +28,14 @@ NIXL_TELEMETRY_ENABLE_ENV = "NIXL_TELEMETRY_ENABLE"
 NIXL_TELEMETRY_EXPORTER_ENV = "NIXL_TELEMETRY_EXPORTER"
 NIXL_TELEMETRY_PROMETHEUS_PORT_ENV = "NIXL_TELEMETRY_PROMETHEUS_PORT"
 
-DEFAULT_NIXL_PROMETHEUS_PORT = 19090
+# NIXL's Prometheus exporter uses this port when no override is configured.
+DEFAULT_NIXL_PROMETHEUS_PORT = 9090
+
+# NIXL compares these tokens case-insensitively, without trimming whitespace.
+NIXL_TELEMETRY_ENABLED_VALUES = frozenset({"y", "1", "yes", "on", "true", "enable"})
+
+_ASCII_DECIMAL_DIGITS = frozenset("0123456789")
+_ASCII_HEXADECIMAL_DIGITS = frozenset("0123456789abcdefABCDEF")
 
 # Keep in sync with DynamoMaxNixlPorts in deploy/operator/internal/consts/consts.go:
 # a rank deriving a port past the reserved range would bind a port nothing scrapes.
@@ -45,11 +52,7 @@ def configured_fixed_port(
     default: int | None = None,
     env: Mapping[str, str] | None = None,
 ) -> int | None:
-    """Return a configured fixed TCP port, ignoring disabled/invalid values.
-
-    Mirrors ``dynamo.vllm.backend_args._configured_fixed_port`` so that a value
-    this package accepts is exactly a value that package accepts.
-    """
+    """Return a configured fixed TCP port, ignoring disabled/invalid values."""
     environ = os.environ if env is None else env
     raw = environ.get(env_name)
     if raw is None:
@@ -61,14 +64,46 @@ def configured_fixed_port(
     return port if 0 < port <= MAX_PORT else None
 
 
+def configured_nixl_uint16(
+    env_name: str,
+    *,
+    default: int | None = None,
+    env: Mapping[str, str] | None = None,
+) -> int | None:
+    """Parse an environment value like NIXL's unsigned 16-bit parser."""
+    environ = os.environ if env is None else env
+    raw = environ.get(env_name)
+    if raw is None:
+        return default
+
+    if raw.startswith(("0x", "0X")):
+        digits = raw[2:]
+        base = 16
+        valid_digits = _ASCII_HEXADECIMAL_DIGITS
+    else:
+        digits = raw
+        base = 10
+        valid_digits = _ASCII_DECIMAL_DIGITS
+
+    # Unlike int(), NIXL rejects signs, whitespace, separators, and partial parses.
+    if not digits or any(character not in valid_digits for character in digits):
+        return None
+
+    try:
+        value = int(digits, base)
+    except ValueError:
+        return None
+    return value if 0 < value <= MAX_PORT else None
+
+
 def nixl_prometheus_base_port(env: Mapping[str, str] | None = None) -> int | None:
     """Return the base NIXL Prometheus port, or None when it is not in use."""
     environ = os.environ if env is None else env
-    enabled = environ.get(NIXL_TELEMETRY_ENABLE_ENV, "").strip().lower()
-    exporter = environ.get(NIXL_TELEMETRY_EXPORTER_ENV, "prometheus")
-    if enabled != "y" or exporter.strip().lower() != "prometheus":
+    enabled = environ.get(NIXL_TELEMETRY_ENABLE_ENV, "").lower()
+    exporter = environ.get(NIXL_TELEMETRY_EXPORTER_ENV, "")
+    if enabled not in NIXL_TELEMETRY_ENABLED_VALUES or exporter != "prometheus":
         return None
-    return configured_fixed_port(
+    return configured_nixl_uint16(
         NIXL_TELEMETRY_PROMETHEUS_PORT_ENV,
         default=DEFAULT_NIXL_PROMETHEUS_PORT,
         env=environ,

@@ -19,6 +19,11 @@ from dynamo.common.configuration.utils import (
     add_negatable_bool_argument,
     parse_bool,
 )
+from dynamo.common.utils.nixl_telemetry import (
+    DEFAULT_NIXL_PROMETHEUS_PORT,
+    NIXL_TELEMETRY_ENABLED_VALUES,
+    configured_nixl_uint16,
+)
 
 from . import __version__
 from .benchmark_points import (
@@ -32,7 +37,6 @@ from .constants import DisaggregationMode, EmbeddingTransferMode
 logger = logging.getLogger(__name__)
 PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
 MAX_PORT = 65535
-DEFAULT_NIXL_PROMETHEUS_PORT = 19090
 
 
 def _configured_fixed_port(env_name: str, *, default: int | None = None) -> int | None:
@@ -48,15 +52,23 @@ def _configured_fixed_port(env_name: str, *, default: int | None = None) -> int 
 
 
 def _nixl_prometheus_port() -> int | None:
-    """Return the NIXL Prometheus listener port when it is enabled."""
-    enabled = os.environ.get("NIXL_TELEMETRY_ENABLE", "").strip().lower()
-    exporter = os.environ.get("NIXL_TELEMETRY_EXPORTER", "prometheus")
-    if enabled != "y" or exporter.strip().lower() != "prometheus":
+    """Return the port used by NIXL's active Prometheus exporter."""
+    enabled = os.environ.get("NIXL_TELEMETRY_ENABLE", "").lower()
+    exporter = os.environ.get("NIXL_TELEMETRY_EXPORTER", "")
+    if enabled not in NIXL_TELEMETRY_ENABLED_VALUES or exporter != "prometheus":
         return None
-    return _configured_fixed_port(
-        "NIXL_TELEMETRY_PROMETHEUS_PORT",
-        default=DEFAULT_NIXL_PROMETHEUS_PORT,
+    port = configured_nixl_uint16(
+        "NIXL_TELEMETRY_PROMETHEUS_PORT", default=DEFAULT_NIXL_PROMETHEUS_PORT
     )
+    if port is None:
+        logger.warning(
+            "NIXL telemetry is enabled with the Prometheus exporter, but "
+            "NIXL_TELEMETRY_PROMETHEUS_PORT is not a usable port. NIXL then "
+            "binds no exporter, so no listener is reserved for it. Set "
+            "NIXL_TELEMETRY_PROMETHEUS_PORT to a port in 1-%d.",
+            MAX_PORT,
+        )
+    return port
 
 
 def _is_intra_pod_failover_engine() -> bool:

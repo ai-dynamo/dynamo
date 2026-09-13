@@ -91,7 +91,11 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 <ParamField path="NIXL_TELEMETRY_ENABLE" type="string" default="n">
   Enables [NIXL](https://github.com/ai-dynamo/nixl) telemetry. NIXL metrics track KV cache and embedding data transfers and are populated only during disaggregated serving or multimodal embedding transfers.
 
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>y</Badge> <Badge intent="note" minimal>n</Badge></span>
+  This variable alone does not produce a scrapeable endpoint: set `NIXL_TELEMETRY_EXPORTER` as well. `NIXL_TELEMETRY_PROMETHEUS_PORT` then chooses the port, and while it is optional, leaving it unset lands the exporter on a port the operator already uses. Both are described below.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>y</Badge> <Badge intent="note" minimal>1</Badge> <Badge intent="note" minimal>yes</Badge> <Badge intent="note" minimal>on</Badge> <Badge intent="note" minimal>true</Badge> <Badge intent="note" minimal>enable</Badge> <Badge intent="note" minimal>n</Badge> <Badge intent="note" minimal>0</Badge> <Badge intent="note" minimal>no</Badge> <Badge intent="note" minimal>off</Badge> <Badge intent="note" minimal>false</Badge> <Badge intent="note" minimal>disable</Badge></span>
+
+  NIXL compares the value case-insensitively, so `Y` and `TRUE` are also accepted. Any other value is an error.
 
   **Operator preset:** `n` on worker, prefill, and decode pods.
 </ParamField>
@@ -99,17 +103,19 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 <ParamField path="NIXL_TELEMETRY_EXPORTER" type="string">
   NIXL telemetry exporter to use, e.g. `prometheus`.
 
+  Required for a Prometheus endpoint, with the exact lowercase value `prometheus`. NIXL has no default exporter: with this variable unset, or set to another value, enabling telemetry collects metrics in-process and opens no Prometheus port.
+
   **Operator preset:** `prometheus` on worker, prefill, and decode pods.
 </ParamField>
 
-<ParamField path="NIXL_TELEMETRY_PROMETHEUS_PORT" type="integer" default="19090">
+<ParamField path="NIXL_TELEMETRY_PROMETHEUS_PORT" type="integer">
   Port for NIXL's Prometheus exporter — a separate port from the Dynamo metrics port. Each NIXL agent binds its own exporter, so every agent needs a port of its own; two agents pointed at the same port leave the second unable to bind and the process exits.
 
   Give each worker a non-overlapping value when workers share a network namespace. Because each value is the base of an eight-port range (see below), `19090` for the prefill worker leaves `19098` as the next free base for the decode worker.
 
   Within a single worker, treat this as the **base** of a range rather than one port. SGLang runs one scheduler process per node-local GPU and each builds its own NIXL agent, so Dynamo gives node-local rank *i* the port `base + i` and the operator declares the whole range on the pod as `nixl`, `nixl-1`, … so Prometheus scrapes every rank. Leave room for as many consecutive ports as the pod has GPUs (up to 8).
 
-  Set it to a literal port between 1 and 65535. The operator reads this value to declare the range as container ports, so while NIXL Prometheus telemetry is on it rejects a value taken from `valueFrom`, and one that is not a usable port, rather than let the exporters bind a range nothing scrapes.
+  Optional: with the exporter selected, NIXL binds a listener whether or not this is set. `19090` is Dynamo's convention rather than a NIXL default, and with this variable unset the exporter falls back to its own built-in `9090` — which is the `DYN_SYSTEM_PORT` operator preset, so set it explicitly to keep the two apart. A noninteger value or a value outside `1`-`65535` is not a fallback: NIXL then binds no exporter at all.
 
   **Operator preset:** `19090` on worker, prefill, and decode pods.
 </ParamField>

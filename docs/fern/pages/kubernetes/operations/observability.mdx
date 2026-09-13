@@ -146,10 +146,27 @@ spec:
               value: "y"
 ```
 
-NIXL exposes these metrics on its telemetry port, which defaults to `19090`. A worker that runs
-several ranks in one container builds one NIXL agent per rank, so that value is the base of a
-range: SGLang gives node-local rank *i* the port `19090 + i` and the operator declares each one as
-a separate container port (`nixl`, `nixl-1`, …). See
+`NIXL_TELEMETRY_ENABLE` on its own only turns collection on. A scrapeable endpoint also needs
+`NIXL_TELEMETRY_EXPORTER=prometheus`, because NIXL has no default exporter.
+`NIXL_TELEMETRY_PROMETHEUS_PORT` is optional and chooses the port: unset, the exporter falls back to
+`9090` rather than to Dynamo's `19090` convention, which is the same `9090` the `DYN_SYSTEM_PORT`
+preset already uses — so set it anyway to keep the two apart. The operator presets both variables on
+worker, prefill, and decode pods, so on an operator-managed deployment the snippet above is enough.
+Set all three explicitly anywhere else.
+
+A worker that runs several ranks in one container builds one NIXL agent per rank, so the configured
+port is the base of a range: SGLang gives node-local rank *i* the port `base + i` and the operator
+declares each one as a separate container port (`nixl`, `nixl-1`, …).
+
+<Note>
+Enabling telemetry does not on its own make the port scrapeable from Prometheus. The
+`dynamo-worker` PodMonitor endpoint for the `nixl` port is off by default
+(`dynamo.metrics.podMonitors.nixlTelemetry`), because every worker pod declares the `nixl`
+container port whether or not telemetry is enabled. Turn the endpoint on once the port is
+confirmed to be serving.
+</Note>
+
+See
 [Environment Variables](../../reference/observability/environment-variables.mdx#system-and-metrics)
 for the complete NIXL telemetry configuration.
 

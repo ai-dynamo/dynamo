@@ -93,23 +93,28 @@ func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount Con
 	if !prometheusOn {
 		sourced = append(sourced, "NIXL_TELEMETRY_ENABLE")
 	}
-	if prometheusOn && !strings.EqualFold(strings.TrimSpace(enabled.Value), "y") {
-		return nil
+	if prometheusOn {
+		switch strings.ToLower(enabled.Value) {
+		case "y", "1", "yes", "on", "true", "enable":
+		default:
+			return nil
+		}
 	}
 
 	// Only the Prometheus exporter binds a port per rank, so activate on the
-	// same pair of variables nixl_prometheus_base_port() reads: an absent
-	// selection is the Prometheus default, any other literal selection needs no
-	// ports at all, and a sourced one joins an unreadable enable value in
-	// reserving a range this code cannot rule out.
+	// same pair of variables nixl_prometheus_base_port() reads. An absent
+	// selection or any other literal selection needs no ports at all, while a
+	// sourced one joins an unreadable enable value in reserving a range this
+	// code cannot rule out.
 	exporter := findEnvVar(container.Env, "NIXL_TELEMETRY_EXPORTER")
-	if exporter != nil {
-		if exporter.ValueFrom != nil {
-			prometheusOn = false
-			sourced = append(sourced, "NIXL_TELEMETRY_EXPORTER")
-		} else if !strings.EqualFold(strings.TrimSpace(exporter.Value), "prometheus") {
-			return nil
-		}
+	if exporter == nil {
+		return nil
+	}
+	if exporter.ValueFrom != nil {
+		prometheusOn = false
+		sourced = append(sourced, "NIXL_TELEMETRY_EXPORTER")
+	} else if exporter.Value != "prometheus" {
+		return nil
 	}
 
 	containerGPUs, err := containerGPUCount()
@@ -121,7 +126,7 @@ func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount Con
 	// the whole range: realign `nixl` with it or it advertises a port rank 0
 	// never binds.
 	override := findEnvVar(container.Env, "NIXL_TELEMETRY_PROMETHEUS_PORT")
-	overridden, literal, err := literalPort(override)
+	overridden, literal, err := nixlPrometheusPort(override)
 	switch {
 	case err != nil:
 		// A base that is present but unusable is the quietest way to lose the
@@ -207,19 +212,23 @@ func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount Con
 	return nil
 }
 
-// literalPort reads a TCP port written inline on an environment variable. An
-// unset variable and one taken from valueFrom are both reported as absent,
-// because a value resolved in the container at startup cannot be turned into a
-// container port declaration here. A variable that is set inline to something
-// that is not a usable port is neither absent nor usable, so it is returned as
-// an error rather than folded into either.
-func literalPort(env *corev1.EnvVar) (int32, bool, error) {
+// nixlPrometheusPort reads a literal NIXL Prometheus port with NIXL's unsigned
+// 16-bit syntax. An unset variable and one taken from valueFrom are both
+// reported as absent, because a value resolved in the container at startup
+// cannot be turned into a container port declaration here.
+func nixlPrometheusPort(env *corev1.EnvVar) (int32, bool, error) {
 	if env == nil || env.ValueFrom != nil {
 		return 0, false, nil
 	}
 
-	value := strings.TrimSpace(env.Value)
-	port, err := strconv.Atoi(value)
+	value := env.Value
+	base := 10
+	digits := value
+	if strings.HasPrefix(value, "0x") || strings.HasPrefix(value, "0X") {
+		base = 16
+		digits = value[2:]
+	}
+	port, err := strconv.ParseUint(digits, base, 64)
 	if err != nil {
 		return 0, false, fmt.Errorf("is set to %q, which is not a number", env.Value)
 	}
