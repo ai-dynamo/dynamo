@@ -63,8 +63,9 @@ use prometheus::{
 };
 
 use crate::http::service::metrics::generate_log_buckets;
-use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
+use crate::protocols::common::timing::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
 use dynamo_kv_router::indexer::ApproximateLruStats;
+use dynamo_kv_router::protocols::BestOverlapCandidate;
 
 pub(crate) const ROUTER_WORKER_ID_LABEL: &str = "router_worker_id";
 const TARGET_NAMESPACE_LABEL: &str = "target_namespace";
@@ -854,6 +855,10 @@ pub struct RouterRequestMetrics {
     pub shared_cache_beyond_blocks: prometheus::Histogram,
     pub non_max_overlap_selections_total: IntCounterVec,
     pub overlap_blocks_lost: HistogramVec,
+    pub decisions_total: IntCounterVec,
+    pub decision_kv_optimal_total: IntCounterVec,
+    pub input_f0_total: IntCounterVec,
+    pub input_f1_total: IntCounterVec,
 }
 
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
@@ -987,8 +992,49 @@ impl RouterRequestMetrics {
                         Some(prometheus::exponential_buckets(0.25, 2.0, 16).unwrap()),
                     )
                     .expect("failed to create router_overlap_blocks_lost");
+                let decisions_total = metrics
+                    .create_intcountervec(
+                        &router_metric(frontend_service::DECISIONS_TOTAL),
+                        "Total routing decisions made by the router, excluding caller-pinned selections",
+                        &[labels::WORKER_TYPE],
+                        extra_labels,
+                    )
+                    .expect("failed to create router_decisions_total");
+                let decision_kv_optimal_total = metrics
+                    .create_intcountervec(
+                        &router_metric(frontend_service::DECISION_KV_OPTIMAL_TOTAL),
+                        "Routing decisions that selected the eligible instance with the greatest known KV cache overlap",
+                        &[labels::WORKER_TYPE],
+                        extra_labels,
+                    )
+                    .expect("failed to create router_decision_kv_optimal_total");
+                let input_f0_total = metrics
+                    .create_intcountervec(
+                        &router_metric(frontend_service::INPUT_F0_TOTAL),
+                        "Total input tokens observed across routing decisions",
+                        &[labels::WORKER_TYPE],
+                        extra_labels,
+                    )
+                    .expect("failed to create router_input_f0_total");
+                let input_f1_total = metrics
+                    .create_intcountervec(
+                        &router_metric(frontend_service::INPUT_F1_TOTAL),
+                        "Total input tokens cached on the eligible instance with the greatest known KV cache overlap, whether or not that instance was selected",
+                        &[labels::WORKER_TYPE],
+                        extra_labels,
+                    )
+                    .expect("failed to create router_input_f1_total");
                 non_max_overlap_selections_total.with_label_values(&[WORKER_TYPE_PREFILL]);
                 overlap_blocks_lost.with_label_values(&[WORKER_TYPE_PREFILL]);
+                // Export both worker types at zero so the decision-quality ratios are defined on
+                // a scrape taken before any traffic. An aggregated deployment routes only one of
+                // them, leaving the other permanently zero.
+                for worker_type in [WORKER_TYPE_PREFILL, WORKER_TYPE_DECODE] {
+                    decisions_total.with_label_values(&[worker_type]);
+                    decision_kv_optimal_total.with_label_values(&[worker_type]);
+                    input_f0_total.with_label_values(&[worker_type]);
+                    input_f1_total.with_label_values(&[worker_type]);
+                }
                 Arc::new(Self {
                     requests_total,
                     time_to_first_token_seconds,
@@ -1001,6 +1047,10 @@ impl RouterRequestMetrics {
                     shared_cache_beyond_blocks,
                     non_max_overlap_selections_total,
                     overlap_blocks_lost,
+                    decisions_total,
+                    decision_kv_optimal_total,
+                    input_f0_total,
+                    input_f1_total,
                 })
             })
             .clone()
@@ -1015,6 +1065,32 @@ impl RouterRequestMetrics {
         self.overlap_blocks_lost
             .with_label_values(&[worker_type])
             .observe(overlap_blocks_lost);
+    }
+
+    /// Record one routing decision and the KV overlap that was reachable for it.
+    ///
+    /// `best_overlap` describes the eligible instance holding the most overlap, whether or not
+    /// the router picked it, so `input_f1_total / input_f0_total` reports the cache-hit ceiling
+    /// the router had available rather than the hit rate it achieved.
+    pub fn observe_routing_decision(
+        &self,
+        worker_type: &str,
+        isl_tokens: usize,
+        best_overlap: BestOverlapCandidate,
+    ) {
+        let labels = &[worker_type];
+        self.decisions_total.with_label_values(labels).inc();
+        self.input_f0_total
+            .with_label_values(labels)
+            .inc_by(isl_tokens as u64);
+        self.input_f1_total
+            .with_label_values(labels)
+            .inc_by(best_overlap.effective_cached_tokens as u64);
+        if best_overlap.selected_has_max_overlap {
+            self.decision_kv_optimal_total
+                .with_label_values(labels)
+                .inc();
+        }
     }
 }
 
@@ -1684,5 +1760,116 @@ mod kv_publisher_registration_tests {
                 .contains("conflicts with auto-injected const label"),
             "unexpected error: {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod routing_decision_tests {
+    use super::*;
+
+    fn counter_vec(name: &str) -> IntCounterVec {
+        IntCounterVec::new(Opts::new(name, name), &[labels::WORKER_TYPE]).unwrap()
+    }
+
+    fn hist(name: &str) -> prometheus::Histogram {
+        prometheus::Histogram::with_opts(HistogramOpts::new(name, name)).unwrap()
+    }
+
+    fn metrics() -> RouterRequestMetrics {
+        RouterRequestMetrics {
+            requests_total: IntCounter::new("requests_total", "test").unwrap(),
+            time_to_first_token_seconds: hist("ttft_seconds"),
+            inter_token_latency_seconds: hist("itl_seconds"),
+            input_sequence_tokens: hist("isl_tokens"),
+            output_sequence_tokens: hist("osl_tokens"),
+            kv_hit_rate: hist("kv_hit_rate"),
+            kv_transfer_estimated_latency_seconds: hist("kv_transfer_seconds"),
+            shared_cache_hit_rate: hist("shared_cache_hit_rate"),
+            shared_cache_beyond_blocks: hist("shared_cache_beyond_blocks"),
+            non_max_overlap_selections_total: counter_vec("non_max_overlap_selections_total"),
+            overlap_blocks_lost: HistogramVec::new(
+                HistogramOpts::new("overlap_blocks_lost", "test"),
+                &[labels::WORKER_TYPE],
+            )
+            .unwrap(),
+            decisions_total: counter_vec("decisions_total"),
+            decision_kv_optimal_total: counter_vec("decision_kv_optimal_total"),
+            input_f0_total: counter_vec("input_f0_total"),
+            input_f1_total: counter_vec("input_f1_total"),
+        }
+    }
+
+    fn counts(m: &RouterRequestMetrics, worker_type: &str) -> (u64, u64, u64, u64) {
+        let labels = &[worker_type];
+        (
+            m.decisions_total.with_label_values(labels).get(),
+            m.decision_kv_optimal_total.with_label_values(labels).get(),
+            m.input_f0_total.with_label_values(labels).get(),
+            m.input_f1_total.with_label_values(labels).get(),
+        )
+    }
+
+    /// f1 accumulates the best reachable overlap, not the overlap that was taken, so a
+    /// suboptimal decision still raises the ceiling it is measured against.
+    #[test]
+    fn a_suboptimal_decision_still_counts_its_best_candidate_into_f1() {
+        let m = metrics();
+        m.observe_routing_decision(
+            WORKER_TYPE_DECODE,
+            1_000,
+            BestOverlapCandidate {
+                effective_overlap_blocks: 8.0,
+                effective_cached_tokens: 128,
+                selected_has_max_overlap: false,
+            },
+        );
+
+        assert_eq!(counts(&m, WORKER_TYPE_DECODE), (1, 0, 1_000, 128));
+    }
+
+    #[test]
+    fn an_optimal_decision_increments_the_optimal_counter() {
+        let m = metrics();
+        m.observe_routing_decision(
+            WORKER_TYPE_DECODE,
+            1_000,
+            BestOverlapCandidate {
+                effective_overlap_blocks: 8.0,
+                effective_cached_tokens: 128,
+                selected_has_max_overlap: true,
+            },
+        );
+
+        assert_eq!(counts(&m, WORKER_TYPE_DECODE), (1, 1, 1_000, 128));
+    }
+
+    /// Prefill and decode are routed by separate router instances sharing one metrics
+    /// singleton; without the label their ratios would be blended into one another.
+    #[test]
+    fn worker_types_accumulate_independently() {
+        let m = metrics();
+        for _ in 0..3 {
+            m.observe_routing_decision(
+                WORKER_TYPE_PREFILL,
+                100,
+                BestOverlapCandidate {
+                    effective_overlap_blocks: 1.0,
+                    effective_cached_tokens: 16,
+                    selected_has_max_overlap: true,
+                },
+            );
+        }
+        m.observe_routing_decision(
+            WORKER_TYPE_DECODE,
+            700,
+            BestOverlapCandidate {
+                effective_overlap_blocks: 0.0,
+                effective_cached_tokens: 0,
+                selected_has_max_overlap: false,
+            },
+        );
+
+        assert_eq!(counts(&m, WORKER_TYPE_PREFILL), (3, 3, 300, 48));
+        assert_eq!(counts(&m, WORKER_TYPE_DECODE), (1, 0, 700, 0));
     }
 }

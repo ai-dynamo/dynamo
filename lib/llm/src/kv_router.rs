@@ -1766,6 +1766,17 @@ where
             m.shared_cache_beyond_blocks.observe(beyond as f64);
         }
 
+        // Routing-decision quality. Shares the `is_admitted_routing` gate with the metric blocks
+        // above so every router metric covers one population, and sits after the QueueRejected
+        // early returns so it counts exactly the decisions that produced a worker. A pinned
+        // selection carries no candidate: the caller chose, so there is no decision to score.
+        if is_admitted_routing
+            && let Some(best_overlap) = response.best_overlap
+            && let Some(m) = metrics::RouterRequestMetrics::get()
+        {
+            m.observe_routing_decision(self.worker_type(), isl_tokens, best_overlap);
+        }
+
         #[cfg(feature = "bench")]
         tracing::info!(
             isl_tokens,
@@ -2640,6 +2651,7 @@ mod tests {
                     .worker_load_for(self.selected_worker)
                     .potential_decode_blocks()
                     .saturating_add(request.isl_tokens.div_ceil(block_size as usize)),
+                best_overlap: None,
             })
         }
     }

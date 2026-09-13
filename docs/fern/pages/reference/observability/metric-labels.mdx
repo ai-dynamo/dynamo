@@ -76,7 +76,7 @@ Added by an individual metric family. Each label appears only on the metrics not
 </ParamField>
 
 <ParamField path="worker_type" type="string">
-  `[Shared]` On `dynamo_frontend_worker_*` and `dynamo_frontend_router_queue_*` — the worker role. In disaggregated mode both values appear; in aggregated mode all workers report as `decode`.
+  `[Shared]` On `dynamo_frontend_worker_*`, `dynamo_frontend_router_queue_*`, and the `dynamo_component_router_*` decision counters — the worker role. In disaggregated mode both values appear; in aggregated mode all workers report as `decode`, so the `prefill` series stays at zero.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>prefill</Badge> <Badge intent="note" minimal>decode</Badge></span>
 </ParamField>
