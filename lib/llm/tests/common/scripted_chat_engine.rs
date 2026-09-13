@@ -27,6 +27,10 @@ enum QueuedScript {
         chunks: Script,
         error: DynamoError,
     },
+    /// `generate()` itself fails before any stream exists, the shape of a
+    /// router-side rejection (overload, deadline) rather than a backend fault.
+    #[allow(dead_code)]
+    GenerateError(DynamoError),
     Gated {
         chunks: Script,
         split_at: usize,
@@ -88,6 +92,14 @@ impl ScriptedChatEngine {
         }
     }
 
+    #[allow(dead_code)]
+    pub fn with_generate_error(error: DynamoError) -> Self {
+        Self {
+            scripts: Mutex::new(VecDeque::from([QueuedScript::GenerateError(error)])),
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+
     /// Remove and return all requests observed so far, in arrival order.
     pub async fn take_requests(&self) -> Vec<NvCreateChatCompletionRequest> {
         std::mem::take(&mut *self.requests.lock().await)
@@ -120,6 +132,10 @@ impl
             .await
             .pop_front()
             .ok_or_else(|| anyhow!("ScriptedChatEngine received an unexpected request"))?;
+
+        if let QueuedScript::GenerateError(error) = script {
+            return Err(error.into());
+        }
 
         let output = async_stream::stream! {
             match script {
@@ -157,6 +173,9 @@ impl
                     for chunk in chunks {
                         yield Annotated::from_data(chunk);
                     }
+                }
+                QueuedScript::GenerateError(_) => {
+                    unreachable!("GenerateError returns before the stream is built")
                 }
             }
         };

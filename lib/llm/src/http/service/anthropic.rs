@@ -561,6 +561,18 @@ async fn anthropic_messages(
     tracing::trace!("Issuing generate call for Anthropic messages");
 
     let engine_stream = engine.generate(request).await.map_err(|e| {
+        // Deadline is checked before overload so a chain carrying both markers
+        // keeps the deadline outcome, matching the OpenAI surface: HTTP 429
+        // (`rate_limit_error`) with a `Cancelled` metric label and no
+        // rejection accounting.
+        if super::metrics::request_deadline_exceeded(e.as_ref()) {
+            inflight_guard.mark_error(super::metrics::ErrorType::Cancelled);
+            return anthropic_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limit_error",
+                super::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE,
+            );
+        }
         if super::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()

@@ -62,6 +62,11 @@ impl HarnessService {
         .await
     }
 
+    #[allow(dead_code)]
+    pub async fn start_with_generate_error(error: DynamoError) -> Self {
+        Self::start_with_engine(Arc::new(ScriptedChatEngine::with_generate_error(error))).await
+    }
+
     async fn start_with_engine(engine: Arc<ScriptedChatEngine>) -> Self {
         let client = reqwest::Client::builder()
             .no_proxy()

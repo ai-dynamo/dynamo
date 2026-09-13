@@ -188,6 +188,17 @@ fn generate_cancelled_response() -> Response {
     )
 }
 
+/// Caller-supplied deadline elapsed before the engine produced a stream: HTTP
+/// 429 with a `Cancelled` metric label, the same contract as the OpenAI and
+/// SGLang generate surfaces.
+fn generate_deadline_exceeded_response() -> Response {
+    generate_error_response(
+        StatusCode::TOO_MANY_REQUESTS,
+        "deadline_exceeded",
+        super::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE.to_string(),
+    )
+}
+
 fn generate_unavailable_response() -> Response {
     generate_error_response(
         StatusCode::SERVICE_UNAVAILABLE,
@@ -1011,17 +1022,23 @@ async fn generate_dispatch(
     let stream = match generate_result {
         Ok(stream) => stream,
         Err(error) => {
+            // Deadline is checked before overload so a chain carrying both
+            // markers keeps the deadline outcome, matching the OpenAI surface.
+            let deadline_exceeded = super::metrics::request_deadline_exceeded(error.as_ref());
             let was_cancelled = request_context.is_killed()
                 || super::metrics::request_was_cancelled(error.as_ref());
             let was_rejected = super::metrics::request_was_rejected(error.as_ref());
             let was_unavailable = super::metrics::request_was_unavailable(error.as_ref());
-            inflight_guard.mark_error(if was_cancelled {
+            inflight_guard.mark_error(if deadline_exceeded || was_cancelled {
                 ErrorType::Cancelled
             } else if was_rejected || was_unavailable {
                 ErrorType::Unavailable
             } else {
                 ErrorType::Internal
             });
+            if deadline_exceeded {
+                return generate_deadline_exceeded_response();
+            }
             if was_cancelled {
                 return generate_cancelled_response();
             }
@@ -1209,6 +1226,8 @@ pub(crate) mod tests {
 
     struct CancelledEngine;
 
+    struct DeadlineEngine;
+
     struct MetricEngine;
 
     /// Fails dispatch the way an addressed worker that no longer serves the instance does.
@@ -1248,6 +1267,22 @@ pub(crate) mod tests {
             Err(dynamo_runtime::error::DynamoError::builder()
                 .error_type(dynamo_runtime::error::ErrorType::Cancelled)
                 .message("backend cancelled before opening a stream")
+                .build()
+                .into())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for DeadlineEngine
+    {
+        async fn generate(
+            &self,
+            _request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            Err(dynamo_runtime::error::DynamoError::builder()
+                .error_type(dynamo_runtime::error::ErrorType::DeadlineExceeded)
+                .message("router deadline exceeded before stream start")
                 .build()
                 .into())
         }
@@ -2700,6 +2735,39 @@ pub(crate) mod tests {
         .await;
 
         assert_eq!(response.status().as_u16(), 499);
+        assert_cancelled_dispatch_metrics(state.as_ref(), 0, 0);
+    }
+
+    #[tokio::test]
+    async fn immediate_deadline_exceeded_returns_429_with_cancelled_metric() {
+        let engine: crate::types::openai::generate::GenerateStreamingEngine =
+            Arc::new(DeadlineEngine);
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+
+        let response = generate_dispatch_for_test(
+            engine,
+            dispatch_test_context(),
+            "req-deadline".to_string(),
+            "test-model".to_string(),
+            state.clone(),
+            GenerateResponseOptions::default(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["message"], "request deadline exceeded");
+        assert_eq!(body["error"]["type"], "deadline_exceeded");
+        assert_eq!(body["error"]["code"], 429);
+        assert!(
+            !body
+                .to_string()
+                .contains("router deadline exceeded before stream start")
+        );
         assert_cancelled_dispatch_metrics(state.as_ref(), 0, 0);
     }
 
