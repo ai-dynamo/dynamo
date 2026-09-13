@@ -111,6 +111,7 @@ link no catalog and reject a configured policy type at startup.
 |---|---|
 | `default` | Dynamo's built-in selector and cost model. Reserved; always available. |
 | `dynamo-two-tier-cost-fn` | Ranks on two tiers instead of one additive cost: active-request load first, then device-KV prefix overlap. Prefers the worker holding the largest prefix overlap unless load is badly imbalanced. Thresholds and selection order ported from the experimental SGLang router's `cache_aware_zmq` policy. Thresholds are tunable; the defaults reproduce it exactly. |
+| `dynamo-soft-affinity-load-guard` | Keeps a soft session binding as a preference rather than an exclusive pin: retains the bound worker while it holds at most `max_active_requests`, otherwise moves only to a worker at least `move_margin` requests less loaded. Pair with `--router-session-affinity-binding parent-group` to co-locate the subagents of one parent session. |
 
 Write the instance into the same YAML file that `--router-policy-config` already points at:
 
@@ -158,6 +159,59 @@ startup, so an out-of-range value or an unknown key fails the process immediatel
 rather than being silently ignored. It selects the least-loaded worker once the active-request spread is greater than 32 and the
 largest count is more than 1.1 times the smallest; otherwise it prefers the worker holding the
 largest device-KV overlap when that overlap covers more than 50% of the request's blocks.
+
+`dynamo-soft-affinity-load-guard` takes two optional parameters:
+
+```yaml
+    - name: dynamo-soft-affinity-load-guard
+      type: dynamo-soft-affinity-load-guard
+      parameters:
+        max_active_requests: 32
+        move_margin: 2
+```
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `max_active_requests` | `32` | Active requests the bound worker may already hold before the binding becomes eligible to move. Counts every request that worker is serving, not just this binding's, so it must sit above ordinary per-worker concurrency or the binding moves on nearly every request and loses the prefix it exists to reuse. Compared inclusively. |
+
+| `move_margin` | `2` | How many fewer active requests an alternative must hold before the binding moves to it. Must be at least `1`. |
+
+The margin is hysteresis. Without it, load that alternates by a single request between workers
+relocates the binding on every request and walks it across the pool, losing the prefix it exists to
+reuse; a swing larger than the margin still moves it. If a group must never move, do not use this
+policy: run `--router-session-affinity-mode hard --router-session-affinity-binding parent-group`
+instead. Hard mode pins the group to its first worker and does not migrate it because of load; it
+resets when the target becomes unusable or dispatch fails, at the cost of no load balancing across a
+fan-out.
+
+> [!IMPORTANT]
+> This policy only sees a binding when one reaches selection as an advisory target, which means
+> `--router-session-affinity-mode soft`. Under the default `hard` mode a
+> bound session arrives as a pinned target and the candidate set is narrowed to one worker before
+> any policy runs.
+
+**Experimental.** Available since v1.5. To co-locate the subagents of one parent session, run
+`--router-session-affinity-mode soft --router-session-affinity-binding parent-group`. A request that
+carries a parent session id then binds under an internal key derived from that parent id instead of
+its own session, so the subagents of one parent share a binding while the parent keeps its own.
+Dynamo's affinity coordinator owns that binding: it commits only after a successful dispatch, is
+version-checked against concurrent updates, expires on `--router-session-affinity-ttl-secs`, and
+counts against the same global entry limit as any session binding. A request that carries an
+explicit worker target stays on its own session, so it is neither rejected against the group nor
+able to move it.
+
+Two behaviors are known and unresolved. A worker-selection policy sees only the workers eligible for
+the request in front of it, so it cannot tell a request-local exclusion from a worker that has left
+the pool; if one subagent's constraints exclude the group's worker, the fallback it selects becomes
+the group's worker for every sibling. And because siblings share one binding, a concurrent fan-out
+waits for the first sibling's dispatch to commit before the others are placed.
+
+Dynamo resolves the parent session id from the agent headers it already recognizes
+(`X-Dynamo-Parent-Session-ID`, `x-claude-code-parent-agent-id`, `x-codex-parent-thread-id`,
+`x-parent-session-id`). On a backend that routes again internally the group can still split across
+ranks: with TensorRT-LLM's `attention_dp_config.kv_cache_routing_conversation_affinity` enabled,
+set `--conversation-affinity-dp-rank-source dynamo` so the attention-DP rank Dynamo selects is the
+one the engine records.
 
 #### Override the Selection
 
@@ -268,6 +322,11 @@ The first successfully dispatched request binds the session ID to its selected w
 |---|---|
 | `hard` | Default. Exact-dispatch to the stored target. If the worker or rank is no longer valid, invalidate the binding and retry normal selection once |
 | `soft` | Pass the stored target through the normal selection pipeline as an advisory target. The built-in selector retains it while eligible; a custom policy can choose another worker |
+
+`--router-session-affinity-binding` (or `DYN_ROUTER_SESSION_AFFINITY_BINDING`) chooses which id a
+binding is keyed on: `session` (default) keys every request on its own session id; `parent-group`
+binds a subagent under its parent's group. It is frontend-only and never appears on a model card. See
+[Worker-Selection Policies](#worker-selection-policies) for how it pairs with the load-guard policy.
 
 For soft affinity, Dynamo commits a changed binding after dispatch returns a response stream. Selection, setup, or dispatch failure before that point leaves the old binding intact. A later stream error or cancellation does not roll back the rebind. Explicit request targets remain exact in both modes.
 

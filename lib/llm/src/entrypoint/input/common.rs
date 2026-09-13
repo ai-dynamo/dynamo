@@ -24,7 +24,10 @@ use crate::{
     preprocessor::{OpenAIPreprocessor, prompt::prompt_formatter_from_mdc},
     protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
     request_template::RequestTemplate,
-    session_affinity::{AffinityCoordinator, SessionAffinityMode, create_affinity_coordinator},
+    session_affinity::{
+        AffinityCoordinator, SessionAffinityBinding, SessionAffinityMode,
+        create_affinity_coordinator,
+    },
     types::{
         Annotated,
         openai::chat_completions::{
@@ -168,6 +171,7 @@ fn preprocessed_backend_engine<Sel>(
     endpoint_id: &dynamo_runtime::protocols::EndpointId,
     affinity: Option<AffinityCoordinator>,
     session_affinity_mode: SessionAffinityMode,
+    session_affinity_binding: SessionAffinityBinding,
     load_context: Arc<RoutingLoadContext>,
 ) -> anyhow::Result<Arc<RoutingHost<Sel>>>
 where
@@ -187,25 +191,31 @@ where
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
             };
-            Arc::new(RoutingHost::new_with_load_context_and_coordinator(
-                router,
-                chooser,
-                load_context,
-                affinity,
-                session_affinity_mode,
-            ))
+            Arc::new(
+                RoutingHost::new_with_load_context_and_coordinator(
+                    router,
+                    chooser,
+                    load_context,
+                    affinity,
+                    session_affinity_mode,
+                )
+                .with_session_affinity_binding(session_affinity_binding),
+            )
         }
         _ => {
             let lora = model_manager
                 .lora_filter_for(endpoint_id)
                 .map(|filter| (filter, model_manager.lora_load_estimator_for(endpoint_id)));
-            Arc::new(RoutingHost::<Sel>::new_builtin_with_capabilities(
-                router,
-                load_context,
-                affinity,
-                session_affinity_mode,
-                lora,
-            )?)
+            Arc::new(
+                RoutingHost::<Sel>::new_builtin_with_capabilities(
+                    router,
+                    load_context,
+                    affinity,
+                    session_affinity_mode,
+                    lora,
+                )?
+                .with_session_affinity_binding(session_affinity_binding),
+            )
         }
     };
 
@@ -235,6 +245,7 @@ pub async fn build_preprocessed_routing(
         enable_multimodal_cache_indexer,
         session_affinity_ttl_secs,
         SessionAffinityMode::Hard,
+        SessionAffinityBinding::default(),
     )
     .await
 }
@@ -251,6 +262,7 @@ pub(crate) async fn build_preprocessed_routing_with_selector<Sel>(
     enable_multimodal_cache_indexer: bool,
     session_affinity_ttl_secs: Option<u64>,
     session_affinity_mode: SessionAffinityMode,
+    session_affinity_binding: SessionAffinityBinding,
 ) -> anyhow::Result<PreprocessedRouting<Sel>>
 where
     Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
@@ -307,6 +319,7 @@ where
             router_mode,
             session_affinity_ttl_secs,
             session_affinity_mode,
+            session_affinity_binding,
         )
     });
     let encoder_router = encoder_chooser.unwrap_or_else(EncoderRouter::disabled);
@@ -318,6 +331,7 @@ where
         &endpoint_id,
         affinity,
         session_affinity_mode,
+        session_affinity_binding,
         load_context,
     )?;
     if router_mode.is_kv_routing() && prefill_router.conditional_disagg_enabled() {

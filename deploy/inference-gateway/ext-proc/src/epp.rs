@@ -214,6 +214,7 @@ impl Router {
             None,
             None,
             dynamo_llm::session_affinity::SessionAffinityMode::Hard,
+            dynamo_llm::session_affinity::SessionAffinityBinding::default(),
             model_name.clone(),
             actual_namespace.to_string(),
             decode_router.load_context().load_thresholds(),

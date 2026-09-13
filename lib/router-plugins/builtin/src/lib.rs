@@ -18,6 +18,7 @@
 //! beyond `dynamo-kv-router`, put it behind its own default-on Cargo feature so a build can drop
 //! it; every policy registered here is compiled into every artifact that links this crate.
 
+mod soft_affinity_load_guard;
 mod two_tier_cost_fn;
 
 use dynamo_kv_router::services::selection::{
@@ -32,7 +33,8 @@ use dynamo_kv_router::services::selection::{
 pub fn register(
     registry: &mut WorkerSelectionPolicyRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {
-    two_tier_cost_fn::register(registry)
+    two_tier_cost_fn::register(registry)?;
+    soft_affinity_load_guard::register(registry)
 }
 
 #[cfg(test)]
@@ -90,6 +92,88 @@ worker_selection:
         ] {
             factory(&config, worker_type, partition);
         }
+    }
+
+    /// Same contract for the soft-affinity load guard: the documented instance shape must
+    /// resolve through the default build path for every stage it selects.
+    #[test]
+    fn resolves_documented_soft_affinity_load_guard_yaml() {
+        let (config, resolved) = resolve(
+            r#"
+worker_selection:
+  aggregated: dynamo-soft-affinity-load-guard
+  prefill: dynamo-soft-affinity-load-guard
+  decode: dynamo-soft-affinity-load-guard
+  instances:
+    - name: dynamo-soft-affinity-load-guard
+      type: dynamo-soft-affinity-load-guard
+      parameters:
+        max_active_requests: 32
+"#,
+        );
+        let factory = resolved
+            .unwrap()
+            .expect("a configured instance resolves to a factory");
+
+        let partition = RoutingPartitionRef::new("model", "default");
+        for worker_type in [
+            WorkerType::Aggregated,
+            WorkerType::Prefill,
+            WorkerType::Decode,
+        ] {
+            factory(&config, worker_type, partition);
+        }
+    }
+
+    /// Every parameter is optional, so an instance with no `parameters` mapping must still start.
+    #[test]
+    fn resolves_soft_affinity_load_guard_without_parameters() {
+        let (config, resolved) = resolve(
+            r#"
+worker_selection:
+  aggregated: dynamo-soft-affinity-load-guard
+  instances:
+    - name: dynamo-soft-affinity-load-guard
+      type: dynamo-soft-affinity-load-guard
+"#,
+        );
+        let factory = resolved
+            .unwrap()
+            .expect("a configured instance resolves to a factory");
+
+        factory(
+            &config,
+            WorkerType::Aggregated,
+            RoutingPartitionRef::new("model", "default"),
+        );
+    }
+
+    #[test]
+    fn rejects_an_unknown_soft_affinity_load_guard_parameter() {
+        let (_config, resolved) = resolve(
+            r#"
+worker_selection:
+  aggregated: dynamo-soft-affinity-load-guard
+  instances:
+    - name: dynamo-soft-affinity-load-guard
+      type: dynamo-soft-affinity-load-guard
+      parameters:
+        group_idle_ttl_secs: 300
+"#,
+        );
+
+        let Err(error) = resolved else {
+            panic!("an unknown parameter must fail resolution");
+        };
+        assert!(
+            matches!(&error, WorkerSelectionPolicyRegistryError::Provider { policy_type, .. }
+                if policy_type == soft_affinity_load_guard::POLICY_TYPE),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.to_string().contains("group_idle_ttl_secs"),
+            "the error should name the offending key: {error}"
+        );
     }
 
     /// An unknown parameter key is a mistake, most often a misremembered threshold name. It must

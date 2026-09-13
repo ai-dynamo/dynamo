@@ -2203,7 +2203,7 @@ impl KvRouter {
     /// Worker role and Prometheus metric labels come from the endpoint's model card.
     #[new]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (endpoint, block_size, kv_router_config, aic_perf_config=None, session_affinity_ttl_secs=None, *, load_threshold_config=None, session_affinity_mode="hard"))]
+    #[pyo3(signature = (endpoint, block_size, kv_router_config, aic_perf_config=None, session_affinity_ttl_secs=None, *, load_threshold_config=None, session_affinity_mode="hard", session_affinity_binding="session"))]
     fn new(
         py: Python<'_>,
         endpoint: &Endpoint,
@@ -2213,6 +2213,7 @@ impl KvRouter {
         session_affinity_ttl_secs: Option<u64>,
         load_threshold_config: Option<&LoadThresholdConfig>,
         session_affinity_mode: &str,
+        session_affinity_binding: &str,
     ) -> PyResult<Self> {
         if session_affinity_ttl_secs.is_some_and(|ttl| !(1..=31_536_000).contains(&ttl)) {
             return Err(PyValueError::new_err(
@@ -2221,6 +2222,9 @@ impl KvRouter {
         }
         let session_affinity_mode = session_affinity_mode
             .parse::<RsSessionAffinityMode>()
+            .map_err(PyValueError::new_err)?;
+        let session_affinity_binding = session_affinity_binding
+            .parse::<llm_rs::session_affinity::SessionAffinityBinding>()
             .map_err(PyValueError::new_err)?;
         let kv_router_config = kv_router_config.inner();
         let load_threshold_config = load_threshold_config
@@ -2293,7 +2297,8 @@ impl KvRouter {
                     session_affinity_ttl_secs.map(Duration::from_secs),
                     session_affinity_mode,
                 )
-                .map_err(to_pyerr)?;
+                .map_err(to_pyerr)?
+                .with_session_affinity_binding(session_affinity_binding);
 
                 Ok(Self {
                     inner: Arc::new(routing_host),

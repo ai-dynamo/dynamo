@@ -591,6 +591,7 @@ def test_frontend_rejection_thresholds_default_to_none(
         "active_prefill_tokens_threshold_frac": None,
         "session_affinity_ttl_secs": None,
         "session_affinity_mode": "hard",
+        "session_affinity_binding": "session",
     }
     assert "busy-worker rejection disabled" in caplog.text
 
@@ -720,6 +721,7 @@ def test_all_rejection_thresholds_and_queue_override_are_forwarded(
         "active_prefill_tokens_threshold_frac": 2.0,
         "session_affinity_ttl_secs": None,
         "session_affinity_mode": "hard",
+        "session_affinity_binding": "session",
     }
     assert config.kv_router_kwargs()["router_queue_threshold"] == 32.0
 
@@ -908,6 +910,36 @@ def test_session_affinity_mode_cli_and_environment(monkeypatch) -> None:
         parser.parse_args(["--router-session-affinity-mode", "hard"])
     )
     assert config.session_affinity_mode == "hard"
+
+
+def test_session_affinity_binding_cli_and_environment(monkeypatch) -> None:
+    monkeypatch.delenv("DYN_ROUTER_SESSION_AFFINITY_BINDING", raising=False)
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(parser.parse_args([]))
+    assert config.session_affinity_binding == "session"
+    assert config.router_kwargs()["session_affinity_binding"] == "session"
+
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(["--router-session-affinity-binding", "parent-group"])
+    )
+    config.validate()
+    assert config.router_kwargs()["session_affinity_binding"] == "parent-group"
+
+    monkeypatch.setenv("DYN_ROUTER_SESSION_AFFINITY_BINDING", "parent-group")
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(parser.parse_args([]))
+    assert config.session_affinity_binding == "parent-group"
+
+
+def test_session_affinity_binding_rejects_unknown_value() -> None:
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--router-session-affinity-binding", "subagent"])
 
 
 @pytest.mark.parametrize("ttl", [0, 31_536_001])

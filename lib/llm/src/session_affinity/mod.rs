@@ -20,6 +20,38 @@ pub enum SessionAffinityMode {
     Soft,
 }
 
+impl SessionAffinityMode {
+    pub fn is_soft(self) -> bool {
+        matches!(self, Self::Soft)
+    }
+}
+
+/// Which id a request's session binding is keyed on.
+///
+/// Frontend-only: it never appears on a model card, so it cannot break an older frontend's
+/// card parsing the way a new `SessionAffinityMode` wire value would.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SessionAffinityBinding {
+    #[default]
+    Session,
+    /// A subagent binds under its parent's group rather than its own session.
+    ParentGroup,
+}
+
+impl FromStr for SessionAffinityBinding {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "session" => Ok(Self::Session),
+            "parent-group" => Ok(Self::ParentGroup),
+            _ => Err(format!(
+                "invalid session affinity binding {value:?}; expected 'session' or 'parent-group'"
+            )),
+        }
+    }
+}
+
 impl FromStr for SessionAffinityMode {
     type Err = String;
 
@@ -32,6 +64,13 @@ impl FromStr for SessionAffinityMode {
             )),
         }
     }
+}
+
+/// The `\u{1}` prefix cannot appear in an HTTP header value, so no client can claim this key as
+/// its own session id; the constant length keeps a long parent id from overflowing the limit.
+pub(crate) fn subagent_group_affinity_id(parent_session_id: &str) -> String {
+    let digest = blake3::hash(parent_session_id.as_bytes());
+    format!("\u{1}sg:{}", digest.to_hex())
 }
 
 pub const MAX_SESSION_AFFINITY_TTL_SECS: u64 = 31_536_000;

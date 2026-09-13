@@ -3648,6 +3648,7 @@ mod tests {
             None,
             None,
             crate::session_affinity::SessionAffinityMode::Hard,
+            crate::session_affinity::SessionAffinityBinding::Session,
             "topology-model".to_string(),
             worker_set.namespace().to_string(),
             crate::discovery::LoadThresholdHandle::new(Default::default()),

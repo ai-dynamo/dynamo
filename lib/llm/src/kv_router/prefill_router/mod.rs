@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::session_affinity::SessionAffinityBinding;
 use std::sync::atomic::AtomicU8;
 use std::sync::{Arc, OnceLock};
 
@@ -235,6 +236,7 @@ where
     decode_router_mode: RouterMode,
     session_affinity_ttl: Option<std::time::Duration>,
     session_affinity_mode: SessionAffinityMode,
+    session_affinity_binding: SessionAffinityBinding,
     conditional_disagg_policy: Box<dyn ConditionalDisaggPolicy>,
     /// Resolved once at construction: dedicated threshold if set, otherwise
     /// `router_queue_threshold`. `None` means the prefill-load condition is disabled.
@@ -277,6 +279,7 @@ where
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     session_affinity_ttl: Option<std::time::Duration>,
     session_affinity_mode: SessionAffinityMode,
+    session_affinity_binding: SessionAffinityBinding,
     model_name: String,
     load_thresholds: crate::discovery::LoadThresholdHandle,
     parent_token: CancellationToken,
@@ -781,6 +784,7 @@ mod tests {
             None,
             None,
             SessionAffinityMode::Hard,
+            crate::session_affinity::SessionAffinityBinding::Session,
             "model".to_string(),
             "namespace".to_string(),
             crate::discovery::LoadThresholdHandle::new(Default::default()),
@@ -1040,6 +1044,7 @@ mod tests {
             None,
             None,
             SessionAffinityMode::Hard,
+            crate::session_affinity::SessionAffinityBinding::Session,
             "test-model".to_string(),
             "test-namespace".to_string(),
             crate::discovery::LoadThresholdHandle::new(Default::default()),

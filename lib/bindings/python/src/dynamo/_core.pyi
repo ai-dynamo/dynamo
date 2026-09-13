@@ -1732,6 +1732,7 @@ class RouterConfig:
             enforce_disagg: Deprecated and ignored. Routing topology and readiness come from registered worker types.
             session_affinity_ttl_secs: Router-local session-affinity idle TTL in seconds.
             session_affinity_mode: Session binding behavior: ``hard`` or ``soft``.
+            session_affinity_binding: Which id a binding is keyed on: ``session`` or ``parent-group``. Frontend-only.
         """
         ...
 
@@ -2917,6 +2918,7 @@ class KvRouter:
             session_affinity_ttl_secs: Optional router-local session-affinity idle TTL in seconds
             load_threshold_config: Optional overload-admission thresholds; all checks are disabled when omitted
             session_affinity_mode: Session binding behavior: ``hard`` or ``soft``
+            session_affinity_binding: Which id a binding is keyed on: ``session`` or ``parent-group``
         """
         ...
 
