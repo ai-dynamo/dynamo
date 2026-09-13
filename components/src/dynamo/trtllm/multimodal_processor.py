@@ -267,7 +267,7 @@ class MultimodalRequestProcessor:
                     )
                     raise HttpStatusError(
                         500,
-                        "Passed in path is a local file path, but allowed_local_media_path is not configured."
+                        "Passed in path is a local file path, but allowed_local_media_path is not configured. "
                         "Please configure an allowed path for local media.",
                         path,
                     )
@@ -485,13 +485,14 @@ class MultimodalRequestProcessor:
                             if isinstance(item, dict):
                                 emb = item.get("mm_embeddings")
                                 if emb is None:
+                                    source = describe_media_source(path)
                                     logging.error(
                                         f"Dictionary embeddings missing 'mm_embeddings' key: {path}"
                                     )
                                     raise HttpStatusError(
                                         400,
-                                        f"Malformed embedding file {path}: missing 'mm_embeddings' key",
-                                        str(path),
+                                        f"Malformed embedding file {path}: missing 'mm_embeddings' key.",
+                                        source,
                                     )
                                 loaded_embeddings.append(emb)
                             else:
