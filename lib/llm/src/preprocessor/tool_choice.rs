@@ -3,6 +3,8 @@
 
 //! Tool-choice guided decoding policy for OpenAI chat requests.
 
+use std::borrow::Cow;
+
 use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest};
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use crate::protocols::openai::tools::{
@@ -104,7 +106,7 @@ impl OpenAIPreprocessor {
 
         if self.apply_tool_choice_structural_tag(
             &convert_tool_choice(tool_choice),
-            &convert_tools(&tools),
+            &convert_tools(tools.as_ref()),
             request.inner.parallel_tool_calls,
             prompt_injected_reasoning,
             common_request,
@@ -133,7 +135,7 @@ impl OpenAIPreprocessor {
 
         match get_tool_choice_guidance_from_tools(
             Some(tool_choice),
-            Some(&tools),
+            Some(tools.as_ref()),
             request.inner.parallel_tool_calls,
         ) {
             Ok(Some(guidance)) => {
@@ -213,7 +215,7 @@ pub(crate) fn convert_tools(tools: &[ChatCompletionTool]) -> Vec<ToolDefinition>
 /// original message positions for prompt rendering and KV-cache correctness.
 pub(crate) fn effective_tools(
     request: &CreateChatCompletionRequest,
-) -> Result<Vec<ChatCompletionTool>, DynamoError> {
+) -> Result<Cow<'_, [ChatCompletionTool]>, DynamoError> {
     validate::validated_effective_tools(request)
         .map_err(|error| invalid_argument(error.to_string()))
 }
@@ -221,7 +223,7 @@ pub(crate) fn effective_tools(
 pub(crate) fn effective_tool_definitions(
     request: &CreateChatCompletionRequest,
 ) -> Result<Vec<ToolDefinition>, DynamoError> {
-    effective_tools(request).map(|tools| convert_tools(&tools))
+    effective_tools(request).map(|tools| convert_tools(tools.as_ref()))
 }
 
 /// The guided-tool constraint a request implies, given what the structural-tag stage
@@ -247,7 +249,7 @@ pub(crate) fn guided_tool_constraint(
         .as_ref()
         .unwrap_or(&ChatCompletionToolChoiceOption::Auto);
     let tools = effective_tools(&request.inner)?;
-    validate_openai_tool_choice(Some(tool_choice), Some(&tools))
+    validate_openai_tool_choice(Some(tool_choice), Some(tools.as_ref()))
         .map_err(|error| invalid_argument(error.to_string()))?;
     let is_forced_tool_choice = matches!(
         tool_choice,
@@ -273,7 +275,7 @@ pub(crate) fn guided_tool_constraint(
     // empty `tools` list under `tool_choice: "required"`).
     match get_tool_choice_guidance_from_tools(
         Some(tool_choice),
-        Some(&tools),
+        Some(tools.as_ref()),
         request.inner.parallel_tool_calls,
     ) {
         Ok(Some(_)) => Ok(installed_json_constraint(tool_choice)),
@@ -374,6 +376,17 @@ mod tests {
     }
 
     #[test]
+    fn effective_tools_borrows_top_level_tools_without_dynamic_declarations() {
+        let request = request(json!({"tools": tools()}));
+        let top_level = request.inner.tools.as_deref().unwrap();
+
+        let effective = effective_tools(&request.inner).expect("top-level tools must validate");
+
+        assert!(matches!(&effective, Cow::Borrowed(_)));
+        assert!(std::ptr::eq(effective.as_ptr(), top_level.as_ptr()));
+    }
+
+    #[test]
     fn dynamic_system_tools_enable_parsing_and_honor_tool_choice_none() {
         for (tool_choice, expected) in [(None, true), (Some(json!("none")), false)] {
             let mut extra = json!({
@@ -433,6 +446,7 @@ mod tests {
         }));
 
         let normalized = effective_tools(&request.inner).expect("dynamic tools must normalize");
+        assert!(matches!(&normalized, Cow::Owned(_)));
         assert_eq!(
             normalized
                 .iter()

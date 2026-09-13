@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{fmt::Display, sync::LazyLock};
+use std::{borrow::Cow, fmt::Display, sync::LazyLock};
 
 use dynamo_protocols::types::{
     ChatCompletionTool, ChatCompletionToolType, CreateChatCompletionRequest, FunctionObject,
@@ -535,22 +535,24 @@ pub fn validate_top_logprobs(top_logprobs: Option<u8>) -> Result<(), anyhow::Err
     Ok(())
 }
 
-/// Collects and validates every tool visible to the model.
-///
-/// Top-level OpenAI tools remain first. Kimi-style tools declared on system
-/// messages follow in message order and may use either the wrapped OpenAI form
-/// or Kimi's bare function-schema form. The original messages are not rewritten.
 pub(crate) fn validated_effective_tools(
     request: &CreateChatCompletionRequest,
-) -> Result<Vec<ChatCompletionTool>, anyhow::Error> {
+) -> Result<Cow<'_, [ChatCompletionTool]>, anyhow::Error> {
     let dynamic_tools = request
         .dynamic_system_tools()
         .enumerate()
         .map(|(index, tool)| normalize_dynamic_system_tool(tool, index))
         .collect::<Result<Vec<_>, _>>()?;
-    let mut tools = request.tools.clone().unwrap_or_default();
-    tools.extend(dynamic_tools);
-    validate_tools(&Some(tools.as_slice()))?;
+
+    let tools = if dynamic_tools.is_empty() {
+        Cow::Borrowed(request.tools.as_deref().unwrap_or_default())
+    } else {
+        let mut tools = request.tools.clone().unwrap_or_default();
+        tools.extend(dynamic_tools);
+        Cow::Owned(tools)
+    };
+
+    validate_tools(&Some(tools.as_ref()))?;
     Ok(tools)
 }
 

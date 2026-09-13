@@ -625,7 +625,7 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         validate::validate_temperature(self.inner.temperature)?;
         validate::validate_top_p(self.inner.top_p)?;
         let effective_tools = validate::validated_effective_tools(&self.inner)?;
-        validate::validate_tool_choice(&self.inner.tool_choice, Some(effective_tools.as_slice()))?;
+        validate::validate_tool_choice(&self.inner.tool_choice, Some(effective_tools.as_ref()))?;
         // none for parallel_tool_calls
         validate::validate_user(self.inner.user.as_deref())?;
         // none for function call

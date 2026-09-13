@@ -7743,8 +7743,54 @@ mod tests {
         );
     }
 
+    const HARMONY_CALL_TOKEN_ID: TokenIdType = 42;
+
+    struct HiddenStopTokenizer;
+
+    impl crate::tokenizers::traits::Encoder for HiddenStopTokenizer {
+        fn encode(&self, input: &str) -> anyhow::Result<Encoding> {
+            if input != "<|call|>" {
+                anyhow::bail!("unexpected Harmony tool-call end token {input:?}");
+            }
+            Ok(Encoding::Sp(vec![HARMONY_CALL_TOKEN_ID]))
+        }
+
+        fn encode_batch(&self, inputs: &[&str]) -> anyhow::Result<Vec<Encoding>> {
+            inputs.iter().map(|input| self.encode(input)).collect()
+        }
+    }
+
+    impl crate::tokenizers::traits::Decoder for HiddenStopTokenizer {
+        fn decode(
+            &self,
+            _token_ids: &[TokenIdType],
+            _skip_special_tokens: bool,
+        ) -> anyhow::Result<crate::tokenizers::traits::DecodeResult> {
+            Ok(crate::tokenizers::traits::DecodeResult::Complete(
+                String::new(),
+            ))
+        }
+    }
+
+    impl Tokenizer for HiddenStopTokenizer {}
+
+    fn hidden_stop_preprocessor() -> OpenAIPreprocessor {
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let mut preprocessor = match Arc::try_unwrap(OpenAIPreprocessor::new(mdc).unwrap()) {
+            Ok(preprocessor) => preprocessor,
+            Err(_) => panic!("test preprocessor unexpectedly shared"),
+        };
+        preprocessor.tool_call_parser = Some("harmony".to_string());
+        preprocessor.tokenizer = Arc::new(HiddenStopTokenizer);
+        preprocessor
+    }
+
     #[test]
-    fn hidden_stop_policy_recognizes_dynamic_system_tools() {
+    fn hidden_stop_path_recognizes_dynamic_system_tools_and_tool_choice_none() {
         let dynamic: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
             "model": "moonshotai/Kimi-K3",
             "messages": [
@@ -7755,24 +7801,30 @@ mod tests {
         .unwrap();
         let none: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
             "model": "moonshotai/Kimi-K3",
-            "messages": [{"role": "user", "content": "test"}]
+            "messages": [
+                {"role": "system", "content": "", "tools": [{"name": "lookup"}]},
+                {"role": "user", "content": "test"}
+            ],
+            "tool_choice": "none"
         }))
         .unwrap();
+        assert!(dynamic.inner.tools.is_none());
+        assert!(none.inner.tools.is_none());
 
-        assert!(OpenAIPreprocessor::request_has_effective_tools(&dynamic));
-        assert!(!OpenAIPreprocessor::request_has_effective_tools(&none));
-        assert!(
-            OpenAIPreprocessor::should_keep_tool_parser_end_tokens_visible(
-                OpenAIPreprocessor::request_has_effective_tools(&dynamic),
-                false,
-            )
-        );
-        assert!(
-            !OpenAIPreprocessor::should_keep_tool_parser_end_tokens_visible(
-                OpenAIPreprocessor::request_has_effective_tools(&dynamic),
-                true,
-            )
-        );
+        let preprocessor = hidden_stop_preprocessor();
+        let mut dynamic_hidden = vec![HARMONY_CALL_TOKEN_ID, 7];
+        let dynamic_visible = preprocessor
+            .remove_tool_parser_end_tokens_from_hidden_stops(&dynamic, &mut dynamic_hidden)
+            .unwrap();
+        assert_eq!(dynamic_visible, [HARMONY_CALL_TOKEN_ID]);
+        assert_eq!(dynamic_hidden, [7]);
+
+        let mut none_hidden = vec![HARMONY_CALL_TOKEN_ID, 7];
+        let none_visible = preprocessor
+            .remove_tool_parser_end_tokens_from_hidden_stops(&none, &mut none_hidden)
+            .unwrap();
+        assert!(none_visible.is_empty());
+        assert_eq!(none_hidden, [HARMONY_CALL_TOKEN_ID, 7]);
     }
 
     async fn apply_kimi_k3_no_tools(
