@@ -242,7 +242,7 @@ impl AicPerfConfig {
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, *, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_ttl_secs=120.0, router_approximate_cache_policy="ttl", router_queue_threshold=None, router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, shared_cache_multiplier=0.0, shared_cache_type="none", router_predicted_ttl_secs=None, conditional_disagg_enabled=false, conditional_disagg_policy="isl_bounding", conditional_disagg_eff_isl_threshold=2048, conditional_disagg_eff_isl_ratio_threshold=0.7, conditional_disagg_prefill_busy_threshold=None, conditional_disagg_decode_busy_threshold=None, overlap_score_credit=1.0, overlap_score_credit_decay=0.0, prefill_load_scale=1.0, decode_active_request_weight=0.0, router_policy_config=None, router_prefill_policy=None, router_decode_policy=None, router_tracking_hash="public-xxh3-v1", router_tracking_key_file=None, router_tracking_key_id=None))]
+    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, *, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_ttl_secs=120.0, router_approximate_cache_policy="ttl", router_queue_threshold=None, router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, shared_cache_multiplier=0.0, shared_cache_type="none", router_predicted_ttl_secs=None, conditional_disagg_enabled=false, conditional_disagg_policy="isl_bounding", conditional_disagg_eff_isl_threshold=2048, conditional_disagg_eff_isl_ratio_threshold=0.7, conditional_disagg_prefill_busy_threshold=None, conditional_disagg_decode_busy_threshold=None, overlap_score_credit=1.0, overlap_score_credit_decay=0.0, prefill_load_scale=1.0, decode_active_request_weight=0.0, router_policy_config=None, router_prefill_policy=None, router_decode_policy=None, router_tracking_hash="public-xxh3-v1", router_tracking_key_file=None, router_tracking_key_id=None, session_affinity_ttl_secs=None, session_affinity_mode="hard"))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         overlap_score_weight: Option<f64>,
@@ -282,6 +282,8 @@ impl KvRouterConfig {
         router_tracking_hash: &str,
         router_tracking_key_file: Option<PathBuf>,
         router_tracking_key_id: Option<String>,
+        session_affinity_ttl_secs: Option<u64>,
+        session_affinity_mode: &str,
     ) -> PyResult<Self> {
         if let Some(value) = overlap_score_weight {
             apply_deprecated_overlap_score_weight(
@@ -290,6 +292,10 @@ impl KvRouterConfig {
                 &mut prefill_load_scale,
             );
         }
+        super::kv::check_session_affinity_ttl_secs(session_affinity_ttl_secs)?;
+        let session_affinity_mode = session_affinity_mode
+            .parse::<RsSessionAffinityMode>()
+            .map_err(PyValueError::new_err)?;
 
         let inner = RsKvRouterConfig {
             overlap_score_credit,
@@ -339,6 +345,8 @@ impl KvRouterConfig {
             conditional_disagg_prefill_busy_threshold,
             conditional_disagg_decode_busy_threshold,
             router_predicted_ttl_secs,
+            session_affinity_ttl_secs: session_affinity_ttl_secs.map(|t| t as f64),
+            session_affinity_mode,
         };
         validate_kv_router_config(&inner)?;
         Ok(KvRouterConfig { inner })
@@ -480,15 +488,13 @@ pub struct RouterConfig {
     active_prefill_tokens_threshold: Option<u64>,
     /// Threshold for active prefill tokens as fraction of max_num_batched_tokens
     active_prefill_tokens_threshold_frac: Option<f64>,
-    session_affinity_ttl_secs: Option<u64>,
-    session_affinity_mode: RsSessionAffinityMode,
 }
 
 #[pymethods]
 impl RouterConfig {
     #[new]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false, session_affinity_ttl_secs=None, session_affinity_mode="hard"))]
+    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false))]
     pub fn new(
         mode: RouterMode,
         config: Option<KvRouterConfig>,
@@ -496,8 +502,6 @@ impl RouterConfig {
         active_prefill_tokens_threshold: Option<u64>,
         active_prefill_tokens_threshold_frac: Option<f64>,
         enforce_disagg: bool,
-        session_affinity_ttl_secs: Option<u64>,
-        session_affinity_mode: &str,
     ) -> PyResult<Self> {
         if enforce_disagg {
             static WARN_ONCE: std::sync::Once = std::sync::Once::new();
@@ -507,7 +511,6 @@ impl RouterConfig {
                 );
             });
         }
-        super::kv::check_session_affinity_ttl_secs(session_affinity_ttl_secs)?;
         RsLoadThresholdConfig {
             active_decode_blocks_threshold,
             active_prefill_tokens_threshold,
@@ -515,23 +518,24 @@ impl RouterConfig {
         }
         .validate()
         .map_err(PyValueError::new_err)?;
-        let session_affinity_mode = session_affinity_mode
-            .parse()
-            .map_err(PyValueError::new_err)?;
         Ok(Self {
             router_mode: mode,
             kv_router_config: config.unwrap_or_default(),
             active_decode_blocks_threshold,
             active_prefill_tokens_threshold,
             active_prefill_tokens_threshold_frac,
-            session_affinity_ttl_secs,
-            session_affinity_mode,
         })
     }
 }
 
 impl From<RouterConfig> for RsRouterConfig {
     fn from(rc: RouterConfig) -> RsRouterConfig {
+        let session_affinity_ttl_secs = rc
+            .kv_router_config
+            .inner
+            .session_affinity_ttl_secs
+            .map(|f| f as u64);
+        let session_affinity_mode = rc.kv_router_config.inner.session_affinity_mode;
         RsRouterConfig {
             router_mode: rc.router_mode.into(),
             kv_router_config: rc.kv_router_config.inner,
@@ -541,8 +545,8 @@ impl From<RouterConfig> for RsRouterConfig {
                 active_prefill_tokens_threshold_frac: rc.active_prefill_tokens_threshold_frac,
             },
             enforce_disagg: false,
-            session_affinity_ttl_secs: rc.session_affinity_ttl_secs,
-            session_affinity_mode: rc.session_affinity_mode,
+            session_affinity_ttl_secs,
+            session_affinity_mode,
         }
     }
 }
