@@ -11,9 +11,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use dynamo_kv_router::DEFAULT_ROUTING_GROUP;
-use dynamo_kv_router::services::selection::{
-    CatalogReconciler, WorkerCatalogSource, WorkerRequest,
-};
+use dynamo_kv_router::services::selection::{WorkerCatalogSource, WorkerRequest};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
@@ -94,10 +92,7 @@ impl TopologyAdapter {
             primed: false,
             closed: false,
         };
-        tokio::spawn(
-            CatalogReconciler::new(Arc::clone(selector.service.core()))
-                .run(source, cancel.child_token()),
-        );
+        tokio::spawn(selector.catalog_reconciler().run(source, cancel.child_token()));
         Self { cancel }
     }
 }
@@ -145,14 +140,11 @@ mod tests {
             tokenizer_max_response_bytes: 16 * 1024 * 1024,
             tokenization_timeout_ms: 5_000,
             block_size: 16,
-            data_parallel_size: 1,
-            kv_event_port_stride: 1,
             kv_event_port: 5557,
             replay_port: None,
             total_kv_blocks: Some(1000),
             max_num_batched_tokens: Some(8192),
             max_inflight_requests: 1024,
-            session_affinity_ttl_secs: None,
         }
     }
 

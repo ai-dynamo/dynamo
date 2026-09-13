@@ -28,7 +28,6 @@ use tokio::sync::Semaphore;
 
 use dynamo_kv_router::services::selection::{SelectionError, WorkerSelectionPolicyRegistry};
 use dynamo_llm::http::service::metadata::extract_metadata_from_header_pairs;
-use dynamo_llm::protocols::agents::HEADER_DYNAMO_SESSION_ID;
 use dynamo_llm::protocols::common::extensions::{
     AgentHints, HEADER_REQUEST_PRIORITY, HEADER_REQUEST_STRICT_PRIORITY, resolve_request_priority,
 };
@@ -235,6 +234,30 @@ fn first_header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a s
         .filter(|v| !v.is_empty())
 }
 
+/// Extract a session affinity key from ext-proc header pairs, covering all
+/// supported agent harnesses in priority order:
+/// 1. `x-dynamo-session-id` (explicit Dynamo session)
+/// 2. Claude Code: `x-claude-code-agent-id` (child) or `x-claude-code-session-id` (root)
+/// 3. Codex: `thread-id`
+/// 4. OpenCode: `x-session-id`
+///
+/// Mirrors the logic of `dynamo_llm::protocols::agents::session_affinity_header_value`,
+/// adapted for the ext-proc `&[(String, String)]` header representation.
+fn session_id_from_headers(headers: &[(String, String)]) -> Option<String> {
+    if let Some(id) = first_header(headers, "x-dynamo-session-id") {
+        return Some(id.to_owned());
+    }
+    if first_header(headers, "x-claude-code-session-id").is_some() {
+        let id = first_header(headers, "x-claude-code-agent-id")
+            .or_else(|| first_header(headers, "x-claude-code-session-id"))?;
+        return Some(id.to_owned());
+    }
+    if let Some(id) = first_header(headers, "thread-id") {
+        return Some(id.to_owned());
+    }
+    first_header(headers, "x-session-id").map(str::to_owned)
+}
+
 #[tonic::async_trait]
 impl EndpointPicker for EppRouter {
     async fn pick(
@@ -342,7 +365,7 @@ impl EndpointPicker for EppRouter {
             model_name: self.model_name.clone(),
             reservation_id: reservation_id.clone(),
             token_ids: tokens,
-            session_id: first_header(&req.headers, HEADER_DYNAMO_SESSION_ID).map(str::to_owned),
+            session_id: session_id_from_headers(&req.headers),
             // `None` on the ordinary path: the selector schedules over its
             // catalog; `Some` only carries an Envoy subset constraint.
             allowed_worker_ids: allowed,
@@ -359,6 +382,12 @@ impl EndpointPicker for EppRouter {
             Ok(resp) => resp,
             Err(SelectionError::BadRequest(message)) => {
                 return Err(PickError::InvalidRequest(message));
+            }
+            // A Conflict arises only when the EPP's own UUID collides in the selection
+            // index — this is an EPP-internal invariant violation, never caused by client
+            // input, so 500 is correct (not 400 or 503).
+            Err(SelectionError::Conflict(msg)) => {
+                return Err(PickError::Internal(format!("selection id conflict: {msg}")));
             }
             Err(e) => return Err(PickError::RoutingFailed(e.to_string())),
         };

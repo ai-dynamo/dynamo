@@ -122,7 +122,7 @@ fn codex_compaction_header_value(headers: &HeaderMap) -> Option<AgentCompaction>
         .then(|| metadata.compaction.unwrap_or_default())
 }
 
-pub(crate) fn session_affinity_header_value(headers: &HeaderMap) -> Option<String> {
+pub fn session_affinity_header_value(headers: &HeaderMap) -> Option<String> {
     if let Some(session_id) = borrowed_header_value(headers, HEADER_DYNAMO_SESSION_ID) {
         return Some(session_id.to_owned());
     }

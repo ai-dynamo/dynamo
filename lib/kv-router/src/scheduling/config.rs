@@ -200,6 +200,8 @@ fn log_env_config(config: &KvRouterConfig) {
         disk_cache_hit_weight = config.disk_cache_hit_weight,
         router_prefill_load_model = %config.router_prefill_load_model,
         router_approximate_cache_policy = %config.router_approximate_cache_policy,
+        session_affinity_ttl_secs = ?config.session_affinity_ttl_secs,
+        session_affinity_mode = ?config.session_affinity_mode,
         "KvRouterConfig initialized (DYN_* env overrides applied)"
     );
 }
@@ -364,6 +366,12 @@ fn kv_router_config_from_lookup(
     if let Some(value) = get_env("DYN_ROUTER_PREFILL_LOAD_MODEL") {
         config.router_prefill_load_model = value.parse()?;
     }
+    if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_SESSION_AFFINITY_TTL_SECS") {
+        config.session_affinity_ttl_secs = Some(value);
+    }
+    if let Some(value) = get_env("DYN_ROUTER_SESSION_AFFINITY_MODE") {
+        config.session_affinity_mode = value.parse()?;
+    }
 
     Ok(config)
 }
@@ -444,6 +452,41 @@ impl FromStr for SharedCacheType {
             "hicache" => Ok(Self::Hicache),
             _ => Err(format!(
                 "unknown shared_cache_type: {s:?}, expected 'none' or 'hicache'"
+            )),
+        }
+    }
+}
+
+/// How a session-affinity binding treats a dispatch that landed on a different
+/// worker. Stored in [`KvRouterConfig`]; read from `DYN_ROUTER_SESSION_AFFINITY_MODE`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionAffinityMode {
+    /// The binding is exact: dispatching to another worker is an error.
+    #[default]
+    Hard,
+    /// The binding follows the dispatch: the session rebinds to where it ran.
+    Soft,
+}
+
+impl fmt::Display for SessionAffinityMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Hard => f.write_str("hard"),
+            Self::Soft => f.write_str("soft"),
+        }
+    }
+}
+
+impl FromStr for SessionAffinityMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "hard" => Ok(Self::Hard),
+            "soft" => Ok(Self::Soft),
+            _ => Err(format!(
+                "invalid session affinity mode {value:?}; expected 'hard' or 'soft'"
             )),
         }
     }
@@ -893,6 +936,19 @@ pub struct KvRouterConfig {
     /// maximum overlap.
     pub router_predicted_ttl_secs: Option<f64>,
 
+    /// Session-affinity TTL in seconds. When set, the selection service pins
+    /// sessions to their first-chosen worker for this duration. `None` disables
+    /// session affinity. Read from `DYN_ROUTER_SESSION_AFFINITY_TTL_SECS`.
+    /// Must be finite and ≥ 1.0 when set.
+    #[serde(skip)]
+    pub session_affinity_ttl_secs: Option<f64>,
+
+    /// Session-affinity binding mode. `Hard` (default) treats a dispatch to
+    /// another worker as an error; `Soft` rebinds the session instead.
+    /// Read from `DYN_ROUTER_SESSION_AFFINITY_MODE`.
+    #[serde(skip)]
+    pub session_affinity_mode: SessionAffinityMode,
+
     /// Enable conditional-disagg bypass. When true, the `PrefillRouter`
     /// may short-circuit selected requests to prefill+decode on a decode worker.
     #[serde(default, skip_serializing_if = "is_default")]
@@ -979,6 +1035,8 @@ impl Default for KvRouterConfig {
             shared_cache_multiplier: 0.0,
             shared_cache_type: SharedCacheType::default(),
             router_predicted_ttl_secs: None,
+            session_affinity_ttl_secs: None,
+            session_affinity_mode: SessionAffinityMode::Hard,
             conditional_disagg_enabled: false,
             conditional_disagg_policy: ConditionalDisaggPolicyKind::default(),
             conditional_disagg_eff_isl_threshold: default_conditional_disagg_eff_isl_threshold(),
@@ -1043,6 +1101,8 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             shared_cache_multiplier: compat.shared_cache_multiplier,
             shared_cache_type: compat.shared_cache_type,
             router_predicted_ttl_secs: compat.router_predicted_ttl_secs,
+            session_affinity_ttl_secs: None,
+            session_affinity_mode: SessionAffinityMode::Hard,
             conditional_disagg_enabled: compat.conditional_disagg_enabled,
             conditional_disagg_policy: compat.conditional_disagg_policy,
             conditional_disagg_eff_isl_threshold: compat.conditional_disagg_eff_isl_threshold,
@@ -1407,6 +1467,13 @@ impl KvRouterConfig {
         }
         if let Some(value) = self.conditional_disagg_decode_busy_threshold {
             validate_min("conditional_disagg_decode_busy_threshold", value, 0.0)?;
+        }
+        if let Some(ttl) = self.session_affinity_ttl_secs {
+            if !ttl.is_finite() || ttl < 1.0 || ttl > 31_536_000.0 {
+                return Err(format!(
+                    "session affinity TTL must be a finite value between 1 and 31536000 seconds, got {ttl}"
+                ));
+            }
         }
         validate_kv_router_config(self)
     }
