@@ -39,6 +39,18 @@ use crate::epp_router::{endpoint_in_subset, requested_policy_class};
 use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo, ResponseUsage};
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Formats a worker id as hex directly into the tracing subscriber's buffer.
+/// `format!("{id:x}")` at a per-request callsite allocates a `String` that is
+/// written once and dropped; the operator ships `RUST_LOG=info`, so that
+/// callsite is enabled and the field expression really does run per request.
+struct LowerHex(u64);
+
+impl std::fmt::Display for LowerHex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:x}", self.0)
+    }
+}
 const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
 
 /// `(token_ids, cache_namespace, priority_jump, strict_priority,
@@ -570,16 +582,17 @@ impl Router {
         is_disaggregated: bool,
         cache_namespace: Option<String>,
     ) -> Result<()> {
-        let decode_router = self.decode_router.clone();
-        let request_id = request_id.to_owned();
-        let tokens = tokens.to_vec();
+        // The timeout future is awaited here, so it can borrow `tokens` and
+        // `request_id` for its whole lifetime. Copying them in would put an
+        // O(prompt_len) allocation on every request for no benefit.
+        let decode_router = &self.decode_router;
 
         tokio::time::timeout(BOOKKEEPING_TIMEOUT, async {
             let worker = WorkerWithDpRank::new(worker_id, dp_rank);
             let router_config_override = decode_router_config_override(is_disaggregated);
 
             let overlap_blocks = decode_router
-                .get_overlap_blocks(&tokens, None, worker, None, cache_namespace.as_deref())
+                .get_overlap_blocks(tokens, None, worker, None, cache_namespace.as_deref())
                 .await
                 .map_err(|e| anyhow::anyhow!("get_overlap_blocks failed: {e:?}"))?;
 
@@ -587,8 +600,8 @@ impl Router {
 
             decode_router
                 .add_request(
-                    request_id,
-                    &tokens,
+                    request_id.to_owned(),
+                    tokens,
                     None,
                     cached_tokens,
                     None,
@@ -607,12 +620,11 @@ impl Router {
 
     /// Mark prefill as completed for a request.
     pub async fn mark_prefill_complete(&self, request_id: &str) -> Result<()> {
-        let decode_router = self.decode_router.clone();
-        let request_id = request_id.to_owned();
+        let decode_router = &self.decode_router;
 
         tokio::time::timeout(BOOKKEEPING_TIMEOUT, async {
             decode_router
-                .mark_prefill_completed(&request_id)
+                .mark_prefill_completed(request_id)
                 .await
                 .map_err(|e| anyhow::anyhow!("mark_prefill_completed failed: {e}"))
         })
@@ -622,12 +634,11 @@ impl Router {
 
     /// Free a request from the router's bookkeeping.
     pub async fn free_request(&self, request_id: &str) -> Result<()> {
-        let decode_router = self.decode_router.clone();
-        let request_id = request_id.to_owned();
+        let decode_router = &self.decode_router;
 
         tokio::time::timeout(BOOKKEEPING_TIMEOUT, async {
             decode_router
-                .free(&request_id)
+                .free(request_id)
                 .await
                 .map_err(|e| anyhow::anyhow!("free failed: {e}"))
         })
@@ -1584,7 +1595,7 @@ impl EndpointPicker for Router {
 
         tracing::info!(
             worker_id = decode_worker.worker_id,
-            worker_id_hex = format!("{:x}", decode_worker.worker_id),
+            worker_id_hex = %LowerHex(decode_worker.worker_id),
             dp_rank = decode_worker.dp_rank,
             is_disaggregated,
             endpoint = %endpoint,

@@ -67,8 +67,11 @@ type ComponentContext struct {
 	ParentGraphDeploymentNamespace string
 	Discovery                      DiscoveryContext
 	EPPConfig                      *v1beta1.EPPConfig
-	WorkerHashSuffix               string
-	RuntimeVersion                 *runtimeversion.Version
+	// Replicas is the component's requested replica count, nil when unset.
+	// The EPP uses it to pick a coherent cross-replica routing default.
+	Replicas         *int32
+	WorkerHashSuffix string
+	RuntimeVersion   *runtimeversion.Version
 }
 
 func (b *BaseComponentDefaults) GetBaseContainer(context ComponentContext) (corev1.Container, error) {
