@@ -4820,15 +4820,22 @@ async fn handler_audio_speech(
             .unwrap_or_default()
     });
     // Per-model serving readiness gate (now that we have a resolved model
-    // name string).
+    // name string). Runs on the requested name so a 503 quotes back what the
+    // caller asked for.
     check_model_serving_ready(&state, &model)?;
+
+    // Audio registrations honor --served-model-name aliases, so resolve one to
+    // its primary before it reaches routing or a metric label. Readiness is
+    // published per primary name, and every other alias-bearing surface labels
+    // its metrics the same way.
+    let model = state.manager().resolve_canonical_name(&model);
 
     let context = request.context();
     let (mut connection_handle, stream_handle) = create_connection_monitor(
         context,
         Some(state.metrics_clone()),
         CancellationLabels {
-            model: model.clone(),
+            model: state.manager().metric_model_for(&model).to_string(),
             endpoint: Endpoint::Audios.to_string(),
             request_type: if streams_audio_chunks {
                 "stream"
@@ -4882,13 +4889,15 @@ async fn audio_speech(
         .map_err(|e| ErrorMessage::from_model_error(&e))?;
 
     let mut inflight = state.metrics_clone().create_inflight_guard(
-        &model,
+        &metric_model,
         Endpoint::Audios,
         streams_audio_chunks,
         &request_id,
     );
 
-    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+    let mut response_collector = state
+        .metrics_clone()
+        .create_response_collector(&metric_model);
 
     let ctx = request.context();
     inflight.mark_error(ErrorType::Cancelled);
@@ -4896,7 +4905,7 @@ async fn audio_speech(
         if super::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::Audios);
+                .inc_rejection(&metric_model, super::metrics::Endpoint::Audios);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate audio");
         inflight.mark_error(extract_error_type_from_response(&err_response));
