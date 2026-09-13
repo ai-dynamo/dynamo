@@ -14,11 +14,33 @@ For an end-to-end workflow, see
 search configuration domains, see
 [Sweep DynoSim Configurations](../../cli/operations/simulation-with-dynosim/dynosim-sweeps.mdx).
 
+## Migration from Dynamo Replay
+
 <Warning>
-The former Replay `online` mode has no replacement in the unified AISimulate CLI yet. `aisimulate
-predict` and `aisimulate recommend` are offline-only. The separate `python3 -m dynamo.mocker`
-command remains available for launching live workers but does not provide replay orchestration.
+**Removed CLI.** `python -m dynamo.replay` was removed when Dynamo adopted the unified AISimulate
+CLI. There is no compatibility command or warning period for this entry point. Choose a replacement
+by workload below.
 </Warning>
+
+| Workflow | Current entry point |
+|---|---|
+| Engine-only offline prediction | `aisimulate predict --stack engine` |
+| Offline prediction through Dynamo, including Router or Planner adapters | `aisimulate predict --stack dynamo` |
+| Search simulated configurations | `aisimulate recommend --stack engine` or `aisimulate recommend --stack dynamo` |
+| Public Replay `online` CLI | No unified CLI replacement yet; the Python replay SDK retains online mode |
+
+Build a public prediction or recommendation YAML file and pass it with `--config`. The removed
+Replay flags are not aliases for the new YAML fields. Use the [prediction
+walkthrough](../../cli/operations/simulation-with-dynosim/dynosim-replay.mdx) or [recommendation
+walkthrough](../../cli/operations/simulation-with-dynosim/dynosim-sweeps.mdx) for complete Dynamo
+examples, and the [AISimulate overview](../../developer-guide/knowledge-base/modular-components/ai-simulate-experimental/overview.md)
+for stack ownership and installation.
+
+The removal applies to the CLI. The `dynamo.replay` Python API remains available for single-run
+replay, Router and Planner integration, and online replay. Some [SDK trace
+capabilities](#typed-agentic-replay-through-the-dynamo-api) are not exposed by the unified CLI.
+`python3 -m dynamo.mocker` remains the supported live worker launcher; it does not orchestrate replay
+traffic. `aisimulate predict` and `aisimulate recommend` are offline-only.
 
 ## Command
 
