@@ -3,9 +3,13 @@
 
 use std::{fmt::Display, sync::LazyLock};
 
+use dynamo_protocols::types::{
+    ChatCompletionTool, ChatCompletionToolType, CreateChatCompletionRequest, FunctionObject,
+};
 use dynamo_runtime::config::{
     env_is_truthy, environment_names::llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
 };
+use serde_json::Value;
 
 use super::common_ext::{CommonExtProvider, extract_guided_decoding_options};
 use super::tools::{ToolChoiceError, validate_openai_tool_choice};
@@ -531,6 +535,102 @@ pub fn validate_top_logprobs(top_logprobs: Option<u8>) -> Result<(), anyhow::Err
     Ok(())
 }
 
+/// Collects and validates every tool visible to the model.
+///
+/// Top-level OpenAI tools remain first. Kimi-style tools declared on system
+/// messages follow in message order and may use either the wrapped OpenAI form
+/// or Kimi's bare function-schema form. The original messages are not rewritten.
+pub(crate) fn validated_effective_tools(
+    request: &CreateChatCompletionRequest,
+) -> Result<Vec<ChatCompletionTool>, anyhow::Error> {
+    let dynamic_tools = request
+        .dynamic_system_tools()
+        .enumerate()
+        .map(|(index, tool)| normalize_dynamic_system_tool(tool, index))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut tools = request.tools.clone().unwrap_or_default();
+    tools.extend(dynamic_tools);
+    validate_tools(&Some(tools.as_slice()))?;
+    Ok(tools)
+}
+
+/// Converts one dynamic system tool into the typed OpenAI function-tool shape.
+fn normalize_dynamic_system_tool(
+    tool: &Value,
+    index: usize,
+) -> Result<ChatCompletionTool, anyhow::Error> {
+    let object = tool.as_object().ok_or_else(|| {
+        anyhow::anyhow!("dynamic system tool at index {index} must be a JSON object")
+    })?;
+    let function = match (object.get("type"), object.get("function")) {
+        (Some(Value::String(kind)), Some(Value::Object(function))) if kind == "function" => {
+            function
+        }
+        (Some(kind), _) if kind.as_str() != Some("function") => {
+            anyhow::bail!("dynamic system tool at index {index} must have type=\"function\"");
+        }
+        (Some(_), _) => {
+            anyhow::bail!(
+                "dynamic system tool at index {index} with type=\"function\" needs a function object"
+            );
+        }
+        (None, Some(_)) => {
+            anyhow::bail!(
+                "dynamic system tool at index {index} with a function field needs type=\"function\""
+            );
+        }
+        (None, None) => object,
+    };
+
+    let name = function
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("dynamic system tool at index {index} needs a non-empty string name")
+        })?;
+    let description = optional_dynamic_string(function.get("description"), "description", index)?;
+    let parameters = match function.get("parameters") {
+        None | Some(Value::Null) => None,
+        Some(parameters @ Value::Object(_)) => Some(parameters.clone()),
+        Some(_) => {
+            anyhow::bail!(
+                "dynamic system tool at index {index} parameters must be a JSON Schema object"
+            );
+        }
+    };
+    let strict = match function.get("strict") {
+        None | Some(Value::Null) => None,
+        Some(Value::Bool(strict)) => Some(*strict),
+        Some(_) => {
+            anyhow::bail!("dynamic system tool at index {index} strict must be a boolean");
+        }
+    };
+
+    Ok(ChatCompletionTool {
+        r#type: ChatCompletionToolType::Function,
+        function: FunctionObject {
+            name: name.to_string(),
+            description,
+            parameters,
+            strict,
+        },
+    })
+}
+
+/// Reads an optional string field from a dynamic system tool definition.
+fn optional_dynamic_string(
+    value: Option<&Value>,
+    field: &str,
+    index: usize,
+) -> Result<Option<String>, anyhow::Error> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.clone())),
+        Some(_) => anyhow::bail!("dynamic system tool at index {index} {field} must be a string"),
+    }
+}
+
 /// Validates tools array
 pub fn validate_tools(
     tools: &Option<&[dynamo_protocols::types::ChatCompletionTool]>,
@@ -612,36 +712,6 @@ pub fn validate_tool_choice(
             anyhow::bail!("tool named \"{name}\" in tool_choice is not present in tools")
         }
         Err(error) => Err(error.into()),
-    }
-}
-
-/// Validate a forced tool choice against every tool visible to the model.
-///
-/// Kimi-style dynamic tools remain inside system messages so prompt ordering
-/// and prefix-cache semantics are preserved. They still participate in the
-/// request's tool-choice contract, alongside the ordinary top-level list.
-pub fn validate_effective_tool_choice(
-    request: &dynamo_protocols::types::CreateChatCompletionRequest,
-) -> Result<(), anyhow::Error> {
-    use dynamo_protocols::types::ChatCompletionToolChoiceOption;
-
-    match request.tool_choice.as_ref() {
-        None
-        | Some(ChatCompletionToolChoiceOption::None)
-        | Some(ChatCompletionToolChoiceOption::Auto) => Ok(()),
-        Some(ChatCompletionToolChoiceOption::Required) if !request.has_effective_tools() => {
-            anyhow::bail!("tool_choice is \"required\" but tools is empty")
-        }
-        Some(ChatCompletionToolChoiceOption::Named(named))
-            if !request.effective_tool_contains(&named.function.name) =>
-        {
-            anyhow::bail!(
-                "tool named \"{}\" in tool_choice is not present in tools",
-                named.function.name
-            )
-        }
-        Some(ChatCompletionToolChoiceOption::Required)
-        | Some(ChatCompletionToolChoiceOption::Named(_)) => Ok(()),
     }
 }
 

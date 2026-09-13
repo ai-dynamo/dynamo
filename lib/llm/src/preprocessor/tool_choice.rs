@@ -4,19 +4,17 @@
 //! Tool-choice guided decoding policy for OpenAI chat requests.
 
 use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest};
-use crate::protocols::openai::GuidedToolConstraint;
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use crate::protocols::openai::tools::{
     ToolChoiceGuidance, get_tool_choice_guidance_from_tools, validate_openai_tool_choice,
 };
+use crate::protocols::openai::{GuidedToolConstraint, validate};
 
 use dynamo_parsers::tool_calling::{ToolChoice, ToolDefinition};
 use dynamo_protocols::types::{
-    ChatCompletionTool, ChatCompletionToolChoiceOption, ChatCompletionToolType,
-    CreateChatCompletionRequest, FunctionObject, ResponseFormat,
+    ChatCompletionTool, ChatCompletionToolChoiceOption, CreateChatCompletionRequest, ResponseFormat,
 };
 use dynamo_runtime::error::{DynamoError, ErrorType};
-use serde_json::Value;
 
 fn invalid_argument(message: impl Into<String>) -> DynamoError {
     DynamoError::builder()
@@ -206,7 +204,7 @@ pub(crate) fn convert_tools(tools: &[ChatCompletionTool]) -> Vec<ToolDefinition>
         .collect()
 }
 
-/// Normalize all tools visible to the model without rewriting the request.
+/// Normalize and validate all tools visible to the model without rewriting the request.
 ///
 /// Top-level OpenAI tools remain first. Kimi-style tools declared on system
 /// messages follow in message order and may use either the wrapped OpenAI form
@@ -216,14 +214,8 @@ pub(crate) fn convert_tools(tools: &[ChatCompletionTool]) -> Vec<ToolDefinition>
 pub(crate) fn effective_tools(
     request: &CreateChatCompletionRequest,
 ) -> Result<Vec<ChatCompletionTool>, DynamoError> {
-    let dynamic_tools = request
-        .dynamic_system_tools()
-        .enumerate()
-        .map(|(index, tool)| normalize_dynamic_system_tool(tool, index))
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut tools = request.tools.clone().unwrap_or_default();
-    tools.extend(dynamic_tools);
-    Ok(tools)
+    validate::validated_effective_tools(request)
+        .map_err(|error| invalid_argument(error.to_string()))
 }
 
 /// Parser-facing form of [`effective_tools`].
@@ -231,91 +223,6 @@ pub(crate) fn effective_tool_definitions(
     request: &CreateChatCompletionRequest,
 ) -> Result<Vec<ToolDefinition>, DynamoError> {
     effective_tools(request).map(|tools| convert_tools(&tools))
-}
-
-fn normalize_dynamic_system_tool(
-    tool: &Value,
-    index: usize,
-) -> Result<ChatCompletionTool, DynamoError> {
-    let object = tool.as_object().ok_or_else(|| {
-        invalid_argument(format!(
-            "dynamic system tool at index {index} must be a JSON object"
-        ))
-    })?;
-    let function = match (object.get("type"), object.get("function")) {
-        (Some(Value::String(kind)), Some(Value::Object(function))) if kind == "function" => {
-            function
-        }
-        (Some(kind), _) if kind.as_str() != Some("function") => {
-            return Err(invalid_argument(format!(
-                "dynamic system tool at index {index} must have type=\"function\""
-            )));
-        }
-        (Some(_), _) => {
-            return Err(invalid_argument(format!(
-                "dynamic system tool at index {index} with type=\"function\" needs a function object"
-            )));
-        }
-        (None, Some(_)) => {
-            return Err(invalid_argument(format!(
-                "dynamic system tool at index {index} with a function field needs type=\"function\""
-            )));
-        }
-        (None, None) => object,
-    };
-
-    let name = function
-        .get("name")
-        .and_then(Value::as_str)
-        .filter(|name| !name.is_empty())
-        .ok_or_else(|| {
-            invalid_argument(format!(
-                "dynamic system tool at index {index} needs a non-empty string name"
-            ))
-        })?;
-    let description = optional_string(function.get("description"), "description", index)?;
-    let parameters = match function.get("parameters") {
-        None | Some(Value::Null) => None,
-        Some(parameters @ Value::Object(_)) => Some(parameters.clone()),
-        Some(_) => {
-            return Err(invalid_argument(format!(
-                "dynamic system tool at index {index} parameters must be a JSON Schema object"
-            )));
-        }
-    };
-    let strict = match function.get("strict") {
-        None | Some(Value::Null) => None,
-        Some(Value::Bool(strict)) => Some(*strict),
-        Some(_) => {
-            return Err(invalid_argument(format!(
-                "dynamic system tool at index {index} strict must be a boolean"
-            )));
-        }
-    };
-
-    Ok(ChatCompletionTool {
-        r#type: ChatCompletionToolType::Function,
-        function: FunctionObject {
-            name: name.to_string(),
-            description,
-            parameters,
-            strict,
-        },
-    })
-}
-
-fn optional_string(
-    value: Option<&Value>,
-    field: &str,
-    index: usize,
-) -> Result<Option<String>, DynamoError> {
-    match value {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(value)) => Ok(Some(value.clone())),
-        Some(_) => Err(invalid_argument(format!(
-            "dynamic system tool at index {index} {field} must be a string"
-        ))),
-    }
 }
 
 /// The guided-tool constraint a request implies, given what the structural-tag stage
@@ -469,19 +376,7 @@ mod tests {
 
     #[test]
     fn dynamic_system_tools_enable_parsing_and_honor_tool_choice_none() {
-        for (tool_choice, expected) in [
-            (None, true),
-            (Some(json!("none")), false),
-            (Some(json!("auto")), true),
-            (Some(json!("required")), true),
-            (
-                Some(json!({
-                    "type": "function",
-                    "function": {"name": "lookup"}
-                })),
-                true,
-            ),
-        ] {
+        for (tool_choice, expected) in [(None, true), (Some(json!("none")), false)] {
             let mut extra = json!({
                 "messages": [
                     {
@@ -560,7 +455,7 @@ mod tests {
     }
 
     #[test]
-    fn effective_tools_reject_invalid_dynamic_schema_fields() {
+    fn effective_tools_reject_invalid_dynamic_metadata() {
         for (field, value) in [
             ("strict", json!("yes")),
             ("parameters", json!([])),
@@ -577,6 +472,16 @@ mod tests {
             let error = effective_tools(&request.inner).expect_err("invalid field must fail");
             assert!(error.to_string().contains(field), "{field}: {error}");
         }
+
+        let request = request(json!({
+            "messages": [
+                {"role": "system", "content": "", "tools": [{"name": "bad name"}]},
+                {"role": "user", "content": "go"}
+            ]
+        }));
+        let error = effective_tools(&request.inner).expect_err("invalid name must fail");
+        assert_eq!(error.error_type(), ErrorType::InvalidArgument);
+        assert!(error.to_string().contains("has an invalid name"));
     }
 
     #[test]

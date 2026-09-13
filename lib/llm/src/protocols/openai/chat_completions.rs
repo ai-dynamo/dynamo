@@ -624,8 +624,8 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         // none for stream_options
         validate::validate_temperature(self.inner.temperature)?;
         validate::validate_top_p(self.inner.top_p)?;
-        validate::validate_tools(&self.inner.tools.as_deref())?;
-        validate::validate_effective_tool_choice(&self.inner)?;
+        let effective_tools = validate::validated_effective_tools(&self.inner)?;
+        validate::validate_tool_choice(&self.inner.tool_choice, Some(effective_tools.as_slice()))?;
         // none for parallel_tool_calls
         validate::validate_user(self.inner.user.as_deref())?;
         // none for function call
@@ -1120,6 +1120,68 @@ mod tests {
             error
                 .to_string()
                 .contains("tool named \"missing\" in tool_choice is not present in tools")
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_invalid_dynamic_tool_names() {
+        for (name, expected_error) in [
+            ("bad name".to_string(), "has an invalid name".to_string()),
+            (
+                "x".repeat(validate::MAX_FUNCTION_NAME_LENGTH + 1),
+                format!(
+                    "exceeds {} character limit",
+                    validate::MAX_FUNCTION_NAME_LENGTH
+                ),
+            ),
+        ] {
+            let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+                "model": "test-model",
+                "messages": [
+                    {"role": "system", "tools": [{"name": name}]},
+                    {"role": "user", "content": "Hello"}
+                ]
+            }))
+            .expect("dynamic-tool request must deserialize");
+
+            let error = ValidateRequest::validate(&request)
+                .expect_err("invalid dynamic tool name must fail validation");
+            assert!(
+                error.to_string().contains(&expected_error),
+                "unexpected validation error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_rejects_combined_effective_tool_count_over_limit() {
+        let tools = (0..validate::MAX_TOOLS)
+            .map(|index| {
+                json!({
+                    "type": "function",
+                    "function": {"name": format!("tool_{index}")}
+                })
+            })
+            .collect::<Vec<_>>();
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "system", "tools": [{"name": "dynamic_tool"}]},
+                {"role": "user", "content": "Hello"}
+            ],
+            "tools": tools
+        }))
+        .expect("combined-tool request must deserialize");
+
+        let error = ValidateRequest::validate(&request)
+            .expect_err("combined effective tool count over the limit must fail validation");
+        assert!(
+            error.to_string().contains(&format!(
+                "Maximum of {} tools are supported, got {}",
+                validate::MAX_TOOLS,
+                validate::MAX_TOOLS + 1
+            )),
+            "unexpected validation error: {error}"
         );
     }
 
