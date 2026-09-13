@@ -421,6 +421,7 @@ async def run_profile(
         resolved_backend = pick_result.get("resolved_backend", backend)
 
         dgd_override = dgdr.overrides.dgd if dgdr.overrides else None
+        trust_remote_code = bool(dgdr.overrides and dgdr.overrides.trustRemoteCode)
         job_tolerations = get_profiling_job_tolerations(dgdr)
 
         # ---------------------------------------------------------------
@@ -476,6 +477,7 @@ async def run_profile(
                     tolerations=job_tolerations,
                     runtime_backend=resolved_backend,
                     model_name_or_path=resolve_model_path(dgdr),
+                    trust_remote_code=trust_remote_code,
                 )
                 if resolved_backend == "trtllm":
                     enable_trtllm_chunked_prefill(interpolation_dgd_config)
@@ -546,6 +548,7 @@ async def run_profile(
             tolerations=job_tolerations,
             runtime_backend=resolved_backend,
             model_name_or_path=resolve_model_path(dgdr),
+            trust_remote_code=trust_remote_code,
         )
 
         if final_config:

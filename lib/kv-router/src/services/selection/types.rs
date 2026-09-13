@@ -266,73 +266,44 @@ pub struct WorkerRequest {
     pub model_name: String,
     #[serde(default = "default_routing_group")]
     pub routing_group: String,
-    #[serde(default)]
     pub endpoint: Option<String>,
-    #[serde(default)]
     pub kv_events_endpoint: Option<String>,
     #[serde(default)]
     pub kv_events_endpoints: HashMap<u32, String>,
-    #[serde(default)]
     pub replay_endpoint: Option<String>,
-    #[serde(default)]
     pub block_size: Option<u32>,
-    #[serde(default)]
     pub data_parallel_start_rank: Option<u32>,
-    #[serde(default)]
     pub data_parallel_size: Option<u32>,
-    #[serde(default)]
     pub max_num_batched_tokens: Option<u64>,
-    #[serde(default)]
     pub total_kv_blocks: Option<u64>,
-    #[serde(default)]
     pub stable_routing_id: Option<String>,
-    #[serde(default)]
     pub is_eagle: Option<bool>,
     #[serde(default)]
     pub taints: HashSet<String>,
     #[serde(default)]
     pub topology_domains: HashMap<String, String>,
-    #[serde(default)]
     pub kv_transfer_domain: Option<String>,
-    #[serde(default)]
     pub kv_transfer_enforcement: Option<KvTransferEnforcement>,
-    #[serde(default)]
     pub kv_transfer_preferred_weight: Option<f32>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct WorkerPatchRequest {
-    #[serde(default)]
     pub endpoint: Option<String>,
-    #[serde(default)]
     pub kv_events_endpoint: Option<String>,
-    #[serde(default)]
     pub kv_events_endpoints: Option<HashMap<u32, String>>,
-    #[serde(default)]
     pub replay_endpoint: Option<String>,
-    #[serde(default)]
     pub block_size: Option<u32>,
-    #[serde(default)]
     pub data_parallel_start_rank: Option<u32>,
-    #[serde(default)]
     pub data_parallel_size: Option<u32>,
-    #[serde(default)]
     pub max_num_batched_tokens: Option<u64>,
-    #[serde(default)]
     pub total_kv_blocks: Option<u64>,
-    #[serde(default)]
     pub stable_routing_id: Option<String>,
-    #[serde(default)]
     pub is_eagle: Option<bool>,
-    #[serde(default)]
     pub taints: Option<HashSet<String>>,
-    #[serde(default)]
     pub topology_domains: Option<HashMap<String, String>>,
-    #[serde(default)]
     pub kv_transfer_domain: Option<String>,
-    #[serde(default)]
     pub kv_transfer_enforcement: Option<KvTransferEnforcement>,
-    #[serde(default)]
     pub kv_transfer_preferred_weight: Option<f32>,
 }
 
@@ -398,25 +369,16 @@ pub struct SelectRequest {
     pub model_name: String,
     #[serde(default = "default_routing_group")]
     pub routing_group: String,
-    #[serde(default)]
     pub selection_id: Option<String>,
     #[serde(flatten)]
     pub prompt: PromptRequest,
-    #[serde(default)]
     pub router_config_override: Option<RouterConfigOverride>,
-    #[serde(default)]
     pub expected_output_tokens: Option<u32>,
-    #[serde(default)]
     pub priority_jump: Option<f64>,
-    #[serde(default)]
     pub strict_priority: Option<u32>,
-    #[serde(default)]
     pub session_id: Option<String>,
-    #[serde(default)]
     pub affinity_target: Option<WorkerAffinityTarget>,
-    #[serde(default)]
     pub pinned_worker: Option<WorkerWithDpRank>,
-    #[serde(default)]
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
     #[serde(default)]
     pub routing_constraints: RoutingConstraints,
@@ -428,25 +390,16 @@ pub struct SelectAndReserveRequest {
     pub model_name: String,
     #[serde(default = "default_routing_group")]
     pub routing_group: String,
-    #[serde(default)]
     pub selection_id: Option<String>,
     #[serde(flatten)]
     pub prompt: PromptRequest,
-    #[serde(default)]
     pub router_config_override: Option<RouterConfigOverride>,
-    #[serde(default)]
     pub expected_output_tokens: Option<u32>,
-    #[serde(default)]
     pub priority_jump: Option<f64>,
-    #[serde(default)]
     pub strict_priority: Option<u32>,
-    #[serde(default)]
     pub session_id: Option<String>,
-    #[serde(default)]
     pub affinity_target: Option<WorkerAffinityTarget>,
-    #[serde(default)]
     pub pinned_worker: Option<WorkerWithDpRank>,
-    #[serde(default)]
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
     #[serde(default)]
     pub routing_constraints: RoutingConstraints,
@@ -466,25 +419,18 @@ pub struct ReservationRequest {
     pub selection_id: String,
     /// Explicit, self-contained form: books under `selection_id` on this worker
     /// without a cached select. Omit to replay the cached `selection_id`.
-    #[serde(default)]
     pub worker_id: Option<WorkerId>,
-    #[serde(default)]
     pub dp_rank: Option<DpRank>,
     #[serde(flatten)]
     pub prompt: PromptRequest,
-    #[serde(default)]
     pub router_config_override: Option<RouterConfigOverride>,
-    #[serde(default)]
     pub expected_output_tokens: Option<u32>,
-    #[serde(default)]
     pub effective_prefill_tokens: Option<usize>,
-    #[serde(default)]
     pub track_prefill_tokens: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct OutputBlockRequest {
-    #[serde(default)]
     pub decay_fraction: Option<f64>,
 }
 
@@ -496,7 +442,6 @@ pub struct PotentialLoadsRequest {
     pub routing_group: String,
     #[serde(flatten)]
     pub prompt: PromptRequest,
-    #[serde(default)]
     pub router_config_override: Option<RouterConfigOverride>,
 }
 
@@ -508,7 +453,6 @@ pub struct OverlapScoresRequest {
     pub routing_group: String,
     #[serde(flatten)]
     pub prompt: PromptRequest,
-    #[serde(default)]
     pub router_config_override: Option<RouterConfigOverride>,
 }
 

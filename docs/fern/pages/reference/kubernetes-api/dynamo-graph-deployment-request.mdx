@@ -638,6 +638,11 @@ containers, and container environment variables merge by `name`; atomic lists
 such as graph-level `spec.env` and container `args` replace their generated
 values.
 
+To permit custom model repository code without depending on the selected topology, set
+`spec.overrides.trustRemoteCode: true`. The profiler applies `--trust-remote-code` to every generated
+vLLM or SGLang worker after the component topology is known. Enable this setting only for model
+repositories you trust.
+
 ### Generated component names
 
 An entry in `spec.overrides.dgd.spec.components` must use the exact, case-sensitive
@@ -646,7 +651,7 @@ Service resource names. The current profiler templates generate these components
 
 | Backend | Aggregated | Disaggregated |
 |---|---|---|
-| vLLM | `Frontend`, `VllmDecodeWorker` | `Frontend`, `VllmDecodeWorker`, `VllmPrefillWorker` |
+| vLLM | `Frontend`, `worker` | `Frontend`, `decode`, `prefill` |
 | SGLang | `Frontend`, `decode` | `Frontend`, `decode`, `prefill` |
 | TensorRT-LLM | `Frontend`, `TRTLLMWorker` | `Frontend`, `decode`, `prefill` |
 
@@ -685,10 +690,12 @@ spec:
                   value: /usr/local/cuda/bin/ptxas
 ```
 
-Overrides can modify only components present in the generated DGD; unknown names are ignored with a
-warning, and an override cannot add deployment topology. Labels and annotations merge,
-`metadata.name` selects the final DGD name, and other identity metadata is ignored. `status`, null
-values for typed fields, and field deletion are not supported.
+Overrides can modify only components present in the generated DGD. An unresolved `spec.components` or
+`spec.services` name causes DGD materialization to fail. A recognized deprecated name may be
+translated to the corresponding component in the selected topology with a warning. An override
+cannot add deployment topology. Labels and annotations merge, `metadata.name` selects the final DGD
+name, and other identity metadata is ignored. `status`, null values for typed fields, and field
+deletion are not supported.
 
 To add flags to a container already present in the generated DGD, set `$patch.args` to `append` on
 that named container:

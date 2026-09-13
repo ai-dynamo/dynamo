@@ -43,7 +43,6 @@ import (
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/modelendpoint"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 )
 
 const (
@@ -343,7 +342,7 @@ func (r *DynamoModelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			}),
 		).
 		WithEventFilter(commoncontroller.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig)). // set the event filter to ignore resources handled by other controllers in namespace-restricted mode
-		Complete(observability.NewObservedReconciler(r, consts.ResourceTypeDynamoModel))
+		Complete(r)
 }
 
 // findModelsForEndpointSlice maps an EndpointSlice to DynamoModels

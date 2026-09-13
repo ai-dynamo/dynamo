@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 import warnings
 from dataclasses import dataclass, field
@@ -144,6 +145,7 @@ class WorkerConfig:
     # KV event/recovery ownership endpoint. None uses this worker's serving endpoint.
     kv_state_endpoint: Optional[str] = None
     default_thinking_mode: Optional[str] = None
+    response_plane: str = "tcp"
 
     @classmethod
     def from_runtime_config(
@@ -167,6 +169,7 @@ class WorkerConfig:
             ),
             "discovery_backend": runtime_cfg.discovery_backend,
             "request_plane": runtime_cfg.request_plane,
+            "response_plane": getattr(runtime_cfg, "response_plane", "tcp"),
             "event_plane": runtime_cfg.event_plane,
             "use_kv_events": getattr(runtime_cfg, "use_kv_events", False),
             "custom_jinja_template": getattr(
@@ -241,6 +244,10 @@ class Worker:
                 DeprecationWarning,
                 stacklevel=2,
             )
+
+        if self.config.response_plane not in {"tcp", "quic"}:
+            raise ValueError("response_plane must be 'tcp' or 'quic'")
+        os.environ["DYN_RESPONSE_PLANE"] = self.config.response_plane
 
         runtime_cfg = _backend.RuntimeConfig(
             discovery_backend=self.config.discovery_backend,

@@ -981,6 +981,43 @@ mod remove_tests {
 mod structural_tests {
     use super::*;
 
+    #[test]
+    fn split_preserves_high_fanout_children_under_original_suffix() {
+        let index = ConcurrentRadixTreeCompressed::new();
+        let worker0 = worker(0);
+        let worker1 = worker(1);
+        let mut lookup0 = direct_lookup();
+        let mut lookup1 = direct_lookup();
+
+        apply_direct(&index, &mut lookup0, make_store_event(0, &[1, 2, 3, 4]));
+        for branch in 10..15 {
+            apply_direct(
+                &index,
+                &mut lookup0,
+                make_store_event_with_parent(0, &[1, 2, 3, 4], &[branch]),
+            );
+        }
+        let parent = index.root.child_snapshot(LocalBlockHash(1)).unwrap();
+        let original_children = parent.child_edges_snapshot();
+        assert_eq!(original_children.len(), 5);
+
+        apply_direct(&index, &mut lookup1, make_store_event(1, &[1, 2, 99]));
+
+        let suffix = parent.child_snapshot(LocalBlockHash(3)).unwrap();
+        assert_eq!(parent.edge_local_hashes_for_test(), vec![1, 2]);
+        assert_eq!(parent.child_edges_snapshot().len(), 2);
+        assert_eq!(suffix.edge_local_hashes_for_test(), vec![3, 4]);
+        assert_eq!(suffix.child_edges_snapshot().len(), original_children.len());
+        for (hash, original_child) in original_children {
+            assert!(Arc::ptr_eq(
+                &suffix.child_snapshot(hash).unwrap(),
+                &original_child,
+            ));
+            assert_direct_score(&index, &[1, 2, 3, 4, hash.0], worker0, 5);
+        }
+        assert_direct_score(&index, &[1, 2, 99], worker1, 3);
+    }
+
     #[tokio::test]
     async fn test_extends_decode_tail_in_place() {
         let index = ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 1, 32);
@@ -1378,4 +1415,67 @@ fn remove_after_split_and_children_clear_scrubs_lookup() {
     let w2_leaf = remove_hashes_with_parent(&[1, 2], &[9]);
     apply_direct(&index, &mut l2, remove_event(2, 103, 0, w2_leaf));
     assert_eq!(worker_lookup_len(&l2, w2), Some(0));
+}
+
+#[test]
+fn successful_repair_does_not_restore_scrubbed_other_worker_entries() {
+    let index = ConcurrentRadixTreeCompressed::new();
+    let scrubbed_worker = worker(1);
+    let repairing_worker = worker(2);
+    let mut shared_lookup = direct_lookup();
+    let mut splitter_lookup = direct_lookup();
+
+    apply_direct(
+        &index,
+        &mut shared_lookup,
+        make_store_event(1, &[1, 2, 3, 4]),
+    );
+    apply_direct(
+        &index,
+        &mut shared_lookup,
+        make_store_event(2, &[1, 2, 3, 4]),
+    );
+
+    // A split from another event thread leaves both local lookups pointing at
+    // the old prefix node for the [3, 4] suffix.
+    apply_direct(
+        &index,
+        &mut splitter_lookup,
+        make_store_event(3, &[1, 2, 9]),
+    );
+    let suffix_hashes = remove_hashes_with_parent(&[1, 2], &[3, 4]);
+
+    // A resolve-miss remove scrubs lookup state but cannot update coverage on
+    // the node it failed to find. Model that boundary directly while keeping
+    // the resolved live node's coverage intact.
+    let scrubbed_lookup = shared_lookup.get_mut(&scrubbed_worker).unwrap();
+    for hash in &suffix_hashes {
+        scrubbed_lookup.remove(hash);
+    }
+    assert_eq!(worker_lookup_len(&shared_lookup, scrubbed_worker), Some(2));
+    assert_direct_score(&index, &[1, 2, 3, 4], scrubbed_worker, 4);
+
+    // A different worker's stale lookup successfully resolves the suffix and
+    // repairs the event thread's shared lookup map.
+    let resolved = index
+        .resolve_lookup(
+            &mut shared_lookup,
+            repairing_worker,
+            suffix_hashes[0],
+            LookupRepairDirection::TowardTail,
+        )
+        .expect("repairing worker should resolve the split suffix");
+
+    let repairing_lookup = shared_lookup.get(&repairing_worker).unwrap();
+    for hash in &suffix_hashes {
+        assert!(Arc::ptr_eq(repairing_lookup.get(hash).unwrap(), &resolved));
+    }
+
+    let scrubbed_lookup = shared_lookup.get(&scrubbed_worker).unwrap();
+    for hash in suffix_hashes {
+        assert!(
+            !scrubbed_lookup.contains_key(&hash),
+            "repair for another worker restored a scrubbed lookup entry"
+        );
+    }
 }

@@ -81,7 +81,7 @@ spec:
                     --trust-remote-code \
                     --http-host 0.0.0.0 \
                     --http-port 8000
-    - name: VllmPrefill
+    - name: prefill
       type: prefill
       replicas: 1
       multinode:
@@ -265,7 +265,7 @@ spec:
                   networking.gke.io.networks/rdma-2.IP: "1"
                   networking.gke.io.networks/rdma-3: "1"
                   networking.gke.io.networks/rdma-3.IP: "1"
-    - name: VllmDecode
+    - name: decode
       type: decode
       replicas: 1
       multinode:

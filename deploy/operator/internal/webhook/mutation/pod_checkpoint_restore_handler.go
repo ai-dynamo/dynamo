@@ -29,7 +29,6 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 )
@@ -166,7 +165,7 @@ func (h *PodCheckpointRestoreMutator) buildPinnedPodSnapshotRestorePod(
 		h.apiReader,
 		podNamespace,
 		config,
-		expectedWorkerHashForPod(pod),
+		expectedSnapshotCompatibilityHashForPod(pod),
 		checkpoint.ExplicitPodSnapshotUse(),
 	)
 	if err != nil {
@@ -239,7 +238,7 @@ func (h *PodCheckpointRestoreMutator) buildAutomaticSnapshotJobRestorePod(
 		h.apiReader,
 		podNamespace,
 		config,
-		expectedWorkerHashForPod(pod),
+		expectedSnapshotCompatibilityHashForPod(pod),
 		checkpoint.ManagedPodSnapshotUse(ownerUID),
 	)
 	if apierrors.IsNotFound(err) {
@@ -269,12 +268,8 @@ func automaticCandidateUnavailable(
 	return nil, false, fmt.Errorf("automatic restore candidate unavailable: %s", reason)
 }
 
-func expectedWorkerHashForPod(pod *corev1.Pod) *string {
-	if !dynamo.IsWorkerComponent(pod.Labels[consts.KubeLabelDynamoComponentType]) {
-		return nil
-	}
-	workerHash := pod.Labels[consts.KubeLabelDynamoWorkerHash]
-	return &workerHash
+func expectedSnapshotCompatibilityHashForPod(pod *corev1.Pod) string {
+	return pod.Annotations[consts.SnapshotCandidateCompatibilityHashAnnotation]
 }
 
 func (h *PodCheckpointRestoreMutator) shapeNativeRestorePod(
@@ -447,5 +442,6 @@ func removeRestoreCandidateAnnotations(annotations map[string]string) {
 	delete(annotations, consts.SnapshotCandidateContentAnnotation)
 	delete(annotations, consts.SnapshotCandidateGMSModeAnnotation)
 	delete(annotations, consts.SnapshotCandidateVersionAnnotation)
+	delete(annotations, consts.SnapshotCandidateCompatibilityHashAnnotation)
 	delete(annotations, consts.RestoreCandidateTargetContainersAnnotation)
 }
