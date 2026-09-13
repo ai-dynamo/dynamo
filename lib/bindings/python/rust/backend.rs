@@ -36,6 +36,7 @@ use dynamo_runtime as rs;
 use dynamo_runtime::logging::{DistributedTraceContext, get_distributed_tracing_context};
 use dynamo_sidecar_common::SidecarStartupError;
 use futures::stream::{BoxStream, StreamExt};
+use pyo3::exceptions::PyGeneratorExit;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
 use pyo3_async_runtimes::TaskLocals;
@@ -1677,6 +1678,13 @@ where
 /// subclasses go through the shared mapping table; built-in Python
 /// exceptions fall back to the closest category.
 fn py_err_to_dynamo(err: PyErr) -> DynamoError {
+    if Python::with_gil(|py| err.is_instance_of::<PyGeneratorExit>(py)) {
+        return DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::Cancelled))
+            .message("Python generator closed")
+            .build();
+    }
+
     let (backend, message) = Python::with_gil(|py| {
         if let Some(mapped) = py_exception_to_backend_error(py, &err) {
             return mapped;
@@ -1707,8 +1715,6 @@ fn py_err_to_dynamo(err: PyErr) -> DynamoError {
             BackendError::Disconnected
         } else if err.is_instance_of::<pyo3::exceptions::asyncio::CancelledError>(py) {
             BackendError::Cancelled
-        } else if err.is_instance_of::<pyo3::exceptions::PyGeneratorExit>(py) {
-            BackendError::EngineShutdown
         } else {
             BackendError::Unknown
         };
