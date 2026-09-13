@@ -182,6 +182,9 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 {# Inline expression, not a block tag: render.py leaves trim_blocks off, so a tag
    on its own line inside the RUN breaks the backslash continuation. #}
 {% set vllm_rs_required = "1" if device == "cuda" else "0" %}
+{# TODO: Remove this workaround once bundled vllm-rs accepts extra output fields. #}
+{% set vllm_rs_allowlist = "1" if target not in ("dev", "local-dev") else "0" %}
+{% set vllm_rs_plugins = "modelexpress" if context.vllm.enable_modelexpress == "true" else "" %}
 
 # The vLLM 0.28.0 release images resolve the unbounded `transformers>=5.5.3`
 # requirement to 5.15.1, but vLLM-Omni 0.28.0rc1 caps Transformers below 5.15.
@@ -531,18 +534,30 @@ if actual != expected:
     raise RuntimeError(f"expected transformers {expected}, found {actual}")
 PY
 
-# `vllm-rs` ships inside the installed `vllm` package, not as a console script;
-# linking it keeps the binary at that package's vLLM revision. Fatal on cuda only.
+# Use the packaged binary to match the installed vLLM version.
 RUN set -eu; \
     pkg="$({{ python_executable }} -c 'import os, vllm; print(os.path.dirname(vllm.__file__))')"; \
     if [ -f "${pkg}/vllm-rs" ] && [ -x "${pkg}/vllm-rs" ]; then \
-        ln -sf "${pkg}/vllm-rs" {{ vllm_rs_link }}; \
+        if [ "{{ vllm_rs_allowlist }}" = "1" ]; then \
+            printf '%s\n' \
+                '#!/bin/sh' \
+                '# Keep Omni from changing the EngineCore output schema.' \
+                'if [ "${VLLM_PLUGINS+x}" != x ]; then' \
+                '    VLLM_PLUGINS="{{ vllm_rs_plugins }}"' \
+                'fi' \
+                'export VLLM_PLUGINS' \
+                "exec \"${pkg}/vllm-rs\" \"\$@\"" \
+                > {{ vllm_rs_link }}; \
+            chmod 755 {{ vllm_rs_link }}; \
+        else \
+            ln -sf "${pkg}/vllm-rs" {{ vllm_rs_link }}; \
+        fi; \
         vllm-rs --help >/dev/null; \
     elif [ "{{ vllm_rs_required }}" = "1" ]; then \
         echo "ERROR: installed vllm package (${pkg}) ships no executable vllm-rs" >&2; \
         exit 1; \
     else \
-        echo "WARNING: installed vllm package (${pkg}) ships no executable vllm-rs; not linking it onto PATH" >&2; \
+        echo "WARNING: installed vllm package (${pkg}) ships no executable vllm-rs; not putting it onto PATH" >&2; \
     fi
 
 USER dynamo
