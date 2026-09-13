@@ -59,9 +59,6 @@ if [[ "$POLICY" == "ta" ]]; then
     DYN_SYSTEM_PORT=8183 python -m dynamo.thunderagent_router \
         --endpoint dynamo.backend.generate \
         --model-name "$MODEL_NAME_ROUTER" \
-        --model-path "$MODEL_PATH" \
-        --dyn-tool-call-parser minimax_m2 \
-        --dyn-reasoning-parser minimax_append_think \
         --router-block-size "$BLOCK_SIZE" \
         --shared-cache-type none &
     ROUTER_MODE=round-robin
