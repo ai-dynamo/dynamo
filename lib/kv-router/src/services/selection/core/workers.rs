@@ -4,6 +4,8 @@
 //! Worker membership: catalog upserts, patches and deletes, partition
 //! creation, indexer registration and scheduler config publication.
 
+use std::collections::HashSet;
+
 use super::reservations::{ReservationIndexObserver, spawn_reservation_index_sweep};
 use super::*;
 use crate::services::selection::ingress::remove_worker_from_index;
@@ -13,15 +15,55 @@ impl SelectionCore {
         &self,
         req: WorkerRequest,
     ) -> Result<WorkerCatalogRecord, SelectionError> {
-        self.ensure_running()?;
-        let mut record = WorkerCatalogRecord::new(req);
+        self.upsert_workers(vec![req])
+            .await
+            .pop()
+            .expect("one result per request")
+    }
+
+    /// Upsert one membership snapshot under a single catalog lock, publishing
+    /// each affected partition's scheduler config once after every record has
+    /// committed. Results are positional; one failure does not block the rest.
+    pub async fn upsert_workers(
+        &self,
+        requests: Vec<WorkerRequest>,
+    ) -> Vec<Result<WorkerCatalogRecord, SelectionError>> {
         // Partition policy factories may construct independently. Only committing
         // membership and reconciling ingress needs the catalog mutation lock.
-        self.prepare_worker(&mut record)?;
+        let prepared: Vec<Result<WorkerCatalogRecord, SelectionError>> = requests
+            .into_iter()
+            .map(|req| {
+                self.ensure_running()?;
+                #[cfg(test)]
+                if self.fail_upsert_for.lock().contains(&req.worker_id) {
+                    return Err(SelectionError::Internal(format!(
+                        "test hook: upsert of worker {} fails",
+                        req.worker_id
+                    )));
+                }
+                let mut record = WorkerCatalogRecord::new(req);
+                self.prepare_worker(&mut record)?;
+                Ok(record)
+            })
+            .collect();
         let _update = self.catalog_updates.lock().await;
-        self.ensure_running()?;
-        let previous = self.catalog.get(record.worker_id);
-        self.reconcile_worker(record, previous).await
+        let mut affected: HashSet<RoutingPartitionId> = HashSet::new();
+        let mut results = Vec::with_capacity(prepared.len());
+        for record in prepared {
+            let result = match (record, self.ensure_running()) {
+                (Ok(record), Ok(())) => {
+                    let previous = self.catalog.get(record.worker_id);
+                    self.reconcile_worker(record, previous, Some(&mut affected))
+                        .await
+                }
+                (Err(error), _) | (_, Err(error)) => Err(error),
+            };
+            results.push(result);
+        }
+        for key in &affected {
+            self.publish_scheduler_config(key);
+        }
+        results
     }
 
     pub async fn patch_worker(
@@ -38,7 +80,7 @@ impl SelectionCore {
         let mut record = previous.clone();
         record.apply_patch(patch);
         self.prepare_worker(&mut record)?;
-        self.reconcile_worker(record, Some(previous)).await
+        self.reconcile_worker(record, Some(previous), None).await
     }
 
     pub async fn delete_worker(
@@ -107,10 +149,16 @@ impl SelectionCore {
         Ok(())
     }
 
+    /// Commit `record`. With `deferred`, the final publish for the record's
+    /// partition is recorded there instead of sent, so a snapshot publishes
+    /// once per partition; the Draining publish on a partition move or loss
+    /// of schedulability stays immediate because it must precede the indexer
+    /// cleanup that follows it.
     async fn reconcile_worker(
         &self,
         mut record: WorkerCatalogRecord,
         previous: Option<WorkerCatalogRecord>,
+        deferred: Option<&mut HashSet<RoutingPartitionId>>,
     ) -> Result<WorkerCatalogRecord, SelectionError> {
         let previous = previous.filter(|old| old.lifecycle == WorkerLifecycle::Schedulable);
         let previous = if let Some(old) = previous.as_ref()
@@ -144,7 +192,12 @@ impl SelectionCore {
         // Readers see only committed metadata. A valid capacity/topology update preserves
         // live bookings on ranks present in both the old and new snapshots.
         self.catalog.replace(record.clone());
-        self.publish_scheduler_config(&record.key());
+        match deferred {
+            Some(affected) => {
+                affected.insert(record.key());
+            }
+            None => self.publish_scheduler_config(&record.key()),
+        }
         Ok(record)
     }
 
@@ -347,7 +400,7 @@ impl SelectionCore {
         entry.hint_capable.store(hint_capable, Ordering::Release);
         // Lifecycle transitions between non-schedulable states publish the same
         // map; skipping them saves the scheduler a wake and a full map clone.
-        entry.workers_tx.send_if_modified(|current| {
+        let modified = entry.workers_tx.send_if_modified(|current| {
             if *current == workers {
                 false
             } else {
@@ -355,5 +408,11 @@ impl SelectionCore {
                 true
             }
         });
+        #[cfg(test)]
+        if modified {
+            self.publish_count.fetch_add(1, Ordering::SeqCst);
+        }
+        #[cfg(not(test))]
+        let _ = modified;
     }
 }

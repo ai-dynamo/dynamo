@@ -281,6 +281,13 @@ pub struct SelectionCore {
     selection_cache: SelectionCache,
     tracking_hash: Arc<TrackingHashContext>,
     session_affinity: Option<SessionAffinityConfig>,
+    /// Worker ids whose upsert fails with `Internal` before any catalog
+    /// mutation, so membership tests can exercise per-worker error paths.
+    #[cfg(test)]
+    pub(super) fail_upsert_for: parking_lot::Mutex<std::collections::HashSet<WorkerId>>,
+    /// Scheduler-config publishes that changed a partition's worker map.
+    #[cfg(test)]
+    pub(super) publish_count: std::sync::atomic::AtomicUsize,
 }
 
 fn affinity_error(error: AffinityError) -> SelectionError {
@@ -381,6 +388,10 @@ impl SelectionCore {
             selection_cache: SelectionCache::new(&cache_config),
             tracking_hash,
             session_affinity,
+            #[cfg(test)]
+            fail_upsert_for: parking_lot::Mutex::default(),
+            #[cfg(test)]
+            publish_count: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
