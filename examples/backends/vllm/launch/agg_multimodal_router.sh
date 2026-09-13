@@ -71,8 +71,13 @@ Env vars:
   HTTP_PORT                   (default 8000)
   BLOCK_SIZE                  (default 16)
   MAX_MODEL_LEN               (default 4096)
+  VLLM_SYSTEM_PORT_BASE       (default 18081 — worker i uses port BASE + (i-1)*2)
   KV_EVENTS_PORT_BASE         (default 5557 — worker i uses port BASE + (i-1))
   DYN_LOG                     (default info + mm_routing + scheduling debug)
+
+  DYN_SYSTEM_PORT{i} and DYN_VLLM_KV_EVENT_PORT{i}, when set, take precedence
+  over the *_BASE formulas above. The tests/serve harness exports them with a
+  unique value per deployment so concurrent runs on one host do not collide.
 
 Routing test (run after the script reports "All services are ready"):
   # Same image twice -> 2nd request should pin to same worker (high overlap_blocks)
@@ -134,9 +139,15 @@ GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 # Phase 1: launch all workers in parallel.
 # Under SINGLE_GPU=true, requires the KV-bytes cap (CI sets it via the
 # requested_vllm_kv_cache_bytes marker) — otherwise vLLM's 0.9 default races.
+WORKER_PORTS=()
+KV_EVENTS_PORTS=()
 for i in $(seq 1 "${NUM_WORKERS}"); do
-    WORKER_PORT=$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))
-    KV_EVENTS_PORT=$((KV_EVENTS_PORT_BASE + (i - 1)))
+    HARNESS_SYSTEM_VAR="DYN_SYSTEM_PORT${i}"
+    HARNESS_KV_VAR="DYN_VLLM_KV_EVENT_PORT${i}"
+    WORKER_PORT="${!HARNESS_SYSTEM_VAR:-$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))}"
+    KV_EVENTS_PORT="${!HARNESS_KV_VAR:-$((KV_EVENTS_PORT_BASE + (i - 1)))}"
+    WORKER_PORTS+=("${WORKER_PORT}")
+    KV_EVENTS_PORTS+=("${KV_EVENTS_PORT}")
     if [[ "${SINGLE_GPU}" == "true" ]]; then GPU_ID=0; else GPU_ID=$((i - 1)); fi
 
     KV_EVENTS_CONFIG="{\"enable_kv_cache_events\":true,\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_EVENTS_PORT}\"}"
@@ -157,8 +168,7 @@ done
 
 # Phase 2: wait for all workers to be ready.
 for i in $(seq 1 "${NUM_WORKERS}"); do
-    WORKER_PORT=$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))
-    wait_ready "http://127.0.0.1:${WORKER_PORT}/health" "vLLM backend $i"
+    wait_ready "http://127.0.0.1:${WORKER_PORTS[i-1]}/health" "vLLM backend $i"
 done
 
 echo "=== Starting frontend (KV router, MM-aware exact routing) ==="
@@ -185,8 +195,8 @@ echo
 echo "=== All services are ready ==="
 echo "Frontend:        http://127.0.0.1:${HTTP_PORT}"
 for i in $(seq 1 "${NUM_WORKERS}"); do
-    echo "Worker $i health: http://127.0.0.1:$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))/health"
-    echo "Worker $i kv-events: tcp://*:$((KV_EVENTS_PORT_BASE + (i - 1)))"
+    echo "Worker $i health: http://127.0.0.1:${WORKER_PORTS[i-1]}/health"
+    echo "Worker $i kv-events: tcp://*:${KV_EVENTS_PORTS[i-1]}"
 done
 echo
 echo "Architecture: Rust frontend (MM-aware KV router) -> ${NUM_WORKERS}x vLLM workers"

@@ -56,8 +56,8 @@ ETCD_ENDPOINTS="${ETCD_ENDPOINTS:-http://127.0.0.1:2379}"
 
 VLLM_SYSTEM_PORT_BASE="${VLLM_SYSTEM_PORT_BASE:-18081}"
 # Worker `i` publishes ZMQ KV events on `KV_EVENTS_PORT_BASE + (i - 1)`.
-# Default differs from the Rust default script (5557) — kept distinct so
-# the two variants can be co-run on the same host without colliding.
+# Default differs from the Rust default script (5557), but both scripts share
+# system-port base 18081; only DYN_SYSTEM_PORT{i} separates two co-run deployments.
 KV_EVENTS_PORT_BASE="${KV_EVENTS_PORT_BASE:-29080}"
 
 # ImageLoader cache size (number of images kept in-memory LRU)
@@ -113,8 +113,8 @@ echo "DYN_MM_IMAGE_CACHE_SIZE=${DYN_MM_IMAGE_CACHE_SIZE}"
 echo "DYNAMO_MM_TRANSFER=${DYNAMO_MM_TRANSFER}"
 echo "NATS_SERVER=${NATS_SERVER}"
 echo "ETCD_ENDPOINTS=${ETCD_ENDPOINTS}"
-echo "VLLM_SYSTEM_PORT_BASE=${VLLM_SYSTEM_PORT_BASE}"
-echo "KV_EVENTS_PORT_BASE=${KV_EVENTS_PORT_BASE}"
+echo "VLLM_SYSTEM_PORT_BASE=${VLLM_SYSTEM_PORT_BASE} (fallback; DYN_SYSTEM_PORT{i} wins)"
+echo "KV_EVENTS_PORT_BASE=${KV_EVENTS_PORT_BASE} (fallback; DYN_VLLM_KV_EVENT_PORT{i} wins)"
 echo
 
 # Clear the trap inside the handler so `kill 0` (which sends SIGTERM to the
@@ -173,9 +173,17 @@ COMMON_ENV=(
 # Phase 1: launch all workers in parallel.
 # Under SINGLE_GPU=true, requires the KV-bytes cap (CI sets it via the
 # requested_vllm_kv_cache_bytes marker) — otherwise vLLM's 0.9 default races.
+# Ports are host-wide: prefer the harness-allocated DYN_SYSTEM_PORT{i} /
+# DYN_VLLM_KV_EVENT_PORT{i}, so concurrent runs on one host cannot collide.
+WORKER_PORTS=()
+KV_EVENTS_PORTS=()
 for i in $(seq 1 "${NUM_WORKERS}"); do
-    WORKER_PORT=$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))
-    KV_EVENTS_PORT=$((KV_EVENTS_PORT_BASE + i - 1))
+    HARNESS_SYSTEM_VAR="DYN_SYSTEM_PORT${i}"
+    HARNESS_KV_VAR="DYN_VLLM_KV_EVENT_PORT${i}"
+    WORKER_PORT="${!HARNESS_SYSTEM_VAR:-$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))}"
+    KV_EVENTS_PORT="${!HARNESS_KV_VAR:-$((KV_EVENTS_PORT_BASE + i - 1))}"
+    WORKER_PORTS+=("${WORKER_PORT}")
+    KV_EVENTS_PORTS+=("${KV_EVENTS_PORT}")
 
     if [[ "${SINGLE_GPU}" == "true" ]]; then
         GPU_ID=0
@@ -201,8 +209,7 @@ done
 
 # Phase 2: wait for all workers to be ready.
 for i in $(seq 1 "${NUM_WORKERS}"); do
-    WORKER_PORT=$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))
-    wait_ready "http://127.0.0.1:${WORKER_PORT}/health" "vLLM backend $i" 900
+    wait_ready "http://127.0.0.1:${WORKER_PORTS[i-1]}/health" "vLLM backend $i" 900
 done
 
 echo
@@ -221,7 +228,10 @@ FRONTEND_SYSTEM_PORT_BASE="${FRONTEND_SYSTEM_PORT_BASE:-9080}"
 
 for f in $(seq 1 "${NUM_FRONTENDS}"); do
     FE_HTTP_PORT=$((HTTP_PORT + f - 1))
-    FE_SYSTEM_PORT=$((FRONTEND_SYSTEM_PORT_BASE + f - 1))
+    # dynamo.frontend pops DYN_SYSTEM_PORT before building its runtime, so
+    # nothing binds this; it keeps a harness run off a worker's system port.
+    HARNESS_FE_SYSTEM_VAR="DYN_SYSTEM_PORT$((NUM_WORKERS + f))"
+    FE_SYSTEM_PORT="${!HARNESS_FE_SYSTEM_VAR:-$((FRONTEND_SYSTEM_PORT_BASE + f - 1))}"
 
     # Enable replica sync when running multiple frontends.
     SYNC_ARGS=""
@@ -271,7 +281,7 @@ for f in $(seq 1 "${NUM_FRONTENDS}"); do
     echo "Frontend ${f}: http://127.0.0.1:$((HTTP_PORT + f - 1))"
 done
 for i in $(seq 1 "${NUM_WORKERS}"); do
-    echo "Worker $i: http://127.0.0.1:$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))/health"
+    echo "Worker $i: http://127.0.0.1:${WORKER_PORTS[i-1]}/health"
 done
 echo
 echo "Architecture: ${NUM_FRONTENDS}x Frontend (vLLM processor + KvRouter) -> ${NUM_WORKERS}x vLLM backend"
