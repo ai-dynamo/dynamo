@@ -46,6 +46,41 @@ func TestAddSSHVolumePreservesAuthoredStorage(t *testing.T) {
 	}
 }
 
+func TestAddConductorSSHKeyRejectsAuthoredKeyVolume(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name   string
+		source corev1.VolumeSource
+	}{
+		{"Secret", corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "application"}}},
+		{"PVC", corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "data"}}},
+		{"EmptyDir", corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Mount authored storage using the reserved conductor key-volume name")
+			pod := corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Name: commonconsts.MainContainerName, Image: "lpu-runtime",
+					VolumeMounts: []corev1.VolumeMount{{Name: conductorSSHKeyVolumeName, MountPath: "/application-data"}},
+				}},
+				Volumes: []corev1.Volume{
+					{Name: runtimeSSHVolumeName, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+						SecretName: "mpi.ssh", DefaultMode: ptr.To(int32(0644)),
+					}}},
+					{Name: conductorSSHKeyVolumeName, VolumeSource: test.source},
+				},
+			}
+			before := pod.DeepCopy()
+
+			t.Log("Reject the collision before changing storage, mounts or source Secret permissions")
+			err := addConductorSSHKey(&pod, &pod.Containers[0], "mpi.ssh")
+			require.ErrorContains(t, err, `volume "single-v2-ssh-key" is reserved for the conductor SSH key`)
+			require.Equal(t, *before, pod)
+		})
+	}
+}
+
 func TestXTRuntimesRejectSSHVolumeCollision(t *testing.T) {
 	t.Log("Start each XT role with an authored volume using the fixed SSH name")
 	base := corev1.PodSpec{

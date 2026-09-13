@@ -62,13 +62,20 @@ func addConductorSSHKey(podSpec *corev1.PodSpec, conductor *corev1.Container, se
 		return err
 	}
 
+	// Reject authored destination storage before changing the source Secret volume.
+	for _, volume := range podSpec.Volumes {
+		if volume.Name == conductorSSHKeyVolumeName {
+			return fmt.Errorf("selected LPX podTemplate volume %q is reserved for the conductor SSH key", conductorSSHKeyVolumeName)
+		}
+	}
+
 	// Mount the source Secret and the writable destination used by OpenMPI.
 	if err := addSSHVolume(podSpec, secretName, 0600); err != nil {
 		return err
 	}
 
 	// Keep the copied private key in a Pod-local writable volume.
-	podSpec.Volumes = setVolumeByName(podSpec.Volumes, corev1.Volume{
+	podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
 		Name: conductorSSHKeyVolumeName,
 		VolumeSource: corev1.VolumeSource{
 			EmptyDir: &corev1.EmptyDirVolumeSource{},
