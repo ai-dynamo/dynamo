@@ -8,6 +8,17 @@ use super::*;
 /// Pick the best router-hint source for `target`: a same-role worker (or
 /// cache owner) holding a longer root-aligned prefix than the target's own
 /// `target_cached_prefix_blocks`, with a non-empty control endpoint.
+/// Whether any worker in the published partition snapshot advertises a router
+/// hint worker type (worker-level metadata, so one rank suffices).
+pub(super) fn hint_capable_partition(configs: &HashMap<WorkerId, SelectionWorkerConfig>) -> bool {
+    configs.values().any(|config| {
+        config
+            .router_hint_worker_type
+            .as_deref()
+            .is_some_and(|worker_type| !worker_type.is_empty())
+    })
+}
+
 pub(super) fn transfer_hint_for_selection(
     configs: &HashMap<WorkerId, SelectionWorkerConfig>,
     target: WorkerWithDpRank,

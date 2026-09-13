@@ -350,7 +350,6 @@ impl SelectionCore {
                     is_eagle,
                     indexer,
                     workers_tx,
-                    hint_capable: AtomicBool::new(false),
                     scheduler,
                     replica_tx,
                     affinity: OnceCell::new(),
@@ -396,8 +395,7 @@ impl SelectionCore {
         let Some(entry) = self.entry(key) else {
             return;
         };
-        let (workers, hint_capable) = self.catalog.partition_view(key);
-        entry.hint_capable.store(hint_capable, Ordering::Release);
+        let workers = self.catalog.scheduler_configs_for_key(key);
         // Lifecycle transitions between non-schedulable states publish the same
         // map; skipping them saves the scheduler a wake and a full map clone.
         let modified = entry.workers_tx.send_if_modified(|current| {

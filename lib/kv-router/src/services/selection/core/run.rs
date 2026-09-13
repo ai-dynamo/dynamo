@@ -36,7 +36,7 @@
 //!   (`dropped_selection_future_frees_its_booking`,
 //!   `dropped_book_selection_during_routing_record_frees_booking_and_claim`).
 
-use super::hint::transfer_hint_for_selection;
+use super::hint::{hint_capable_partition, transfer_hint_for_selection};
 use super::reservations::Reservation;
 use super::*;
 
@@ -299,7 +299,9 @@ impl SelectionCore {
         // Router hints are attached to bookings only, and only when a worker in
         // this partition can consume them and the indexer can retain the
         // matched chain (local, event-driven, no approximate writes).
-        let hint_capable_workers = book && entry.hint_capable.load(Ordering::Acquire);
+        // Read from the published partition snapshot, the same view the hint
+        // builder uses, rather than scanning the catalog per booking.
+        let hint_capable_workers = book && hint_capable_partition(&entry.workers_tx.borrow());
         let retain_kv_transfer_chain =
             hint_capable_workers && entry.indexer.supports_kv_transfer_chain_retention();
         if hint_capable_workers && !retain_kv_transfer_chain {

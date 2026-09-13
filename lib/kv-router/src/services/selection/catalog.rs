@@ -89,30 +89,21 @@ impl WorkerCatalog {
         self.workers.write().remove(&worker_id)
     }
 
-    /// The schedulable workers in `key`'s partition and whether any of them
-    /// can consume router hints (worker-level metadata, so one representative
-    /// rank suffices). One pass over the catalog for both.
-    pub(super) fn partition_view(
+    /// The schedulable workers in `key`'s partition, keyed by worker id.
+    pub(super) fn scheduler_configs_for_key(
         &self,
         key: &RoutingPartitionId,
-    ) -> (HashMap<WorkerId, SelectionWorkerConfig>, bool) {
-        let mut hint_capable = false;
-        let workers = self
-            .workers
+    ) -> HashMap<WorkerId, SelectionWorkerConfig> {
+        self.workers
             .read()
             .values()
             .filter(|record| schedulable_in(record, key))
             .filter_map(|record| {
-                hint_capable |= record
-                    .router_hint_worker_type
-                    .as_deref()
-                    .is_some_and(|worker_type| !worker_type.is_empty());
                 record
                     .scheduler_config()
                     .map(|config| (record.worker_id, config))
             })
-            .collect();
-        (workers, hint_capable)
+            .collect()
     }
 
     pub(super) fn schedulable_count(&self) -> usize {

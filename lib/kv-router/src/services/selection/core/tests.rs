@@ -595,7 +595,7 @@ async fn hint_capability_tracks_catalog_membership() {
         hint_capable(&mut request);
         request
     };
-    let flag = || entry.hint_capable.load(Ordering::Acquire);
+    let flag = || super::hint::hint_capable_partition(&entry.workers_tx.borrow());
 
     assert!(!flag());
     let response = reserve_pinned(&core, "before", &tokens, 2).await;
