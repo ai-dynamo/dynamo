@@ -460,7 +460,9 @@ impl FromStr for SharedCacheType {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionAffinityMode {
-    /// The binding is exact: dispatching to another worker is an error.
+    /// The binding is exact: dispatching an overloaded worker's session to
+    /// another worker is rejected (503). Worker departure re-initializes the
+    /// session on the new worker regardless of mode.
     #[default]
     Hard,
     /// The binding follows the dispatch: the session rebinds to where it ran.
@@ -934,12 +936,13 @@ pub struct KvRouterConfig {
     /// maximum overlap.
     pub router_predicted_ttl_secs: Option<f64>,
 
-    /// Session-affinity TTL in seconds (`DYN_ROUTER_SESSION_AFFINITY_TTL_SECS`).
-    /// `None` disables session affinity. Must be finite and in [1, 31536000].
+    /// Session-affinity TTL in seconds. Populated by `kv_router_config_from_lookup()`
+    /// via `DYN_ROUTER_SESSION_AFFINITY_TTL_SECS` (EPP path only). The Python/DGD
+    /// path sets session affinity on `RouterConfig` instead.
     #[serde(skip)]
     pub session_affinity_ttl_secs: Option<f64>,
 
-    /// Session-affinity binding mode (`DYN_ROUTER_SESSION_AFFINITY_MODE`).
+    /// Session-affinity binding mode. EPP path only; see `session_affinity_ttl_secs`.
     #[serde(skip)]
     pub session_affinity_mode: SessionAffinityMode,
 

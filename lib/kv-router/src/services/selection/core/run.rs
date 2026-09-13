@@ -606,8 +606,8 @@ impl SelectionCore {
     }
 
     /// Bind the held session to `dispatched`. A `Hard` rejection whose bound
-    /// worker departed after [`Self::hold_session`] checked it is not a client
-    /// fault: the session is re-initialized on the dispatched worker instead.
+    /// worker departed is not a client fault: the session re-initializes on
+    /// the dispatched worker. An overloaded bound worker returns `NotReady`.
     pub(super) fn commit_session(
         &self,
         table: &SessionAffinity,
@@ -624,6 +624,21 @@ impl SelectionCore {
                 let departed =
                     bound.is_some_and(|target| !self.catalog.is_schedulable(target.worker_id, key));
                 if !departed {
+                    // If the bound worker is overloaded, the client is not at fault.
+                    let overloaded = bound.is_some_and(|target| {
+                        self.host
+                            .load
+                            .overloaded_workers
+                            .as_ref()
+                            .and_then(|provider| provider())
+                            .is_some_and(|ids| ids.contains(&target.worker_id))
+                    });
+                    if overloaded {
+                        return Err(SelectionError::NotReady(format!(
+                            "session affinity worker {} is overloaded",
+                            bound.unwrap().worker_id,
+                        )));
+                    }
                     return Err(affinity_error(error));
                 }
                 // `commit` invalidated the stale binding. Another request may
