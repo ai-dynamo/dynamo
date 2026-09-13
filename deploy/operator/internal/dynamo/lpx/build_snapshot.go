@@ -224,9 +224,12 @@ func normalizeModelPath(path string) string {
 }
 
 // normalizeBuildFilePaths consumes a nonnil owned path slice and canonicalizes it in place.
-func normalizeBuildFilePaths(paths []string) ([]string, error) {
+func normalizeBuildFilePaths(ctx context.Context, paths []string) ([]string, error) {
 	// Normalize and retain compiler evidence while validating every listed path.
 	for index, rawPath := range paths {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		path := normalizeModelPath(rawPath)
 		if path == "" || path == "." || filepath.IsAbs(path) || path == ".." || strings.HasPrefix(path, "../") {
 			return nil, fmt.Errorf("build inventory contains invalid relative path %q", rawPath)
@@ -235,11 +238,18 @@ func normalizeBuildFilePaths(paths []string) ([]string, error) {
 	}
 
 	// Canonical ordering makes duplicate paths adjacent without a second index.
+	// Sorting itself is not interruptible; observe cancellation in the following checks.
 	sort.Strings(paths)
 	for i := 1; i < len(paths); i++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if paths[i] == paths[i-1] {
 			return nil, fmt.Errorf("build inventory repeats relative path %q", paths[i])
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return paths, nil
 }

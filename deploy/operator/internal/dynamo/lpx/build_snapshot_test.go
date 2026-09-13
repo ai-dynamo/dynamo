@@ -6,6 +6,7 @@
 package lpx
 
 import (
+	"context"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -36,7 +37,7 @@ func TestAcquireBuildSnapshotTracksLocalContent(t *testing.T) {
 	}
 
 	t.Log("Inventory every file beneath the build root, including metadata, artifacts and weights")
-	paths, err := localBuildFilePaths(buildDir)
+	paths, err := localBuildFilePaths(t.Context(), buildDir, maxBuildSnapshotMetadataBytes)
 	require.NoError(t, err)
 	require.ElementsMatch(t, []string{
 		"extra-metadata.json",
@@ -119,7 +120,7 @@ func TestNormalizeBuildFilePathsCanonicalizesAndRejectsAmbiguity(t *testing.T) {
 	t.Parallel()
 
 	t.Log("Canonicalize and sort an unambiguous build inventory")
-	inventory, err := normalizeBuildFilePaths([]string{"z/file.gas", gbuildManifestJSONFile, "./a/file.gas"})
+	inventory, err := normalizeBuildFilePaths(t.Context(), []string{"z/file.gas", gbuildManifestJSONFile, "./a/file.gas"})
 	require.NoError(t, err)
 	require.Equal(t, []string{"a/file.gas", gbuildManifestJSONFile, "z/file.gas"}, inventory)
 
@@ -131,8 +132,36 @@ func TestNormalizeBuildFilePathsCanonicalizesAndRejectsAmbiguity(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Log("Reject the selected ambiguous or unsafe inventory path")
-			_, err := normalizeBuildFilePaths(paths)
+			_, err := normalizeBuildFilePaths(t.Context(), paths)
 			require.Error(t, err)
+		})
+	}
+}
+
+func TestNormalizeBuildFilePathsCancellation(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name   string
+		paths  []string
+		checks int
+	}{
+		{name: "empty inventory", paths: []string{}, checks: 1},
+		{name: "validation", paths: []string{"z", "b", "a"}, checks: 2},
+		{name: "after sorting", paths: []string{"z", "b", "a"}, checks: 4},
+		{name: "duplicate checking", paths: []string{"z", "b", "a"}, checks: 5},
+		{name: "before returning", paths: []string{"z", "b", "a"}, checks: 6},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Cancel deterministically at the selected inventory-normalization stage")
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			normalizeCtx := &cancelAfterChecksContext{Context: ctx, cancel: cancel, remaining: tt.checks}
+
+			t.Log("Return cancellation without publishing a normalized inventory")
+			paths, err := normalizeBuildFilePaths(normalizeCtx, tt.paths)
+			require.ErrorIs(t, err, context.Canceled)
+			require.Nil(t, paths)
 		})
 	}
 }
