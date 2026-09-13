@@ -29,15 +29,19 @@ from vllm_omni.entrypoints.utils import load_and_resolve_stage_configs
 from vllm_omni.inputs.data import OmniTokensPrompt
 
 from dynamo import prometheus_names
+from dynamo.common.storage import get_fs
+from dynamo.common.utils.output_modalities import RequestType, parse_request_type
 from dynamo.llm import ModelType
 from dynamo.runtime import DistributedRuntime
 from dynamo.vllm.health_check import VllmOmniHealthCheckPayload
 from dynamo.vllm.main import setup_metrics_collection
 from dynamo.vllm.omni.args import OmniConfig
 from dynamo.vllm.omni.connectors import register_dynamoomni_nixl_connector
+from dynamo.vllm.omni.output_formatter import OutputFormatter
 from dynamo.vllm.omni.types import StageEngine, StageRequest, _int_keyed
 from dynamo.vllm.omni.utils import (
     _build_sampling_params,
+    build_media_format_context,
     ensure_awaited,
     is_empty_payload,
     parse_omni_request,
@@ -67,7 +71,8 @@ class OmniStageWorker:
     then runs the engine.
 
     Non-final stages write output to a connector and yield stage_connector_refs for the router.
-    Final stages write to SHM and yield shm_meta for the router to format.
+    Final media stages can format/upload output locally and yield a formatted response;
+    other final stages write to SHM and yield shm_meta for the router to format.
     """
 
     def __init__(
@@ -78,6 +83,7 @@ class OmniStageWorker:
         stage_id: int,
         output_modalities: list | None = None,
         default_video_fps: int = 16,
+        media_formatter: OutputFormatter | None = None,
     ) -> None:
         self.engine = engine
         self.stage_id = stage_id
@@ -85,6 +91,7 @@ class OmniStageWorker:
         self._output_modalities = output_modalities or []
         self._default_video_fps = default_video_fps
         self.stage_config = stage_config
+        self._media_formatter = media_formatter
 
         func_path = getattr(stage_config, "custom_process_input_func", None)
         self._processor = _load_processor(func_path)
@@ -237,6 +244,67 @@ class OmniStageWorker:
             yield out
             return
 
+        # Final media stage with worker-side persist configured: encode and
+        # upload here (same path as the aggregated OmniHandler) and hand the
+        # router a small formatted response.  Raw frames must not cross the
+        # stage→router SHM/NIXL edge — multi-GB fp32 video payloads hang or
+        # OOM that edge after VAE decode even though generation finished.
+        # Routed requests from an older router do not carry the formatting
+        # context needed to reconstruct the original media request. Keep
+        # those requests on the legacy connector/SHM path during rolling
+        # upgrades; only a routed request with context, or a direct request,
+        # may use worker-side formatting.
+        has_format_context = bool(req.format_context)
+        can_persist_media = has_format_context or req.request_id is None
+        if (
+            self._media_formatter is not None
+            and _is_media_output(last_result)
+            and can_persist_media
+        ):
+            try:
+                formatted = await self._persist_final_output(
+                    last_result, request_id, req, request
+                )
+            except (OSError, ValueError) as e:
+                logger.error(
+                    "Stage %d: media persist failed for %s: %s",
+                    self.stage_id,
+                    request_id,
+                    e,
+                    exc_info=True,
+                )
+                yield {"error": f"media persist failed: {e}", "finished": True}
+                return
+            except Exception:
+                logger.exception(
+                    "Stage %d: unexpected media formatter error for %s",
+                    self.stage_id,
+                    request_id,
+                )
+                raise
+            if formatted is not None:
+                logger.info(
+                    "Stage %d: persisted final media output for %s",
+                    self.stage_id,
+                    request_id,
+                )
+                yield {"formatted_response": formatted, "finished": True}
+                return
+            logger.error(
+                "Stage %d: media formatter returned no output for %s; "
+                "raw media will not be transferred",
+                self.stage_id,
+                request_id,
+            )
+            yield {
+                "error": (
+                    "media persist returned no output for "
+                    f"final_output_type={getattr(last_result, 'final_output_type', None)!r}"
+                ),
+                "finished": True,
+            }
+            return
+
         # Final stage -> router: check for a YAML-configured connector for the
         # (stage_id -> "router") edge before falling back to SHM.  A connector
         # here enables multi-node deployments where the router and final stage
@@ -279,6 +347,33 @@ class OmniStageWorker:
         # SHM fallback -- only works when router and final stage are on the same node.
         shm_meta = shm_write_bytes(serialize_obj(last_result), name=request_id)
         yield {"shm_meta": shm_meta, "finished": True}
+
+    async def _persist_final_output(
+        self,
+        result: Any,
+        request_id: str,
+        req: StageRequest,
+        request: dict,
+    ) -> dict | None:
+        """Format the final media output and upload it from the worker.
+
+        Mirrors the aggregated ``OmniHandler``: run the encode (PNG / VP9
+        mp4) and ``upload_to_fs`` here, then return the small formatted
+        response chunk (media url or base64) for the router to forward
+        verbatim.  Returns None when the formatter produced no output.
+        """
+        ctx: dict[str, Any] = dict(req.format_context or {})
+        request_type = ctx.pop("request_type", None)
+        if request_type is None:
+            # Direct frontend → stage path (no router): resolve the context
+            # from the raw request ourselves.
+            _, request_type = parse_request_type(request, self._output_modalities)
+            ctx.update(build_media_format_context(request, request_type))
+        else:
+            request_type = _coerce_request_type(request_type)
+        return await self._media_formatter.format(
+            result, request_id, request_type=request_type, **ctx
+        )
 
     def _build_engine_core_request_from_upstream(
         self,
@@ -527,6 +622,10 @@ async def init_omni_stage(
     # (SharedMemoryConnector, MooncakeConnector, etc.)
     _, connectors = initialize_orchestrator_connectors(connector_configs_path)  # type: ignore[arg-type]
 
+    # Skip unused filesystem setup on intermediate stages: remote storage
+    # initialization can fail before they ever serve a request.
+    media_formatter = _build_media_formatter(config, stage_id, len(stage_configs))
+
     worker = OmniStageWorker(
         engine=engine,
         stage_config=my_config,
@@ -534,6 +633,7 @@ async def init_omni_stage(
         output_modalities=config.output_modalities,
         default_video_fps=config.default_video_fps,
         stage_id=stage_id,
+        media_formatter=media_formatter,
     )
 
     setup_metrics_collection(config, generate_endpoint, logger)
@@ -581,6 +681,36 @@ async def init_omni_stage(
 def _connector_key(from_stage: int | str, to_stage: int | str) -> tuple[str, str]:
     """Build the connector dict key used by initialize_orchestrator_connectors."""
     return (str(from_stage), str(to_stage))
+
+
+def _is_media_output(result: Any) -> bool:
+    """True when an engine output carries media frames (diffusion output).
+
+    vLLM-Omni uses image/video for diffusion outputs, with plural aliases
+    also accepted by its stage-pool and metrics code. Text/audio outputs
+    keep the legacy router-connector/SHM path.
+    """
+    return getattr(result, "final_output_type", None) in (
+        "image",
+        "images",
+        "video",
+        "videos",
+    )
+
+
+def _coerce_request_type(value: Any) -> Any:
+    """Map a (possibly JSON-deserialized) request type back to RequestType.
+
+    The router forwards ``format_context`` over the wire, so ``RequestType``
+    enum members arrive as their plain string values; comparisons in the
+    formatters need the enum back.
+    """
+    if isinstance(value, RequestType):
+        return value
+    try:
+        return RequestType(value)
+    except ValueError:
+        return value
 
 
 def _uses_nixl_connector(stage_configs_path: str, stage_configs: list[Any]) -> bool:
@@ -820,6 +950,26 @@ def _accepts_source_outputs_processor(parameter_names: list[str]) -> bool:
         parameter_names[0] == "source_outputs"
         and (parameter_names[1] in {"original_prompt", "prompt"})
         and (parameter_names[2] in {"requires_mm", "requires_multimodal_data"})
+    )
+
+
+def _build_media_formatter(
+    config: OmniConfig, stage_id: int, stage_count: int
+) -> OutputFormatter | None:
+    """Create the worker-side formatter only for the final configured stage."""
+    if stage_id != stage_count - 1:
+        return None
+
+    media_fs_url = config.media_output_fs_url
+    if not media_fs_url:
+        return None
+
+    media_fs = get_fs(media_fs_url)
+    return OutputFormatter(
+        model_name=config.served_model_name or config.model,
+        media_fs=media_fs,
+        media_http_url=config.media_output_http_url,
+        default_fps=config.default_video_fps,
     )
 
 

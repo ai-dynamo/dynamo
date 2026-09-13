@@ -13,6 +13,7 @@ from dynamo.common.utils.output_modalities import RequestType
 
 try:
     from dynamo.vllm.omni import stage_router
+    from dynamo.vllm.omni.types import StageOutput
 except ImportError:
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
@@ -506,7 +507,7 @@ async def test_format_output_uses_connector_deserialized_object_directly():
     connector.get.return_value = (final_obj, 10)
     router.connectors = {stage_router._connector_key(0, "router"): connector}
 
-    stage_output = SimpleNamespace(
+    stage_output = StageOutput(
         stage_connector_refs={"0": {"rdma": "meta"}},
         shm_meta=None,
     )
@@ -560,7 +561,7 @@ async def test_format_output_restores_completion_attrs_from_engine_inputs_wrappe
     connector.get.return_value = (wrapped, 32)
     router.connectors = {stage_router._connector_key(0, "router"): connector}
 
-    stage_output = SimpleNamespace(
+    stage_output = StageOutput(
         stage_connector_refs={"0": {"rdma": "meta"}},
         shm_meta=None,
     )
@@ -578,3 +579,119 @@ async def test_format_output_restores_completion_attrs_from_engine_inputs_wrappe
     restored = wrapped["engine_inputs"].outputs[0]
     assert restored.cumulative_token_ids == [1, 2, 3]
     assert restored.multimodal_output == {"hidden": True}
+
+
+# ── #13805: worker-persisted media passes through the router ─────────
+
+
+@pytest.mark.asyncio
+async def test_generate_passes_through_worker_formatted_response():
+    """Final stage persisted media itself: router forwards formatted_response verbatim.
+
+    No connector.get(), no SHM deserialize, no re-formatting on the router.
+    """
+    formatted = {
+        "id": "req-1",
+        "object": "video",
+        "status": "completed",
+        "data": [{"output_format": "mp4", "url": "file:///tmp/dynamo_media/x.mp4"}],
+    }
+
+    async def stage0_handler(request):
+        return {"formatted_response": formatted, "finished": True}
+
+    mock_formatter = AsyncMock()
+    router = _make_router(
+        stage_configs=[_make_stage_cfg(0)],
+        stage_clients={"stage0": _StageClient(stage0_handler)},
+        formatter=mock_formatter,
+    )
+
+    p1, p2 = _patched_generate(router, {"prompt": "x"}, request_type="video_generation")
+    with p1, p2:
+        with patch.object(stage_router, "shm_deserialize") as mock_shm:
+            chunks = [c async for c in router.generate({"prompt": "x"}, None)]
+
+    assert chunks == [formatted]
+    mock_formatter.format.assert_not_called()
+    mock_shm.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_generate_forwards_format_context_to_final_stage():
+    """The router hands the final stage the formatting context for worker-side persist."""
+    stage1_received = {}
+
+    async def stage0_handler(request):
+        return {
+            "original_prompt": {"prompt": "a dog"},
+            "stage_connector_refs": {"0": {"name": "ref0"}},
+            "finished": True,
+        }
+
+    async def stage1_handler(request):
+        stage1_received.update(request)
+        return {"formatted_response": {"status": "completed"}, "finished": True}
+
+    mock_formatter = AsyncMock()
+    router = _make_router(
+        stage_configs=[_make_stage_cfg(0), _make_stage_cfg(1)],
+        stage_clients={
+            "stage0": _StageClient(stage0_handler),
+            "stage1": _StageClient(stage1_handler),
+        },
+        formatter=mock_formatter,
+    )
+
+    request = {
+        "prompt": "a dog",
+        "response_format": "url",
+        "output_format": "mp4",
+        "nvext": {"fps": 24},
+    }
+    p1, p2 = _patched_generate(router, request, request_type="video_generation")
+    with p1, p2:
+        chunks = [c async for c in router.generate(request, None)]
+
+    assert chunks == [{"status": "completed"}]
+    fmt_ctx = stage1_received["format_context"]
+    assert fmt_ctx["request_type"] == "video_generation"
+    assert fmt_ctx["response_format"] == "url"
+    assert fmt_ctx["output_format"] == "mp4"
+    assert fmt_ctx["fps"] == 24
+
+
+@pytest.mark.asyncio
+async def test_format_output_passthrough_formatted_response():
+    """_format_output forwards an already-formatted response without touching connectors."""
+    formatted = {"id": "r", "object": "video", "data": [{"url": "file:///m/v.mp4"}]}
+    mock_formatter = AsyncMock()
+
+    router = _make_router(
+        stage_configs=[_make_stage_cfg(0)],
+        stage_clients={},
+        formatter=mock_formatter,
+    )
+    connector = MagicMock()
+    router.connectors = {stage_router._connector_key(0, "router"): connector}
+
+    stage_output = StageOutput(
+        stage_connector_refs=None,
+        shm_meta=None,
+        formatted_response=formatted,
+    )
+
+    chunks = [
+        c
+        async for c in router._format_output(
+            stage_output,
+            request_id="req-passthrough",
+            request_type=RequestType.VIDEO_GENERATION,
+            ctx={},
+            final_stage_id=0,
+        )
+    ]
+
+    assert chunks == [formatted]
+    connector.get.assert_not_called()
+    mock_formatter.format.assert_not_called()
