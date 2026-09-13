@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use dynamo_tokens::SequenceHash;
@@ -123,6 +124,10 @@ struct SelectionEntry {
     is_eagle: bool,
     indexer: Indexer,
     workers_tx: watch::Sender<HashMap<WorkerId, SelectionWorkerConfig>>,
+    /// Some schedulable worker in this partition advertises a router hint
+    /// worker type. Recomputed by `publish_scheduler_config` on every catalog
+    /// mutation, so bookings read a bool instead of scanning the catalog.
+    hint_capable: AtomicBool,
     scheduler: SelectionScheduler,
     replica_tx: Option<mpsc::Sender<ActiveSequenceEvent>>,
     affinity: OnceCell<SessionAffinity>,

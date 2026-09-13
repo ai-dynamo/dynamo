@@ -299,7 +299,7 @@ impl SelectionCore {
         // Router hints are attached to bookings only, and only when a worker in
         // this partition can consume them and the indexer can retain the
         // matched chain (local, event-driven, no approximate writes).
-        let hint_capable_workers = book && self.catalog.has_router_hint_capable_workers(&key);
+        let hint_capable_workers = book && entry.hint_capable.load(Ordering::Acquire);
         let retain_kv_transfer_chain =
             hint_capable_workers && entry.indexer.supports_kv_transfer_chain_retention();
         if hint_capable_workers && !retain_kv_transfer_chain {

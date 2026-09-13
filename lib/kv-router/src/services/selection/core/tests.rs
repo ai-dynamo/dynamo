@@ -566,6 +566,99 @@ async fn router_hint_needs_capable_workers() {
     assert!(response.kv_hint.is_none());
 }
 
+/// The partition's hint-capability flag follows catalog membership: set by
+/// the upsert that adds a capable worker, cleared by the delete that removes
+/// the last one, unaffected by other partitions. Deleted workers leave the
+/// catalog instead of lingering as `Unschedulable`.
+#[tokio::test]
+async fn hint_capability_tracks_catalog_membership() {
+    use crate::indexer::KvIndexerInterface;
+    use crate::protocols::{BlockHashOptions, compute_block_hash_for_seq};
+
+    let (core, entry, tokens) = hint_fixture(|_| {}).await;
+    let hashes: Vec<u64> = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default())
+        .into_iter()
+        .map(|hash| hash.0)
+        .collect();
+    let seed_worker_1 = || async {
+        entry
+            .indexer
+            .apply_event_routed(store_event(1, 0, 1, &[], &hashes, StorageTier::Device))
+            .await
+            .unwrap();
+        if let Indexer::Single { primary, .. } = &entry.indexer {
+            let _ = primary.flush().await;
+        }
+    };
+    let capable = |worker_id: WorkerId| {
+        let mut request = worker_with_kv_events(worker_id);
+        hint_capable(&mut request);
+        request
+    };
+    let flag = || entry.hint_capable.load(Ordering::Acquire);
+
+    assert!(!flag());
+    let response = reserve_pinned(&core, "before", &tokens, 2).await;
+    assert!(response.kv_hint.is_none());
+
+    // A capable worker in another partition does not flip this one.
+    let mut other = capable(9);
+    other.routing_group = "group-b".to_string();
+    core.upsert_worker(other).await.expect("group-b upsert");
+    assert!(!flag());
+
+    // Re-registering both workers with hint capability enables hints.
+    core.upsert_worker(capable(1)).await.expect("upsert 1");
+    core.upsert_worker(capable(2)).await.expect("upsert 2");
+    seed_worker_1().await;
+    let response = reserve_pinned(&core, "enabled", &tokens, 2).await;
+    assert!(
+        response.kv_hint.is_some(),
+        "capable partition attaches hints"
+    );
+    assert!(flag());
+
+    // Deleting the capable workers clears the flag and drops their records.
+    core.delete_worker(1).await.expect("delete 1");
+    assert!(flag(), "worker 2 is still capable");
+    assert_eq!(core.list_workers(None, None).len(), 2, "1 left the catalog");
+    core.delete_worker(2).await.expect("delete 2");
+    assert!(!flag());
+    assert_eq!(
+        core.list_workers(None, None).len(),
+        1,
+        "only group-b remains"
+    );
+    assert!(core.list_workers(Some("model"), Some("default")).is_empty());
+
+    // Non-capable replacements keep the flag clear and hints off.
+    core.upsert_worker(worker_with_kv_events(1))
+        .await
+        .expect("plain upsert 1");
+    core.upsert_worker(worker_with_kv_events(2))
+        .await
+        .expect("plain upsert 2");
+    seed_worker_1().await;
+    assert!(!flag());
+    let response = reserve_pinned(&core, "after", &tokens, 2).await;
+    assert!(response.kv_hint.is_none());
+
+    // Re-adding capable workers restores hints.
+    core.upsert_worker(capable(1))
+        .await
+        .expect("upsert 1 again");
+    core.upsert_worker(capable(2))
+        .await
+        .expect("upsert 2 again");
+    seed_worker_1().await;
+    assert!(flag());
+    let response = reserve_pinned(&core, "restored", &tokens, 2).await;
+    assert!(
+        response.kv_hint.is_some(),
+        "re-added capable worker restores hints"
+    );
+}
+
 #[tokio::test]
 async fn event_driven_indexer_does_not_record_bookings() {
     let core = local_core(test_config(true));

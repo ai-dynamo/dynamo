@@ -325,12 +325,12 @@ impl EmbeddedSelection {
             primed: false,
         };
         let mut reconciler = CatalogReconciler::new(Arc::clone(service.core())).with_observer(
-            Arc::new(RegisteredGauge {
-                metrics: super::metrics::RouterWorkerStatusMetrics::from_component(
+            Arc::new(RegisteredGauge::new(
+                super::metrics::RouterWorkerStatusMetrics::from_component(
                     args.endpoint.component(),
                 ),
-                worker_label: args.metric_worker_type,
-            }),
+                args.metric_worker_type,
+            )),
         );
         // The current membership is in the catalog before the router serves.
         if let Some(snapshot) = source.next_snapshot().await
@@ -442,18 +442,55 @@ impl WorkerCatalogSource for RuntimeDiscoverySource {
 struct RegisteredGauge {
     metrics: Arc<super::metrics::RouterWorkerStatusMetrics>,
     worker_label: &'static str,
+    /// Last published rank range per worker, so a shrinking or shifted
+    /// `data_parallel_size` clears the ranks that left instead of stranding
+    /// them at 1.
+    ranks: std::sync::Mutex<HashMap<WorkerId, std::ops::Range<u32>>>,
+}
+
+impl RegisteredGauge {
+    fn new(
+        metrics: Arc<super::metrics::RouterWorkerStatusMetrics>,
+        worker_label: &'static str,
+    ) -> Self {
+        Self {
+            metrics,
+            worker_label,
+            ranks: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
 }
 
 impl CatalogObserver for RegisteredGauge {
     fn upserted(&self, record: &WorkerCatalogRecord) {
-        for dp_rank in record.dp_ranks() {
+        let current = record.dp_ranks();
+        let previous = self
+            .ranks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(record.worker_id, current.clone());
+        for dp_rank in previous
+            .into_iter()
+            .flatten()
+            .filter(|dp_rank| !current.contains(dp_rank))
+        {
+            self.metrics
+                .remove_worker(record.worker_id, dp_rank, self.worker_label);
+        }
+        for dp_rank in current {
             self.metrics
                 .set_registered(record.worker_id, dp_rank, self.worker_label);
         }
     }
 
     fn removed(&self, record: &WorkerCatalogRecord) {
-        for dp_rank in record.dp_ranks() {
+        let previous = self
+            .ranks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&record.worker_id);
+        // The record's own ranks plus whatever an earlier upsert published.
+        for dp_rank in record.dp_ranks().chain(previous.into_iter().flatten()) {
             self.metrics
                 .remove_worker(record.worker_id, dp_rank, self.worker_label);
         }
@@ -572,6 +609,52 @@ mod tests {
             request.max_num_batched_tokens,
             Some(DEFAULT_MAX_BATCHED_TOKENS)
         );
+    }
+
+    /// A data-parallel shrink clears the gauges of the ranks that left; a
+    /// removal clears every rank the worker ever published.
+    #[test]
+    fn registered_gauge_clears_ranks_that_leave_the_worker() {
+        let metrics = Arc::new(super::super::metrics::RouterWorkerStatusMetrics::unregistered());
+        let gauge = RegisteredGauge::new(Arc::clone(&metrics), "decode");
+        let record = |dp_size: u32| {
+            WorkerCatalogRecord::new(WorkerRequest {
+                worker_id: 7,
+                data_parallel_start_rank: Some(0),
+                data_parallel_size: Some(dp_size),
+                ..WorkerRequest::default()
+            })
+        };
+        // `get_metric_with_label_values` creates the child it looks up;
+        // `collect` reports only the children that exist.
+        let registered = |dp_rank: u32| {
+            use prometheus::core::Collector;
+            let dp_rank = dp_rank.to_string();
+            metrics.registered.collect().into_iter().find_map(|family| {
+                family
+                    .get_metric()
+                    .iter()
+                    .find(|metric| {
+                        metric
+                            .get_label()
+                            .iter()
+                            .any(|label| label.name() == "dp_rank" && label.value() == dp_rank)
+                    })
+                    .map(|metric| metric.get_gauge().value() as i64)
+            })
+        };
+
+        gauge.upserted(&record(4));
+        assert!((0..4).all(|dp_rank| registered(dp_rank) == Some(1)));
+
+        gauge.upserted(&record(2));
+        assert_eq!(registered(0), Some(1));
+        assert_eq!(registered(1), Some(1));
+        assert_eq!(registered(2), None, "rank 2 left the worker");
+        assert_eq!(registered(3), None, "rank 3 left the worker");
+
+        gauge.removed(&record(2));
+        assert!((0..4).all(|dp_rank| registered(dp_rank).is_none()));
     }
 
     #[test]

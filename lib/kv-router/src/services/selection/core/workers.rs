@@ -61,6 +61,9 @@ impl SelectionCore {
             .set_lifecycle(worker_id, WorkerLifecycle::Unschedulable, Vec::new())
             .ok_or_else(|| SelectionError::NotFound(format!("worker {worker_id} not found")))?;
         self.publish_scheduler_config(&key);
+        // Departed workers do not linger: every reader treats a missing record
+        // like an unschedulable one, and the catalog stays bounded by live ids.
+        self.catalog.remove(worker_id);
         Ok(record)
     }
 
@@ -294,6 +297,7 @@ impl SelectionCore {
                     is_eagle,
                     indexer,
                     workers_tx,
+                    hint_capable: AtomicBool::new(false),
                     scheduler,
                     replica_tx,
                     affinity: OnceCell::new(),
@@ -339,7 +343,8 @@ impl SelectionCore {
         let Some(entry) = self.entry(key) else {
             return;
         };
-        let workers = self.catalog.scheduler_configs_for_key(key);
+        let (workers, hint_capable) = self.catalog.partition_view(key);
+        entry.hint_capable.store(hint_capable, Ordering::Release);
         // Lifecycle transitions between non-schedulable states publish the same
         // map; skipping them saves the scheduler a wake and a full map clone.
         entry.workers_tx.send_if_modified(|current| {

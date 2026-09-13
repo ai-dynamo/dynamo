@@ -159,7 +159,7 @@ pub struct WorkerCatalogRecord {
 }
 
 impl WorkerCatalogRecord {
-    pub(super) fn new(req: WorkerRequest) -> Self {
+    pub fn new(req: WorkerRequest) -> Self {
         Self {
             worker_id: req.worker_id,
             model_name: req.model_name,
@@ -200,7 +200,7 @@ impl WorkerCatalogRecord {
         self.data_parallel_size.unwrap_or(1)
     }
 
-    pub fn dp_ranks(&self) -> impl Iterator<Item = u32> {
+    pub fn dp_ranks(&self) -> std::ops::Range<u32> {
         let start = self.dp_start();
         let size = self.dp_size();
         start..start.saturating_add(size)

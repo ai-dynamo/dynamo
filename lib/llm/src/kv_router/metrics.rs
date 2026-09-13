@@ -459,6 +459,29 @@ impl RouterWorkerStatusMetrics {
             .clone()
     }
 
+    /// Gauges on no registry, for observer tests that only read them back.
+    #[cfg(test)]
+    pub(crate) fn unregistered() -> Self {
+        Self {
+            registered: IntGaugeVec::new(
+                Opts::new(router::WORKER_REGISTERED, "registered"),
+                &[ROUTER_WORKER_ID_LABEL, labels::DP_RANK, labels::WORKER_TYPE],
+            )
+            .expect("valid gauge"),
+            kv_event_source_mismatch_workers: IntGaugeVec::new(
+                Opts::new(router::KV_EVENT_SOURCE_MISMATCH_WORKERS, "mismatch"),
+                &[
+                    labels::MODEL,
+                    labels::WORKER_TYPE,
+                    TARGET_NAMESPACE_LABEL,
+                    TARGET_COMPONENT_LABEL,
+                    TARGET_ENDPOINT_LABEL,
+                ],
+            )
+            .expect("valid gauge"),
+        }
+    }
+
     pub fn set_registered(&self, worker_id: u64, dp_rank: u32, worker_type: &str) {
         let worker_id = worker_id.to_string();
         let dp_rank = dp_rank.to_string();

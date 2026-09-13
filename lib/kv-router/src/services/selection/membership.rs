@@ -240,9 +240,10 @@ mod tests {
         reconciler.apply(vec![incomplete(1)]).await.expect("apply");
         assert_eq!(counter.upserts(), 2);
 
-        // The never-schedulable worker was still tracked, so leaving deletes it.
+        // The never-schedulable worker was still tracked, so leaving deletes it
+        // and the catalog no longer lists it.
         reconciler.apply(Vec::new()).await.expect("apply");
-        assert_eq!(lifecycle(&core, 1), Some(WorkerLifecycle::Unschedulable));
+        assert_eq!(lifecycle(&core, 1), None);
         assert_eq!(counter.removals(), 1);
 
         // Nothing is tracked any more: an empty snapshot deletes nothing.

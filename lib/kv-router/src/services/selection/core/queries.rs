@@ -99,7 +99,7 @@ impl SelectionCore {
     }
 
     fn schedulable_worker_ranks(&self, key: &RoutingPartitionId) -> Vec<WorkerWithDpRank> {
-        let configs = self.catalog.scheduler_configs_for_key(key);
+        let (configs, _) = self.catalog.partition_view(key);
         let mut workers = Vec::new();
         for (worker_id, config) in configs {
             let start = config.data_parallel_start_rank;
