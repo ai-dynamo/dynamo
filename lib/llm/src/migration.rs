@@ -783,11 +783,7 @@ mod tests {
             ..Default::default()
         });
 
-        for phase in [
-            RequestPhase::Aggregated,
-            RequestPhase::Prefill,
-            RequestPhase::Decode,
-        ] {
+        for phase in [RequestPhase::Aggregated, RequestPhase::Decode] {
             let permit = tracker.set_phase(phase).await;
             for error_type in [ErrorType::Disconnected, ErrorType::WorkerOverloaded] {
                 let error = migratable_error(error_type);
@@ -798,6 +794,18 @@ mod tests {
             }
             drop(permit);
         }
+
+        // A backend pin names the worker that generates tokens, so it leaves the
+        // prefill hop unpinned and that hop stays migratable.
+        let permit = tracker.set_phase(RequestPhase::Prefill).await;
+        for error_type in [ErrorType::Disconnected, ErrorType::WorkerOverloaded] {
+            let error = migratable_error(error_type);
+            assert!(
+                is_migratable_for_request(&request, &error),
+                "backend pin must not block {error_type:?} migration during prefill"
+            );
+        }
+        drop(permit);
     }
 
     #[tokio::test]
