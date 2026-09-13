@@ -41,6 +41,7 @@ pytestmark = [
 def _embedding_processor(
     allowed_local_media_path: str = "",
 ) -> MultimodalRequestProcessor:
+    """Build a processor with a mocked tokenizer and the given allowed local media path."""
     return MultimodalRequestProcessor(
         model_type="multimodal",
         model_dir="unused",
@@ -559,8 +560,10 @@ async def test_cached_path_rejects_non_object_kwargs_on_hit() -> None:
 
 
 def _embedding_request(url: str) -> dict:
-    # A URL ending in .safetensors routes to the embedding loader, which needs
-    # the frontend's formatted prompt once the embeddings have loaded.
+    """Build a request whose .safetensors URL routes to the embedding loader.
+
+    The formatted prompt is required once the embeddings have loaded.
+    """
     return {
         "multi_modal_data": {"image_url": [{"Url": url}]},
         "token_ids": [1],
@@ -571,10 +574,12 @@ def _embedding_request(url: str) -> dict:
 # Each setup receives a processor whose allowed_local_media_path is tmp_path,
 # prepares one failure, and returns the URL the client would send.
 def _missing_file(tmp_path, processor):
+    """Return a URL for a file that does not exist inside the allowed directory."""
     return f"file://{tmp_path / 'missing.safetensors'}"
 
 
 def _outside_allowed_dir(tmp_path, processor):
+    """Restrict the allowed directory to a subfolder and return a file outside it."""
     allowed = tmp_path / "allowed"
     allowed.mkdir()
     processor.allowed_local_media_path = str(allowed)
@@ -584,6 +589,7 @@ def _outside_allowed_dir(tmp_path, processor):
 
 
 def _file_too_large(tmp_path, processor):
+    """Lower the size limit to 1 byte and return a valid file that exceeds it."""
     processor.max_file_size_bytes = 1
     path = tmp_path / "large.safetensors"
     save_file({"emb": torch.zeros(2)}, str(path))
@@ -591,13 +597,14 @@ def _file_too_large(tmp_path, processor):
 
 
 def _missing_mm_embeddings_key(tmp_path, processor):
-    # Two keys, so the file is returned as a dict and must name mm_embeddings.
+    """Return a two-key file, loaded as a dict, that lacks the mm_embeddings key."""
     path = tmp_path / "two_keys.safetensors"
     save_file({"a": torch.zeros(2), "b": torch.zeros(2)}, str(path))
     return f"file://{path}"
 
 
 def _unsupported_scheme(tmp_path, processor):
+    """Return a .safetensors URL with a scheme other than http or https."""
     return "ftp://example.invalid/emb.safetensors"
 
 
