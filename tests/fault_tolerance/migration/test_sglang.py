@@ -3,14 +3,10 @@
 
 import logging
 import os
-import signal
 import threading
 import time
-from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
 
-import psutil
 import pytest
 import requests
 
@@ -24,9 +20,9 @@ from tests.utils.prometheus import sum_metric_samples
 # Customized utils for migration tests
 from .utils import (
     DynamoFrontendProcess,
+    graceful_worker_shutdown,
     managed_processes_concurrently,
     run_migration_test,
-    wait_for_endpoint_instance_reduction,
     wait_for_endpoint_instances,
 )
 
@@ -43,52 +39,6 @@ KV_TRANSFER_PROMPT_REPETITIONS = 128
 SGLANG_MIGRATION_FRONTEND_STARTUP_TIMEOUT_S = 60
 # Last-resort ceiling; individual operations have their own bounded waits.
 SGLANG_MIGRATION_TEST_TIMEOUT_S = 780
-
-
-@contextmanager
-def _sglang_graceful_shutdown(
-    frontend: DynamoFrontendProcess,
-    worker: ManagedProcess,
-) -> Iterator[None]:
-    """Keep the failed worker alive until the request outcome is observable."""
-    endpoint = ("backend", "generate")
-    response = requests.get(
-        f"http://localhost:{frontend.frontend_port}/health",
-        timeout=1,
-    )
-    response.raise_for_status()
-    previous_count = sum(
-        1
-        for instance in response.json().get("instances", [])
-        if (instance.get("component"), instance.get("endpoint")) == endpoint
-    )
-
-    pid = worker.get_pid()
-    parent = psutil.Process(pid)
-    process_groups = {os.getpgid(pid)}
-    try:
-        for child in parent.children(recursive=True):
-            try:
-                process_groups.add(os.getpgid(child.pid))
-            except (ProcessLookupError, OSError):
-                pass
-    except (psutil.AccessDenied, psutil.NoSuchProcess):
-        pass
-
-    try:
-        parent.terminate()
-        wait_for_endpoint_instance_reduction(
-            frontend.frontend_port,
-            endpoint,
-            previous_count,
-        )
-        yield
-    finally:
-        for process_group in process_groups:
-            try:
-                os.killpg(process_group, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
 
 
 def get_sglang_kv_transfer_metrics(worker_system_port: int) -> tuple[float, float]:
@@ -543,7 +493,7 @@ def test_request_migration_sglang_aggregated(
                 stream=stream,
                 max_tokens=AGGREGATED_MAX_TOKENS,
                 expected_ongoing_request_count=1,
-                graceful_shutdown=lambda worker: _sglang_graceful_shutdown(
+                graceful_shutdown=lambda worker: graceful_worker_shutdown(
                     frontend, worker
                 ),
                 verify_replacement_worker=True,
@@ -656,7 +606,7 @@ def test_request_migration_sglang_kv_transfer(
                 use_long_prompt=True,
                 long_prompt_repetitions=KV_TRANSFER_PROMPT_REPETITIONS,
                 expected_ongoing_request_count=1,
-                graceful_shutdown=lambda worker: _sglang_graceful_shutdown(
+                graceful_shutdown=lambda worker: graceful_worker_shutdown(
                     frontend, worker
                 ),
                 verify_replacement_worker=True,
@@ -756,7 +706,7 @@ def test_request_migration_sglang_decode(
                 max_tokens=DECODE_MAX_TOKENS,
                 wait_for_new_response_before_stop=True,
                 expected_ongoing_request_count=1,
-                graceful_shutdown=lambda worker: _sglang_graceful_shutdown(
+                graceful_shutdown=lambda worker: graceful_worker_shutdown(
                     frontend, worker
                 ),
                 verify_replacement_worker=True,

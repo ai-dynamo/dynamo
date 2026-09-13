@@ -2,13 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
+import os
 import re
+import signal
 import threading
 import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 
+import psutil
 import pytest
 import requests
 from openai import APIError, OpenAI
@@ -21,6 +24,10 @@ from tests.utils.managed_process import ManagedProcess, terminate_process_tree
 from tests.utils.prometheus import sum_metric_samples
 
 logger = logging.getLogger(__name__)
+
+# The (component, endpoint) pair a decode or aggregated worker registers with
+# the frontend.
+BACKEND_ENDPOINT = ("backend", "generate")
 
 
 @contextmanager
@@ -461,6 +468,69 @@ def wait_for_endpoint_instance_reduction(
         f"{previous_count} within {max_wait_time}s; last count={last_count}, "
         f"last error={last_error}"
     )
+
+
+@contextmanager
+def graceful_worker_shutdown(
+    frontend: DynamoFrontendProcess,
+    worker: ManagedProcess,
+) -> Iterator[None]:
+    """Send SIGTERM only, and keep the worker alive until the outcome is known.
+
+    `terminate_process_tree` escalates to SIGKILL a fixed number of seconds
+    after SIGTERM, which severs the worker's streams before its own shutdown
+    path can report anything. A migration observed that way shows only that the
+    frontend reacts to a dead connection, not that the backend interrupted the
+    request at grace expiry and reported a migratable error. Sending SIGTERM
+    alone leaves the backend's shutdown event, abort monitor and error
+    propagation as the only thing that can produce the migration.
+
+    This context sends SIGTERM, waits for the worker to leave frontend
+    discovery, yields while the request outcome is observed, and only then
+    force-kills the worker's process groups, so teardown still cannot leak
+    engine processes that pin the GPU.
+
+    Args:
+        frontend: Frontend whose `/health` view reports endpoint instances
+        worker: Worker to shut down
+    """
+    response = requests.get(
+        f"http://localhost:{frontend.frontend_port}/health",
+        timeout=1,
+    )
+    response.raise_for_status()
+    previous_count = sum(
+        1
+        for instance in response.json().get("instances", [])
+        if (instance.get("component"), instance.get("endpoint")) == BACKEND_ENDPOINT
+    )
+
+    pid = worker.get_pid()
+    parent = psutil.Process(pid)
+    process_groups = {os.getpgid(pid)}
+    try:
+        for child in parent.children(recursive=True):
+            try:
+                process_groups.add(os.getpgid(child.pid))
+            except ProcessLookupError:
+                pass
+    except psutil.NoSuchProcess:
+        pass
+
+    try:
+        parent.terminate()
+        wait_for_endpoint_instance_reduction(
+            frontend.frontend_port,
+            BACKEND_ENDPOINT,
+            previous_count,
+        )
+        yield
+    finally:
+        for process_group in process_groups:
+            try:
+                os.killpg(process_group, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 def wait_for_response(

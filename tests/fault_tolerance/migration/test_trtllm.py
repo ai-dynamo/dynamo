@@ -21,7 +21,7 @@ from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import allocate_port, deallocate_port
 
 # Customized utils for migration tests
-from .utils import DynamoFrontendProcess, run_migration_test
+from .utils import DynamoFrontendProcess, graceful_worker_shutdown, run_migration_test
 
 logger = logging.getLogger(__name__)
 
@@ -236,6 +236,9 @@ def test_request_migration_trtllm_aggregated(
                     immediate_kill=immediate_kill,
                     use_chat_completion=(request_api == "chat"),
                     stream=stream,
+                    graceful_shutdown=lambda worker: graceful_worker_shutdown(
+                        frontend, worker
+                    ),
                 )
 
 
@@ -466,4 +469,7 @@ def test_request_migration_trtllm_decode(
                         use_chat_completion=(request_api == "chat"),
                         stream=stream,
                         wait_for_new_response_before_stop=True,
+                        graceful_shutdown=lambda worker: graceful_worker_shutdown(
+                            frontend, worker
+                        ),
                     )
