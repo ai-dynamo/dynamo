@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""process_openai_request must let client-error types from image loading
-propagate (so the frontend returns a 4xx) instead of swallowing them to None."""
+"""process_openai_request must let client-error types from image and embedding
+loading propagate (so the frontend returns a 4xx) instead of swallowing them to None."""
 
 import json
 from unittest.mock import AsyncMock, MagicMock
@@ -19,6 +19,8 @@ if not torch.cuda.is_available():
         allow_module_level=True,
     )
 
+from safetensors.torch import save_file
+
 from dynamo.common.http import HttpStatusError
 from dynamo.common.http.url_validator import UrlValidationError
 from dynamo.trtllm import multimodal_processor as mmp
@@ -34,6 +36,19 @@ pytestmark = [
 
 # Intentionally unprofiled: these import-heavy, zero-VRAM tests run in the
 # sequential GPU stage so TensorRT-LLM initialization is shared.
+
+
+def _embedding_processor(
+    allowed_local_media_path: str = "",
+) -> MultimodalRequestProcessor:
+    """Build a processor with a mocked tokenizer and the given allowed local media path."""
+    return MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+        allowed_local_media_path=allowed_local_media_path,
+    )
 
 
 @pytest.mark.asyncio
@@ -542,3 +557,110 @@ async def test_cached_path_rejects_non_object_kwargs_on_hit() -> None:
 
     assert excinfo.value.status == 400
     cache.get.assert_not_called()
+
+
+def _embedding_request(url: str) -> dict:
+    """Build a request whose .safetensors URL routes to the embedding loader.
+
+    The formatted prompt is required once the embeddings have loaded.
+    """
+    return {
+        "multi_modal_data": {"image_url": [{"Url": url}]},
+        "token_ids": [1],
+        "extra_args": {"formatted_prompt": "describe"},
+    }
+
+
+# Each setup receives a processor whose allowed_local_media_path is tmp_path,
+# prepares one failure, and returns the URL the client would send.
+def _missing_file(tmp_path, processor):
+    return f"file://{tmp_path / 'missing.safetensors'}"
+
+
+def _outside_allowed_dir(tmp_path, processor):
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    processor.allowed_local_media_path = str(allowed)
+    outside = tmp_path / "outside.safetensors"
+    save_file({"emb": torch.zeros(2)}, str(outside))
+    return f"file://{outside}"
+
+
+def _file_too_large(tmp_path, processor):
+    processor.max_file_size_bytes = 1
+    path = tmp_path / "large.safetensors"
+    save_file({"emb": torch.zeros(2)}, str(path))
+    return f"file://{path}"
+
+
+def _missing_mm_embeddings_key(tmp_path, processor):
+    """Return a two-key file, loaded as a dict, that lacks the mm_embeddings key."""
+    path = tmp_path / "two_keys.safetensors"
+    save_file({"a": torch.zeros(2), "b": torch.zeros(2)}, str(path))
+    return f"file://{path}"
+
+
+def _unsupported_scheme(tmp_path, processor):
+    return "ftp://example.invalid/emb.safetensors"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "setup, expected_in_message",
+    [
+        pytest.param(_missing_file, "not found", id="missing-file"),
+        pytest.param(_outside_allowed_dir, "outside allowed path", id="outside-dir"),
+        pytest.param(_file_too_large, "exceeds", id="too-large"),
+        pytest.param(_missing_mm_embeddings_key, "mm_embeddings", id="missing-key"),
+        pytest.param(_unsupported_scheme, "ftp", id="unsupported-scheme"),
+    ],
+)
+async def test_embedding_client_errors_return_400(
+    setup, expected_in_message, tmp_path
+) -> None:
+    """A bad embedding URL is the client's fault: 400 with a reason, not a
+    swallowed None that the handler turns into a sanitized 500."""
+    processor = _embedding_processor(str(tmp_path))
+    url = setup(tmp_path, processor)
+
+    with pytest.raises(HttpStatusError) as exc_info:
+        await processor.process_openai_request(
+            _embedding_request(url), embeddings=None, ep_disaggregated_params=None
+        )
+
+    assert exc_info.value.status == 400
+    # Every case is a 400, so the message is what proves the intended check fired.
+    assert expected_in_message in exc_info.value.message
+
+
+@pytest.mark.asyncio
+async def test_embedding_outside_allowed_dir_does_not_leak_it(tmp_path) -> None:
+    """The 400 message reaches the client directly, so it must not name the
+    server's allowed directory."""
+    processor = _embedding_processor()
+    url = _outside_allowed_dir(tmp_path, processor)
+
+    with pytest.raises(HttpStatusError) as exc_info:
+        await processor.process_openai_request(
+            _embedding_request(url), embeddings=None, ep_disaggregated_params=None
+        )
+
+    assert processor.allowed_local_media_path not in exc_info.value.message
+
+
+@pytest.mark.asyncio
+async def test_embedding_local_path_unconfigured_is_server_error(tmp_path) -> None:
+    """Local media access unconfigured is the operator's problem, so it
+    should throw a 5xx error, which the frontend sanitizes."""
+    processor = _embedding_processor()
+    path = tmp_path / "emb.safetensors"
+    save_file({"emb": torch.zeros(2)}, str(path))
+
+    with pytest.raises(HttpStatusError) as exc_info:
+        await processor.process_openai_request(
+            _embedding_request(f"file://{path}"),
+            embeddings=None,
+            ep_disaggregated_params=None,
+        )
+
+    assert exc_info.value.status == 500

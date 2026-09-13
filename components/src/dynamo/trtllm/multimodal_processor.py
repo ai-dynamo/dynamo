@@ -204,16 +204,24 @@ class MultimodalRequestProcessor:
         parsed = urlparse(path)
         lower_path = parsed.path.lower()
         if lower_path.endswith((".pt", ".pth", ".bin")):
-            raise RuntimeError(
+            raise HttpStatusError(
+                400,
                 "Unsafe tensor format: .pt/.pth/.bin files are not allowed. "
-                "Use .safetensors format instead."
+                "Use .safetensors format instead.",
+                path,
             )
         if not lower_path.endswith(".safetensors"):
-            raise RuntimeError("Only .safetensors embedding files are supported.")
+            raise HttpStatusError(
+                400, "Only .safetensors embedding files are supported.", path
+            )
 
         if self.is_url(path):
             if parsed.scheme not in ("http", "https"):
-                raise RuntimeError(f"Unsupported URL scheme: {parsed.scheme}")
+                raise HttpStatusError(
+                    400,
+                    f"Unsupported URL scheme: {parsed.scheme}. Only http and https are allowed.",
+                    path,
+                )
             try:
                 with httpx.Client(timeout=300.0) as client:
                     with client.stream("GET", path) as resp:
@@ -223,26 +231,30 @@ class MultimodalRequestProcessor:
                             content_length
                             and int(content_length) > self.max_file_size_bytes
                         ):
-                            raise RuntimeError(
+                            raise HttpStatusError(
+                                400,
                                 f"File size exceeds limit: "
                                 f"{int(content_length) // (1024*1024)}MB > "
-                                f"{self.max_file_size_mb}MB"
+                                f"{self.max_file_size_mb}MB",
+                                path,
                             )
                         chunks = []
                         downloaded = 0
                         for chunk in resp.iter_bytes():
                             downloaded += len(chunk)
                             if downloaded > self.max_file_size_bytes:
-                                raise RuntimeError(
+                                raise HttpStatusError(
+                                    400,
                                     f"File size exceeds limit: "
                                     f"{downloaded // (1024*1024)}MB > "
-                                    f"{self.max_file_size_mb}MB"
+                                    f"{self.max_file_size_mb}MB",
+                                    path,
                                 )
                             chunks.append(chunk)
                         content = b"".join(chunks)
                     data = safetensors_load(content)
                     return self._unwrap_safetensors(data)
-            except RuntimeError:
+            except HttpStatusError:
                 raise
             except Exception as e:
                 logging.error(f"Failed to download or load tensor from URL: {e}")
@@ -253,7 +265,12 @@ class MultimodalRequestProcessor:
                     logging.warning(
                         "Local file access attempted but no allowed path configured"
                     )
-                    raise RuntimeError("Failed to load tensor")
+                    raise HttpStatusError(
+                        500,
+                        "Passed in path is a local file path, but allowed_local_media_path is not configured. "
+                        "Please configure an allowed path for local media.",
+                        path,
+                    )
 
                 local_path = path.removeprefix("file://")
                 resolved_path = Path(local_path).resolve()
@@ -265,19 +282,25 @@ class MultimodalRequestProcessor:
                     logging.warning(
                         f"Blocked access to file outside {self.allowed_local_media_path}: {path}"
                     )
-                    raise RuntimeError("Failed to load tensor")
+                    raise HttpStatusError(
+                        400,
+                        "Access to file outside allowed path is not permitted.",
+                        path,
+                    )
 
                 if not resolved_path.exists():
-                    raise RuntimeError(f"Embedding file not found: {resolved_path}")
+                    raise HttpStatusError(400, "Embedding file not found.", path)
                 file_size = resolved_path.stat().st_size
                 if file_size > self.max_file_size_bytes:
-                    raise RuntimeError(
+                    raise HttpStatusError(
+                        400,
                         f"File size ({file_size // (1024*1024)}MB) exceeds "
-                        f"maximum allowed size ({self.max_file_size_bytes // (1024*1024)}MB)"
+                        f"maximum allowed size ({self.max_file_size_bytes // (1024*1024)}MB)",
+                        path,
                     )
                 data = safetensors_load_file(str(resolved_path))
                 return self._unwrap_safetensors(data)
-            except RuntimeError:
+            except HttpStatusError:
                 raise
             except Exception as e:
                 logging.error(f"Failed to load tensor from local path: {e}")
@@ -458,14 +481,19 @@ class MultimodalRequestProcessor:
                             for path in embedding_paths
                         ]
                         loaded_embeddings = []
-                        for item in raw_loaded:
+                        for item, path in zip(raw_loaded, embedding_paths):
                             if isinstance(item, dict):
                                 emb = item.get("mm_embeddings")
                                 if emb is None:
+                                    source = describe_media_source(path)
                                     logging.error(
-                                        "Dictionary embeddings missing 'mm_embeddings' key"
+                                        f"Dictionary embeddings missing 'mm_embeddings' key: {source}"
                                     )
-                                    return None
+                                    raise HttpStatusError(
+                                        400,
+                                        f"Malformed embedding file {source}: missing 'mm_embeddings' key.",
+                                        source,
+                                    )
                                 loaded_embeddings.append(emb)
                             else:
                                 loaded_embeddings.append(item)
@@ -473,6 +501,10 @@ class MultimodalRequestProcessor:
                             logging.info(
                                 f"Loaded {len(loaded_embeddings)} embedding file(s) from paths: {embedding_paths}"
                             )
+                    except HttpStatusError:
+                        # Typed HTTP errors: let them reach the frontend with their status
+                        # instead of the generic catch below swallowing them to None.
+                        raise
                     except Exception as e:
                         logging.error(f"Failed to load embeddings: {e}")
                         return None
