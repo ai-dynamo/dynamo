@@ -9,6 +9,7 @@
 
 import asyncio
 import base64
+import copy
 import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -978,6 +979,142 @@ async def test_prefill_delegates_mode_policy_to_shared_processor():
         log_prefix="Prefill ",
         mm_processor_kwargs=mm_processor_kwargs,
     )
+
+
+@pytest.mark.asyncio
+async def test_parallel_choices_prefill_once_and_fan_out_on_decode():
+    from vllm.sampling_params import SamplingParams
+
+    sampling_options = {"n": 3}
+    supports_best_of = hasattr(SamplingParams(), "best_of")
+    if supports_best_of:
+        sampling_options["best_of"] = 4
+
+    request = {
+        "model": "test-model",
+        "token_ids": [1, 2, 3],
+        "sampling_options": sampling_options,
+        "stop_conditions": {"max_tokens": 8},
+        "output_options": {},
+        "routing": {},
+    }
+    original_request = copy.deepcopy(request)
+
+    @asynccontextmanager
+    async def no_abort(*args, **kwargs):
+        yield None
+
+    prefill_handler = mod.PrefillWorkerHandler.__new__(mod.PrefillWorkerHandler)
+    prefill_handler.config = SimpleNamespace(enable_rl=False)
+    prefill_handler.default_sampling_params = {}
+    prefill_handler.model_max_len = 128
+    prefill_handler._multimodal_request_processor = SimpleNamespace(
+        prepare_input=AsyncMock(
+            return_value=PreparedMultimodalInput(
+                request=request,
+                multi_modal_data=None,
+                mm_processor_kwargs=None,
+            )
+        ),
+        build_prefill_handoff=MagicMock(return_value=None),
+    )
+    prefill_handler._build_prompt_from_request = MagicMock(
+        return_value={"prompt_token_ids": request["token_ids"]}
+    )
+    prefill_handler._resolve_lora_request = MagicMock(return_value=None)
+    prefill_handler._to_local_dp_rank = MagicMock(return_value=None)
+    prefill_handler._abort_monitor = no_abort
+
+    def generate_with_lora_admission_lock(_lora_request, create_generator):
+        return create_generator(None)
+
+    prefill_handler._generate_with_lora_admission_lock = (
+        generate_with_lora_admission_lock
+    )
+    prefill_handler.engine_client = SimpleNamespace(vllm_config=MagicMock())
+    captured_prefill_params = []
+
+    async def prefill_generate(prompt, sampling_params, request_id, **kwargs):
+        captured_prefill_params.append(sampling_params)
+        for index in range(sampling_params.n):
+            yield SimpleNamespace(
+                kv_transfer_params={"remote_request_id": f"{index}_{request_id}"},
+                outputs=[SimpleNamespace(token_ids=[100 + index])],
+                prompt_token_ids=list(prompt["prompt_token_ids"]),
+                num_cached_tokens=None,
+            )
+
+    prefill_handler.engine_client.generate = prefill_generate
+    kv_protocol = SimpleNamespace(
+        prefill_request_kv_transfer_params=lambda: {"do_remote_prefill": True},
+        decode_request_kv_transfer_params=lambda response: response.kv_transfer_params,
+    )
+    context = MagicMock()
+    context.trace_headers.return_value = {}
+
+    with patch.object(mod, "make_kv_connector_protocol", return_value=kv_protocol):
+        prefill_outputs = [
+            output
+            async for output in prefill_handler._generate_token_mode(
+                request,
+                context,
+                "req",
+            )
+        ]
+
+    assert len(captured_prefill_params) == 1
+    assert captured_prefill_params[0].n == 1
+    assert len(prefill_outputs) == 1
+    if supports_best_of:
+        assert captured_prefill_params[0].best_of == 1
+    assert request == original_request
+
+    decode_request = copy.deepcopy(request)
+    decode_request["prefill_result"] = prefill_outputs[0]
+    decode_handler = _make_decode_handler(disaggregation_mode="DECODE")
+    decode_handler.config.enable_rl = False
+    decode_handler.engine_client = MagicMock()
+    decode_handler._multimodal_request_processor = SimpleNamespace(
+        prepare_input=AsyncMock(
+            return_value=PreparedMultimodalInput(
+                request=decode_request,
+                multi_modal_data=None,
+                mm_processor_kwargs=None,
+            )
+        )
+    )
+    decode_handler._build_prompt_from_request = MagicMock(
+        return_value={"prompt_token_ids": decode_request["token_ids"]}
+    )
+    decode_handler._resolve_lora_request = MagicMock(return_value=None)
+    decode_handler._to_local_dp_rank = MagicMock(return_value=None)
+    decode_handler._abort_monitor = no_abort
+    decode_handler._shutdown_on_engine_dead = MagicMock()
+    captured_decode_params = []
+
+    async def decode_generate_tokens(prompt, sampling_params, request_id, **kwargs):
+        captured_decode_params.append(sampling_params)
+        for index in range(sampling_params.n):
+            yield {"index": index, "token_ids": [200 + index]}
+
+    decode_handler.generate_tokens = decode_generate_tokens
+    original_decode_sampling = copy.deepcopy(decode_request["sampling_options"])
+    with patch.object(mod, "_deferred_abort_guard", no_abort):
+        decode_outputs = [
+            output
+            async for output in decode_handler._generate_token_mode(
+                decode_request,
+                context,
+                "req",
+            )
+        ]
+
+    assert len(captured_decode_params) == 1
+    assert captured_decode_params[0].n == 3
+    assert len(decode_outputs) == 3
+    if supports_best_of:
+        assert captured_decode_params[0].best_of == 4
+    assert decode_request["sampling_options"] == original_decode_sampling
 
 
 @pytest.mark.asyncio

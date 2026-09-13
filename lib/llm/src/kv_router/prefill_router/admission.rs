@@ -75,13 +75,19 @@ where
                     let detail = format!("Prefill router returned error in output stream: {error}");
                     return Err(PrefillError::PrefillError(detail, Some(Box::new(error))));
                 }
-                if let Some(output) = next.data.as_ref()
-                    && prompt_tokens_details.is_none()
-                {
-                    prompt_tokens_details = output
-                        .completion_usage
-                        .as_ref()
-                        .and_then(|usage| usage.prompt_tokens_details.clone());
+                if let Some(output) = next.data.as_ref() {
+                    if output.disaggregated_params.is_some() {
+                        return Err(PrefillError::PrefillError(
+                            "Prefill router returned multiple handoff payloads".to_string(),
+                            None,
+                        ));
+                    }
+                    if prompt_tokens_details.is_none() {
+                        prompt_tokens_details = output
+                            .completion_usage
+                            .as_ref()
+                            .and_then(|usage| usage.prompt_tokens_details.clone());
+                    }
                 }
             }
         } else {
@@ -171,6 +177,7 @@ where
 #[cfg(test)]
 mod tests {
     use dynamo_kv_router::selector::DefaultWorkerSelector;
+    use dynamo_protocols::types::{CompletionUsage, PromptTokensDetails};
     use futures::stream;
     use serde_json::json;
 
@@ -271,6 +278,74 @@ mod tests {
         };
         assert!(err.to_string().contains("prefill stream failed"), "{err}");
         assert!(!tracker.record_prefill_complete());
+    }
+
+    #[tokio::test]
+    async fn later_handoff_payload_is_rejected_instead_of_silently_dropped() {
+        let result = PrefillRouter::<DefaultWorkerSelector>::consume_prefill_stream(
+            prefill_stream(vec![
+                Annotated::from_data(LLMEngineOutput {
+                    disaggregated_params: Some(json!({"remote_request_id": "0_req"})),
+                    ..Default::default()
+                }),
+                Annotated::from_data(LLMEngineOutput {
+                    disaggregated_params: Some(json!({"remote_request_id": "1_req"})),
+                    ..Default::default()
+                }),
+            ]),
+            None,
+            None,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(PrefillError::PrefillError(message, None))
+                if message.contains("multiple handoff payloads")
+        ));
+    }
+
+    #[tokio::test]
+    async fn later_output_without_handoff_is_still_drained() {
+        let result = PrefillRouter::<DefaultWorkerSelector>::consume_prefill_stream(
+            prefill_stream(vec![
+                Annotated::from_data(LLMEngineOutput {
+                    disaggregated_params: Some(json!({"remote_request_id": "req"})),
+                    ..Default::default()
+                }),
+                Annotated::from_data(LLMEngineOutput {
+                    completion_usage: Some(CompletionUsage {
+                        prompt_tokens: 3,
+                        completion_tokens: 0,
+                        total_tokens: 3,
+                        prompt_tokens_details: Some(PromptTokensDetails {
+                            audio_tokens: None,
+                            cached_tokens: Some(2),
+                        }),
+                        completion_tokens_details: None,
+                    }),
+                    ..Default::default()
+                }),
+            ]),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let PrefillCompletion::Handoff { result, .. } = result else {
+            panic!("expected prefill handoff");
+        };
+        assert_eq!(
+            result.disaggregated_params,
+            json!({"remote_request_id": "req"})
+        );
+        assert_eq!(
+            result
+                .prompt_tokens_details
+                .and_then(|details| details.cached_tokens),
+            Some(2)
+        );
     }
 
     #[tokio::test]
