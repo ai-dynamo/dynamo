@@ -123,6 +123,10 @@ pub struct RequestReplayMetrics {
     pub trace_block_size: usize,
     pub input_length: usize,
     pub input_sequence_hashes: Vec<u64>,
+    /// Rolling sequence hashes for the generated continuation. If the input
+    /// ends mid-block, the first hash replaces its trailing input hash.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_sequence_hashes: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -337,6 +341,7 @@ mod tests {
                     trace_block_size: 2,
                     input_length: 4,
                     input_sequence_hashes: vec![11, 22],
+                    output_sequence_hashes: Vec::new(),
                 }),
                 finish_reason_metadata: None,
             }),
