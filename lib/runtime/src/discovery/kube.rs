@@ -402,18 +402,38 @@ impl Discovery for KubeDiscoveryClient {
         let event_tx = self.event_tx.clone();
 
         tokio::spawn(async move {
+            let receiver_closed = out_tx.closed();
+            tokio::pin!(receiver_closed);
+            let cancelled = async {
+                match cancel_token.as_ref() {
+                    Some(token) => token.cancelled().await,
+                    None => std::future::pending().await,
+                }
+            };
+            tokio::pin!(cancelled);
+
             // Acquire read lock, subscribe to broadcast, then read initial state.
             // The write lock (held by the daemon while updating list_state and sending events)
             // is mutually exclusive with our read lock, so no events can slip between
             // our subscription point and our initial state read.
-            let (initial_instances, mut broadcast_rx) = {
-                let state = list_state.read().await;
-                let rx = event_tx.subscribe();
-                let initial = state
-                    .values()
-                    .flat_map(|m| m.filter(&query))
-                    .collect::<Vec<_>>();
-                (initial, rx)
+            let (initial_instances, mut broadcast_rx) = tokio::select! {
+                _ = &mut receiver_closed => {
+                    tracing::debug!(stream_id = %stream_id, "Watch receiver dropped");
+                    return;
+                }
+                _ = &mut cancelled => {
+                    tracing::info!(stream_id = %stream_id, "Watch cancelled via cancel token");
+                    return;
+                }
+                initial = async {
+                    let state = list_state.read().await;
+                    let rx = event_tx.subscribe();
+                    let initial = state
+                        .values()
+                        .flat_map(|m| m.filter(&query))
+                        .collect::<Vec<_>>();
+                    (initial, rx)
+                } => initial,
             };
 
             tracing::debug!(
@@ -443,16 +463,16 @@ impl Discovery for KubeDiscoveryClient {
             }
 
             loop {
-                let recv_result = if let Some(ref token) = cancel_token {
-                    tokio::select! {
-                        result = broadcast_rx.recv() => result,
-                        _ = token.cancelled() => {
-                            tracing::info!(stream_id = %stream_id, "Watch cancelled via cancel token");
-                            break;
-                        }
+                let recv_result = tokio::select! {
+                    result = broadcast_rx.recv() => result,
+                    _ = &mut receiver_closed => {
+                        tracing::debug!(stream_id = %stream_id, "Watch receiver dropped");
+                        break;
                     }
-                } else {
-                    broadcast_rx.recv().await
+                    _ = &mut cancelled => {
+                        tracing::info!(stream_id = %stream_id, "Watch cancelled via cancel token");
+                        break;
+                    }
                 };
 
                 match recv_result {
@@ -502,7 +522,17 @@ impl Discovery for KubeDiscoveryClient {
                             dropped = n,
                             "Broadcast receiver lagged, reconciling from list_state"
                         );
-                        let state = list_state.read().await;
+                        let state = tokio::select! {
+                            state = list_state.read() => state,
+                            _ = &mut receiver_closed => {
+                                tracing::debug!(stream_id = %stream_id, "Watch receiver dropped");
+                                break;
+                            }
+                            _ = &mut cancelled => {
+                                tracing::info!(stream_id = %stream_id, "Watch cancelled via cancel token");
+                                break;
+                            }
+                        };
                         let current: HashMap<DiscoveryInstanceId, DiscoveryInstance> = state
                             .values()
                             .flat_map(|m| m.filter(&query))
