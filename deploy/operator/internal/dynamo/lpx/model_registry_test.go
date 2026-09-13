@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -135,6 +136,38 @@ func TestAcquireLocalBuildSnapshotCancellation(t *testing.T) {
 			require.Nil(t, snapshot)
 		})
 	}
+}
+
+func TestAcquireLocalBuildSnapshotRejectsFIFOManifest(t *testing.T) {
+	t.Parallel()
+
+	const buildDirEnv = "DYNAMO_TEST_FIFO_MANIFEST_BUILD_DIR"
+	if buildDir := os.Getenv(buildDirEnv); buildDir != "" {
+		t.Log("Reject the FIFO manifest while the acquisition context is still active")
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		snapshot, err := (&ModelRegistry{}).AcquireBuildSnapshot(ctx, buildDir)
+		require.ErrorContains(t, err, "not a regular file")
+		require.ErrorContains(t, err, gbuildManifestV2CapnpFile)
+		require.Nil(t, snapshot)
+		require.NoError(t, ctx.Err())
+		return
+	}
+
+	t.Log("Create a valid build directory containing a FIFO manifest with no writer")
+	buildDir := t.TempDir()
+	require.NoError(t, syscall.Mkfifo(filepath.Join(buildDir, gbuildManifestV2CapnpFile), 0o600))
+
+	t.Log("Bound the subprocess so a regressed FIFO open cannot hang or leak a goroutine")
+	executable, err := os.Executable()
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, executable, "-test.run=^"+t.Name()+"$", "-test.v")
+	cmd.Env = append(os.Environ(), buildDirEnv+"="+buildDir)
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, ctx.Err(), "FIFO manifest acquisition blocked past its deadline: %s", output)
+	require.NoError(t, err, "%s", output)
 }
 
 func TestLocalBuildFilePathsBudget(t *testing.T) {
@@ -276,6 +309,13 @@ func TestReadBuildFileBoundsLocalFileAtAcquisition(t *testing.T) {
 
 	t.Log("Read the file at the inclusive acquisition limit")
 	data, err := registry.readBuildFileBounded(t.Context(), buildURL, metadataFile, 5)
+	require.NoError(t, err)
+	require.Equal(t, []byte("12345"), data)
+
+	t.Log("Read the same metadata through a symlink at the inclusive acquisition limit")
+	const metadataLink = "metadata-link.bin"
+	require.NoError(t, os.Symlink(metadataFile, filepath.Join(buildDir, metadataLink)))
+	data, err = registry.readBuildFileBounded(t.Context(), buildURL, metadataLink, 5)
 	require.NoError(t, err)
 	require.Equal(t, []byte("12345"), data)
 

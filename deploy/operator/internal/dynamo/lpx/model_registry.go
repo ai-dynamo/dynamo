@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	modelpb "github.com/ai-dynamo/modelexpress/modelexpress_client/go/gen/modelexpress/model"
 )
@@ -191,15 +192,25 @@ func (r *ModelRegistry) readBuildFileBounded(
 ) ([]byte, error) {
 	switch buildURL.Scheme {
 	case BuildSchemeFile:
+		// Open nonblocking so a FIFO cannot stall before file-type validation.
 		fileURL := buildURL.JoinPath(relativePath)
-		file, err := os.Open(filepath.Clean(fileURL.Path))
+		file, err := os.OpenFile(filepath.Clean(fileURL.Path), os.O_RDONLY|syscall.O_NONBLOCK, 0)
 		if err != nil {
 			return nil, fmt.Errorf("reading %s: %w", fileURL.String(), err)
 		}
 		defer func() {
 			_ = file.Close()
 		}()
-		if info, statErr := file.Stat(); statErr == nil && info.Size() > int64(maxBytes) {
+
+		// Validate the opened file, not a path that could be replaced.
+		info, err := file.Stat()
+		if err != nil {
+			return nil, fmt.Errorf("checking %s: %w", fileURL.String(), err)
+		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("reading %s: not a regular file", fileURL.String())
+		}
+		if info.Size() > int64(maxBytes) {
 			return nil, fmt.Errorf(
 				"%w: %s is %d bytes, limit is %d",
 				errBuildFileTooLarge,
