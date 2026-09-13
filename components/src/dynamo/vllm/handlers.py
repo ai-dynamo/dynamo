@@ -116,6 +116,13 @@ logger = logging.getLogger(__name__)
 _FULL_VOCAB_LOGPROBS_SENTINEL = 2**32 - 1
 
 
+# Keep cache-loss worker metadata off unless the matching frontend funnel is
+# enabled. This prevents per-request dictionary construction for deployments
+# that do not collect the funnel.
+CACHE_LOSS_FUNNEL_ENABLED: Final[bool] = os.environ.get(
+    "DYN_CACHE_LOSS_FUNNEL_ENABLED", ""
+).strip().lower() in {"1", "true", "yes", "on"}
+
 # Marker set by the Rust conditional-disagg bypass path. When present on a
 # DECODE-mode worker, the request runs as local prefill+decode instead of
 # expecting KV-transfer metadata from an upstream prefill worker.
@@ -3181,6 +3188,31 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         }
 
     @staticmethod
+    def _cache_loss_engine_data(request_output: RequestOutput) -> Dict[str, Any]:
+        """Expose final cache counters for internal router observability."""
+        prompt_tokens = getattr(request_output, "prompt_token_ids", None)
+        local_hits = getattr(request_output, "num_local_cached_tokens", None)
+        if not isinstance(local_hits, int):
+            # Released vLLM builds expose only the aggregate GPU-cache counter.
+            # Prefer the split counter when present, but keep the funnel complete
+            # for workers without external-cache accounting.
+            local_hits = getattr(request_output, "num_cached_tokens", None)
+        external_hits = getattr(request_output, "num_external_cached_tokens", None)
+        external_lookups = getattr(request_output, "num_external_lookup_tokens", None)
+        external_hits = 0 if external_hits is None else external_hits
+        external_lookups = 0 if external_lookups is None else external_lookups
+        values = (local_hits, external_hits, external_lookups)
+        if prompt_tokens is None or any(not isinstance(value, int) for value in values):
+            return {"complete": False}
+        return {
+            "complete": True,
+            "prompt_tokens": len(prompt_tokens),
+            "gpu_hit_tokens": local_hits,
+            "cpu_hit_tokens": external_hits,
+            "cpu_lookup_tokens": external_lookups,
+        }
+
+    @staticmethod
     def _extract_logprobs(
         output, num_output_tokens_so_far: int, tokenizer=None
     ) -> tuple[list[float] | None, list[list[dict]] | None]:
@@ -3348,6 +3380,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             request_output=res,
                             completion_token_counts=total_output_tokens_by_index,
                         )
+                        if CACHE_LOSS_FUNNEL_ENABLED:
+                            out.setdefault("engine_data", {})[
+                                "cache_loss"
+                            ] = BaseWorkerHandler._cache_loss_engine_data(res)
                         if prompt_logprobs_payload is not None:
                             _attach_prompt_logprobs_engine_data(
                                 out, prompt_logprobs_payload
