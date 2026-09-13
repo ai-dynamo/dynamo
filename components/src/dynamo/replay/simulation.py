@@ -58,6 +58,38 @@ class DynamoReplayRunnerFactory:
     trace_block_size: int = 512
     benchmark_granularity: int = 8
 
+    def estimate_host_resources(self, workload, *, concurrency=None):
+        """Qualify lazy allocation only when the loaded native binding supports it."""
+        from aisimulate.resources import (
+            WORKER_BASELINE_BYTES,
+            ResourceEstimate,
+            estimate_workload,
+        )
+
+        from dynamo import _core
+
+        fallback = estimate_workload(workload, stack="dynamo", concurrency=concurrency)
+        active = concurrency or workload.get("concurrency")
+        if (
+            getattr(_core, "OFFLINE_SYNTHETIC_CONCURRENCY_ALLOCATION_MODEL", None)
+            != "generated-u32-v1"
+            or fallback.allocation_model != "dynamo-eager-u32-v1"
+            or not active
+            or workload.get("request_rate") is not None
+            or workload.get("arrival_interval_ms") is not None
+            or workload.get("shared_prefix_ratio", 0)
+            or workload.get("num_prefix_groups", 0)
+            or workload.get("inter_turn_delay_ms", 0)
+        ):
+            return fallback
+        count = fallback.request_count
+        isl, osl = int(workload.get("isl", 1024)), int(workload.get("osl", 128))
+        tokens = min(count, int(active)) * isl * 4
+        # Keep a conservative allowance for detailed capture and other report
+        # evidence. The generation capability alone does not qualify those paths.
+        peak = WORKER_BASELINE_BYTES + 2 * tokens + count * (4096 + 16 * osl)
+        return ResourceEstimate("dynamo-generated-u32-v1", count, tokens, tokens, peak)
+
     def capabilities(self) -> RunnerCapabilities:
         """Advertise the backend/topology and Dynamo hook support."""
 
@@ -124,11 +156,18 @@ class DynamoReplayRunner:
             **self._goodput_sla_kwargs(spec),
         }
 
-        if self._is_trace(spec):
-            report = self._run_trace(spec, common)
-        else:
-            common.update(self._synthetic_kwargs(spec))
-            report = self._run_synthetic(spec, common)
+        try:
+            if self._is_trace(spec):
+                report = self._run_trace(spec, common)
+            else:
+                common.update(self._synthetic_kwargs(spec))
+                report = self._run_synthetic(spec, common)
+        except MemoryError as error:
+            try:
+                from aisimulate.resources import ResourceLimitError
+            except ImportError:
+                raise error from None
+            raise ResourceLimitError(str(error)) from error
 
         metrics, metadata = self._normalize_report(report, output_requirements)
         self._require_goodput_metric(metrics, spec)

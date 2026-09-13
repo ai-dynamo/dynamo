@@ -178,7 +178,6 @@ def test_trace_paths_only_workload_routes_to_trace_replay(monkeypatch) -> None:
             "trace_paths": ["first.jsonl", "second.jsonl"],
             "trace_format": "dynamo",
             "arrival_speedup_ratio": 2.0,
-            "agentic_lanes": 4,
         },
         goal={"target": "throughput"},
     )
@@ -187,8 +186,40 @@ def test_trace_paths_only_workload_routes_to_trace_replay(monkeypatch) -> None:
 
     assert seen["trace_files"] == ["first.jsonl", "second.jsonl"]
     assert seen["arrival_speedup_ratio"] == 2.0
-    assert seen["agentic_lanes"] == 4
+    assert seen["agentic_lanes"] is None
     assert report.metrics["completed_requests"] == 2.0
+
+
+def test_trace_adapter_forwards_agentic_lanes_without_qualifying_runner(monkeypatch):
+    seen = {}
+
+    def fake_run_trace_replay(**kwargs):
+        seen.update(kwargs)
+        return _report({"completed_requests": 2})
+
+    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
+    monkeypatch.setattr(simulation, "run_trace_replay", fake_run_trace_replay)
+    spec = ReplaySpec(
+        backend_deployment=_agg_deployment(),
+        workload={
+            "trace_paths": ["first.jsonl", "second.jsonl"],
+            "trace_format": "dynamo",
+            "agentic_lanes": 4,
+        },
+        goal={"target": "throughput"},
+    )
+    runner = simulation.DynamoReplayRunnerFactory().create(0)
+
+    # Verify adapter plumbing separately from the public capability contract.
+    # Older optional AISimulate packages predate the explicit lane capability.
+    if hasattr(runner.capabilities, "supports_agentic_lanes"):
+        with pytest.raises(ValueError, match="runner does not support agentic_lanes"):
+            runner.run(spec)
+        assert not seen
+
+    runner._run_trace(spec, {})
+    assert seen["trace_files"] == ["first.jsonl", "second.jsonl"]
+    assert seen["agentic_lanes"] == 4
 
 
 def test_trace_replay_rejects_boolean_agentic_lanes() -> None:
@@ -453,3 +484,62 @@ def test_goodput_goal_fails_closed_when_replay_omits_metric(monkeypatch) -> None
 
     with pytest.raises(RuntimeError, match="did not emit goodput"):
         simulation.DynamoReplayRunnerFactory().create(0).run(spec)
+
+
+def test_resource_estimate_requires_native_generated_capability(monkeypatch):
+    resources = pytest.importorskip("aisimulate.resources")
+    from dynamo import _core
+
+    factory = simulation.DynamoReplayRunnerFactory()
+    workload = {
+        "isl": 10240,
+        "osl": 1024,
+        "request_count": 6451200,
+        "concurrency": 64512,
+    }
+    monkeypatch.delattr(
+        _core, "OFFLINE_SYNTHETIC_CONCURRENCY_ALLOCATION_MODEL", raising=False
+    )
+    assert (
+        factory.estimate_host_resources(workload).allocation_model
+        == "dynamo-eager-u32-v1"
+    )
+    monkeypatch.setattr(
+        _core,
+        "OFFLINE_SYNTHETIC_CONCURRENCY_ALLOCATION_MODEL",
+        "generated-u32-v1",
+        raising=False,
+    )
+    estimate = factory.estimate_host_resources(workload)
+    assert isinstance(estimate, resources.ResourceEstimate)
+    assert estimate.allocation_model == "dynamo-generated-u32-v1"
+    assert estimate.input_token_bytes == 64512 * 10240 * 4
+    assert estimate.estimated_peak_bytes > 6451200 * 4096
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"request_rate": 1.0},
+        {"arrival_interval_ms": 1.0},
+        {"turns_per_session": 2},
+        {"shared_prefix_ratio": 0.5},
+        {"num_prefix_groups": 1},
+        {"inter_turn_delay_ms": 1},
+    ],
+)
+def test_resource_estimate_keeps_conservative_fallback_for_other_paths(
+    monkeypatch, extra
+):
+    pytest.importorskip("aisimulate.resources")
+    from dynamo import _core
+
+    monkeypatch.setattr(
+        _core,
+        "OFFLINE_SYNTHETIC_CONCURRENCY_ALLOCATION_MODEL",
+        "generated-u32-v1",
+        raising=False,
+    )
+    workload = {"isl": 16, "osl": 4, "request_count": 128, "concurrency": 8, **extra}
+    estimate = simulation.DynamoReplayRunnerFactory().estimate_host_resources(workload)
+    assert estimate.allocation_model != "dynamo-generated-u32-v1"
