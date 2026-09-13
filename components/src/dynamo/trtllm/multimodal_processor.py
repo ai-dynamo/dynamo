@@ -487,11 +487,11 @@ class MultimodalRequestProcessor:
                                 if emb is None:
                                     source = describe_media_source(path)
                                     logging.error(
-                                        f"Dictionary embeddings missing 'mm_embeddings' key: {path}"
+                                        f"Dictionary embeddings missing 'mm_embeddings' key: {source}"
                                     )
                                     raise HttpStatusError(
                                         400,
-                                        f"Malformed embedding file {path}: missing 'mm_embeddings' key.",
+                                        f"Malformed embedding file {source}: missing 'mm_embeddings' key.",
                                         source,
                                     )
                                 loaded_embeddings.append(emb)
