@@ -28,7 +28,6 @@ use tokio::sync::Semaphore;
 
 use dynamo_kv_router::services::selection::{SelectionError, WorkerSelectionPolicyRegistry};
 use dynamo_llm::http::service::metadata::extract_metadata_from_header_pairs;
-use dynamo_llm::protocols::agents::HEADER_DYNAMO_SESSION_ID;
 use dynamo_llm::protocols::common::extensions::{
     AgentHints, HEADER_REQUEST_PRIORITY, HEADER_REQUEST_STRICT_PRIORITY, resolve_request_priority,
 };
@@ -226,13 +225,23 @@ struct RoutingNvExt {
     agent_hints: Option<AgentHints>,
 }
 
-/// Case-insensitive lookup of the first non-empty, trimmed value for `name`.
 fn first_header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
     headers
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case(name))
         .map(|(_, v)| v.trim())
         .filter(|v| !v.is_empty())
+}
+
+fn session_id_from_headers(headers: &[(String, String)]) -> Option<String> {
+    use axum::http::{HeaderMap, HeaderName, HeaderValue};
+    let mut map = HeaderMap::with_capacity(headers.len());
+    for (k, v) in headers {
+        if let (Ok(name), Ok(val)) = (k.parse::<HeaderName>(), v.parse::<HeaderValue>()) {
+            map.insert(name, val);
+        }
+    }
+    dynamo_llm::protocols::agents::session_affinity_header_value(&map)
 }
 
 #[tonic::async_trait]
@@ -342,7 +351,7 @@ impl EndpointPicker for EppRouter {
             model_name: self.model_name.clone(),
             reservation_id: reservation_id.clone(),
             token_ids: tokens,
-            session_id: first_header(&req.headers, HEADER_DYNAMO_SESSION_ID).map(str::to_owned),
+            session_id: session_id_from_headers(&req.headers),
             // `None` on the ordinary path: the selector schedules over its
             // catalog; `Some` only carries an Envoy subset constraint.
             allowed_worker_ids: allowed,
@@ -359,6 +368,12 @@ impl EndpointPicker for EppRouter {
             Ok(resp) => resp,
             Err(SelectionError::BadRequest(message)) => {
                 return Err(PickError::InvalidRequest(message));
+            }
+            // A Conflict arises only when the EPP's own UUID collides in the selection
+            // index — this is an EPP-internal invariant violation, never caused by client
+            // input, so 500 is correct (not 400 or 503).
+            Err(SelectionError::Conflict(msg)) => {
+                return Err(PickError::Internal(format!("selection id conflict: {msg}")));
             }
             Err(e) => return Err(PickError::RoutingFailed(e.to_string())),
         };

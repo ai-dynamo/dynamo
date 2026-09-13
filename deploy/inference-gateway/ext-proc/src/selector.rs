@@ -15,8 +15,8 @@ use anyhow::{Context, Result, anyhow};
 use dynamo_kv_router::config::{KvRouterConfig, try_kv_router_config_from_dynamo_env};
 use dynamo_kv_router::protocols::RoutingConstraints;
 use dynamo_kv_router::services::selection::{
-    PromptRequest, SelectAndReserveRequest as CoreSelectAndReserveRequest, SelectionError,
-    SelectionService, SelectionServiceBuilder, WorkerSelectionPolicyRegistry,
+    CatalogReconciler, PromptRequest, SelectAndReserveRequest as CoreSelectAndReserveRequest,
+    SelectionError, SelectionService, SelectionServiceBuilder, WorkerSelectionPolicyRegistry,
     warn_for_unserved_worker_selection_policies,
 };
 use dynamo_kv_router::{DEFAULT_ROUTING_GROUP, WorkerType};
@@ -66,7 +66,7 @@ pub struct SelectResponse {
 
 /// In-process runtime-free selector wrapping a [`SelectionService`].
 pub struct Selector {
-    pub(crate) service: Arc<SelectionService>,
+    service: Arc<SelectionService>,
     /// Cancels the peer-discovery watch on drop. The `SelectionService`'s own
     /// `Drop` tears down its core + replica-sync tasks.
     cancel: CancellationToken,
@@ -115,12 +115,6 @@ impl Selector {
         if let Some(peer_replication) = peer_replication {
             builder = builder.replica_sync(peer_replication.sync_port, Vec::new());
         }
-        if let Some(ttl) = cfg.session_affinity_ttl_secs {
-            builder = builder.session_affinity(
-                std::time::Duration::try_from_secs_f64(ttl)
-                    .context("invalid session affinity TTL")?,
-            );
-        }
         let service = Arc::new(
             builder
                 .build()
@@ -164,6 +158,10 @@ impl Selector {
             );
         }
         Ok(())
+    }
+
+    pub(crate) fn catalog_reconciler(&self) -> CatalogReconciler {
+        CatalogReconciler::new(Arc::clone(self.service.core()))
     }
 
     /// Select a worker for a prompt and book its load in one operation. Takes the
@@ -350,14 +348,11 @@ models:
             tokenizer_max_response_bytes: 16 * 1024 * 1024,
             tokenization_timeout_ms: 5_000,
             block_size: 16,
-            data_parallel_size: 1,
-            kv_event_port_stride: 1,
             kv_event_port: 5557,
             replay_port: None,
             total_kv_blocks: None,
             max_num_batched_tokens: Some(8192),
             max_inflight_requests: 1024,
-            session_affinity_ttl_secs: None,
         }
     }
 
@@ -396,7 +391,8 @@ models:
     }
 
     async fn register(selector: &Selector, workers: Vec<WorkerRequest>) {
-        CatalogReconciler::new(Arc::clone(selector.service.core()))
+        selector
+            .catalog_reconciler()
             .apply(workers)
             .await
             .expect("reconcile should succeed");
@@ -433,11 +429,16 @@ models:
 
     #[tokio::test]
     async fn over_long_session_id_is_a_bad_request() {
-        let mut cfg = test_config();
-        cfg.session_affinity_ttl_secs = Some(60.0);
-        let selector = Selector::new(&cfg, WorkerSelectionPolicyRegistry::default())
-            .await
-            .expect("selector should build");
+        let selector = Selector::new_with_kv_router_config(
+            &test_config(),
+            KvRouterConfig {
+                session_affinity_ttl_secs: Some(60.0),
+                ..Default::default()
+            },
+            WorkerSelectionPolicyRegistry::default(),
+        )
+        .await
+        .expect("selector should build");
         register(&selector, vec![schedulable_registration(1)]).await;
         let mut request = select_request("res-long-session");
         request.session_id = Some("s".repeat(MAX_SESSION_AFFINITY_ID_BYTES + 1));
@@ -743,7 +744,8 @@ worker_selection:
             .expect("selector should build");
         let duplicate = incomplete_registration(1);
 
-        let error = CatalogReconciler::new(Arc::clone(selector.service.core()))
+        let error = selector
+            .catalog_reconciler()
             .apply(vec![duplicate.clone(), duplicate])
             .await
             .expect_err("duplicate IDs must be rejected");
@@ -899,12 +901,17 @@ worker_selection:
     #[tokio::test]
     async fn invalid_affinity_ttl_returns_configuration_error() {
         for ttl in [-1.0, 0.0, 0.5, f64::NAN, f64::INFINITY] {
-            let mut cfg = test_config();
-            cfg.session_affinity_ttl_secs = Some(ttl);
-            let error = Selector::new(&cfg, WorkerSelectionPolicyRegistry::default())
-                .await
-                .err()
-                .unwrap_or_else(|| panic!("TTL={ttl} must be rejected"));
+            let error = Selector::new_with_kv_router_config(
+                &test_config(),
+                KvRouterConfig {
+                    session_affinity_ttl_secs: Some(ttl),
+                    ..Default::default()
+                },
+                WorkerSelectionPolicyRegistry::default(),
+            )
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("TTL={ttl} must be rejected"));
             assert!(
                 format!("{error:#}").contains("session affinity TTL"),
                 "TTL={ttl}: {error:#}"
