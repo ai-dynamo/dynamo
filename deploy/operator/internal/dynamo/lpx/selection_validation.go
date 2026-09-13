@@ -93,6 +93,10 @@ func validateLPXComposition(dgd *dynamov1beta1.DynamoGraphDeployment, componentC
 			if component.ModelRef != nil {
 				allErrs = append(allErrs, field.Forbidden(componentPath.Child("modelRef"), "the shared target owns the serving endpoint"))
 			}
+			// Grove persists its immutable default of 1 even for drafts.
+			if ptr.Deref(component.MinAvailable, 1) != 1 {
+				allErrs = append(allErrs, field.Forbidden(componentPath.Child("minAvailable"), "draft minAvailable must be omitted or 1; the shared target owns minimum availability"))
+			}
 		} else if replicas != 1 {
 			allErrs = append(allErrs, field.Invalid(componentPath.Child("replicas"), replicas, "shared target replicas must be one"))
 		}

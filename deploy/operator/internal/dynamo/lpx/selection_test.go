@@ -10,8 +10,14 @@ import (
 
 	dynamov1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/defaulting"
 	"github.com/stretchr/testify/require"
+	admissionv1 "k8s.io/api/admission/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
 func TestLPXSchedulerSelectionUsesComponents(t *testing.T) {
@@ -114,4 +120,76 @@ func TestSelectedModelNamesRequiresSharedConductorOwner(t *testing.T) {
 	require.Nil(t, names)
 	require.Nil(t, ServingComponent(dgd))
 	require.Equal(t, before, dgd)
+}
+
+func TestSelectedMinAvailableOwnership(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name              string
+		draftMin          *int32
+		targetMin         *int32
+		singleton         bool
+		implicitConductor bool
+		wantErr           bool
+	}{
+		{name: "omitted draft"},
+		{name: "default draft", draftMin: ptr.To(int32(1))},
+		{name: "nondefault draft", draftMin: ptr.To(int32(2)), wantErr: true},
+		{name: "target", targetMin: ptr.To(int32(1))},
+		{name: "singleton", targetMin: ptr.To(int32(2)), singleton: true},
+		{name: "implicit singleton conductor", targetMin: ptr.To(int32(2)), singleton: true, implicitConductor: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Put a non-LPX component before the target and reverse the authored LPX order")
+			target := testLPXComponent("target", "target-build",
+				dynamov1beta1.ComponentRoleSpec{Name: dynamov1beta1.ComponentRoleLPXConductor},
+				dynamov1beta1.ComponentRoleSpec{Name: dynamov1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("target")})
+			target.MinAvailable = test.targetMin
+			if test.singleton {
+				target.Replicas = ptr.To(int32(2))
+			}
+			if test.implicitConductor {
+				target.Roles = target.Roles[1:]
+			}
+			dgd := newSelectedTestDGD(t, "min-available",
+				dynamov1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "frontend", MinAvailable: ptr.To(int32(1))}, target)
+			if !test.singleton {
+				draft := testLPXComponent("draft", "draft-build", dynamov1beta1.ComponentRoleSpec{Name: dynamov1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("draft")})
+				draft.Replicas = ptr.To(int32(2))
+				draft.MinAvailable = test.draftMin
+				dgd.Spec.Components = append(dgd.Spec.Components, draft)
+			}
+
+			for _, phase := range []string{"authored", "defaulted"} {
+				t.Run(phase, func(t *testing.T) {
+					if phase == "defaulted" {
+						t.Log("Apply the real Grove CREATE defaulter before selected-LPX validation")
+						ctx := features.WithGate(t.Context(), features.Gates{Grove: true})
+						ctx = admission.NewContextWithRequest(ctx, admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
+							Operation: admissionv1.Create,
+							Kind:      metav1.GroupVersionKind(dynamov1beta1.DynamoGraphDeploymentGVK),
+						}})
+						require.NoError(t, defaulting.NewDGDDefaulter("test").Default(ctx, dgd))
+						if !test.singleton {
+							require.Equal(t, ptr.To(ptr.Deref(test.draftMin, 1)), dgd.Spec.Components[2].MinAvailable)
+						}
+					}
+					before := dgd.DeepCopy()
+
+					t.Log("Reject only nondefault draft availability at its authored index without mutation")
+					errs := ValidateSelectedIntent(dgd)
+					require.Equal(t, before, dgd)
+					if test.wantErr {
+						require.Len(t, errs, 1)
+						require.Equal(t, field.ErrorTypeForbidden, errs[0].Type)
+						require.Equal(t, "spec.components[2].minAvailable", errs[0].Field)
+						require.Contains(t, errs[0].Detail, "must be omitted or 1")
+						return
+					}
+					require.Empty(t, errs)
+				})
+			}
+		})
+	}
 }
