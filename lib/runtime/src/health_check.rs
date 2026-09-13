@@ -101,6 +101,13 @@ impl HealthCheckManager {
                         // Timeout - send health check for this specific endpoint
                         debug!("Canary timer expired for {}, sending health check", endpoint_subject);
 
+                        // A maintenance window means the engine is deliberately busy, so a
+                        // probe would only queue behind whatever is blocking it.
+                        if manager.drt.system_health().lock().canary_suppressed() {
+                            debug!("Canary suppressed for {}, skipping health check", endpoint_subject);
+                            continue;
+                        }
+
                         // Get the health check payload for this endpoint
                         let target = manager.drt.system_health().lock().get_health_check_target(&endpoint_subject);
 
@@ -257,7 +264,7 @@ impl HealthCheckManager {
                         });
 
                         // Update health status based on response
-                        system_health.lock().set_endpoint_health_status(
+                        system_health.lock().set_canary_health_status(
                             &endpoint_subject_owned,
                             if is_healthy {
                                 HealthStatus::Ready
@@ -271,7 +278,7 @@ impl HealthCheckManager {
                             "Health check request failed for {}: {}",
                             endpoint_subject_owned, e
                         );
-                        system_health.lock().set_endpoint_health_status(
+                        system_health.lock().set_canary_health_status(
                             &endpoint_subject_owned,
                             HealthStatus::NotReady,
                         );
@@ -285,7 +292,7 @@ impl HealthCheckManager {
                 warn!("Health check timeout for {}", endpoint_subject_owned);
                 system_health
                     .lock()
-                    .set_endpoint_health_status(&endpoint_subject_owned, HealthStatus::NotReady);
+                    .set_canary_health_status(&endpoint_subject_owned, HealthStatus::NotReady);
             }
 
             debug!("Health check completed for {}", endpoint_subject_owned);
