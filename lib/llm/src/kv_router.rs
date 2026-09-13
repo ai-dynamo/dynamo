@@ -10,9 +10,9 @@ use std::{
 
 use anyhow::Result;
 use dynamo_kv_router::{
-    DEFAULT_ROUTING_GROUP, KvSchedulerError, PrefillLoadEstimator, RoutingPartitionId,
-    RoutingPartitionRef, SharedKvCache, TrackingHashAlgorithm, TrackingHashContext,
-    TrackingHashScope, WorkerSelectionPolicy, WorkerSelectionPolicyFactory,
+    DEFAULT_ROUTING_GROUP, KvSchedulerError, PrefillLoadEstimator, RoutingPartitionRef,
+    SharedKvCache, TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope,
+    WorkerSelectionPolicy, WorkerSelectionPolicyFactory,
     config::{KvRouterConfig, RouterConfigOverride, min_initial_workers_from_env},
     indexer::{
         ApproximateLruIncarnation, ApproximateLruStats, KvRouterError, RoutingDecisionHashes,
@@ -166,10 +166,7 @@ impl PreparedSelectionPolicy {
         worker_type: WorkerType,
         model_name: Option<&str>,
     ) -> Self {
-        let key = RoutingPartitionId::new(
-            model_name.unwrap_or(dynamo_kv_router::services::selection::DEFAULT_MODEL_NAME),
-            DEFAULT_ROUTING_GROUP,
-        );
+        let key = embedded::embedded_partition_key(model_name);
         let policy = inner(config, worker_type, key.as_ref());
         let inputs =
             dynamo_kv_router::selector::WorkerSelector::<ModelRuntimeConfig>::required_worker_inputs(
@@ -2703,6 +2700,52 @@ mod tests {
                 .position(|candidate| candidate.worker() == WorkerWithDpRank::from_worker_id(0))
                 .ok_or_else(|| WorkerSelectionPolicyError::failed("worker 0 not eligible"))
         }
+    }
+
+    /// The prepared wrapper hands its parked instance to the embedded
+    /// partition key for a named model too, and a `Prepared` source is not
+    /// probed again.
+    #[test]
+    fn prepared_policy_matches_the_named_model_partition_and_is_not_reprepared() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let constructions = Arc::new(AtomicUsize::new(0));
+        let counting: WorkerSelectionPolicyFactory = {
+            let constructions = Arc::clone(&constructions);
+            Arc::new(move |config: &KvRouterConfig, _, _| {
+                constructions.fetch_add(1, Ordering::SeqCst);
+                WorkerSelectionPolicy::default(config.clone(), "decode")
+            })
+        };
+        let config = KvRouterConfig::default();
+        let prepared = PreparedSelectionPolicy::prepare(
+            counting,
+            &config,
+            WorkerType::Decode,
+            Some("named-model"),
+        );
+        assert_eq!(constructions.load(Ordering::SeqCst), 1);
+        let inputs = prepared.inputs();
+
+        // The first call for the embedded key takes the parked instance.
+        let key = embedded::embedded_partition_key(Some("named-model"));
+        let _served = (prepared.factory)(&config, WorkerType::Decode, key.as_ref());
+        assert_eq!(
+            constructions.load(Ordering::SeqCst),
+            1,
+            "parked instance served"
+        );
+        // Another partition constructs its own.
+        let other = dynamo_kv_router::RoutingPartitionId::new("other-model", DEFAULT_ROUTING_GROUP);
+        let _other = (prepared.factory)(&config, WorkerType::Decode, other.as_ref());
+        assert_eq!(constructions.load(Ordering::SeqCst), 2);
+
+        // Preparing an already prepared source is a passthrough.
+        let again = SelectionPolicySource::Prepared(prepared)
+            .prepare(&config, WorkerType::Decode, "decode", Some("named-model"))
+            .expect("prepare");
+        assert_eq!(again.inputs(), inputs, "inputs carried through unchanged");
+        assert_eq!(constructions.load(Ordering::SeqCst), 2, "no second probe");
     }
 
     /// The factory runs once for the router's partition, and the instance

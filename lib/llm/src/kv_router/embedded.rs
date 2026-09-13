@@ -150,6 +150,16 @@ fn non_max_overlap_observer(worker_type: &'static str) -> NonMaxOverlapSelection
     })
 }
 
+/// The partition an embedded router serves: `model_name` (or the default) in
+/// the default routing group. The prepared policy probes the same key, so the
+/// instance it inspected is the one this partition receives.
+pub(crate) fn embedded_partition_key(model_name: Option<&str>) -> RoutingPartitionId {
+    RoutingPartitionId::new(
+        model_name.unwrap_or(DEFAULT_MODEL_NAME),
+        DEFAULT_ROUTING_GROUP,
+    )
+}
+
 /// One `SelectionService` partition driven directly by the router.
 pub(crate) struct EmbeddedSelection {
     /// Keeps the service (listeners, sweep, replica sync) alive for as long as
@@ -218,12 +228,7 @@ impl EmbeddedSelection {
         cancellation_token: CancellationToken,
     ) -> Result<(Self, crate::kv_router::sequence::ReplicaIngress)> {
         let worker_type = args.worker_role.unwrap_or(WorkerType::Aggregated);
-        let key = RoutingPartitionId::new(
-            args.model_name
-                .clone()
-                .unwrap_or_else(|| DEFAULT_MODEL_NAME.to_string()),
-            DEFAULT_ROUTING_GROUP,
-        );
+        let key = embedded_partition_key(args.model_name.as_deref());
 
         // Replica sync rides the runtime event plane. Worker-origin completion
         // marks are consumed even when router-to-router replica sync is
