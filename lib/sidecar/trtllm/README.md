@@ -34,9 +34,13 @@ carries no context-phase handoff.
 
 ## Run
 
-Start TensorRT-LLM with its native gRPC listener (TRT-LLM `1.3.0rc21`; rc22 has a broken `--grpc`):
+Start TensorRT-LLM with its native gRPC listener. Its protobuf bindings are an
+optional extra, so install them first. Install the package directly rather than
+via `tensorrt_llm[grpc-smg]`: the extra makes pip re-resolve TensorRT-LLM's whole
+dependency closure, which fails on an image whose site-packages is read-only.
 
 ```bash
+pip install "smg-grpc-proto>=0.4.2"
 python -m tensorrt_llm.commands.serve <model> --grpc --host 0.0.0.0 --port 50051
 ```
 

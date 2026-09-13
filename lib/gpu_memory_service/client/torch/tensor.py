@@ -33,26 +33,53 @@ def _tensor_from_pointer(
     dtype: torch.dtype,
     device_index: int,
 ) -> torch.Tensor:
-    """Create a torch.Tensor from a raw CUDA pointer without copying data.
+    """Create a torch.Tensor from a raw GPU pointer without copying data.
 
     Uses PyTorch's internal APIs to create a tensor that aliases existing
     GPU memory. The tensor does NOT own the memory - the caller must ensure
     the memory remains valid for the tensor's lifetime.
 
     Args:
-        data_ptr: CUDA device pointer (virtual address) to the tensor data.
+        data_ptr: GPU device pointer (virtual address) to the tensor data.
         shape: Tensor dimensions.
         stride: Tensor strides (in elements, not bytes).
         dtype: Tensor data type.
-        device_index: CUDA device index where the memory resides.
+        device_index: Device index where the memory resides.
 
     Returns:
         A tensor aliasing the specified GPU memory.
     """
-    device = torch.device("cuda", device_index)
+    from gpu_memory_service.common.vmm import get_vmm_device_type
 
-    # Calculate storage size in bytes based on stride (handles non-contiguous tensors)
-    # For non-contiguous tensors, the memory footprint is larger than numel * element_size
+    device_type = get_vmm_device_type().value
+
+    if device_type == "xpu":
+        # XPU: use _sycl_vmm.tensor_from_device_ptr (at::from_blob).
+        # _construct_CUDA_Tensor_From_Storage_And_Metadata hardcodes DispatchKey::CUDA.
+        from gpu_memory_service.common.vmm import _sycl_vmm
+
+        # c10::ScalarType enum values
+        _DTYPE_TO_SCALAR_TYPE = {
+            torch.uint8: 0,
+            torch.int8: 1,
+            torch.int16: 2,
+            torch.int32: 3,
+            torch.int64: 4,
+            torch.float16: 5,
+            torch.float32: 6,
+            torch.float64: 7,
+            torch.complex64: 9,
+            torch.complex128: 10,
+            torch.bool: 11,
+            torch.bfloat16: 15,
+        }
+        dtype_code = _DTYPE_TO_SCALAR_TYPE[dtype]
+        return _sycl_vmm.tensor_from_device_ptr(
+            data_ptr, list(shape), list(stride), dtype_code, device_index
+        )
+
+    # CUDA/other: use PyTorch internal APIs
+    device = torch.device(device_type, device_index)
     element_size = torch.tensor([], dtype=dtype).element_size()
 
     if shape and stride:
@@ -60,30 +87,23 @@ def _tensor_from_pointer(
             raise ValueError(
                 f"Shape and stride length mismatch: {len(shape)} vs {len(stride)}"
             )
-        # Maximum offset = sum of stride[i] * (shape[i] - 1) for all dimensions
         max_offset = sum(
             s * (d - 1) for s, d in zip(stride, shape, strict=True) if d > 0
         )
         required_elements = max_offset + 1
     else:
-        # Scalar tensor or empty tensor
         required_elements = 1
 
     storage_size_bytes = required_elements * element_size
-
-    # Create storage from raw pointer (does not take ownership)
     storage = torch._C._construct_storage_from_data_pointer(
         data_ptr, device, storage_size_bytes
     )
-
-    # Create tensor from storage with metadata
     metadata = {
         "size": torch.Size(shape),
         "stride": stride,
         "storage_offset": 0,
         "dtype": dtype,
     }
-
     return torch._C._construct_CUDA_Tensor_From_Storage_And_Metadata(metadata, storage)
 
 

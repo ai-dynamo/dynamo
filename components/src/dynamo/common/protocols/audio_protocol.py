@@ -12,7 +12,7 @@ code-generated from the Rust definitions; for now they are maintained
 manually and must be kept in sync.
 """
 
-from typing import Literal, Optional
+from typing import Any, Dict, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -33,6 +33,11 @@ class NvCreateAudioSpeechRequest(BaseModel):
 
     Follows vLLM-Omni's OpenAICreateSpeechRequest format.
     """
+
+    extra_args: Optional[Dict[str, Any]] = None
+    """Worker-boundary passthrough. The frontend nests unknown top-level
+    request fields (an OpenAI client's extra_body) under the
+    "media_passthrough" key."""
 
     # Standard OpenAI params
     input: str

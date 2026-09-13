@@ -58,6 +58,8 @@ pub(crate) struct VideoRoutingReplacement {
 
 enum SupportedVideoModel {
     Qwen3(qwen3::Qwen3VideoRoutingSpec),
+    #[cfg(test)]
+    TestStub,
 }
 
 pub(crate) struct VideoRoutingProcessor {
@@ -65,6 +67,13 @@ pub(crate) struct VideoRoutingProcessor {
 }
 
 impl VideoRoutingProcessor {
+    #[cfg(test)]
+    pub(crate) fn test_stub() -> Self {
+        Self {
+            model: SupportedVideoModel::TestStub,
+        }
+    }
+
     pub(crate) fn try_new(
         model_id: &str,
         model_type: &str,
@@ -93,6 +102,8 @@ impl VideoRoutingProcessor {
     ) -> Result<VideoRoutingReplacement> {
         match &self.model {
             SupportedVideoModel::Qwen3(spec) => spec.build_replacement(input),
+            #[cfg(test)]
+            SupportedVideoModel::TestStub => anyhow::bail!("test video routing processor stub"),
         }
     }
 }

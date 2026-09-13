@@ -10,6 +10,7 @@ package podcache
 import (
 	"fmt"
 
+	podcontract "github.com/ai-dynamo/snapshot/api/podcontract"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -164,8 +165,9 @@ func projectStatus(in corev1.PodStatus) corev1.PodStatus {
 		// Failover, DGDR diagnostics, and Recreate drain barriers require the
 		// lifecycle phase.
 		Phase: in.Phase,
-		// Model endpoint classification requires the Kubernetes Ready condition.
-		Conditions: projectReadyConditions(in.Conditions),
+		// Model endpoint classification requires Ready; Snapshot-aware GMS
+		// replacement requires the public restore outcome.
+		Conditions: projectConditions(in.Conditions),
 		// DGDR diagnostics inspect container failures.
 		ContainerStatuses: projectContainerStatuses(in.ContainerStatuses),
 		// GMS Pod replacement also requires init-sidecar restart counts.
@@ -173,16 +175,21 @@ func projectStatus(in corev1.PodStatus) corev1.PodStatus {
 	}
 }
 
-func projectReadyConditions(in []corev1.PodCondition) []corev1.PodCondition {
+func projectConditions(in []corev1.PodCondition) []corev1.PodCondition {
 	out := make([]corev1.PodCondition, 0, len(in))
 	for i := range in {
-		if in[i].Type != corev1.PodReady {
+		if in[i].Type != corev1.PodReady &&
+			in[i].Type != corev1.PodConditionType(podcontract.RestoredCondition) {
 			continue
 		}
-		out = append(out, corev1.PodCondition{
+		condition := corev1.PodCondition{
 			Type:   in[i].Type,
 			Status: in[i].Status,
-		})
+		}
+		if in[i].Type == corev1.PodConditionType(podcontract.RestoredCondition) {
+			condition.Reason = in[i].Reason
+		}
+		out = append(out, condition)
 	}
 	return out
 }

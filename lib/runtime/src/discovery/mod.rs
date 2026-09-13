@@ -845,6 +845,81 @@ impl DiscoveryInstance {
             }),
         }
     }
+
+    /// Returns true if this instance satisfies `query`.
+    pub fn matches(&self, query: &DiscoveryQuery) -> bool {
+        match (self, query) {
+            (Self::Endpoint(_), DiscoveryQuery::AllEndpoints) => true,
+            (Self::Endpoint(i), DiscoveryQuery::NamespacedEndpoints { namespace }) => {
+                &i.namespace == namespace
+            }
+            (
+                Self::Endpoint(i),
+                DiscoveryQuery::ComponentEndpoints {
+                    namespace,
+                    component,
+                },
+            ) => &i.namespace == namespace && &i.component == component,
+            (
+                Self::Endpoint(i),
+                DiscoveryQuery::Endpoint {
+                    namespace,
+                    component,
+                    endpoint,
+                },
+            ) => &i.namespace == namespace && &i.component == component && &i.endpoint == endpoint,
+
+            (Self::Model { .. }, DiscoveryQuery::AllModels) => true,
+            (Self::Model { namespace: ns, .. }, DiscoveryQuery::NamespacedModels { namespace }) => {
+                ns == namespace
+            }
+            (
+                Self::Model {
+                    namespace: ns,
+                    component: comp,
+                    ..
+                },
+                DiscoveryQuery::ComponentModels {
+                    namespace,
+                    component,
+                },
+            ) => ns == namespace && comp == component,
+            (
+                Self::Model {
+                    namespace: ns,
+                    component: comp,
+                    endpoint: ep,
+                    ..
+                },
+                DiscoveryQuery::EndpointModels {
+                    namespace,
+                    component,
+                    endpoint,
+                },
+            ) => ns == namespace && comp == component && ep == endpoint,
+
+            (
+                Self::EventChannel {
+                    scope, topic: t, ..
+                },
+                DiscoveryQuery::EventChannels(q),
+            ) => {
+                q.scope.as_ref().is_none_or(|expected| expected == scope)
+                    && q.topic.as_ref().is_none_or(|qt| qt == t)
+            }
+            (
+                Self::EventSource {
+                    scope, topic: t, ..
+                },
+                DiscoveryQuery::EventSources(q),
+            ) => {
+                q.scope.as_ref().is_none_or(|expected| expected == scope)
+                    && q.topic.as_ref().is_none_or(|qt| qt == t)
+            }
+
+            _ => false,
+        }
+    }
 }
 
 /// Unique identifier for an endpoint instance
@@ -1631,6 +1706,62 @@ mod tests {
             }
             _ => panic!("expected endpoint discovery metadata"),
         }
+    }
+
+    #[test]
+    fn matches_routes_by_query_scope() {
+        let endpoint = DiscoveryInstance::Endpoint(Instance {
+            namespace: "ns".to_string(),
+            component: "comp".to_string(),
+            endpoint: "ep".to_string(),
+            instance_id: 1,
+            transport: TransportType::Tcp("127.0.0.1:1234".to_string()),
+            device_type: None,
+            request_plane_codec: None,
+        });
+        let model = DiscoveryInstance::Model {
+            namespace: "ns".to_string(),
+            component: "comp".to_string(),
+            endpoint: "ep".to_string(),
+            instance_id: 1,
+            card_json: serde_json::json!({}),
+            model_suffix: None,
+        };
+
+        assert!(endpoint.matches(&DiscoveryQuery::AllEndpoints));
+        assert!(endpoint.matches(&DiscoveryQuery::NamespacedEndpoints {
+            namespace: "ns".to_string()
+        }));
+        assert!(endpoint.matches(&DiscoveryQuery::ComponentEndpoints {
+            namespace: "ns".to_string(),
+            component: "comp".to_string(),
+        }));
+        assert!(endpoint.matches(&DiscoveryQuery::Endpoint {
+            namespace: "ns".to_string(),
+            component: "comp".to_string(),
+            endpoint: "ep".to_string(),
+        }));
+
+        assert!(!endpoint.matches(&DiscoveryQuery::NamespacedEndpoints {
+            namespace: "other".to_string()
+        }));
+        assert!(!endpoint.matches(&DiscoveryQuery::AllModels));
+
+        assert!(model.matches(&DiscoveryQuery::AllModels));
+        assert!(model.matches(&DiscoveryQuery::NamespacedModels {
+            namespace: "ns".to_string()
+        }));
+        assert!(model.matches(&DiscoveryQuery::ComponentModels {
+            namespace: "ns".to_string(),
+            component: "comp".to_string(),
+        }));
+        assert!(model.matches(&DiscoveryQuery::EndpointModels {
+            namespace: "ns".to_string(),
+            component: "comp".to_string(),
+            endpoint: "ep".to_string(),
+        }));
+
+        assert!(!model.matches(&DiscoveryQuery::AllEndpoints));
     }
 }
 

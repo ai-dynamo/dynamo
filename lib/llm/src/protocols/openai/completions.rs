@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use anyhow::Context;
 use derive_builder::Builder;
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
@@ -358,15 +359,15 @@ impl TryFrom<NvCreateCompletionRequest> for common::CompletionRequest {
 
         let stop_conditions = request
             .extract_stop_conditions()
-            .map_err(|e| anyhow::anyhow!("Failed to extract stop conditions: {}", e))?;
+            .context("Failed to extract stop conditions")?;
 
         let sampling_options = request
             .extract_sampling_options()
-            .map_err(|e| anyhow::anyhow!("Failed to extract sampling options: {}", e))?;
+            .context("Failed to extract sampling options")?;
 
         let output_options = request
             .extract_output_options()
-            .map_err(|e| anyhow::anyhow!("Failed to extract output options: {}", e))?;
+            .context("Failed to extract output options")?;
 
         let prompt = common::PromptType::Completion(common::CompletionContext {
             prompt: prompt_to_string(&request.inner.prompt),
@@ -450,6 +451,7 @@ impl OpenAIOutputOptionsProvider for NvCreateCompletionRequest {
 impl ValidateRequest for NvCreateCompletionRequest {
     fn validate(&self) -> Result<(), anyhow::Error> {
         validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
+        validate::validate_guided_decoding(self)?;
         validate::validate_model(&self.inner.model)?;
 
         // Validate prompt and prompt_embeds together (checks presence, format, and content)
@@ -500,12 +502,59 @@ impl ValidateRequest for NvCreateCompletionRequest {
 }
 
 #[cfg(test)]
+mod conversion_error_tests {
+    use super::*;
+
+    /// `anyhow!("{e}")` builds a fresh error with no source, which drops the
+    /// `DynamoError` and sends a caller error to `ErrorMessage::from_anyhow` as a 500.
+    /// `.context()` keeps the chain, so the conflict still maps to 400 here.
+    #[test]
+    fn guided_decoding_conflict_stays_typed_through_conversion() {
+        let request: NvCreateCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "prompt": "hi",
+            "guided_json": {"type": "object"},
+            "guided_regex": "a+",
+        }))
+        .expect("request should deserialize");
+
+        let error = common::CompletionRequest::try_from(request).unwrap_err();
+        let dynamo_error = error
+            .chain()
+            .find_map(|source| source.downcast_ref::<dynamo_runtime::error::DynamoError>())
+            .expect("conversion must preserve the HTTP error type");
+        assert_eq!(
+            dynamo_error.error_type(),
+            dynamo_runtime::error::ErrorType::InvalidArgument
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::engines::ValidateRequest;
     use crate::protocols::common::OutputOptionsProvider;
     use base64::Engine;
     use serde_json::json;
+
+    #[test]
+    fn test_conflicting_guided_decoding_options_fail_request_validation() {
+        let request: NvCreateCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "prompt": "hello",
+            "guided_regex": "a+",
+            "guided_choice": ["a"]
+        }))
+        .expect("request should deserialize");
+
+        let error = ValidateRequest::validate(&request).expect_err("constraints conflict");
+        assert!(
+            error
+                .to_string()
+                .contains("Only one guided-decoding constraint")
+        );
+    }
 
     #[test]
     fn test_skip_special_tokens_none() {

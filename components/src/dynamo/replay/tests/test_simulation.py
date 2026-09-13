@@ -23,7 +23,12 @@ from aisimulate.sweeper.replay import (
     ReplaySpec,
 )
 
-from dynamo.replay import PlannerReplayDetails, ReplayReport, simulation
+from dynamo.replay import (
+    PlannerReplayDetails,
+    ReplayReport,
+    run_trace_replay,
+    simulation,
+)
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -173,6 +178,7 @@ def test_trace_paths_only_workload_routes_to_trace_replay(monkeypatch) -> None:
             "trace_paths": ["first.jsonl", "second.jsonl"],
             "trace_format": "dynamo",
             "arrival_speedup_ratio": 2.0,
+            "agentic_lanes": 4,
         },
         goal={"target": "throughput"},
     )
@@ -181,7 +187,13 @@ def test_trace_paths_only_workload_routes_to_trace_replay(monkeypatch) -> None:
 
     assert seen["trace_files"] == ["first.jsonl", "second.jsonl"]
     assert seen["arrival_speedup_ratio"] == 2.0
+    assert seen["agentic_lanes"] == 4
     assert report.metrics["completed_requests"] == 2.0
+
+
+def test_trace_replay_rejects_boolean_agentic_lanes() -> None:
+    with pytest.raises(TypeError, match="agentic_lanes must be an integer"):
+        run_trace_replay("unused.jsonl", agentic_lanes=True)
 
 
 def test_runner_captures_per_request_output_when_requested(monkeypatch) -> None:

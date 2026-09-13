@@ -1,0 +1,60 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Document order in prometheus.yaml: 0 dynamo-frontend, 1 dynamo-worker,
+# 2 dynamo-planner, 3 dynamo-epp, 4 dynamo-router.
+suite: PodMonitor NIXL exporter ports
+templates:
+  - charts/dynamo-operator/templates/prometheus.yaml
+
+tests:
+  - it: scrapes every co-located rank's exporter, not just rank 0
+    set:
+      dynamo-operator.dynamo.metrics.podMonitors.enabled: true
+      dynamo-operator.dynamo.metrics.podMonitors.nixlTelemetry: true
+    asserts:
+      - equal:
+          path: spec.podMetricsEndpoints[4].port
+          value: nixl
+        documentIndex: 1
+      - equal:
+          path: spec.podMetricsEndpoints[5].port
+          value: nixl-1
+        documentIndex: 1
+      - equal:
+          path: spec.podMetricsEndpoints[6].port
+          value: nixl-2
+        documentIndex: 1
+      - equal:
+          path: spec.podMetricsEndpoints[7].port
+          value: nixl-3
+        documentIndex: 1
+      - equal:
+          path: spec.podMetricsEndpoints[8].port
+          value: nixl-4
+        documentIndex: 1
+      - equal:
+          path: spec.podMetricsEndpoints[9].port
+          value: nixl-5
+        documentIndex: 1
+      - equal:
+          path: spec.podMetricsEndpoints[10].port
+          value: nixl-6
+        documentIndex: 1
+      - equal:
+          path: spec.podMetricsEndpoints[11].port
+          value: nixl-7
+        documentIndex: 1
+      - lengthEqual:
+          path: spec.podMetricsEndpoints
+          count: 12
+        documentIndex: 1
+
+  - it: adds no NIXL endpoints when NIXL telemetry scraping is off
+    set:
+      dynamo-operator.dynamo.metrics.podMonitors.enabled: true
+    asserts:
+      - lengthEqual:
+          path: spec.podMetricsEndpoints
+          count: 4
+        documentIndex: 1

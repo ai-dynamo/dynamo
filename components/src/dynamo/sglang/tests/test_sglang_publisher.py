@@ -498,6 +498,72 @@ def test_init_kv_event_publish_uses_worker_id_override(monkeypatch):
     assert {call["kv_block_size"] for call in calls} == {32}
 
 
+def test_init_kv_event_publish_subscribes_to_every_pure_dp_replica(monkeypatch):
+    calls = []
+
+    class FakeKvEventPublisher:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+        def shutdown(self):
+            pass
+
+    monkeypatch.setattr(publisher_mod, "KvEventPublisher", FakeKvEventPublisher)
+    monkeypatch.setattr(
+        publisher_mod,
+        "get_zmq_socket",
+        lambda *args, **kwargs: SimpleNamespace(close=lambda linger=0: None),
+    )
+    monkeypatch.setattr(publisher_mod, "get_local_ip_auto", lambda: "127.0.0.1")
+    monkeypatch.setattr(
+        publisher_mod,
+        "ZmqEventPublisher",
+        SimpleNamespace(
+            offset_endpoint_port=staticmethod(
+                lambda base_ep, dp_rank: f"tcp://*:{5557 + dp_rank}"
+            )
+        ),
+    )
+
+    server_args = SimpleNamespace(
+        kv_events_config='{"endpoint": "tcp://*:5557"}',
+        page_size=16,
+        dcp_size=1,
+        dp_size=4,
+        enable_dp_attention=False,
+        nnodes=1,
+        node_rank=0,
+    )
+    config = SimpleNamespace(
+        server_args=server_args,
+        dynamo_args=SimpleNamespace(
+            enable_local_indexer=False,
+            kv_state_endpoint=None,
+            use_kv_events=True,
+        ),
+    )
+    publisher = DynamoSglangPublisher(
+        engine=SimpleNamespace(
+            port_args=SimpleNamespace(metrics_ipc_name="ipc://metrics")
+        ),
+        config=config,
+        generate_endpoint=SimpleNamespace(),
+        component_gauges=SimpleNamespace(),
+    )
+
+    publishers = publisher.init_kv_event_publish()
+
+    assert len(publishers) == 4
+    assert [call["dp_rank"] for call in calls] == [0, 1, 2, 3]
+    assert [call["zmq_endpoint"] for call in calls] == [
+        "tcp://127.0.0.1:5557",
+        "tcp://127.0.0.1:5558",
+        "tcp://127.0.0.1:5559",
+        "tcp://127.0.0.1:5560",
+    ]
+    publisher.cleanup()
+
+
 def test_init_kv_event_publish_uses_effective_kv_event_setting():
     server_args = SimpleNamespace(
         kv_events_config='{"publisher": "null", "endpoint": "tcp://*:5557"}',

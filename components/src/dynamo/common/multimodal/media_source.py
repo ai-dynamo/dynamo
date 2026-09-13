@@ -70,7 +70,7 @@ def describe_media_source(source: str, limit: int = SOURCE_LABEL_LIMIT) -> str:
     return source
 
 
-def _decode_data_uri(url: str) -> bytes:
+def decode_data_uri(url: str) -> bytes:
     """Decode a ``data:`` URI body to bytes.
 
     Only base64 payloads are accepted: a percent-encoded body would have to be
@@ -98,7 +98,7 @@ async def read_local_media_bytes(url: str, policy: UrlValidationPolicy) -> bytes
     """
     scheme = urlparse(url).scheme
     if scheme == "data":
-        return _decode_data_uri(url)
+        return decode_data_uri(url)
     if scheme != "file":
         raise UrlValidationError(f"Unsupported local media scheme: {scheme!r}")
 

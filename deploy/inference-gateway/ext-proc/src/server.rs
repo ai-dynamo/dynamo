@@ -221,6 +221,10 @@ impl<P: EndpointPicker> ExtProcServer<P> {
         // picker and for the stream-end bookkeeping keyed on the request ID.
         if let Some(header_map) = &hdr.headers {
             ctx.request_headers = envoy_helpers::collect_headers(header_map);
+            // Client-owned routing metadata must not influence selection. A
+            // trusted replacement can only come back through `PickResult`.
+            ctx.request_headers
+                .retain(|(key, _)| !envoy_helpers::is_prefiller_host_port_header(key));
 
             if let Some(id) =
                 envoy_helpers::extract_header_value(header_map, metadata::REQUEST_ID_HEADER_KEY)
@@ -264,6 +268,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             &result.endpoint,
             None,
             &result.headers,
+            result.selected_prefill_endpoint.as_deref(),
         ));
         Ok(())
     }
@@ -317,6 +322,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             &result.endpoint,
             Some(ctx.request_size),
             &result.headers,
+            result.selected_prefill_endpoint.as_deref(),
         ));
 
         // Inject nvext.token_data into the request body JSON so the backend
@@ -935,9 +941,13 @@ impl ExtProcError {
                 status_code: StatusCode::ServiceUnavailable,
                 message: msg,
             },
-            PickError::TokenizationFailed(msg) => Self {
+            PickError::InvalidRequest(msg) => Self {
                 status_code: StatusCode::BadRequest,
                 message: msg,
+            },
+            PickError::MetadataHeadersTooLarge(err) => Self {
+                status_code: StatusCode::RequestHeaderFieldsTooLarge,
+                message: err.to_string(),
             },
             // Upstream tokenizer failures are not client errors: preserve their
             // semantics so clients retry appropriately. `e.to_string()` is the
@@ -1581,5 +1591,13 @@ mod tests {
     fn overloaded_pick_error_maps_to_503() {
         let err = ExtProcError::from_pick_error(PickError::Overloaded);
         assert_eq!(err.status_code, StatusCode::ServiceUnavailable);
+    }
+
+    #[test]
+    fn metadata_headers_too_large_maps_to_431() {
+        let err = ExtProcError::from_pick_error(PickError::MetadataHeadersTooLarge(
+            dynamo_llm::http::service::metadata::MetadataHeaderError::TooManyEntries { limit: 64 },
+        ));
+        assert_eq!(err.status_code, StatusCode::RequestHeaderFieldsTooLarge);
     }
 }

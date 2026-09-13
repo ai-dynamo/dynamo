@@ -13,6 +13,7 @@ members = [
     "lib/mocker",
     "lib/kv-router",
     "lib/router-plugins/catalog",
+    "lib/router-plugins/builtin",
     "examples/router/custom-policy-example/soft-pin-repin",
     "examples/router/custom-policy-example/simple-filter-score-pick",
     "examples/router/custom-policy-example/catalog",
@@ -39,6 +40,7 @@ members = [
     "lib/bindings/c",
     "lib/bindings/python/codegen",
     "deploy/inference-gateway/ext-proc",
+    "deploy/inference-gateway/sidecar",
 ]
 resolver = "3"
 
@@ -60,8 +62,8 @@ aisimulate-core = { version = "=0.1.0-dev.2" }
 dynamo-runtime = { path = "lib/runtime", version = "1.5.0" }
 dynamo-llm = { path = "lib/llm", version = "1.5.0" }
 dynamo-rl = { path = "lib/rl", version = "1.5.0" }
-dynamo-tokenizers = { version = "=1.8.0" }
-dynamo-renderer = { version = "=5.1.0" }
+dynamo-tokenizers = { version = "=1.8.1" }
+dynamo-renderer = { version = "=5.1.2" }
 dynamo-tokens = { path = "lib/tokens", version = "1.5.0" }
 dynamo-truthy = { path = "lib/truthy", version = "1.5.0" }
 dynamo-data-gen = { path = "lib/data-gen", version = "1.5.0" }
@@ -69,7 +71,7 @@ dynamo-kv-hashing = { path = "lib/kv-hashing", version = "1.5.0" }
 dynamo-memory = { path = "lib/memory", version = "1.5.0" }
 dynamo-mocker = { path = "lib/mocker", version = "1.5.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.5.0" }
-dynamo-protocols = { version = "=5.4.0" }
+dynamo-protocols = { version = "=5.4.1" }
 dynamo-parsers = { version = "8.1.0" }
 
 # Published on crates.io. To see all available versions:
@@ -91,7 +93,7 @@ kvbm-logical = { path = "lib/kvbm-logical", version = "1.5.0" }
 kvbm-physical = { path = "lib/kvbm-physical", version = "1.5.0" }
 
 # velo
-velo = { version = "0.4.1" }
+velo = { version = "0.12.0" }
 
 # External dependencies
 anyhow = { version = "1" }
@@ -177,6 +179,10 @@ opentelemetry-otlp = { version = "0.31.0", features = [
     "reqwest-rustls",
 ] }
 opentelemetry-appender-tracing = { version = "0.31.0" }
+opentelemetry-proto = { version = "0.31.0", default-features = false, features = [
+    "gen-tonic",
+    "metrics",
+] }
 validator = { version = "0.20.0", features = ["derive"] }
 uuid = { version = "1.18.1", features = ["v4", "serde"] }
 url = { version = "2.5", features = ["serde"] }
@@ -192,6 +198,8 @@ tonic-build = { version = "0.13.1" }
 kube = { version = "2.0.1", default-features = false, features = ["client", "rustls-tls", "aws-lc-rs", "runtime"] }
 k8s-openapi = { version = "0.26.0", features = ["v1_32"] }
 rcgen = { version = "0.13" }
+quinn = { version = "0.11.9", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+sha2 = { version = "0.10" }
 tokio-rustls = { version = "0.26" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = { version = "2" }

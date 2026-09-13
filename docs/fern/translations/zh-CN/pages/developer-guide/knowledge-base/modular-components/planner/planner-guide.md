@@ -109,6 +109,7 @@ spec:
 | 字段 | 类型 | 默认值 | 说明 |
 |-------|------|---------|-------------|
 | `throughput_adjustment_interval_seconds` | int | `180` | 基于吞吐量的扩缩容决策之间的秒数。 |
+| `max_throughput_scaling_replicas` | int | `8` | 单次吞吐量观测对每个组件产生的最大副本数变化。限幅后的目标会保留到下一次吞吐量观测。GPU 和 power budget 可以进一步缩小变化；端点下限和超出 budget band 后的恢复优先于该限制。 |
 | `throughput_metrics_source` | string | `frontend` | 用于吞吐量扩缩容的 Prometheus 流量来源：`frontend` 从公共 Frontend 读取 `dynamo_frontend_*` 指标；`router` 从 LocalRouter 读取 `dynamo_component_router_*` 指标。在 GlobalPlanner 部署中，为池本地 Planner 使用 `router`。 |
 | `min_endpoint` | int | `1` | `agg` 模式的最小端点数；在 `disagg` 模式中，将同一最小值同时应用于 prefill 和 decode；在 `prefill` 或 `decode` 单组件模式中，当对应角色专用字段为 `null` 时应用于当前角色。为兼容 scale-to-zero，可设置为 `0`。 |
 | `prefill_min_endpoint` | int 或 `null` | `null` | `disagg` 和 `prefill` 模式的最小 prefill 端点数。设置后会替换 `min_endpoint` 提供的 prefill 值。必须至少为 `1`。 |

@@ -27,6 +27,7 @@ class BasePlannerDefaults:
     backend: Literal["vllm", "sglang", "trtllm", "mocker"] = "vllm"
     log_dir = None
     throughput_adjustment_interval_seconds = 180
+    max_throughput_scaling_replicas = 8
     max_gpu_budget = 8
     # GPU floor for the local planner (per-DGD scope). -1 disables.
     # When set alongside max_gpu_budget (with min == max), pins the total

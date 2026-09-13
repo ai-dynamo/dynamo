@@ -10,6 +10,7 @@ use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(test)]
 use super::config::RouterQueuePolicy;
 use super::overlap::OverlapSignals;
 use super::overlap_refresh::{NoopOverlapScoresRefresh, OverlapScoresRefresh};
@@ -89,8 +90,8 @@ where
             policy_class,
             session_context,
             overlap,
-            router_hint_candidates,
-            retain_router_hint_chain,
+            kv_transfer_candidates,
+            retain_kv_transfer_chain,
             shared_cache_hits,
         } = request;
         let request = SchedulingRequest {
@@ -110,8 +111,8 @@ where
             policy_class,
             session_context,
             overlap,
-            router_hint_candidates,
-            retain_router_hint_chain,
+            kv_transfer_candidates,
+            retain_kv_transfer_chain,
             shared_cache_hits,
             worker_loads: FxHashMap::default(),
             resp_tx,
@@ -147,47 +148,8 @@ where
         WorkerConfigReconcileOutcome::Applied
     }
 
-    /// Construct a scheduler with dequeue-time overlap refresh.
     #[allow(clippy::too_many_arguments)]
-    pub fn new_with_overlap_refresh(
-        slots: Arc<ActiveSequencesMultiWorker<P>>,
-        workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
-        threshold_frac: Option<f64>,
-        block_size: u32,
-        selector: Sel,
-        queue_policy: RouterQueuePolicy,
-        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-        overlap_scores_refresh: Option<Arc<RF>>,
-        overloaded_worker_provider: Option<OverloadedWorkerProvider>,
-        available_worker_provider: Option<WorkerAvailabilityProvider>,
-        recheck_interval: Duration,
-        track_prefill_tokens_default: bool,
-        cancellation_token: CancellationToken,
-        worker_type: &'static str,
-        monitor_worker_configs: bool,
-    ) -> Self {
-        let profile = PolicyProfile::synthetic(threshold_frac, queue_policy);
-        Self::new_with_policy_profile(
-            slots,
-            workers_with_configs,
-            profile,
-            block_size,
-            selector,
-            prefill_load_estimator,
-            overlap_scores_refresh,
-            overloaded_worker_provider,
-            available_worker_provider,
-            recheck_interval,
-            track_prefill_tokens_default,
-            cancellation_token,
-            worker_type,
-            monitor_worker_configs,
-        )
-        .expect("synthetic policy profile is valid")
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_with_policy_profile(
+    pub fn new(
         slots: Arc<ActiveSequencesMultiWorker<P>>,
         workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
         profile: PolicyProfile,
@@ -202,8 +164,8 @@ where
         cancellation_token: CancellationToken,
         worker_type: &'static str,
         monitor_worker_configs: bool,
-    ) -> Result<Self, KvSchedulerError> {
-        let queue = Arc::new(SchedulerQueue::new_with_policy_profile(
+    ) -> Self {
+        let queue = Arc::new(SchedulerQueue::new(
             Arc::clone(&slots),
             workers_with_configs.clone(),
             profile,
@@ -213,7 +175,7 @@ where
             overlap_scores_refresh,
             overloaded_worker_provider,
             available_worker_provider,
-        )?);
+        ));
 
         let (queue_updates, _) = watch::channel(());
 
@@ -304,13 +266,13 @@ where
             }
         });
 
-        Ok(Self {
+        Self {
             slots,
             queue,
             queue_updates,
             track_prefill_tokens_default,
             worker_type,
-        })
+        }
     }
 
     pub async fn schedule_request(
@@ -506,8 +468,8 @@ where
                 effective_overlap_blocks,
                 effective_cached_tokens,
             },
-            router_hint_candidates: None,
-            retain_router_hint_chain: false,
+            kv_transfer_candidates: None,
+            retain_kv_transfer_chain: false,
             routing_constraints,
             router_config_override: router_config_override.cloned(),
             lora_name,
@@ -725,149 +687,6 @@ where
     }
 }
 
-impl<P, C, Sel> LocalScheduler<P, C, Sel, NoopOverlapScoresRefresh>
-where
-    P: SequencePublisher + 'static,
-    C: WorkerConfigLike + Clone + PartialEq + Send + Sync + 'static,
-    Sel: WorkerSelector<C> + Send + 'static,
-{
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_without_overlap_refresh_with_policy_profile(
-        slots: Arc<ActiveSequencesMultiWorker<P>>,
-        workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
-        profile: PolicyProfile,
-        block_size: u32,
-        selector: Sel,
-        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-        overloaded_worker_provider: Option<OverloadedWorkerProvider>,
-        available_worker_provider: Option<WorkerAvailabilityProvider>,
-        recheck_interval: Duration,
-        track_prefill_tokens_default: bool,
-        cancellation_token: CancellationToken,
-        worker_type: &'static str,
-        monitor_worker_configs: bool,
-    ) -> Result<Self, KvSchedulerError> {
-        Self::new_with_policy_profile(
-            slots,
-            workers_with_configs,
-            profile,
-            block_size,
-            selector,
-            prefill_load_estimator,
-            None,
-            overloaded_worker_provider,
-            available_worker_provider,
-            recheck_interval,
-            track_prefill_tokens_default,
-            cancellation_token,
-            worker_type,
-            monitor_worker_configs,
-        )
-    }
-
-    /// Construct a scheduler without dequeue-time overlap refresh.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        slots: Arc<ActiveSequencesMultiWorker<P>>,
-        workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
-        threshold_frac: Option<f64>,
-        block_size: u32,
-        selector: Sel,
-        queue_policy: RouterQueuePolicy,
-        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-        recheck_interval: Duration,
-        track_prefill_tokens_default: bool,
-        cancellation_token: CancellationToken,
-        worker_type: &'static str,
-        monitor_worker_configs: bool,
-    ) -> Self {
-        Self::new_with_overload_provider(
-            slots,
-            workers_with_configs,
-            threshold_frac,
-            block_size,
-            selector,
-            queue_policy,
-            prefill_load_estimator,
-            None,
-            recheck_interval,
-            track_prefill_tokens_default,
-            cancellation_token,
-            worker_type,
-            monitor_worker_configs,
-        )
-    }
-
-    /// Construct a scheduler without dequeue-time overlap refresh but with an overload
-    /// provider consulted during worker selection.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_with_overload_provider(
-        slots: Arc<ActiveSequencesMultiWorker<P>>,
-        workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
-        threshold_frac: Option<f64>,
-        block_size: u32,
-        selector: Sel,
-        queue_policy: RouterQueuePolicy,
-        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-        overloaded_worker_provider: Option<OverloadedWorkerProvider>,
-        recheck_interval: Duration,
-        track_prefill_tokens_default: bool,
-        cancellation_token: CancellationToken,
-        worker_type: &'static str,
-        monitor_worker_configs: bool,
-    ) -> Self {
-        Self::new_with_overlap_refresh(
-            slots,
-            workers_with_configs,
-            threshold_frac,
-            block_size,
-            selector,
-            queue_policy,
-            prefill_load_estimator,
-            None,
-            overloaded_worker_provider,
-            None,
-            recheck_interval,
-            track_prefill_tokens_default,
-            cancellation_token,
-            worker_type,
-            monitor_worker_configs,
-        )
-    }
-
-    /// Backwards-compatible alias for callers that spell out the no-refresh path.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_without_overlap_refresh(
-        slots: Arc<ActiveSequencesMultiWorker<P>>,
-        workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
-        threshold_frac: Option<f64>,
-        block_size: u32,
-        selector: Sel,
-        queue_policy: RouterQueuePolicy,
-        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-        recheck_interval: Duration,
-        track_prefill_tokens_default: bool,
-        cancellation_token: CancellationToken,
-        worker_type: &'static str,
-        monitor_worker_configs: bool,
-    ) -> Self {
-        Self::new(
-            slots,
-            workers_with_configs,
-            threshold_frac,
-            block_size,
-            selector,
-            queue_policy,
-            prefill_load_estimator,
-            recheck_interval,
-            track_prefill_tokens_default,
-            cancellation_token,
-            worker_type,
-            monitor_worker_configs,
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -956,14 +775,16 @@ mod tests {
         ));
         let (cfg_tx, cfg_rx) = watch::channel(workers);
         let cancel_token = CancellationToken::new();
-        let scheduler = Arc::new(LocalScheduler::new_without_overlap_refresh(
+        let scheduler = Arc::new(LocalScheduler::new(
             Arc::clone(&slots),
             cfg_rx,
-            threshold_frac,
+            PolicyProfile::synthetic(threshold_frac, RouterQueuePolicy::Fcfs),
             64,
             DefaultWorkerSelector::new(None, "test"),
-            RouterQueuePolicy::Fcfs,
             prefill_load_estimator,
+            None::<Arc<NoopOverlapScoresRefresh>>,
+            None,
+            None,
             Duration::from_secs(60),
             true,
             cancel_token.clone(),
@@ -1016,8 +837,8 @@ mod tests {
             policy_class: None,
             session_context: None,
             overlap: OverlapSignals::default(),
-            router_hint_candidates: None,
-            retain_router_hint_chain: false,
+            kv_transfer_candidates: None,
+            retain_kv_transfer_chain: false,
             shared_cache_hits: None,
         }
     }
@@ -1749,13 +1570,15 @@ mod tests {
         cfg_tx.send(updated_workers).unwrap();
 
         let cancel_token = CancellationToken::new();
-        let scheduler = LocalScheduler::new_without_overlap_refresh(
+        let scheduler = LocalScheduler::new(
             Arc::clone(&slots),
             cfg_rx,
-            None,
+            PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs),
             64,
             DefaultWorkerSelector::new(None, "test"),
-            RouterQueuePolicy::Fcfs,
+            None,
+            None::<Arc<NoopOverlapScoresRefresh>>,
+            None,
             None,
             Duration::from_secs(60),
             true,
@@ -1802,13 +1625,15 @@ mod tests {
         cfg_tx.send(HashMap::new()).unwrap();
 
         let cancel_token = CancellationToken::new();
-        let scheduler = LocalScheduler::new_without_overlap_refresh(
+        let scheduler = LocalScheduler::new(
             Arc::clone(&slots),
             cfg_rx,
-            None,
+            PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs),
             64,
             DefaultWorkerSelector::new(None, "test"),
-            RouterQueuePolicy::Fcfs,
+            None,
+            None::<Arc<NoopOverlapScoresRefresh>>,
+            None,
             None,
             Duration::from_secs(60),
             true,
