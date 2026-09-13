@@ -324,6 +324,32 @@ def merge_base_tree(repo: Path, base: str) -> list[str]:
     return [p for p in out.splitlines() if p.strip()]
 
 
+def merge_base_blob(repo: Path, base: str, path: str) -> str | None:
+    """Contents of ``path`` at the merge-base of ``base`` and HEAD.
+
+    Returns ``None`` when there is no reference frame to read: a shallow
+    clone, an unavailable base, or the commit that first adds the file.
+    Unlike ``merge_base_tree`` this never raises. The declaration gate needs
+    the base policy to say anything at all, and a gate that cannot read its
+    own reference frame must skip loudly rather than fail closed -- otherwise
+    a bug in the gate blocks the very change that removes it. Returns text so
+    this module stays free of YAML; the caller parses.
+    """
+    try:
+        merge_base = subprocess.check_output(
+            ["git", "-C", str(repo), "merge-base", base, "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        return subprocess.check_output(
+            ["git", "-C", str(repo), "show", f"{merge_base}:{path}"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except subprocess.CalledProcessError:
+        return None
+
+
 # ----------------------------------------------------------------------
 # Resolution pipeline
 # ----------------------------------------------------------------------
