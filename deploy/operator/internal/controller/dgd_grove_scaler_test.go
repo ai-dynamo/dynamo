@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -89,6 +90,85 @@ func TestGroveScaler_ReconcileTargetsExpectedGroveChildren(t *testing.T) {
 	assert.Equal(t, int32(2), frontend.Spec.Replicas)
 	assert.Equal(t, int32(3), worker.Spec.Replicas)
 	assert.Equal(t, int32(0), gated.Spec.Replicas)
+}
+
+// TestGroveScaler_ReconcileKeepsRenderedTopologyConstraint pins the operator's
+// half of the packDomain guarantee: a replica-count change must not disturb the
+// rendered Grove `topologyConstraint.pack.required` domain, which is what keeps
+// the constraint applying to the replicas a scale-up adds. Where those replicas
+// then land is Grove's and the backend scheduler's, and is not asserted here.
+func TestGroveScaler_ReconcileKeepsRenderedTopologyConstraint(t *testing.T) {
+	t.Log("Given a constrained deployment whose components are scaled up")
+	dgd := betaDGD(t, &nvidiacomv1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"},
+		Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"frontend": {
+					ComponentType: consts.ComponentTypeFrontend,
+					Replicas:      ptr.To(int32(3)),
+				},
+				"worker": {
+					ComponentType: consts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(4)),
+					Multinode:     &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2},
+				},
+			},
+		},
+	})
+	dgd.Spec.TopologyConstraint = &nvidiacomv1beta1.SpecTopologyConstraint{
+		ClusterTopologyName: "cluster-topology",
+		PackDomain:          "rack",
+	}
+
+	t.Log("And a PodCliqueSet already carrying the rendered required domain")
+	packRack := grovev1alpha1.TopologyConstraint{
+		TopologyName: "cluster-topology",
+		Pack:         &grovev1alpha1.TopologyPackConstraint{RequiredDomain: "rack"},
+	}
+	cliqueSet := &grovev1alpha1.PodCliqueSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"},
+		Spec: grovev1alpha1.PodCliqueSetSpec{
+			Replicas: 1,
+			Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+				TopologyConstraint: packRack.DeepCopy(),
+				Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
+					{Name: "frontend", TopologyConstraint: packRack.DeepCopy()},
+					{Name: "worker-ldr"},
+					{Name: "worker-wkr"},
+				},
+				PodCliqueScalingGroupConfigs: []grovev1alpha1.PodCliqueScalingGroupConfig{
+					{
+						Name:               "worker",
+						CliqueNames:        []string{"worker-ldr", "worker-wkr"},
+						Replicas:           ptr.To(int32(1)),
+						TopologyConstraint: packRack.DeepCopy(),
+					},
+				},
+			},
+		},
+	}
+	renderedSpec := cliqueSet.Spec.DeepCopy()
+	frontend := &grovev1alpha1.PodClique{ObjectMeta: metav1.ObjectMeta{Name: "graph-0-frontend", Namespace: "default"}, Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1}}
+	worker := &grovev1alpha1.PodCliqueScalingGroup{ObjectMeta: metav1.ObjectMeta{Name: "graph-0-worker", Namespace: "default"}, Spec: grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: 1}}
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+		WithRESTMapper(groveScaleRESTMapper()).
+		WithObjects(cliqueSet, frontend, worker).
+		WithInterceptorFuncs(groveScaleInterceptor(interceptor.Funcs{}, nil)).
+		Build()
+
+	t.Log("When the scaler reconciles the replica change")
+	require.NoError(t, newGroveScaler(kubeClient).Reconcile(t.Context(), dgd, nil))
+
+	t.Log("Then the new counts reach the Grove children")
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(frontend), frontend))
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(worker), worker))
+	assert.Equal(t, int32(3), frontend.Spec.Replicas)
+	assert.Equal(t, int32(4), worker.Spec.Replicas)
+
+	t.Log("And the PodCliqueSet that carries the constraint is left untouched")
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(cliqueSet), cliqueSet))
+	assert.Equal(t, renderedSpec, &cliqueSet.Spec)
 }
 
 func groveScaleInterceptor(funcs interceptor.Funcs, onUpdate func()) interceptor.Funcs {

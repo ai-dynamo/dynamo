@@ -560,6 +560,15 @@ type SpecTopologyConstraint struct {
 
 	// packDomain is the default topology domain to pack pods within.
 	// Optional; omit when only components carry constraints.
+	//
+	// The operator renders this as the Grove `topologyConstraint.pack.required`
+	// domain and leaves that constraint in place when the replica count later
+	// changes: a scale only writes the new replica count to the `scale`
+	// subresource of the Grove child. Grove and the backend scheduler enforce
+	// the constraint, and it is required rather than preferred, so a scale-up
+	// places the added replicas in the domain instance that already holds the
+	// running replicas and leaves them Pending while that instance has no room
+	// for them, rather than placing them in a different instance.
 	// +optional
 	PackDomain TopologyDomain `json:"packDomain,omitempty"`
 }
@@ -570,6 +579,15 @@ type SpecTopologyConstraint struct {
 type TopologyConstraint struct {
 	// packDomain is the topology domain to pack pods within. Must match a
 	// domain defined in the referenced ClusterTopology CR.
+	//
+	// The operator renders this as the Grove `topologyConstraint.pack.required`
+	// domain and leaves that constraint in place when the replica count later
+	// changes: a scale only writes the new replica count to the `scale`
+	// subresource of the Grove child. Grove and the backend scheduler enforce
+	// the constraint, and it is required rather than preferred, so a scale-up
+	// places the added replicas in the domain instance that already holds the
+	// running replicas and leaves them Pending while that instance has no room
+	// for them, rather than placing them in a different instance.
 	PackDomain TopologyDomain `json:"packDomain"`
 }
 

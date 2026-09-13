@@ -2922,7 +2922,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `clusterTopologyName` _string_ | clusterTopologyName is the name of the ClusterTopology resource that<br />defines the topology hierarchy for this deployment. |  | MinLength: 1 <br /> |
-| `packDomain` _[TopologyDomain](#topologydomain)_ | packDomain is the default topology domain to pack pods within.<br />Optional; omit when only components carry constraints. |  | Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
+| `packDomain` _[TopologyDomain](#topologydomain)_ | packDomain is the default topology domain to pack pods within.<br />Optional; omit when only components carry constraints.<br />The operator renders this as the Grove `topologyConstraint.pack.required`<br />domain and leaves that constraint in place when the replica count later<br />changes: a scale only writes the new replica count to the `scale`<br />subresource of the Grove child. Grove and the backend scheduler enforce<br />the constraint, and it is required rather than preferred, so a scale-up<br />places the added replicas in the domain instance that already holds the<br />running replicas and leaves them Pending while that instance has no room<br />for them, rather than placing them in a different instance. |  | Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
 
 
 #### TopologyConstraint
@@ -2941,7 +2941,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `packDomain` _[TopologyDomain](#topologydomain)_ | packDomain is the topology domain to pack pods within. Must match a<br />domain defined in the referenced ClusterTopology CR. |  | Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` <br /> |
+| `packDomain` _[TopologyDomain](#topologydomain)_ | packDomain is the topology domain to pack pods within. Must match a<br />domain defined in the referenced ClusterTopology CR.<br />The operator renders this as the Grove `topologyConstraint.pack.required`<br />domain and leaves that constraint in place when the replica count later<br />changes: a scale only writes the new replica count to the `scale`<br />subresource of the Grove child. Grove and the backend scheduler enforce<br />the constraint, and it is required rather than preferred, so a scale-up<br />places the added replicas in the domain instance that already holds the<br />running replicas and leaves them Pending while that instance has no room<br />for them, rather than placing them in a different instance. |  | Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` <br /> |
 
 
 #### TopologyDomain

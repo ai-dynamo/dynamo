@@ -100,7 +100,7 @@ spec:
     Name of the `ClusterTopology` resource defining the topology hierarchy for this deployment.
   </ParamField>
   <ParamField path="packDomain" type="string">
-    Default topology domain to pack pods within. Optional at this level; omit when only components carry constraints.
+    Default topology domain to pack pods within. Optional at this level; omit when only components carry constraints. The operator renders this as the Grove `topologyConstraint.pack.required` domain and leaves that constraint in place when the replica count later changes: a scale only writes the new replica count to the `scale` subresource of the Grove child. Grove and the backend scheduler enforce the constraint, and it is required rather than preferred, so a scale-up places the added replicas in the domain instance that already holds the running replicas and leaves them `Pending` while that instance has no room for them, rather than placing them in a different instance.
   </ParamField>
 </Indent>
 
