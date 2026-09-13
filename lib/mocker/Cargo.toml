@@ -27,6 +27,7 @@ aisimulate-core = { workspace = true }
 dynamo-data-gen = { workspace = true }
 dynamo-kv-router = { workspace = true }
 dynamo-tokens = { workspace = true }
+dynamo-truthy = { workspace = true }
 
 # workspace
 anyhow = { workspace = true }

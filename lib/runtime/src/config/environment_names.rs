@@ -372,6 +372,10 @@ pub mod llm {
     /// disabled.
     pub const DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS: &str = "DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS";
 
+    /// Rust direct-publisher heartbeat interval in ms (1..=300000; default 1000).
+    /// This does not affect `FpmEventRelay` or the Python vLLM publisher.
+    pub const DYN_FPM_HEARTBEAT_INTERVAL_MS: &str = "DYN_FPM_HEARTBEAT_INTERVAL_MS";
+
     /// Enable LoRA adapter support (set to "true" to enable)
     pub const DYN_LORA_ENABLED: &str = "DYN_LORA_ENABLED";
 
@@ -931,6 +935,12 @@ pub mod mocker {
     /// This path is race-prone during startup; prefer leaving it unset unless you are
     /// explicitly trying to reproduce the original behavior.
     pub const DYN_MOCKER_SYNC_DIRECT: &str = "DYN_MOCKER_SYNC_DIRECT";
+
+    /// Precise-sleep backend: `auto`, `timerfd`, or `time_driver`; read once.
+    pub const DYN_MOCKER_SLEEP_BACKEND: &str = "DYN_MOCKER_SLEEP_BACKEND";
+
+    /// Enables per-backend precise-sleep drift accounting; read once.
+    pub const DYN_MOCKER_SLEEP_DRIFT: &str = "DYN_MOCKER_SLEEP_DRIFT";
 }
 
 /// Testing environment variables
@@ -1084,6 +1094,7 @@ mod tests {
             llm::request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
             llm::request_trace::DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST,
             llm::audit::DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES,
+            llm::DYN_FPM_HEARTBEAT_INTERVAL_MS,
             // Model
             model::model_express::MODEL_EXPRESS_URL,
             model::model_express::MODEL_EXPRESS_CACHE_PATH,
@@ -1141,6 +1152,8 @@ mod tests {
             // Mocker
             mocker::DYN_MOCKER_KV_CACHE_TRACE,
             mocker::DYN_MOCKER_SYNC_DIRECT,
+            mocker::DYN_MOCKER_SLEEP_BACKEND,
+            mocker::DYN_MOCKER_SLEEP_DRIFT,
             // Testing
             testing::DYN_QUEUED_UP_PROCESSING,
             testing::DYN_SOAK_RUN_DURATION,
