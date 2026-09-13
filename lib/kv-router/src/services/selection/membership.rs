@@ -7,7 +7,8 @@
 //! workers file) and exposes it as a [`WorkerCatalogSource`]: a stream of
 //! complete desired snapshots. [`CatalogReconciler`] turns each snapshot into
 //! catalog upserts and deletes, retrying workers the core has not yet accepted
-//! as schedulable and removing workers that left.
+//! as schedulable and removing workers that left. A snapshot whose pass fails
+//! is re-applied after [`RECONCILE_RETRY_DELAY`] unless a newer one arrives.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -179,10 +180,11 @@ impl CatalogReconciler {
                     pending.take().expect("guarded by pending.is_some()")
                 }
             };
+            let outcome = self.apply(snapshot.clone()).await;
             #[cfg(test)]
             self.applies
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            match self.apply(snapshot.clone()).await {
+            match outcome {
                 Ok(()) => pending = None,
                 Err(error) => {
                     tracing::warn!(
@@ -477,6 +479,21 @@ mod tests {
             "one publish for four workers in one partition"
         );
         assert_eq!(counter.upserts(), 4, "observer still fires per worker");
+        // The scheduler applies the published map asynchronously; the one
+        // publish must have carried all four workers.
+        let published = || -> usize {
+            core.loads(None, None)
+                .iter()
+                .map(|load| load.loads.len())
+                .sum()
+        };
+        for _ in 0..1000 {
+            if published() == 4 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(published(), 4, "the one publish carries all four workers");
         let schedulable_count = core
             .list_workers(None, None)
             .into_iter()

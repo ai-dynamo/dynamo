@@ -114,7 +114,10 @@ after the last progress touch.
 ## Worker Registration
 
 Every selector replica must receive the same worker catalog before it serves
-selection traffic. Replica traffic never creates workers.
+selection traffic. Replica traffic never creates workers. When the catalog comes
+from a discovery source (Kubernetes, a workers file), a snapshot whose apply
+fails is retried after 5 seconds unless a newer snapshot arrives first, so a
+stale worker can persist for that long after a failed pass.
 
 ```http
 POST /workers

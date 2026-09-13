@@ -151,9 +151,11 @@ impl SelectionCore {
 
     /// Commit `record`. With `deferred`, the final publish for the record's
     /// partition is recorded there instead of sent, so a snapshot publishes
-    /// once per partition; the Draining publish on a partition move or loss
-    /// of schedulability stays immediate because it must precede the indexer
-    /// cleanup that follows it.
+    /// once per partition. Two publishes stay immediate even then: the
+    /// Draining publish on a partition move or loss of schedulability, which
+    /// must precede the indexer cleanup that follows it, and the publish of a
+    /// completed move, so the destination partition becomes routable before
+    /// the rest of the batch (which may block in indexer cleanup) finishes.
     async fn reconcile_worker(
         &self,
         mut record: WorkerCatalogRecord,
@@ -161,6 +163,9 @@ impl SelectionCore {
         deferred: Option<&mut HashSet<RoutingPartitionId>>,
     ) -> Result<WorkerCatalogRecord, SelectionError> {
         let previous = previous.filter(|old| old.lifecycle == WorkerLifecycle::Schedulable);
+        let moved_partition = previous
+            .as_ref()
+            .is_some_and(|old| old.key() != record.key());
         let previous = if let Some(old) = previous.as_ref()
             && (old.key() != record.key() || !record.not_schedulable_reasons.is_empty())
         {
@@ -193,10 +198,10 @@ impl SelectionCore {
         // live bookings on ranks present in both the old and new snapshots.
         self.catalog.replace(record.clone());
         match deferred {
-            Some(affected) => {
+            Some(affected) if !moved_partition => {
                 affected.insert(record.key());
             }
-            None => self.publish_scheduler_config(&record.key()),
+            _ => self.publish_scheduler_config(&record.key()),
         }
         Ok(record)
     }
