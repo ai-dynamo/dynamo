@@ -75,3 +75,8 @@
 ^https://github\.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4/deepseek-v4-pro-0813$
 ^https://github\.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4/deepseek-v4-pro-0813/perf$
 ^https://github\.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4/deepseek-v4-pro-0813/perf/README\.md$
+
+# The DeepSeek-V4.1-Flash docs page is published by the same PR that adds this
+# link, so the URL returns 404 until the docs deploy. Remove this entry after
+# the page is live.
+^https://docs\.nvidia\.com/dynamo/dev/recipes/deepseek-v4-1-flash$

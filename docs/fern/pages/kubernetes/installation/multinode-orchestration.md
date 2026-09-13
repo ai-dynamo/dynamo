@@ -21,7 +21,7 @@ Grove is the default and recommended orchestrator for multinode deployments. It 
   --create-namespace \
   --set "global.grove.install=true" \
   --set "global.kai-scheduler.install=true" \
-  --set-string "kai-scheduler.scheduler.args.default-staleness-grace-period=-1"
+  --set-string "kai-scheduler.scheduler.args.default-staleness-grace-period=-1s"
   ```
   </Tab>
   <Tab title="External Installation" value="external">

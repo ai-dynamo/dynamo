@@ -130,7 +130,8 @@ Volcano:
   {{- $schedulerValues := default (dict) (index $kaiValues "scheduler") }}
   {{- $schedulerArgs := default (dict) (index $schedulerValues "args") }}
   {{- $stalenessGracePeriod := default "" (index $schedulerArgs "default-staleness-grace-period") | toString }}
-  {{- if ne $stalenessGracePeriod "-1" }}
+  {{- /* KAI parses this value as time.Duration, so the unit is required. */ -}}
+  {{- if ne $stalenessGracePeriod "-1s" }}
     {{- fail `
 CONFIGURATION ERROR: bundled KAI Scheduler must disable stale PodGroup eviction when Grove integration is enabled.
 Grove owns PodGroup termination timing, so KAI must not independently delete stale PodGroups.
@@ -140,7 +141,7 @@ Add this value:
 kai-scheduler:
   scheduler:
     args:
-      default-staleness-grace-period: "-1"
+      default-staleness-grace-period: "-1s"
 ` }}
   {{- end }}
 {{- end }}
