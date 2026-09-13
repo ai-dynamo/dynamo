@@ -578,14 +578,50 @@ impl ErrorMessage {
 
         // InvalidArgument (top-level OR Backend) → 400.
         if let Some(dynamo_err) = find_invalid_argument_in_chain(err.as_ref()) {
+            // The message may be an [`ErrorPayload`] envelope rather than prose,
+            // so unwrap it; otherwise the client is shown the raw JSON. An
+            // explicit client-error status inside the envelope (for example 415)
+            // is honoured, matching what the in-stream path already does. A 5xx
+            // is not, because reaching this arm means the worker classified the
+            // failure as a request problem, and a 5xx body here would bypass the
+            // sanitizing the other arms apply.
+            let (message, code) = match serde_json::from_str::<ErrorPayload>(dynamo_err.message()) {
+                Ok(envelope) => (
+                    envelope
+                        .message
+                        .unwrap_or_else(|| dynamo_err.message().to_string()),
+                    envelope
+                        .code
+                        .and_then(|code| StatusCode::from_u16(code).ok())
+                        .filter(StatusCode::is_client_error)
+                        .unwrap_or(StatusCode::BAD_REQUEST),
+                ),
+                Err(_) => (dynamo_err.message().to_string(), StatusCode::BAD_REQUEST),
+            };
+            // The status the worker asserted still goes through the shared
+            // policy, so a 499 answers with the same sanitized cancellation
+            // body as every other HTTP path rather than the worker's own text,
+            // which can name a context id or an internal file. `code` is always
+            // a client error here, so the only other action triage can return
+            // is `ForwardClientError`.
+            if let BackendStatusAction::Sanitize(variant) = BackendStatusAction::triage(code) {
+                return ErrorMessage::sanitized_with_details(variant, message);
+            }
             return (
-                StatusCode::BAD_REQUEST,
+                code,
                 Json(ErrorMessage {
-                    message: dynamo_err.message().to_string(),
-                    error_type: map_error_code_to_error_type(StatusCode::BAD_REQUEST),
-                    code: StatusCode::BAD_REQUEST.as_u16(),
+                    message,
+                    error_type: map_error_code_to_error_type(code),
+                    code: code.as_u16(),
                     details: None,
-                    metric_error_type: Some(ErrorType::Validation),
+                    // A plain 400 keeps the validation override: a worker's
+                    // refusal text does not carry the `Validation:` prefix
+                    // `classify_error_for_metrics` looks for, so the request
+                    // error would otherwise be counted as `Internal`. A status
+                    // the envelope preserved classifies from that status
+                    // instead, so a backend rate limit counts as `Overload`.
+                    metric_error_type: (code == StatusCode::BAD_REQUEST)
+                        .then_some(ErrorType::Validation),
                 }),
             );
         }
@@ -2280,17 +2316,28 @@ impl BackendErrorInfo {
     }
 }
 
+/// The `{"message": ..., "code": ...}` envelope `py_err_to_dynamo` emits for an
+/// HTTP-like Python exception (see `lib/bindings/python/rust/backend.rs`).
+///
+/// A worker's error message is therefore not always prose, and the raw envelope
+/// must never reach a client. Both the in-stream path
+/// ([`extract_backend_error_if_present`]) and the pre-stream path
+/// ([`ErrorMessage::from_anyhow`]) unwrap it, so the *body* is the same either
+/// way. They deliberately differ on the *status*: the in-stream path honours
+/// any code in the envelope, while the pre-stream path honours only a client
+/// error, because it is reached solely through the `InvalidArgument` arm and a
+/// 5xx there would skip the sanitizing the other arms apply.
+#[derive(serde::Deserialize)]
+struct ErrorPayload {
+    message: Option<String>,
+    code: Option<u16>,
+}
+
 /// Checks if an Annotated event represents a backend error and extracts error information.
 /// Returns Some(info) if it's an error, None otherwise.
 fn extract_backend_error_if_present<T: serde::Serialize>(
     event: &Annotated<T>,
 ) -> Option<BackendErrorInfo> {
-    #[derive(serde::Deserialize)]
-    struct ErrorPayload {
-        message: Option<String>,
-        code: Option<u16>,
-    }
-
     // Check if event type is "error" (from postprocessor when FinishReason::Error is encountered)
     if let Some(event_type) = &event.event
         && event_type == "error"
@@ -6186,6 +6233,193 @@ mod tests {
         assert_eq!(response.0, StatusCode::BAD_REQUEST);
         assert_eq!(response.1.code, StatusCode::BAD_REQUEST.as_u16());
         assert!(response.1.message.contains("does not currently support"));
+    }
+
+    /// A worker that refuses a request before the response stream opens must
+    /// reach the client as 400, not 500.
+    #[test]
+    fn test_pre_stream_refusal_surfaces_as_400() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+        use dynamo_runtime::pipeline::network::StreamPrologueError;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+
+        let prologue_error = StreamPrologueError::new(
+            "Generate Error: multimodal input is not supported by this backend",
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                .message("multimodal input is not supported by this backend")
+                .build(),
+        );
+
+        let err: anyhow::Error = pre_stream_failure_error(prologue_error).into();
+        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.code, StatusCode::BAD_REQUEST.as_u16());
+        assert!(
+            response
+                .1
+                .message
+                .contains("multimodal input is not supported"),
+            "the client should see the worker's reason, got: {}",
+            response.1.message
+        );
+    }
+
+    /// `py_err_to_dynamo` wraps an HTTP-like Python exception's text in a
+    /// `{"message":..,"code":..}` envelope, so a refusal from a Python worker
+    /// carries JSON, not prose. The client must be shown the reason, never the
+    /// envelope -- the in-stream path already unwraps it, and the two must agree.
+    #[test]
+    fn test_pre_stream_refusal_unwraps_the_python_error_envelope() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+        use dynamo_runtime::pipeline::network::StreamPrologueError;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+
+        let refuse = |message: &str| {
+            let prologue = StreamPrologueError::new(
+                format!("Generate Error: {message}"),
+                DynamoError::builder()
+                    .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                    .message(message)
+                    .build(),
+            );
+            ErrorMessage::from_anyhow(
+                pre_stream_failure_error(prologue).into(),
+                BACKUP_ERROR_MESSAGE,
+            )
+        };
+
+        let response = refuse(
+            &serde_json::json!({"message": "multimodal input is not supported", "code": 400})
+                .to_string(),
+        );
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.message, "multimodal input is not supported");
+
+        // An explicit client-error status inside the envelope is honoured.
+        let response = refuse(
+            &serde_json::json!({"message": "unsupported media type", "code": 415}).to_string(),
+        );
+        assert_eq!(response.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(response.1.message, "unsupported media type");
+
+        // A 5xx inside the envelope does not escape through the 4xx arm.
+        let response = refuse(&serde_json::json!({"message": "boom", "code": 500}).to_string());
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+    }
+
+    /// A worker can report a cancellation as an HTTP-like 499, and its own text
+    /// may name a context id or an internal path. The status survives, the text
+    /// does not: this arm owes the client the same sanitized body every other
+    /// HTTP path produces for a cancellation.
+    #[test]
+    fn test_pre_stream_refusal_sanitizes_the_envelope_cancellation() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynErrorType};
+        use dynamo_runtime::pipeline::network::StreamPrologueError;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+
+        let envelope = serde_json::json!({
+            "message": "Context id abc-123 stopped at /opt/dynamo/worker.py:42",
+            "code": 499,
+        })
+        .to_string();
+        let prologue = StreamPrologueError::new(
+            format!("Generate Error: {envelope}"),
+            DynamoError::builder()
+                .error_type(DynErrorType::Backend(BackendError::InvalidArgument))
+                .message(envelope)
+                .build(),
+        );
+
+        let response = ErrorMessage::from_anyhow(
+            pre_stream_failure_error(prologue).into(),
+            BACKUP_ERROR_MESSAGE,
+        );
+
+        assert_eq!(response.0, StatusCode::from_u16(499).unwrap());
+        assert_eq!(response.1.message, SanitizedError::Cancelled.to_string());
+        assert!(
+            !response.1.message.contains("abc-123") && !response.1.message.contains("/opt/dynamo"),
+            "the worker's own cancellation text must not reach the client, got: {}",
+            response.1.message
+        );
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::Cancelled
+        );
+    }
+
+    /// A status the envelope preserved is what the metric is counted from. A
+    /// backend rate limit is an overload, not a validation failure; a plain 400
+    /// keeps the validation override, because a worker's refusal text carries no
+    /// `Validation:` prefix and would otherwise be counted as internal.
+    #[test]
+    fn test_pre_stream_refusal_classifies_metrics_from_the_preserved_status() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynErrorType};
+        use dynamo_runtime::pipeline::network::StreamPrologueError;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+
+        let refuse = |message: String| {
+            let prologue = StreamPrologueError::new(
+                format!("Generate Error: {message}"),
+                DynamoError::builder()
+                    .error_type(DynErrorType::Backend(BackendError::InvalidArgument))
+                    .message(message)
+                    .build(),
+            );
+            ErrorMessage::from_anyhow(
+                pre_stream_failure_error(prologue).into(),
+                BACKUP_ERROR_MESSAGE,
+            )
+        };
+
+        let rate_limited =
+            refuse(serde_json::json!({"message": "too many requests", "code": 429}).to_string());
+        assert_eq!(rate_limited.0, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            extract_error_type_from_response(&rate_limited),
+            ErrorType::Overload
+        );
+
+        let refused = refuse("multimodal input is not supported by this backend".to_string());
+        assert_eq!(refused.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            extract_error_type_from_response(&refused),
+            ErrorType::Validation
+        );
+    }
+
+    /// Negative control for `test_pre_stream_refusal_surfaces_as_400`: a genuine
+    /// pre-stream connect failure must still be 500. Only a request-level
+    /// refusal earns a 4xx.
+    #[test]
+    fn test_pre_stream_connect_failure_still_surfaces_as_500() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+        use dynamo_runtime::pipeline::network::StreamPrologueError;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+
+        // The worker died rather than refused: typed, but not a request problem.
+        let engine_shutdown = StreamPrologueError::new(
+            "Generate Error: engine shut down",
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+                .message("engine shut down")
+                .build(),
+        );
+        let response = ErrorMessage::from_anyhow(
+            pre_stream_failure_error(engine_shutdown).into(),
+            BACKUP_ERROR_MESSAGE,
+        );
+        assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
+
+        // An older worker sends no typed error at all: also still 500.
+        let untyped = StreamPrologueError::from_message("Generate Error: could not reach worker");
+        let response = ErrorMessage::from_anyhow(
+            pre_stream_failure_error(untyped).into(),
+            BACKUP_ERROR_MESSAGE,
+        );
+        assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[test]
