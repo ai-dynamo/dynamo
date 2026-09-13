@@ -5,20 +5,15 @@
  * Landing page component styles (Home and Community).
  *
  * Styles for WelcomeHero, WhyDynamo, EventsCalendar and CommunityLanding.
- * This block is their only home -- main.css carries none of these rules, so
- * there is no fallback baseline. If this block does not render, both pages
- * render unstyled. (CustomFooter.tsx is the one that genuinely mirrors
- * main.css, enforced by the `sync-site-css` pre-commit hook.)
+ * This block is their hosted-build delivery path. The shared NVIDIA global theme
+ * replaces the project `css:` entry and custom footer at publish (#11952), so
+ * production ships neither the main.css link nor CustomFooter's mirrored copy.
  *
- * Delivered as a page-level <style> block (NOT via the docs.yml `css:` field)
- * so it survives the shared NVIDIA global theme, which replaces project `css`
- * at publish (#11952) -- production ships no main.css <link> at all. Same
- * pattern as ReferenceStyles.tsx and RecipeStyles.tsx.
- *
- * main.css content does still reach production, mirrored verbatim into
- * CustomFooter.tsx's SITE_CSS by sync_site_css.py, and that block does render
- * on these pages. It is not somewhere to put landing rules, though: it is
- * generated, so any hand edit is overwritten on the next sync.
+ * main.css remains the stylesheet for local `fern docs dev` and other builds
+ * that do not inject the global theme. Keep site-wide local-preview rules there,
+ * but keep landing-page rules and variables in this component so the rendered
+ * pages are self-contained. Same pattern as ReferenceStyles.tsx and
+ * RecipeStyles.tsx.
  *
  * Injected via dangerouslySetInnerHTML, like RecipeStyles.tsx, not as a text
  * child like ReferenceStyles.tsx. A text child is escaped on render, which
@@ -1600,18 +1595,30 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
   }
 }
 
+.dynamo-community-page {
+  --dynamo-community-green: #76b900;
+  --dynamo-community-green-bright: #8ed600;
+  --dynamo-community-ink: var(--grayscale-a12);
+  --dynamo-community-muted: var(--grayscale-a10);
+  --dynamo-community-rule: color-mix(in srgb, var(--grayscale-a12) 14%, transparent);
+  --dynamo-community-soft: #f3f4f3;
+  --dynamo-community-titlebar-text: #555755;
+  color: var(--dynamo-community-ink);
+}
+
 article:has(.dynamo-community-page) {
   width: 100% !important;
   max-width: 1200px !important;
-  margin-inline: auto;
+  /* Fern centers the article in the viewport area left after the sidebar.
+     On very wide screens that separates the content from its navigation.
+     Anchor this custom layout to the sidebar-side content rail instead. */
+  margin-inline: 0 auto;
 }
 
 .dark .dynamo-community-page {
   --dynamo-community-soft: #2b2c2b;
   --dynamo-community-titlebar-text: #d4d5d4;
 }
-
-.dynamo-community-page { color: var(--dynamo-community-ink); }
 
 .dynamo-community-page h2, .dynamo-community-page h3, .dynamo-community-page p { margin-top: 0; }
 

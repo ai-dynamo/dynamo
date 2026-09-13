@@ -14,6 +14,13 @@
  * page rendering this must render <BlogStyles /> too.
  */
 const PUBLICATIONS_CSS = `
+/* Keep the publication cards visually attached to the Blog navigation on wide
+   screens. Fern otherwise centers the article in all space remaining to the
+   right of the sidebar, so the gap grows with the viewport. */
+article:has(.dynamo-pubs__section) {
+  margin-inline: 0 auto;
+}
+
 .dynamo-pubs {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
