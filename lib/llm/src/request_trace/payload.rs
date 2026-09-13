@@ -31,19 +31,29 @@ pub fn capture_http_headers(headers: &HeaderMap) -> Option<BTreeMap<String, Stri
     if !http_header_capture_active() {
         return None;
     }
-    capture_http_headers_with_list(headers, &super::policy().http_header_capture_list)
+    let policy = super::policy();
+    capture_http_headers_with_lists(
+        headers,
+        &policy.http_header_capture_list,
+        &policy.http_header_redact_list,
+    )
 }
 
-fn capture_http_headers_with_list(
+fn capture_http_headers_with_lists(
     headers: &HeaderMap,
     capture_list: &[String],
+    redact_list: &[String],
 ) -> Option<BTreeMap<String, String>> {
     if capture_list.is_empty() {
         return None;
     }
     let mut out = BTreeMap::new();
     for name in capture_list {
-        if headers.contains_key(name.as_str()) && crate::sensitive::is_sensitive_header(name, "") {
+        if headers.contains_key(name.as_str())
+            && redact_list
+                .iter()
+                .any(|redact| name.eq_ignore_ascii_case(redact))
+        {
             out.insert(name.clone(), REDACTED_HEADER_VALUE.to_string());
             continue;
         }
@@ -58,15 +68,7 @@ fn capture_http_headers_with_list(
             continue;
         }
 
-        let value = if values
-            .iter()
-            .any(|value| crate::sensitive::is_sensitive_header(name, value))
-        {
-            REDACTED_HEADER_VALUE.to_string()
-        } else {
-            values.join(", ")
-        };
-        out.insert(name.clone(), value);
+        out.insert(name.clone(), values.join(", "));
     }
     (!out.is_empty()).then_some(out)
 }
@@ -166,6 +168,13 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
+    fn default_redact_list() -> Vec<String> {
+        super::super::config::DEFAULT_HTTP_HEADER_REDACT_LIST
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect()
+    }
+
     fn create_test_request(model: &str, store: bool) -> NvCreateChatCompletionRequest {
         let json = serde_json::json!({
             "model": model,
@@ -224,8 +233,9 @@ mod tests {
         headers.insert("NVCF-Function-Id", "fn-9".parse().unwrap());
         headers.insert("authorization", "Bearer secret".parse().unwrap());
 
-        let captured = capture_http_headers_with_list(&headers, &capture_list)
-            .expect("allowlisted headers are captured");
+        let captured =
+            capture_http_headers_with_lists(&headers, &capture_list, &default_redact_list())
+                .expect("allowlisted headers are captured");
         assert_eq!(
             captured.get("x-request-id").map(String::as_str),
             Some("abc-123")
@@ -262,13 +272,14 @@ mod tests {
             headers.insert(name, "credential-value".parse().unwrap());
         }
 
-        let captured = capture_http_headers_with_list(&headers, &capture_list)
-            .expect("sensitive headers are represented as redacted");
+        let captured =
+            capture_http_headers_with_lists(&headers, &capture_list, &default_redact_list())
+                .expect("sensitive headers are represented as redacted");
         for name in sensitive_names {
             assert_eq!(
                 captured.get(name).map(String::as_str),
                 Some("<redacted>"),
-                "{name} must be redacted even when explicitly allowlisted"
+                "{name} is on the default redact list"
             );
         }
     }
@@ -283,8 +294,9 @@ mod tests {
             axum::http::HeaderValue::from_bytes(b"\xff").unwrap(),
         );
 
-        let captured = capture_http_headers_with_list(&headers, &capture_list)
-            .expect("sensitive header is represented as redacted");
+        let captured =
+            capture_http_headers_with_lists(&headers, &capture_list, &default_redact_list())
+                .expect("sensitive header is represented as redacted");
         assert_eq!(
             captured.get("authorization").map(String::as_str),
             Some("<redacted>")
@@ -292,55 +304,34 @@ mod tests {
     }
 
     #[test]
-    fn capture_http_headers_redacts_bearer_value_under_benign_name() {
-        let capture_list = vec!["x-forwarded-credential".to_string()];
-
+    fn capture_http_headers_redact_override_is_name_based_and_keeps_repeats() {
+        let capture_list = vec!["authorization".to_string(), "x-custom".to_string()];
         let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-credential", "  bEaReR secret".parse().unwrap());
+        headers.append("authorization", "Bearer secret".parse().unwrap());
+        headers.append("authorization", "Basic dXNlcjpwYXNz".parse().unwrap());
+        headers.append("x-custom", "first".parse().unwrap());
+        headers.append("x-custom", "second".parse().unwrap());
+        headers.insert("cookie", "session=secret".parse().unwrap());
 
-        let captured = capture_http_headers_with_list(&headers, &capture_list)
-            .expect("sensitive header is represented as redacted");
+        let captured = capture_http_headers_with_lists(
+            &headers,
+            &capture_list,
+            &["X-Custom".to_string(), "cookie".to_string()],
+        )
+        .unwrap();
         assert_eq!(
-            captured.get("x-forwarded-credential").map(String::as_str),
-            Some("<redacted>")
+            captured["authorization"],
+            "Bearer secret, Basic dXNlcjpwYXNz"
         );
-    }
+        assert_eq!(captured["x-custom"], "<redacted>");
+        assert!(!captured.contains_key("cookie"));
 
-    #[test]
-    fn capture_http_headers_redacts_basic_value_under_benign_name() {
-        let capture_list = vec!["x-forwarded-authorization".to_string()];
-
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-forwarded-authorization",
-            "bAsIc dXNlcjpwYXNz".parse().unwrap(),
-        );
-
-        let captured = capture_http_headers_with_list(&headers, &capture_list)
-            .expect("sensitive header is represented as redacted");
+        let captured = capture_http_headers_with_lists(&headers, &capture_list, &[]).unwrap();
         assert_eq!(
-            captured
-                .get("x-forwarded-authorization")
-                .map(String::as_str),
-            Some("<redacted>")
+            captured["authorization"],
+            "Bearer secret, Basic dXNlcjpwYXNz"
         );
-    }
-
-    #[test]
-    fn capture_http_headers_redacts_all_repeated_values_if_any_is_sensitive() {
-        let capture_list = vec!["x-tag".to_string()];
-
-        let mut headers = HeaderMap::new();
-        headers.append("x-tag", "tenant-a".parse().unwrap());
-        headers.append("x-tag", "Bearer secret".parse().unwrap());
-
-        let captured = capture_http_headers_with_list(&headers, &capture_list)
-            .expect("sensitive header is represented as redacted");
-        assert_eq!(
-            captured.get("x-tag").map(String::as_str),
-            Some("<redacted>"),
-            "a sensitive repeated value must prevent every value from leaking"
-        );
+        assert_eq!(captured["x-custom"], "first, second");
     }
 
     #[test]
@@ -349,7 +340,7 @@ mod tests {
         headers.insert("x-request-id", "abc-123".parse().unwrap());
 
         assert!(
-            capture_http_headers_with_list(&headers, &[]).is_none(),
+            capture_http_headers_with_lists(&headers, &[], &default_redact_list()).is_none(),
             "empty allowlist must capture nothing"
         );
     }
@@ -362,8 +353,9 @@ mod tests {
         headers.append("x-tag", "a".parse().unwrap());
         headers.append("x-tag", "b".parse().unwrap());
 
-        let captured = capture_http_headers_with_list(&headers, &capture_list)
-            .expect("repeated header is captured");
+        let captured =
+            capture_http_headers_with_lists(&headers, &capture_list, &default_redact_list())
+                .expect("repeated header is captured");
         assert_eq!(captured.get("x-tag").map(String::as_str), Some("a, b"));
     }
 
@@ -376,7 +368,8 @@ mod tests {
         headers.append("x-tag", "".parse().unwrap());
 
         assert!(
-            capture_http_headers_with_list(&headers, &capture_list).is_none(),
+            capture_http_headers_with_lists(&headers, &capture_list, &default_redact_list())
+                .is_none(),
             "repeated empty values must be omitted, not joined into \", \""
         );
     }
@@ -389,8 +382,9 @@ mod tests {
         headers.append("x-tag", "".parse().unwrap());
         headers.append("x-tag", "tenant-a".parse().unwrap());
 
-        let captured = capture_http_headers_with_list(&headers, &capture_list)
-            .expect("non-empty value is captured");
+        let captured =
+            capture_http_headers_with_lists(&headers, &capture_list, &default_redact_list())
+                .expect("non-empty value is captured");
         assert_eq!(captured.get("x-tag").map(String::as_str), Some("tenant-a"));
     }
 
