@@ -20,6 +20,7 @@ from kr8s.objects import Pod, Service
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client import exceptions
 
+from tests.deploy.response_checks import validate_chat
 from tests.utils.test_output import resolve_test_output_path
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,8 @@ def validate_chat_response(
     response: requests.Response,
     expected_model: str,
     min_content_length: int = MIN_RESPONSE_CONTENT_LENGTH,
+    max_tokens: int | None = None,
+    stop: str | None = None,
 ) -> dict[str, Any]:
     """Validate the structure and content of a chat completion response.
 
@@ -62,6 +65,8 @@ def validate_chat_response(
         response: HTTP response from the chat completion endpoint
         expected_model: Expected model name in the response
         min_content_length: Minimum required length for response content
+        max_tokens: Optional requested token cap for the completion contract
+        stop: Stop sequence; permits empty or shortened response content
 
     Returns:
         Parsed response JSON on success
@@ -80,6 +85,9 @@ def validate_chat_response(
     except ValueError as e:
         pytest.fail(f"Response is not valid JSON: {e}. Response: {response.text[:500]}")
 
+    if max_tokens is not None:
+        validate_chat(data, max_tokens, stop)
+
     assert "choices" in data, f"Response missing 'choices' field: {data}"
     assert len(data["choices"]) > 0, f"Response has empty 'choices': {data}"
 
@@ -93,10 +101,14 @@ def validate_chat_response(
     assert "content" in message, f"Message missing 'content' field: {message}"
 
     content = message["content"]
-    assert len(content) >= min_content_length, (
-        f"Response content too short: {len(content)} chars (min: {min_content_length}). "
-        f"Content: {content[:200]}"
-    )
+    if stop is not None and content is None:
+        content = ""
+    assert isinstance(content, str), f"Expected text content: {message}"
+    if stop is None:
+        assert len(content) >= min_content_length, (
+            f"Response content too short: {len(content)} chars (min: {min_content_length}). "
+            f"Content: {content[:200]}"
+        )
 
     assert "model" in data, f"Response missing 'model' field: {data}"
     assert (
@@ -279,7 +291,20 @@ class ServiceSpec:
         self._spec["envs"] = value
 
     def add_pvc_mount(self, pvc_name: str, mount_point: str) -> None:
-        """Add a service-level volumeMount for a PVC declared in ``spec.pvcs``. Idempotent."""
+        """Mount an existing PVC using the service's CRD schema. Idempotent."""
+        if self._schema == SCHEMA_V1BETA1:
+            pod = self._spec.setdefault("podTemplate", {}).setdefault("spec", {})
+            volumes = pod.setdefault("volumes", [])
+            if not any(v.get("name") == pvc_name for v in volumes):
+                volumes.append(
+                    {"name": pvc_name, "persistentVolumeClaim": {"claimName": pvc_name}}
+                )
+            container = self._main_container(create=True)
+            assert container is not None
+            mounts = container.setdefault("volumeMounts", [])
+            if not any(m.get("name") == pvc_name for m in mounts):
+                mounts.append({"name": pvc_name, "mountPath": mount_point})
+            return
         mounts = self._spec.setdefault("volumeMounts", [])
         if not any(m.get("name") == pvc_name for m in mounts):
             mounts.append({"name": pvc_name, "mountPoint": mount_point})
@@ -582,6 +607,10 @@ class DeploymentSpec:
         for service in services:
             service.image = image
 
+    def set_runtime_version(self, version: str, service_name: str) -> None:
+        """Keep operator defaults tied to the runtime of a mixed-version component."""
+        self._component_by_name(service_name)["runtimeVersionOverride"] = version
+
     def mount_model_cache_pvc(
         self, pvc_name: str, mount_point: str = "/models"
     ) -> None:
@@ -589,6 +618,13 @@ class DeploymentSpec:
         service, with ``HF_HOME`` pointed at it so models come from the shared cache
         instead of HuggingFace. Idempotent; used by CI via --model-cache-pvc.
         """
+        if self._schema == SCHEMA_V1BETA1:
+            for service in self.services:
+                service.add_pvc_mount(pvc_name, mount_point)
+                envs = service.envs
+                if not any(e.get("name") == "HF_HOME" for e in envs):
+                    service.envs = [*envs, {"name": "HF_HOME", "value": mount_point}]
+            return
         spec = self._deployment_spec["spec"]
         pvcs = spec.setdefault("pvcs", [])
         if not any(p.get("name") == pvc_name for p in pvcs):
@@ -870,6 +906,10 @@ class PodStatusDetail:
         return result
 
 
+class DeploymentStartupError(RuntimeError):
+    """A deployment cannot recover without changing its configuration."""
+
+
 @dataclass
 class ManagedDeployment:
     log_dir: str
@@ -883,6 +923,8 @@ class ManagedDeployment:
     # this below it, so _wait_for_condition raises with pod-status diagnostics
     # instead of pytest-timeout killing the test mid-wait with a bare traceback.
     readiness_timeout: int = 1800
+    fail_fast_startup: bool = False
+    cleanup_errors: list[Exception] = field(default_factory=list, init=False)
 
     _custom_api: Optional[client.CustomObjectsApi] = None
     _core_api: Optional[client.CoreV1Api] = None
@@ -1034,6 +1076,25 @@ class ManagedDeployment:
                     plural="dynamographdeployments",
                     name=self._deployment_name,
                 )
+                if self.fail_fast_startup and desired_ready_condition_val:
+                    details = await self._get_pod_status_details()
+                    for detail in details:
+                        if detail.reason in (
+                            "InvalidImageName",
+                            "CreateContainerConfigError",
+                            "CreateContainerError",
+                        ) or (
+                            detail.restart_count >= 2
+                            and (
+                                detail.reason == "CrashLoopBackOff"
+                                or (
+                                    detail.state == "Terminated"
+                                    and detail.exit_code is not None
+                                    and detail.exit_code != 0
+                                )
+                            )
+                        ):
+                            raise DeploymentStartupError(detail.format())
                 # Check both conditions:
                 # 1. Ready condition is True
                 # 2. State is successful
@@ -1102,6 +1163,8 @@ class ManagedDeployment:
                             for ev in pod_events:
                                 self._logger.info(f"    {ev}")
 
+            except DeploymentStartupError:
+                raise
             except exceptions.ApiException as e:
                 self._logger.info(
                     f"API Exception while checking deployment status: {e}"
@@ -1146,7 +1209,12 @@ class ManagedDeployment:
                 phase = pod_status.phase if pod_status else "Unknown"
 
                 container_statuses = (
-                    pod_status.container_statuses if pod_status else None
+                    (
+                        (pod_status.init_container_statuses or [])
+                        + (pod_status.container_statuses or [])
+                    )
+                    if pod_status
+                    else None
                 )
                 if not container_statuses:
                     details.append(
@@ -1625,21 +1693,48 @@ class ManagedDeployment:
                 f.write(content)
 
     async def _delete_deployment(self):
-        """
-        Delete the DynamoGraphDeployment CR.
-        """
+        """Wait for the CR and its Pods to disappear before releasing the fixture."""
+        if not self._deployment_name or self._custom_api is None:
+            return
         try:
-            if self._deployment_name and self._custom_api is not None:
-                await self._custom_api.delete_namespaced_custom_object(
+            await self._custom_api.delete_namespaced_custom_object(
+                group="nvidia.com",
+                version=self.deployment_spec.api_version,
+                namespace=self.namespace,
+                plural="dynamographdeployments",
+                name=self._deployment_name,
+                body=client.V1DeleteOptions(propagation_policy="Foreground"),
+            )
+        except exceptions.ApiException as error:
+            if error.status != 404:
+                raise
+        assert self._core_api is not None, "Kubernetes API not initialized"
+        deadline = time.monotonic() + 120
+        while True:
+            exists = True
+            try:
+                await self._custom_api.get_namespaced_custom_object(
                     group="nvidia.com",
                     version=self.deployment_spec.api_version,
                     namespace=self.namespace,
                     plural="dynamographdeployments",
                     name=self._deployment_name,
                 )
-        except exceptions.ApiException as e:
-            if e.status != 404:  # Ignore if already deleted
-                raise
+            except exceptions.ApiException as error:
+                if error.status != 404:
+                    raise
+                exists = False
+            pods = await self._core_api.list_namespaced_pod(
+                self.namespace,
+                label_selector=f"nvidia.com/dynamo-graph-deployment-name={self._deployment_name}",
+            )
+            if not exists and not pods.items:
+                return
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"Deployment {self._deployment_name} or its Pods were not deleted within 120s"
+                )
+            await asyncio.sleep(1)
 
     def port_forward(
         self, pod: Pod, remote_port: int, max_connection_attempts: int = 3
@@ -1708,6 +1803,9 @@ class ManagedDeployment:
         try:
             # Collect logs/metrics first; any PFs opened here will be tracked and stopped below.
             self._get_service_logs()
+            events = await self._get_pod_events()
+            with open(os.path.join(self.log_dir, "events.log"), "w") as event_file:
+                event_file.write("\n".join(events))
             self._logger.info(
                 f"Cleaning up {len(self._active_port_forwards)} active port forwards"
             )
@@ -1740,13 +1838,22 @@ class ManagedDeployment:
             await self._create_deployment()
             await self._wait_for_ready(timeout=self.readiness_timeout)
 
-        except:
-            await self._cleanup()
+        except BaseException as error:
+            await self._cleanup_preserving_error(error)
             raise
         return self
 
+    async def _cleanup_preserving_error(self, primary):
+        try:
+            await self._cleanup()
+        except Exception as error:
+            self.cleanup_errors.append(error)
+            if primary is None:
+                raise
+            self._logger.error("Deployment cleanup also failed", exc_info=True)
+
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        await self._cleanup()
+        await self._cleanup_preserving_error(exc_val)
 
 
 async def main():

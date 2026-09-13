@@ -176,6 +176,7 @@ jobs:
       - deploy-operator
       - deploy-test-vllm
       - deploy-test-sglang
+      - cross-version-compatibility
       - deploy-test-trtllm
       - deploy-test-dgdr
       - deploy-operator-checkpoint-vllm
@@ -219,6 +220,7 @@ jobs:
   operator:
     needs: changed-files
     if: |
+      needs.changed-files.outputs.core == 'true' ||
       needs.changed-files.outputs.operator == 'true' ||
       needs.changed-files.outputs.vllm == 'true' ||
       needs.changed-files.outputs.sglang == 'true' ||
@@ -756,6 +758,10 @@ jobs:
     name: frontend
     needs: [changed-files]
     if: |
+      needs.changed-files.outputs.core == 'true' ||
+      needs.changed-files.outputs.vllm == 'true' ||
+      needs.changed-files.outputs.sglang == 'true' ||
+      needs.changed-files.outputs.trtllm == 'true' ||
       needs.changed-files.outputs.frontend == 'true' ||
       needs.changed-files.outputs.operator == 'true' ||
       needs.changed-files.outputs.snapshot == 'true' ||
@@ -1185,7 +1191,14 @@ jobs:
     needs: [changed-files, frontend-build]
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.snapshot == 'true' ||
+      (needs.changed-files.outputs.core == 'true' ||
+       needs.changed-files.outputs.frontend == 'true' ||
+       needs.changed-files.outputs.vllm == 'true' ||
+       needs.changed-files.outputs.sglang == 'true' ||
+       needs.changed-files.outputs.trtllm == 'true' ||
+       needs.changed-files.outputs.deploy == 'true' ||
+       needs.changed-files.outputs.operator == 'true' ||
+       needs.changed-files.outputs.snapshot == 'true' ||
       needs.changed-files.outputs.snapshot_vllm == 'true' ||
       needs.changed-files.outputs.snapshot_sglang == 'true' ||
       needs.changed-files.outputs.snapshot_trtllm == 'true') &&
@@ -1366,7 +1379,8 @@ jobs:
     if: |
       needs.changed-files.outputs.run_deploy_tests == 'true' &&
       !cancelled() && !failure() &&
-      (needs.changed-files.outputs.operator == 'true' ||
+      (needs.changed-files.outputs.core == 'true' ||
+       needs.changed-files.outputs.operator == 'true' ||
        needs.changed-files.outputs.vllm == 'true' ||
        needs.changed-files.outputs.sglang == 'true' ||
        needs.changed-files.outputs.trtllm == 'true' ||
@@ -1404,11 +1418,12 @@ jobs:
 
   deploy-test-vllm:
     name: vllm Deploy Test
-    needs: [changed-files, deploy-operator, vllm-copy-to-acr]
+    needs: [changed-files, deploy-operator, vllm-copy-to-acr, frontend-copy-to-acr]
     if: |
       needs.changed-files.outputs.run_deploy_tests == 'true' &&
       !cancelled() && !failure() &&
-      (needs.changed-files.outputs.vllm == 'true' ||
+      (needs.changed-files.outputs.core == 'true' ||
+       needs.changed-files.outputs.vllm == 'true' ||
        needs.changed-files.outputs.deploy == 'true' ||
        needs.changed-files.outputs.operator == 'true')
     uses: $/.github/workflows/shared-deploy-test.yml
@@ -1416,6 +1431,7 @@ jobs:
       framework: vllm
       profiles: '["agg", "agg_router", "disagg", "disagg_router"]'
       image_tag: ${{ needs.vllm-copy-to-acr.outputs.image_tag }}
+      frontend_tag: ${{ needs.frontend-copy-to-acr.outputs.image_tag }}
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
@@ -1423,18 +1439,20 @@ jobs:
 
   deploy-test-sglang:
     name: sglang Deploy Test
-    needs: [changed-files, deploy-operator, sglang-copy-to-acr]
+    needs: [changed-files, deploy-operator, sglang-copy-to-acr, frontend-copy-to-acr]
     if: |
       needs.changed-files.outputs.run_deploy_tests == 'true' &&
       !cancelled() && !failure() &&
-      (needs.changed-files.outputs.sglang == 'true' ||
+      (needs.changed-files.outputs.core == 'true' ||
+       needs.changed-files.outputs.sglang == 'true' ||
        needs.changed-files.outputs.deploy == 'true' ||
        needs.changed-files.outputs.operator == 'true')
     uses: $/.github/workflows/shared-deploy-test.yml
     with:
       framework: sglang
-      profiles: '["agg", "agg_router"]'
+      profiles: '["agg", "agg_router", "agg_embed"]'
       image_tag: ${{ needs.sglang-copy-to-acr.outputs.image_tag }}
+      frontend_tag: ${{ needs.frontend-copy-to-acr.outputs.image_tag }}
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
@@ -1442,11 +1460,12 @@ jobs:
 
   deploy-test-trtllm:
     name: trtllm Deploy Test
-    needs: [changed-files, deploy-operator, trtllm-copy-to-acr]
+    needs: [changed-files, deploy-operator, trtllm-copy-to-acr, frontend-copy-to-acr]
     if: |
       needs.changed-files.outputs.run_deploy_tests == 'true' &&
       !cancelled() && !failure() &&
-      (needs.changed-files.outputs.trtllm == 'true' ||
+      (needs.changed-files.outputs.core == 'true' ||
+       needs.changed-files.outputs.trtllm == 'true' ||
        needs.changed-files.outputs.deploy == 'true' ||
        needs.changed-files.outputs.operator == 'true')
     uses: $/.github/workflows/shared-deploy-test.yml
@@ -1454,9 +1473,31 @@ jobs:
       framework: trtllm
       profiles: '["agg", "agg_router"]'
       image_tag: ${{ needs.trtllm-copy-to-acr.outputs.image_tag }}
+      frontend_tag: ${{ needs.frontend-copy-to-acr.outputs.image_tag }}
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+    secrets: inherit
+
+  cross-version-compatibility:
+    name: SGLang N-2 compatibility
+    needs: [changed-files, operator, frontend-copy-to-acr, sglang-copy-to-acr, deploy-test-sglang]
+    if: |
+      always() && !cancelled() &&
+      needs.changed-files.outputs.run_deploy_tests == 'true' &&
+      (needs.changed-files.outputs.core == 'true' ||
+       needs.changed-files.outputs.sglang == 'true' ||
+       needs.changed-files.outputs.deploy == 'true' ||
+       needs.changed-files.outputs.operator == 'true') &&
+      needs.deploy-test-sglang.result == 'success' &&
+      needs.operator.result == 'success' &&
+      needs.frontend-copy-to-acr.result == 'success' &&
+      needs.sglang-copy-to-acr.result == 'success'
+    uses: $/.github/workflows/cross-version-compatibility.yml
+    with:
+      frontend_tag: ${{ needs.frontend-copy-to-acr.outputs.image_tag }}
+      worker_tag: ${{ needs.sglang-copy-to-acr.outputs.image_tag }}
+      operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
     secrets: inherit
 
   deploy-test-dgdr:
