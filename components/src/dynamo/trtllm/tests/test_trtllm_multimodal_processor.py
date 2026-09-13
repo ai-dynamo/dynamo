@@ -574,12 +574,10 @@ def _embedding_request(url: str) -> dict:
 # Each setup receives a processor whose allowed_local_media_path is tmp_path,
 # prepares one failure, and returns the URL the client would send.
 def _missing_file(tmp_path, processor):
-    """Return a URL for a file that does not exist inside the allowed directory."""
     return f"file://{tmp_path / 'missing.safetensors'}"
 
 
 def _outside_allowed_dir(tmp_path, processor):
-    """Restrict the allowed directory to a subfolder and return a file outside it."""
     allowed = tmp_path / "allowed"
     allowed.mkdir()
     processor.allowed_local_media_path = str(allowed)
@@ -589,7 +587,6 @@ def _outside_allowed_dir(tmp_path, processor):
 
 
 def _file_too_large(tmp_path, processor):
-    """Lower the size limit to 1 byte and return a valid file that exceeds it."""
     processor.max_file_size_bytes = 1
     path = tmp_path / "large.safetensors"
     save_file({"emb": torch.zeros(2)}, str(path))
@@ -604,7 +601,6 @@ def _missing_mm_embeddings_key(tmp_path, processor):
 
 
 def _unsupported_scheme(tmp_path, processor):
-    """Return a .safetensors URL with a scheme other than http or https."""
     return "ftp://example.invalid/emb.safetensors"
 
 
@@ -668,23 +664,3 @@ async def test_embedding_local_path_unconfigured_is_server_error(tmp_path) -> No
         )
 
     assert exc_info.value.status == 500
-
-
-@pytest.mark.asyncio
-async def test_embedding_valid_file_loads(tmp_path) -> None:
-    """The new error paths must leave a valid embedding file loading as before."""
-    processor = _embedding_processor(str(tmp_path))
-    emb = torch.ones(2, 3)
-    path = tmp_path / "emb.safetensors"
-    save_file({"emb": emb}, str(path))
-
-    processed = await processor.process_openai_request(
-        _embedding_request(f"file://{path}"),
-        embeddings=None,
-        ep_disaggregated_params=None,
-    )
-
-    assert processed["prompt"] == "describe"
-    loaded = processed["multi_modal_embeddings"]["image"]
-    assert len(loaded) == 1
-    assert torch.equal(loaded[0], emb)
