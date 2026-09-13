@@ -27,22 +27,30 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
             match task {
                 WorkerTask::Event(event) => {
                     let kind = EventKind::of(&event.event.data);
+                    let stored_block_count = EventKind::stored_block_count(&event.event.data);
                     let result = self.apply_event(&mut lookup, event, counters.as_ref());
                     if result.is_err() {
                         tracing::warn!("Failed to apply event: {:?}", result.as_ref().err());
                     }
                     if let Some(ref c) = counters {
+                        if let Some(block_count) = stored_block_count {
+                            c.inc_stored_parent_not_found_blocks(block_count, &result);
+                        }
                         c.inc(kind, result);
                     }
                 }
                 WorkerTask::EventWithAck { event, resp } => {
                     let kind = EventKind::of(&event.event.data);
+                    let stored_block_count = EventKind::stored_block_count(&event.event.data);
                     let result = self.apply_event(&mut lookup, event, counters.as_ref());
                     let applied = result.is_ok();
                     if result.is_err() {
                         tracing::warn!("Failed to apply event: {:?}", result.as_ref().err());
                     }
                     if let Some(ref c) = counters {
+                        if let Some(block_count) = stored_block_count {
+                            c.inc_stored_parent_not_found_blocks(block_count, &result);
+                        }
                         c.inc(kind, result);
                     }
                     let _ = resp.send(applied);
@@ -63,8 +71,14 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                         } = output;
                         for event in events {
                             let kind = EventKind::of(&event.event.data);
+                            let stored_block_count =
+                                EventKind::stored_block_count(&event.event.data);
                             let applied = self.apply_event(&mut lookup, event, counters.as_ref());
                             if let Some(ref counters) = counters {
+                                if let Some(block_count) = stored_block_count {
+                                    counters
+                                        .inc_stored_parent_not_found_blocks(block_count, &applied);
+                                }
                                 counters.inc(kind, applied);
                             }
                             if applied.is_err() {
@@ -96,12 +110,16 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                     correlation_id,
                 } => {
                     let kind = EventKind::of(&event.event.data);
+                    let stored_block_count = EventKind::stored_block_count(&event.event.data);
                     let result = self.apply_event(&mut lookup, event, counters.as_ref());
                     observation.record(correlation_id, result.is_ok());
                     if result.is_err() {
                         tracing::warn!("Failed to apply event: {:?}", result.as_ref().err());
                     }
                     if let Some(ref c) = counters {
+                        if let Some(block_count) = stored_block_count {
+                            c.inc_stored_parent_not_found_blocks(block_count, &result);
+                        }
                         c.inc(kind, result);
                     }
                 }
