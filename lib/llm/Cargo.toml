@@ -119,6 +119,7 @@ tokio = { workspace = true }
 tokio-stream = { workspace = true, features = ["net"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 opentelemetry-otlp = { workspace = true }

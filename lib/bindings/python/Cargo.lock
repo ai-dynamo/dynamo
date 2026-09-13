@@ -2265,6 +2265,7 @@ dependencies = [
  "tonic-reflection",
  "tower-http",
  "tracing",
+ "tracing-opentelemetry",
  "url",
  "utoipa",
  "utoipa-swagger-ui",
