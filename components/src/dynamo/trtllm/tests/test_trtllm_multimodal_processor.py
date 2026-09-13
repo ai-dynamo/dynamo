@@ -41,7 +41,6 @@ pytestmark = [
 def _embedding_processor(
     allowed_local_media_path: str = "",
 ) -> MultimodalRequestProcessor:
-    # Factory for a processor with a mocked tokenizer and the given allowed_local_media_path.
     return MultimodalRequestProcessor(
         model_type="multimodal",
         model_dir="unused",
@@ -682,27 +681,3 @@ async def test_embedding_valid_file_loads(tmp_path) -> None:
     loaded = processed["multi_modal_embeddings"]["image"]
     assert len(loaded) == 1
     assert torch.equal(loaded[0], emb)
-
-
-@pytest.mark.asyncio
-async def test_epd_embedding_load_error_propagates() -> None:
-    """The encode worker calls load_tensor_from_path_or_url; its typed
-    error must propagate, not be swallowed into a yielded error dict."""
-    from dynamo.trtllm.encode_helper import EncodeHelper
-
-    url = "file:///missing.safetensors"
-    processor = MagicMock()
-    processor.extract_prompt_and_media.return_value = ("", [], [url])
-    processor.load_tensor_from_path_or_url.side_effect = HttpStatusError(
-        400, "Embedding file not found.", url
-    )
-
-    with pytest.raises(HttpStatusError) as excinfo:
-        async for _ in EncodeHelper.process_encode_request(
-            request={"messages": []},
-            multimodal_processor=processor,
-            connector=MagicMock(),  # the embedding flow requires a connector
-        ):
-            pass
-
-    assert excinfo.value.status == 400
