@@ -155,6 +155,15 @@ repos:
       # regenerate leaves every committed generated span stale.
       files: ^docs/fern/(scripts/gen_llms_tables\.py|components/releases\.data\.ts|pages/reference/general/.*\.mdx)$
       pass_filenames: false
+    - id: gen-llms-tables-determinism
+      name: Check the generated docs tables are reproducible
+      entry: docs/fern/scripts/check_llms_tables_determinism.sh
+      language: system
+      # Triggers on the script itself as well as the generator and its inputs:
+      # the reproducibility claim is only as good as the harness asserting it.
+      files: ^docs/fern/(scripts/(gen_llms_tables|check_llms_tables_determinism)\.(py|sh)|components/releases\.data\.ts|pages/reference/general/.*\.mdx)$
+      pass_filenames: false
+
     - id: check-component-imports
       name: Check Fern components trigger no rolldown bundling
       entry: python3 docs/fern/scripts/check_component_imports.py
