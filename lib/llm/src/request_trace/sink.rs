@@ -420,6 +420,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn jsonl_sink_shutdown_flushes_accepted_records() {
+        const RECORDS: usize = 16;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("request_trace.jsonl");
+        let sink = JsonlRequestTraceSink::new(
+            path.display().to_string(),
+            JsonlSinkOptions {
+                buffer_bytes: 1024 * 1024,
+                flush_interval: Duration::from_secs(60),
+            },
+        )
+        .await
+        .unwrap();
+
+        for index in 0..RECORDS {
+            let mut record = sample_record();
+            if let Some(request) = record.request.as_mut() {
+                request.request_id = format!("req-{index}");
+            }
+            sink.emit(&record).await;
+        }
+
+        RequestTraceSink::shutdown(&sink).await;
+        RequestTraceSink::shutdown(&sink).await;
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content.lines().count(), RECORDS);
+        for index in 0..RECORDS {
+            assert!(
+                content.contains(&format!("\"request_id\":\"req-{index}\"")),
+                "record {index} missing from the file after shutdown"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn gzip_sink_writes_and_rolls_request_records() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("request_trace");
