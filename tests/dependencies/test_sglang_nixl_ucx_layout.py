@@ -8,6 +8,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 from types import ModuleType
 
@@ -23,9 +24,7 @@ pytestmark = [
     pytest.mark.post_merge,
     pytest.mark.gpu_0,
     pytest.mark.unit,
-    pytest.mark.sglang,
-    pytest.mark.multimodal,
-    pytest.mark.framework_agnostic,
+    pytest.mark.parallel,
 ]
 
 
@@ -73,14 +72,17 @@ def _run_installer_helper(
     environment = os.environ.copy()
     environment["CANNED_LDD_OUTPUT"] = ldd_output
     script = helpers + '\nNIXL_LIB_DIR="$1"\n' + command + "\n"
-    return subprocess.run(
-        ["bash", "-s", "--", str(root)],
-        input=script,
-        capture_output=True,
-        text=True,
-        check=False,
-        env=environment,
-    )
+    # Use a file so BASH_SOURCE[0] is defined under the installer's `set -u`.
+    with tempfile.TemporaryDirectory() as scratch:
+        script_path = Path(scratch, "installer_helpers.sh")
+        script_path.write_text(script, encoding="utf-8")
+        return subprocess.run(
+            ["bash", str(script_path), str(root)],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=environment,
+        )
 
 
 def test_cuda_distributions_normalizes_names(monkeypatch, tmp_path: Path) -> None:
@@ -177,8 +179,7 @@ def test_main_resolves_one_coherent_private_ucx_layout(
     ]
     nixl = _stub_files(tmp_path / "aarch64-site-packages", nixl_files)
     nixl.metadata["Name"] = "nixl-cu13"
-    # Wheel RECORD files can retain irrelevant or stale paths. Discovery must
-    # ignore them instead of treating them as usable native libraries.
+    # Ignore stale or irrelevant wheel RECORD entries.
     nixl.files.extend(
         [
             Path("nixl/_bindings/missing/libnixl_capi.so"),
@@ -359,10 +360,10 @@ def test_installer_accepts_only_private_ucx_dependency_resolution(
     )
 
     assert rejected.returncode != 0
+    # Identify the system UCX selected instead of NIXL's private copy.
     assert "resolved outside NIXL's UCX" in rejected.stderr
-    assert (
-        rejected.stdout != accepted.stdout or rejected.returncode != accepted.returncode
-    )
+    assert "/usr/lib/aarch64-linux-gnu/libucp.so.0" in rejected.stderr
+    assert "resolved outside NIXL's UCX" not in accepted.stderr
 
 
 @pytest.mark.parametrize(
@@ -407,7 +408,8 @@ def test_installer_rejects_missing_ucx_cuda_modules(
     assert supported.stdout.strip() == str(cuda_module)
     assert unsupported.returncode != 0
     assert "missing NIXL UCX CUDA module" in unsupported.stderr
-    assert unsupported.stdout != supported.stdout
+    # Do not emit a partial path for an unsupported layout.
+    assert unsupported.stdout == ""
 
 
 def test_sglang_runtime_wires_the_validated_compatibility_layout() -> None:
