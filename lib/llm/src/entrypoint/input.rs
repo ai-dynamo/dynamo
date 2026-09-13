@@ -117,31 +117,37 @@ pub async fn run_input_with_frontend_route_extensions(
     if !matches!(&in_opt, Input::Http) && !frontend_route_extensions.is_empty() {
         anyhow::bail!("frontend route extensions are only supported by HTTP input");
     }
+    // Registered before initialization, not after: `spawn_workers` reads the
+    // registration count to decide whether the process-wide sinks follow the
+    // caller's token, and this input owns their teardown.
+    let active_input = crate::request_trace::ActiveInput::register();
+
     if !matches!(&in_opt, Input::Http) {
         initialize_input(&drt, &engine_config).await;
     }
 
-    match in_opt {
+    let result = match in_opt {
         Input::Http => {
             http::run_with_frontend_route_extensions(drt, engine_config, frontend_route_extensions)
-                .await?;
+                .await
         }
-        Input::Grpc => {
-            grpc::run(drt, engine_config).await?;
-        }
-        Input::Text => {
-            text::run(drt, None, engine_config).await?;
-        }
+        Input::Grpc => grpc::run(drt, engine_config).await,
+        Input::Text => text::run(drt, None, engine_config).await,
         Input::Stdin => {
             let mut prompt = String::new();
             std::io::stdin().read_to_string(&mut prompt).unwrap();
-            text::run(drt, Some(prompt), engine_config).await?;
+            text::run(drt, Some(prompt), engine_config).await
         }
-        Input::Endpoint(path) => {
-            endpoint::run(drt, path, engine_config).await?;
-        }
-    }
-    Ok(())
+        Input::Endpoint(path) => endpoint::run(drt, path, engine_config).await,
+    };
+
+    // Nothing above this frame waits for the sinks; the caller's next step is
+    // process exit. The result is carried across so a failing input still
+    // drains, and the drain itself only happens once the last input has
+    // finished, because several can share one process.
+    active_input.release_and_drain().await;
+
+    result
 }
 
 pub(crate) async fn initialize_input(

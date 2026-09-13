@@ -110,6 +110,11 @@ impl S3RequestTraceSink {
             run_id,
         };
         let worker_shutdown = shutdown.clone();
+        // The worker shares the counter with `emit`, so the shutdown total
+        // covers records lost inside the worker as well as records the full
+        // channel turned away.
+        let dropped = Arc::new(AtomicU64::new(0));
+        let worker_dropped = dropped.clone();
         let worker = tokio::spawn(async move {
             run_worker(
                 store,
@@ -118,6 +123,7 @@ impl S3RequestTraceSink {
                 worker_shutdown,
                 roll_uncompressed_bytes,
                 flush_interval,
+                worker_dropped,
             )
             .await;
         });
@@ -126,28 +132,38 @@ impl S3RequestTraceSink {
             tx,
             shutdown,
             worker: Mutex::new(Some(worker)),
-            dropped: Arc::new(AtomicU64::new(0)),
+            dropped,
         })
     }
 
-    /// Record one dropped record and, only on the first drop, emit a single
-    /// warning. Subsequent drops bump the counter silently; the running total
-    /// is reported once at shutdown. Mirrors the OpenTelemetry Rust
-    /// `BatchLogProcessor` drop-accounting pattern so a degraded S3 endpoint
-    /// cannot flood the log with one line per dropped record. Returns `true`
-    /// when this call emitted the warning (i.e. it was the first drop).
+    /// Record one record dropped by backpressure in `emit`.
     fn note_dropped(&self, reason: &str) -> bool {
-        if self.dropped.fetch_add(1, Ordering::Relaxed) == 0 {
-            tracing::warn!(
-                target: "dynamo_llm::request_trace",
-                reason,
-                "request trace s3: dropping records (batcher backpressure); \
-                 further drops are counted and summarized at shutdown"
-            );
-            true
-        } else {
-            false
-        }
+        note_dropped_records(&self.dropped, 1, reason)
+    }
+}
+
+/// Add `count` lost records to `dropped` and, only on the first loss of the
+/// run, emit a single warning. Later losses bump the counter silently; the
+/// running total is reported once at shutdown and read by the shutdown joiner
+/// through `dropped_records`. Mirrors the OpenTelemetry Rust
+/// `BatchLogProcessor` drop-accounting pattern so a degraded S3 endpoint cannot
+/// flood the log with one line per lost record. Returns `true` when this call
+/// emitted the warning (i.e. it was the first loss).
+fn note_dropped_records(dropped: &AtomicU64, count: u64, reason: &str) -> bool {
+    if count == 0 {
+        return false;
+    }
+    if dropped.fetch_add(count, Ordering::Relaxed) == 0 {
+        tracing::warn!(
+            target: "dynamo_llm::request_trace",
+            reason,
+            count,
+            "request trace s3: dropping records; \
+             further drops are counted and summarized at shutdown"
+        );
+        true
+    } else {
+        false
     }
 }
 
@@ -165,6 +181,10 @@ impl RequestTraceSink for S3RequestTraceSink {
             };
             self.note_dropped(reason);
         }
+    }
+
+    fn dropped_records(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
     }
 
     async fn shutdown(&self) {
@@ -191,7 +211,7 @@ impl RequestTraceSink for S3RequestTraceSink {
             tracing::warn!(
                 target: "dynamo_llm::request_trace",
                 dropped,
-                "request trace s3: dropped records during the run (batcher backpressure)"
+                "request trace s3: dropped records during the run"
             );
         }
     }
@@ -204,6 +224,7 @@ async fn run_worker(
     shutdown: CancellationToken,
     roll_uncompressed_bytes: u64,
     flush_interval: Duration,
+    dropped: Arc<AtomicU64>,
 ) {
     let uploader = Arc::new(S3Uploader { store, options });
     let mut batch = JsonlBatch::new();
@@ -223,6 +244,7 @@ async fn run_worker(
                 rx.close();
                 while let Some(record) = rx.recv().await {
                     if let Err(error) = batch.push(&record) {
+                        note_dropped_records(&dropped, 1, "serialize_failed");
                         tracing::warn!(
                             target: "dynamo_llm::request_trace",
                             %error,
@@ -232,35 +254,36 @@ async fn run_worker(
                         // Enforce the roll threshold during shutdown too, so a
                         // full channel can't collapse into one oversized PUT
                         // that loses everything on a single upload failure.
-                        upload_ready_batch(&uploader, &mut batch, &mut seq).await;
+                        upload_ready_batch(&uploader, &mut batch, &mut seq, &dropped).await;
                     }
                 }
                 if !batch.is_empty() {
-                    upload_ready_batch(&uploader, &mut batch, &mut seq).await;
+                    upload_ready_batch(&uploader, &mut batch, &mut seq, &dropped).await;
                 }
                 return;
             }
             _ = flush_tick.tick() => {
                 if !batch.is_empty() {
-                    upload_ready_batch(&uploader, &mut batch, &mut seq).await;
+                    upload_ready_batch(&uploader, &mut batch, &mut seq, &dropped).await;
                 }
             }
             message = rx.recv() => {
                 match message {
                     Some(record) => {
                         if let Err(error) = batch.push(&record) {
+                            note_dropped_records(&dropped, 1, "serialize_failed");
                             tracing::warn!(
                                 target: "dynamo_llm::request_trace",
                                 %error,
                                 "request trace s3: serialize failed; dropping record"
                             );
                         } else if batch.uncompressed_bytes() >= roll_uncompressed_bytes {
-                            upload_ready_batch(&uploader, &mut batch, &mut seq).await;
+                            upload_ready_batch(&uploader, &mut batch, &mut seq, &dropped).await;
                         }
                     }
                     None => {
                         if !batch.is_empty() {
-                            upload_ready_batch(&uploader, &mut batch, &mut seq).await;
+                            upload_ready_batch(&uploader, &mut batch, &mut seq, &dropped).await;
                         }
                         return;
                     }
@@ -270,12 +293,23 @@ async fn run_worker(
     }
 }
 
-async fn upload_ready_batch(uploader: &Arc<S3Uploader>, batch: &mut JsonlBatch, seq: &mut u64) {
+async fn upload_ready_batch(
+    uploader: &Arc<S3Uploader>,
+    batch: &mut JsonlBatch,
+    seq: &mut u64,
+    dropped: &AtomicU64,
+) {
+    // Read the size before `take_finished` empties the batch. Every record in
+    // it is lost if the gzip finalize or the upload fails, and the shutdown
+    // report is only accurate if those losses are counted.
+    let records = batch.records();
     let ready = match batch.take_finished().await {
         Ok(bytes) => bytes,
         Err(error) => {
+            note_dropped_records(dropped, records, "gzip_failed");
             tracing::warn!(
                 target: "dynamo_llm::request_trace",
+                records,
                 %error,
                 "request trace s3: finalize gzip batch failed; discarding"
             );
@@ -291,10 +325,12 @@ async fn upload_ready_batch(uploader: &Arc<S3Uploader>, batch: &mut JsonlBatch, 
         // the operation timeout). The batch is dropped here rather
         // than requeued; a persistent retry buffer is a follow-up concern
         // tracked in the S3 layout PR.
+        note_dropped_records(dropped, records, "upload_failed");
         tracing::warn!(
             target: "dynamo_llm::request_trace",
             key = %key,
             batch_bytes,
+            records,
             %error,
             "request trace s3: put_object failed after retries; batch discarded"
         );
@@ -397,6 +433,10 @@ impl JsonlBatch {
 
     fn uncompressed_bytes(&self) -> u64 {
         self.raw.len() as u64
+    }
+
+    fn records(&self) -> u64 {
+        self.lines
     }
 
     fn push(&mut self, record: &RequestTraceRecord) -> Result<()> {
@@ -651,6 +691,7 @@ mod tests {
 
         let dropped = sink.dropped.load(Ordering::Relaxed);
         assert_eq!(dropped, (total - capacity) as u64);
+        assert_eq!(sink.dropped_records(), dropped);
     }
 
     #[test]
@@ -662,5 +703,43 @@ mod tests {
             assert!(!sink.note_dropped("channel_full"));
         }
         assert_eq!(sink.dropped.load(Ordering::Relaxed), 1001);
+    }
+
+    fn batch_of(records: usize) -> JsonlBatch {
+        let mut batch = JsonlBatch::new();
+        for _ in 0..records {
+            batch.push(&sample_record()).unwrap();
+        }
+        batch
+    }
+
+    #[tokio::test]
+    async fn failed_upload_counts_every_record_in_the_batch() {
+        // The uploader builds its key from the prefix, and an empty path
+        // segment makes `put_object` reject the key, so this reaches the same
+        // failure branch a refused or timed-out `PutObject` takes.
+        let uploader = Arc::new(S3Uploader {
+            store: Arc::new(InMemory::new()),
+            options: test_options("traces//bad"),
+        });
+        let mut batch = batch_of(7);
+        let dropped = AtomicU64::new(0);
+        let mut seq = 0;
+
+        upload_ready_batch(&uploader, &mut batch, &mut seq, &dropped).await;
+
+        assert_eq!(dropped.load(Ordering::Relaxed), 7);
+    }
+
+    #[tokio::test]
+    async fn successful_upload_counts_no_drops() {
+        let uploader = Arc::new(test_uploader("traces"));
+        let mut batch = batch_of(7);
+        let dropped = AtomicU64::new(0);
+        let mut seq = 0;
+
+        upload_ready_batch(&uploader, &mut batch, &mut seq, &dropped).await;
+
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
     }
 }
