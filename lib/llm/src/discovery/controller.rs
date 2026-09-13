@@ -47,6 +47,8 @@ pub(crate) struct DesiredInstance {
     pub(crate) group_key: GroupKey,
     pub(crate) mdc_checksum: String,
     pub(crate) projection_fingerprint: String,
+    /// Digest of this worker's Qwen video prompt-expansion contract.
+    pub(crate) video_contract: Option<String>,
 }
 
 impl DesiredInstance {
@@ -55,12 +57,35 @@ impl DesiredInstance {
     }
 }
 
+/// Returns the cohort's shared contract, if every member publishes one.
+///
+/// A WorkerSet has one video-routing processor, so exact video routing is
+/// enabled only when all members agree.
+fn cohort_video_contract(members: &[DesiredInstance]) -> Option<String> {
+    let mut members = members.iter();
+    let agreed = members.next()?.video_contract.clone()?;
+    members
+        .all(|member| member.video_contract.as_deref() == Some(agreed.as_str()))
+        .then_some(agreed)
+}
+
+/// Identifies a cohort's active video contract without changing its MDC checksum.
+fn cohort_fingerprint(mdc_checksum: &str, video_contract: Option<&str>) -> String {
+    match video_contract {
+        Some(contract) => format!("{mdc_checksum}\0video_contract\0{contract}"),
+        None => mdc_checksum.to_string(),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct GroupSpec {
     pub(crate) key: GroupKey,
     pub(crate) mdc_checksum: String,
+    pub(crate) fingerprint: String,
     pub(crate) generation: u64,
     pub(crate) representative: DesiredInstance,
+    /// Contract shared by the cohort, if any.
+    pub(crate) video_contract: Option<String>,
 }
 
 #[async_trait]
@@ -95,6 +120,14 @@ pub(crate) trait ControllerHost: Send + Sync + 'static {
         adapters: &[DesiredInstance],
     ) -> anyhow::Result<()>;
 
+    fn replace_prepared_group(
+        &self,
+        spec: &GroupSpec,
+        prepared: Self::Prepared,
+        members: &[DesiredInstance],
+        adapters: &[DesiredInstance],
+    ) -> anyhow::Result<()>;
+
     fn remove_group(&self, key: &GroupKey);
 
     fn discard_prepared(&self, prepared: Self::Prepared);
@@ -107,11 +140,13 @@ enum GroupStatus {
     Idle,
     Queued {
         mdc_checksum: String,
+        committed_members: Option<BTreeSet<String>>,
     },
     Building {
         mdc_checksum: String,
         generation: u64,
         cancellation: CancellationToken,
+        committed_members: Option<BTreeSet<String>>,
     },
     Ready {
         mdc_checksum: String,
@@ -120,10 +155,12 @@ enum GroupStatus {
     Retrying {
         mdc_checksum: String,
         deadline: Instant,
+        committed_members: Option<BTreeSet<String>>,
     },
     Blocked {
         mdc_checksum: String,
         deadline: Instant,
+        committed_members: Option<BTreeSet<String>>,
     },
     BlockedReady {
         mdc_checksum: String,
@@ -340,6 +377,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         if let Some(existing) = self.desired.get(&instance.key) {
             if existing.mdc_checksum == instance.mdc_checksum
                 && existing.projection_fingerprint == instance.projection_fingerprint
+                && existing.video_contract == instance.video_contract
             {
                 // A repeated registration still confirms liveness after an older snapshot.
                 self.record_mutation(instance.key.clone());
@@ -435,26 +473,46 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             .selected_checksum()
             .expect("non-empty group has a cohort")
             .to_string();
-        if status_checksum(&old_status).is_some_and(|previous| previous != mdc_checksum) {
-            group.admission_tx.send_replace(Vec::new());
+        let member_keys = group.cohorts[&mdc_checksum].clone();
+        let members = self.members(&member_keys);
+        let fingerprint =
+            cohort_fingerprint(&mdc_checksum, cohort_video_contract(&members).as_deref());
+        let fingerprint_changed =
+            status_checksum(&old_status).is_some_and(|previous| previous != fingerprint);
+        let mut retained_commit = status_committed_members(&old_status).cloned();
+        if fingerprint_changed {
+            retained_commit = retained_commit.filter(|committed_members| {
+                committed_members == &member_keys
+                    && (status_checksum(&old_status) == Some(mdc_checksum.as_str())
+                        || status_checksum(&old_status).is_some_and(|previous| {
+                            previous
+                                .strip_prefix(mdc_checksum.as_str())
+                                .is_some_and(|suffix| suffix.starts_with("\0video_contract\0"))
+                        }))
+            });
             cancel_build(&old_status);
-            if status_has_commit(&old_status) {
-                self.host.remove_group(key);
+            if retained_commit.is_some() {
+                let (admission_tx, _) = watch::channel(Vec::new());
+                group.admission_tx = admission_tx;
+            } else {
+                group.admission_tx.send_replace(Vec::new());
+                if status_has_commit(&old_status) {
+                    self.host.remove_group(key);
+                }
+                // Retained pipeline clients must never observe the successor's IDs.
+                let (admission_tx, _) = watch::channel(Vec::new());
+                group.admission_tx = admission_tx;
             }
-            // Retained pipeline clients must never observe the successor's IDs.
-            let (admission_tx, _) = watch::channel(Vec::new());
-            group.admission_tx = admission_tx;
             group.reported_rejections.clear();
             group.retry_attempt = 0;
         }
         group.report_rejections(key);
-        let member_keys = group.cohorts[&mdc_checksum].clone();
-        let members = self.members(&member_keys);
         let admitted = admitted_ids(&members);
         if !matches!(
             &old_status,
             GroupStatus::Ready { .. } | GroupStatus::BlockedReady { .. }
-        ) {
+        ) || (fingerprint_changed && retained_commit.is_some())
+        {
             group.admission_tx.send_replace(admitted);
         }
 
@@ -467,7 +525,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 mdc_checksum: ready_checksum,
                 committed_members,
                 ..
-            } if ready_checksum == mdc_checksum => {
+            } if ready_checksum == fingerprint => {
                 let current_members = member_keys;
                 let old_admitted = group.admission_tx.borrow().clone();
                 let new_admitted = admitted_ids(&members);
@@ -485,7 +543,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                         group.admission_tx.send_replace(new_admitted);
                         group.retry_attempt = 0;
                         GroupStatus::Ready {
-                            mdc_checksum,
+                            mdc_checksum: fingerprint,
                             committed_members: current_members,
                         }
                     }
@@ -500,7 +558,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                             "Discovery-group replacement blocked; retaining the last safe commit"
                         );
                         GroupStatus::BlockedReady {
-                            mdc_checksum,
+                            mdc_checksum: fingerprint,
                             committed_members,
                             deadline: Instant::now() + delay,
                         }
@@ -515,8 +573,9 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                             "Discovery-group membership replacement failed; withdrawing stale commit"
                         );
                         GroupStatus::Blocked {
-                            mdc_checksum,
+                            mdc_checksum: fingerprint,
                             deadline: Instant::now() + retry_delay(group.retry_attempt),
+                            committed_members: None,
                         }
                     }
                 }
@@ -525,33 +584,46 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 mdc_checksum: building_checksum,
                 generation,
                 cancellation,
-            } if building_checksum == mdc_checksum => GroupStatus::Building {
-                mdc_checksum,
+                committed_members,
+            } if building_checksum == fingerprint => GroupStatus::Building {
+                mdc_checksum: fingerprint,
                 generation,
                 cancellation,
+                committed_members,
             },
             GroupStatus::Queued {
                 mdc_checksum: queued_checksum,
-            } if queued_checksum == mdc_checksum => GroupStatus::Queued { mdc_checksum },
+                committed_members,
+            } if queued_checksum == fingerprint => GroupStatus::Queued {
+                mdc_checksum: fingerprint,
+                committed_members,
+            },
             GroupStatus::Retrying {
                 mdc_checksum: retry_checksum,
                 deadline,
-            } if retry_checksum == mdc_checksum && !desired_changed => GroupStatus::Retrying {
-                mdc_checksum,
+                committed_members,
+            } if retry_checksum == fingerprint && !desired_changed => GroupStatus::Retrying {
+                mdc_checksum: fingerprint,
                 deadline,
+                committed_members,
             },
             GroupStatus::Blocked {
                 mdc_checksum: blocked_checksum,
                 deadline,
-            } if blocked_checksum == mdc_checksum && !desired_changed => GroupStatus::Blocked {
-                mdc_checksum,
+                committed_members,
+            } if blocked_checksum == fingerprint && !desired_changed => GroupStatus::Blocked {
+                mdc_checksum: fingerprint,
                 deadline,
+                committed_members,
             },
             previous => {
                 cancel_build(&previous);
                 group.admission_tx.send_replace(admitted_ids(&members));
                 group.retry_attempt = 0;
-                GroupStatus::Queued { mdc_checksum }
+                GroupStatus::Queued {
+                    mdc_checksum: fingerprint,
+                    committed_members: retained_commit,
+                }
             }
         };
         self.groups.insert(key.clone(), group);
@@ -630,20 +702,30 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             let Some(group) = self.groups.get_mut(&key) else {
                 continue;
             };
-            let GroupStatus::Queued { mdc_checksum } = &group.status else {
+            let GroupStatus::Queued { .. } = &group.status else {
                 continue;
             };
-            let mdc_checksum = mdc_checksum.clone();
-            let Some(member_key) = group
-                .cohorts
-                .get(&mdc_checksum)
-                .and_then(|members| members.first())
-            else {
+            let committed_members = match &group.status {
+                GroupStatus::Queued {
+                    committed_members, ..
+                } => committed_members.clone(),
+                _ => unreachable!("queued status was checked above"),
+            };
+            let Some(mdc_checksum) = group.selected_checksum().map(str::to_string) else {
                 continue;
             };
-            let Some(representative) = self.desired.get(member_key).cloned() else {
+            let Some(member_keys) = group.cohorts.get(&mdc_checksum) else {
                 continue;
             };
+            let members = member_keys
+                .iter()
+                .filter_map(|member_key| self.desired.get(member_key).cloned())
+                .collect::<Vec<_>>();
+            let Some(representative) = members.first().cloned() else {
+                continue;
+            };
+            let video_contract = cohort_video_contract(&members);
+            let fingerprint = cohort_fingerprint(&mdc_checksum, video_contract.as_deref());
 
             let cancellation = CancellationToken::new();
             let generation = self.next_build_generation;
@@ -651,13 +733,16 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             let spec = GroupSpec {
                 key: key.clone(),
                 mdc_checksum: mdc_checksum.clone(),
+                fingerprint: fingerprint.clone(),
                 generation,
                 representative,
+                video_contract,
             };
             group.status = GroupStatus::Building {
-                mdc_checksum,
+                mdc_checksum: fingerprint,
                 generation,
                 cancellation: cancellation.clone(),
+                committed_members,
             };
 
             let host = self.host.clone();
@@ -668,7 +753,11 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                     tokio::select! {
                         biased;
                         _ = cancellation.cancelled() => BuildOutcome::Cancelled,
-                        result = host.prepare(task_spec.clone(), admitted_ids, cancellation.clone()) => {
+                        result = host.prepare(
+                            task_spec.clone(),
+                            admitted_ids,
+                            cancellation.clone(),
+                        ) => {
                             match result {
                                 Ok(prepared) => BuildOutcome::Prepared(prepared),
                                 Err(error) => BuildOutcome::Failed(error),
@@ -678,9 +767,9 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 });
                 let outcome = match future.catch_unwind().await {
                     Ok(outcome) => outcome,
-                    Err(_) => BuildOutcome::Failed(anyhow::anyhow!(
-                        "model materialization panicked"
-                    )),
+                    Err(_) => {
+                        BuildOutcome::Failed(anyhow::anyhow!("model materialization panicked"))
+                    }
                 };
                 BuildResult {
                     spec: task_spec,
@@ -704,9 +793,24 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 mdc_checksum,
                 generation,
                 ..
-            } if mdc_checksum == &result.spec.mdc_checksum && *generation == result.spec.generation
+            } if mdc_checksum == &result.spec.fingerprint && *generation == result.spec.generation
         ) && group.selected_checksum() == Some(result.spec.mdc_checksum.as_str())
-            && group.cohorts.contains_key(&result.spec.mdc_checksum);
+            && group.cohorts.contains_key(&result.spec.mdc_checksum)
+            && group
+                .cohorts
+                .get(&result.spec.mdc_checksum)
+                .is_some_and(|member_keys| {
+                    cohort_fingerprint(
+                        &result.spec.mdc_checksum,
+                        cohort_video_contract(&self.members(member_keys)).as_deref(),
+                    ) == result.spec.fingerprint
+                });
+        let committed_members = match &group.status {
+            GroupStatus::Building {
+                committed_members, ..
+            } => committed_members.clone(),
+            _ => None,
+        };
         if !is_current {
             if let BuildOutcome::Prepared(prepared) = result.outcome {
                 self.host.discard_prepared(prepared);
@@ -725,14 +829,18 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 let members = self.members(&member_keys);
                 let adapters = self.adapters_for_members(&member_keys);
                 group.admission_tx.send_replace(admitted_ids(&members));
-                match self
-                    .host
-                    .commit_group(&result.spec, prepared, &members, &adapters)
-                {
+                let commit_result = if committed_members.is_some() {
+                    self.host
+                        .replace_prepared_group(&result.spec, prepared, &members, &adapters)
+                } else {
+                    self.host
+                        .commit_group(&result.spec, prepared, &members, &adapters)
+                };
+                match commit_result {
                     Ok(()) => {
                         group.retry_attempt = 0;
                         group.status = GroupStatus::Ready {
-                            mdc_checksum: result.spec.mdc_checksum,
+                            mdc_checksum: result.spec.fingerprint,
                             committed_members: member_keys,
                         };
                     }
@@ -745,8 +853,9 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                         );
                         group.retry_attempt = group.retry_attempt.saturating_add(1);
                         group.status = GroupStatus::Blocked {
-                            mdc_checksum: result.spec.mdc_checksum,
+                            mdc_checksum: result.spec.fingerprint,
                             deadline: Instant::now() + retry_delay(group.retry_attempt),
+                            committed_members,
                         };
                     }
                 }
@@ -762,13 +871,15 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                     "Model materialization failed; scheduling retry"
                 );
                 group.status = GroupStatus::Retrying {
-                    mdc_checksum: result.spec.mdc_checksum,
+                    mdc_checksum: result.spec.fingerprint,
                     deadline: Instant::now() + delay,
+                    committed_members,
                 };
             }
             BuildOutcome::Cancelled => {
                 group.status = GroupStatus::Queued {
-                    mdc_checksum: result.spec.mdc_checksum,
+                    mdc_checksum: result.spec.fingerprint,
+                    committed_members,
                 };
             }
         }
@@ -791,15 +902,17 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         let now = Instant::now();
         let mut retained_retries = Vec::new();
         for (key, group) in &mut self.groups {
-            let (mdc_checksum, deadline) = match &group.status {
+            let (mdc_checksum, deadline, committed_members) = match &group.status {
                 GroupStatus::Retrying {
                     mdc_checksum,
                     deadline,
+                    committed_members,
                 }
                 | GroupStatus::Blocked {
                     mdc_checksum,
                     deadline,
-                } => (mdc_checksum, deadline),
+                    committed_members,
+                } => (mdc_checksum, deadline, committed_members.clone()),
                 GroupStatus::BlockedReady {
                     mdc_checksum,
                     committed_members,
@@ -817,6 +930,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             if *deadline <= now {
                 group.status = GroupStatus::Queued {
                     mdc_checksum: mdc_checksum.clone(),
+                    committed_members,
                 };
             }
         }
@@ -928,7 +1042,7 @@ fn cancel_build(status: &GroupStatus) {
 fn status_checksum(status: &GroupStatus) -> Option<&str> {
     match status {
         GroupStatus::Idle => None,
-        GroupStatus::Queued { mdc_checksum }
+        GroupStatus::Queued { mdc_checksum, .. }
         | GroupStatus::Building { mdc_checksum, .. }
         | GroupStatus::Ready { mdc_checksum, .. }
         | GroupStatus::Retrying { mdc_checksum, .. }
@@ -938,10 +1052,31 @@ fn status_checksum(status: &GroupStatus) -> Option<&str> {
 }
 
 fn status_has_commit(status: &GroupStatus) -> bool {
-    matches!(
-        status,
-        GroupStatus::Ready { .. } | GroupStatus::BlockedReady { .. }
-    )
+    status_committed_members(status).is_some()
+}
+
+fn status_committed_members(status: &GroupStatus) -> Option<&BTreeSet<String>> {
+    match status {
+        GroupStatus::Ready {
+            committed_members, ..
+        }
+        | GroupStatus::BlockedReady {
+            committed_members, ..
+        } => Some(committed_members),
+        GroupStatus::Queued {
+            committed_members, ..
+        }
+        | GroupStatus::Building {
+            committed_members, ..
+        }
+        | GroupStatus::Retrying {
+            committed_members, ..
+        }
+        | GroupStatus::Blocked {
+            committed_members, ..
+        } => committed_members.as_ref(),
+        GroupStatus::Idle => None,
+    }
 }
 
 async fn wait_for_deadline(deadline: Option<Instant>) {
@@ -1095,6 +1230,7 @@ mod tests {
                 group_key: group_key(),
                 mdc_checksum: card.mdcsum().to_string(),
                 projection_fingerprint: card.source_path.clone().unwrap(),
+                video_contract: None,
                 card,
             }))
         }
@@ -1169,6 +1305,17 @@ mod tests {
             Ok(())
         }
 
+        fn replace_prepared_group(
+            &self,
+            spec: &GroupSpec,
+            prepared: Self::Prepared,
+            members: &[DesiredInstance],
+            adapters: &[DesiredInstance],
+        ) -> anyhow::Result<()> {
+            let Prepared(_build) = prepared;
+            self.replace_group(&spec.key, members, adapters)
+        }
+
         fn remove_group(&self, key: &GroupKey) {
             self.committed.lock().unwrap().remove(&key.id());
             self.adapters.lock().unwrap().remove(&key.id());
@@ -1215,6 +1362,7 @@ mod tests {
             mdc_checksum: card.mdcsum().to_string(),
             card,
             projection_fingerprint: mdc_checksum.to_string(),
+            video_contract: None,
         }
     }
 

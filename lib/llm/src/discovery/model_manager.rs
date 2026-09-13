@@ -799,6 +799,7 @@ impl ModelManager {
     pub(crate) fn replace_discovery_group(
         &self,
         group_id: &str,
+        replacement_worker_set: Option<WorkerSet>,
         members: Vec<(String, ModelDeploymentCard)>,
         adapters: Vec<(String, ModelDeploymentCard)>,
     ) -> anyhow::Result<()> {
@@ -808,8 +809,13 @@ impl ModelManager {
             .get(group_id)
             .ok_or_else(|| anyhow::anyhow!("committed discovery group {group_id:?} not found"))?;
         let primary = group.primary.clone();
+        let namespace = group.namespace.clone();
         let worker_set_key = group.worker_set_key.clone();
-        let worker_set = group.worker_set.clone();
+        let aliases = group.aliases.clone();
+        let replacing_worker_set = replacement_worker_set.is_some();
+        let worker_set = replacement_worker_set
+            .map(Arc::new)
+            .unwrap_or_else(|| group.worker_set.clone());
         let previous_member_keys = group.cards.keys().cloned().collect::<HashSet<_>>();
         let previous_adapter_keys = group.adapters.keys().cloned().collect::<HashSet<_>>();
         let previous_adapter_names = group
@@ -822,6 +828,10 @@ impl ModelManager {
         anyhow::ensure!(
             !members.is_empty(),
             "cannot replace with an empty discovery group"
+        );
+        anyhow::ensure!(
+            worker_set.namespace() == namespace,
+            "replacement WorkerSet namespace does not match committed discovery group"
         );
         self.validate_adapter_claims(&primary, adapters.iter().map(|(_, card)| card))?;
         let members = members.into_iter().collect::<HashMap<_, _>>();
@@ -842,6 +852,21 @@ impl ModelManager {
             })
             .collect::<HashMap<_, _>>();
         let lora_before = self.lora_projection_locked();
+
+        if replacing_worker_set {
+            let primary_model = self.get_or_create_model(&primary);
+            if let Some(displaced_worker_set) = primary_model.get_worker_set(&worker_set_key) {
+                Self::clear_worker_set_targets(&displaced_worker_set);
+            }
+            primary_model.add_worker_set(worker_set_key.clone(), worker_set.clone());
+            for alias in &aliases {
+                let alias_model = self.get_or_create_model(alias);
+                if let Some(displaced_worker_set) = alias_model.get_worker_set(&worker_set_key) {
+                    Self::clear_worker_set_targets(&displaced_worker_set);
+                }
+                alias_model.add_worker_set(worker_set_key.clone(), worker_set.clone());
+            }
+        }
 
         for key in previous_member_keys.difference(&desired_member_keys) {
             self.cards.remove(key);
@@ -864,6 +889,9 @@ impl ModelManager {
             .expect("non-empty members checked above");
         group.cards = members;
         group.adapters = adapters;
+        if replacing_worker_set {
+            group.worker_set = worker_set;
+        }
         drop(group);
 
         for (name, adapter_view) in adapter_views {
@@ -878,6 +906,9 @@ impl ModelManager {
         }
         let lora_after = self.lora_projection_locked();
         self.publish_lora_projection_locked(Self::union_lora_projection(&lora_before, &lora_after));
+        if replacing_worker_set {
+            self.reconcile_discovery_topology(&primary, &namespace);
+        }
         self.publish_catalog_locked();
         self.publish_lora_projection_locked(lora_after);
         Ok(())
