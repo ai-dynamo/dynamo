@@ -40,6 +40,7 @@ from dynamo.sglang._compat import (
     resolved_server_args,
 )
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
+from dynamo.sglang.elastic_ep_preflight import check_elastic_ep_backend
 
 configure_dynamo_logging()
 PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
@@ -440,6 +441,16 @@ async def parse_args(args: list[str]) -> Config:
         args_dict = vars(parsed_args)
         args_dict["disaggregation_bootstrap_port"] = bootstrap_port
         parsed_args = Namespace(**args_dict)
+
+    # Read off the parsed flags rather than ServerArgs: ServerArgs.from_cli_args
+    # downloads the model, and the diffusion and video paths build a stub that
+    # carries neither flag, so both would leave this unchecked. parsed_args
+    # comes from ServerArgs.add_cli_args, which declares both options across
+    # the supported SGLang releases.
+    check_elastic_ep_backend(
+        parsed_args.elastic_ep_backend,
+        parsed_args.enable_dp_attention,
+    )
 
     # Dynamo argument processing
     # If an endpoint is provided, validate and use it
