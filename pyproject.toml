@@ -457,6 +457,15 @@ follow_imports = "skip"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+# OpenCV: the vLLM runtime image ships a source build with no video backend
+# (common/multimodal/video_loader.py reads its build information), and no other
+# image ships it at all. Absent from the lint env and ships no type stubs, so
+# mypy would raise import-not-found on the guarded `import cv2`.
+module = ["cv2", "cv2.*"]
+follow_imports = "skip"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 # WAR mypy 1.18.x crash with numpy 1.26.x stubs:
 # "Should never get here in normal mode, got TypeAlias:numpy.float64 instead of TypeInfo"
 module = ["numpy", "numpy.*"]

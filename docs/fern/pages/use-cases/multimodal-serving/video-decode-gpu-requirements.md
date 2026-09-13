@@ -12,8 +12,9 @@ Other formats — VP8, VP9 and AV1 — have **no video-input decoder** in the sh
 The in-tree VP8/VP9 FFmpeg serves the video *output* (generation) path; it is not wired to
 video input, and the Rust `media-ffmpeg` decoder is not built into these images. Video
 input decodes through Python carriers (OpenCV, PyAV, decord) that the images deliberately
-omit, so a VP8/VP9/AV1 clip fails with an unsupported-codec error unless one of those
-packages is installed alongside.
+omit — the vLLM images do ship OpenCV, but built without any video backend, for still-image
+work only — so a VP8/VP9/AV1 clip fails with an unsupported-codec error unless a carrier
+that decodes video is installed alongside.
 
 This page covers which GPUs provide NVDEC, what the container must expose, and how
 Dynamo behaves when hardware decode is unavailable.
@@ -133,8 +134,9 @@ to the software decode path where one exists.
 > [!IMPORTANT]
 > In the shipped images there is no software decode path for video input, for any format.
 > The Python carriers that decode video input (OpenCV, PyAV, decord) are deliberately not
-> installed, and the in-tree VP8/VP9 FFmpeg serves the video *output* path rather than
-> input. So if NVDEC is unavailable, H.264 and H.265 fail with an unsupported-codec error
+> installed — the vLLM images ship OpenCV built without a video backend, which resizes
+> still images and opens no video — and the in-tree VP8/VP9 FFmpeg serves the video
+> *output* path rather than input. So if NVDEC is unavailable, H.264 and H.265 fail with an unsupported-codec error
 > — and VP8, VP9 and AV1 fail the same way whether NVDEC is available or not, since NVDEC
 > does not decode them either.
 >
@@ -148,8 +150,8 @@ To decode a format NVDEC does not cover — or H.264/H.265 on a host with no NVD
 explicitly install the backend's decode package at the validated version bounds:
 
 ```bash
-# vLLM: video + audio input
-pip install --no-deps 'opencv-python-headless>=4.13.0.92,<5' 'av>=18.0.0,<19'
+# vLLM: audio input
+pip install --no-deps 'av>=18.0.0,<19'
 
 # SGLang: video input
 pip install --no-deps 'decord2>=3.4.0,<4'
@@ -158,9 +160,20 @@ pip install --no-deps 'decord2>=3.4.0,<4'
 pip install --no-deps 'opencv-python-headless>=4.13.0.92,<5'
 ```
 
+vLLM **video** input is the exception, because those images already ship OpenCV built
+without a video backend. Adding video decode there means replacing that build with the
+binary wheel of the same version, not installing a range:
+
+```bash
+VERSION=$(pip show opencv-python-headless | awk '/^Version:/{print $2}')
+pip install --no-deps --force-reinstall --only-binary opencv-python-headless \
+  "opencv-python-headless==${VERSION}"
+```
+
 Nothing installs automatically — this is a deliberate operator step. The images also ship
 an installer with the same bounds plus idempotency and air-gap support
-(`python -m dynamo.common.utils.install_media_decoders <backend>`); see
+(`python -m dynamo.common.utils.install_media_decoders <backend>`). It does not cover the
+vLLM OpenCV case above: that package is already importable, so the installer skips it. See
 [Additional Media Decoders](additional-media-decoders.md) for the full workflow,
 including baking the install into an image layer for Kubernetes.
 
