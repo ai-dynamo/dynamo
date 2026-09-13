@@ -45,6 +45,8 @@ mistral-common>=1.11.2
 mypy==1.18.2
 # For NATS object store verification in router tests
 nats-py==2.12.0
+# Router benchmark tests import graph synthesis during whole-tree collection.
+networkx
 openai==2.32.0  # for Fault Tolerance migration tests
 # Protobuf definitions the OTLP parity receiver decodes; see grpcio above.
 # Version-matched to the opentelemetry-* pins in requirements.common.txt.
