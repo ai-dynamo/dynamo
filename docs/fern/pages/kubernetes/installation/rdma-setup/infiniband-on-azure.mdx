@@ -19,7 +19,7 @@ The Network Operator and NicClusterPolicy steps in this guide are based on the [
 - At least **2 GPU nodes** to enable cross-node RDMA communication
 - **ND-series VMs** with Mellanox ConnectX InfiniBand NICs (e.g., `Standard_ND96asr_v4`, `Standard_ND96isr_H100_v5`)
 - **Ubuntu OS** on the node pool (required for NVIDIA driver compatibility)
-- GPU driver installation **skipped** on the node pool (`--skip-gpu-driver-install`) — see [GPU Node Pool Setup](../managed-kubernetes/azure/aks-setup.mdx#step-2-add-a-gpu-node-pool)
+- GPU driver installation **skipped** on the node pool (`--gpu-driver none`) — see [GPU Node Pool Setup](../managed-kubernetes/azure/aks-setup.mdx#step-2-add-a-gpu-node-pool). This guide has the GPU Operator build and manage the driver (Step 5) so that it is compiled with RDMA support. A node takes its driver from either the host or the Operator's driver daemonset, not both.
 
 **Register the AKS InfiniBand feature** to ensure nodes land on the same physical InfiniBand network:
 
@@ -40,6 +40,12 @@ The RDMA setup involves five components installed in this order:
 3. **IB Node Configuration** — Loads InfiniBand kernel modules and sets memlock limits
 4. **RDMA Shared Device Plugin** — Exposes InfiniBand NICs to pods as a Kubernetes resource
 5. **GPU Operator** — Installed with RDMA-specific settings (NFD disabled, GPUDirect RDMA enabled, host MOFED)
+
+<Note>
+Steps 1 and 2 install the OFED/DOCA driver, which the AKS node image does not ship — the Network Operator is what makes the Mellanox NICs usable for RDMA. Step 5 is only needed because this guide manages GPU drivers with the GPU Operator.
+
+Azure documents a second, simpler option: keep the **AKS-managed GPU driver** (create the node pool without `--gpu-driver none`) and load `nvidia_peermem` with Azure's [`nvidia-peermem-reloader`](https://github.com/Azure/aks-rdma-infiniband/tree/main/configs/nvidia-peermem-reloader) DaemonSet, which drops Step 5 entirely. A node takes its driver from one source or the other, so if you still want the Operator's other components on that path, install it with [`driver.enabled=false`](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html) so it does not manage the driver. See [GPU Drivers](https://github.com/Azure/aks-rdma-infiniband/blob/main/website/docs/configurations/02-gpu-drivers.md) in the Azure RDMA repo for the trade-offs. The steps below cover the GPU Operator path.
+</Note>
 
 <Steps toc={true}>
 <Step title="Install the NVIDIA Network Operator" id="step-1-install-the-nvidia-network-operator">
@@ -96,9 +102,13 @@ This targets nodes with Mellanox NICs (`feature.node.kubernetes.io/pci-15b3.pres
 Wait for the MOFED driver DaemonSet to finish installing on all nodes (this may take several minutes):
 
 ```bash
-kubectl get pods -n network-operator -l app=mofed-ubuntu22.04-ds -w
+kubectl get pods -n network-operator -l nvidia.com/ofed-driver -w
 # Wait until all pods show Running
 ```
+
+<Note>
+Select these pods by the `nvidia.com/ofed-driver` label rather than by name. The Network Operator names the DaemonSet `mofed-<os><version>-<kernel-hash>-ds`, so the name changes with the node OS version and kernel — and the pods' `app` label omits the `-ds` suffix that the DaemonSet name carries.
+</Note>
 
 </Step>
 <Step title="Deploy the IB Node Configuration DaemonSet" id="step-3-deploy-the-ib-node-configuration-daemonset">
@@ -191,7 +201,7 @@ kubectl get pods -n kube-system -l app=ib-node-config -w
 <Step title="Deploy the RDMA Shared Device Plugin" id="step-4-deploy-the-rdma-shared-device-plugin">
 The RDMA Shared Device Plugin exposes InfiniBand NICs as a Kubernetes extended resource so pods can request RDMA access.
 
-Create the ConfigMap with the device plugin configuration:
+Create `rdma-configmap.yaml` with the device plugin configuration:
 
 ```yaml
 apiVersion: v1
@@ -215,7 +225,7 @@ data:
     }
 ```
 
-Create the DaemonSet:
+Create `rdma-shared-dp-ds.yaml`:
 
 ```yaml
 apiVersion: apps/v1
@@ -311,7 +321,7 @@ kubectl get pods -n gpu-operator -w
 **1. Check that MOFED driver pods are running on all InfiniBand nodes:**
 
 ```bash
-kubectl get pods -n network-operator -l app=mofed-ubuntu22.04-ds
+kubectl get pods -n network-operator -l nvidia.com/ofed-driver
 ```
 
 **2. Check that IB node config pods completed initialization:**
@@ -385,22 +395,16 @@ If you see `ENOMEM` errors from `ibv_reg_mr` and `ib-node-config` is running, ve
   ```
 - If limits are not unlimited, the ib-node-config DaemonSet needs to be re-applied and services restarted
 
-**GPUDirect RDMA not working — `nvidia_peermem` module missing:**
+**GPUDirect RDMA not working — `nvidia_peermem` module not loaded:**
 
-ND-series nodes (including ND H100 v5) do **not** ship `nvidia_peermem` in the host OS. This module is required for InfiniBand adapters to directly read/write GPU memory — without it, RDMA transfers fall back to staging through host memory.
+`nvidia_peermem` lets InfiniBand adapters read and write GPU memory directly — without it, RDMA transfers fall back to staging through host memory.
 
-Verify whether the module is loaded:
+The module ships **inside the NVIDIA GPU driver package** (since driver R470) rather than in the node OS image, and nothing loads it automatically — it must be loaded explicitly. See [GPUDirect RDMA and GPUDirect Storage](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/gpu-operator-rdma.html) for how kernel-mode support is provided. Where the module lives therefore depends on which driver source the node pool uses:
 
-```bash
-# Check on a GPU node via a privileged pod or node shell
-lsmod | grep nvidia_peermem
-# If empty, the module is not loaded
+- **GPU Operator (this guide, `--gpu-driver none`)** — the host has no NVIDIA driver at all, so `nvidia_peermem` is absent from the host's `/lib/modules` by design. The module is built and loaded inside the `nvidia-driver-daemonset` instead.
+- **AKS-managed GPU driver** — the driver install places `nvidia_peermem` in the host's `/lib/modules` (as `updates/dkms/nvidia-peermem.ko`), but does not load it. Loading it also requires an `ib_core` that exposes the peer-memory API, which the DOCA/OFED stack provides; on a node with only the inbox `ib_core`, `modprobe nvidia_peermem` fails with `Invalid argument` even though the module file is present.
 
-modinfo nvidia_peermem
-# If "Module not found", it is also not present in the host's /lib/modules
-```
-
-With the GPU Operator managing drivers (`driver.rdma.enabled=true`), `nvidia_peermem` is built and loaded by the `nvidia-driver-daemonset` — it lives in the driver pod's `/lib/modules`, not the host's native kernel modules. Verify the driver daemonset is loading it:
+Verify the module inside the driver daemonset:
 
 ```bash
 kubectl exec -n gpu-operator $(kubectl get pod -n gpu-operator -l app=nvidia-driver-daemonset -o jsonpath='{.items[0].metadata.name}') -- lsmod | grep nvidia_peermem
@@ -412,8 +416,10 @@ If this returns empty, ensure `driver.rdma.enabled=true` and `driver.rdma.useHos
 kubectl rollout restart daemonset/nvidia-driver-daemonset -n gpu-operator
 ```
 
+Running `lsmod` or `modinfo nvidia_peermem` on the host is not a meaningful check on this path — the module belongs to the driver container, so an empty result there is expected and does not indicate a problem.
+
 <Note>
-The [nvidia-peermem-reloader](https://github.com/Azure/aks-rdma-infiniband/tree/main/configs/nvidia-peermem-reloader) DaemonSet from the Azure RDMA repo is designed for clusters using **AKS-managed GPU drivers** (without the GPU Operator). It simply runs `modprobe nvidia-peermem` — which will fail on ND H100 v5 nodes because the host OS doesn't include the module. When using the GPU Operator (recommended), the operator handles `nvidia_peermem` automatically via `driver.rdma.enabled=true`.
+The [nvidia-peermem-reloader](https://github.com/Azure/aks-rdma-infiniband/tree/main/configs/nvidia-peermem-reloader) DaemonSet from the Azure RDMA repo is the fix for the **AKS-managed GPU driver** case, where the module is present on the host but unloaded. It mounts the host's `/lib/modules` and runs `modprobe nvidia-peermem`. It has nothing to load on a `--gpu-driver none` node pool, since there is no host driver there — on this guide's path, `driver.rdma.enabled=true` handles `nvidia_peermem` inside the driver daemonset instead.
 </Note>
 
 ## See Also
