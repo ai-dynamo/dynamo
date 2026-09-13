@@ -181,3 +181,6 @@ fern/components/install-selector-data.ts
 
 # Optimization-run artifacts (EXP_ROOT lives at runs/<EXP_ID>/ in the repo root)
 /runs/
+
+# Agent skill-tool scratch: a per-session lease marker, never shared state.
+.agents/skills/.lease.json
