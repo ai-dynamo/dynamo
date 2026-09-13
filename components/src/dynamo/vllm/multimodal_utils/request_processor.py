@@ -54,6 +54,16 @@ VIDEO_URL_KEY = "video_url"
 AUDIO_URL_KEY = "audio_url"
 
 
+def _image_cache_scope(request: dict[str, Any]) -> str | None:
+    """Return the stable agent session, or None when it is unavailable."""
+    agent_context = request.get("agent_context")
+    if isinstance(agent_context, dict):
+        session_id = agent_context.get("session_id")
+        if isinstance(session_id, str) and session_id.strip():
+            return session_id.strip()
+    return None
+
+
 def mark_forwarded_mm_hashes_for_routing(
     mm_hashes: Sequence[str | None],
 ) -> list[str | None]:
@@ -560,7 +570,9 @@ class VllmMultimodalRequestProcessor:
             if image_key not in vllm_mm_data and image_items:
                 with _nvtx.annotate("mm_backend:image_download", color="green"):
                     images = await self.image_loader.load_image_batch(
-                        image_items, preserve_uuid_slots=True
+                        image_items,
+                        cache_scope=_image_cache_scope(request),
+                        preserve_uuid_slots=True,
                     )
                 if images:
                     if self.use_unified_vision_chunk:

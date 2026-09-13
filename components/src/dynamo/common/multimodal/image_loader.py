@@ -4,6 +4,7 @@
 import asyncio
 import base64
 import binascii
+import hashlib
 import logging
 import os
 from collections import OrderedDict
@@ -28,6 +29,7 @@ from ..http.url_validator import (
     UrlValidationPolicy,
     validate_media_url,
 )
+from .shared_image_cache import SharedImageCache, SharedImageCacheStats
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +73,7 @@ class ImageLoader:
         http_timeout: float = 30.0,
         enable_frontend_decoding: bool = False,
         url_policy: UrlValidationPolicy | None = None,
+        session_scoped_cache: bool | None = None,
     ):
         """
         Initialize the ImageLoader with caching, HTTP settings, and optional NIXL config for
@@ -85,11 +88,27 @@ class ImageLoader:
                 decoded images directly from frontend memory, bypassing standard
                 network transport. Defaults to False.
             url_policy: Policy for validating URLs. Defaults to UrlValidationPolicy.from_env().
+            session_scoped_cache: Include a caller-provided cache scope in local,
+                in-flight, and shared-cache keys. ``None`` (default) reads
+                DYN_MM_IMAGE_CACHE_SESSION_SCOPED (default off). When enabled,
+                HTTP loads without a scope bypass all image caches.
         """
         self._http_timeout = http_timeout
         self._cache_size = cache_size
+        if session_scoped_cache is None:
+            session_scoped_value = os.environ.get(
+                "DYN_MM_IMAGE_CACHE_SESSION_SCOPED", "0"
+            )
+            if session_scoped_value not in ("0", "1"):
+                raise ValueError(
+                    "DYN_MM_IMAGE_CACHE_SESSION_SCOPED must be '0' or '1', "
+                    f"got {session_scoped_value!r}"
+                )
+            session_scoped_cache = session_scoped_value == "1"
+        self._session_scoped_cache = session_scoped_cache
         self._image_cache: OrderedDict[str, Image.Image] = OrderedDict()
         self._inflight: dict[str, asyncio.Task[Image.Image]] = {}
+        self._shared_image_cache = SharedImageCache.from_env()
         self._enable_frontend_decoding = enable_frontend_decoding
         self._url_policy = url_policy or UrlValidationPolicy.from_env()
         # Lazy-init NIXL connector only when frontend decoding is enabled
@@ -99,6 +118,35 @@ class ImageLoader:
             run_async(
                 self._nixl_connector.initialize
             )  # Synchronously wait for async init
+
+    @property
+    def cache_entries(self) -> int:
+        """Current number of cached images (read by metrics export)."""
+        return len(self._image_cache)
+
+    @property
+    def shared_image_cache_stats(self) -> SharedImageCacheStats | None:
+        """Latency samples for the optional shared encoded-image cache."""
+        if self._shared_image_cache is None:
+            return None
+        return self._shared_image_cache.stats
+
+    def _cache_key(
+        self, normalized_url: str, cache_scope: str | None = None
+    ) -> str | None:
+        """Return the LRU/inflight/shared-cache key for a validated http(s) URL.
+
+        ``None`` means the caller must bypass all image caches: session
+        scoping is enabled but no valid scope was provided for this load.
+        """
+        url_key = normalized_url.lower()
+
+        if not self._session_scoped_cache:
+            return url_key
+        if cache_scope is None or not cache_scope.strip():
+            return None
+        scope_digest = hashlib.sha256(cache_scope.strip().encode("utf-8")).hexdigest()
+        return f"{scope_digest}:{url_key}"
 
     @staticmethod
     def _open_image_sync(image_data: BytesIO) -> Image.Image:
@@ -126,13 +174,29 @@ class ImageLoader:
                 self._image_cache.popitem(last=False)
             self._image_cache[key] = image
 
-    async def _fetch_and_process(self, image_url: str) -> Image.Image:
+    async def _fetch_and_process(self, key: str | None, image_url: str) -> Image.Image:
         """Fetch image via HTTP(S), decode with PIL, return RGB Image.
 
-        All exception normalization happens here so shared callers
-        see identical error types.
+        Checks the optional shared encoded-image cache before hitting the
+        origin and refills it after a successful origin fetch. A ``None`` key
+        bypasses the shared cache (session scoping without a valid scope).
+        All exception normalization happens here so shared callers see
+        identical error types.
         """
         try:
+            if self._shared_image_cache is not None and key is not None:
+                cached_content = await self._shared_image_cache.get(key)
+                if cached_content is not None:
+                    try:
+                        return await self._open_image(BytesIO(cached_content))
+                    except (Image.UnidentifiedImageError, ValueError) as exc:
+                        logger.warning(
+                            "Discarding invalid shared image cache entry for '%s': %s",
+                            image_url[:80],
+                            exc,
+                        )
+                        await self._shared_image_cache.delete(key)
+
             with _nvtx.annotate("mm:img:http_fetch", color="lime"):
                 content = await fetch_bytes(
                     image_url, self._http_timeout, policy=self._url_policy
@@ -141,7 +205,10 @@ class ImageLoader:
                     raise ValueError("Empty response content from image URL")
                 image_data = BytesIO(content)
 
-            return await self._open_image(image_data)
+            image = await self._open_image(image_data)
+            if self._shared_image_cache is not None and key is not None:
+                await self._shared_image_cache.put(key, content)
+            return image
 
         except HttpStatusError as e:
             logger.error(f"HTTP {e.status} loading image: '{image_url}'")
@@ -190,7 +257,7 @@ class ImageLoader:
     async def _fetch_and_cache(self, key: str, image_url: str) -> Image.Image:
         """Shared task: fetch, cache, then remove from _inflight."""
         try:
-            image = await self._fetch_and_process(image_url)
+            image = await self._fetch_and_process(key, image_url)
             self._cache_put(key, image)
             return image
         finally:
@@ -208,7 +275,9 @@ class ImageLoader:
         return image if image.mode == "RGB" else image.convert("RGB")
 
     @_nvtx.annotate("mm:img:load_image", color="lime")
-    async def load_image(self, image_url: str) -> Image.Image:
+    async def load_image(
+        self, image_url: str, *, cache_scope: str | None = None
+    ) -> Image.Image:
         parsed_url = urlparse(image_url)
         if parsed_url.scheme in ("", "file"):
             raise ValueError(
@@ -218,7 +287,10 @@ class ImageLoader:
         parsed_url = urlparse(normalized_url)
 
         if parsed_url.scheme in ("http", "https"):
-            key = normalized_url.lower()
+            key = self._cache_key(normalized_url, cache_scope)
+
+            if key is None:
+                return await self._fetch_and_process(None, normalized_url)
 
             if key in self._image_cache:
                 logger.debug(f"Image found in cache for URL: {image_url}")
@@ -272,6 +344,7 @@ class ImageLoader:
         image_mm_items: List[Dict[str, Any]],
         *,
         preserve_uuid_slots: Literal[False] = False,
+        cache_scope: str | None = None,
     ) -> list[Image.Image]:
         ...
 
@@ -281,6 +354,7 @@ class ImageLoader:
         image_mm_items: List[Dict[str, Any]],
         *,
         preserve_uuid_slots: Literal[True],
+        cache_scope: str | None = None,
     ) -> list[Image.Image | None]:
         ...
 
@@ -289,6 +363,7 @@ class ImageLoader:
         image_mm_items: List[Dict[str, Any]],
         *,
         preserve_uuid_slots: bool = False,
+        cache_scope: str | None = None,
     ) -> list[Any]:
         """
         Load a batch of images from multimodal data items.
@@ -303,6 +378,8 @@ class ImageLoader:
             image_mm_items: List of multimodal data items for images
             preserve_uuid_slots: Allow UUID-only items and preserve their positions
                 as None. This is enabled only by backends that resolve such slots.
+            cache_scope: Stable session or request identifier used when
+                DYN_MM_IMAGE_CACHE_SESSION_SCOPED is enabled.
 
         Returns:
             Loaded images, with None for UUID-only cache slots
@@ -327,7 +404,7 @@ class ImageLoader:
                 # URL path: download and decode in Python backend
                 url = item[URL_VARIANT_KEY]
                 slot_to_future_idx.append(len(image_futures))
-                image_futures.append(self.load_image(url))
+                image_futures.append(self.load_image(url, cache_scope=cache_scope))
                 logger.debug(f"Preparing to load image from URL: {url[:80]}...")
             elif isinstance(item, dict) and DECODED_VARIANT_KEY in item:
                 if self._enable_frontend_decoding:
