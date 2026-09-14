@@ -32,7 +32,7 @@ spec:
         # Dynamo frontend. No vLLM needed. The operator adds the command.
         - name: main
           image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.3.0
-  - name: VLLMWorker
+  - name: worker
     type: worker
     replicas: 1
     podTemplate:

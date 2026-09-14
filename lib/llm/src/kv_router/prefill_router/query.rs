@@ -89,6 +89,7 @@ where
         cache_namespace: Option<String>,
         priority_jump: f64,
         strict_priority: u32,
+        policy_class: Option<String>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
     ) -> Result<PrefillReservation> {
@@ -125,6 +126,7 @@ where
                 cache_namespace,
                 priority_jump,
                 strict_priority,
+                policy_class,
                 None,
                 None,
                 allowed_worker_ids,
@@ -469,6 +471,13 @@ mod tests {
         let prefill = PrefillRouter::disabled(Arc::new(ModelManager::new()), mode, None);
         prefill.binding.store(Some(Arc::new(
             crate::kv_router::prefill_router::PrefillBinding {
+                target_id: crate::discovery::WorkerSetTargetId::Legacy(
+                    dynamo_runtime::protocols::EndpointId {
+                        namespace: namespace.to_string(),
+                        component: component.to_string(),
+                        name: endpoint_name.to_string(),
+                    },
+                ),
                 endpoint_id: dynamo_runtime::protocols::EndpointId {
                     namespace: namespace.to_string(),
                     component: component.to_string(),
@@ -545,6 +554,7 @@ mod tests {
                 .await
                 .unwrap();
         let binding = Arc::new(PrefillBinding {
+            target_id: crate::discovery::WorkerSetTargetId::Legacy(endpoint_id.clone()),
             endpoint_id,
             router: Arc::new(KvPushRouter::new(push_router, chooser.clone(), None).unwrap()),
             prefill_router_mode: RouterMode::KV,
@@ -579,6 +589,7 @@ mod tests {
                 0.0,
                 0,
                 None,
+                None,
                 RoutingConstraints::default(),
             )
             .await
@@ -594,6 +605,7 @@ mod tests {
                 None,
                 0.0,
                 0,
+                None,
                 None,
                 RoutingConstraints::default(),
             )
@@ -654,6 +666,7 @@ mod tests {
                 None,
                 0.0,
                 0,
+                None,
                 None,
                 RoutingConstraints::default(),
             )

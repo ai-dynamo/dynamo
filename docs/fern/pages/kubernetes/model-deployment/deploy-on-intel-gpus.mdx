@@ -154,7 +154,7 @@ spec:
         containers:
         - name: main
           image: ${FRONTEND_IMAGE}
-  - name: VllmWorker
+  - name: worker
     type: worker
     replicas: 1
     podTemplate:

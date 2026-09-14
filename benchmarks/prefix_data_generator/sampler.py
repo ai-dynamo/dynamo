@@ -42,9 +42,9 @@ def sample_from_cdf(
     # CDF stands for cumulative distribution function
     assert len(data) == len(cdf)
     if rng is not None:
-        return data[np.searchsorted(cdf, rng.random())]
+        return data[np.searchsorted(cdf, rng.random(), side="right")]
     else:
-        return data[np.searchsorted(cdf, np.random.rand())]
+        return data[np.searchsorted(cdf, np.random.rand(), side="right")]
 
 
 class EmpiricalSampler:
@@ -55,8 +55,10 @@ class EmpiricalSampler:
         data (Union[List[Any], np.ndarray]): The input data to learn the distribution from.
     """
 
-    def __init__(self, data: Union[List[Any], np.ndarray]) -> None:
-        self.rng = np.random.default_rng(0)
+    def __init__(
+        self, data: Union[List[Any], np.ndarray], rng: Optional[Generator] = None
+    ) -> None:
+        self.rng = rng if rng is not None else np.random.default_rng()
         self.empty_data = len(data) == 0
         if self.empty_data:
             logger.warning("Empty data provided to EmpiricalSampler")

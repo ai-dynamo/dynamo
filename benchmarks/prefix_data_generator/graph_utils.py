@@ -13,8 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections import defaultdict
+
 import networkx as nx
-import numpy as np
 from prefix_data_generator.sampler import get_cdf
 
 # Protocol-level constants for synthetic data graph structure
@@ -40,7 +41,7 @@ def _mark_visited(G: nx.DiGraph) -> None:
     for node in G.nodes():
         if "to_leaf" not in G.nodes[node]:
             G.nodes[node]["to_leaf"] = 0
-        if G.nodes[node]["visited"] <= 1:
+        if node != SUPER_ROOT and G.nodes[node]["visited"] <= 1:
             continue
         for child in G.successors(node):
             if G.nodes[child]["visited"] == 1:
@@ -67,15 +68,18 @@ def _merge_chains(G: nx.DiGraph) -> nx.DiGraph:
     Returns:
         networkx.DiGraph: The resulting radix tree with unary paths contracted.
     """
-    for visited in sorted(np.unique([G.nodes[node]["visited"] for node in G.nodes()])):
-        sub_nodes = [node for node in G.nodes() if G.nodes[node]["visited"] == visited]
-        subgraph = G.subgraph(sub_nodes)
-        if len(subgraph) == 1:
+    # Visit counts do not change during contraction. Group once instead of
+    # rescanning the entire graph for each distinct count.
+    nodes_by_visits = defaultdict(list)
+    for node, attrs in G.nodes(data=True):
+        nodes_by_visits[attrs["visited"]].append(node)
+    for visited, sub_nodes in sorted(nodes_by_visits.items()):
+        if len(sub_nodes) == 1:
             continue
 
         chain_nodes = [
             node
-            for node in subgraph.nodes()
+            for node in sub_nodes
             if G.in_degree(node) == 1 and G.out_degree(node) == 1
         ]
         if not chain_nodes:
@@ -135,7 +139,7 @@ def _remove_leaves(G: nx.DiGraph) -> tuple[nx.DiGraph, list[int]]:
     leaves = {
         node: G.nodes[node]["length"]
         for node in G.nodes()
-        if G.nodes[node]["visited"] == 1
+        if node != SUPER_ROOT and G.nodes[node]["visited"] == 1
     }
     leaves_id = list(leaves.keys())
     leaves_len = list(leaves.values())

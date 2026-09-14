@@ -80,7 +80,7 @@ use opentelemetry::propagation::{Extractor, Injector, TextMapPropagator};
 use opentelemetry::trace::{Span as OtelSpan, TraceContextExt};
 use opentelemetry::{global, trace::Tracer};
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
-use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_otlp::{WithExportConfig, WithTonicConfig};
 
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::{Key, KeyValue};
@@ -148,19 +148,19 @@ fn otlp_exporter_enabled() -> bool {
 }
 
 /// Get the service name from environment or use default
-fn get_service_name() -> String {
+pub(crate) fn get_service_name() -> String {
     std::env::var(env_logging::otlp::OTEL_SERVICE_NAME)
         .unwrap_or_else(|_| DEFAULT_OTEL_SERVICE_NAME.to_string())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum OtlpProtocol {
+pub(crate) enum OtlpProtocol {
     Grpc,
     HttpProtobuf,
 }
 
 impl OtlpProtocol {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Grpc => "grpc",
             Self::HttpProtobuf => "http/protobuf",
@@ -187,7 +187,7 @@ fn parse_otlp_protocol(value: Option<&str>) -> OtlpProtocol {
     parse_otlp_protocol_for_env(value, env_logging::otlp::OTEL_EXPORTER_OTLP_PROTOCOL)
 }
 
-fn otlp_protocol_from_env() -> OtlpProtocol {
+pub(crate) fn otlp_protocol_from_env() -> OtlpProtocol {
     parse_otlp_protocol(
         std::env::var(env_logging::otlp::OTEL_EXPORTER_OTLP_PROTOCOL)
             .ok()
@@ -195,7 +195,7 @@ fn otlp_protocol_from_env() -> OtlpProtocol {
     )
 }
 
-fn resolve_signal_otlp_protocol(
+pub(crate) fn resolve_signal_otlp_protocol(
     generic_protocol: OtlpProtocol,
     signal_protocol: Option<&str>,
     signal_protocol_env: &str,
@@ -214,7 +214,7 @@ fn append_otlp_http_path(endpoint: &str, path: &str) -> String {
     format!("{endpoint}{path}")
 }
 
-fn resolve_otlp_endpoint(
+pub(crate) fn resolve_otlp_endpoint(
     protocol: OtlpProtocol,
     signal_endpoint: Option<String>,
     generic_endpoint: Option<String>,
@@ -260,7 +260,7 @@ fn trace_sample_ratio_from_env() -> Option<f64> {
     )
 }
 
-fn otel_runtime_handle() -> std::io::Result<tokio::runtime::Handle> {
+pub(crate) fn otel_runtime_handle() -> std::io::Result<tokio::runtime::Handle> {
     // Keep our own long-lived runtime for the exporter. Using the ambient one
     // (Handle::try_current) pins the exporter to whatever runtime is live at init,
     // since INIT (Once) runs setup once. If that's a #[tokio::test] runtime, export
@@ -278,6 +278,33 @@ fn otel_runtime_handle() -> std::io::Result<tokio::runtime::Handle> {
     Ok(OTEL_RUNTIME.get_or_init(|| rt).handle().clone())
 }
 
+/// gRPC metadata carrying the configured OTLP headers.
+///
+/// `opentelemetry-otlp` reads `OTEL_EXPORTER_OTLP_HEADERS` only on its HTTP
+/// path ("as of now, this is only supported for HTTP requests"), and Dynamo
+/// defaults to gRPC -- so without this, an authenticated collector rejects
+/// every span and log while the variable looks configured. Signal-specific
+/// headers replace the generic set rather than merging, per the exporter spec.
+fn otlp_metadata_for(signal_env: &str) -> tonic::metadata::MetadataMap {
+    let mut metadata = tonic::metadata::MetadataMap::new();
+    let raw = std::env::var(signal_env)
+        .or_else(|_| std::env::var(env_logging::otlp::OTEL_EXPORTER_OTLP_HEADERS))
+        .unwrap_or_default();
+
+    for (key, value) in crate::metrics::otlp_export::parse_key_value_list(&raw) {
+        match (
+            tonic::metadata::MetadataKey::from_bytes(key.as_bytes()),
+            tonic::metadata::MetadataValue::try_from(&value),
+        ) {
+            (Ok(key), Ok(value)) => {
+                metadata.insert(key, value);
+            }
+            _ => tracing::warn!(header = %key, "skipping unusable OTLP header"),
+        }
+    }
+    metadata
+}
+
 fn build_span_exporter(
     protocol: OtlpProtocol,
     endpoint: &str,
@@ -286,6 +313,9 @@ fn build_span_exporter(
         OtlpProtocol::Grpc => opentelemetry_otlp::SpanExporter::builder()
             .with_tonic()
             .with_endpoint(endpoint)
+            .with_metadata(otlp_metadata_for(
+                env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_HEADERS,
+            ))
             .build(),
         OtlpProtocol::HttpProtobuf => opentelemetry_otlp::SpanExporter::builder()
             .with_http()
@@ -302,6 +332,9 @@ fn build_log_exporter(
         OtlpProtocol::Grpc => opentelemetry_otlp::LogExporter::builder()
             .with_tonic()
             .with_endpoint(endpoint)
+            .with_metadata(otlp_metadata_for(
+                env_logging::otlp::OTEL_EXPORTER_OTLP_LOGS_HEADERS,
+            ))
             .build(),
         OtlpProtocol::HttpProtobuf => opentelemetry_otlp::LogExporter::builder()
             .with_http()
@@ -2914,6 +2947,49 @@ pub mod tests {
     #[tracing::instrument(level = "info", target = "other_module", skip_all)]
     async fn other_target_info_span() {
         tracing::info!(target: "other_module", "inside other target span");
+    }
+
+    /// Headers must reach the gRPC exporters. `opentelemetry-otlp` reads
+    /// OTEL_EXPORTER_OTLP_HEADERS only on its HTTP path, and Dynamo defaults to
+    /// gRPC, so without explicit metadata an authenticated collector rejects
+    /// every span and log while the variable looks configured.
+    #[test]
+    fn otlp_headers_reach_the_grpc_exporters() {
+        temp_env::with_vars(
+            [
+                (
+                    env_logging::otlp::OTEL_EXPORTER_OTLP_HEADERS,
+                    Some("authorization=Bearer abc=="),
+                ),
+                (env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_HEADERS, None),
+            ],
+            || {
+                let md = otlp_metadata_for(env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_HEADERS);
+                assert_eq!(
+                    md.get("authorization").map(|v| v.to_str().unwrap()),
+                    Some("Bearer abc==")
+                );
+            },
+        );
+
+        // Signal-specific replaces the generic set rather than merging.
+        temp_env::with_vars(
+            [
+                (
+                    env_logging::otlp::OTEL_EXPORTER_OTLP_HEADERS,
+                    Some("generic=1"),
+                ),
+                (
+                    env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_HEADERS,
+                    Some("specific=2"),
+                ),
+            ],
+            || {
+                let md = otlp_metadata_for(env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_HEADERS);
+                assert!(md.get("generic").is_none(), "generic should not be merged");
+                assert_eq!(md.get("specific").map(|v| v.to_str().unwrap()), Some("2"));
+            },
+        );
     }
 
     #[test]

@@ -17,7 +17,7 @@ import pytest
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, DynamoPortRange
 from tests.utils.gpu_args import build_gpu_mem_args
-from tests.utils.managed_process import ManagedProcess
+from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import allocate_port, deallocate_ports
 
@@ -350,7 +350,7 @@ class DynamoWorkerProcess(ManagedProcess):
 
         # Configure health check based on worker type
         health_check_urls = [
-            (f"http://localhost:{self.system_port}/health", self.is_ready)
+            (f"http://localhost:{self.system_port}/health", check_health_ready)
         ]
         if is_prefill is None or is_prefill is False:
             # aggregated or decode
@@ -374,22 +374,6 @@ class DynamoWorkerProcess(ManagedProcess):
             log_dir=str(log_dir),
             display_name=worker_id,
         )
-
-    def is_ready(self, response) -> bool:
-        """Check the health of the worker process"""
-        try:
-            data = response.json()
-            if data.get("status") == "ready":
-                logger.info("%s status is ready", self.worker_id)
-                return True
-            logger.warning(
-                "%s status is not ready: %s",
-                self.worker_id,
-                data.get("status"),
-            )
-        except ValueError:
-            logger.warning("%s health response is not valid JSON", self.worker_id)
-        return False
 
 
 @pytest.mark.timeout(290)  # 3x average

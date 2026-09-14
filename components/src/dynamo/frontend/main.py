@@ -442,6 +442,8 @@ async def async_main():
         kwargs["tls_cert_path"] = config.tls_cert_path
     if config.tls_key_path:
         kwargs["tls_key_path"] = config.tls_key_path
+    if config.tls_client_ca_cert_path:
+        kwargs["tls_client_ca_cert_path"] = config.tls_client_ca_cert_path
     if config.namespace:
         kwargs["namespace"] = config.namespace
     if config.namespace_prefix:
@@ -468,14 +470,6 @@ async def async_main():
 
     e = EntrypointArgs(EngineType.Dynamic, **kwargs)
     engine = await make_engine(runtime, e)
-    # Validate mode compatibility before loading extensions, so an incompatible
-    # mode fails fast without importing/executing third-party provider code.
-    if config.frontend_route_extensions and (
-        config.interactive or config.kserve_grpc_server
-    ):
-        raise ValueError(
-            "frontend route extensions are only supported by HTTP frontend mode"
-        )
     frontend_route_extensions = load_frontend_route_extensions(
         config.frontend_route_extensions
     )

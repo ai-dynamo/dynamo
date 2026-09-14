@@ -63,7 +63,7 @@ spec:
                 capabilities:
                   add: [IPC_LOCK]
 
-    - name: VllmPrefill
+    - name: prefill
       type: prefill
       runtimeVersionOverride: "1.4.1"
       replicas: 1
@@ -223,7 +223,7 @@ spec:
                 capabilities:
                   add: [IPC_LOCK, SYS_RESOURCE]
 
-    - name: VllmDecode
+    - name: decode
       type: decode
       runtimeVersionOverride: "1.4.1"
       replicas: 1
