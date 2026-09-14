@@ -1,0 +1,153 @@
+{
+  "schema_version": "1.0",
+  "captured_at": "2026-08-28T18:54:25Z",
+  "pairing": {
+    "controller_run_id": "20260828T183813Z-planner-loop-15424f",
+    "workload_run_id": "20260828T183835Z-planner-controlled-1451d7",
+    "workload_batch_id": "batch_243c681d-4bb0-4a14-837f-303ee2c7eb42",
+    "relationship": "controller governed the workload batch during iterations 20 through 30"
+  },
+  "controller": {
+    "run_id": "20260828T183813Z-planner-loop-15424f",
+    "paired_workload_run_id": "20260828T183835Z-planner-controlled-1451d7",
+    "mode": "apply",
+    "exit_code": 0,
+    "decision_records": 40,
+    "applied_records": 40,
+    "error_records": 0,
+    "rate_phases": [
+      {
+        "iterations": "1-19",
+        "max_admission_rps": 0
+      },
+      {
+        "iterations": "20-30",
+        "max_admission_rps": 5
+      },
+      {
+        "iterations": "31-40",
+        "max_admission_rps": 0
+      }
+    ],
+    "maximum_prometheus_sample_age_seconds": 5.027878046035767,
+    "prometheus_sample_age_limit_seconds": 15,
+    "stale_feedback_records": 0,
+    "local_artifact": "results/raw/20260828T183813Z-planner-loop-15424f/control-loop-decisions.jsonl",
+    "local_artifact_sha256": "1f9a050c8d898041018dca754699b4dfd1d651d4edcc16c6dd2e2cc511c86108"
+  },
+  "workload": {
+    "run_id": "20260828T183835Z-planner-controlled-1451d7",
+    "kind": "planner-controlled",
+    "paired_controller_run_id": "20260828T183813Z-planner-loop-15424f",
+    "status": "completed",
+    "exit_code": 0,
+    "batch": {
+      "id": "batch_243c681d-4bb0-4a14-837f-303ee2c7eb42",
+      "terminal_status": "completed",
+      "total": 100,
+      "completed": 100,
+      "failed": 0,
+      "duration_seconds": 28.485065,
+      "average_completion_rate_rps": 3.510611613489385,
+      "peak_poll_interval_completion_rate_rps": 5.905138795040183
+    },
+    "validation": {
+      "downloaded_output_lines": 100,
+      "downloaded_error_lines": 0,
+      "unique_custom_ids": 100,
+      "http_200_responses": 100,
+      "finish_reason_length_responses": 100,
+      "prompt_tokens": 9923,
+      "completion_tokens": 12800,
+      "total_tokens": 22723,
+      "compiler_data_quality_issue_count": 0,
+      "async_dispatch_counter_start": 100,
+      "async_dispatch_counter_end": 200,
+      "async_dispatch_counter_delta": 100,
+      "frontend_admissions": 100,
+      "frontend_admission_span_seconds": 22.053508,
+      "frontend_interarrival_rate_rps": 4.489082
+    },
+    "validation_bootstrap": {
+      "first_gateway_reported_total": 0,
+      "first_effective_total": 100,
+      "first_remaining": 100,
+      "first_total_source": "planner_request_count"
+    },
+    "input": {
+      "dataset_sha256": "fc56d28e5522056856c064181dfe841d3fe927ea2f4f605f24b9fbe81db06fd0",
+      "submitted_sha256": "a75148f503f5518b00463a708ef79c67470857abb2c390a1bc8053de67f5dada"
+    },
+    "local_artifacts": {
+      "metadata.json": "0652c24b3c0bba4577da798d3c8faf41ef3fafbb951673e4499a7c835313d95d",
+      "progress.jsonl": "0202e9e72194706c2dd497344635914db83660ed522894a30edd6fcdc4bce0ce",
+      "batch-output.jsonl": "d3b428a5682eb7ea390dfea816f5aaff03acbc37bb27e1e962aabafa7b77d611",
+      "compiled-summary.json": "b8aa30a8ef407baec6b5722b0eee7e5bc0e235a2edc200872821dc8a7d7cc1bd",
+      "kubernetes-start-async-metrics.txt": "6e3f58afc804340422c3a9212ecc8e41fccdd7b9c46c8810c84549582ffa668a",
+      "kubernetes-end-async-metrics.txt": "d60d70e4e3ce20452f85facf8c11aa2a89ccb7eaa939ed27c8d2719c3ace6ad2",
+      "kubernetes-end-frontend-log.txt": "e6f1dae3ee2063be19b3a6737e6050127aa5c3e49d93bce4c29fb5510e0c2f4b"
+    }
+  },
+  "stock_comparator": {
+    "run_id": "20260828T131444Z-baseline-9f7b71",
+    "kind": "baseline",
+    "completed": 100,
+    "failed": 0,
+    "duration_seconds": 6.180863,
+    "average_completion_rate_rps": 16.17897,
+    "peak_poll_interval_completion_rate_rps": 25.245067,
+    "prompt_tokens": 9923,
+    "completion_tokens": 12800,
+    "total_tokens": 22723,
+    "local_artifacts": {
+      "metadata.json": "f3e910c411fa6a8478d7311f07597cc028d5051cffec7786ebc061341347b320",
+      "progress.jsonl": "c93243cc9bf092e6dfd9b2650a09f341223af2f64a9dd68646d6f4394b4d1086",
+      "batch-output.jsonl": "3986adf2239c64cec0513b06e7d68a1bf48d7ccbea62574d7babb8910ad0a103",
+      "compiled-summary.json": "044528e6661b25fac48a8e238ce67fb013acd6d2737a9600c1d9db4ba7918660"
+    }
+  },
+  "comparison": {
+    "controlled_average_as_fraction_of_stock": 0.21698610069054983,
+    "average_completion_rate_reduction_percent": 78.30138993094502,
+    "controlled_duration_as_multiple_of_stock": 4.608590256732756
+  },
+  "deployment": {
+    "kubernetes_context": "omitted: deployment-specific cluster context",
+    "namespace": "omitted: deployment-specific POC namespace",
+    "helm_release": "async-dispatch",
+    "helm_revision": 2,
+    "helm_status": "deployed",
+    "configured_image": "omitted: private POC registry image",
+    "live_image_id": "omitted: matched private POC image identity",
+    "async_ready": true,
+    "async_restarts": 0,
+    "frontend_ready": true,
+    "frontend_restarts": 0,
+    "worker_ready": true,
+    "worker_restarts": 0,
+    "pod_monitor": {
+      "namespace": "omitted: deployment-specific POC namespace",
+      "name": "async-dispatch-llm-d-async",
+      "interval": "5s",
+      "prometheus_job": "<poc-namespace>/async-dispatch-llm-d-async",
+      "observed_up_at_unix_seconds": 1787942721.462,
+      "observed_up_value": 1
+    }
+  },
+  "post_expiry_redis_observation": {
+    "redis_server_time_seconds": 1787942445.468513,
+    "control_key": "llm-d-async:drain-limit:dynamo-batch",
+    "type": "none",
+    "pttl_milliseconds": -2,
+    "value": {},
+    "post_expiry_request_canary_sent": false
+  },
+  "scope": {
+    "online_load_enabled": false,
+    "replica_actuation_enabled": false,
+    "gsm8k_accuracy_evaluated": false,
+    "fault_recovery_exercised": false,
+    "post_expiry_request_behavior_exercised": false,
+    "raw_and_compiled_artifacts_are_git_ignored": true
+  }
+}

@@ -1,0 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+llm_d_async_async_dispatched_requests_total{pool_name="dynamo-batch",queue_id="dynamo-batch",queue_name="llm-d-async:requests:dynamo-batch"} 400
+llm_d_async_async_successful_requests_total{pool_name="dynamo-batch",queue_id="dynamo-batch",queue_name="llm-d-async:requests:dynamo-batch"} 400

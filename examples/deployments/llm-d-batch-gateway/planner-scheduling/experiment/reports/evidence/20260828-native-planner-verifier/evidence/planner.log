@@ -1,0 +1,5 @@
+2026-08-28T21:36:15.637Z INFO Batch scheduling decision: pipeline_action=apply pool_id=dynamo-batch replica_floor=1 max_admission_rps=0.0
+2026-08-28T21:36:15.695Z INFO Updating decode component VllmDecodeWorker from 0 to desired replica count 1
+2026-08-28T21:36:15.707Z INFO Scaled DGDSA qwen3-0-6b-batch-vllmdecodeworker to 1 replicas
+2026-08-28T21:38:16.891Z INFO Batch scheduling decision: pipeline_action=apply pool_id=dynamo-batch replica_floor=1 max_admission_rps=5.0
+2026-08-28T21:38:42.162Z INFO Batch scheduling decision: pipeline_action=apply pool_id=dynamo-batch replica_floor=0 max_admission_rps=0.0
