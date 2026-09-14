@@ -335,24 +335,52 @@ def test_get_average_metric_with_validation_error():
         assert result == 25.5
 
 
-def test_get_average_metric_multiple_matching_containers(mock_prometheus_result):
-    """Test _get_average_metric with multiple matching containers returns average"""
-    client = PrometheusAPIClient("http://localhost:9090", "target_namespace")
+def test_frontend_histogram_query_and_model_namespace_selection():
+    client = _mocked_frontend_client("target_namespace")
+    client.prom.custom_query.return_value = [
+        {
+            "metric": {"model": "other", "dynamo_namespace": "target_namespace"},
+            "value": [0, "9999"],
+        },
+        {
+            "metric": {"model": "target_model", "dynamo_namespace": "other"},
+            "value": [0, "9999"],
+        },
+        {
+            "metric": {
+                "model": "target_model",
+                "dynamo_namespace": "target_namespace",
+            },
+            "value": [0, "199"],
+        },
+    ]
 
-    with patch.object(client.prom, "custom_query") as mock_query:
-        # Use containers 1, 2, 3 which all match target criteria
-        mock_query.return_value = mock_prometheus_result[1:]
+    result = client.get_avg_input_sequence_tokens("60s", "TARGET_MODEL")
 
-        result = client._get_average_metric(
-            full_metric_name="test_metric",
-            interval="60s",
-            operation_name="test operation",
-            model_name="target_model",
+    client.prom.custom_query.assert_called_once_with(
+        query=(
+            "sum by (model, dynamo_namespace) "
+            "(increase(dynamo_frontend_input_sequence_tokens_sum[60s])) / "
+            "sum by (model, dynamo_namespace) "
+            "(increase(dynamo_frontend_input_sequence_tokens_count[60s]))"
         )
+    )
+    assert result == 199.0
 
-        # Average of 42.7, 35.5, and 15.5 (using value[1] from each container)
-        expected = (42.7 + 35.5 + 15.5) / 3
-        assert result == expected
+
+def test_frontend_histogram_preserves_nan_result():
+    client = _mocked_frontend_client("target_namespace")
+    client.prom.custom_query.return_value = [
+        {
+            "metric": {
+                "model": "target_model",
+                "dynamo_namespace": "target_namespace",
+            },
+            "value": [0, "NaN"],
+        }
+    ]
+
+    assert math.isnan(client.get_avg_input_sequence_tokens("60s", "target_model"))
 
 
 def test_get_avg_request_count_uses_started_requests():
