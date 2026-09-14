@@ -4421,11 +4421,11 @@ policy_classes:
                 }),
                 overlap: OverlapSignals {
                     tier_overlap_blocks: Default::default(),
-                    effective_overlap_blocks: HashMap::from([
+                    effective_overlap_blocks: rustc_hash::FxHashMap::from_iter([
                         (WorkerWithDpRank::new(0, 0), 1.0),
                         (WorkerWithDpRank::new(1, 0), 9.0),
                     ]),
-                    effective_cached_tokens: HashMap::from([
+                    effective_cached_tokens: rustc_hash::FxHashMap::from_iter([
                         (WorkerWithDpRank::new(0, 0), 16),
                         (WorkerWithDpRank::new(1, 0), 144),
                     ]),
@@ -4519,8 +4519,8 @@ policy_classes:
                 }),
                 overlap: OverlapSignals {
                     tier_overlap_blocks: Default::default(),
-                    effective_overlap_blocks: HashMap::from([(worker, 5.0)]),
-                    effective_cached_tokens: HashMap::from([(worker, 80)]),
+                    effective_overlap_blocks: rustc_hash::FxHashMap::from_iter([(worker, 5.0)]),
+                    effective_cached_tokens: rustc_hash::FxHashMap::from_iter([(worker, 80)]),
                 },
             },
         });
@@ -4563,8 +4563,8 @@ policy_classes:
         let refresher = Arc::new(BlockingRefresher::new(RefreshedOverlap::from_overlap(
             OverlapSignals {
                 tier_overlap_blocks: Default::default(),
-                effective_overlap_blocks: HashMap::from([(worker, 7.0)]),
-                effective_cached_tokens: HashMap::from([(worker, 56)]),
+                effective_overlap_blocks: rustc_hash::FxHashMap::from_iter([(worker, 7.0)]),
+                effective_cached_tokens: rustc_hash::FxHashMap::from_iter([(worker, 56)]),
             },
         )));
         let (queue, slots) = make_queue_with_blocking_refresher(

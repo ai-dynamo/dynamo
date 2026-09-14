@@ -21,8 +21,6 @@ use std::sync::Arc;
 
 use crate::protocols::{WorkerAffinityTarget, WorkerWithDpRank};
 use crate::scheduling::SchedulingRequest;
-#[cfg(any(test, feature = "bench"))]
-use crate::scheduling::selector::LogitWeights;
 use crate::{KvRouterConfig, RoutingPartitionRef, WorkerType};
 
 /// Factory that creates one worker-selection policy per routing partition.
@@ -35,13 +33,9 @@ pub type WorkerSelectionPolicyFactory = Arc<
 /// Request-level values available to custom filters, scorers, and pickers.
 pub struct WorkerSelectionContext<'a> {
     pub(crate) request: &'a SchedulingRequest,
-    #[cfg(any(test, feature = "bench"))]
-    pub(crate) request_id: &'a str,
     pub(crate) request_blocks: u64,
     pub(crate) block_size: u32,
     pub(crate) track_prefill_tokens: bool,
-    #[cfg(any(test, feature = "bench"))]
-    pub(crate) weights: LogitWeights,
     pub(crate) has_tier_matches: bool,
     pub(crate) pinned_worker: Option<WorkerWithDpRank>,
     pub(crate) router_temperature_override: Option<f64>,
@@ -113,8 +107,6 @@ pub struct WorkerCacheInput {
 /// Active-load values for one worker.
 #[derive(Clone, Copy, Default)]
 pub struct WorkerLoadInput {
-    #[cfg(any(test, feature = "bench"))]
-    pub(crate) raw_prefill_blocks: f64,
     pub(crate) available: bool,
     pub(crate) active_prefill_tokens: usize,
     pub(crate) decode_cost_blocks: f64,

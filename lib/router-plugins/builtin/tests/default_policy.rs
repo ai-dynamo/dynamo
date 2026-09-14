@@ -14,7 +14,7 @@ use support::*;
 fn seeded_selection_matches_reference_across_cache_and_load_shapes() {
     for temperature in [0.0, 0.7] {
         for prompt in [1, 17, 127, 2048] {
-            for mode in 0..4 {
+            for mode in 0..8 {
                 let (workers, mut request) = fixture(16, prompt);
                 let config = KvRouterConfig {
                     router_temperature: temperature,
@@ -23,7 +23,14 @@ fn seeded_selection_matches_reference_across_cache_and_load_shapes() {
                     disk_cache_hit_weight: 0.1,
                     ..Default::default()
                 };
-                match mode {
+                if mode >= 4 {
+                    request.shared_cache_hits =
+                        Some(dynamo_kv_router::SharedCacheHits::from_ranges(vec![
+                            1..3,
+                            5..12,
+                        ]));
+                }
+                match mode % 4 {
                     1 => request.overlap.tier_overlap_blocks = Default::default(),
                     2 => request.worker_loads.clear(),
                     3 => request.track_prefill_tokens = false,

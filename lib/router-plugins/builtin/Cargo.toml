@@ -27,3 +27,7 @@ tempfile = { workspace = true }
 [[bench]]
 name = "default_selection"
 harness = false
+
+[[bench]]
+name = "default_lifecycle"
+harness = false

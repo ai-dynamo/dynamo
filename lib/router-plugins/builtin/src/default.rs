@@ -66,16 +66,17 @@ fn softmax_sample_index<T>(
 /// Construct the builtin default from configured policy parameters.
 /// Per-request score overrides are not used. Request load-tracking remains host-owned.
 pub fn default_policy(config: KvRouterConfig, worker_label: &'static str) -> WorkerSelectionPolicy {
-    policy_with_rng(config, worker_label, None)
+    policy_with_rng(config, worker_label, None, false)
 }
 
 fn policy_with_rng(
     config: KvRouterConfig,
     worker_label: &'static str,
     rng: Option<Arc<Mutex<fastrand::Rng>>>,
+    plain_decode: bool,
 ) -> WorkerSelectionPolicy {
     let picker = DefaultPicker {
-        plain_decode: false,
+        plain_decode,
         config: config.clone(),
         worker_label,
         rng,
@@ -95,22 +96,9 @@ fn policy_for_role(
     config: KvRouterConfig,
     role: dynamo_kv_router::WorkerType,
 ) -> WorkerSelectionPolicy {
-    let picker = DefaultPicker {
-        plain_decode: role == dynamo_kv_router::WorkerType::Decode
-            && !config.conditional_disagg_enabled,
-        config: config.clone(),
-        worker_label: role.default_selector_label(),
-        rng: None,
-        entries: Vec::new(),
-        probabilities: Vec::new(),
-    };
-    WorkerSelectionPolicy::new(
-        config,
-        role.default_selector_label(),
-        Vec::new(),
-        Box::new(picker),
-    )
-    .with_exclusive_affinity(true)
+    let plain_decode =
+        role == dynamo_kv_router::WorkerType::Decode && !config.conditional_disagg_enabled;
+    policy_with_rng(config, role.default_selector_label(), None, plain_decode)
 }
 
 struct DefaultPicker {
@@ -333,7 +321,12 @@ impl DefaultWorkerSelector {
         rng: Option<Arc<Mutex<fastrand::Rng>>>,
     ) -> Self {
         Self {
-            policy: Mutex::new(policy_with_rng(config.clone(), worker_type, rng.clone())),
+            policy: Mutex::new(policy_with_rng(
+                config.clone(),
+                worker_type,
+                rng.clone(),
+                false,
+            )),
             kv_router_config: config,
             worker_type,
             rng,
@@ -393,69 +386,30 @@ pub(super) fn register(
         "dynamo-default-cost-fn",
         Arc::new(|parameters| {
             let parameters: Parameters = parameters.deserialize()?;
-            if parameters
-                .overlap_score_credit
-                .is_some_and(|value| !value.is_finite() || value < 0.0)
-            {
-                return Err(WorkerSelectionPolicyProviderError::new(
-                    "overlap_score_credit must be finite and non-negative",
-                ));
-            }
-            if parameters
-                .overlap_score_credit_decay
-                .is_some_and(|value| !value.is_finite() || value < 0.0)
-            {
-                return Err(WorkerSelectionPolicyProviderError::new(
-                    "overlap_score_credit_decay must be finite and non-negative",
-                ));
-            }
-            if parameters
-                .prefill_load_scale
-                .is_some_and(|value| !value.is_finite() || value < 0.0)
-            {
-                return Err(WorkerSelectionPolicyProviderError::new(
-                    "prefill_load_scale must be finite and non-negative",
-                ));
-            }
-            if parameters
-                .decode_active_request_weight
-                .is_some_and(|value| !value.is_finite() || value < 0.0)
-            {
-                return Err(WorkerSelectionPolicyProviderError::new(
-                    "decode_active_request_weight must be finite and non-negative",
-                ));
-            }
-            if parameters
-                .host_cache_hit_weight
-                .is_some_and(|value| !value.is_finite() || value < 0.0)
-            {
-                return Err(WorkerSelectionPolicyProviderError::new(
-                    "host_cache_hit_weight must be finite and non-negative",
-                ));
-            }
-            if parameters
-                .disk_cache_hit_weight
-                .is_some_and(|value| !value.is_finite() || value < 0.0)
-            {
-                return Err(WorkerSelectionPolicyProviderError::new(
-                    "disk_cache_hit_weight must be finite and non-negative",
-                ));
-            }
-            if parameters
-                .shared_cache_multiplier
-                .is_some_and(|value| !value.is_finite() || value < 0.0)
-            {
-                return Err(WorkerSelectionPolicyProviderError::new(
-                    "shared_cache_multiplier must be finite and non-negative",
-                ));
-            }
-            if parameters
-                .router_temperature
-                .is_some_and(|value| !value.is_finite() || value < 0.0)
-            {
-                return Err(WorkerSelectionPolicyProviderError::new(
-                    "router_temperature must be finite and non-negative",
-                ));
+            for (name, value) in [
+                ("overlap_score_credit", parameters.overlap_score_credit),
+                (
+                    "overlap_score_credit_decay",
+                    parameters.overlap_score_credit_decay,
+                ),
+                ("prefill_load_scale", parameters.prefill_load_scale),
+                (
+                    "decode_active_request_weight",
+                    parameters.decode_active_request_weight,
+                ),
+                ("host_cache_hit_weight", parameters.host_cache_hit_weight),
+                ("disk_cache_hit_weight", parameters.disk_cache_hit_weight),
+                (
+                    "shared_cache_multiplier",
+                    parameters.shared_cache_multiplier,
+                ),
+                ("router_temperature", parameters.router_temperature),
+            ] {
+                if value.is_some_and(|value| !value.is_finite() || value < 0.0) {
+                    return Err(WorkerSelectionPolicyProviderError::new(format!(
+                        "{name} must be finite and non-negative"
+                    )));
+                }
             }
             Ok(Arc::new(
                 move |config: &KvRouterConfig, role, _partition| {
