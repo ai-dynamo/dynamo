@@ -376,7 +376,6 @@ def test_installer_accepts_only_private_ucx_dependency_resolution(
     )
 
     assert rejected.returncode != 0
-    # Identify the system UCX selected instead of NIXL's private copy.
     assert "resolved outside NIXL's UCX" in rejected.stderr
     assert "/usr/lib/aarch64-linux-gnu/libucp.so.0" in rejected.stderr
     assert "resolved outside NIXL's UCX" not in accepted.stderr
@@ -426,7 +425,6 @@ def test_installer_rejects_missing_ucx_cuda_modules(
     assert supported.stdout.strip() == str(cuda_module)
     assert unsupported.returncode != 0
     assert "missing NIXL UCX CUDA module" in unsupported.stderr
-    # Do not emit a partial path for an unsupported layout.
     assert unsupported.stdout == ""
 
 
