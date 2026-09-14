@@ -312,19 +312,9 @@ type CABundleInjector struct {
 	pollInterval time.Duration
 }
 
-// CABundleInjectorOption configures optional CABundleInjector behavior.
-type CABundleInjectorOption func(*CABundleInjector)
-
-// WithCABundlePollInterval overrides the CA bundle polling interval.
-func WithCABundlePollInterval(interval time.Duration) CABundleInjectorOption {
-	return func(i *CABundleInjector) {
-		i.pollInterval = interval
-	}
-}
-
 // NewCABundleInjector creates a CABundleInjector. Use a direct client before
 // mgr.Start and the manager client after its cache is running.
-func NewCABundleInjector(cl client.Client, cfg *configv1alpha1.OperatorConfiguration, opts ...CABundleInjectorOption) (*CABundleInjector, error) {
+func NewCABundleInjector(cl client.Client, cfg *configv1alpha1.OperatorConfiguration) (*CABundleInjector, error) {
 	ns, err := getOperatorNamespace()
 	if err != nil {
 		return nil, fmt.Errorf("reading operator namespace: %w", err)
@@ -335,9 +325,6 @@ func NewCABundleInjector(cl client.Client, cfg *configv1alpha1.OperatorConfigura
 		namespace:    ns,
 		logger:       ctrl.Log.WithName("ca-bundle-injector"),
 		pollInterval: defaultCABundlePollInterval,
-	}
-	for _, opt := range opts {
-		opt(injector)
 	}
 	return injector, nil
 }

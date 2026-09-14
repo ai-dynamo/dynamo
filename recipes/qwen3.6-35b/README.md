@@ -159,7 +159,7 @@ nodes live in a different AZ.
 
 ## aiperf install
 
-We install `aiperf==0.10.0` from PyPI. This release includes
+We install `aiperf==0.12.0` from PyPI. This release includes
 [PR 824](https://github.com/ai-dynamo/aiperf/pull/824)
 (`feat(dataset): add session_id to single-turn for causal ordering`),
 which makes `single_turn` mode honor `session_id` ordering so

@@ -81,6 +81,8 @@ spec:
         nodeCount: 2
       sharedMemorySize: 200Gi
       podTemplate:
+        metadata:
+          annotations: {}
         spec:
           resourceClaims:
             - name: compute-domain-channel
@@ -216,6 +218,8 @@ spec:
         nodeCount: 2
       sharedMemorySize: 200Gi
       podTemplate:
+        metadata:
+          annotations: {}
         spec:
           resourceClaims:
             - name: compute-domain-channel
