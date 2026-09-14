@@ -48,6 +48,33 @@ impl VllmClient {
         self.pool.len()
     }
 
+    /// Health is a discovery signal, not a generation-channel admission gate.
+    pub(crate) async fn wait_for_withdrawal(&self) {
+        let mut health = HealthClient::new(self.pool.next_channel());
+        let result = async {
+            let mut updates = health
+                .watch(HealthCheckRequest {
+                    service: INFERENCE_SERVICE.to_string(),
+                })
+                .await?
+                .into_inner();
+            while let Some(update) = updates.message().await? {
+                if update.status != ServingStatus::Serving as i32 {
+                    tracing::info!(
+                        status = update.status,
+                        "vLLM is no longer serving; withdrawing"
+                    );
+                    return Ok::<(), tonic::Status>(());
+                }
+            }
+            Err(tonic::Status::unavailable("vLLM health watch ended"))
+        }
+        .await;
+        if let Err(error) = result {
+            tracing::warn!(%error, "vLLM health watch failed; withdrawing without cancelling generation");
+        }
+    }
+
     pub(crate) fn control_client(&self) -> pb::control_client::ControlClient<Channel> {
         pb::control_client::ControlClient::new(self.pool.next_channel())
             .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)

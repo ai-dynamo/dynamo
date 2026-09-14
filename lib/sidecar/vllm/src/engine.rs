@@ -29,6 +29,7 @@ pub struct VllmSidecarEngine {
     transport: GrpcTransportConfig,
     client: OnceCell<VllmClient>,
     cancel: CancellationToken,
+    watch_engine_health: bool,
 }
 
 fn cancelled(state: &ResponseState) -> LLMEngineOutput {
@@ -52,6 +53,7 @@ impl VllmSidecarEngine {
             transport,
             client: OnceCell::new(),
             cancel: CancellationToken::new(),
+            watch_engine_health: false,
         }
     }
 
@@ -114,7 +116,13 @@ impl VllmSidecarEngine {
         let rl_metadata = enable_rl
             .then(|| model.rl_worker_metadata(vllm_http_url))
             .transpose()?;
-        let engine = Self::new(endpoint, model.clone(), mode, transport);
+        if args.watch_engine_health && (mode != DisaggregationMode::Aggregated || enable_rl) {
+            return Err(client::invalid_argument(
+                "--watch-engine-health currently requires aggregated serving without RL",
+            ));
+        }
+        let mut engine = Self::new(endpoint, model.clone(), mode, transport);
+        engine.watch_engine_health = args.watch_engine_health;
         let config = WorkerConfig {
             namespace: args.sidecar.common.namespace,
             // Disaggregated workers register under fixed role components so the
@@ -535,6 +543,16 @@ impl LLMEngine for VllmSidecarEngine {
                 Ok(json!({"success": true, "new_version": weight_version}))
             }
             _ => Ok(unsupported("update", &update)),
+        }
+    }
+
+    async fn wait_for_withdrawal(&self) {
+        if !self.watch_engine_health {
+            std::future::pending::<()>().await;
+        }
+        match self.started_client() {
+            Ok(client) => client.wait_for_withdrawal().await,
+            Err(error) => tracing::warn!(%error, "Cannot watch vLLM health; withdrawing"),
         }
     }
 
