@@ -5,7 +5,7 @@
 
 import pytest
 
-import dynamo.common.multimodal.codec_errors as codec_errors
+from dynamo.common.multimodal import codec_errors
 from dynamo.common.multimodal.codec_errors import (
     MissingMediaDecoderError,
     audio_decoder_missing,

@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 import numpy as np
 import pytest
 
-import dynamo.common.multimodal.audio_loader as audio_loader_module
+from dynamo.common.multimodal import audio_loader as audio_loader_module
 from dynamo.common.multimodal import codec_errors
 from dynamo.common.http import HttpStatusError
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy

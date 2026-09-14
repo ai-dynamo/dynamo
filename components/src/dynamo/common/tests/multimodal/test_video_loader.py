@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock
 import numpy as np
 import pytest
 
-import dynamo.common.multimodal.codec_errors as codec_errors
-import dynamo.common.multimodal.video_loader as video_loader_module
+from dynamo.common.multimodal import codec_errors
+from dynamo.common.multimodal import video_loader as video_loader_module
 from dynamo.common.http import HttpStatusError
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.multimodal.codec_errors import MissingMediaDecoderError
