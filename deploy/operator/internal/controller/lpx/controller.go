@@ -181,7 +181,7 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 			}
 		}
 		if ready == metav1.ConditionTrue && deployment.Status.ModelDownload != nil && deployment.Status.ModelDownload.LastCheckedAt != nil && result.RequeueAfter == 0 {
-			result.RequeueAfter = max(time.Second, time.Until(deployment.Status.ModelDownload.LastCheckedAt.Add(modelDownloadRefreshInterval)))
+			result.RequeueAfter = max(modelDownloadRequeueAfter, time.Until(deployment.Status.ModelDownload.LastCheckedAt.Add(modelDownloadRefreshInterval)))
 		}
 		result, err = completeLPXDeadline(ctx, deadlineAt, result, err)
 	}()

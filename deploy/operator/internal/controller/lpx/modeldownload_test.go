@@ -177,12 +177,12 @@ func TestRunningLPXModelDownloadRefresh(t *testing.T) {
 			name:      "stale check remains ready when ModelExpress is down",
 			checkedAt: time.Now().Add(-modelDownloadRefreshInterval),
 			err:       fmt.Errorf("ModelExpress unavailable"),
-			wantCalls: 1,
+			wantCalls: 2,
 		},
 		{
 			name:      "stale check remains ready while an evicted model redownloads",
 			checkedAt: time.Now().Add(-modelDownloadRefreshInterval),
-			wantCalls: 1,
+			wantCalls: 2,
 		},
 	}
 
@@ -210,9 +210,14 @@ func TestRunningLPXModelDownloadRefresh(t *testing.T) {
 			if len(registry.calls) != tt.wantCalls {
 				t.Fatalf("ModelExpress calls = %d, want %d", len(registry.calls), tt.wantCalls)
 			}
-			if tt.wantCalls > 0 && !child.Status.ModelDownload.LastCheckedAt.After(tt.checkedAt) {
-				t.Fatalf("last check = %s, want after %s", child.Status.ModelDownload.LastCheckedAt, tt.checkedAt)
+
+			t.Log("Only a successful refresh starts another 24-hour cache window")
+			if tt.wantCalls > 0 && tt.ready {
+				require.True(t, child.Status.ModelDownload.LastCheckedAt.After(tt.checkedAt))
+			} else {
+				require.Equal(t, tt.checkedAt, child.Status.ModelDownload.LastCheckedAt.Time)
 			}
+
 			if !slices.Equal(child.Status.ModelDownload.Builds, []string{modelDownloadTestBuildID}) {
 				t.Fatalf("downloaded builds = %v, want preserved", child.Status.ModelDownload.Builds)
 			}

@@ -86,7 +86,7 @@ func (r *graphReconciler) reconcileModelDownloads(
 	} else if previous == nil {
 		deployment.Status.ModelDownload = &v1beta1.ModelDownloadStatus{}
 	}
-	if running || checkSucceeded {
+	if checkSucceeded {
 		checkedAt := metav1.Now()
 		deployment.Status.ModelDownload.LastCheckedAt = &checkedAt
 	}
