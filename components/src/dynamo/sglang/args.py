@@ -45,15 +45,8 @@ from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
 configure_dynamo_logging()
 PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
 
-# SGLang attention backends that may run with --dcp-size > 1 on a non-MLA
-# model. `triton` is the only non-MLA backend that reads the DCP parallel
-# state in its forward path. `aiter` is here because SGLang's own
-# _handle_dcp_validation() accepts dcp_size > 1 on ROCm with no further
-# checks, and `aiter` is the MHA default there; rejecting it would block a
-# combination the engine itself treats as supported.
-#
-# This is an allowlist on purpose: a backend that gains DCP support upstream is
-# added here deliberately, so a new backend cannot silently reopen the gap.
+# Non-MLA attention backends that read the DCP parallel state in their forward
+# path. `aiter` is here because SGLang itself allows dcp_size > 1 on ROCm.
 DCP_CAPABLE_ATTENTION_BACKENDS = frozenset({"triton", "aiter"})
 
 
@@ -222,9 +215,8 @@ def _validate_dcp_attention_backend(server_args: Any, parsed_args: Namespace) ->
     if sglang_uses_mla_backend(server_args):
         return
 
-    # Read the backend SGLang resolved, not the flag the user typed: the
-    # failure reproduces with no --attention-backend at all, because fa3 is the
-    # automatic choice for an MHA model on Hopper.
+    # Read the backend SGLang resolved, not the flag the user typed: fa3 is the
+    # automatic choice for an MHA model on Hopper with no --attention-backend.
     resolved = resolved_server_args(server_args)
     base_backend = getattr(resolved, "attention_backend", None)
     phase_backends = {
@@ -235,9 +227,8 @@ def _validate_dcp_attention_backend(server_args: Any, parsed_args: Namespace) ->
     unsupported = sorted(
         (phase, backend)
         for phase, backend in phase_backends.items()
-        # A backend name SGLang has not resolved yet is unknown, not
-        # unsupported; guessing would break launches on a release that
-        # resolves it later.
+        # A backend name SGLang has not resolved yet is unknown, not unsupported;
+        # guessing would break launches on a release that resolves it later.
         if backend is not None and backend not in DCP_CAPABLE_ATTENTION_BACKENDS
     )
     if not unsupported:
