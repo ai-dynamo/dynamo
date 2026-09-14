@@ -128,9 +128,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
-    # python -m calls main() with no argument list. run_per_device wants a real
-    # list, and forwards it verbatim to the per-device helpers, so the process
-    # command line has to be substituted before the V1 branch reads it.
+    # python -m passes no argv, and run_per_device forwards argv verbatim to
+    # the per-device helpers, so substitute the real command line first.
     argv = argv if argv is not None else sys.argv[1:]
     if os.environ.get("DYN_GMS_USE_V1") == "true":
         run_per_device("gpu_memory_service.v1.snapshot.saver", argv)
