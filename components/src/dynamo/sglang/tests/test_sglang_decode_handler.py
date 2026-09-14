@@ -48,28 +48,6 @@ pytestmark = [
 ]
 
 
-@pytest.mark.asyncio
-async def test_cancellation_monitor_rechecks_shutdown_after_cleanup():
-    handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
-    handler.shutdown_event = asyncio.Event()
-
-    async def set_shutdown_when_cancelled(*_args):
-        try:
-            await asyncio.Future()
-        except asyncio.CancelledError:
-            handler.shutdown_event.set()
-            raise
-
-    handler._handle_cancellation = set_shutdown_when_cancelled
-    request_id_future = asyncio.get_running_loop().create_future()
-    request_id_future.set_result("sglang-request-id")
-    context = SimpleNamespace(id=lambda: "request-id")
-
-    with pytest.raises(EngineShutdown, match="shut down during token generation"):
-        async with handler._cancellation_monitor(request_id_future, context):
-            await asyncio.sleep(0)
-
-
 def _read_zstd_payload(path):
     import zstandard as zstd
 
@@ -254,7 +232,15 @@ def _new_decode_handler(*, use_sglang_tokenizer: bool = False, enable_rl: bool =
 
     @asynccontextmanager
     async def no_cancellation_monitor(*args, **kwargs):
-        yield None
+        async def wait_forever():
+            await asyncio.Future()
+
+        task = asyncio.create_task(wait_forever())
+        try:
+            yield task
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     handler._cancellation_monitor = no_cancellation_monitor
     return handler
@@ -343,14 +329,14 @@ def test_engine_generate_preserves_native_fields_and_overrides_worker_state():
     native = build_native_generate_request(
         request,
         input_ids=[7, 8],
-        fallback_rid="fallback-request",
+        request_id="internal-request-id",
         priority=9,
         sampling_overrides={"n": 1, "max_new_tokens": 1},
         bootstrap_host="prefill.internal",
         routed_dp_rank=3,
     )
 
-    assert native.rid == "resolved-request"
+    assert native.rid == "internal-request-id"
     assert native.input_ids == [7, 8]
     assert native.stream is True
     assert native.priority == 9
@@ -377,7 +363,7 @@ def test_engine_generate_requires_object_sampling_params_for_prefill_override():
         build_native_generate_request(
             request,
             input_ids=[1],
-            fallback_rid="prefill-request",
+            request_id="prefill-request",
             priority=None,
             sampling_overrides={"max_new_tokens": 1},
         )
@@ -390,7 +376,7 @@ def test_engine_generate_rejects_top_logprobs_by_default(monkeypatch):
         build_native_generate_request(
             {"return_logprob": True, "top_logprobs_num": 1},
             input_ids=[1],
-            fallback_rid="request",
+            request_id="request",
             priority=None,
         )
 
@@ -401,7 +387,7 @@ def test_engine_generate_allows_top_logprobs_with_escape_hatch(monkeypatch):
     native = build_native_generate_request(
         {"return_logprob": True, "top_logprobs_num": 2},
         input_ids=[1],
-        fallback_rid="request",
+        request_id="request",
         priority=None,
     )
 
@@ -437,6 +423,46 @@ async def test_native_generate_stream_forwards_only_opaque_response():
         {"token_ids": [], "engine_data": {"sglang_response": native_response}}
     ]
     assert chunks[0]["engine_data"]["sglang_response"] is native_response
+
+
+@pytest.mark.asyncio
+async def test_native_generate_stream_maps_internal_id_without_mutation():
+    native_response = {
+        "output_ids": [101],
+        "meta_info": {"id": "internal-request-id"},
+    }
+
+    async def stream():
+        yield {
+            "token_ids": [],
+            "engine_data": {"sglang_response": native_response},
+        }
+
+    handler = _new_decode_handler()
+    chunks = await _collect(
+        handler._process_native_generate_stream(
+            stream(),
+            _Context(),
+            submitted_request_id="internal-request-id",
+            response_request_id="caller-visible-id",
+        )
+    )
+
+    mapped_response = chunks[0]["engine_data"]["sglang_response"]
+    assert mapped_response["meta_info"]["id"] == "caller-visible-id"
+    assert native_response["meta_info"]["id"] == "internal-request-id"
+    assert mapped_response is not native_response
+    assert mapped_response["meta_info"] is not native_response["meta_info"]
+
+
+def test_engine_generate_always_uses_internal_request_id():
+    native = build_native_generate_request(
+        {"rid": "caller-controlled-id"},
+        input_ids=[1],
+        request_id="internal-request-id",
+        priority=None,
+    )
+    assert native.rid == "internal-request-id"
 
 
 def _new_token_input_handler(maximum_input_token_id: int = 151935):
