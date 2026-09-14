@@ -592,6 +592,7 @@ fn update_queue_metrics(
             );
             continue;
         };
+        handles.update_admission(stats.received_total, stats.rejected_due_time_passed_total);
         handles.pending_requests.set(stats.pending_count as i64);
         handles
             .pending_isl_tokens
@@ -626,11 +627,15 @@ mod tests {
             .map(|class| ROUTER_QUEUE_METRICS.handles("index-test", "decode", class));
         let stats = [
             dynamo_kv_router::queue::ClassQueueStats {
+                received_total: 10,
+                rejected_due_time_passed_total: 1,
                 pending_count: 2,
                 pending_isl_tokens: 128,
                 pending_cached_tokens: 64,
             },
             dynamo_kv_router::queue::ClassQueueStats {
+                received_total: 10,
+                rejected_due_time_passed_total: 1,
                 pending_count: 3,
                 pending_isl_tokens: 384,
                 pending_cached_tokens: 192,
@@ -639,7 +644,13 @@ mod tests {
 
         update_queue_metrics(&handles, |class_index| stats.get(class_index).copied());
 
+        update_queue_metrics(&handles, |class_index| stats.get(class_index).copied());
         for (handles, stats) in handles.iter().zip(stats) {
+            assert_eq!(handles.received_total.get(), stats.received_total);
+            assert_eq!(
+                handles.rejected_due_time_passed_total.get(),
+                stats.rejected_due_time_passed_total
+            );
             assert_eq!(handles.pending_requests.get(), stats.pending_count as i64);
             assert_eq!(
                 handles.pending_isl_tokens.get(),
