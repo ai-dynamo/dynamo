@@ -4937,6 +4937,10 @@ pub fn images_router(
     (vec![doc, edits_doc], router)
 }
 
+fn video_fold_error(error: dynamo_runtime::error::DynamoError) -> ErrorResponse {
+    ErrorMessage::from_anyhow(anyhow::Error::new(error), "Failed to fold videos stream")
+}
+
 async fn videos(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
@@ -5055,8 +5059,7 @@ async fn videos(
         let response = NvVideosResponse::from_annotated_stream(stream)
             .await
             .map_err(|e| {
-                let err_response =
-                    non_streaming_aggregation_error_response(e, "Failed to fold videos stream");
+                let err_response = video_fold_error(e);
                 inflight.mark_error(extract_error_type_from_response(&err_response));
                 err_response
             })?;
@@ -7177,6 +7180,21 @@ mod tests {
             BACKUP_ERROR_MESSAGE,
         );
         assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn test_video_fold_preserves_backend_invalid_argument() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+
+        let error = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+            .message("unsupported video control")
+            .build();
+        let response = video_fold_error(error);
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.code, StatusCode::BAD_REQUEST.as_u16());
+        assert_eq!(response.1.message, "unsupported video control");
     }
 
     #[test]
