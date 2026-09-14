@@ -26,7 +26,7 @@ use dynamo_runtime::{
     DistributedRuntime,
     component::{Client, Instance, TransportType},
     discovery::{DiscoveryInstance, DiscoveryQuery},
-    namespace::{GLOBAL_NAMESPACE, NamespaceFilter},
+    namespace::{GLOBAL_NAMESPACE, NamespaceFilter, is_global_namespace},
     pipeline::{
         SingleIn,
         network::egress::push_router::{PushRouter, RouterMode},
@@ -105,9 +105,9 @@ pub struct RlDiscoveryConfig {
 /// Precedence, highest first:
 ///
 /// 1. `namespace_prefix` (`DYN_NAMESPACE_PREFIX`): match every namespace under that
-///    prefix. Kubernetes deployments get this on the frontend container automatically,
-///    and it is what lets one listener see several worker generations during a rolling
-///    update.
+///    prefix, or every namespace at all when the prefix is the global one. Kubernetes
+///    deployments get this on the frontend container automatically, and it is what lets
+///    one listener see several worker generations during a rolling update.
 /// 2. `worker_suffix` (`DYN_NAMESPACE_WORKER_SUFFIX`): match exactly `{base}-{suffix}`.
 /// 3. Neither: match `base` exactly.
 ///
@@ -125,11 +125,20 @@ pub struct RlDiscoveryConfig {
 /// The prefix has no counterpart in that helper. An empty one would match every
 /// namespace, so it counts as absent rather than as a scope over everything.
 ///
-/// The no-prefix, no-suffix case stays [`NamespaceFilter::Exact`] rather than going
-/// through `NamespaceFilter::from_namespace_and_prefix`, because that constructor maps
-/// the literal `dynamo` to `NamespaceFilter::Global`. Routing the default through it
-/// would silently widen RL discovery from one namespace to all of them for everyone who
-/// leaves `DYN_NAMESPACE` unset.
+/// A prefix of [`GLOBAL_NAMESPACE`] is the one exception: it means every namespace, the
+/// same reading `NamespaceFilter::from_namespace_and_prefix` gives it for model
+/// discovery. The operator produces exactly that input — `ComputeDynamoNamespace`
+/// returns the literal `dynamo` for a component with `globalDynamoNamespace: true`, and
+/// the frontend passes it through as `DYN_NAMESPACE_PREFIX`. Since that field is
+/// per-component, a deployment can set it on the frontend alone; leaving it a literal
+/// prefix here would let the frontend route to a worker that `/v1/rl/workers` cannot
+/// see.
+///
+/// The no-prefix, no-suffix case still stays [`NamespaceFilter::Exact`] rather than going
+/// through `NamespaceFilter::from_namespace_and_prefix`, because that constructor also
+/// maps a `dynamo` *namespace* to `NamespaceFilter::Global`. Routing the default through
+/// it would silently widen RL discovery from one namespace to all of them for everyone
+/// who leaves `DYN_NAMESPACE` unset.
 pub fn resolve_namespace_filter(
     namespace: Option<&str>,
     namespace_prefix: Option<&str>,
@@ -140,6 +149,9 @@ pub fn resolve_namespace_filter(
     }
 
     if let Some(prefix) = present(namespace_prefix) {
+        if is_global_namespace(prefix) {
+            return NamespaceFilter::Global;
+        }
         return NamespaceFilter::Prefix(prefix.to_string());
     }
 
@@ -153,9 +165,9 @@ pub fn resolve_namespace_filter(
 /// The scope reported back to the caller in [`RlWorkersResponse::namespace`].
 ///
 /// Protocol version 1 types that field as a plain string, so a prefix scope reports the
-/// prefix itself. `Global` has no string form of its own and reports `GLOBAL_NAMESPACE`;
-/// [`resolve_namespace_filter`] never produces it, so this arm only covers a config built
-/// directly by a caller.
+/// prefix itself. `Global` has no string form of its own and reports [`GLOBAL_NAMESPACE`],
+/// which is also the `DYN_NAMESPACE_PREFIX` value [`resolve_namespace_filter`] turns into
+/// `Global`, so a global scope reports the same string either way.
 fn namespace_scope(filter: &NamespaceFilter) -> &str {
     match filter {
         NamespaceFilter::Global => GLOBAL_NAMESPACE,
@@ -1075,6 +1087,20 @@ mod tests {
     }
 
     #[test]
+    fn global_prefix_scope_matches_model_discovery() {
+        let filter = resolve_namespace_filter(Some("ns"), Some(GLOBAL_NAMESPACE), None);
+
+        assert_eq!(
+            filter,
+            NamespaceFilter::from_namespace_and_prefix(Some("ns"), Some(GLOBAL_NAMESPACE)),
+            "a frontend with globalDynamoNamespace must not route to workers RL cannot see"
+        );
+        assert!(namespace_in_scope(&filter, "mydgd-9ed17bcc"));
+        assert!(namespace_in_scope(&filter, GLOBAL_NAMESPACE));
+        assert_eq!(namespace_scope(&filter), GLOBAL_NAMESPACE);
+    }
+
+    #[test]
     fn resolve_namespace_filter_precedence() {
         let cases = [
             (
@@ -1125,6 +1151,20 @@ mod tests {
                 Some(""),
                 None,
                 NamespaceFilter::Exact("ns".to_string()),
+            ),
+            (
+                "a global prefix means every namespace, as it does for model discovery",
+                Some("ns"),
+                Some(GLOBAL_NAMESPACE),
+                None,
+                NamespaceFilter::Global,
+            ),
+            (
+                "a global prefix wins over a suffix that is also set",
+                Some("ns"),
+                Some(GLOBAL_NAMESPACE),
+                Some("abc123"),
+                NamespaceFilter::Global,
             ),
         ];
 
