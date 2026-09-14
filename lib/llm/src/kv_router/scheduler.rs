@@ -36,6 +36,7 @@ use dynamo_kv_router::{
 use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_tokens::SequenceHash;
+use rustc_hash::FxHashMap;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -297,8 +298,8 @@ where
         isl_tokens: usize,
         token_seq: Option<Vec<SequenceHash>>,
         tier_overlap_blocks: TierOverlapBlocks,
-        effective_overlap_blocks: HashMap<dynamo_kv_router::protocols::WorkerWithDpRank, f64>,
-        effective_cached_tokens: HashMap<dynamo_kv_router::protocols::WorkerWithDpRank, usize>,
+        effective_overlap_blocks: FxHashMap<WorkerWithDpRank, f64>,
+        effective_cached_tokens: FxHashMap<WorkerWithDpRank, usize>,
         router_config_override: Option<&RouterConfigOverride>,
         update_states: bool,
         lora_name: Option<String>,
@@ -343,8 +344,8 @@ where
         token_seq: Option<Vec<SequenceHash>>,
         block_hashes: Option<Vec<LocalBlockHash>>,
         tier_overlap_blocks: TierOverlapBlocks,
-        effective_overlap_blocks: HashMap<dynamo_kv_router::protocols::WorkerWithDpRank, f64>,
-        effective_cached_tokens: HashMap<dynamo_kv_router::protocols::WorkerWithDpRank, usize>,
+        effective_overlap_blocks: FxHashMap<WorkerWithDpRank, f64>,
+        effective_cached_tokens: FxHashMap<WorkerWithDpRank, usize>,
         router_config_override: Option<&RouterConfigOverride>,
         update_states: bool,
         lora_name: Option<String>,
@@ -387,8 +388,8 @@ where
         token_seq: Option<Vec<SequenceHash>>,
         block_hashes: Option<Vec<LocalBlockHash>>,
         tier_overlap_blocks: TierOverlapBlocks,
-        effective_overlap_blocks: HashMap<dynamo_kv_router::protocols::WorkerWithDpRank, f64>,
-        effective_cached_tokens: HashMap<dynamo_kv_router::protocols::WorkerWithDpRank, usize>,
+        effective_overlap_blocks: FxHashMap<WorkerWithDpRank, f64>,
+        effective_cached_tokens: FxHashMap<WorkerWithDpRank, usize>,
         router_config_override: Option<&RouterConfigOverride>,
         update_states: bool,
         lora_name: Option<String>,
@@ -554,7 +555,7 @@ where
         &self,
         token_seq: Option<Vec<SequenceHash>>,
         isl_tokens: usize,
-        effective_cached_tokens: HashMap<dynamo_kv_router::protocols::WorkerWithDpRank, usize>,
+        effective_cached_tokens: FxHashMap<dynamo_kv_router::protocols::WorkerWithDpRank, usize>,
         track_prefill_tokens: bool,
     ) -> Vec<PotentialLoad> {
         self.inner.get_potential_loads(
@@ -690,7 +691,7 @@ mod tests {
 
         assert_eq!(
             scheduler
-                .get_potential_loads(None, 64, HashMap::new(), true)
+                .get_potential_loads(None, 64, Default::default(), true)
                 .len(),
             1
         );
@@ -703,7 +704,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 if scheduler
-                    .get_potential_loads(None, 64, HashMap::new(), true)
+                    .get_potential_loads(None, 64, Default::default(), true)
                     .iter()
                     .any(|load| load.worker_id == 1)
                 {

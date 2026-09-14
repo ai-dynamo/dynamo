@@ -1094,7 +1094,7 @@ impl SelectionCore {
                 routing_group: entry.key.routing_group.clone(),
                 loads: entry
                     .scheduler
-                    .get_potential_loads(None, 0, HashMap::new(), false),
+                    .get_potential_loads(None, 0, Default::default(), false),
                 pending_count: entry.scheduler.pending_count(),
                 pending_isl_tokens: entry.scheduler.pending_isl_tokens(),
             });
