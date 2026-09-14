@@ -35,7 +35,8 @@ use crate::{
         EncoderRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext, WorkerSelectorFactory,
     },
     local_model::runtime_config::{
-        ModelRuntimeConfig, TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+        DISAGG_PREFILL_CANCEL_ANYTIME_V1, ModelRuntimeConfig, TokenizerBackend,
+        VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
     },
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
@@ -632,6 +633,8 @@ where
                     None,
                     self.manager.clone(),
                     router_config.router_mode,
+                    card.runtime_config
+                        .supports_runtime_capability(DISAGG_PREFILL_CANCEL_ANYTIME_V1),
                     card.kv_cache_block_size,
                     Some(prefill_config),
                     self.worker_selector_factory.clone(),
