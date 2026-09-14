@@ -20,7 +20,6 @@ from sglang.srt.managers.io_struct import ProfileReq
 import dynamo.sglang._compat as sglang_compat
 import dynamo.sglang._disagg as disagg_mod
 import dynamo.sglang.args as sglang_args
-import dynamo.sglang.main as sglang_main
 from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
 from dynamo.common.snapshot.constants import SNAPSHOT_CONTROL_DIR_ENV
 from dynamo.sglang._compat import (
@@ -1732,19 +1731,36 @@ async def test_prefill_warmup_cancellation_cancels_metrics(monkeypatch):
                 await metrics_task
 
 
-def test_main_treats_cancellation_as_clean_exit(monkeypatch, caplog):
+def _import_sglang_main_without_reconfiguring_logging(monkeypatch):
+    from dynamo.runtime import logging as runtime_logging
+
+    configure_dynamo_logging = runtime_logging.configure_dynamo_logging
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime_logging, "configure_dynamo_logging", lambda: None)
+        import dynamo.sglang.main as sglang_main
+
+    sglang_main.configure_dynamo_logging = configure_dynamo_logging
+    return sglang_main
+
+
+def test_main_treats_cancellation_as_clean_exit(monkeypatch):
+    sglang_main = _import_sglang_main_without_reconfiguring_logging(monkeypatch)
+    messages = []
+    monkeypatch.setattr(sglang_main.logger, "info", messages.append)
+
     async def cancelled_worker():
         raise asyncio.CancelledError
 
     monkeypatch.setattr(sglang_main, "worker", cancelled_worker)
 
-    with caplog.at_level(logging.INFO):
-        sglang_main.main()
+    sglang_main.main()
 
-    assert "Worker cancelled; shutdown complete" in caplog.text
+    assert messages == ["Worker cancelled; shutdown complete"]
 
 
 def test_main_preserves_worker_failure(monkeypatch):
+    sglang_main = _import_sglang_main_without_reconfiguring_logging(monkeypatch)
+
     async def failing_worker():
         raise RuntimeError("worker failed")
 
