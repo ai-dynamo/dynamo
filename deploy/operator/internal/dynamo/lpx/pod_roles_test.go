@@ -523,7 +523,7 @@ func TestGeneratedAgentConfigMountOverrides(t *testing.T) {
 	}
 }
 
-func TestXTRuntimesValidateHostDeviceVolumes(t *testing.T) {
+func TestHostDeviceVolumeValidationIsLimitedToLP30Init(t *testing.T) {
 	for _, test := range []struct {
 		name    string
 		volume  corev1.Volume
@@ -549,7 +549,7 @@ func TestXTRuntimesValidateHostDeviceVolumes(t *testing.T) {
 		}}, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			t.Log("Give an authored sidecar a volume name reserved by the Agent runtime")
+			t.Log("Give an authored sidecar a volume name used by LP30 initialization")
 			base := corev1.PodSpec{
 				Containers: []corev1.Container{
 					{Name: commonconsts.MainContainerName, Image: "lpu-runtime"},
@@ -567,17 +567,13 @@ func TestXTRuntimesValidateHostDeviceVolumes(t *testing.T) {
 			configureAgentScheduling(&base, BuildFamilyXT)
 			direct, agent := base.DeepCopy(), base.DeepCopy()
 
-			t.Log("Reject incompatible bindings through both XT runtime entry points")
+			t.Log("Leave authored device bindings to the DGD creator in both XT runtimes")
 			errors := []error{
 				configureDirectHybridAgentRuntime(direct, "graph-lpu", "ssh-secret", false),
 				configureNodeLocalAgentRuntime(agent, BuildFamilyXT, false, "ssh-secret"),
 			}
 			for _, err := range errors {
-				if test.wantErr {
-					require.ErrorContains(t, err, "must use directory hostPath")
-				} else {
-					require.NoError(t, err)
-				}
+				require.NoError(t, err)
 			}
 
 			t.Log("Never rebind the authored volume or its sidecar mount")
@@ -586,6 +582,34 @@ func TestXTRuntimesValidateHostDeviceVolumes(t *testing.T) {
 				require.Equal(t, test.volume.VolumeSource, testVolumeByName(t, pod.Volumes, test.volume.Name))
 				require.Equal(t, base.Containers[1], pod.Containers[1])
 			}
+
+			t.Log("Validate only the host volumes mounted by the generated LP30 init")
+			lp30 := renderTestPodSpec()
+			index := slices.IndexFunc(lp30.Volumes, func(volume corev1.Volume) bool { return volume.Name == test.volume.Name })
+			lp30.Volumes[index] = test.volume
+			before := lp30.DeepCopy()
+			err := addLP30InitContainer(&lp30, &lp30.Containers[0])
+			if test.wantErr {
+				require.ErrorContains(t, err, "must use directory hostPath")
+				require.Equal(t, *before, lp30)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, before.Volumes, lp30.Volumes)
+				require.Equal(t, before.Containers, lp30.Containers)
+			}
+		})
+	}
+
+	for _, name := range []string{"host-dev", "host-sys"} {
+		t.Run("LP30 missing "+name, func(t *testing.T) {
+			t.Log("Reject a missing generated init binding without changing the Pod")
+			pod := renderTestPodSpec()
+			pod.Volumes = slices.DeleteFunc(pod.Volumes, func(volume corev1.Volume) bool { return volume.Name == name })
+			before := pod.DeepCopy()
+			err := addLP30InitContainer(&pod, &pod.Containers[0])
+			require.ErrorContains(t, err, "requires podTemplate volume")
+			require.ErrorContains(t, err, name)
+			require.Equal(t, *before, pod)
 		})
 	}
 }

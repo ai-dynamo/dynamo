@@ -176,10 +176,7 @@ func configureDirectHybridAgentRuntime(
 	agentPodSpec.SecurityContext.RunAsGroup = ptr.To(int64(0))
 	agentPodSpec.SecurityContext.RunAsNonRoot = ptr.To(false)
 
-	if err := validateSSHVolume(agentPodSpec, sshSecretName); err != nil {
-		return err
-	}
-	return validateLPUHostDeviceVolumes(agentPodSpec)
+	return validateSSHVolume(agentPodSpec, sshSecretName)
 }
 
 // configureNodeLocalConductorRuntime consumes a nonnil conductor PodSpec.
@@ -248,9 +245,6 @@ func configureNodeLocalAgentRuntime(
 	}
 	agentPodSpec.HostUsers = nil
 	updateWorkerPodSpec(agentPodSpec)
-	if err := validateLPUHostDeviceVolumes(agentPodSpec); err != nil {
-		return err
-	}
 	if err := validateSSHVolume(agentPodSpec, sshSecretName); err != nil {
 		return err
 	}
@@ -331,12 +325,6 @@ func addLP30InitContainer(podSpec *corev1.PodSpec, agent *corev1.Container) erro
 	if err := validateRolePodSpecContainerNames(podSpec, field.NewPath("spec"), lp30InitContainerName).ToAggregate(); err != nil {
 		return err
 	}
-	// The generated init mounts fixed names; their host volumes must be authored.
-	for _, name := range []string{"host-dev", "host-sys"} {
-		if !slices.ContainsFunc(podSpec.Volumes, func(volume corev1.Volume) bool { return volume.Name == name }) {
-			return fmt.Errorf("LP30 initialization requires podTemplate volume %q", name)
-		}
-	}
 
 	initContainer := corev1.Container{
 		Name:            lp30InitContainerName,
@@ -359,6 +347,20 @@ func addLP30InitContainer(podSpec *corev1.PodSpec, agent *corev1.Container) erro
 			{Name: "host-sys", MountPath: "/sys"},
 			{Name: "host-dev", MountPath: "/dev"},
 		},
+	}
+
+	// Validate only host volumes consumed by the operator-generated init container.
+	for _, mount := range initContainer.VolumeMounts {
+		index := slices.IndexFunc(podSpec.Volumes, func(volume corev1.Volume) bool { return volume.Name == mount.Name })
+		if index < 0 {
+			return fmt.Errorf("LP30 initialization requires podTemplate volume %q", mount.Name)
+		}
+		hostPath := podSpec.Volumes[index].HostPath
+		if hostPath == nil || hostPath.Path != mount.MountPath ||
+			hostPath.Type != nil && *hostPath.Type != corev1.HostPathUnset &&
+				*hostPath.Type != corev1.HostPathDirectory && *hostPath.Type != corev1.HostPathDirectoryOrCreate {
+			return fmt.Errorf("LP30 initialization volume %q must use directory hostPath %q", mount.Name, mount.MountPath)
+		}
 	}
 	podSpec.InitContainers = append(podSpec.InitContainers, initContainer)
 	return nil

@@ -6,7 +6,6 @@
 package lpx
 
 import (
-	"fmt"
 	"slices"
 
 	corev1 "k8s.io/api/core/v1"
@@ -18,28 +17,6 @@ const (
 	lpuAgentContainerName       = "agent"
 	defaultLPUAgentCPUs   int64 = 62
 )
-
-func validateLPUHostDeviceVolumes(podSpec *corev1.PodSpec) error {
-	// Keep the existing compatibility checks without supplying missing device volumes.
-	for _, volume := range podSpec.Volumes {
-		var path string
-		switch volume.Name {
-		case "host-dev":
-			path = "/dev"
-		case "host-sys":
-			path = "/sys"
-		default:
-			continue
-		}
-		hostPath := volume.HostPath
-		if hostPath == nil || hostPath.Path != path ||
-			hostPath.Type != nil && *hostPath.Type != corev1.HostPathUnset &&
-				*hostPath.Type != corev1.HostPathDirectory && *hostPath.Type != corev1.HostPathDirectoryOrCreate {
-			return fmt.Errorf("selected LPX podTemplate volume %q must use directory hostPath %q", volume.Name, path)
-		}
-	}
-	return nil
-}
 
 func updateWorkerPodSpec(podSpec *corev1.PodSpec) {
 	// TODO can we remove some of this when we get the device-plugin?
