@@ -85,7 +85,11 @@ class _V1Owner:
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline:
             sessions = self.managers[domain].session_snapshot()
-            if not sessions.rw_sessions and not sessions.ro_sessions:
+            if (
+                not sessions.rw_sessions
+                and not sessions.ro_sessions
+                and not sessions.persistent_sessions
+            ):
                 return
             time.sleep(0.001)
         raise TimeoutError(f"{domain} sessions did not quiesce")
@@ -195,6 +199,26 @@ def test_prepare_rejects_invalid_domain_and_session_state(
     )
     with pytest.raises(RuntimeError, match="kv_cache must be empty"):
         control.prepare()
+
+
+@pytest.mark.timeout(10)
+def test_prepare_rejects_active_persistent_kv_session(v1_owner) -> None:
+    v1_owner.publish_weights()
+    control = v1_owner.control()
+    persistent = _GMSClientSession(
+        v1_owner.paths["kv_cache"],
+        RequestedLockType.RW_PERSISTENT,
+    )
+    try:
+        assert v1_owner.managers["kv_cache"].session_snapshot().persistent_sessions == 1
+        with pytest.raises(RuntimeError, match="kv_cache has active or waiting"):
+            control.prepare()
+    finally:
+        persistent.close()
+    v1_owner.wait_for_quiesced("kv_cache")
+    prepared = control.prepare()
+    assert prepared.token is not None
+    control.abort(prepared.token)
 
 
 @pytest.mark.timeout(10)

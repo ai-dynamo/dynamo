@@ -69,6 +69,44 @@ V0 and `DYN_GMS_USE_V1=true` launch profiles are mutually exclusive. Mixed
 initialization is unsupported by contract and prevented by launch/process
 topology; no runtime cross-profile arbitration is provided or needed.
 
+## Persistent KV pool backend
+
+V1 also exposes an independent persistent-pool namespace for crash-surviving
+engine memory. A client connects with `RW_PERSISTENT` and accesses the namespace
+through `V1PersistentPoolBackend`, which implements the same backend-neutral
+contract as the existing V0 adapter.
+
+```text
+PersistentPoolBackend
+  claim(engine_id, tag, size, shared)
+  export(engine_id, tag)
+  inventory(engine_id, include_unclaimed)
+  destroy(engine_id, tag)
+                  |
+                  v
+V1 typed RPC -> PersistentAllocationManager -> daemon-owned CUDA VMM backing
+```
+
+This namespace is deliberately separate from V1's transactional allocation
+epochs:
+
+- a persistent session does not block weight/KV epoch readers or writers;
+- disconnect releases that session's claims but retains its allocations;
+- an uncommitted transactional writer abort clears only its transactional epoch;
+- shared claims permit cooperating engines to attach concurrently, but do not
+  grant permission to access individual KV pages; and
+- explicit destruction is the only normal operation that retires backing.
+
+Shared attach must therefore still be paired with KV leases, generation-fenced
+content publication, and engine-index hydration. An active persistent session
+also prevents Snapshot checkpoint preparation so the controller cannot snapshot
+while KV writers remain attached.
+
+This change supplies the V1 allocation backend and wire semantics. The existing
+V1 vLLM/SGLang sleep integrations continue to use ephemeral KV epochs until a
+separate engine-integration change selects persistent pools and wires the lease
+and content-directory lifecycle end to end.
+
 Both client domains use the same `GMSClientMemoryManager` class and the same
 V0-style operations:
 
