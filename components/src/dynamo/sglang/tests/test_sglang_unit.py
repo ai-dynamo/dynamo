@@ -511,30 +511,29 @@ def _dcp_server_args_stub(**overrides):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ["fa3", "flashinfer"])
 async def test_parse_args_rejects_dcp_on_backend_without_dcp_support(
-    monkeypatch, mock_sglang_cli, backend
+    monkeypatch, mock_sglang_cli, tmp_path
 ):
     monkeypatch.setattr(
         "dynamo.sglang.args.ServerArgs.from_cli_args",
-        lambda _: _dcp_server_args_stub(dcp_size=2, attention_backend=backend),
+        lambda _: _dcp_server_args_stub(dcp_size=2, attention_backend="fa3"),
     )
-    mock_sglang_cli(model="/tmp")
+    mock_sglang_cli(model=str(tmp_path))
 
     with pytest.raises(ValueError) as excinfo:
         await parse_args(sys.argv[1:])
 
     message = str(excinfo.value)
-    assert f"'{backend}'" in message
+    assert "'fa3'" in message
     assert "--dcp-size 1" in message
-    # No --attention-backend was passed, so the message must say the engine
+    # No attention backend was passed, so the message must say the engine
     # picked this one -- that is the reported reproduction.
     assert "automatically" in message
 
 
 @pytest.mark.asyncio
 async def test_parse_args_rejects_dcp_on_decode_only_unsupported_backend(
-    monkeypatch, mock_sglang_cli
+    monkeypatch, mock_sglang_cli, tmp_path
 ):
     monkeypatch.setattr(
         "dynamo.sglang.args.ServerArgs.from_cli_args",
@@ -544,7 +543,7 @@ async def test_parse_args_rejects_dcp_on_decode_only_unsupported_backend(
             decode_attention_backend="fa3",
         ),
     )
-    mock_sglang_cli(model="/tmp")
+    mock_sglang_cli(model=str(tmp_path))
 
     with pytest.raises(ValueError) as excinfo:
         await parse_args(sys.argv[1:])
@@ -552,6 +551,55 @@ async def test_parse_args_rejects_dcp_on_decode_only_unsupported_backend(
     message = str(excinfo.value)
     assert "decode attention backend 'fa3'" in message
     assert "prefill attention backend" not in message
+
+
+@pytest.mark.asyncio
+async def test_parse_args_does_not_call_a_phase_flag_automatic(
+    monkeypatch, mock_sglang_cli, tmp_path
+):
+    """A backend the user named on either phase flag is not an automatic choice."""
+    monkeypatch.setattr(
+        "dynamo.sglang.args.ServerArgs.from_cli_args",
+        lambda _: _dcp_server_args_stub(dcp_size=2, decode_attention_backend="fa3"),
+    )
+    mock_sglang_cli(model=str(tmp_path), decode_attention_backend="fa3")
+
+    with pytest.raises(ValueError) as excinfo:
+        await parse_args(sys.argv[1:])
+
+    message = str(excinfo.value)
+    assert "decode attention backend 'fa3'" in message
+    assert "automatically" not in message
+
+
+@pytest.mark.asyncio
+async def test_resolved_server_args_rejects_an_automatic_unsupported_backend(
+    monkeypatch, mock_sglang_cli, tmp_path
+):
+    """The backend SGLang chooses for itself is only readable from the engine.
+
+    On the pinned SGLang release ``ServerArgs`` still holds what the caller
+    asked for, so a launch that passes no attention backend reaches parse_args
+    with all three fields unset. The engine resolves fa3 afterwards, and the
+    check on its configuration is the one that catches it.
+    """
+    cli_server_args = _dcp_server_args_stub(dcp_size=2)
+    monkeypatch.setattr(
+        "dynamo.sglang.args.ServerArgs.from_cli_args", lambda _: cli_server_args
+    )
+    mock_sglang_cli(model=str(tmp_path))
+
+    config = await parse_args(sys.argv[1:])
+    assert config.server_args is cli_server_args
+
+    engine_server_args = _dcp_server_args_stub(dcp_size=2, attention_backend="fa3")
+    with pytest.raises(ValueError) as excinfo:
+        config.use_resolved_server_args(engine_server_args)
+
+    message = str(excinfo.value)
+    assert "'fa3'" in message
+    assert "automatically" in message
+    assert config.server_args is cli_server_args
 
 
 @pytest.mark.asyncio
@@ -565,17 +613,18 @@ async def test_parse_args_rejects_dcp_on_decode_only_unsupported_backend(
     ids=["dcp-capable-backend", "dcp-disabled", "mla-model"],
 )
 async def test_parse_args_accepts_supported_dcp_configurations(
-    monkeypatch, mock_sglang_cli, overrides
+    monkeypatch, mock_sglang_cli, tmp_path, overrides
 ):
     server_args = _dcp_server_args_stub(**overrides)
     monkeypatch.setattr(
         "dynamo.sglang.args.ServerArgs.from_cli_args", lambda _: server_args
     )
-    mock_sglang_cli(model="/tmp")
+    mock_sglang_cli(model=str(tmp_path))
 
     config = await parse_args(sys.argv[1:])
 
     assert config.server_args is server_args
+    assert config.use_resolved_server_args(server_args) is not None
 
 
 @pytest.mark.asyncio

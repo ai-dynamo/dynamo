@@ -49,6 +49,14 @@ PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
 # path. `aiter` is here because SGLang itself allows dcp_size > 1 on ROCm.
 DCP_CAPABLE_ATTENTION_BACKENDS = frozenset({"triton", "aiter"})
 
+# The CLI fields that name an attention backend. The phase-specific pair takes
+# priority over the combined flag.
+ATTENTION_BACKEND_CLI_FIELDS = (
+    "attention_backend",
+    "prefill_attention_backend",
+    "decode_attention_backend",
+)
+
 
 class DynamoConfig(DynamoRuntimeConfig, DynamoSGLangConfig):
     """Combined configuration container for SGLang server and Dynamo args."""
@@ -71,9 +79,19 @@ class DynamoConfig(DynamoRuntimeConfig, DynamoSGLangConfig):
 class Config:
     """Combined configuration container for SGLang server and Dynamo args."""
 
-    def __init__(self, server_args: ServerArgs, dynamo_args: DynamoConfig) -> None:
+    def __init__(
+        self,
+        server_args: ServerArgs,
+        dynamo_args: DynamoConfig,
+        *,
+        attention_backend_from_cli: bool = False,
+    ) -> None:
         self.server_args = server_args
         self.dynamo_args = dynamo_args
+        # Whether the launch named an attention backend itself. Only the CLI
+        # knows this; the resolved configuration reports the same field whether
+        # SGLang chose the value or the user did.
+        self.attention_backend_from_cli = attention_backend_from_cli
         self.serving_mode = self._set_serving_strategy()
 
     def _set_serving_strategy(self):
@@ -88,6 +106,9 @@ class Config:
 
     def use_resolved_server_args(self, server_args: Any) -> Any:
         """Switch post-runtime Dynamo code to SGLang's resolved configuration."""
+        _validate_dcp_attention_backend(
+            server_args, backend_from_cli=self.attention_backend_from_cli
+        )
         self.server_args = resolved_server_args(server_args)
         return self.server_args
 
@@ -195,7 +216,20 @@ def _validate_parser_flags(
         sys.exit(1)
 
 
-def _validate_dcp_attention_backend(server_args: Any, parsed_args: Namespace) -> None:
+def _attention_backend_from_cli(parsed_args: Namespace) -> bool:
+    """Return whether the launch named an attention backend on the command line.
+
+    The phase-specific flags take priority over --attention-backend, so any one
+    of the three means the backend in force was chosen by the user.
+    """
+    return any(
+        getattr(parsed_args, field, None) for field in ATTENTION_BACKEND_CLI_FIELDS
+    )
+
+
+def _validate_dcp_attention_backend(
+    server_args: Any, *, backend_from_cli: bool
+) -> None:
     """Reject --dcp-size > 1 on an attention backend that never reads it.
 
     SGLang sizes the KV cache pool the DCP way: DCP ranks replicate the KV
@@ -204,6 +238,12 @@ def _validate_dcp_attention_backend(server_args: Any, parsed_args: Namespace) ->
     a plain tensor-parallel head split, so the two disagree on the KV row width
     and the scheduler dies on the first real request. Fail here instead, before
     the worker registers and starts taking traffic.
+
+    Call this twice: once on the arguments the CLI produced, which catches a
+    backend the user named, and once on the engine's own configuration, which
+    is the only place a backend SGLang chose for itself can be read. SGLang
+    0.5.19 keeps ``ServerArgs`` at what the caller asked for and resolves in a
+    separate pass, so at CLI time an automatic backend is still ``None``.
     """
     # Diffusion/video argument stubs and older SGLang releases omit dcp_size.
     dcp_size = int(getattr(server_args, "dcp_size", 1) or 1)
@@ -215,7 +255,7 @@ def _validate_dcp_attention_backend(server_args: Any, parsed_args: Namespace) ->
     if sglang_uses_mla_backend(server_args):
         return
 
-    # Read the backend SGLang resolved, not the flag the user typed: fa3 is the
+    # Read the effective backend, not the flag the user typed: fa3 is the
     # automatic choice for an MHA model on Hopper with no --attention-backend.
     resolved = resolved_server_args(server_args)
     base_backend = getattr(resolved, "attention_backend", None)
@@ -227,8 +267,9 @@ def _validate_dcp_attention_backend(server_args: Any, parsed_args: Namespace) ->
     unsupported = sorted(
         (phase, backend)
         for phase, backend in phase_backends.items()
-        # A backend name SGLang has not resolved yet is unknown, not unsupported;
-        # guessing would break launches on a release that resolves it later.
+        # A backend SGLang has not decided yet is unknown, not unsupported. At
+        # CLI time that is every automatic backend; the engine's configuration
+        # carries the decision, and this runs again there.
         if backend is not None and backend not in DCP_CAPABLE_ATTENTION_BACKENDS
     )
     if not unsupported:
@@ -237,11 +278,10 @@ def _validate_dcp_attention_backend(server_args: Any, parsed_args: Namespace) ->
     named = ", ".join(
         f"{phase} attention backend '{backend}'" for phase, backend in unsupported
     )
-    typed_backend = getattr(parsed_args, "attention_backend", None)
     automatic = (
         ""
-        if typed_backend
-        else " SGLang selected it automatically because no --attention-backend was passed."
+        if backend_from_cli
+        else " SGLang selected it automatically because no attention backend was passed."
     )
     raise ValueError(
         f"--dcp-size {dcp_size} is not supported with the {named}.{automatic} "
@@ -708,7 +748,8 @@ async def parse_args(args: list[str]) -> Config:
             "values are always higher priority at the API layer."
         )
 
-    _validate_dcp_attention_backend(server_args, parsed_args)
+    backend_from_cli = _attention_backend_from_cli(parsed_args)
+    _validate_dcp_attention_backend(server_args, backend_from_cli=backend_from_cli)
 
     if dynamo_config.use_sglang_tokenizer:
         warnings.warn(
@@ -750,7 +791,9 @@ async def parse_args(args: list[str]) -> Config:
 
     logging.debug(f"Dynamo configs: {dynamo_config}")
 
-    return Config(server_args, dynamo_config)
+    return Config(
+        server_args, dynamo_config, attention_backend_from_cli=backend_from_cli
+    )
 
 
 @contextlib.contextmanager
