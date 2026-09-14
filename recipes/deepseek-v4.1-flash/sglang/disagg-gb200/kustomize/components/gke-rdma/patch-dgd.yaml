@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: deepseek-v41-flash-sglang-gb200-disagg
+spec:
+  components:
+    # A strategic merge puts patched components first. Name the Frontend so the
+    # rendered manifest keeps the canonical beta order.
+    - name: Frontend
+    - name: PrefillWorker
+      podTemplate:
+        metadata:
+          annotations: &gkeAnnotations
+            networking.gke.io/default-interface: eth0
+            networking.gke.io/interfaces: '[{"interfaceName":"eth0","network":"default"},{"interfaceName":"rdma0","network":"rdma-0"},{"interfaceName":"rdma1","network":"rdma-1"},{"interfaceName":"rdma2","network":"rdma-2"},{"interfaceName":"rdma3","network":"rdma-3"}]'
+        spec:
+          containers:
+            - name: main
+              env: &gkeEnv
+                # This target attaches RDMA devices, so Mooncake finds HCAs and
+                # uses RDMA. Drop the base's TCP pin, which exists only for the
+                # generic target, which has no RDMA device.
+                - name: MC_FORCE_TCP
+                  $patch: delete
+                # Register GPU memory for RDMA through DMA-BUF, not through the
+                # nvidia_peermem kernel module. These nodes load nvidia,
+                # nvidia_drm, nvidia_modeset and nvidia_uvm, and no peermem. With
+                # the default Mooncake path every GPU registration fails:
+                #   rdma_context.cpp:602] Failed to register memory: Bad address [14]
+                # Host memory still registers, so the workers reach Ready and the
+                # API answers HTTP 200 with content null.
+                - name: WITH_NVIDIA_PEERMEM
+                  value: "0"
+                # eth0 is the GKE default pod interface. NCCL and Gloo must not
+                # pick an RDMA interface for their control plane.
+                - name: NCCL_SOCKET_IFNAME
+                  value: eth0
+                - name: GLOO_SOCKET_IFNAME
+                  value: eth0
+              resources: &gkeResources
+                limits:
+                  networking.gke.io.networks/rdma-0: "1"
+                  networking.gke.io.networks/rdma-1: "1"
+                  networking.gke.io.networks/rdma-2: "1"
+                  networking.gke.io.networks/rdma-3: "1"
+    - name: DecodeWorker
+      podTemplate:
+        metadata:
+          annotations: *gkeAnnotations
+        spec:
+          containers:
+            - name: main
+              env: *gkeEnv
+              resources: *gkeResources
