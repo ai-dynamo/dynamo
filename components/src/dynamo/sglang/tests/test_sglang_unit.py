@@ -1694,6 +1694,40 @@ async def test_prefill_warmup_failure_cancels_metrics(
     assert metrics_task.cancelled()
 
 
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_prefill_warmup_cancellation_cancels_metrics(monkeypatch):
+    warmup_started = asyncio.Event()
+
+    async def suspended_warmup(engine, port):
+        warmup_started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(disagg_mod, "warmup_prefill_engine", suspended_warmup)
+    metrics_task = await _real_shaped_metrics_task()
+    warmup_task = asyncio.create_task(
+        init_llm_mod._warmup_prefill_engine(
+            object(),
+            SimpleNamespace(disaggregation_bootstrap_port=1234),
+            metrics_task,
+        )
+    )
+    try:
+        await warmup_started.wait()
+        warmup_task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await warmup_task
+
+        assert metrics_task.done()
+        assert metrics_task.cancelled()
+    finally:
+        if not metrics_task.done():
+            metrics_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await metrics_task
+
+
 def test_main_treats_cancellation_as_clean_exit(monkeypatch, caplog):
     async def cancelled_worker():
         raise asyncio.CancelledError

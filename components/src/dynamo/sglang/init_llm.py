@@ -38,6 +38,9 @@ async def _warmup_prefill_engine(
 
     try:
         await warmup_prefill_engine(engine, server_args.disaggregation_bootstrap_port)
+    except asyncio.CancelledError:
+        await finish_worker_teardown(metrics_task, lambda: None, body_failed=True)
+        raise
     except asyncio.TimeoutError as exc:
         await finish_worker_teardown(metrics_task, lambda: None, body_failed=True)
         logging.error("Prefill warmup timed out after 1800s — aborting worker startup")
