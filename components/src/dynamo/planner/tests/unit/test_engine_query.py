@@ -91,6 +91,14 @@ def _sum_prefill_ms(metrics_by_rank: list[dict[str, Any]]) -> float:
 def test_best_available_uses_aic_core_wheel_facade(monkeypatch):
     sentinel = _FakeForwardPassModel(lambda _metrics: 1.0)
 
+    class _FakeConfig:
+        def __init__(self, **values):
+            self.values = values
+
+    class _FakeOptions:
+        def __init__(self, **values):
+            self.values = values
+
     class _FakeAicFacade:
         last_config = None
         last_options = None
@@ -102,6 +110,8 @@ def test_best_available_uses_aic_core_wheel_facade(monkeypatch):
             return sentinel
 
     monkeypatch.setattr(engine_query, "AicForwardPassPerfModel", _FakeAicFacade)
+    monkeypatch.setattr(engine_query, "_AIC_FORWARD_PASS_CONFIG_TYPE", _FakeConfig)
+    monkeypatch.setattr(engine_query, "_AIC_FORWARD_PASS_OPTIONS_TYPE", _FakeOptions)
     limits = EnginePerfLimits(128, 16, 10_000)
     options = {
         "max_observations": 8,
@@ -111,18 +121,65 @@ def test_best_available_uses_aic_core_wheel_facade(monkeypatch):
         "max_batch_size": 16,
         "max_kv_tokens": 10_000,
     }
-    config = {"schema_version": 1, "model_name": "Qwen/Qwen3-0.6B"}
+    config = {
+        "model": "Qwen/Qwen3-0.6B",
+        "system": "h200_sxm",
+        "backend": "vllm",
+    }
 
     model = AicCoreEnginePerfModel.best_available(
         aic_config=config,
+        legacy_aic_config=None,
         worker_type="prefill",
         limits=limits,
         options=options,
         attention_dp_size=1,
     )
 
-    assert _FakeAicFacade.last_config is config
-    assert _FakeAicFacade.last_options is options
+    assert _FakeAicFacade.last_config.values == config
+    assert _FakeAicFacade.last_options.values == options
+    assert model.diagnostics()["readiness"] == "ready"
+
+
+def test_precanonical_wheel_bridge_uses_legacy_regression_constructor(monkeypatch):
+    sentinel = _FakeForwardPassModel(lambda _metrics: 1.0)
+
+    class _LegacyAicFacade:
+        last_options = None
+
+        @classmethod
+        def from_regression(cls, options):
+            cls.last_options = options
+            return sentinel
+
+    monkeypatch.setattr(engine_query, "AicForwardPassPerfModel", _LegacyAicFacade)
+    monkeypatch.setattr(engine_query, "_AIC_FORWARD_PASS_CONFIG_TYPE", None)
+    monkeypatch.setattr(engine_query, "_AIC_FORWARD_PASS_OPTIONS_TYPE", None)
+    limits = EnginePerfLimits(128, 16, 10_000)
+    options = {
+        "max_observations": 8,
+        "min_observations": 2,
+        "bucket_count": 4,
+        "max_num_tokens": 128,
+        "max_batch_size": 16,
+        "max_kv_tokens": 10_000,
+    }
+
+    model = AicCoreEnginePerfModel.best_available(
+        aic_config={
+            "model": "dynamo/observed-fpm-regression",
+            "system": "dynamo_unconfigured",
+            "backend": "vllm",
+            "fallback_policy": "regression",
+        },
+        legacy_aic_config=None,
+        worker_type="decode",
+        limits=limits,
+        options=options,
+        attention_dp_size=1,
+    )
+
+    assert _LegacyAicFacade.last_options is options
     assert model.diagnostics()["readiness"] == "ready"
 
 

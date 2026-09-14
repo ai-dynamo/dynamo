@@ -392,7 +392,11 @@ os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 import msgspec
 import aiconfigurator_core
-from aiconfigurator_core.sdk import RustForwardPassPerfModel
+from aiconfigurator_core.sdk import (
+    ForwardPassPerfModelConfig,
+    ForwardPassPerfOptions,
+    RustForwardPassPerfModel,
+)
 from aiconfigurator_core.sdk.engine import compile_engine
 from aiconfigurator_core.sdk.memory import estimate_num_gpu_blocks
 from dynamo.common.forward_pass_metrics import (
@@ -413,35 +417,26 @@ for path in parquet_files:
     with path.open("rb") as handle:
         assert handle.read(4) == b"PAR1"
 
-model = RustForwardPassPerfModel.from_native(
-    {
-        "schema_version": 1,
-        "model_name": "Qwen/Qwen3-32B",
-        "system_name": "h200_sxm",
-        "backend": "vllm",
-        "backend_version": "0.19.0",
-        "kv_block_size": None,
-        "tp_size": 1,
-        "pp_size": 1,
-        "moe_tp_size": None,
-        "moe_ep_size": None,
-        "attention_dp_size": 1,
-        "cp_size": None,
-        "weight_dtype": None,
-        "moe_dtype": None,
-        "activation_dtype": None,
-        "kv_cache_dtype": None,
-        "nextn": None,
-        "extra": {},
-    },
-    {
-        "max_observations": 64,
-        "min_observations": 5,
-        "bucket_count": 16,
-        "max_num_tokens": 4096,
-        "max_batch_size": 128,
-        "max_kv_tokens": 1_000_000,
-    },
+model = RustForwardPassPerfModel.best_available(
+    ForwardPassPerfModelConfig(
+        model="Qwen/Qwen3-32B",
+        system="h200_sxm",
+        backend="vllm",
+        backend_version="0.19.0",
+        tp=1,
+        pp=1,
+        attention_dp=1,
+        kv_block_size=16,
+        fallback_policy="error",
+    ),
+    ForwardPassPerfOptions(
+        max_observations=64,
+        min_observations=5,
+        bucket_count=16,
+        max_num_tokens=4096,
+        max_batch_size=128,
+        max_kv_tokens=1_000_000,
+    ),
 )
 estimate_ms = model.estimate_forward_pass_time_ms(
     [

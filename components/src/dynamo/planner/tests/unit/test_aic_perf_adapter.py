@@ -255,6 +255,18 @@ def test_aic_config_requests_raw_spec_decode_iteration_time(
     assert fake_engine_factory.last_kwargs is not None
     aic_config = fake_engine_factory.last_kwargs["aic_config"]
     assert aic_config["nextn"] == int(expected_nextn)
+    assert aic_config["model"] == "Qwen/Qwen3-0.6B"
+    assert aic_config["system"] == "h200_sxm"
+    assert aic_config["fallback_policy"] == "regression"
+    assert {
+        "schema_version",
+        "model_name",
+        "system_name",
+        "tp_size",
+        "attention_dp_size",
+    }.isdisjoint(aic_config)
+    legacy_config = fake_engine_factory.last_kwargs["legacy_aic_config"]
+    assert legacy_config["nextn"] == int(expected_nextn)
 
 
 def test_capability_nextn_update_rebuilds_aic_model_and_replays_fpms(

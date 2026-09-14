@@ -18,8 +18,8 @@ from enum import Enum
 from itertools import pairwise
 from typing import Any, Callable, Literal, Optional
 
+import aiconfigurator_core.sdk as aic_sdk
 import msgspec
-from aiconfigurator_core.sdk import RustForwardPassPerfModel as AicForwardPassPerfModel
 
 from dynamo.common.forward_pass_metrics import (
     FPM_VERSION,
@@ -32,6 +32,17 @@ MAX_CAPACITY_SEARCH_CANDIDATES = 128
 MAX_KV_HIT_RATE_DISCOUNT = 0.95
 _U32_MAX = (1 << 32) - 1
 _DURATION_EXCLUSIVE_MAX_SECONDS = float(1 << 64)
+
+AicForwardPassPerfModel = aic_sdk.RustForwardPassPerfModel
+# Rolling-release bridge: merge this Dynamo migration before AISimulate PR #13.
+# Once the canonical types are present, every Planner construction path uses
+# best_available. The legacy branch keeps the already-released wheel working
+# during that ordering window and can be removed after the new minimum version
+# is published.
+# The SDK lazily exports these types, so ``__dict__.get`` would incorrectly
+# classify a canonical wheel as legacy until another caller touched them.
+_AIC_FORWARD_PASS_CONFIG_TYPE = getattr(aic_sdk, "ForwardPassPerfModelConfig", None)
+_AIC_FORWARD_PASS_OPTIONS_TYPE = getattr(aic_sdk, "ForwardPassPerfOptions", None)
 
 WorkerType = Literal["prefill", "decode", "aggregated"]
 
@@ -211,16 +222,24 @@ class AicCoreEnginePerfModel:
     def best_available(
         cls,
         *,
-        aic_config: Optional[dict[str, Any]],
+        aic_config: dict[str, Any],
+        legacy_aic_config: Optional[dict[str, Any]],
         worker_type: WorkerType,
         limits: EnginePerfLimits,
         options: dict[str, int],
         attention_dp_size: int,
     ) -> AicCoreEnginePerfModel:
-        if aic_config is None:
+        if (
+            _AIC_FORWARD_PASS_CONFIG_TYPE is not None
+            and _AIC_FORWARD_PASS_OPTIONS_TYPE is not None
+        ):
+            config = _AIC_FORWARD_PASS_CONFIG_TYPE(**aic_config)
+            perf_options = _AIC_FORWARD_PASS_OPTIONS_TYPE(**options)
+            model = AicForwardPassPerfModel.best_available(config, perf_options)
+        elif legacy_aic_config is None:
             model = AicForwardPassPerfModel.from_regression(options)
         else:
-            model = AicForwardPassPerfModel.best_available(aic_config, options)
+            model = AicForwardPassPerfModel.best_available(legacy_aic_config, options)
         return cls(
             model=model,
             worker_type=worker_type,
