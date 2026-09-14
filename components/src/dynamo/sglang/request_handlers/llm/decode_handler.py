@@ -934,7 +934,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 )
 
                 response = {
-                    "id": meta_info["id"],
+                    "id": context.id(),
                     "created": int(time.time()),
                     "choices": [choice_data],
                     "model": self.config.server_args.served_model_name,

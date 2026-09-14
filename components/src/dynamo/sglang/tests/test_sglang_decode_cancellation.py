@@ -9,6 +9,7 @@ import pytest
 
 from dynamo.common.constants import DisaggregationMode
 from dynamo.llm.exceptions import EngineShutdown
+from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
 
 pytestmark = [
@@ -26,9 +27,11 @@ async def _collect(stream):
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(5)
 async def test_cancellation_monitor_rechecks_shutdown_after_cleanup():
     handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
     handler.shutdown_event = asyncio.Event()
+    handler._abort_retry_tasks = set()
 
     async def set_shutdown_when_cancelled(*_args):
         try:
@@ -50,6 +53,7 @@ async def test_cancellation_monitor_rechecks_shutdown_after_cleanup():
 @pytest.fixture
 def decode_cancellation_case(monkeypatch):
     handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
+    handler._abort_retry_tasks = set()
     handler.shutdown_event = None
     handler.use_sglang_tokenizer = False
     handler.config = SimpleNamespace(
@@ -137,7 +141,6 @@ def decode_cancellation_case(monkeypatch):
         native_request=None,
         request={
             "token_ids": [1],
-            # No network is used by this engine double.
             "bootstrap_info": {
                 "bootstrap_host": "localhost",
                 "bootstrap_port": 0,
@@ -476,6 +479,7 @@ async def test_cancellation_monitor_logs_only_submitted_abort(
             await abort
     else:
         await abort
+    await asyncio.gather(*case.handler._abort_retry_tasks)
     assert case.abort_calls == ([] if abort_fails else [(rid, False)])
     assert caplog.messages.count(f"Aborted Request ID: {case.context.id()}") == (
         0 if abort_fails else 1
@@ -522,6 +526,7 @@ async def test_cancellation_monitor_stops_when_request_finishes(
             case.registry[rid] = object()
         resume.set()
         await asyncio.wait_for(monitor, timeout=1)
+        await asyncio.gather(*case.handler._abort_retry_tasks)
         expected = [(rid, False)] if waiting_for == "retry" else []
         assert case.abort_calls == expected
         assert caplog.messages.count(f"Aborted Request ID: {case.context.id()}") == len(
@@ -689,6 +694,7 @@ async def test_cancellation_monitor_retries_only_without_ordered_dispatch(
         ),
         timeout=1,
     )
+    await asyncio.gather(*case.handler._abort_retry_tasks)
     assert case.abort_calls == [(rid, False)] * (2 if expect_retry else 1)
 
 
@@ -724,11 +730,105 @@ async def test_cancellation_monitor_bounds_abort_retries(
         timeout=1,
     )
 
+    await asyncio.gather(*case.handler._abort_retry_tasks)
     assert case.abort_calls == [(rid, False)] * 9
     assert (
         "SGLang request internal-request-id remained registered after 8 abort retries"
         in caplog.messages
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_stream_drain_starts_before_abort_retries_complete(
+    decode_cancellation_case, monkeypatch
+):
+    case = decode_cancellation_case
+    rid = "internal-request-id"
+    state = SimpleNamespace(
+        time_stats=SimpleNamespace(api_server_dispatch_finish_time=1.0)
+    )
+    case.registry[rid] = state
+    retry_started = asyncio.Event()
+    release_retry = asyncio.Event()
+
+    async def blocked_retry(*_args):
+        retry_started.set()
+        await release_retry.wait()
+
+    async def stalled_stream():
+        await asyncio.Future()
+        yield {}
+
+    monkeypatch.setattr(case.handler, "_retry_abort", blocked_retry)
+    monkeypatch.setattr(
+        "dynamo.sglang.request_handlers.cancellation.resolved_server_args",
+        lambda raw_args: SimpleNamespace(pp_size=2),
+    )
+    monkeypatch.setattr(
+        "dynamo.sglang.request_handlers.cancellation._CANCELLATION_DRAIN_TIMEOUT_S",
+        0,
+    )
+
+    case.cancelled.set()
+    cancellation_task = asyncio.create_task(
+        case.handler._handle_cancellation(
+            asyncio.get_running_loop().create_future(), case.context, rid
+        )
+    )
+    stream_task = asyncio.create_task(
+        _collect(
+            case.handler._stream_until_cancelled(stalled_stream(), cancellation_task)
+        )
+    )
+    try:
+        await asyncio.wait_for(retry_started.wait(), timeout=1)
+        assert await asyncio.wait_for(stream_task, timeout=0.1) == []
+        assert cancellation_task.done()
+        assert case.abort_calls == [(rid, False)]
+    finally:
+        retry_tasks = tuple(case.handler._abort_retry_tasks)
+        release_retry.set()
+        await asyncio.gather(
+            cancellation_task, stream_task, *retry_tasks, return_exceptions=True
+        )
+    assert not case.handler._abort_retry_tasks
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_cancel_abort_retries_cancels_and_releases_owned_tasks(
+    decode_cancellation_case, monkeypatch
+):
+    case = decode_cancellation_case
+    retry_started = asyncio.Event()
+
+    async def blocked_retry(*_args):
+        retry_started.set()
+        await asyncio.Future()
+
+    monkeypatch.setattr(case.handler, "_retry_abort", blocked_retry)
+    case.handler._start_abort_retry(object(), "request-id", {}, object())
+    await asyncio.wait_for(retry_started.wait(), timeout=1)
+    retry_task = next(iter(case.handler._abort_retry_tasks))
+
+    case.handler._cancel_abort_retries()
+    with pytest.raises(asyncio.CancelledError):
+        await retry_task
+    await asyncio.sleep(0)
+
+    assert not case.handler._abort_retry_tasks
+
+
+def test_base_worker_cleanup_cancels_abort_retries():
+    handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
+    handler.publisher = None
+    cleanup_calls = []
+    handler._cancel_abort_retries = lambda: cleanup_calls.append("cancel")
+
+    BaseWorkerHandler.cleanup(handler)
+
+    assert cleanup_calls == ["cancel"]
 
 
 @pytest.mark.asyncio

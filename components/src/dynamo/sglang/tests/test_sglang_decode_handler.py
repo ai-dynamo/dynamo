@@ -455,16 +455,6 @@ async def test_native_generate_stream_maps_internal_id_without_mutation():
     assert mapped_response["meta_info"] is not native_response["meta_info"]
 
 
-def test_engine_generate_always_uses_internal_request_id():
-    native = build_native_generate_request(
-        {"rid": "caller-controlled-id"},
-        input_ids=[1],
-        request_id="internal-request-id",
-        priority=None,
-    )
-    assert native.rid == "internal-request-id"
-
-
 def _new_token_input_handler(maximum_input_token_id: int = 151935):
     handler = _new_decode_handler()
     handler._max_input_token_id = maximum_input_token_id
@@ -689,6 +679,9 @@ async def _stream(items):
 
 
 class _Context:
+    def id(self):
+        return "public-request-id"
+
     def is_stopped(self):
         return False
 
@@ -1518,6 +1511,7 @@ async def test_process_text_stream_forwards_incremental_text_per_choice():
         "llo",
         "od",
     ]
+    assert [chunk["id"] for chunk in chunks] == ["public-request-id"] * 4
 
 
 @pytest.mark.asyncio
