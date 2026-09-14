@@ -557,7 +557,6 @@ async def test_parse_args_rejects_dcp_on_decode_only_unsupported_backend(
 async def test_parse_args_does_not_call_a_phase_flag_automatic(
     monkeypatch, mock_sglang_cli, tmp_path
 ):
-    """A backend the user named on either phase flag is not an automatic choice."""
     monkeypatch.setattr(
         "dynamo.sglang.args.ServerArgs.from_cli_args",
         lambda _: _dcp_server_args_stub(dcp_size=2, decode_attention_backend="fa3"),
