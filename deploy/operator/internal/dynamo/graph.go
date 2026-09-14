@@ -1531,9 +1531,20 @@ func expandRolesForComponent(componentName string, componentReplicas *int32, num
 		return expandSingleNodeScalingGroupRoles(componentName)
 	default:
 		// The elastic-EP follower is deliberately NOT emitted here: a Grove clique
-		// cannot rest at zero replicas (grove#676, minAvailable must be > 0), so it
-		// renders on the non-Grove pathway instead (synthesizeElasticEPFollowerDCD).
-		// Revisit once grove#686 makes replicas:0 a valid idle state.
+		// cannot rest at zero, so it renders on the non-Grove pathway instead
+		// (synthesizeElasticEPFollowerDCD).
+		//
+		// The blocker is gang membership, not minAvailable. A clique at replicas: 0 is
+		// still counted as a required member of its PodGang, so kai-scheduler marks the
+		// PodGroup stale and evicts the survivors -- which is why grove#676 was closed as
+		// working-as-designed rather than fixed. Raising minAvailable is not the remedy:
+		// grove#677 rejected that framing and GREP-0677 lists "Allow minAvailable: 0"
+		// under Non-Goals. Track grove#677; grove#686 is the GREP that would make
+		// replicas: 0 a first-class idle state.
+		//
+		// Note that a *plain* Grove clique would not close the identity gap either --
+		// its replicas are fungible. The identity-bearing target is a PodCliqueScalingGroup
+		// member clique, which needs grove#793 / grove#823.
 		return expandSingleNodeRoles(componentName, componentReplicas)
 	}
 }
