@@ -1,9 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::future::Future;
 use std::io::Write;
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
@@ -11,7 +13,7 @@ use async_nats::jetstream;
 use async_trait::async_trait;
 use dynamo_runtime::config::environment_names::llm::request_trace as env_request_trace;
 use dynamo_runtime::transports::nats;
-use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::telemetry::jsonl::{JsonlSinkOptions, JsonlWriter};
@@ -22,29 +24,29 @@ use super::{
     otel_sink::OtelRequestTraceSink,
 };
 
-// Workers own the generation; the registry holds only a weak reference so shutdown permits restart.
-struct WorkerGeneration {
-    shutdown: CancellationToken,
-    stopped: CancellationToken,
-}
+static WORKERS_STARTED: AtomicBool = AtomicBool::new(false);
+static WORKERS: Mutex<Option<SinkWorkers>> = Mutex::new(None);
+// Serializes worker creation against shutdown. The worker slot alone cannot do
+// that because shutdown removes a generation before awaiting its final drain.
+static WORKER_LIFECYCLE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static ACTIVE_INPUTS: AtomicUsize = AtomicUsize::new(0);
 
-impl Drop for WorkerGeneration {
-    fn drop(&mut self) {
-        self.stopped.cancel();
-    }
-}
-
-static GENERATION: OnceLock<Mutex<Weak<WorkerGeneration>>> = OnceLock::new();
-
-fn generation() -> &'static Mutex<Weak<WorkerGeneration>> {
-    GENERATION.get_or_init(|| Mutex::new(Weak::new()))
-}
+/// Upper bound on how long process teardown waits for the sink workers to
+/// drain. Chosen to fit inside a default Kubernetes
+/// `terminationGracePeriodSeconds` of 30 with room for the rest of teardown, so
+/// a wedged sink endpoint cannot turn a rollout into a `SIGKILL`.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[async_trait]
 pub trait RequestTraceSink: Send + Sync {
     fn name(&self) -> &'static str;
     async fn emit(&self, record: &RequestTraceRecord);
     async fn shutdown(&self) {}
+    /// Records this sink dropped. Read by the shutdown joiner so counts are
+    /// still reported when a sink does not finish draining in time.
+    fn dropped_records(&self) -> u64 {
+        0
+    }
 }
 
 pub struct StderrRequestTraceSink;
@@ -177,7 +179,7 @@ pub struct JsonlGzipRequestTraceSink {
     // writer lock. Sending fails once the writer closes admission for shutdown.
     sender: mpsc::Sender<RequestTraceRecord>,
     // shutdown consumes the writer; None means it has already closed.
-    writer: Mutex<Option<JsonlGzipWriter<RequestTraceRecord>>>,
+    writer: tokio::sync::Mutex<Option<JsonlGzipWriter<RequestTraceRecord>>>,
 }
 
 impl JsonlGzipRequestTraceSink {
@@ -191,7 +193,7 @@ impl JsonlGzipRequestTraceSink {
             .expect("newly constructed JsonlGzipWriter always has a sender");
         Ok(Self {
             sender,
-            writer: Mutex::new(Some(writer)),
+            writer: tokio::sync::Mutex::new(Some(writer)),
         })
     }
 
@@ -286,65 +288,240 @@ async fn parse_sinks_from_env() -> anyhow::Result<Vec<Arc<dyn RequestTraceSink>>
     Ok(sinks)
 }
 
-pub async fn spawn_workers_from_env(shutdown: CancellationToken) -> anyhow::Result<()> {
-    spawn_generation(shutdown, parse_sinks_from_env).await
+/// The sink workers, retained so that teardown can wait for them.
+pub struct SinkWorkers {
+    /// Cancelled by [`SinkWorkers::shutdown`]. A child of the token passed to
+    /// [`spawn_workers`], so a runtime-wide cancellation still stops the
+    /// workers, but teardown does not have to wait for one to arrive.
+    token: CancellationToken,
+    handles: Vec<tokio::task::JoinHandle<()>>,
+    /// Same order as `handles`, so a handle that is still running can be paired
+    /// with the sink it belongs to.
+    sinks: Vec<Arc<dyn RequestTraceSink>>,
 }
 
-async fn spawn_generation<F, Fut>(shutdown: CancellationToken, make_sinks: F) -> anyhow::Result<()>
-where
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = anyhow::Result<Vec<Arc<dyn RequestTraceSink>>>>,
-{
-    loop {
-        let mut live = tokio::select! {
-            biased;
-            _ = shutdown.cancelled() => return Err(anyhow!("request trace initialization cancelled")),
-            live = generation().lock() => live,
-        };
-        if let Some(existing) = live.upgrade() {
-            if !existing.shutdown.is_cancelled() {
-                return Ok(());
-            }
-            // Release the strong reference so the last worker can signal its drop.
-            let stopped = existing.stopped.clone();
-            drop(existing);
-            drop(live);
-            tokio::select! {
-                biased;
-                _ = shutdown.cancelled() => return Err(anyhow!("request trace initialization cancelled")),
-                _ = stopped.cancelled() => {},
-            }
-            continue;
+/// What the bounded shutdown observed.
+#[derive(Debug)]
+pub struct TraceShutdownReport {
+    pub timed_out: bool,
+    /// (sink name, records dropped so far) for sinks that did not finish draining.
+    pub pending: Vec<(&'static str, u64)>,
+}
+
+impl SinkWorkers {
+    /// Cancel the workers and wait for them to finish draining, giving up after
+    /// `timeout`. On timeout the sink tasks are aborted after their counts are
+    /// captured, so the next worker generation cannot overlap them.
+    pub async fn shutdown(self, timeout: Duration) -> TraceShutdownReport {
+        self.token.cancel();
+        let Self {
+            mut handles, sinks, ..
+        } = self;
+
+        if tokio::time::timeout(timeout, futures::future::join_all(handles.iter_mut()))
+            .await
+            .is_ok()
+        {
+            return TraceShutdownReport {
+                timed_out: false,
+                pending: Vec::new(),
+            };
         }
 
-        let generation = Arc::new(WorkerGeneration {
-            shutdown: shutdown.clone(),
-            stopped: CancellationToken::new(),
-        });
-        let sinks = make_sinks().await?;
-        anyhow::ensure!(
-            !shutdown.is_cancelled(),
-            "request trace initialization cancelled"
+        let pending: Vec<(&'static str, u64)> = handles
+            .iter()
+            .zip(sinks.iter())
+            .filter(|(handle, _)| !handle.is_finished())
+            .map(|(_, sink)| (sink.name(), sink.dropped_records()))
+            .collect();
+        tracing::warn!(
+            timeout_ms = timeout.as_millis() as u64,
+            pending = ?pending,
+            "request trace sinks did not finish draining before the shutdown timeout"
         );
-        spawn_workers(shutdown, sinks, &generation);
-        *live = Arc::downgrade(&generation);
-        return Ok(());
+        for handle in &handles {
+            handle.abort();
+        }
+        // Wait for cancellation to complete before reopening the start gate.
+        // Dropping a JoinHandle would detach its task and let it consume new
+        // broadcast records alongside the next worker generation.
+        let _ = futures::future::join_all(handles.iter_mut()).await;
+        TraceShutdownReport {
+            timed_out: true,
+            pending,
+        }
     }
 }
 
+pub async fn spawn_workers_from_env(shutdown: CancellationToken) -> anyhow::Result<()> {
+    let _lifecycle = WORKER_LIFECYCLE.lock().await;
+    if WORKERS_STARTED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        let workers = {
+            let mut slot = WORKERS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !slot
+                .as_ref()
+                .is_some_and(|workers| workers.token.is_cancelled())
+            {
+                return Ok(());
+            }
+            slot.take().expect("cancelled workers must be retained")
+        };
+        // The last input can only cancel from `Drop`, where it cannot await a
+        // drain. A later lifecycle owns the join: retire that cancelled
+        // generation before it installs a replacement.
+        workers.shutdown(SHUTDOWN_TIMEOUT).await;
+        WORKERS_STARTED.store(false, Ordering::Release);
+        WORKERS_STARTED.store(true, Ordering::Release);
+    }
+
+    let sinks = match parse_sinks_from_env().await {
+        Ok(sinks) => sinks,
+        Err(error) => {
+            WORKERS_STARTED.store(false, Ordering::Release);
+            return Err(error);
+        }
+    };
+    *WORKERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(spawn_workers(sinks, shutdown));
+    Ok(())
+}
+
+/// Registers one running input for as long as it is held.
+///
+/// The sink workers are one process-wide set, but an input is not: the mocker
+/// starts one endpoint input per worker and awaits them together, and the HTTP
+/// frontend runs nested inside another input. Draining when the first of those
+/// returns would leave the rest publishing into a bus with no worker behind it,
+/// so the drain waits for the last registration to be released.
+///
+/// Only [`ActiveInput::release_and_drain`] gives the bounded drain. Dropping the
+/// last guard instead — a cancelled or panicking input — cancels the workers so
+/// they start draining, but cannot wait for them, and warns.
+pub struct ActiveInput(());
+
+impl ActiveInput {
+    /// Count this input as running until the guard is released or dropped.
+    pub fn register() -> Self {
+        ACTIVE_INPUTS.fetch_add(1, Ordering::AcqRel);
+        Self(())
+    }
+
+    /// Release this registration and, when it was the last one, cancel the sink
+    /// workers and wait for them to drain. Returns `None` while another input
+    /// is still running, and when no workers were started.
+    pub async fn release_and_drain(self) -> Option<TraceShutdownReport> {
+        // Serialize the final decrement with worker creation. Otherwise a new
+        // input could reuse the old workers immediately before this last input
+        // takes them out of the slot to drain.
+        let _lifecycle = WORKER_LIFECYCLE.lock().await;
+        if !self.release() {
+            return None;
+        }
+        shutdown_workers_locked().await
+    }
+
+    /// Release the registration, reporting whether it was the last one. `Drop`
+    /// releases it too, so the guard is forgotten here rather than released
+    /// twice.
+    fn release(self) -> bool {
+        let was_last = ACTIVE_INPUTS.fetch_sub(1, Ordering::AcqRel) == 1;
+        std::mem::forget(self);
+        was_last
+    }
+}
+
+impl Drop for ActiveInput {
+    fn drop(&mut self) {
+        // Take the worker slot before releasing the registration. A new input
+        // either increments the count first (so this is not the last guard),
+        // or waits for this cancellation and then retires the cancelled
+        // generation before it reuses the slot.
+        let slot = WORKERS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if ACTIVE_INPUTS.fetch_sub(1, Ordering::AcqRel) != 1 {
+            return;
+        }
+        // The last input ended without calling `release_and_drain`, so it was
+        // cancelled or it panicked. `Drop` cannot await, and spawning a
+        // detached drain would only look like one: nothing would be left to
+        // wait on it, which is the timing guess this change exists to remove.
+        // Cancelling is the part that can be done here, and it is worth doing:
+        // each worker leaves its loop and runs the sink's own `shutdown`, so a
+        // caller that keeps the runtime alive past the cancellation still gets
+        // the backlog written. What cannot be promised is that it finishes
+        // before the process exits, so say so rather than fail quietly. There
+        // is nothing to say when no workers were running, which is every run
+        // with request tracing switched off.
+        if let Some(workers) = slot.as_ref() {
+            workers.token.cancel();
+            tracing::warn!(
+                "request trace sinks were cancelled without a bounded drain because the last \
+                 input ended early; records still queued may be lost if the process exits \
+                 immediately"
+            );
+        }
+    }
+}
+
+/// Cancel the retained workers and wait for them to drain, bounded by
+/// [`SHUTDOWN_TIMEOUT`]. Returns `None` when no workers were started, which is
+/// the case whenever request tracing is disabled.
+pub async fn shutdown_workers() -> Option<TraceShutdownReport> {
+    let _lifecycle = WORKER_LIFECYCLE.lock().await;
+    shutdown_workers_locked().await
+}
+
+async fn shutdown_workers_locked() -> Option<TraceShutdownReport> {
+    let workers = {
+        let mut slot = WORKERS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        slot.take()?
+    };
+    let report = workers.shutdown(SHUTDOWN_TIMEOUT).await;
+    // Keep the gate closed until the retired generation is fully stopped. This
+    // prevents a new subscription from receiving records that the old workers
+    // are still draining.
+    WORKERS_STARTED.store(false, Ordering::Release);
+    Some(report)
+}
+
 fn spawn_workers(
-    shutdown: CancellationToken,
     sinks: Vec<Arc<dyn RequestTraceSink>>,
-    generation: &Arc<WorkerGeneration>,
-) {
+    shutdown: CancellationToken,
+) -> SinkWorkers {
     let sink_count = sinks.len();
-    for sink in sinks {
+    // The workers are process-wide, so they cannot hang off the runtime of
+    // whichever input happened to initialize tracing first. The mocker gives
+    // each of its workers its own runtime, and one of those ending — cleanly or
+    // not — would otherwise cancel the shared sinks while the other inputs are
+    // still publishing into them. When an input is registered, teardown belongs
+    // to `ActiveInput`: the last one out cancels these workers whether it
+    // returns, is cancelled, or panics.
+    let token = CancellationToken::new();
+    if ACTIVE_INPUTS.load(Ordering::Acquire) == 0 {
+        // Started outside any input, so the caller's token is the only teardown
+        // signal there is and the workers follow it as before.
+        let linked = token.clone();
+        tokio::spawn(async move {
+            shutdown.cancelled().await;
+            linked.cancel();
+        });
+    }
+    let mut handles = Vec::with_capacity(sink_count);
+    for sink in &sinks {
+        let sink = sink.clone();
         let name = sink.name();
         let mut receiver: broadcast::Receiver<RequestTraceRecord> = super::subscribe();
-        let worker_shutdown = shutdown.clone();
-        let generation = Arc::clone(generation);
-        tokio::spawn(async move {
-            let _generation_guard = generation;
+        let worker_shutdown = token.clone();
+        handles.push(tokio::spawn(async move {
             loop {
                 tokio::select! {
                     biased;
@@ -379,32 +556,27 @@ fn spawn_workers(
                 }
             }
             sink.shutdown().await;
-        });
+        }));
     }
 
     if sink_count == 0 {
         tracing::warn!("request trace is enabled but no valid request trace sinks were configured");
     }
     tracing::info!(sinks = sink_count, "Request trace sinks ready");
-}
-
-#[cfg(test)]
-async fn live_generation_stopped() -> Option<CancellationToken> {
-    generation()
-        .lock()
-        .await
-        .upgrade()
-        .map(|generation| generation.stopped.clone())
+    SinkWorkers {
+        token,
+        handles,
+        sinks,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::io::Read;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::AtomicUsize;
 
     use flate2::read::MultiGzDecoder;
     use tempfile::tempdir;
-    use tokio::sync::{mpsc, oneshot};
 
     use crate::request_trace::RequestReplayMetrics;
     use crate::telemetry::jsonl_gz::segment_path;
@@ -450,348 +622,192 @@ mod tests {
         }
     }
 
-    fn record_with_request_id(request_id: &str) -> RequestTraceRecord {
-        let mut record = sample_record();
-        if let Some(request) = record.request.as_mut() {
-            request.request_id = request_id.to_string();
-        }
-        record
-    }
-
-    // Tests that drive the process-global generation registry must not overlap.
-    static GENERATION_TEST_LOCK: Mutex<()> = Mutex::const_new(());
-
-    struct RecordingSink {
-        emitted: mpsc::UnboundedSender<RequestTraceRecord>,
-        shutdowns: Arc<AtomicUsize>,
-    }
-
-    impl RecordingSink {
-        fn new() -> (
-            Arc<Self>,
-            mpsc::UnboundedReceiver<RequestTraceRecord>,
-            Arc<AtomicUsize>,
-        ) {
-            let (emitted, records) = mpsc::unbounded_channel();
-            let shutdowns = Arc::new(AtomicUsize::new(0));
-            let sink = Arc::new(Self {
-                emitted,
-                shutdowns: Arc::clone(&shutdowns),
-            });
-            (sink, records, shutdowns)
-        }
+    /// Sink whose teardown is observable from the outside: `shutdown` only sets
+    /// `shutdown_done` after an await point, so a caller that does not wait for
+    /// the worker sees `false`.
+    struct FakeSink {
+        emitted: Arc<AtomicUsize>,
+        shutdown_done: Arc<AtomicBool>,
+        dropped: u64,
+        /// When set, `shutdown` never returns — a sink whose endpoint is wedged.
+        hang_on_shutdown: bool,
     }
 
     #[async_trait]
-    impl RequestTraceSink for RecordingSink {
+    impl RequestTraceSink for FakeSink {
         fn name(&self) -> &'static str {
-            "recording"
+            "fake"
         }
 
         async fn emit(&self, record: &RequestTraceRecord) {
-            let _ = self.emitted.send(record.clone());
-        }
-
-        async fn shutdown(&self) {
-            self.shutdowns.fetch_add(1, Ordering::AcqRel);
-        }
-    }
-
-    // Other tests publish to the process-global bus, so filter by request ID.
-    async fn await_record(
-        records: &mut mpsc::UnboundedReceiver<RequestTraceRecord>,
-        request_id: &str,
-    ) -> bool {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while let Some(record) = records.recv().await {
-                if record
-                    .request
-                    .as_ref()
-                    .is_some_and(|request| request.request_id == request_id)
-                {
-                    return true;
-                }
+            if record
+                .request
+                .as_ref()
+                .is_some_and(|request| request.request_id == "req-123")
+            {
+                self.emitted.fetch_add(1, Ordering::SeqCst);
             }
-            false
-        })
-        .await
-        .unwrap_or(false)
-    }
-
-    async fn shutdown_generation(shutdown: CancellationToken) {
-        shutdown.cancel();
-        if let Some(stopped) = live_generation_stopped().await {
-            tokio::time::timeout(Duration::from_secs(5), stopped.cancelled())
-                .await
-                .expect("generation did not release after its shutdown token fired");
         }
-    }
-
-    #[tokio::test]
-    async fn sink_workers_restart_after_generation_shutdown() {
-        let _serialized = GENERATION_TEST_LOCK.lock().await;
-        crate::request_trace::init_bus_for_test(64);
-
-        let (sink_one, mut records_one, shutdowns_one) = RecordingSink::new();
-        let token_one = CancellationToken::new();
-        spawn_generation(token_one.clone(), || async move {
-            let sinks: Vec<Arc<dyn RequestTraceSink>> = vec![sink_one];
-            Ok(sinks)
-        })
-        .await
-        .unwrap();
-
-        crate::request_trace::publish(record_with_request_id("restart-generation-one"));
-        assert!(
-            await_record(&mut records_one, "restart-generation-one").await,
-            "the first generation's sink never received its record"
-        );
-
-        let stopped = live_generation_stopped()
-            .await
-            .expect("the first generation is live");
-        token_one.cancel();
-        tokio::time::timeout(Duration::from_secs(5), stopped.cancelled())
-            .await
-            .expect("the first generation did not release after its shutdown token fired");
-        assert_eq!(
-            shutdowns_one.load(Ordering::Acquire),
-            1,
-            "the first generation released before its sink was shut down"
-        );
-
-        let (sink_two, mut records_two, _shutdowns_two) = RecordingSink::new();
-        let token_two = CancellationToken::new();
-        spawn_generation(token_two.clone(), || async move {
-            let sinks: Vec<Arc<dyn RequestTraceSink>> = vec![sink_two];
-            Ok(sinks)
-        })
-        .await
-        .unwrap();
-
-        crate::request_trace::publish(record_with_request_id("restart-generation-two"));
-        assert!(
-            await_record(&mut records_two, "restart-generation-two").await,
-            "the second generation's sink never received its record"
-        );
-
-        shutdown_generation(token_two).await;
-    }
-
-    struct DrainingSink {
-        entered: CancellationToken,
-        release: CancellationToken,
-    }
-
-    #[async_trait]
-    impl RequestTraceSink for DrainingSink {
-        fn name(&self) -> &'static str {
-            "draining"
-        }
-
-        async fn emit(&self, _record: &RequestTraceRecord) {}
 
         async fn shutdown(&self) {
-            self.entered.cancel();
-            self.release.cancelled().await;
+            if self.hang_on_shutdown {
+                std::future::pending::<()>().await;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            self.shutdown_done.store(true, Ordering::SeqCst);
+        }
+
+        fn dropped_records(&self) -> u64 {
+            self.dropped
         }
     }
 
     #[tokio::test]
-    async fn successor_waits_for_draining_generation_and_receives_records() {
-        let _serialized = GENERATION_TEST_LOCK.lock().await;
+    async fn shutdown_drains_the_backlog_before_returning() {
         crate::request_trace::init_bus_for_test(64);
-        let entered = CancellationToken::new();
-        let release = CancellationToken::new();
-        let sink = Arc::new(DrainingSink {
-            entered: entered.clone(),
-            release: release.clone(),
+        let emitted = Arc::new(AtomicUsize::new(0));
+        let shutdown_done = Arc::new(AtomicBool::new(false));
+        let sink: Arc<dyn RequestTraceSink> = Arc::new(FakeSink {
+            emitted: emitted.clone(),
+            shutdown_done: shutdown_done.clone(),
+            dropped: 0,
+            hang_on_shutdown: false,
         });
-        let old_token = CancellationToken::new();
-        spawn_generation(old_token.clone(), || async move {
-            Ok(vec![sink as Arc<dyn RequestTraceSink>])
-        })
-        .await
-        .unwrap();
-        old_token.cancel();
-        entered.cancelled().await;
+        let workers = spawn_workers(vec![sink], CancellationToken::new());
 
-        // Cancellation of a waiting runtime must not stop or replace the old drain.
-        let cancelled_token = CancellationToken::new();
-        let mut cancelled = Box::pin(spawn_generation(cancelled_token.clone(), || async {
-            panic!("cancelled waiter must never construct sinks");
-        }));
-        assert!(futures::poll!(cancelled.as_mut()).is_pending());
-        cancelled_token.cancel();
-        assert!(cancelled.await.is_err());
+        crate::request_trace::publish(sample_record());
 
-        let (sink, mut records, _) = RecordingSink::new();
-        let token = CancellationToken::new();
-        let builds = AtomicUsize::new(0);
-        let mut successor = Box::pin(spawn_generation(token.clone(), || async {
-            builds.fetch_add(1, Ordering::AcqRel);
-            Ok(vec![sink as Arc<dyn RequestTraceSink>])
-        }));
-        assert!(futures::poll!(successor.as_mut()).is_pending());
-        assert_eq!(builds.load(Ordering::Acquire), 0);
+        let report = workers.shutdown(Duration::from_secs(5)).await;
 
-        release.cancel();
-        tokio::time::timeout(Duration::from_secs(5), successor)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(builds.load(Ordering::Acquire), 1);
-        crate::request_trace::publish(record_with_request_id("successor-after-drain"));
-        assert!(await_record(&mut records, "successor-after-drain").await);
-        shutdown_generation(token).await;
+        assert!(!report.timed_out);
+        assert_eq!(
+            emitted.load(Ordering::SeqCst),
+            1,
+            "the record published before shutdown should reach the sink"
+        );
+        assert!(
+            shutdown_done.load(Ordering::SeqCst),
+            "shutdown returned before the sink worker finished"
+        );
     }
 
     #[tokio::test]
-    async fn second_initializer_reuses_live_generation() {
-        let _serialized = GENERATION_TEST_LOCK.lock().await;
+    async fn shutdown_timeout_reports_pending_sinks_and_their_drops() {
         crate::request_trace::init_bus_for_test(64);
+        let sink: Arc<dyn RequestTraceSink> = Arc::new(FakeSink {
+            emitted: Arc::new(AtomicUsize::new(0)),
+            shutdown_done: Arc::new(AtomicBool::new(false)),
+            dropped: 1132,
+            hang_on_shutdown: true,
+        });
+        let workers = spawn_workers(vec![sink], CancellationToken::new());
 
-        let (sink_one, mut records_one, _shutdowns_one) = RecordingSink::new();
-        let token = CancellationToken::new();
-        spawn_generation(token.clone(), || async move {
-            let sinks: Vec<Arc<dyn RequestTraceSink>> = vec![sink_one];
-            Ok(sinks)
-        })
-        .await
-        .unwrap();
+        let report = workers.shutdown(Duration::from_millis(100)).await;
 
-        let (sink_two, mut records_two, _shutdowns_two) = RecordingSink::new();
-        let second_generation_builds = Arc::new(AtomicUsize::new(0));
-        let builds = Arc::clone(&second_generation_builds);
-        spawn_generation(CancellationToken::new(), move || async move {
-            builds.fetch_add(1, Ordering::AcqRel);
-            let sinks: Vec<Arc<dyn RequestTraceSink>> = vec![sink_two];
-            Ok(sinks)
-        })
-        .await
-        .unwrap();
-
-        assert_eq!(
-            second_generation_builds.load(Ordering::Acquire),
-            0,
-            "an initialization overlapping a live generation built a second set of sinks"
-        );
-
-        crate::request_trace::publish(record_with_request_id("shared-generation"));
-        assert!(
-            await_record(&mut records_one, "shared-generation").await,
-            "the live generation's sink stopped receiving records"
-        );
-        assert!(
-            records_two.try_recv().is_err(),
-            "a duplicate worker emitted into the overlapping initializer's sink"
-        );
-
-        shutdown_generation(token).await;
+        assert!(report.timed_out);
+        assert_eq!(report.pending, vec![("fake", 1132)]);
     }
 
-    #[tokio::test]
-    async fn overlapping_initializer_waits_for_slow_sink_construction() {
-        let _serialized = GENERATION_TEST_LOCK.lock().await;
-        crate::request_trace::init_bus_for_test(64);
-
-        let (sink_one, mut records_one, _shutdowns_one) = RecordingSink::new();
-        let (construction_started, started) = oneshot::channel();
-        let (release, wait_for_release) = oneshot::channel();
-        let token = CancellationToken::new();
-        let first = tokio::spawn(spawn_generation(token.clone(), move || async move {
-            let _ = construction_started.send(());
-            wait_for_release
-                .await
-                .expect("the test releases the blocked construction");
-            let sinks: Vec<Arc<dyn RequestTraceSink>> = vec![sink_one];
-            Ok(sinks)
-        }));
-        started
-            .await
-            .expect("the first initializer reached sink construction");
-
-        let (sink_two, _records_two, _shutdowns_two) = RecordingSink::new();
-        let second_generation_builds = Arc::new(AtomicUsize::new(0));
-        let builds = Arc::clone(&second_generation_builds);
-        let mut second = tokio::spawn(spawn_generation(
-            CancellationToken::new(),
-            move || async move {
-                builds.fetch_add(1, Ordering::AcqRel);
-                let sinks: Vec<Arc<dyn RequestTraceSink>> = vec![sink_two];
-                Ok(sinks)
-            },
-        ));
-
-        assert!(
-            tokio::time::timeout(Duration::from_millis(250), &mut second)
-                .await
-                .is_err(),
-            "an initializer overlapping an unfinished sink construction returned before it completed"
-        );
-        assert_eq!(
-            second_generation_builds.load(Ordering::Acquire),
-            0,
-            "the overlapping initializer built sinks while the first construction held the lock"
-        );
-
-        release
-            .send(())
-            .expect("the first initializer is still waiting on construction");
-        first
-            .await
-            .expect("the first initializer task did not panic")
-            .expect("the first initializer started its generation");
-        tokio::time::timeout(Duration::from_secs(5), &mut second)
-            .await
-            .expect("the overlapping initializer never returned after construction completed")
-            .expect("the overlapping initializer task did not panic")
-            .expect("the overlapping initializer reported success");
-
-        assert_eq!(
-            second_generation_builds.load(Ordering::Acquire),
-            0,
-            "the overlapping initializer built a second set of sinks once it acquired the lock"
-        );
-
-        crate::request_trace::publish(record_with_request_id("slow-construction"));
-        assert!(
-            await_record(&mut records_one, "slow-construction").await,
-            "the generation built under contention never received its record"
-        );
-
-        shutdown_generation(token).await;
+    fn fake_sink(shutdown_done: &Arc<AtomicBool>) -> Arc<dyn RequestTraceSink> {
+        Arc::new(FakeSink {
+            emitted: Arc::new(AtomicUsize::new(0)),
+            shutdown_done: shutdown_done.clone(),
+            dropped: 0,
+            hang_on_shutdown: false,
+        })
     }
 
+    fn install_workers(sink: Arc<dyn RequestTraceSink>, shutdown: CancellationToken) {
+        WORKERS_STARTED.store(true, Ordering::SeqCst);
+        *WORKERS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some(spawn_workers(vec![sink], shutdown));
+    }
+
+    fn workers_are_cancelled() -> bool {
+        WORKERS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .expect("the workers should still be installed")
+            .token
+            .is_cancelled()
+    }
+
+    /// `ACTIVE_INPUTS`, `WORKERS` and `WORKERS_STARTED` are process-wide, and
+    /// the entrypoint tests register an input of their own, so this shares a
+    /// serialization group with them rather than racing their registrations.
     #[tokio::test]
-    async fn generation_with_no_sinks_does_not_latch() {
-        let _serialized = GENERATION_TEST_LOCK.lock().await;
+    #[serial_test::serial(request_trace_lifecycle)]
+    async fn only_the_last_input_out_stops_the_shared_workers() {
         crate::request_trace::init_bus_for_test(64);
+        let shutdown_done = Arc::new(AtomicBool::new(false));
 
-        spawn_generation(CancellationToken::new(), || async { Ok(Vec::new()) })
-            .await
-            .unwrap();
+        let first = ActiveInput::register();
+        let second = ActiveInput::register();
+        // The runtime of the input that initialized tracing. Every later input
+        // has a runtime of its own, so this one ending says nothing about them.
+        let first_runtime = CancellationToken::new();
+        install_workers(fake_sink(&shutdown_done), first_runtime.clone());
+
+        first_runtime.cancel();
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
         assert!(
-            live_generation_stopped().await.is_none(),
-            "a generation with no workers stayed live"
+            !workers_are_cancelled(),
+            "one input's runtime must not stop the shared workers while another input is still publishing"
         );
 
-        let (sink, mut records, _shutdowns) = RecordingSink::new();
-        let token = CancellationToken::new();
-        spawn_generation(token.clone(), || async move {
-            let sinks: Vec<Arc<dyn RequestTraceSink>> = vec![sink];
-            Ok(sinks)
-        })
+        assert!(
+            !first.release(),
+            "an input that finishes while another is still running must not drain"
+        );
+
+        // Dropping the last guard is the cancelled or panicking input. It
+        // cannot await the drain, but it must still start one.
+        drop(second);
+        assert_eq!(ACTIVE_INPUTS.load(Ordering::SeqCst), 0);
+        assert!(
+            workers_are_cancelled(),
+            "dropping the last input must cancel the workers"
+        );
+
+        let workers = WORKERS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .expect("the drop path must leave the workers joinable");
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            futures::future::join_all(workers.handles),
+        )
         .await
-        .unwrap();
-
-        crate::request_trace::publish(record_with_request_id("after-empty-generation"));
+        .expect("the cancelled workers should finish on their own");
         assert!(
-            await_record(&mut records, "after-empty-generation").await,
-            "a generation configured with no sinks latched the guard"
+            shutdown_done.load(Ordering::SeqCst),
+            "each sink should have run its own shutdown after the cancellation"
         );
 
-        shutdown_generation(token).await;
+        // A second set of inputs in the same process: the last one out gets the
+        // bounded drain, and the drain reopens the start gate so a set after
+        // that one can be spawned at all.
+        let drained = Arc::new(AtomicBool::new(false));
+        install_workers(fake_sink(&drained), CancellationToken::new());
+        let only = ActiveInput::register();
+
+        let report = only
+            .release_and_drain()
+            .await
+            .expect("the last input out drains the workers it can still see");
+
+        assert!(!report.timed_out);
+        assert!(drained.load(Ordering::SeqCst));
+        assert!(
+            !WORKERS_STARTED.load(Ordering::SeqCst),
+            "a drained worker set must leave the start gate open for the next one"
+        );
     }
 
     #[tokio::test]
