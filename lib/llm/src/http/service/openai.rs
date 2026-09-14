@@ -602,7 +602,6 @@ impl ErrorMessage {
                     }
                     Err(_) => (dynamo_err.message().to_string(), StatusCode::BAD_REQUEST, false),
                 };
-            };
             // An explicit status the worker asserted goes through the shared
             // policy, so a 499 answers with the same sanitized cancellation
             // body as every other HTTP path rather than the worker's own text,
