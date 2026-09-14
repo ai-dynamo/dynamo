@@ -18,7 +18,7 @@ use dynamo_mocker::replay::{
 };
 use parking_lot::Mutex;
 use pyo3::{
-    exceptions::{PyException, PyValueError},
+    exceptions::{PyException, PyMemoryError, PyValueError},
     prelude::*,
 };
 use pythonize::pythonize;
@@ -1154,7 +1154,8 @@ pub fn run_mocker_trace_replay(
         })))
         .map_err(|error| scaling_run_err_to_pyerr(error, &callback_error))?
     } else {
-        py.allow_threads(move || run(None)).map_err(to_pyerr)?
+        py.allow_threads(move || run(None))
+            .map_err(replay_run_err_to_pyerr)?
     };
     let runtime_evidence = report.runtime_evidence.clone();
     // Write per-request JSONL from Rust directly if requested, avoiding a
@@ -1583,6 +1584,29 @@ pub fn run_mocker_synthetic_trace_replay(
             };
         }
 
+        // Only this single-turn closed-loop path can defer token allocation.
+        // Open-loop timestamps and multi-turn/session traces keep their existing
+        // behavior and must not advertise the generated allocation model.
+        if replay_mode == "offline"
+            && let Some(max_in_flight) = replay_concurrency
+        {
+            let requests =
+                build_generated_synthetic_requests(input_tokens, output_tokens, request_count)?;
+            return match args_selection {
+                ReplayArgsSelection::Aggregated(args) =>
+                    dynamo_mocker::replay::simulate_concurrency_requests_with_router_mode_and_scaling_policy(
+                        *args, router_config.clone(), prefill_load_estimator.clone(), requests,
+                        max_in_flight, num_workers, router_mode, record_per_request, sla,
+                        scaling_policy.take(),
+                    ),
+                ReplayArgsSelection::Disagg(config) =>
+                    dynamo_mocker::replay::simulate_concurrency_requests_disagg_with_router_mode_and_scaling_policy(
+                        *config, router_config.clone(), prefill_load_estimator.clone(), requests,
+                        max_in_flight, router_mode, record_per_request, sla, scaling_policy.take(),
+                    ),
+            };
+        }
+
         let arrival_timestamps_ms = load_controller
             .arrival_spec()
             .map(|spec| spec.timestamps(request_count, arrival_seed))
@@ -1700,7 +1724,8 @@ pub fn run_mocker_synthetic_trace_replay(
         })))
         .map_err(|error| scaling_run_err_to_pyerr(error, &callback_error))?
     } else {
-        py.allow_threads(move || run(None)).map_err(to_pyerr)?
+        py.allow_threads(move || run(None))
+            .map_err(replay_run_err_to_pyerr)?
     };
     let runtime_evidence = report.runtime_evidence.clone();
     if is_offline {
@@ -1781,6 +1806,22 @@ mod tests {
     };
     use dynamo_mocker::common::protocols::{ForwardPassSnapshot, MockEngineArgs};
     use dynamo_mocker::loadgen::ArrivalSpec;
+
+    #[test]
+    fn generated_synthetic_source_validates_without_allocating_the_population() {
+        assert!(super::build_generated_synthetic_requests(10240, 1024, 6_451_200).is_ok());
+        for (input, output, count) in [(0, 1, 1), (1, 0, 1), (1, 1, 0)] {
+            assert!(super::build_generated_synthetic_requests(input, output, count).is_err());
+        }
+        let eager = super::build_synthetic_requests(16, 4, 8, None).unwrap();
+        for (index, request) in eager.iter().enumerate() {
+            let generated = super::build_synthetic_request(16, 4, index, None);
+            assert_eq!(request.tokens, generated.tokens);
+            assert_eq!(request.uuid, generated.uuid);
+            assert_eq!(request.max_output_tokens, generated.max_output_tokens);
+            assert_eq!(request.arrival_timestamp_ms, generated.arrival_timestamp_ms);
+        }
+    }
 
     #[test]
     fn online_disaggregation_is_rejected_with_stable_message() {
@@ -2343,22 +2384,61 @@ fn build_synthetic_requests(
         );
     }
 
-    let mut requests = Vec::with_capacity(request_count);
-    for request_idx in 0..request_count {
-        let tokens = (0..input_tokens)
-            .map(|token_idx| synthetic_token_id(request_idx, token_idx))
-            .collect();
-        requests.push(DirectRequest {
-            tokens,
-            max_output_tokens: output_tokens,
-            uuid: Some(Uuid::from_u128((request_idx as u128) + 1)),
-            dp_rank: 0,
-            arrival_timestamp_ms: arrival_timestamps_ms.map(|values| values[request_idx]),
-            ..Default::default()
-        });
-    }
+    Ok((0..request_count)
+        .map(|index| {
+            build_synthetic_request(
+                input_tokens,
+                output_tokens,
+                index,
+                arrival_timestamps_ms.map(|values| values[index]),
+            )
+        })
+        .collect())
+}
 
-    Ok(requests)
+fn build_generated_synthetic_requests(
+    input_tokens: usize,
+    output_tokens: usize,
+    request_count: usize,
+) -> anyhow::Result<dynamo_mocker::replay::GeneratedRequests> {
+    if input_tokens == 0 {
+        anyhow::bail!("input_tokens must be at least 1");
+    }
+    if output_tokens == 0 {
+        anyhow::bail!("output_tokens must be at least 1");
+    }
+    if request_count == 0 {
+        anyhow::bail!("request_count must be at least 1");
+    }
+    Ok(dynamo_mocker::replay::GeneratedRequests::new(
+        request_count,
+        move |index| {
+            Ok(build_synthetic_request(
+                input_tokens,
+                output_tokens,
+                index,
+                None,
+            ))
+        },
+    ))
+}
+
+fn build_synthetic_request(
+    input_tokens: usize,
+    output_tokens: usize,
+    request_idx: usize,
+    arrival_timestamp_ms: Option<f64>,
+) -> DirectRequest {
+    DirectRequest {
+        tokens: (0..input_tokens)
+            .map(|token_idx| synthetic_token_id(request_idx, token_idx))
+            .collect(),
+        max_output_tokens: output_tokens,
+        uuid: Some(Uuid::from_u128((request_idx as u128) + 1)),
+        dp_rank: 0,
+        arrival_timestamp_ms,
+        ..Default::default()
+    }
 }
 
 fn synthetic_token_id(request_idx: usize, token_idx: usize) -> u32 {
@@ -2425,6 +2505,19 @@ fn validate_sla_threshold(name: &str, value: Option<f64>) -> PyResult<()> {
 /// separately instead of relying on it to remain the root anyhow error.
 /// Non-Python errors (e.g. a simulation dead-end) fall back to the generic
 /// conversion.
+fn replay_run_err_to_pyerr(error: anyhow::Error) -> PyErr {
+    if error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<dynamo_mocker::replay::ReplayError>(),
+            Some(dynamo_mocker::replay::ReplayError::ResourceLimited(_))
+        )
+    }) {
+        PyMemoryError::new_err(format!("{error:#}"))
+    } else {
+        to_pyerr(error)
+    }
+}
+
 fn scaling_run_err_to_pyerr(
     err: anyhow::Error,
     callback_error: &PyReplayScalingErrorSlot,
@@ -2434,7 +2527,7 @@ fn scaling_run_err_to_pyerr(
     }
     match err.downcast::<PyErr>() {
         Ok(py_err) => py_err,
-        Err(other) => to_pyerr(other),
+        Err(other) => replay_run_err_to_pyerr(other),
     }
 }
 
