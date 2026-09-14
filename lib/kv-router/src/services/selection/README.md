@@ -68,8 +68,10 @@ notification and plugins must tolerate repeated invocations.
 
 `context.is_path_planning()` identifies the preview. Pickers requesting
 `WorkerInputs::CACHE` receive raw `device_overlap_blocks()` separately from
-`effective_overlap_blocks()`, the weighted cache estimate, and `cached_tokens()`,
-the exact weighted token estimate used by the built-in decision. Multiply raw device
+`effective_overlap_blocks()`, the weighted cache estimate. The standard cache
+estimator converts weighted overlap to tokens with
+`(cache.effective_overlap_blocks() * context.block_size() as f64).round().max(0.0) as usize`.
+Multiply raw device
 coverage by `context.block_size()` and clamp it to `context.prompt_tokens()`
 before computing uncached tokens. `candidate.can_prefill_locally()` reports
 `Some(true)`, `Some(false)`, or `None` for unreported backend support.

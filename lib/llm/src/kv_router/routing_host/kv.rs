@@ -267,7 +267,7 @@ impl RoutingHost {
         plan: RoutePlan,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         if let Err(error) = self.validate_prefill_action(plan.prefill, plan.selection.worker) {
-            plan.abort().await;
+            plan.cleanup.finish().await;
             return Err(error);
         }
         let RoutePlan {

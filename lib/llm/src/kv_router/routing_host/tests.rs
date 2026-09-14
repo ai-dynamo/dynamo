@@ -1140,21 +1140,13 @@ async fn router_with_worker_configs(
     session_affinity_ttl: Option<Duration>,
     workers: HashMap<u64, ModelRuntimeConfig>,
 ) -> (RoutingHost, Runtime) {
-    router_with_worker_policy(
+    let (router, runtime, _) = router_with_worker_policy_updates(
         session_affinity_ttl,
         workers,
         SelectionPolicySource::Registry,
+        None,
     )
-    .await
-}
-
-pub(crate) async fn router_with_worker_policy(
-    session_affinity_ttl: Option<Duration>,
-    workers: HashMap<u64, ModelRuntimeConfig>,
-    policy: SelectionPolicySource,
-) -> (RoutingHost, Runtime) {
-    let (router, runtime, _) =
-        router_with_worker_policy_updates(session_affinity_ttl, workers, policy, None).await;
+    .await;
     (router, runtime)
 }
 

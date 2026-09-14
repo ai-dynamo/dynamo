@@ -111,7 +111,6 @@ impl BitOr for WorkerInputs {
 /// KV-cache overlap values for one worker.
 #[derive(Clone, Copy, Default)]
 pub struct WorkerCacheInput {
-    pub(super) cached_tokens: usize,
     pub(super) effective_overlap_blocks: f64,
     pub(super) device_overlap_blocks: f64,
     pub(super) host_overlap_blocks: f64,
@@ -361,11 +360,6 @@ impl ScoredWorkerCandidate {
 }
 
 impl WorkerCacheInput {
-    /// Exact weighted token credit used by the built-in conditional policy.
-    pub fn cached_tokens(&self) -> usize {
-        self.cached_tokens
-    }
-
     /// Weighted cache estimate, distinct from device-resident prefix coverage.
     pub fn effective_overlap_blocks(&self) -> f64 {
         self.effective_overlap_blocks

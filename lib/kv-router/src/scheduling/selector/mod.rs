@@ -209,7 +209,6 @@ impl<'a> MaterializedSelectionInput<'a> {
                 })
             };
             WorkerCacheInput {
-                cached_tokens,
                 effective_overlap_blocks,
                 device_overlap_blocks,
                 host_overlap_blocks: self
