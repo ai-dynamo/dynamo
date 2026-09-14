@@ -14,6 +14,8 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from dynamo.llm.exceptions import InvalidArgument
+
 if not torch.cuda.is_available():
     pytest.skip(
         "Skipping to avoid errors during collection with '-m gpu_0'. "
@@ -572,7 +574,9 @@ class TestMultimodalGuard:
         handler = self._make_handler(multimodal_processor=None)
         request = request_factory(self.IMAGE_MESSAGE)
 
-        with pytest.raises(RuntimeError, match="--modality multimodal"):
+        # InvalidArgument, not RuntimeError: the type is what makes the
+        # frontend answer 4xx instead of 500.
+        with pytest.raises(InvalidArgument, match="--modality multimodal"):
             await self._prepare(handler, request)
 
     @pytest.mark.asyncio
