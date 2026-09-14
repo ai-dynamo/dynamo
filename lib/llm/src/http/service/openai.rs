@@ -1432,7 +1432,7 @@ async fn embeddings(
         request.inner.model = canonical;
     }
     let request_id = get_or_create_request_id(&headers);
-    let request = context_from_headers(request, request_id, &headers)?;
+    let mut request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
 
     // The worker always emits base64-encoded vectors over NATS so we
@@ -4825,10 +4825,11 @@ async fn handler_audio_speech(
     check_model_serving_ready(&state, &model)?;
 
     // Audio registrations honor --served-model-name aliases, so resolve one to
-    // its primary before it reaches routing or a metric label. Readiness is
-    // published per primary name, and every other alias-bearing surface labels
-    // its metrics the same way.
+    // its primary before it reaches routing, metrics, or the engine request.
+    // Readiness is published per primary name, and every other alias-bearing
+    // surface keeps the request model consistent with that name.
     let model = state.manager().resolve_canonical_name(&model);
+    request.model = Some(model.clone());
 
     let context = request.context();
     let (mut connection_handle, stream_handle) = create_connection_monitor(
