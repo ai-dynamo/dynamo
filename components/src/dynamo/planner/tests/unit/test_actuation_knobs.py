@@ -85,8 +85,8 @@ def _dgd(*components):
 class TestGetComponentPowerConfigs:
     def test_resolves_disagg_from_annotations(self, connector, mock_kube_api):
         mock_kube_api.get_graph_deployment.return_value = _dgd(
-            _worker("VllmPrefillWorker", "prefill", "350", "2"),
-            _worker("VllmDecodeWorker", "decode", "300", "4"),
+            _worker("prefill", "prefill", "350", "2"),
+            _worker("decode", "decode", "300", "4"),
         )
 
         prefill, decode = connector.get_component_power_configs(
@@ -102,7 +102,7 @@ class TestGetComponentPowerConfigs:
         # is rejected by PlannerConfig validation because the shared deployment-
         # validation and GPU-count paths do not follow this fallback.
         mock_kube_api.get_graph_deployment.return_value = _dgd(
-            _worker("VllmWorker", "worker", "300", "4"),
+            _worker("worker", "worker", "300", "4"),
         )
 
         prefill, decode = connector.get_component_power_configs(
@@ -114,7 +114,7 @@ class TestGetComponentPowerConfigs:
 
     def test_missing_annotation_propagates(self, connector, mock_kube_api):
         mock_kube_api.get_graph_deployment.return_value = _dgd(
-            _worker("VllmDecodeWorker", "decode", None, "4"),
+            _worker("decode", "decode", None, "4"),
         )
         with pytest.raises(PowerAnnotationMissingError):
             connector.get_component_power_configs(
@@ -123,7 +123,7 @@ class TestGetComponentPowerConfigs:
 
     def test_malformed_annotation_propagates(self, connector, mock_kube_api):
         mock_kube_api.get_graph_deployment.return_value = _dgd(
-            _worker("VllmDecodeWorker", "decode", "0", "4"),
+            _worker("decode", "decode", "0", "4"),
         )
         with pytest.raises(PowerAnnotationInvalidError):
             connector.get_component_power_configs(
@@ -132,7 +132,7 @@ class TestGetComponentPowerConfigs:
 
     def test_missing_role_propagates(self, connector, mock_kube_api):
         mock_kube_api.get_graph_deployment.return_value = _dgd(
-            _worker("VllmDecodeWorker", "decode", "300", "4"),
+            _worker("decode", "decode", "300", "4"),
         )
         with pytest.raises(SubComponentNotFoundError):
             connector.get_component_power_configs(

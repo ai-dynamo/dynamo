@@ -8,15 +8,16 @@
 //! a focused adapter in this module tree.
 
 use std::path::Path;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use anyhow::{Context, Result, anyhow};
 use llm_multimodal::vision::{PreProcessorConfig, VisionPreProcessor, VisionProcessorRegistry};
 use llm_multimodal::{ModelMetadata, ModelRegistry};
-use llm_tokenizer::traits::Tokenizer;
+use llm_tokenizer::traits::Tokenizer as ModelTokenizer;
 use llm_tokenizer::{Decoder, Encoder, Encoding, HuggingFaceTokenizer, SpecialTokens};
 
 use crate::protocols::TokenIdType;
+use crate::tokenizers::traits::Tokenizer as RuntimeTokenizer;
 
 use super::nemotron;
 
@@ -50,7 +51,7 @@ impl Decoder for NullTokenizer {
     }
 }
 
-impl Tokenizer for NullTokenizer {
+impl ModelTokenizer for NullTokenizer {
     fn vocab_size(&self) -> usize {
         0
     }
@@ -75,18 +76,93 @@ static REGISTRY: LazyLock<VisionProcessorRegistry> =
     LazyLock::new(VisionProcessorRegistry::with_defaults);
 static MODEL_REGISTRY: LazyLock<ModelRegistry> = LazyLock::new(ModelRegistry::new);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImagePromptKind {
+    /// The rendered prompt already contains any model-specific wrapper; only
+    /// the single image pad is replaced by the per-image feature-token run.
+    RepeatedPad,
+    /// Kimi-K3's renderer emits one structural `<|media_pad|>` per image, but
+    /// the backend replaces it with a dimension-bearing media block.
+    KimiK3,
+    /// vLLM wraps each expanded image-token run in `<img>` and `</img>`.
+    Nemotron,
+}
+
 /// Maps image dimensions to model-visible token counts using the model's HF
 /// configuration. Most processors count each image independently; Nemotron's
 /// dynamic path also consumes request-wide context.
 pub struct ImageRoutingProcessor {
-    processor: ImageTokenCounter,
-    config: PreProcessorConfig,
+    processor: Box<dyn ImageRoutingBackend>,
     model_id: String,
 }
 
-enum ImageTokenCounter {
-    Registry(&'static dyn VisionPreProcessor),
-    Nemotron(nemotron::NemotronImageTokenCounter),
+/// Runtime contract available to an exact-routing image processor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ImageRoutingRuntime {
+    BackendNeutral,
+    VllmNativeGenerate,
+}
+
+/// Model-family behavior needed to construct a backend-exact routing prompt.
+///
+/// Registry-backed processors use the default per-image behavior. Adapters
+/// such as Nemotron override the request-wide or runtime-specific pieces
+/// without leaking model checks into the generic preprocessor.
+pub(super) trait ImageRoutingBackend: Send + Sync {
+    fn count_tokens(&self, width: u32, height: u32) -> usize;
+
+    fn count_tokens_for_images(
+        &self,
+        dimensions: &[(u32, u32)],
+        _max_model_len: usize,
+        _text_prompt_len: usize,
+    ) -> Result<Vec<usize>> {
+        Ok(dimensions
+            .iter()
+            .map(|&(width, height)| self.count_tokens(width, height))
+            .collect())
+    }
+
+    fn uses_request_context_budget(&self) -> bool {
+        false
+    }
+
+    fn validate_runtime(&self, _runtime: ImageRoutingRuntime) -> Result<()> {
+        Ok(())
+    }
+
+    fn routing_prompt_kind(&self) -> Option<ImagePromptKind>;
+
+    fn context_budget_prompt(
+        &self,
+        _formatted_prompt: &str,
+        _image_count: usize,
+    ) -> Result<String> {
+        Err(anyhow!(
+            "image processor does not use request-context budgeting"
+        ))
+    }
+}
+
+struct RegistryImageRoutingBackend {
+    processor: &'static dyn VisionPreProcessor,
+    config: PreProcessorConfig,
+}
+
+impl ImageRoutingBackend for RegistryImageRoutingBackend {
+    fn count_tokens(&self, width: u32, height: u32) -> usize {
+        self.processor
+            .calculate_num_tokens(width, height, &self.config)
+    }
+
+    fn routing_prompt_kind(&self) -> Option<ImagePromptKind> {
+        match self.processor.model_name() {
+            "kimi-k3" => Some(ImagePromptKind::KimiK3),
+            "inkling" | "kimi-k2.5" | "llama4-vision" | "llava" | "llava-next" | "phi3-vision"
+            | "qwen2-vl" | "qwen3-omni" | "qwen3-vl" => Some(ImagePromptKind::RepeatedPad),
+            _ => None,
+        }
+    }
 }
 
 impl ImageRoutingProcessor {
@@ -116,41 +192,51 @@ impl ImageRoutingProcessor {
             )
         })?;
 
-        let processor = if nemotron::supports_model_type(model_type) {
+        let processor: Box<dyn ImageRoutingBackend> = if nemotron::supports_model_type(model_type) {
             let model_config = read_json(model_dir, "config.json").ok_or_else(|| {
                 anyhow!(
                     "mm-routing: failed to read Nemotron Nano Omni config.json at {}",
                     model_dir.display()
                 )
             })?;
-            ImageTokenCounter::Nemotron(nemotron::NemotronImageTokenCounter::try_from_configs(
+            Box::new(nemotron::NemotronImageTokenCounter::try_from_configs(
                 &config,
                 &model_config,
             )?)
         } else {
-            ImageTokenCounter::Registry(REGISTRY.find(model_id, model_type).ok_or_else(|| {
-                anyhow!(
-                    "mm-routing: no image processor registered for model_id={:?} model_type={:?}",
-                    model_id,
-                    model_type
-                )
-            })?)
+            Box::new(RegistryImageRoutingBackend {
+                processor: REGISTRY.find(model_id, model_type).ok_or_else(|| {
+                    anyhow!(
+                        "mm-routing: no image processor registered for model_id={:?} model_type={:?}",
+                        model_id,
+                        model_type
+                    )
+                })?,
+                config,
+            })
         };
 
         Ok(Self {
             processor,
-            config,
             model_id: model_id.to_string(),
         })
     }
 
+    /// Construct a processor and validate that its exact-routing contract is
+    /// supported by the active backend runtime.
+    pub(crate) fn try_new_for_runtime(
+        model_id: &str,
+        model_type: Option<&str>,
+        model_dir: &Path,
+        runtime: ImageRoutingRuntime,
+    ) -> Result<Self> {
+        let processor = Self::try_new(model_id, model_type, model_dir)?;
+        processor.processor.validate_runtime(runtime)?;
+        Ok(processor)
+    }
+
     pub fn count_tokens(&self, width: u32, height: u32) -> usize {
-        match &self.processor {
-            ImageTokenCounter::Registry(processor) => {
-                processor.calculate_num_tokens(width, height, &self.config)
-            }
-            ImageTokenCounter::Nemotron(counter) => counter.count_tokens(width, height),
-        }
+        self.processor.count_tokens(width, height)
     }
 
     /// Return backend-exact image counts for one request. Nemotron shares the
@@ -162,27 +248,73 @@ impl ImageRoutingProcessor {
         max_model_len: usize,
         text_prompt_len: usize,
     ) -> Result<Vec<usize>> {
-        match &self.processor {
-            ImageTokenCounter::Registry(processor) => Ok(dimensions
-                .iter()
-                .map(|&(width, height)| processor.calculate_num_tokens(width, height, &self.config))
-                .collect()),
-            ImageTokenCounter::Nemotron(counter) => {
-                counter.count_tokens_for_images(dimensions, max_model_len, text_prompt_len)
-            }
-        }
+        self.processor
+            .count_tokens_for_images(dimensions, max_model_len, text_prompt_len)
     }
 
     /// Whether exact counting needs the rendered prompt with image placeholders
     /// removed, as opposed to only the independent image dimensions.
     pub fn uses_request_context_budget(&self) -> bool {
-        matches!(&self.processor, ImageTokenCounter::Nemotron(_))
+        self.processor.uses_request_context_budget()
     }
 
-    /// Whether this processor mirrors a vLLM-specific prompt expansion
-    /// contract rather than the backend-neutral registry contract.
-    pub(crate) fn requires_vllm_runtime(&self) -> bool {
-        matches!(&self.processor, ImageTokenCounter::Nemotron(_))
+    /// Return the backend-exact prompt shape selected by the processor.
+    pub fn routing_prompt_kind(&self) -> Option<ImagePromptKind> {
+        self.processor.routing_prompt_kind()
+    }
+
+    /// Tokenize the model-specific text used to derive a request-wide image
+    /// budget without blocking the async frontend runtime.
+    pub(crate) async fn context_budget_text_len(
+        &self,
+        tokenizer: Arc<dyn RuntimeTokenizer>,
+        formatted_prompt: Option<&str>,
+        image_count: usize,
+    ) -> Option<usize> {
+        let prompt = match formatted_prompt {
+            Some(prompt) => prompt,
+            None => {
+                tracing::debug!(
+                    target: "mm_routing",
+                    model = self.model_id(),
+                    "rendered prompt unavailable for request-wide image budgeting; skipping MM routing info"
+                );
+                return None;
+            }
+        };
+        let budget_prompt = match self.processor.context_budget_prompt(prompt, image_count) {
+            Ok(prompt) => prompt,
+            Err(error) => {
+                tracing::warn!(
+                    target: "mm_routing",
+                    model = self.model_id(),
+                    %error,
+                    "rendered prompt does not match its image batch; skipping MM routing info"
+                );
+                return None;
+            }
+        };
+        match tokio::task::spawn_blocking(move || tokenizer.encode(&budget_prompt)).await {
+            Ok(Ok(encoding)) => Some(encoding.token_ids().len()),
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    target: "mm_routing",
+                    model = self.model_id(),
+                    %error,
+                    "failed to tokenize request-budgeted image prompt; skipping MM routing info"
+                );
+                None
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "mm_routing",
+                    model = self.model_id(),
+                    %error,
+                    "image-budget tokenizer task failed; skipping MM routing info"
+                );
+                None
+            }
+        }
     }
 
     pub fn model_id(&self) -> &str {
@@ -212,40 +344,6 @@ impl ImageRoutingProcessor {
 pub fn resolve_image_token_id(model_id: &str, model_dir: &Path) -> Option<TokenIdType> {
     let config = read_json(model_dir, "config.json")?;
     resolve_model_token_with_config(model_id, model_dir, &config).map(|resolved| resolved.token_id)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ImagePromptKind {
-    /// The rendered prompt already contains any model-specific wrapper; only
-    /// the single image pad is replaced by the per-image feature-token run.
-    RepeatedPad,
-    /// Kimi-K3's renderer emits one structural `<|media_pad|>` per image, but
-    /// the backend replaces it with a dimension-bearing media block.
-    KimiK3,
-    /// vLLM wraps each expanded image-token run in `<img>` and `</img>`.
-    Nemotron,
-}
-
-impl ImageRoutingProcessor {
-    /// Return the exact-routing prompt shape for the processor selected by
-    /// `VisionProcessorRegistry::find`.
-    ///
-    /// This deliberately maps the selected processor family rather than
-    /// repeating its model-id / model-type aliases. New processor families
-    /// fail closed until their worker prompt shape has been verified here.
-    pub fn routing_prompt_kind(&self) -> Option<ImagePromptKind> {
-        match &self.processor {
-            ImageTokenCounter::Nemotron(_) => Some(ImagePromptKind::Nemotron),
-            ImageTokenCounter::Registry(processor) => match processor.model_name() {
-                "kimi-k3" => Some(ImagePromptKind::KimiK3),
-                "inkling" | "kimi-k2.5" | "llama4-vision" | "llava" | "llava-next"
-                | "phi3-vision" | "qwen2-vl" | "qwen3-omni" | "qwen3-vl" => {
-                    Some(ImagePromptKind::RepeatedPad)
-                }
-                _ => None,
-            },
-        }
-    }
 }
 
 struct ResolvedModelToken {
@@ -302,7 +400,7 @@ fn resolve_model_token_with_config(
                 }
             });
     let null_tokenizer = NullTokenizer;
-    let tokenizer: &dyn Tokenizer = match hf_tokenizer.as_ref() {
+    let tokenizer: &dyn ModelTokenizer = match hf_tokenizer.as_ref() {
         Some(t) => t,
         None => &null_tokenizer,
     };
@@ -542,10 +640,11 @@ mod tests {
         )
         .unwrap();
 
-        let counter = ImageRoutingProcessor::try_new(
+        let counter = ImageRoutingProcessor::try_new_for_runtime(
             "Qwen/Qwen3-VL-2B-Instruct",
             Some("qwen3_vl"),
             model_dir.path(),
+            ImageRoutingRuntime::BackendNeutral,
         )
         .unwrap();
 
@@ -617,6 +716,37 @@ mod tests {
                 .count_tokens_for_images(&[(1920, 1080); 3], 4096, 10)
                 .unwrap(),
             vec![1344, 1344, 1344]
+        );
+    }
+
+    #[test]
+    fn nemotron_runtime_requirement_is_owned_by_adapter() {
+        let model_dir = tempfile::tempdir().unwrap();
+        write_nemotron_omni_configs(model_dir.path());
+        let model_id = "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-FP8";
+
+        let error = ImageRoutingProcessor::try_new_for_runtime(
+            model_id,
+            Some(nemotron::MODEL_TYPE),
+            model_dir.path(),
+            ImageRoutingRuntime::BackendNeutral,
+        )
+        .err()
+        .expect("Nemotron must reject a non-vLLM routing runtime");
+        assert!(
+            error
+                .to_string()
+                .contains("requires the vLLM native Generate runtime")
+        );
+
+        assert!(
+            ImageRoutingProcessor::try_new_for_runtime(
+                model_id,
+                Some(nemotron::MODEL_TYPE),
+                model_dir.path(),
+                ImageRoutingRuntime::VllmNativeGenerate,
+            )
+            .is_ok()
         );
     }
 

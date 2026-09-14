@@ -11,6 +11,7 @@ use llm_multimodal::vision::PreProcessorConfig;
 use super::{
     NemotronVideoProcessorContract, VideoRoutingInput, VideoRoutingReplacement,
     config::read_model_config,
+    image::{ImagePromptKind, ImageRoutingBackend, ImageRoutingRuntime},
 };
 use crate::{protocols::TokenIdType, tokenizers::traits::Tokenizer};
 
@@ -229,6 +230,55 @@ impl NemotronImageTokenCounter {
             .ok_or_else(|| anyhow!("rounded image patch grid overflowed"))?;
         Ok((raw_patches, raw_patches / 4))
     }
+}
+
+impl ImageRoutingBackend for NemotronImageTokenCounter {
+    fn count_tokens(&self, width: u32, height: u32) -> usize {
+        NemotronImageTokenCounter::count_tokens(self, width, height)
+    }
+
+    fn count_tokens_for_images(
+        &self,
+        dimensions: &[(u32, u32)],
+        max_model_len: usize,
+        text_prompt_len: usize,
+    ) -> Result<Vec<usize>> {
+        NemotronImageTokenCounter::count_tokens_for_images(
+            self,
+            dimensions,
+            max_model_len,
+            text_prompt_len,
+        )
+    }
+
+    fn uses_request_context_budget(&self) -> bool {
+        true
+    }
+
+    fn validate_runtime(&self, runtime: ImageRoutingRuntime) -> Result<()> {
+        ensure!(
+            runtime == ImageRoutingRuntime::VllmNativeGenerate,
+            "Nemotron image routing requires the vLLM native Generate runtime"
+        );
+        Ok(())
+    }
+
+    fn routing_prompt_kind(&self) -> Option<ImagePromptKind> {
+        Some(ImagePromptKind::Nemotron)
+    }
+
+    fn context_budget_prompt(&self, formatted_prompt: &str, image_count: usize) -> Result<String> {
+        prompt_without_images(formatted_prompt, image_count)
+    }
+}
+
+fn prompt_without_images(formatted_prompt: &str, image_count: usize) -> Result<String> {
+    let placeholder_count = formatted_prompt.match_indices(IMAGE_CONTEXT).count();
+    ensure!(
+        placeholder_count == image_count,
+        "Nemotron rendered prompt contains {placeholder_count} image placeholders for {image_count} images"
+    );
+    Ok(formatted_prompt.replace(IMAGE_CONTEXT, ""))
 }
 
 /// Routing-only implementation of vLLM's Nemotron video prompt expansion.
@@ -757,6 +807,15 @@ mod tests {
         let mut config = model_config();
         config["img_end_token"] = serde_json::json!("<different>");
         assert!(image_context_token_id(&config).is_err());
+    }
+
+    #[test]
+    fn budget_prompt_removes_all_image_placeholders() {
+        assert_eq!(
+            prompt_without_images("before<image>middle<image>after", 2).unwrap(),
+            "beforemiddleafter"
+        );
+        assert!(prompt_without_images("before<image>after", 2).is_err());
     }
 
     #[test]
