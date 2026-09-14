@@ -77,6 +77,79 @@ func TestDeleteOrphanedElasticEPFollowers(t *testing.T) {
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: leader.Name, Namespace: "default"}, &nvidiacomv1beta1.DynamoComponentDeployment{}))
 }
 
+// TestDeleteOrphanedElasticEPFollowersRefusesANonEmptyFollower pins the release
+// precondition: a follower is removed only when it is provably empty.
+//
+// Nothing in the operator calls scale_elastic_ep -- there is no engine-control client in
+// the tree -- so deleting a follower that still holds ranks leaves the engine committed
+// to a DP size whose members are gone. DYN-3838 records the leader surviving at
+// restart=0 with inference stopped; DYN-2660 records the orphaned placement group then
+// blocking every later scale-up until the pod restarts, which no gate flip undoes.
+//
+// This is also what makes "turning the gate off stops scaling" mean stop rather than
+// tear down: running capacity is left alone and the operator says so.
+//
+// Mutation check: removing the replicas>0 guard fails the non-empty subtest.
+func TestDeleteOrphanedElasticEPFollowersRefusesANonEmptyFollower(t *testing.T) {
+	s := scheme.Scheme
+	require.NoError(t, nvidiacomv1beta1.AddToScheme(s))
+
+	for _, tt := range []struct {
+		name        string
+		replicas    *int32
+		wantDeleted bool
+	}{
+		{name: "at rest is released", replicas: ptr.To(int32(0)), wantDeleted: true},
+		{name: "nil replicas is released", replicas: nil, wantDeleted: true},
+		{name: "scaled up is refused", replicas: ptr.To(int32(3)), wantDeleted: false},
+		{name: "a single replica is refused", replicas: ptr.To(int32(1)), wantDeleted: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "mydgd", Namespace: "default"},
+			}
+			follower := &nvidiacomv1beta1.DynamoComponentDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "mydgd-decode-flw",
+					Namespace: "default",
+					Labels: map[string]string{
+						consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+					},
+					Annotations: map[string]string{
+						consts.KubeAnnotationElasticEPFollower: consts.KubeLabelValueTrue,
+					},
+				},
+				Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
+					DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+						Replicas: tt.replicas,
+					},
+				},
+			}
+
+			c := fake.NewClientBuilder().WithScheme(s).WithObjects(follower).Build()
+			r := &componentWorkloadsReconciler{syncer: newDGDResourceSyncer(c, nil)}
+
+			t.Log("Generation no longer produces this follower, so the sweep considers it")
+			require.NoError(t, r.deleteOrphanedElasticEPFollowers(
+				context.Background(), dgd,
+				map[string]*nvidiacomv1beta1.DynamoComponentDeployment{},
+			))
+
+			err := c.Get(context.Background(),
+				types.NamespacedName{Name: follower.Name, Namespace: "default"},
+				&nvidiacomv1beta1.DynamoComponentDeployment{})
+			if tt.wantDeleted {
+				require.True(t, err != nil && client.IgnoreNotFound(err) == nil,
+					"an empty follower should be released, got err=%v", err)
+				return
+			}
+			require.NoError(t, err,
+				"a follower with replicas must survive: deleting it strands engine ranks the "+
+					"operator has no way to shrink first")
+		})
+	}
+}
+
 // TestPreserveExistingDCDStateKeepsFollowerReplicas covers the defect that made the
 // whole feature inert: the operator re-asserted the follower's resting zero on every
 // reconcile, so nothing could ever scale it.

@@ -342,6 +342,33 @@ func (r *componentWorkloadsReconciler) deleteOrphanedElasticEPFollowers(
 		if _, keep := wanted[existing.Name]; keep {
 			continue
 		}
+		// Only release a follower that is provably empty. Nothing in the operator calls
+		// scale_elastic_ep -- there is no engine-control client in the tree -- so deleting
+		// a follower that still holds ranks leaves the engine committed to a DP size whose
+		// members are gone: DYN-3838 records the leader surviving at restart=0 with
+		// inference stopped, and DYN-2660 records the orphaned placement group then
+		// blocking every later scale-up until the pod restarts. DYN-3686 classifies that
+		// state as a fault on the recovery path, not a scale-down signal, so the operator
+		// must not manufacture it.
+		//
+		// Today this is vacuous for the disable case by construction -- a follower rests at
+		// zero and only an external scale client moves it -- so it is not dead code, it is
+		// the precondition a Phase 7 drain will satisfy. It also gives "turning the gate
+		// off stops scaling" its literal meaning: running capacity is left alone.
+		if replicas := existing.Spec.Replicas; replicas != nil && *replicas > 0 {
+			logger.Info(
+				"Refusing to delete an elastic-EP follower that still has replicas; scale it to zero first",
+				"name", existing.Name, "replicas", *replicas,
+			)
+			if recorder := r.syncer.GetRecorder(); recorder != nil {
+				recorder.Eventf(
+					dgd, nil, corev1.EventTypeWarning, "ElasticEPFollowerNotReleased", "Delete",
+					"follower %s still has %d replicas and may hold live engine ranks; scale it to zero before it can be removed",
+					existing.Name, *replicas,
+				)
+			}
+			continue
+		}
 		logger.Info("Deleting orphaned elastic-EP follower", "name", existing.Name)
 		if err := r.syncer.Delete(ctx, existing); err != nil && !apierrors.IsNotFound(err) {
 			deleteErrors = append(deleteErrors, fmt.Errorf("delete %s: %w", existing.Name, err))
