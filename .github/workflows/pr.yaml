@@ -392,6 +392,7 @@ jobs:
     uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: vllm
+      framework: vllm  # matches the framework passed to vllm-build
       test_type: Sidecar E2E Test
       amd_runner: prod-tester-amd-gpu-v2
       target_tag_plain: ${{ needs.vllm-build.result == 'success' && needs.vllm-build.outputs.target_tag_plain || 'vllm-runtime' }}
@@ -415,6 +416,7 @@ jobs:
     uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: sglang
+      framework: sglang  # matches the framework passed to sglang-build
       test_type: Sidecar E2E Test
       amd_runner: prod-tester-amd-gpu-v2
       target_tag_plain: ${{ needs.sglang-build.result == 'success' && needs.sglang-build.outputs.target_tag_plain || 'sglang-runtime' }}
@@ -438,6 +440,7 @@ jobs:
     uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: trtllm
+      framework: trtllm  # matches the framework passed to trtllm-build
       test_type: Sidecar E2E Test
       amd_runner: prod-tester-amd-gpu-v2
       target_tag_plain: ${{ needs.trtllm-build.result == 'success' && needs.trtllm-build.outputs.target_tag_plain || 'trtllm-runtime' }}
