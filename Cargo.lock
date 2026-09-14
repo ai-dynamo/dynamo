@@ -2806,7 +2806,6 @@ dependencies = [
  "bytes",
  "dashmap",
  "derive_builder",
- "dynamo-data-gen",
  "dynamo-kv-router",
  "dynamo-tokens",
  "futures",
