@@ -446,7 +446,9 @@ impl ModelManager {
     /// registration.
     fn ensure_name_not_alias(&self, model_name: &str) -> Result<(), ModelManagerError> {
         if self.alias_to_primary.contains_key(model_name) {
-            return Err(ModelManagerError::ModelAlreadyExists(model_name.to_string()));
+            return Err(ModelManagerError::ModelAlreadyExists(
+                model_name.to_string(),
+            ));
         }
         Ok(())
     }
