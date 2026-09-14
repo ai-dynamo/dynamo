@@ -210,6 +210,24 @@ to it. The size of the error grows with request arrival rate and with propagatio
 removes it. `DYN_ROUTER_TEMPERATURE` above `0` decorrelates replicas by sampling among near-equal
 workers, which reduces how often they converge on the same choice.
 
+### Queue and Admission State
+
+Replica synchronization covers active-sequence state. It does not cover the router queue, and that
+is a different kind of loss from the accuracy drift above.
+
+When router queueing is enabled, a request waits in the queue of the replica that received it. That
+queue is local to the replica and does not outlive it. No peer adopts the queued requests of a
+replica that goes away, and none of them is replayed. A replica also cannot see what its peers have
+queued, so admission decisions, fairness, and priority ordering hold within a replica rather than
+across the fleet. Making them fleet-wide would need strong consistency between replicas, which
+best-effort synchronization does not provide.
+
+Plan for this at the layer above. A client or gateway retry re-enters admission on whichever replica
+serves the retry, which is the recovery path available today. Weigh that against the workload's
+tolerance before enabling queueing and replication together: a queue that absorbs a long backlog
+concentrates more work in each replica, so more is lost when one is replaced during a rolling update
+or a node failure.
+
 ### Choosing a Replica Count
 
 Use one replica when active-load precision matters more than endpoint-picker throughput, or when the
