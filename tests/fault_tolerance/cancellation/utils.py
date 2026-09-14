@@ -182,6 +182,20 @@ class CancellableRequest:
                 f"HTTP {status_code}: {response_body}"
             )
 
+    def wait(self, timeout_s: float = 60.0) -> None:
+        """Block until a non-streaming request finishes.
+
+        Raises:
+            AssertionError: If the request does not finish before timeout_s.
+        """
+        thread = self._request_thread
+        if thread is None:
+            raise RuntimeError("wait() called before post()")
+        thread.join(timeout_s)
+        if thread.is_alive():
+            self.cancel()
+            raise AssertionError(f"Request did not complete within {timeout_s}s")
+
     def get_response(self, timeout: float = 30.0):
         """Wait for the request to produce a response or raise an exception."""
         if not self._response_ready.wait(timeout):
