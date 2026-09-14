@@ -268,7 +268,6 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
 
     @pytest.mark.router
     def test_worker_routing_omits_null(self):
-        """A null target leaves the request unpinned."""
         result = _build_dynamo_preproc(
             {"nvext": {"backend_instance_id": None}}, [1], "test", None
         )
@@ -3310,8 +3309,6 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
 def test_generator_preserves_decode_and_routing_options(
     requested, use_pool, pin_workers, monkeypatch
 ):
-    """Both preprocessing paths retain decode options and explicit worker targets."""
-
     class SpecialTokenTokenizer:
         chat_template = ""
 
