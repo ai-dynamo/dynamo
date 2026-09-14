@@ -14,12 +14,32 @@ with vLLM via Dynamo.
 
 ## Configurations
 
-| Configuration | GPUs | Shape | File |
-|---|---|---|---|
-| Aggregated | 4 | TP=4, single worker | [`vllm/agg-b200-chat/deploy.yaml`](vllm/agg-b200-chat/deploy.yaml) |
-| Disaggregated | 8 | 1P1D, TP=4 per role | [`vllm/disagg-b200-chat/deploy.yaml`](vllm/disagg-b200-chat/deploy.yaml) |
+Dynamo + vLLM deployment profiles for the B200 chat workload:
 
-Both serve the chat workload: ~8K input / 1K output with ~70% prefix reuse.
+|                          | B200 aggregated chat                         | B200 disaggregated chat                                      |
+| ------------------------ | -------------------------------------------- | ------------------------------------------------------------ |
+| **Recipe**               | [`vllm/agg-b200-chat`](vllm/agg-b200-chat/deploy.yaml) | [`vllm/disagg-b200-chat`](vllm/disagg-b200-chat/deploy.yaml) |
+| **GPU**                  | 4x B200                                      | 4x B200 prefill + 4x B200 decode                             |
+| **Mode**                 | Aggregated                                   | Prefill/decode disaggregated, 1P1D                           |
+| **Framework**            | vLLM 0.28.0                                  | vLLM 0.28.0                                                  |
+| **Precision**            | NVFP4 (W4A4) + FP8 KV                        | NVFP4 (W4A4) + FP8 KV                                        |
+| **Parallelism**          | TP4                                          | TP4 prefill / TP4 decode                                     |
+| **MoE backend**          | FLASHINFER_CUTLASS (mandatory)               | FLASHINFER_CUTLASS (mandatory)                               |
+| **Expert parallel**      | Off (measured within noise at TP4)           | Off                                                          |
+| **Speculative decoding** | MTP, `exaone_moe_mtp` DL=2                   | MTP, `exaone_moe_mtp` DL=2 — **both roles**                  |
+| **Block size**           | 64                                           | 64                                                           |
+| **Max num seqs**         | 32                                           | 32 prefill / **256 decode**                                  |
+| **Max batched tokens**   | 8,192                                        | 8,192                                                        |
+| **GPU memory util**      | 0.93                                         | 0.93                                                         |
+| **Context length**       | 262,144 (model native)                       | 262,144 (model native)                                       |
+| **Prefix caching**       | On (vLLM default)                            | On (vLLM default)                                            |
+| **Routing**              | KV-aware                                     | KV-aware                                                     |
+| **KV transfer**          | N/A                                          | NIXL/UCX over InfiniBand RDMA (`rc_x`/`rc`)                  |
+| **KV cache offloading**  | None                                         | None                                                         |
+
+Spec-dec and block size **must match across prefill and decode** — a mismatch changes KV block
+geometry and produces silent garbage output rather than an error. `--max-num-seqs` is the
+deliberate exception.
 
 ## Supported features
 
@@ -192,14 +212,18 @@ kubectl logs <worker> -n ${NAMESPACE} | grep -o 'Prefix cache hit rate: [0-9.]*%
   match your device plugin. Prefer a **shared** flavour: with an exclusive-mode resource, two
   co-located workers each claiming HCAs can deadlock NCCL bootstrap in whichever initialises
   second. A Kustomize `provider-networking` Component is the portable answer and is planned.
-- **NIXL falls back to TCP silently.** If no fast transport is available, UCX stages GPU memory
-  through host RAM at roughly two orders of magnitude lower bandwidth, and the only symptom is a
-  large TTFT. Verify before trusting any measurement:
+- **Verify the KV transport before trusting any disaggregated measurement.** `UCX_TLS` here
+  excludes `tcp` on purpose, but if the `rdma/` resource name does not match your cluster the
+  HCAs are never exposed to the pod and UCX has no fast transport to select. With `tcp` in the
+  list it will silently stage GPU memory through host RAM at roughly two orders of magnitude
+  lower bandwidth, and the only symptom is a large TTFT. Check:
   ```bash
   kubectl exec <decode-worker> -n ${NAMESPACE} -- \
     curl -s localhost:9090/metrics | grep vllm:nixl_xfer_time_seconds
   ```
-  A ~1 GB KV transfer should take milliseconds, not seconds.
+  Divide `_sum` by `_count`: a ~1 GB KV transfer should take **milliseconds, not seconds**. To see
+  the transport UCX actually chose, redeploy with `UCX_PROTO_INFO=y` and look for `rc_mlx5` rather
+  than `tcp/eth0` in the worker log.
 - **1M context is not supported.** The checkpoint declares `max_position_embeddings = 262144`
   with `rope_type: "default"` (unscaled), and LG's model card states the same. Reaching 1M would
   need a rope-scaling override with unvalidated long-context accuracy.
