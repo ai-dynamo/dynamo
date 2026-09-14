@@ -36,7 +36,7 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
 | `backend_instance_id` | `u64` | `None` | Router | Routes the request to a specific backend instance. |
 | `token_data` | `u32[]` | `None` | Preprocessor | Pre-tokenized prompt tokens. When present, the frontend skips tokenization. |
 | `max_thinking_tokens` | `u32` | `None` | Backend | Maximum thinking tokens allowed (passed through to backends). |
-| `cache_salt` | `string` | `None` | Router / supported backends | Namespaces Dynamo KV routing. vLLM and TensorRT-LLM also isolate backend KV-cache reuse; see [Backend support](#backend-support). This is the recommended cache-isolation input. |
+| `cache_salt` | `string` | `None` | Router / supported backends | Namespaces Dynamo KV routing. Supported backends also isolate backend KV-cache reuse; see [Backend support](#backend-support). This is the recommended cache-isolation input. |
 | `extra_fields` | `string[]` | `None` | Response builder | Fields to include in the response `nvext`. Supported: `"worker_id"`, `"timing"`, `"routed_experts"`, `"engine_data"`, `"stop_reason"`, `"detailed_finish_reason"`, `"prompt_token_ids"`, `"completion_token_ids"`, `"prompt_logprobs"`. |
 | `metadata_upload` | object | `None` | SGLang backend | Uploads final cumulative SGLang `meta_info` out of band. The object accepts one required `url` field. Requires an RL-enabled SGLang worker. |
 | `prefill_worker_id` | `u64` | `None` | Router | Routes the request to a specific prefill worker (disaggregated serving). |
@@ -95,7 +95,12 @@ KV-cache entries:
 |---------|---------|----------|
 | vLLM | Supported | Router matching and backend KV-cache reuse are isolated by salt. |
 | TensorRT-LLM | Supported | Router matching and backend KV-cache reuse are isolated by salt. |
-| SGLang | Not supported end to end | Dynamo request hashes are namespaced, but the embedded SGLang engine does not receive the salt. SGLang KV events and radix-cache reuse remain unsalted. Do not rely on `cache_salt` for tenant cache isolation with SGLang. |
+| SGLang | Supported for text generation | Router matching and backend KV-cache reuse are isolated by salt in aggregated and disaggregated text generation, including native `/generate`, with SGLang 0.5.18 and 0.5.19. Dedicated multimodal workers, LoRA combinations, and diffusion are outside this support. |
+
+Before sending salted requests to SGLang, update all Dynamo SGLang workers and KV-event
+consumers to a version with this support. Unsalted requests continue to work during the upgrade.
+Native SGLang `/generate` accepts its top-level `cache_salt` body field as a string; it does not
+use `x-tenant-id`. An empty string is treated as absent.
 
 Chat completion and completion requests accept three inputs, in descending precedence:
 

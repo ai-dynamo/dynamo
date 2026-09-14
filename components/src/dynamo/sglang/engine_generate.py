@@ -49,6 +49,7 @@ def build_native_generate_request(
     external_trace_header: dict[str, str] | None = None,
     routed_dp_rank: int | None = None,
     lora_path: str | None = None,
+    cache_salt: str | None = None,
 ) -> GenerateReqInput:
     """Reconstruct the installed SGLang version native request.
 
@@ -64,6 +65,8 @@ def build_native_generate_request(
     request ID.
     """
     payload = dict(native_payload)
+    salt = cache_salt if cache_salt is not None else payload.get("cache_salt")
+    payload["cache_salt"] = None if salt == "" else salt
     payload["input_ids"] = input_ids
     payload["rid"] = request_id
     payload["stream"] = True

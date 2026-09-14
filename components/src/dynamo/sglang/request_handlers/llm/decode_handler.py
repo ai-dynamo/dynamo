@@ -44,6 +44,7 @@ from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     extract_media_urls,
     raise_if_unextracted_multimodal,
 )
+from dynamo.sglang.request_utils import request_cache_salt
 
 _SAMPLING_OPTION_FIELDS = (
     "presence_penalty",
@@ -550,6 +551,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             ),
             routed_dp_rank=routing.get("dp_rank"),
             lora_path=self._resolve_lora(request),
+            cache_salt=request_cache_salt(request),
         )
         return native_generate_stream(self.engine, native_request)
 
@@ -673,6 +675,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             decode = await self.engine.async_generate(
                 **input_param,
                 **decode_mm_kwargs,
+                cache_salt=request_cache_salt(request),
                 sampling_params=sampling_params,
                 stream=True,
                 **require_reasoning_kwargs(self.engine, request),
@@ -758,6 +761,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
             agg = await self.engine.async_generate(
                 **input_param,
+                cache_salt=request_cache_salt(request),
                 image_data=image_data,
                 audio_data=audio_data,
                 video_data=video_data,
