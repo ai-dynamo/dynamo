@@ -26,10 +26,10 @@ prefix correctly; exaone_moe.py is the outlier.
 
 Only manifests for checkpoints that exclude lm_head from quantization, which is
 why BF16-validated upstream support PRs never hit it.
-
 --- a/vllm/model_executor/models/exaone_moe.py
 +++ b/vllm/model_executor/models/exaone_moe.py
-@@ -513,6 +513,7 @@
+@@ -520,6 +520,7 @@
+                 if not lora_config
                  else lora_config.lora_vocab_padding_size,
                  quant_config=quant_config,
 +                prefix=maybe_prefix(prefix, "lm_head"),
