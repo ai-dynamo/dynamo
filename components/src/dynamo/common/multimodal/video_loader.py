@@ -83,7 +83,9 @@ def _cv2_lacks_video_backend() -> bool:
         return False
     build_info = cv2.getBuildInformation()
     return not any(
-        re.search(rf"^\s*{backend}:\s*YES", build_info, re.MULTILINE)
+        re.search(
+            rf"^\s*{backend}:\s*YES", build_info, re.MULTILINE | re.IGNORECASE
+        )
         for backend in ("FFMPEG", "GSTREAMER")
     )
 

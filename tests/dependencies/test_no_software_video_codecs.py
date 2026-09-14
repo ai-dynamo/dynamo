@@ -164,7 +164,9 @@ def _assert_cv2_carries_no_codec() -> None:
 
     build_info = cv2.getBuildInformation()
     for backend in ("FFMPEG", "GSTREAMER"):
-        match = re.search(rf"^\s*{backend}:\s*(\S+)", build_info, re.MULTILINE)
+        match = re.search(
+            rf"^\s*{backend}:\s*(\S+)", build_info, re.MULTILINE | re.IGNORECASE
+        )
         assert not (match and match.group(1).upper() == "YES"), (
             f"the shipped cv2 was built with {backend}; it must be built with "
             f"-DWITH_{backend}=OFF so the image carries no software video codec"
