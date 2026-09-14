@@ -9,10 +9,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
 
-use anyhow::Context;
 use parking_lot::Mutex;
 use pyo3::{exceptions::PyException, prelude::*};
-use serde::{Deserialize, Serialize};
 
 use super::to_pyerr;
 use dynamo_runtime::transports::etcd::{self, Client, KvCache};
@@ -20,7 +18,6 @@ use tokio_util::sync::CancellationToken;
 
 // All three AI's I asked agreed, this is the way
 const NONE_SENTINEL: usize = usize::MAX;
-const DECISION_KEY: &str = "scaling_decision";
 
 struct InnerConnector {
     check_interval: Duration,
@@ -176,13 +173,24 @@ impl VirtualConnectorCoordinator {
                 decision_id: new_decision_id,
             };
 
-            // One value keeps counts and ID atomic for both etcd readers and the cache watcher.
-            kv_cache
-                .put(
-                    DECISION_KEY,
-                    serde_json::to_vec(&decision).map_err(to_pyerr)?,
-                    None,
+            // Preserve the existing keys and absent counts, but commit the decision at one revision.
+            let entries = [
+                ("num_prefill_workers", decision.num_prefill_workers),
+                ("num_decode_workers", decision.num_decode_workers),
+                ("decision_id", decision.decision_id),
+            ]
+            .into_iter()
+            .filter(|(_, value)| *value != -1)
+            .map(|(key, value)| {
+                (
+                    format!("{}{key}", kv_cache.prefix),
+                    value.to_string().into_bytes(),
                 )
+            })
+            .collect();
+            inner
+                .etcd_client
+                .kv_put_many(entries, None)
                 .await
                 .map_err(to_pyerr)?;
 
@@ -374,7 +382,7 @@ impl VirtualConnectorClient {
 }
 
 #[pyclass]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy)]
 /// The decision Planner made. The client should make necessary changes to the environment to make
 /// this true, and then call `complete` on the VirtualConnectorClient.
 pub struct PlannerDecision {
@@ -425,38 +433,29 @@ impl InnerClient {
 }
 
 async fn read_decision(client: &Client, prefix: &str) -> anyhow::Result<PlannerDecision> {
-    // A prefix read also gives a consistent snapshot of legacy fields during migration.
-    let kvs = client.kv_get_prefix(prefix).await?;
-    let values = kvs
-        .iter()
-        .map(|kv| {
-            let key = kv.key_str()?;
-            Ok((key.strip_prefix(prefix).unwrap_or(key), kv.value()))
-        })
-        .collect::<anyhow::Result<HashMap<_, _>>>()?;
-    decode_decision(&values)
-}
-
-fn decode_decision(values: &HashMap<&str, &[u8]>) -> anyhow::Result<PlannerDecision> {
-    if let Some(value) = values.get(DECISION_KEY) {
-        return serde_json::from_slice(value).context("Invalid planner scaling decision");
-    }
-
-    // Support persisted decisions from before the single-record format. Once the new
-    // key exists it is authoritative; mixed-version writers are not supported.
-    let legacy_field = |key| -> anyhow::Result<isize> {
-        let Some(value) = values.get(key) else {
-            return Ok(-1);
-        };
-        std::str::from_utf8(value)?
-            .parse()
-            .with_context(|| format!("Invalid planner {key}"))
+    let mut decision = PlannerDecision {
+        num_prefill_workers: -1,
+        num_decode_workers: -1,
+        decision_id: -1,
     };
-    Ok(PlannerDecision {
-        num_prefill_workers: legacy_field("num_prefill_workers")?,
-        num_decode_workers: legacy_field("num_decode_workers")?,
-        decision_id: legacy_field("decision_id")?,
-    })
+    // One prefix read observes all fields at the same etcd revision.
+    for kv in client.kv_get_prefix(prefix).await? {
+        let key = kv.key_str()?;
+        match key.strip_prefix(prefix) {
+            Some("num_prefill_workers") => {
+                decision.num_prefill_workers = kv.value_str()?.parse()?
+            }
+            Some("num_decode_workers") => decision.num_decode_workers = kv.value_str()?.parse()?,
+            Some("decision_id") => decision.decision_id = kv.value_str()?.parse()?,
+            Some("scaled_decision_id") => {}
+            _ => tracing::warn!(
+                unexpected_key = key,
+                root = prefix,
+                "Unexpected key in planner etcd"
+            ),
+        }
+    }
+    Ok(decision)
 }
 
 // This compiles to a `mov`, it's basically free
@@ -470,46 +469,7 @@ fn root_key(namespace: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{DECISION_KEY, PlannerDecision, decode_decision, scaling_decision_is_ready};
-    use std::collections::HashMap;
-
-    #[test]
-    fn decision_record_overrides_stale_legacy_fields() {
-        let values: HashMap<&str, &[u8]> = HashMap::from([
-            ("num_prefill_workers", b"1".as_slice()),
-            ("num_decode_workers", b"invalid".as_slice()),
-            ("decision_id", b"0".as_slice()),
-            ("scaled_decision_id", b"0".as_slice()),
-            (
-                DECISION_KEY,
-                br#"{"num_prefill_workers":5,"num_decode_workers":8,"decision_id":1}"#.as_slice(),
-            ),
-        ]);
-        assert_eq!(
-            decode_decision(&values).unwrap(),
-            PlannerDecision {
-                num_prefill_workers: 5,
-                num_decode_workers: 8,
-                decision_id: 1
-            },
-        );
-    }
-
-    #[test]
-    fn invalid_record_does_not_fall_back_to_legacy_decision() {
-        for record in [
-            b"not json".as_slice(),
-            br#"{"num_prefill_workers":5,"decision_id":1}"#.as_slice(),
-        ] {
-            let values = HashMap::from([
-                ("num_prefill_workers", b"1".as_slice()),
-                ("num_decode_workers", b"2".as_slice()),
-                ("decision_id", b"0".as_slice()),
-                (DECISION_KEY, record),
-            ]);
-            assert!(decode_decision(&values).is_err());
-        }
-    }
+    use super::scaling_decision_is_ready;
 
     #[test]
     fn scaling_is_ready_before_first_decision() {
