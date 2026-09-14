@@ -18,10 +18,11 @@ use dynamo_runtime::pipeline::{
 };
 use tokio::sync::{Mutex, Semaphore};
 
-pub type Script = Vec<NvCreateChatCompletionStreamResponse>;
+pub type Script = Vec<Annotated<NvCreateChatCompletionStreamResponse>>;
 
 enum QueuedScript {
     Immediate(Script),
+    Failure(Error),
     #[allow(dead_code)]
     BackendError {
         chunks: Script,
@@ -51,9 +52,17 @@ pub struct ScriptedChatEngine {
 }
 
 impl ScriptedChatEngine {
-    pub fn new(scripts: impl IntoIterator<Item = Script>) -> Self {
+    pub fn new(scripts: impl IntoIterator<Item = Result<Script, Error>>) -> Self {
         Self {
-            scripts: Mutex::new(scripts.into_iter().map(QueuedScript::Immediate).collect()),
+            scripts: Mutex::new(
+                scripts
+                    .into_iter()
+                    .map(|script| match script {
+                        Ok(script) => QueuedScript::Immediate(script),
+                        Err(error) => QueuedScript::Failure(error),
+                    })
+                    .collect(),
+            ),
             requests: Mutex::new(Vec::new()),
         }
     }
@@ -120,17 +129,22 @@ impl
             .await
             .pop_front()
             .ok_or_else(|| anyhow!("ScriptedChatEngine received an unexpected request"))?;
+        let script = match script {
+            QueuedScript::Failure(error) => return Err(error),
+            script => script,
+        };
 
         let output = async_stream::stream! {
             match script {
                 QueuedScript::Immediate(chunks) => {
                     for chunk in chunks {
-                        yield Annotated::from_data(chunk);
+                        yield chunk;
                     }
                 }
+                QueuedScript::Failure(_) => unreachable!("failure scripts return before streaming"),
                 QueuedScript::BackendError { chunks, error } => {
                     for chunk in chunks {
-                        yield Annotated::from_data(chunk);
+                        yield chunk;
                     }
                     yield Annotated {
                         data: None,
@@ -147,7 +161,7 @@ impl
                 } => {
                     let mut chunks = chunks.into_iter();
                     for chunk in chunks.by_ref().take(split_at) {
-                        yield Annotated::from_data(chunk);
+                        yield chunk;
                     }
                     let permit = release
                         .acquire()
@@ -155,7 +169,7 @@ impl
                         .expect("script gate semaphore was closed");
                     permit.forget();
                     for chunk in chunks {
-                        yield Annotated::from_data(chunk);
+                        yield chunk;
                     }
                 }
             }

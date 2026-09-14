@@ -39,10 +39,13 @@ use dynamo_runtime::protocols::annotated::Annotated;
 /// Accessors the migration RetryManager needs from a response chunk.
 /// `token_ids` lets it replay already-delivered tokens; `worker_trace_link`
 /// lets it stamp the failed worker's span onto the next attempt's
-/// `migration_link`.
+/// `migration_link`; `jailed_text` lets it carry forward whatever the Backend's
+/// decoder is still withholding as a possible hidden-stop-sequence prefix, so a
+/// retried attempt's fresh decoder can be reseeded instead of silently losing it.
 pub(crate) trait HasTokenIds {
     fn token_ids(&self) -> &[TokenIdType];
     fn worker_trace_link(&self) -> Option<&crate::protocols::common::preprocessor::TraceLink>;
+    fn jailed_text(&self) -> Option<&str>;
 }
 
 impl HasTokenIds for BackendOutput {
@@ -52,6 +55,9 @@ impl HasTokenIds for BackendOutput {
     fn worker_trace_link(&self) -> Option<&crate::protocols::common::preprocessor::TraceLink> {
         self.worker_trace_link.as_ref()
     }
+    fn jailed_text(&self) -> Option<&str> {
+        self.jailed_text.as_deref()
+    }
 }
 
 impl HasTokenIds for LLMEngineOutput {
@@ -60,6 +66,9 @@ impl HasTokenIds for LLMEngineOutput {
     }
     fn worker_trace_link(&self) -> Option<&crate::protocols::common::preprocessor::TraceLink> {
         self.worker_trace_link.as_ref()
+    }
+    fn jailed_text(&self) -> Option<&str> {
+        self.jailed_text.as_deref()
     }
 }
 
@@ -317,8 +326,9 @@ where
         // embedding prompts until a retry can represent an embedding-based continuation.
 
         // TODO: Define a replay-capability contract for attempt-local decoder and sampler state.
-        // Stop-string matching, generated-token penalties, and thinking-token budgets are not
-        // currently checkpointed across workers.
+        // A withheld hidden-stop-sequence prefix is now checkpointed across workers (see
+        // `jail_seed` / `track_response`), but generated-token penalties and thinking-token
+        // budgets are not.
 
         // Disable migration for structured-output (guided-decoding) requests.
         // Inference backends initialize the guided-decoding FSM (finite state machine) fresh
@@ -647,6 +657,12 @@ where
         if let Some(link) = llm_engine_output.worker_trace_link() {
             self.last_worker_link = Some(link.clone());
         }
+        // Snapshot whatever the Backend's decoder is currently withholding as a possible
+        // hidden-stop-sequence prefix, so a future retry's fresh decoder can be reseeded
+        // from it (`jail_seed`) instead of the withheld text simply vanishing. Overwritten
+        // on every chunk -- `None` once the decoder resolves it one way or the other -- so
+        // this always reflects the last known-good chunk's state, never a stale one.
+        self.request.jail_seed = llm_engine_output.jailed_text().map(str::to_string);
         let output_len = u32::try_from(token_ids.len()).unwrap_or(u32::MAX);
         if self.exceed_max_seq_len(output_len) {
             return;
@@ -879,6 +895,7 @@ mod tests {
             completion_usage: None,
             engine_data: None,
             routing_data: None,
+            jailed_text: None,
         })
     }
 
@@ -2329,6 +2346,109 @@ mod tests {
         );
     }
 
+    /// Regression test for the migration-discards-withheld-text bug: a chunk delivered
+    /// before a migratable error carries `jailed_text` (whatever the `Backend` decoder was
+    /// withholding as a possible hidden-stop-sequence prefix), and the retried attempt's
+    /// request must be reseeded from it via `jail_seed` rather than starting the new
+    /// decoder unseeded and silently losing that withheld text.
+    #[tokio::test]
+    async fn test_retry_manager_carries_jail_seed_across_migration() {
+        dynamo_runtime::logging::init();
+        let context_id = uuid::Uuid::new_v4().to_string();
+
+        struct JailSeedMockEngine {
+            calls: Arc<AtomicU32>,
+            context_id: String,
+        }
+
+        #[async_trait]
+        impl
+            AsyncEngine<
+                SingleIn<PreprocessedRequest>,
+                ManyOut<Annotated<BackendOutput>>,
+                anyhow::Error,
+            > for JailSeedMockEngine
+        {
+            async fn generate(
+                &self,
+                request: SingleIn<PreprocessedRequest>,
+            ) -> Result<ManyOut<Annotated<BackendOutput>>> {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                let (preprocessed_request, _context) = request.transfer(());
+
+                if call == 0 {
+                    // First attempt: deliver one good chunk that leaves "STOP" withheld as
+                    // a partial hidden-stop-sequence match, then disconnect mid-stream.
+                    assert_eq!(
+                        preprocessed_request.jail_seed, None,
+                        "a first attempt must not start pre-seeded"
+                    );
+                    let responses = stream::iter(vec![
+                        Annotated::from_data(BackendOutput {
+                            jailed_text: Some("STOP".to_string()),
+                            ..create_mock_output(10).data.unwrap()
+                        }),
+                        Annotated::from_err(
+                            DynamoError::builder()
+                                .error_type(ErrorType::Disconnected)
+                                .message("worker disconnected mid-stream")
+                                .build(),
+                        ),
+                    ]);
+                    let ctx = Arc::new(Controller::new(self.context_id.clone()));
+                    Ok(ResponseStream::new(Box::pin(responses), ctx))
+                } else {
+                    // Retry attempt: the withheld text from the abandoned attempt's last
+                    // known-good chunk must have been carried onto this request.
+                    assert_eq!(
+                        preprocessed_request.jail_seed.as_deref(),
+                        Some("STOP"),
+                        "retry request must be reseeded with the withheld jail text"
+                    );
+                    let responses = stream::iter(vec![Annotated::from_data(BackendOutput {
+                        jailed_text: None,
+                        ..create_mock_output(11).data.unwrap()
+                    })]);
+                    let ctx = Arc::new(Controller::new(self.context_id.clone()));
+                    Ok(ResponseStream::new(Box::pin(responses), ctx))
+                }
+            }
+        }
+
+        let request = create_mock_request(5);
+        let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>> =
+            Arc::new(JailSeedMockEngine {
+                calls: Arc::new(AtomicU32::new(0)),
+                context_id: context_id.clone(),
+            });
+
+        let ctx = Arc::new(Controller::new(context_id.clone()));
+        let metrics = Arc::new(Metrics::new());
+        let mut retry_manager = RetryManager::build(
+            ctx,
+            BTreeMap::new(),
+            request,
+            next_generate,
+            1,
+            None,
+            Arc::new(TEST_MODEL.to_string()),
+            metrics,
+            None,
+        )
+        .await
+        .expect("Failed to build RetryManager");
+
+        let mut responses = Vec::new();
+        while let Some(r) = retry_manager.next().await {
+            responses.push(r);
+        }
+
+        // One good chunk from the first attempt, one from the retry -- the in-stream
+        // error itself is consumed internally to drive the migration, not surfaced.
+        assert_eq!(responses.len(), 2);
+        assert!(responses.iter().all(|r| r.error.is_none()));
+    }
+
     #[tokio::test]
     async fn test_retry_manager_cancellation_during_migration_skips_retry_dispatch() {
         dynamo_runtime::logging::init();
@@ -2760,5 +2880,208 @@ mod tests {
             vec![u64::from(last_dispatched)],
             "retry scheduled must name the upcoming attempt"
         );
+    }
+
+    // --- Real-Backend migration integration tests -------------------------------------
+    //
+    // `create_mock_output` above fabricates already-decoded `BackendOutput` text directly,
+    // so `test_retry_manager_carries_jail_seed_across_migration` only proves the
+    // `jail_seed` field gets copied between hand-built mocks -- removing the real `Backend`
+    // seed consumption entirely would not fail it. The tests below instead run raw
+    // (undetokenized) token ids through a real `crate::backend::Backend` wrapping a real
+    // `Decoder`, so a migration retry re-creates an actual fresh decoder the way the
+    // production pipeline does, and prove the checkpoint is consumed correctly by it.
+
+    /// Token 1 decodes to "o", 2 to "there", 3 to "zzy" -- letters chosen so a hidden stop
+    /// of "ozzy" can complete across a migration boundary (token 1 on the first attempt,
+    /// the remainder on the retry), and so an ordinary continuation ("o" then "there") is
+    /// legible as "othere".
+    struct LetterTokenizer;
+
+    impl crate::tokenizers::traits::Encoder for LetterTokenizer {
+        fn encode(&self, _input: &str) -> anyhow::Result<crate::tokenizers::Encoding> {
+            Ok(crate::tokenizers::Encoding::Sp(vec![]))
+        }
+        fn encode_batch(
+            &self,
+            _inputs: &[&str],
+        ) -> anyhow::Result<Vec<crate::tokenizers::Encoding>> {
+            Ok(vec![])
+        }
+    }
+
+    impl crate::tokenizers::traits::Decoder for LetterTokenizer {
+        fn decode(
+            &self,
+            token_ids: &[TokenIdType],
+            _skip_special_tokens: bool,
+        ) -> anyhow::Result<crate::tokenizers::traits::DecodeResult> {
+            let text: String = token_ids
+                .iter()
+                .map(|&id| match id {
+                    1 => "o",
+                    2 => "there",
+                    3 => "zzy",
+                    other => panic!("unexpected token id in LetterTokenizer: {other}"),
+                })
+                .collect();
+            Ok(crate::tokenizers::traits::DecodeResult::Complete(text))
+        }
+    }
+
+    impl crate::tokenizers::traits::Tokenizer for LetterTokenizer {}
+
+    fn letter_backend() -> Arc<crate::backend::Backend> {
+        let tokenizer: Arc<dyn crate::tokenizers::traits::Tokenizer> = Arc::new(LetterTokenizer);
+        crate::backend::Backend::from_tokenizer(crate::tokenizers::Tokenizer::from(tokenizer))
+    }
+
+    fn jail_request(stop: Option<Vec<String>>) -> PreprocessedRequest {
+        PreprocessedRequest::builder()
+            .model(TEST_MODEL.to_string())
+            .token_ids(vec![])
+            .stop_conditions(StopConditions {
+                stop,
+                ..Default::default()
+            })
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .build()
+            .expect("valid preprocessed request")
+    }
+
+    /// Emits raw token ids for a real `Backend`/`Decoder` to detokenize: `first_attempt_tokens`
+    /// then a migratable disconnect on the first call, `retry_tokens` to completion on the
+    /// second.
+    struct RawTokenMigrationEngine {
+        calls: Arc<AtomicU32>,
+        first_attempt_tokens: Vec<u32>,
+        retry_tokens: Vec<u32>,
+        context_id: String,
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for RawTokenMigrationEngine
+    {
+        async fn generate(
+            &self,
+            _request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let ctx = Arc::new(Controller::new(self.context_id.clone()));
+            let tokens = if call == 0 {
+                &self.first_attempt_tokens
+            } else {
+                &self.retry_tokens
+            };
+            let mut chunks: Vec<_> = tokens
+                .iter()
+                .map(|&id| {
+                    Annotated::from_data(LLMEngineOutput {
+                        token_ids: vec![id],
+                        index: Some(0),
+                        ..Default::default()
+                    })
+                })
+                .collect();
+            if call == 0 {
+                chunks.push(Annotated::from_err(
+                    DynamoError::builder()
+                        .error_type(ErrorType::Disconnected)
+                        .message("worker disconnected mid-stream")
+                        .build(),
+                ));
+            }
+            Ok(ResponseStream::new(Box::pin(stream::iter(chunks)), ctx))
+        }
+    }
+
+    /// Wraps a raw-token engine with a real `Backend`, so `RetryManager`'s `next_generate`
+    /// re-creates an actual fresh `Decoder` on every retry, exactly as the production
+    /// pipeline does (migration sits outside `Backend` from the response's perspective; see
+    /// `lib/llm/src/entrypoint/input/common.rs`).
+    struct BackendWrappedEngine {
+        backend: Arc<crate::backend::Backend>,
+        raw_engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>
+        for BackendWrappedEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<BackendOutput>>> {
+            Operator::generate(self.backend.as_ref(), request, self.raw_engine.clone()).await
+        }
+    }
+
+    /// Drives a `RetryManager` wrapping a real `Backend` over a scripted raw-token engine
+    /// and returns the concatenation of every response's visible text.
+    async fn run_raw_token_migration(
+        stop: Option<Vec<String>>,
+        first_attempt_tokens: Vec<u32>,
+        retry_tokens: Vec<u32>,
+    ) -> String {
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let raw_engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            Arc::new(RawTokenMigrationEngine {
+                calls: Arc::new(AtomicU32::new(0)),
+                first_attempt_tokens,
+                retry_tokens,
+                context_id: context_id.clone(),
+            });
+        let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>> =
+            Arc::new(BackendWrappedEngine {
+                backend: letter_backend(),
+                raw_engine,
+            });
+
+        let ctx = Arc::new(Controller::new(context_id.clone()));
+        let metrics = Arc::new(Metrics::new());
+        let mut retry_manager = RetryManager::build(
+            ctx,
+            BTreeMap::new(),
+            jail_request(stop),
+            next_generate,
+            1,
+            None,
+            Arc::new(TEST_MODEL.to_string()),
+            metrics,
+            None,
+        )
+        .await
+        .expect("Failed to build RetryManager");
+
+        let mut text = String::new();
+        while let Some(response) = retry_manager.next().await {
+            if let Some(t) = response.data.and_then(|data| data.text) {
+                text.push_str(&t);
+            }
+        }
+        text
+    }
+
+    /// End-to-end regression for the migration-discards-withheld-text bug, through a real
+    /// `Backend`/`Decoder`: a hidden stop "ozzy" withholds "o" on the first attempt, the
+    /// worker disconnects, and the retried attempt's fresh decoder must be reseeded from
+    /// the checkpoint so "o" plus the retry's "there" reaches the caller as "othere" --
+    /// not "there" alone.
+    #[tokio::test]
+    async fn migration_preserves_withheld_text_through_real_backend_retry() {
+        let text = run_raw_token_migration(Some(vec!["ozzy".to_string()]), vec![1], vec![2]).await;
+        assert_eq!(text, "othere");
+    }
+
+    /// Same setup, but the retry's tokens complete the hidden stop instead of abandoning
+    /// it: "o" (withheld, first attempt) plus "zzy" (retry) makes "ozzy", which must stay
+    /// fully hidden -- proving the checkpoint doesn't just prevent loss, it still
+    /// participates correctly in stop-sequence matching across the migration boundary.
+    #[tokio::test]
+    async fn migration_hides_stop_sequence_completed_across_real_backend_retry() {
+        let text = run_raw_token_migration(Some(vec!["ozzy".to_string()]), vec![1], vec![3]).await;
+        assert_eq!(text, "", "the completed hidden stop must not leak any text");
     }
 }

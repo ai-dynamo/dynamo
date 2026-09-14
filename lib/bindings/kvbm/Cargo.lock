@@ -2158,6 +2158,7 @@ dependencies = [
  "futures",
  "futures-util",
  "galil-seiferas",
+ "half",
  "hf-hub",
  "http-body-util",
  "image",
@@ -2186,7 +2187,6 @@ dependencies = [
  "rayon",
  "reqwest 0.12.28",
  "rmp-serde",
- "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3334,6 +3334,7 @@ dependencies = [
  "cfg-if",
  "crunchy",
  "num-traits",
+ "serde",
  "zerocopy",
 ]
 

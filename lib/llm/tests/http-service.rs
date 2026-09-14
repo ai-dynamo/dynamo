@@ -2448,6 +2448,7 @@ mod zero_top_logprobs {
     use std::time::Duration;
 
     use dynamo_llm::protocols::{
+        Annotated,
         common::{FinishReason, llm_backend::BackendOutput},
         openai::{DeltaGeneratorExt, chat_completions::NvCreateChatCompletionRequest},
     };
@@ -2499,12 +2500,14 @@ mod zero_top_logprobs {
                         worker_trace_link: None,
                         engine_data: None,
                         routing_data: None,
+                        jailed_text: None,
                     })
                     .expect("backend output conversion failed")
             })
+            .map(Annotated::from_data)
             .collect();
         if generator.is_usage_enabled() {
-            chunks.push(generator.create_usage_chunk());
+            chunks.push(Annotated::from_data(generator.create_usage_chunk()));
         }
         chunks
     }
