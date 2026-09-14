@@ -489,6 +489,13 @@ class ManagedProcess:
         assert self._command_name
         assert self._log_path
 
+        # ``tee`` opens its output asynchronously after the child starts. A
+        # waiter invoked immediately after ``__enter__`` could otherwise read a
+        # marker left by a previous run and advance the test before this run
+        # has emitted it. Establish an empty generation synchronously first.
+        with open(self._log_path, "w", encoding="utf-8"):
+            pass
+
         self._logger.info(
             "Running command: %s in %s",
             " ".join(self.command),
