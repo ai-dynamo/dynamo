@@ -53,7 +53,10 @@ Apply the following concerns only where the change makes them relevant. They des
    successful output.
 
 10. Verify the existing source error chain and classification before proposing changes; do not
-    infer an error type from arbitrary message text.
+    infer an error type from arbitrary message text. Before alleging an incorrect error status,
+    establish from the interface contract whether the fault belongs to the client, server, or
+    backend. A server-selected action conflicting with a supported client constraint does not by
+    itself make the request invalid.
 
 11. Keep error bodies and logs bounded and avoid including entire schemas or inline media.
 
