@@ -359,6 +359,10 @@ pub mod llm {
     pub const DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: &str =
         "DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS";
 
+    /// Action taken when an HTTP client disconnects: `kill` (default) aborts
+    /// immediately, while `stop` requests graceful generation shutdown.
+    pub const DYN_HTTP_CLIENT_DISCONNECT_BEHAVIOR: &str = "DYN_HTTP_CLIENT_DISCONNECT_BEHAVIOR";
+
     /// HTTP status code returned when the frontend rejects a request because
     /// all workers are overloaded. Defaults to 529 ("Site is overloaded"); set
     /// to 503 for Service Unavailable retry semantics. Status codes from 200
@@ -1025,6 +1029,7 @@ mod tests {
             // LLM
             llm::DYN_HTTP_BODY_LIMIT_MB,
             llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+            llm::DYN_HTTP_CLIENT_DISCONNECT_BEHAVIOR,
             llm::DYN_HTTP_OVERLOAD_STATUS_CODE,
             llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS,
             llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS,
