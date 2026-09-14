@@ -26,7 +26,6 @@ use dynamo_llm::{
     },
     model_card::ModelDeploymentCard,
 };
-use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::metrics::prometheus_names::{frontend_service, name_prefix};
 use dynamo_runtime::{
     CancellationToken,
@@ -1743,30 +1742,9 @@ async fn test_nvext_disabled_strips_request_and_response() {
 /// Same regression for `/v1/responses`: the streaming Responses path shares
 /// the peek-before-200 helper with chat_completions, so an `InvalidArgument`
 /// frame at t=0 must land as HTTP 400, not HTTP 200 + generic 500 SSE.
-///
-/// The pre-commit peek is opt-in via `DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS`
-/// (default: unset → peek disabled). Enable it here so the assertion
-/// exercises the fix path. `#[serial]` prevents the env var from bleeding
-/// into other tests that may run in parallel.
+/// Relies on the default peek window (`DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS` unset).
 #[tokio::test]
-#[serial_test::serial]
 async fn test_streaming_responses_returns_4xx_on_backend_invalid_argument() {
-    // SAFETY: single-threaded via `#[serial]`; no other test reads or writes
-    // this env var concurrently.
-    unsafe {
-        std::env::set_var(env_llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS, "500");
-    }
-    // Guard to unset on any exit path from this test.
-    struct EnvGuard;
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            unsafe {
-                std::env::remove_var(env_llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS);
-            }
-        }
-    }
-    let _guard = EnvGuard;
-
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
         .port(port)
@@ -1822,6 +1800,157 @@ async fn test_streaming_responses_returns_4xx_on_backend_invalid_argument() {
     assert!(
         text.contains("Received multimodal data but multimodal processing is not enabled"),
         "expected typed backend error message forwarded to client; got: {text}"
+    );
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+/// A first-frame `Backend(InvalidArgument)` on `/v1/chat/completions` must land
+/// as HTTP 400 with the worker's reason, for both streaming and unary. Streaming
+/// is the OpenAI-compatible default; without the default pre-commit peek it
+/// used to commit HTTP 200 and sanitize the error into an SSE 500 frame.
+#[tokio::test]
+async fn test_chat_completions_returns_4xx_on_backend_invalid_argument() {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .port(port)
+        .enable_chat_endpoints(true)
+        .enable_cmpl_endpoints(true)
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+    let manager = state.manager();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task =
+        tokio::spawn(async move { service.run_with_listener(token.clone(), listener).await });
+    wait_for_service_ready(port).await;
+
+    let card = ModelDeploymentCard::with_name_only("invalid-arg-model");
+    manager
+        .add_chat_completions_model(
+            "invalid-arg-model",
+            card.mdcsum(),
+            Arc::new(InvalidArgumentEngine {}),
+        )
+        .unwrap();
+
+    let client = reqwest::Client::new();
+    for stream in [true, false] {
+        let response = client
+            .post(format!("http://localhost:{port}/v1/chat/completions"))
+            .json(&serde_json::json!({
+                "model": "invalid-arg-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": stream,
+                "max_tokens": 1
+            }))
+            .send()
+            .await
+            .expect("POST /v1/chat/completions");
+
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let text = response.text().await.unwrap_or_default();
+
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "stream={stream}: Backend(InvalidArgument) must land as HTTP 400 before HTTP 200 is committed; got {status}, content-type={content_type}, body: {text}"
+        );
+        assert!(
+            content_type.starts_with("application/json"),
+            "stream={stream}: refusal must be a JSON error body, not SSE; content-type={content_type}, body: {text}"
+        );
+        assert!(
+            text.contains("Received multimodal data but multimodal processing is not enabled"),
+            "stream={stream}: expected typed backend error message forwarded to client; got: {text}"
+        );
+        let body: serde_json::Value =
+            serde_json::from_str(&text).expect("refusal body must be JSON");
+        assert_eq!(body["code"], StatusCode::BAD_REQUEST.as_u16());
+        assert_ne!(body["message"], "Internal server error");
+    }
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+/// Default peek must not turn a healthy streaming chat completion into a
+/// refusal: HTTP 200, SSE, and generated tokens still arrive.
+#[tokio::test]
+async fn test_streaming_chat_completions_happy_path_still_200_with_tokens() {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .port(port)
+        .enable_chat_endpoints(true)
+        .enable_cmpl_endpoints(true)
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+    let manager = state.manager();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task =
+        tokio::spawn(async move { service.run_with_listener(token.clone(), listener).await });
+    wait_for_service_ready(port).await;
+
+    let card = ModelDeploymentCard::with_name_only("happy-path-model");
+    manager
+        .add_chat_completions_model(
+            "happy-path-model",
+            card.mdcsum(),
+            Arc::new(CounterEngine {}),
+        )
+        .unwrap();
+
+    let response = timeout(
+        std::time::Duration::from_secs(5),
+        reqwest::Client::new()
+            .post(format!("http://localhost:{port}/v1/chat/completions"))
+            .json(&serde_json::json!({
+                "model": "happy-path-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": true,
+                "max_tokens": 1
+            }))
+            .send(),
+    )
+    .await
+    .expect("streaming happy-path headers should arrive well inside the peek window")
+    .expect("POST /v1/chat/completions");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        content_type.starts_with("text/event-stream"),
+        "happy-path streaming must remain SSE; content-type={content_type}"
+    );
+
+    let body = timeout(std::time::Duration::from_secs(5), response.text())
+        .await
+        .expect("streaming happy-path body should complete")
+        .expect("read body");
+    assert!(
+        body.contains("choice 0"),
+        "happy-path stream must include generated tokens; body: {body}"
+    );
+    assert!(
+        !body.contains("Internal server error"),
+        "happy-path stream must not carry a sanitized error frame; body: {body}"
     );
 
     cancel_token.cancel();

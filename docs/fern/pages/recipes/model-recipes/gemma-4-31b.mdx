@@ -286,7 +286,6 @@ The B200 and GB200 targets serve the model on TensorRT-LLM with KV-aware routing
 
 - MTP support has not been verified on H200 and is not enabled in the H200 deployment.
 - Audio is not supported by the model.
-- For streaming responses with multimodal inputs, the HTTP status code can be misreported. Newer Dynamo versions fix this by setting `DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS`, for example to `500`.
 - Some video codecs, including AV1, are not included in the runtime image. Extend the image when those codecs are required.
 - `media_io_kwargs` applies only when frontend decoding is enabled. When frontend decoding is disabled, the frameworks do not receive it correctly.
 - Multimodal items support public URLs only.
