@@ -378,7 +378,6 @@ impl KvRouterPlacement {
                 best_available_overlap_blocks: admission.best_available_overlap_blocks,
                 isl_blocks: admission.isl_blocks,
             }),
-            placement_replica_id: None,
         }
     }
 
@@ -942,19 +941,6 @@ impl OfflineReplayRouter {
         )
         .unwrap_or(u32::MAX);
         let eligibility = scheduling_request.eligibility();
-        let best_available_overlap_blocks = request
-            .overlaps
-            .scores
-            .iter()
-            .filter(|(worker, _)| {
-                self.workers_with_configs
-                    .get(&worker.worker_id)
-                    .is_some_and(|config| eligibility.allows_worker(worker.worker_id, config))
-                    && worker.dp_rank < self.dp_size
-            })
-            .map(|(_, overlap)| *overlap)
-            .max()
-            .unwrap_or(0);
         let selection = self
             .selector
             .select_worker(WorkerSelectionInput::configured(
