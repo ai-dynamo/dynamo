@@ -27,6 +27,10 @@ const (
 	DynamoNixlPort     = 19090
 	DynamoNixlPortName = "nixl"
 
+	// DynamoMaxNixlPorts bounds the per-pod NIXL exporter ports: rank i uses
+	// DynamoNixlPort+i. Keep in sync with MAX_COLOCATED_NIXL_EXPORTERS (nixl_telemetry.py).
+	DynamoMaxNixlPorts = 8
+
 	DynamoFPMBasePort = 20380
 
 	MpiRunSshPort = 2222
@@ -121,17 +125,18 @@ const (
 	// Snapshot compatibility metadata is written by Dynamo capture producers
 	// and validated before a PodSnapshot may restore a Dynamo worker.
 	SnapshotCompatibilityVersionAnnotation = "nvidia.com/dynamo-snapshot-compatibility-version"
-	SnapshotWorkerHashAnnotation           = "nvidia.com/dynamo-snapshot-worker-hash"
+	SnapshotCompatibilityHashAnnotation    = "nvidia.com/dynamo-snapshot-compatibility-hash"
 	SnapshotGMSModeAnnotation              = "nvidia.com/dynamo-snapshot-gms-mode"
-	SnapshotCompatibilityVersion           = "v1"
+	SnapshotCompatibilityVersion           = "v2"
 	SnapshotGMSModeDisabled                = "disabled"
 
 	// Native restore candidate metadata pins the PodSnapshot observation used
 	// by workload reconciliation so admission can detect intervening changes.
-	SnapshotCandidateUIDAnnotation     = "nvidia.com/dynamo-restore-snapshot-uid"
-	SnapshotCandidateContentAnnotation = "nvidia.com/dynamo-restore-snapshot-content"
-	SnapshotCandidateGMSModeAnnotation = "nvidia.com/dynamo-restore-snapshot-gms-mode"
-	SnapshotCandidateVersionAnnotation = "nvidia.com/dynamo-restore-snapshot-version"
+	SnapshotCandidateUIDAnnotation               = "nvidia.com/dynamo-restore-snapshot-uid"
+	SnapshotCandidateContentAnnotation           = "nvidia.com/dynamo-restore-snapshot-content"
+	SnapshotCandidateGMSModeAnnotation           = "nvidia.com/dynamo-restore-snapshot-gms-mode"
+	SnapshotCandidateVersionAnnotation           = "nvidia.com/dynamo-restore-snapshot-version"
+	SnapshotCandidateCompatibilityHashAnnotation = "nvidia.com/dynamo-restore-snapshot-compatibility-hash"
 	// RestoreCandidateTargetContainersAnnotation carries Dynamo's rendered
 	// restore destinations from workload reconciliation to Pod admission.
 	RestoreCandidateTargetContainersAnnotation = "nvidia.com/dynamo-restore-target-containers"

@@ -64,6 +64,11 @@ pub enum ErrorType {
     WorkerOverloaded,
     /// No backend worker is currently available to handle the request.
     Unavailable,
+    /// One addressed worker answered that it does not serve this request's
+    /// endpoint instance (stale discovery or a worker shutting down) while
+    /// other workers may. Distinct from [`Self::Unavailable`] so the request
+    /// can migrate; both surface as HTTP 503.
+    WorkerUnavailable,
     /// Error originating from a backend engine.
     Backend(BackendError),
 }
@@ -81,6 +86,7 @@ impl fmt::Display for ErrorType {
             ErrorType::ResourceExhausted => write!(f, "ResourceExhausted"),
             ErrorType::WorkerOverloaded => write!(f, "WorkerOverloaded"),
             ErrorType::Unavailable => write!(f, "Unavailable"),
+            ErrorType::WorkerUnavailable => write!(f, "WorkerUnavailable"),
             ErrorType::Backend(sub) => write!(f, "Backend{sub}"),
         }
     }
@@ -484,6 +490,10 @@ mod tests {
         );
         assert_eq!(ErrorType::WorkerOverloaded.to_string(), "WorkerOverloaded");
         assert_eq!(ErrorType::Unavailable.to_string(), "Unavailable");
+        assert_eq!(
+            ErrorType::WorkerUnavailable.to_string(),
+            "WorkerUnavailable"
+        );
         assert_eq!(
             ErrorType::Backend(BackendError::Unknown).to_string(),
             "BackendUnknown"

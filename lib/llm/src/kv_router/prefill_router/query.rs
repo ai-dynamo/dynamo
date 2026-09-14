@@ -471,6 +471,13 @@ mod tests {
         let prefill = PrefillRouter::disabled(Arc::new(ModelManager::new()), mode, None);
         prefill.binding.store(Some(Arc::new(
             crate::kv_router::prefill_router::PrefillBinding {
+                target_id: crate::discovery::WorkerSetTargetId::Legacy(
+                    dynamo_runtime::protocols::EndpointId {
+                        namespace: namespace.to_string(),
+                        component: component.to_string(),
+                        name: endpoint_name.to_string(),
+                    },
+                ),
                 endpoint_id: dynamo_runtime::protocols::EndpointId {
                     namespace: namespace.to_string(),
                     component: component.to_string(),
@@ -547,6 +554,7 @@ mod tests {
                 .await
                 .unwrap();
         let binding = Arc::new(PrefillBinding {
+            target_id: crate::discovery::WorkerSetTargetId::Legacy(endpoint_id.clone()),
             endpoint_id,
             router: Arc::new(KvPushRouter::new(push_router, chooser.clone(), None).unwrap()),
             prefill_router_mode: RouterMode::KV,

@@ -14,6 +14,8 @@ import copy
 import json
 import sys
 import types
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 
 import pytest
 from _routed_engine_fakes import FakeRoutedEngine, FakeRoutedItem
@@ -152,7 +154,7 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
                     "video_url": {"url": "https://example.com/video.mp4"},
                     "uuid": "cached-video",
                 },
-                "supported only for image_url",
+                "supported only by the vLLM backend",
             ),
             (
                 {
@@ -3243,6 +3245,76 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.core
+@pytest.mark.parametrize(
+    "requested", [None, True, False], ids=["omitted", "true", "false"]
+)
+@pytest.mark.parametrize("use_pool", [False, True], ids=["inline", "pool"])
+def test_generator_honors_explicit_skip_special_tokens(
+    requested, use_pool, monkeypatch
+):
+    """Decode flags reach both the routed request and local detokenization."""
+
+    class SpecialTokenTokenizer:
+        chat_template = ""
+
+        def apply_chat_template(self, messages, **kwargs):
+            return [1]
+
+        def decode(self, token_ids, *, skip_special_tokens):
+            return "".join(
+                "<special>" if token == 2 else "A"
+                for token in token_ids
+                if token != 2 or not skip_special_tokens
+            )
+
+    tokenizer = SpecialTokenTokenizer()
+    engine = FakeRoutedEngine(items=[{"token_ids": [2, 3], "finish_reason": "length"}])
+    request = {"model": "test", "messages": [{"role": "user", "content": "Hi"}]}
+    if requested is not None:
+        request["skip_special_tokens"] = requested
+
+    if use_pool:
+        # Run the real worker through the pool branch without loading a model
+        # or spawning a process; monkeypatch restores its globals afterwards.
+        monkeypatch.setattr(sglang_processor_module, "_w_tokenizer", tokenizer)
+        monkeypatch.setattr(sglang_processor_module, "_w_tool_call_parser_name", None)
+        monkeypatch.setattr(sglang_processor_module, "_w_reasoning_parser_name", None)
+        monkeypatch.setattr(
+            sglang_processor_module, "_w_exclude_tools_when_tool_choice_none", True
+        )
+        monkeypatch.setattr(
+            sglang_processor_module, "_w_template_force_reasoning", False
+        )
+        monkeypatch.setattr(sglang_processor_module, "_w_default_thinking_mode", None)
+
+    with ThreadPoolExecutor(max_workers=1) if use_pool else nullcontext() as pool:
+        processor = SglangProcessor(
+            tokenizer,
+            engine,
+            None,
+            None,
+            None,
+            preprocess_pool=pool,
+            preprocess_workers=1 if use_pool else 0,
+        )
+
+        async def collect():
+            return [item async for item in processor.generator(request)]
+
+        output = asyncio.run(collect())
+
+    content = "".join(
+        choice["delta"].get("content", "")
+        for item in output
+        for choice in item.get("data", {}).get("choices", [])
+    )
+    assert content == ("<special>A" if requested is False else "A")
+    assert engine.requests[0]["output_options"]["skip_special_tokens"] is (
+        requested is not False
+    )
+
+
 class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
     """Test safe-boundary incremental detokenization."""
 
@@ -4097,6 +4169,8 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             "model": MODEL,
             "messages": [{"role": "user", "content": "Say hello"}],
             "stop_token_ids": [stop_token_id],
+            # Displaying special tokens must not expose a matched stop suffix.
+            "skip_special_tokens": False,
         }
 
         async def collect():
@@ -4112,7 +4186,7 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         assert routed_engine.requests[0]["stop_conditions"]["stop_token_ids"] == [
             stop_token_id
         ]
-        assert content == tokenizer.decode(visible_ids, skip_special_tokens=True)
+        assert content == tokenizer.decode(visible_ids, skip_special_tokens=False)
 
 
 # ---------------------------------------------------------------------------
