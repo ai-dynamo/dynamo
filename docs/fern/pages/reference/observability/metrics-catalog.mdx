@@ -35,7 +35,7 @@ Engine pass-through metrics (`vllm:*`, `sglang:*`, `trtllm_*`) are emitted by th
 
 ## Frontend metrics
 
-Emitted by the HTTP frontend at `/metrics` on port 8000 by default. Most carry a `model` label. That label always holds the primary served model name — the first `--served-model-name` value — so a request sent to an alias is counted under the primary. A name the frontend has not registered is counted under `unknown_model`.
+Emitted by the HTTP frontend at `/metrics` on port 8000 by default. Most carry a `model` label. For endpoints that canonicalize aliases, that label holds the primary served model name — the first `--served-model-name` value — so a request sent to an alias is counted under the primary. A name the frontend has not registered is counted under `unknown_model`.
 
 <ParamField path="dynamo_frontend_active_requests" type="gauge">
   Requests currently being handled by the frontend, from HTTP handler entry until the response stream completes. The top-level in-flight count with no stage breakdown.
