@@ -1684,13 +1684,14 @@ async def test_prefill_warmup_failure_cancels_metrics(
     metrics_task = asyncio.create_task(metrics_loop())
     await metrics_started.wait()
 
-    with pytest.raises(RuntimeError, match=message):
+    with pytest.raises(RuntimeError, match=message) as raised:
         await init_llm_mod._warmup_prefill_engine(
             object(),
             SimpleNamespace(disaggregation_bootstrap_port=1234),
             metrics_task,
         )
 
+    assert raised.value.__cause__ is warmup_error
     assert metrics_task.cancelled()
 
 
