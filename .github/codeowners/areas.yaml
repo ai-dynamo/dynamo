@@ -533,6 +533,11 @@ required_owners:
   owners:
   - operator
 shared:
+- glob: .github/review-prompts/README.md
+  owners:
+  - ops
+  - frontend
+  - runtime
 - glob: .github/review-prompts/frontend.md
   owners:
   - ops

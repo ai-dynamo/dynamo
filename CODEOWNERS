@@ -614,6 +614,7 @@ requirements.txt                                                                
 /examples/deployments/**/vllm/**                                                                        @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
 /lib/llm/src/protocols/agents.rs                                                                        @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-agents-codeowners
 /lib/runtime/src/health_check.rs                                                                        @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
+/.github/review-prompts/README.md                                                                       @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-runtime-codeowners
 /components/src/dynamo/vllm/omni/                                                                       @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /deploy/operator/**/*podsnapshot*                                                                       @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-gms-codeowners
 /deploy/operator/samples/**/*gms*                                                                       @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-gms-codeowners
