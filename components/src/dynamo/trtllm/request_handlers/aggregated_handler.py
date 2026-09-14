@@ -52,11 +52,11 @@ class AggregatedHandler(HandlerBase):
         embeddings: Optional[Union[torch.Tensor, dict]] = None
         ep_disaggregated_params = None
         if self.multimodal_processor and self.encode_client:
-            _, image_urls, _ = (
-                self.multimodal_processor.extract_prompt_and_media_from_request(
-                    request
-                )
-            )
+            (
+                _,
+                image_urls,
+                _,
+            ) = self.multimodal_processor.extract_prompt_and_media_from_request(request)
             if image_urls:
                 result = await fetch_embeddings_from_encoder(
                     image_urls,

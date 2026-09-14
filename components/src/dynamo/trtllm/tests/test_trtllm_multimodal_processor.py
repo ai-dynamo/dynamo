@@ -554,29 +554,25 @@ def test_extract_prompt_and_media_from_request_uses_multi_modal_data() -> None:
     )
     data_url = "data:image/png;base64,AAAA"
     https_url = "https://example.com/img.png"
-    text, image_urls, embedding_paths = (
-        processor.extract_prompt_and_media_from_request(
-            {
-                "extra_args": {
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": "describe"},
-                                {"type": "image_url", "image_url": {"url": ""}},
-                                {
-                                    "type": "image_url",
-                                    "image_url": {"url": https_url},
-                                },
-                            ],
-                        }
-                    ]
-                },
-                "multi_modal_data": {
-                    "image_url": [{"Url": data_url}, {"Url": https_url}]
-                },
-            }
-        )
+    text, image_urls, embedding_paths = processor.extract_prompt_and_media_from_request(
+        {
+            "extra_args": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "describe"},
+                            {"type": "image_url", "image_url": {"url": ""}},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": https_url},
+                            },
+                        ],
+                    }
+                ]
+            },
+            "multi_modal_data": {"image_url": [{"Url": data_url}, {"Url": https_url}]},
+        }
     )
     assert text == "describe"
     assert image_urls == [data_url, https_url]
@@ -649,9 +645,11 @@ def test_extract_prompt_and_media_from_request_empty_or_malformed_mm_data() -> N
     }
     for mm_data in ({}, {"image_url": "not-a-list"}, {"image_url": [None, 1, {}]}):
         request["multi_modal_data"] = mm_data
-        text, image_urls, embedding_paths = (
-            processor.extract_prompt_and_media_from_request(request)
-        )
+        (
+            text,
+            image_urls,
+            embedding_paths,
+        ) = processor.extract_prompt_and_media_from_request(request)
         assert text == "hi"
         assert image_urls == [fallback]
         assert embedding_paths == []

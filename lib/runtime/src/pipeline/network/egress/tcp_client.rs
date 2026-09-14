@@ -1904,11 +1904,13 @@ mod tests {
     #[test]
     fn test_request_frame_size_validation() {
         assert!(validate_request_frame_size(1024, 1024).is_ok());
-        assert!(validate_request_frame_size(
-            crate::pipeline::network::DEFAULT_TCP_MAX_MESSAGE_SIZE,
-            crate::pipeline::network::DEFAULT_TCP_MAX_MESSAGE_SIZE
-        )
-        .is_ok());
+        assert!(
+            validate_request_frame_size(
+                crate::pipeline::network::DEFAULT_TCP_MAX_MESSAGE_SIZE,
+                crate::pipeline::network::DEFAULT_TCP_MAX_MESSAGE_SIZE
+            )
+            .is_ok()
+        );
         let over_default = validate_request_frame_size(
             crate::pipeline::network::DEFAULT_TCP_MAX_MESSAGE_SIZE + 1,
             crate::pipeline::network::DEFAULT_TCP_MAX_MESSAGE_SIZE,
