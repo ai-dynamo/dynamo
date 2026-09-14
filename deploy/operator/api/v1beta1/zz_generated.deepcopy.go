@@ -184,14 +184,14 @@ func (in *ComponentRoleSpec) DeepCopyInto(out *ComponentRoleSpec) {
 		*out = new(int32)
 		**out = **in
 	}
-	if in.PodTemplate != nil {
-		in, out := &in.PodTemplate, &out.PodTemplate
-		*out = new(v1.PodTemplateSpec)
-		(*in).DeepCopyInto(*out)
-	}
 	if in.ProviderOverride != nil {
 		in, out := &in.ProviderOverride, &out.ProviderOverride
 		*out = new(ProviderOverride)
+		(*in).DeepCopyInto(*out)
+	}
+	if in.PodTemplate != nil {
+		in, out := &in.PodTemplate, &out.PodTemplate
+		*out = new(v1.PodTemplateSpec)
 		(*in).DeepCopyInto(*out)
 	}
 }

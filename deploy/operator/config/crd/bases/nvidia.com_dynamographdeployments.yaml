@@ -29441,8 +29441,9 @@ spec:
                               type: string
                             podTemplate:
                               description: |-
-                                podTemplate configures Pods for this role. The enclosing component
-                                defines whether the template is required or may be inherited.
+                                podTemplate defines the Pod configuration for this role. Admission permits
+                                it only when the enclosing component type explicitly supports role-specific
+                                Pod templates.
                               properties:
                                 metadata:
                                   description: |-
