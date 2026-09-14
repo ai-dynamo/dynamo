@@ -285,11 +285,13 @@ where
             .collect::<Vec<String>>()
     );
 
-    http_service
-        .run(distributed_runtime.primary_token())
-        .await?;
+    let run_result = http_service.run(distributed_runtime.primary_token()).await;
 
-    distributed_runtime.shutdown(); // Cancel primary token
+    // Initiate runtime shutdown whenever the server exits, including bind
+    // failures, for both discovery-backed and in-process engines.
+    distributed_runtime.shutdown();
+
+    run_result?;
     Ok(())
 }
 
@@ -444,6 +446,57 @@ mod tests {
     use crate::engines::make_echo_engine;
     use crate::model_card::{LoraInfo, ModelDeploymentCard};
     use crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
+
+    #[tokio::test]
+    async fn http_bind_failure_shuts_down_dynamic_and_in_process_runtimes() {
+        use crate::local_model::LocalModelBuilder;
+        use dynamo_runtime::{Runtime, distributed::DistributedConfig};
+        use std::time::Duration;
+
+        for dynamic in [true, false] {
+            let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let model = Box::new(
+                LocalModelBuilder::default()
+                    .model_name(Some("bind-failure".to_string()))
+                    .http_host(Some("127.0.0.1".to_string()))
+                    .http_port(occupied.local_addr().unwrap().port())
+                    .build()
+                    .await
+                    .unwrap(),
+            );
+            let engine_config = if dynamic {
+                EngineConfig::Dynamic {
+                    model,
+                    chat_engine_factory: None,
+                    prefill_load_estimator: None,
+                }
+            } else {
+                EngineConfig::InProcessText {
+                    engine: make_echo_engine(),
+                    model,
+                }
+            };
+            let drt = DistributedRuntime::new(
+                Runtime::from_current().unwrap(),
+                DistributedConfig::process_local(),
+            )
+            .await
+            .unwrap();
+            let shutdown = drt.primary_token();
+
+            let error = tokio::time::timeout(Duration::from_secs(5), run(drt, engine_config))
+                .await
+                .expect("HTTP run must return after an occupied-port bind failure")
+                .expect_err("the occupied HTTP port must prevent server startup");
+            assert!(
+                error.to_string().contains("already in use"),
+                "expected an HTTP bind error (dynamic={dynamic}), got {error:#}"
+            );
+            tokio::time::timeout(Duration::from_secs(5), shutdown.cancelled())
+                .await
+                .expect("HTTP bind failure must initiate runtime shutdown");
+        }
+    }
 
     fn chat_engine() -> OpenAIChatCompletionsStreamingEngine {
         Arc::new(StreamingEngineAdapter::new(make_echo_engine()))
