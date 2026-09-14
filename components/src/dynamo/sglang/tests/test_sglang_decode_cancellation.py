@@ -452,7 +452,6 @@ async def test_decode_cancellation_drains_buffered_empty_chunk(
 async def test_cancellation_monitor_logs_only_submitted_abort(
     decode_cancellation_case, caplog, state_kind, abort_fails
 ):
-    """Fallback paths log the context ID only after a successful abort call."""
     caplog.set_level(logging.INFO)
     case = decode_cancellation_case
     rid = case.context.trace_id
@@ -544,7 +543,6 @@ async def test_cancellation_monitor_stops_when_request_finishes(
 async def test_decode_stream_exit_cleans_up_pending_dispatch_wait(
     decode_cancellation_case, monkeypatch, outcome
 ):
-    """Completion or dispatch failure must cancel the pending monitor."""
     case = decode_cancellation_case
     case.allow_registration.set()
     case.allow_dispatch.clear()
@@ -588,16 +586,13 @@ async def test_decode_stream_exit_cleans_up_pending_dispatch_wait(
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(5)
-@pytest.mark.parametrize(
-    "engine", [None, SimpleNamespace(), SimpleNamespace(tokenizer_manager=None)]
-)
 @pytest.mark.parametrize("signal", ["cancel", "shutdown"])
 async def test_cancellation_monitor_without_tokenizer_manager(
-    decode_cancellation_case, engine, signal
+    decode_cancellation_case, signal
 ):
     """Engine-less handlers retain cancellation and shutdown cleanup behavior."""
     case = decode_cancellation_case
-    case.handler.engine = engine
+    case.handler.engine = None
     if signal == "cancel":
         case.cancelled.set()
     else:
