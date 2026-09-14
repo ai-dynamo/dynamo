@@ -247,13 +247,25 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     bash /tmp/install_vllm_omni.sh
 
 {% if device == "cuda" %}
-# Apply vLLM hotfixes to the installed package tree. Patches are applied with
-# --fuzz=5 to tolerate minor line-number drift across nightly builds.
+# Apply vLLM hotfixes to the installed package tree. --fuzz=5 tolerates minor
+# line-number drift across nightly builds.
+#
+# Every step here fails the build loudly on purpose. A `for` loop returns the status of its
+# LAST command, so the obvious form swallows a patch that fails anywhere but the end, and a
+# glob guarded by `ls ... 2>/dev/null` turns a missing/renamed patch directory into a silent
+# no-op. Either one ships an image that builds green and is simply not patched -- and the
+# defects these patches fix are themselves silent, surfacing much later as a confusing
+# weight-load error. Note the glob is already lexically sorted, so `ls | sort` buys nothing.
 RUN --mount=type=bind,source=./container/deps/vllm/patches,target=/tmp/vllm_patches,readonly \
     SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')" && \
-    for p in $(ls /tmp/vllm_patches/*.patch 2>/dev/null | sort); do \
-        patch --fuzz=5 -p1 -d "${SITE_PACKAGES}" < "$p"; \
-    done
+    n=0; \
+    for p in /tmp/vllm_patches/*.patch; do \
+        [ -e "$p" ] || { echo "ERROR: no .patch files under /tmp/vllm_patches" >&2; exit 1; }; \
+        echo "applying $(basename "$p")"; \
+        patch --fuzz=5 -p1 -d "${SITE_PACKAGES}" < "$p" || { echo "ERROR: failed to apply $p" >&2; exit 1; }; \
+        n=$((n+1)); \
+    done; \
+    echo "applied ${n} vLLM patch(es)"
 {% endif %}
 
 {% if device == "xpu" %}
