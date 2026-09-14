@@ -18,9 +18,9 @@ so it can avoid repeating reported defects. The prompts describe what to investi
 and what makes a finding actionable; they do not require a particular review tool
 or response schema.
 
-The [review bot](https://github.com/NVIDIA-dev/dynamo-review-agent) also uses these
-prompts. It loads them from one fetched commit on Dynamo main and adds its own
-execution and output instructions. Those integration details belong in the bot.
+The review bot also uses these prompts. It loads them from one fetched commit on
+Dynamo main and adds its own execution and output instructions. Those integration
+details belong in the bot.
 
 Two independent research agents collected the source discussions on September 10,
 2026. The frontend sample contains 40 selected PRs and their complete 617 inline
