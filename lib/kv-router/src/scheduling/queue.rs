@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -49,6 +49,8 @@ struct ClassQueueCounters {
     pending_count: AtomicUsize,
     pending_isl_tokens: AtomicUsize,
     pending_cached_tokens: AtomicUsize,
+    received_total: AtomicU64,
+    rejected_due_time_passed_total: AtomicU64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +58,10 @@ pub struct ClassQueueStats {
     pub pending_count: usize,
     pub pending_isl_tokens: usize,
     pub pending_cached_tokens: usize,
+    /// Attempts received by the admission actor; includes retries, excludes advisory probes.
+    pub received_total: u64,
+    /// Attempts rejected because their due time passed, counted once at rejection.
+    pub rejected_due_time_passed_total: u64,
 }
 
 struct QueuedRequest {
@@ -547,6 +553,8 @@ impl<
                     pending_count: AtomicUsize::new(0),
                     pending_isl_tokens: AtomicUsize::new(0),
                     pending_cached_tokens: AtomicUsize::new(0),
+                    received_total: AtomicU64::new(0),
+                    rejected_due_time_passed_total: AtomicU64::new(0),
                 })
                 .collect(),
         );
@@ -992,6 +1000,10 @@ impl<
             pending_count: counters.pending_count.load(AtomicOrdering::Relaxed),
             pending_isl_tokens: counters.pending_isl_tokens.load(AtomicOrdering::Relaxed),
             pending_cached_tokens: counters.pending_cached_tokens.load(AtomicOrdering::Relaxed),
+            received_total: counters.received_total.load(AtomicOrdering::Relaxed),
+            rejected_due_time_passed_total: counters
+                .rejected_due_time_passed_total
+                .load(AtomicOrdering::Relaxed),
         })
     }
 
@@ -1151,15 +1163,18 @@ impl<
         block_hashes: Option<Vec<LocalBlockHash>>,
         queue_metadata: QueueMetadata,
     ) -> bool {
+        let class_index = queue_metadata.class_index;
+        self.class_counters[class_index]
+            .received_total
+            .fetch_add(1, AtomicOrdering::Relaxed);
         let decay_now = Instant::now();
         if queue_metadata
             .due_at
             .is_some_and(|due_at| due_at <= decay_now)
         {
-            request.respond(Err(KvSchedulerError::DeadlineExceeded));
+            self.reject_due_time_passed(class_index, &mut request);
             return false;
         }
-        let class_index = queue_metadata.class_index;
         let snapshot = queue_metadata.snapshot;
         let class = self.profile.class(class_index);
         // With zero discovered workers every per-worker limit scales to zero and
@@ -1225,12 +1240,19 @@ impl<
         true
     }
 
+    fn reject_due_time_passed(&self, class_index: usize, request: &mut SchedulingRequest) {
+        self.class_counters[class_index]
+            .rejected_due_time_passed_total
+            .fetch_add(1, AtomicOrdering::Relaxed);
+        request.respond(Err(KvSchedulerError::DeadlineExceeded));
+    }
+
     fn reject_expired(&mut self, now: Instant) {
         for entry in self.pending.take_expired(now) {
             let class_index = entry.class_index();
             self.subtract_pending_counters(class_index, entry.snapshot());
             let mut request = entry.into_payload().request;
-            request.respond(Err(KvSchedulerError::DeadlineExceeded));
+            self.reject_due_time_passed(class_index, &mut request);
         }
     }
 
@@ -1432,6 +1454,7 @@ impl<
             self.pending_isl_tokens
                 .fetch_sub(snapshot.raw_isl_tokens, AtomicOrdering::Relaxed);
             self.subtract_class_counters(popped.class_index(), snapshot);
+            let class_index = popped.class_index();
             let queued = popped.payload_mut();
             // NOTE: Overlap refresh is expected to be very short. We intentionally
             // accept load crossing the class threshold during this await: busy
@@ -1456,7 +1479,7 @@ impl<
                 // the class deficit; the credit is intentionally not refunded,
                 // matching every other post-pop terminal outcome.
                 let mut request = popped.into_payload().request;
-                request.respond(Err(KvSchedulerError::DeadlineExceeded));
+                self.reject_due_time_passed(class_index, &mut request);
                 continue;
             }
             let wait_ms = queued.enqueue_at.elapsed().as_millis() as u64;
@@ -2553,6 +2576,8 @@ policy_classes:
     #[tokio::test]
     async fn expired_deadline_is_rejected_at_enqueue() {
         let (queue, _slots) = make_queue(1, 16, 64, Some(0.0));
+        let (probe, _probe_rx) = make_request("advisory", 64);
+        queue.select_without_admission(probe).await.unwrap();
         let (request, response_rx) = make_request("expired-on-arrival", 64);
         queue
             .enqueue_with_due_at_for_test(request, Instant::now())
@@ -2562,6 +2587,10 @@ policy_classes:
             Err(KvSchedulerError::DeadlineExceeded)
         ));
         assert_eq!(queue.pending_count(), 0);
+        queue.update().await;
+        let stats = queue.class_queue_stats(0).unwrap();
+        assert_eq!(stats.received_total, 1);
+        assert_eq!(stats.rejected_due_time_passed_total, 1);
     }
 
     #[tokio::test(start_paused = true)]
@@ -2584,6 +2613,64 @@ policy_classes:
             Err(KvSchedulerError::DeadlineExceeded)
         ));
         assert_eq!(queue.pending_count(), 0);
+        queue.update().await;
+        let stats = queue.class_queue_stats(0).unwrap();
+        assert_eq!(stats.received_total, 2);
+        assert_eq!(stats.rejected_due_time_passed_total, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deadline_expiry_during_refresh_is_counted_once() {
+        let refresher = Arc::new(BlockingRefresher::new(RefreshedOverlap::default()));
+        let (queue, slots) = make_queue_with_blocking_refresher(
+            1,
+            16,
+            64,
+            Some(0.0),
+            Arc::clone(&refresher),
+            ADMISSION_CHANNEL_CAPACITY,
+        );
+        let (active, active_rx) = make_request("active", 64);
+        queue.enqueue(active).await;
+        active_rx.await.unwrap().unwrap();
+
+        let (request, response_rx) = make_request("expires-during-refresh", 64);
+        let mut queue_metadata = queue.default_queue_metadata(&request);
+        queue_metadata.due_at = Some(Instant::now() + Duration::from_secs(30));
+        let (ack_tx, ack_rx) = oneshot::channel();
+        queue
+            .admission_tx
+            .send(AdmissionCommand::Enqueue {
+                request,
+                attempt_tx: None,
+                block_hashes: Some(vec![LocalBlockHash(42)]),
+                queue_metadata,
+                lease: None,
+                ack_tx,
+            })
+            .await
+            .unwrap();
+        ack_rx.await.unwrap();
+        slots
+            .mark_prefill_completed(&"active".to_string(), decay_now())
+            .unwrap();
+        slots.free(&"active".to_string(), decay_now()).unwrap();
+        tokio::time::advance(Duration::from_secs(11)).await;
+        let updating_queue = Arc::clone(&queue);
+        let update = tokio::spawn(async move { updating_queue.update().await });
+        refresher.wait_for_calls(1).await;
+        tokio::time::advance(Duration::from_secs(20)).await;
+        refresher.release_one();
+        update.await.unwrap();
+        assert!(matches!(
+            response_rx.await.unwrap(),
+            Err(KvSchedulerError::DeadlineExceeded)
+        ));
+        queue.update().await;
+        assert_eq!(queue.pending_count(), 0);
+        let stats = queue.class_queue_stats(0).unwrap();
+        assert_eq!(stats.received_total, 2);
+        assert_eq!(stats.rejected_due_time_passed_total, 1);
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -3529,6 +3616,8 @@ policy_classes:
         assert_eq!(
             queue.class_queue_stats(0),
             Some(ClassQueueStats {
+                received_total: 1,
+                rejected_due_time_passed_total: 0,
                 pending_count: 1,
                 pending_isl_tokens: 64,
                 pending_cached_tokens: 64,
@@ -3537,6 +3626,8 @@ policy_classes:
         assert_eq!(
             queue.class_queue_stats(1),
             Some(ClassQueueStats {
+                received_total: 2,
+                rejected_due_time_passed_total: 0,
                 pending_count: 1,
                 pending_isl_tokens: 64,
                 pending_cached_tokens: 0,
@@ -3545,6 +3636,8 @@ policy_classes:
         assert_eq!(
             queue.class_queue_stats(2),
             Some(ClassQueueStats {
+                received_total: 1,
+                rejected_due_time_passed_total: 0,
                 pending_count: 1,
                 pending_isl_tokens: 64,
                 pending_cached_tokens: 64,
@@ -3553,6 +3646,8 @@ policy_classes:
         assert_eq!(
             queue.class_queue_stats(3),
             Some(ClassQueueStats {
+                received_total: 1,
+                rejected_due_time_passed_total: 0,
                 pending_count: 1,
                 pending_isl_tokens: 64,
                 pending_cached_tokens: 0,
@@ -3561,6 +3656,8 @@ policy_classes:
         assert_eq!(
             queue.class_queue_stats(4),
             Some(ClassQueueStats {
+                received_total: 1,
+                rejected_due_time_passed_total: 0,
                 pending_count: 1,
                 pending_isl_tokens: 64,
                 pending_cached_tokens: 0,
@@ -3609,6 +3706,8 @@ policy_classes:
         assert_eq!(
             queue.class_queue_stats(0),
             Some(ClassQueueStats {
+                received_total: 3,
+                rejected_due_time_passed_total: 0,
                 pending_count: 1,
                 pending_isl_tokens: 64,
                 pending_cached_tokens: 0,
