@@ -29,16 +29,21 @@ pytestmark = [
 
 
 class _FakeDistribution:
+    """Minimal stand-in for an installed Python distribution."""
+
     def __init__(self, root: Path, name: str, files: list[str]) -> None:
+        """Create a fake distribution rooted at a temporary path."""
         self.root = root
         self.metadata = {"Name": name}
         self.files = [Path(item) for item in files]
 
     def locate_file(self, item: str | Path) -> Path:
+        """Resolve a wheel-relative path under the fake root."""
         return self.root / item
 
 
 def _load_discovery_module() -> ModuleType:
+    """Load the production discovery script as a Python module."""
     spec = importlib.util.spec_from_file_location(
         "test_sglang_nixl_ucx_layout_discovery", DISCOVERY_SCRIPT
     )
@@ -49,6 +54,7 @@ def _load_discovery_module() -> ModuleType:
 
 
 def _stub_files(root: Path, files: list[str]) -> _FakeDistribution:
+    """Create stub wheel files and return their fake distribution."""
     for item in files:
         path = root / item
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -86,6 +92,7 @@ def _run_installer_helper(
 
 
 def test_cuda_distributions_normalizes_names(monkeypatch, tmp_path: Path) -> None:
+    """Find CUDA packages across normalized distribution names."""
     module = _load_discovery_module()
     distributions = [
         _FakeDistribution(tmp_path / "nixl13", "nixl_cu13", []),
@@ -106,6 +113,7 @@ def test_cuda_distributions_normalizes_names(monkeypatch, tmp_path: Path) -> Non
 def test_read_ucx_version_probes_the_selected_library(
     monkeypatch, tmp_path: Path
 ) -> None:
+    """Read the version from the selected private UCX library."""
     module = _load_discovery_module()
     libucp = tmp_path / "libucp-private.so.0"
     calls: list[tuple[str, int]] = []
@@ -141,6 +149,7 @@ def test_read_ucx_version_probes_the_selected_library(
 def test_read_ucx_version_rejects_an_unloadable_library(
     monkeypatch, tmp_path: Path
 ) -> None:
+    """Reject a private UCX library that cannot be loaded."""
     module = _load_discovery_module()
     libucp = tmp_path / "libucp-broken.so.0"
 
@@ -157,6 +166,7 @@ def test_read_ucx_version_rejects_an_unloadable_library(
 def test_read_ucx_version_requires_the_version_symbol(
     monkeypatch, tmp_path: Path
 ) -> None:
+    """Reject a UCX library without its version symbol."""
     module = _load_discovery_module()
     libucp = tmp_path / "libucp-without-version-symbol.so.0"
     monkeypatch.setattr(module.ctypes, "CDLL", lambda *_args, **_kwargs: object())
@@ -168,6 +178,7 @@ def test_read_ucx_version_requires_the_version_symbol(
 def test_main_resolves_one_coherent_private_ucx_layout(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
+    """Resolve one complete NIXL-private UCX layout."""
     module = _load_discovery_module()
     nixl_files = [
         "nixl/_bindings/libnixl_capi.so",
@@ -236,6 +247,7 @@ def test_main_resolves_one_coherent_private_ucx_layout(
 def test_main_rejects_ambiguous_nixl_distributions_without_partial_output(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
+    """Reject multiple NIXL wheels without partial output."""
     module = _load_discovery_module()
     first = _FakeDistribution(tmp_path / "first", "nixl-cu12", [])
     second = _FakeDistribution(tmp_path / "second", "nixl-cu13", [])
@@ -278,6 +290,7 @@ def test_main_rejects_incomplete_layout_without_partial_output(
     files: list[str],
     error_match: str,
 ) -> None:
+    """Reject incomplete NIXL layouts without partial output."""
     module = _load_discovery_module()
     nixl = _stub_files(tmp_path / "incomplete-site-packages", files)
     nixl.metadata["Name"] = "nixl-cu13"
@@ -298,6 +311,7 @@ def test_main_rejects_incomplete_layout_without_partial_output(
 def test_main_rejects_ucx_libraries_from_different_directories(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
+    """Reject UCX core libraries from different directories."""
     module = _load_discovery_module()
     files = [
         "nixl/_bindings/libnixl_capi.so",
@@ -323,6 +337,7 @@ def test_main_rejects_ucx_libraries_from_different_directories(
 def test_main_rejects_empty_environment_without_partial_output(
     monkeypatch, capsys
 ) -> None:
+    """Reject an environment without a NIXL CUDA wheel."""
     module = _load_discovery_module()
     monkeypatch.setattr(module, "cuda_distributions", lambda _prefix: [])
 
@@ -335,6 +350,7 @@ def test_main_rejects_empty_environment_without_partial_output(
 def test_installer_accepts_only_private_ucx_dependency_resolution(
     tmp_path: Path,
 ) -> None:
+    """Accept private UCX and reject system UCX resolution."""
     private_ldd = "\n".join(
         [
             f"libucp.so.0 => {tmp_path}/libucp-a1B2c3.so.0 (0x01)",
@@ -376,6 +392,7 @@ def test_installer_accepts_only_private_ucx_dependency_resolution(
 def test_installer_rejects_incomplete_dependency_reports(
     tmp_path: Path, ldd_output: str, error_match: str
 ) -> None:
+    """Reject missing or unresolved UCX dependencies."""
     result = _run_installer_helper(
         tmp_path,
         'validate_ucx_dependencies "nvshmem_transport_ucx.so.3" "${CANNED_LDD_OUTPUT}"',
@@ -390,6 +407,7 @@ def test_installer_rejects_incomplete_dependency_reports(
 def test_installer_rejects_missing_ucx_cuda_modules(
     tmp_path: Path, module_name: str
 ) -> None:
+    """Reject layouts missing required UCX CUDA modules."""
     supported_root = tmp_path / "supported"
     cuda_module = supported_root / f"ucx/{module_name}.so.1.21.0"
     cuda_module.parent.mkdir(parents=True)
@@ -413,6 +431,7 @@ def test_installer_rejects_missing_ucx_cuda_modules(
 
 
 def test_sglang_runtime_wires_the_validated_compatibility_layout() -> None:
+    """Keep the validated NIXL layout wired into the runtime image."""
     dockerfile = SGLANG_DOCKERFILE.read_text(encoding="utf-8")
 
     assert (
