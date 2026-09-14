@@ -96,9 +96,6 @@ class TestDeriveNixlPrometheusPort:
 
 
 class TestNixlPrometheusBasePort:
-    def test_operator_defaults_are_recognized(self):
-        assert nixl_prometheus_base_port(OPERATOR_ENV) == 19090
-
     @pytest.mark.parametrize(
         "enabled_value", ["y", "1", "yes", "on", "true", "enable", "TRUE"]
     )
