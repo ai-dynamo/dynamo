@@ -233,10 +233,29 @@ class TestBuildEngineInputs:
         assert seen["request_id"] == "req-1"
 
 
-class TestStreamedAudioIsResolved:
-    """A chunk-streaming codec decoder emits the waveform repeatedly as
-    cumulative snapshots, interleaved with empty payloads. The response must
-    carry the complete waveform exactly once."""
+def _cumulative_stage_params():
+    """A stand-in for stage params that reach the engine asking for snapshots.
+
+    Deliberately not a real ``SamplingParams``: the coercion in
+    ``streaming_sampling_params`` would rewrite that to ``DELTA``, and no params
+    type the pinned vLLM-Omni actually ships can carry ``CUMULATIVE`` past it
+    (see ``utils.audio_output_is_cumulative``). So this pins the *branch* --
+    that a cumulative answer de-duplicates rather than concatenates -- not a
+    reachable deployment. The delta test below is the one guarding production.
+    """
+    return [SimpleNamespace(output_kind=RequestOutputKind.CUMULATIVE)]
+
+
+class TestAggregatedAudioFollowsOutputKind:
+    """Buffering must follow the output kind the engine was actually given.
+
+    Under ``DELTA`` the output processor drains the audio it emits, so the
+    payloads are disjoint pieces that must all be kept; under ``CUMULATIVE``
+    every payload repeats the whole waveform decoded so far, so they must be
+    de-duplicated to the longest. Reading the model's identity instead
+    truncated Audex — whose stages are coerced to ``DELTA`` — to one 100 ms
+    delta.
+    """
 
     @staticmethod
     def _audio_output(samples):
@@ -251,11 +270,20 @@ class TestStreamedAudioIsResolved:
             },
         )
 
-    async def _run(self, handler, stage_outputs, *, reuse_formatter=False):
+    async def _run(
+        self,
+        handler,
+        stage_outputs,
+        *,
+        sampling_params_list=None,
+        reuse_formatter=False,
+    ):
         """Drive the handler over ``stage_outputs`` and collect the responses.
 
         Uses a real OutputFormatter so the buffering path under test is the
         production one; only the engine and the abort monitor are stubbed.
+        ``sampling_params_list`` is what the request carries into the handler,
+        so it goes through the same streaming coercion a real request does.
         ``reuse_formatter`` keeps the formatter from a previous call, so a
         second request runs against the state the first one left behind.
         """
@@ -283,7 +311,9 @@ class TestStreamedAudioIsResolved:
         handler.audio = MagicMock()
         handler.audio.build_engine_inputs = _AsyncReturn(
             EngineInputs(
-                prompt={"prompt": "hi"}, request_type=RequestType.AUDIO_GENERATION
+                prompt={"prompt": "hi"},
+                request_type=RequestType.AUDIO_GENERATION,
+                sampling_params_list=sampling_params_list,
             )
         )
 
@@ -294,29 +324,58 @@ class TestStreamedAudioIsResolved:
             )
         ]
 
-    @pytest.mark.asyncio
-    async def test_complete_waveform_is_returned_once(self):
-        """The client gets the longest snapshot, not a partial or a concatenation."""
+    @staticmethod
+    def _decode(chunk):
+        """Read the response's base64 audio back as (samples, sample_rate)."""
         import base64
         import io
 
         import soundfile as sf
 
-        handler = _make_handler()
+        return sf.read(io.BytesIO(base64.b64decode(chunk["data"][0]["b64_json"])))
+
+    @pytest.mark.asyncio
+    async def test_delta_payloads_are_all_concatenated(self):
+        """Every delta must survive: the engine already drained what it emitted.
+
+        This is the Audex shape — its code2wav stage never re-decodes left
+        context — and the regression the keep-longest branch caused: the client
+        used to receive only the longest single delta.
+        """
+        handler = _make_handler(stage_types=("llm",))
         chunks = await self._run(
             handler,
             [
                 self._audio_output([]),  # streams can open with an empty payload
                 self._audio_output([0.1] * 1200),
-                self._audio_output([0.1] * 2400),  # cumulative, not incremental
+                self._audio_output([0.1] * 2400),
             ],
+            sampling_params_list=[SamplingParams()],
         )
 
         assert len(chunks) == 1
         assert chunks[0]["status"] == "completed"
-        audio, sr = sf.read(
-            io.BytesIO(base64.b64decode(chunks[0]["data"][0]["b64_json"]))
+        audio, sr = self._decode(chunks[0])
+        assert len(audio) == 3600
+        assert sr == 24000
+
+    @pytest.mark.asyncio
+    async def test_cumulative_payloads_are_deduplicated(self):
+        """Snapshots repeat the waveform, so concatenating them triples it."""
+        handler = _make_handler(stage_types=("llm",))
+        chunks = await self._run(
+            handler,
+            [
+                self._audio_output([]),
+                self._audio_output([0.1] * 1200),
+                self._audio_output([0.1] * 2400),
+            ],
+            sampling_params_list=_cumulative_stage_params(),
         )
+
+        assert len(chunks) == 1
+        assert chunks[0]["status"] == "completed"
+        audio, sr = self._decode(chunks[0])
         # The final snapshot verbatim: not the partial one, and not 3600 samples
         # of the snapshots concatenated.
         assert len(audio) == 2400
@@ -351,26 +410,25 @@ class TestStreamedAudioIsResolved:
 
         Buffering lives in a per-request AudioAggregateState the handler
         creates, so a second request through the same formatter must answer
-        with its own waveform only. The longer waveform goes first on purpose:
-        keep-longest de-duplication would otherwise let the second request win
-        on length alone, and shared state would go unnoticed.
+        with its own waveform only. Both requests run cumulative with the longer
+        waveform first on purpose: that is the mode where keep-longest
+        de-duplication would let the first request's audio win on length alone,
+        so shared state would otherwise go unnoticed.
         """
-        import base64
-        import io
-
         import numpy as np
-        import soundfile as sf
 
-        handler = _make_handler()
-        await self._run(handler, [self._audio_output([0.2] * 2400)])
+        handler = _make_handler(stage_types=("llm",))
+        cumulative = dict(sampling_params_list=_cumulative_stage_params())
+        await self._run(handler, [self._audio_output([0.2] * 2400)], **cumulative)
         chunks = await self._run(
-            handler, [self._audio_output([0.1] * 1200)], reuse_formatter=True
+            handler,
+            [self._audio_output([0.1] * 1200)],
+            reuse_formatter=True,
+            **cumulative,
         )
 
         assert len(chunks) == 1
-        audio, _ = sf.read(
-            io.BytesIO(base64.b64decode(chunks[0]["data"][0]["b64_json"]))
-        )
+        audio, _ = self._decode(chunks[0])
         assert len(audio) == 1200
         assert np.allclose(audio, 0.1, atol=1e-3)
 

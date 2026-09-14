@@ -54,6 +54,7 @@ from dynamo.vllm.omni.output_formatter import (
     OutputFormatter,
 )
 from dynamo.vllm.omni.utils import (
+    audio_output_is_cumulative,
     build_image_generation_prompt,
     image_generation_negative_prompt_from_request,
     image_generation_sampling_overrides,
@@ -417,8 +418,14 @@ class OmniHandler(BaseOmniHandler):
 
         previous_text = ""
         audio_stream_state = AudioStreamState() if inputs.stream_audio else None
+        # Read the coerced params, not the request's: the coercion above is what
+        # decides whether the engine emits disjoint deltas or whole-waveform
+        # snapshots, so aggregation has to follow its result rather than the
+        # model's identity.
         audio_aggregate_state = (
-            AudioAggregateState(cumulative=self.audio.emits_cumulative_waveforms())
+            AudioAggregateState(
+                cumulative=audio_output_is_cumulative(inputs.sampling_params_list)
+            )
             if inputs.request_type == RequestType.AUDIO_GENERATION
             and not inputs.stream_audio
             else None

@@ -737,10 +737,13 @@ class TestAudioFormatterFormat:
 
 
 class TestAudioFormatterCumulativeAggregate:
-    """Audex's decoder emits the waveform repeatedly, each payload a cumulative
-    snapshot and some of them empty, so an ``AudioAggregateState(cumulative=True)``
-    request must answer from the longest snapshot rather than from whichever
-    payload arrived last, or from all of them concatenated."""
+    """A ``CUMULATIVE`` stage emits the waveform repeatedly, each payload a
+    snapshot of everything decoded so far and some of them empty, so an
+    ``AudioAggregateState(cumulative=True)`` request must answer from the
+    longest snapshot rather than from whichever payload arrived last, or from
+    all of them concatenated. Which requests are cumulative is the handler's
+    call (see ``utils.audio_output_is_cumulative``); these tests set the flag
+    directly."""
 
     @pytest.fixture
     def formatter(self):

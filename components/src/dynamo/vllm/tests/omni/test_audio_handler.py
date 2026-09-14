@@ -15,6 +15,7 @@ try:
         NvCreateAudioSpeechRequest,
     )
     from dynamo.common.utils.output_modalities import RequestType
+    from dynamo.vllm.omni import audex as audex_module
     from dynamo.vllm.omni import audio_handler as audio_handler_module
     from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
 except ImportError:
@@ -225,10 +226,10 @@ def test_audex_request_fails_cleanly_without_audex_support(monkeypatch):
     RuntimeError is one of the types the handler turns into an error response,
     so the request fails instead of the exception escaping the generator.
     """
-    monkeypatch.setattr(audio_handler_module, "audex_prompt", None)
+    monkeypatch.setattr(audex_module, "audex_prompt", None)
 
     with pytest.raises(RuntimeError, match="no Audex support"):
-        audio_handler_module.AudioGenerationHandler._audex_prompt_builders("audex_tts")
+        audex_module.AudexRequestAdapter._prompt_builders(audex_module.MODEL_TYPE_TTS)
 
 
 def test_tts_prompt_len_propagates_estimator_errors(monkeypatch):
@@ -337,32 +338,32 @@ def _make_audex_handler(*stages, **config_overrides):
 
 
 class TestAudexModelDetection:
-    """Tests for _audex_model_type."""
+    """Tests for AudexRequestAdapter.model_type."""
 
     def test_tts_pipeline_detected(self):
         """thinker + code2wav is the speech pipeline."""
         handler = _make_audex_handler("audex_thinker", "audex_code2wav")
-        assert handler._audex_model_type() == "audex"
+        assert handler.audex.model_type() == "audex"
 
     def test_tta_pipeline_detected(self):
         """tta_thinker + xcodec is the text-to-audio pipeline."""
         handler = _make_audex_handler("audex_tta_thinker", "audex_xcodec")
-        assert handler._audex_model_type() == "audex_tta"
+        assert handler.audex.model_type() == "audex_tta"
 
     def test_s2s_pipeline_detected(self):
         """audex_omni is speech-capable only alongside the code2wav decoder."""
         handler = _make_audex_handler("audex_omni", "audex_code2wav")
-        assert handler._audex_model_type() == "audex"
+        assert handler.audex.model_type() == "audex"
 
     def test_thinker_only_pipeline_is_not_speech(self):
         """The thinker-only deployment is text-final: no speech path."""
         handler = _make_audex_handler("audex_omni")
-        assert handler._audex_model_type() is None
+        assert handler.audex.model_type() is None
 
     def test_non_audex_pipeline(self):
         """A non-Audex stage name must not take the Audex path."""
         handler = _make_audex_handler("qwen3_tts")
-        assert handler._audex_model_type() is None
+        assert handler.audex.model_type() is None
 
     def test_stage_configs_shapes(self):
         """model_stage is read from nested engine_args and from dict configs."""
@@ -372,7 +373,20 @@ class TestAudexModelDetection:
             SimpleNamespace(engine_args={"model_stage": "audex_thinker"}),
             {"engine_args": {"model_stage": "audex_code2wav"}},
         ]
-        assert handler._audex_model_type() == "audex"
+        assert handler.audex.model_type() == "audex"
+
+    def test_prepare_rejects_an_unknown_model_type(self):
+        """An unrecognized task must fail, not fall through to the TTS branch.
+
+        Every branch in the adapter reads "not TTA" as TTS, so a bad value would
+        otherwise be served with the wrong prompt and codec space -- audible
+        garbage rather than an error.
+        """
+        handler = _make_audex_handler("audex_thinker", "audex_code2wav")
+        req = NvCreateAudioSpeechRequest(input="Hello world")
+
+        with pytest.raises(ValueError, match="unknown Audex model type"):
+            handler.audex.prepare(req, "r1", "audex_tts")
 
 
 @requires_audex
@@ -445,9 +459,7 @@ class TestAudexEngineInputs:
     async def test_tts_cfg_attaches_pair_contract(self, monkeypatch):
         """Guided requests carry the pair id and a length-matched null prompt."""
         handler = _make_audex_handler("audex_thinker", "audex_code2wav")
-        monkeypatch.setattr(
-            handler, "_get_audex_tokenizer", lambda model_type: MagicMock()
-        )
+        monkeypatch.setattr(handler.audex, "tokenizer", lambda model_type: MagicMock())
         import vllm_omni.model_executor.models.audex.prompt as audex_prompt
 
         monkeypatch.setattr(audex_prompt, "build_null_prompt", lambda cond, tok: "NULL")
@@ -488,9 +500,7 @@ class TestAudexEngineInputs:
     async def test_tta_prompt_and_rvq_contract(self, monkeypatch):
         """TTA primes <audiogen_start> and always attaches the RVQ phase mask."""
         handler = _make_audex_handler("audex_tta_thinker", "audex_xcodec")
-        monkeypatch.setattr(
-            handler, "_get_audex_tokenizer", lambda model_type: MagicMock()
-        )
+        monkeypatch.setattr(handler.audex, "tokenizer", lambda model_type: MagicMock())
         import vllm_omni.model_executor.models.audex.prompt as audex_prompt
         import vllm_omni.model_executor.models.audex.tta as audex_tta
 
@@ -581,7 +591,12 @@ class TestAudexValidation:
     @requires_audex
     @pytest.mark.asyncio
     async def test_audex_never_streams_chunks(self):
-        """Cumulative snapshots must be aggregated, never streamed per payload."""
+        """Audex takes the aggregate path even when the frontend accepts chunks.
+
+        Per-payload chunk streaming has not been validated for this pipeline, so
+        the response carries one complete waveform regardless of the frontend's
+        advertised capability.
+        """
         handler = _make_audex_handler("audex_thinker", "audex_code2wav")
         req = NvCreateAudioSpeechRequest(
             input="hello",

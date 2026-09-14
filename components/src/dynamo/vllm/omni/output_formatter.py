@@ -61,9 +61,12 @@ class AudioAggregateState:
     cumulative: bool = False
     """Each payload is a snapshot of the whole waveform decoded so far.
 
-    Audex's code2wav/XCodec1 stages re-emit the entire waveform on every yield
-    instead of the newly decoded frames, so the snapshots must be de-duplicated
-    to the longest one rather than concatenated.
+    Set from the output kind the engine was actually given, not from the model:
+    ``RequestOutputKind.CUMULATIVE`` consolidates the accumulated audio on every
+    step and drains nothing, so the snapshots must be de-duplicated to the
+    longest one rather than concatenated, while ``DELTA`` drains what it emits
+    and yields disjoint pieces that must all be kept. See
+    ``utils.audio_output_is_cumulative``, which the handler uses to fill this in.
     """
 
 
@@ -484,6 +487,13 @@ class AudioFormatter:
 
         if isinstance(audio_val, list):
             if chunk_state is not None:
+                # Slicing by a running count assumes each list *extends* the
+                # previous one. That holds only while the engine does not drain
+                # what it emits: a draining (``DELTA``) stage restarts its list
+                # at index 0, and this would then keep just the tail. Audex
+                # takes the delta path but yields bare tensors, which skip this
+                # branch entirely. If a stage ever emits multi-entry lists under
+                # DELTA, the count has to be per-payload rather than running.
                 new_audio = audio_val[chunk_state.emitted_chunks :]
                 chunk_state.emitted_chunks = len(audio_val)
                 audio_val = new_audio

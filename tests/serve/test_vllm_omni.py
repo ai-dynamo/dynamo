@@ -235,9 +235,10 @@ vllm_omni_configs = {
                     "cfg_scale": 1.5,
                 },
                 repeat_count=1,
-                # Stage 1 emits cumulative waveform snapshots, the first of
-                # which is empty. Mis-assembling that stream yields a short or
-                # silent WAV that still parses, so check the waveform itself:
+                # Stage 1 is a streaming causal decoder: it emits one ~100 ms
+                # delta per yield, the first of which is empty, and the worker
+                # concatenates them. Mis-assembling that stream yields a short
+                # or silent WAV that still parses, so check the waveform itself:
                 # this prompt decodes to ~2.3s at rms ~0.055.
                 min_duration_s=1.0,
                 min_rms=0.01,
