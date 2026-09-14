@@ -131,6 +131,18 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>json</Badge> <Badge intent="note" minimal>msgpack</Badge></span>
 </ParamField>
 
+<ParamField path="DYN_TCP_MAX_MESSAGE_SIZE" type="integer" default="33554432">
+  Maximum TCP request-plane frame size in bytes (default 32 MiB). The frontend
+  rejects an oversized frame with HTTP 400 before writing it. This limit is
+  independent of `DYN_HTTP_BODY_LIMIT_MB` (default 192 MB) on the HTTP ingress:
+  a chat-completions body can be accepted by the HTTP server and still fail at
+  this cap after serialization. Inline `data:` media is sent once in
+  `multi_modal_data`; raise this value when operators must accept larger
+  inline-media worker frames.
+
+  See [Frontend Configuration](frontend-configuration.mdx) for `DYN_HTTP_BODY_LIMIT_MB`.
+</ParamField>
+
 <ParamField path="DYN_TCP_RESPONSE_STREAM_HOST" type="string" default="auto-detected local address">
   IPv4 or IPv6 address, or exact network interface name, used to bind and advertise the TCP response
   stream server. If an interface name occurs more than once in the operating system's interface

@@ -3545,19 +3545,19 @@ impl OpenAIPreprocessor {
             }
 
             // Preserve original messages and formatted prompt in extra_args for multimodal
-            // workers (e.g., TRT-LLM needs messages and the template-rendered prompt with
-            // <image> placeholders for embedding-path / NIXL flows).
+            // workers (e.g., TRT-LLM needs message structure and the template-rendered
+            // prompt with <image> placeholders for embedding-path / NIXL flows).
             let messages_json = serde_json::to_value(request.messages())?;
             let mut extra_args = serde_json::json!({
                 "messages": messages_json
             });
 
-            // Strip redundant inline data: URLs only when frontend decoding is active
-            // (media_loader decoded the images into RDMA descriptors). TRT-LLM and
-            // other backends that pass URLs through still need the original data: URIs.
-            if self.media_loader.is_some() {
-                Self::strip_inline_data_urls(&mut extra_args["messages"]);
-            }
+            // `multi_modal_data` already carries the media (decoded descriptors or
+            // original URLs, including inline `data:`). Duplicating those payloads
+            // in `extra_args.messages` doubles the request-plane frame and can
+            // exceed DYN_TCP_MAX_MESSAGE_SIZE. Strip inline data; keep HTTP(S)
+            // URLs and the chat-template message structure.
+            Self::strip_inline_data_urls(&mut extra_args["messages"]);
 
             if let Some(prompt) = formatted_prompt {
                 // Clone here is the single owned allocation we actually need:
@@ -7305,6 +7305,274 @@ mod strip_tests {
         let mut messages = serde_json::json!([]);
         OpenAIPreprocessor::strip_inline_data_urls(&mut messages);
         assert_eq!(messages, serde_json::json!([]));
+    }
+
+    #[test]
+    fn test_strip_inline_data_urls_malformed_does_not_panic() {
+        for mut messages in [
+            serde_json::json!(null),
+            serde_json::json!({"role": "user"}),
+            serde_json::json!([{"role": "user"}]),
+            serde_json::json!([{"role": "user", "content": {"text": "x"}}]),
+            serde_json::json!([{
+                "role": "user",
+                "content": [
+                    "plain",
+                    {"type": "image_url"},
+                    {"type": "image_url", "image_url": "https://example.com/x.png"},
+                    {"type": "image_url", "image_url": {"url": 1}},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,QQ"}}
+                ]
+            }]),
+        ] {
+            OpenAIPreprocessor::strip_inline_data_urls(&mut messages);
+        }
+        let mut two_inline = serde_json::json!([{
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}},
+                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,BBB"}}
+            ]
+        }]);
+        OpenAIPreprocessor::strip_inline_data_urls(&mut two_inline);
+        assert_eq!(two_inline[0]["content"][0]["image_url"]["url"], "");
+        assert_eq!(two_inline[0]["content"][1]["image_url"]["url"], "");
+    }
+}
+
+#[cfg(test)]
+mod extra_args_media_copy_tests {
+    use super::*;
+    use crate::model_card::ModelDeploymentCard;
+    use crate::protocols::common::preprocessor::MultimodalData;
+
+    fn test_preprocessor() -> OpenAIPreprocessor {
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        assert!(
+            preprocessor.media_loader.is_none(),
+            "default frontend path must not decode media"
+        );
+        match Arc::try_unwrap(preprocessor) {
+            Ok(preprocessor) => preprocessor,
+            Err(_) => panic!("test preprocessor unexpectedly shared"),
+        }
+    }
+
+    fn inline_data_url() -> String {
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn extra_args_messages_omit_inline_data_when_multi_modal_data_present() {
+        let preprocessor = test_preprocessor();
+        let data_url = inline_data_url();
+        let https_url = "https://example.com/img.png";
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "describe"},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                    {"type": "image_url", "image_url": {"url": https_url}}
+                ]
+            }],
+            "max_tokens": 1
+        }))
+        .unwrap();
+
+        let (preprocessed, _, _) = preprocessor
+            .preprocess_request(&request, None)
+            .await
+            .unwrap();
+
+        let media = preprocessed
+            .multi_modal_data
+            .as_ref()
+            .expect("single media copy lives in multi_modal_data");
+        let images = media.get("image_url").expect("image_url slot");
+        assert_eq!(images.len(), 2);
+        match &images[0] {
+            MultimodalData::Url(url) => assert_eq!(url.as_str(), data_url),
+            other => panic!("expected Url for inline image, got {other:?}"),
+        }
+        match &images[1] {
+            MultimodalData::Url(url) => assert_eq!(url.as_str(), https_url),
+            other => panic!("expected Url for HTTP image, got {other:?}"),
+        }
+
+        let extra_args = preprocessed
+            .extra_args
+            .as_ref()
+            .expect("chat-template extras must remain");
+        let parts = extra_args["messages"][0]["content"]
+            .as_array()
+            .expect("message content parts");
+        assert_eq!(parts[0]["text"], "describe");
+        assert_eq!(parts[1]["image_url"]["url"], "");
+        assert_eq!(parts[2]["image_url"]["url"], https_url);
+        assert!(
+            extra_args.get("formatted_prompt").is_some(),
+            "LLaVA / TRT-LLM template path needs formatted_prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn text_only_chat_does_not_set_multi_modal_data() {
+        let preprocessor = test_preprocessor();
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 1
+        }))
+        .unwrap();
+
+        let (preprocessed, _, _) = preprocessor
+            .preprocess_request(&request, None)
+            .await
+            .unwrap();
+
+        assert!(preprocessed.multi_modal_data.is_none());
+        if let Some(extra_args) = preprocessed.extra_args.as_ref() {
+            assert!(
+                extra_args.get("messages").is_none(),
+                "text-only path must not copy chat messages into extra_args"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn https_only_image_url_survives_in_extra_args() {
+        let preprocessor = test_preprocessor();
+        let https_url = "https://example.com/only.png";
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "what"},
+                    {"type": "image_url", "image_url": {"url": https_url}}
+                ]
+            }],
+            "max_tokens": 1
+        }))
+        .unwrap();
+
+        let (preprocessed, _, _) = preprocessor
+            .preprocess_request(&request, None)
+            .await
+            .unwrap();
+
+        let images = preprocessed
+            .multi_modal_data
+            .as_ref()
+            .and_then(|media| media.get("image_url"))
+            .expect("https image must populate multi_modal_data");
+        match &images[0] {
+            MultimodalData::Url(url) => assert_eq!(url.as_str(), https_url),
+            other => panic!("expected Url, got {other:?}"),
+        }
+
+        let extra_args = preprocessed.extra_args.as_ref().expect("mm extras");
+        assert_eq!(
+            extra_args["messages"][0]["content"][1]["image_url"]["url"],
+            https_url
+        );
+    }
+
+    #[tokio::test]
+    async fn two_inline_data_images_are_all_stripped() {
+        let preprocessor = test_preprocessor();
+        let first = inline_data_url();
+        let second = format!("{first}QQ");
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": first.clone()}},
+                    {"type": "image_url", "image_url": {"url": second.clone()}}
+                ]
+            }],
+            "max_tokens": 1
+        }))
+        .unwrap();
+
+        let (preprocessed, _, _) = preprocessor
+            .preprocess_request(&request, None)
+            .await
+            .unwrap();
+
+        let images = preprocessed
+            .multi_modal_data
+            .as_ref()
+            .and_then(|media| media.get("image_url"))
+            .expect("both inline images belong in multi_modal_data");
+        assert_eq!(images.len(), 2);
+        match &images[0] {
+            MultimodalData::Url(url) => assert_eq!(url.as_str(), first),
+            other => panic!("expected Url, got {other:?}"),
+        }
+        match &images[1] {
+            MultimodalData::Url(url) => assert_eq!(url.as_str(), second),
+            other => panic!("expected Url, got {other:?}"),
+        }
+
+        let parts = preprocessed.extra_args.as_ref().unwrap()["messages"][0]["content"]
+            .as_array()
+            .unwrap();
+        assert_eq!(parts[0]["image_url"]["url"], "");
+        assert_eq!(parts[1]["image_url"]["url"], "");
+    }
+
+    #[tokio::test]
+    async fn stripped_inline_payload_fits_tcp_cap_that_doubled_copy_exceeds() {
+        // Default TCP request-plane cap is 32 MiB. A ~20 MiB inline image
+        // doubled in extra_args.messages + multi_modal_data would exceed it;
+        // a single copy after strip must stay under.
+        const TCP_CAP: usize = 32 * 1024 * 1024;
+        let preprocessor = test_preprocessor();
+        let data_url = format!("data:image/png;base64,{}", "A".repeat(20 * 1024 * 1024));
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "describe"},
+                    {"type": "image_url", "image_url": {"url": data_url}}
+                ]
+            }],
+            "max_tokens": 1
+        }))
+        .unwrap();
+
+        let (preprocessed, _, _) = preprocessor
+            .preprocess_request(&request, None)
+            .await
+            .unwrap();
+
+        let extra_args = preprocessed.extra_args.as_ref().expect("mm extras");
+        assert_eq!(extra_args["messages"][0]["content"][1]["image_url"]["url"], "");
+        let extra_len = serde_json::to_vec(extra_args).unwrap().len();
+        let mm_len = serde_json::to_vec(preprocessed.multi_modal_data.as_ref().unwrap())
+            .unwrap()
+            .len();
+        let single_copy = extra_len + mm_len;
+        let doubled = single_copy + data_url.len();
+        assert!(
+            single_copy < TCP_CAP,
+            "single-copy frame {single_copy} must fit under {TCP_CAP}"
+        );
+        assert!(
+            doubled > TCP_CAP,
+            "pre-strip doubled payload {doubled} must exceed {TCP_CAP}"
+        );
     }
 }
 

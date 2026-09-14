@@ -40,6 +40,13 @@ This page describes multimodal inference with the Dynamo vLLM backend.
 | **Data URL**   | `data:image/jpeg;base64,/9j/4AAQ...` | Base64-encoded inline data |
 
 > [!NOTE]
+> Inline `data:` media is forwarded once on the request plane in `multi_modal_data`.
+> The frontend strips the inline payload from `extra_args.messages` so the worker
+> frame is not doubled. A serialized frame that still exceeds
+> `DYN_TCP_MAX_MESSAGE_SIZE` (32 MiB by default) returns HTTP 400. See
+> [Frontend Configuration](../../../../../reference/components/frontend-configuration.mdx).
+
+> [!NOTE]
 > Media URLs are validated against a default-deny policy. `https://` and `data:` sources
 > pass; plain `http://` and hostnames that resolve to private or loopback addresses are
 > refused. To fetch media over the cluster's internal network, set
