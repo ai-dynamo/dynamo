@@ -131,6 +131,7 @@ def test_read_ucx_version_probes_the_selected_library(
         ucp_get_version = FakeGetVersion()
 
     def fake_cdll(path: str, mode: int):
+        """Record the load request and return the fake UCX library."""
         calls.append((path, mode))
         return FakeLibrary()
 
