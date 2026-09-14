@@ -77,6 +77,14 @@ fn cohort_fingerprint(mdc_checksum: &str, video_contract: Option<&str>) -> Strin
     }
 }
 
+/// Splits a fingerprint back into the MDC checksum and video contract it carries.
+fn fingerprint_parts(fingerprint: &str) -> (&str, Option<&str>) {
+    match fingerprint.split_once("\0video_contract\0") {
+        Some((mdc_checksum, contract)) => (mdc_checksum, Some(contract)),
+        None => (fingerprint, None),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct GroupSpec {
     pub(crate) key: GroupKey,
@@ -175,6 +183,9 @@ struct DesiredGroup {
     cohort_order: VecDeque<String>,
     reported_rejections: HashSet<String>,
     admission_tx: watch::Sender<Vec<u64>>,
+    /// Sender of the committed pipeline that keeps serving while its replacement
+    /// is prepared. Retired once the replacement commits or the commit is withdrawn.
+    retained_admission_tx: Option<watch::Sender<Vec<u64>>>,
     status: GroupStatus,
 }
 
@@ -187,6 +198,7 @@ impl DesiredGroup {
             cohort_order: VecDeque::new(),
             reported_rejections: HashSet::new(),
             admission_tx,
+            retained_admission_tx: None,
             status: GroupStatus::Idle,
         }
     }
@@ -462,6 +474,9 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
 
         if group.cohorts.is_empty() {
             group.admission_tx.send_replace(Vec::new());
+            if let Some(retained_tx) = group.retained_admission_tx.take() {
+                retained_tx.send_replace(Vec::new());
+            }
             cancel_build(&old_status);
             if status_has_commit(&old_status) {
                 self.host.remove_group(key);
@@ -481,21 +496,54 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             status_checksum(&old_status).is_some_and(|previous| previous != fingerprint);
         let mut retained_commit = status_committed_members(&old_status).cloned();
         if fingerprint_changed {
-            retained_commit = retained_commit.filter(|committed_members| {
-                committed_members == &member_keys
-                    && (status_checksum(&old_status) == Some(mdc_checksum.as_str())
-                        || status_checksum(&old_status).is_some_and(|previous| {
-                            previous
-                                .strip_prefix(mdc_checksum.as_str())
-                                .is_some_and(|suffix| suffix.starts_with("\0video_contract\0"))
-                        }))
+            retained_commit = retained_commit.and_then(|committed_members| {
+                let (previous_checksum, retained_contract) =
+                    fingerprint_parts(status_checksum(&old_status)?);
+                if previous_checksum != mdc_checksum {
+                    return None;
+                }
+                // Keep serving the committed workers that are still here rather than
+                // demanding the whole membership, so dropping the last worker of a
+                // rolling upgrade does not withdraw a healthy group.
+                let surviving = members
+                    .iter()
+                    .filter(|member| committed_members.contains(&member.key))
+                    .collect::<Vec<_>>();
+                if surviving.is_empty() {
+                    return None;
+                }
+                // The committed pipeline expands video prompts with the contract it
+                // was built from, so every worker it still serves must publish that
+                // same contract; one that republished a different contract under the
+                // same ID would otherwise keep receiving requests against the old one.
+                if let Some(contract) = retained_contract
+                    && !surviving
+                        .iter()
+                        .all(|member| member.video_contract.as_deref() == Some(contract))
+                {
+                    return None;
+                }
+                Some(
+                    surviving
+                        .into_iter()
+                        .map(|member| member.key.clone())
+                        .collect::<BTreeSet<_>>(),
+                )
             });
             cancel_build(&old_status);
             if retained_commit.is_some() {
-                let (admission_tx, _) = watch::channel(Vec::new());
-                group.admission_tx = admission_tx;
+                // The retained pipeline keeps its own sender, or its client leaves the
+                // update loop and freezes on the worker list it last saw. Retained
+                // pipeline clients must never observe the successor's IDs, so the
+                // successor builds against a fresh channel.
+                let (successor_tx, _) = watch::channel(Vec::new());
+                let previous_tx = std::mem::replace(&mut group.admission_tx, successor_tx);
+                group.retained_admission_tx.get_or_insert(previous_tx);
             } else {
                 group.admission_tx.send_replace(Vec::new());
+                if let Some(retained_tx) = group.retained_admission_tx.take() {
+                    retained_tx.send_replace(Vec::new());
+                }
                 if status_has_commit(&old_status) {
                     self.host.remove_group(key);
                 }
@@ -505,6 +553,20 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             }
             group.reported_rejections.clear();
             group.retry_attempt = 0;
+        }
+        // Follow the retained pipeline's membership until it is retired, so a worker
+        // that leaves during a slow or failing rebuild stops receiving requests.
+        if let Some(retained_members) = &retained_commit {
+            if let Some(retained_tx) = &group.retained_admission_tx {
+                let still_serving = members
+                    .iter()
+                    .filter(|member| retained_members.contains(&member.key))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                retained_tx.send_replace(admitted_ids(&still_serving));
+            }
+        } else if let Some(retained_tx) = group.retained_admission_tx.take() {
+            retained_tx.send_replace(Vec::new());
         }
         group.report_rejections(key);
         let admitted = admitted_ids(&members);
@@ -838,6 +900,9 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 };
                 match commit_result {
                     Ok(()) => {
+                        // The replacement has taken over, so retire the sender the
+                        // superseded pipeline was watching.
+                        group.retained_admission_tx = None;
                         group.retry_attempt = 0;
                         group.status = GroupStatus::Ready {
                             mdc_checksum: result.spec.fingerprint,
@@ -942,6 +1007,9 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
     async fn shutdown_builds(&mut self) {
         for group in self.groups.values_mut() {
             group.admission_tx.send_replace(Vec::new());
+            if let Some(retained_tx) = group.retained_admission_tx.take() {
+                retained_tx.send_replace(Vec::new());
+            }
             cancel_build(&group.status);
         }
         self.builds.abort_all();
@@ -1107,6 +1175,8 @@ mod tests {
     };
     use tokio::sync::{Semaphore, mpsc};
 
+    use crate::local_model::runtime_config::VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY;
+
     struct Prepared(u64);
 
     struct FakeHost {
@@ -1122,6 +1192,7 @@ mod tests {
         admissions: Mutex<Vec<watch::Receiver<Vec<u64>>>>,
         removed_groups: AtomicUsize,
         discarded: AtomicUsize,
+        prepared_replacements: AtomicUsize,
     }
 
     impl FakeHost {
@@ -1141,6 +1212,7 @@ mod tests {
                     admissions: Mutex::new(Vec::new()),
                     removed_groups: AtomicUsize::new(0),
                     discarded: AtomicUsize::new(0),
+                    prepared_replacements: AtomicUsize::new(0),
                 }),
                 start_rx,
             )
@@ -1230,7 +1302,7 @@ mod tests {
                 group_key: group_key(),
                 mdc_checksum: card.mdcsum().to_string(),
                 projection_fingerprint: card.source_path.clone().unwrap(),
-                video_contract: None,
+                video_contract: crate::discovery::watcher::qwen_video_contract_digest(&card),
                 card,
             }))
         }
@@ -1274,6 +1346,12 @@ mod tests {
             {
                 anyhow::bail!("injected commit conflict");
             }
+            // `ModelManager::commit_discovery_group` refuses a group ID it already holds.
+            anyhow::ensure!(
+                !self.committed.lock().unwrap().contains_key(&spec.key.id()),
+                "discovery group {:?} is already committed",
+                spec.key.id()
+            );
             self.committed.lock().unwrap().insert(
                 spec.key.id(),
                 members.iter().map(|member| member.key.clone()).collect(),
@@ -1297,6 +1375,12 @@ mod tests {
             {
                 anyhow::bail!("injected replacement conflict");
             }
+            // `ModelManager::replace_discovery_group` requires a committed group ID.
+            anyhow::ensure!(
+                self.committed.lock().unwrap().contains_key(&key.id()),
+                "committed discovery group {:?} not found",
+                key.id()
+            );
             self.committed.lock().unwrap().insert(
                 key.id(),
                 members.iter().map(|member| member.key.clone()).collect(),
@@ -1313,6 +1397,7 @@ mod tests {
             adapters: &[DesiredInstance],
         ) -> anyhow::Result<()> {
             let Prepared(_build) = prepared;
+            self.prepared_replacements.fetch_add(1, Ordering::SeqCst);
             self.replace_group(&spec.key, members, adapters)
         }
 
@@ -1341,8 +1426,22 @@ mod tests {
     }
 
     fn instance(id: u64, mdc_checksum: &str) -> DesiredInstance {
+        build_instance(id, mdc_checksum, None)
+    }
+
+    fn build_instance(
+        id: u64,
+        mdc_checksum: &str,
+        video_contract: Option<serde_json::Value>,
+    ) -> DesiredInstance {
         let mut card = ModelDeploymentCard::with_name_only("model");
         card.source_path = Some(mdc_checksum.to_string());
+        if let Some(contract) = video_contract {
+            card.runtime_config.runtime_data.insert(
+                VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY.to_string(),
+                contract,
+            );
+        }
         let mcid = ModelCardInstanceId {
             namespace: "namespace".to_string(),
             component: "worker".to_string(),
@@ -1360,10 +1459,37 @@ mod tests {
             },
             group_key: group_key(),
             mdc_checksum: card.mdcsum().to_string(),
-            card,
             projection_fingerprint: mdc_checksum.to_string(),
-            video_contract: None,
+            video_contract: crate::discovery::watcher::qwen_video_contract_digest(&card),
+            card,
         }
+    }
+
+    /// Builds a worker that publishes a Qwen video prompt-expansion contract.
+    ///
+    /// The contract stays out of `mdcsum()`, so workers that differ only in
+    /// `resize_mode` share a cohort and disagree only on the contract.
+    fn instance_with_contract(id: u64, mdc_checksum: &str, resize_mode: &str) -> DesiredInstance {
+        let instance = build_instance(
+            id,
+            mdc_checksum,
+            Some(serde_json::json!({
+                "placeholder_target": "bare_video_token",
+                "resize_mode": resize_mode,
+            })),
+        );
+        assert!(instance.video_contract.is_some());
+        assert_eq!(
+            instance.mdc_checksum,
+            self::instance(id, mdc_checksum).mdc_checksum
+        );
+        instance
+    }
+
+    fn contract_digest(resize_mode: &str) -> String {
+        instance_with_contract(0, "spec", resize_mode)
+            .video_contract
+            .unwrap()
     }
 
     fn discovery_instance(instance: &DesiredInstance) -> DiscoveryInstance {
@@ -1381,6 +1507,151 @@ mod tests {
         let result = controller.builds.join_next().await.unwrap().unwrap();
         controller.active_builds -= 1;
         controller.apply_build_result(result);
+    }
+
+    #[tokio::test]
+    async fn contract_agreement_drives_the_fingerprint_and_survives_a_rolling_upgrade() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        // A legacy worker that predates the contract, alongside one that publishes it.
+        let legacy = instance(1, "same");
+        let upgraded = instance_with_contract(2, "same", "round_ties_even");
+        assert_eq!(legacy.mdc_checksum, upgraded.mdc_checksum);
+
+        controller.apply_added(legacy.clone());
+        controller.apply_added(upgraded.clone());
+        controller.start_queued_builds();
+        let mixed_spec = starts.recv().await.unwrap();
+        // The cohort disagrees, so exact video routing stays off.
+        assert_eq!(mixed_spec.video_contract, None);
+        assert_eq!(mixed_spec.fingerprint, mixed_spec.mdc_checksum);
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([legacy.key.clone(), upgraded.key.clone()])
+        );
+        let committed_admissions = host.admissions.lock().unwrap()[0].clone();
+        assert_eq!(*committed_admissions.borrow(), vec![1, 2]);
+
+        // Removing the last legacy worker changes membership and contract agreement
+        // at once. Text service must keep running while the replacement is prepared.
+        controller.apply_removed(&legacy.key);
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([legacy.key.clone(), upgraded.key.clone()]),
+            "the committed group must survive the upgrade's last legacy worker leaving"
+        );
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
+        // The retained pipeline keeps its channel and stops admitting the worker
+        // that left, so it never routes to a worker that is gone.
+        assert_eq!(*committed_admissions.borrow(), vec![2]);
+        assert!(committed_admissions.has_changed().is_ok());
+
+        controller.start_queued_builds();
+        let upgraded_spec = starts.recv().await.unwrap();
+        assert_eq!(
+            upgraded_spec.video_contract,
+            Some(contract_digest("round_ties_even"))
+        );
+        assert_eq!(
+            upgraded_spec.fingerprint,
+            cohort_fingerprint(
+                &upgraded_spec.mdc_checksum,
+                Some(&contract_digest("round_ties_even"))
+            )
+        );
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+
+        // A retained commit is replaced in place, never committed a second time.
+        assert_eq!(host.prepared_replacements.load(Ordering::SeqCst), 1);
+        assert_eq!(host.members(&group_key()), BTreeSet::from([upgraded.key]));
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn republished_contract_withdraws_the_commit_it_no_longer_matches() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        let worker = instance_with_contract(1, "same", "round_ties_even");
+        let peer = instance_with_contract(2, "same", "round_ties_even");
+
+        controller.apply_added(worker.clone());
+        controller.apply_added(peer.clone());
+        controller.start_queued_builds();
+        let spec = starts.recv().await.unwrap();
+        assert_eq!(
+            spec.video_contract,
+            Some(contract_digest("round_ties_even"))
+        );
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(host.members(&group_key()).len(), 2);
+
+        // The same instance ID republishes a different contract. The committed
+        // pipeline expands video prompts with the old one, so it cannot be kept.
+        let republished = instance_with_contract(1, "same", "legacy_ceil");
+        assert_eq!(republished.key, worker.key);
+        assert_ne!(republished.video_contract, worker.video_contract);
+        assert!(controller.apply_added(republished));
+
+        assert!(
+            host.members(&group_key()).is_empty(),
+            "a worker serving a contract it no longer publishes must lose its commit"
+        );
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 1);
+
+        // The cohort now disagrees, so the rebuild turns exact video routing off.
+        controller.start_queued_builds();
+        let rebuilt = starts.recv().await.unwrap();
+        assert_eq!(rebuilt.video_contract, None);
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(host.prepared_replacements.load(Ordering::SeqCst), 0);
+        assert_eq!(host.members(&group_key()).len(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_retained_pipeline_keeps_receiving_worker_updates_while_rebuilding() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        let first = instance_with_contract(1, "same", "round_ties_even");
+        let second = instance_with_contract(2, "same", "round_ties_even");
+        let legacy = instance(3, "same");
+
+        controller.apply_added(first.clone());
+        controller.apply_added(second.clone());
+        controller.apply_added(legacy.clone());
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        let committed_admissions = host.admissions.lock().unwrap()[0].clone();
+        assert_eq!(*committed_admissions.borrow(), vec![1, 2, 3]);
+
+        // Dropping the legacy worker retains the commit and starts a rebuild that fails.
+        host.failures.store(1, Ordering::SeqCst);
+        controller.apply_removed(&legacy.key);
+        assert_eq!(*committed_admissions.borrow(), vec![1, 2]);
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(host.members(&group_key()).len(), 3);
+
+        // A worker leaving during the failed rebuild must still reach the retained
+        // pipeline, or it keeps routing to a worker that is gone.
+        controller.apply_removed(&second.key);
+        assert_eq!(*committed_admissions.borrow(), vec![1]);
+        assert!(committed_admissions.has_changed().is_ok());
+
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(host.members(&group_key()), BTreeSet::from([first.key]));
+        assert_eq!(host.prepared_replacements.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

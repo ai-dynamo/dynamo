@@ -1402,7 +1402,7 @@ fn lora_projection_fingerprint(card: &ModelDeploymentCard) -> anyhow::Result<Str
 }
 
 /// Hashes the published Qwen video prompt-expansion contract.
-fn qwen_video_contract_digest(card: &ModelDeploymentCard) -> Option<String> {
+pub(super) fn qwen_video_contract_digest(card: &ModelDeploymentCard) -> Option<String> {
     let mut contract = card
         .runtime_config
         .runtime_data
