@@ -408,7 +408,13 @@ impl Manager {
 
         let established = tokio::select! {
             biased;
-            () = cancel_token.cancelled() => return Err(StoreError::WatchCancelled(bucket_name)),
+            // Abort rather than detach: the task is still free to create the bucket and open a
+            // backend watch that nobody reads before its establishment hand-off fails.
+            () = cancel_token.cancelled() => {
+                watch_task.abort();
+                let _ = watch_task.await;
+                return Err(StoreError::WatchCancelled(bucket_name));
+            }
             established = established_rx => established,
         };
         established.map_err(|_| {
@@ -711,6 +717,7 @@ mod tests {
         cancel_token.cancel();
 
         let error = manager
+            .clone()
             .watch(BUCKET_NAME, None, cancel_token)
             .await
             .expect_err("a cancelled watch establishes no snapshot");
@@ -718,6 +725,12 @@ mod tests {
         assert!(
             matches!(&error, StoreError::WatchCancelled(bucket) if bucket == BUCKET_NAME),
             "expected a cancelled watch, got {error:?}"
+        );
+        // Give a task that outlived the failed watch its chance to run.
+        tokio::task::yield_now().await;
+        assert!(
+            manager.get_bucket(BUCKET_NAME).await.unwrap().is_none(),
+            "a cancelled watch created the bucket it gave up on"
         );
     }
 
