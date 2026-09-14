@@ -202,7 +202,12 @@ async fn finish_signal_publishes_tool_block_before_usage_tail() {
         let script = load_agent_fixture("fragmented-tool.sse").await.unwrap();
         let split_at = script
             .iter()
-            .position(|chunk| chunk.inner.usage.is_some())
+            .position(|chunk| {
+                chunk
+                    .data
+                    .as_ref()
+                    .is_some_and(|data| data.inner.usage.is_some())
+            })
             .expect("fragmented-tool fixture has no usage chunk");
         let (svc, gate) = HarnessService::start_with_gated_tail(script, split_at).await;
         let response = post_messages(
@@ -276,7 +281,7 @@ async fn tool_choice_controls_parallel_calls() {
         let mut script = load_agent_fixture("parallel-tools.sse").await.unwrap();
         // Interleave the second call between fragments of the first call.
         let mut tail = script[1].clone();
-        script[1].inner.choices[0]
+        script[1].data.as_mut().unwrap().inner.choices[0]
             .delta
             .tool_calls
             .as_mut()
@@ -285,7 +290,11 @@ async fn tool_choice_controls_parallel_calls() {
             .as_mut()
             .unwrap()
             .arguments = Some(r#"{"path":"#.into());
-        let call = &mut tail.inner.choices[0].delta.tool_calls.as_mut().unwrap()[0];
+        let call = &mut tail.data.as_mut().unwrap().inner.choices[0]
+            .delta
+            .tool_calls
+            .as_mut()
+            .unwrap()[0];
         call.id = None;
         call.function.as_mut().unwrap().name = None;
         call.function.as_mut().unwrap().arguments = Some(r#""/a"}"#.into());
