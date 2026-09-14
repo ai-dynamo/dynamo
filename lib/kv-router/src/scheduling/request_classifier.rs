@@ -370,42 +370,44 @@ impl RequestClassifierRuntime {
             return Err(KvSchedulerError::SubscriberShutdown);
         }
 
-        if let Some(overrides) = request.request_id().and_then(|request_id| {
-            self.live_requests
-                .lock()
-                .get(request_id)
-                .and_then(|live| live.overrides.clone())
-        }) {
-            request.overrides = overrides;
-            return Ok(request);
-        }
+        // Capture the lifecycle before waiting: an id re-registered while we
+        // wait belongs to a different request, even before the plugin runs.
+        let generation = if let Some(request_id) = request.request_id() {
+            let live_requests = self.live_requests.lock();
+            let live = live_requests.get(request_id).ok_or_else(|| {
+                KvSchedulerError::ClassificationLifecycleEnded(request_id.to_owned())
+            })?;
+            if let Some(overrides) = live.overrides.clone() {
+                request.overrides = overrides;
+                return Ok(request);
+            }
+            Some(live.generation)
+        } else {
+            None
+        };
 
         let classification_id = NEXT_CLASSIFICATION_ID.fetch_add(1, Ordering::Relaxed);
         request.classification_id = classification_id;
-        let (classification, generation) = {
+        let classification = {
             let mut classifier = self.lock_classifier_for(request.request_id()).await?;
-            // Re-check registration under the classifier lock: terminal events
+            // Re-check lifecycle identity under the classifier lock: terminal events
             // are delivered under this same lock after the id leaves the live
             // set, so an id seen live here cannot have had its Aborted
             // delivered yet — the plugin never observes classify-after-abort.
-            let generation = match request.request_id() {
-                Some(request_id) => match self.live_requests.lock().get(request_id) {
-                    Some(live) => Some(live.generation),
-                    // The lifecycle ended while this caller waited for the
-                    // lock: only a still-live request may enter Order.
-                    None => {
-                        return Err(KvSchedulerError::ClassificationLifecycleEnded(
-                            request_id.to_owned(),
-                        ));
-                    }
-                },
-                None => None,
-            };
-            let classification = catch_unwind(AssertUnwindSafe(|| classifier.classify(request)))
-                .map_err(|panic| {
-                    KvSchedulerError::RequestClassifierPanicked(panic_message(panic))
-                })?;
-            (classification, generation)
+            if let (Some(request_id), Some(generation)) = (request.request_id(), generation)
+                && self
+                    .live_requests
+                    .lock()
+                    .get(request_id)
+                    .is_none_or(|live| live.generation != generation)
+            {
+                return Err(KvSchedulerError::ClassificationLifecycleEnded(
+                    request_id.to_owned(),
+                ));
+            }
+            catch_unwind(AssertUnwindSafe(|| classifier.classify(request))).map_err(|panic| {
+                KvSchedulerError::RequestClassifierPanicked(panic_message(panic))
+            })?
         };
         let classification = AssertUnwindSafe(classification).catch_unwind();
 
@@ -1133,6 +1135,43 @@ mod tests {
             .unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), 2);
         assert_eq!(second.scheduling_cost_tokens(), 2);
+    }
+
+    #[tokio::test]
+    async fn reused_id_while_waiting_for_classifier_lock_rejects_stale_classification() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let runtime = RequestClassifierRuntime::new(
+            Box::new(CountingClassifier {
+                calls: Arc::clone(&calls),
+            }),
+            CancellationToken::new(),
+        );
+        let lifecycle = runtime.begin_request("reused").unwrap();
+        let guard = runtime.classifier.lock().await;
+        let mut stale =
+            Box::pin(runtime.classify_with(ClassifyRequest::new(1, 0).with_request_id("reused")));
+
+        // Poll once to guarantee the old call is waiting for the lock, then
+        // replace its lifecycle before the plugin can be invoked.
+        assert!(futures_util::poll!(stale.as_mut()).is_pending());
+        drop(lifecycle);
+        let _replacement = runtime.begin_request("reused").unwrap();
+        drop(guard);
+
+        assert!(matches!(
+            stale.await,
+            Err(KvSchedulerError::ClassificationLifecycleEnded(_))
+        ));
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+
+        // The replacement must reach the plugin, without stale overrides.
+        let replacement = runtime
+            .classify_with(ClassifyRequest::new(100, 0).with_request_id("reused"))
+            .await
+            .unwrap();
+        assert_eq!(replacement.input_tokens(), 100);
+        assert_eq!(replacement.scheduling_cost_tokens(), 7);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
