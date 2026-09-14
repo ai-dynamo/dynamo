@@ -83,6 +83,9 @@ class PersistentPoolBackend(Protocol):
         """Observe allocations; inventory alone does not establish a claim."""
         ...
 
-    def destroy(self, key: PersistentPoolKey) -> bool:
-        """Explicitly retire backing, subject to backend claimant checks."""
+    def destroy(self, key: PersistentPoolKey, allocation_id: str | None = None) -> bool:
+        """Explicitly retire backing, subject to backend claimant checks.
+
+        ``allocation_id`` names the incarnation the caller observed; backends
+        must refuse to destroy a different incarnation of the same key."""
         ...
