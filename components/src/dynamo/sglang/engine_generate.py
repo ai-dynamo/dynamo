@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping
 from typing import Any
+from uuid import uuid4
 
 from pydantic import TypeAdapter
 from sglang.srt.managers.io_struct import GenerateReqInput
@@ -14,8 +15,14 @@ from sglang.srt.managers.io_struct import GenerateReqInput
 from dynamo.common.backend import logprobs as _shared_logprobs
 
 SGLANG_GENERATE_CAPABILITY = "sglang_generate"
+DISAGG_PREFILL_CANCEL_ANYTIME_V1 = "disagg_prefill_cancel_anytime_v1"
 _PAYLOAD_KEY = "sglang_tito"
 _GENERATE_REQUEST_ADAPTER = TypeAdapter(GenerateReqInput)
+
+
+def new_sglang_request_id() -> str:
+    """Return an unguessable fixed-width ID used only inside SGLang."""
+    return uuid4().hex
 
 
 def native_generate_payload(
@@ -33,7 +40,7 @@ def build_native_generate_request(
     native_payload: Mapping[str, Any],
     *,
     input_ids: list[int],
-    fallback_rid: str,
+    request_id: str,
     priority: int | None,
     sampling_overrides: Mapping[str, Any] | None = None,
     bootstrap_host: str | None = None,
@@ -49,10 +56,13 @@ def build_native_generate_request(
     ``extra_args.sglang_tito``. Dynamo replaces only canonical input,
     routing state, and fields supplied by the selected worker. SGLang owns
     all remaining validation.
+
+    ``request_id`` is router-owned and always replaces a caller-supplied
+    ``rid`` so cancellation cannot target another request.
     """
     payload = dict(native_payload)
     payload["input_ids"] = input_ids
-    payload["rid"] = payload.get("rid") or fallback_rid
+    payload["rid"] = request_id
     payload["stream"] = True
     if priority is None:
         payload.pop("priority", None)
