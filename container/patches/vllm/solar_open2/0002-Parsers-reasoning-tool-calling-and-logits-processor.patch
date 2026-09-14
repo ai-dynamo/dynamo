@@ -18,7 +18,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..ea94d4e1b481ea44ab39dfd06cf1ea9dfeb26130
 --- /dev/null
 +++ b/vllm/reasoning/solar_open2_reasoning_parser.py
-@@ -0,0 +1,351 @@
+@@ -0,0 +1,357 @@
 +# SPDX-License-Identifier: Apache-2.0
 +# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 +
@@ -140,7 +140,13 @@ index 0000000000000000000000000000000000000000..ea94d4e1b481ea44ab39dfd06cf1ea9d
 +        """Reset streaming-only state. Called on init and at the start of
 +        every new stream (detected via empty ``previous_text``)."""
 +        self._stream_buffer: str = ""
-+        self._stream_in_content: bool = False
++        # A closed reasoning effort renders the think block into the prompt, so
++        # the generated output is all content and carries no <|think:end|> to
++        # switch on. Start in CONTENT there, matching what extract_reasoning()
++        # already concludes for the same request.
++        self._stream_in_content: bool = (
++            self._default_reasoning_effort not in self._OPEN_REASONING_EFFORTS
++        )
 +        # ``True`` once we've handled at least one streaming delta in this
 +        # request — used to gate the streaming-aware ``is_reasoning_end``
 +        # behavior so non-streaming and prompt-side callers fall back to

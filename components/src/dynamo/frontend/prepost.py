@@ -621,7 +621,14 @@ def _tool_calls_from_forced_choice_text(
         named = getattr(fn, "name", None)
     elif isinstance(tool_choice, dict):
         named = (tool_choice.get("function") or {}).get("name")
-    if named and isinstance(parsed, dict) and "name" not in parsed:
+    # A named choice constrains generation to the parameters object alone, so the
+    # function name comes from the request. Only a payload carrying both "name" and
+    # "parameters" is the required-choice shape handled below; a lone "name" key is an
+    # ordinary argument, as in create_user(name, email).
+    is_required_shape = isinstance(parsed, dict) and (
+        isinstance(parsed.get("name"), str) and "parameters" in parsed
+    )
+    if named and isinstance(parsed, dict) and not is_required_shape:
         return [(named, _json.dumps(parsed))]
 
     if isinstance(parsed, dict):
@@ -659,9 +666,13 @@ class StreamingPostProcessor:
         self.tool_parser = tool_parser
         # Computed once: request_for_sampling is already prepared by the time
         # this runs, and process_output() consults this per output chunk.
+        # Parsers that do not support required/named choices get no JSON constraint
+        # from build_tool_call_guided_decoding(); they emit their native markers,
+        # which the streaming parser already handles. Buffering those would withhold
+        # every delta until finish_reason for no gain.
         self._forced_tool_choice = _is_forced_tool_choice(
             getattr(request_for_sampling, "tool_choice", None)
-        )
+        ) and getattr(tool_parser, "supports_required_and_named", True)
         self.stream_response = stream_response
         # See https://github.com/ai-dynamo/dynamo/issues/8636 —
         # when the chat template runs with enable_thinking=False,
