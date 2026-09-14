@@ -54,6 +54,52 @@ class ListAllocationsRequest(
     pass
 
 
+class ClaimPersistentPoolRequest(
+    msgspec.Struct, tag="claim_persistent_pool_request", forbid_unknown_fields=True
+):
+    engine_id: str
+    tag: str
+    aligned_size: int
+    shared: bool = False
+
+
+class UnclaimPersistentPoolRequest(
+    msgspec.Struct, tag="unclaim_persistent_pool_request", forbid_unknown_fields=True
+):
+    engine_id: str
+    tag: str
+
+
+class DestroyPersistentPoolRequest(
+    msgspec.Struct, tag="destroy_persistent_pool_request", forbid_unknown_fields=True
+):
+    engine_id: str
+    tag: str
+
+
+class ExportPersistentPoolRequest(
+    msgspec.Struct, tag="export_persistent_pool_request", forbid_unknown_fields=True
+):
+    engine_id: str
+    tag: str
+
+
+class ListPersistentPoolsRequest(
+    msgspec.Struct, tag="list_persistent_pools_request", forbid_unknown_fields=True
+):
+    engine_id: str | None = None
+    include_unclaimed: bool = False
+
+
+class PersistentPoolRecord(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    allocation_id: str
+    engine_id: str
+    tag: str
+    size: int
+    aligned_size: int
+    claimed: bool = True
+
+
 class CommitRequest(msgspec.Struct, tag="commit_request", forbid_unknown_fields=True):
     pass
 
@@ -107,6 +153,37 @@ class ListAllocationsResponse(
     allocations: tuple[AllocationRecord, ...]
 
 
+class ClaimPersistentPoolResponse(
+    msgspec.Struct, tag="claim_persistent_pool_response", forbid_unknown_fields=True
+):
+    allocation: PersistentPoolRecord
+    reattached: bool
+
+
+class UnclaimPersistentPoolResponse(
+    msgspec.Struct, tag="unclaim_persistent_pool_response", forbid_unknown_fields=True
+):
+    unclaimed: bool
+
+
+class DestroyPersistentPoolResponse(
+    msgspec.Struct, tag="destroy_persistent_pool_response", forbid_unknown_fields=True
+):
+    destroyed: bool
+
+
+class ExportPersistentPoolResponse(
+    msgspec.Struct, tag="export_persistent_pool_response", forbid_unknown_fields=True
+):
+    pass
+
+
+class ListPersistentPoolsResponse(
+    msgspec.Struct, tag="list_persistent_pools_response", forbid_unknown_fields=True
+):
+    allocations: tuple[PersistentPoolRecord, ...]
+
+
 class CheckpointStateResponse(
     msgspec.Struct, tag="checkpoint_state_response", forbid_unknown_fields=True
 ):
@@ -117,6 +194,13 @@ class CheckpointStateResponse(
 class ErrorResponse(msgspec.Struct, tag="error_response", forbid_unknown_fields=True):
     message: str
     out_of_memory: bool = False
+    code: str | None = None
+
+
+ERROR_CLAIM_CONFLICT = "claim_conflict"
+ERROR_NOT_CLAIMED = "not_claimed"
+ERROR_NOT_FOUND = "not_found"
+ERROR_INVALID_REQUEST = "invalid_request"
 
 
 Request: TypeAlias = (
@@ -124,6 +208,11 @@ Request: TypeAlias = (
     | ExportRequest
     | FreeRequest
     | ListAllocationsRequest
+    | ClaimPersistentPoolRequest
+    | UnclaimPersistentPoolRequest
+    | DestroyPersistentPoolRequest
+    | ExportPersistentPoolRequest
+    | ListPersistentPoolsRequest
     | CommitRequest
     | AbortRequest
 )
@@ -137,6 +226,11 @@ Response: TypeAlias = (
     SuccessResponse
     | ExportResponse
     | ListAllocationsResponse
+    | ClaimPersistentPoolResponse
+    | UnclaimPersistentPoolResponse
+    | DestroyPersistentPoolResponse
+    | ExportPersistentPoolResponse
+    | ListPersistentPoolsResponse
     | CheckpointStateResponse
     | ErrorResponse
 )
@@ -148,6 +242,11 @@ REQUEST_TYPES = (
     ExportRequest,
     FreeRequest,
     ListAllocationsRequest,
+    ClaimPersistentPoolRequest,
+    UnclaimPersistentPoolRequest,
+    DestroyPersistentPoolRequest,
+    ExportPersistentPoolRequest,
+    ListPersistentPoolsRequest,
     CommitRequest,
     AbortRequest,
 )

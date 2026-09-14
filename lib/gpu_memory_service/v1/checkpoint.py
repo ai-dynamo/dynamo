@@ -150,6 +150,7 @@ class GMSCheckpointLifecycle:
         if (
             sessions.rw_sessions
             or sessions.ro_sessions
+            or sessions.persistent_sessions
             or sessions.waiting_writers
             or sessions.writer_reserved
         ):
