@@ -15,7 +15,7 @@ index 84682cdc8bcba7ec3a1f0b40bee88bb7514825d6..41c33d3bce77a7dec697737b930df758
          "InklingParserReasoningAdapter",
 diff --git a/vllm/reasoning/solar_open2_reasoning_parser.py b/vllm/reasoning/solar_open2_reasoning_parser.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..ea94d4e1b481ea44ab39dfd06cf1ea9dfeb26130
+index 0000000000000000000000000000000000000000..3e90e24cddc88ad8440b12e8819ea614870045ba
 --- /dev/null
 +++ b/vllm/reasoning/solar_open2_reasoning_parser.py
 @@ -0,0 +1,357 @@
