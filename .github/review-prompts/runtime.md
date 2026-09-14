@@ -103,4 +103,4 @@ Report as findings only high-confidence, actionable defects introduced by the ch
 
 For each finding, identify the file and relevant lines, explain the triggering condition and concrete consequence, and describe the narrow correction. Verify any identifiers or replacement code you propose, including relevant ownership and lifetime constraints. If no new defect qualifies, state that no new findings were identified. This does not establish that previously reported defects are fixed or that the change is ready to approve.
 
-When item 7 requires evidence from the author, include a short "Questions for the author" block separate from findings. Identify the affected supported path and the calculation or measurement needed to assess the suspected regression; do not present the question as a confirmed defect.
+When a suspected inference-path regression requires evidence from the author, include a short "Questions for the author" block separate from findings. Identify the affected supported path and the calculation or measurement needed to assess the suspected regression; do not present the question as a confirmed defect.
