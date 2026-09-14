@@ -18,6 +18,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 // TestDeleteOrphanedElasticEPFollowers covers the review's last gate-off requirement:
@@ -32,7 +33,7 @@ func TestDeleteOrphanedElasticEPFollowers(t *testing.T) {
 	require.NoError(t, nvidiacomv1beta1.AddToScheme(s))
 
 	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "mydgd", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "mydgd", Namespace: "default", UID: "dgd-uid"},
 	}
 	dcd := func(name string, follower bool) *nvidiacomv1beta1.DynamoComponentDeployment {
 		obj := &nvidiacomv1beta1.DynamoComponentDeployment{
@@ -49,6 +50,10 @@ func TestDeleteOrphanedElasticEPFollowers(t *testing.T) {
 				consts.KubeAnnotationElasticEPFollower: consts.KubeLabelValueTrue,
 			}
 		}
+		// A real controller reference: the sweep proves ownership before deleting, and a
+		// fixture without one would assert that an unowned object is fair game.
+		// Ownership itself is covered by TestDeleteOrphanedElasticEPFollowersProvesOwnership.
+		require.NoError(t, controllerutil.SetControllerReference(dgd, obj, s))
 		return obj
 	}
 
@@ -75,6 +80,83 @@ func TestDeleteOrphanedElasticEPFollowers(t *testing.T) {
 
 	t.Log("A non-follower DCD is never touched, whatever generation says")
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: leader.Name, Namespace: "default"}, &nvidiacomv1beta1.DynamoComponentDeployment{}))
+}
+
+// TestDeleteOrphanedElasticEPFollowersProvesOwnership covers the review's P1: the sweep
+// must prove it controls an object before destroying it.
+//
+// The candidate list is narrowed only by the DGD-name label and the follower annotation.
+// Both are ordinary metadata that anything can set, so without an ownership check a
+// standalone or foreign-owned DCD carrying those two values is deleted by a DGD that does
+// not control it. The delete also needs UID and resourceVersion preconditions: the name is
+// reused across worker generations, so between the List and the Delete the object may
+// already be a replacement that generation wants to keep.
+//
+// Mutation check: removing the IsControlledBy guard fails the unowned and foreign
+// subtests.
+func TestDeleteOrphanedElasticEPFollowersProvesOwnership(t *testing.T) {
+	s := scheme.Scheme
+	require.NoError(t, nvidiacomv1beta1.AddToScheme(s))
+
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "mydgd", Namespace: "default", UID: "dgd-uid"},
+	}
+	other := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "otherdgd", Namespace: "default", UID: "other-uid"},
+	}
+
+	for _, tt := range []struct {
+		name        string
+		owner       *nvidiacomv1beta1.DynamoGraphDeployment // nil = no controller reference
+		wantDeleted bool
+	}{
+		{name: "controlled by this DGD is released", owner: dgd, wantDeleted: true},
+		{name: "no controller reference survives", owner: nil, wantDeleted: false},
+		{name: "controlled by a different DGD survives", owner: other, wantDeleted: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			follower := &nvidiacomv1beta1.DynamoComponentDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "mydgd-decode-flw",
+					Namespace: "default",
+					Labels: map[string]string{
+						consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+					},
+					Annotations: map[string]string{
+						consts.KubeAnnotationElasticEPFollower: consts.KubeLabelValueTrue,
+					},
+				},
+				Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
+					DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+						Replicas: ptr.To(int32(0)),
+					},
+				},
+			}
+			if tt.owner != nil {
+				require.NoError(t, controllerutil.SetControllerReference(tt.owner, follower, s))
+			}
+
+			c := fake.NewClientBuilder().WithScheme(s).WithObjects(follower).Build()
+			r := &componentWorkloadsReconciler{syncer: newDGDResourceSyncer(c, nil)}
+
+			require.NoError(t, r.deleteOrphanedElasticEPFollowers(
+				context.Background(), dgd,
+				map[string]*nvidiacomv1beta1.DynamoComponentDeployment{},
+			))
+
+			err := c.Get(context.Background(),
+				types.NamespacedName{Name: follower.Name, Namespace: "default"},
+				&nvidiacomv1beta1.DynamoComponentDeployment{})
+			if tt.wantDeleted {
+				require.True(t, err != nil && client.IgnoreNotFound(err) == nil,
+					"a follower this DGD controls should be released, got err=%v", err)
+				return
+			}
+			require.NoError(t, err,
+				"the sweep destroyed an object this DGD does not control; the DGD-name label "+
+					"and the follower annotation are both mutable and settable by anyone")
+		})
+	}
 }
 
 // TestDeleteOrphanedElasticEPFollowersRefusesANonEmptyFollower pins the release
@@ -106,7 +188,7 @@ func TestDeleteOrphanedElasticEPFollowersRefusesANonEmptyFollower(t *testing.T) 
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "mydgd", Namespace: "default"},
+				ObjectMeta: metav1.ObjectMeta{Name: "mydgd", Namespace: "default", UID: "dgd-uid"},
 			}
 			follower := &nvidiacomv1beta1.DynamoComponentDeployment{
 				ObjectMeta: metav1.ObjectMeta{
@@ -125,6 +207,9 @@ func TestDeleteOrphanedElasticEPFollowersRefusesANonEmptyFollower(t *testing.T) 
 					},
 				},
 			}
+			// Controlled by this DGD, so this test isolates the emptiness precondition
+			// rather than passing because the ownership guard skipped the object.
+			require.NoError(t, controllerutil.SetControllerReference(dgd, follower, s))
 
 			c := fake.NewClientBuilder().WithScheme(s).WithObjects(follower).Build()
 			r := &componentWorkloadsReconciler{syncer: newDGDResourceSyncer(c, nil)}

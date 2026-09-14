@@ -29,6 +29,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
@@ -342,6 +343,18 @@ func (r *componentWorkloadsReconciler) deleteOrphanedElasticEPFollowers(
 		if _, keep := wanted[existing.Name]; keep {
 			continue
 		}
+		// Prove ownership before destroying anything. The list is narrowed only by the
+		// DGD-name label and the follower annotation, and both are mutable and settable
+		// by anyone -- so without this a standalone or foreign-owned DCD that happens to
+		// carry those two values lands in this loop and is deleted by a DGD that does not
+		// control it.
+		if !metav1.IsControlledBy(existing, dgd) {
+			logger.Info(
+				"Skipping a follower-marked DynamoComponentDeployment this DynamoGraphDeployment does not control",
+				"name", existing.Name,
+			)
+			continue
+		}
 		// Only release a follower that is provably empty. Nothing in the operator calls
 		// scale_elastic_ep -- there is no engine-control client in the tree -- so deleting
 		// a follower that still holds ranks leaves the engine committed to a DP size whose
@@ -370,7 +383,17 @@ func (r *componentWorkloadsReconciler) deleteOrphanedElasticEPFollowers(
 			continue
 		}
 		logger.Info("Deleting orphaned elastic-EP follower", "name", existing.Name)
-		if err := r.syncer.Delete(ctx, existing); err != nil && !apierrors.IsNotFound(err) {
+		// UID and resourceVersion preconditions, so this cannot lose a delete race. The
+		// name is reused across generations, so between the List above and this call the
+		// object may already have been replaced by a follower that generation does want.
+		// Without the preconditions that replacement is what gets deleted; with them the
+		// API server refuses and the next reconcile re-evaluates.
+		preconditions := client.Preconditions{
+			UID:             &existing.UID,
+			ResourceVersion: &existing.ResourceVersion,
+		}
+		if err := r.syncer.Delete(ctx, existing, preconditions); err != nil &&
+			!apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
 			deleteErrors = append(deleteErrors, fmt.Errorf("delete %s: %w", existing.Name, err))
 		}
 	}
