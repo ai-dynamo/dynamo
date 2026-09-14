@@ -27,14 +27,25 @@ pub(crate) fn build_generate_request(
     let request = normalize_response_options(request)?;
     validate_request(&request, mode)?;
     validate_multimodal_cache_uuids(&request)?;
-    // vllm-proto 0.1.0 cannot represent native sampling JSON. Never silently
-    // discard it on workers that generate tokens. Prefill/encode intentionally
-    // use the canonical one-token request instead of decode sampling controls.
-    if !mode.is_prefill() && !mode.is_encode() && vllm_tito_sampling(&request.extra_args)?.is_some()
+    // Legacy envelopes may only carry controls preserved by the typed request.
+    if !mode.is_prefill()
+        && !mode.is_encode()
+        && let Some(sampling) = vllm_tito_sampling(&request.extra_args)?
+        && let Some(key) = sampling.keys().find(|key| {
+            !matches!(
+                key.as_str(),
+                "max_tokens"
+                    | "min_tokens"
+                    | "ignore_eos"
+                    | "logprobs"
+                    | "prompt_logprobs"
+                    | "skip_special_tokens"
+            )
+        })
     {
-        return Err(client::invalid_argument(
-            "native /inference/v1/generate sampling is not supported by vllm-proto 0.1.0; use the chat/completions API",
-        ));
+        return Err(client::invalid_argument(format!(
+            "extra_args.vllm_tito.sampling_params.{key} is not supported by vllm-proto 0.1.0; use the chat/completions API"
+        )));
     }
 
     let has_media = request

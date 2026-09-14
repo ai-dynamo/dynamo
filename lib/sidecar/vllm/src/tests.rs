@@ -919,11 +919,68 @@ fn skip_special_tokens_is_forwarded_without_compatibility_envelope() {
 }
 
 #[test]
+fn compatibility_envelope_preserves_typed_controls() {
+    for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Decode] {
+        let request = PreprocessedRequest::builder()
+            .model("served-model".to_string())
+            .token_ids(vec![11, 22, 33])
+            .stop_conditions(StopConditions {
+                max_tokens: Some(8),
+                min_tokens: Some(2),
+                ignore_eos: Some(true),
+                ..Default::default()
+            })
+            .sampling_options(SamplingOptions {
+                n: Some(1),
+                ..Default::default()
+            })
+            .output_options(OutputOptions::default())
+            .prefill_result(if mode.is_decode() {
+                decode_request().prefill_result
+            } else {
+                None
+            })
+            .extra_args(Some(json!({
+                "vllm_tito": {
+                    "sampling_params": {
+                        "max_tokens": 8,
+                        "min_tokens": 2,
+                        "ignore_eos": true,
+                        "logprobs": 2,
+                        "prompt_logprobs": 3,
+                        "skip_special_tokens": false
+                    }
+                }
+            })))
+            .build()
+            .expect("v1.4 request");
+        let wire = build_generate_request(request, "legacy".to_string(), mode)
+            .expect("legacy typed controls should be preserved");
+        let stopping = wire.stopping.expect("stopping");
+        assert_eq!(stopping.max_new_tokens, 8);
+        assert_eq!(stopping.min_new_tokens, 2);
+        assert!(stopping.ignore_eos);
+        let response = wire.response.expect("response");
+        assert!(response.output_logprobs);
+        assert_eq!(
+            response.output_candidates.and_then(|tokens| tokens.select),
+            Some(pb::candidate_tokens::Select::TopN(2))
+        );
+        assert!(response.prompt_logprobs);
+        assert_eq!(
+            response.prompt_candidates.and_then(|tokens| tokens.select),
+            Some(pb::candidate_tokens::Select::TopN(3))
+        );
+        assert_eq!(response.skip_special_tokens, Some(false));
+    }
+}
+
+#[test]
 fn native_sampling_is_rejected_instead_of_silently_discarded() {
     for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Decode] {
         let mut request = request();
         request.extra_args = Some(json!({
-            "vllm_tito": {"sampling_params": {"temperature": 0.0, "future_vllm_field": true}}
+            "vllm_tito": {"sampling_params": {"temperature": 0.0}}
         }));
         let error = build_generate_request(request, "native".to_string(), mode)
             .expect_err("released protocol cannot preserve native sampling semantics");
@@ -934,7 +991,7 @@ fn native_sampling_is_rejected_instead_of_silently_discarded() {
         assert!(
             error
                 .to_string()
-                .contains("native /inference/v1/generate sampling is not supported")
+                .contains("sampling_params.temperature is not supported")
         );
     }
 }
