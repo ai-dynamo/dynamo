@@ -68,22 +68,25 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 </ParamField>
 
 <ParamField path="multinode" type="MultinodeSpec">
-  Configures a multinode component. See [Multinode Orchestration](../../kubernetes/installation/multinode-orchestration.md).
+  Configures a `worker`, `prefill`, or `decode` component that spans multiple pods. Other component types reject this field. A pre-existing unsupported combination can remain unchanged during unrelated updates or remove `multinode`, but cannot change or reintroduce it. See [Multinode Orchestration](../../kubernetes/installation/multinode-orchestration.md).
 </ParamField>
 
 <Indent>
   <ParamField path="nodeCount" type="integer" default="2">
-    Number of nodes to deploy. Minimum `2`. Total GPUs used is `nodeCount × container GPU request`.
+    Number of nodes to deploy. Minimum `2` and immutable after creation. Total GPUs used is `nodeCount × container GPU request`.
   </ParamField>
 </Indent>
 
 <ParamField path="roles" type="[]ComponentRoleSpec">
-  Optional explicit structure of a compound component. In this release, roles are supported for multinode components and must contain exactly one `leader` and one `worker`. Their cardinality remains derived from `multinode.nodeCount`. Omit the field to retain the implicit leader/worker layout.
+  Optional explicit structure of a compound component. In this release, roles are supported for multinode components and must contain exactly one `leader` and one `worker`. Omit the field to retain the implicit leader/worker layout.
 </ParamField>
 
 <Indent>
   <ParamField path="name" type="string" required={true}>
     Semantic role name. Multinode components allow `leader` and `worker`.
+  </ParamField>
+  <ParamField path="replicas" type="integer">
+    Logical cardinality of the role in one complete component instance. For multinode, admission defaults and persists an omitted value as `leader: 1` or `worker: multinode.nodeCount - 1`; an explicit value must match that fixed shape.
   </ParamField>
   <ParamField path="providerOverride" type="ProviderOverride">
     Provider configuration for the workload unit generated for this role. Available only on components embedded in a DGD; standalone DCD OpenAPI omits this field.
@@ -131,6 +134,23 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
   </ParamField>
   <ParamField path="mountPath" type="string">
     Overrides the backend-specific default mount path. When empty, the operator selects a default appropriate for the backend framework.
+  </ParamField>
+</Indent>
+
+<ParamField path="eppConfig" type="EPPConfig" deprecated={true}>
+  Deprecated: omit `eppConfig` and use the native Rust EPP, which is configured through environment variables and takes no config file. Presence of this field selects the legacy Go EPP pod contract, so existing deployments keep running across an operator upgrade until you clear it.
+
+  Only valid when `type` is `epp`, and its use is decided by the component's resolved runtime version: required below 1.5.0 (legacy Go EPP image), forbidden at 1.5.0 and later (native Rust EPP image). Migrate by clearing `eppConfig` and moving to a 1.5.0+ image in the same update. Exactly one of `configMapRef` or `config` must be set. See the [Gateway API Routing Reference](../components/gateway-api-routing.mdx).
+</ParamField>
+
+<Indent>
+  <ParamField path="configMapRef" type="core/v1.ConfigMapKeySelector">
+    References a user-provided ConfigMap key containing EPP configuration. Mutually exclusive with `config`.
+
+    <a href="https://pkg.go.dev/k8s.io/api/core/v1#ConfigMapKeySelector" target="_blank">core/v1.ConfigMapKeySelector</a>
+  </ParamField>
+  <ParamField path="config" type="EndpointPickerConfig">
+    EPP `EndpointPickerConfig` supplied inline. The operator marshals it to YAML and creates the ConfigMap for you. Mutually exclusive with `configMapRef`.
   </ParamField>
 </Indent>
 

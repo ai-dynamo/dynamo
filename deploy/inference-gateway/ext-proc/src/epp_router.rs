@@ -51,7 +51,7 @@ pub(crate) fn requested_policy_class(
 ) -> Result<Option<String>, PickError> {
     let metadata =
         extract_metadata_from_header_pairs(headers.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-            .map_err(|e| PickError::MetadataHeadersInvalid(e.to_string()))?;
+            .map_err(PickError::MetadataHeadersTooLarge)?;
     Ok(metadata.get("policy-class").cloned())
 }
 
@@ -540,6 +540,23 @@ mod tests {
         // No metadata header → no policy class.
         let headers: Vec<(String, String)> = vec![("x-request-id".to_string(), "r1".to_string())];
         assert_eq!(requested_policy_class(&headers).unwrap(), None);
+    }
+
+    #[test]
+    fn requested_policy_class_preserves_typed_limit_error() {
+        use dynamo_llm::http::service::metadata::MetadataHeaderError;
+
+        let headers: Vec<(String, String)> = (0..65)
+            .map(|i| (format!("x-dynamo-meta-key-{i:02}"), "v".to_string()))
+            .collect();
+        let err = requested_policy_class(&headers).expect_err("65 metadata entries must fail");
+        assert!(
+            matches!(
+                err,
+                PickError::MetadataHeadersTooLarge(MetadataHeaderError::TooManyEntries { .. })
+            ),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
