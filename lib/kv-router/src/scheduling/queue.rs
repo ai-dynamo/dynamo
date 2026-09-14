@@ -2635,7 +2635,7 @@ policy_classes:
         active_rx.await.unwrap().unwrap();
 
         let (request, response_rx) = make_request("expires-during-refresh", 64);
-        let mut queue_metadata = queue.default_queue_metadata(&request);
+        let mut queue_metadata = queue.default_queue_metadata(&request, Instant::now());
         queue_metadata.due_at = Some(Instant::now() + Duration::from_secs(30));
         let (ack_tx, ack_rx) = oneshot::channel();
         queue
