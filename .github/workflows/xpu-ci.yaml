@@ -181,7 +181,7 @@ jobs:
       - name: Run XPU GMS tests
         uses: $/.github/actions/pytest
         with:
-          pytest_marks: 'pre_merge and none and xpu_1'
+          pytest_marks: 'pre_merge and none and xpu_1 and not cuda_only'
           image_tag: ${{ env.TEST_IMAGE_TAG }}
           test_suite_name: 'xpu-gms'
           test_type: 'e2e'

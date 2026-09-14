@@ -37,26 +37,35 @@ pytestmark = [
 
 def test_xpu_vmm_allocates_maps_and_releases_memory():
     _reset_vmm_singleton()
-    init_vmm(VMMDeviceType.XPU)
-    vmm = get_vmm()
-    assert get_vmm_device_type() is VMMDeviceType.XPU
-
-    vmm.ensure_initialized()
-    assert 0 in vmm.list_devices()
-    granularity = vmm.get_allocation_granularity(0)
-    assert granularity > 0
-
-    allocated, handle = vmm.create_tolerate_oom(granularity, 0)
-    assert allocated
-    assert handle
-
-    virtual_address = vmm.address_reserve(granularity, granularity)
+    vmm = None
+    handle = None
+    virtual_address = None
+    mapped = False
     try:
+        init_vmm(VMMDeviceType.XPU)
+        vmm = get_vmm()
+        assert get_vmm_device_type() is VMMDeviceType.XPU
+
+        vmm.ensure_initialized()
+        assert 0 in vmm.list_devices()
+        granularity = vmm.get_allocation_granularity(0)
+        assert granularity > 0
+
+        allocated, handle = vmm.create_tolerate_oom(granularity, 0)
+        assert allocated
+        assert handle
+
+        virtual_address = vmm.address_reserve(granularity, granularity)
         vmm.map(virtual_address, granularity, handle)
+        mapped = True
         vmm.set_access(virtual_address, granularity, 0, GrantedLockType.RW)
         vmm.validate_pointer(virtual_address)
-        vmm.unmap(virtual_address, granularity)
     finally:
-        vmm.address_free(virtual_address, granularity)
-        vmm.release(handle)
+        if vmm is not None:
+            if mapped:
+                vmm.unmap(virtual_address, granularity)
+            if virtual_address is not None:
+                vmm.address_free(virtual_address, granularity)
+            if handle is not None:
+                vmm.release(handle)
         _reset_vmm_singleton()

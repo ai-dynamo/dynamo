@@ -735,7 +735,6 @@ RUN mkdir -p /opt/dynamo/dist ${CARGO_TARGET_DIR} && \
 COPY lib/gpu_memory_service/ /opt/dynamo/lib/gpu_memory_service/
 {% endif %}
 
-# Build gpu-memory-service wheel → /opt/dynamo/dist/gpu_memory_service*.whl (small C++ extension, fast build -- all targets, all frameworks)
 {% if device in ("cuda", "xpu") %}
 # Build gpu_memory_service wheel with the device-specific native extension.
 ARG ENABLE_GPU_MEMORY_SERVICE

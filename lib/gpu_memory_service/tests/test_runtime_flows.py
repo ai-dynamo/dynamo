@@ -978,6 +978,7 @@ async def test_allocation_manager_lazily_exports_fresh_fds(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(180)
+@pytest.mark.cuda_only
 @pytest.mark.skipif(
     not (HAS_CUDA and HAS_PYNVML),
     reason="CUDA+pynvml only. Caveat: Unsupported on XPU."
