@@ -96,6 +96,7 @@ async def test_prefill_cancellation_waits_for_dispatch_and_drains(
     handler.bootstrap_host = "127.0.0.1"
     handler.bootstrap_port = 1234
     handler.enable_trace = False
+    handler._abort_tasks = set()
     handler._consume_tasks = set()
     handler._supports_ordered_cancellation = ordered_cancellation
     handler._generate_bootstrap_room = lambda: 17
