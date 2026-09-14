@@ -332,6 +332,7 @@ areas:
   - container/deps/
   - container/dev/
   - container/launch_message/
+  - container/patches/
   - container/render.py
   - container/run.sh
   - container/templates/
