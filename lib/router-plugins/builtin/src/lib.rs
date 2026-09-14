@@ -14,7 +14,7 @@ pub use default::{DefaultWorkerSelector, default_factory, default_policy};
 
 /// Registry containing the required default only, without an optional policy catalog.
 pub fn default_registry() -> WorkerSelectionPolicyRegistry {
-    WorkerSelectionPolicyRegistry::new(default_factory())
+    WorkerSelectionPolicyRegistry::default().with_default_factory(default_factory())
 }
 
 use dynamo_kv_router::services::selection::{

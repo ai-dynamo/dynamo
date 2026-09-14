@@ -95,15 +95,6 @@ pub enum WorkerSelectionPolicyRegistryError {
 }
 
 impl WorkerSelectionPolicyRegistry {
-    /// Construct a registry with the host's required default policy. Custom registrations
-    /// cannot replace this factory. An empty registry still supports explicit custom policies.
-    pub fn new(default_factory: WorkerSelectionPolicyFactory) -> Self {
-        Self {
-            providers: HashMap::new(),
-            default_factory: Some(default_factory),
-        }
-    }
-
     /// Supply the host default while preserving registered custom policy types.
     pub fn with_default_factory(mut self, factory: WorkerSelectionPolicyFactory) -> Self {
         self.default_factory = Some(factory);

@@ -43,16 +43,22 @@ fn allocations(mut select: impl FnMut()) -> usize {
 }
 
 fn bench(c: &mut Criterion) {
+    let decay: f64 = std::env::var("DYN_BENCH_OVERLAP_DECAY")
+        .unwrap_or_else(|_| "0".into())
+        .parse()
+        .unwrap();
     for temperature in [0.0, 0.7] {
         let mut group = c.benchmark_group(format!("default_selection/t{temperature}"));
         group
             .warm_up_time(Duration::from_millis(200))
             .measurement_time(Duration::from_millis(500))
-            .sample_size(20);
+            .sample_size(30)
+            .nresamples(1_000);
         for count in [8, 64, 256, 1024] {
             let (workers, request) = support::fixture(count, 2048);
             let config = KvRouterConfig {
                 router_temperature: temperature,
+                overlap_score_credit_decay: decay,
                 ..Default::default()
             };
             let reference =

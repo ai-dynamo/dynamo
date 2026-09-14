@@ -145,8 +145,8 @@ fn fixture_with_preferred_taints(
     const PREFERRED_TAINTS: [&str; 4] = ["rack-a", "zone-a", "gpu-a", "node-a"];
     assert!(preferred_taint_count <= PREFERRED_TAINTS.len());
     let mut workers = HashMap::with_capacity(worker_count);
-    let mut effective_overlap_blocks = HashMap::with_capacity(worker_count);
-    let mut effective_cached_tokens = HashMap::with_capacity(worker_count);
+    let mut effective_overlap_blocks = FxHashMap::default();
+    let mut effective_cached_tokens = FxHashMap::default();
     let mut worker_loads = FxHashMap::with_capacity_and_hasher(worker_count, Default::default());
 
     for worker_id in 0..worker_count as WorkerId {

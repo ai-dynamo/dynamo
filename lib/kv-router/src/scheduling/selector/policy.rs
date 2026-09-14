@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::ops::BitOr;
 
 #[cfg(any(test, feature = "bench"))]
-use super::{DefaultWorkerPicker, LogitWeights};
+use super::DefaultWorkerPicker;
 use super::{
     MaterializedSelectionInput, WorkerSelectionInput, WorkerSelector, select_worker_with_policy,
 };
@@ -23,13 +23,9 @@ use crate::scheduling::types::{
 /// Request-level values available to custom filters, scorers, and pickers.
 pub struct WorkerSelectionContext<'a> {
     pub(super) request: &'a SchedulingRequest,
-    #[cfg(any(test, feature = "bench"))]
-    pub(super) request_id: &'a str,
     pub(super) request_blocks: u64,
     pub(super) block_size: u32,
     pub(super) track_prefill_tokens: bool,
-    #[cfg(any(test, feature = "bench"))]
-    pub(super) weights: LogitWeights,
     pub(super) has_tier_matches: bool,
     pub(super) pinned_worker: Option<WorkerWithDpRank>,
     pub(super) router_temperature_override: Option<f64>,
@@ -101,8 +97,6 @@ pub struct WorkerCacheInput {
 /// Active-load values for one worker.
 #[derive(Clone, Copy, Default)]
 pub struct WorkerLoadInput {
-    #[cfg(any(test, feature = "bench"))]
-    pub(super) raw_prefill_blocks: f64,
     pub(super) available: bool,
     pub(super) active_prefill_tokens: usize,
     pub(super) decode_cost_blocks: f64,

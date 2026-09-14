@@ -22,7 +22,7 @@ use policy::{
     CustomWorkerSelectionState, WorkerSelectionPolicyStateRef, collect_custom_candidates,
 };
 #[cfg(any(test, feature = "bench"))]
-use reference::{pick_default_worker, selection_weights};
+use reference::pick_default_worker;
 
 use super::config::KvRouterConfig;
 use super::filter::{RoutingEligibility, WorkerEligibilityError};
@@ -128,37 +128,20 @@ impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-#[cfg(any(test, feature = "bench"))]
-struct LogitWeights {
-    overlap_score_credit: f64,
-    overlap_score_credit_decay: f64,
-    prefill_load_scale: f64,
-    shared_cache_multiplier: f64,
-}
-
 struct MaterializedSelectionInput<'a> {
     request: &'a SchedulingRequest,
     context: WorkerSelectionContext<'a>,
 }
 
 impl<'a> MaterializedSelectionInput<'a> {
-    fn new(
-        request: &'a SchedulingRequest,
-        block_size: u32,
-        #[cfg(any(test, feature = "bench"))] weights: LogitWeights,
-    ) -> Self {
+    fn new(request: &'a SchedulingRequest, block_size: u32) -> Self {
         Self {
             request,
             context: WorkerSelectionContext {
                 request,
-                #[cfg(any(test, feature = "bench"))]
-                request_id: request.mode.request_id().unwrap_or("-"),
                 request_blocks: request.request_blocks(block_size),
                 block_size,
                 track_prefill_tokens: request.track_prefill_tokens,
-                #[cfg(any(test, feature = "bench"))]
-                weights,
                 pinned_worker: request.pinned_worker,
                 has_tier_matches: !request.overlap.tier_overlap_blocks.device.is_empty()
                     || !request.overlap.tier_overlap_blocks.host_pinned.is_empty()
@@ -171,6 +154,7 @@ impl<'a> MaterializedSelectionInput<'a> {
         }
     }
 
+    #[inline(always)]
     fn row(
         &self,
         worker: WorkerWithDpRank,
@@ -181,18 +165,16 @@ impl<'a> MaterializedSelectionInput<'a> {
             worker,
             preferred_taint_multiplier,
             inputs,
-            #[cfg(any(test, feature = "bench"))]
-            false,
             |_, device_overlap_blocks| device_overlap_blocks,
         )
     }
 
+    #[inline(always)]
     fn row_with_device_overlap(
         &self,
         worker: WorkerWithDpRank,
         preferred_taint_multiplier: Option<f64>,
         inputs: WorkerInputs,
-        #[cfg(any(test, feature = "bench"))] reference_formula: bool,
         select_device_overlap: impl FnOnce(f64, f64) -> f64,
     ) -> WorkerCandidate {
         let cached_tokens = if inputs.contains(WorkerInputs::CACHE)
@@ -252,29 +234,10 @@ impl<'a> MaterializedSelectionInput<'a> {
             WorkerCacheInput::default()
         };
         let load = if inputs.contains(WorkerInputs::LOAD) {
-            #[cfg(any(test, feature = "bench"))]
-            let raw_prefill_tokens = if reference_formula && self.request.track_prefill_tokens {
-                match worker_load {
-                    Some(load) => {
-                        // Preserve the legacy operation order when overlap exceeds the prompt.
-                        let uncached_tokens = super::prefill_load::effective_prefill_tokens(
-                            self.request.isl_tokens,
-                            cached_tokens,
-                        );
-                        let projected_tokens = load.active_prefill_tokens + uncached_tokens;
-                        projected_tokens.saturating_add(cached_tokens)
-                    }
-                    None => self.request.isl_tokens,
-                }
-            } else {
-                0
-            } as f64;
             let available = worker_load.is_some();
             let worker_load = worker_load.unwrap_or_default();
             WorkerLoadInput {
                 available,
-                #[cfg(any(test, feature = "bench"))]
-                raw_prefill_blocks: raw_prefill_tokens / self.context.block_size as f64,
                 active_prefill_tokens: worker_load.active_prefill_tokens,
                 decode_cost_blocks: worker_load.potential_decode_blocks() as f64,
                 active_requests: worker_load.active_requests,
@@ -401,16 +364,9 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         }
     }
 
-    #[cfg(any(test, feature = "bench"))]
-    let weights = selection_weights(kv_router_config, request);
     #[cfg(not(any(test, feature = "bench")))]
     let _ = kv_router_config;
-    let mut input = MaterializedSelectionInput::new(
-        request,
-        block_size,
-        #[cfg(any(test, feature = "bench"))]
-        weights,
-    );
+    let mut input = MaterializedSelectionInput::new(request, block_size);
     input.context.pinned_worker = eligibility.pinned_worker();
     let selected = match state {
         #[cfg(any(test, feature = "bench"))]
@@ -499,7 +455,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
 
 #[cfg(test)]
 mod test_support {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashSet;
 
     use rustc_hash::FxHashMap;
 
@@ -542,8 +498,8 @@ mod test_support {
             isl_tokens,
             overlap: OverlapSignals {
                 tier_overlap_blocks: Default::default(),
-                effective_overlap_blocks: HashMap::default(),
-                effective_cached_tokens: HashMap::default(),
+                effective_overlap_blocks: Default::default(),
+                effective_cached_tokens: Default::default(),
             },
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,
