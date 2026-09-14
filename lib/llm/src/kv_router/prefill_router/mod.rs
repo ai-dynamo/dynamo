@@ -28,6 +28,7 @@ use futures::stream::{self, StreamExt};
 use crate::{
     discovery::{ModelManager, WorkerSetTarget, WorkerSetTargetId},
     kv_router::{RoutingHost, SelectionPolicySource, routing_host::PrefillDispatch},
+    local_model::runtime_config::DISAGG_PREFILL_CANCEL_ANYTIME_V1,
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
@@ -42,6 +43,7 @@ use crate::{
 
 mod activation;
 mod admission;
+mod cancellation;
 mod conditional_bypass;
 mod handoff;
 mod query;
@@ -249,6 +251,9 @@ pub struct PrefillRouter {
     /// lives on [`PrefillBinding::prefill_router_mode`].
     decode_router_mode: RouterMode,
     session_affinity_ttl: Option<std::time::Duration>,
+    /// Whether the paired decode worker set supports pre-output cancellation.
+    decode_supports_prefill_cancellation: bool,
+
     session_affinity_mode: SessionAffinityMode,
     conditional_disagg_policy: Box<dyn ConditionalDisaggPolicy>,
     /// Resolved once at construction: dedicated threshold if set, otherwise
@@ -540,6 +545,7 @@ impl
 
         let tracker = prefill_req.tracker.clone();
         let mut prefill_context = independent_prefill_context(prefill_req, &context)?;
+        let prefill_ctx = prefill_context.context();
         if let Some(session_affinity) = session_affinity {
             prefill_context.insert(
                 SESSION_AFFINITY_CONTEXT_KEY,
@@ -587,7 +593,22 @@ impl
                 booking,
             } = router
                 .select_and_dispatch_prefill(prefill_context, |request, target| {
-                    self.prepare_prefill_dispatch(request, target, endpoint_id)
+                    let prepared = self.prepare_prefill_dispatch(request, target, endpoint_id)?;
+                    let prefill_supports_cancellation =
+                        self.model_manager.worker_supports_runtime_capability(
+                            endpoint_id,
+                            prepared.worker_id,
+                            DISAGG_PREFILL_CANCEL_ANYTIME_V1,
+                        );
+                    if let Some(guard) = cancellation::arm_for(
+                        prefill_supports_cancellation,
+                        self.decode_supports_prefill_cancellation,
+                        engine_ctx.clone(),
+                        Arc::downgrade(&prefill_ctx),
+                    ) {
+                        prefill_ctx.retain(guard);
+                    }
+                    Ok(prepared)
                 })
                 .await?;
             if let (Some(state), Some(booking)) = (req.migration_state.as_ref(), booking) {
