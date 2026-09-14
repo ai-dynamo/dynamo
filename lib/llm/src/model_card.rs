@@ -1267,6 +1267,13 @@ impl ModelDeploymentCard {
                     VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
                 );
 
+                if self.runtime_config.runtime_flag_enabled(
+                    crate::local_model::runtime_config::DISAGG_PREFILL_CANCEL_ANYTIME_V1,
+                ) {
+                    bytes_to_hash
+                        .extend_from_slice(b"\0disagg_prefill_cancel_anytime_v1\0true");
+                }
+
                 // TODO: Do we want any other user_data or runtime_config?
 
                 blake3::hash(&bytes_to_hash).to_string()
@@ -3350,6 +3357,26 @@ mod ownership_tests {
         assert_ne!(missing.mdcsum(), nemotron.mdcsum());
         assert_ne!(nemotron.mdcsum(), different_nemotron.mdcsum());
         assert_ne!(qwen.mdcsum(), nemotron.mdcsum());
+    }
+
+    #[test]
+    fn disagg_prefill_cancel_capability_isolates_worker_sets() {
+        use crate::local_model::runtime_config::DISAGG_PREFILL_CANCEL_ANYTIME_V1;
+
+        let missing = ModelDeploymentCard::with_name_only("model");
+        let mut disabled = ModelDeploymentCard::with_name_only("model");
+        disabled
+            .runtime_config
+            .runtime_data
+            .insert(DISAGG_PREFILL_CANCEL_ANYTIME_V1.to_string(), false.into());
+        let mut enabled = ModelDeploymentCard::with_name_only("model");
+        enabled
+            .runtime_config
+            .runtime_data
+            .insert(DISAGG_PREFILL_CANCEL_ANYTIME_V1.to_string(), true.into());
+
+        assert_eq!(missing.mdcsum(), disabled.mdcsum());
+        assert_ne!(missing.mdcsum(), enabled.mdcsum());
     }
 }
 

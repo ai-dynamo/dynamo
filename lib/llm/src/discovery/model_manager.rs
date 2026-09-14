@@ -2721,6 +2721,22 @@ impl ModelManager {
         Some(configs.get(&worker_id)?.data_parallel_size)
     }
 
+    /// Whether a specific worker advertises a runtime capability.
+    pub fn worker_supports_runtime_capability(
+        &self,
+        endpoint_id: &EndpointId,
+        worker_id: WorkerId,
+        capability: &str,
+    ) -> bool {
+        let Some(rx) = self.runtime_configs.get(endpoint_id) else {
+            return false;
+        };
+        let configs = rx.borrow();
+        configs
+            .get(&worker_id)
+            .is_some_and(|config| config.supports_runtime_capability(capability))
+    }
+
     /// Whether any worker on this endpoint advertises a required KV-transfer topology policy.
     pub fn has_kv_transfer_required_routing_policy(&self, endpoint_id: &EndpointId) -> bool {
         let Some(rx) = self.runtime_configs.get(endpoint_id) else {
@@ -2826,7 +2842,7 @@ mod tests {
     use crate::model_card::ModelDeploymentCard;
     use crate::{
         discovery::{KvEventSource, KvSourceStatus},
-        local_model::runtime_config::ModelRuntimeConfig,
+        local_model::runtime_config::{DISAGG_PREFILL_CANCEL_ANYTIME_V1, ModelRuntimeConfig},
     };
 
     fn make_worker_set(namespace: &str, mdcsum: &str) -> WorkerSet {
@@ -2931,6 +2947,42 @@ mod tests {
             .topology_domains
             .insert("zone".to_string(), "us-east-1a".to_string());
         config
+    }
+
+    #[test]
+    fn runtime_capability_lookup_is_worker_specific_and_fail_closed() {
+        let manager = ModelManager::new();
+        let endpoint_id = EndpointId::from("test.prefill.generate");
+        let missing_endpoint = EndpointId::from("test.missing.generate");
+        let mut enabled = ModelRuntimeConfig::default();
+        enabled.runtime_data.insert(
+            DISAGG_PREFILL_CANCEL_ANYTIME_V1.to_string(),
+            serde_json::Value::Bool(true),
+        );
+        let mut disabled = ModelRuntimeConfig::default();
+        disabled.runtime_data.insert(
+            DISAGG_PREFILL_CANCEL_ANYTIME_V1.to_string(),
+            serde_json::Value::Bool(false),
+        );
+        insert_runtime_configs(
+            &manager,
+            &endpoint_id,
+            HashMap::from([(7, enabled), (8, disabled)]),
+        );
+
+        assert!(manager.worker_supports_runtime_capability(
+            &endpoint_id,
+            7,
+            DISAGG_PREFILL_CANCEL_ANYTIME_V1,
+        ));
+        for (endpoint, worker_id) in [(&endpoint_id, 8), (&endpoint_id, 9), (&missing_endpoint, 7)]
+        {
+            assert!(!manager.worker_supports_runtime_capability(
+                endpoint,
+                worker_id,
+                DISAGG_PREFILL_CANCEL_ANYTIME_V1,
+            ));
+        }
     }
 
     #[test]
