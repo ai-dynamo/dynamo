@@ -22,6 +22,7 @@ test-support = []
 zmq-events = ["dep:tmq"]
 
 [dependencies]
+dynamo-custom-policy-builtin = { workspace = true }
 # repo
 aisimulate-core = { workspace = true }
 dynamo-data-gen = { workspace = true }

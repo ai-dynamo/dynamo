@@ -5,10 +5,12 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::BitOr;
 
+#[cfg(any(test, feature = "bench"))]
+use super::{DefaultWorkerPicker, LogitWeights};
 use super::{
-    DefaultWorkerPicker, LogitWeights, MaterializedSelectionInput, WorkerSelectionInput,
-    WorkerSelector, select_worker_with_policy,
+    MaterializedSelectionInput, WorkerSelectionInput, WorkerSelector, select_worker_with_policy,
 };
+
 use crate::protocols::{
     WorkerAffinityTarget, WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank,
 };
@@ -21,11 +23,15 @@ use crate::scheduling::types::{
 /// Request-level values available to custom filters, scorers, and pickers.
 pub struct WorkerSelectionContext<'a> {
     pub(super) request: &'a SchedulingRequest,
+    #[cfg(any(test, feature = "bench"))]
     pub(super) request_id: &'a str,
     pub(super) request_blocks: u64,
     pub(super) block_size: u32,
     pub(super) track_prefill_tokens: bool,
+    #[cfg(any(test, feature = "bench"))]
     pub(super) weights: LogitWeights,
+    pub(super) has_tier_matches: bool,
+    pub(super) pinned_worker: Option<WorkerWithDpRank>,
     pub(super) router_temperature_override: Option<f64>,
 }
 
@@ -61,6 +67,7 @@ impl WorkerInputs {
     pub const PREFERRED_TAINT: Self = Self(1 << 2);
     /// Request host-owned active-request counts.
     pub const OCCUPANCY: Self = Self(1 << 5);
+    #[cfg(any(test, feature = "bench"))]
     pub(super) const ALL: Self = Self(Self::CACHE.0 | Self::LOAD.0 | Self::PREFERRED_TAINT.0);
 
     pub const fn contains(self, other: Self) -> bool {
@@ -84,6 +91,7 @@ impl BitOr for WorkerInputs {
 #[derive(Clone, Copy, Default)]
 pub struct WorkerCacheInput {
     pub(super) effective_overlap_blocks: f64,
+    pub(super) estimated_cached_tokens: usize,
     pub(super) device_overlap_blocks: f64,
     pub(super) host_overlap_blocks: f64,
     pub(super) disk_overlap_blocks: f64,
@@ -93,7 +101,9 @@ pub struct WorkerCacheInput {
 /// Active-load values for one worker.
 #[derive(Clone, Copy, Default)]
 pub struct WorkerLoadInput {
+    #[cfg(any(test, feature = "bench"))]
     pub(super) raw_prefill_blocks: f64,
+    pub(super) available: bool,
     pub(super) active_prefill_tokens: usize,
     pub(super) decode_cost_blocks: f64,
     pub(super) active_requests: usize,
@@ -141,6 +151,16 @@ pub trait WorkerFilter: Send {
 
 /// Selects one row after all filters and scorers run.
 pub trait WorkerPicker: Send {
+    /// Return a selected row and an optional policy-computed cost for host diagnostics.
+    /// The host validates both. Existing pickers use the summed scorer cost by default.
+    fn pick_with_cost(
+        &mut self,
+        context: &WorkerSelectionContext<'_>,
+        input: WorkerInputView<'_>,
+    ) -> Result<(usize, Option<f64>), WorkerSelectionPolicyError> {
+        self.pick(context, input).map(|row| (row, None))
+    }
+
     /// Declare the optional worker-signal columns needed by this picker.
     fn required_worker_inputs(&self) -> WorkerInputs {
         WorkerInputs::NONE
@@ -156,6 +176,33 @@ pub trait WorkerPicker: Send {
 }
 
 impl WorkerSelectionContext<'_> {
+    /// The exact worker/rank imposed by the host for this selection, if any.
+    /// Includes explicit pins and eligible exclusive-affinity targets. This is
+    /// read-only routing metadata, not permission to change eligibility.
+    pub fn pinned_worker(&self) -> Option<WorkerWithDpRank> {
+        self.pinned_worker
+    }
+
+    /// Exact incoming prompt length in tokens. Borrowed from this request; no rounding,
+    /// cache weighting, or additional storage is involved.
+    pub fn prompt_tokens(&self) -> usize {
+        self.request.isl_tokens
+    }
+
+    /// Shared-cache ranges from this request's lookup snapshot, if present.
+    /// The ranges are unweighted block offsets. The host owns their lifetime and
+    /// policy inspection does not perform a lookup or change accounting.
+    pub fn shared_cache_hits(&self) -> Option<&crate::SharedCacheHits> {
+        self.request.shared_cache_hits.as_ref()
+    }
+
+    /// Whether this request has any tier-specific cache matches, before worker filtering.
+    /// False means the host only supplied its accounting estimate (or no cache data).
+    /// The value describes the current lookup snapshot, not worker cache capacity.
+    pub fn has_tier_matches(&self) -> bool {
+        self.has_tier_matches
+    }
+
     /// Return the incoming prompt size in KV blocks.
     pub fn request_blocks(&self) -> u64 {
         self.request_blocks
@@ -284,6 +331,14 @@ impl ScoredWorkerCandidate {
 }
 
 impl WorkerCacheInput {
+    /// Host accounting estimate for this worker, in weighted KV blocks and rounded tokens.
+    /// Lower-tier matches use the host's cache weights. Missing estimates are zero;
+    /// neither value is clamped to prompt length. This is the current lookup snapshot,
+    /// not a count of physically resident GPU tokens. Policy scores do not alter it.
+    pub fn accounting_cache_estimate(&self) -> (f64, usize) {
+        (self.effective_overlap_blocks, self.estimated_cached_tokens)
+    }
+
     /// Return device-resident prefix overlap in KV blocks.
     pub fn device_overlap_blocks(&self) -> f64 {
         self.device_overlap_blocks
@@ -306,6 +361,12 @@ impl WorkerCacheInput {
 }
 
 impl WorkerLoadInput {
+    /// Whether the host supplied a load projection for this worker in this selection.
+    /// False distinguishes a missing observation from an observed idle worker.
+    pub fn is_available(&self) -> bool {
+        self.available
+    }
+
     /// Return the tokens active in this worker's prefill stage.
     pub fn active_prefill_tokens(&self) -> usize {
         self.active_prefill_tokens
@@ -341,12 +402,14 @@ impl<'a> WorkerInputView<'a> {
 
 #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
 pub(super) enum WorkerSelectionPolicyState {
+    #[cfg(any(test, feature = "bench"))]
     Default(DefaultWorkerPicker),
     /// Policy-local state owned and called serially by one scheduler queue actor.
     Custom(RefCell<CustomWorkerSelectionState>),
 }
 
 pub(super) enum WorkerSelectionPolicyStateRef<'a> {
+    #[cfg(any(test, feature = "bench"))]
     Default(&'a DefaultWorkerPicker),
     Custom(&'a RefCell<CustomWorkerSelectionState>),
 }
@@ -371,6 +434,7 @@ pub struct WorkerSelectionPolicy {
     kv_router_config: KvRouterConfig,
     worker_label: &'static str,
     state: WorkerSelectionPolicyState,
+    exclusive_affinity: bool,
 }
 
 impl WorkerSelectionPolicy {
@@ -408,6 +472,7 @@ impl WorkerSelectionPolicy {
         Self {
             kv_router_config,
             worker_label,
+            exclusive_affinity: false,
             state: WorkerSelectionPolicyState::Custom(RefCell::new(CustomWorkerSelectionState {
                 filters,
                 scorers,
@@ -422,15 +487,24 @@ impl WorkerSelectionPolicy {
         }
     }
 
+    /// Ask the host to constrain selection to an eligible affinity target.
+    /// Explicit request pins remain mandatory regardless of this option.
+    pub fn with_exclusive_affinity(mut self, exclusive: bool) -> Self {
+        self.exclusive_affinity = exclusive;
+        self
+    }
+
     /// Wrap Dynamo's built-in selector for a host that uses the policy selector type.
     ///
     /// `worker_label` selects the built-in scoring and logging contract. Typed hosts use
     /// [`crate::WorkerType::default_selector_label`] to preserve Dynamo's historical behavior.
+    #[cfg(any(test, feature = "bench"))]
     pub fn default(kv_router_config: KvRouterConfig, worker_label: &'static str) -> Self {
         let picker = DefaultWorkerPicker::new();
         Self {
             kv_router_config,
             worker_label,
+            exclusive_affinity: false,
             state: WorkerSelectionPolicyState::Default(picker),
         }
     }
@@ -590,11 +664,16 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
 
 impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
     fn uses_exclusive_affinity_target(&self) -> bool {
-        matches!(&self.state, WorkerSelectionPolicyState::Default(_))
+        #[cfg(any(test, feature = "bench"))]
+        if matches!(&self.state, WorkerSelectionPolicyState::Default(_)) {
+            return true;
+        }
+        self.exclusive_affinity
     }
 
     fn required_worker_inputs(&self) -> WorkerInputs {
         match &self.state {
+            #[cfg(any(test, feature = "bench"))]
             WorkerSelectionPolicyState::Default(_) => WorkerInputs::CACHE | WorkerInputs::LOAD,
             WorkerSelectionPolicyState::Custom(state) => {
                 let state = state.borrow();
@@ -610,6 +689,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
         let (workers, request, eligibility, block_size) = input.into_configured()?;
         let state = match &self.state {
+            #[cfg(any(test, feature = "bench"))]
             WorkerSelectionPolicyState::Default(picker) => {
                 WorkerSelectionPolicyStateRef::Default(picker)
             }

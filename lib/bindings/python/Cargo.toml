@@ -28,7 +28,6 @@ default = ["custom-policy"]
 # router-policy YAML without rebuilding. A private image replaces only the catalog dependency, so
 # its policies are added alongside the shipped ones rather than displacing them.
 custom-policy = [
-  "dep:dynamo-custom-policy-builtin",
   "dep:dynamo-worker-selection-policy-catalog",
   "dynamo-kv-router/standalone-selection",
 ]
@@ -98,7 +97,7 @@ uuid = { version = "1.18.1" }
 
 # kv-indexer / slot-tracker / shared kv-router types
 dynamo-kv-router = { path = "../../kv-router" }
-dynamo-custom-policy-builtin = { path = "../../router-plugins/builtin", optional = true }
+dynamo-custom-policy-builtin = { path = "../../router-plugins/builtin" }
 dynamo-worker-selection-policy-catalog = { path = "../../router-plugins/catalog", optional = true }
 clap = { version = "4.5", features = ["derive"], optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }

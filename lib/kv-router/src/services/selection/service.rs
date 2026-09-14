@@ -147,6 +147,12 @@ impl SelectionServiceBuilder {
                 .worker_selection_policy_registry
                 .resolve_for_worker_type(&self.kv_router_config, self.worker_type)?,
         };
+        #[cfg(not(test))]
+        if worker_selection_policy_factory.is_none() {
+            return Err(
+                super::policy_registry::WorkerSelectionPolicyRegistryError::MissingDefault.into(),
+            );
+        }
         let tracking_hash = Arc::new(TrackingHashContext::from_config(&self.kv_router_config)?);
         let mut indexer_policy = IndexerPolicy::from_router_config(&self.kv_router_config)?;
         if let KvIndexSource::Remote(base_url) = &self.host.cache.index {
@@ -314,6 +320,12 @@ impl SelectionService {
                     indexer_threads,
                     cancel_token.clone(),
                     SelectionCacheConfig::default(),
+                    std::sync::Arc::new(|config, role, _| {
+                        crate::WorkerSelectionPolicy::default(
+                            config.clone(),
+                            role.default_selector_label(),
+                        )
+                    }),
                 )
                 .expect("valid test config"),
             ),

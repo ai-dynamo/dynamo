@@ -16,6 +16,7 @@ use crate::scheduling::config::WorkerSelectionPolicySelections;
 pub use crate::scheduling::config::{
     DYN_ROUTER_DECODE_POLICY, DYN_ROUTER_PREFILL_POLICY, DYN_ROUTER_WORKER_SELECTION_POLICY,
 };
+#[cfg(test)]
 use crate::scheduling::selector::WorkerSelectionPolicy;
 
 /// Parses one policy instance's YAML parameters and creates its partition factory.
@@ -65,6 +66,7 @@ impl WorkerSelectionPolicyProviderError {
 #[derive(Clone, Default)]
 pub struct WorkerSelectionPolicyRegistry {
     providers: HashMap<String, WorkerSelectionPolicyProvider>,
+    default_factory: Option<WorkerSelectionPolicyFactory>,
 }
 
 /// An error from policy registration or startup resolution.
@@ -72,6 +74,8 @@ pub struct WorkerSelectionPolicyRegistry {
 pub enum WorkerSelectionPolicyRegistryError {
     #[error("worker-selection policy type must not be empty")]
     EmptyName,
+    #[error("routing host must supply a default worker-selection policy factory")]
+    MissingDefault,
     #[error("worker-selection policy type 'default' is reserved for Dynamo's built-in selector")]
     ReservedDefault,
     #[error("worker-selection policy type {name:?} is already registered")]
@@ -91,6 +95,21 @@ pub enum WorkerSelectionPolicyRegistryError {
 }
 
 impl WorkerSelectionPolicyRegistry {
+    /// Construct a registry with the host's required default policy. Custom registrations
+    /// cannot replace this factory. An empty registry still supports explicit custom policies.
+    pub fn new(default_factory: WorkerSelectionPolicyFactory) -> Self {
+        Self {
+            providers: HashMap::new(),
+            default_factory: Some(default_factory),
+        }
+    }
+
+    /// Supply the host default while preserving registered custom policy types.
+    pub fn with_default_factory(mut self, factory: WorkerSelectionPolicyFactory) -> Self {
+        self.default_factory = Some(factory);
+        self
+    }
+
     /// Whether this image has no linked custom worker-selection policy types.
     pub fn is_empty(&self) -> bool {
         self.providers.is_empty()
@@ -169,9 +188,22 @@ impl WorkerSelectionPolicyRegistry {
             self.resolve_selected_cached(policy_config, selected.encode.as_deref(), &mut resolved)?;
 
         if aggregated.is_none() && prefill.is_none() && decode.is_none() && encode.is_none() {
-            return Ok(None);
+            return Ok(self.default_factory.clone());
         }
 
+        #[cfg(not(test))]
+        if self.default_factory.is_none()
+            && [
+                aggregated.is_none(),
+                prefill.is_none(),
+                decode.is_none(),
+                encode.is_none(),
+            ]
+            .contains(&true)
+        {
+            return Err(WorkerSelectionPolicyRegistryError::MissingDefault);
+        }
+        let default_factory = self.default_factory.clone();
         Ok(Some(Arc::new(move |config, worker_type, partition| {
             let selected = match worker_type {
                 WorkerType::Aggregated => aggregated.as_ref(),
@@ -181,10 +213,22 @@ impl WorkerSelectionPolicyRegistry {
             };
             match selected {
                 Some(factory) => factory(config, worker_type, partition),
-                None => WorkerSelectionPolicy::default(
-                    config.clone(),
-                    worker_type.default_selector_label(),
-                ),
+                None => {
+                    #[cfg(test)]
+                    if default_factory.is_none() {
+                        return WorkerSelectionPolicy::default(
+                            config.clone(),
+                            worker_type.default_selector_label(),
+                        );
+                    }
+                    default_factory
+                        .as_ref()
+                        .expect("default factory validated at resolution")(
+                        config,
+                        worker_type,
+                        partition,
+                    )
+                }
             }
         })))
     }
@@ -216,10 +260,10 @@ impl WorkerSelectionPolicyRegistry {
         selected: Option<&str>,
     ) -> Result<Option<WorkerSelectionPolicyFactory>, WorkerSelectionPolicyRegistryError> {
         let Some(selected) = selected else {
-            return Ok(None);
+            return Ok(self.default_factory.clone());
         };
         if selected == "default" {
-            return Ok(None);
+            return Ok(self.default_factory.clone());
         }
         let instance = config
             .and_then(|config| config.instance(selected))

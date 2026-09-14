@@ -20,7 +20,7 @@ use super::queue::{
     BookingHandle, ClassQueueStats, SchedulerBookingCleanup, SchedulerBookingDescriptor,
     SchedulerQueue,
 };
-use super::selector::{DefaultWorkerSelector, WorkerSelector};
+use super::selector::WorkerSelector;
 use super::types::{
     AdmissionAttempt, AdmittedSchedulingResponse, AdvisorySchedulingResponse, AttemptId,
     KvSchedulerError, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, PotentialLoad,
@@ -43,8 +43,12 @@ enum WorkerConfigReconcileOutcome {
     Rejected,
 }
 
-pub struct LocalScheduler<P, C, Sel = DefaultWorkerSelector, RF = NoopOverlapScoresRefresh>
-where
+pub struct LocalScheduler<
+    P,
+    C,
+    Sel = super::selector::WorkerSelectionPolicy,
+    RF = NoopOverlapScoresRefresh,
+> where
     P: SequencePublisher,
     C: WorkerConfigLike,
     Sel: WorkerSelector<C>,
@@ -815,7 +819,7 @@ mod tests {
         monitor_worker_configs: bool,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     ) -> (
-        Arc<LocalScheduler<NoopSequencePublisher, SimpleWorkerConfig>>,
+        Arc<LocalScheduler<NoopSequencePublisher, SimpleWorkerConfig, DefaultWorkerSelector>>,
         Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
         watch::Sender<HashMap<WorkerId, SimpleWorkerConfig>>,
         CancellationToken,
@@ -837,7 +841,7 @@ mod tests {
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         replica_sync: bool,
     ) -> (
-        Arc<LocalScheduler<NoopSequencePublisher, SimpleWorkerConfig>>,
+        Arc<LocalScheduler<NoopSequencePublisher, SimpleWorkerConfig, DefaultWorkerSelector>>,
         Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
         watch::Sender<HashMap<WorkerId, SimpleWorkerConfig>>,
         CancellationToken,
@@ -885,7 +889,9 @@ mod tests {
     }
 
     async fn wait_for_pending_count(
-        scheduler: &Arc<LocalScheduler<NoopSequencePublisher, SimpleWorkerConfig>>,
+        scheduler: &Arc<
+            LocalScheduler<NoopSequencePublisher, SimpleWorkerConfig, DefaultWorkerSelector>,
+        >,
         expected: usize,
     ) {
         tokio::time::timeout(Duration::from_millis(250), async {

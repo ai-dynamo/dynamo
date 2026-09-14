@@ -134,7 +134,11 @@ pub async fn run(policy_registry: Option<WorkerSelectionPolicyRegistry>) -> Resu
     {
         anyhow::bail!("linked worker-selection policies require DYN_EPP_MODE=standalone")
     }
-    run_inner(mode, policy_registry.unwrap_or_default()).await
+    run_inner(
+        mode,
+        policy_registry.unwrap_or_else(dynamo_custom_policy_builtin::default_registry),
+    )
+    .await
 }
 
 fn init_tracing() {
