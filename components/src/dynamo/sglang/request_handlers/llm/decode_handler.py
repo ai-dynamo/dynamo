@@ -438,7 +438,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         native_request = build_native_generate_request(
             native_payload,
             input_ids=input_ids,
-            request_id=sglang_request_id,
+            fallback_rid=sglang_request_id,
             priority=self._priority_kwargs(priority).get("priority"),
             bootstrap_host=bootstrap_info.get("bootstrap_host"),
             bootstrap_port=bootstrap_info.get("bootstrap_port"),
