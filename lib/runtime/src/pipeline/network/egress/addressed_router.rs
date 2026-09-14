@@ -12,7 +12,7 @@ use crate::component::Instance;
 use crate::discovery::EndpointInstanceId;
 use crate::dynamo_nvtx_range;
 use crate::engine::{AsyncEngine, AsyncEngineContextProvider, Data, EngineContextGuard};
-use crate::error::{DynamoError, ErrorType};
+use crate::error::{DynamoError, ErrorType, match_error_chain};
 use crate::logging::inject_trace_headers_into_map;
 use crate::metrics::frontend_perf::STAGE_DURATION_SECONDS;
 use crate::metrics::request_plane::{
@@ -30,6 +30,7 @@ use crate::pipeline::network::ResponsePlaneMode;
 use crate::pipeline::network::ResponseService;
 use crate::pipeline::network::ResponseType;
 use crate::pipeline::network::StreamOptions;
+use crate::pipeline::network::StreamPrologueError;
 use crate::pipeline::network::StreamProvider;
 use crate::pipeline::network::StreamReceiver;
 use crate::pipeline::network::StreamSender;
@@ -49,6 +50,69 @@ use std::task::{Context, Poll};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_stream::{StreamExt, StreamNotifyClose, wrappers::ReceiverStream};
 use tracing::Instrument;
+
+/// Error types that must never be attached as the cause of a pre-stream
+/// failure, because migration classification walks the whole cause chain.
+///
+/// Must hold the same set as `NON_MIGRATABLE` in `lib/llm/src/migration.rs`,
+/// which cannot be reused directly because `dynamo-llm` depends on
+/// `dynamo-runtime` and not the reverse.
+/// `migration_sensitive_types_match_the_exclusion_set` there fails if the two
+/// lists ever disagree.
+pub(crate) const MIGRATION_SENSITIVE_ERROR_TYPES: &[ErrorType] =
+    &[ErrorType::Cancelled, ErrorType::ResourceExhausted];
+
+/// Whether any link of `err`'s chain carries a migration-sensitive type.
+///
+/// An empty exclude set reduces [`crate::error::match_error_chain`] to "does
+/// any link match", and that is deliberately the same walk migration
+/// classification runs: an excluded type nested one link down short-circuits it
+/// just as an outer one does.
+fn is_migration_sensitive(err: &DynamoError) -> bool {
+    match_error_chain(err, MIGRATION_SENSITIVE_ERROR_TYPES, &[])
+}
+
+/// Build the error returned when the worker fails before any response bytes.
+///
+/// The outer type stays [`ErrorType::CannotConnect`], so retry classification
+/// of the outer error is unchanged. A typed error from the worker's prologue is
+/// attached as the cause, which consumers reach with
+/// [`crate::error::match_error_chain`].
+///
+/// Because that walk covers the whole chain, an attached cause is as visible as
+/// the outer type, so causes typed one of [`MIGRATION_SENSITIVE_ERROR_TYPES`]
+/// are withheld rather than attached. The worker's text stays in the message
+/// either way; only the machine-readable type is withheld.
+pub(crate) fn pre_stream_failure_error(error: StreamPrologueError) -> DynamoError {
+    let builder = DynamoError::builder()
+        .error_type(ErrorType::CannotConnect)
+        .message(format!(
+            "Worker generate() failed before response stream: {error}"
+        ));
+
+    match error.typed_error {
+        Some(typed) if !is_migration_sensitive(&typed) => builder.cause(typed).build(),
+        _ => builder.build(),
+    }
+}
+
+/// White-box handles for the cross-crate tests in `dynamo-llm`. Gated so a
+/// normal build of this crate exposes no public API for them.
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub mod testing {
+    use super::{DynamoError, ErrorType, StreamPrologueError};
+
+    /// The set `migration_sensitive_types_match_the_exclusion_set` in
+    /// `lib/llm/src/migration.rs` pins against its `NON_MIGRATABLE`.
+    pub fn migration_sensitive_error_types() -> &'static [ErrorType] {
+        super::MIGRATION_SENSITIVE_ERROR_TYPES
+    }
+
+    pub fn pre_stream_failure_error(error: StreamPrologueError) -> DynamoError {
+        super::pre_stream_failure_error(error)
+    }
+}
 
 const FIRST_RESPONSE_GUARD_CONTEXT_KEY: &str = "dynamo.request_plane.first_response_guard";
 // A timeout cannot safely release registered memory while a remote read may
@@ -775,20 +839,7 @@ impl AddressedPushRouter {
         let response_stream = match response_stream_provider.await {
             Ok(Ok(stream)) => stream,
             Ok(Err(e)) => {
-                // generate() failed before any response bytes; migrate via
-                // CannotConnect since the dominant cause is a worker-local
-                // setup/version issue. The wire prologue carries only an
-                // opaque string today, so app-level rejections also retry
-                // -- safe because no side effects are visible yet. Follow-up:
-                // structured prologue error type for finer routing.
-                return Err(anyhow::anyhow!(
-                    DynamoError::builder()
-                        .error_type(ErrorType::CannotConnect)
-                        .message(format!(
-                            "Worker generate() failed before response stream: {e}"
-                        ))
-                        .build()
-                ));
+                return Err(anyhow::anyhow!(pre_stream_failure_error(e)));
             }
             Err(_recv_err) => {
                 // oneshot dropped: either the discovery watcher cancelled

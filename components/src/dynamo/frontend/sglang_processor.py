@@ -416,6 +416,22 @@ def _build_dynamo_preproc(
     nvext_routing = (
         _routing_from_agent_hints(nvext) if isinstance(nvext, dict) else None
     )
+    if isinstance(nvext, dict):
+        # Preserve explicit targets for the router to resolve in the current phase.
+        # Rank zero is a valid target; only absent/null values are omitted.
+        worker_routing = {
+            key: nvext[key]
+            for key in (
+                "backend_instance_id",
+                "decode_worker_id",
+                "prefill_worker_id",
+                "dp_rank",
+                "prefill_dp_rank",
+            )
+            if nvext.get(key) is not None
+        }
+        if worker_routing:
+            nvext_routing = {**(nvext_routing or {}), **worker_routing}
     if isinstance(routing, dict):
         if nvext_routing:
             routing = {**nvext_routing, **routing}
