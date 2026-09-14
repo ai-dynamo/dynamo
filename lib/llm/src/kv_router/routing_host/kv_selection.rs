@@ -25,6 +25,7 @@ use crate::{
 };
 
 pub(super) struct WorkerSelection {
+    pub(super) prefill: dynamo_kv_router::selector::PrefillAction,
     pub(super) worker: WorkerWithDpRank,
     /// The booking's handle until the request's cleanup takes it over.
     pub(super) booking: Option<BookingHandle>,
@@ -133,6 +134,7 @@ impl RoutingHost {
                 routing_hashes,
                 kv_hint,
             } => Ok(SelectionOutcome::Routed(WorkerSelection {
+                prefill: admitted.prefill,
                 worker,
                 booking: admitted.booking,
                 overlap_amount: overlap_blocks,

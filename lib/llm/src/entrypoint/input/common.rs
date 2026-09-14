@@ -304,7 +304,10 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
         affinity,
         load_context,
     )?;
-    if router_mode.is_kv_routing() && prefill_router.conditional_disagg_enabled() {
+    if router_mode.is_kv_routing()
+        && (prefill_router.conditional_disagg_enabled()
+            || routing_host.kv_router().path_planning().is_some())
+    {
         prefill_router
             .set_decode_routing_host(routing_host.clone())
             .context("install conditional-disagg decode RoutingHost")?;

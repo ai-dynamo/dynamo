@@ -44,3 +44,55 @@ and active-sequence accounting. Keep these implementation invariants explicit:
   barrier.
 - Reservation IDs must be globally unique. Retry and idempotency behavior is
   the existing active-sequence behavior.
+
+## Plugin-controlled prefill execution
+
+A linked decode strategy can opt into path planning by implementing
+`WorkerPicker::path_planning()` and returning `Some(PathPlanningRequirements)`.
+Dynamo then runs an advisory decode preview even when built-in conditional
+disaggregation is disabled. Existing pickers return `None` by default and do
+not incur an extra preview.
+
+During that preview, `pick_route(context, input)` returns a `RouteChoice`:
+
+- `Default` uses the configured conditional-disaggregation policy, including
+  its decode-busy guard and unavailable-signal behavior.
+- `LocalOnDecode` requests local prefill and generation on the selected worker.
+- `Remote` continues normal P/D routing. The preview's decode choice is not
+  reserved or guaranteed to be the later decode destination.
+
+Ordinary P selection, decode-after-prefill, and external queries call `pick`,
+not `pick_route`. A picker must support both. Filtering, scoring, explicit
+worker pins, and row validation still apply. The preview is not a dispatch
+notification and plugins must tolerate repeated invocations.
+
+`context.is_path_planning()` identifies the preview. Pickers requesting
+`WorkerInputs::CACHE` receive raw `device_overlap_blocks()` separately from
+`effective_overlap_blocks()`, the weighted cache estimate, and `cached_tokens()`,
+the exact weighted token estimate used by the built-in decision. Multiply raw device
+coverage by `context.block_size()` and clamp it to `context.prompt_tokens()`
+before computing uncached tokens. `candidate.can_prefill_locally()` reports
+`Some(true)`, `Some(false)`, or `None` for unreported backend support.
+`WorkerInputs::LOAD` also exposes optional `total_kv_blocks()` during path
+planning; missing capacity must not be interpreted as zero load.
+
+`PathPlanningRequirements::prefill_load` requests the host's selected-P load
+probe. `context.prefill_worker_busy()` remains `None` when no threshold or load
+is available; it must not be interpreted as idle. No P probe is added unless
+the strategy requests it or the configured `Default` decision requires it.
+The pure `conditional_disagg::evaluate_conditional_disagg` helper lets plugins
+reuse built-in thresholds with supplied facts and no routing side effects.
+
+Explicit actions replace heuristic path preferences. They do not bypass
+backend support, eligibility, explicit P pins, or admission. A local request
+must target a worker advertising `local_prefill=true`; vLLM and TensorRT-LLM
+publish this runtime metadata for supported workers. Unknown support fails
+closed for explicit local actions. `Default` retains the existing backend
+compatibility behavior.
+
+The frontend validates local actions, admits the previewed worker and DP rank,
+charges local prefill, and emits `x-bypass-remote-prefill`. Unsupported or
+conflicting explicit local actions and failed local admission return an error;
+they do not silently switch workers or fall back to remote prefill. The shared
+selection core transports the choice; this does not add a disaggregation
+coordinator or frontend orchestration to the standalone service or EPP.

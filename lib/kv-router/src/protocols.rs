@@ -295,6 +295,11 @@ pub struct KvHintTransferWorkerMetadata<'a> {
 ///
 /// `ModelRuntimeConfig` (in `lib/llm`) implements this directly so no adapter type is needed.
 pub trait WorkerConfigLike {
+    /// Whether the backend supports local prefill on a decode worker.
+    fn can_prefill_locally(&self) -> Option<bool> {
+        None
+    }
+
     fn data_parallel_start_rank(&self) -> u32;
     fn data_parallel_size(&self) -> u32;
     fn max_num_batched_tokens(&self) -> Option<u64>;
@@ -1076,6 +1081,7 @@ pub enum RouterResponse {
 
 #[derive(Debug)]
 pub struct WorkerSelectionResult {
+    pub prefill: crate::selector::PrefillAction,
     /// The full worker information including dp_rank
     pub worker: WorkerWithDpRank,
 

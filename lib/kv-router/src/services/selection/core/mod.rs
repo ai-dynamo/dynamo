@@ -98,6 +98,10 @@ pub type SelectionScheduler = LocalScheduler<
 pub struct SelectionPartition(Arc<SelectionEntry>);
 
 impl SelectionPartition {
+    pub fn path_planning(&self) -> Option<crate::selector::PathPlanningRequirements> {
+        self.0.path_planning
+    }
+
     pub fn key(&self) -> &RoutingPartitionId {
         &self.0.key
     }
@@ -126,6 +130,7 @@ struct SelectionEntry {
     indexer: Indexer,
     workers_tx: watch::Sender<HashMap<WorkerId, SelectionWorkerConfig>>,
     scheduler: SelectionScheduler,
+    path_planning: Option<crate::selector::PathPlanningRequirements>,
     replica_tx: Option<mpsc::Sender<ActiveSequenceEvent>>,
     affinity: OnceCell<SessionAffinity>,
     replica_config: Option<ReplicaSyncConfig>,

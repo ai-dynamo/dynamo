@@ -775,6 +775,13 @@ async def init_llm_worker(
         # because they can be overridden by --extra-engine-args or --override-engine-args
         runtime_config.max_num_seqs = engine_args["max_batch_size"]
         runtime_config.max_num_batched_tokens = engine_args["max_num_tokens"]
+        runtime_config.set_engine_specific(
+            "local_prefill",
+            json.dumps(
+                config.disaggregation_mode
+                in (DisaggregationMode.DECODE, DisaggregationMode.AGGREGATED)
+            ),
+        )
         runtime_config.reasoning_parser = config.dyn_reasoning_parser
         runtime_config.tool_call_parser = config.dyn_tool_call_parser
         if config.dyn_default_thinking_mode is not None:

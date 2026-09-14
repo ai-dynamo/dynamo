@@ -51,6 +51,11 @@ pub struct SelectionOperation<'a> {
 }
 
 pub enum SelectionAdmission {
+    /// Advisory decode preview that may request a host-executed prefill action.
+    PathPlanning {
+        request_id: Option<String>,
+        prefill_worker_busy: Option<bool>,
+    },
     /// Queue admission without a booking.
     Query { request_id: Option<String> },
     /// Queue admission with a booking the core records as a reservation under
@@ -66,7 +71,9 @@ pub enum SelectionAdmission {
 impl SelectionAdmission {
     pub fn request_id(&self) -> Option<&str> {
         match self {
-            Self::Query { request_id } | Self::Advisory { request_id } => request_id.as_deref(),
+            Self::Query { request_id }
+            | Self::Advisory { request_id }
+            | Self::PathPlanning { request_id, .. } => request_id.as_deref(),
             Self::Book { selection_id }
             | Self::Lease {
                 request_id: selection_id,

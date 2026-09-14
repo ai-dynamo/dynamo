@@ -888,6 +888,9 @@ async def register_vllm_model(
     runtime_config.max_num_seqs = runtime_values["max_num_seqs"]
     runtime_config.max_num_batched_tokens = runtime_values["max_num_batched_tokens"]
     runtime_config.enable_local_indexer = config.enable_local_indexer
+    runtime_config.set_engine_specific(
+        "local_prefill", json.dumps(worker_type != WorkerType.Prefill)
+    )
     runtime_config.kv_event_publishing_enabled = config.use_kv_events
     runtime_config.kv_state_endpoint = config.kv_state_endpoint
     if state_agent_enabled:

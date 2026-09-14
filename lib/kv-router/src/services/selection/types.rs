@@ -61,9 +61,14 @@ pub struct SelectionWorkerConfig {
     /// a router-hint source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv_event_source_mode: Option<String>,
+    /// Backend-advertised local prefill support; absent means unknown.
+    pub local_prefill: Option<bool>,
 }
 
 impl WorkerConfigLike for SelectionWorkerConfig {
+    fn can_prefill_locally(&self) -> Option<bool> {
+        self.local_prefill
+    }
     fn data_parallel_start_rank(&self) -> u32 {
         self.data_parallel_start_rank
     }
@@ -154,6 +159,8 @@ pub struct WorkerCatalogRecord {
     pub router_hint_source_control_endpoints: HashMap<u32, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv_event_source_mode: Option<String>,
+    /// Backend-advertised local prefill support; absent means unknown.
+    pub local_prefill: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub not_schedulable_reasons: Vec<String>,
 }
@@ -184,6 +191,7 @@ impl WorkerCatalogRecord {
             router_hint_worker_type: req.router_hint_worker_type,
             router_hint_source_control_endpoints: req.router_hint_source_control_endpoints,
             kv_event_source_mode: req.kv_event_source_mode,
+            local_prefill: req.local_prefill,
             not_schedulable_reasons: Vec::new(),
         }
     }
@@ -223,6 +231,7 @@ impl WorkerCatalogRecord {
             router_hint_worker_type: self.router_hint_worker_type.clone(),
             router_hint_source_control_endpoints: self.router_hint_source_control_endpoints.clone(),
             kv_event_source_mode: self.kv_event_source_mode.clone(),
+            local_prefill: self.local_prefill,
         })
     }
 
@@ -284,6 +293,7 @@ impl Default for WorkerRequest {
             router_hint_worker_type: None,
             router_hint_source_control_endpoints: HashMap::new(),
             kv_event_source_mode: None,
+            local_prefill: None,
         }
     }
 }
@@ -323,6 +333,8 @@ pub struct WorkerRequest {
     pub router_hint_source_control_endpoints: HashMap<u32, String>,
     #[serde(default)]
     pub kv_event_source_mode: Option<String>,
+    /// Backend-advertised local prefill support; absent means unknown.
+    pub local_prefill: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -349,6 +361,8 @@ pub struct WorkerPatchRequest {
     pub router_hint_source_control_endpoints: Option<HashMap<u32, String>>,
     #[serde(default)]
     pub kv_event_source_mode: Option<String>,
+    /// Backend-advertised local prefill support; absent means unknown.
+    pub local_prefill: Option<bool>,
 }
 
 impl WorkerCatalogRecord {
@@ -409,6 +423,9 @@ impl WorkerCatalogRecord {
         }
         if let Some(endpoints) = patch.router_hint_source_control_endpoints {
             self.router_hint_source_control_endpoints = endpoints;
+        }
+        if patch.local_prefill.is_some() {
+            self.local_prefill = patch.local_prefill;
         }
         if patch.kv_event_source_mode.is_some() {
             self.kv_event_source_mode = patch.kv_event_source_mode;

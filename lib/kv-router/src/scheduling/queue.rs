@@ -1444,6 +1444,7 @@ impl<
         Ok(AdvisorySchedulingResponse {
             selected_worker_load: selected.selected_worker_load,
             response: SchedulingResponse {
+                prefill: selected.selection.prefill,
                 best_worker: selected.selection.worker,
                 effective_overlap_blocks: selected.selection.effective_overlap_blocks,
                 cached_tokens: selected.selection.cached_tokens,
@@ -1476,6 +1477,7 @@ impl<
         let target_cached_prefix_blocks =
             target_cached_prefix_blocks(&request, selected.selection.worker);
         let response = SchedulingResponse {
+            prefill: selected.selection.prefill,
             best_worker: selected.selection.worker,
             effective_overlap_blocks: selected.selection.effective_overlap_blocks,
             cached_tokens: selected.selection.cached_tokens,
@@ -1928,6 +1930,7 @@ mod tests {
             };
 
             Ok(WorkerSelectionResult {
+                prefill: Default::default(),
                 worker,
                 required_blocks: request.request_blocks(block_size),
                 effective_overlap_blocks: request.effective_overlap_blocks_for(worker),

@@ -458,6 +458,7 @@ pub enum FindBestMatchOutcome {
 pub(super) enum FindBestMatchAdmission {
     WithAdmission,
     WithoutAdmission,
+    PathPlanning { prefill_worker_busy: Option<bool> },
 }
 
 /// A routed outcome with the booking's handle, when the request was booked.
@@ -465,6 +466,7 @@ pub(super) enum FindBestMatchAdmission {
 /// cleanup.
 #[doc(hidden)]
 pub struct AdmittedFindBestMatchOutcome {
+    pub(super) prefill: dynamo_kv_router::selector::PrefillAction,
     pub(super) outcome: FindBestMatchOutcome,
     pub(super) booking: Option<BookingHandle>,
     /// The selected worker's scheduler-load snapshot; set only by advisory
@@ -1218,6 +1220,12 @@ impl KvRouter {
         }
         let is_admitted_routing = matches!(admission, FindBestMatchAdmission::WithAdmission);
         let core_admission = match admission {
+            FindBestMatchAdmission::PathPlanning {
+                prefill_worker_busy,
+            } => SelectionAdmission::PathPlanning {
+                request_id: context_id.map(str::to_string),
+                prefill_worker_busy,
+            },
             FindBestMatchAdmission::WithAdmission if update_states => SelectionAdmission::Lease {
                 request_id: context_id.expect("validated above").to_string(),
             },
@@ -1272,6 +1280,7 @@ impl KvRouter {
             Ok(SelectionOutcome::Selected(selected)) => selected,
             Ok(SelectionOutcome::QueueRejected { rejection }) => {
                 return Ok(AdmittedFindBestMatchOutcome {
+                    prefill: Default::default(),
                     outcome: FindBestMatchOutcome::QueueRejected { rejection },
                     booking: None,
                     advisory_load: None,
@@ -1337,6 +1346,7 @@ impl KvRouter {
             "advisory load is set exactly for without-admission selection"
         );
         Ok(AdmittedFindBestMatchOutcome {
+            prefill: response.prefill,
             outcome: FindBestMatchOutcome::Routed {
                 worker: response.best_worker,
                 overlap_blocks,
@@ -1528,6 +1538,12 @@ impl KvRouter {
             .scheduler()
             .enqueue_output_block_if_booking(booking, decay_fraction)
             .await
+    }
+
+    pub(crate) fn path_planning(
+        &self,
+    ) -> Option<dynamo_kv_router::selector::PathPlanningRequirements> {
+        self.selection.path_planning()
     }
 
     pub fn block_size(&self) -> u32 {

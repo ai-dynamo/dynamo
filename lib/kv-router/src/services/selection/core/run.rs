@@ -357,6 +357,20 @@ impl SelectionCore {
         // The queue lease frees a booking whose response is never consumed
         // (the caller dropped this future after the actor booked).
         let mode = match &admission {
+            SelectionAdmission::PathPlanning {
+                request_id,
+                prefill_worker_busy,
+            } => {
+                if self.worker_type != WorkerType::Decode {
+                    return Err(SelectionError::BadRequest(
+                        "path planning requires a decode partition".into(),
+                    ));
+                }
+                ScheduleMode::PathPlanning {
+                    request_id: request_id.clone(),
+                    prefill_worker_busy: *prefill_worker_busy,
+                }
+            }
             SelectionAdmission::Book { selection_id }
             | SelectionAdmission::Lease {
                 request_id: selection_id,
@@ -437,7 +451,7 @@ impl SelectionCore {
                 return Err(SelectionError::Scheduler(KvSchedulerError::SubscriberShutdown));
             }
             result = async {
-                if matches!(admission, SelectionAdmission::Advisory { .. }) {
+                if matches!(admission, SelectionAdmission::Advisory { .. } | SelectionAdmission::PathPlanning { .. }) {
                     entry
                         .scheduler
                         .select_without_admission(schedule_request)

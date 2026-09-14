@@ -18,6 +18,33 @@ use crate::scheduling::types::{
     KvSchedulerError, SchedulingRequest, SessionContext, WorkerSelectionPolicyError,
 };
 
+/// Prefill execution requested by a picker during a path-planning preview.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PrefillAction {
+    /// Preserve the configured conditional-disaggregation policy.
+    #[default]
+    Default,
+    /// Run prefill and generation on the selected decode worker.
+    LocalOnDecode,
+    /// Continue normal remote prefill routing.
+    Remote,
+}
+
+/// A row in the eligible table and a host-executed prefill preference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RouteChoice {
+    pub candidate: usize,
+    pub prefill: PrefillAction,
+}
+
+/// Resolved once when a strategy is constructed. Presence opts into path planning.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PathPlanningRequirements {
+    /// Ask the host to probe the selected prefill worker's load before the preview.
+    /// The signal remains unavailable when no threshold or load is available.
+    pub prefill_load: bool,
+}
+
 /// Request-level values available to custom filters, scorers, and pickers.
 pub struct WorkerSelectionContext<'a> {
     pub(super) request: &'a SchedulingRequest,
@@ -43,6 +70,7 @@ pub struct WorkerCandidate {
 pub struct ScoredWorkerCandidate {
     pub(super) worker: WorkerWithDpRank,
     pub(super) cost: f64,
+    pub(super) local_prefill: Option<bool>,
     pub(super) preferred_taint_multiplier: Option<f64>,
 }
 
@@ -83,6 +111,7 @@ impl BitOr for WorkerInputs {
 /// KV-cache overlap values for one worker.
 #[derive(Clone, Copy, Default)]
 pub struct WorkerCacheInput {
+    pub(super) cached_tokens: usize,
     pub(super) effective_overlap_blocks: f64,
     pub(super) device_overlap_blocks: f64,
     pub(super) host_overlap_blocks: f64,
@@ -93,6 +122,7 @@ pub struct WorkerCacheInput {
 /// Active-load values for one worker.
 #[derive(Clone, Copy, Default)]
 pub struct WorkerLoadInput {
+    pub(super) total_kv_blocks: Option<u64>,
     pub(super) raw_prefill_blocks: f64,
     pub(super) active_prefill_tokens: usize,
     pub(super) decode_cost_blocks: f64,
@@ -141,6 +171,24 @@ pub trait WorkerFilter: Send {
 
 /// Selects one row after all filters and scorers run.
 pub trait WorkerPicker: Send {
+    /// Opt into prefill path planning. Existing pickers do not cause extra previews.
+    fn path_planning(&self) -> Option<PathPlanningRequirements> {
+        None
+    }
+
+    /// Choose placement and prefill execution during a host-owned path preview.
+    /// Called only after opt-in; admission and ordinary queries still call `pick`.
+    fn pick_route(
+        &mut self,
+        context: &WorkerSelectionContext<'_>,
+        input: WorkerInputView<'_>,
+    ) -> Result<RouteChoice, WorkerSelectionPolicyError> {
+        self.pick(context, input).map(|candidate| RouteChoice {
+            candidate,
+            prefill: PrefillAction::Default,
+        })
+    }
+
     /// Declare the optional worker-signal columns needed by this picker.
     fn required_worker_inputs(&self) -> WorkerInputs {
         WorkerInputs::NONE
@@ -156,6 +204,30 @@ pub trait WorkerPicker: Send {
 }
 
 impl WorkerSelectionContext<'_> {
+    /// Whether this invocation may choose the prefill execution path.
+    pub fn is_path_planning(&self) -> bool {
+        matches!(
+            self.request.mode,
+            crate::scheduling::ScheduleMode::PathPlanning { .. }
+        )
+    }
+
+    /// Host-probed prefill load; unavailable is distinct from idle.
+    pub fn prefill_worker_busy(&self) -> Option<bool> {
+        match self.request.mode {
+            crate::scheduling::ScheduleMode::PathPlanning {
+                prefill_worker_busy,
+                ..
+            } => prefill_worker_busy,
+            _ => None,
+        }
+    }
+
+    /// Prompt length before cache reuse.
+    pub fn prompt_tokens(&self) -> usize {
+        self.request.isl_tokens
+    }
+
     /// Return the incoming prompt size in KV blocks.
     pub fn request_blocks(&self) -> u64 {
         self.request_blocks
@@ -266,6 +338,11 @@ impl WorkerCandidate {
 }
 
 impl ScoredWorkerCandidate {
+    /// Backend-advertised local-prefill support; `None` means unreported.
+    pub fn can_prefill_locally(&self) -> Option<bool> {
+        self.local_prefill
+    }
+
     /// Return this candidate's worker ID and data-parallel rank.
     pub fn worker(&self) -> WorkerWithDpRank {
         self.worker
@@ -284,6 +361,16 @@ impl ScoredWorkerCandidate {
 }
 
 impl WorkerCacheInput {
+    /// Exact weighted token credit used by the built-in conditional policy.
+    pub fn cached_tokens(&self) -> usize {
+        self.cached_tokens
+    }
+
+    /// Weighted cache estimate, distinct from device-resident prefix coverage.
+    pub fn effective_overlap_blocks(&self) -> f64 {
+        self.effective_overlap_blocks
+    }
+
     /// Return device-resident prefix overlap in KV blocks.
     pub fn device_overlap_blocks(&self) -> f64 {
         self.device_overlap_blocks
@@ -306,6 +393,11 @@ impl WorkerCacheInput {
 }
 
 impl WorkerLoadInput {
+    /// KV capacity during path planning; `None` when unreported or outside a preview.
+    pub fn total_kv_blocks(&self) -> Option<u64> {
+        self.total_kv_blocks
+    }
+
     /// Return the tokens active in this worker's prefill stage.
     pub fn active_prefill_tokens(&self) -> usize {
         self.active_prefill_tokens
@@ -355,6 +447,7 @@ pub(super) struct CustomWorkerSelectionState {
     pub(super) filters: Vec<Box<dyn WorkerFilter>>,
     pub(super) scorers: Vec<Box<dyn WorkerScorer>>,
     pub(super) picker: Box<dyn WorkerPicker>,
+    pub(super) path_planning: Option<PathPlanningRequirements>,
     pub(super) filter_inputs: WorkerInputs,
     pub(super) scorer_picker_inputs: WorkerInputs,
     pub(super) picker_inputs: WorkerInputs,
@@ -374,6 +467,14 @@ pub struct WorkerSelectionPolicy {
 }
 
 impl WorkerSelectionPolicy {
+    /// Construction-time path-planning declaration for embedding hosts.
+    pub fn path_planning(&self) -> Option<PathPlanningRequirements> {
+        match &self.state {
+            WorkerSelectionPolicyState::Default(_) => None,
+            WorkerSelectionPolicyState::Custom(state) => state.borrow().path_planning,
+        }
+    }
+
     /// Build a custom policy with no filters.
     ///
     /// `worker_label` identifies the worker pool in routing logs. A typed policy factory normally
@@ -398,6 +499,7 @@ impl WorkerSelectionPolicy {
         scorers: Vec<Box<dyn WorkerScorer>>,
         picker: Box<dyn WorkerPicker>,
     ) -> Self {
+        let path_planning = picker.path_planning();
         let picker_inputs = picker.required_worker_inputs();
         let filter_inputs = filters.iter().fold(WorkerInputs::NONE, |inputs, filter| {
             inputs | filter.required_worker_inputs()
@@ -412,6 +514,7 @@ impl WorkerSelectionPolicy {
                 filters,
                 scorers,
                 picker,
+                path_planning,
                 filter_inputs,
                 scorer_picker_inputs,
                 picker_inputs,
@@ -441,6 +544,7 @@ impl WorkerSelectionPolicy {
 fn push_scored_candidate(
     context: &WorkerSelectionContext<'_>,
     candidate: &WorkerCandidate,
+    config: &impl WorkerConfigLike,
     scorers: &mut [Box<dyn WorkerScorer>],
     picker_inputs: WorkerInputs,
     candidates: &mut Vec<ScoredWorkerCandidate>,
@@ -460,6 +564,10 @@ fn push_scored_candidate(
         }
     }
     candidates.push(ScoredWorkerCandidate {
+        local_prefill: context
+            .is_path_planning()
+            .then(|| config.can_prefill_locally())
+            .flatten(),
         worker: candidate.worker,
         cost,
         preferred_taint_multiplier: candidate.preferred_taint_multiplier,
@@ -468,7 +576,11 @@ fn push_scored_candidate(
         cache_inputs.push(candidate.cache);
     }
     if picker_inputs.contains(WorkerInputs::LOAD) {
-        load_inputs.push(candidate.load);
+        let mut load = candidate.load;
+        if context.is_path_planning() {
+            load.total_kv_blocks = config.total_kv_blocks();
+        }
+        load_inputs.push(load);
     }
     Ok(())
 }
@@ -510,6 +622,7 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
             if let Err(policy_error) = push_scored_candidate(
                 &input.context,
                 &candidate,
+                config,
                 scorers,
                 *picker_inputs,
                 candidates,
@@ -571,6 +684,7 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
         if let Err(policy_error) = push_scored_candidate(
             &input.context,
             &candidate,
+            config,
             scorers,
             *picker_inputs,
             candidates,
