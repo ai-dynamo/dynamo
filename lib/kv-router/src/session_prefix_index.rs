@@ -3,13 +3,13 @@
 
 //! Session lineage retained independently of physical cache eviction.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use parking_lot::RwLock;
 use rustc_hash::{FxHashMap, FxHashSet};
 use slotmap::{SlotMap, new_key_type};
 
-use crate::protocols::ExternalSequenceBlockHash;
+use crate::protocols::{ExternalSequenceBlockHash, WorkerWithDpRank};
 
 /// Logical session identity as owned by this index.
 pub type SessionId = String;
@@ -70,14 +70,15 @@ pub struct SessionPrefixIndexer {
 
 #[derive(Debug, Default)]
 struct SessionEntry {
-    frontiers: FxHashSet<NodeId>,
+    worker_frontiers: FxHashMap<WorkerWithDpRank, FxHashSet<NodeId>>,
 }
 
 #[derive(Debug, Default)]
 struct IndexState {
     nodes: SlotMap<NodeId, LogicalNode>,
     hash_to_node: FxHashMap<ExternalSequenceBlockHash, NodeId>,
-    sessions: HashMap<SessionId, SessionEntry>,
+    session_to_worker_frontiers: HashMap<SessionId, SessionEntry>,
+    worker_frontier_to_sessions: FxHashMap<WorkerWithDpRank, FxHashMap<NodeId, HashSet<SessionId>>>,
 }
 
 impl SessionPrefixIndexer {
@@ -93,20 +94,29 @@ impl SessionPrefixIndexer {
         self.state.read().nodes.get(node_id).copied()
     }
 
-    /// Returns unordered frontier nodes, or an empty vector for an unknown session.
-    pub fn get_session_frontiers(&self, session_id: &str) -> Vec<NodeId> {
+    /// Returns unordered worker-qualified frontier nodes.
+    pub fn get_session_frontiers(&self, session_id: &str) -> Vec<(WorkerWithDpRank, NodeId)> {
         self.state
             .read()
-            .sessions
+            .session_to_worker_frontiers
             .get(session_id)
-            .map(|entry| entry.frontiers.iter().copied().collect())
+            .map(|entry| {
+                entry
+                    .worker_frontiers
+                    .iter()
+                    .flat_map(|(&worker, frontiers)| {
+                        frontiers.iter().map(move |&frontier| (worker, frontier))
+                    })
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
-    /// Returns root-first chains, optionally filtered and truncated at an anchor.
+    /// Returns root-first chains for one worker, optionally truncated at an anchor.
     pub fn get_session_block_lineage(
         &self,
         session_id: &str,
+        worker: WorkerWithDpRank,
         anchor_hash: Option<ExternalSequenceBlockHash>,
     ) -> Result<Vec<Vec<ExternalSequenceBlockHash>>, SessionPrefixIndexError> {
         let state = self.state.read();
@@ -122,12 +132,16 @@ impl SessionPrefixIndexer {
             None => None,
         };
 
-        let Some(entry) = state.sessions.get(session_id) else {
+        let Some(frontiers) = state
+            .session_to_worker_frontiers
+            .get(session_id)
+            .and_then(|entry| entry.worker_frontiers.get(&worker))
+        else {
             return Ok(Vec::new());
         };
 
-        let mut lineages = Vec::with_capacity(entry.frontiers.len());
-        for &frontier in &entry.frontiers {
+        let mut lineages = Vec::with_capacity(frontiers.len());
+        for &frontier in frontiers {
             let path = state.path_to_root(frontier);
             let start = match anchor_node {
                 Some(anchor) => match path.iter().position(|&node| node == anchor) {
@@ -150,17 +164,19 @@ impl SessionPrefixIndexer {
     pub fn update_session_from_match(
         &self,
         session_id: &str,
+        worker: WorkerWithDpRank,
         matched_hash: ExternalSequenceBlockHash,
     ) -> Result<bool, SessionPrefixIndexError> {
         let mut state = self.state.write();
         let node = state.resolve_or_insert_root(matched_hash);
-        Ok(state.advance_frontier(session_id, node))
+        Ok(state.advance_frontier(session_id, worker, node))
     }
 
     /// Records a stored block chain and reports whether the frontier advanced.
     pub fn update_session_from_stored_blocks(
         &self,
         session_id: &str,
+        worker: WorkerWithDpRank,
         parent_hash: Option<ExternalSequenceBlockHash>,
         block_hashes: &[ExternalSequenceBlockHash],
     ) -> Result<bool, SessionPrefixIndexError> {
@@ -189,7 +205,27 @@ impl SessionPrefixIndexer {
         }
 
         let leaf = parent.expect("non-empty block chain always yields a node");
-        Ok(state.advance_frontier(session_id, leaf))
+        Ok(state.advance_frontier(session_id, worker, leaf))
+    }
+
+    /// Recedes worker-local session frontiers affected by removed blocks.
+    pub fn update_session_from_removed_blocks(
+        &self,
+        worker: WorkerWithDpRank,
+        block_hashes: &[ExternalSequenceBlockHash],
+    ) -> usize {
+        if block_hashes.is_empty() {
+            return 0;
+        }
+
+        self.state
+            .write()
+            .recede_removed_frontiers(worker, block_hashes)
+    }
+
+    /// Removes every session frontier associated with one worker rank.
+    pub fn clear_worker_frontiers(&self, worker: WorkerWithDpRank) -> usize {
+        self.state.write().clear_worker_frontiers(worker)
     }
 
     /// Removes a session and reclaims its unshared nodes.
@@ -203,7 +239,7 @@ impl SessionPrefixIndexer {
     }
 
     pub fn session_count(&self) -> usize {
-        self.state.read().sessions.len()
+        self.state.read().session_to_worker_frontiers.len()
     }
 }
 
@@ -263,11 +299,14 @@ impl IndexState {
 
     // Explicit session removal reclaims unshared lineage nodes.
     fn drop_session(&mut self, session_id: &str) -> bool {
-        let Some(entry) = self.sessions.remove(session_id) else {
+        let Some(entry) = self.session_to_worker_frontiers.remove(session_id) else {
             return false;
         };
-        for frontier in entry.frontiers {
-            self.release_frontier(frontier);
+        for (worker, frontiers) in entry.worker_frontiers {
+            for frontier in frontiers {
+                self.remove_reverse_frontier(worker, frontier, session_id);
+                self.release_frontier(frontier);
+            }
         }
         true
     }
@@ -316,24 +355,32 @@ impl IndexState {
         false
     }
 
-    // Keep only the deepest frontier on each chain.
-    fn advance_frontier(&mut self, session_id: &str, node: NodeId) -> bool {
-        let already_reached = self.sessions.get(session_id).is_some_and(|entry| {
-            entry
-                .frontiers
-                .iter()
-                .any(|&frontier| self.is_ancestor_or_self(node, frontier))
-        });
+    // Keep only the deepest frontier on each worker-local chain.
+    fn advance_frontier(
+        &mut self,
+        session_id: &str,
+        worker: WorkerWithDpRank,
+        node: NodeId,
+    ) -> bool {
+        let already_reached = self
+            .session_to_worker_frontiers
+            .get(session_id)
+            .and_then(|entry| entry.worker_frontiers.get(&worker))
+            .is_some_and(|frontiers| {
+                frontiers
+                    .iter()
+                    .any(|&frontier| self.is_ancestor_or_self(node, frontier))
+            });
         if already_reached {
             return false;
         }
 
         let subsumed: Vec<NodeId> = self
-            .sessions
+            .session_to_worker_frontiers
             .get(session_id)
-            .map(|entry| {
-                entry
-                    .frontiers
+            .and_then(|entry| entry.worker_frontiers.get(&worker))
+            .map(|frontiers| {
+                frontiers
                     .iter()
                     .copied()
                     .filter(|&frontier| self.is_ancestor_or_self(frontier, node))
@@ -341,17 +388,161 @@ impl IndexState {
             })
             .unwrap_or_default();
 
-        for frontier in &subsumed {
-            self.nodes[*frontier].frontier_refs -= 1;
+        for &frontier in &subsumed {
+            self.remove_frontier_binding(session_id, worker, frontier);
         }
-        self.nodes[node].frontier_refs += 1;
-
-        let entry = self.sessions.entry(session_id.to_string()).or_default();
-        for frontier in subsumed {
-            entry.frontiers.remove(&frontier);
-        }
-        entry.frontiers.insert(node);
+        self.add_frontier_binding(session_id, worker, node);
         true
+    }
+
+    fn add_frontier_binding(&mut self, session_id: &str, worker: WorkerWithDpRank, node: NodeId) {
+        let inserted = self
+            .session_to_worker_frontiers
+            .entry(session_id.to_string())
+            .or_default()
+            .worker_frontiers
+            .entry(worker)
+            .or_default()
+            .insert(node);
+        if !inserted {
+            return;
+        }
+
+        self.nodes[node].frontier_refs += 1;
+        self.worker_frontier_to_sessions
+            .entry(worker)
+            .or_default()
+            .entry(node)
+            .or_default()
+            .insert(session_id.to_string());
+    }
+
+    fn remove_frontier_binding(
+        &mut self,
+        session_id: &str,
+        worker: WorkerWithDpRank,
+        node: NodeId,
+    ) -> bool {
+        let removed = self
+            .session_to_worker_frontiers
+            .get_mut(session_id)
+            .and_then(|entry| entry.worker_frontiers.get_mut(&worker))
+            .is_some_and(|frontiers| frontiers.remove(&node));
+        if !removed {
+            return false;
+        }
+
+        self.nodes[node].frontier_refs -= 1;
+        self.remove_reverse_frontier(worker, node, session_id);
+
+        let remove_worker = self
+            .session_to_worker_frontiers
+            .get(session_id)
+            .and_then(|entry| entry.worker_frontiers.get(&worker))
+            .is_some_and(FxHashSet::is_empty);
+        if remove_worker && let Some(entry) = self.session_to_worker_frontiers.get_mut(session_id) {
+            entry.worker_frontiers.remove(&worker);
+        }
+        let remove_session = self
+            .session_to_worker_frontiers
+            .get(session_id)
+            .is_some_and(|entry| entry.worker_frontiers.is_empty());
+        if remove_session {
+            self.session_to_worker_frontiers.remove(session_id);
+        }
+        true
+    }
+
+    fn remove_reverse_frontier(
+        &mut self,
+        worker: WorkerWithDpRank,
+        node: NodeId,
+        session_id: &str,
+    ) {
+        let remove_node = self
+            .worker_frontier_to_sessions
+            .get_mut(&worker)
+            .and_then(|frontiers| frontiers.get_mut(&node))
+            .is_some_and(|sessions| {
+                sessions.remove(session_id);
+                sessions.is_empty()
+            });
+        if remove_node && let Some(frontiers) = self.worker_frontier_to_sessions.get_mut(&worker) {
+            frontiers.remove(&node);
+        }
+        let remove_worker = self
+            .worker_frontier_to_sessions
+            .get(&worker)
+            .is_some_and(FxHashMap::is_empty);
+        if remove_worker {
+            self.worker_frontier_to_sessions.remove(&worker);
+        }
+    }
+
+    fn recede_removed_frontiers(
+        &mut self,
+        worker: WorkerWithDpRank,
+        block_hashes: &[ExternalSequenceBlockHash],
+    ) -> usize {
+        let removed_nodes: FxHashSet<NodeId> = block_hashes
+            .iter()
+            .filter_map(|block_hash| self.hash_to_node.get(block_hash).copied())
+            .collect();
+        if removed_nodes.is_empty() {
+            return 0;
+        }
+
+        let affected: Vec<(SessionId, NodeId)> = removed_nodes
+            .iter()
+            .filter_map(|node| {
+                self.worker_frontier_to_sessions
+                    .get(&worker)
+                    .and_then(|frontiers| frontiers.get(node))
+                    .map(|sessions| {
+                        sessions
+                            .iter()
+                            .cloned()
+                            .map(|session_id| (session_id, *node))
+                            .collect::<Vec<_>>()
+                    })
+            })
+            .flatten()
+            .collect();
+
+        for (session_id, old_frontier) in &affected {
+            let mut replacement = self.nodes[*old_frontier].parent;
+            while replacement.is_some_and(|node| removed_nodes.contains(&node)) {
+                replacement = replacement.and_then(|node| self.nodes[node].parent);
+            }
+
+            self.remove_frontier_binding(session_id, worker, *old_frontier);
+            if let Some(replacement) = replacement {
+                self.advance_frontier(session_id, worker, replacement);
+            }
+        }
+        affected.len()
+    }
+
+    fn clear_worker_frontiers(&mut self, worker: WorkerWithDpRank) -> usize {
+        let affected: Vec<(SessionId, NodeId)> = self
+            .worker_frontier_to_sessions
+            .get(&worker)
+            .map(|frontiers| {
+                frontiers
+                    .iter()
+                    .flat_map(|(&node, sessions)| {
+                        sessions
+                            .iter()
+                            .cloned()
+                            .map(move |session_id| (session_id, node))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (session_id, node) in &affected {
+            self.remove_frontier_binding(session_id, worker, *node);
+        }
+        affected.len()
     }
 
     // Reclaim ancestors until reaching a shared frontier or parent.
@@ -386,12 +577,24 @@ mod tests {
             .collect()
     }
 
+    fn worker(worker_id: u64) -> WorkerWithDpRank {
+        WorkerWithDpRank::new(worker_id, 0)
+    }
+
     fn lineage_of(
         indexer: &SessionPrefixIndexer,
         session: &str,
     ) -> Vec<Vec<ExternalSequenceBlockHash>> {
+        lineage_on_worker(indexer, session, worker(1))
+    }
+
+    fn lineage_on_worker(
+        indexer: &SessionPrefixIndexer,
+        session: &str,
+        worker: WorkerWithDpRank,
+    ) -> Vec<Vec<ExternalSequenceBlockHash>> {
         let mut lineages = indexer
-            .get_session_block_lineage(session, None)
+            .get_session_block_lineage(session, worker, None)
             .expect("lineage query without an anchor cannot fail");
         lineages.sort();
         lineages
@@ -403,14 +606,18 @@ mod tests {
         let indexer = SessionPrefixIndexer::new();
 
         assert!(
-            indexer.update_session_from_match("s1", chain[0]).unwrap(),
+            indexer
+                .update_session_from_match("s1", worker(1), chain[0])
+                .unwrap(),
             "first match must advance the frontier"
         );
         assert_eq!(indexer.node_count(), 1);
         assert_eq!(lineage_of(&indexer, "s1"), vec![vec![chain[0]]]);
 
         assert!(
-            !indexer.update_session_from_match("s1", chain[0]).unwrap(),
+            !indexer
+                .update_session_from_match("s1", worker(1), chain[0])
+                .unwrap(),
             "re-matching the same block is not an advance"
         );
         assert_eq!(
@@ -427,17 +634,23 @@ mod tests {
         let indexer = SessionPrefixIndexer::new();
 
         indexer
-            .update_session_from_stored_blocks("s1", None, &chain)
+            .update_session_from_stored_blocks("s1", worker(1), None, &chain)
             .unwrap();
         assert_eq!(indexer.get_session_frontiers("s1").len(), 1);
 
         assert!(
-            !indexer.update_session_from_match("s1", chain[1]).unwrap(),
+            !indexer
+                .update_session_from_match("s1", worker(1), chain[1])
+                .unwrap(),
             "a match above the current frontier must not move it"
         );
         assert_eq!(lineage_of(&indexer, "s1"), vec![chain.clone()]);
 
-        assert!(indexer.update_session_from_match("s2", chain[1]).unwrap());
+        assert!(
+            indexer
+                .update_session_from_match("s2", worker(1), chain[1])
+                .unwrap()
+        );
         assert_eq!(lineage_of(&indexer, "s2"), vec![chain[..2].to_vec()]);
     }
 
@@ -448,13 +661,13 @@ mod tests {
         let indexer = SessionPrefixIndexer::new();
 
         indexer
-            .update_session_from_stored_blocks("s1", None, &trunk)
+            .update_session_from_stored_blocks("s1", worker(1), None, &trunk)
             .unwrap();
         indexer
-            .update_session_from_stored_blocks("s2", None, &trunk)
+            .update_session_from_stored_blocks("s2", worker(1), None, &trunk)
             .unwrap();
         indexer
-            .update_session_from_stored_blocks("s2", Some(trunk[1]), &branch)
+            .update_session_from_stored_blocks("s2", worker(1), Some(trunk[1]), &branch)
             .unwrap();
 
         assert_eq!(
@@ -474,12 +687,14 @@ mod tests {
         let chain = hashes(vec![1, 2]);
         let indexer = SessionPrefixIndexer::new();
 
-        indexer.update_session_from_match("s1", chain[1]).unwrap();
+        indexer
+            .update_session_from_match("s1", worker(1), chain[1])
+            .unwrap();
         let child = indexer.get_node_from_hash(chain[1]).unwrap();
         assert_eq!(indexer.get_node(child).unwrap().parent(), None);
 
         indexer
-            .update_session_from_stored_blocks("s1", Some(chain[0]), &chain[1..])
+            .update_session_from_stored_blocks("s1", worker(1), Some(chain[0]), &chain[1..])
             .unwrap();
 
         assert_eq!(
@@ -501,11 +716,11 @@ mod tests {
         let indexer = SessionPrefixIndexer::new();
 
         indexer
-            .update_session_from_stored_blocks("s1", None, &chain[..2])
+            .update_session_from_stored_blocks("s1", worker(1), None, &chain[..2])
             .unwrap();
 
         let err = indexer
-            .update_session_from_stored_blocks("s1", Some(chain[2]), &chain[1..2])
+            .update_session_from_stored_blocks("s1", worker(1), Some(chain[2]), &chain[1..2])
             .expect_err("re-parenting a known block violates the hash invariant");
         assert_eq!(
             err,
@@ -521,13 +736,13 @@ mod tests {
         let indexer = SessionPrefixIndexer::new();
 
         indexer
-            .update_session_from_stored_blocks("s1", None, &trunk)
+            .update_session_from_stored_blocks("s1", worker(1), None, &trunk)
             .unwrap();
         indexer
-            .update_session_from_stored_blocks("s1", Some(trunk[0]), &left)
+            .update_session_from_stored_blocks("s1", worker(1), Some(trunk[0]), &left)
             .unwrap();
         indexer
-            .update_session_from_stored_blocks("s1", Some(trunk[0]), &right)
+            .update_session_from_stored_blocks("s1", worker(1), Some(trunk[0]), &right)
             .unwrap();
 
         assert_eq!(
@@ -549,17 +764,17 @@ mod tests {
         let indexer = SessionPrefixIndexer::new();
 
         indexer
-            .update_session_from_stored_blocks("s1", None, &trunk)
+            .update_session_from_stored_blocks("s1", worker(1), None, &trunk)
             .unwrap();
         indexer
-            .update_session_from_stored_blocks("s1", Some(trunk[1]), &left)
+            .update_session_from_stored_blocks("s1", worker(1), Some(trunk[1]), &left)
             .unwrap();
         indexer
-            .update_session_from_stored_blocks("s1", None, &right)
+            .update_session_from_stored_blocks("s1", worker(1), None, &right)
             .unwrap();
 
         let anchored = indexer
-            .get_session_block_lineage("s1", Some(trunk[1]))
+            .get_session_block_lineage("s1", worker(1), Some(trunk[1]))
             .unwrap();
         assert_eq!(
             anchored,
@@ -573,14 +788,16 @@ mod tests {
         let chain = hashes(vec![1]);
         let missing = hashes(vec![99]);
         let indexer = SessionPrefixIndexer::new();
-        indexer.update_session_from_match("s1", chain[0]).unwrap();
+        indexer
+            .update_session_from_match("s1", worker(1), chain[0])
+            .unwrap();
 
         assert_eq!(
-            indexer.get_session_block_lineage("s1", Some(missing[0])),
+            indexer.get_session_block_lineage("s1", worker(1), Some(missing[0])),
             Err(SessionPrefixIndexError::UnknownAnchor(missing[0]))
         );
         assert_eq!(
-            indexer.get_session_block_lineage("unrouted", None),
+            indexer.get_session_block_lineage("unrouted", worker(1), None),
             Ok(Vec::new()),
             "a session with no routed requests is empty, not an error"
         );
@@ -592,11 +809,13 @@ mod tests {
         let indexer = SessionPrefixIndexer::new();
 
         indexer
-            .update_session_from_stored_blocks("s1", None, &chain)
+            .update_session_from_stored_blocks("s1", worker(1), None, &chain)
             .unwrap();
         let before = lineage_of(&indexer, "s1");
 
-        indexer.update_session_from_match("s1", chain[0]).unwrap();
+        indexer
+            .update_session_from_match("s1", worker(1), chain[0])
+            .unwrap();
 
         assert_eq!(
             lineage_of(&indexer, "s1"),
@@ -607,19 +826,86 @@ mod tests {
     }
 
     #[test]
+    fn removal_recedes_only_the_affected_worker_frontier() {
+        let chain = hashes(vec![1, 2, 3]);
+        let indexer = SessionPrefixIndexer::new();
+
+        for target in [worker(1), worker(2)] {
+            indexer
+                .update_session_from_stored_blocks("s1", target, None, &chain)
+                .unwrap();
+        }
+
+        assert_eq!(
+            indexer.update_session_from_removed_blocks(worker(2), &chain[1..]),
+            1
+        );
+        assert_eq!(
+            lineage_on_worker(&indexer, "s1", worker(1)),
+            vec![chain.clone()]
+        );
+        assert_eq!(
+            lineage_on_worker(&indexer, "s1", worker(2)),
+            vec![vec![chain[0]]]
+        );
+    }
+
+    #[test]
+    fn batched_removal_recedes_all_sessions_and_is_idempotent() {
+        let chain = hashes(vec![1, 2, 3]);
+        let indexer = SessionPrefixIndexer::new();
+
+        for session in ["s1", "s2"] {
+            indexer
+                .update_session_from_stored_blocks(session, worker(1), None, &chain)
+                .unwrap();
+        }
+
+        assert_eq!(
+            indexer.update_session_from_removed_blocks(worker(1), &[chain[2], chain[1]]),
+            2
+        );
+        for session in ["s1", "s2"] {
+            assert_eq!(lineage_of(&indexer, session), vec![vec![chain[0]]]);
+        }
+        assert_eq!(
+            indexer.update_session_from_removed_blocks(worker(1), &[chain[1], chain[2]]),
+            0,
+            "replaying the same removal must not recede the frontier again"
+        );
+    }
+
+    #[test]
+    fn clear_removes_only_one_workers_frontiers() {
+        let chain = hashes(vec![1, 2]);
+        let indexer = SessionPrefixIndexer::new();
+
+        for target in [worker(1), worker(2)] {
+            indexer
+                .update_session_from_stored_blocks("s1", target, None, &chain)
+                .unwrap();
+        }
+
+        assert_eq!(indexer.clear_worker_frontiers(worker(2)), 1);
+        assert!(lineage_on_worker(&indexer, "s1", worker(2)).is_empty());
+        assert_eq!(lineage_on_worker(&indexer, "s1", worker(1)), vec![chain]);
+        assert_eq!(indexer.node_count(), 2, "clear preserves logical topology");
+    }
+
+    #[test]
     fn removing_a_session_frees_only_its_exclusive_tail() {
         let trunk = hashes(vec![1, 2]);
         let tail = hashes(vec![3]);
         let indexer = SessionPrefixIndexer::new();
 
         indexer
-            .update_session_from_stored_blocks("s1", None, &trunk)
+            .update_session_from_stored_blocks("s1", worker(1), None, &trunk)
             .unwrap();
         indexer
-            .update_session_from_stored_blocks("s2", None, &trunk)
+            .update_session_from_stored_blocks("s2", worker(1), None, &trunk)
             .unwrap();
         indexer
-            .update_session_from_stored_blocks("s2", Some(trunk[1]), &tail)
+            .update_session_from_stored_blocks("s2", worker(1), Some(trunk[1]), &tail)
             .unwrap();
         assert_eq!(indexer.node_count(), 3);
 
@@ -657,11 +943,15 @@ mod tests {
         let second = hashes(vec![2]);
         let indexer = SessionPrefixIndexer::new();
 
-        indexer.update_session_from_match("s1", first[0]).unwrap();
+        indexer
+            .update_session_from_match("s1", worker(1), first[0])
+            .unwrap();
         let stale = indexer.get_node_from_hash(first[0]).unwrap();
         indexer.remove_session("s1");
 
-        indexer.update_session_from_match("s2", second[0]).unwrap();
+        indexer
+            .update_session_from_match("s2", worker(1), second[0])
+            .unwrap();
         let fresh = indexer.get_node_from_hash(second[0]).unwrap();
 
         assert_ne!(stale, fresh, "the generational key must not be reissued");
@@ -677,11 +967,11 @@ mod tests {
         let indexer = SessionPrefixIndexer::new();
 
         indexer
-            .update_session_from_stored_blocks("s1", None, &chain)
+            .update_session_from_stored_blocks("s1", worker(1), None, &chain)
             .unwrap();
 
         let err = indexer
-            .update_session_from_stored_blocks("s1", Some(chain[2]), &chain[..1])
+            .update_session_from_stored_blocks("s1", worker(1), Some(chain[2]), &chain[..1])
             .expect_err("grafting an ancestor under its own descendant must fail");
         assert!(
             matches!(
@@ -705,7 +995,7 @@ mod tests {
 
         let repeating = vec![chain[0], chain[1], chain[0]];
         let err = indexer
-            .update_session_from_stored_blocks("s1", None, &repeating)
+            .update_session_from_stored_blocks("s1", worker(1), None, &repeating)
             .expect_err("a chain that revisits its own block must fail");
         assert!(
             matches!(

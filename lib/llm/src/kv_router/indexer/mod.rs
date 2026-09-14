@@ -14,8 +14,8 @@ use dynamo_kv_router::{
         record_unsupported_residency_event,
     },
     protocols::{
-        DpRank, ExternalSequenceBlockHash, KvCacheEventData, ResidencyProjection,
-        ResidencyRoutingSnapshot, RouterEvent, WorkerId,
+        DpRank, KvCacheEventData, ResidencyProjection, ResidencyRoutingSnapshot, RouterEvent,
+        WorkerId,
     },
 };
 
@@ -32,6 +32,8 @@ mod lookup;
 mod recording;
 mod recovery;
 pub mod remote;
+#[doc(hidden)]
+pub mod session_updates;
 mod side;
 
 pub use self::embedding_cache::{
@@ -40,6 +42,7 @@ pub use self::embedding_cache::{
 pub(crate) use self::recording::ApproximateRequestLease;
 use self::remote::RemoteIndexer;
 pub use self::remote::{ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
+use self::session_updates::{SessionMutation, SessionUpdateSender};
 pub use self::side::SideIndexer;
 #[cfg(feature = "ckf-diagnostics")]
 pub(crate) use recovery::WorkerQueryHealthSnapshot;
@@ -69,14 +72,14 @@ pub enum Indexer {
         lower_tier: LowerTierIndexers,
         approx: Option<SideIndexer>,
         primary_records_routing_decisions: bool,
-        session_prefix_index: Option<Arc<SessionPrefixIndexer>>,
+        session_updates: Option<SessionUpdateSender>,
     },
     Concurrent {
         primary: Arc<ThreadPoolIndexer<ConcurrentRadixTreeCompressed>>,
         lower_tier: LowerTierIndexers,
         approx: Option<SideIndexer>,
         primary_records_routing_decisions: bool,
-        session_prefix_index: Option<Arc<SessionPrefixIndexer>>,
+        session_updates: Option<SessionUpdateSender>,
     },
     Remote {
         primary: Arc<RemoteIndexer>,
@@ -92,49 +95,6 @@ enum ResolvedApproximatePrimaryPolicy {
     Ttl,
     Lru,
     TtlRemoteFallback,
-}
-
-struct SessionStoreUpdate {
-    index: Arc<SessionPrefixIndexer>,
-    session_id: String,
-    parent_hash: Option<ExternalSequenceBlockHash>,
-    block_hashes: Vec<ExternalSequenceBlockHash>,
-}
-
-impl SessionStoreUpdate {
-    fn from_event(indexer: &Indexer, event: &RouterEvent) -> Option<Self> {
-        let index = match indexer {
-            Indexer::KvIndexer {
-                session_prefix_index,
-                ..
-            }
-            | Indexer::Concurrent {
-                session_prefix_index,
-                ..
-            } => session_prefix_index.as_ref()?,
-            Indexer::Remote { .. } | Indexer::None => return None,
-        };
-        let KvCacheEventData::Stored(stored) = &event.event.data else {
-            return None;
-        };
-        let session_id = event.session_id.as_deref()?;
-        Some(Self {
-            index: Arc::clone(index),
-            session_id: session_id.to_owned(),
-            parent_hash: stored.parent_hash,
-            block_hashes: stored.blocks.iter().map(|block| block.block_hash).collect(),
-        })
-    }
-
-    fn apply(self) {
-        if let Err(error) = self.index.update_session_from_stored_blocks(
-            &self.session_id,
-            self.parent_hash,
-            &self.block_hashes,
-        ) {
-            tracing::warn!(%error, session_id = self.session_id, "failed to record stored session blocks");
-        }
-    }
 }
 
 fn resolve_approximate_primary_policy(
@@ -286,16 +246,19 @@ impl Indexer {
                 ApproximateRetentionConfig::Ttl(prune_config)
             };
             if kv_router_config.router_event_threads > 1 {
-                return Ok(Self::Concurrent {
-                    primary: Arc::new(
-                        ThreadPoolIndexer::new_with_metrics_and_approximate_retention(
-                            ConcurrentRadixTreeCompressed::new(),
-                            kv_router_config.router_event_threads as usize,
-                            block_size,
-                            Some(kv_indexer_metrics.clone()),
-                            Some(retention),
-                        ),
+                let primary = Arc::new(
+                    ThreadPoolIndexer::new_with_metrics_and_approximate_retention(
+                        ConcurrentRadixTreeCompressed::new(),
+                        kv_router_config.router_event_threads as usize,
+                        block_size,
+                        Some(kv_indexer_metrics.clone()),
+                        Some(retention),
                     ),
+                );
+                let session_updates = session_prefix_index
+                    .map(|index| SessionUpdateSender::for_concurrent(index, Arc::clone(&primary)));
+                return Ok(Self::Concurrent {
+                    primary,
                     lower_tier: LowerTierIndexers::new_with_metrics(
                         kv_router_config.router_event_threads as usize,
                         block_size,
@@ -303,17 +266,20 @@ impl Indexer {
                     ),
                     approx: None,
                     primary_records_routing_decisions: true,
-                    session_prefix_index,
+                    session_updates,
                 });
             }
 
+            let primary = KvIndexer::new_with_approximate_retention(
+                cancellation_token.child_token(),
+                block_size,
+                kv_indexer_metrics.clone(),
+                Some(retention),
+            );
+            let session_updates = session_prefix_index
+                .map(|index| SessionUpdateSender::for_legacy(index, primary.clone()));
             return Ok(Self::KvIndexer {
-                primary: KvIndexer::new_with_approximate_retention(
-                    cancellation_token.child_token(),
-                    block_size,
-                    kv_indexer_metrics.clone(),
-                    Some(retention),
-                ),
+                primary,
                 lower_tier: LowerTierIndexers::new_with_metrics(
                     1,
                     block_size,
@@ -321,7 +287,7 @@ impl Indexer {
                 ),
                 approx: None,
                 primary_records_routing_decisions: true,
-                session_prefix_index,
+                session_updates,
             });
         }
 
@@ -334,13 +300,16 @@ impl Indexer {
 
         if kv_router_config.router_event_threads > 1 {
             let kv_indexer_metrics = KvIndexerMetrics::from_component(component);
+            let primary = Arc::new(ThreadPoolIndexer::new_with_metrics(
+                ConcurrentRadixTreeCompressed::new(),
+                kv_router_config.router_event_threads as usize,
+                block_size,
+                Some(kv_indexer_metrics.clone()),
+            ));
+            let session_updates = session_prefix_index
+                .map(|index| SessionUpdateSender::for_concurrent(index, Arc::clone(&primary)));
             return Ok(Self::Concurrent {
-                primary: Arc::new(ThreadPoolIndexer::new_with_metrics(
-                    ConcurrentRadixTreeCompressed::new(),
-                    kv_router_config.router_event_threads as usize,
-                    block_size,
-                    Some(kv_indexer_metrics.clone()),
-                )),
+                primary,
                 lower_tier: LowerTierIndexers::new_with_metrics(
                     kv_router_config.router_event_threads as usize,
                     block_size,
@@ -348,18 +317,21 @@ impl Indexer {
                 ),
                 approx,
                 primary_records_routing_decisions: false,
-                session_prefix_index,
+                session_updates,
             });
         }
 
         let kv_indexer_metrics = KvIndexerMetrics::from_component(component);
+        let primary = KvIndexer::new_with_pruning(
+            cancellation_token.child_token(),
+            block_size,
+            kv_indexer_metrics.clone(),
+            None,
+        );
+        let session_updates = session_prefix_index
+            .map(|index| SessionUpdateSender::for_legacy(index, primary.clone()));
         Ok(Self::KvIndexer {
-            primary: KvIndexer::new_with_pruning(
-                cancellation_token.child_token(),
-                block_size,
-                kv_indexer_metrics.clone(),
-                None,
-            ),
+            primary,
             lower_tier: LowerTierIndexers::new_with_metrics(
                 1,
                 block_size,
@@ -367,7 +339,7 @@ impl Indexer {
             ),
             approx,
             primary_records_routing_decisions: false,
-            session_prefix_index,
+            session_updates,
         })
     }
 
@@ -405,7 +377,21 @@ impl Indexer {
                 return Ok(());
             }
         };
-        let session_update = SessionStoreUpdate::from_event(self, &event);
+        let session_update = if targets_primary {
+            match self {
+                Self::KvIndexer {
+                    session_updates, ..
+                }
+                | Self::Concurrent {
+                    session_updates, ..
+                } => session_updates.as_ref().and_then(|sender| {
+                    SessionMutation::from_event(&event).map(|mutation| (sender.clone(), mutation))
+                }),
+                Self::Remote { .. } | Self::None => None,
+            }
+        } else {
+            None
+        };
         let is_clear = matches!(&event.event.data, KvCacheEventData::Cleared);
         match self {
             Self::KvIndexer {
@@ -458,8 +444,8 @@ impl Indexer {
             }
             Self::Remote { .. } | Self::None => {}
         }
-        if let Some(update) = session_update {
-            update.apply();
+        if let Some((sender, update)) = session_update {
+            sender.enqueue(update)?;
         }
         Ok(())
     }
@@ -468,6 +454,22 @@ impl Indexer {
     pub(crate) async fn apply_event(&self, event: RouterEvent) {
         if let Err(error) = self.try_apply_event(event).await {
             tracing::error!(%error, "Failed to enqueue KV event");
+        }
+    }
+
+    #[cfg(test)]
+    async fn flush_session_updates(&self) -> Result<(), KvRouterError> {
+        match self {
+            Self::KvIndexer {
+                session_updates, ..
+            }
+            | Self::Concurrent {
+                session_updates, ..
+            } => match session_updates {
+                Some(updates) => updates.flush().await,
+                None => Ok(()),
+            },
+            Self::Remote { .. } | Self::None => Ok(()),
         }
     }
 
@@ -570,8 +572,8 @@ impl Indexer {
 #[cfg(test)]
 pub(super) mod test_util {
     use dynamo_kv_router::protocols::{
-        ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
-        KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier,
+        ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData,
+        KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier,
         compute_seq_hash_for_block,
     };
 
@@ -622,6 +624,33 @@ pub(super) mod test_util {
             storage_tier,
         )
     }
+
+    pub(crate) fn remove_event(
+        worker_id: u64,
+        dp_rank: u32,
+        event_id: u64,
+        block_hashes: Vec<ExternalSequenceBlockHash>,
+    ) -> RouterEvent {
+        RouterEvent::new(
+            worker_id,
+            KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Removed(KvCacheRemoveData { block_hashes }),
+                dp_rank,
+            },
+        )
+    }
+
+    pub(crate) fn clear_event(worker_id: u64, dp_rank: u32, event_id: u64) -> RouterEvent {
+        RouterEvent::new(
+            worker_id,
+            KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Cleared,
+                dp_rank,
+            },
+        )
+    }
 }
 
 #[cfg(test)]
@@ -631,15 +660,15 @@ mod tests {
 
     use tokio_util::sync::CancellationToken;
 
-    use super::test_util::store_event;
-    use super::{Indexer, LowerTierIndexers};
+    use super::test_util::{clear_event, remove_event, store_event};
+    use super::{Indexer, LowerTierIndexers, SessionUpdateSender};
     use dynamo_kv_router::{
         ConcurrentRadixTreeCompressed, SessionPrefixIndexer, ThreadPoolIndexer,
         approx::PruneConfig,
         indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics, RoutingDecisionHashes},
         protocols::{
-            BlockHashOptions, ExternalSequenceBlockHash, LocalBlockHash, StorageTier,
-            TokensWithHashes, WorkerWithDpRank, compute_block_hash_for_seq,
+            BlockHashOptions, ExternalSequenceBlockHash, KvCacheEventData, LocalBlockHash,
+            StorageTier, TokensWithHashes, WorkerWithDpRank, compute_block_hash_for_seq,
             compute_seq_hash_for_block,
         },
     };
@@ -654,7 +683,7 @@ mod tests {
             lower_tier: LowerTierIndexers::new(1, 4),
             approx: None,
             primary_records_routing_decisions: false,
-            session_prefix_index: None,
+            session_updates: None,
         }
     }
 
@@ -668,7 +697,7 @@ mod tests {
             lower_tier: LowerTierIndexers::new(2, 4),
             approx: None,
             primary_records_routing_decisions: false,
-            session_prefix_index: None,
+            session_updates: None,
         }
     }
 
@@ -685,8 +714,48 @@ mod tests {
             lower_tier: LowerTierIndexers::new(2, 4),
             approx: None,
             primary_records_routing_decisions: true,
-            session_prefix_index: None,
+            session_updates: None,
         }
+    }
+
+    fn make_session_test_indexer() -> (Indexer, Arc<SessionPrefixIndexer>) {
+        let session_prefix_index = Arc::new(SessionPrefixIndexer::new());
+        let primary = KvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+        );
+        let indexer = Indexer::KvIndexer {
+            primary: primary.clone(),
+            lower_tier: LowerTierIndexers::new(1, 4),
+            approx: None,
+            primary_records_routing_decisions: false,
+            session_updates: Some(SessionUpdateSender::for_legacy(
+                Arc::clone(&session_prefix_index),
+                primary,
+            )),
+        };
+        (indexer, session_prefix_index)
+    }
+
+    fn make_concurrent_session_test_indexer() -> (Indexer, Arc<SessionPrefixIndexer>) {
+        let session_prefix_index = Arc::new(SessionPrefixIndexer::new());
+        let primary = Arc::new(ThreadPoolIndexer::new(
+            ConcurrentRadixTreeCompressed::new(),
+            2,
+            4,
+        ));
+        let indexer = Indexer::Concurrent {
+            primary: Arc::clone(&primary),
+            lower_tier: LowerTierIndexers::new(2, 4),
+            approx: None,
+            primary_records_routing_decisions: false,
+            session_updates: Some(SessionUpdateSender::for_concurrent(
+                Arc::clone(&session_prefix_index),
+                primary,
+            )),
+        };
+        (indexer, session_prefix_index)
     }
 
     #[test]
@@ -706,18 +775,7 @@ mod tests {
 
     #[tokio::test]
     async fn only_attributed_stored_events_update_session_lineage() {
-        let session_prefix_index = Arc::new(SessionPrefixIndexer::new());
-        let indexer = Indexer::KvIndexer {
-            primary: KvIndexer::new(
-                CancellationToken::new(),
-                4,
-                Arc::new(KvIndexerMetrics::new_unregistered()),
-            ),
-            lower_tier: LowerTierIndexers::new(1, 4),
-            approx: None,
-            primary_records_routing_decisions: false,
-            session_prefix_index: Some(Arc::clone(&session_prefix_index)),
-        };
+        let (indexer, session_prefix_index) = make_session_test_indexer();
 
         indexer
             .apply_event(
@@ -727,10 +785,11 @@ mod tests {
         indexer
             .apply_event(store_event(7, 0, 2, &[], &[51], StorageTier::HostPinned))
             .await;
+        indexer.flush_session_updates().await.unwrap();
 
         assert_eq!(
             session_prefix_index
-                .get_session_block_lineage("session-1", None)
+                .get_session_block_lineage("session-1", WorkerWithDpRank::new(7, 0), None)
                 .unwrap(),
             vec![vec![ExternalSequenceBlockHash(41)]]
         );
@@ -740,6 +799,88 @@ mod tests {
             session_prefix_index
                 .get_node_from_hash(ExternalSequenceBlockHash(51))
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn physical_events_update_worker_local_session_frontiers_in_order() {
+        let (indexer, session_prefix_index) = make_session_test_indexer();
+        let first_worker = WorkerWithDpRank::new(7, 0);
+        let second_worker = WorkerWithDpRank::new(8, 0);
+        let first_store = store_event(7, 0, 1, &[], &[41, 42, 43], StorageTier::Device)
+            .with_session_id("session-1");
+        let block_hashes = match &first_store.event.data {
+            KvCacheEventData::Stored(stored) => stored
+                .blocks
+                .iter()
+                .map(|block| block.block_hash)
+                .collect::<Vec<_>>(),
+            _ => unreachable!(),
+        };
+        let second_store = store_event(8, 0, 1, &[], &[41, 42, 43], StorageTier::Device)
+            .with_session_id("session-1");
+
+        indexer.apply_event(first_store).await;
+        indexer.apply_event(second_store).await;
+        indexer
+            .apply_event(remove_event(7, 0, 2, block_hashes[1..].to_vec()))
+            .await;
+        indexer.flush_session_updates().await.unwrap();
+
+        assert_eq!(
+            session_prefix_index
+                .get_session_block_lineage("session-1", first_worker, None)
+                .unwrap(),
+            vec![vec![block_hashes[0]]]
+        );
+        assert_eq!(
+            session_prefix_index
+                .get_session_block_lineage("session-1", second_worker, None)
+                .unwrap(),
+            vec![block_hashes.clone()]
+        );
+
+        indexer.apply_event(clear_event(8, 0, 2)).await;
+        indexer.flush_session_updates().await.unwrap();
+        assert!(
+            session_prefix_index
+                .get_session_block_lineage("session-1", second_worker, None)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            session_prefix_index.node_count(),
+            3,
+            "physical removal preserves logical topology"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_physical_events_precede_session_updates() {
+        let (indexer, session_prefix_index) = make_concurrent_session_test_indexer();
+        let worker = WorkerWithDpRank::new(7, 0);
+        let store =
+            store_event(7, 0, 1, &[], &[41, 42], StorageTier::Device).with_session_id("session-1");
+        let block_hashes = match &store.event.data {
+            KvCacheEventData::Stored(stored) => stored
+                .blocks
+                .iter()
+                .map(|block| block.block_hash)
+                .collect::<Vec<_>>(),
+            _ => unreachable!(),
+        };
+
+        indexer.apply_event(store).await;
+        indexer
+            .apply_event(remove_event(7, 0, 2, vec![block_hashes[1]]))
+            .await;
+        indexer.flush_session_updates().await.unwrap();
+
+        assert_eq!(
+            session_prefix_index
+                .get_session_block_lineage("session-1", worker, None)
+                .unwrap(),
+            vec![vec![block_hashes[0]]]
         );
     }
 
@@ -1133,7 +1274,7 @@ mod tests {
             lower_tier: LowerTierIndexers::new(2, 4),
             approx: Some(super::SideIndexer::Concurrent(side)),
             primary_records_routing_decisions: false,
-            session_prefix_index: None,
+            session_updates: None,
         };
         assert!(indexer.records_routing_decisions());
 
@@ -1265,7 +1406,7 @@ mod tests {
             lower_tier: LowerTierIndexers::new(2, 4),
             approx: Some(super::SideIndexer::Concurrent(side)),
             primary_records_routing_decisions: false,
-            session_prefix_index: None,
+            session_updates: None,
         };
 
         let primary_worker = WorkerWithDpRank::new(10, 0);

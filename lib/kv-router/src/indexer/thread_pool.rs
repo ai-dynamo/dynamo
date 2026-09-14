@@ -749,7 +749,8 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
     /// NOTE: Rank-to-queue assignment is stable for the indexer's lifetime. Replacement reset
     /// depends on removal and acknowledgement using that same FIFO lane before activation. This
     /// proves queue progress only; ordinary event errors are logged by the worker.
-    async fn flush_worker_lane_and_wait(
+    #[doc(hidden)]
+    pub async fn flush_worker_lane_and_wait(
         &self,
         worker: WorkerWithDpRank,
     ) -> Result<(), KvRouterError> {
