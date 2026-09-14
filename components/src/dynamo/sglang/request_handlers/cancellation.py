@@ -19,13 +19,13 @@ _CANCELLATION_DRAIN_TIMEOUT_S = 1.0
 
 
 def _consume_detached_task(task: asyncio.Task[Any]) -> None:
-    """Consume a detached iterator task result without surfacing expected closure."""
+    """Consume a detached cancellation task result without surfacing closure."""
     try:
         task.result()
     except (asyncio.CancelledError, StopAsyncIteration):
         pass
     except Exception:
-        logging.exception("Detached SGLang iterator task failed during cancellation")
+        logging.exception("Detached SGLang task failed during cancellation")
 
 
 def _cancel_and_detach(task: asyncio.Task[Any]) -> None:
@@ -40,6 +40,25 @@ class CancellationMixin:
     engine: Any
     config: Any
     shutdown_event: asyncio.Event | None
+    _abort_retry_tasks: set[asyncio.Task[Any]]
+
+    def _start_abort_retry(
+        self,
+        tokenizer_manager: Any,
+        request_id: str,
+        registry: Mapping[str, Any],
+        state: Any,
+    ) -> None:
+        retry_task = asyncio.create_task(
+            self._retry_abort(tokenizer_manager, request_id, registry, state)
+        )
+        self._abort_retry_tasks.add(retry_task)
+        retry_task.add_done_callback(self._abort_retry_tasks.discard)
+        retry_task.add_done_callback(_consume_detached_task)
+
+    def _cancel_abort_retries(self) -> None:
+        for retry_task in tuple(self._abort_retry_tasks):
+            retry_task.cancel()
 
     async def _stream_until_cancelled(
         self,
@@ -260,7 +279,7 @@ class CancellationMixin:
         self._submit_abort(tokenizer_manager, request_id, context_id)
         server_args = resolved_server_args(self.config.server_args)
         if self._requires_abort_retry(server_args, dispatch_observed):
-            await self._retry_abort(tokenizer_manager, request_id, registry, state)
+            self._start_abort_retry(tokenizer_manager, request_id, registry, state)
 
     @asynccontextmanager
     async def _cancellation_monitor(
