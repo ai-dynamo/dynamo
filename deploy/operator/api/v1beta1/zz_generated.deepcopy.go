@@ -898,6 +898,11 @@ func (in *DynamoGraphDeploymentStatus) DeepCopyInto(out *DynamoGraphDeploymentSt
 			(*out)[key] = val
 		}
 	}
+	if in.RollingUpdate != nil {
+		in, out := &in.RollingUpdate, &out.RollingUpdate
+		*out = new(RollingUpdateStatus)
+		(*in).DeepCopyInto(*out)
+	}
 	if in.Placement != nil {
 		in, out := &in.Placement, &out.Placement
 		*out = new(PlacementStatus)
@@ -906,11 +911,6 @@ func (in *DynamoGraphDeploymentStatus) DeepCopyInto(out *DynamoGraphDeploymentSt
 	if in.LPX != nil {
 		in, out := &in.LPX, &out.LPX
 		*out = new(DynamoGraphDeploymentLPXStatus)
-		(*in).DeepCopyInto(*out)
-	}
-	if in.RollingUpdate != nil {
-		in, out := &in.RollingUpdate, &out.RollingUpdate
-		*out = new(RollingUpdateStatus)
 		(*in).DeepCopyInto(*out)
 	}
 }

@@ -133,6 +133,11 @@ type DynamoGraphDeploymentStatus struct {
 	// +optional
 	Checkpoints map[string]ComponentCheckpointStatus `json:"checkpoints,omitempty"`
 
+	// rollingUpdate tracks the progress of operator-managed rolling updates.
+	// Currently only supported for single-node, non-Grove deployments (DCD/Deployment).
+	// +optional
+	RollingUpdate *RollingUpdateStatus `json:"rollingUpdate,omitempty"`
+
 	// placement groups DGD-level scheduler placement signals (score, reporting
 	// state, and any future placement fields).
 	// +optional
@@ -141,11 +146,6 @@ type DynamoGraphDeploymentStatus struct {
 	// lpx contains the status of the graph's LPX workload, when present.
 	// +optional
 	LPX *DynamoGraphDeploymentLPXStatus `json:"lpx,omitempty"`
-
-	// rollingUpdate tracks the progress of operator-managed rolling updates.
-	// Currently only supported for single-node, non-Grove deployments (DCD/Deployment).
-	// +optional
-	RollingUpdate *RollingUpdateStatus `json:"rollingUpdate,omitempty"`
 }
 
 // DGD Ready condition reasons used to classify Grove-backed not-ready

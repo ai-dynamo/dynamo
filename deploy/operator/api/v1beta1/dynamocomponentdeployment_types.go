@@ -288,7 +288,7 @@ type DynamoComponentDeploymentStatus struct {
 // +kubebuilder:storageversion
 // +kubebuilder:resource:shortName=dcd
 // +kubebuilder:printcolumn:name="Available",type="string",JSONPath=".status.conditions[?(@.type=='Available')].status",description="Available"
-// +kubebuilder:printcolumn:name="Backend",type="string",JSONPath=`.spec.backendFramework`,description="GPU backend framework"
+// +kubebuilder:printcolumn:name="Backend",type="string",JSONPath=`.spec.backendFramework`,description="Backend framework (sglang, vllm, trtllm)"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
 // DynamoComponentDeployment is the Schema for the dynamocomponentdeployments API.

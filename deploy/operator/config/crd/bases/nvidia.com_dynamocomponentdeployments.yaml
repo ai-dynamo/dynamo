@@ -713,13 +713,12 @@ spec:
                       properties:
                         backendFramework:
                           description: |-
-                            BackendFramework is the runtime framework (vllm, sglang, trtllm, lpu).
+                            BackendFramework is the runtime framework (vllm, sglang, trtllm).
                             Deprecated: legacy identity only.
                           enum:
                             - vllm
                             - sglang
                             - trtllm
-                            - lpu
                           type: string
                         dtype:
                           description: |-
@@ -11484,8 +11483,9 @@ spec:
                         type: string
                       podTemplate:
                         description: |-
-                          PodTemplate configures Pods for this role. The enclosing component
-                          defines whether the template is required or may be inherited.
+                          PodTemplate defines the Pod configuration for this role. Admission permits
+                          it only when the enclosing component type explicitly supports role-specific
+                          Pod templates.
                         properties:
                           metadata:
                             description: |-
@@ -19717,8 +19717,6 @@ spec:
                   rule: '!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)'
                 - message: componentType is immutable after it is set
                   rule: '!has(oldSelf.componentType) || (has(self.componentType) && self.componentType == oldSelf.componentType)'
-                - message: componentType lpu is not supported; use lpx
-                  rule: '!has(self.componentType) || self.componentType != ''lpu'''
                 - message: replicas must be positive when componentType is lpx
                   rule: '!(has(self.componentType) && self.componentType == ''lpx'' && has(self.replicas) && self.replicas < 1)'
                 - message: scalingAdapter is not supported when componentType is lpx
@@ -19913,7 +19911,7 @@ spec:
           jsonPath: .status.conditions[?(@.type=='Available')].status
           name: Available
           type: string
-        - description: GPU backend framework
+        - description: Backend framework (sglang, vllm, trtllm)
           jsonPath: .spec.backendFramework
           name: Backend
           type: string
@@ -20198,13 +20196,12 @@ spec:
                           properties:
                             backendFramework:
                               description: |-
-                                backendFramework is the runtime framework (`vllm`, `sglang`, `trtllm`, or `lpu`).
+                                backendFramework is the runtime framework (`vllm`, `sglang`, or `trtllm`).
                                 Deprecated: legacy identity only.
                               enum:
                                 - vllm
                                 - sglang
                                 - trtllm
-                                - lpu
                               type: string
                             dtype:
                               description: |-

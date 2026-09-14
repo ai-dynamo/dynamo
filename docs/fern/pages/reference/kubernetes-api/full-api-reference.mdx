@@ -154,15 +154,15 @@ Replicas is the logical cardinality of this role in one complete component insta
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="podTemplate" type="PodTemplateSpec">
-PodTemplate configures Pods for this role. The enclosing component defines whether the template is required or may be inherited.
-See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
 <ParamField path="providerOverride" type="ProviderOverride">
 ProviderOverride configures the provider workload unit generated for this role. It is supported only for components embedded in a DGD.
 See [ProviderOverride](#provideroverride).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="podTemplate" type="PodTemplateSpec">
+PodTemplate defines the Pod configuration for this role. Admission permits it only when the enclosing component type explicitly supports role-specific Pod templates.
+See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -293,8 +293,8 @@ Model is the model identifier (e.g., "meta-llama/Llama-3-70B"). Deprecated: lega
 </ParamField>
 
 <ParamField path="backendFramework" type="string" required={true}>
-BackendFramework is the runtime framework (vllm, sglang, trtllm, lpu). Deprecated: legacy identity only.
-**Validation:** Enum: [vllm sglang trtllm lpu]  Required: \&#123;\&#125;
+BackendFramework is the runtime framework (vllm, sglang, trtllm). Deprecated: legacy identity only.
+**Validation:** Enum: [vllm sglang trtllm]  Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="dynamoVersion" type="string">
@@ -1092,6 +1092,12 @@ See [ServiceCheckpointStatus](#servicecheckpointstatus).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
+<ParamField path="rollingUpdate" type="RollingUpdateStatus">
+RollingUpdate tracks the progress of operator manged rolling updates. Currently only supported for singl-node, non-Grove deployments (DCD/Deployment).
+See [RollingUpdateStatus](#rollingupdatestatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
 <ParamField path="placement" type="PlacementStatus">
 Placement groups DGD-level scheduler placement signals (score, reporting state, and any future placement fields).
 See [PlacementStatus](#placementstatus).
@@ -1101,12 +1107,6 @@ See [PlacementStatus](#placementstatus).
 <ParamField path="lpx" type="DynamoGraphDeploymentLPXStatus">
 LPX contains the status of the graph's LPX workload, when present.
 See [DynamoGraphDeploymentLPXStatus](#dynamographdeploymentlpxstatus).
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="rollingUpdate" type="RollingUpdateStatus">
-RollingUpdate tracks the progress of operator manged rolling updates. Currently only supported for singl-node, non-Grove deployments (DCD/Deployment).
-See [RollingUpdateStatus](#rollingupdatestatus).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -2613,8 +2613,8 @@ model is the model identifier (e.g. "meta-llama/Llama-3-70B"). Deprecated: legac
 </ParamField>
 
 <ParamField path="backendFramework" type="string" required={true}>
-backendFramework is the runtime framework (`vllm`, `sglang`, `trtllm`, or `lpu`). Deprecated: legacy identity only.
-**Validation:** Enum: [vllm sglang trtllm lpu]  Required: \&#123;\&#125;
+backendFramework is the runtime framework (`vllm`, `sglang`, or `trtllm`). Deprecated: legacy identity only.
+**Validation:** Enum: [vllm sglang trtllm]  Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="dynamoVersion" type="string">
@@ -3370,6 +3370,12 @@ See [ComponentCheckpointStatus](#componentcheckpointstatus).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
+<ParamField path="rollingUpdate" type="RollingUpdateStatus">
+rollingUpdate tracks the progress of operator-managed rolling updates. Currently only supported for single-node, non-Grove deployments (DCD/Deployment).
+See [RollingUpdateStatus](#v1beta1-rollingupdatestatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
 <ParamField path="placement" type="PlacementStatus">
 placement groups DGD-level scheduler placement signals (score, reporting state, and any future placement fields).
 See [PlacementStatus](#v1beta1-placementstatus).
@@ -3379,12 +3385,6 @@ See [PlacementStatus](#v1beta1-placementstatus).
 <ParamField path="lpx" type="DynamoGraphDeploymentLPXStatus">
 lpx contains the status of the graph's LPX workload, when present.
 See [DynamoGraphDeploymentLPXStatus](#dynamographdeploymentlpxstatus).
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="rollingUpdate" type="RollingUpdateStatus">
-rollingUpdate tracks the progress of operator-managed rolling updates. Currently only supported for single-node, non-Grove deployments (DCD/Deployment).
-See [RollingUpdateStatus](#v1beta1-rollingupdatestatus).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>

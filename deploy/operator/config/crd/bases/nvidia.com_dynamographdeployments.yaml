@@ -1054,13 +1054,12 @@ spec:
                             properties:
                               backendFramework:
                                 description: |-
-                                  BackendFramework is the runtime framework (vllm, sglang, trtllm, lpu).
+                                  BackendFramework is the runtime framework (vllm, sglang, trtllm).
                                   Deprecated: legacy identity only.
                                 enum:
                                   - vllm
                                   - sglang
                                   - trtllm
-                                  - lpu
                                 type: string
                               dtype:
                                 description: |-
@@ -11874,8 +11873,9 @@ spec:
                               type: string
                             podTemplate:
                               description: |-
-                                PodTemplate configures Pods for this role. The enclosing component
-                                defines whether the template is required or may be inherited.
+                                PodTemplate defines the Pod configuration for this role. Admission permits
+                                it only when the enclosing component type explicitly supports role-specific
+                                Pod templates.
                               properties:
                                 metadata:
                                   description: |-
@@ -20134,8 +20134,6 @@ spec:
                         rule: '!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)'
                       - message: componentType is immutable after it is set
                         rule: '!has(oldSelf.componentType) || (has(self.componentType) && self.componentType == oldSelf.componentType)'
-                      - message: componentType lpu is not supported; use lpx
-                        rule: '!has(self.componentType) || self.componentType != ''lpu'''
                       - message: lpx may only be set when componentType is lpx
                         rule: '!has(self.lpx) || (has(self.componentType) && self.componentType == ''lpx'')'
                       - message: lpx is required when componentType is lpx
@@ -20914,13 +20912,12 @@ spec:
                                 properties:
                                   backendFramework:
                                     description: |-
-                                      backendFramework is the runtime framework (`vllm`, `sglang`, `trtllm`, or `lpu`).
+                                      backendFramework is the runtime framework (`vllm`, `sglang`, or `trtllm`).
                                       Deprecated: legacy identity only.
                                     enum:
                                       - vllm
                                       - sglang
                                       - trtllm
-                                      - lpu
                                     type: string
                                   dtype:
                                     description: |-

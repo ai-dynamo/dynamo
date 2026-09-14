@@ -124,14 +124,14 @@ func (in *ComponentRoleSpec) DeepCopyInto(out *ComponentRoleSpec) {
 		*out = new(int32)
 		**out = **in
 	}
-	if in.PodTemplate != nil {
-		in, out := &in.PodTemplate, &out.PodTemplate
-		*out = new(v1.PodTemplateSpec)
-		(*in).DeepCopyInto(*out)
-	}
 	if in.ProviderOverride != nil {
 		in, out := &in.ProviderOverride, &out.ProviderOverride
 		*out = new(ProviderOverride)
+		(*in).DeepCopyInto(*out)
+	}
+	if in.PodTemplate != nil {
+		in, out := &in.PodTemplate, &out.PodTemplate
+		*out = new(v1.PodTemplateSpec)
 		(*in).DeepCopyInto(*out)
 	}
 }
@@ -962,6 +962,11 @@ func (in *DynamoGraphDeploymentStatus) DeepCopyInto(out *DynamoGraphDeploymentSt
 			(*out)[key] = val
 		}
 	}
+	if in.RollingUpdate != nil {
+		in, out := &in.RollingUpdate, &out.RollingUpdate
+		*out = new(RollingUpdateStatus)
+		(*in).DeepCopyInto(*out)
+	}
 	if in.Placement != nil {
 		in, out := &in.Placement, &out.Placement
 		*out = new(PlacementStatus)
@@ -970,11 +975,6 @@ func (in *DynamoGraphDeploymentStatus) DeepCopyInto(out *DynamoGraphDeploymentSt
 	if in.LPX != nil {
 		in, out := &in.LPX, &out.LPX
 		*out = new(v1beta1.DynamoGraphDeploymentLPXStatus)
-		(*in).DeepCopyInto(*out)
-	}
-	if in.RollingUpdate != nil {
-		in, out := &in.RollingUpdate, &out.RollingUpdate
-		*out = new(RollingUpdateStatus)
 		(*in).DeepCopyInto(*out)
 	}
 }

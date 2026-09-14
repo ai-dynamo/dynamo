@@ -526,10 +526,10 @@ type DynamoCheckpointIdentity struct {
 	// +kubebuilder:validation:MinLength=1
 	Model string `json:"model"`
 
-	// backendFramework is the runtime framework (`vllm`, `sglang`, `trtllm`, or `lpu`).
+	// backendFramework is the runtime framework (`vllm`, `sglang`, or `trtllm`).
 	// Deprecated: legacy identity only.
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Enum=vllm;sglang;trtllm;lpu
+	// +kubebuilder:validation:Enum=vllm;sglang;trtllm
 	BackendFramework string `json:"backendFramework"`
 
 	// dynamoVersion is the Dynamo platform version.

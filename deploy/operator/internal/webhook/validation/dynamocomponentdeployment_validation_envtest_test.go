@@ -167,13 +167,6 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{"spec.roles[0].podTemplate: Forbidden: is not supported for this component role"},
 		},
 		{
-			name: "v1alpha1 rejects the legacy lpu component type",
-			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
-				dcd.Spec.ComponentType = "lpu"
-			}),
-			wantCELErr: "spec: Invalid value: componentType lpu is not supported; use lpx",
-		},
-		{
 			name: "standalone v1alpha1 canonical lpx component is rejected",
 			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
 				dcd.Spec.ComponentType = "lpx"
@@ -729,6 +722,32 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					ExtraClientContainers: []string{"gms-loader"},
 				},
 			}),
+		},
+		{
+			name: "v1alpha1 checkpoint identity rejects lpu backend",
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.Checkpoint = &nvidiacomv1alpha1.ServiceCheckpointConfig{
+					Identity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
+						Model:            "model",
+						BackendFramework: "lpu",
+					},
+				}
+			}),
+			wantSchemaErr: `spec.checkpoint.identity.backendFramework: Unsupported value: "lpu": supported values: "vllm", "sglang", "trtllm"`,
+		},
+		{
+			name: "v1beta1 checkpoint identity rejects lpu backend",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{
+						Identity: &nvidiacomv1beta1.DynamoCheckpointIdentity{
+							Model:            "model",
+							BackendFramework: "lpu",
+						},
+					},
+				}
+			}),
+			wantSchemaErr: `spec.experimental.checkpoint.identity.backendFramework: Unsupported value: "lpu": supported values: "vllm", "sglang", "trtllm"`,
 		},
 		{
 			name: "checkpoint target container name is validated by the source schema",

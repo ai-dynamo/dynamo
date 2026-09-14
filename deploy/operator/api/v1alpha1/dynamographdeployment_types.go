@@ -228,6 +228,10 @@ type DynamoGraphDeploymentStatus struct {
 	// The map key is the service name from spec.services.
 	// +optional
 	Checkpoints map[string]ServiceCheckpointStatus `json:"checkpoints,omitempty"`
+	// RollingUpdate tracks the progress of operator manged rolling updates.
+	// Currently only supported for singl-node, non-Grove deployments (DCD/Deployment).
+	// +optional
+	RollingUpdate *RollingUpdateStatus `json:"rollingUpdate,omitempty"`
 	// Placement groups DGD-level scheduler placement signals (score, reporting
 	// state, and any future placement fields).
 	// +optional
@@ -235,10 +239,6 @@ type DynamoGraphDeploymentStatus struct {
 	// LPX contains the status of the graph's LPX workload, when present.
 	// +optional
 	LPX *v1beta1.DynamoGraphDeploymentLPXStatus `json:"lpx,omitempty"`
-	// RollingUpdate tracks the progress of operator manged rolling updates.
-	// Currently only supported for singl-node, non-Grove deployments (DCD/Deployment).
-	// +optional
-	RollingUpdate *RollingUpdateStatus `json:"rollingUpdate,omitempty"`
 }
 
 // ServiceCheckpointStatus contains checkpoint information for a single service.

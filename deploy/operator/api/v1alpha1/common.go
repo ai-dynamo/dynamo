@@ -89,15 +89,16 @@ type ComponentRoleSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	Replicas *int32 `json:"replicas,omitempty"`
 
-	// PodTemplate configures Pods for this role. The enclosing component
-	// defines whether the template is required or may be inherited.
-	// +optional
-	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
-
 	// ProviderOverride configures the provider workload unit generated for this
 	// role. It is supported only for components embedded in a DGD.
 	// +optional
 	ProviderOverride *ProviderOverride `json:"providerOverride,omitempty"`
+
+	// PodTemplate defines the Pod configuration for this role. Admission permits
+	// it only when the enclosing component type explicitly supports role-specific
+	// Pod templates.
+	// +optional
+	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 }
 
 // +kubebuilder:validation:XValidation:rule="!has(self.create) || self.create == false || (has(self.size) && has(self.storageClass) && has(self.volumeAccessMode))",message="When create is true, size, storageClass, and volumeAccessMode are required"
@@ -475,10 +476,10 @@ type DynamoCheckpointIdentity struct {
 	// +kubebuilder:validation:Required
 	Model string `json:"model"`
 
-	// BackendFramework is the runtime framework (vllm, sglang, trtllm, lpu).
+	// BackendFramework is the runtime framework (vllm, sglang, trtllm).
 	// Deprecated: legacy identity only.
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Enum=vllm;sglang;trtllm;lpu
+	// +kubebuilder:validation:Enum=vllm;sglang;trtllm
 	BackendFramework string `json:"backendFramework"`
 
 	// DynamoVersion is the Dynamo platform version.
