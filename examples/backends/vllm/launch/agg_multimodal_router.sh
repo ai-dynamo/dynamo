@@ -142,10 +142,8 @@ GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 WORKER_PORTS=()
 KV_EVENTS_PORTS=()
 for i in $(seq 1 "${NUM_WORKERS}"); do
-    HARNESS_SYSTEM_VAR="DYN_SYSTEM_PORT${i}"
-    HARNESS_KV_VAR="DYN_VLLM_KV_EVENT_PORT${i}"
-    WORKER_PORT="${!HARNESS_SYSTEM_VAR:-$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))}"
-    KV_EVENTS_PORT="${!HARNESS_KV_VAR:-$((KV_EVENTS_PORT_BASE + (i - 1)))}"
+    WORKER_PORT=$(dyn_port DYN_SYSTEM_PORT "$i" $((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2)))
+    KV_EVENTS_PORT=$(dyn_port DYN_VLLM_KV_EVENT_PORT "$i" $((KV_EVENTS_PORT_BASE + (i - 1))))
     WORKER_PORTS+=("${WORKER_PORT}")
     KV_EVENTS_PORTS+=("${KV_EVENTS_PORT}")
     if [[ "${SINGLE_GPU}" == "true" ]]; then GPU_ID=0; else GPU_ID=$((i - 1)); fi
@@ -172,7 +170,8 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
 done
 
 echo "=== Starting frontend (KV router, MM-aware exact routing) ==="
-env "${COMMON_ENV[@]}" \
+env -u DYN_SYSTEM_PORT -u DYN_SYSTEM_PORT1 -u DYN_SYSTEM_PORT2 -u DYN_SYSTEM_PORT3 \
+    "${COMMON_ENV[@]}" \
     "DYN_LOG=${DYN_LOG_VAL}" \
 python -m dynamo.frontend \
     --http-port "${HTTP_PORT}" \

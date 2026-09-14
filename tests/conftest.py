@@ -1289,7 +1289,7 @@ def dynamo_dynamic_ports(num_system_ports) -> Generator[ServicePorts, None, None
 
     - frontend_port: OpenAI-compatible HTTP/gRPC ingress (dynamo.frontend)
     - system_ports: List of worker metrics/system ports (configurable count via num_system_ports)
-    - kv_event_port: ZMQ port for vLLM KV event publishing (avoids collisions under xdist)
+    - kv_event_ports: one ZMQ port per worker for vLLM KV event publishing
     """
     # Track ports as they are allocated so a failure mid-sequence (e.g. NIXL
     # allocation raising) still cleans up earlier reservations via finally,
@@ -1300,8 +1300,8 @@ def dynamo_dynamic_ports(num_system_ports) -> Generator[ServicePorts, None, None
         all_ports.append(frontend_port)
         system_port_list = allocate_ports(num_system_ports, DynamoPortRange.SERVE.value)
         all_ports.extend(system_port_list)
-        kv_event_port = allocate_port(DynamoPortRange.SERVE.value)
-        all_ports.append(kv_event_port)
+        kv_event_ports = allocate_ports(num_system_ports, DynamoPortRange.SERVE.value)
+        all_ports.extend(kv_event_ports)
         fpm_port = allocate_port(DynamoPortRange.FPM.value)
         all_ports.append(fpm_port)
         # One NIXL side-channel port per worker (avoids xdist collisions on shared hosts).
@@ -1312,7 +1312,7 @@ def dynamo_dynamic_ports(num_system_ports) -> Generator[ServicePorts, None, None
         yield ServicePorts(
             frontend_port=frontend_port,
             system_ports=system_port_list,
-            kv_event_port=kv_event_port,
+            kv_event_ports=kv_event_ports,
             fpm_port=fpm_port,
             nixl_side_channel_ports=nixl_side_channel_ports,
         )
