@@ -31,7 +31,7 @@ from uuid import uuid4
 
 from gpu_memory_service.common.locks import GrantedLockType
 from gpu_memory_service.common.utils import align_to_granularity
-from gpu_memory_service.common.vmm import get_vmm
+from gpu_memory_service.common.vmm import VMMDevice, get_vmm
 
 logger = logging.getLogger(__name__)
 
@@ -78,8 +78,8 @@ class PersistentAllocationManager:
     next claimant with the matching key reattaches.
     """
 
-    def __init__(self, device: int = 0):
-        self._vmm = get_vmm()
+    def __init__(self, device: int = 0, *, vmm: VMMDevice | None = None):
+        self._vmm = vmm if vmm is not None else get_vmm()
         self._vmm.ensure_initialized()
         self._device = device
         self._granularity = self._vmm.get_allocation_granularity(device)

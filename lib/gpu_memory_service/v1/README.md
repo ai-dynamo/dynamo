@@ -69,6 +69,65 @@ V0 and `DYN_GMS_USE_V1=true` launch profiles are mutually exclusive. Mixed
 initialization is unsupported by contract and prevented by launch/process
 topology; no runtime cross-profile arbitration is provided or needed.
 
+## Persistent KV pool backend
+
+V1 also exposes an independent persistent-pool namespace for crash-surviving
+engine memory. A client connects with `RW_PERSISTENT` and accesses the namespace
+through `V1PersistentPoolBackend`, which implements the same backend-neutral
+contract as the existing V0 adapter.
+
+```text
+PersistentPoolBackend
+  claim(engine_id, tag, size, shared)
+  export(engine_id, tag)
+  inventory(engine_id, include_unclaimed)
+  destroy(engine_id, tag)
+                  |
+                  v
+V1 typed RPC -> PersistentAllocationManager -> daemon-owned CUDA VMM backing
+```
+
+This namespace is deliberately separate from V1's transactional allocation
+epochs:
+
+- a persistent session does not block weight/KV epoch readers or writers;
+- disconnect releases that session's claims but retains its allocations;
+- an uncommitted transactional writer abort clears only its transactional epoch;
+- shared claims permit cooperating engines to attach concurrently, but do not
+  grant permission to access individual KV pages; and
+- explicit destruction is the only normal operation that retires backing.
+
+Shared attach must therefore still be paired with KV leases, generation-fenced
+content publication, and engine-index hydration. An active persistent session
+also prevents Snapshot checkpoint preparation so the controller cannot snapshot
+while KV writers remain attached.
+
+Disconnect is not enough to make retained pools checkpoint-safe: preparation
+also rejects orphaned persistent backing in either domain. Persistent-pool
+checkpoint/restore is not implemented. The controller must explicitly destroy
+such pools if discarding their KV is acceptable; preparation never discards them.
+Persistent sessions cannot enumerate or export transactional allocations.
+Typed pool errors have their own wire tag; ordinary V1 errors retain the legacy
+wire shape for existing clients.
+
+This change supplies the V1 allocation backend and wire semantics. The existing
+V1 vLLM/SGLang sleep integrations continue to use ephemeral KV epochs until a
+separate engine-integration change selects persistent pools and wires the lease
+and content-directory lifecycle end to end.
+
+Before claiming engine-level V1 failover support, the follow-up must:
+
+- Select the backend explicitly and validate daemon incarnation and GPU identity.
+- Wire claim/unclaim, failed-import rollback, lease fencing, directory adoption,
+  and engine-index hydration through the selected backend.
+- Validate real-CUDA crash/reattach byte equality, then vLLM/SGLang TP=1 and TP=2
+  failover with output correctness and baseline/primary/shadow latency trials.
+
+The CPU contract tests validate transport and ownership rules, not GPU byte
+survival or subsecond engine recovery. Contention backoff defaults to two seconds
+via `GMS_PERSISTENT_CLAIM_RETRY_SECS`; it retries busy owners only and does not
+replace session RPC timeouts. Zero disables retries.
+
 Both client domains use the same `GMSClientMemoryManager` class and the same
 V0-style operations:
 

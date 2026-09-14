@@ -85,7 +85,11 @@ class _V1Owner:
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline:
             sessions = self.managers[domain].session_snapshot()
-            if not sessions.rw_sessions and not sessions.ro_sessions:
+            if (
+                not sessions.rw_sessions
+                and not sessions.ro_sessions
+                and not sessions.persistent_sessions
+            ):
                 return
             time.sleep(0.001)
         raise TimeoutError(f"{domain} sessions did not quiesce")
@@ -101,6 +105,32 @@ def v1_owner(tmp_path):
         yield owner
     finally:
         owner.close()
+
+
+@pytest.mark.parametrize("domain", ["weights", "kv_cache"])
+def test_checkpoint_rejects_unclaimed_persistent_backing(v1_owner, domain):
+    v1_owner.publish_weights()
+    session = _GMSClientSession(v1_owner.paths[domain], RequestedLockType.RW_PERSISTENT)
+    try:
+        session.claim_persistent("engine", "kv", 64)
+    finally:
+        session.close()
+    v1_owner.wait_for_quiesced(domain)
+    control = v1_owner.control()
+    with pytest.raises(RuntimeError, match="persistent pools must be destroyed"):
+        control.prepare()
+    assert control.state().state == "serving"
+    assert v1_owner.managers[domain].persistent_allocation_count == 1
+    # Refusal preserves bytes and leaves admission open for explicit cleanup.
+    cleanup = _GMSClientSession(v1_owner.paths[domain], RequestedLockType.RW_PERSISTENT)
+    try:
+        assert cleanup.destroy_persistent("engine", "kv")
+    finally:
+        cleanup.close()
+    v1_owner.wait_for_quiesced(domain)
+    prepared = control.prepare()
+    assert prepared.state == "checkpoint_ready"
+    control.abort(prepared.token)
 
 
 @pytest.mark.timeout(10)
@@ -195,6 +225,26 @@ def test_prepare_rejects_invalid_domain_and_session_state(
     )
     with pytest.raises(RuntimeError, match="kv_cache must be empty"):
         control.prepare()
+
+
+@pytest.mark.timeout(10)
+def test_prepare_rejects_active_persistent_kv_session(v1_owner) -> None:
+    v1_owner.publish_weights()
+    control = v1_owner.control()
+    persistent = _GMSClientSession(
+        v1_owner.paths["kv_cache"],
+        RequestedLockType.RW_PERSISTENT,
+    )
+    try:
+        assert v1_owner.managers["kv_cache"].session_snapshot().persistent_sessions == 1
+        with pytest.raises(RuntimeError, match="kv_cache has active or waiting"):
+            control.prepare()
+    finally:
+        persistent.close()
+    v1_owner.wait_for_quiesced("kv_cache")
+    prepared = control.prepare()
+    assert prepared.token is not None
+    control.abort(prepared.token)
 
 
 @pytest.mark.timeout(10)
