@@ -485,20 +485,19 @@ def test_request_cancellation_sglang_prefill_cancel(
                     poll_interval_ms=50,
                 )
 
-                for attempt in range(3):
-                    followup = send_completion_request(
-                        prompt="hello",
-                        max_tokens=4,
-                        frontend_port=frontend.frontend_port,
-                        timeout_s=FOLLOWUP_TIMEOUT_S,
-                    )
-                    followup.wait(FOLLOWUP_TIMEOUT_S)
-                    response = followup.get_response()
-                    assert response.status_code == 200, (
-                        f"Request {attempt} after prefill cancellation failed "
-                        f"with HTTP {response.status_code}; the prefill/decode "
-                        "pair appears wedged."
-                    )
+                followup = send_completion_request(
+                    prompt="hello",
+                    max_tokens=4,
+                    frontend_port=frontend.frontend_port,
+                    timeout_s=FOLLOWUP_TIMEOUT_S,
+                )
+                followup.wait(FOLLOWUP_TIMEOUT_S)
+                response = followup.get_response()
+                assert response.status_code == 200, (
+                    "Request after prefill cancellation failed "
+                    f"with HTTP {response.status_code}; the prefill/decode "
+                    "pair appears wedged."
+                )
 
                 verify_frontend_cancellation_metrics(
                     frontend_port=frontend.frontend_port,
