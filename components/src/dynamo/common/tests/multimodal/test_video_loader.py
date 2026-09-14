@@ -350,6 +350,42 @@ async def test_decode_video_bytes_backendless_cv2_is_actionable(monkeypatch):
     assert "video backend" in msg
 
 
+class _FailedOpenMediaIO:
+    """What OpenCV's own video backend raises when VideoCapture opens nothing."""
+
+    def load_bytes(self, content: bytes):
+        raise ValueError("Could not open video stream")
+
+
+@pytest.mark.asyncio
+async def test_decode_video_bytes_failed_open_value_error_is_actionable(monkeypatch):
+    """The failed-open ValueError must reach the same actionable error.
+
+    A backendless cv2 fails two ways, and only one of them names cv2: the
+    OpenCV backend's own failed-open error is a bare ValueError whose text
+    mentions neither cv2 nor the codec. Without this conversion that message
+    reaches the client with no remedy at all.
+    """
+    loader = VideoLoader()
+    monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: "vp9")
+    monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
+    monkeypatch.setattr(video_loader_module, "_cv2_lacks_video_backend", lambda: True)
+
+    monkeypatch.setattr(codec_errors.importlib.util, "find_spec", lambda name: object())
+    monkeypatch.setattr(
+        codec_errors.importlib.metadata, "version", lambda p: "5.0.0.93"
+    )
+
+    with pytest.raises(MissingMediaDecoderError) as exc_info:
+        await loader._decode_video_bytes(b"vp9-bytes", _FailedOpenMediaIO())
+
+    msg = str(exc_info.value)
+    assert "'vp9'" in msg
+    assert "opencv-python-headless==5.0.0.93" in msg
+    assert "--force-reinstall" in msg
+    assert "video backend" in msg
+
+
 @pytest.mark.asyncio
 async def test_backendless_cv2_does_not_pre_empt_a_working_decode(monkeypatch):
     """The check must not short-circuit a decoder that would have succeeded.

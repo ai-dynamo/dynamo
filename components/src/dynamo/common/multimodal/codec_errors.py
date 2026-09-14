@@ -92,7 +92,7 @@ def _install_hint(backend: str, package: str, module: str) -> str:
         else:
             hint = (
                 "first determine the shipped cv2 version with "
-                "`python -c \"import cv2; print(cv2.__version__)\"`, then replace "
+                '`python -c "import cv2; print(cv2.__version__)"`, then replace '
                 "it with the binary wheel of that same version: "
                 f"`pip install --no-deps --force-reinstall --only-binary {package} "
                 f"'{package}==<cv2-version>'`"
