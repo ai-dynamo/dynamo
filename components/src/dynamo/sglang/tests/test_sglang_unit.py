@@ -492,6 +492,92 @@ async def test_parse_args_enables_incremental_streaming_before_resolution(
     assert config.server_args.incremental_streaming_output is True
 
 
+def _dcp_server_args_stub(**overrides):
+    """Minimal resolved ServerArgs surface that parse_args reads."""
+    stub = SimpleNamespace(
+        disaggregation_mode="null",
+        dllm_algorithm=None,
+        kv_events_config=None,
+        dcp_size=1,
+        attention_backend=None,
+        prefill_attention_backend=None,
+        decode_attention_backend=None,
+        use_mla_backend=lambda: False,
+        get_model_config=lambda: SimpleNamespace(is_multimodal=False),
+    )
+    for name, value in overrides.items():
+        setattr(stub, name, value)
+    return stub
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["fa3", "flashinfer"])
+async def test_parse_args_rejects_dcp_on_backend_without_dcp_support(
+    monkeypatch, mock_sglang_cli, backend
+):
+    monkeypatch.setattr(
+        "dynamo.sglang.args.ServerArgs.from_cli_args",
+        lambda _: _dcp_server_args_stub(dcp_size=2, attention_backend=backend),
+    )
+    mock_sglang_cli(model="/tmp")
+
+    with pytest.raises(ValueError) as excinfo:
+        await parse_args(sys.argv[1:])
+
+    message = str(excinfo.value)
+    assert f"'{backend}'" in message
+    assert "--dcp-size 1" in message
+    # No --attention-backend was passed, so the message must say the engine
+    # picked this one -- that is the reported reproduction.
+    assert "automatically" in message
+
+
+@pytest.mark.asyncio
+async def test_parse_args_rejects_dcp_on_decode_only_unsupported_backend(
+    monkeypatch, mock_sglang_cli
+):
+    monkeypatch.setattr(
+        "dynamo.sglang.args.ServerArgs.from_cli_args",
+        lambda _: _dcp_server_args_stub(
+            dcp_size=2,
+            prefill_attention_backend="triton",
+            decode_attention_backend="fa3",
+        ),
+    )
+    mock_sglang_cli(model="/tmp")
+
+    with pytest.raises(ValueError) as excinfo:
+        await parse_args(sys.argv[1:])
+
+    message = str(excinfo.value)
+    assert "decode attention backend 'fa3'" in message
+    assert "prefill attention backend" not in message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"dcp_size": 2, "attention_backend": "triton"},
+        {"dcp_size": 1, "attention_backend": "fa3"},
+        {"dcp_size": 2, "attention_backend": "fa3", "use_mla_backend": lambda: True},
+    ],
+    ids=["dcp-capable-backend", "dcp-disabled", "mla-model"],
+)
+async def test_parse_args_accepts_supported_dcp_configurations(
+    monkeypatch, mock_sglang_cli, overrides
+):
+    server_args = _dcp_server_args_stub(**overrides)
+    monkeypatch.setattr(
+        "dynamo.sglang.args.ServerArgs.from_cli_args", lambda _: server_args
+    )
+    mock_sglang_cli(model="/tmp")
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.server_args is server_args
+
+
 @pytest.mark.asyncio
 async def test_parse_args_applies_dynamo_defaults_before_resolution(
     monkeypatch, mock_sglang_cli

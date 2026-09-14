@@ -38,11 +38,23 @@ from dynamo.sglang._compat import (
     ensure_sglang_tensor_image_size,
     get_sglang_model_config,
     resolved_server_args,
+    sglang_uses_mla_backend,
 )
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
 
 configure_dynamo_logging()
 PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
+
+# SGLang attention backends that may run with --dcp-size > 1 on a non-MLA
+# model. `triton` is the only non-MLA backend that reads the DCP parallel
+# state in its forward path. `aiter` is here because SGLang's own
+# _handle_dcp_validation() accepts dcp_size > 1 on ROCm with no further
+# checks, and `aiter` is the MHA default there; rejecting it would block a
+# combination the engine itself treats as supported.
+#
+# This is an allowlist on purpose: a backend that gains DCP support upstream is
+# added here deliberately, so a new backend cannot silently reopen the gap.
+DCP_CAPABLE_ATTENTION_BACKENDS = frozenset({"triton", "aiter"})
 
 
 class DynamoConfig(DynamoRuntimeConfig, DynamoSGLangConfig):
@@ -188,6 +200,67 @@ def _validate_parser_flags(
     if sglang_val and dynamo_val:
         logging.error(f"Cannot use both --{name} and --dyn-{name}.")
         sys.exit(1)
+
+
+def _validate_dcp_attention_backend(server_args: Any, parsed_args: Namespace) -> None:
+    """Reject --dcp-size > 1 on an attention backend that never reads it.
+
+    SGLang sizes the KV cache pool the DCP way: DCP ranks replicate the KV
+    heads instead of splitting them, and partition the context dimension. Only
+    some attention backends honor that in their forward path; the rest still do
+    a plain tensor-parallel head split, so the two disagree on the KV row width
+    and the scheduler dies on the first real request. Fail here instead, before
+    the worker registers and starts taking traffic.
+    """
+    # Diffusion/video argument stubs and older SGLang releases omit dcp_size.
+    dcp_size = int(getattr(server_args, "dcp_size", 1) or 1)
+    if dcp_size <= 1:
+        return
+
+    # MLA KV pools have no per-rank KV head split to disagree about, and every
+    # MLA attention backend consumes the DCP parallel state.
+    if sglang_uses_mla_backend(server_args):
+        return
+
+    # Read the backend SGLang resolved, not the flag the user typed: the
+    # failure reproduces with no --attention-backend at all, because fa3 is the
+    # automatic choice for an MHA model on Hopper.
+    resolved = resolved_server_args(server_args)
+    base_backend = getattr(resolved, "attention_backend", None)
+    phase_backends = {
+        "prefill": getattr(resolved, "prefill_attention_backend", None) or base_backend,
+        "decode": getattr(resolved, "decode_attention_backend", None) or base_backend,
+    }
+
+    unsupported = sorted(
+        (phase, backend)
+        for phase, backend in phase_backends.items()
+        # A backend name SGLang has not resolved yet is unknown, not
+        # unsupported; guessing would break launches on a release that
+        # resolves it later.
+        if backend is not None and backend not in DCP_CAPABLE_ATTENTION_BACKENDS
+    )
+    if not unsupported:
+        return
+
+    named = ", ".join(
+        f"{phase} attention backend '{backend}'" for phase, backend in unsupported
+    )
+    typed_backend = getattr(parsed_args, "attention_backend", None)
+    automatic = (
+        ""
+        if typed_backend
+        else " SGLang selected it automatically because no --attention-backend was passed."
+    )
+    raise ValueError(
+        f"--dcp-size {dcp_size} is not supported with the {named}.{automatic} "
+        "Decode context parallel replicates the KV heads across DCP ranks when "
+        "it sizes the KV cache pool, but this backend still splits them across "
+        "tensor-parallel ranks, so the worker crashes on its first request. "
+        "Use --dcp-size 1, or an attention backend that implements decode "
+        "context parallel (--attention-backend triton), or an MLA model with "
+        "one of SGLang's MLA attention backends."
+    )
 
 
 def _has_cli_flag(args: list[str], flag: str) -> bool:
@@ -643,6 +716,8 @@ async def parse_args(args: list[str]) -> Config:
             "SGLang integration. Dynamo normalizes request priority so higher "
             "values are always higher priority at the API layer."
         )
+
+    _validate_dcp_attention_backend(server_args, parsed_args)
 
     if dynamo_config.use_sglang_tokenizer:
         warnings.warn(
