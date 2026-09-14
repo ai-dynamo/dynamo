@@ -26,8 +26,7 @@ def _maybe_preload_jemalloc() -> None:
 
     lib = ctypes.util.find_library("jemalloc")
     if not lib:
-        # Requested but unavailable: warn and stay on glibc rather than fail to
-        # start. (Logging isn't configured this early, so write to stderr.)
+        # Logging is not configured yet, so write the warning to stderr.
         print(
             "WARNING: DYN_FRONTEND_JEMALLOC is enabled but libjemalloc was not found "
             "(install libjemalloc2); continuing with the default allocator.",
