@@ -10,7 +10,7 @@ def request_cache_salt(request: Mapping[str, Any]) -> str | None:
     extra_args = request.get("extra_args") or {}
     for source in (
         request.get("routing"),
-        extra_args.get("nvext"),
+        extra_args.get("nvext") if isinstance(extra_args, Mapping) else None,
         request.get("nvext"),
         request,
     ):
