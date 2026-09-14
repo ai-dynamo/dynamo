@@ -189,9 +189,11 @@ jobs:
       - name: Run mypy (components)
         working-directory: /workspace
         shell: bash
+        # We have to exclude the components/src/dynamo/triton folder from the mypy check
+        # due its required dependencies not being available at verification time.
         run: |
           MYPYPATH=components/src:lib/bindings/python/src
-          TARGETS=$(find components/src/dynamo -maxdepth 1 -mindepth 1 -type d | sort | tr "\n" " ")
+          TARGETS=$(find components/src/dynamo -maxdepth 1 -mindepth 1 -type d ! -name "triton" | sort | tr "\n" " ")
           MYPYPATH=$MYPYPATH mypy --explicit-package-bases $TARGETS
       - name: Run mypy (bindings)
         working-directory: /workspace
