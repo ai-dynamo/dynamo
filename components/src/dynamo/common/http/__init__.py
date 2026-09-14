@@ -10,8 +10,10 @@ Callers catch the unified exception classes (``HttpTimeoutError``,
 follows redirects manually and revalidates each hop against the policy.
 
 ``DYN_HTTP_BACKEND`` accepts only ``aiohttp``; any other value logs a warning
-and uses aiohttp. aiohttp scales well under fan-out and exposes a native
-DNS-resolver hook used for SSRF pinning (see README).
+and uses aiohttp. aiohttp scales well under fan-out and exposes a
+``TCPConnector(resolver=...)`` hook that a policy-aware resolver can use to pin
+validated DNS answers (the connect-time SSRF backstop lands on top of this
+capability; it is not wired in the default client here).
 """
 
 from __future__ import annotations

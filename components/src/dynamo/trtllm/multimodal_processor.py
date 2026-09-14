@@ -215,13 +215,20 @@ class MultimodalRequestProcessor:
             if parsed.scheme not in ("http", "https"):
                 raise RuntimeError(f"Unsupported URL scheme: {parsed.scheme}")
             try:
-                timeout = aiohttp.ClientTimeout(total=300.0)
+                # Per-operation budget (connect + per-read), not a single
+                # whole-request cap: a large embedding on a slow link keeps
+                # downloading as long as it makes progress, while a stalled
+                # connect or a read that hangs still fast-fails at 300s.
+                timeout = aiohttp.ClientTimeout(sock_connect=300.0, sock_read=300.0)
                 # trust_env=True honors HTTP_PROXY / HTTPS_PROXY / NO_PROXY, which
                 # aiohttp ignores by default.
                 async with aiohttp.ClientSession(
                     timeout=timeout, trust_env=True
                 ) as client:
-                    async with client.get(path) as resp:
+                    # Do not follow redirects: this path applies no destination
+                    # policy, so following Location would turn one unvalidated
+                    # fetch into an attacker-chained multi-hop one.
+                    async with client.get(path, allow_redirects=False) as resp:
                         resp.raise_for_status()
                         content_length = resp.headers.get("content-length")
                         if (
