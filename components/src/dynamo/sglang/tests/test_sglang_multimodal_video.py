@@ -445,6 +445,7 @@ async def test_multimodal_prefill_cancels_registered_rid_before_first_result():
 async def test_multimodal_prefill_cleanup_awaits_consumers_before_engine_shutdown():
     handler = MultimodalPrefillWorkerHandler.__new__(MultimodalPrefillWorkerHandler)
     handler.publisher = None
+    handler._abort_tasks = set()
     events = []
 
     async def consumer():

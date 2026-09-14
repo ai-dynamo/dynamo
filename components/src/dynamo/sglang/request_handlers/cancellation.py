@@ -20,6 +20,10 @@ _CANCELLATION_DRAIN_TIMEOUT_S = 1.0
 _CANCELLATION_DISPATCH_WAIT_TIMEOUT_S = 0.25
 
 
+async def _next_stream_item(iterator: AsyncIterator[Any]) -> Any:
+    return await anext(iterator)
+
+
 def _consume_detached_task(task: asyncio.Task[Any]) -> None:
     """Consume a detached cancellation task result without surfacing closure."""
     try:
@@ -94,7 +98,7 @@ class CancellationMixin:
         iterator = aiter(stream_source)
         drain_deadline: float | None = None
         while True:
-            next_item = asyncio.create_task(anext(iterator))
+            next_item = asyncio.create_task(_next_stream_item(iterator))
             try:
                 if drain_deadline is None:
                     done, _ = await asyncio.wait(
@@ -141,7 +145,7 @@ class CancellationMixin:
             if self.shutdown_event
             else None
         )
-        wait_for = [cancellation_future]
+        wait_for: list[asyncio.Future[Any]] = [cancellation_future]
         if shutdown_task is not None:
             wait_for.append(shutdown_task)
         try:
@@ -292,14 +296,16 @@ class CancellationMixin:
         state: Any,
     ) -> bool:
         time_stats = getattr(state, "time_stats", None)
-        if not hasattr(time_stats, "api_server_dispatch_finish_time"):
+        if time_stats is None or not hasattr(
+            time_stats, "api_server_dispatch_finish_time"
+        ):
             return False
         delay = 0.001
         deadline = (
             asyncio.get_running_loop().time() + _CANCELLATION_DISPATCH_WAIT_TIMEOUT_S
         )
         while registry.get(request_id) is state:
-            if time_stats.api_server_dispatch_finish_time:
+            if getattr(time_stats, "api_server_dispatch_finish_time", None):
                 return True
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
