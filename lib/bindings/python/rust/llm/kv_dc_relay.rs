@@ -275,7 +275,7 @@ impl KvDcRelay {
                                         .upgrade()
                                         .ok_or_else(|| anyhow::anyhow!("Relay stopped"))?;
                                     let health = relay.health().await;
-                                    let ready = health.wan_serving
+                                    let ready = (!health.wan_enabled || health.wan_serving)
                                         && !health.shutting_down
                                         && health.host_last_error.is_none()
                                         && health.wan_last_error.is_none();

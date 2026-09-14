@@ -51,10 +51,7 @@ impl SourcesDocument {
             ensure!(
                 source.namespace.len() <= 512
                     && !source.namespace.is_empty()
-                    && source
-                        .namespace
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+                    && source.namespace.trim() == source.namespace,
                 "invalid source namespace"
             );
             ensure!(
@@ -192,5 +189,36 @@ mod tests {
             )
             .is_err()
         );
+    }
+    #[test]
+    fn file_namespaces_accept_discovery_names_and_reject_surrounding_whitespace() {
+        use crate::kv_dc_relay::KvDcRelayDiscoveryConfig;
+
+        for namespace in [
+            "model.a",
+            "team/model",
+            "model name",
+            "モデル",
+            "",
+            " ",
+            " a",
+            "a ",
+            "a\n",
+        ] {
+            let discovery = KvDcRelayDiscoveryConfig {
+                namespaces: vec![namespace.into()],
+                ..Default::default()
+            };
+            let mut document: SourcesDocument = serde_json::from_value(serde_json::json!({
+                "version": 1,
+                "sources": [{"namespace": namespace}],
+            }))
+            .unwrap();
+            assert_eq!(
+                document.canonicalize(None).is_ok(),
+                discovery.validate().is_ok(),
+                "{namespace:?}"
+            );
+        }
     }
 }

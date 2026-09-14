@@ -189,6 +189,7 @@ impl NamespaceMembership {
         cancel: CancellationToken,
     ) {
         let mut source_invalid = false;
+        let mut last_reconcile_error = None;
         let mut desired = self.selection.clone();
         let mut retry = tokio::time::interval(Duration::from_secs(1));
         retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -248,19 +249,33 @@ impl NamespaceMembership {
                 let revision = selection.revision.clone();
                 let count = selection.namespaces.len();
                 match self.bounded_apply(selection, &cancel).await {
-                    Ok(()) => status.send_modify(|s| {
-                        s.applied_revision = revision;
-                        s.count = count;
-                        if !source_invalid {
-                            s.last_error = None;
+                    Ok(()) => {
+                        last_reconcile_error = None;
+                        status.send_modify(|s| {
+                            s.applied_revision = revision;
+                            s.count = count;
+                            if !source_invalid {
+                                s.last_error = None;
+                            }
+                        });
+                    }
+                    Err(error) => {
+                        let detail = format!("{error:#}");
+                        if last_reconcile_error.as_ref() != Some(&detail) {
+                            tracing::warn!(
+                                error = %detail,
+                                namespaces = count,
+                                "KV DC Relay sources reconciliation failed; retaining last applied sources"
+                            );
+                            last_reconcile_error = Some(detail);
                         }
-                    }),
-                    Err(_) => status.send_modify(|s| {
-                        s.last_error = Some(
-                            "Sources discovery reconciliation failed; retaining last applied sources"
-                                .into(),
-                        )
-                    }),
+                        status.send_modify(|s| {
+                            s.last_error = Some(
+                                "Sources discovery reconciliation failed; retaining last applied sources"
+                                    .into(),
+                            );
+                        });
+                    }
                 }
             }
         }

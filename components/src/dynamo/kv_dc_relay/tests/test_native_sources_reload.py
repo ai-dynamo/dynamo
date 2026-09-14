@@ -74,11 +74,11 @@ def relay_factory(runtime):
     from dynamo.llm import KvDcRelay
 
     @asynccontextmanager
-    async def start(**kwargs):
+    async def start(*, bind="127.0.0.1:0", **kwargs):
         relay = KvDcRelay(
             runtime.endpoint("test.relay.control"),
             "test-dc",
-            bind="127.0.0.1:0",
+            bind=bind,
             **kwargs,
         )
         await relay.start()
@@ -102,7 +102,12 @@ async def wait_for_sources(relay, predicate):
 
 @pytest.mark.parametrize("system_port", [True], indirect=True)
 @pytest.mark.parametrize("mode", ["discovery", "from-file"])
-async def test_http_state(relay_factory, sources_file, system_port, monkeypatch, mode):
+@pytest.mark.parametrize(
+    "bind", ["127.0.0.1:0", None], ids=["wan-enabled", "wan-disabled"]
+)
+async def test_http_state(
+    relay_factory, sources_file, system_port, monkeypatch, mode, bind
+):
     monkeypatch.setenv("POD_UID", "test-pod")
     options = {}
     if mode == "from-file":
@@ -112,7 +117,7 @@ async def test_http_state(relay_factory, sources_file, system_port, monkeypatch,
             "connection_revision": "revision-a",
         }
 
-    async with relay_factory(**options) as relay:
+    async with relay_factory(bind=bind, **options) as relay:
         async with httpx.AsyncClient(timeout=1) as client:
             url = f"http://127.0.0.1:{system_port}/engine/state"
             for _ in range(100):
@@ -132,7 +137,9 @@ async def test_http_state(relay_factory, sources_file, system_port, monkeypatch,
         assert state["mode"] == mode
         assert state["podUID"] == "test-pod"
         assert state["connectionRevision"] == options.get("connection_revision")
-        assert state["sources"] == (await relay.health())["sources"]
+        health = await relay.health()
+        assert health["wan_enabled"] is (bind is not None)
+        assert state["sources"] == health["sources"]
         assert state["sources"]["count"] == 0
 
 
