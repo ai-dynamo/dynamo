@@ -48,3 +48,16 @@ Reference implementations for deploying multimodal models for each backend:
 - [vLLM Multimodal](../../developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md)
 
 To use an author-provided custom vision tower or projector, see [Custom Vision Encoders](custom-vision-encoders.md).
+
+## Shared Image Download Cache
+
+To reuse encoded HTTP image payloads across backend workers, set
+`DYN_MM_SHARED_IMAGE_CACHE_ENABLED=1` and configure
+`DYN_MM_SHARED_IMAGE_CACHE_URL` with a Redis Cluster or Dragonfly connection
+URL.
+
+> [!WARNING]
+> Use a `rediss://` URL unless Redis traffic is protected by equivalent
+> transport encryption, such as an encrypted service mesh. A `redis://` URL
+> sends cache data and any URL credentials without TLS and should be used only
+> on an appropriately secured in-cluster network.

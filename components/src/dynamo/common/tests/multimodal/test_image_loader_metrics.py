@@ -83,11 +83,18 @@ async def test_shared_cache_get_set_duration_histograms(monkeypatch) -> None:
     with patch(_REDIS_CLUSTER_FACTORY_PATH, return_value=client):
         loader = ImageLoader(cache_size=4, url_policy=_permissive_policy())
     register_image_loader_metrics(endpoint, loader, "m", "c")
+    endpoint.metrics.register_prometheus_typed_callback.assert_called_once()
     callback = endpoint.metrics.register_prometheus_expfmt_callback.call_args[0][0]
+    typed_callback = endpoint.metrics.register_prometheus_typed_callback.call_args[0][0]
 
     with patch(_FETCH_BYTES_PATH, _mock_fetch_bytes()):
         await loader.load_image("https://example.com/shared.png")
 
+    typed_metrics = typed_callback()
+    assert any(
+        family[0] == "dynamo_component_image_shared_cache_get_duration_seconds"
+        for family in typed_metrics
+    )
     text = callback()
     assert (
         _parse_metric(
