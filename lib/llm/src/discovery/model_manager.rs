@@ -444,10 +444,7 @@ impl ModelManager {
     ///
     /// Callers hold `reservation_lock` so this check is atomic with alias
     /// registration.
-    fn reject_alias_reserved_name(
-        &self,
-        model_name: &str,
-    ) -> Result<(), ModelManagerError> {
+    fn ensure_name_not_alias(&self, model_name: &str) -> Result<(), ModelManagerError> {
         if self.alias_to_primary.contains_key(model_name) {
             return Err(ModelManagerError::ModelAlreadyExists(model_name.to_string()));
         }
@@ -1518,7 +1515,7 @@ impl ModelManager {
         engine: OpenAIChatCompletionsStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
-        self.reject_alias_reserved_name(model)?;
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_chat_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1542,7 +1539,7 @@ impl ModelManager {
         engine: OpenAICompletionsStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
-        self.reject_alias_reserved_name(model)?;
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_completions_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1566,7 +1563,7 @@ impl ModelManager {
         engine: OpenAIEmbeddingsStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
-        self.reject_alias_reserved_name(model)?;
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_embeddings_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1590,7 +1587,7 @@ impl ModelManager {
         engine: OpenAIClassifyStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
-        self.reject_alias_reserved_name(model)?;
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_classify_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1614,7 +1611,7 @@ impl ModelManager {
         engine: OpenAIPoolingStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
-        self.reject_alias_reserved_name(model)?;
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_pooling_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1638,7 +1635,7 @@ impl ModelManager {
         engine: TensorStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
-        self.reject_alias_reserved_name(model)?;
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_tensor_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1662,7 +1659,7 @@ impl ModelManager {
         engine: OpenAIImagesStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
-        self.reject_alias_reserved_name(model)?;
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_images_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1686,7 +1683,7 @@ impl ModelManager {
         engine: OpenAIVideosStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
-        self.reject_alias_reserved_name(model)?;
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_videos_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1710,7 +1707,7 @@ impl ModelManager {
         engine: OpenAIAudiosStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
-        self.reject_alias_reserved_name(model)?;
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_audios_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1734,7 +1731,7 @@ impl ModelManager {
         engine: RealtimeBidirectionalEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
-        self.reject_alias_reserved_name(model)?;
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_realtime_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1758,7 +1755,7 @@ impl ModelManager {
         engine: GenerateStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
-        self.reject_alias_reserved_name(model)?;
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_generate_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1782,7 +1779,7 @@ impl ModelManager {
         card_checksum: &str,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
-        self.reject_alias_reserved_name(model)?;
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_prefill() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
