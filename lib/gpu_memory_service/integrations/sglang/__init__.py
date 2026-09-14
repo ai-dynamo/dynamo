@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import TYPE_CHECKING, Type
 
 try:
@@ -28,6 +29,18 @@ _gms_initialized = False
 def is_gms_active() -> bool:
     """Return True if setup_gms() has been called successfully."""
     return _gms_initialized
+
+
+def configure_shared_failover_env() -> None:
+    from gpu_memory_service.common.utils import is_truthy_env
+    from gpu_memory_service.integrations.sglang.kv_identity import shared_kv_enabled
+
+    if not (shared_kv_enabled() and is_truthy_env("DYN_GMS_FAILOVER_SHADOW_MODE")):
+        return
+    os.environ.setdefault("SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK", "0")
+    logger.info(
+        "[GMS] Disabled SGLang TP memory imbalance check for shared-GMS failover"
+    )
 
 
 def setup_gms(server_args) -> Type["GMSModelLoader"]:
@@ -68,6 +81,8 @@ def setup_gms(server_args) -> Type["GMSModelLoader"]:
             # predates ServerArgs.override. Remove after that pin reaches 0.5.16+.
             server_args.enable_memory_saver = True
 
+    configure_shared_failover_env()
+
     # Resolve lock mode and RO reconnect timeout from model_loader_extra_config
     # before patches fire.
     global _gms_lock_mode
@@ -87,15 +102,18 @@ def setup_gms(server_args) -> Type["GMSModelLoader"]:
     _gms_lock_mode = get_gms_lock_mode(extra)
     _gms_ro_connect_timeout_ms = get_gms_ro_connect_timeout_ms(extra)
 
-    # Import triggers patches at module level
-    from gpu_memory_service.integrations.sglang.install_gms_unified_cache import (
-        configure,
+    from gpu_memory_service.integrations.sglang import (
+        install_gms_unified_cache,
+        install_kv_leases,
+        install_vmm_ipc_kv,
     )
-    from gpu_memory_service.integrations.sglang.install_kv_leases import install
-    from gpu_memory_service.integrations.sglang.model_loader import GMSModelLoader
 
-    install()
-    configure(server_args)
+    install_vmm_ipc_kv.install_lazy()
+    install_kv_leases.install()
+    install_gms_unified_cache.configure(server_args)
+
+    # Import triggers patches at module level
+    from gpu_memory_service.integrations.sglang.model_loader import GMSModelLoader
 
     global _gms_initialized
     _gms_initialized = True
