@@ -5,18 +5,17 @@
 
 from __future__ import annotations
 
-import logging
-import os
-import time
-
-from gpu_memory_service.client.rpc import GMS_ERR_CLAIM_CONFLICT, GmsRemoteError
+from gpu_memory_service.client.rpc import (
+    GMS_ERR_CLAIM_CONFLICT,
+    GMS_ERR_OUT_OF_MEMORY,
+    GmsRemoteError,
+)
 from gpu_memory_service.client.session import _GMSClientSession
 from gpu_memory_service.common.persistent_pool import (
     PersistentPoolAllocation,
     PersistentPoolKey,
+    retry_persistent_claim,
 )
-
-logger = logging.getLogger(__name__)
 
 
 class V0PersistentPoolBackend:
@@ -32,36 +31,31 @@ class V0PersistentPoolBackend:
         *,
         shared: bool = False,
     ) -> PersistentPoolAllocation:
-        retry_secs = float(os.environ.get("GMS_PERSISTENT_CLAIM_RETRY_SECS", "2.0"))
-        deadline = time.monotonic() + max(0.0, retry_secs)
-        delay = 0.05
-        while True:
-            try:
-                response = self._session.claim_persistent(
+        try:
+            response = retry_persistent_claim(
+                lambda: self._session.claim_persistent(
                     engine_id=key.engine_id,
                     tag=key.tag,
                     size=aligned_size,
                     shared=shared,
-                )
-                return PersistentPoolAllocation(
-                    key=key,
-                    allocation_id=response.allocation_id,
-                    size=int(getattr(response, "size", aligned_size)),
-                    aligned_size=int(response.aligned_size),
-                    reattached=bool(response.reattached),
-                )
-            except GmsRemoteError as exc:
-                if exc.code != GMS_ERR_CLAIM_CONFLICT or time.monotonic() >= deadline:
-                    raise
-                logger.warning(
-                    "GMS persistent claim conflict for %s/%s; retrying in %.2fs "
-                    "(likely a prior connection's claim not yet cleaned up)",
-                    key.engine_id,
-                    key.tag,
-                    delay,
-                )
-                time.sleep(delay)
-                delay = min(delay * 2, 0.5)
+                ),
+                lambda exc: isinstance(exc, GmsRemoteError)
+                and exc.code == GMS_ERR_CLAIM_CONFLICT,
+            )
+        except GmsRemoteError as exc:
+            if exc.code == GMS_ERR_OUT_OF_MEMORY:
+                raise MemoryError(str(exc)) from exc
+            raise
+        return PersistentPoolAllocation(
+            key=key,
+            allocation_id=response.allocation_id,
+            size=int(getattr(response, "size", aligned_size)),
+            aligned_size=int(response.aligned_size),
+            reattached=bool(response.reattached),
+        )
+
+    def unclaim(self, key: PersistentPoolKey) -> bool:
+        return self._session.unclaim_persistent(engine_id=key.engine_id, tag=key.tag)
 
     def export(self, key: PersistentPoolKey) -> int:
         _, fd = self._session.export_persistent(
