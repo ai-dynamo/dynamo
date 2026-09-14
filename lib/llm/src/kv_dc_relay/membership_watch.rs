@@ -1,10 +1,89 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use super::discovery::{DcDiscoveryFilter, DcMembershipView, MembershipState};
+use super::namespace_source::{KvDcRelaySourcesStatus, discovery::DiscoveryNamespaces};
 use super::namespace_source::{NamespaceSelection, NamespaceSource, NamespaceUpdates};
-use super::*;
-use crate::kv_dc_relay::sources::KvDcRelaySourcesStatus;
+use dynamo_runtime::discovery::{Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryQuery};
+use futures::{Stream, StreamExt, future::try_join_all};
+use std::{collections::HashMap, pin::Pin, sync::Arc, time::Duration};
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tokio_util::sync::DropGuard;
+
+const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
+
+pub(crate) struct DcMembershipWatch {
+    receiver: watch::Receiver<DcMembershipView>,
+    cancel: CancellationToken,
+    task: JoinHandle<()>,
+    sources_status: watch::Receiver<KvDcRelaySourcesStatus>,
+}
+
+impl DcMembershipWatch {
+    pub(crate) async fn start_sources(
+        discovery: Arc<dyn Discovery>,
+        sources: super::host::KvDcRelaySources,
+        parent_cancel: CancellationToken,
+    ) -> anyhow::Result<Self> {
+        let (source, filter): (Box<dyn NamespaceSource>, _) = match sources {
+            super::host::KvDcRelaySources::File(file) => {
+                (Box::new(file), DcDiscoveryFilter::default())
+            }
+            super::host::KvDcRelaySources::Discovery(config) => {
+                config.validate()?;
+                let filter = config.filter();
+                (
+                    Box::new(DiscoveryNamespaces {
+                        discovery: discovery.clone(),
+                        config,
+                    }),
+                    filter,
+                )
+            }
+        };
+        Self::start_namespace_source(discovery, source, filter, parent_cancel).await
+    }
+
+    pub(crate) fn sources_status(&self) -> KvDcRelaySourcesStatus {
+        self.sources_status.borrow().clone()
+    }
+
+    pub(crate) fn subscribe(&self) -> watch::Receiver<DcMembershipView> {
+        self.receiver.clone()
+    }
+
+    pub(crate) async fn shutdown(self) {
+        self.cancel.cancel();
+        if let Err(error) = self.task.await
+            && !error.is_cancelled()
+        {
+            tracing::warn!(%error, "KV DC Relay model-card watch failed during shutdown");
+        }
+    }
+}
+
+pub(super) fn publish_membership_if_changed(
+    sender: &watch::Sender<DcMembershipView>,
+    next: DcMembershipView,
+) {
+    sender.send_if_modified(move |current| {
+        if current == &next {
+            return false;
+        }
+        *current = next;
+        true
+    });
+}
+
+async fn list_queries(
+    discovery: &Arc<dyn Discovery>,
+    queries: &[DiscoveryQuery],
+) -> anyhow::Result<Vec<DiscoveryInstance>> {
+    let results = try_join_all(queries.iter().cloned().map(|query| discovery.list(query))).await?;
+    Ok(results.into_iter().flatten().collect())
+}
 
 const SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -243,8 +322,13 @@ impl DcMembershipWatch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kv_dc_relay::sources::{KvDcRelaySourcesFile, RelaySource, SourcesDocument};
+    use crate::kv_dc_relay::namespace_source::discovery::KvDcRelayDiscoveryConfig;
+    use crate::kv_dc_relay::namespace_source::file::{
+        KvDcRelaySourcesFile, RelaySource, SourcesDocument,
+    };
+    use crate::{model_card::ModelDeploymentCard, worker_type::WorkerType};
     use dynamo_runtime::discovery::{DiscoverySpec, MockDiscovery, SharedMockRegistry};
+    use dynamo_runtime::protocols::EndpointId;
 
     fn document(names: &[&str]) -> SourcesDocument {
         let mut doc = SourcesDocument {

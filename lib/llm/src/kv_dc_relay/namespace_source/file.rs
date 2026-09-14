@@ -3,11 +3,14 @@
 
 //! Transport-independent source files, usable with or without an operator.
 
+use super::{NamespaceSelection, NamespaceSource, NamespaceUpdates};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::time::Duration;
 use std::{collections::HashSet, path::PathBuf};
 use tokio::io::AsyncReadExt;
+use tokio_util::sync::CancellationToken;
 
 const MAX_SOURCES_BYTES: u64 = 1024 * 1024;
 
@@ -15,15 +18,6 @@ const MAX_SOURCES_BYTES: u64 = 1024 * 1024;
 pub struct KvDcRelaySourcesFile {
     pub path: PathBuf,
     pub connection_revision: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KvDcRelaySourcesStatus {
-    pub desired_revision: Option<String>,
-    pub applied_revision: Option<String>,
-    pub count: usize,
-    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -103,6 +97,44 @@ impl KvDcRelaySourcesFile {
     }
 }
 
+impl From<SourcesDocument> for NamespaceSelection {
+    fn from(document: SourcesDocument) -> Self {
+        Self {
+            namespaces: document
+                .sources
+                .into_iter()
+                .map(|source| source.namespace)
+                .collect(),
+            revision: Some(document.revision),
+        }
+    }
+}
+
+impl NamespaceSource for KvDcRelaySourcesFile {
+    fn updates(self: Box<Self>, cancel: CancellationToken) -> NamespaceUpdates {
+        Box::pin(async_stream::stream! {
+            let mut poll = tokio::time::interval(Duration::from_secs(1));
+            poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    _ = poll.tick() => {}
+                }
+                let result = tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    result = tokio::time::timeout(Duration::from_secs(10), self.read()) => result,
+                };
+                // File parsing errors omit the document contents.
+                yield match result {
+                    Ok(Ok(document)) => Ok(document.into()),
+                    Ok(Err(error)) => Err(error),
+                    Err(_) => Err(anyhow::anyhow!("sources file read timed out")),
+                };
+            }
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,7 +148,7 @@ mod tests {
             revision: String,
         }
         let fixtures: Vec<Fixture> = serde_json::from_str(include_str!(
-            "../../tests/fixtures/relay-sources-canonical.json"
+            "../../../tests/fixtures/relay-sources-canonical.json"
         ))
         .unwrap();
         for fixture in fixtures {

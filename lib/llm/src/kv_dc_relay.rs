@@ -8,14 +8,14 @@ mod discovery;
 mod host;
 mod identity;
 mod load;
+mod membership_watch;
+mod namespace_source;
 mod pool_registry;
 mod publication;
 mod resolution;
-mod sources;
 mod topology;
 pub mod wan;
 
-pub use discovery::KvDcRelayDiscoveryConfig;
 pub use host::{
     DEFAULT_EXPECTED_UNIQUE_BLOCKS, KvDcRelay, KvDcRelayConfig, KvDcRelayError, KvDcRelayHealth,
     KvDcRelayProducerConfig, KvDcRelaySources,
@@ -33,11 +33,12 @@ pub use identity::{
     ModelAlias, ModelAliasError, ModelTarget, PoolIdentitySources, WorkerRole,
 };
 pub use load::PoolLoadSnapshot;
+pub use namespace_source::discovery::KvDcRelayDiscoveryConfig;
+pub use namespace_source::{KvDcRelaySourcesStatus, file::KvDcRelaySourcesFile};
 pub use publication::{
     PoolPublicationStream, PublicationError, PublicationErrorKind, PublicationFrame,
     PublicationFrameKind, RelayPublicationSource,
 };
-pub use sources::{KvDcRelaySourcesFile, KvDcRelaySourcesStatus};
 pub use topology::{
     AdapterReadiness, TopologyEntry, TopologyMember, TopologyReadinessState, TopologySnapshot,
 };

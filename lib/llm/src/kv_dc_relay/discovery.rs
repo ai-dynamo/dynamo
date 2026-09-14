@@ -2,20 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{HashMap, HashSet};
-use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
 
 use dynamo_kv_router::protocols::WorkerId;
 use dynamo_runtime::discovery::DiscoveryEvent;
-use dynamo_runtime::discovery::{
-    Discovery, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery, ModelCardInstanceId,
-};
+use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryInstanceId, ModelCardInstanceId};
 use dynamo_runtime::protocols::EndpointId;
-use futures::{Stream, StreamExt, future::try_join_all};
-use tokio::sync::watch;
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 
 use super::identity::{
     CanonicalModelId, CanonicalModelRegistration, ModelAlias, ModelTarget, WorkerRole,
@@ -26,104 +18,21 @@ use crate::model_card::ModelDeploymentCard;
 use crate::model_type::ModelType;
 use crate::worker_type::WorkerType;
 
-const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
+#[cfg(test)]
+use super::{
+    membership_watch::publish_membership_if_changed,
+    namespace_source::discovery::KvDcRelayDiscoveryConfig,
+};
+#[cfg(test)]
+use dynamo_runtime::discovery::DiscoveryQuery;
+#[cfg(test)]
+use tokio::sync::watch;
 
 pub(crate) type KvCacheDomainKey = ResolvedIndexerDomain;
 
-/// Selects which Dynamo endpoints one Relay supervises.
-///
-/// The watch scope also fixes a naming invariant: request-facing model and
-/// adapter names must be unique across every namespace one Relay watches. A
-/// local ModelManager may resolve a name collision by its own first-wins
-/// order, but a Relay federates independently owned endpoints and has no safe
-/// canonical owner to choose, so a name claimed by conflicting targets is
-/// omitted from every endpoint (fail-closed, recorded as a serving conflict)
-/// rather than arbitrated per namespace.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct KvDcRelayDiscoveryConfig {
-    pub namespaces: Vec<String>,
-    pub endpoint_prefixes: Vec<String>,
-    pub watch_all: bool,
-}
-
-impl KvDcRelayDiscoveryConfig {
-    pub fn validate(&self) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            self.watch_all || !self.namespaces.is_empty(),
-            "KV DC Relay requires at least one discovery namespace or explicit watch_all"
-        );
-        anyhow::ensure!(
-            !self.watch_all || self.namespaces.is_empty(),
-            "KV DC Relay watch_all cannot be combined with explicit discovery namespaces"
-        );
-
-        let mut unique_namespaces = HashSet::new();
-        for namespace in &self.namespaces {
-            anyhow::ensure!(
-                !namespace.trim().is_empty(),
-                "KV DC Relay discovery namespaces must not be empty"
-            );
-            anyhow::ensure!(
-                namespace.trim() == namespace,
-                "KV DC Relay discovery namespaces must not contain surrounding whitespace"
-            );
-            anyhow::ensure!(
-                unique_namespaces.insert(namespace),
-                "duplicate KV DC Relay discovery namespace: {namespace}"
-            );
-        }
-
-        let mut unique_prefixes = HashSet::new();
-        for prefix in &self.endpoint_prefixes {
-            anyhow::ensure!(
-                !prefix.trim().is_empty(),
-                "KV DC Relay endpoint prefixes must not be empty"
-            );
-            anyhow::ensure!(
-                prefix.trim() == prefix,
-                "KV DC Relay endpoint prefixes must not contain surrounding whitespace"
-            );
-            anyhow::ensure!(
-                unique_prefixes.insert(prefix),
-                "duplicate KV DC Relay endpoint prefix: {prefix}"
-            );
-            anyhow::ensure!(
-                self.watch_all
-                    || self.namespaces.iter().any(|namespace| {
-                        prefix == namespace
-                            || prefix
-                                .strip_prefix(namespace)
-                                .is_some_and(|suffix| suffix.starts_with('.'))
-                    }),
-                "KV DC Relay endpoint prefix {prefix} is outside the configured namespaces"
-            );
-        }
-        Ok(())
-    }
-
-    fn queries(&self) -> Vec<DiscoveryQuery> {
-        if self.watch_all {
-            vec![DiscoveryQuery::AllModels]
-        } else {
-            self.namespaces
-                .iter()
-                .map(|namespace| DiscoveryQuery::NamespacedModels {
-                    namespace: namespace.clone(),
-                })
-                .collect()
-        }
-    }
-
-    fn filter(&self) -> DcDiscoveryFilter {
-        DcDiscoveryFilter {
-            endpoint_prefixes: self.endpoint_prefixes.clone(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DcDiscoveryFilter {
-    endpoint_prefixes: Vec<String>,
+    pub(super) endpoint_prefixes: Vec<String>,
 }
 
 impl DcDiscoveryFilter {
@@ -414,58 +323,7 @@ impl<'a> ProjectionDiagnostics<'a> {
     }
 }
 
-pub(crate) struct DcMembershipWatch {
-    receiver: watch::Receiver<DcMembershipView>,
-    cancel: CancellationToken,
-    task: JoinHandle<()>,
-    sources_status: watch::Receiver<super::sources::KvDcRelaySourcesStatus>,
-}
-
-impl DcMembershipWatch {
-    pub(crate) async fn start_sources(
-        discovery: Arc<dyn Discovery>,
-        sources: super::host::KvDcRelaySources,
-        parent_cancel: CancellationToken,
-    ) -> anyhow::Result<Self> {
-        use namespace_source::DiscoveryNamespaces;
-        let (source, filter): (Box<dyn namespace_source::NamespaceSource>, _) = match sources {
-            super::host::KvDcRelaySources::File(file) => {
-                (Box::new(file), DcDiscoveryFilter::default())
-            }
-            super::host::KvDcRelaySources::Discovery(config) => {
-                config.validate()?;
-                let filter = config.filter();
-                (
-                    Box::new(DiscoveryNamespaces {
-                        discovery: discovery.clone(),
-                        config,
-                    }),
-                    filter,
-                )
-            }
-        };
-        Self::start_namespace_source(discovery, source, filter, parent_cancel).await
-    }
-
-    pub(crate) fn sources_status(&self) -> super::sources::KvDcRelaySourcesStatus {
-        self.sources_status.borrow().clone()
-    }
-
-    pub(crate) fn subscribe(&self) -> watch::Receiver<DcMembershipView> {
-        self.receiver.clone()
-    }
-
-    pub(crate) async fn shutdown(self) {
-        self.cancel.cancel();
-        if let Err(error) = self.task.await
-            && !error.is_cancelled()
-        {
-            tracing::warn!(%error, "KV DC Relay model-card watch failed during shutdown");
-        }
-    }
-}
-
-struct MembershipState {
+pub(super) struct MembershipState {
     cards: HashMap<ModelCardInstanceId, StoredModelCard>,
     next_membership_generation: u64,
     previous: Arc<HashMap<EndpointId, EndpointMembership>>,
@@ -496,7 +354,7 @@ impl Default for MembershipState {
 }
 
 impl MembershipState {
-    fn replace_all(
+    pub(super) fn replace_all(
         &mut self,
         instances: Vec<DiscoveryInstance>,
         filter: &DcDiscoveryFilter,
@@ -517,7 +375,7 @@ impl MembershipState {
         true
     }
 
-    fn apply(&mut self, event: DiscoveryEvent, filter: &DcDiscoveryFilter) -> bool {
+    pub(super) fn apply(&mut self, event: DiscoveryEvent, filter: &DcDiscoveryFilter) -> bool {
         match event {
             DiscoveryEvent::Added(instance) => {
                 let Some((id, card)) = decode_card(instance) else {
@@ -552,7 +410,7 @@ impl MembershipState {
         }
     }
 
-    fn view(&mut self, filter: &DcDiscoveryFilter) -> DcMembershipView {
+    pub(super) fn view(&mut self, filter: &DcDiscoveryFilter) -> DcMembershipView {
         #[cfg(test)]
         {
             self.projection_count = self.projection_count.saturating_add(1);
@@ -999,24 +857,6 @@ pub(super) fn project_instances_for_test(instances: Vec<DiscoveryInstance>) -> D
     let mut state = MembershipState::default();
     state.replace_all(instances, &filter);
     state.view(&filter)
-}
-
-fn publish_membership_if_changed(sender: &watch::Sender<DcMembershipView>, next: DcMembershipView) {
-    sender.send_if_modified(move |current| {
-        if current == &next {
-            return false;
-        }
-        *current = next;
-        true
-    });
-}
-
-async fn list_queries(
-    discovery: &Arc<dyn Discovery>,
-    queries: &[DiscoveryQuery],
-) -> anyhow::Result<Vec<DiscoveryInstance>> {
-    let results = try_join_all(queries.iter().cloned().map(|query| discovery.list(query))).await?;
-    Ok(results.into_iter().flatten().collect())
 }
 
 fn decode_card(instance: DiscoveryInstance) -> Option<(ModelCardInstanceId, StoredModelCard)> {
@@ -1751,9 +1591,3 @@ mod tests {
         }
     }
 }
-
-#[path = "sources_watch.rs"]
-mod sources_watch;
-
-#[path = "namespace_source.rs"]
-mod namespace_source;

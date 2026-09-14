@@ -39,11 +39,13 @@ use tokio_util::sync::CancellationToken;
 
 use super::actor::{ActorFault, DEFAULT_FAULT_CAPACITY, KvDcRelayHandle, KvDcRelayRecoveryTarget};
 use super::discovery::{
-    DcMembershipView, DcMembershipWatch, EndpointMembership, KvCacheDomainKey,
-    KvDcRelayDiscoveryConfig, MaterializationConflict, MaterializationConflictSubject,
+    DcMembershipView, EndpointMembership, KvCacheDomainKey, MaterializationConflict,
+    MaterializationConflictSubject,
 };
 use super::identity::{CanonicalModelRegistration, DcPoolCatalog, DcRelayIdentity, WorkerRole};
 use super::load::PoolLoadSnapshot;
+use super::membership_watch::DcMembershipWatch;
+use super::namespace_source::discovery::KvDcRelayDiscoveryConfig;
 use super::pool_registry::{
     PoolActorConfig, PoolAttachRequest, PoolAttachment, PoolRegistry, PoolRetirementMode,
     drain_faults_while,
@@ -136,7 +138,7 @@ impl Default for KvDcRelayProducerConfig {
 #[derive(Debug, Clone)]
 pub enum KvDcRelaySources {
     Discovery(KvDcRelayDiscoveryConfig),
-    File(super::sources::KvDcRelaySourcesFile),
+    File(super::namespace_source::file::KvDcRelaySourcesFile),
 }
 
 #[derive(Debug, Clone)]
@@ -292,7 +294,7 @@ pub struct KvDcRelayActorStats {
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct KvDcRelayHealth {
-    pub sources: super::sources::KvDcRelaySourcesStatus,
+    pub sources: super::namespace_source::KvDcRelaySourcesStatus,
     pub healthy: bool,
     pub shutting_down: bool,
     pub host_last_error: Option<String>,
