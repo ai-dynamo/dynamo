@@ -959,9 +959,7 @@ async fn completions_single(
             err_response
         })?;
 
-    let mut response_collector = state
-        .metrics_clone()
-        .create_response_collector(&metric_model);
+    let mut response_collector = state.metrics_clone().create_response_collector(&metric_model);
 
     // prepare to process any annotations
     let annotations = request.annotations();
