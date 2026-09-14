@@ -67,7 +67,14 @@ def test_present_but_unusable_carrier_pins_the_installed_version(monkeypatch):
 
 
 def test_present_carrier_without_metadata_requests_its_version(monkeypatch):
-    """An unknown source-build version must not be replaced with a range."""
+    """An unknown source-build version must not be replaced with a range.
+
+    With no distribution metadata the only version the operator can read is
+    ``cv2.__version__``, which is the OpenCV library version and carries no
+    packaging revision. Pinning it exactly would name a distribution release
+    that was never published, so the command has to match on the prefix --
+    still the one library version, not the validated range.
+    """
     monkeypatch.setattr(codec_errors.importlib.util, "find_spec", lambda name: object())
 
     def _missing(_package):
@@ -76,7 +83,7 @@ def test_present_carrier_without_metadata_requests_its_version(monkeypatch):
     monkeypatch.setattr(codec_errors.importlib.metadata, "version", _missing)
     msg = str(video_decoder_missing("vllm", "opencv-python-headless", "cv2", "vp9"))
     assert "print(cv2.__version__)" in msg
-    assert "opencv-python-headless==<cv2-version>" in msg
+    assert "opencv-python-headless==<cv2-version>.*" in msg
     assert VALIDATED_SPECS["opencv-python-headless"] not in msg
     assert "--force-reinstall" in msg
 

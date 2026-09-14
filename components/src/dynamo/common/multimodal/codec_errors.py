@@ -90,12 +90,21 @@ def _install_hint(backend: str, package: str, module: str) -> str:
                 f"--only-binary {package} '{package}=={installed}'`"
             )
         else:
+            # Nothing to pin from, so the operator reads the version off the
+            # module -- but the two version strings are not the same string.
+            # ``cv2.__version__`` is the OpenCV library version and stops at
+            # three components, while the distribution appends its own
+            # packaging revision (5.0.0 against 5.0.0.93). An exact pin built
+            # from the former therefore names a release that was never
+            # published, and pip fails to find it; the prefix match selects
+            # the published wheel built from that library version.
             hint = (
                 "first determine the shipped cv2 version with "
                 '`python -c "import cv2; print(cv2.__version__)"`, then replace '
-                "it with the binary wheel of that same version: "
+                "it with the binary wheel built from that same version -- the "
+                "distribution adds a packaging revision, so match on the prefix: "
                 f"`pip install --no-deps --force-reinstall --only-binary {package} "
-                f"'{package}==<cv2-version>'`"
+                f"'{package}==<cv2-version>.*'`"
             )
     else:
         hint = (
