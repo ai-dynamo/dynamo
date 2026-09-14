@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from sglang.srt.managers.io_struct import GenerateReqInput
 
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.metadata_upload import MetadataUploader
@@ -367,7 +368,13 @@ async def test_ordered_cancellation_skips_stopped_chunk_processing(processor_nam
 
 @pytest.mark.parametrize(
     "body_salt,routing_salt,expected_salt",
-    [(None, None, None), ("", None, None), ("body-salt", "tenant-a", "tenant-a")],
+    [
+        (None, None, None),
+        ("", None, None),
+        ("body-salt", None, "body-salt"),
+        ("body-salt", "", None),
+        ("body-salt", "tenant-a", "tenant-a"),
+    ],
 )
 def test_engine_generate_preserves_native_fields_and_overrides_worker_state(
     body_salt, routing_salt, expected_salt
@@ -423,6 +430,17 @@ def test_engine_generate_preserves_native_fields_and_overrides_worker_state(
     }
 
 
+def test_native_generate_rejects_salt_without_engine_support(monkeypatch):
+    monkeypatch.delitem(GenerateReqInput.__dataclass_fields__, "cache_salt")
+    kwargs = {"input_ids": [1], "fallback_rid": "request", "priority": None}
+
+    with pytest.raises(ValueError, match="cache_salt is not supported"):
+        build_native_generate_request({"cache_salt": "tenant-a"}, **kwargs)
+
+    native = build_native_generate_request({"cache_salt": ""}, **kwargs)
+    assert native.cache_salt is None
+
+
 def test_request_cache_salt_precedence():
     request = {
         "routing": {"cache_salt": "routing"},
@@ -440,6 +458,7 @@ def test_request_cache_salt_precedence():
         source["cache_salt"] = ""
     assert request_cache_salt(request) is None
     assert request_cache_salt({}) is None
+    assert request_cache_salt({"extra_args": [1], "cache_salt": "body"}) == "body"
 
 
 def test_engine_generate_requires_object_sampling_params_for_prefill_override():

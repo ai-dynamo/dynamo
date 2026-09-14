@@ -66,7 +66,16 @@ def build_native_generate_request(
     """
     payload = dict(native_payload)
     salt = cache_salt if cache_salt is not None else payload.get("cache_salt")
-    payload["cache_salt"] = None if salt == "" else salt
+    if salt is None or salt == "":
+        payload.pop("cache_salt", None)
+    else:
+        # The separately pinned XPU release (0.5.11) silently ignores unknown
+        # dataclass fields. Remove this check when that pin supports cache_salt.
+        if "cache_salt" not in GenerateReqInput.__dataclass_fields__:
+            raise ValueError(
+                "cache_salt is not supported by the installed SGLang engine"
+            )
+        payload["cache_salt"] = salt
     payload["input_ids"] = input_ids
     payload["rid"] = request_id
     payload["stream"] = True

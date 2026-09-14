@@ -95,10 +95,17 @@ KV-cache entries:
 |---------|---------|----------|
 | vLLM | Supported | Router matching and backend KV-cache reuse are isolated by salt. |
 | TensorRT-LLM | Supported | Router matching and backend KV-cache reuse are isolated by salt. |
-| SGLang | Supported for text generation | Router matching and backend KV-cache reuse are isolated by salt in aggregated and disaggregated text generation, including native `/generate`, with SGLang 0.5.18 and 0.5.19. Dedicated multimodal workers, LoRA combinations, and diffusion are outside this support. |
+| SGLang | Supported for Python text workers | Workers started with `python -m dynamo.sglang` isolate router matching and backend KV-cache reuse in aggregated and disaggregated text generation, including native `/generate`, with SGLang 0.5.18 and 0.5.19. |
 
-Before sending salted requests to SGLang, update all Dynamo SGLang workers and KV-event
-consumers to a version with this support. Unsalted requests continue to work during the upgrade.
+SGLang cache salt routing is available in Dynamo development builds that include
+[PR #14803](https://github.com/ai-dynamo/dynamo/pull/14803). Updating SGLang alone does not
+enable this support. The SGLang sidecar, dedicated multimodal workers, LoRA combinations,
+diffusion, and storage extensions do not provide this cache salt isolation guarantee.
+
+Before sending salted requests to SGLang, update all Dynamo SGLang workers and router KV-event
+consumers to a build with this support. Unsalted requests continue to work during the upgrade.
+The pinned XPU image with SGLang 0.5.11 supports unsalted requests only; salted requests
+produce an unsupported-feature error.
 Native SGLang `/generate` accepts its top-level `cache_salt` body field as a string; it does not
 use `x-tenant-id`. An empty string is treated as absent.
 

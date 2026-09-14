@@ -712,7 +712,7 @@ def _new_prefill_handler() -> PrefillWorkerHandler:
         DisaggregationMode.DECODE,
     ],
 )
-async def test_cache_salt_reaches_engine(mode):
+async def test_cache_salt_reaches_engine(mode, unused_tcp_port):
     handler = (
         _new_prefill_handler()
         if mode == DisaggregationMode.PREFILL
@@ -727,18 +727,29 @@ async def test_cache_salt_reaches_engine(mode):
         "extra_args": {"nvext": {"cache_salt": "body-salt"}},
         "bootstrap_info": {
             "bootstrap_host": "prefill.invalid",
-            "bootstrap_port": 1234,
+            "bootstrap_port": unused_tcp_port,
             "bootstrap_room": 7,
         },
     }
-    if mode == DisaggregationMode.PREFILL:
-        request = {"request": request, "sampling_params": {}}
+    routed_request = (
+        {"request": request, "sampling_params": {}}
+        if mode == DisaggregationMode.PREFILL
+        else request
+    )
 
-    async for _ in handler.generate(request, _Context()):
+    async for _ in handler.generate(routed_request, _Context()):
         pass
 
     assert len(recorder.calls) == 1
     assert recorder.calls[0]["cache_salt"] == "tenant-a"
+
+    del request["routing"]
+    del request["extra_args"]
+    async for _ in handler.generate(routed_request, _Context()):
+        pass
+
+    assert len(recorder.calls) == 2
+    assert "cache_salt" not in recorder.calls[1]
 
 
 @pytest.mark.asyncio

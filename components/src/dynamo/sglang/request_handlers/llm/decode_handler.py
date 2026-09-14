@@ -22,6 +22,7 @@ from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.llm import HttpError
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.sglang._compat import (
+    cache_salt_kwargs,
     filter_supported_async_generate_kwargs,
     require_reasoning_kwargs,
 )
@@ -675,7 +676,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             decode = await self.engine.async_generate(
                 **input_param,
                 **decode_mm_kwargs,
-                cache_salt=request_cache_salt(request),
+                **cache_salt_kwargs(self.engine, request_cache_salt(request)),
                 sampling_params=sampling_params,
                 stream=True,
                 **require_reasoning_kwargs(self.engine, request),
@@ -761,7 +762,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
             agg = await self.engine.async_generate(
                 **input_param,
-                cache_salt=request_cache_salt(request),
+                **cache_salt_kwargs(self.engine, request_cache_salt(request)),
                 image_data=image_data,
                 audio_data=audio_data,
                 video_data=video_data,

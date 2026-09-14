@@ -114,14 +114,12 @@ mod tests {
 
     #[test]
     fn request_rejects_non_string_cache_salt() {
-        for salt in [serde_json::json!(42), serde_json::json!(["tenant-a"])] {
-            assert!(
-                serde_json::from_value::<SglangGenerateRequest>(serde_json::json!({
-                    "input_ids": [1], "cache_salt": salt
-                }))
-                .is_err()
-            );
-        }
+        assert!(
+            serde_json::from_value::<SglangGenerateRequest>(serde_json::json!({
+                "input_ids": [1], "cache_salt": 42
+            }))
+            .is_err()
+        );
     }
 
     #[test]

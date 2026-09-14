@@ -24,7 +24,7 @@ enum TestEventKind {
 
 #[test]
 fn test_deserialize_sglang_cache_salt() {
-    for salt in [None, Some("tenant-a")] {
+    for salt in [None, Some(""), Some("tenant-a")] {
         let mut event = serde_json::json!(["BlockStored", [-123], null, [10, 11], 2, null, "GPU"]);
         if let Some(salt) = salt {
             event
@@ -41,7 +41,10 @@ fn test_deserialize_sglang_cache_salt() {
         else {
             panic!("expected BlockStored");
         };
-        assert_eq!(cache_namespace.as_deref(), salt);
+        assert_eq!(
+            cache_namespace.as_deref(),
+            salt.filter(|salt| !salt.is_empty())
+        );
         assert_eq!(lora_name, None);
     }
 

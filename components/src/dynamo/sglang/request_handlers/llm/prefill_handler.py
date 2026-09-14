@@ -10,7 +10,7 @@ import sglang as sgl
 
 from dynamo._core import Context
 from dynamo.health_check import HEALTH_CHECK_KEY
-from dynamo.sglang._compat import require_reasoning_kwargs
+from dynamo.sglang._compat import cache_salt_kwargs, require_reasoning_kwargs
 from dynamo.sglang._disagg import validate_disagg_parallel_sampling
 from dynamo.sglang.agent_session import agent_session_kwargs
 from dynamo.sglang.args import Config
@@ -218,7 +218,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             results = await self.engine.async_generate(
                 **input_param,
                 **mm_kwargs,
-                cache_salt=request_cache_salt(inner_request),
+                **cache_salt_kwargs(self.engine, request_cache_salt(inner_request)),
                 sampling_params=sampling_params,
                 stream=True,
                 **require_reasoning_kwargs(self.engine, inner_request),

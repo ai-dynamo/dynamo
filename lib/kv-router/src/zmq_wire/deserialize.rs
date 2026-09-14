@@ -215,7 +215,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 let (lora_name, cache_namespace) = match namespace {
                     Some(BlockStoredNamespace::LoraName(name)) => (Some(name), None),
                     Some(BlockStoredNamespace::SglangMetadata { cache_salt }) => {
-                        (None, Some(cache_salt))
+                        (None, (!cache_salt.is_empty()).then_some(cache_salt))
                     }
                     None => (None, None),
                 };
