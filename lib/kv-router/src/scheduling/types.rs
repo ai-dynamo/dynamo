@@ -15,8 +15,8 @@ use super::prefill_load::effective_prefill_tokens;
 use crate::kv_hints::KvTransferCandidates;
 pub use crate::protocols::PotentialLoad;
 use crate::protocols::{
-    BestOverlapCandidate, LocalBlockHash, RoutingConstraints, SharedCacheHits,
-    WorkerAffinityTarget, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+    LocalBlockHash, RoutingConstraints, SharedCacheHits, WorkerAffinityTarget, WorkerConfigLike,
+    WorkerId, WorkerWithDpRank,
 };
 use crate::scheduling::policy_queue::QueueRejection;
 use crate::sequences::WorkerLoadProjection;
@@ -163,6 +163,29 @@ impl AdmittedSchedulingResponse {
     pub fn into_response(self) -> SchedulingResponse {
         self.response
     }
+}
+
+/// The best KV overlap any eligible worker held for a routing decision.
+///
+/// Recorded whether or not the selection landed on that worker, so routing quality can be
+/// measured against the overlap that was reachable rather than the overlap that was taken.
+/// Where [`NonMaxOverlapSelection`] reports only the decisions that gave overlap up, this
+/// reports every decision, which is what makes a rate computable.
+///
+/// Host-path state: it depends on eligibility, so it is computed after selection and is not
+/// part of the public worker-selection contract.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BestOverlapCandidate {
+    /// Effective overlap on the best eligible worker, in fractional blocks. Weighted by the
+    /// configured device, host, and disk credits, so it is comparable only within one router.
+    pub effective_overlap_blocks: f64,
+
+    /// Cached tokens that best eligible worker would have supplied.
+    pub effective_cached_tokens: usize,
+
+    /// Whether the selected worker matched that best overlap. An equal-overlap tie counts as
+    /// a match, because no strictly better worker existed.
+    pub selected_has_max_overlap: bool,
 }
 
 /// A routing decision that selected less KV overlap than another eligible worker.

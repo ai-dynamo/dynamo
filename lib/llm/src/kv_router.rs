@@ -2651,7 +2651,6 @@ mod tests {
                     .worker_load_for(self.selected_worker)
                     .potential_decode_blocks()
                     .saturating_add(request.isl_tokens.div_ceil(block_size as usize)),
-                best_overlap: None,
             })
         }
     }

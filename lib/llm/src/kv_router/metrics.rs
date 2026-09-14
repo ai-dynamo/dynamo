@@ -65,7 +65,7 @@ use prometheus::{
 use crate::http::service::metrics::generate_log_buckets;
 use crate::protocols::common::timing::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
 use dynamo_kv_router::indexer::ApproximateLruStats;
-use dynamo_kv_router::protocols::BestOverlapCandidate;
+use dynamo_kv_router::scheduling::BestOverlapCandidate;
 
 pub(crate) const ROUTER_WORKER_ID_LABEL: &str = "router_worker_id";
 const TARGET_NAMESPACE_LABEL: &str = "target_namespace";

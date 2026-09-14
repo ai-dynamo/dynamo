@@ -1074,26 +1074,6 @@ pub enum RouterResponse {
     },
 }
 
-/// Best KV overlap available on any eligible worker for a routing decision.
-///
-/// Recorded whether or not the selection landed on that worker, so routing quality can be
-/// measured against the overlap that was actually reachable. Absent when the caller pinned a
-/// worker, because the router made no choice.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct BestOverlapCandidate {
-    /// Effective overlap available on the best eligible worker, in fractional blocks.
-    pub effective_overlap_blocks: f64,
-
-    /// Cached tokens that best eligible worker would have supplied.
-    pub effective_cached_tokens: usize,
-
-    /// Whether the selected worker matched that best overlap.
-    ///
-    /// Decided where the selected and best overlap values share a scope, so the comparison
-    /// never has to be re-derived from a value that has since been rounded or copied.
-    pub selected_has_max_overlap: bool,
-}
-
 #[derive(Debug)]
 pub struct WorkerSelectionResult {
     /// The full worker information including dp_rank
@@ -1112,10 +1092,6 @@ pub struct WorkerSelectionResult {
     /// Selected worker's projected decode load after adding this request's
     /// prompt blocks, in scheduler-tracked block units.
     pub potential_decode_blocks: usize,
-
-    /// Best overlap reachable for this request, and whether the selection matched it.
-    /// `None` for pinned selections, which the router did not choose.
-    pub best_overlap: Option<BestOverlapCandidate>,
 }
 
 /// Active load metrics for a worker, used for overload detection.
