@@ -69,6 +69,7 @@ type dgdAdmissionTestCase struct {
 	wantPodAnnotations map[string]string
 	wantProvider       string
 	wantRoleReplicas   map[string]int32
+	wantReplicas       map[string]*int32
 }
 
 func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
@@ -3074,9 +3075,21 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				}
 			}
 			actual := runAdmissionTest(t, test)
-			if tt.wantPodAnnotations != nil || tt.wantProvider != "" || tt.wantRoleReplicas != nil {
+			if tt.wantPodAnnotations != nil || tt.wantProvider != "" || tt.wantRoleReplicas != nil || tt.wantReplicas != nil {
 				t.Log("Convert the admitted DGD for result assertions")
 				actualDGD := admittedBetaDGD(t, actual)
+
+				t.Log("Verify admission preserved component replica intent")
+				for name, want := range tt.wantReplicas {
+					component := actualDGD.GetComponentByName(name)
+					if component == nil {
+						t.Fatalf("admitted DGD has no component %q", name)
+					}
+					if !k8sptr.Equal(component.Replicas, want) {
+						t.Fatalf("component %q: replicas = %v, want %v", name, component.Replicas, want)
+					}
+				}
+
 				if tt.wantProvider != "" {
 					t.Log("Verify creation-time routing intent determined the admitted workload provider")
 					if got := actualDGD.Annotations[consts.KubeAnnotationWorkloadProvider]; got != tt.wantProvider {

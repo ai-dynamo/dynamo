@@ -19,9 +19,10 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 	// Keep LPX inputs and oracles together without a separate admission execution path.
 	return []dgdAdmissionTestCase{
 		{
-			name: "valid singleton lpx deployment with implicit conductor",
+			name: "singleton LPX with implicit conductor preserves omitted replicas",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				component := &dgd.Spec.Components[0]
+				component.Replicas = nil
 				component.Roles = component.Roles[:1]
 				component.Roles[0].PodTemplate.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "model-storage", MountPath: "/nfs"}}
 				component.Roles[0].PodTemplate.Spec.Volumes = []corev1.Volume{{Name: "model-storage", VolumeSource: corev1.VolumeSource{
@@ -36,10 +37,30 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 					},
 				}}
 			}),
+			wantReplicas: map[string]*int32{"lpx": nil},
 		},
 		{
-			name:       "valid canonical v1alpha1 lpx deployment",
-			deployment: alphaLPXDGDForAdmission(nil),
+			name: "v1alpha1 LPX preserves omitted replicas on CREATE",
+			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services["lpx"].Replicas = nil
+			}),
+			wantReplicas: map[string]*int32{"lpx": nil},
+		},
+		{
+			name:          "LPX preserves omitted replicas on UPDATE",
+			oldDeployment: betaLPXDGDForAdmission(nil),
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Replicas = nil
+			}),
+			wantReplicas: map[string]*int32{"lpx": nil},
+		},
+		{
+			name:          "v1alpha1 LPX preserves omitted replicas on UPDATE",
+			oldDeployment: alphaLPXDGDForAdmission(nil),
+			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services["lpx"].Replicas = nil
+			}),
+			wantReplicas: map[string]*int32{"lpx": nil},
 		},
 		{
 			name: "LPX admits nine hybrid replicas with lowered conductor volumes",
@@ -54,6 +75,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 					}}},
 				}}
 			}),
+			wantReplicas: map[string]*int32{"lpx": k8sptr.To(int32(9))},
 		},
 		{
 			name: "LPX native template schema rejects duplicate main container names",
