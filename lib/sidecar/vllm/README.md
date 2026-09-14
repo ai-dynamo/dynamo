@@ -86,6 +86,18 @@ LoRA requires a vLLM build containing
 NIXL prefill/decode also requires the gRPC numeric-conversion fix in
 [vllm-project/vllm#54814](https://github.com/vllm-project/vllm/pull/54814).
 
+For local LoRA serving, use [`launch/agg_lora.sh`](launch/agg_lora.sh) or
+[`launch/disagg_lora.sh`](launch/disagg_lora.sh). Both print adapter loading examples
+and accept `--help` for GPU, port, and cache settings. Load each adapter on both
+workers before sending prefill/decode traffic.
+
+The disaggregated launcher uses a private local IPC socket for KV events, with one
+data-parallel rank per engine. Custom multi-rank deployments must set
+`VLLM_PREFILL_KV_EVENT_ENDPOINT`, replacing `VLLM_PREFILL_KV_EVENT_PORT`.
+For TCP, this vLLM publisher requires a wildcard bind address such as
+`tcp://*:20081`; a concrete IP makes it connect instead of listen. Restrict access
+to that port to trusted consumers because KV events contain request token IDs.
+
 ## Run
 
 ### Runtime compatibility
