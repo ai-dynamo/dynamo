@@ -285,7 +285,7 @@ impl LLMEngine for SglangSidecarEngine {
         } else {
             None
         };
-        let cancel = self.cancel.clone();
+        let cancel = self.cancel.child_token();
         let is_prefill = self.disaggregation_mode.is_prefill();
 
         Ok(Box::pin(async_stream::stream! {
