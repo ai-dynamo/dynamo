@@ -39,6 +39,7 @@ message ServerInfo {
   uint64 max_running_requests = 8;
   uint64 max_batched_tokens = 9;
   RlCapabilities rl_capabilities = 11;
+  bool supports_native_sampling_params_json = 12;
 }
 
 message RlCapabilities {

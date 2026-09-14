@@ -45,7 +45,15 @@ The official `Qwen/Qwen3-ASR-1.7B` repository currently needs Rust-frontend-comp
 
 ### Runtime compatibility
 
-The Python `vllm` package and `vllm-rs` must expose compatible EngineCore and gRPC contracts. Prefer artifacts built from the same vLLM source revision; do not combine a Python wheel from one nightly with a `vllm-rs` binary from another. The sidecar's vendored gRPC source revisions are recorded in [`proto/README.md`](proto/README.md).
+The Python `vllm` package and `vllm-rs` must come from compatible vLLM revisions. Do not combine a wheel from one nightly with a binary from another. The sidecar's vendored gRPC source revisions are recorded in [`proto/README.md`](proto/README.md).
+
+vLLM-Omni changes the engine response format, causing `vllm-rs` to reject
+responses. The Dynamo vLLM runtime image provides a `vllm-rs` wrapper that
+disables Omni by default. Use `vllm-rs` from `PATH` when starting the engine.
+
+The wrapper enables only ModelExpress when installed; otherwise it disables
+all plugins. An exported `VLLM_PLUGINS` overrides this default. The `dev` and
+`local-dev` images do not install Omni and retain normal plugin discovery.
 
 Start vLLM with its gRPC listener:
 
@@ -180,7 +188,10 @@ command.
 
 The sidecar waits for both the Control and Inference services through the standard gRPC health API before registering the worker. The deployment manifests retain lightweight socket probes for container lifecycle monitoring. The engine image must include a `vllm-rs` build compatible with the vendored protocol.
 
-The Dynamo vLLM CUDA runtime image exposes `vllm-rs` on `PATH`, linked from the `vllm` package that image installs, so `vllm-rs serve` runs there by name; that image fails to build if its `vllm` package ever stops shipping the binary. The XPU and CPU variants build from separate upstream vLLM distributions and link it the same way when it is present, but only warn when it is not, so check `command -v vllm-rs` before relying on it there. A stock upstream engine image ships the same binary inside the package but leaves it off `PATH`; `deploy/agg.yaml` and `deploy/disagg.yaml` run that image and resolve the path out of the package themselves.
+The Dynamo vLLM runtime image exposes `vllm-rs` through the
+[wrapper described above](#runtime-compatibility). On CPU and XPU, check that
+the binary is available with `command -v vllm-rs`. The example manifests use
+upstream vLLM images and locate the binary inside the Python package.
 
 ### Prerequisites
 

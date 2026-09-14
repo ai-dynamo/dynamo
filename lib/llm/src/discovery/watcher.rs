@@ -708,11 +708,9 @@ where
                             .context("python chat_engine_factory")?,
                     )
                 } else if let Some(tk) = tokenizer.clone() {
-                    let PromptFormatter::OAI(formatter) =
-                        prompt_formatter_from_mdc(card).context("prompt_formatter_from_mdc")?;
+                    // Only chat pipelines use speculative prefill.
                     let preprocessor =
-                        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tk.clone())
-                            .context("OpenAIPreprocessor.new_with_parts")?;
+                        worker_set_chat_preprocessor(card, tk.clone(), &cancellation)?;
                     Some(
                         routing
                             .build_pipeline::<
@@ -1324,6 +1322,23 @@ fn canonicalize_json(value: &mut serde_json::Value) {
     }
 }
 
+fn worker_set_chat_preprocessor(
+    card: &ModelDeploymentCard,
+    tokenizer: crate::tokenizers::Tokenizer,
+    cancellation: &CancellationToken,
+) -> anyhow::Result<Arc<OpenAIPreprocessor>> {
+    let PromptFormatter::OAI(formatter) =
+        prompt_formatter_from_mdc(card).context("prompt_formatter_from_mdc")?;
+    // A retained pipeline must stop its warmups when its WorkerSet is retired.
+    OpenAIPreprocessor::new_with_parts_and_cancel(
+        card.clone(),
+        formatter,
+        tokenizer,
+        Some(cancellation.clone()),
+    )
+    .context("OpenAIPreprocessor.new_with_parts_and_cancel")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1336,6 +1351,139 @@ mod tests {
     use dynamo_runtime::pipeline::Error;
     use dynamo_runtime::{Runtime, distributed::DistributedConfig};
     use futures::StreamExt;
+
+    #[tokio::test]
+    async fn retired_worker_set_prevents_late_prefill_from_retained_chat_pipeline() {
+        use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
+        use dynamo_runtime::engine::AsyncEngineContextProvider;
+        use dynamo_runtime::pipeline::ResponseStream;
+        use futures::StreamExt;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Debug, Default)]
+        struct CompletingBackend {
+            calls: AtomicUsize,
+            speculative_dispatch: Notify,
+            finish_response: Arc<Notify>,
+        }
+
+        #[async_trait]
+        impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>
+            for CompletingBackend
+        {
+            async fn generate(
+                &self,
+                request: SingleIn<PreprocessedRequest>,
+            ) -> Result<ManyOut<Annotated<BackendOutput>>, Error> {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                let (_, context) = request.transfer(());
+                if call > 0 {
+                    self.speculative_dispatch.notify_one();
+                    return Ok(ResponseStream::new(
+                        Box::pin(futures::stream::empty()),
+                        context.context(),
+                    ));
+                }
+                let finish_response = self.finish_response.clone();
+                let stream = futures::stream::once(async move {
+                    finish_response.notified().await;
+                    Annotated::from_data(
+                        serde_json::from_value::<BackendOutput>(serde_json::json!({
+                            "token_ids": [42],
+                            "tokens": ["The answer is 42."],
+                            "text": "The answer is 42.",
+                            "finish_reason": "stop",
+                            "index": 0
+                        }))
+                        .unwrap(),
+                    )
+                });
+                Ok(ResponseStream::new(Box::pin(stream), context.context()))
+            }
+        }
+
+        // The live case proves this response actually triggers speculative dispatch.
+        for retire_worker_set in [false, true] {
+            let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+            let card = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+            let runtime_cancellation = CancellationToken::new();
+            let cancellation = runtime_cancellation.child_token();
+            let preprocessor =
+                worker_set_chat_preprocessor(&card, card.tokenizer().unwrap(), &cancellation)
+                    .unwrap()
+                    .into_operator();
+            let backend = Arc::new(CompletingBackend::default());
+            let source = SegmentSource::<
+                SingleIn<NvCreateChatCompletionRequest>,
+                ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+            >::new();
+            let engine = source
+                .link(preprocessor.forward_edge())
+                .unwrap()
+                .link(ServiceBackend::from_engine(backend.clone()))
+                .unwrap()
+                .link(preprocessor.backward_edge())
+                .unwrap()
+                .link_terminal(source)
+                .unwrap();
+            let mut worker_set = WorkerSet::new("retired-prefill".into(), "test".into(), card);
+            worker_set.set_lifecycle_cancellation(cancellation.clone());
+            worker_set.chat_engine = Some(engine);
+            let retained_engine = worker_set.chat_engine.clone().unwrap();
+            let request =
+                serde_json::from_value::<NvCreateChatCompletionRequest>(serde_json::json!({
+                    "model": "mock-llama",
+                    "messages": [{"role": "user", "content": "What is the answer?"}],
+                    "stream": true,
+                    "nvext": {"agent_hints": {"speculative_prefill": true}}
+                }))
+                .unwrap();
+            let mut response = retained_engine
+                .generate(SingleIn::new(request))
+                .await
+                .unwrap();
+            assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
+            let worker_set = Some(worker_set);
+            let live_worker_set = if retire_worker_set {
+                drop(worker_set);
+                assert!(cancellation.is_cancelled());
+                None
+            } else {
+                worker_set
+            };
+            assert!(!runtime_cancellation.is_cancelled());
+            backend.finish_response.notify_one();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while response.next().await.is_some() {}
+            })
+            .await
+            .expect("the client response must complete after WorkerSet retirement");
+
+            if retire_worker_set {
+                assert!(
+                    tokio::time::timeout(
+                        Duration::from_secs(1),
+                        backend.speculative_dispatch.notified(),
+                    )
+                    .await
+                    .is_err(),
+                    "the retained pipeline dispatched a warmup after WorkerSet retirement"
+                );
+                assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
+            } else {
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    backend.speculative_dispatch.notified(),
+                )
+                .await
+                .expect("the live WorkerSet must dispatch its warmup");
+                assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
+            }
+            drop(live_worker_set);
+            drop(retained_engine);
+        }
+    }
 
     fn test_endpoint_id(name: &str) -> EndpointId {
         EndpointId {
