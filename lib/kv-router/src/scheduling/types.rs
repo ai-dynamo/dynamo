@@ -266,6 +266,18 @@ impl ScheduleMode {
         )
     }
 
+    // TODO(epp-integration): `TrackedWithLifecycle` is the only mode that
+    // carries a request into pluggable flow control, and nothing outside
+    // `dynamo-llm` can select it. The Rust EPP in full dynamo mode lands in
+    // `QueryOnly` (it calls `find_best_match` with `context_id: None` and
+    // `update_states: false`), so `tracked_request_id()` below returns `None`
+    // and classification is skipped for every gateway request.
+    //
+    // Note the failure is silent: a classifier installed alongside the EPP is
+    // simply never consulted, with no error and no warning. Whatever exposes
+    // lifecycle tracking to external crates should also make that
+    // misconfiguration observable — a warn-level log at install time when the
+    // router has no path to produce `TrackedWithLifecycle`, or a typed error.
     pub(crate) fn lifecycle_request_id(&self) -> Option<&str> {
         match self {
             Self::TrackedWithLifecycle { request_id } => Some(request_id),
