@@ -3,6 +3,27 @@ From: Codex <codex@openai.com>
 Date: Thu, 27 Aug 2026 04:04:25 -0700
 Subject: [PATCH] fix(spec decode): honor DSpark anchor sampling layout
 
+vLLM 0.26.0's Speculators converter unconditionally selects the bonus-anchor
+layout. For checkpoints with sample_from_anchor=true, including
+skt/A.X-K2-DSpark, the anchor predicts the first draft token and the existing
+runtime expects N query slots rather than 1+N. Honor the checkpoint setting
+to avoid that layout mismatch. False or absent retains the existing layout.
+
+This configuration fix applies to any DSpark checkpoint using this converter.
+Current upstream vLLM top of tree supports the same behavior by deriving
+dspark_bonus_anchor from sample_from_anchor:
+https://github.com/vllm-project/vllm/blob/995e8581f462a13e32f30cfba946c63d48cf31d7/vllm/transformers_utils/configs/speculators/algos.py
+
+SKT already honored sample_from_anchor as part of its larger DSpark support
+effort on vLLM 0.23. This local patch preserves that behavior using the DSpark
+runtime already present in vLLM 0.26, without importing SKT's older runtime:
+https://github.com/SKT-AI/vllm/commit/97045d9e981dbe41903938c46d1d3a00ab5c64ce
+
+Dynamo currently applies this series only to CUDA images; CPU and XPU images
+retain the upstream 0.26 behavior. The build-time validator checks the A.X-K2
+DSpark configuration conversion, but non-A.X-K2 DSpark checkpoint inference
+has not been validated by this port.
+
 Signed-off-by: Codex <codex@openai.com>
 ---
  vllm/transformers_utils/configs/speculators/algos.py | 9 +++++++--
