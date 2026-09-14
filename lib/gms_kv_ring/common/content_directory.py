@@ -594,6 +594,15 @@ class ContentDirectory:
         if self._async_read:
             self.start_async_read()
             return self._read_view_lookup(content_hashes)
+        return self.lookup_authoritative(content_hashes)
+
+    def lookup_authoritative(self, content_hashes: list[bytes]) -> list[Optional[dict]]:
+        """Read READY entries directly from the daemon.
+
+        Normal request lookups deliberately use the asynchronous local view.
+        Transaction cleanup instead needs a read-after-write check against the
+        daemon commit point, without waiting for that view to catch up.
+        """
         entries, _epoch, _writer = self._call(
             lambda client: client.directory_lookup(self.manifest_id, content_hashes)
         )
@@ -624,11 +633,27 @@ class ContentDirectory:
     ) -> tuple[list[Optional[dict]], Optional[str]]:
         if self._async_read:
             self.start_async_read()
-            local = self._read_view_lookup(content_hashes)
+            # The public read view intentionally exposes only READY entries,
+            # but a TP peer may have changed a shared HBM entry to ACTIVE while
+            # staging the same successor generation. That ACTIVE candidate
+            # still requires an authoritative daemon claim: short-circuiting it
+            # as a miss lets TP ranks choose different prefix lengths and hang
+            # in their next collective.
+            with self._view_lock:
+                raw = [self._view.get(content_hash) for content_hash in content_hashes]
+                local = [
+                    dict(entry)
+                    if entry is not None and entry.get("state") == "ready"
+                    else None
+                    for entry in raw
+                ]
             # Misses and host/storage hits are read-only. Only HBM adoption
             # needs the daemon claim that fences eviction and slot reuse.
             if not any(
-                entry is not None and entry.get("tier") == "hbm" for entry in local
+                entry is not None
+                and entry.get("tier") == "hbm"
+                and entry.get("state") in ("ready", "active")
+                for entry in raw
             ):
                 return local, None
 
@@ -661,12 +686,22 @@ class ContentDirectory:
             retryable=False,
         )
 
-    def ensure_hbm_capacity(self, required_blocks: int) -> list[dict]:
+    def ensure_hbm_capacity(
+        self, required_blocks: int, *, eligible_slot_ids: list[int] | None = None
+    ) -> list[dict]:
         if required_blocks <= 0:
             return []
         return self._writer_call(
             lambda client, epoch: client.directory_ensure_hbm_capacity(
-                self.manifest_id, self.writer_id, epoch, int(required_blocks)
+                self.manifest_id,
+                self.writer_id,
+                epoch,
+                int(required_blocks),
+                **(
+                    {"eligible_slot_ids": eligible_slot_ids}
+                    if eligible_slot_ids is not None
+                    else {}
+                ),
             ),
             [],
             retryable=False,
