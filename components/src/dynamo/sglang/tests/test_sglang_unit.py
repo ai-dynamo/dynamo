@@ -20,7 +20,6 @@ from sglang.srt.managers.io_struct import ProfileReq
 import dynamo.sglang._compat as sglang_compat
 import dynamo.sglang._disagg as disagg_mod
 import dynamo.sglang.args as sglang_args
-import dynamo.sglang.init_llm as init_llm_mod
 import dynamo.sglang.main as sglang_main
 from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
 from dynamo.common.snapshot.constants import SNAPSHOT_CONTROL_DIR_ENV
@@ -1671,6 +1670,8 @@ async def test_worker_teardown_keeps_the_body_failure(caplog):
 async def test_prefill_warmup_failure_cancels_metrics(
     monkeypatch, warmup_error, message
 ):
+    import dynamo.sglang.init_llm as init_llm_mod
+
     metrics_started = asyncio.Event()
 
     async def metrics_loop():
@@ -1698,6 +1699,8 @@ async def test_prefill_warmup_failure_cancels_metrics(
 @pytest.mark.timeout(5)
 @pytest.mark.asyncio
 async def test_prefill_warmup_cancellation_cancels_metrics(monkeypatch):
+    import dynamo.sglang.init_llm as init_llm_mod
+
     warmup_started = asyncio.Event()
 
     async def suspended_warmup(engine, port):
