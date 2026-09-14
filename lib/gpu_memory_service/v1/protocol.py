@@ -194,13 +194,20 @@ class CheckpointStateResponse(
 class ErrorResponse(msgspec.Struct, tag="error_response", forbid_unknown_fields=True):
     message: str
     out_of_memory: bool = False
-    code: str | None = None
+
+
+class PersistentPoolErrorResponse(
+    msgspec.Struct, tag="persistent_pool_error_response", forbid_unknown_fields=True
+):
+    message: str
+    code: str
 
 
 ERROR_CLAIM_CONFLICT = "claim_conflict"
 ERROR_NOT_CLAIMED = "not_claimed"
 ERROR_NOT_FOUND = "not_found"
 ERROR_INVALID_REQUEST = "invalid_request"
+ERROR_OUT_OF_MEMORY = "out_of_memory"
 
 
 Request: TypeAlias = (
@@ -233,6 +240,7 @@ Response: TypeAlias = (
     | ListPersistentPoolsResponse
     | CheckpointStateResponse
     | ErrorResponse
+    | PersistentPoolErrorResponse
 )
 Message: TypeAlias = (
     HandshakeRequest | HandshakeResponse | Request | CheckpointControlRequest | Response

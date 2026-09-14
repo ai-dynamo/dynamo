@@ -13,6 +13,7 @@ from typing import TypeVar
 
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.v1.protocol import (
+    ERROR_OUT_OF_MEMORY,
     AbortRequest,
     AllocateRequest,
     ClaimPersistentPoolRequest,
@@ -31,6 +32,7 @@ from gpu_memory_service.v1.protocol import (
     ListPersistentPoolsRequest,
     ListPersistentPoolsResponse,
     Message,
+    PersistentPoolErrorResponse,
     SuccessResponse,
     UnclaimPersistentPoolRequest,
     UnclaimPersistentPoolResponse,
@@ -246,13 +248,17 @@ class _GMSClientSession:
         expect_fd: bool = False,
     ) -> T:
         try:
-            if isinstance(response, ErrorResponse):
-                if response.out_of_memory:
+            if isinstance(response, PersistentPoolErrorResponse):
+                if response.code == ERROR_OUT_OF_MEMORY:
                     raise MemoryError(response.message)
                 raise GMSV1RemoteError(
                     response.message,
                     code=response.code,
                 )
+            if isinstance(response, ErrorResponse):
+                if response.out_of_memory:
+                    raise MemoryError(response.message)
+                raise GMSV1RemoteError(response.message)
             if not isinstance(response, response_type):
                 raise RuntimeError(  # noqa: TRY004
                     f"GMS {operation} returned {type(response).__name__}, "
