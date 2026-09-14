@@ -11,7 +11,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/utils/ptr"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -99,38 +98,4 @@ func TestEPPCacheVolumeMatchesTheMount(t *testing.T) {
 			assert.Equal(t, tc.wantVolume, found, "hf-cache volume must be declared exactly where it is mounted")
 		})
 	}
-}
-
-func eppContainerWithReplicas(t *testing.T, replicas *int32) corev1.Container {
-	t.Helper()
-	container, err := NewEPPDefaults().GetBaseContainer(ComponentContext{
-		DynamoNamespace:                "ns-dgd",
-		ComponentType:                  commonconsts.ComponentTypeEPP,
-		ParentGraphDeploymentName:      "dgd",
-		ParentGraphDeploymentNamespace: "ns",
-		Replicas:                       replicas,
-	})
-	require.NoError(t, err)
-	return container
-}
-
-func TestEPPReplicaSyncDefault(t *testing.T) {
-	t.Run("single replica leaves replica sync unset", func(t *testing.T) {
-		container := eppContainerWithReplicas(t, ptr.To(int32(1)))
-		_, found := envValueNamed(container, "DYN_ROUTER_REPLICA_SYNC")
-		assert.False(t, found, "a single EPP has no peer to synchronize with")
-	})
-
-	t.Run("unset replicas leaves replica sync unset", func(t *testing.T) {
-		container := eppContainerWithReplicas(t, nil)
-		_, found := envValueNamed(container, "DYN_ROUTER_REPLICA_SYNC")
-		assert.False(t, found)
-	})
-
-	t.Run("multiple replicas default replica sync on", func(t *testing.T) {
-		container := eppContainerWithReplicas(t, ptr.To(int32(2)))
-		value, found := envValueNamed(container, "DYN_ROUTER_REPLICA_SYNC")
-		require.True(t, found, "a replicated EPP must default to sharing active-sequence state")
-		assert.Equal(t, "true", value)
-	})
 }

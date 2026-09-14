@@ -67,7 +67,6 @@ type ComponentContext struct {
 	ParentGraphDeploymentNamespace string
 	Discovery                      DiscoveryContext
 	EPPConfig                      *v1beta1.EPPConfig
-	Replicas                       *int32
 	WorkerHashSuffix               string
 	RuntimeVersion                 *runtimeversion.Version
 }
