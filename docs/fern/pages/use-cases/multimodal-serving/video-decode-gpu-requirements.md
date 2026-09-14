@@ -166,6 +166,11 @@ binary wheel of the same version, not installing a range:
 
 ```bash
 VERSION=$(pip show opencv-python-headless | awk '/^Version:/{print $2}')
+# No distribution metadata leaves VERSION empty, and `opencv-python-headless==`
+# fails. Fall back to the OpenCV library version, which stops at three
+# components while the distribution adds a packaging revision, so match on it
+# as a prefix.
+[ -n "$VERSION" ] || VERSION="$(python -c 'import cv2; print(cv2.__version__)').*"
 pip install --no-deps --force-reinstall --only-binary opencv-python-headless \
   "opencv-python-headless==${VERSION}"
 ```
