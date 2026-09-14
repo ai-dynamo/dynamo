@@ -206,7 +206,6 @@ def _racer(
     ready_queue: multiprocessing.Queue,
     result_queue: multiprocessing.Queue,
 ):
-    """Confirm contention, acquire the lock, report timing, hold, and release."""
     import fcntl
 
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
@@ -249,7 +248,6 @@ def _racer(
 # catches a child or queue shutdown path that blocks outside those waits.
 @pytest.mark.timeout(90)
 async def test_cross_process_race(lock_path):
-    """Two processes contend for the lock; the kernel serializes their holds."""
     import fcntl
 
     ready_queue = multiprocessing.Queue()
