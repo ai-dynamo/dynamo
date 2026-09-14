@@ -64,6 +64,7 @@ from .persistent_allocations import (
     PersistentAllocationManager,
     PersistentClaimConflictError,
     PersistentNotFoundError,
+    PersistentPoolIncompatibleError,
 )
 from .session import GMSSessionManager
 
@@ -555,12 +556,17 @@ class GMS:
             )
             key = (msg.engine_id, msg.tag)
             try:
-                if key in claims and getattr(msg, "shared", False):
+                if key in claims:
+                    was_shared = self._persistent.shared_claim_count(*key) > 0
+                    if was_shared != msg.shared:
+                        raise PersistentPoolIncompatibleError(
+                            "persistent claim mode differs from this session's claim"
+                        )
                     alloc = self._persistent.get_compatible(
                         msg.engine_id,
                         msg.tag,
                         msg.size,
-                        shared=True,
+                        shared=msg.shared,
                     )
                     reattached = True
                 else:
@@ -570,10 +576,14 @@ class GMS:
                         size=msg.size,
                         shared=getattr(msg, "shared", False),
                     )
+            except PersistentPoolIncompatibleError as exc:
+                return ErrorResponse(error=str(exc), code=2), -1, False
             except PersistentClaimConflictError as exc:
                 return ErrorResponse(error=str(exc), code=1), -1, False
-            except (ValueError, MemoryError) as exc:
+            except ValueError as exc:
                 return ErrorResponse(error=str(exc), code=2), -1, False
+            except MemoryError as exc:
+                return ErrorResponse(error=str(exc), code=5), -1, False
             claims.add(key)
             self._sync_persistent_layout_events()
             return (
