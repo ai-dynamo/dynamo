@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 import dynamo.common.multimodal.audio_loader as audio_loader_module
-import dynamo.common.multimodal.codec_errors as codec_errors
+from dynamo.common.multimodal import codec_errors
 from dynamo.common.http import HttpStatusError
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.multimodal.audio_loader import AudioLoader
