@@ -6,6 +6,7 @@
 package lpx
 
 import (
+	"fmt"
 	"slices"
 
 	corev1 "k8s.io/api/core/v1"
@@ -18,14 +19,27 @@ const (
 	defaultLPUAgentCPUs   int64 = 62
 )
 
-func applyLPUHostDeviceVolumes(podSpec *corev1.PodSpec, replaceExisting bool) {
+func applyLPUHostDeviceVolumes(podSpec *corev1.PodSpec, replaceExisting bool) error {
 	apply := appendVolumeIfMissing
 	if replaceExisting {
 		apply = setVolumeByName
 	}
 
-	podSpec.Volumes = apply(podSpec.Volumes, lpuHostDeviceVolume("host-dev", "/dev"))
-	podSpec.Volumes = apply(podSpec.Volumes, lpuHostDeviceVolume("host-sys", "/sys"))
+	// Keep authored storage only when it exposes the required host device directory.
+	for _, required := range []corev1.Volume{lpuHostDeviceVolume("host-dev", "/dev"), lpuHostDeviceVolume("host-sys", "/sys")} {
+		if !replaceExisting {
+			for _, existing := range podSpec.Volumes {
+				hostPath := existing.HostPath
+				if existing.Name == required.Name && (hostPath == nil || hostPath.Path != required.HostPath.Path ||
+					hostPath.Type != nil && *hostPath.Type != corev1.HostPathUnset &&
+						*hostPath.Type != corev1.HostPathDirectory && *hostPath.Type != corev1.HostPathDirectoryOrCreate) {
+					return fmt.Errorf("selected LPX podTemplate volume %q must use directory hostPath %q", required.Name, required.HostPath.Path)
+				}
+			}
+		}
+		podSpec.Volumes = apply(podSpec.Volumes, required)
+	}
+	return nil
 }
 
 func lpuHostDeviceVolume(name, path string) corev1.Volume {

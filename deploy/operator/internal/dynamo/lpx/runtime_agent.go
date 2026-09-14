@@ -176,7 +176,9 @@ func configureDirectHybridAgentRuntime(
 	if err := addSSHVolume(agentPodSpec, sshSecretName, 0644); err != nil {
 		return err
 	}
-	applyLPUHostDeviceVolumes(agentPodSpec, false)
+	if err := applyLPUHostDeviceVolumes(agentPodSpec, false); err != nil {
+		return err
+	}
 	agentPodSpec.Volumes = appendVolumeIfMissing(agentPodSpec.Volumes, corev1.Volume{
 		Name: "hugepages",
 		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{
@@ -250,7 +252,9 @@ func configureNodeLocalAgentRuntime(
 	addRuntimeTemporaryStorage(agentPodSpec, agent, !isXT)
 	agentPodSpec.HostUsers = nil
 	updateWorkerPodSpec(agentPodSpec)
-	applyLPUHostDeviceVolumes(agentPodSpec, !isXT)
+	if err := applyLPUHostDeviceVolumes(agentPodSpec, !isXT); err != nil {
+		return err
+	}
 	if err := addSSHVolume(agentPodSpec, sshSecretName, 0644); err != nil {
 		return err
 	}

@@ -396,6 +396,65 @@ func TestXTSSHSecretNameIsNotUsedAsVolumeName(t *testing.T) {
 	}
 }
 
+func TestXTRuntimesValidateHostDeviceVolumes(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		volume  corev1.Volume
+		wantErr bool
+	}{
+		{"ConfigMap", corev1.Volume{Name: "host-dev", VolumeSource: corev1.VolumeSource{
+			ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "application"}},
+		}}, true},
+		{"Secret", corev1.Volume{Name: "host-sys", VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{SecretName: "application"},
+		}}, true},
+		{"wrong host directory", corev1.Volume{Name: "host-dev", VolumeSource: corev1.VolumeSource{
+			HostPath: &corev1.HostPathVolumeSource{Path: "/application"},
+		}}, true},
+		{"wrong host type", corev1.Volume{Name: "host-dev", VolumeSource: corev1.VolumeSource{
+			HostPath: &corev1.HostPathVolumeSource{Path: "/dev", Type: ptr.To(corev1.HostPathFile)},
+		}}, true},
+		{"compatible host directory", corev1.Volume{Name: "host-dev", VolumeSource: corev1.VolumeSource{
+			HostPath: &corev1.HostPathVolumeSource{Path: "/dev"},
+		}}, false},
+		{"compatible host type", corev1.Volume{Name: "host-sys", VolumeSource: corev1.VolumeSource{
+			HostPath: &corev1.HostPathVolumeSource{Path: "/sys", Type: ptr.To(corev1.HostPathDirectoryOrCreate)},
+		}}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Give an authored sidecar a volume name reserved by the Agent runtime")
+			base := corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: commonconsts.MainContainerName, Image: "lpu-runtime"},
+					{Name: "sidecar", VolumeMounts: []corev1.VolumeMount{{Name: test.volume.Name, MountPath: "/application"}}},
+				},
+				Volumes: []corev1.Volume{test.volume},
+			}
+			configureAgentScheduling(&base, BuildFamilyXT)
+			direct, agent := base.DeepCopy(), base.DeepCopy()
+
+			t.Log("Reject incompatible bindings through both XT runtime entry points")
+			errors := []error{
+				configureDirectHybridAgentRuntime(direct, "graph-lpu", "ssh-secret"),
+				configureNodeLocalAgentRuntime(agent, BuildFamilyXT, false, "ssh-secret"),
+			}
+			for _, err := range errors {
+				if test.wantErr {
+					require.ErrorContains(t, err, "must use directory hostPath")
+				} else {
+					require.NoError(t, err)
+				}
+			}
+
+			t.Log("Never rebind the authored volume or its sidecar mount")
+			for _, pod := range []*corev1.PodSpec{direct, agent} {
+				require.Equal(t, test.volume.VolumeSource, testVolumeByName(t, pod.Volumes, test.volume.Name))
+				require.Equal(t, base.Containers[1], pod.Containers[1])
+			}
+		})
+	}
+}
+
 func TestConfigureDirectHybridAgentRuntimePreservesPodOverrides(t *testing.T) {
 	t.Log("Define custom entrypoint, probe and Pod security preservation cases")
 	customStartup := testExecProbe("custom-startup")
