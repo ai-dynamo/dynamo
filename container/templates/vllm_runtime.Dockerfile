@@ -126,7 +126,7 @@ RUN SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')
 
 {% if device == "cuda" %}
 # A.X-K2 support is not present in the upstream vLLM 0.26.0 runtime. Apply the
-# four Python-only forward-port patches directly to the installed package in the
+# four Python patches directly to the installed package in the
 # standard Dynamo vLLM runtime image. vLLM 0.26.0 already includes the newer
 # upstream DSpark runtime, but needs the later upstream sparse-MLA-plus-SWA-draft
 # KV allocation fix.
