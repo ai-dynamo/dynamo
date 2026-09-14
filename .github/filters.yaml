@@ -226,6 +226,8 @@ operator:
   - 'components/src/dynamo/profiler/utils/dgd_override.py'
   - 'components/src/dynamo/profiler/tests/integration/test_dgd_override_go_integration.py'
   - 'components/src/dynamo/profiler/utils/dgdr_*'
+  # The operator check also owns the Go/Python snapshot environment contract test.
+  - 'components/src/dynamo/common/snapshot/**'
 
 snapshot:
   - 'deploy/checkpoint-placeholder/**'
