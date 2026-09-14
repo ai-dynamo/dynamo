@@ -129,8 +129,10 @@ RUN SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')
 # four Python-only forward-port patches directly to the installed package in the
 # standard Dynamo vLLM runtime image. vLLM 0.26.0 already includes the newer
 # upstream DSpark runtime, but needs the later upstream sparse-MLA-plus-SWA-draft
-# KV allocation fix. Validate config conversion, registry wiring, and that cache
-# grouping fallback rather than overlaying SKT's older DSpark implementation.
+# KV allocation fix.
+# Validate the port at build time: A.X-K2 and DSpark model registration,
+# DSpark config conversion, and the sparse-MLA + SWA-draft cache-grouping
+# fallback. The validator uses the upstream vLLM 0.26.0 DSpark runtime.
 COPY --chmod=644 container/patches/vllm/axk2/*.patch /tmp/axk2-vllm-patches/
 COPY --chmod=755 container/deps/vllm/validate_axk2_port.py /tmp/validate_axk2_port.py
 RUN set -eux; \
