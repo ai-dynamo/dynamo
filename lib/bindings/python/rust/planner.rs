@@ -3,7 +3,6 @@
 
 //! TODO: This was ported directly from Python so some changes may be beneficial.
 //! - Do we really want to convert to/from string before writing to etcd? It takes Vec<U8>
-//! - We can probably replace wrap the whole InnerConnector in a Mutex, it should be uncontended.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -33,10 +32,7 @@ struct InnerConnector {
     // be calling it from max one thread at once.
     kv_cache: Mutex<Option<Arc<KvCache>>>,
 
-    // On x86 AtomicUsize at Relaxed compiles to usize, it's free
-    num_prefill_workers: AtomicUsize,
-    num_decode_workers: AtomicUsize,
-    decision_id: AtomicUsize,          // NONE_SENTINEL means not set
+    decision: Mutex<PlannerDecision>,
     first_skip_timestamp: AtomicUsize, // In seconds since epoch, with NONE_SENTINEL
 }
 
@@ -75,9 +71,11 @@ impl VirtualConnectorCoordinator {
             namespace: dynamo_namespace.to_string(),
             etcd_client,
             kv_cache: Mutex::new(None),
-            num_prefill_workers: AtomicUsize::new(NONE_SENTINEL),
-            num_decode_workers: AtomicUsize::new(NONE_SENTINEL),
-            decision_id: AtomicUsize::new(NONE_SENTINEL),
+            decision: Mutex::new(PlannerDecision {
+                num_prefill_workers: -1,
+                num_decode_workers: -1,
+                decision_id: -1,
+            }),
             first_skip_timestamp: AtomicUsize::new(NONE_SENTINEL),
         };
         Ok(Self(Arc::new(c)))
@@ -85,26 +83,7 @@ impl VirtualConnectorCoordinator {
 
     #[pyo3(signature = ())]
     pub fn read_state(&self) -> PlannerDecision {
-        let current_prefill = load(&self.0.num_prefill_workers);
-        let current_decode = load(&self.0.num_decode_workers);
-        let current_decision_id = load(&self.0.decision_id);
-        PlannerDecision {
-            num_prefill_workers: if current_prefill != NONE_SENTINEL {
-                current_prefill as isize
-            } else {
-                -1
-            },
-            num_decode_workers: if current_decode != NONE_SENTINEL {
-                current_decode as isize
-            } else {
-                -1
-            },
-            decision_id: if current_decision_id != NONE_SENTINEL {
-                current_decision_id as isize
-            } else {
-                -1
-            },
-        }
+        *self.0.decision.lock()
     }
 
     #[pyo3(signature = ())]
@@ -129,11 +108,12 @@ impl VirtualConnectorCoordinator {
     ) -> PyResult<Bound<'p, PyAny>> {
         let inner = self.0.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let current_prefill = load(&inner.num_prefill_workers);
-            let has_prefill_changed = num_prefill.is_some_and(|n| n != current_prefill);
+            let current = *inner.decision.lock();
+            let current_prefill = current.num_prefill_workers;
+            let has_prefill_changed = num_prefill.is_some_and(|n| n as isize != current_prefill);
 
-            let current_decode = load(&inner.num_decode_workers);
-            let has_decode_changed = num_decode.is_some_and(|n| n != current_decode);
+            let current_decode = current.num_decode_workers;
+            let has_decode_changed = num_decode.is_some_and(|n| n as isize != current_decode);
 
             if !(has_prefill_changed || has_decode_changed) {
                 tracing::info!(
@@ -159,7 +139,7 @@ impl VirtualConnectorCoordinator {
                         .first_skip_timestamp
                         .store(current_time, Ordering::Relaxed);
                     tracing::info!(
-                        decision_id = load(&inner.decision_id),
+                        decision_id = current.decision_id,
                         "Previous scaling decision not ready, starting to track skip time"
                     )
                 }
@@ -168,14 +148,14 @@ impl VirtualConnectorCoordinator {
                 let time_waited = current_time - load(&inner.first_skip_timestamp);
                 if time_waited < inner.max_wait_time.as_secs() as usize {
                     tracing::warn!(
-                        decision_id = load(&inner.decision_id),
+                        decision_id = current.decision_id,
                         time_waited,
                         "Previous scaling decision not ready, skipping new decision",
                     );
                     return Ok(());
                 } else {
                     tracing::warn!(
-                        decision_id = load(&inner.decision_id),
+                        decision_id = current.decision_id,
                         scaling_max_wait_time = inner.max_wait_time.as_secs(),
                         "Previous scaling decision not ready, proceeding with new decision anyway"
                     )
@@ -187,16 +167,13 @@ impl VirtualConnectorCoordinator {
                     "Call async_init before using this object",
                 ));
             };
-            let new_prefill = num_prefill.unwrap_or(current_prefill);
-            let new_decode = num_decode.unwrap_or(current_decode);
-            let new_decision_id = match load(&inner.decision_id) {
-                NONE_SENTINEL => 0,
-                current => current + 1,
-            };
+            let new_prefill = num_prefill.map(|n| n as isize).unwrap_or(current_prefill);
+            let new_decode = num_decode.map(|n| n as isize).unwrap_or(current_decode);
+            let new_decision_id = current.decision_id + 1;
             let decision = PlannerDecision {
-                num_prefill_workers: new_prefill as isize,
-                num_decode_workers: new_decode as isize,
-                decision_id: new_decision_id as isize,
+                num_prefill_workers: new_prefill,
+                num_decode_workers: new_decode,
+                decision_id: new_decision_id,
             };
 
             // One value keeps counts and ID atomic for both etcd readers and the cache watcher.
@@ -210,13 +187,7 @@ impl VirtualConnectorCoordinator {
                 .map_err(to_pyerr)?;
 
             // A failed publication must leave the previous decision available for retry.
-            inner
-                .num_prefill_workers
-                .store(new_prefill, Ordering::Relaxed);
-            inner
-                .num_decode_workers
-                .store(new_decode, Ordering::Relaxed);
-            inner.decision_id.store(new_decision_id, Ordering::Relaxed);
+            *inner.decision.lock() = decision;
             inner
                 .first_skip_timestamp
                 .store(NONE_SENTINEL, Ordering::Relaxed);
@@ -244,8 +215,8 @@ impl VirtualConnectorCoordinator {
                 // If no scaling decision has been made yet, return immediately
                 // rather than waiting for a scaled_decision_id that will never
                 // appear (the client only writes it after handling a decision).
-                let current = load(&inner.decision_id);
-                if current == NONE_SENTINEL {
+                let current = inner.decision.lock().decision_id;
+                if current == -1 {
                     tracing::info!(
                         decision_id = current,
                         "No scaling decision pending, skipping wait"
@@ -259,7 +230,7 @@ impl VirtualConnectorCoordinator {
                     Some(scaled_decision_id_bytes) => {
                         match String::from_utf8_lossy(&scaled_decision_id_bytes).parse::<usize>() {
                             Ok(scaled_decision_id) => {
-                                if scaled_decision_id >= current {
+                                if scaled_decision_id >= current as usize {
                                     tracing::info!(
                                         decision_id = current,
                                         "Scaling decision completed"
@@ -275,7 +246,7 @@ impl VirtualConnectorCoordinator {
                 }
             }
             tracing::warn!(
-                decision_id = load(&inner.decision_id),
+                decision_id = inner.decision.lock().decision_id,
                 scaling_max_wait_time = inner.max_wait_time.as_secs(),
                 "Timeout waiting for scaling decision to complete"
             );
@@ -305,19 +276,14 @@ impl InnerConnector {
         let decision = read_decision(&self.etcd_client, &kv_cache.prefix)
             .await
             .map_err(to_pyerr)?;
-        self.num_prefill_workers
-            .store(decision.num_prefill_workers as usize, Ordering::Relaxed);
-        self.num_decode_workers
-            .store(decision.num_decode_workers as usize, Ordering::Relaxed);
-        self.decision_id
-            .store(decision.decision_id as usize, Ordering::Relaxed);
+        *self.decision.lock() = decision;
 
         Ok(())
     }
 
     /// Check if the previous scaling decision has been completed"""
     async fn is_scaling_ready(&self) -> bool {
-        let current = load(&self.decision_id);
+        let current = self.decision.lock().decision_id;
         // If this is the first decision, it's always ready
         if scaling_decision_is_ready(current, None) {
             return true;
@@ -343,8 +309,8 @@ impl InnerConnector {
     }
 }
 
-fn scaling_decision_is_ready(current: usize, scaled: Option<usize>) -> bool {
-    current == NONE_SENTINEL || scaled.is_some_and(|scaled| scaled >= current)
+fn scaling_decision_is_ready(current: isize, scaled: Option<usize>) -> bool {
+    current == -1 || scaled.is_some_and(|scaled| scaled >= current as usize)
 }
 
 #[pyclass]
@@ -504,9 +470,7 @@ fn root_key(namespace: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        DECISION_KEY, NONE_SENTINEL, PlannerDecision, decode_decision, scaling_decision_is_ready,
-    };
+    use super::{DECISION_KEY, PlannerDecision, decode_decision, scaling_decision_is_ready};
     use std::collections::HashMap;
 
     #[test]
@@ -549,7 +513,7 @@ mod tests {
 
     #[test]
     fn scaling_is_ready_before_first_decision() {
-        assert!(scaling_decision_is_ready(NONE_SENTINEL, None));
+        assert!(scaling_decision_is_ready(-1, None));
     }
 
     #[test]
