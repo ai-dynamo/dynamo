@@ -5,6 +5,12 @@ SPDX-License-Identifier: Apache-2.0
 
 # vLLM sidecar
 
+The sidecar and its mock server use the official
+[`vllm-proto`](https://crates.io/crates/vllm-proto) crate for Rust gRPC bindings.
+The version is pinned in the workspace `Cargo.toml` and released independently
+of vLLM. Update it together with compatibility checks against the supported
+vLLM runtime. Dynamo does not need copied schemas, a generation script, or Buf credentials.
+
 > [!WARNING]
 > **Experimental.** This sidecar and its deployment examples are experimental.
 > The Python launcher ships in the `ai-dynamo` and `ai-dynamo-runtime` wheel
@@ -35,7 +41,7 @@ It is a standalone Rust executable and is also compiled into
 
 Audio and video gRPC inputs are not available in vLLM `0.28.0`. They require a later vLLM release.
 
-The protocol does not support LoRA, beam search, `n > 1`, or Dynamo tool-call and reasoning parsers. The sidecar does not support `input_audio`, `file://` media, `use_audio_in_video` or other `mm_processor_kwargs`, preprocessed multimodal features, decoded RDMA media, UUID-only media, or audio/video cache UUIDs. Encoder disaggregation is image-only in this release. Direct vLLM gRPC callers can send raw media bytes, but Dynamo's current `MultimodalData` representation cannot. Parser defaults returned by Control are intentionally not advertised to the Dynamo frontend because the current inference protocol does not preserve all parser-related request semantics.
+The sidecar does not support LoRA, beam search, `n > 1`, or Dynamo tool-call and reasoning parsers. The sidecar does not support `input_audio`, `file://` media, `use_audio_in_video` or other `mm_processor_kwargs`, preprocessed multimodal features, decoded RDMA media, UUID-only media, or audio/video cache UUIDs. Encoder disaggregation is image-only in this release. Direct vLLM gRPC callers can send raw media bytes, but Dynamo's current `MultimodalData` representation cannot. Parser defaults returned by Control are intentionally not advertised to the Dynamo frontend because the current inference protocol does not preserve all parser-related request semantics.
 
 In prefill/decode deployments, both engines independently prepare the original media. Reusing only the prefill-expanded prompt IDs is insufficient because KV transfer does not carry model-specific multimodal position metadata.
 
@@ -43,9 +49,24 @@ The official `Qwen/Qwen3-ASR-1.7B` repository currently needs Rust-frontend-comp
 
 ## Run
 
+### Native Generate compatibility
+
+`vllm-proto 0.1.0` does not include the native sampling JSON extension proposed
+in [vLLM #56421](https://github.com/vllm-project/vllm/pull/56421). The sidecar
+therefore does not advertise `vllm_inference_v1_generate`. Aggregated and decode
+requests from v1.4 frontends can still use the legacy
+`extra_args.vllm_tito.sampling_params` envelope for controls already preserved
+in the typed request: `max_tokens`, `min_tokens`, `ignore_eos`, `logprobs`,
+`prompt_logprobs`, and `skip_special_tokens`. Other sampling settings fail
+with an explicit unsupported-request error.
+Use the chat/completions APIs with the supported typed controls instead.
+Prefill and encode still use their canonical one-token request; they do not
+apply decode sampling JSON. Native Generate can be enabled after an upstream
+protocol release includes both the payload and its capability flag.
+
 ### Runtime compatibility
 
-The Python `vllm` package and `vllm-rs` must come from compatible vLLM revisions. Do not combine a wheel from one nightly with a binary from another. The sidecar's vendored gRPC source revisions are recorded in [`proto/README.md`](proto/README.md).
+The Python `vllm` package and `vllm-rs` must come from compatible vLLM revisions. Do not combine a wheel from one nightly with a binary from another. The sidecar's `vllm-proto` dependency is pinned in the workspace `Cargo.toml`.
 
 vLLM-Omni changes the engine response format, causing `vllm-rs` to reject
 responses. The Dynamo vLLM runtime image provides a `vllm-rs` wrapper that
@@ -186,7 +207,7 @@ There is no published sidecar image yet, so build and push the image from
 sidecar executables; these manifests run `dynamo-vllm-sidecar` as the container
 command.
 
-The sidecar waits for both the Control and Inference services through the standard gRPC health API before registering the worker. The deployment manifests retain lightweight socket probes for container lifecycle monitoring. The engine image must include a `vllm-rs` build compatible with the vendored protocol.
+The sidecar waits for both the Control and Inference services through the standard gRPC health API before registering the worker. The deployment manifests retain lightweight socket probes for container lifecycle monitoring. The engine image must include a `vllm-rs` build compatible with the pinned `vllm-proto` crate.
 
 The Dynamo vLLM runtime image exposes `vllm-rs` through the
 [wrapper described above](#runtime-compatibility). On CPU and XPU, check that

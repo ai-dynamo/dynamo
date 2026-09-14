@@ -33,6 +33,11 @@ RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/
             --requirement /tmp/requirements.test.txt; \
     fi
 
+# Datadog's CI action shells out to `pip`. Images that run from a virtualenv
+# keep pip inside it rather than on PATH, so expose it. A PATH entry that does
+# not exist is skipped, so this is a no-op on the non-venv images.
+ENV PATH="/opt/dynamo/venv/bin:${PATH}"
+
 # Copy pytest configuration (markers, filterwarnings, asyncio_mode, etc.)
 COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/pyproject.toml
 COPY --chmod=664 --chown=dynamo:0 tests/__init__.py /workspace/tests/__init__.py
