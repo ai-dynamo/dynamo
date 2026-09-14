@@ -945,9 +945,9 @@ impl ExtProcError {
                 status_code: StatusCode::BadRequest,
                 message: msg,
             },
-            PickError::MetadataHeadersInvalid(msg) => Self {
-                status_code: StatusCode::BadRequest,
-                message: msg,
+            PickError::MetadataHeadersTooLarge(err) => Self {
+                status_code: StatusCode::RequestHeaderFieldsTooLarge,
+                message: err.to_string(),
             },
             // Upstream tokenizer failures are not client errors: preserve their
             // semantics so clients retry appropriately. `e.to_string()` is the
@@ -1593,13 +1593,11 @@ mod tests {
         assert_eq!(err.status_code, StatusCode::ServiceUnavailable);
     }
 
-    /// Metadata headers over the frontend's limits map to a client 400, not a
-    /// retryable 503: the frontend rejects these requests too.
     #[test]
-    fn metadata_headers_invalid_maps_to_400() {
-        let err = ExtProcError::from_pick_error(PickError::MetadataHeadersInvalid(
-            "metadata headers exceed the limit of 64 entries".to_string(),
+    fn metadata_headers_too_large_maps_to_431() {
+        let err = ExtProcError::from_pick_error(PickError::MetadataHeadersTooLarge(
+            dynamo_llm::http::service::metadata::MetadataHeaderError::TooManyEntries { limit: 64 },
         ));
-        assert_eq!(err.status_code, StatusCode::BadRequest);
+        assert_eq!(err.status_code, StatusCode::RequestHeaderFieldsTooLarge);
     }
 }

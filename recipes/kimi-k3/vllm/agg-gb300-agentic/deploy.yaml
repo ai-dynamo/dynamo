@@ -51,7 +51,7 @@ spec:
             requests:
               cpu: "16"
               memory: 128Gi
-  - name: Worker
+  - name: worker
     type: worker
     replicas: 1
     multinode:
@@ -134,6 +134,8 @@ spec:
           - name: HF_HUB_OFFLINE
             value: "1"
           - name: TRANSFORMERS_OFFLINE
+            value: "1"
+          - name: DYN_SELF_HOST_METADATA
             value: "1"
           - name: VLLM_USE_NCCL_SYMM_MEM
             value: "0"

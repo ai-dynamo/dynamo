@@ -45,8 +45,8 @@ func NewDCDDefaulter() *DCDDefaulter {
 
 // Default implements admission.CustomDefaulter.
 // On CREATE, standalone v1beta1 DCDs default spec.name from metadata.name.
-// UPDATE requests are admitted unchanged because renaming an existing component
-// from metadata would rewrite user intent.
+// On every operation, explicit multinode roles receive their implied replica
+// counts. UPDATE does not default spec.name because that would rewrite user intent.
 func (d *DCDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	logger := log.FromContext(ctx).WithName(dcdDefaultingWebhookName)
 
@@ -72,6 +72,8 @@ func (d *DCDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 			"namespace", dcd.Namespace,
 		)
 	}
+
+	defaultMultinodeRoleReplicas(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
 
 	return nil
 }
