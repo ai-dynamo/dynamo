@@ -1,7 +1,7 @@
 From 7f264ad0a93302ba9f0442cde22ab78d910ccad2 Mon Sep 17 00:00:00 2001
 From: "Kim, Jin" <jinn.kim@sk.com>
 Date: Tue, 28 Jul 2026 03:07:37 +0000
-Subject: [PATCH 1/2] [Model] Add SKT A.X K2 (axk2)
+Subject: [PATCH] [Model] Add SKT A.X K2 (axk2)
 
 A.X K2 is a 688B-total / 33B-active Mixture-of-Experts decoder-only model
 (256 routed + 1 shared expert, 8 routed experts per token, 61 layers) released

@@ -1,7 +1,7 @@
 From 038b5006511c286b2d7baeaa76881af6972c1c4d Mon Sep 17 00:00:00 2001
 From: "Kim, Jin" <jinn.kim@sk.com>
 Date: Tue, 28 Jul 2026 07:16:10 +0000
-Subject: [PATCH 2/2] [Model] axk2: reject non-fused attention-gate checkpoints
+Subject: [PATCH] [Model] axk2: reject non-fused attention-gate checkpoints
  explicitly
 
 Only the fused attention-output-gate layout is implemented: q_b_proj takes a
