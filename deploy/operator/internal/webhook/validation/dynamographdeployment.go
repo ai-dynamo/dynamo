@@ -365,9 +365,16 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 		// Phase-1 power accounting reads scalar GPU resources and cannot account for DRA devices.
 		allErrs = append(allErrs, v.validateDGDComponentPowerAnnotation(component, componentPath)...)
 
-		// Only where the operator runs the Ray path; see the DCD validator for why.
+		// Shipped in #12943 and not gated, matching the DCD validator. It guards the
+		// Phase 2/3 Ray head, which renders whether or not this PoC gate is on:
+		// injectElasticEPRayLaunchFlags cannot wrap an image ENTRYPOINT it cannot see, so
+		// without an explicit command it declines and only logs. Gating this rule would
+		// make that silent no-op reachable -- elastic EP accepted, and simply absent.
+		allErrs = append(allErrs, validateElasticEPRequiresCommand(spec.BackendFramework, component, componentPath)...)
+		// The single-replica rule is new here, and describes only the topology the PoC
+		// renderer manages: one follower and one <leader>-ray Service are derived per
+		// component, so two leader replicas would share one DNS name.
 		if features.MustGateFrom(v.ctx).Enabled(features.ElasticEPRayPoC) {
-			allErrs = append(allErrs, validateElasticEPRequiresCommand(spec.BackendFramework, component, componentPath)...)
 			allErrs = append(allErrs, validateElasticEPSingleReplica(spec.BackendFramework, component, componentPath)...)
 		}
 

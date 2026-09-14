@@ -97,12 +97,16 @@ func (r *groveStableResourcesReconciler) Reconcile(
 
 		// Give a single-pod elastic-EP leader a stable address for its followers to join.
 		// Sync every component so one that stops qualifying has its Service deleted.
+		//
+		// Shape only, not the gate: this Service shipped ungated in #13178. Deleting it
+		// when an upgrade introduces a default-off gate would remove a live leader's
+		// stable address without the deployment changing at all.
 		epService, err := r.reconcileElasticEPLeaderService(
 			ctx,
 			dgd,
 			renderDeployment,
 			component,
-			!dynamo.IsSinglePodElasticEPLeader(component, r.config != nil && r.config.ElasticEPRayPoC.Enabled),
+			!dynamo.IsSinglePodElasticEPShape(component),
 		)
 		if err != nil {
 			return nil, err

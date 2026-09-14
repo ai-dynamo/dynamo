@@ -374,21 +374,21 @@ func ElasticEPComponentIdentity(component *v1beta1.DynamoComponentDeploymentShar
 	return componentName
 }
 
-// IsSinglePodElasticEPLeader reports whether a component is the single-pod elastic-EP
-// leader that the headless Ray Service addresses and a follower can join.
+// IsSinglePodElasticEPShape reports whether a component has the topology the headless
+// Ray Service addresses and a follower can join. It asks only about shape, never about
+// the feature gate.
 //
 // The Service selector matches every pod carrying the component labels, so it resolves
 // to exactly one Ray head only while the component renders as one pod. replicas > 1
 // gives each replica its own independent head behind one DNS name; numberOfNodes > 1
 // renders leader and worker pods that share the component labels, reconciles through
 // the LWS path, and already reaches its leader through the framework hostname.
-func IsSinglePodElasticEPLeader(component *v1beta1.DynamoComponentDeploymentSharedSpec, elasticEPRayPoCEnabled bool) bool {
-	// The gate is checked here, in the one predicate the leader Service (both
-	// pathways), follower synthesis, and follower rendering all defer to. Gated off,
-	// every one of them sees an ordinary component and leaves it alone.
-	if !elasticEPRayPoCEnabled {
-		return false
-	}
+//
+// Callers that predate features.ElasticEPRayPoC use this directly: the Grove leader
+// Service shipped ungated in #13178, and gating it would delete a Service that an
+// upgrade never asked to remove. Callers this PoC introduced use
+// IsSinglePodElasticEPLeader instead.
+func IsSinglePodElasticEPShape(component *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
 	// Elastic EP is a worker topology: the leader is the engine that heads the Ray
 	// cluster and the follower lends it a GPU. Admission accepts the launch flags on any
 	// component, so without this a global-vLLM graph could put them on a planner or
@@ -404,6 +404,18 @@ func IsSinglePodElasticEPLeader(component *v1beta1.DynamoComponentDeploymentShar
 		return false
 	}
 	return component.Replicas == nil || *component.Replicas == 1
+}
+
+// IsSinglePodElasticEPLeader reports whether a component is a single-pod elastic-EP
+// leader *and* the operator-managed Ray PoC is enabled.
+//
+// This is the predicate for everything the PoC introduced -- follower synthesis and the
+// non-Grove leader Service. It deliberately excludes the leader's own launch rewrite and
+// the Grove Service: both shipped before this gate existed (#12943, #13178), so gating
+// them would rewrite or delete a running deployment's resources on an operator upgrade
+// that only turned the gate off by default.
+func IsSinglePodElasticEPLeader(component *v1beta1.DynamoComponentDeploymentSharedSpec, elasticEPRayPoCEnabled bool) bool {
+	return elasticEPRayPoCEnabled && IsSinglePodElasticEPShape(component)
 }
 
 // synthesizeElasticEPFollowerDCD derives the optional follower DCD for an elastic-EP

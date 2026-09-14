@@ -338,27 +338,58 @@ func TestDynamoGraphDeploymentRejectsElasticEPWithoutCommand(t *testing.T) {
 // starts a private in-process Ray and the component serves normally. Rejecting it would
 // break a running deployment to enforce a rule about a feature nobody enabled -- and on
 // update it would freeze the object, since admission runs over the whole spec.
-func TestDynamoGraphDeploymentSkipsElasticEPRulesWhenGated(t *testing.T) {
-	// Both rules at once: elastic-EP Ray flags, no explicit command, and replicas > 1.
-	dgd := newBetaDGDForValidation()
-	dgd.Spec.Components[1].PodTemplate.Spec.Containers[0].Command = nil
-	dgd.Spec.Components[1].PodTemplate.Spec.Containers[0].Args = []string{
-		"--model", "test", "--data-parallel-backend", "ray", "--enable-elastic-ep",
-	}
-	dgd.Spec.Components[1].Replicas = k8sptr.To(int32(2))
-
+// TestDynamoGraphDeploymentElasticEPRuleGating pins which of the two elastic-EP rules
+// the PoC gate governs, and which it must not.
+//
+// validateElasticEPRequiresCommand shipped in #12943 and guards the Phase 2/3 Ray head,
+// which renders at either gate position. injectElasticEPRayLaunchFlags cannot wrap an
+// image ENTRYPOINT it cannot see, so without an explicit command it declines and only
+// logs -- gating this rule would make that silent no-op reachable, leaving elastic EP
+// accepted and simply absent, with no error, event or condition anywhere.
+//
+// validateElasticEPSingleReplica is new in this PoC and describes only the topology the
+// PoC renderer manages -- one follower and one <leader>-ray Service are derived per
+// component -- so it is gated and must not outlive the feature it protects.
+//
+// Mutation check: moving validateElasticEPRequiresCommand back inside the gate block
+// fails the first subtest.
+func TestDynamoGraphDeploymentElasticEPRuleGating(t *testing.T) {
+	offCtx := features.WithGate(context.Background(), features.Gates{Grove: true})
+	onCtx := features.WithGate(context.Background(), features.Gates{Grove: true, ElasticEPRayPoC: true})
+	elasticArgs := []string{"--model", "test", "--data-parallel-backend", "ray", "--enable-elastic-ep"}
 	validator := newDynamoGraphDeploymentTestValidator(t)
 
-	t.Log("Gate off: the graph is accepted, because neither rule applies")
-	offCtx := features.WithGate(context.Background(), features.Gates{Grove: true})
-	if _, err := validator.Validate(offCtx, dgd, runtimeVersionSourceV1Beta1); err != nil {
-		t.Fatalf("gate off rejected a config it does not manage: %v", err)
-	}
+	t.Run("missing command is rejected at either gate position", func(t *testing.T) {
+		dgd := newBetaDGDForValidation()
+		dgd.Spec.Components[1].PodTemplate.Spec.Containers[0].Command = nil
+		dgd.Spec.Components[1].PodTemplate.Spec.Containers[0].Args = elasticArgs
 
-	t.Log("Gate on: the same graph is rejected, so the skip is the gate and not a broken rule")
-	onCtx := features.WithGate(context.Background(), features.Gates{Grove: true, ElasticEPRayPoC: true})
-	_, err := validator.Validate(onCtx, dgd, runtimeVersionSourceV1Beta1)
-	if err == nil || !k8serrors.IsInvalid(err) {
-		t.Fatalf("gate on error = %v, want invalid field error", err)
-	}
+		for name, ctx := range map[string]context.Context{"gate off": offCtx, "gate on": onCtx} {
+			_, err := validator.Validate(ctx, dgd, runtimeVersionSourceV1Beta1)
+			if err == nil || !k8serrors.IsInvalid(err) {
+				t.Fatalf("%s: error = %v, want invalid field error; this rule shipped ungated in #12943 "+
+					"and without it elastic EP silently no-ops", name, err)
+			}
+		}
+	})
+
+	t.Run("replicas > 1 is rejected only when the gate is on", func(t *testing.T) {
+		dgd := newBetaDGDForValidation()
+		// An explicit command, so the ungated RequiresCommand rule is satisfied and this
+		// subtest isolates the gated single-replica rule.
+		dgd.Spec.Components[1].PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.vllm"}
+		dgd.Spec.Components[1].PodTemplate.Spec.Containers[0].Args = elasticArgs
+		dgd.Spec.Components[1].Replicas = k8sptr.To(int32(2))
+
+		t.Log("Gate off: accepted, because the PoC derives nothing for this shape")
+		if _, err := validator.Validate(offCtx, dgd, runtimeVersionSourceV1Beta1); err != nil {
+			t.Fatalf("gate off rejected a shape the PoC does not manage: %v", err)
+		}
+
+		t.Log("Gate on: rejected, so the skip is the gate and not a broken rule")
+		_, err := validator.Validate(onCtx, dgd, runtimeVersionSourceV1Beta1)
+		if err == nil || !k8serrors.IsInvalid(err) {
+			t.Fatalf("gate on error = %v, want invalid field error", err)
+		}
+	})
 }

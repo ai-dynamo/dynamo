@@ -284,6 +284,18 @@ func (r *componentWorkloadsReconciler) preserveExistingDCDState(
 	}
 
 	desired.Spec.BackendFramework = existing.Spec.BackendFramework
+
+	// A synthesized elastic-EP follower's replica count is owned by whatever drives the
+	// scale, not by generation. Synthesis re-derives the follower from its leader on
+	// every pass and stamps the resting zero (synthesizeElasticEPFollowerDCD), so
+	// without this the sync classifies an external scale-up as a manual change and
+	// writes zero back -- observed on a cluster reverting `replicas: 1` within two
+	// seconds, with "Manual changes detected ... will be overwritten" in the log.
+	// Zero is the value to seed at creation, not to re-assert forever.
+	if existing.GetAnnotations()[consts.KubeAnnotationElasticEPFollower] == consts.KubeLabelValueTrue &&
+		existing.Spec.Replicas != nil {
+		desired.Spec.Replicas = existing.Spec.Replicas
+	}
 	return nil
 }
 

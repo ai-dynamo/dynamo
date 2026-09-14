@@ -87,19 +87,18 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 			container.ReadinessProbe = nil
 			container.StartupProbe = nil
 		}
-	} else if role == RoleMain && IsSinglePodElasticEPLeader(component, b.ElasticEPRayPoCEnabled) {
+	} else if role == RoleMain && IsElasticEPRayLaunch(container) {
 		// A single-pod elastic-EP component still needs a Ray head, so that
 		// follower pods created later have a cluster to join. Only the leader
 		// arm applies here: a lone pod is expanded as RoleMain, never RoleWorker.
 		//
-		// The full leader predicate, not just the gate and the launch flags. Synthesis
-		// and both Service pathways already defer to it, so gating on less here rewrites
-		// the pod template of shapes that get no follower and no Service -- replicas > 1,
-		// or the flags on a non-worker. That matters on the gate-off-to-on transition:
-		// admission runs on create and update, never on a gate flip, so a component
-		// accepted while the gate was off is not re-admitted when it is switched on. The
-		// narrower check would then rewrite its command, rolling a running deployment
-		// into a shape this operator declines to admit.
+		// Deliberately NOT gated on features.ElasticEPRayPoC. This render shipped in
+		// #12943 and is already live, so making it conditional would rewrite the pod
+		// template of every existing elastic-EP leader the moment an operator upgrade
+		// introduced a default-off gate -- dropping the Ray head and POD_IP, and rolling
+		// a serving deployment nobody edited. The gate governs what this PoC adds
+		// (follower synthesis, the non-Grove Service, the single-replica rule), not what
+		// it inherited.
 		if injectElasticEPRayLaunchFlags(container, role, serviceName, multinodeDeployer, "") {
 			// Bind both addresses only when a Ray head was actually injected.
 			//
@@ -634,12 +633,18 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 // half -- what the engine intends -- and the gate answers the second, which is the
 // administrator's to grant.
 //
-// Only the RoleFollower arm uses this. The leader arm applies the full
-// IsSinglePodElasticEPLeader predicate, which a follower deliberately fails: it rests
-// at zero replicas. A follower exists only because synthesis already applied that
-// predicate to its leader, so it inherits the guarantee rather than re-testing it.
+// Only the RoleFollower arm uses this. A follower deliberately fails the leader
+// predicate -- it rests at zero replicas -- and exists only because gated synthesis
+// already applied that predicate to its leader, so it inherits the guarantee rather
+// than re-testing it.
+//
+// Not gated. RoleFollower is assigned from the operator-set follower annotation with no
+// gate term, and only gated synthesis ever writes that annotation, so re-checking the
+// gate here is redundant on the way in and harmful on the way out: a follower DCD that
+// outlives a gate flip would render without the Ray-join rewrite and run the leader's
+// full serve command, which it carries verbatim from the deep copy.
 func (b *VLLMBackend) elasticEPRayLaunch(container *corev1.Container) bool {
-	return b.ElasticEPRayPoCEnabled && IsElasticEPRayLaunch(container)
+	return IsElasticEPRayLaunch(container)
 }
 
 // IsElasticEPRayLaunch reports whether the container asks for the elastic-EP Ray

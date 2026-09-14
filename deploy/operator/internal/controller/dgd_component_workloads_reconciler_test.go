@@ -15,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -74,4 +75,122 @@ func TestDeleteOrphanedElasticEPFollowers(t *testing.T) {
 
 	t.Log("A non-follower DCD is never touched, whatever generation says")
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: leader.Name, Namespace: "default"}, &nvidiacomv1beta1.DynamoComponentDeployment{}))
+}
+
+// TestPreserveExistingDCDStateKeepsFollowerReplicas covers the defect that made the
+// whole feature inert: the operator re-asserted the follower's resting zero on every
+// reconcile, so nothing could ever scale it.
+//
+// synthesizeElasticEPFollowerDCD re-derives the follower from its leader each pass and
+// stamps Replicas=0, and SyncResource classifies an externally written replica count as
+// a manual change and copies the desired spec over it. Observed on a cluster: replicas 1
+// reverted to 0 within two seconds, with "Manual changes detected on
+// DynamoComponentDeployment, will be overwritten" in the operator log. Zero is the value
+// to seed at creation, not to re-assert forever -- the scale client owns it after that.
+//
+// This is also what makes "gate on -> off stops scaling" mean stop rather than tear
+// down: the operator simply stops writing the field.
+//
+// Mutation check: deleting the follower branch in preserveExistingDCDState fails every
+// scaled subtest below.
+func TestPreserveExistingDCDStateKeepsFollowerReplicas(t *testing.T) {
+	s := scheme.Scheme
+	require.NoError(t, nvidiacomv1beta1.AddToScheme(s))
+
+	const ns = "default"
+	existingDCD := func(name string, follower bool, replicas int32) *nvidiacomv1beta1.DynamoComponentDeployment {
+		obj := &nvidiacomv1beta1.DynamoComponentDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+			Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
+				BackendFramework: "vllm",
+				DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+					Replicas: ptr.To(replicas),
+				},
+			},
+		}
+		if follower {
+			obj.Annotations = map[string]string{
+				consts.KubeAnnotationElasticEPFollower: consts.KubeLabelValueTrue,
+			}
+		}
+		return obj
+	}
+
+	tests := []struct {
+		name         string
+		existing     *nvidiacomv1beta1.DynamoComponentDeployment
+		wantReplicas int32
+	}{
+		{
+			// EP16 at TP4 is one leader plus three followers, so the scale client has to
+			// be able to hold the follower above zero across reconciles.
+			name:         "a scaled follower keeps the count the scale client wrote",
+			existing:     existingDCD("mydgd-decode-flw", true, 3),
+			wantReplicas: 3,
+		},
+		{
+			name:         "scaling a follower back down is equally preserved",
+			existing:     existingDCD("mydgd-decode-flw", true, 1),
+			wantReplicas: 1,
+		},
+		{
+			name:         "a follower still at rest stays at zero",
+			existing:     existingDCD("mydgd-decode-flw", true, 0),
+			wantReplicas: 0,
+		},
+		{
+			// Only the synthesized follower's count is externally owned. A declared
+			// component's replica count comes from the DGD and must still be enforced.
+			name:         "a non-follower DCD is still driven by generation",
+			existing:     existingDCD("mydgd-decode", false, 3),
+			wantReplicas: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := fake.NewClientBuilder().WithScheme(s).WithObjects(tt.existing).Build()
+			r := &componentWorkloadsReconciler{syncer: newDGDResourceSyncer(c, nil)}
+
+			t.Log("Generation re-derives the follower and stamps the resting zero")
+			desired := &nvidiacomv1beta1.DynamoComponentDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        tt.existing.Name,
+					Namespace:   ns,
+					Annotations: tt.existing.Annotations,
+				},
+				Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
+					DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+						Replicas: ptr.To(int32(0)),
+					},
+				},
+			}
+			require.NoError(t, r.preserveExistingDCDState(context.Background(), desired))
+
+			require.NotNil(t, desired.Spec.Replicas)
+			require.Equal(t, tt.wantReplicas, *desired.Spec.Replicas,
+				"the operator must not own a synthesized follower's replica count after creation")
+		})
+	}
+
+	t.Run("a follower that does not exist yet is seeded at zero", func(t *testing.T) {
+		c := fake.NewClientBuilder().WithScheme(s).Build()
+		r := &componentWorkloadsReconciler{syncer: newDGDResourceSyncer(c, nil)}
+		desired := &nvidiacomv1beta1.DynamoComponentDeployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "mydgd-decode-flw",
+				Namespace: ns,
+				Annotations: map[string]string{
+					consts.KubeAnnotationElasticEPFollower: consts.KubeLabelValueTrue,
+				},
+			},
+			Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+					Replicas: ptr.To(int32(0)),
+				},
+			},
+		}
+		require.NoError(t, r.preserveExistingDCDState(context.Background(), desired))
+		require.Equal(t, int32(0), *desired.Spec.Replicas, "creation must still seed the resting zero")
+	})
 }
