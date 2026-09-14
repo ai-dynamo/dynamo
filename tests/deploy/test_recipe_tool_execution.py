@@ -126,13 +126,18 @@ def _declared_tool_call_parser(spec: DeploymentSpec) -> ParserScan:
         name = getattr(service, "name", "<unnamed>")
         try:
             haystack = " ".join(str(arg) for arg in (service._get_args() or []))
-        except Exception:  # noqa: BLE001 - unbalanced quotes are real
-            # Degrade to the raw container spec rather than dropping the service.
+        except ValueError:
+            # ``shlex.split`` on unbalanced quotes -- real recipes contain them.
+            # Deliberately narrow: a broad catch here turned any defect in this
+            # harness into "undetermined", which the caller reports as a skip,
+            # and a skipped test is indistinguishable from a passing one.
+            #
+            # The fallback lookup is not guarded for the same reason. A
+            # ValueError from ``_get_args`` can only come from ``shlex.split``,
+            # which runs *after* the container dict was located, so re-locating
+            # it here cannot fail for the reason the first call did.
             unreadable.append(name)
-            try:
-                haystack = str(service._main_container() or "")
-            except Exception:  # noqa: BLE001
-                continue
+            haystack = str(service._main_container() or "")
         match = _TOOL_PARSER_RE.search(haystack)
         if match:
             return ParserScan(match.group(1), tuple(unreadable))
@@ -495,6 +500,49 @@ def test_unparseable_args_report_undetermined_not_absent(tmp_path):
     assert "VllmDecodeWorker" in scan.unreadable
 
 
+@pytest.mark.unit
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+def test_a_harness_bug_fails_instead_of_degrading_to_a_skip(tmp_path, monkeypatch):
+    """Only ``shlex``'s ValueError may downgrade a service to "unreadable".
+
+    The catch used to be ``except Exception``, so any defect in this harness --
+    a renamed attribute, a bad index -- became "undetermined", which the caller
+    turns into a skip. A skipped test is indistinguishable from a passing one in
+    a CI report, so the bug would have been invisible rather than loud.
+    """
+    manifest = {
+        "apiVersion": "nvidia.com/v1beta1",
+        "kind": "DynamoGraphDeployment",
+        "metadata": {"name": "harness-bug"},
+        "spec": {
+            "components": [
+                {
+                    "name": "VllmDecodeWorker",
+                    "type": "worker",
+                    "podTemplate": {
+                        "spec": {"containers": [{"name": "main", "image": "img"}]}
+                    },
+                }
+            ]
+        },
+    }
+    path = tmp_path / "deploy.yaml"
+    path.write_text(yaml.safe_dump(manifest))
+    spec = DeploymentSpec(str(path))
+
+    def boom(self):
+        raise AttributeError("ServiceSpec has no attribute 'argv'")
+
+    # monkeypatch, not a bare class assignment: the original ``_get_args`` lives
+    # on the class, so restoring it by hand with ``del`` would leave ServiceSpec
+    # without the method for every test that follows.
+    monkeypatch.setattr(type(next(iter(spec.services))), "_get_args", boom)
+
+    with pytest.raises(AttributeError, match="no attribute 'argv'"):
+        _declared_tool_call_parser(spec)
+
+
 # ---------------------------------------------------------------------------
 # Unit coverage for model resolution (no cluster required)
 # ---------------------------------------------------------------------------
@@ -659,6 +707,31 @@ def test_availability_probe_stays_within_its_budget(monkeypatch):
     )
 
 
+def _fake_item(markers: list, *, deploying: bool):
+    """A collection item just real enough for ``pytest_collection_modifyitems``.
+
+    ``deploying`` decides whether it carries the ``deploy`` marker, which is the
+    hook's scoping predicate.
+    """
+    return type(
+        "Item",
+        (),
+        {
+            "module": sys.modules[__name__],
+            "add_marker": lambda self, m: markers.append(m),
+            "get_closest_marker": lambda self, name: (
+                pytest.mark.deploy if (deploying and name == "deploy") else None
+            ),
+        },
+    )()
+
+
+def _fake_config(deploy_timeout: int):
+    return type(
+        "Config", (), {"getoption": lambda self, name, default=None: deploy_timeout}
+    )()
+
+
 @pytest.mark.unit
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
@@ -674,17 +747,8 @@ def test_the_outer_timeout_covers_every_inner_budget():
 
     for deploy_timeout in (600, 1800, 5400):
         markers: list[Any] = []
-        item = type(
-            "Item",
-            (),
-            {
-                "module": sys.modules[__name__],
-                "add_marker": lambda self, m: markers.append(m),
-            },
-        )()
-        config = type(
-            "Config", (), {"getoption": lambda self, name, default=None: deploy_timeout}
-        )()
+        item = _fake_item(markers, deploying=True)
+        config = _fake_config(deploy_timeout)
 
         pytest_collection_modifyitems(config, [item])
 
@@ -700,3 +764,36 @@ def test_the_outer_timeout_covers_every_inner_budget():
             f"--recipe-deploy-timeout={deploy_timeout} yields outer={outer}s "
             f"but the inner waits can reach {inner}s"
         )
+
+
+@pytest.mark.unit
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+def test_the_derived_timeout_does_not_touch_this_modules_unit_tests():
+    """The hook must only raise the ceiling for tests that wait on a deployment.
+
+    ``POST_READY_BUDGET`` is a module-level constant, so an unscoped hook hands
+    it to every test collected from this module -- including the nine unit tests
+    here, which run in pre-merge and wait on nothing. That is not a harmless
+    over-grant: pytest-timeout prefers a ``timeout`` marker over ``--timeout``,
+    so it *raises* their ceiling to 46 minutes and no command line can lower it.
+    A hung unit test would hold a runner for the full budget instead of failing
+    fast.
+    """
+    from tests.deploy.conftest import pytest_collection_modifyitems
+
+    markers: list[Any] = []
+    pytest_collection_modifyitems(
+        _fake_config(1800), [_fake_item(markers, deploying=False)]
+    )
+    assert markers == [], (
+        "a unit test in a module that declares POST_READY_BUDGET must keep the "
+        f"--timeout value, but it was given {markers}"
+    )
+
+    # ...and the scoping must not have disarmed the deploy test it exists for.
+    deploying: list[Any] = []
+    pytest_collection_modifyitems(
+        _fake_config(1800), [_fake_item(deploying, deploying=True)]
+    )
+    assert len(deploying) == 1 and deploying[0].args[0] == 1800 + POST_READY_BUDGET

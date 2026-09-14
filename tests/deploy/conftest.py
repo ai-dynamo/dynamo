@@ -294,6 +294,14 @@ def pytest_collection_modifyitems(
         budget = getattr(getattr(item, "module", None), "POST_READY_BUDGET", None)
         if budget is None:
             continue
+        # Scoped to items that actually wait on a deployment. A module's own
+        # unit tests share its ``POST_READY_BUDGET`` but wait on nothing, and
+        # because pytest-timeout prefers a marker over ``--timeout`` (see
+        # above), handing them this ceiling would *raise* their timeout to
+        # three quarters of an hour with no way to lower it -- turning a hung
+        # unit test in pre-merge from a fast failure into a stalled runner.
+        if item.get_closest_marker("deploy") is None:
+            continue
         item.add_marker(pytest.mark.timeout(int(deploy_timeout) + int(budget)))
 
 

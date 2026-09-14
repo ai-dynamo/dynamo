@@ -776,3 +776,57 @@ def test_uniquify_leaves_every_volume_mount_resolvable_across_the_corpus() -> No
                         f"{path}: volumeMount {mount.get('name')!r} no longer "
                         f"matches any volume in {sorted(declared)}"
                     )
+
+
+def test_uniquify_refuses_a_companion_kind_it_cannot_repoint(tmp_path) -> None:
+    """Renaming a kind the reference walker does not know is silent breakage.
+
+    ``_rewrite_companion_refs`` repoints ConfigMap and resource-claim-template
+    references. A bundled PersistentVolumeClaim would get a fresh name while
+    ``persistentVolumeClaim.claimName`` kept the old one, and the pod would fail
+    to schedule for a reason that looks nothing like "the harness renamed it".
+    Leaving it unrenamed is no better -- that is the cross-run collision
+    ``uniquify`` exists to prevent. So refuse, and say what would fix it.
+
+    No recipe bundles such a kind today (measured: 87 ConfigMaps, 28
+    ComputeDomains, 2 ResourceClaimTemplates and nothing else), so this rejects
+    nothing that ships; it makes the next kind an explicit decision.
+    """
+    manifest_path = tmp_path / "deploy.yaml"
+    manifest_path.write_text(
+        yaml.safe_dump_all(
+            [
+                {
+                    "apiVersion": "v1",
+                    "kind": "PersistentVolumeClaim",
+                    "metadata": {"name": "model-cache"},
+                    "spec": {"accessModes": ["ReadWriteMany"]},
+                },
+                {
+                    "apiVersion": "nvidia.com/v1beta1",
+                    "kind": "DynamoGraphDeployment",
+                    "metadata": {"name": "recipe-under-test"},
+                    "spec": {"components": []},
+                },
+            ]
+        )
+    )
+    spec = DeploymentSpec(str(manifest_path))
+
+    with pytest.raises(ValueError, match="cannot isolate per run"):
+        spec.uniquify("-tx-abc123")
+
+    # And the refusal must not have half-renamed anything on its way out.
+    assert spec.name == "recipe-under-test"
+    assert spec.companions[0]["metadata"]["name"] == "model-cache"
+
+
+def test_uniquify_accepts_every_companion_kind_the_recipes_actually_bundle(
+    tmp_path,
+) -> None:
+    """The guard is only honest if it does not reject the shipped corpus."""
+    spec = DeploymentSpec(str(_multi_document_manifest(tmp_path)))
+
+    spec.uniquify("-tx-abc123")  # ConfigMap + ComputeDomain: must not raise
+
+    assert spec.name.endswith("-tx-abc123")

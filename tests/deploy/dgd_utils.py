@@ -506,6 +506,19 @@ class ServiceSpec:
 _CONFIGMAP_REF_KEYS = ("configMap", "configMapRef", "configMapKeyRef")
 _TEMPLATE_REF_KEY = "resourceClaimTemplateName"
 
+#: Companion kinds whose in-DGD references :func:`_rewrite_companion_refs` knows
+#: how to repoint, and therefore the only kinds :meth:`DeploymentSpec.uniquify`
+#: may rename. Renaming anything else produces a name nothing points at: a
+#: bundled PersistentVolumeClaim keeps its ``persistentVolumeClaim.claimName``,
+#: a Secret its ``secretRef.name``, and the pod fails to start for a reason that
+#: looks nothing like "the test harness renamed it".
+#:
+#: Measured over ``recipes/``: every companion bundled alongside a DGD today is
+#: one of these three (87 ConfigMaps, 28 ComputeDomains, 2 ResourceClaimTemplates),
+#: so this rejects nothing that currently ships. It exists to make the *next*
+#: kind an explicit decision -- add it here and to the reference walker together.
+_UNIQUIFIABLE_KINDS = frozenset({"ConfigMap", "ComputeDomain", "ResourceClaimTemplate"})
+
 
 def _rewrite_companion_refs(node: Any, renames: dict) -> None:
     """Point every companion reference in a DGD at its renamed resource.
@@ -553,6 +566,7 @@ class DeploymentSpec:
         :class:`ManagedDeployment` applies before the DGD and removes on
         cleanup.
         """
+        self._source = base
         with open(base, "r") as f:
             docs = [d for d in yaml.safe_load_all(f) if isinstance(d, dict)]
         graph_deployments = [
@@ -621,6 +635,25 @@ class DeploymentSpec:
                 renames[old] = holder[key] = f"{old}{suffix}"
                 if owned:
                     companion_renames[old] = renames[old]
+
+        unsupported = sorted(
+            {
+                str(doc.get("kind") or "<no kind>")
+                for doc in self._companions
+                if doc.get("kind") not in _UNIQUIFIABLE_KINDS
+            }
+        )
+        if unsupported:
+            raise ValueError(
+                f"{self._source} bundles companion resources this harness cannot "
+                f"isolate per run: {', '.join(unsupported)}. Only "
+                f"{', '.join(sorted(_UNIQUIFIABLE_KINDS))} have reference paths "
+                "that _rewrite_companion_refs knows how to repoint. Renaming one "
+                "of these anyway would leave the DGD pointing at the old name; "
+                "leaving it unrenamed would let concurrent runs overwrite and "
+                "delete each other's copy. Teach _rewrite_companion_refs the new "
+                "kind's reference key and add it to _UNIQUIFIABLE_KINDS."
+            )
 
         rename(self._deployment_spec.setdefault("metadata", {}), owned=False)
 
