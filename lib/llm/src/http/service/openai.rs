@@ -1432,7 +1432,7 @@ async fn embeddings(
         request.inner.model = canonical;
     }
     let request_id = get_or_create_request_id(&headers);
-    let mut request = context_from_headers(request, request_id, &headers)?;
+    let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
 
     // The worker always emits base64-encoded vectors over NATS so we
@@ -4805,7 +4805,7 @@ async fn handler_audio_speech(
             .frontend_accepts_audio_chunks = Some(true);
     }
     request.nest_passthrough();
-    let request = context_from_headers(request, request_id, &headers)?;
+    let mut request = context_from_headers(request, request_id, &headers)?;
 
     // model is optional in the request; fall back to a model that can actually
     // serve right now (complete worker set), not just any displayable one, so
