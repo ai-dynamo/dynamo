@@ -18,10 +18,12 @@ client here uses the stock resolver; the pinning lands as a follow-up). See the
 for the fan-out latency comparison.
 
 > [!NOTE]
-> **Deprecated:** `DYN_HTTP_BACKEND` now accepts only `aiohttp` (any
-> other value warns and falls back), and the `DYN_HTTP_CONCURRENCY`
-> semaphore is a no-op. Both existed for a second HTTP backend that has
-> been removed.
+> **Deprecated:** `DYN_HTTP_BACKEND` now accepts only `aiohttp` (any other
+> value warns and falls back). The httpx-only knobs — `DYN_HTTP_MAX_KEEPALIVE`,
+> `DYN_HTTP_POOL_TIMEOUT`, and `DYN_HTTP_CONCURRENCY` (and their `--http-*`
+> flags) — are still accepted for backward compatibility but **ignored**;
+> aiohttp consumes none of them. They configured a second HTTP backend that
+> has been removed.
 
 ## Operator-tunable knobs
 

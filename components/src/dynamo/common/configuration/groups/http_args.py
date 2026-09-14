@@ -43,6 +43,13 @@ _LEGACY_ENV_ALIASES: dict[str, tuple[str, ...]] = {
     "DYN_HTTP_CONCURRENCY": ("DYN_MM_HTTP_CONCURRENCY",),
 }
 
+# Canonical names that are now accepted-but-ignored (they configured the removed
+# httpx backend). Their legacy aliases warn that they're ignored rather than
+# pointing operators at a live knob to migrate to.
+_IGNORED_HTTP_KNOBS = frozenset(
+    {"DYN_HTTP_MAX_KEEPALIVE", "DYN_HTTP_POOL_TIMEOUT", "DYN_HTTP_CONCURRENCY"}
+)
+
 _legacy_warned: set[str] = set()
 
 
@@ -64,7 +71,16 @@ def _apply_legacy_env_aliases() -> None:
             os.environ[canonical] = value
             if legacy not in _legacy_warned:
                 _legacy_warned.add(legacy)
-                logger.warning("%s is deprecated; use %s instead.", legacy, canonical)
+                if canonical in _IGNORED_HTTP_KNOBS:
+                    logger.warning(
+                        "%s is deprecated and ignored; it configured the removed "
+                        "httpx backend.",
+                        legacy,
+                    )
+                else:
+                    logger.warning(
+                        "%s is deprecated; use %s instead.", legacy, canonical
+                    )
             break
 
 

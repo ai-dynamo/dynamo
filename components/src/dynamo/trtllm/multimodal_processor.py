@@ -229,6 +229,18 @@ class MultimodalRequestProcessor:
                     # policy, so following Location would turn one unvalidated
                     # fetch into an attacker-chained multi-hop one.
                     async with client.get(path, allow_redirects=False) as resp:
+                        # raise_for_status() only fires at >= 400, so a 3xx would
+                        # otherwise fall through to an empty-body read and surface
+                        # as a cryptic "safetensors: empty buffer". Redirecting
+                        # .safetensors URLs are common (CDN / presigned), so give
+                        # the operator an actionable message. Do not echo Location
+                        # or the path — both are caller-controlled and unbounded.
+                        if 300 <= resp.status < 400:
+                            raise RuntimeError(
+                                f"Embedding URL returned HTTP {resp.status}; this "
+                                "path does not follow redirects because it applies "
+                                "no destination policy. Supply the final URL."
+                            )
                         resp.raise_for_status()
                         content_length = resp.headers.get("content-length")
                         if (
