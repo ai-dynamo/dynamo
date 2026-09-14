@@ -91,6 +91,7 @@ func TestDGDSharedResourcesReconciler_PreservesCheckpointResultOnLaterFailure(t 
 	dgd := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default", UID: types.UID("dgd-uid")},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{
 					ComponentName: "worker",
@@ -114,9 +115,7 @@ func TestDGDSharedResourcesReconciler_PreservesCheckpointResultOnLaterFailure(t 
 	dgd.Annotations = map[string]string{
 		consts.AnnotationCurrentWorkerHashV2: betaDGDWorkersSpecHash(t, dgd),
 	}
-	workerHash, err := checkpointWorkerHashForComponent(dgd, "worker")
-	require.NoError(t, err)
-	referenced := dgdTestPodSnapshot(reference, workerHash, true)
+	referenced := dgdTestPodSnapshot(reference, dgdTestSnapshotCompatibilityHash(t, dgd), true)
 	s := newDynamoGraphDeploymentControllerTestScheme(t)
 	kubeClient := fake.NewClientBuilder().
 		WithScheme(s).

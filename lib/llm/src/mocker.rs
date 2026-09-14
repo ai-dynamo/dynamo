@@ -873,7 +873,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let prompt_tokens_count = request.token_ids.len();
         // Convert PreprocessedRequest to DirectRequest for scheduler
         let direct_request = DirectRequest {
-            tokens: request.token_ids.clone(),
+            tokens: request.token_ids.as_ref().clone(),
             max_output_tokens,
             output_token_ids: planned_output_token_ids,
             uuid: Some(request_uuid),
@@ -1438,7 +1438,7 @@ mod tests {
         let engine = MockerExecutionContext::new(args);
         assert!(engine.engines.set(vec![live]).is_ok());
         let mut request = prefill_request();
-        request.token_ids = vec![1, 2, 3, 4];
+        request.token_ids = vec![1, 2, 3, 4].into();
 
         let mut stream = engine.generate(SingleIn::new(request)).await.unwrap();
         let token = stream.next().await.unwrap().data.unwrap();

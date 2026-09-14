@@ -1,10 +1,15 @@
 package dynamo
 
 import (
+	"errors"
 	"reflect"
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -640,6 +645,318 @@ func TestSGLangBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
 					t.Errorf("Expected no environment variable changes, but env count changed from %d to %d", originalEnvCount, len(container.Env))
 				}
 			}
+		})
+	}
+}
+
+func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T) {
+	backend := &SGLangBackend{}
+
+	workerPorts := []corev1.ContainerPort{
+		{Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoSystemPortName, ContainerPort: int32(commonconsts.DynamoSystemPort)},
+		{Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoNixlPortName, ContainerPort: int32(commonconsts.DynamoNixlPort)},
+	}
+	frontendPorts := []corev1.ContainerPort{
+		{Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoContainerPortName, ContainerPort: int32(commonconsts.DynamoServicePort)},
+	}
+	allEightPorts := map[string]int32{
+		"nixl": 19090, "nixl-1": 19091, "nixl-2": 19092, "nixl-3": 19093,
+		"nixl-4": 19094, "nixl-5": 19095, "nixl-6": 19096, "nixl-7": 19097,
+	}
+
+	tests := []struct {
+		name               string
+		ports              []corev1.ContainerPort
+		telemetryEnable    string
+		telemetryValueFrom *corev1.EnvVarSource
+		telemetryExporter  string
+		exporterAbsent     bool
+		exporterValueFrom  *corev1.EnvVarSource
+		telemetryPort      string
+		portEmpty          bool
+		portValueFrom      *corev1.EnvVarSource
+		containerGPUs      int64
+		expectedPorts      map[string]int32
+		expectedError      string
+	}{
+		{
+			name:            "one rank needs no extra port",
+			ports:           workerPorts,
+			telemetryEnable: "y",
+			containerGPUs:   1,
+			expectedPorts:   map[string]int32{"nixl": 19090},
+		},
+		{
+			name:            "eight co-located ranks reserve eight ports",
+			ports:           workerPorts,
+			telemetryEnable: "y",
+			containerGPUs:   8,
+			expectedPorts:   allEightPorts,
+		},
+		{
+			name:            "more ranks than the reserved range is rejected",
+			ports:           workerPorts,
+			telemetryEnable: "y",
+			containerGPUs:   16,
+			expectedError:   "16 co-located GPUs each need a NIXL exporter port",
+		},
+		{
+			name:            "the operator default of disabled telemetry reserves nothing",
+			ports:           workerPorts,
+			telemetryEnable: "n",
+			containerGPUs:   -1,
+			expectedPorts:   map[string]int32{"nixl": 19090},
+		},
+		{
+			name:            "a frontend shares the backend framework but declares no NIXL port",
+			ports:           frontendPorts,
+			telemetryEnable: "y",
+			containerGPUs:   -1,
+			expectedPorts:   map[string]int32{},
+		},
+		{
+			name:  "a sourced enable value reserves the range it cannot read",
+			ports: workerPorts,
+			telemetryValueFrom: &corev1.EnvVarSource{
+				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "telemetry"},
+					Key:                  "nixl-enable",
+				},
+			},
+			containerGPUs: 8,
+			expectedPorts: allEightPorts,
+		},
+		{
+			name:  "a sourced enable value reserves the whole range rather than refusing the deployment",
+			ports: workerPorts,
+			telemetryValueFrom: &corev1.EnvVarSource{
+				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "telemetry"},
+					Key:                  "nixl-enable",
+				},
+			},
+			containerGPUs: 16,
+			expectedPorts: allEightPorts,
+		},
+		{
+			name:            "a sourced base the operator cannot declare is rejected",
+			ports:           workerPorts,
+			telemetryEnable: "y",
+			portValueFrom: &corev1.EnvVarSource{
+				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "telemetry"},
+					Key:                  "nixl-port",
+				},
+			},
+			containerGPUs: 4,
+			expectedError: "cannot declare the exporter range",
+		},
+		{
+			name:  "a sourced base is rejected even when the enable value is unreadable too",
+			ports: workerPorts,
+			telemetryValueFrom: &corev1.EnvVarSource{
+				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "telemetry"},
+					Key:                  "nixl-enable",
+				},
+			},
+			portValueFrom: &corev1.EnvVarSource{
+				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "telemetry"},
+					Key:                  "nixl-port",
+				},
+			},
+			containerGPUs: 8,
+			expectedError: "cannot declare the exporter range",
+		},
+		{
+			name:            "an overridden base moves every declared port with it",
+			ports:           workerPorts,
+			telemetryEnable: "y",
+			telemetryPort:   "30500",
+			containerGPUs:   4,
+			expectedPorts: map[string]int32{
+				"nixl": 30500, "nixl-1": 30501, "nixl-2": 30502, "nixl-3": 30503,
+			},
+		},
+		{
+			name: "a rank port written against another base moves with it too",
+			ports: append(slices.Clone(workerPorts),
+				corev1.ContainerPort{Protocol: corev1.ProtocolTCP, Name: "nixl-1", ContainerPort: 19091}),
+			telemetryEnable: "y",
+			telemetryPort:   "30500",
+			containerGPUs:   4,
+			expectedPorts: map[string]int32{
+				"nixl": 30500, "nixl-1": 30501, "nixl-2": 30502, "nixl-3": 30503,
+			},
+		},
+		{
+			name:            "a base with no room for the range is rejected",
+			ports:           workerPorts,
+			telemetryEnable: "y",
+			telemetryPort:   strconv.Itoa(maxTCPPort),
+			containerGPUs:   4,
+			expectedError:   "exceeds the maximum port",
+		},
+		{
+			name:              "another exporter binds no port per rank, however many ranks there are",
+			ports:             workerPorts,
+			telemetryEnable:   "y",
+			telemetryExporter: "file",
+			containerGPUs:     -1,
+			expectedPorts:     map[string]int32{"nixl": 19090},
+		},
+		{
+			name:              "another exporter reads no base, so a sourced one is no obstacle",
+			ports:             workerPorts,
+			telemetryEnable:   "y",
+			telemetryExporter: "file",
+			portValueFrom: &corev1.EnvVarSource{
+				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "telemetry"},
+					Key:                  "nixl-port",
+				},
+			},
+			containerGPUs: -1,
+			expectedPorts: map[string]int32{"nixl": 19090},
+		},
+		{
+			name:            "no exporter selection is the Prometheus default",
+			ports:           workerPorts,
+			telemetryEnable: "y",
+			exporterAbsent:  true,
+			containerGPUs:   8,
+			expectedPorts:   allEightPorts,
+		},
+		{
+			name:            "a sourced exporter reserves the range it cannot read",
+			ports:           workerPorts,
+			telemetryEnable: "y",
+			exporterValueFrom: &corev1.EnvVarSource{
+				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "telemetry"},
+					Key:                  "nixl-exporter",
+				},
+			},
+			containerGPUs: 16,
+			expectedPorts: allEightPorts,
+		},
+		{
+			name:            "a base padded with whitespace is still a port",
+			ports:           workerPorts,
+			telemetryEnable: "y",
+			telemetryPort:   " 19090 ",
+			containerGPUs:   4,
+			expectedPorts: map[string]int32{
+				"nixl": 19090, "nixl-1": 19091, "nixl-2": 19092, "nixl-3": 19093,
+			},
+		},
+		{
+			name:            "a base written as words is rejected",
+			ports:           workerPorts,
+			telemetryEnable: "y",
+			telemetryPort:   "nineteen thousand",
+			containerGPUs:   4,
+			expectedError:   `is set to "nineteen thousand", which is not a number`,
+		},
+		{
+			name:            "an empty base is rejected rather than read as the default",
+			ports:           workerPorts,
+			telemetryEnable: "y",
+			portEmpty:       true,
+			containerGPUs:   4,
+			expectedError:   `is set to "", which is not a number`,
+		},
+		{
+			name:            "a base of zero is rejected rather than bound as an ephemeral port",
+			ports:           workerPorts,
+			telemetryEnable: "y",
+			telemetryPort:   "0",
+			containerGPUs:   4,
+			expectedError:   "is set to 0, which is outside the port range",
+		},
+		{
+			name:            "a base past the maximum port is rejected",
+			ports:           workerPorts,
+			telemetryEnable: "y",
+			telemetryPort:   "70000",
+			containerGPUs:   4,
+			expectedError:   "is set to 70000, which is outside the port range",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Render the container the way the component defaults do")
+			telemetryPort := tt.telemetryPort
+			switch {
+			case tt.portValueFrom != nil || tt.portEmpty:
+				// The API rejects a variable carrying both, so a sourced base has
+				// no inline value for the operator to fall back on.
+				telemetryPort = ""
+			case telemetryPort == "":
+				telemetryPort = strconv.Itoa(commonconsts.DynamoNixlPort)
+			}
+			telemetryExporter := tt.telemetryExporter
+			if telemetryExporter == "" && tt.exporterValueFrom == nil {
+				telemetryExporter = "prometheus"
+			}
+			env := []corev1.EnvVar{
+				{Name: "DYN_SYSTEM_PORT", Value: strconv.Itoa(commonconsts.DynamoSystemPort)},
+				{Name: "NIXL_TELEMETRY_ENABLE", Value: tt.telemetryEnable, ValueFrom: tt.telemetryValueFrom},
+			}
+			// An older deployment predating the exporter selection leaves the
+			// variable off entirely, which the runtime reads as Prometheus.
+			if !tt.exporterAbsent {
+				env = append(env, corev1.EnvVar{Name: "NIXL_TELEMETRY_EXPORTER", Value: telemetryExporter, ValueFrom: tt.exporterValueFrom})
+			}
+			env = append(env, corev1.EnvVar{Name: "NIXL_TELEMETRY_PROMETHEUS_PORT", Value: telemetryPort, ValueFrom: tt.portValueFrom})
+			container := &corev1.Container{
+				Ports: slices.Clone(tt.ports),
+				Env:   env,
+			}
+
+			t.Log("A negative GPU count marks the cases that must never resolve one")
+			containerGPUCount := staticContainerGPUCount(tt.containerGPUs)
+			if tt.containerGPUs < 0 {
+				containerGPUCount = func() (int64, error) {
+					return 0, errors.New("resolving the GPU count needs a Kubernetes client")
+				}
+			}
+
+			err := backend.UpdateContainer(container, 1, RoleMain, betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{}), "test-service", &GroveMultinodeDeployer{}, containerGPUCount)
+			if tt.expectedError != "" {
+				t.Log("A range that cannot be declared is reported, not silently truncated")
+				require.ErrorContains(t, err, tt.expectedError)
+				return
+			}
+			require.NoError(t, err)
+
+			t.Log("Every co-located rank has a port of its own, and no rank shares one")
+			nixlPorts := map[string]int32{}
+			seen := map[int32]string{}
+			for _, port := range container.Ports {
+				if !strings.HasPrefix(port.Name, commonconsts.DynamoNixlPortName) {
+					continue
+				}
+				nixlPorts[port.Name] = port.ContainerPort
+				if other, duplicate := seen[port.ContainerPort]; duplicate {
+					t.Errorf("ports %q and %q both bind %d", other, port.Name, port.ContainerPort)
+				}
+				seen[port.ContainerPort] = port.Name
+			}
+			require.Equal(t, tt.expectedPorts, nixlPorts)
+
+			t.Log("Every port declared for something other than NIXL keeps its number")
+			// The NIXL ports move with an overridden base, so expectedPorts above is
+			// what pins them; here only the ports the reservation must not touch.
+			for _, port := range tt.ports {
+				if strings.HasPrefix(port.Name, commonconsts.DynamoNixlPortName) {
+					continue
+				}
+				require.Contains(t, container.Ports, port)
+			}
+			require.NotContains(t, seen, int32(commonconsts.DynamoSystemPort))
 		})
 	}
 }
