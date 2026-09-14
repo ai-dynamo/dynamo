@@ -254,7 +254,9 @@ class VideoLoader:
             # ValueError. Require the selected backend as well as the build to
             # lack a backend: a configured non-OpenCV decoder must keep its
             # own failure and remediation.
-            if not _attributable_to_cv2(exc, media_io) or not _cv2_lacks_video_backend():
+            if not (
+                _attributable_to_cv2(exc, media_io) and _cv2_lacks_video_backend()
+            ):
                 raise
             raise video_decoder_missing(
                 "vllm",
