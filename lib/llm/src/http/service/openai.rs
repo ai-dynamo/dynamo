@@ -552,7 +552,11 @@ impl ErrorMessage {
                 code,
                 Json(ErrorMessage {
                     message: rejection.to_string(),
-                    error_type: map_error_code_to_error_type(code),
+                    error_type: if code == StatusCode::BAD_REQUEST {
+                        bad_request_error_type()
+                    } else {
+                        map_error_code_to_error_type(code)
+                    },
                     code: code.as_u16(),
                     details: serde_json::to_value(rejection).ok().map(Box::new),
                     metric_error_type: None,
@@ -619,7 +623,11 @@ impl ErrorMessage {
                 code,
                 Json(ErrorMessage {
                     message,
-                    error_type: map_error_code_to_error_type(code),
+                    error_type: if code == StatusCode::BAD_REQUEST {
+                        bad_request_error_type()
+                    } else {
+                        map_error_code_to_error_type(code)
+                    },
                     code: code.as_u16(),
                     details: None,
                     // A plain 400 keeps the validation override: a worker's
