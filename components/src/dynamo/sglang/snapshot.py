@@ -134,6 +134,17 @@ async def prepare_snapshot_engine(
     if snapshot_config is None:
         return None
 
+    if os.environ.get("DYN_GMS_FAILOVER_SHADOW_MODE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        raise RuntimeError(
+            "SGLang GMS crash failover cannot use snapshot engines: restored "
+            "scheduler writers do not participate in the writer-cohort fence"
+        )
+
     configure_snapshot_capture_env()
     logger.info("Snapshot mode enabled (watcher-driven signals)")
 
