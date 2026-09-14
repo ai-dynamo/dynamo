@@ -103,11 +103,6 @@ impl PodDiscovery {
 
         let kv_event_port = cfg.kv_event_port;
         let replay_port = cfg.replay_port;
-        let kv_ports = KvEventPorts {
-            base: kv_event_port,
-            stride: cfg.kv_event_port_stride,
-            data_parallel_size: cfg.data_parallel_size,
-        };
 
         let index: Arc<RwLock<WorkerIndex>> = Arc::new(RwLock::new(WorkerIndex::new()));
 
@@ -184,7 +179,7 @@ impl PodDiscovery {
                     Delta::Rebuild => rebuild_index(
                         &store,
                         pool_rx.borrow().as_ref(),
-                        kv_ports,
+                        kv_event_port,
                         replay_port,
                         &index_task,
                     ),
@@ -192,7 +187,7 @@ impl PodDiscovery {
                         &index_task,
                         &pod,
                         pool_rx.borrow().as_ref(),
-                        kv_ports,
+                        kv_event_port,
                         replay_port,
                     ),
                     Delta::Remove(pod) => remove_pod(&index_task, &pod),
@@ -345,14 +340,14 @@ fn upsert_pod(
     index: &RwLock<WorkerIndex>,
     pod: &Pod,
     pool: Option<&PoolState>,
-    kv_ports: KvEventPorts,
+    kv_event_port: u16,
     replay_port: Option<u16>,
 ) -> bool {
     let Some(worker_id) = pod_worker_id(pod) else {
         return false;
     };
     let entry = pool
-        .and_then(|pool| raw_worker_from_pod(pod, pool, kv_ports, replay_port))
+        .and_then(|pool| raw_worker_from_pod(pod, pool, kv_event_port, replay_port))
         .map(WorkerEntry::from_raw);
     let mut index = index.write().unwrap();
     match entry {
@@ -383,14 +378,14 @@ fn remove_pod(index: &RwLock<WorkerIndex>, pod: &Pod) -> bool {
 fn rebuild_index(
     store: &kube::runtime::reflector::Store<Pod>,
     pool: Option<&PoolState>,
-    kv_ports: KvEventPorts,
+    kv_event_port: u16,
     replay_port: Option<u16>,
     index: &RwLock<WorkerIndex>,
 ) -> bool {
     let mut fresh = WorkerIndex::new();
     if let Some(pool) = pool {
         for pod in store.state().iter() {
-            if let Some(worker) = raw_worker_from_pod(pod, pool, kv_ports, replay_port) {
+            if let Some(worker) = raw_worker_from_pod(pod, pool, kv_event_port, replay_port) {
                 fresh.insert(worker.worker_id, WorkerEntry::from_raw(worker));
             }
         }
@@ -404,33 +399,12 @@ fn rebuild_index(
     }
 }
 
-/// Per-pod KV-event port layout: rank `r` publishes on `base + r * stride`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct KvEventPorts {
-    pub base: u16,
-    pub stride: u16,
-    pub data_parallel_size: u32,
-}
-
-impl KvEventPorts {
-    fn endpoints(self, ip: IpAddr) -> HashMap<u32, String> {
-        (0..self.data_parallel_size.max(1))
-            .map(|rank| {
-                let port = self
-                    .base
-                    .saturating_add(self.stride.saturating_mul(rank as u16));
-                (rank, format!("tcp://{}", SocketAddr::new(ip, port)))
-            })
-            .collect()
-    }
-}
-
 /// Build a [`RawWorker`] from a pod, or `None` if it is not `Ready`, not
 /// pool-selected, or lacks an IP/name. Pure function — unit-testable.
 fn raw_worker_from_pod(
     pod: &Pod,
     pool: &PoolState,
-    kv_ports: KvEventPorts,
+    kv_event_port: u16,
     replay_port: Option<u16>,
 ) -> Option<RawWorker> {
     if !pod_is_ready(pod) || !pod_matches(pod, &pool.match_labels) {
@@ -445,7 +419,10 @@ fn raw_worker_from_pod(
         pod_name: pod_name.to_string(),
         pod_ip: pod_ip.to_string(),
         http_endpoint: format!("http://{}", SocketAddr::new(ip, pool.target_port)),
-        kv_events_endpoints: kv_ports.endpoints(ip),
+        kv_events_endpoints: HashMap::from([(
+            0u32,
+            format!("tcp://{}", SocketAddr::new(ip, kv_event_port)),
+        )]),
         replay_endpoint: replay_port.map(|p| format!("tcp://{}", SocketAddr::new(ip, p))),
     })
 }
@@ -457,41 +434,6 @@ mod tests {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
     use kube::api::ObjectMeta;
 
-    fn single_rank(port: u16) -> KvEventPorts {
-        KvEventPorts {
-            base: port,
-            stride: 1,
-            data_parallel_size: 1,
-        }
-    }
-
-    #[test]
-    fn data_parallel_ranks_publish_on_strided_ports() {
-        let w = raw_worker_from_pod(
-            &pod(
-                "vllm-0",
-                Some("10.0.0.1"),
-                Some(true),
-                &[("app", "vllm-qwen")],
-            ),
-            &pool(),
-            KvEventPorts {
-                base: 5557,
-                stride: 2,
-                data_parallel_size: 3,
-            },
-            None,
-        )
-        .expect("ready, selected pod should map");
-        assert_eq!(
-            w.kv_events_endpoints,
-            HashMap::from([
-                (0, "tcp://10.0.0.1:5557".to_string()),
-                (1, "tcp://10.0.0.1:5559".to_string()),
-                (2, "tcp://10.0.0.1:5561".to_string()),
-            ])
-        );
-    }
 
     fn pool() -> PoolState {
         PoolState {
@@ -537,7 +479,7 @@ mod tests {
                 &[("app", "vllm-qwen")],
             ),
             &pool(),
-            single_rank(5557),
+            5557u16,
             Some(5560),
         )
         .expect("ready, selected pod should map");
@@ -560,7 +502,7 @@ mod tests {
                 &[("app", "vllm-qwen")],
             ),
             &pool(),
-            single_rank(5557),
+            5557u16,
             Some(5560),
         )
         .expect("ready, selected IPv6 pod should map");
@@ -584,7 +526,7 @@ mod tests {
                     &[("app", "vllm-qwen")]
                 ),
                 &pool(),
-                single_rank(5557),
+                5557u16,
                 None,
             )
             .is_none()
@@ -602,7 +544,7 @@ mod tests {
                     &[("app", "something-else")]
                 ),
                 &pool(),
-                single_rank(5557),
+                5557u16,
                 None,
             )
             .is_none()
@@ -620,7 +562,7 @@ mod tests {
                     &[("app", "vllm-qwen")]
                 ),
                 &pool(),
-                single_rank(5557),
+                5557u16,
                 None,
             )
             .is_none()
@@ -636,7 +578,7 @@ mod tests {
             &[("app", "vllm-qwen")],
         );
         p.metadata.deletion_timestamp = Some(Time(k8s_openapi::chrono::Utc::now()));
-        assert!(raw_worker_from_pod(&p, &pool(), single_rank(5557), None).is_none());
+        assert!(raw_worker_from_pod(&p, &pool(), 5557u16, None).is_none());
     }
 
     #[test]
@@ -645,7 +587,7 @@ mod tests {
             raw_worker_from_pod(
                 &pod("vllm-0", None, Some(true), &[("app", "vllm-qwen")]),
                 &pool(),
-                single_rank(5557),
+                5557u16,
                 None,
             )
             .is_none()
@@ -666,7 +608,7 @@ mod tests {
 
     #[test]
     fn rebuild_index_keeps_only_ready_selected_pods() {
-        let kp = single_rank(5557);
+        let kp = 5557u16;
         let store = store_from_pods(vec![
             pod(
                 "vllm-0",
@@ -705,7 +647,7 @@ mod tests {
 
     #[test]
     fn rebuild_index_is_empty_without_pool() {
-        let kp = single_rank(5557);
+        let kp = 5557u16;
         let store = store_from_pods(vec![pod(
             "vllm-0",
             Some("10.0.0.1"),
@@ -719,7 +661,7 @@ mod tests {
 
     #[test]
     fn upsert_and_remove_pod_mutate_index_incrementally() {
-        let kp = single_rank(5557);
+        let kp = 5557u16;
         let index = RwLock::new(WorkerIndex::new());
         let id = hash_pod_name("vllm-0");
         let ready = pod(
@@ -762,7 +704,7 @@ mod tests {
 
     #[test]
     fn upsert_pod_without_pool_drops_entry() {
-        let kp = single_rank(5557);
+        let kp = 5557u16;
         // A `None` pool (unresolved or deleted) means nothing is routable, so an
         // upsert must evict any existing entry rather than leave stale routing.
         let index = RwLock::new(WorkerIndex::new());
@@ -784,7 +726,7 @@ mod tests {
 
     #[test]
     fn pool_edit_during_relist_rebuilds_at_init_done_from_completed_store() {
-        let kp = single_rank(5557);
+        let kp = 5557u16;
         use kube::runtime::watcher;
 
         let vllm_0 = pod(
@@ -851,7 +793,7 @@ mod tests {
 
     #[test]
     fn rebuild_index_drops_workers_absent_from_the_store() {
-        let kp = single_rank(5557);
+        let kp = 5557u16;
         // A relist arrives as a fresh snapshot with no `Delete` events for pods
         // that disappeared during the disconnect, so the `InitDone`/pool-change
         // rebuild must *replace* the index, not merge into it — otherwise dead

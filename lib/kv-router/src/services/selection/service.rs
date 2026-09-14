@@ -141,6 +141,21 @@ impl SelectionServiceBuilder {
         self.kv_router_config
             .validate_config()
             .map_err(anyhow::Error::msg)?;
+
+        // Explicit session_affinity() call takes precedence over KvRouterConfig.
+        let affinity_config: Option<SessionAffinityConfig> =
+            if let Some(ttl) = self.session_affinity_ttl {
+                Some(SessionAffinityConfig::new(ttl).with_mode(self.kv_router_config.session_affinity_mode))
+            } else if let Some(secs) = self.kv_router_config.session_affinity_ttl_secs {
+                let ttl = Duration::try_from_secs_f64(secs)
+                    .map_err(|_| anyhow::anyhow!("session affinity TTL {secs} out of range"))?;
+                Some(
+                    SessionAffinityConfig::new(ttl)
+                        .with_mode(self.kv_router_config.session_affinity_mode),
+                )
+            } else {
+                None
+            };
         let worker_selection_policy_factory = match self.worker_selection_policy_factory {
             Some(factory) => Some(factory),
             None => self
@@ -187,7 +202,7 @@ impl SelectionServiceBuilder {
             self.selection_cache,
             tracking_hash,
             indexer_policy,
-            self.session_affinity_ttl.map(SessionAffinityConfig::new),
+            affinity_config,
         ));
 
         if recover_from_peers {
@@ -216,7 +231,7 @@ impl SelectionServiceBuilder {
                         core.dispatch_replica_event(event);
                     }
                 },
-                self.session_affinity_ttl.map(|_| {
+                affinity_config.as_ref().map(|_| {
                     move |event| {
                         if let Some(core) = affinity_core.upgrade() {
                             core.dispatch_affinity_event(event);

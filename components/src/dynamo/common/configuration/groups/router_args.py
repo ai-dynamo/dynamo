@@ -36,8 +36,6 @@ _ROUTER_FIELDS: tuple[str, ...] = (
     "active_decode_blocks_threshold",
     "active_prefill_tokens_threshold",
     "active_prefill_tokens_threshold_frac",
-    "session_affinity_ttl_secs",
-    "session_affinity_mode",
 )
 
 _ENFORCE_DISAGG_DEPRECATION = (
@@ -77,8 +75,6 @@ class RouterConfigBase(ConfigBase):
     router_mode: str
     min_initial_workers: int
     enforce_disagg: bool
-    session_affinity_ttl_secs: Optional[int]
-    session_affinity_mode: str
     active_decode_blocks_threshold: Optional[float]
     active_prefill_tokens_threshold: Optional[int]
     active_prefill_tokens_threshold_frac: Optional[float]
@@ -243,33 +239,6 @@ class RouterArgGroup(ArgGroup):
                 "least-loaded",
                 "device-aware-weighted",
             ],
-        )
-        add_argument(
-            g,
-            flag_name="--router-session-affinity-ttl-secs",
-            env_var="DYN_ROUTER_SESSION_AFFINITY_TTL_SECS",
-            default=None,
-            help=(
-                "Enable session affinity with this router-local idle TTL in seconds. "
-                "Bindings synchronize across router replicas on a best-effort basis. "
-                "Affinity is disabled when this option is omitted. "
-                "This is independent of KV prediction TTL settings."
-            ),
-            arg_type=int,
-            dest="session_affinity_ttl_secs",
-        )
-        add_argument(
-            g,
-            flag_name="--router-session-affinity-mode",
-            env_var="DYN_ROUTER_SESSION_AFFINITY_MODE",
-            default="hard",
-            help=(
-                "How an existing session binding participates in worker selection. "
-                "hard makes the binding an exact constraint; soft exposes it as a "
-                "policy-visible preference."
-            ),
-            choices=("hard", "soft"),
-            dest="session_affinity_mode",
         )
         add_argument(
             g,
