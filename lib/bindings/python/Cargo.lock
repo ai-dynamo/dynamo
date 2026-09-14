@@ -2099,6 +2099,8 @@ name = "dynamo-custom-policy-builtin"
 version = "1.5.0"
 dependencies = [
  "dynamo-kv-router",
+ "fastrand",
+ "parking_lot",
  "serde",
 ]
 
@@ -2197,6 +2199,7 @@ dependencies = [
  "derive-getters",
  "derive_builder",
  "dialoguer",
+ "dynamo-custom-policy-builtin",
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",
@@ -2301,6 +2304,7 @@ dependencies = [
  "bytes",
  "dashmap",
  "derive_builder",
+ "dynamo-custom-policy-builtin",
  "dynamo-data-gen",
  "dynamo-kv-router",
  "dynamo-tokens",

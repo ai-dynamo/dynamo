@@ -181,12 +181,17 @@ static INSTALLED_POLICY_REGISTRY: OnceLock<WorkerSelectionPolicyRegistry> = Once
 /// policies) that embedded selection partitions resolve `KvRouterConfig`
 /// policy instances against. Returns `false` if one is already installed.
 pub fn install_worker_selection_policy_registry(registry: WorkerSelectionPolicyRegistry) -> bool {
-    INSTALLED_POLICY_REGISTRY.set(registry).is_ok()
+    INSTALLED_POLICY_REGISTRY
+        .set(registry.with_default_factory(dynamo_custom_policy_builtin::default_factory()))
+        .is_ok()
 }
 
 /// The installed registry, or the built-in default.
 pub fn worker_selection_policy_registry() -> WorkerSelectionPolicyRegistry {
-    INSTALLED_POLICY_REGISTRY.get().cloned().unwrap_or_default()
+    INSTALLED_POLICY_REGISTRY
+        .get()
+        .cloned()
+        .unwrap_or_else(dynamo_custom_policy_builtin::default_registry)
 }
 
 /// Bridges the partition's scheduler load snapshots to the router's

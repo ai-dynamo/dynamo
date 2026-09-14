@@ -23,7 +23,7 @@ use super::policy_config::{PolicyClassConfig, PolicyProfile};
 use super::policy_queue::{PolicyQueue, QueueSnapshot};
 use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::queue_admission::WorkerPlacement;
-use super::selector::{DefaultWorkerSelector, WorkerSelectionInput, WorkerSelector};
+use super::selector::{WorkerSelectionInput, WorkerSelector};
 use super::types::{
     AdvisorySchedulingResponse, AdvisoryWorkerLoad, AttemptId, KvSchedulerError,
     NonMaxOverlapSelection, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider,
@@ -497,7 +497,7 @@ struct SchedulerQueueActor<
 pub struct SchedulerQueue<
     P: SequencePublisher,
     C: WorkerConfigLike,
-    Sel: WorkerSelector<C> = DefaultWorkerSelector,
+    Sel: WorkerSelector<C> = super::selector::WorkerSelectionPolicy,
     RF: OverlapScoresRefresh = NoopOverlapScoresRefresh,
 > {
     admission_tx: mpsc::Sender<AdmissionCommand>,
@@ -1938,13 +1938,14 @@ mod tests {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     fn make_queue(
         num_workers: usize,
         block_size: u32,
         isl: usize,
         threshold_frac: Option<f64>,
     ) -> (
-        Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
+        Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig, DefaultWorkerSelector>>,
         Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
     ) {
         let (queue, slots, _tx) =
@@ -2009,7 +2010,7 @@ mod tests {
         threshold_frac: Option<f64>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     ) -> (
-        Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
+        Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig, DefaultWorkerSelector>>,
         Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
         watch::Sender<HashMap<u64, SimpleWorkerConfig>>,
     ) {
@@ -2065,7 +2066,7 @@ mod tests {
         max_num_batched_tokens: usize,
         profile: PolicyProfile,
     ) -> (
-        Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
+        Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig, DefaultWorkerSelector>>,
         Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
     ) {
         let (queue, slots, _cfg_tx) = make_queue_with_profile_and_sender(
@@ -2084,7 +2085,7 @@ mod tests {
         max_num_batched_tokens: usize,
         profile: PolicyProfile,
     ) -> (
-        Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
+        Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig, DefaultWorkerSelector>>,
         Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
         watch::Sender<HashMap<u64, SimpleWorkerConfig>>,
     ) {
@@ -2124,6 +2125,7 @@ mod tests {
         (queue, slots, cfg_tx)
     }
 
+    #[allow(clippy::type_complexity)]
     fn make_queue_with_providers(
         num_workers: usize,
         block_size: u32,
@@ -2131,7 +2133,7 @@ mod tests {
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
         available_worker_provider: Option<WorkerAvailabilityProvider>,
     ) -> (
-        Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
+        Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig, DefaultWorkerSelector>>,
         Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
     ) {
         let dp_range: HashMap<u64, (u32, u32)> =
@@ -3633,11 +3635,11 @@ policy_classes:
                 }),
                 overlap: OverlapSignals {
                     tier_overlap_blocks: Default::default(),
-                    effective_overlap_blocks: HashMap::from([
+                    effective_overlap_blocks: rustc_hash::FxHashMap::from_iter([
                         (WorkerWithDpRank::new(0, 0), 1.0),
                         (WorkerWithDpRank::new(1, 0), 9.0),
                     ]),
-                    effective_cached_tokens: HashMap::from([
+                    effective_cached_tokens: rustc_hash::FxHashMap::from_iter([
                         (WorkerWithDpRank::new(0, 0), 16),
                         (WorkerWithDpRank::new(1, 0), 144),
                     ]),
@@ -3731,8 +3733,8 @@ policy_classes:
                 }),
                 overlap: OverlapSignals {
                     tier_overlap_blocks: Default::default(),
-                    effective_overlap_blocks: HashMap::from([(worker, 5.0)]),
-                    effective_cached_tokens: HashMap::from([(worker, 80)]),
+                    effective_overlap_blocks: rustc_hash::FxHashMap::from_iter([(worker, 5.0)]),
+                    effective_cached_tokens: rustc_hash::FxHashMap::from_iter([(worker, 80)]),
                 },
             },
         });
@@ -3775,8 +3777,8 @@ policy_classes:
         let refresher = Arc::new(BlockingRefresher::new(RefreshedOverlap::from_overlap(
             OverlapSignals {
                 tier_overlap_blocks: Default::default(),
-                effective_overlap_blocks: HashMap::from([(worker, 7.0)]),
-                effective_cached_tokens: HashMap::from([(worker, 56)]),
+                effective_overlap_blocks: rustc_hash::FxHashMap::from_iter([(worker, 7.0)]),
+                effective_cached_tokens: rustc_hash::FxHashMap::from_iter([(worker, 56)]),
             },
         )));
         let (queue, slots) = make_queue_with_blocking_refresher(
