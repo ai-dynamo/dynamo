@@ -146,12 +146,10 @@ RUN set -eux; \
     python3 /tmp/validate_axk2_port.py; \
     rm -rf /tmp/axk2-vllm-patches /tmp/validate_axk2_port.py
 
-# Model-specific safe defaults discovered during Dynamo 1.4.1 functional
-# bring-up. Quack FP8 fails under torch.compile for this architecture; disabling
-# only that vLLM-Omni override retains torch.compile and CUDA graph execution.
-ENV VLLM_USE_FLASHINFER_MOE_FP4=1 \
-    FLASHINFER_DISABLE_VERSION_CHECK=1 \
-    VLLM_OMNI_USE_QUACK_FP8=0
+# Disable vLLM-Omni's Quack FP8 override to avoid the torch.compile failure
+# observed during A.X-K2 bring-up. This default applies to all models in the
+# CUDA runtime image and preserves torch.compile and CUDA graph execution.
+ENV VLLM_OMNI_USE_QUACK_FP8=0
 {% endif %}
 
 {% if device != "cuda" %}
