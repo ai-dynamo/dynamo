@@ -27,6 +27,7 @@ from sglang.srt.utils.network import NetworkAddress, get_local_ip_auto
 
 from dynamo._core import Context
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.gms_failover import release_attached_gms_failover_lock
 from dynamo.common.lora.manager import get_lora_manager
 from dynamo.common.model_taints import MODEL_TAINT_ROUTE, register_model_taint_route
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
@@ -660,12 +661,32 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
 
             unregistered = False
             try:
-                # Stop new requests and drain in-flight work before releasing memory.
                 if self.generate_endpoint is not None:
                     await self.generate_endpoint.unregister_endpoint_instance()
                     unregistered = True
 
+                if body.get("handoff"):
+                    await self._pause_controller.pause(tags)
+                    lock_released = await release_attached_gms_failover_lock(
+                        self, backend_name="sglang"
+                    )
+                    if lock_released:
+                        self._gms_failover_handed_off = True
+                    return {
+                        "status": "ok",
+                        "message": "Failover handoff released",
+                        "failover_lock_released": lock_released,
+                    }
+
                 await self._pause_controller.pause(tags)
+
+                lock_released = False
+                if body.get("release_failover_lock"):
+                    lock_released = await release_attached_gms_failover_lock(
+                        self, backend_name="sglang"
+                    )
+                    if lock_released:
+                        self._gms_failover_handed_off = True
 
                 return {
                     "status": "ok",
@@ -674,6 +695,7 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
                         if tags is not None
                         else "Memory released"
                     ),
+                    "failover_lock_released": lock_released,
                 }
             except Exception as e:
                 logging.error(f"Failed to release memory occupation: {e}")
@@ -717,6 +739,11 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         body = body or {}
         tags = body.get("tags")
         async with self._pause_lock:
+            if getattr(self, "_gms_failover_handed_off", False):
+                return {
+                    "status": "error",
+                    "message": "failover ownership was handed off; resume is unsafe",
+                }
             needs_recovery = self._pause_controller.needs_resume_recovery
             if not self._pause_controller.is_paused and not needs_recovery:
                 return {
@@ -1035,6 +1062,9 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
 
     def cleanup(self) -> None:
         """Cleanup resources. Override in subclasses as needed."""
+        watchdog = getattr(self, "_gms_failover_child_watchdog", None)
+        if watchdog is not None:
+            watchdog.stop()
         if self.publisher is not None:
             self.publisher.cleanup()
 
