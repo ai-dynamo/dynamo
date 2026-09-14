@@ -69,7 +69,9 @@ class AicPerfArgGroup(ArgGroup):
             flag_name="--aic-backend-version",
             env_var="DYN_AIC_BACKEND_VERSION",
             default=None,
-            help="[EXPERIMENTAL] Pinned backend version for AIC database lookup.",
+            help="[EXPERIMENTAL] Pinned backend version for AIC database lookup. "
+            "Defaults to the installed aisimulate perf database's maintained "
+            "version for the system/backend.",
         )
         add_argument(
             g,

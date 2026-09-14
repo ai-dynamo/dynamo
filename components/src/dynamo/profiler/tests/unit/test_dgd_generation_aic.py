@@ -300,7 +300,23 @@ class TestInjectMockerAicArgs:
             decode_pick=pick,
         )
 
-    def test_injects_all_required_flags(self):
+    @staticmethod
+    def _patch_latest_version(monkeypatch, version):
+        """Stand in for aisimulate's get_latest_database_version and record calls."""
+        calls = []
+
+        def fake_latest(*, system, backend):
+            calls.append((system, backend))
+            return version
+
+        monkeypatch.setattr(
+            "dynamo.profiler.utils.dgd_generation.get_latest_database_version",
+            fake_latest,
+        )
+        return calls
+
+    def test_injects_all_required_flags(self, monkeypatch):
+        calls = self._patch_latest_version(monkeypatch, "1.3.0rc20")
         spec = self._spec("trtllm")
         args = ["--model-path", "Qwen/Qwen3-235B", "--disaggregation-mode", "prefill"]
         out = _inject_mocker_aic_args(args, spec, spec.prefill_pick)
@@ -313,21 +329,43 @@ class TestInjectMockerAicArgs:
         assert out[out.index("--aic-attention-dp-size") + 1] == "8"
         # trtllm is not a mocker engine_type; leave --engine-type alone.
         assert "--engine-type" not in out
-        assert out[out.index("--aic-backend-version") + 1] == "1.3.0rc10"
+        # The version is whatever the installed perf database maintains for the
+        # (system, backend); Dynamo carries no version table of its own.
+        assert out[out.index("--aic-backend-version") + 1] == "1.3.0rc20"
+        assert calls == [("h200_sxm", "trtllm")]
 
-    def test_matches_engine_type_for_vllm(self):
+    def test_matches_engine_type_for_vllm(self, monkeypatch):
+        calls = self._patch_latest_version(monkeypatch, "0.24.0")
         spec = self._spec("vllm")
         out = _inject_mocker_aic_args([], spec, spec.prefill_pick)
         assert out[out.index("--engine-type") + 1] == "vllm"
         assert out[out.index("--aic-backend") + 1] == "vllm"
-        assert out[out.index("--aic-backend-version") + 1] == "0.14.0"
+        assert out[out.index("--aic-backend-version") + 1] == "0.24.0"
+        assert calls == [("h200_sxm", "vllm")]
 
-    def test_matches_engine_type_for_sglang(self):
+    def test_matches_engine_type_for_sglang(self, monkeypatch):
+        self._patch_latest_version(monkeypatch, "0.5.14")
         spec = self._spec("sglang")
         out = _inject_mocker_aic_args([], spec, spec.decode_pick)
         assert out[out.index("--engine-type") + 1] == "sglang"
         assert out[out.index("--aic-backend") + 1] == "sglang"
-        assert out[out.index("--aic-backend-version") + 1] == "0.5.6.post2"
+        assert out[out.index("--aic-backend-version") + 1] == "0.5.14"
+
+    def test_omits_version_when_database_has_no_data(self, monkeypatch):
+        self._patch_latest_version(monkeypatch, None)
+        spec = self._spec("vllm")
+        out = _inject_mocker_aic_args([], spec, spec.prefill_pick)
+        assert "--aic-perf-model" in out
+        assert "--aic-backend-version" not in out
+
+    def test_omits_version_when_sdk_is_unavailable(self, monkeypatch):
+        monkeypatch.setattr(
+            "dynamo.profiler.utils.dgd_generation.get_latest_database_version", None
+        )
+        spec = self._spec("vllm")
+        out = _inject_mocker_aic_args([], spec, spec.prefill_pick)
+        assert "--aic-perf-model" in out
+        assert "--aic-backend-version" not in out
 
 
 class TestBuildPlannerConfigEmbedsAicSpec:

@@ -591,8 +591,9 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     pub aic_system: Option<String>,
 
-    /// AIC backend engine version (e.g., "0.12.0" for vLLM, "0.5.6.post2" for SGLang).
-    /// If None, uses the default version for the backend.
+    /// AIC backend engine version for perf database lookups. If None, resolves
+    /// to the installed aisimulate perf database's maintained version for the
+    /// system/backend.
     #[serde(skip)]
     #[builder(default = "None")]
     pub aic_backend_version: Option<String>,

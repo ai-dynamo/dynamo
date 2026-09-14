@@ -467,9 +467,15 @@ def test_candidate_engine_args_do_not_synthesize_base_only_fields(monkeypatch) -
     assert "num_gpu_blocks" not in captured_payloads[0]
     assert "enable_prefix_caching" not in captured_payloads[0]
     assert captured_payloads[0]["aic_tp_size"] == 4
+    # No version is stamped on; replay materialization resolves it.
+    assert "aic_backend_version" not in captured_payloads[0]
 
     replay_optimize._build_candidate_engine_args(
-        base_args={"block_size": 64, "enable_prefix_caching": False},
+        base_args={
+            "block_size": 64,
+            "enable_prefix_caching": False,
+            "aic_backend_version": "0.20.0",
+        },
         tp_size=4,
         worker_type="prefill",
         backend="vllm",
@@ -478,6 +484,8 @@ def test_candidate_engine_args_do_not_synthesize_base_only_fields(monkeypatch) -
     )
 
     assert captured_payloads[1]["enable_prefix_caching"] is False
+    # An explicit pin in the base args is user intent and passes through.
+    assert captured_payloads[1]["aic_backend_version"] == "0.20.0"
 
 
 def test_replay_optimize_spec_pickles_without_rust_bound_args() -> None:

@@ -15,13 +15,7 @@ _NEXTN_ACCEPT_RATES_LEN = 5
 # Dynamo's historical default when conditional acceptance rates are omitted.
 _DEFAULT_NEXTN_ACCEPT_RATES = [0.85, 0.3, 0.0, 0.0, 0.0]
 
-# Default backend versions match the AIC-core v0.11.0 perf DB.
-DEFAULT_BACKEND_VERSIONS = {
-    "vllm": "0.19.0",
-    "sglang": "0.5.10",
-    "trtllm": "1.3.0rc10",
-}
-_KV_CAPACITY_BACKENDS = frozenset(DEFAULT_BACKEND_VERSIONS)
+_KV_CAPACITY_BACKENDS = frozenset({"vllm", "sglang", "trtllm"})
 DEFAULT_STATIC_STRIDE = 32
 DEFAULT_GPU_MEMORY_UTILIZATION = 0.9
 DEFAULT_MEM_FRACTION_STATIC = 0.88
@@ -38,11 +32,37 @@ def _validate_kv_capacity_backend(backend_name: str) -> None:
         )
 
 
-def resolve_backend_version(backend_name: str, backend_version: str | None) -> str:
-    """Return the pinned backend version used for AIC perf lookups."""
+def resolve_backend_version(
+    backend_name: str, backend_version: str | None, system: str
+) -> str:
+    """Return the backend version used for AIC perf lookups.
+
+    An explicit pin passes through. Otherwise the installed aisimulate perf
+    database decides: ``get_latest_database_version`` is its maintained default
+    for (system, backend). Dynamo keeps no version table of its own; hard-coded
+    pins fall out of the database on every aisimulate upgrade.
+    """
     if backend_version is not None:
         return backend_version
-    return DEFAULT_BACKEND_VERSIONS.get(backend_name, DEFAULT_BACKEND_VERSIONS["vllm"])
+    try:
+        from aiconfigurator_core.sdk.perf_database import get_latest_database_version
+    except ImportError as exc:
+        missing = exc.name or ""
+        if missing == "aiconfigurator_core" or missing.startswith(
+            "aiconfigurator_core."
+        ):
+            raise RuntimeError(
+                "aisimulate is required to resolve the AIC backend version but is "
+                "not installed"
+            ) from exc
+        raise
+    version = get_latest_database_version(system, backend_name)
+    if version is None:
+        raise RuntimeError(
+            f"no AIC perf database for system={system!r}, backend={backend_name!r}; "
+            "pick a supported system or pass an explicit backend version"
+        )
+    return version
 
 
 def _normalize_aic_quant_mode(value: str | None) -> str | None:
@@ -179,7 +199,7 @@ class AicSession:
         nextn_accept_rates: list[float] | str | None = None,
     ):
         aic = _load_aiconfigurator()
-        version = resolve_backend_version(backend_name, backend_version)
+        version = resolve_backend_version(backend_name, backend_version, system)
 
         database = aic["get_database"](
             system=system, backend=backend_name, version=version
@@ -470,7 +490,9 @@ def estimate_num_gpu_blocks(
             model_path,
             system,
             backend_name,
-            backend_version=resolve_backend_version(backend_name, backend_version),
+            backend_version=resolve_backend_version(
+                backend_name, backend_version, system
+            ),
             scheduler_block_size=block_size,
             max_num_tokens=max_num_batched_tokens,
             max_batch_size=1,
