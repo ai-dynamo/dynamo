@@ -54,7 +54,14 @@ fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
         // stale or the worker is shutting down. Same reasoning as above.
         ErrorType::WorkerUnavailable,
     ];
-    match_error_chain(err, INHIBITED, &[])
+    // A clean client refusal is not a worker fault. The outer pre-stream
+    // wrapper is still CannotConnect (so retry classification is unchanged),
+    // so without this exclude a typed InvalidArgument would still quarantine.
+    const CLIENT_REFUSAL: &[ErrorType] = &[
+        ErrorType::InvalidArgument,
+        ErrorType::Backend(BackendError::InvalidArgument),
+    ];
+    match_error_chain(err, INHIBITED, CLIENT_REFUSAL)
 }
 
 /// Read the backend response inactivity timeout from the environment.
@@ -2510,6 +2517,33 @@ mod tests {
             .message("Server unavailable: unknown endpoint a/generate")
             .build();
         assert!(is_inhibited(&err));
+    }
+
+    #[test]
+    fn typed_client_refusal_does_not_quarantine_the_worker() {
+        use crate::pipeline::network::StreamPrologueError;
+        use crate::pipeline::network::egress::addressed_router::pre_stream_failure_error;
+
+        let refusal = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+            .message("multimodal input is not supported by this backend")
+            .build();
+        let err = pre_stream_failure_error(StreamPrologueError::new(
+            "Generate Error: multimodal input is not supported by this backend",
+            refusal,
+        ));
+        assert!(
+            !is_inhibited(&err),
+            "a clean client refusal must not quarantine the worker that refused"
+        );
+
+        let untyped = pre_stream_failure_error(StreamPrologueError::from_message(
+            "Generate Error: could not reach worker",
+        ));
+        assert!(
+            is_inhibited(&untyped),
+            "an untyped pre-stream failure is still a worker fault"
+        );
     }
 
     #[test]

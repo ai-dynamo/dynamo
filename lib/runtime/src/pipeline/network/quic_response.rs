@@ -44,13 +44,20 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use xxhash_rust::xxh3::xxh3_64;
 
-use super::{ConnectionInfo, RegisteredStream, StreamReceiver};
+use super::{
+    ConnectionInfo, RegisteredStream, ResponseStreamPrologue, StreamPrologueError, StreamReceiver,
+};
 use crate::{
     config::environment_names::quic_response, discovery::EndpointInstanceId,
     engine::AsyncEngineContext, pipeline::PipelineError,
 };
 
 pub const TRANSPORT_NAME: &str = "quic-response";
+// Version 3 Error frames: UTF-8 message (legacy) or JSON ResponseStreamPrologue
+// with optional typed_error. Receivers accept both so a mixed-version pair
+// during a rolling upgrade still completes the handshake. The version is
+// unchanged because a bump would force a lockstep upgrade for a payload the
+// old decoder already accepts as UTF-8.
 const PROTOCOL_VERSION: u8 = 3;
 const ALPN: &[u8] = b"dynamo-response-v2";
 const BULK_CONNECTIONS: usize = 8;
@@ -176,6 +183,8 @@ impl TryFrom<ConnectionInfo> for QuicResponseConnectionInfo {
 enum FrameKind {
     Prologue = 1,
     Data = 2,
+    /// Terminal pre-stream failure. Payload is raw UTF-8, or JSON
+    /// [`ResponseStreamPrologue`] when the worker has a typed error to keep.
     Error = 3,
     End = 4,
     Stop = 5,
@@ -233,6 +242,53 @@ impl Frame {
         header.put_u32(self.payload.len() as u32);
         header.freeze()
     }
+}
+
+/// Encode a pre-stream error for `FrameKind::Error`.
+///
+/// Untyped errors stay raw UTF-8 so a mixed-version frontend still sees the
+/// worker's text. Typed errors are JSON [`ResponseStreamPrologue`]: a current
+/// frontend recovers the type; an older one `from_utf8`s the payload (JSON is
+/// valid UTF-8) and treats the object as the message.
+fn encode_error_payload(error: StreamPrologueError) -> Bytes {
+    let Some(typed_error) = error.typed_error else {
+        return Bytes::from(error.message);
+    };
+    let prologue = ResponseStreamPrologue {
+        error: Some(error.message),
+        typed_error: Some(typed_error),
+    };
+    match serde_json::to_vec(&prologue) {
+        Ok(bytes) => Bytes::from(bytes),
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                "QUIC error prologue did not serialize; sending untyped text"
+            );
+            Bytes::from(prologue.error.unwrap_or_default())
+        }
+    }
+}
+
+/// Decode a `FrameKind::Error` payload.
+///
+/// JSON that looks like [`ResponseStreamPrologue`] with a present `error`
+/// field is the typed encoding. Anything else is the legacy UTF-8 message,
+/// including a Python `{"message","code"}` envelope which must not be
+/// mistaken for a prologue.
+fn decode_error_payload(payload: &[u8]) -> Result<StreamPrologueError> {
+    if payload.first() == Some(&b'{')
+        && let Ok(prologue) = serde_json::from_slice::<ResponseStreamPrologue>(payload)
+        && let Some(message) = prologue.error
+    {
+        return Ok(StreamPrologueError {
+            message,
+            typed_error: prologue.typed_error,
+        });
+    }
+    let message = String::from_utf8(payload.to_vec())
+        .context("QUIC response terminal error was not UTF-8")?;
+    Ok(StreamPrologueError::from_message(message))
 }
 
 async fn read_frame<R>(recv: &mut R) -> Result<Frame>
@@ -540,7 +596,7 @@ impl DeferredResponse {
 
 struct PendingResponse {
     context: Arc<dyn AsyncEngineContext>,
-    connection: oneshot::Sender<Result<StreamReceiver, String>>,
+    connection: oneshot::Sender<Result<StreamReceiver, StreamPrologueError>>,
     bundle_id: Option<Uuid>,
     deferred: DeferredResponse,
     monitor_cancel: CancellationToken,
@@ -902,7 +958,7 @@ fn fail_registration(state: &ServerState, registration_id: Uuid, reason: &str) {
     let mut registration = state.registration(registration_id).lock();
     if let Some(pending) = registration.pending.remove(&registration_id) {
         pending.monitor_cancel.cancel();
-        let _ = pending.connection.send(Err(reason.to_string()));
+        let _ = pending.connection.send(Err(reason.into()));
     }
     if let Some(active) = registration.active.remove(&registration_id) {
         active.monitor_cancel.cancel();
@@ -1191,8 +1247,7 @@ async fn process_server_frame(
             }
         }
         FrameKind::Error => {
-            let error = String::from_utf8(frame.payload.to_vec())
-                .context("QUIC response terminal error was not UTF-8")?;
+            let error = decode_error_payload(&frame.payload)?;
             let pending = state
                 .registration(frame.registration_id)
                 .lock()
@@ -2007,11 +2062,19 @@ impl QuicResponseSender {
     }
 
     pub async fn send_prologue(&mut self, error: Option<String>) -> Result<(), String> {
+        self.send_prologue_typed(error.map(StreamPrologueError::from_message))
+            .await
+    }
+
+    pub async fn send_prologue_typed(
+        &mut self,
+        error: Option<StreamPrologueError>,
+    ) -> Result<(), String> {
         if self.prologue_sent {
             return Err("QUIC response prologue already sent".to_string());
         }
         let (kind, payload, terminal) = match error {
-            Some(error) => (FrameKind::Error, Bytes::from(error), true),
+            Some(error) => (FrameKind::Error, encode_error_payload(error), true),
             None => (FrameKind::Prologue, Bytes::new(), false),
         };
         self.enqueue_on(
@@ -2253,7 +2316,11 @@ fn decode_hex_digit(value: u8) -> Result<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{engine::AsyncEngineContextProvider, pipeline::Context as PipelineContext};
+    use crate::{
+        engine::AsyncEngineContextProvider,
+        error::{BackendError, DynamoError, ErrorType},
+        pipeline::Context as PipelineContext,
+    };
 
     fn frame(index: usize) -> Frame {
         Frame::new(FrameKind::Data, Uuid::nil(), Bytes::from(index.to_string()))
@@ -2748,7 +2815,77 @@ mod tests {
             .await
             .unwrap();
         match provider.await.unwrap() {
-            Err(error) => assert_eq!(error, "generate failed"),
+            Err(error) => assert_eq!(&*error, "generate failed"),
+            Ok(_) => panic!("terminal error unexpectedly opened a response stream"),
+        }
+        shutdown.cancel();
+    }
+
+    #[test]
+    fn error_payload_legacy_utf8_stays_untyped() {
+        let decoded = decode_error_payload(b"generate failed").unwrap();
+        assert_eq!(&*decoded, "generate failed");
+        assert!(decoded.typed_error.is_none());
+    }
+
+    #[test]
+    fn error_payload_round_trips_typed_refusal() {
+        let original = StreamPrologueError::new(
+            "Generate Error: multimodal input is not supported by this backend",
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                .message("multimodal input is not supported by this backend")
+                .build(),
+        );
+        let payload = encode_error_payload(original.clone());
+        assert_eq!(payload.first(), Some(&b'{'));
+
+        let decoded = decode_error_payload(&payload).unwrap();
+        assert_eq!(decoded, original);
+        assert_eq!(
+            decoded.typed_error.map(|e| e.error_type()),
+            Some(ErrorType::Backend(BackendError::InvalidArgument))
+        );
+    }
+
+    #[test]
+    fn error_payload_python_envelope_is_not_a_prologue() {
+        let envelope = br#"{"message":"unsupported media type","code":415}"#;
+        let decoded = decode_error_payload(envelope).unwrap();
+        assert_eq!(decoded.message.as_bytes(), envelope);
+        assert!(
+            decoded.typed_error.is_none(),
+            "a Python HTTP envelope must stay the untyped message, not a prologue"
+        );
+    }
+
+    #[tokio::test]
+    async fn typed_generate_error_survives_the_quic_error_frame() {
+        let (shutdown, server) = test_server(RESPONSE_BUFFER_CAPACITY);
+        let pool = test_pool();
+        let context = PipelineContext::new(());
+        let registered = server.register_response(context.context());
+        let (info, provider) = registered.into_parts();
+        let mut sender = pool.sender(context.context(), info).await.unwrap();
+        sender
+            .send_prologue_typed(Some(StreamPrologueError::new(
+                "Generate Error: multimodal input is not supported by this backend",
+                DynamoError::builder()
+                    .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                    .message("multimodal input is not supported by this backend")
+                    .build(),
+            )))
+            .await
+            .unwrap();
+        match provider.await.unwrap() {
+            Err(error) => {
+                assert!(error.contains("multimodal input is not supported"));
+                assert_eq!(
+                    error.typed_error.as_ref().map(|e| e.error_type()),
+                    Some(ErrorType::Backend(BackendError::InvalidArgument)),
+                    "the worker's error type must survive the QUIC error frame"
+                );
+            }
             Ok(_) => panic!("terminal error unexpectedly opened a response stream"),
         }
         shutdown.cancel();
