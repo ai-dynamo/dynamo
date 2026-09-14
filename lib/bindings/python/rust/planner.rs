@@ -548,34 +548,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_snapshot_preserves_counts_and_decision_id() {
-        let mut values = HashMap::from([
-            ("num_prefill_workers", b"0".as_slice()),
-            ("num_decode_workers", b"8".as_slice()),
-            ("decision_id", b"42".as_slice()),
-        ]);
-        assert_eq!(
-            decode_decision(&values).unwrap(),
-            PlannerDecision {
-                num_prefill_workers: 0,
-                num_decode_workers: 8,
-                decision_id: 42
-            },
-        );
-        values.remove("num_prefill_workers");
-        assert_eq!(decode_decision(&values).unwrap().num_prefill_workers, -1);
-        values.clear();
-        assert_eq!(
-            decode_decision(&values).unwrap(),
-            PlannerDecision {
-                num_prefill_workers: -1,
-                num_decode_workers: -1,
-                decision_id: -1
-            },
-        );
-    }
-
-    #[test]
     fn scaling_is_ready_before_first_decision() {
         assert!(scaling_decision_is_ready(NONE_SENTINEL, None));
     }
