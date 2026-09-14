@@ -2562,11 +2562,21 @@ fn backend_error_response(backend_error: BackendErrorInfo) -> ErrorResponse {
     }
 }
 
+/// Default pre-commit peek window when `DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS` is
+/// unset. The peek returns as soon as the first non-annotation event arrives;
+/// this is only the cap. Set the env var to `0` to disable.
+const DEFAULT_PRE_COMMIT_ERROR_PEEK_MS: u64 = 100;
+
 /// Read the pre-commit peek window from the environment.
 ///
 /// `Some(dur)` — poll for that duration before committing SSE.
-/// `None` — the peek is disabled entirely (default; matches pre-fix behavior
-/// where all backend errors surface as SSE frames post-HTTP-200).
+/// `None` — skip the peek and commit HTTP 200 immediately (`0` disables).
+///
+/// Unset or unparsable values use [`DEFAULT_PRE_COMMIT_ERROR_PEEK_MS`] so a
+/// synchronous first-frame refusal (`Backend(InvalidArgument)` from a
+/// generator-body capability guard) can land as HTTP 4xx instead of an SSE
+/// error frame. The peek returns on the first non-annotation event, so a
+/// healthy stream pays `min(time-to-first-event, window)`, not the full cap.
 ///
 /// Read live per streaming request. Reading `std::env::var` is a hashmap
 /// lookup — sub-microsecond, negligible next to the peek window
@@ -2579,8 +2589,11 @@ fn pre_commit_error_peek_timeout() -> Option<std::time::Duration> {
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
     {
-        Some(0) | None => None,
+        Some(0) => None,
         Some(ms) => Some(std::time::Duration::from_millis(ms)),
+        None => Some(std::time::Duration::from_millis(
+            DEFAULT_PRE_COMMIT_ERROR_PEEK_MS,
+        )),
     }
 }
 
@@ -2963,8 +2976,8 @@ async fn chat_completions(
                     inflight_guard.mark_error(extract_error_type_from_response(&err_response));
                     err_response
                 })?,
-            // Env var unset → skip peek, commit HTTP 200 immediately (pre-fix
-            // behavior). Backend errors will surface as SSE error frames via
+            // `DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS=0` → skip peek, commit HTTP 200
+            // immediately. Backend errors then surface as SSE error frames via
             // monitor_for_disconnects.
             None => Box::pin(stream)
                 as std::pin::Pin<
@@ -3593,7 +3606,8 @@ async fn responses(
                     inflight_guard.mark_error(extract_error_type_from_response(&err_response));
                     err_response
                 })?,
-            // Env var unset → skip peek, commit HTTP 200 immediately.
+            // `DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS=0` → skip peek, commit HTTP 200
+            // immediately.
             None => Box::pin(engine_stream)
                 as std::pin::Pin<
                     Box<dyn futures::Stream<Item = _> + Send>,
@@ -7478,6 +7492,108 @@ mod tests {
         assert!(first.is_some());
         let first_event = first.unwrap();
         assert_eq!(first_event.id, Some("msg-1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_pre_commit_peek_returns_on_first_token_without_waiting_full_window() {
+        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use dynamo_protocols::types::CreateChatCompletionStreamResponse;
+        use futures::StreamExt;
+
+        let normal_event = Annotated::<NvCreateChatCompletionStreamResponse> {
+            data: Some(NvCreateChatCompletionStreamResponse {
+                inner: CreateChatCompletionStreamResponse {
+                    id: "test-id".to_string(),
+                    choices: vec![],
+                    created: 0,
+                    model: "test-model".to_string(),
+                    system_fingerprint: None,
+                    object: "chat.completion.chunk".to_string(),
+                    service_tier: None,
+                    usage: None,
+                },
+                nvext: None,
+                llm_metrics: None,
+            }),
+            id: Some("msg-1".to_string()),
+            event: None,
+            comment: None,
+            error: None,
+        };
+
+        let window = std::time::Duration::from_millis(250);
+        let started = tokio::time::Instant::now();
+        let stream = async_stream::stream! {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            yield normal_event;
+        };
+        let result = check_for_backend_error(stream, Some(window)).await;
+        let elapsed = started.elapsed();
+
+        assert!(result.is_ok(), "first-token peek must not fail");
+        let mut returned_stream = result.unwrap();
+        assert_eq!(
+            returned_stream.next().await.and_then(|event| event.id),
+            Some("msg-1".to_string())
+        );
+        assert!(
+            elapsed < window,
+            "peek must return on the first token instead of waiting the full window; elapsed={elapsed:?}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn pre_commit_error_peek_timeout_defaults_to_100ms_when_unset() {
+        temp_env::with_vars_unset([env_llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS], || {
+            assert_eq!(
+                pre_commit_error_peek_timeout(),
+                Some(std::time::Duration::from_millis(
+                    DEFAULT_PRE_COMMIT_ERROR_PEEK_MS
+                ))
+            );
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn pre_commit_error_peek_timeout_zero_disables_peek() {
+        temp_env::with_vars(
+            [(env_llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS, Some("0"))],
+            || {
+                assert_eq!(pre_commit_error_peek_timeout(), None);
+            },
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn pre_commit_error_peek_timeout_parses_custom_window() {
+        temp_env::with_vars(
+            [(env_llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS, Some("250"))],
+            || {
+                assert_eq!(
+                    pre_commit_error_peek_timeout(),
+                    Some(std::time::Duration::from_millis(250))
+                );
+            },
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn pre_commit_error_peek_timeout_unparsable_uses_default() {
+        temp_env::with_vars(
+            [(env_llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS, Some("bogus"))],
+            || {
+                assert_eq!(
+                    pre_commit_error_peek_timeout(),
+                    Some(std::time::Duration::from_millis(
+                        DEFAULT_PRE_COMMIT_ERROR_PEEK_MS
+                    ))
+                );
+            },
+        );
     }
 
     #[tokio::test]

@@ -62,6 +62,15 @@ The Rust HTTP server also reads these environment variables, which are not expos
   Unset, `0`, invalid, or unrepresentable values disable keep-alive comments.
 </ParamField>
 
+<ParamField path="DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS" type="integer" default="100">
+  How long the Frontend waits for a synchronous backend error on `/v1/chat/completions` and
+  `/v1/responses` streaming requests before committing HTTP 200. The peek returns as soon as the
+  first non-annotation event arrives, so a healthy stream pays `min(time-to-first-event, window)`
+  rather than a fixed delay. Request-validation errors within the window surface as HTTP 4xx instead
+  of an SSE error frame. Set to `0` to disable the peek and commit HTTP 200 immediately. Unset or
+  unparsable values use the 100ms default.
+</ParamField>
+
 ## Router
 
 This section is the canonical CLI and environment-variable reference for the frontend's embedded
