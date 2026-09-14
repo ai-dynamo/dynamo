@@ -28,7 +28,8 @@ use tracing::Instrument;
 use super::disconnect::create_connection_monitor;
 use super::error::SanitizedError;
 use super::metrics::{
-    CancellationLabels, ErrorType, HttpQueueGuard, InflightGuard, ResponseMetricCollector,
+    CancellationLabels, DispatchFailure, ErrorType, HttpQueueGuard, InflightGuard,
+    ResponseMetricCollector,
 };
 use super::openai::{
     check_model_serving_ready, check_ready, context_from_headers, get_body_limit,
@@ -190,10 +191,47 @@ fn generate_cancelled_response() -> Response {
 
 fn generate_unavailable_response() -> Response {
     generate_error_response(
-        StatusCode::SERVICE_UNAVAILABLE,
+        SanitizedError::Unavailable.status(),
         "service_unavailable",
         SanitizedError::Unavailable.to_string(),
     )
+}
+
+/// Log a failed dispatch and answer it. The caller owns the metric label, so this only chooses
+/// the log level and the response body.
+fn generate_failure_response(
+    failure: DispatchFailure,
+    error: &anyhow::Error,
+    request_id: &str,
+    state: &service_v2::State,
+    metric_model: &str,
+) -> Response {
+    match failure {
+        DispatchFailure::Cancelled => generate_cancelled_response(),
+        DispatchFailure::Rejected => {
+            tracing::warn!(%request_id, error = %format!("{error:#}"), "engine rejected generate request");
+            state
+                .metrics_clone()
+                .inc_rejection(metric_model, super::metrics::Endpoint::Generate);
+            generate_error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "service_unavailable",
+                "engine rejected the request".to_string(),
+            )
+        }
+        DispatchFailure::Unavailable => {
+            tracing::warn!(
+                %request_id,
+                error = %format!("{error:#}"),
+                "no worker available for generate request"
+            );
+            generate_unavailable_response()
+        }
+        DispatchFailure::Internal => {
+            tracing::error!(%request_id, error = %format!("{error:#}"), "engine generate call failed");
+            generate_internal_error_response()
+        }
+    }
 }
 
 fn generate_internal_error_response() -> Response {
@@ -1011,41 +1049,9 @@ async fn generate_dispatch(
     let stream = match generate_result {
         Ok(stream) => stream,
         Err(error) => {
-            let was_cancelled = request_context.is_killed()
-                || super::metrics::request_was_cancelled(error.as_ref());
-            let was_rejected = super::metrics::request_was_rejected(error.as_ref());
-            let was_unavailable = super::metrics::request_was_unavailable(error.as_ref());
-            inflight_guard.mark_error(if was_cancelled {
-                ErrorType::Cancelled
-            } else if was_rejected || was_unavailable {
-                ErrorType::Unavailable
-            } else {
-                ErrorType::Internal
-            });
-            if was_cancelled {
-                return generate_cancelled_response();
-            }
-            if was_rejected {
-                tracing::warn!(%request_id, error = %format!("{error:#}"), "engine rejected generate request");
-                state
-                    .metrics_clone()
-                    .inc_rejection(&metric_model, super::metrics::Endpoint::Generate);
-                return generate_error_response(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "service_unavailable",
-                    "engine rejected the request".to_string(),
-                );
-            }
-            if was_unavailable {
-                tracing::warn!(
-                    %request_id,
-                    error = %format!("{error:#}"),
-                    "no worker available for generate request"
-                );
-                return generate_unavailable_response();
-            }
-            tracing::error!(%request_id, error = %format!("{error:#}"), "engine generate call failed");
-            return generate_internal_error_response();
+            let failure = DispatchFailure::classify(error.as_ref(), request_context.is_killed());
+            inflight_guard.mark_error(failure.metric_error_type());
+            return generate_failure_response(failure, &error, &request_id, &state, &metric_model);
         }
     };
 
