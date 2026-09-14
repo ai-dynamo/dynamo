@@ -169,7 +169,7 @@ connection-level throttling in high-concurrency sidecar tests. Override the
 pool size with `--grpc-connections` or `DYN_SIDECAR_GRPC_CONNECTIONS`.
 
 Connection startup uses a 30-second timeout per attempt, a one-second retry
-interval, and a five-minute deadline for establishing the full connection
+interval, and a 30-minute deadline for establishing the full connection
 pool. Override them with `--grpc-connect-attempt-timeout-secs`,
 `--grpc-retry-interval-secs`, and `--grpc-startup-deadline-secs`, or with the
 corresponding `DYN_SIDECAR_GRPC_*` environment variables.
