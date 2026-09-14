@@ -135,47 +135,6 @@ jobs:
             build-xpu-test.log
           retention-days: 7
 
-  # ============================================================================
-  # XPU TESTS
-  # ============================================================================
-
-  test-xpu:
-    needs: [build-xpu]
-    if: ${{ !cancelled() && needs.build-xpu.result == 'success' }}
-    runs-on: xpu
-    env:
-      FRAMEWORK: ${{ inputs.framework || 'vllm' }}
-      IMAGE_TAG: dynamo-${{ inputs.framework || 'vllm' }}-${{ inputs.target || 'runtime' }}-xpu:${{ github.run_id }}-${{ inputs.source_ref || github.sha }}
-      TEST_IMAGE_TAG: dynamo-${{ inputs.framework || 'vllm' }}-${{ inputs.target || 'runtime' }}-xpu:${{ github.run_id }}-${{ inputs.source_ref || github.sha }}-test
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-        with:
-          ref: ${{ env.SOURCE_REF }}
-          lfs: true
-
-      - name: Pre-cleanup Pytest Containers
-        shell: bash
-        run: |
-          echo "🧹 Removing any leftover pytest containers..."
-          CONTAINER_ID_PREFIX="test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}"
-          docker rm -f "${CONTAINER_ID_PREFIX}_pytest" 2>/dev/null || true
-
-      - name: Run Sanity Check on Runtime Image
-        shell: bash
-        run: |
-          echo "Running sanity check on image: ${{ env.IMAGE_TAG }}"
-          set +e
-          docker run --rm "${{ env.IMAGE_TAG }}" python /workspace/dev/sanity_check.py --runtime-check --no-gpu-check
-          SANITY_CHECK_EXIT_CODE=$?
-          set -e
-          if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
-            echo "ERROR: Sanity check failed - ai-dynamo packages not properly installed"
-            exit ${SANITY_CHECK_EXIT_CODE}
-          else
-            echo "✅ Sanity check passed"
-          fi
-
   test-xpu-gms:
     needs: [build-xpu]
     if: ${{ !cancelled() && needs.build-xpu.result == 'success' }}
@@ -290,6 +249,21 @@ jobs:
           echo "🧹 Removing any leftover pytest containers..."
           CONTAINER_ID_PREFIX="test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}"
           docker rm -f "${CONTAINER_ID_PREFIX}_pytest" 2>/dev/null || true
+
+      - name: Run Sanity Check on Runtime Image
+        shell: bash
+        run: |
+          echo "Running sanity check on image: ${{ env.IMAGE_TAG }}"
+          set +e
+          docker run --rm "${{ env.IMAGE_TAG }}" python /workspace/dev/sanity_check.py --runtime-check --no-gpu-check
+          SANITY_CHECK_EXIT_CODE=$?
+          set -e
+          if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
+            echo "ERROR: Sanity check failed - ai-dynamo packages not properly installed"
+            exit ${SANITY_CHECK_EXIT_CODE}
+          else
+            echo "✅ Sanity check passed"
+          fi
 
       - name: Run XPU tests
         uses: $/.github/actions/pytest
