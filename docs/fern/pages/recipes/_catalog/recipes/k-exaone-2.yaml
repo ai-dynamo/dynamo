@@ -63,8 +63,10 @@ targets:
     tool: aiperf
     asset: recipes/k-exaone-2.0/perf/perf.yaml
   expected_performance:
-    available: false
+    available: true
+    summary: 55 tok/s/GPU at concurrency 7, E2E 70.6 tok/s/user, TTFT p50 1,018 ms, ITL 13.15 ms; quoted at the same
+      concurrency as the aggregated target for comparability, and conservative because the gate is met with wide margin
 gaps:
-- Disaggregated performance is being re-measured after a KV-transport fix; no validated figure is published for that target yet.
+- Disaggregated is quoted at concurrency 7 for comparability with the aggregated target; its true operating point is at a higher concurrency that has not been swept.
 - The InfiniBand RDMA extended-resource name in the disaggregated manifest is cluster-specific and must be adjusted per cluster.
 - 1M context is not supported; the checkpoint declares 262,144 positions with unscaled rope.

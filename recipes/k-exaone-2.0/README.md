@@ -157,7 +157,15 @@ legs**, not peak throughput.
 | Configuration | Concurrency | tok/s/GPU | E2E tok/s/user | TTFT p50 | ITL |
 |---|---|---|---|---|---|
 | Aggregated (4 GPU) | 7 | **87** | 51.4 | 291 ms | 19.15 ms |
-| Disaggregated (8 GPU) | 7 | _pending re-measurement_ | | | |
+| Disaggregated (8 GPU) | 7 | **55** | 70.6 | 1,018 ms | 13.15 ms |
+
+The disaggregated figure is **conservative**: at C=7 it clears the gate with wide margin
+(E2E 70.6 against 50, TTFT 1,018 ms against 5,000), so its true operating point is at a higher
+concurrency that has not been swept. It is quoted at C=7 only so it is directly comparable to the
+aggregated row.
+
+Disaggregation buys per-token latency, not throughput: ITL 13.15 ms against the aggregated
+recipe's 19.15 ms, for roughly 1.6x the GPUs per unit of throughput.
 
 Aggregated on the **full** 12,031-request trace, for reference: **97 tok/s/GPU** at C=8,
 E2E 51.1, TTFT 312 ms.

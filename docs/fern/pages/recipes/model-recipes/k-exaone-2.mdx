@@ -144,7 +144,13 @@ Measured KV reuse on this workload is 8.8%. That is not a misconfiguration — t
 
 <div data-variant="disagg">
 
-Disaggregated figures are being re-measured following a KV-transport change and are not published yet.
+Mooncake chat trace replay, 1,805 requests, quoted at the same concurrency as the aggregated target for comparability.
+
+| Concurrency | tok/s/GPU | E2E tok/s/user | TTFT p50 | ITL |
+| ----------- | --------- | -------------- | -------- | --- |
+| 7           | 55        | 70.6           | 1,018 ms | 13.15 ms |
+
+This is conservative — at concurrency 7 the gate is met with wide margin (E2E 70.6 against 50, TTFT 1,018 ms against 5,000), so the true operating point sits higher. Disaggregation buys per-token latency here: ITL 13.15 ms against the aggregated recipe's 19.15 ms, for roughly 1.6x the GPUs per unit of throughput.
 
 </div>
 
