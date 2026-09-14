@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import subprocess
@@ -19,8 +20,14 @@ pytestmark = [
     pytest.mark.integration,
     pytest.mark.core,
     pytest.mark.parallel,
-    pytest.mark.timeout(30),
+    # Stays comfortably above CHILD_TIMEOUT_SECONDS so the child timeout is what
+    # fires, and reports the captured child output instead of a bare kill.
+    pytest.mark.timeout(120),
 ]
+
+# These assertions are about ordering, never about speed, so the budget only has
+# to exclude a genuine hang. On an idle host the child finishes in ~0.1 s.
+CHILD_TIMEOUT_SECONDS = 60
 
 MODEL = "runtime-tests/cached"
 REVISION = "0" * 40
@@ -274,22 +281,51 @@ def _parse_jsonl_logs(output: str) -> list[dict[str, Any]]:
     return records
 
 
+def _partial_output(stream: str | bytes | None) -> str:
+    """Render what a timed-out child had written, whatever type it came back as.
+
+    subprocess buffers partially in bytes, so TimeoutExpired can carry bytes even
+    when the call asked for text.
+    """
+    if stream is None:
+        return ""
+    if isinstance(stream, bytes):
+        return stream.decode("utf-8", errors="replace")
+    return stream
+
+
 @pytest.mark.parametrize(("scenario", "expect_mismatch"), SCENARIOS)
 def test_fetch_model_runtime_bridge_orders(
-    tmp_path: Path, scenario: str, expect_mismatch: bool, dynamo_dynamic_ports
+    tmp_path: Path,
+    scenario: str,
+    expect_mismatch: bool,
+    request: pytest.FixtureRequest,
 ) -> None:
     cache = tmp_path / "hf-cache"
     cache.mkdir()
     snapshot = _build_cached_model(cache)
-    system_port = dynamo_dynamic_ports.system_ports[0]
-    result = subprocess.run(
-        [sys.executable, "-c", CHILD, scenario, str(snapshot), str(system_port)],
-        env=_isolated_child_env(cache, scenario, system_port),
-        capture_output=True,
-        text=True,
-        timeout=20,
-        check=False,
-    )
+    # Only fetch_then_backend_worker binds a socket. Every other scenario keeps
+    # DYN_SYSTEM_PORT=-1, so reserving host-wide ports for them would make the
+    # test depend on the shared port pool without ever using it.
+    if scenario == "fetch_then_backend_worker":
+        system_port = request.getfixturevalue("dynamo_dynamic_ports").system_ports[0]
+    else:
+        system_port = 0
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", CHILD, scenario, str(snapshot), str(system_port)],
+            env=_isolated_child_env(cache, scenario, system_port),
+            capture_output=True,
+            text=True,
+            timeout=CHILD_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        pytest.fail(
+            f"scenario={scenario} child exceeded {CHILD_TIMEOUT_SECONDS}s\n"
+            f"partial stdout:\n{_partial_output(error.stdout)}\n"
+            f"partial stderr:\n{_partial_output(error.stderr)}"
+        )
     diagnostic = (
         f"scenario={scenario} returncode={result.returncode}\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
@@ -326,3 +362,46 @@ def test_fetch_model_runtime_bridge_orders(
 
     if scenario in ("fetch_first_distributed_runtime", "detached_then_fetch"):
         assert OLD_DISTRIBUTED_RUNTIME_WARNING not in result.stderr, diagnostic
+
+
+def _exhausted_port_pool(*args: Any, **kwargs: Any) -> Any:
+    raise RuntimeError("port pool exhausted")
+
+
+def _break_port_allocation(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The root conftest imports the allocators by name, so its own module
+    # globals are what the dynamo_dynamic_ports fixture actually calls.
+    root_conftest = importlib.import_module("tests.conftest")
+    monkeypatch.setattr(root_conftest, "allocate_port", _exhausted_port_pool)
+    monkeypatch.setattr(root_conftest, "allocate_ports", _exhausted_port_pool)
+
+
+def test_invalid_config_scenario_runs_without_shared_port_allocation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    _break_port_allocation(monkeypatch)
+    test_fetch_model_runtime_bridge_orders(
+        tmp_path=tmp_path,
+        scenario="invalid_config_then_fetch",
+        expect_mismatch=False,
+        request=request,
+    )
+
+
+def test_backend_scenario_still_requires_shared_port_allocation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    # Control for the test above: the one scenario that really binds a socket
+    # must keep failing without a port, so "never allocate" is not a fix.
+    _break_port_allocation(monkeypatch)
+    with pytest.raises(RuntimeError, match="port pool exhausted"):
+        test_fetch_model_runtime_bridge_orders(
+            tmp_path=tmp_path,
+            scenario="fetch_then_backend_worker",
+            expect_mismatch=False,
+            request=request,
+        )
