@@ -608,10 +608,10 @@ impl ErrorMessage {
             // which can name a context id or an internal file. Do not triage
             // the fallback 400: it is an ordinary validation error, even when
             // the configured overload status also happens to be 400.
-            if has_explicit_status
-                && let BackendStatusAction::Sanitize(variant) = BackendStatusAction::triage(code)
-            {
-                return ErrorMessage::sanitized_with_details(variant, message);
+            if has_explicit_status {
+                if let BackendStatusAction::Sanitize(variant) = BackendStatusAction::triage(code) {
+                    return ErrorMessage::sanitized_with_details(variant, message);
+                }
             }
             return (
                 code,
