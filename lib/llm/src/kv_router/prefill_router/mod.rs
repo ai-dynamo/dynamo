@@ -235,7 +235,6 @@ where
     /// lives on [`PrefillBinding::prefill_router_mode`].
     decode_router_mode: RouterMode,
     session_affinity_ttl: Option<std::time::Duration>,
-    /// Whether the paired decode worker set supports pre-output cancellation.
     decode_supports_prefill_cancellation: bool,
 
     session_affinity_mode: SessionAffinityMode,
