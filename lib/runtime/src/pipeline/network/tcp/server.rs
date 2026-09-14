@@ -1092,8 +1092,7 @@ async fn tcp_listener(
                         // Notify the requester as the sibling arm does. Returning on
                         // `?` alone drops the oneshot un-sent, and the requester then
                         // reports a bare disconnect that names neither the worker's
-                        // failure nor this one. A newer worker sending an
-                        // `ErrorType` variant this build does not know lands here.
+                        // failure nor this one.
                         let msg = format!("malformed prologue: {e}");
                         let _ =
                             connection.send(Err(StreamPrologueError::from_message(msg.clone())));

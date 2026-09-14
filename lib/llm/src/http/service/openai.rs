@@ -585,26 +585,33 @@ impl ErrorMessage {
             // is not, because reaching this arm means the worker classified the
             // failure as a request problem, and a 5xx body here would bypass the
             // sanitizing the other arms apply.
-            let (message, code) = match serde_json::from_str::<ErrorPayload>(dynamo_err.message()) {
-                Ok(envelope) => (
-                    envelope
-                        .message
-                        .unwrap_or_else(|| dynamo_err.message().to_string()),
-                    envelope
-                        .code
-                        .and_then(|code| StatusCode::from_u16(code).ok())
-                        .filter(StatusCode::is_client_error)
-                        .unwrap_or(StatusCode::BAD_REQUEST),
-                ),
-                Err(_) => (dynamo_err.message().to_string(), StatusCode::BAD_REQUEST),
+            let (message, code, has_explicit_status) =
+                match serde_json::from_str::<ErrorPayload>(dynamo_err.message()) {
+                    Ok(envelope) => {
+                        let explicit_status = envelope
+                            .code
+                            .and_then(|code| StatusCode::from_u16(code).ok())
+                            .filter(StatusCode::is_client_error);
+                        (
+                            envelope
+                                .message
+                                .unwrap_or_else(|| dynamo_err.message().to_string()),
+                            explicit_status.unwrap_or(StatusCode::BAD_REQUEST),
+                            explicit_status.is_some(),
+                        )
+                    }
+                    Err(_) => (dynamo_err.message().to_string(), StatusCode::BAD_REQUEST, false),
+                };
             };
-            // The status the worker asserted still goes through the shared
+            // An explicit status the worker asserted goes through the shared
             // policy, so a 499 answers with the same sanitized cancellation
             // body as every other HTTP path rather than the worker's own text,
-            // which can name a context id or an internal file. `code` is always
-            // a client error here, so the only other action triage can return
-            // is `ForwardClientError`.
-            if let BackendStatusAction::Sanitize(variant) = BackendStatusAction::triage(code) {
+            // which can name a context id or an internal file. Do not triage
+            // the fallback 400: it is an ordinary validation error, even when
+            // the configured overload status also happens to be 400.
+            if has_explicit_status
+                && let BackendStatusAction::Sanitize(variant) = BackendStatusAction::triage(code)
+            {
                 return ErrorMessage::sanitized_with_details(variant, message);
             }
             return (
