@@ -102,10 +102,31 @@ content publication, and engine-index hydration. An active persistent session
 also prevents Snapshot checkpoint preparation so the controller cannot snapshot
 while KV writers remain attached.
 
+Disconnect is not enough to make retained pools checkpoint-safe: preparation
+also rejects orphaned persistent backing in either domain. Persistent-pool
+checkpoint/restore is not implemented. The controller must explicitly destroy
+such pools if discarding their KV is acceptable; preparation never discards them.
+Persistent sessions cannot enumerate or export transactional allocations.
+Typed pool errors have their own wire tag; ordinary V1 errors retain the legacy
+wire shape for existing clients.
+
 This change supplies the V1 allocation backend and wire semantics. The existing
 V1 vLLM/SGLang sleep integrations continue to use ephemeral KV epochs until a
 separate engine-integration change selects persistent pools and wires the lease
 and content-directory lifecycle end to end.
+
+Before claiming engine-level V1 failover support, the follow-up must:
+
+- Select the backend explicitly and validate daemon incarnation and GPU identity.
+- Wire claim/unclaim, failed-import rollback, lease fencing, directory adoption,
+  and engine-index hydration through the selected backend.
+- Validate real-CUDA crash/reattach byte equality, then vLLM/SGLang TP=1 and TP=2
+  failover with output correctness and baseline/primary/shadow latency trials.
+
+The CPU contract tests validate transport and ownership rules, not GPU byte
+survival or subsecond engine recovery. Contention backoff defaults to two seconds
+via `GMS_PERSISTENT_CLAIM_RETRY_SECS`; it retries busy owners only and does not
+replace session RPC timeouts. Zero disables retries.
 
 Both client domains use the same `GMSClientMemoryManager` class and the same
 V0-style operations:

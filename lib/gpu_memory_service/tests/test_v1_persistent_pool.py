@@ -20,7 +20,18 @@ from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.persistent_pool import PersistentPoolKey
 from gpu_memory_service.v1.client.persistent_pool import V1PersistentPoolBackend
 from gpu_memory_service.v1.client.session import GMSV1RemoteError, _GMSClientSession
-from gpu_memory_service.v1.protocol import ERROR_CLAIM_CONFLICT, ERROR_NOT_CLAIMED
+from gpu_memory_service.v1.protocol import (
+    ERROR_CLAIM_CONFLICT,
+    ERROR_INVALID_REQUEST,
+    ERROR_NOT_CLAIMED,
+    AbortRequest,
+    AllocateRequest,
+    CommitRequest,
+    ExportRequest,
+    FreeRequest,
+    ListAllocationsRequest,
+    SuccessResponse,
+)
 from gpu_memory_service.v1.server.rpc import GMSRPCServer, GMSServerMemoryManager
 
 pytestmark = [
@@ -75,7 +86,7 @@ def test_shared_claim_export_inventory_and_destroy(v1_server, monkeypatch) -> No
         monkeypatch.setenv("GMS_PERSISTENT_CLAIM_RETRY_SECS", "0")
         with pytest.raises(GMSV1RemoteError) as mode_conflict:
             first.claim(key, 64, shared=False)
-        assert mode_conflict.value.code == ERROR_CLAIM_CONFLICT
+        assert mode_conflict.value.code == ERROR_INVALID_REQUEST
 
         assert manager.persistent.shared_claim_count(key.engine_id, key.tag) == 2
         assert first.inventory() == [created]
@@ -93,7 +104,7 @@ def test_shared_claim_export_inventory_and_destroy(v1_server, monkeypatch) -> No
             observer.export(key)
         assert denied.value.code == ERROR_NOT_CLAIMED
 
-        assert first_session.unclaim_persistent(key.engine_id, key.tag)
+        assert first.unclaim(key)
         assert second.destroy(key)
         assert observer.inventory(include_unclaimed=True) == []
         assert not vmm.server_handles
@@ -171,5 +182,61 @@ def test_backend_rejects_transactional_session(v1_server) -> None:
                 "kv:rank0",
                 64,
             )
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        AllocateRequest("other", 64),
+        ExportRequest("uncommitted"),
+        ListAllocationsRequest(),
+        FreeRequest("uncommitted"),
+        CommitRequest(),
+        AbortRequest(),
+    ],
+)
+def test_persistent_session_cannot_access_transactional_epoch(v1_server, operation):
+    path, manager, _vmm = v1_server
+    writer = _GMSClientSession(path, RequestedLockType.RW)
+    persistent_session, _backend = _connect(path)
+    try:
+        writer.allocate("uncommitted", 64)
+        with pytest.raises(GMSV1RemoteError, match="transactional operation"):
+            persistent_session._call(operation, SuccessResponse)
+        assert manager.allocation_snapshot() == (("uncommitted", 64),)
+        # Rejection must not close or commit the legitimate writer's epoch.
+        os.close(writer.export("uncommitted"))
+    finally:
+        persistent_session.close()
+        writer.close()
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_repeated_claim_and_permanent_conflicts_do_not_retry(
+    v1_server, monkeypatch, shared
+):
+    path, manager, _vmm = v1_server
+    session, backend = _connect(path)
+    key = PersistentPoolKey("engine", "kv")
+    # Any backoff here would hide a permanent error behind failover latency.
+    monkeypatch.setattr(
+        "gpu_memory_service.common.persistent_pool.time.sleep",
+        lambda _: pytest.fail("permanent conflict must not retry"),
+    )
+    try:
+        first = backend.claim(key, 64, shared=shared)
+        repeated = backend.claim(key, 64, shared=shared)
+        assert repeated.reattached
+        assert repeated.allocation_id == first.allocation_id
+        for size, mode in [(128, shared), (64, not shared)]:
+            with pytest.raises(GMSV1RemoteError) as failure:
+                backend.claim(key, size, shared=mode)
+            assert failure.value.code == ERROR_INVALID_REQUEST
+        assert backend.unclaim(key)
+        assert not backend.unclaim(key)
+        assert manager.persistent.active_claim_count == 0
+        assert backend.destroy(key)
     finally:
         session.close()

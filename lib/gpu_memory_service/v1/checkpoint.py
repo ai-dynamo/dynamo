@@ -102,6 +102,12 @@ class GMSCheckpointLifecycle:
         kv_sessions = kv_cache.session_snapshot()
         self._require_quiesced(_WEIGHTS_DOMAIN, weights_sessions)
         self._require_quiesced(_KV_CACHE_DOMAIN, kv_sessions)
+        for domain, manager in managers.items():
+            if manager.persistent_allocation_count:
+                raise RuntimeError(
+                    f"{domain} persistent pools must be destroyed before checkpoint; "
+                    "persistent-pool checkpoint/restore is not supported"
+                )
         if not weights_sessions.committed:
             raise RuntimeError("weights must be committed before checkpoint")
         if kv_sessions.committed:

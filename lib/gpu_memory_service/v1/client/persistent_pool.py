@@ -1,23 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""GMS v1 implementation of the persistent-pool ownership contract."""
-
 from __future__ import annotations
-
-import logging
-import os
-import time
 
 from gpu_memory_service.common.locks import GrantedLockType
 from gpu_memory_service.common.persistent_pool import (
     PersistentPoolAllocation,
     PersistentPoolKey,
+    retry_persistent_claim,
 )
 from gpu_memory_service.v1.client.session import GMSV1RemoteError, _GMSClientSession
 from gpu_memory_service.v1.protocol import ERROR_CLAIM_CONFLICT
-
-logger = logging.getLogger(__name__)
 
 
 class V1PersistentPoolBackend:
@@ -42,38 +35,25 @@ class V1PersistentPoolBackend:
         *,
         shared: bool = False,
     ) -> PersistentPoolAllocation:
-        retry_secs = float(os.environ.get("GMS_PERSISTENT_CLAIM_RETRY_SECS", "2.0"))
-        deadline = time.monotonic() + max(0.0, retry_secs)
-        delay = 0.05
-        while True:
-            try:
-                response = self._session.claim_persistent(
-                    key.engine_id,
-                    key.tag,
-                    aligned_size,
-                    shared=shared,
-                )
-                allocation = response.allocation
-                return PersistentPoolAllocation(
-                    key=key,
-                    allocation_id=allocation.allocation_id,
-                    size=int(allocation.size),
-                    aligned_size=int(allocation.aligned_size),
-                    reattached=bool(response.reattached),
-                    claimed=bool(allocation.claimed),
-                )
-            except GMSV1RemoteError as exc:
-                if exc.code != ERROR_CLAIM_CONFLICT or time.monotonic() >= deadline:
-                    raise
-                logger.warning(
-                    "GMS v1 persistent claim conflict for %s/%s; retrying in "
-                    "%.2fs (likely a prior connection's claim is being cleaned up)",
-                    key.engine_id,
-                    key.tag,
-                    delay,
-                )
-                time.sleep(delay)
-                delay = min(delay * 2, 0.5)
+        response = retry_persistent_claim(
+            lambda: self._session.claim_persistent(
+                key.engine_id, key.tag, aligned_size, shared=shared
+            ),
+            lambda exc: isinstance(exc, GMSV1RemoteError)
+            and exc.code == ERROR_CLAIM_CONFLICT,
+        )
+        allocation = response.allocation
+        return PersistentPoolAllocation(
+            key=key,
+            allocation_id=allocation.allocation_id,
+            size=int(allocation.size),
+            aligned_size=int(allocation.aligned_size),
+            reattached=bool(response.reattached),
+            claimed=bool(allocation.claimed),
+        )
+
+    def unclaim(self, key: PersistentPoolKey) -> bool:
+        return self._session.unclaim_persistent(key.engine_id, key.tag)
 
     def export(self, key: PersistentPoolKey) -> int:
         return self._session.export_persistent(key.engine_id, key.tag)
