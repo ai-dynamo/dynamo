@@ -20,7 +20,7 @@ covers Dynamo mode only.
 | Dynamo runtime | Required, with etcd and NATS | Not used |
 | Worker discovery | Dynamo runtime discovery | Kubernetes pod watch driven by `InferencePool.spec.selector` |
 | EPP ServiceAccount and RBAC | Created by the operator against the ClusterRole or Role from the `dynamo-platform` chart | Supplied with the deployment manifests |
-| EPP replication | Available; active-sequence state shared over the Dynamo event plane | Available; active-sequence state shared over ZMQ, peers discovered through `DYN_EPP_PEER_SERVICE` |
+| EPP replication | Available. Replicas exchange active-sequence state through the Dynamo event plane, which the runtime addresses and discovers. It is ZMQ-backed by default and NATS when the runtime is configured for it | Available. Replicas exchange active-sequence state over ZMQ sockets the EPP binds itself, discovering peers from the Service named by `DYN_EPP_PEER_SERVICE` |
 
 Standalone mode does not install or run the Dynamo operator, so no operator-generated resource
 described on this page applies to it, including the EPP ServiceAccount and the chart's EPP RBAC. A
