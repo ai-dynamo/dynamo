@@ -1238,7 +1238,6 @@ mod tests {
             .list_and_watch(DiscoveryQuery::AllEndpoints, None)
             .await
             .unwrap();
-        // list_and_watch returned, so the watch is established and this unregister is newer.
         client.unregister(instance.clone()).await.unwrap();
 
         let added = tokio::time::timeout(tokio::time::Duration::from_secs(1), stream.next())

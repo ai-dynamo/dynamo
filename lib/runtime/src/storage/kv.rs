@@ -665,7 +665,6 @@ mod tests {
             .watch(BUCKET_NAME, None, cancel_token.clone())
             .await
             .unwrap();
-        // watch() returned, so the snapshot is captured and this delete is newer than it.
         bucket.delete(&key).await.unwrap();
 
         let first = tokio::time::timeout(Duration::from_secs(1), rx.recv())

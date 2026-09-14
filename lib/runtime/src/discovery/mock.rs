@@ -365,7 +365,6 @@ mod tests {
             .list_and_watch(DiscoveryQuery::AllEndpoints, None)
             .await
             .unwrap();
-        // list_and_watch returned, so the first snapshot is taken and this unregister is newer.
         client.unregister(instance.clone()).await.unwrap();
 
         let added = timeout(Duration::from_secs(1), stream.next())
