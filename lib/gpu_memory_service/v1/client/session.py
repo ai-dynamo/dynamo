@@ -15,15 +15,25 @@ from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.v1.protocol import (
     AbortRequest,
     AllocateRequest,
+    ClaimPersistentPoolRequest,
+    ClaimPersistentPoolResponse,
     CommitRequest,
+    DestroyPersistentPoolRequest,
+    DestroyPersistentPoolResponse,
     ErrorResponse,
+    ExportPersistentPoolRequest,
+    ExportPersistentPoolResponse,
     ExportRequest,
     ExportResponse,
     FreeRequest,
     HandshakeRequest,
     HandshakeResponse,
+    ListPersistentPoolsRequest,
+    ListPersistentPoolsResponse,
     Message,
     SuccessResponse,
+    UnclaimPersistentPoolRequest,
+    UnclaimPersistentPoolResponse,
     receive_message,
     send_message,
 )
@@ -31,6 +41,14 @@ from gpu_memory_service.v1.protocol import (
 T = TypeVar("T")
 
 _STARTUP_CONNECT_RETRY_INTERVAL = 0.1
+
+
+class GMSV1RemoteError(RuntimeError):
+    """Typed failure returned by a GMS v1 server."""
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class _GMSClientSession:
@@ -126,6 +144,52 @@ class _GMSClientSession:
     def free(self, allocation_id: str) -> None:
         self._call(FreeRequest(allocation_id), SuccessResponse)
 
+    def claim_persistent(
+        self,
+        engine_id: str,
+        tag: str,
+        aligned_size: int,
+        *,
+        shared: bool = False,
+    ) -> ClaimPersistentPoolResponse:
+        return self._call(
+            ClaimPersistentPoolRequest(engine_id, tag, aligned_size, shared),
+            ClaimPersistentPoolResponse,
+        )
+
+    def unclaim_persistent(self, engine_id: str, tag: str) -> bool:
+        response = self._call(
+            UnclaimPersistentPoolRequest(engine_id, tag),
+            UnclaimPersistentPoolResponse,
+        )
+        return response.unclaimed
+
+    def destroy_persistent(self, engine_id: str, tag: str) -> bool:
+        response = self._call(
+            DestroyPersistentPoolRequest(engine_id, tag),
+            DestroyPersistentPoolResponse,
+        )
+        return response.destroyed
+
+    def export_persistent(self, engine_id: str, tag: str) -> int:
+        _response, fd = self._call(
+            ExportPersistentPoolRequest(engine_id, tag),
+            ExportPersistentPoolResponse,
+            expect_fd=True,
+        )
+        return fd
+
+    def list_persistent(
+        self,
+        engine_id: str | None = None,
+        *,
+        include_unclaimed: bool = False,
+    ) -> ListPersistentPoolsResponse:
+        return self._call(
+            ListPersistentPoolsRequest(engine_id, include_unclaimed),
+            ListPersistentPoolsResponse,
+        )
+
     def commit(self) -> None:
         self._call(CommitRequest(), SuccessResponse)
         self._granted_lock_type = GrantedLockType.RO
@@ -185,7 +249,10 @@ class _GMSClientSession:
             if isinstance(response, ErrorResponse):
                 if response.out_of_memory:
                     raise MemoryError(response.message)
-                raise RuntimeError(response.message)  # noqa: TRY004
+                raise GMSV1RemoteError(
+                    response.message,
+                    code=response.code,
+                )
             if not isinstance(response, response_type):
                 raise RuntimeError(  # noqa: TRY004
                     f"GMS {operation} returned {type(response).__name__}, "
