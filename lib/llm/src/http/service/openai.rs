@@ -610,12 +610,10 @@ impl ErrorMessage {
             // happens to be 400.
             if let Some(explicit_status) = explicit_status
                 && explicit_status != StatusCode::BAD_REQUEST
-            {
-                if let BackendStatusAction::Sanitize(variant) =
+                && let BackendStatusAction::Sanitize(variant) =
                     BackendStatusAction::triage(explicit_status)
-                {
-                    return ErrorMessage::sanitized_with_details(variant, message);
-                }
+            {
+                return ErrorMessage::sanitized_with_details(variant, message);
             }
             return (
                 code,
