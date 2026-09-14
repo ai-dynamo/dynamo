@@ -91,12 +91,11 @@ dynamo-operator:
   # -- URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true).
   modelExpressURL: ""
 
-  # LPX is installed and operated separately. These values only opt the
-  # Dynamo operator into producing node-local scheduling requests.
+  # The LPX scheduler and its CRDs must be installed separately.
   lpx:
-    # -- Enable LPX integration. Startup requires the externally installed
-    # scheduling.lpu.nvidia.com/v1alpha1 LpuPipelineRequest and
-    # scheduler.grove.io/v1alpha1 PodGang APIs.
+    # -- Enable the Dynamo operator's LPX integration. Startup requires the
+    # externally installed scheduling.lpu.nvidia.com/v1alpha1 LpuPipelineRequest
+    # and scheduler.grove.io/v1alpha1 PodGang APIs.
     enabled: false
     # -- Configure the LPU model registry used by the LPX integration.
     modelRegistryURL: ""

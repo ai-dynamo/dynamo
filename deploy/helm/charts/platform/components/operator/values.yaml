@@ -22,10 +22,9 @@
 # the cluster-wide operator.
 upgradeCRD: true
 
-# LPX is an externally installed scheduler integration. Enabling it only
-# configures the Dynamo operator; this chart never installs LPX resources.
+# The LPX scheduler and its CRDs must be installed separately.
 lpx:
-  # -- Enable node-local LpuPipelineRequest production. Startup requires the
+  # -- Enable the Dynamo operator's LPX integration. Startup requires the
   # externally installed scheduling.lpu.nvidia.com/v1alpha1 LpuPipelineRequest
   # and scheduler.grove.io/v1alpha1 PodGang APIs.
   enabled: false
