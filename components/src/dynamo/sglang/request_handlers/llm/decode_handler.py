@@ -16,7 +16,10 @@ from dynamo._core import Context
 from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.metadata_upload import MetadataUploader
-from dynamo.common.multimodal.image_loader import ImageLoader
+from dynamo.common.multimodal.image_loader import (
+    ImageLoader,
+    image_cache_scope_from_request,
+)
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.llm import HttpError
@@ -760,7 +763,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 assert self._image_loader is not None
                 image_items = mm_data.get(IMAGE_URL_KEY) or []
                 if image_items:
-                    image_data = await self._image_loader.load_image_batch(image_items)
+                    image_data = await self._image_loader.load_image_batch(
+                        image_items,
+                        cache_scope=image_cache_scope_from_request(request),
+                    )
                 else:
                     image_data = None
 

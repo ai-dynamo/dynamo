@@ -765,34 +765,43 @@ def register_image_loader_metrics(
 
     lock = threading.Lock()
 
+    def _refresh_locked() -> None:
+        shared_cache_stats = loader.shared_image_cache_stats
+        if shared_cache_stats is not None:
+            shared_cache_durations = shared_cache_stats.snapshot_and_drain()
+            for (
+                operation,
+                outcome,
+                size_bucket,
+            ), samples in shared_cache_durations.items():
+                histogram = (
+                    shared_cache_get_duration_histogram
+                    if operation == "get"
+                    else shared_cache_set_duration_histogram
+                )
+                for duration in samples:
+                    histogram.labels(
+                        **label_values,
+                        outcome=outcome,
+                        size_bucket=size_bucket,
+                    ).observe(duration)
+
+        entries_gauge.labels(**label_values).set(loader.cache_entries)
+
     def _collect_image_loader_metrics() -> str:
         """Callback invoked on each /metrics scrape."""
         with lock:
-            shared_cache_stats = loader.shared_image_cache_stats
-            if shared_cache_stats is not None:
-                shared_cache_durations = shared_cache_stats.snapshot_and_drain()
-                for (
-                    operation,
-                    outcome,
-                    size_bucket,
-                ), samples in shared_cache_durations.items():
-                    histogram = (
-                        shared_cache_get_duration_histogram
-                        if operation == "get"
-                        else shared_cache_set_duration_histogram
-                    )
-                    for duration in samples:
-                        histogram.labels(
-                            **label_values,
-                            outcome=outcome,
-                            size_bucket=size_bucket,
-                        ).observe(duration)
-
-            entries_gauge.labels(**label_values).set(loader.cache_entries)
-
+            _refresh_locked()
             return generate_latest(registry).decode("utf-8")
 
+    def _collect_image_loader_typed() -> list:
+        """Return the same image-loader metrics for OTLP export."""
+        with lock:
+            _refresh_locked()
+            return get_prometheus_typed(registry)
+
     endpoint.metrics.register_prometheus_expfmt_callback(_collect_image_loader_metrics)
+    endpoint.metrics.register_prometheus_typed_callback(_collect_image_loader_typed)
     logging.info(
         "Registered image loader metrics (model=%s, component=%s)",
         model_name,
