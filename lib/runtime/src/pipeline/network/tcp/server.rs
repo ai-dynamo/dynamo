@@ -42,7 +42,7 @@ use crate::engine::AsyncEngineContext;
 use crate::pipeline::{
     PipelineError,
     network::{
-        ResponseService, ResponseStreamPrologue,
+        ResponseService, ResponseStreamPrologue, StreamPrologueError,
         codec::{TwoPartMessage, TwoPartMessageType},
         tcp::StreamType,
     },
@@ -90,7 +90,7 @@ pub struct TcpStreamServer {
 #[allow(dead_code)]
 struct RequestedSendConnection {
     context: Arc<dyn AsyncEngineContext>,
-    connection: oneshot::Sender<Result<StreamSender, String>>,
+    connection: oneshot::Sender<Result<StreamSender, StreamPrologueError>>,
     /// Capacity of the per-stream mpsc buffer between the socket task and the
     /// engine producer; carried from the registration [`StreamOptions`].
     send_buffer_count: usize,
@@ -98,7 +98,7 @@ struct RequestedSendConnection {
 
 struct RequestedRecvConnection {
     context: Arc<dyn AsyncEngineContext>,
-    connection: oneshot::Sender<Result<StreamReceiver, String>>,
+    connection: oneshot::Sender<Result<StreamReceiver, StreamPrologueError>>,
     /// Capacity of the per-stream mpsc buffer between the socket task and the
     /// engine consumer; carried from the registration [`StreamOptions`].
     send_buffer_count: usize,
@@ -1086,9 +1086,18 @@ async fn tcp_listener(
         // deserialize prologue
         let prologue = match prologue.into_message_type() {
             TwoPartMessageType::HeaderOnly(header) => {
-                let prologue: ResponseStreamPrologue = serde_json::from_slice(&header)
-                    .map_err(|e| error!("Failed to deserialize ControlMessage: {}", e))?;
-                prologue
+                match serde_json::from_slice::<ResponseStreamPrologue>(&header) {
+                    Ok(prologue) => prologue,
+                    Err(e) => {
+                        // Notify the requester as the sibling arm does. Returning on
+                        // `?` alone drops the oneshot un-sent, and the requester then
+                        // reports a bare disconnect that names neither failure.
+                        let msg = format!("malformed prologue: {e}");
+                        let _ =
+                            connection.send(Err(StreamPrologueError::from_message(msg.clone())));
+                        return Err(error!(msg));
+                    }
+                }
             }
             _ => {
                 // Worker sent a non-HeaderOnly frame in the prologue slot
@@ -1096,7 +1105,7 @@ async fn tcp_listener(
                 // requester so the generate call chain fails cleanly, then
                 // return Err so the connection task ends without panicking.
                 let msg = "malformed prologue: expected HeaderOnly ControlMessage";
-                let _ = connection.send(Err(msg.to_string()));
+                let _ = connection.send(Err(StreamPrologueError::from_message(msg)));
                 return Err(error!(msg));
             }
         };
@@ -1107,9 +1116,13 @@ async fn tcp_listener(
         // note: this second control message might be delayed, but the expensive part of setting up the connection
         // is both complete and ready for data flow; awaiting here is not a performance hit or problem and it allows
         // us to trace the initial setup time vs the time to prologue
-        if let Some(error) = &prologue.error {
-            let _ = connection.send(Err(error.clone()));
-            return Err(error!("Received error prologue: {}", error));
+        if let Some(error) = prologue.error {
+            let returned = error!("Received error prologue: {error}");
+            let _ = connection.send(Err(StreamPrologueError {
+                message: error,
+                typed_error: prologue.typed_error,
+            }));
+            return Err(returned);
         }
 
         // Buffer size is driven by the registration options
@@ -1324,6 +1337,7 @@ fn process_control_message(message: Bytes) -> Result<ControlAction> {
 mod tests {
     use super::*;
     use crate::engine::AsyncEngineContextProvider;
+    use crate::error::{BackendError, DynamoError, ErrorType};
     use crate::pipeline::Context;
     use crate::pipeline::network::DEFAULT_SEND_BUFFER_COUNT;
     use crate::pipeline::network::tcp::client::TcpClient;
@@ -1644,7 +1658,7 @@ mod tests {
         server: &TcpStreamServer,
     ) -> (
         String,
-        tokio::sync::oneshot::Receiver<Result<super::StreamReceiver, String>>,
+        tokio::sync::oneshot::Receiver<Result<super::StreamReceiver, StreamPrologueError>>,
     ) {
         let context = Context::new(());
         let options = StreamOptions::builder()
@@ -1682,9 +1696,9 @@ mod tests {
         server: &TcpStreamServer,
     ) -> (
         String,
-        tokio::sync::oneshot::Receiver<Result<super::StreamSender, String>>,
+        tokio::sync::oneshot::Receiver<Result<super::StreamSender, StreamPrologueError>>,
         String,
-        tokio::sync::oneshot::Receiver<Result<super::StreamReceiver, String>>,
+        tokio::sync::oneshot::Receiver<Result<super::StreamReceiver, StreamPrologueError>>,
     ) {
         let context = Context::new(());
         let options = StreamOptions::builder()
@@ -2223,9 +2237,12 @@ mod tests {
             .unwrap();
         framed_writer
             .send(TwoPartMessage::from_header(
-                serde_json::to_vec(&ResponseStreamPrologue { error: None })
-                    .unwrap()
-                    .into(),
+                serde_json::to_vec(&ResponseStreamPrologue {
+                    error: None,
+                    typed_error: None,
+                })
+                .unwrap()
+                .into(),
             ))
             .await
             .unwrap();
@@ -2376,6 +2393,55 @@ mod tests {
             ),
             Ok(_) => panic!("invalid prologue should produce an error, but got Ok"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_typed_prologue_error_survives_to_requester() {
+        let server = test_server().await;
+        let context = Context::new(());
+        let options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(false)
+            .enable_response_stream(true)
+            .build()
+            .unwrap();
+
+        let pending = server.register(options).await;
+        let (connection_info, stream_provider) = pending.recv_stream.unwrap().into_parts();
+        let client_context =
+            Context::with_id_and_metadata((), context.id().to_string(), Default::default());
+
+        let worker_error = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+            .message("multimodal input is not supported by this backend")
+            .build();
+
+        let mut sender =
+            TcpClient::create_response_stream(client_context.context(), connection_info, None)
+                .await
+                .unwrap();
+        sender
+            .send_prologue_typed(Some(StreamPrologueError::new(
+                "Generate Error: multimodal input is not supported by this backend",
+                worker_error,
+            )))
+            .await
+            .unwrap();
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), stream_provider)
+            .await
+            .expect("stream provider should resolve quickly")
+            .expect("stream provider channel should not be dropped");
+
+        let prologue_error = match outcome {
+            Err(err) => err,
+            Ok(_) => panic!("an error prologue must not yield a usable stream"),
+        };
+        assert_eq!(
+            prologue_error.typed_error.as_ref().map(|e| e.error_type()),
+            Some(ErrorType::Backend(BackendError::InvalidArgument)),
+            "the worker's error type must survive the prologue round trip"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

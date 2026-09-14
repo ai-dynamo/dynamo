@@ -156,7 +156,7 @@ impl fmt::Display for BackendError {
 /// let err = DynamoError::msg("outer");
 /// println!("{}", err); // "Unknown: outer"
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DynamoError {
     error_type: ErrorType,
     message: String,
