@@ -38,14 +38,24 @@ spec:
     - {name: VLLM_WORKER_MULTIPROC_METHOD, value: spawn}
   components:
     - name: Frontend
+      # digest-pinned image has no semver tag for the operator to parse
+      runtimeVersionOverride: "1.4.1"
       minAvailable: 1
       replicas: 1
       type: frontend
       podTemplate:
         spec:
+          # required only by the dev image above; drop with the public image swap.
+          imagePullSecrets: [{name: acr-token-secret}]
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-k-exaone-2.0-dev.1
+              # DEV IMAGE, digest-pinned. NOT a public image: external users cannot pull it.
+              # Blocked on ai-dynamo/dynamo#14599 (one-line lm_head prefix fix) merging and a
+              # public nvcr.io tag being cut -- stock vLLM 0.28.0 cannot load this NVFP4
+              # checkpoint without it. Swap to nvcr.io/nvidia/ai-dynamo/vllm-runtime:<tag>
+              # pinned to the MULTI-ARCH INDEX digest before this recipe ships.
+              # tag at time of validation: 1.4.1-ci-7ba2828b...-vllm-runtime
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:79a9d1b103d81fbdda1e97dc476a31adcaf6056e2d2f465b09173a5578a574b8
               command: [/bin/bash, -lc]
               args:
                 - exec python3 -m dynamo.frontend --router-mode kv --no-router-kv-events --kv-cache-block-size 64 --http-host 0.0.0.0 --http-port 8000
@@ -56,19 +66,29 @@ spec:
             - name: model-cache
               persistentVolumeClaim: {claimName: model-cache}
     - name: VllmWorker
+      # digest-pinned image has no semver tag for the operator to parse
+      runtimeVersionOverride: "1.4.1"
       minAvailable: 1
       replicas: 1
       type: worker
       sharedMemorySize: 40Gi
       podTemplate:
         spec:
+          # required only by the dev image above; drop with the public image swap.
+          imagePullSecrets: [{name: acr-token-secret}]
           nodeSelector:
             nvidia.com/gpu.product: NVIDIA-B200
           tolerations:
             - {key: nvidia.com/gpu, operator: Equal, value: "true", effect: NoSchedule}
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-k-exaone-2.0-dev.1
+              # DEV IMAGE, digest-pinned. NOT a public image: external users cannot pull it.
+              # Blocked on ai-dynamo/dynamo#14599 (one-line lm_head prefix fix) merging and a
+              # public nvcr.io tag being cut -- stock vLLM 0.28.0 cannot load this NVFP4
+              # checkpoint without it. Swap to nvcr.io/nvidia/ai-dynamo/vllm-runtime:<tag>
+              # pinned to the MULTI-ARCH INDEX digest before this recipe ships.
+              # tag at time of validation: 1.4.1-ci-7ba2828b...-vllm-runtime
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:79a9d1b103d81fbdda1e97dc476a31adcaf6056e2d2f465b09173a5578a574b8
               command: [/bin/bash, -lc]
               args:
                 - |
