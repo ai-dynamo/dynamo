@@ -855,10 +855,83 @@ pub struct RouterRequestMetrics {
     pub shared_cache_beyond_blocks: prometheus::Histogram,
     pub non_max_overlap_selections_total: IntCounterVec,
     pub overlap_blocks_lost: HistogramVec,
-    pub decisions_total: IntCounterVec,
-    pub decision_kv_optimal_total: IntCounterVec,
-    pub input_f0_total: IntCounterVec,
-    pub input_f1_total: IntCounterVec,
+    pub(crate) decision_counters_prefill: RoutingDecisionCounters,
+    pub(crate) decision_counters_decode: RoutingDecisionCounters,
+}
+
+/// The four routing-decision counters for one worker type, resolved at registration.
+///
+/// `IntCounterVec::with_label_values` hashes the label slice, takes a read lock on the vec, and
+/// clones an `Arc` on every call. This fires on every routing decision, and the `worker_type`
+/// domain is two values both known at construction, so the lookup buys nothing. Resolving the
+/// children once leaves the hot path incrementing the atomics directly.
+///
+/// The resolved handles share their atomics with the registered vec, so increments here still
+/// appear under the right label on a scrape.
+pub struct RoutingDecisionCounters {
+    decisions_total: IntCounter,
+    decision_kv_optimal_total: IntCounter,
+    input_f0_total: IntCounter,
+    input_f1_total: IntCounter,
+}
+
+impl RoutingDecisionCounters {
+    /// Resolve one worker type's children. Also serves as the pre-touch that makes each series
+    /// export at zero, so the decision-quality ratios are defined before any traffic arrives.
+    fn resolve(
+        decisions_total: &IntCounterVec,
+        decision_kv_optimal_total: &IntCounterVec,
+        input_f0_total: &IntCounterVec,
+        input_f1_total: &IntCounterVec,
+        worker_type: &str,
+    ) -> Self {
+        let labels = &[worker_type];
+        Self {
+            decisions_total: decisions_total.with_label_values(labels),
+            decision_kv_optimal_total: decision_kv_optimal_total.with_label_values(labels),
+            input_f0_total: input_f0_total.with_label_values(labels),
+            input_f1_total: input_f1_total.with_label_values(labels),
+        }
+    }
+
+    /// Record one routing decision and the KV overlap that was reachable for it.
+    ///
+    /// `best_overlap` describes the eligible instance holding the most overlap, whether or not
+    /// the router picked it, so `input_f1_total / input_f0_total` reports the cache-hit ceiling
+    /// the router had available rather than the hit rate it achieved.
+    pub fn observe(&self, isl_tokens: usize, best_overlap: BestOverlapCandidate) {
+        self.decisions_total.inc();
+        self.input_f0_total.inc_by(isl_tokens as u64);
+        self.input_f1_total
+            .inc_by(best_overlap.effective_cached_tokens as u64);
+        if best_overlap.selected_has_max_overlap {
+            self.decision_kv_optimal_total.inc();
+        }
+    }
+}
+
+#[cfg(test)]
+impl RoutingDecisionCounters {
+    /// Standalone counters for tests, registered with nothing.
+    pub(crate) fn for_test() -> Self {
+        let counter = |name: &str| IntCounter::new(name, name).unwrap();
+        Self {
+            decisions_total: counter("decisions_total"),
+            decision_kv_optimal_total: counter("decision_kv_optimal_total"),
+            input_f0_total: counter("input_f0_total"),
+            input_f1_total: counter("input_f1_total"),
+        }
+    }
+
+    /// `(decisions, kv_optimal, f0, f1)`.
+    pub(crate) fn snapshot(&self) -> (u64, u64, u64, u64) {
+        (
+            self.decisions_total.get(),
+            self.decision_kv_optimal_total.get(),
+            self.input_f0_total.get(),
+            self.input_f1_total.get(),
+        )
+    }
 }
 
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
@@ -1026,15 +1099,21 @@ impl RouterRequestMetrics {
                     .expect("failed to create router_input_f1_total");
                 non_max_overlap_selections_total.with_label_values(&[WORKER_TYPE_PREFILL]);
                 overlap_blocks_lost.with_label_values(&[WORKER_TYPE_PREFILL]);
-                // Export both worker types at zero so the decision-quality ratios are defined on
-                // a scrape taken before any traffic. An aggregated deployment routes only one of
-                // them, leaving the other permanently zero.
-                for worker_type in [WORKER_TYPE_PREFILL, WORKER_TYPE_DECODE] {
-                    decisions_total.with_label_values(&[worker_type]);
-                    decision_kv_optimal_total.with_label_values(&[worker_type]);
-                    input_f0_total.with_label_values(&[worker_type]);
-                    input_f1_total.with_label_values(&[worker_type]);
-                }
+                // Resolving both worker types here is also what makes each series export at
+                // zero before any traffic, so the decision-quality ratios are defined on a
+                // scrape taken at startup. An aggregated deployment routes only decode, leaving
+                // the prefill series permanently zero.
+                let resolve = |worker_type| {
+                    RoutingDecisionCounters::resolve(
+                        &decisions_total,
+                        &decision_kv_optimal_total,
+                        &input_f0_total,
+                        &input_f1_total,
+                        worker_type,
+                    )
+                };
+                let decision_counters_prefill = resolve(WORKER_TYPE_PREFILL);
+                let decision_counters_decode = resolve(WORKER_TYPE_DECODE);
                 Arc::new(Self {
                     requests_total,
                     time_to_first_token_seconds,
@@ -1047,10 +1126,8 @@ impl RouterRequestMetrics {
                     shared_cache_beyond_blocks,
                     non_max_overlap_selections_total,
                     overlap_blocks_lost,
-                    decisions_total,
-                    decision_kv_optimal_total,
-                    input_f0_total,
-                    input_f1_total,
+                    decision_counters_prefill,
+                    decision_counters_decode,
                 })
             })
             .clone()
@@ -1067,29 +1144,21 @@ impl RouterRequestMetrics {
             .observe(overlap_blocks_lost);
     }
 
-    /// Record one routing decision and the KV overlap that was reachable for it.
+    /// The pre-resolved decision counters for `worker_type`.
     ///
-    /// `best_overlap` describes the eligible instance holding the most overlap, whether or not
-    /// the router picked it, so `input_f1_total / input_f0_total` reports the cache-hit ceiling
-    /// the router had available rather than the hit rate it achieved.
-    pub fn observe_routing_decision(
-        &self,
-        worker_type: &str,
-        isl_tokens: usize,
-        best_overlap: BestOverlapCandidate,
-    ) {
-        let labels = &[worker_type];
-        self.decisions_total.with_label_values(labels).inc();
-        self.input_f0_total
-            .with_label_values(labels)
-            .inc_by(isl_tokens as u64);
-        self.input_f1_total
-            .with_label_values(labels)
-            .inc_by(best_overlap.effective_cached_tokens as u64);
-        if best_overlap.selected_has_max_overlap {
-            self.decision_kv_optimal_total
-                .with_label_values(labels)
-                .inc();
+    /// Decode is the fallback because it is the routing path for both aggregated and
+    /// disaggregated-decode deployments, so it is the right home for an unexpected value. The
+    /// assertion catches a caller that invents a third worker type, which would otherwise be
+    /// misattributed rather than rejected.
+    pub fn decision_counters(&self, worker_type: &str) -> &RoutingDecisionCounters {
+        debug_assert!(
+            worker_type == WORKER_TYPE_PREFILL || worker_type == WORKER_TYPE_DECODE,
+            "unexpected router worker_type {worker_type:?}"
+        );
+        if worker_type == WORKER_TYPE_PREFILL {
+            &self.decision_counters_prefill
+        } else {
+            &self.decision_counters_decode
         }
     }
 }
@@ -1767,109 +1836,83 @@ mod kv_publisher_registration_tests {
 mod routing_decision_tests {
     use super::*;
 
-    fn counter_vec(name: &str) -> IntCounterVec {
-        IntCounterVec::new(Opts::new(name, name), &[labels::WORKER_TYPE]).unwrap()
-    }
-
-    fn hist(name: &str) -> prometheus::Histogram {
-        prometheus::Histogram::with_opts(HistogramOpts::new(name, name)).unwrap()
-    }
-
-    fn metrics() -> RouterRequestMetrics {
-        RouterRequestMetrics {
-            requests_total: IntCounter::new("requests_total", "test").unwrap(),
-            time_to_first_token_seconds: hist("ttft_seconds"),
-            inter_token_latency_seconds: hist("itl_seconds"),
-            input_sequence_tokens: hist("isl_tokens"),
-            output_sequence_tokens: hist("osl_tokens"),
-            kv_hit_rate: hist("kv_hit_rate"),
-            kv_transfer_estimated_latency_seconds: hist("kv_transfer_seconds"),
-            shared_cache_hit_rate: hist("shared_cache_hit_rate"),
-            shared_cache_beyond_blocks: hist("shared_cache_beyond_blocks"),
-            non_max_overlap_selections_total: counter_vec("non_max_overlap_selections_total"),
-            overlap_blocks_lost: HistogramVec::new(
-                HistogramOpts::new("overlap_blocks_lost", "test"),
-                &[labels::WORKER_TYPE],
-            )
-            .unwrap(),
-            decisions_total: counter_vec("decisions_total"),
-            decision_kv_optimal_total: counter_vec("decision_kv_optimal_total"),
-            input_f0_total: counter_vec("input_f0_total"),
-            input_f1_total: counter_vec("input_f1_total"),
+    fn candidate(cached_tokens: usize, optimal: bool) -> BestOverlapCandidate {
+        BestOverlapCandidate {
+            effective_overlap_blocks: 8.0,
+            effective_cached_tokens: cached_tokens,
+            selected_has_max_overlap: optimal,
         }
-    }
-
-    fn counts(m: &RouterRequestMetrics, worker_type: &str) -> (u64, u64, u64, u64) {
-        let labels = &[worker_type];
-        (
-            m.decisions_total.with_label_values(labels).get(),
-            m.decision_kv_optimal_total.with_label_values(labels).get(),
-            m.input_f0_total.with_label_values(labels).get(),
-            m.input_f1_total.with_label_values(labels).get(),
-        )
     }
 
     /// f1 accumulates the best reachable overlap, not the overlap that was taken, so a
     /// suboptimal decision still raises the ceiling it is measured against.
     #[test]
     fn a_suboptimal_decision_still_counts_its_best_candidate_into_f1() {
-        let m = metrics();
-        m.observe_routing_decision(
-            WORKER_TYPE_DECODE,
-            1_000,
-            BestOverlapCandidate {
-                effective_overlap_blocks: 8.0,
-                effective_cached_tokens: 128,
-                selected_has_max_overlap: false,
-            },
-        );
-
-        assert_eq!(counts(&m, WORKER_TYPE_DECODE), (1, 0, 1_000, 128));
+        let counters = RoutingDecisionCounters::for_test();
+        counters.observe(1_000, candidate(128, false));
+        assert_eq!(counters.snapshot(), (1, 0, 1_000, 128));
     }
 
     #[test]
     fn an_optimal_decision_increments_the_optimal_counter() {
-        let m = metrics();
-        m.observe_routing_decision(
-            WORKER_TYPE_DECODE,
-            1_000,
-            BestOverlapCandidate {
-                effective_overlap_blocks: 8.0,
-                effective_cached_tokens: 128,
-                selected_has_max_overlap: true,
-            },
-        );
-
-        assert_eq!(counts(&m, WORKER_TYPE_DECODE), (1, 1, 1_000, 128));
+        let counters = RoutingDecisionCounters::for_test();
+        counters.observe(1_000, candidate(128, true));
+        assert_eq!(counters.snapshot(), (1, 1, 1_000, 128));
     }
 
-    /// Prefill and decode are routed by separate router instances sharing one metrics
-    /// singleton; without the label their ratios would be blended into one another.
     #[test]
-    fn worker_types_accumulate_independently() {
-        let m = metrics();
+    fn observations_accumulate() {
+        let counters = RoutingDecisionCounters::for_test();
         for _ in 0..3 {
-            m.observe_routing_decision(
-                WORKER_TYPE_PREFILL,
-                100,
-                BestOverlapCandidate {
-                    effective_overlap_blocks: 1.0,
-                    effective_cached_tokens: 16,
-                    selected_has_max_overlap: true,
-                },
-            );
+            counters.observe(100, candidate(16, true));
         }
-        m.observe_routing_decision(
-            WORKER_TYPE_DECODE,
-            700,
-            BestOverlapCandidate {
-                effective_overlap_blocks: 0.0,
-                effective_cached_tokens: 0,
-                selected_has_max_overlap: false,
-            },
-        );
+        counters.observe(700, candidate(0, false));
+        assert_eq!(counters.snapshot(), (4, 3, 1_000, 48));
+    }
 
-        assert_eq!(counts(&m, WORKER_TYPE_PREFILL), (3, 3, 300, 48));
-        assert_eq!(counts(&m, WORKER_TYPE_DECODE), (1, 0, 700, 0));
+    /// The whole optimization rests on this: a child resolved once at registration must share
+    /// its atomic with the registered vec. If `with_label_values` handed back a detached copy,
+    /// the counters would increment somewhere no scrape could see, exactly the silent-failure
+    /// mode the kv_publisher regression tests exist to catch.
+    #[test]
+    fn a_resolved_child_writes_through_to_the_registered_vec() {
+        let registry = prometheus::Registry::new();
+        let vec = IntCounterVec::new(
+            Opts::new("router_decisions_total", "test"),
+            &[labels::WORKER_TYPE],
+        )
+        .unwrap();
+        registry.register(Box::new(vec.clone())).unwrap();
+
+        // Resolve once, as `RoutingDecisionCounters::resolve` does, then drop the vec handle
+        // the way `from_component` does once the registry owns the collector.
+        let resolved = vec.with_label_values(&[WORKER_TYPE_PREFILL]);
+        drop(vec);
+        resolved.inc();
+        resolved.inc();
+
+        let gathered = registry.gather();
+        let metric = gathered
+            .iter()
+            .flat_map(|family| family.get_metric())
+            .find(|m| {
+                m.get_label()
+                    .iter()
+                    .any(|l| l.name() == labels::WORKER_TYPE && l.value() == WORKER_TYPE_PREFILL)
+            })
+            .expect("the prefill series must be exported");
+        assert_eq!(metric.get_counter().value(), 2.0);
+    }
+
+    /// Prefill and decode are routed by separate router instances that share this singleton, so
+    /// the two counter sets must be distinct objects rather than aliases of one series.
+    #[test]
+    fn worker_types_resolve_to_independent_counter_sets() {
+        let prefill = RoutingDecisionCounters::for_test();
+        let decode = RoutingDecisionCounters::for_test();
+        prefill.observe(300, candidate(48, true));
+
+        assert_eq!(prefill.snapshot(), (1, 1, 300, 48));
+        assert_eq!(decode.snapshot(), (0, 0, 0, 0));
     }
 }

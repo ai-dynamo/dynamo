@@ -976,6 +976,7 @@ mod output_hash_tests {
 #[cfg(test)]
 mod prefill_start_tests {
     use super::*;
+    use crate::kv_router::metrics::RoutingDecisionCounters;
 
     fn test_request(tracker: Arc<RequestTracker>, annotations: Vec<String>) -> PreprocessedRequest {
         PreprocessedRequest::builder()
@@ -998,10 +999,6 @@ mod prefill_start_tests {
             prometheus::HistogramVec::new(prometheus::HistogramOpts::new(name, name), &["reason"])
                 .unwrap()
         }
-        fn counter_vec(name: &str) -> prometheus::IntCounterVec {
-            prometheus::IntCounterVec::new(prometheus::Opts::new(name, name), &["worker_type"])
-                .unwrap()
-        }
         Arc::new(RouterRequestMetrics {
             requests_total: prometheus::IntCounter::new("requests_total", "test").unwrap(),
             time_to_first_token_seconds: hist("ttft_seconds"),
@@ -1018,10 +1015,8 @@ mod prefill_start_tests {
             )
             .unwrap(),
             overlap_blocks_lost: hist_vec("overlap_blocks_lost"),
-            decisions_total: counter_vec("decisions_total"),
-            decision_kv_optimal_total: counter_vec("decision_kv_optimal_total"),
-            input_f0_total: counter_vec("input_f0_total"),
-            input_f1_total: counter_vec("input_f1_total"),
+            decision_counters_prefill: RoutingDecisionCounters::for_test(),
+            decision_counters_decode: RoutingDecisionCounters::for_test(),
         })
     }
 

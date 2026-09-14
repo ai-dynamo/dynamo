@@ -1774,7 +1774,8 @@ where
             && let Some(best_overlap) = response.best_overlap
             && let Some(m) = metrics::RouterRequestMetrics::get()
         {
-            m.observe_routing_decision(self.worker_type(), isl_tokens, best_overlap);
+            m.decision_counters(self.worker_type())
+                .observe(isl_tokens, best_overlap);
         }
 
         #[cfg(feature = "bench")]
