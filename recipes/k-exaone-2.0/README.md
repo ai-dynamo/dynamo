@@ -151,24 +151,6 @@ the router cannot route to a block that is already gone.
 > Synthetic benchmarks with a shared system prompt report ~3x higher throughput for this model
 > (68.2% achieved KV reuse vs the trace's 8.8%). Do not compare synthetic and trace numbers.
 
-## Accuracy
-
-Published BF16 reference: GPQA-Diamond **82.2**, IFEval **92.4**.
-
-| Configuration | GPQA-Diamond | IFEval (inst-loose) |
-|---|---|---|
-| raw `vllm serve`, no spec-dec (control) | 0.7677 ± 0.0301 | 0.9161 |
-| **Aggregated** | **0.8131 ± 0.0278** | **0.9113** |
-| **Disaggregated** | **0.7778 ± 0.0296** | **0.9293** |
-
-All pairwise comparisons indistinguishable (z ≤ 1.11); the published 82.2 sits inside every
-confidence interval. Neither speculative decoding, the Dynamo serving layer, nor the NIXL KV
-transfer costs measurable accuracy.
-
-Evaluated at temperature 0.6 / top_p 0.95 with `lm-eval`. GPQA used `--system_instruction` to
-repair a broken answer extractor; IFEval deliberately did **not**, because it would collide with
-IFEval's own constraints.
-
 ## Configuration notes
 
 **`--kernel-config '{"moe_backend":"FLASHINFER_CUTLASS"}'` is mandatory.** vLLM's `auto` selects
@@ -189,6 +171,13 @@ is communication-bound, not KV-capacity-bound.
 block geometry and produces silent garbage output, not an error. `--max-num-seqs` is the exception
 and is deliberately different — 32 on prefill, 256 on decode.
 
+**Evaluating this model.** Use temperature 0.6 / top_p 0.95, not greedy — `temperature=0`
+drives this reasoning model into repetition. On `lm-eval`, GPQA needs `--system_instruction` to
+repair an answer extractor that otherwise discards valid responses, and IFEval must **not** get
+one: injecting "end your response with X" collides with IFEval's own instructions and corrupts
+the measurement. Give a generous token budget — reasoning consumes it before the final answer,
+so a short cap reads as a wrong answer rather than a truncated one.
+
 **`--enable-prompt-tokens-details` is a `vllm serve` flag** and is rejected by `dynamo.vllm`. Read
 achieved KV reuse from the worker log instead:
 
@@ -198,9 +187,6 @@ kubectl logs <worker> -n ${NAMESPACE} | grep -o 'Prefix cache hit rate: [0-9.]*%
 
 ## Limitations
 
-- **Development image.** The manifests pin a digest-pinned development build; `imagePullSecrets`
-  and `runtimeVersionOverride` exist only to support it and are removed when a public
-  `nvcr.io` tag is available.
 - **The RDMA resource name is cluster-specific.** The disaggregated recipe requests
   `rdma/shared_ib`; other clusters expose `rdma/ib` or `rdma/rdma_shared_device_a`. Edit it to
   match your device plugin. Prefer a **shared** flavour: with an exclusive-mode resource, two
