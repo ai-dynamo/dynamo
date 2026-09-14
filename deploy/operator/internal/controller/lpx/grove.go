@@ -42,6 +42,6 @@ func (r *graphReconciler) reconcileGrovePodCliqueSetForLPX(
 	}
 
 	// Match normal PCS synchronization; Grove owns rollout and immutable-field validation.
-	modified, synced, err := commoncontroller.SyncObservedResource(ctx, r, deployment, existingPodCliqueSet, desired)
+	modified, synced, err := commoncontroller.SyncObservedResource(ctx, r, deployment, existingPodCliqueSet, desired, commoncontroller.WithPreservedListOrder())
 	return synced, modified, err
 }

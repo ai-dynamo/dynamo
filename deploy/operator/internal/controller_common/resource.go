@@ -76,11 +76,19 @@ type Reconciler interface {
 // if the resource should be deleted, the returned resource must contain the necessary information to delete it (name and namespace)
 type ResourceGenerator[T client.Object] func(ctx context.Context) (T, bool, error)
 
-// SyncOption configures an exceptional SyncResource ownership policy.
+// SyncOption configures resource synchronization.
 type SyncOption func(*syncOptions)
 
 type syncOptions struct {
-	sharedOwnership bool
+	sharedOwnership   bool
+	preserveListOrder bool
+}
+
+// WithPreservedListOrder makes authored list ordering significant in spec hashes.
+func WithPreservedListOrder() SyncOption {
+	return func(options *syncOptions) {
+		options.preserveListOrder = true
+	}
 }
 
 // WithSharedOwnership permits a caller to reconcile a resource whose controller
@@ -255,7 +263,7 @@ func SyncObservedResource[T client.Object](
 			logs.Info("No parent resource provided, creating resource without owner reference (independent lifecycle)")
 		}
 
-		hash, err := GetSpecHash(desired)
+		hash, err := GetSpecHash(desired, opts...)
 		if err != nil {
 			logs.Error(err, "Failed to get spec hash.")
 			recordResourceEvent(r, desired, corev1.EventTypeWarning, "GetSpecHash", "Get", "Failed to get spec hash for %s %s: %s", resourceType, resourceNamespace, err)
@@ -283,7 +291,7 @@ func SyncObservedResource[T client.Object](
 		}
 	}
 
-	changeResult, err := GetSpecChangeResult(observed, desired)
+	changeResult, err := GetSpecChangeResult(observed, desired, opts...)
 	if err != nil {
 		recordResourceEvent(r, desired, corev1.EventTypeWarning, fmt.Sprintf("CalculatePatch%s", resourceType), "Update", "Failed to calculate patch for %s %s: %s", resourceType, resourceNamespace, err)
 		return false, desired, fmt.Errorf("failed to check if spec has changed: %w", err)
@@ -468,12 +476,12 @@ type SpecChangeResult struct {
 // Returns:
 //   - SpecChangeResult with update information
 //   - error if hash computation fails
-func GetSpecChangeResult(current client.Object, desired client.Object) (SpecChangeResult, error) {
+func GetSpecChangeResult(current client.Object, desired client.Object, opts ...SyncOption) (SpecChangeResult, error) {
 	desiredSpec, err := getSpec(desired)
 	if err != nil {
 		return SpecChangeResult{}, err
 	}
-	desiredHash, err := GetResourceHash(desiredSpec)
+	desiredHash, err := GetResourceHash(desiredSpec, opts...)
 	if err != nil {
 		return SpecChangeResult{}, err
 	}
@@ -588,12 +596,12 @@ func generateSpecDiff(oldResource, newResource client.Object) (string, error) {
 	return diff, nil
 }
 
-func GetSpecHash(obj client.Object) (string, error) {
+func GetSpecHash(obj client.Object, opts ...SyncOption) (string, error) {
 	spec, err := getSpec(obj)
 	if err != nil {
 		return "", err
 	}
-	return GetResourceHash(spec)
+	return GetResourceHash(spec, opts...)
 }
 
 // updateAnnotations sets both hash and generation annotations on an object
@@ -608,11 +616,16 @@ func updateAnnotations(obj client.Object, hash string, generation int64) {
 }
 
 // GetResourceHash returns a consistent hash for the given object spec
-func GetResourceHash(obj any) (string, error) {
+func GetResourceHash(obj any, opts ...SyncOption) (string, error) {
 	// Convert obj to a map[string]interface{}
 	objMap, err := json.Marshal(obj)
 	if err != nil {
 		return "", err
+	}
+
+	// JSON already orders map keys deterministically without reordering lists.
+	if resolveSyncOptions(opts).preserveListOrder {
+		return fmt.Sprintf("%x", sha256.Sum256(objMap)), nil
 	}
 
 	var objData map[string]interface{}

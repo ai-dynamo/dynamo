@@ -662,7 +662,7 @@ func TestLPXPodCliqueSetMetadataSyncUsesSuppliedObservation(t *testing.T) {
 	cached.UID = "cached-pcs-uid"
 	cached.ResourceVersion = "7"
 	cached.Generation = 4
-	hash, err := commoncontroller.GetSpecHash(cached)
+	hash, err := commoncontroller.GetSpecHash(cached, commoncontroller.WithPreservedListOrder())
 	require.NoError(t, err)
 	metav1.SetMetaDataAnnotation(&cached.ObjectMeta, commoncontroller.NvidiaAnnotationHashKey, hash)
 	delete(cached.Annotations, commoncontroller.NvidiaAnnotationGenerationKey)
@@ -718,7 +718,7 @@ func TestLPXPodCliqueSetMetadataSyncUsesSuppliedObservation(t *testing.T) {
 	require.Equal(t, 1, updates)
 	want.Spec = desired.Spec
 	want.ResourceVersion = synced.ResourceVersion
-	want.Annotations[commoncontroller.NvidiaAnnotationHashKey], err = commoncontroller.GetSpecHash(desired)
+	want.Annotations[commoncontroller.NvidiaAnnotationHashKey], err = commoncontroller.GetSpecHash(desired, commoncontroller.WithPreservedListOrder())
 	require.NoError(t, err)
 	want.Annotations[commoncontroller.NvidiaAnnotationGenerationKey] = "5"
 	require.True(t, apiequality.Semantic.DeepEqual(want, synced))
@@ -739,6 +739,49 @@ func TestLPXPodCliqueSetMetadataSyncUsesSuppliedObservation(t *testing.T) {
 	stored := &grovev1alpha1.PodCliqueSet{}
 	require.NoError(t, base.Get(ctx, client.ObjectKeyFromObject(concurrent), stored))
 	require.Equal(t, concurrent, stored)
+}
+
+func TestLPXPodCliqueSetListOrder(t *testing.T) {
+	for _, reorder := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reorder=%t", reorder), func(t *testing.T) {
+			t.Log("Create an LPX PCS with two ordered init containers")
+			ctx := t.Context()
+			dgd, source, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+			reconciler, selected := newPreparedLPXTestReconciler(t, registry, ctx, dgd, source)
+			desired := renderLPXTestPodCliqueSet(t, ctx, reconciler, dgd, source, selected)
+			desired.Spec.Template.Cliques[0].Spec.PodSpec.InitContainers = []corev1.Container{
+				{Name: "setup", Image: "busybox"}, {Name: "migrate", Image: "busybox"},
+			}
+			observed, modified, err := reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, nil, desired.DeepCopy())
+			require.NoError(t, err)
+			require.True(t, modified)
+
+			t.Log("Model API-defaulted live fields without changing the applied generation")
+			observed.Generation = 1
+			require.Nil(t, desired.Spec.Template.Cliques[0].Spec.PodSpec.EnableServiceLinks)
+			observed.Spec.Template.Cliques[0].Spec.PodSpec.EnableServiceLinks = ptr.To(true)
+			require.NoError(t, reconciler.Update(ctx, observed))
+			before := observed.DeepCopy()
+			if reorder {
+				slices.Reverse(desired.Spec.Template.Cliques[0].Spec.PodSpec.InitContainers)
+			}
+
+			t.Log("Apply authored ordering changes but ignore unchanged desired specs")
+			synced, modified, err := reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, observed, desired)
+			require.NoError(t, err)
+			require.Equal(t, reorder, modified)
+			require.Equal(t, desired.Spec.Template.Cliques[0].Spec.PodSpec.InitContainers, synced.Spec.Template.Cliques[0].Spec.PodSpec.InitContainers)
+			require.Equal(t, before, observed, "synchronization must not mutate its observation")
+			if !reorder {
+				require.Equal(t, before, synced, "API defaults must not cause a spec rewrite")
+			}
+
+			t.Log("The next reconciliation is a no-op")
+			_, modified, err = reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, synced, desired)
+			require.NoError(t, err)
+			require.False(t, modified)
+		})
+	}
 }
 
 func TestLPXPodCliqueSetPublicationFence(t *testing.T) {
@@ -795,7 +838,7 @@ func TestLPXPodCliqueSetPublicationFence(t *testing.T) {
 	require.True(t, metav1.IsControlledBy(synced, dgd))
 	require.Equal(t, desired.Labels, synced.Labels)
 	require.Equal(t, desired.Annotations[lpx.WorkloadDigestAnnotation], synced.Annotations[lpx.WorkloadDigestAnnotation])
-	hash, hashErr := commoncontroller.GetSpecHash(desired)
+	hash, hashErr := commoncontroller.GetSpecHash(desired, commoncontroller.WithPreservedListOrder())
 	require.NoError(t, hashErr)
 	require.Equal(t, hash, synced.Annotations[commoncontroller.NvidiaAnnotationHashKey])
 	require.Equal(t, "1", synced.Annotations[commoncontroller.NvidiaAnnotationGenerationKey])
