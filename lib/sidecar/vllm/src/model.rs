@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::ops::Range;
+
 use dynamo_backend_common::{
     DynamoError, EngineConfig, LlmRegistration, RlAdminBaseUrl, RlWorkerMetadata,
 };
@@ -27,6 +29,7 @@ pub(crate) struct DiscoveredModel {
     pub supports_multimodal: bool,
     identity: ModelIdentity,
     server: pb::ServerInfo,
+    data_parallel_range: Range<u32>,
 }
 
 impl DiscoveredModel {
@@ -40,19 +43,33 @@ impl DiscoveredModel {
                 server.api_version
             )));
         }
-        if let Some(parallelism) = server.parallelism.as_ref() {
+        let data_parallel_range = if let Some(parallelism) = server.parallelism.as_ref() {
             if parallelism.data_parallel_size == 0 {
                 return Err(client::protocol_error(
                     "vLLM reports a data-parallel size of zero",
                 ));
             }
-            if parallelism.data_parallel_rank != 0 {
-                return Err(client::protocol_error(format!(
-                    "vLLM reports data_parallel_rank {}; the sidecar currently requires one frontend hosting the complete data-parallel group starting at rank 0",
-                    parallelism.data_parallel_rank
-                )));
-            }
-        }
+            let start = parallelism.data_parallel_rank;
+            let local_size = match parallelism.data_parallel_size_local {
+                Some(size) => size,
+                // Older Control servers describe only complete groups at rank zero.
+                None if start == 0 => parallelism.data_parallel_size,
+                None => {
+                    return Err(client::protocol_error(format!(
+                        "vLLM reports data_parallel_rank {start} without data_parallel_size_local; hybrid rank ownership requires the local-size Control field"
+                    )));
+                }
+            };
+            let end = start.checked_add(local_size).filter(|&end| {
+                local_size > 0 && end <= parallelism.data_parallel_size
+            }).ok_or_else(|| client::protocol_error(format!(
+                "vLLM reports an invalid local data-parallel range: start {start}, local size {local_size}, global size {}",
+                parallelism.data_parallel_size
+            )))?;
+            start..end
+        } else {
+            0..1
+        };
         let source = required("model_id", model.model_id)?;
         let served_name = required("served_model_name", model.served_model_name)?;
         if !model.supports_token_ids_input {
@@ -75,6 +92,7 @@ impl DiscoveredModel {
             supports_multimodal: model.supports_multimodal,
             identity,
             server,
+            data_parallel_range,
         })
     }
 
@@ -159,25 +177,25 @@ impl DiscoveredModel {
                 total_kv_blocks: self.total_kv_blocks_per_rank(),
                 max_num_seqs: nonzero(self.server.max_running_requests),
                 max_num_batched_tokens: nonzero(self.server.max_batched_tokens),
-                data_parallel_size: parallelism
-                    .and_then(|parallelism| nonzero(parallelism.data_parallel_size)),
-                data_parallel_start_rank: parallelism.map(|_| 0),
+                data_parallel_size: parallelism.map(|_| self.data_parallel_size_local()),
+                data_parallel_start_rank: parallelism.map(|_| self.data_parallel_range.start),
                 ..Default::default()
             }),
         }
     }
 
-    pub(crate) fn data_parallel_size(&self) -> u32 {
-        self.server
-            .parallelism
-            .as_ref()
-            .map_or(1, |parallelism| parallelism.data_parallel_size)
+    pub(crate) fn data_parallel_range(&self) -> &Range<u32> {
+        &self.data_parallel_range
+    }
+
+    fn data_parallel_size_local(&self) -> u32 {
+        self.data_parallel_range.end - self.data_parallel_range.start
     }
 
     fn total_kv_blocks_per_rank(&self) -> Option<u64> {
         let total_kv_blocks = nonzero(self.server.total_kv_blocks)?;
-        let data_parallel_size = u64::from(self.data_parallel_size());
-        // Control exposes only the aggregate across DP engines. This arithmetic-mean
+        let data_parallel_size = u64::from(self.data_parallel_size_local());
+        // Control exposes the aggregate across locally attached DP engines. This arithmetic-mean
         // estimate assumes homogeneous ranks; exact division does not prove they are equal.
         // TODO(rank-aware-kv-capacity): consume a per-rank Control response when available and
         // publish it atomically; never relabel this quotient as exact for hard admission.
