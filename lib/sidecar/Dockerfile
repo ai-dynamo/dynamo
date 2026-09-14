@@ -73,6 +73,7 @@ COPY .cargo/ .cargo/
 COPY lib/ lib/
 COPY examples/router/custom-policy-example/ examples/router/custom-policy-example/
 COPY deploy/inference-gateway/ext-proc/ deploy/inference-gateway/ext-proc/
+COPY deploy/inference-gateway/sidecar/ deploy/inference-gateway/sidecar/
 
 # ---- vLLM builder -----------------------------------------------------------
 FROM builder-base AS vllm-builder

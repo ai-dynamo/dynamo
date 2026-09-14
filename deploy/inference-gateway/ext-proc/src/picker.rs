@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 
 use bytes::Bytes;
+use dynamo_llm::http::service::metadata::MetadataHeaderError;
 
 /// A model server pod endpoint available for serving requests.
 #[derive(Debug, Clone)]
@@ -155,9 +156,13 @@ pub enum PickError {
     NoEndpoints,
     #[error("routing failed: {0}")]
     RoutingFailed(String),
-    /// Malformed client input (unparseable body, or a 4xx from the tokenizer) → 400.
-    #[error("tokenization failed: {0}")]
-    TokenizationFailed(String),
+    /// Malformed client input (unparseable body, or a 4xx from the renderer) → 400.
+    #[error("invalid request: {0}")]
+    InvalidRequest(String),
+    /// Metadata headers exceeded the frontend's entry/size limits → 431, the
+    /// same status the frontend returns.
+    #[error("metadata headers too large: {0}")]
+    MetadataHeadersTooLarge(MetadataHeaderError),
     /// The upstream tokenization service could not be reached → 503.
     #[error("tokenization service unavailable")]
     TokenizerUnavailable,

@@ -9,6 +9,7 @@ skills:
   - configure-aiperf-benchmark
   - run-aiperf-benchmark
   - analyze-aiperf-results
+  - report-skillpack-issue
 "Required Readings: Docs":
   - agent-docs/references/definitions.md
 "Required Reading: Rules":

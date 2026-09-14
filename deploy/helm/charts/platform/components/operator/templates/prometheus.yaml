@@ -138,6 +138,18 @@ spec:
       sourceLabels:
       - __meta_kubernetes_pod_label_nvidia_com_dynamo_component_type
       targetLabel: dynamo_component_type
+  # Rank i of a co-located worker binds nixl-<i>; scraping only `nixl` would leave
+  # every rank but the first invisible. Upper bound matches DynamoMaxNixlPorts.
+  {{- range $rank := untilStep 1 8 1 }}
+  - interval: 5s
+    path: /metrics
+    port: nixl-{{ $rank }}
+    relabelings:
+    - action: replace
+      sourceLabels:
+      - __meta_kubernetes_pod_label_nvidia_com_dynamo_component_type
+      targetLabel: dynamo_component_type
+  {{- end }}
 {{- end }}
   selector:
     matchExpressions:
