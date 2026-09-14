@@ -16,6 +16,8 @@ from dynamo.sglang._compat import resolved_server_args
 _CANCELLATION_POLL_MAX_DELAY_S = 0.05
 _CANCELLATION_ABORT_RETRY_LIMIT = 8
 _CANCELLATION_DRAIN_TIMEOUT_S = 1.0
+# Leave most of the drain window available after an ordered abort is submitted.
+_CANCELLATION_DISPATCH_WAIT_TIMEOUT_S = 0.25
 
 
 def _consume_detached_task(task: asyncio.Task[Any]) -> None:
@@ -40,7 +42,32 @@ class CancellationMixin:
     engine: Any
     config: Any
     shutdown_event: asyncio.Event | None
-    _abort_retry_tasks: set[asyncio.Task[Any]]
+    _abort_tasks: set[asyncio.Task[Any]]
+
+    def _track_abort_task(self, task: asyncio.Task[Any]) -> None:
+        self._abort_tasks.add(task)
+        task.add_done_callback(self._abort_tasks.discard)
+        task.add_done_callback(_consume_detached_task)
+
+    def _start_ordered_abort(
+        self,
+        tokenizer_manager: Any,
+        request_id_future: asyncio.Future,
+        submitted_request_id: str,
+        registry: Mapping[str, Any],
+        context_id: str,
+    ) -> asyncio.Task[Any]:
+        task = asyncio.create_task(
+            self._abort_after_registration(
+                tokenizer_manager,
+                request_id_future,
+                submitted_request_id,
+                registry,
+                context_id,
+            )
+        )
+        self._track_abort_task(task)
+        return task
 
     def _start_abort_retry(
         self,
@@ -52,13 +79,11 @@ class CancellationMixin:
         retry_task = asyncio.create_task(
             self._retry_abort(tokenizer_manager, request_id, registry, state)
         )
-        self._abort_retry_tasks.add(retry_task)
-        retry_task.add_done_callback(self._abort_retry_tasks.discard)
-        retry_task.add_done_callback(_consume_detached_task)
+        self._track_abort_task(retry_task)
 
-    def _cancel_abort_retries(self) -> None:
-        for retry_task in tuple(self._abort_retry_tasks):
-            retry_task.cancel()
+    def _cancel_abort_tasks(self) -> None:
+        for task in tuple(self._abort_tasks):
+            task.cancel()
 
     async def _stream_until_cancelled(
         self,
@@ -142,14 +167,42 @@ class CancellationMixin:
         submitted_request_id: str,
         request_id_future: asyncio.Future,
         registry: Mapping[str, Any],
-    ) -> str:
+    ) -> str | None:
         delay = 0.001
         while submitted_request_id not in registry:
+            if request_id_future.cancelled():
+                return None
             if request_id_future.done():
                 return request_id_future.result()
             await asyncio.sleep(delay)
             delay = min(delay * 2, _CANCELLATION_POLL_MAX_DELAY_S)
         return submitted_request_id
+
+    async def _abort_after_registration(
+        self,
+        tokenizer_manager: Any,
+        request_id_future: asyncio.Future,
+        submitted_request_id: str,
+        registry: Mapping[str, Any],
+        context_id: str,
+    ) -> None:
+        request_id = await self._wait_for_registration(
+            submitted_request_id,
+            request_id_future,
+            registry,
+        )
+        if request_id is None:
+            logging.debug(
+                "Abandoning SGLang abort for Context %s; request never registered",
+                context_id,
+            )
+            return
+        await self._abort_sglang_request(
+            tokenizer_manager,
+            request_id,
+            registry,
+            context_id,
+        )
 
     @staticmethod
     def _resolved_request_id(request_id_future: asyncio.Future) -> str:
@@ -168,6 +221,7 @@ class CancellationMixin:
     ) -> None:
         """Wait for cancellation, then order an exact SGLang abort."""
         logging.debug("Cancellation monitor started for Context: %s", context.id())
+        ordered_abort_task = None
         request_id = submitted_request_id
         try:
             if request_id is None:
@@ -177,10 +231,6 @@ class CancellationMixin:
                 registry = self._request_registry(
                     tokenizer_manager, submitted_request_id
                 )
-                if submitted_request_id is not None and registry is not None:
-                    request_id = await self._wait_for_registration(
-                        submitted_request_id, request_id_future, registry
-                    )
                 logging.info(
                     "Cancellation or shutdown signal received for SGLang Request ID %s, Context: %s",
                     request_id,
@@ -191,11 +241,41 @@ class CancellationMixin:
                         "SGLang tokenizer_manager not found for abort request: %s",
                         context.id(),
                     )
-                else:
-                    await self._abort_sglang_request(
-                        tokenizer_manager, request_id, registry, context.id()
+                elif submitted_request_id is not None and registry is not None:
+                    ordered_abort_task = self._start_ordered_abort(
+                        tokenizer_manager,
+                        request_id_future,
+                        submitted_request_id,
+                        registry,
+                        context.id(),
                     )
+                else:
+                    try:
+                        await self._abort_sglang_request(
+                            tokenizer_manager, request_id, registry, context.id()
+                        )
+                    except Exception:
+                        logging.exception(
+                            "Failed to abort SGLang Request ID %s, Context: %s",
+                            request_id,
+                            context.id(),
+                        )
                 if shutdown_requested:
+                    if ordered_abort_task is not None:
+                        try:
+                            await asyncio.wait_for(
+                                asyncio.shield(ordered_abort_task),
+                                timeout=_CANCELLATION_DRAIN_TIMEOUT_S,
+                            )
+                        except asyncio.TimeoutError:
+                            logging.warning(
+                                "Timed out waiting for ordered SGLang abort during shutdown"
+                            )
+                        except asyncio.CancelledError:
+                            if not ordered_abort_task.cancelled():
+                                raise
+                        except Exception:
+                            pass
                     raise EngineShutdown("Engine was shut down during token generation")
         except asyncio.CancelledError:
             logging.debug(
@@ -215,10 +295,20 @@ class CancellationMixin:
         if not hasattr(time_stats, "api_server_dispatch_finish_time"):
             return False
         delay = 0.001
+        deadline = (
+            asyncio.get_running_loop().time() + _CANCELLATION_DISPATCH_WAIT_TIMEOUT_S
+        )
         while registry.get(request_id) is state:
             if time_stats.api_server_dispatch_finish_time:
                 return True
-            await asyncio.sleep(delay)
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                logging.warning(
+                    "Timed out waiting for SGLang Request ID %s to dispatch",
+                    request_id,
+                )
+                return False
+            await asyncio.sleep(min(delay, remaining))
             delay = min(delay * 2, _CANCELLATION_POLL_MAX_DELAY_S)
         return False
 
@@ -299,6 +389,8 @@ class CancellationMixin:
         try:
             yield cancellation_task
         finally:
+            if not request_id_future.done():
+                request_id_future.cancel()
             request_id = self._resolved_request_id(request_id_future)
             if not cancellation_task.done():
                 logging.debug(
