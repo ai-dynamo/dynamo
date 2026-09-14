@@ -18,6 +18,7 @@ from dynamo.sglang.engine_generate import (
     build_native_generate_request,
     native_generate_payload,
     native_generate_stream,
+    new_sglang_request_id,
 )
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
@@ -87,7 +88,17 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         """
         validate_disagg_parallel_sampling(request)
         logging.debug(f"New Request ID: {context.id()}")
-        trace_id = context.trace_id
+        sglang_request_id = new_sglang_request_id()
+        submitted_request_id = (
+            sglang_request_id
+            if getattr(self, "_supports_ordered_cancellation", False)
+            else None
+        )
+        logging.debug(
+            "Submitted SGLang Request ID: %s, Context: %s",
+            sglang_request_id,
+            context.id(),
+        )
 
         if "request" in request:
             # DisaggPreprocessedRequest format
@@ -176,7 +187,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             native_request = build_native_generate_request(
                 native_payload,
                 input_ids=input_ids,
-                fallback_rid=trace_id or context.id(),
+                request_id=sglang_request_id,
                 priority=priority_kwargs.get("priority"),
                 sampling_overrides={"n": 1, "max_new_tokens": 1},
                 bootstrap_host=bootstrap_host,
@@ -198,7 +209,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 bootstrap_port=bootstrap_port,
                 bootstrap_room=bootstrap_room,
                 external_trace_header=trace_header,
-                rid=trace_id,
+                rid=sglang_request_id,
                 data_parallel_rank=dp_rank,
                 lora_path=lora_path,
                 **priority_kwargs,
@@ -220,26 +231,33 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             "disaggregated_params": bootstrap_info,
         }
 
-        task = asyncio.create_task(self._consume_results(results, context))
+        task = asyncio.create_task(
+            self._consume_results(results, submitted_request_id, context)
+        )
         self._consume_tasks.add(task)
         task.add_done_callback(self._consume_tasks.discard)
 
         await task
 
     async def _consume_results(
-        self, results: AsyncIterator[Any], context: Context
+        self,
+        results: AsyncIterator[Any],
+        submitted_request_id: str | None,
+        context: Context,
     ) -> None:
         """Consume async generator results without processing.
 
         Args:
             results: Async generator from engine.async_generate.
+            submitted_request_id: Exact engine ID known before output, when supported.
             context: Context object for cancellation handling.
         """
-        # Use Future pattern for request ID - will be set when first response arrives
+        # Preserve the response ID as a fallback if SGLang replaces the submitted ID.
         request_id_future: asyncio.Future[str] = asyncio.Future()
-        async with self._cancellation_monitor(request_id_future, context):
-            async for res in results:
-                # Extract SGLang request ID from the first response and set the future
+        async with self._cancellation_monitor(
+            request_id_future, context, submitted_request_id
+        ) as cancellation_task:
+            async for res in self._stream_until_cancelled(results, cancellation_task):
                 if not request_id_future.done():
                     meta_info = res.get("meta_info", {})
                     sglang_request_id = meta_info.get("id")
@@ -247,6 +265,5 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                         request_id_future.set_result(sglang_request_id)
                         logging.debug(f"New Prefill Request ID: {sglang_request_id}")
 
-                # Note: No explicit cancellation checks needed here.
-                # When abort_request is called by the cancellation monitor,
-                # SGLang will terminate this async generator automatically.
+                # The shared iterator briefly drains after abort so SGLang can
+                # clean up, then closes a stream that does not terminate.
