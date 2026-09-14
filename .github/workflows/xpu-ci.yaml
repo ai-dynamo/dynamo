@@ -176,6 +176,121 @@ jobs:
             echo "✅ Sanity check passed"
           fi
 
+  test-xpu-gms:
+    needs: [build-xpu]
+    if: ${{ !cancelled() && needs.build-xpu.result == 'success' }}
+    runs-on: xpu
+    env:
+      FRAMEWORK: ${{ inputs.framework || 'vllm' }}
+      IMAGE_TAG: dynamo-${{ inputs.framework || 'vllm' }}-${{ inputs.target || 'runtime' }}-xpu:${{ github.run_id }}-${{ inputs.source_ref || github.sha }}
+      TEST_IMAGE_TAG: dynamo-${{ inputs.framework || 'vllm' }}-${{ inputs.target || 'runtime' }}-xpu:${{ github.run_id }}-${{ inputs.source_ref || github.sha }}-test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          lfs: true
+
+      - name: Pre-cleanup Pytest Containers
+        shell: bash
+        run: |
+          echo "🧹 Removing any leftover pytest containers..."
+          CONTAINER_ID_PREFIX="test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}"
+          docker rm -f "${CONTAINER_ID_PREFIX}_pytest" 2>/dev/null || true
+
+      - name: Validate XPU GMS runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          RENDER_GID=$(stat -c '%g' /dev/dri/renderD128)
+          docker run --rm \
+            -v /dev/dri:/dev/dri \
+            --device /dev/dri:/dev/dri \
+            --group-add "${RENDER_GID}" \
+            -e "ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-}" \
+            "${{ env.TEST_IMAGE_TAG }}" \
+            python - <<'PY'
+          import torch
+          from gpu_memory_service.common.vmm import _sycl_vmm
+
+          assert torch.xpu.is_available(), "torch.xpu.is_available() is false"
+          assert _sycl_vmm.device_count() > 0, "_sycl_vmm found no XPU devices"
+          print(f"XPU: {torch.xpu.get_device_name(0)}")
+          print(f"SYCL VMM devices: {_sycl_vmm.device_count()}")
+          PY
+
+      - name: Run XPU GMS tests
+        uses: $/.github/actions/pytest
+        with:
+          pytest_marks: 'pre_merge and none and xpu_1'
+          image_tag: ${{ env.TEST_IMAGE_TAG }}
+          test_suite_name: 'xpu-gms'
+          test_type: 'e2e'
+          platform_arch: 'amd64'
+          device: 'xpu'
+          parallel_mode: 'none'
+          dind_as_sidecar: 'true'
+          start_minio: 'false'
+
+      - name: Collect XPU diagnostics
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p xpu-diagnostics
+          sycl-ls > xpu-diagnostics/sycl-ls.txt 2>&1 || true
+          zeinfo > xpu-diagnostics/zeinfo.txt 2>&1 || true
+          if [[ -e /dev/dri/renderD128 ]]; then
+            RENDER_GID=$(stat -c '%g' /dev/dri/renderD128)
+            docker run --rm \
+              -v /dev/dri:/dev/dri \
+              --device /dev/dri:/dev/dri \
+              --group-add "${RENDER_GID}" \
+              "${{ env.TEST_IMAGE_TAG }}" \
+              sh -c 'python -c "from gpu_memory_service.common.vmm import _sycl_vmm; print(_sycl_vmm.__file__)" | xargs -r ldd' \
+              > xpu-diagnostics/sycl-vmm-ldd.txt 2>&1 || true
+          else
+            echo "/dev/dri/renderD128 is unavailable on the XPU runner" > xpu-diagnostics/sycl-vmm-ldd.txt
+          fi
+
+      - name: Upload XPU diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: xpu-diagnostics-${{ env.FRAMEWORK }}-${{ github.run_id }}
+          path: xpu-diagnostics/
+          retention-days: 7
+
+      - name: Cleanup Pytest Containers
+        if: always()
+        shell: bash
+        run: |
+          echo "🧹 Stopping and removing pytest containers..."
+          CONTAINER_ID_PREFIX="test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}"
+          docker rm -f "${CONTAINER_ID_PREFIX}_pytest" 2>/dev/null || true
+          echo "✓ Pytest container cleanup finished"
+
+  test-xpu:
+    needs: [build-xpu]
+    if: ${{ !cancelled() && needs.build-xpu.result == 'success' }}
+    runs-on: xpu
+    env:
+      FRAMEWORK: ${{ inputs.framework || 'vllm' }}
+      IMAGE_TAG: dynamo-${{ inputs.framework || 'vllm' }}-${{ inputs.target || 'runtime' }}-xpu:${{ github.run_id }}-${{ inputs.source_ref || github.sha }}
+      TEST_IMAGE_TAG: dynamo-${{ inputs.framework || 'vllm' }}-${{ inputs.target || 'runtime' }}-xpu:${{ github.run_id }}-${{ inputs.source_ref || github.sha }}-test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          lfs: true
+
+      - name: Pre-cleanup Pytest Containers
+        shell: bash
+        run: |
+          echo "🧹 Removing any leftover pytest containers..."
+          CONTAINER_ID_PREFIX="test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}"
+          docker rm -f "${CONTAINER_ID_PREFIX}_pytest" 2>/dev/null || true
+
       - name: Run XPU tests
         uses: $/.github/actions/pytest
         with:
@@ -251,7 +366,7 @@ jobs:
   # ============================================================================
 
   cleanup-xpu:
-    needs: [build-xpu, test-xpu, test-xpu-2card]
+    needs: [build-xpu, test-xpu-gms, test-xpu, test-xpu-2card]
     if: ${{ always() }}
     runs-on: xpu
     env:

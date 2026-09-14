@@ -736,13 +736,21 @@ COPY lib/gpu_memory_service/ /opt/dynamo/lib/gpu_memory_service/
 {% endif %}
 
 # Build gpu-memory-service wheel → /opt/dynamo/dist/gpu_memory_service*.whl (small C++ extension, fast build -- all targets, all frameworks)
-{% if device == "cuda" %}
-# Build gpu_memory_service wheel (C++ extension only needs Python headers, no CUDA/torch)
+{% if device in ("cuda", "xpu") %}
+# Build gpu_memory_service wheel with the device-specific native extension.
 ARG ENABLE_GPU_MEMORY_SERVICE
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
         export UV_CACHE_DIR=/root/.cache/uv && \
         source ${VIRTUAL_ENV}/bin/activate && \
+{% if device == "xpu" %}
+        cmake -S /opt/dynamo/lib/gpu_memory_service/common/vmm/_sycl_vmm \
+            -B /tmp/gpu_memory_service_sycl_vmm \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=icpx && \
+        cmake --build /tmp/gpu_memory_service_sycl_vmm --parallel && \
+        cmake --install /tmp/gpu_memory_service_sycl_vmm --prefix /opt/dynamo/lib && \
+{% endif %}
         uv build --wheel --out-dir /opt/dynamo/dist /opt/dynamo/lib/gpu_memory_service; \
     fi
 {% endif %}
