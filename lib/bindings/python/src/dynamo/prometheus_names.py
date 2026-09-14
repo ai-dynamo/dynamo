@@ -131,8 +131,9 @@ class frontend_service:
     DECISION_KV_OPTIMAL_TOTAL = "decision_kv_optimal_total"
     # Input tokens observed across routing decisions
     INPUT_F0_TOTAL = "input_f0_total"
-    # Input tokens cached on the best-overlap eligible instance
-    INPUT_F1_TOTAL = "input_f1_total"
+    # Input tokens cached on the best-overlap eligible instance.
+    # The numbering skips f1, which the router and indexer cannot evaluate.
+    INPUT_F2_TOTAL = "input_f2_total"
     # Number of cached tokens (prefix cache hits) per request
     CACHED_TOKENS = "cached_tokens"
     # Tokenizer latency in milliseconds
@@ -485,8 +486,9 @@ class router:
     DECISION_KV_OPTIMAL_TOTAL = "router_decision_kv_optimal_total"
     # Input tokens observed across routing decisions
     INPUT_F0_TOTAL = "router_input_f0_total"
-    # Input tokens cached on the best-overlap eligible instance, whether or not it was selected
-    INPUT_F1_TOTAL = "router_input_f1_total"
+    # Input tokens cached on the best-overlap eligible instance, whether or not it was selected.
+    # The numbering skips f1, which the router and indexer cannot evaluate.
+    INPUT_F2_TOTAL = "router_input_f2_total"
     # Whether the router currently has a worker/dp_rank registered (1 = registered)
     WORKER_REGISTERED = "router_worker_registered"
 

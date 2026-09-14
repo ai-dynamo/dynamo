@@ -872,7 +872,7 @@ pub struct RoutingDecisionCounters {
     pub decisions_total: IntCounter,
     pub decision_kv_optimal_total: IntCounter,
     pub input_f0_total: IntCounter,
-    pub input_f1_total: IntCounter,
+    pub input_f2_total: IntCounter,
 }
 
 impl RoutingDecisionCounters {
@@ -882,7 +882,7 @@ impl RoutingDecisionCounters {
         decisions_total: &IntCounterVec,
         decision_kv_optimal_total: &IntCounterVec,
         input_f0_total: &IntCounterVec,
-        input_f1_total: &IntCounterVec,
+        input_f2_total: &IntCounterVec,
         worker_type: &str,
     ) -> Self {
         let labels = &[worker_type];
@@ -890,19 +890,21 @@ impl RoutingDecisionCounters {
             decisions_total: decisions_total.with_label_values(labels),
             decision_kv_optimal_total: decision_kv_optimal_total.with_label_values(labels),
             input_f0_total: input_f0_total.with_label_values(labels),
-            input_f1_total: input_f1_total.with_label_values(labels),
+            input_f2_total: input_f2_total.with_label_values(labels),
         }
     }
 
     /// Record one routing decision and the KV overlap that was reachable for it.
     ///
     /// `best_overlap` describes the eligible instance holding the most overlap, whether or not
-    /// the router picked it, so `input_f1_total / input_f0_total` reports the cache-hit ceiling
+    /// the router picked it, so `input_f2_total / input_f0_total` reports the cache-hit ceiling
     /// the router had available rather than the hit rate it achieved.
+    ///
+    /// The numbering skips f1, which the router and indexer cannot evaluate.
     pub fn observe(&self, isl_tokens: usize, best_overlap: BestOverlapCandidate) {
         self.decisions_total.inc();
         self.input_f0_total.inc_by(isl_tokens as u64);
-        self.input_f1_total
+        self.input_f2_total
             .inc_by(best_overlap.effective_cached_tokens as u64);
         if best_overlap.selected_has_max_overlap {
             self.decision_kv_optimal_total.inc();
@@ -919,17 +921,17 @@ impl RoutingDecisionCounters {
             decisions_total: counter("decisions_total"),
             decision_kv_optimal_total: counter("decision_kv_optimal_total"),
             input_f0_total: counter("input_f0_total"),
-            input_f1_total: counter("input_f1_total"),
+            input_f2_total: counter("input_f2_total"),
         }
     }
 
-    /// `(decisions, kv_optimal, f0, f1)`.
+    /// `(decisions, kv_optimal, f0, f2)`.
     pub(crate) fn snapshot(&self) -> (u64, u64, u64, u64) {
         (
             self.decisions_total.get(),
             self.decision_kv_optimal_total.get(),
             self.input_f0_total.get(),
-            self.input_f1_total.get(),
+            self.input_f2_total.get(),
         )
     }
 }
@@ -1089,14 +1091,14 @@ impl RouterRequestMetrics {
                         extra_labels,
                     )
                     .expect("failed to create router_input_f0_total");
-                let input_f1_total = metrics
+                let input_f2_total = metrics
                     .create_intcountervec(
-                        &router_metric(frontend_service::INPUT_F1_TOTAL),
+                        &router_metric(frontend_service::INPUT_F2_TOTAL),
                         "Total input tokens cached on the eligible instance with the greatest known KV cache overlap, whether or not that instance was selected",
                         &[labels::WORKER_TYPE],
                         extra_labels,
                     )
-                    .expect("failed to create router_input_f1_total");
+                    .expect("failed to create router_input_f2_total");
                 non_max_overlap_selections_total.with_label_values(&[WORKER_TYPE_PREFILL]);
                 overlap_blocks_lost.with_label_values(&[WORKER_TYPE_PREFILL]);
                 // Resolving both worker types here is also what makes each series export at
@@ -1108,7 +1110,7 @@ impl RouterRequestMetrics {
                         &decisions_total,
                         &decision_kv_optimal_total,
                         &input_f0_total,
-                        &input_f1_total,
+                        &input_f2_total,
                         worker_type,
                     )
                 };
@@ -1844,10 +1846,10 @@ mod routing_decision_tests {
         }
     }
 
-    /// f1 accumulates the best reachable overlap, not the overlap that was taken, so a
+    /// f2 accumulates the best reachable overlap, not the overlap that was taken, so a
     /// suboptimal decision still raises the ceiling it is measured against.
     #[test]
-    fn a_suboptimal_decision_still_counts_its_best_candidate_into_f1() {
+    fn a_suboptimal_decision_still_counts_its_best_candidate_into_f2() {
         let counters = RoutingDecisionCounters::for_test();
         counters.observe(1_000, candidate(128, false));
         assert_eq!(counters.snapshot(), (1, 0, 1_000, 128));
