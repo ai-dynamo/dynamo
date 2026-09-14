@@ -418,14 +418,21 @@ pub(crate) struct DcMembershipWatch {
     receiver: watch::Receiver<DcMembershipView>,
     cancel: CancellationToken,
     task: JoinHandle<()>,
+    sources_status: watch::Receiver<super::sources::KvDcRelaySourcesStatus>,
 }
 
 impl DcMembershipWatch {
-    pub(crate) async fn start(
+    pub(crate) async fn start_sources(
         discovery: Arc<dyn Discovery>,
-        config: KvDcRelayDiscoveryConfig,
+        sources: super::host::KvDcRelaySources,
         parent_cancel: CancellationToken,
     ) -> anyhow::Result<Self> {
+        let config = match sources {
+            super::host::KvDcRelaySources::File(file) => {
+                return Self::start_file(discovery, file, parent_cancel).await;
+            }
+            super::host::KvDcRelaySources::Discovery(config) => config,
+        };
         config.validate()?;
         let queries = config.queries();
         let filter = config.filter();
@@ -442,7 +449,23 @@ impl DcMembershipWatch {
             receiver,
             cancel,
             task,
+            sources_status: watch::channel(super::sources::KvDcRelaySourcesStatus::default()).1,
         })
+    }
+
+    pub(crate) fn sources_status(&self) -> super::sources::KvDcRelaySourcesStatus {
+        let mut status = self.sources_status.borrow().clone();
+        if status.applied_revision.is_none() {
+            status.count = self
+                .receiver
+                .borrow()
+                .endpoints
+                .keys()
+                .map(|endpoint| endpoint.namespace.as_str())
+                .collect::<HashSet<_>>()
+                .len();
+        }
+        status
     }
 
     pub(crate) fn subscribe(&self) -> watch::Receiver<DcMembershipView> {
@@ -1886,3 +1909,6 @@ mod tests {
         }
     }
 }
+
+#[path = "sources_watch.rs"]
+mod sources_watch;
