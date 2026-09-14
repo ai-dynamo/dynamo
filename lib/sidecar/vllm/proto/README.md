@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 # Vendored vLLM protocol
 
 - Upstream base commit: [`1f9444a34ff4ebfba4d65c68971bb5306a11aa92`](https://github.com/vllm-project/vllm/commit/1f9444a34ff4ebfba4d65c68971bb5306a11aa92)
-  ([vllm-project/vllm#52840](https://github.com/vllm-project/vllm/pull/52840), "[Rust Frontend][gRPC] Add LoRA lifecycle control")
+  ([vllm-project/vllm#52840](https://github.com/vllm-project/vllm/pull/52840), `[Rust Frontend][gRPC] Add LoRA lifecycle control`)
 - Sources: [`rust/proto/inference.proto`](https://github.com/vllm-project/vllm/blob/1f9444a34ff4ebfba4d65c68971bb5306a11aa92/rust/proto/inference.proto)
   and [`rust/proto/control.proto`](https://github.com/vllm-project/vllm/blob/1f9444a34ff4ebfba4d65c68971bb5306a11aa92/rust/proto/control.proto)
 - Dynamo adds `GenerateRequest.native_sampling_params_json` and `ServerInfo.supports_native_sampling_params_json`; the sidecar advertises native Generate support only when the worker reports this extension.
