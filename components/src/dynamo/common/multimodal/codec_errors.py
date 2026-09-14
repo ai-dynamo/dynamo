@@ -130,7 +130,8 @@ def _install_hint(backend: str, package: str, module: str) -> str:
     else:
         hint = (
             "install the validated decoder with "
-            f"`pip install --no-deps '{VALIDATED_SPECS[package]}'`"
+            f"`pip install --no-deps --force-reinstall "
+            f"'{VALIDATED_SPECS[package]}'`"
         )
     if installer_covers(backend, package):
         hint += f" (or `{INSTALLER_CMD} {backend}`)"

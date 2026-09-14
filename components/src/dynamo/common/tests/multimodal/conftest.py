@@ -87,17 +87,21 @@ def carrier_imports(monkeypatch):
     replacement of ``importlib.import_module`` would break.
 
     Call it with the carriers that should import, and optionally the error a
-    carrier that does not import raises -- a broken wheel and an absent one are
-    different situations and the messages differ.
+    carrier that does not import raises. A string produces ``ImportError``;
+    an exception instance models a native-loader failure such as ``OSError``.
     """
 
-    def _set(present: tuple[str, ...] = (), error: str | None = None) -> None:
+    def _set(
+        present: tuple[str, ...] = (), error: str | BaseException | None = None
+    ) -> None:
         real = importlib.import_module
 
         def _fake(name: str, *args, **kwargs):
             if name in _MEDIA_CARRIERS:
                 if name in present:
                     return object()
+                if isinstance(error, BaseException):
+                    raise error
                 raise ImportError(error or f"No module named '{name}'")
             return real(name, *args, **kwargs)
 

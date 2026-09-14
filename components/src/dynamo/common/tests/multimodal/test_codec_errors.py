@@ -102,7 +102,7 @@ def test_broken_carrier_is_not_treated_as_the_source_build(carrier_imports):
     the two apart, and the generic branch is the right one here: it offers the
     validated install, which replaces the broken files.
     """
-    carrier_imports(error="libGL.so.1: cannot open shared object file")
+    carrier_imports(error=OSError("libGL.so.1: cannot open shared object file"))
 
     msg = str(
         video_decoder_missing(
@@ -115,7 +115,7 @@ def test_broken_carrier_is_not_treated_as_the_source_build(carrier_imports):
     )
     assert "built without a video backend" not in msg
     assert VALIDATED_SPECS["opencv-python-headless"] in msg
-    assert "--force-reinstall" not in msg
+    assert "--force-reinstall" in msg
     # The carrier's own words are what identify the real fault.
     assert "libGL.so.1" in msg
 
