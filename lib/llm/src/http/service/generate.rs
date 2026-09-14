@@ -1878,7 +1878,7 @@ pub(crate) mod tests {
             .as_object_mut()
             .and_then(|object| object.remove("token_ids"))
             .expect("token_ids in client request");
-        assert_eq!(preprocessed.token_ids, vec![1, 2]);
+        assert_eq!(preprocessed.token_ids.as_slice(), &[1, 2]);
         assert_eq!(
             preprocessed
                 .tracker
@@ -1933,8 +1933,8 @@ pub(crate) mod tests {
         assert_eq!(mm.expanded_prompt_len, 10);
 
         assert_eq!(
-            preprocessed.token_ids,
-            vec![10, 11, 12, 12, 12, 15, 16, 12, 12, 19]
+            preprocessed.token_ids.as_slice(),
+            &[10, 11, 12, 12, 12, 15, 16, 12, 12, 19]
         );
         let envelope = preprocessed
             .extra_args
@@ -2188,7 +2188,11 @@ pub(crate) mod tests {
             .expect("invalid routing metadata must not reject execution");
 
             assert!(preprocessed.mm_routing_info.is_none(), "{name}");
-            assert_eq!(preprocessed.token_ids, expected_token_ids, "{name}");
+            assert_eq!(
+                preprocessed.token_ids.as_slice(),
+                expected_token_ids,
+                "{name}"
+            );
             let envelope = preprocessed
                 .extra_args
                 .as_ref()
