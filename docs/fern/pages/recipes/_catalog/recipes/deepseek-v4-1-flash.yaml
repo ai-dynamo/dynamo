@@ -1,0 +1,63 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: deepseek-v4-1-flash
+title: DeepSeek-V4.1-Flash
+page: pages/recipes/model-recipes/deepseek-v4-1-flash.mdx
+provider: deepseek
+model:
+  name: DeepSeek-V4.1-Flash
+  hf_id: deepseek-ai/DeepSeek-V4.1-Flash
+  precision: FP8 dense, FP4 MoE experts, FP8 KV cache
+status: experimental  # Day-0
+targets:
+- id: sglang-agg-gb200
+  recommended: true
+  hardware:
+    gpu: GB200
+    count: 8
+  runtime:
+    framework: sglang
+  topology: aggregated
+  techniques:
+  - kv-aware-routing
+  - dspark-speculative-decoding
+  - expert-parallel
+  - tp4
+  - prefix-caching
+  - fp8-kv-cache
+  - 1m-context
+  workload:
+    type: agentic
+    traffic: Day-0 deployment; no published benchmark traffic yet
+  deploy:
+    asset: recipes/deepseek-v4.1-flash/sglang/agg-gb200/deploy.yaml
+  expected_performance:
+    available: false
+- id: sglang-disagg-gb200
+  recommended: false
+  hardware:
+    gpu: GB200
+    count: 8
+  runtime:
+    framework: sglang
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - 1p1d
+  - pd-kv-transfer
+  - kv-aware-routing
+  - expert-parallel
+  - tp4-per-role
+  - prefix-caching
+  - fp8-kv-cache
+  - 1m-context
+  workload:
+    type: agentic
+    traffic: Day-0 deployment; no published benchmark traffic yet
+  deploy:
+    asset: recipes/deepseek-v4.1-flash/sglang/disagg-gb200/deploy-generic.yaml
+  expected_performance:
+    available: false
+related_benchmarks: []
+maintainer: null
