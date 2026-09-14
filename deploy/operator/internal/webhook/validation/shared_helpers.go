@@ -358,6 +358,39 @@ func validateElasticEPSingleReplica(
 	return allErrs
 }
 
+// validateElasticEPSingleReplicaRatcheted applies the single-replica rule while letting
+// an unchanged pre-existing violation through.
+//
+// The rule is gated, and a cluster-wide gate can be switched on long after a component
+// was admitted -- admission never re-runs on a gate flip. Without a ratchet, enabling the
+// gate would freeze every already-accepted component with replicas > 1: not just its
+// replica count, but any unrelated edit to it, because the stateless rule fires again on
+// every UPDATE. Ratcheting on an unchanged replica count keeps the rule effective for new
+// violations while leaving existing objects editable.
+//
+// oldSpec is nil on create, where there is nothing to ratchet against.
+func validateElasticEPSingleReplicaRatcheted(
+	backendFramework string,
+	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	oldSpec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	newErrs := validateElasticEPSingleReplica(backendFramework, spec, fldPath)
+	if len(newErrs) == 0 || oldSpec == nil {
+		return newErrs
+	}
+	// Only an identical violation is tolerated. Changing the replica count -- in either
+	// direction, including making it worse -- re-asserts the rule, so a user cannot edit
+	// their way further from it under cover of the ratchet.
+	if len(validateElasticEPSingleReplica(backendFramework, oldSpec, fldPath)) == 0 {
+		return newErrs
+	}
+	if ptr.Deref(spec.Replicas, 0) != ptr.Deref(oldSpec.Replicas, 0) {
+		return newErrs
+	}
+	return nil
+}
+
 func gpuMemoryServiceFor(
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 ) *nvidiacomv1beta1.GPUMemoryServiceSpec {

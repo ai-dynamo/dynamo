@@ -375,7 +375,13 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 		// renderer manages: one follower and one <leader>-ray Service are derived per
 		// component, so two leader replicas would share one DNS name.
 		if features.MustGateFrom(v.ctx).Enabled(features.ElasticEPRayPoC) {
-			allErrs = append(allErrs, validateElasticEPSingleReplica(spec.BackendFramework, component, componentPath)...)
+			// Ratcheted: a cluster-wide gate can be enabled long after this component was
+			// admitted, and admission never re-runs on a flip. Without this, enabling the
+			// gate would freeze every existing component with replicas > 1 against any
+			// edit at all, not just a replica change.
+			allErrs = append(allErrs, validateElasticEPSingleReplicaRatcheted(
+				spec.BackendFramework, component, opts.oldComponents[component.ComponentName], componentPath,
+			)...)
 		}
 
 		allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpec(

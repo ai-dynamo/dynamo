@@ -206,7 +206,9 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 	// single leader replica ... capacity is added by scaling followers", by the rule whose
 	// own message says to scale followers.
 	if !isElasticEPFollower && features.MustGateFrom(v.ctx).Enabled(features.ElasticEPRayPoC) {
-		allErrs = append(allErrs, validateElasticEPSingleReplica(spec.BackendFramework, &spec.DynamoComponentDeploymentSharedSpec, fldPath)...)
+		allErrs = append(allErrs, validateElasticEPSingleReplicaRatcheted(
+			spec.BackendFramework, &spec.DynamoComponentDeploymentSharedSpec, oldSharedSpec, fldPath,
+		)...)
 	}
 	allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpec(
 		&spec.DynamoComponentDeploymentSharedSpec,

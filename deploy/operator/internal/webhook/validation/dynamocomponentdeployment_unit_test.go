@@ -143,4 +143,65 @@ func TestElasticEPSingleReplicaAppliesToLeadersOnly(t *testing.T) {
 			t.Fatalf("gate off must not apply a rule that describes only the PoC topology: %v", err)
 		}
 	})
+
+	// A cluster-wide gate can be switched on long after a component was admitted, and
+	// admission never re-runs on a flip. Without a ratchet, enabling the gate freezes
+	// every already-accepted component with replicas > 1 against ANY edit, not just a
+	// replica change -- because the stateless rule fires again on every UPDATE.
+	//
+	// Mutation check: replacing validateElasticEPSingleReplicaRatcheted with the
+	// unratcheted validateElasticEPSingleReplica fails the unrelated-edit subtest.
+	t.Run("ratchets an unchanged pre-existing violation", func(t *testing.T) {
+		for _, tt := range []struct {
+			name       string
+			oldRep     int32
+			newRep     int32
+			mutate     func(*nvidiacomv1beta1.DynamoComponentDeployment)
+			wantReject bool
+		}{
+			{
+				// The freeze case: replicas stay at 2, something unrelated changes.
+				name:   "an unrelated edit is allowed while replicas stay violating",
+				oldRep: 2, newRep: 2,
+				mutate: func(d *nvidiacomv1beta1.DynamoComponentDeployment) {
+					d.Spec.PodTemplate.Spec.Containers[0].Image = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:newer"
+				},
+			},
+			{
+				name:   "changing the replica count re-asserts the rule",
+				oldRep: 2, newRep: 3,
+				wantReject: true,
+			},
+			{
+				// The ratchet must not become a licence to introduce a new violation.
+				name:   "a fresh violation is still rejected",
+				oldRep: 1, newRep: 2,
+				wantReject: true,
+			},
+			{
+				name:   "returning to a single replica is always allowed",
+				oldRep: 2, newRep: 1,
+			},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				oldDCD := newDCD(false, tt.oldRep)
+				newObj := newDCD(false, tt.newRep)
+				if tt.mutate != nil {
+					tt.mutate(newObj)
+				}
+				_, err := validator.ValidateUpdate(ctx, oldDCD, newObj, runtimeVersionSourceV1Beta1)
+
+				if tt.wantReject {
+					if err == nil || !strings.Contains(err.Error(), "supports a single leader replica") {
+						t.Fatalf("error = %v, want the single-leader-replica rule", err)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("enabling a cluster-wide gate must not freeze an existing object "+
+						"against unrelated edits: %v", err)
+				}
+			})
+		}
+	})
 }
