@@ -162,11 +162,14 @@ ARG NIXL_REF
 # UV_FIND_LINKS points at the crick wheel pre-built in the crick_builder stage;
 # uv prefers it over the sdist on arm64 where no manylinux aarch64 wheel exists.
 RUN --mount=type=bind,source=./container/deps/overrides.frontend.txt,target=/tmp/overrides.frontend.txt \
+    --mount=type=bind,source=./container/deps/overrides.aisimulate-review.txt,target=/tmp/overrides.aisimulate-review.txt \
     --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     echo "${NIXL_REF}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "NIXL_REF must be a vX.Y.Z release tag; got '${NIXL_REF}'" >&2; exit 1; } && \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_FIND_LINKS=/opt/dynamo/wheelhouse/extra && \
     uv pip install \
     --overrides /tmp/overrides.frontend.txt \
+    --overrides /tmp/overrides.aisimulate-review.txt \
+    --find-links /opt/dynamo/wheelhouse \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
     # The meta package requires both backends unconditionally (its cu12/cu13
@@ -185,7 +188,10 @@ RUN --mount=type=bind,source=./container/deps/overrides.frontend.txt,target=/tmp
     fi && \
     cd /workspace/benchmarks && \
     export UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
-    uv pip install --overrides /tmp/overrides.frontend.txt .
+    uv pip install \
+        --overrides /tmp/overrides.frontend.txt \
+        --overrides /tmp/overrides.aisimulate-review.txt \
+        .
 
 # Setup environment for all users
 USER root
