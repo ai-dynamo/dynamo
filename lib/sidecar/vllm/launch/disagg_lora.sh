@@ -45,7 +45,7 @@ while [[ $# -gt 0 ]]; do
             echo "  VLLM_PREFILL_GRPC_PORT          Prefill vLLM gRPC port (default: 50052)"
             echo "  VLLM_DECODE_NIXL_SIDE_CHANNEL_PORT  Decode NIXL port (default: 5600)"
             echo "  VLLM_PREFILL_NIXL_SIDE_CHANNEL_PORT Prefill NIXL port (default: 20097)"
-            echo "  VLLM_PREFILL_KV_EVENT_PORT      Prefill KV event port (default: 20081)"
+            echo "  VLLM_PREFILL_KV_EVENT_ENDPOINT  KV event endpoint (default: private local IPC socket)"
             echo "  VLLM_DECODE_GPU                 Decode GPU index (default: 0)"
             echo "  VLLM_PREFILL_GPU                Prefill GPU index (default: 1)"
             echo "  MAX_MODEL_LEN                   Maximum model length (default: 4096)"
@@ -60,7 +60,20 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-trap dynamo_exit_trap EXIT
+KV_EVENT_DIR=""
+if [[ -z "${VLLM_PREFILL_KV_EVENT_ENDPOINT:-}" ]]; then
+    KV_EVENT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dynamo-vllm-kv.XXXXXX")"
+    VLLM_PREFILL_KV_EVENT_ENDPOINT="ipc://${KV_EVENT_DIR}/events"
+fi
+
+lora_exit_trap() {
+    local _rc=$?
+    if [[ -n "$KV_EVENT_DIR" ]]; then
+        rm -rf -- "$KV_EVENT_DIR"
+    fi
+    dynamo_reap_and_exit "$_rc"
+}
+trap lora_exit_trap EXIT
 
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
@@ -74,7 +87,6 @@ VLLM_DECODE_GPU="${VLLM_DECODE_GPU:-0}"
 VLLM_PREFILL_GPU="${VLLM_PREFILL_GPU:-1}"
 VLLM_DECODE_NIXL_SIDE_CHANNEL_PORT="${VLLM_DECODE_NIXL_SIDE_CHANNEL_PORT:-5600}"
 VLLM_PREFILL_NIXL_SIDE_CHANNEL_PORT="${VLLM_PREFILL_NIXL_SIDE_CHANNEL_PORT:-20097}"
-VLLM_PREFILL_KV_EVENT_PORT="${VLLM_PREFILL_KV_EVENT_PORT:-20081}"
 
 export AWS_ENDPOINT_URL_S3="${AWS_ENDPOINT_URL_S3:-${AWS_ENDPOINT:-http://localhost:9000}}"
 export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-minioadmin}"
@@ -146,7 +158,7 @@ vllm-rs serve "$MODEL" \
     --max-loras "$MAX_LORAS" \
     --max-lora-rank "$MAX_LORA_RANK" \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
-    --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_PREFILL_KV_EVENT_PORT}\",\"enable_kv_cache_events\":true}" \
+    --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"${VLLM_PREFILL_KV_EVENT_ENDPOINT}\",\"enable_kv_cache_events\":true}" \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
 

@@ -97,6 +97,13 @@ For local LoRA serving, use [`launch/agg_lora.sh`](launch/agg_lora.sh) or
 and accept `--help` for GPU, port, and cache settings. Load each adapter on both
 workers before sending prefill/decode traffic.
 
+The disaggregated launcher uses a private local IPC socket for KV events, with one
+data-parallel rank per engine. Custom multi-rank deployments must set
+`VLLM_PREFILL_KV_EVENT_ENDPOINT`, replacing `VLLM_PREFILL_KV_EVENT_PORT`.
+For TCP, this vLLM publisher requires a wildcard bind address such as
+`tcp://*:20081`; a concrete IP makes it connect instead of listen. Restrict access
+to that port to trusted consumers because KV events contain request token IDs.
+
 ## Run
 
 ### Native Generate compatibility
