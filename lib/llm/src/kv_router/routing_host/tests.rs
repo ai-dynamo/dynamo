@@ -1539,48 +1539,87 @@ async fn classifier_failure_aborts_once_with_original_error() {
     runtime.shutdown();
 }
 
-struct TypedRejectingClassifier;
+struct TypedRejectingClassifier {
+    error_type: ErrorType,
+    calls: Arc<AtomicUsize>,
+    observations: mpsc::UnboundedSender<ClassifierObservation>,
+}
 
+#[async_trait::async_trait]
 impl RequestClassifier for TypedRejectingClassifier {
     fn classify(&mut self, _request: ClassifyRequest) -> ClassifyFuture {
-        Box::pin(async {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        let error_type = self.error_type;
+        Box::pin(async move {
             Err(Box::new(
                 DynamoError::builder()
-                    .error_type(ErrorType::ResourceExhausted)
+                    .error_type(error_type)
                     .message("classifier shed load")
                     .build(),
             ) as Box<ClassifierError>)
         })
     }
+
+    async fn on_event(&mut self, event: ClassifyEvent) {
+        if let ClassifyEvent::Aborted { error, .. } = event {
+            self.observations
+                .send(ClassifierObservation::Aborted {
+                    cause: error.as_deref().and_then(|error| abort_cause_type(error)),
+                })
+                .unwrap();
+        }
+    }
 }
 
 #[tokio::test]
-async fn typed_classifier_rejection_reaches_client() {
-    let (router, runtime) = router_with_classifier(TypedRejectingClassifier, None).await;
-    let request = Context::new(request());
-
-    let client_error = match router
-        .select_with_affinity(
-            &request,
-            RequestPhase::Aggregated,
-            false,
-            &CleanupBudget::default(),
+async fn typed_classifier_rejection_reaches_client_without_migration() {
+    for error_type in [
+        ErrorType::ResourceExhausted,
+        ErrorType::WorkerOverloaded,
+        ErrorType::CannotConnect,
+    ] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (observations_tx, mut observations_rx) = mpsc::unbounded_channel();
+        let (router, runtime) = router_with_classifier(
+            TypedRejectingClassifier {
+                error_type,
+                calls: Arc::clone(&calls),
+                observations: observations_tx,
+            },
+            None,
         )
-        .await
-    {
-        Ok(_) => panic!("typed rejection unexpectedly selected a worker"),
-        Err(error) => error,
-    };
+        .await;
+        let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            Arc::new(router);
+        let migration = Migration::new(2, None, "test".to_string(), Arc::new(Metrics::new()));
+        let client_error = match migration
+            .generate(Context::new(request()), engine.clone())
+            .await
+        {
+            Ok(_) => panic!("typed rejection unexpectedly selected a worker"),
+            Err(error) => error,
+        };
 
-    let typed = client_error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<DynamoError>())
-        .expect("typed rejection must stay a DynamoError");
-    assert!(matches!(typed.error_type(), ErrorType::ResourceExhausted));
-    assert!(format!("{client_error:#}").contains("classifier shed load"));
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "classifier rejection {error_type:?} must not be retried"
+        );
+        assert!(match_error_chain(client_error.as_ref(), &[error_type], &[]));
+        assert!(format!("{client_error:#}").contains("classifier shed load"));
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), observations_rx.recv())
+                .await
+                .expect("classifier abort event timed out"),
+            Some(ClassifierObservation::Aborted {
+                cause: Some(error_type),
+            })
+        );
+        assert!(observations_rx.try_recv().is_err());
 
-    drop(router);
-    runtime.shutdown();
+        drop(engine);
+        runtime.shutdown();
+    }
 }
 
 #[tokio::test]

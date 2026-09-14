@@ -109,7 +109,7 @@ fn classifier_failure_response(request_id: &str, error: &KvSchedulerError) -> Er
                     error = %typed,
                     "request classifier rejected request"
                 );
-                return typed.clone().into();
+                return crate::migration::ClassifierRejection(typed.clone()).into();
             }
             cause = current.source();
         }

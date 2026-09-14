@@ -73,8 +73,21 @@ impl HasTokenIds for LLMEngineOutput {
     }
 }
 
+/// A classifier decision is terminal even when its client-visible error type
+/// would normally identify a retryable worker failure.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub(crate) struct ClassifierRejection(#[source] pub(crate) DynamoError);
+
 /// Check if an error chain indicates the request should be migrated.
 pub(crate) fn is_migratable(err: &(dyn StdError + 'static)) -> bool {
+    let mut source = Some(err);
+    while let Some(error) = source {
+        if error.is::<ClassifierRejection>() {
+            return false;
+        }
+        source = error.source();
+    }
     const MIGRATABLE: &[ErrorType] = &[
         ErrorType::CannotConnect,
         ErrorType::Disconnected,
