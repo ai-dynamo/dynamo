@@ -435,7 +435,6 @@ def test_request_cancellation_sglang_decode_cancel(
 def test_request_cancellation_sglang_prefill_cancel(
     request, runtime_services_dynamic_ports, predownload_models
 ):
-    """Cancel before the first token and prove the disaggregated pair still serves."""
     decode_system_port = allocate_port(DynamoPortRange.SERVE.value)
     request.addfinalizer(lambda port=decode_system_port: deallocate_port(port))
     prefill_system_port = allocate_port(DynamoPortRange.SERVE.value)
