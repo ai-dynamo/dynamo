@@ -27,7 +27,11 @@ from redis.exceptions import RedisClusterException, RedisError
 
 from dynamo.common.http import HttpConnectionError, HttpStatusError, HttpTimeoutError
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
-from dynamo.common.multimodal.image_loader import URL_VARIANT_KEY, ImageLoader
+from dynamo.common.multimodal.image_loader import (
+    URL_VARIANT_KEY,
+    ImageLoader,
+    image_cache_scope_from_request,
+)
 from dynamo.common.multimodal.shared_image_cache import _size_bucket
 
 pytestmark = [
@@ -599,6 +603,49 @@ async def test_invalid_shared_cache_entry_is_deleted_and_refetched(monkeypatch) 
     client.set.assert_awaited_once()
 
 
+async def test_truncated_shared_cache_entry_is_deleted_and_refetched(
+    monkeypatch,
+) -> None:
+    """Pillow reports some recognized-but-truncated images as plain OSError."""
+    _enable_shared_image_cache(monkeypatch)
+    client = AsyncMock()
+    client.get.return_value = PNG_BYTES[:-30]
+    origin_fetch = _mock_fetch_bytes()
+
+    with (
+        patch(_REDIS_CLUSTER_FACTORY_PATH, return_value=client),
+        patch(_FETCH_BYTES_PATH, origin_fetch),
+    ):
+        shared_loader = ImageLoader(cache_size=4, url_policy=_permissive_policy())
+        image = await shared_loader.load_image("https://example.com/img.png")
+
+    assert image.size == (2, 2)
+    client.delete.assert_awaited_once()
+    origin_fetch.assert_awaited_once()
+    client.set.assert_awaited_once()
+
+
+async def test_cache_key_preserves_url_path_and_query_case(monkeypatch) -> None:
+    _enable_shared_image_cache(monkeypatch)
+    client = AsyncMock()
+    client.get.return_value = None
+    origin_fetch = _mock_fetch_bytes()
+
+    with (
+        patch(_REDIS_CLUSTER_FACTORY_PATH, return_value=client),
+        patch(_FETCH_BYTES_PATH, origin_fetch),
+    ):
+        shared_loader = ImageLoader(cache_size=4, url_policy=_permissive_policy())
+        await shared_loader.load_image("https://example.com/Image.png?sig=AbC")
+        await shared_loader.load_image("https://example.com/image.png?sig=abc")
+
+    assert origin_fetch.await_count == 2
+    assert client.get.await_count == 2
+    assert (
+        client.get.await_args_list[0].args[0] != client.get.await_args_list[1].args[0]
+    )
+
+
 # --- Session-scoped image cache ---
 
 
@@ -720,3 +767,16 @@ async def test_session_scoped_cache_bypasses_when_scope_is_missing(monkeypatch) 
     assert shared_loader.cache_entries == 0
     client.get.assert_not_awaited()
     client.set.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ({"image_cache_scope": " session-a "}, "session-a"),
+        ({"image_cache_scope": ""}, None),
+        ({"image_cache_scope": 123}, None),
+        ({}, None),
+    ],
+)
+async def test_image_cache_scope_from_request(payload, expected) -> None:
+    assert image_cache_scope_from_request(payload) == expected

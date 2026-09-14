@@ -27,6 +27,7 @@ from dynamo.common.multimodal.image_loader import (
     URL_VARIANT_KEY,
     UUID_ONLY_VARIANT_KEY,
     ImageLoader,
+    image_cache_scope_from_request,
 )
 from dynamo.common.multimodal.mm_kwargs_transfer import (
     MmKwargsNixlReceiver,
@@ -52,16 +53,6 @@ logger = logging.getLogger(__name__)
 IMAGE_URL_KEY = "image_url"
 VIDEO_URL_KEY = "video_url"
 AUDIO_URL_KEY = "audio_url"
-
-
-def _image_cache_scope(request: dict[str, Any]) -> str | None:
-    """Return the stable agent session, or None when it is unavailable."""
-    agent_context = request.get("agent_context")
-    if isinstance(agent_context, dict):
-        session_id = agent_context.get("session_id")
-        if isinstance(session_id, str) and session_id.strip():
-            return session_id.strip()
-    return None
 
 
 def mark_forwarded_mm_hashes_for_routing(
@@ -562,6 +553,7 @@ class VllmMultimodalRequestProcessor:
                             request_id,
                             model=self.model,
                             context=context,
+                            cache_scope=image_cache_scope_from_request(request),
                         )
                     )
 
@@ -571,7 +563,7 @@ class VllmMultimodalRequestProcessor:
                 with _nvtx.annotate("mm_backend:image_download", color="green"):
                     images = await self.image_loader.load_image_batch(
                         image_items,
-                        cache_scope=_image_cache_scope(request),
+                        cache_scope=image_cache_scope_from_request(request),
                         preserve_uuid_slots=True,
                     )
                 if images:

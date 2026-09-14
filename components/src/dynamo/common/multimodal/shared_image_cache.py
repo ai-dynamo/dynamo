@@ -9,7 +9,6 @@ import os
 import threading
 import time
 from collections import defaultdict
-from typing import DefaultDict
 
 from redis.asyncio.cluster import RedisCluster
 from redis.exceptions import RedisClusterException, RedisError
@@ -47,7 +46,7 @@ class SharedImageCacheStats:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._durations: DefaultDict[tuple[str, str, str], list[float]] = defaultdict(
+        self._durations: defaultdict[tuple[str, str, str], list[float]] = defaultdict(
             list
         )
         self._pending_count = 0
@@ -114,13 +113,13 @@ class SharedImageCache:
         return cls(client, ttl_seconds)
 
     @staticmethod
-    def _key(canonical_url: str) -> str:
-        digest = hashlib.sha256(canonical_url.encode("utf-8")).hexdigest()
+    def _key(cache_identity: str) -> str:
+        digest = hashlib.sha256(cache_identity.encode("utf-8")).hexdigest()
         return f"dynamo:mm:image:{{{digest}}}:bytes"
 
-    async def get(self, canonical_url: str) -> bytes | None:
+    async def get(self, cache_identity: str) -> bytes | None:
         """Return cached encoded bytes, or ``None`` on a miss or cache error."""
-        key = self._key(canonical_url)
+        key = self._key(cache_identity)
         started = time.perf_counter()
         outcome = "error"
         size_bucket = "unknown"
@@ -138,9 +137,9 @@ class SharedImageCache:
                 "get", outcome, size_bucket, time.perf_counter() - started
             )
 
-    async def put(self, canonical_url: str, content: bytes) -> None:
+    async def put(self, cache_identity: str, content: bytes) -> None:
         """Store validated encoded bytes, ignoring cache availability errors."""
-        key = self._key(canonical_url)
+        key = self._key(cache_identity)
         started = time.perf_counter()
         outcome = "error"
         size_bucket = _size_bucket(len(content))
@@ -155,9 +154,9 @@ class SharedImageCache:
                 "set", outcome, size_bucket, time.perf_counter() - started
             )
 
-    async def delete(self, canonical_url: str) -> None:
+    async def delete(self, cache_identity: str) -> None:
         """Remove a corrupt entry, ignoring cache availability errors."""
-        key = self._key(canonical_url)
+        key = self._key(cache_identity)
         try:
             await self._client.delete(key)
         except _REDIS_OPERATION_ERRORS as exc:

@@ -8,6 +8,7 @@ import hashlib
 import logging
 import os
 from collections import OrderedDict
+from collections.abc import Mapping
 from io import BytesIO
 from typing import Any, Coroutine, Dict, Final, List, Literal, overload
 from urllib.parse import urlparse
@@ -37,6 +38,16 @@ logger = logging.getLogger(__name__)
 URL_VARIANT_KEY: Final = "Url"
 DECODED_VARIANT_KEY: Final = "Decoded"
 UUID_ONLY_VARIANT_KEY: Final = "UuidOnly"
+IMAGE_CACHE_SCOPE_KEY: Final = "image_cache_scope"
+
+
+def image_cache_scope_from_request(request: Mapping[str, Any]) -> str | None:
+    """Return a non-empty frontend-derived image-cache scope, if present."""
+    scope = request.get(IMAGE_CACHE_SCOPE_KEY)
+    if not isinstance(scope, str):
+        return None
+    scope = scope.strip()
+    return scope or None
 
 
 def _create_nixl_connector() -> Any:
@@ -139,7 +150,9 @@ class ImageLoader:
         ``None`` means the caller must bypass all image caches: session
         scoping is enabled but no valid scope was provided for this load.
         """
-        url_key = normalized_url.lower()
+        # Preserve path and query case: unlike the scheme and host, both may be
+        # case-sensitive and therefore identify different origin objects.
+        url_key = normalized_url
 
         if not self._session_scoped_cache:
             return url_key
@@ -189,7 +202,7 @@ class ImageLoader:
                 if cached_content is not None:
                     try:
                         return await self._open_image(BytesIO(cached_content))
-                    except (Image.UnidentifiedImageError, ValueError) as exc:
+                    except (OSError, ValueError) as exc:
                         logger.warning(
                             "Discarding invalid shared image cache entry for '%s': %s",
                             image_url[:80],

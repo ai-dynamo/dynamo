@@ -107,13 +107,13 @@ async def test_extracts_mixed_url_data_url_and_decoded_media():
 
 
 @pytest.mark.asyncio
-async def test_image_cache_uses_agent_session_scope():
+async def test_image_cache_uses_frontend_scope():
     processor = _processor()
     image_items = [{"Url": "https://example.com/image.png"}]
 
     await processor.extract_multimodal_data(
         {
-            "agent_context": {"session_id": " session-42 "},
+            "image_cache_scope": " session-42 ",
             "multi_modal_data": {"image_url": image_items},
         },
         "request-1",
@@ -126,13 +126,13 @@ async def test_image_cache_uses_agent_session_scope():
 
 
 @pytest.mark.asyncio
-async def test_image_cache_has_no_scope_for_malformed_agent_context():
+async def test_image_cache_has_no_scope_for_malformed_scope():
     processor = _processor()
     image_items = [{"Url": "https://example.com/image.png"}]
 
     await processor.extract_multimodal_data(
         {
-            "agent_context": {"session_id": "   "},
+            "image_cache_scope": "   ",
             "multi_modal_data": {"image_url": image_items},
         },
         "request-1",
@@ -281,10 +281,11 @@ async def test_merges_encoder_images_with_local_video_and_decoded_fallback():
 
     result = await processor.extract_multimodal_data(
         {
+            "image_cache_scope": "session-42",
             "multi_modal_data": {
                 "image_url": [{"Url": "https://example.com/image.png"}],
                 "video_url": [{"Url": "https://example.com/video.mp4"}],
-            }
+            },
         },
         "request-encoder",
         None,
@@ -303,6 +304,12 @@ async def test_merges_encoder_images_with_local_video_and_decoded_fallback():
 
     assert result == {"image": decoded_image}
     processor.embedding_loader.load_multimodal_embeddings.assert_awaited_once()
+    assert (
+        processor.embedding_loader.load_multimodal_embeddings.call_args.kwargs[
+            "cache_scope"
+        ]
+        == "session-42"
+    )
 
 
 @pytest.mark.asyncio

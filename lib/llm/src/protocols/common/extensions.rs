@@ -1296,7 +1296,6 @@ mod tests {
                 Some("parent-run-1"),
             ),
             (HEADER_DYNAMO_SESSION_ID, "generic-run-1", None, None),
-            (HEADER_SESSION_AFFINITY, "affinity-run-1", None, None),
         ];
 
         for (header_name, header_value, parent_header_value, expected_parent_session_id) in cases {
@@ -1460,7 +1459,7 @@ mod tests {
         );
         assert_eq!(
             agent_context_from_headers(&headers).unwrap().session_id,
-            "affinity"
+            "claude-session"
         );
 
         // The explicit Dynamo session header wins over every fallback.
@@ -1525,6 +1524,18 @@ mod tests {
 
         headers.insert(HEADER_SESSION_AFFINITY, "   ".parse().unwrap());
         assert!(session_affinity_from_headers(&headers).is_none());
+    }
+
+    #[test]
+    fn session_affinity_header_does_not_create_agent_context() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_SESSION_AFFINITY, "affinity".parse().unwrap());
+
+        assert_eq!(
+            session_affinity_from_headers(&headers).unwrap().as_str(),
+            "affinity"
+        );
+        assert!(agent_context_from_headers(&headers).is_none());
     }
 
     #[test]
