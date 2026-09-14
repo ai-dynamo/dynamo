@@ -526,8 +526,6 @@ async def test_parse_args_rejects_dcp_on_backend_without_dcp_support(
     message = str(excinfo.value)
     assert "'fa3'" in message
     assert "--dcp-size 1" in message
-    # No attention backend was passed, so the message must say the engine
-    # picked this one -- that is the reported reproduction.
     assert "automatically" in message
 
 
@@ -599,6 +597,47 @@ async def test_resolved_server_args_rejects_an_automatic_unsupported_backend(
     assert "'fa3'" in message
     assert "automatically" in message
     assert config.server_args is cli_server_args
+
+
+@pytest.mark.asyncio
+async def test_prepare_snapshot_engine_rejects_dcp_before_warmup(monkeypatch):
+    """Snapshot mode warms the engine with a real request of its own.
+
+    That warmup runs before any init function reaches
+    ``use_resolved_server_args``, so the snapshot engine has to be checked
+    where it is built.
+    """
+    from dynamo.sglang import snapshot as sglang_snapshot
+
+    monkeypatch.setattr(
+        sglang_snapshot,
+        "SnapshotConfig",
+        SimpleNamespace(from_env=lambda: SimpleNamespace()),
+    )
+    monkeypatch.setattr(sglang_snapshot, "configure_snapshot_capture_env", lambda: None)
+    monkeypatch.setattr(sglang_snapshot, "override_server_args", lambda *a, **kw: None)
+
+    engine_server_args = _dcp_server_args_stub(dcp_size=2, attention_backend="fa3")
+    monkeypatch.setattr(
+        sglang_snapshot.sgl,
+        "Engine",
+        lambda server_args: SimpleNamespace(server_args=engine_server_args),
+    )
+
+    warmed = []
+
+    async def _warmup(engine, server_args):
+        warmed.append(engine)
+
+    monkeypatch.setattr(sglang_snapshot, "warmup_engine", _warmup)
+
+    config = sglang_args.Config(_dcp_server_args_stub(dcp_size=2), SimpleNamespace())
+
+    with pytest.raises(ValueError) as excinfo:
+        await sglang_snapshot.prepare_snapshot_engine(config)
+
+    assert "'fa3'" in str(excinfo.value)
+    assert warmed == []
 
 
 @pytest.mark.asyncio

@@ -8,7 +8,7 @@ import gc
 import logging
 import os
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import sglang as sgl
 
@@ -20,6 +20,9 @@ from dynamo.common.snapshot.lifecycle import (
 from dynamo.sglang._compat import override_server_args, resolved_server_args
 
 from .pause import SGLangEnginePauseController
+
+if TYPE_CHECKING:
+    from dynamo.sglang.args import Config
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +118,7 @@ async def warmup_engine(engine: sgl.Engine, server_args: Any) -> None:
 
 
 async def prepare_snapshot_engine(
-    server_args,
+    config: "Config",
 ) -> EngineSnapshotController[sgl.Engine] | None:
     """Single entry point for Dynamo Snapshot integration.
 
@@ -133,6 +136,8 @@ async def prepare_snapshot_engine(
     snapshot_config = SnapshotConfig.from_env()
     if snapshot_config is None:
         return None
+
+    server_args = config.server_args
 
     configure_snapshot_capture_env()
     logger.info("Snapshot mode enabled (watcher-driven signals)")
@@ -164,6 +169,7 @@ async def prepare_snapshot_engine(
     logger.info(
         f"SGLang engine loaded in {time.time() - start_time:.2f}s (snapshot mode)"
     )
+    config.validate_engine_server_args(engine.server_args)
     runtime_server_args = resolved_server_args(engine.server_args)
     await warmup_engine(engine, runtime_server_args)
 

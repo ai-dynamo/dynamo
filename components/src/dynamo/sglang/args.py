@@ -104,11 +104,19 @@ class Config:
         else:
             return DisaggregationMode.AGGREGATED
 
-    def use_resolved_server_args(self, server_args: Any) -> Any:
-        """Switch post-runtime Dynamo code to SGLang's resolved configuration."""
+    def validate_engine_server_args(self, server_args: Any) -> None:
+        """Re-run the launch checks a built engine's configuration can answer.
+
+        Call this on ``engine.server_args`` before the engine takes a request
+        of any kind, including a warmup one.
+        """
         _validate_dcp_attention_backend(
             server_args, backend_from_cli=self.attention_backend_from_cli
         )
+
+    def use_resolved_server_args(self, server_args: Any) -> Any:
+        """Switch post-runtime Dynamo code to SGLang's resolved configuration."""
+        self.validate_engine_server_args(server_args)
         self.server_args = resolved_server_args(server_args)
         return self.server_args
 
