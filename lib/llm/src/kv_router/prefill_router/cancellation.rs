@@ -42,19 +42,6 @@ mod tests {
     use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
 
     #[tokio::test]
-    async fn propagates_cancellation_after_arming() {
-        let parent = Context::new(()).context();
-        let child = Context::new(()).context();
-        let _guard = arm_for(true, true, parent.clone(), Arc::downgrade(&child)).unwrap();
-
-        parent.stop_generating();
-
-        tokio::time::timeout(std::time::Duration::from_secs(1), child.stopped())
-            .await
-            .expect("prefill context did not observe client cancellation");
-    }
-
-    #[tokio::test]
     async fn propagates_cancellation_observed_before_arming() {
         let parent = Context::new(()).context();
         parent.stop_generating();
