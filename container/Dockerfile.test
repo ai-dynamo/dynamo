@@ -37,10 +37,12 @@ RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/
 COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/pyproject.toml
 COPY --chmod=664 --chown=dynamo:0 tests/__init__.py /workspace/tests/__init__.py
 COPY --chmod=664 --chown=dynamo:0 tests/marker_categories.py /workspace/tests/marker_categories.py
-# The nightly version-stamping tests execute this script against temporary
-# fixture repositories. Keep the production image unchanged and expose only
-# this script in the test image.
-COPY --chmod=664 --chown=dynamo:0 .github/scripts/apply_dev_version.py /workspace/.github/scripts/apply_dev_version.py
+# Version-stamping and shell regression tests execute these workflow helpers.
+# COPY also creates parent directories: keep them traversable by ARC's uid 1001.
+COPY --chmod=755 --chown=dynamo:0 \
+    .github/scripts/apply_dev_version.py \
+    .github/scripts/retry_kubectl.sh \
+    .github/scripts/collect_vcluster_diagnostics.sh /workspace/.github/scripts/
 # Required: blocks dynamo.vllm/sglang from shadowing the installed packages.
 COPY --chmod=664 --chown=dynamo:0 conftest.py /workspace/conftest.py
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
