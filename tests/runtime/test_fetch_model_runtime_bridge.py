@@ -304,9 +304,8 @@ def test_fetch_model_runtime_bridge_orders(
     cache = tmp_path / "hf-cache"
     cache.mkdir()
     snapshot = _build_cached_model(cache)
-    # Only fetch_then_backend_worker binds a socket. Every other scenario keeps
-    # DYN_SYSTEM_PORT=-1, so reserving host-wide ports for them would make the
-    # test depend on the shared port pool without ever using it.
+    # Only fetch_then_backend_worker binds a socket; the others run with
+    # DYN_SYSTEM_PORT=-1 and need no reservation from the shared port pool.
     if scenario == "fetch_then_backend_worker":
         system_port = request.getfixturevalue("dynamo_dynamic_ports").system_ports[0]
     else:
