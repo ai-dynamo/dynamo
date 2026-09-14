@@ -173,7 +173,7 @@ pip install --no-deps --force-reinstall --only-binary opencv-python-headless \
 Nothing installs automatically — this is a deliberate operator step. The images also ship
 an installer with the same bounds plus idempotency and air-gap support
 (`python -m dynamo.common.utils.install_media_decoders <backend>`). It does not cover the
-vLLM OpenCV case above: that package is already importable, so the installer skips it. See
+vLLM OpenCV case above: the vLLM installer mapping installs only PyAV. See
 [Additional Media Decoders](additional-media-decoders.md) for the full workflow,
 including baking the install into an image layer for Kubernetes.
 
