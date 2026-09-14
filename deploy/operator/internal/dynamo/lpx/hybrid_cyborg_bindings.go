@@ -15,12 +15,9 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/utils/ptr"
 )
 
 const (
-	selectedCyborgInfiniBandName     = "infiniband"
-	selectedCyborgInfiniBandPath     = "/dev/infiniband"
 	selectedCyborgServerHostsFileEnv = "SERVER_HOSTS_FILE"
 	selectedCyborgTokenizerDirEnv    = "TOKENIZER_DIR"
 	selectedCyborgTotalReplicasEnv   = "TOTAL_REPLICAS"
@@ -39,11 +36,6 @@ func ApplySelectedCyborgContainerDefaults(
 ) error {
 	projection := workload.modelProjections[0]
 
-	container.VolumeMounts = append(
-		container.VolumeMounts,
-		corev1.VolumeMount{Name: selectedCyborgInfiniBandName, MountPath: selectedCyborgInfiniBandPath},
-		corev1.VolumeMount{Name: lpuConfigVolumeName, MountPath: lpuConfigMountPath},
-	)
 	container.Env = append(
 		container.Env,
 		corev1.EnvVar{
@@ -81,28 +73,6 @@ func ApplySelectedCyborgContainerDefaults(
 		Value: runtimeTemporaryStorageMountPath + "/lpu_servers",
 	})
 	return nil
-}
-
-// ApplySelectedCyborgPodDefaults installs the operator-owned V2 Cyborg
-// volumes before the user's PodSpec override is merged. podSpec must be non-nil
-// and is mutated in place.
-func ApplySelectedCyborgPodDefaults(podSpec *corev1.PodSpec, configMapName string) {
-	podSpec.Volumes = append(
-		podSpec.Volumes,
-		corev1.Volume{
-			Name: lpuConfigVolumeName,
-			VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
-				LocalObjectReference: corev1.LocalObjectReference{Name: configMapName},
-			}},
-		},
-		corev1.Volume{
-			Name: selectedCyborgInfiniBandName,
-			VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{
-				Path: selectedCyborgInfiniBandPath,
-				Type: ptr.To(corev1.HostPathDirectory),
-			}},
-		},
-	)
 }
 
 // RenderCyborgConfigMap renders the XT hybrid configuration before Cyborg defaults are merged.

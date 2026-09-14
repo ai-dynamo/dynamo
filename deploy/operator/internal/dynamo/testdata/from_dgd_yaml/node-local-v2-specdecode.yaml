@@ -277,14 +277,12 @@ spec:
             volumeMounts:
             - mountPath: /nfs
               name: model-storage
-            - mountPath: /dev/shm
-              name: shared-memory
             - mountPath: /configs
               name: config
-            - mountPath: /tmp
-              name: tmp
             - mountPath: /tmp/dynamo-lpu-ssh
               name: single-v2-ssh-key
+            - mountPath: /dev/shm
+              name: shared-memory
           initContainers:
           - args:
             - -c
@@ -315,21 +313,19 @@ spec:
           - name: model-storage
             persistentVolumeClaim:
               claimName: model-storage
+          - emptyDir: {}
+            name: single-v2-ssh-key
           - emptyDir:
               medium: Memory
               sizeLimit: 8Gi
             name: shared-memory
-          - configMap:
-              name: lmppuelh-lpu-29156c984c942fc4
-            name: config
-          - emptyDir: {}
-            name: tmp
           - name: ssh-secret
             secret:
               defaultMode: 384
               secretName: ssh-secret
-          - emptyDir: {}
-            name: single-v2-ssh-key
+          - configMap:
+              name: lmppuelh-lpu-29156c984c942fc4
+            name: config
         replicas: 1
         roleName: lpu-ldr
         startsAfter:
@@ -507,21 +503,19 @@ spec:
             volumeMounts:
             - mountPath: /nfs
               name: model-storage
-            - mountPath: /dev/shm
-              name: shared-memory
             - mountPath: /configs
               name: config
-            - mountPath: /tmp
-              name: tmp
-            - mountPath: /sys
-              name: host-sys
             - mountPath: /dev
               name: host-dev
+            - mountPath: /sys
+              name: host-sys
             - mountPath: /ssh-pk
               name: ssh-secret
               readOnly: true
             - mountPath: /dev/hugepages
               name: hugepages
+            - mountPath: /dev/shm
+              name: shared-memory
           dnsPolicy: ClusterFirstWithHostNet
           hostIPC: true
           hostNetwork: true
@@ -542,15 +536,6 @@ spec:
           - name: model-storage
             persistentVolumeClaim:
               claimName: model-storage
-          - emptyDir:
-              medium: Memory
-              sizeLimit: 8Gi
-            name: shared-memory
-          - configMap:
-              name: lmppuelh-lpu-29156c984c942fc4
-            name: config
-          - emptyDir: {}
-            name: tmp
           - hostPath:
               path: /dev
               type: Directory
@@ -566,6 +551,13 @@ spec:
           - emptyDir:
               medium: HugePages
             name: hugepages
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 8Gi
+            name: shared-memory
+          - configMap:
+              name: lmppuelh-lpu-29156c984c942fc4
+            name: config
         replicas: 4
         roleName: lpu-wkr-m-0
     - annotations:
@@ -739,21 +731,19 @@ spec:
             volumeMounts:
             - mountPath: /nfs
               name: model-storage
-            - mountPath: /dev/shm
-              name: shared-memory
             - mountPath: /configs
               name: config
-            - mountPath: /tmp
-              name: tmp
-            - mountPath: /sys
-              name: host-sys
             - mountPath: /dev
               name: host-dev
+            - mountPath: /sys
+              name: host-sys
             - mountPath: /ssh-pk
               name: ssh-secret
               readOnly: true
             - mountPath: /dev/hugepages
               name: hugepages
+            - mountPath: /dev/shm
+              name: shared-memory
           dnsPolicy: ClusterFirstWithHostNet
           hostIPC: true
           hostNetwork: true
@@ -774,15 +764,6 @@ spec:
           - name: model-storage
             persistentVolumeClaim:
               claimName: model-storage
-          - emptyDir:
-              medium: Memory
-              sizeLimit: 8Gi
-            name: shared-memory
-          - configMap:
-              name: lmppuelh-lpu-29156c984c942fc4
-            name: config
-          - emptyDir: {}
-            name: tmp
           - hostPath:
               path: /dev
               type: Directory
@@ -798,6 +779,13 @@ spec:
           - emptyDir:
               medium: HugePages
             name: hugepages
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 8Gi
+            name: shared-memory
+          - configMap:
+              name: lmppuelh-lpu-29156c984c942fc4
+            name: config
         replicas: 4
         roleName: lpu-wkr-m-1
     - annotations:
@@ -971,21 +959,19 @@ spec:
             volumeMounts:
             - mountPath: /nfs
               name: model-storage
-            - mountPath: /dev/shm
-              name: shared-memory
             - mountPath: /configs
               name: config
-            - mountPath: /tmp
-              name: tmp
-            - mountPath: /sys
-              name: host-sys
             - mountPath: /dev
               name: host-dev
+            - mountPath: /sys
+              name: host-sys
             - mountPath: /ssh-pk
               name: ssh-secret
               readOnly: true
             - mountPath: /dev/hugepages
               name: hugepages
+            - mountPath: /dev/shm
+              name: shared-memory
           dnsPolicy: ClusterFirstWithHostNet
           hostIPC: true
           hostNetwork: true
@@ -1006,15 +992,6 @@ spec:
           - name: model-storage
             persistentVolumeClaim:
               claimName: model-storage
-          - emptyDir:
-              medium: Memory
-              sizeLimit: 8Gi
-            name: shared-memory
-          - configMap:
-              name: lmppuelh-lpu-29156c984c942fc4
-            name: config
-          - emptyDir: {}
-            name: tmp
           - hostPath:
               path: /dev
               type: Directory
@@ -1030,6 +1007,13 @@ spec:
           - emptyDir:
               medium: HugePages
             name: hugepages
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 8Gi
+            name: shared-memory
+          - configMap:
+              name: lmppuelh-lpu-29156c984c942fc4
+            name: config
         replicas: 4
         roleName: lpu-wkr-m-2
     headlessServiceConfig:

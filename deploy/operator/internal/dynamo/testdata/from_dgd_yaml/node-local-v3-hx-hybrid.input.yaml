@@ -32,9 +32,13 @@ spec:
               - /opt/gpu-runtime
               args:
               - serve
+              volumeMounts:
+              - {name: model-storage, mountPath: /nfs}
               resources:
                 claims:
                 - name: gpu
+            volumes:
+            - {name: model-storage, persistentVolumeClaim: {claimName: model-storage}}
       - name: agent
         podTemplate:
           spec:
@@ -50,7 +54,17 @@ spec:
               volumeMounts:
               - mountPath: /nfs
                 name: model-storage
+              - name: config
+                mountPath: /configs
+              - {name: hugepages, mountPath: /dev/hugepages}
+              - {name: host-sys, mountPath: /sys}
+              - {name: host-dev, mountPath: /dev}
+              - {name: ssh-secret, mountPath: /ssh-pk, readOnly: true}
             volumes:
             - name: model-storage
               persistentVolumeClaim:
                 claimName: model-storage
+            - {name: host-dev, hostPath: {path: /dev, type: Directory}}
+            - {name: host-sys, hostPath: {path: /sys, type: Directory}}
+            - {name: hugepages, emptyDir: {medium: HugePages}}
+            - {name: ssh-secret, secret: {secretName: ssh-secret, defaultMode: 420}}

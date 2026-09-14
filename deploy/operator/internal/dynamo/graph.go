@@ -1669,15 +1669,6 @@ func generateBasePodSpecWithDefaults(
 	componentDefaults ComponentDefaults,
 	containerGPUs ContainerGPUCount,
 ) (*corev1.PodSpec, error) {
-	// Resolve the one merge policy shared by every PodTemplate overlay.
-	podTemplateMergeStrategy, err := v1alpha1.ResolveExtraPodSpecMergeStrategy(
-		v1alpha1.ExtraPodSpecMergeStrategy(component.ExtraPodSpecMergeStrategy),
-		operatorConfig.PodGeneration.DefaultExtraPodSpecMergeStrategy,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve podTemplate merge strategy: %w", err)
-	}
-
 	// Start with base container generated per component type
 	annotations := GetPodTemplateAnnotations(component)
 	componentContext, err := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes, NewDiscoveryContext(operatorConfig.Discovery.Backend, annotations))
@@ -1690,8 +1681,28 @@ func generateBasePodSpecWithDefaults(
 	}
 
 	if main := GetMainContainer(component); main != nil {
-		if err := mergeContainerByName(&container, main, podTemplateMergeStrategy); err != nil {
+		// Copy the authored container before merging fields and environment variables.
+		main = main.DeepCopy()
+		baseEnv := container.Env
+		if err := mergo.Merge(&container, *main, mergo.WithOverride); err != nil {
 			return nil, fmt.Errorf("failed to merge podTemplate main container: %w", err)
+		}
+		container.Env = MergeEnvs(baseEnv, main.Env)
+
+		// An explicitly empty port list clears generated ports as well.
+		if main.Ports != nil {
+			container.Ports = main.Ports
+		}
+
+		// Replace probes in full so authored handlers do not retain generated handlers.
+		if main.LivenessProbe != nil {
+			container.LivenessProbe = main.LivenessProbe
+		}
+		if main.ReadinessProbe != nil {
+			container.ReadinessProbe = main.ReadinessProbe
+		}
+		if main.StartupProbe != nil {
+			container.StartupProbe = main.StartupProbe
 		}
 	}
 
@@ -1732,7 +1743,7 @@ func generateBasePodSpecWithDefaults(
 	sidecars := make([]corev1.Container, 0)
 
 	if component.PodTemplate != nil {
-		podSpecOverride := *component.PodTemplate.Spec.DeepCopy()
+		podSpecOverride := component.PodTemplate.Spec.DeepCopy()
 		for _, userContainer := range podSpecOverride.Containers {
 			if userContainer.Name != commonconsts.MainContainerName {
 				sidecars = append(sidecars, userContainer)
@@ -1740,7 +1751,7 @@ func generateBasePodSpecWithDefaults(
 		}
 
 		podSpecOverride.Containers = nil
-		if err := mergePodSpecOverride(&podSpec, podSpecOverride, podTemplateMergeStrategy); err != nil {
+		if err := mergo.Merge(&podSpec, podSpecOverride, mergo.WithOverride); err != nil {
 			return nil, fmt.Errorf("failed to merge podTemplate spec: %w", err)
 		}
 	}

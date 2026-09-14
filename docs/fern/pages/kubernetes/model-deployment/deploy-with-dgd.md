@@ -257,7 +257,7 @@ vLLM and SGLang take tensor/pipeline/data parallelism as CLI flags (covered in t
 
 You normally do not need to set the top-level `spec.backendFramework` field — the operator infers the backend from the worker command. Set it explicitly (`vllm`, `sglang`, or `trtllm`) only when a feature needs the framework known up front, such as GMS failover or multinode TensorRT-LLM.
 
-For LPX on LPU hardware, declare the build and runtime roles in a `type: lpx` component:
+For an XT LPU-only deployment, declare separate Agent and Nova conductor templates in a `type: lpx` component:
 
 ```yaml
 spec:
@@ -274,15 +274,68 @@ spec:
           - name: main
             image: <lpu-runtime-image>
             volumeMounts:
+            - name: config
+              mountPath: /configs
+            - name: host-dev
+              mountPath: /dev
+            - name: host-sys
+              mountPath: /sys
+            - name: hugepages
+              mountPath: /dev/hugepages
+            - name: ssh-secret
+              mountPath: /ssh-pk
+              readOnly: true
             - name: model-storage
               mountPath: /models
           volumes:
+          - name: host-dev
+            hostPath:
+              path: /dev
+              type: Directory
+          - name: host-sys
+            hostPath:
+              path: /sys
+              type: Directory
+          - name: hugepages
+            emptyDir:
+              medium: HugePages
+          - name: ssh-secret
+            secret:
+              secretName: mpi-run-ssh-secret
+              defaultMode: 0644
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
+    - name: conductor
+      podTemplate:
+        spec:
+          containers:
+          - name: main
+            image: <lpu-runtime-image>
+            volumeMounts:
+            - name: config
+              mountPath: /configs
+            - name: single-v2-ssh-key
+              mountPath: /tmp/dynamo-lpu-ssh
+            - name: model-storage
+              mountPath: /models
+          volumes:
+          - name: ssh-secret
+            secret:
+              secretName: mpi-run-ssh-secret
+              defaultMode: 0600
+          - name: single-v2-ssh-key
+            emptyDir: {}
           - name: model-storage
             persistentVolumeClaim:
               claimName: model-storage
 ```
 
-Create the `model-storage` PVC in the DGD's namespace with storage accessible to all LPX Pods. Replace `my-model/build` with a build available through the configured LPX model registry and `<lpu-runtime-image>` with its compatible runtime image. The `agent` role configures Agent Pods; the optional `conductor` role configures the conductor. With one LPX component, the conductor reuses the agent template unless the conductor supplies a separate `podTemplate`. For a hybrid engine, configure the hybrid runtime template on the conductor role.
+Create the `model-storage` PVC in the DGD's namespace with storage accessible to all LPX Pods. Replace `my-model/build` with an XT LPU-only build available through the configured LPX model registry and `<lpu-runtime-image>` with its compatible runtime image.
+
+Declare static volumes and every LPX runtime container mount in its role's `podTemplate`, including the conductor's SSH source and destination volumes. Use the configured MPI SSH Secret name; `mpi-run-ssh-secret` is the chart default. The operator generates the `config` volume with its content-based ConfigMap name and init containers with their own mounts. Keep the `hugepages` volume and mount for XT Agents and HX hybrid Agents; omit both for HX LPU-only and speculative-decoding Agents. For a hybrid engine, configure the hybrid runtime's template, volumes, and mounts on the conductor role.
+
+Runtime configuration and scratch files use the container's writable `/tmp`; a separate volume is optional. For a read-only root filesystem, mount a writable `emptyDir` at `/tmp`. The conductor's separate `/tmp/dynamo-lpu-ssh` mount shares its prepared key with the init container and is still required.
 
 For LPU+LPU speculative decoding, declare separate draft and target LPX components: the draft has only an `agent` role; the target has `conductor` and `agent` roles. All LPX components share one LPX deployment and PodCliqueSet, separate from ordinary components. See [LPX component fields](../../reference/kubernetes-api/dynamo-component-deployment.mdx#spec-reference) for replica counts and template requirements.
 

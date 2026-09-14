@@ -39,7 +39,6 @@ spec:
                   name: model-storage
     - name: lpu
       type: lpx
-      extraPodSpecMergeStrategy: strategic
       replicas: 2
       lpx:
         buildId: llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c
@@ -77,10 +76,14 @@ spec:
                 limits:
                   nvidia.com/gpu: '1'
               volumeMounts:
+              - name: config
+                mountPath: /configs
               - mountPath: /etc/cyborg/model-card.json
                 name: cyborg-model-card
                 readOnly: true
                 subPath: model-card.json
+              - name: infiniband
+                mountPath: /dev/infiniband
               - mountPath: /nfs
                 name: model-storage
             tolerations:
@@ -90,6 +93,11 @@ spec:
             - configMap:
                 name: dgd-lpx-v2-vllm-cyborg-model-card
               name: cyborg-model-card
+            - name: infiniband
+              hostPath:
+                path: /dev/infiniband
+                type: Directory
+            - {name: model-storage, persistentVolumeClaim: {claimName: model-storage}}
       - name: agent
         podTemplate:
           spec:
@@ -139,6 +147,18 @@ spec:
               volumeMounts:
               - mountPath: /nfs
                 name: model-storage
+              - name: config
+                mountPath: /configs
+              - {name: hugepages, mountPath: /dev/hugepages}
+              - {name: host-sys, mountPath: /sys}
+              - {name: host-dev, mountPath: /dev}
+              - {name: ssh-secret, mountPath: /ssh-pk, readOnly: true}
+            volumes:
+            - {name: model-storage, persistentVolumeClaim: {claimName: model-storage}}
+            - {name: host-dev, hostPath: {path: /dev, type: Directory}}
+            - {name: host-sys, hostPath: {path: /sys, type: Directory}}
+            - {name: hugepages, emptyDir: {medium: HugePages}}
+            - {name: ssh-secret, secret: {secretName: ssh-secret, defaultMode: 420}}
     - name: prefill
       type: prefill
       replicas: 1

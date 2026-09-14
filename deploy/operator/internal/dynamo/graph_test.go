@@ -6093,6 +6093,7 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 		{
 			name: "frontend with overriding env var",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ServiceName:   "frontend",
 				ComponentType: commonconsts.ComponentTypeFrontend,
 				Envs: []corev1.EnvVar{
 					{
@@ -6100,12 +6101,19 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 						Value: "3000",
 					},
 				},
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{MainContainer: &corev1.Container{
+					Name:  commonconsts.MainContainerName,
+					Ports: []corev1.ContainerPort{{Name: "metrics", ContainerPort: 9001, Protocol: corev1.ProtocolTCP}},
+					Env:   []corev1.EnvVar{{Name: "POD_NAME", Value: "static-pod-name"}},
+				}},
 			},
 			backendFramework: BackendFrameworkVLLM,
 			wantCommand:      []string{"python3"},
 			wantArgs:         []string{"-m", "dynamo.frontend"},
 			wantEnvVars: map[string]string{
-				"DYN_HTTP_PORT": "3000",
+				"DYN_HTTP_PORT":           "3000",
+				"POD_NAME":                "static-pod-name",
+				"DYN_PARENT_DGD_K8S_NAME": "test-deployment",
 			},
 		},
 		{
@@ -6131,8 +6139,11 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Convert and freeze the authored component, then render frontend defaults")
+			component := betaComponent(t, tt.component)
+			original := component.DeepCopy()
 			podSpec, err := GenerateBasePodSpec(
-				betaComponent(t, tt.component),
+				component,
 				tt.backendFramework,
 				secretsRetriever,
 				dynamoDeployment.Name,
@@ -6153,8 +6164,14 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 			if tt.wantErr {
 				return
 			}
+			t.Log("Preserve the authored input and replace authored ports without retaining generated ports")
+			require.Len(t, podSpec.Containers, 1)
+			require.Equal(t, original, component, "rendering must not mutate the authored pod template")
+			if main := GetMainContainer(original); main != nil && main.Ports != nil {
+				require.Equal(t, main.Ports, podSpec.Containers[0].Ports)
+			}
 
-			// Check command and args
+			t.Log("Preserve expected frontend command and arguments")
 			if !reflect.DeepEqual(podSpec.Containers[0].Command, tt.wantCommand) {
 				t.Errorf("GenerateBasePodSpec() command = %v, want %v",
 					podSpec.Containers[0].Command, tt.wantCommand)
@@ -6164,16 +6181,13 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 					podSpec.Containers[0].Args, tt.wantArgs)
 			}
 
-			// Check environment variables
-			envVars := make(map[string]string)
+			t.Log("Keep each expected environment value exactly once without a stale value source")
+			envVars := make(map[string][]corev1.EnvVar)
 			for _, env := range podSpec.Containers[0].Env {
-				envVars[env.Name] = env.Value
+				envVars[env.Name] = append(envVars[env.Name], env)
 			}
 			for k, v := range tt.wantEnvVars {
-				if envVars[k] != v {
-					t.Errorf("GenerateBasePodSpec() env var %s = %v, want %v",
-						k, envVars[k], v)
-				}
+				require.Equal(t, []corev1.EnvVar{{Name: k, Value: v}}, envVars[k])
 			}
 		})
 	}

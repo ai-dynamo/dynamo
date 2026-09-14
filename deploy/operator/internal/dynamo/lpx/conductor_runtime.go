@@ -110,7 +110,6 @@ func updateLPUConductorContainer(
 			),
 		},
 	)
-	container.VolumeMounts = setVolumeMount(container.VolumeMounts, conductorSSHKeyVolumeMount())
 
 	// Default readiness to Nova's health endpoint while preserving an explicit probe.
 	if container.ReadinessProbe == nil {

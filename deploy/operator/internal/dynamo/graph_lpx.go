@@ -296,7 +296,7 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.SelectedWorkload, m
 		lpuRole := lpxRoleComponent(component, agent.PodTemplate, p.dynamoDeployment, p.discoveryBackend)
 		lpuDefaults := &imageEntrypointComponentDefaults{ComponentDefaults: &BaseComponentDefaults{}}
 		lpuTemplate, err := renderSelectedLPXRole(lpuRole, p.dynamoDeployment, alphaComponent, p.operatorConfig, p.secretsRetriever,
-			p.discoveryContext, workload, lpuDefaults, nil)
+			p.discoveryContext, lpuDefaults, nil)
 		if err != nil {
 			return nil, nil, fmt.Errorf("rendering %s.agent: rendering selected LPX base pod: %w", component.ComponentName, err)
 		}
@@ -313,7 +313,7 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.SelectedWorkload, m
 			if conductor != nil && conductor.PodTemplate != nil {
 				role := lpxRoleComponent(component, conductor.PodTemplate, p.dynamoDeployment, p.discoveryBackend)
 				input.Conductor, err = renderSelectedLPXRole(role, p.dynamoDeployment, alphaComponent, p.operatorConfig, p.secretsRetriever,
-					p.discoveryContext, workload, lpuDefaults, nil)
+					p.discoveryContext, lpuDefaults, nil)
 				if err != nil {
 					return nil, nil, fmt.Errorf("rendering %s.conductor: rendering selected LPX base pod: %w", component.ComponentName, err)
 				}
@@ -353,7 +353,7 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.SelectedWorkload, m
 		gpu.componentName = component.ComponentName
 		gpu.r = ServiceRole{Name: workload.CyborgTemplateName(), Role: RoleMain, Replicas: *role.Replicas}
 		gpuTemplate, err := renderSelectedLPXRole(role, p.dynamoDeployment, alphaComponent, p.operatorConfig, p.secretsRetriever,
-			p.discoveryContext, workload, defaults, p.groveClusterTopologyDomains)
+			p.discoveryContext, defaults, p.groveClusterTopologyDomains)
 		if err != nil {
 			return nil, nil, fmt.Errorf("rendering %s.conductor: failed to generate podSpec for role %s: %w", component.ComponentName, gpu.r.Name, err)
 		}
@@ -431,15 +431,6 @@ func (d *selectedCyborgComponentDefaults) GetBaseContainer(context ComponentCont
 	return container, nil
 }
 
-func (d *selectedCyborgComponentDefaults) GetBasePodSpec(context ComponentContext) (corev1.PodSpec, error) {
-	podSpec, err := d.ComponentDefaults.GetBasePodSpec(context)
-	if err != nil {
-		return corev1.PodSpec{}, err
-	}
-	dynamolpx.ApplySelectedCyborgPodDefaults(&podSpec, d.configMapName)
-	return podSpec, nil
-}
-
 // renderSelectedLPXRole consumes a private component copy; other inputs are read-only.
 // alphaComponent may be nil; topologyDomains may be nil when no topology is consumed.
 func renderSelectedLPXRole(
@@ -449,7 +440,6 @@ func renderSelectedLPXRole(
 	operatorConfig *configv1alpha1.OperatorConfiguration,
 	secretsRetriever SecretsRetriever,
 	discoveryContext DiscoveryContext,
-	selectedWorkload *dynamolpx.SelectedWorkload,
 	defaults ComponentDefaults,
 	topologyDomains []v1beta1.TopologyDomain,
 ) (*corev1.PodTemplateSpec, error) {
@@ -481,17 +471,12 @@ func renderSelectedLPXRole(
 		basePodSpec.SecurityContext.FSGroupChangePolicy = ptr.To(corev1.FSGroupChangeOnRootMismatch)
 	}
 
-	if component.IsLPX() && selectedWorkload.BuildFamily() == dynamolpx.BuildFamilyXT {
-		explicitVolumes := component.PodTemplate.Spec.Volumes
-		runtimeVolumes := []string{"config"}
-		if selectedWorkload.Pipeline() != dynamolpx.PipelineLPX {
-			runtimeVolumes = append(runtimeVolumes, "tmp", "hugepages", "host-dev", "host-sys")
-		}
-		basePodSpec.Volumes = slices.DeleteFunc(basePodSpec.Volumes, func(volume corev1.Volume) bool {
-			return slices.Contains(runtimeVolumes, volume.Name) && !slices.ContainsFunc(explicitVolumes,
-				func(explicit corev1.Volume) bool { return explicit.Name == volume.Name })
-		})
-	}
+	// LPX supplies the generated config volume after merging; discard only inferred PVCs.
+	explicitVolumes := component.PodTemplate.Spec.Volumes
+	basePodSpec.Volumes = slices.DeleteFunc(basePodSpec.Volumes, func(volume corev1.Volume) bool {
+		return volume.Name == "config" && !slices.ContainsFunc(explicitVolumes,
+			func(explicit corev1.Volume) bool { return explicit.Name == volume.Name })
+	})
 	for _, annotationKey := range commonconsts.KubeTopologySourceAnnotationKeys() {
 		delete(metadata.Annotations, annotationKey)
 	}

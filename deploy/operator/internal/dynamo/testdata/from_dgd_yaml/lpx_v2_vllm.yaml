@@ -360,20 +360,18 @@ spec:
               periodSeconds: 10
               timeoutSeconds: 5
             volumeMounts:
+            - mountPath: /configs
+              name: config
             - mountPath: /etc/cyborg/model-card.json
               name: cyborg-model-card
               readOnly: true
               subPath: model-card.json
-            - mountPath: /nfs
-              name: model-storage
             - mountPath: /dev/infiniband
               name: infiniband
-            - mountPath: /configs
-              name: config
+            - mountPath: /nfs
+              name: model-storage
             - mountPath: /dev/shm
               name: shared-memory
-            - mountPath: /tmp
-              name: tmp
           restartPolicy: Always
           schedulerName: default-scheduler
           securityContext:
@@ -387,22 +385,20 @@ spec:
           - configMap:
               name: dgd-lpx-v2-vllm-cyborg-model-card
             name: cyborg-model-card
-          - name: model-storage
-            persistentVolumeClaim:
-              claimName: model-storage
           - hostPath:
               path: /dev/infiniband
               type: Directory
             name: infiniband
-          - configMap:
-              name: lstg3y7d-decode-cd1df68308eaf508
-            name: config
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
           - emptyDir:
               medium: Memory
               sizeLimit: 8Gi
             name: shared-memory
-          - emptyDir: {}
-            name: tmp
+          - configMap:
+              name: lstg3y7d-decode-cd1df68308eaf508
+            name: config
         replicas: 1
         roleName: lpu-engine-gpu
         startsAfter:
@@ -573,8 +569,6 @@ spec:
             volumeMounts:
             - mountPath: /nfs
               name: model-storage
-            - mountPath: /dev/shm
-              name: shared-memory
             - mountPath: /configs
               name: config
             - mountPath: /dev/hugepages
@@ -586,8 +580,8 @@ spec:
             - mountPath: /ssh-pk
               name: ssh-secret
               readOnly: true
-            - mountPath: /tmp
-              name: tmp
+            - mountPath: /dev/shm
+              name: shared-memory
           dnsPolicy: ClusterFirstWithHostNet
           hostIPC: true
           hostNetwork: true
@@ -612,29 +606,27 @@ spec:
             persistentVolumeClaim:
               claimName: model-storage
           - emptyDir:
+              medium: HugePages
+            name: hugepages
+          - hostPath:
+              path: /sys
+              type: Directory
+            name: host-sys
+          - hostPath:
+              path: /dev
+              type: Directory
+            name: host-dev
+          - name: ssh-secret
+            secret:
+              defaultMode: 420
+              secretName: ssh-secret
+          - emptyDir:
               medium: Memory
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
               name: lstg3y7d-lpu-70f8ece55681fe1b
             name: config
-          - emptyDir: {}
-            name: tmp
-          - name: ssh-secret
-            secret:
-              defaultMode: 420
-              secretName: ssh-secret
-          - hostPath:
-              path: /dev
-              type: Directory
-            name: host-dev
-          - hostPath:
-              path: /sys
-              type: Directory
-            name: host-sys
-          - emptyDir:
-              medium: HugePages
-            name: hugepages
         replicas: 17
         roleName: lpu-wkr-m-0
     headlessServiceConfig:

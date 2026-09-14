@@ -80,7 +80,6 @@ controllerManager:
     namespace: ""
 
   manager:
-    defaultExtraPodSpecMergeStrategy: override
     containerSecurityContext:
       allowPrivilegeEscalation: false
       capabilities:

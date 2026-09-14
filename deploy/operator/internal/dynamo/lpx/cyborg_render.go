@@ -6,6 +6,7 @@
 package lpx
 
 import (
+	"fmt"
 	"slices"
 	"strconv"
 
@@ -14,6 +15,7 @@ import (
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/thirdparty/lpxscheduler/v1alpha1"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 )
 
 // configureHybridCyborg consumes a fresh hybrid clique from an admitted source
@@ -30,8 +32,12 @@ func configureHybridCyborg(
 	container := common.FindContainerByName(cyborg.Spec.PodSpec.Containers, commonconsts.MainContainerName)
 
 	// Apply manifest-aware runtime bindings to the selected Cyborg container.
-	if err := withLPUModelStorage(&cyborg.Spec.PodSpec, container, modelStorage); err != nil {
+	cyborgStorage, err := lpuModelStorageBinding(cyborg.Spec.PodSpec)
+	if err != nil {
 		return err
+	}
+	if !apiequality.Semantic.DeepEqual(cyborgStorage.volume, modelStorage.volume) || !apiequality.Semantic.DeepEqual(cyborgStorage.mount, modelStorage.mount) {
+		return fmt.Errorf("selected Cyborg podTemplate conflicts with model storage mount %q", modelStorage.mount.MountPath)
 	}
 	cyborgBatchSize, ioFPGACount, err := cyborgRuntimeIO(&projection.configuredBuild, cyborg.Spec.Replicas)
 	if err != nil {
@@ -54,7 +60,7 @@ func configureHybridCyborg(
 		return variable.Name == selectedCyborgServerHostsFileEnv && variable.Value == runtimeTemporaryStorageMountPath+"/lpu_servers" && variable.ValueFrom == nil
 	}) {
 		configFile = "lpu_servers"
-		if err := addRuntimeConfigStorage(&cyborg.Spec.PodSpec, container, configFile); err != nil {
+		if err := validateRuntimeConfigStorage(&cyborg.Spec.PodSpec, container, configFile); err != nil {
 			return err
 		}
 	}
@@ -68,6 +74,9 @@ func configureHybridCyborg(
 		workloadDigest,
 	)
 	if cyborgConfigMap != nil {
+		if err := withLPUConfigVolume(&cyborg.Spec.PodSpec, cyborgConfigMap.Name, true); err != nil {
+			return err
+		}
 		cyborg.Annotations[commonconsts.AnnotationExtraResourcesHash] = LPUConfigMapHash(cyborgConfigMap)
 	}
 	if projection.configuredBuild.Family == BuildFamilyXT {

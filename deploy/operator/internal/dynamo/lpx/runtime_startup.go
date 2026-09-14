@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/utils/ptr"
 )
 
 const runtimeConfigExpansion = `: "${GROVE_PCSG_NAME:?missing GROVE_PCSG_NAME}" "${GROVE_PCSG_INDEX:?missing GROVE_PCSG_INDEX}" "${GROVE_HEADLESS_SERVICE:?missing GROVE_HEADLESS_SERVICE}"
@@ -34,17 +35,28 @@ func wrapRuntimeStartup(container *corev1.Container, defaultCommand, configFile,
 	container.Command, container.Args = []string{"/bin/sh", "-ec"}, args
 }
 
-// addRuntimeConfigStorage keeps expanded configuration writable and local to this Pod.
-func addRuntimeConfigStorage(podSpec *corev1.PodSpec, container *corev1.Container, configFile string) error {
+// validateRuntimeConfigStorage requires writable, Pod-local storage for expanded configuration.
+func validateRuntimeConfigStorage(podSpec *corev1.PodSpec, container *corev1.Container, configFile string) error {
 	// Reject incompatible authored bindings instead of replacing their volumes or mounts.
-	mount := corev1.VolumeMount{Name: runtimeTemporaryStorageVolumeName, MountPath: runtimeTemporaryStorageMountPath}
+	hasConfigMount := false
+	var mount corev1.VolumeMount
 	for _, existing := range container.VolumeMounts {
+		hasConfigMount = hasConfigMount || existing.MountPath == lpuConfigMountPath
 		if existing.MountPath == runtimeTemporaryStorageMountPath+"/"+configFile {
 			return fmt.Errorf("LPX runtime configuration cannot overwrite a volume mounted at %q", existing.MountPath)
 		}
-		if existing.MountPath == mount.MountPath {
+		if existing.MountPath == runtimeTemporaryStorageMountPath {
 			mount = existing
 		}
+	}
+	if !hasConfigMount {
+		return fmt.Errorf("LPX runtime configuration requires a volume mounted at %q", lpuConfigMountPath)
+	}
+	if mount.Name == "" {
+		if container.SecurityContext != nil && ptr.Deref(container.SecurityContext.ReadOnlyRootFilesystem, false) {
+			return fmt.Errorf("LPX runtime configuration requires writable storage at %q", runtimeTemporaryStorageMountPath)
+		}
+		return nil
 	}
 	if mount.ReadOnly {
 		return fmt.Errorf("LPX runtime configuration requires writable storage at %q", mount.MountPath)
@@ -54,12 +66,8 @@ func addRuntimeConfigStorage(podSpec *corev1.PodSpec, container *corev1.Containe
 			if volume.EmptyDir == nil {
 				return fmt.Errorf("LPX runtime configuration requires Pod-local emptyDir storage at %q", mount.MountPath)
 			}
-			container.VolumeMounts = setVolumeMount(container.VolumeMounts, mount)
 			return nil
 		}
 	}
-	if mount.Name != runtimeTemporaryStorageVolumeName {
-		return fmt.Errorf("LPX runtime mount at %q references missing volume %q", mount.MountPath, mount.Name)
-	}
-	return addRuntimeTemporaryStorage(podSpec, container, false)
+	return fmt.Errorf("LPX runtime mount at %q references missing volume %q", mount.MountPath, mount.Name)
 }

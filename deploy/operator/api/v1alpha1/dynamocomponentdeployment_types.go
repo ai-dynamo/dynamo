@@ -35,36 +35,6 @@ const (
 	DynamoGraphDeploymentConditionTypeDynamoComponentReady = "DynamoComponentReady"
 )
 
-// +kubebuilder:validation:Enum=override;strategic
-type ExtraPodSpecMergeStrategy string
-
-const (
-	ExtraPodSpecMergeStrategyOverride  ExtraPodSpecMergeStrategy = "override"
-	ExtraPodSpecMergeStrategyStrategic ExtraPodSpecMergeStrategy = "strategic"
-	DefaultExtraPodSpecMergeStrategy   ExtraPodSpecMergeStrategy = ExtraPodSpecMergeStrategyOverride
-)
-
-func (s ExtraPodSpecMergeStrategy) IsValid() bool {
-	return s == ExtraPodSpecMergeStrategyOverride || s == ExtraPodSpecMergeStrategyStrategic
-}
-
-func ResolveExtraPodSpecMergeStrategy(
-	explicitStrategy ExtraPodSpecMergeStrategy,
-	defaultStrategy ExtraPodSpecMergeStrategy,
-) (ExtraPodSpecMergeStrategy, error) {
-	resolved := explicitStrategy
-	if resolved == "" {
-		resolved = defaultStrategy
-	}
-	if resolved == "" {
-		resolved = DefaultExtraPodSpecMergeStrategy
-	}
-	if !resolved.IsValid() {
-		return "", fmt.Errorf("invalid extraPodSpec merge strategy %q", resolved)
-	}
-	return resolved, nil
-}
-
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
@@ -170,10 +140,6 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// extraPodSpec and provide a non-empty mainContainer image. Existing components created
 	// without extraPodSpec may remain unchanged.
 	ExtraPodSpec *ExtraPodSpec `json:"extraPodSpec,omitempty"`
-	// ExtraPodSpecMergeStrategy controls how extraPodSpec is merged with the
-	// operator-generated pod and container defaults.
-	// +optional
-	ExtraPodSpecMergeStrategy ExtraPodSpecMergeStrategy `json:"extraPodSpecMergeStrategy,omitempty"`
 
 	// LivenessProbe to detect and restart unhealthy containers.
 	LivenessProbe *corev1.Probe `json:"livenessProbe,omitempty"`

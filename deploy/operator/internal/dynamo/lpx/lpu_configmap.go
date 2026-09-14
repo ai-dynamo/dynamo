@@ -20,7 +20,6 @@ import (
 	controllercommon "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/pelletier/go-toml/v2"
 	corev1 "k8s.io/api/core/v1"
-	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/utils/ptr"
@@ -159,26 +158,6 @@ func lpuModelStorageBinding(spec corev1.PodSpec) (lpuModelStorage, error) {
 		return lpuModelStorage{}, fmt.Errorf("selected LPX podTemplate has no model storage volume %q", mount.Name)
 	}
 	return lpuModelStorage{volume: spec.Volumes[volumeIndex], mount: mount}, nil
-}
-
-// withLPUModelStorage requires a nonnil spec and a unique container retained from its unchanged Containers slice.
-func withLPUModelStorage(spec *corev1.PodSpec, container *corev1.Container, storage lpuModelStorage) error {
-	volumeIndex := slices.IndexFunc(spec.Volumes, func(existing corev1.Volume) bool { return existing.Name == storage.volume.Name })
-	if volumeIndex < 0 {
-		spec.Volumes = append(spec.Volumes, storage.volume)
-	} else if !apiequality.Semantic.DeepEqual(spec.Volumes[volumeIndex], storage.volume) {
-		return fmt.Errorf("selected Cyborg podTemplate volume %q conflicts with model storage", storage.volume.Name)
-	}
-
-	mountIndex := slices.IndexFunc(container.VolumeMounts, func(existing corev1.VolumeMount) bool {
-		return existing.Name == storage.mount.Name || existing.MountPath == storage.mount.MountPath
-	})
-	if mountIndex < 0 {
-		container.VolumeMounts = append(container.VolumeMounts, storage.mount)
-	} else if !apiequality.Semantic.DeepEqual(container.VolumeMounts[mountIndex], storage.mount) {
-		return fmt.Errorf("selected Cyborg main container conflicts with model storage mount %q", storage.mount.MountPath)
-	}
-	return nil
 }
 
 func lpuModelConfig(projections []*ModelProjection, modelStoragePath string) (map[string]any, error) {
@@ -444,26 +423,14 @@ func withLPUConfigVolume(spec *corev1.PodSpec, configMapName string, allowOverri
 	}
 	container := common.FindContainerByName(spec.Containers, commonconsts.MainContainerName)
 	found = false
+	configMount := corev1.VolumeMount{Name: lpuConfigVolumeName, MountPath: lpuConfigMountPath}
 	for _, mount := range container.VolumeMounts {
 		if mount.Name == lpuConfigVolumeName || mount.MountPath == lpuConfigMountPath {
-			if !allowOverrides && (found ||
-				mount.Name != lpuConfigVolumeName ||
-				mount.MountPath != lpuConfigMountPath ||
-				mount.ReadOnly ||
-				mount.RecursiveReadOnly != nil ||
-				mount.SubPath != "" ||
-				mount.MountPropagation != nil ||
-				mount.SubPathExpr != "") {
+			if !allowOverrides && (found || mount != configMount) {
 				return fmt.Errorf("selected LPX main container reserves volume %q at %q", lpuConfigVolumeName, lpuConfigMountPath)
 			}
-			found = found || mount.MountPath == lpuConfigMountPath
+			found = true
 		}
-	}
-	if !found {
-		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-			Name:      lpuConfigVolumeName,
-			MountPath: lpuConfigMountPath,
-		})
 	}
 	return nil
 }

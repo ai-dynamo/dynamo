@@ -209,12 +209,10 @@ spec:
               name: config
             - mountPath: /dev/infiniband
               name: infiniband
-            - mountPath: /dev/shm
-              name: shared-memory
             - mountPath: /nfs
               name: model-storage
-            - mountPath: /tmp
-              name: tmp
+            - mountPath: /dev/shm
+              name: shared-memory
           resourceClaims:
           - name: gpu
             resourceClaimTemplateName: decode-gpu
@@ -225,22 +223,20 @@ spec:
             fsGroupChangePolicy: OnRootMismatch
           terminationGracePeriodSeconds: 60
           volumes:
-          - configMap:
-              name: ltudmjcv-decode-97936407dc305636
-            name: config
           - hostPath:
               path: /dev/infiniband
               type: Directory
             name: infiniband
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
           - emptyDir:
               medium: Memory
               sizeLimit: 8Gi
             name: shared-memory
-          - name: model-storage
-            persistentVolumeClaim:
-              claimName: model-storage
-          - emptyDir: {}
-            name: tmp
+          - configMap:
+              name: ltudmjcv-decode-97936407dc305636
+            name: config
         replicas: 1
         roleName: lpu-engine-gpu
         startsAfter:
@@ -362,8 +358,6 @@ spec:
             volumeMounts:
             - mountPath: /nfs
               name: model-storage
-            - mountPath: /dev/shm
-              name: shared-memory
             - mountPath: /configs
               name: config
             - mountPath: /dev/hugepages
@@ -375,8 +369,8 @@ spec:
             - mountPath: /ssh-pk
               name: ssh-secret
               readOnly: true
-            - mountPath: /tmp
-              name: tmp
+            - mountPath: /dev/shm
+              name: shared-memory
           dnsPolicy: ClusterFirstWithHostNet
           hostIPC: true
           hostNetwork: true
@@ -401,29 +395,27 @@ spec:
             persistentVolumeClaim:
               claimName: model-storage
           - emptyDir:
+              medium: HugePages
+            name: hugepages
+          - hostPath:
+              path: /sys
+              type: Directory
+            name: host-sys
+          - hostPath:
+              path: /dev
+              type: Directory
+            name: host-dev
+          - name: ssh-secret
+            secret:
+              defaultMode: 420
+              secretName: ssh-secret
+          - emptyDir:
               medium: Memory
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
               name: ltudmjcv-lpu-6bebe5759af346e9
             name: config
-          - emptyDir: {}
-            name: tmp
-          - name: ssh-secret
-            secret:
-              defaultMode: 420
-              secretName: ssh-secret
-          - hostPath:
-              path: /dev
-              type: Directory
-            name: host-dev
-          - hostPath:
-              path: /sys
-              type: Directory
-            name: host-sys
-          - emptyDir:
-              medium: HugePages
-            name: hugepages
         replicas: 4
         roleName: lpu-wkr-m-0
     headlessServiceConfig:

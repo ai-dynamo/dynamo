@@ -19,37 +19,26 @@ const (
 	defaultLPUAgentCPUs   int64 = 62
 )
 
-func applyLPUHostDeviceVolumes(podSpec *corev1.PodSpec, replaceExisting bool) error {
-	apply := appendVolumeIfMissing
-	if replaceExisting {
-		apply = setVolumeByName
-	}
-
-	// Keep authored storage only when it exposes the required host device directory.
-	for _, required := range []corev1.Volume{lpuHostDeviceVolume("host-dev", "/dev"), lpuHostDeviceVolume("host-sys", "/sys")} {
-		if !replaceExisting {
-			for _, existing := range podSpec.Volumes {
-				hostPath := existing.HostPath
-				if existing.Name == required.Name && (hostPath == nil || hostPath.Path != required.HostPath.Path ||
-					hostPath.Type != nil && *hostPath.Type != corev1.HostPathUnset &&
-						*hostPath.Type != corev1.HostPathDirectory && *hostPath.Type != corev1.HostPathDirectoryOrCreate) {
-					return fmt.Errorf("selected LPX podTemplate volume %q must use directory hostPath %q", required.Name, required.HostPath.Path)
-				}
-			}
+func validateLPUHostDeviceVolumes(podSpec *corev1.PodSpec) error {
+	// Keep the existing compatibility checks without supplying missing device volumes.
+	for _, volume := range podSpec.Volumes {
+		var path string
+		switch volume.Name {
+		case "host-dev":
+			path = "/dev"
+		case "host-sys":
+			path = "/sys"
+		default:
+			continue
 		}
-		podSpec.Volumes = apply(podSpec.Volumes, required)
+		hostPath := volume.HostPath
+		if hostPath == nil || hostPath.Path != path ||
+			hostPath.Type != nil && *hostPath.Type != corev1.HostPathUnset &&
+				*hostPath.Type != corev1.HostPathDirectory && *hostPath.Type != corev1.HostPathDirectoryOrCreate {
+			return fmt.Errorf("selected LPX podTemplate volume %q must use directory hostPath %q", volume.Name, path)
+		}
 	}
 	return nil
-}
-
-func lpuHostDeviceVolume(name, path string) corev1.Volume {
-	return corev1.Volume{
-		Name: name,
-		VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{
-			Path: path,
-			Type: ptr.To(corev1.HostPathDirectory),
-		}},
-	}
 }
 
 func updateWorkerPodSpec(podSpec *corev1.PodSpec) {
@@ -80,10 +69,6 @@ func applyLPUWorkerContainerBase(container *corev1.Container, preserveCommand bo
 	}
 	container.TTY = true
 	container.Stdin = true
-	container.VolumeMounts = setVolumeMount(container.VolumeMounts, corev1.VolumeMount{
-		Name:      "hugepages",
-		MountPath: "/dev/hugepages",
-	})
 
 	// Agent scheduling already initialized device resources; add runtime CPU and hugepage requirements.
 	cpuRequest := *resource.NewQuantity(defaultLPUAgentCPUs, resource.DecimalSI)
@@ -93,15 +78,4 @@ func applyLPUWorkerContainerBase(container *corev1.Container, preserveCommand bo
 	container.Resources.Requests[corev1.ResourceCPU] = cpuRequest
 	container.Resources.Requests[corev1.ResourceHugePagesPrefix+"2Mi"] = resource.MustParse("4096Mi")
 	container.Resources.Limits[corev1.ResourceHugePagesPrefix+"2Mi"] = resource.MustParse("4096Mi")
-}
-
-func addLPUHostDeviceVolumeMounts(container *corev1.Container) {
-	container.VolumeMounts = setVolumeMount(container.VolumeMounts, corev1.VolumeMount{
-		Name:      "host-sys",
-		MountPath: "/sys",
-	})
-	container.VolumeMounts = setVolumeMount(container.VolumeMounts, corev1.VolumeMount{
-		Name:      "host-dev",
-		MountPath: "/dev",
-	})
 }

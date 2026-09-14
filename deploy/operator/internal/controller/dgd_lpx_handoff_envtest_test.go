@@ -170,9 +170,24 @@ func TestLPXPublicationFailureReachesDGDThroughSetup(t *testing.T) {
 				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{
 						Name: consts.MainContainerName, Image: "example/lpu-runtime:1.4.0",
-						VolumeMounts: []corev1.VolumeMount{{Name: consts.ModelStorageVolumeName, MountPath: "/models"}},
+						VolumeMounts: []corev1.VolumeMount{
+							{Name: consts.ModelStorageVolumeName, MountPath: "/models"},
+							{Name: "config", MountPath: "/configs"},
+							{Name: "host-dev", MountPath: "/dev"},
+							{Name: "host-sys", MountPath: "/sys"},
+							{Name: "hugepages", MountPath: "/dev/hugepages"},
+							{Name: "ssh-secret", MountPath: "/ssh-pk", ReadOnly: true},
+							{Name: "single-v2-ssh-key", MountPath: "/tmp/dynamo-lpu-ssh"},
+						},
 					}},
-					Volumes: []corev1.Volume{{Name: consts.ModelStorageVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}},
+					Volumes: []corev1.Volume{
+						{Name: consts.ModelStorageVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+						{Name: "host-dev", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/dev"}}},
+						{Name: "host-sys", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/sys"}}},
+						{Name: "hugepages", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumHugePages}}},
+						{Name: "ssh-secret", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "ssh-secret"}}},
+						{Name: "single-v2-ssh-key", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+					},
 				}},
 			}},
 		}}},

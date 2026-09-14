@@ -11044,14 +11044,6 @@ spec:
                             x-kubernetes-list-type: map
                         required: []
                         type: object
-                      extraPodSpecMergeStrategy:
-                        description: |-
-                          ExtraPodSpecMergeStrategy controls how extraPodSpec is merged with the
-                          operator-generated pod and container defaults.
-                        enum:
-                          - override
-                          - strategic
-                        type: string
                       failover:
                         description: |-
                           Failover configures GMS (GPU Memory Service) failover for this service.
@@ -20679,10 +20671,9 @@ spec:
                       volumeMounts, annotations, labels, extraPodMetadata, extraPodSpec) are
                       replaced with a single `podTemplate` field holding a native
                       `corev1.PodTemplateSpec`. The operator injects its defaults into the
-                      container named `"main"` and merges user overrides according to
-                      `extraPodSpecMergeStrategy`. Users can add sidecars, init containers, and
-                      pod-level configuration directly in `podTemplate` without any
-                      `extraPodSpec`-style escape hatch.
+                      container named `"main"` and merges user overrides. Users can add sidecars,
+                      init containers, and pod-level configuration directly in `podTemplate`
+                      without any `extraPodSpec`-style escape hatch.
                     properties:
                       compilationCache:
                         description: |-
@@ -21148,16 +21139,6 @@ spec:
                                 type: boolean
                             type: object
                         type: object
-                      extraPodSpecMergeStrategy:
-                        description: |-
-                          extraPodSpecMergeStrategy controls how podTemplate is merged with the
-                          operator-generated pod and container defaults. When omitted, the operator
-                          uses its configured defaultExtraPodSpecMergeStrategy, which defaults to
-                          "override".
-                        enum:
-                          - override
-                          - strategic
-                        type: string
                       frontendSidecar:
                         description: |-
                           frontendSidecar optionally designates a container in

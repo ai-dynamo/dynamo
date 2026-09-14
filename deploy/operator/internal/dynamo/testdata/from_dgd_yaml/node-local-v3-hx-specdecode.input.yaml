@@ -33,10 +33,18 @@ spec:
               volumeMounts:
               - name: model-storage
                 mountPath: /nfs
+              - name: config
+                mountPath: /configs
+              - {name: host-dev, mountPath: /dev}
+              - {name: host-sys, mountPath: /sys}
+              - {name: ssh-secret, mountPath: /ssh-pk, readOnly: true}
             volumes:
             - name: model-storage
               persistentVolumeClaim:
                 claimName: model-storage
+            - {name: host-dev, hostPath: {path: /dev, type: Directory}}
+            - {name: host-sys, hostPath: {path: /sys, type: Directory}}
+            - {name: ssh-secret, secret: {secretName: ssh-secret, defaultMode: 420}}
     - name: lpu
       type: lpx
       replicas: 1
@@ -44,6 +52,22 @@ spec:
         buildId: node-local-v3-hx-sd-target
       roles:
       - name: conductor
+        podTemplate:
+          spec:
+            containers:
+            - name: main
+              image: example.invalid/lpu-runtime:test
+              args:
+              - --instance-model-name
+              - test/v3-specdecode
+              volumeMounts:
+              - {name: model-storage, mountPath: /nfs}
+              - {name: config, mountPath: /configs}
+              - {name: single-v2-ssh-key, mountPath: /tmp/dynamo-lpu-ssh}
+            volumes:
+            - {name: model-storage, persistentVolumeClaim: {claimName: model-storage}}
+            - {name: ssh-secret, secret: {secretName: ssh-secret, defaultMode: 384}}
+            - {name: single-v2-ssh-key, emptyDir: {}}
       - name: agent
         podTemplate:
           spec:
@@ -59,7 +83,15 @@ spec:
               volumeMounts:
               - name: model-storage
                 mountPath: /nfs
+              - name: config
+                mountPath: /configs
+              - {name: host-dev, mountPath: /dev}
+              - {name: host-sys, mountPath: /sys}
+              - {name: ssh-secret, mountPath: /ssh-pk, readOnly: true}
             volumes:
             - name: model-storage
               persistentVolumeClaim:
                 claimName: model-storage
+            - {name: host-dev, hostPath: {path: /dev, type: Directory}}
+            - {name: host-sys, hostPath: {path: /sys, type: Directory}}
+            - {name: ssh-secret, secret: {secretName: ssh-secret, defaultMode: 420}}

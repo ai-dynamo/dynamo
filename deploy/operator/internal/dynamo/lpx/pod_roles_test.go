@@ -255,22 +255,43 @@ func TestConfigureNodeLocalLPURuntimeRoles(t *testing.T) {
 				},
 			},
 			{Name: "tmp", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "read-only-tmp"}}},
+			{Name: "host-dev", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/dev"}}},
+			{Name: "host-sys", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/sys"}}},
+			{Name: runtimeSSHVolumeName, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "ssh-secret", DefaultMode: ptr.To(int32(0644))}}},
 		},
 	}
+	base.Containers[0].VolumeMounts = append(base.Containers[0].VolumeMounts, corev1.VolumeMount{Name: lpuConfigVolumeName, MountPath: lpuConfigMountPath})
 	conductor := *base.DeepCopy()
 	agent := *base.DeepCopy()
 
 	t.Log("Lower the image into the Nova conductor and privileged SSH worker roles")
 	require.ErrorContains(t, configureNodeLocalConductorRuntime(&conductor, BuildFamilyHX, "lpu-wkr-m-0", "ssh-secret"), "writable storage")
+	require.ErrorContains(t, configureNodeLocalAgentRuntime(&agent, BuildFamilyHX, false, "ssh-secret"), "writable storage")
 	conductor = *base.DeepCopy()
+	agent = *base.DeepCopy()
 	conductor.Containers[0].VolumeMounts[0].ReadOnly = false
 	conductor.Volumes[2].VolumeSource = corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}
+	conductor.Volumes[5].Secret.DefaultMode = ptr.To(int32(0600))
+	conductor.Volumes = append(conductor.Volumes, corev1.Volume{Name: conductorSSHKeyVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
+	conductor.Containers[0].VolumeMounts = append(conductor.Containers[0].VolumeMounts, corev1.VolumeMount{
+		Name: conductorSSHKeyVolumeName, MountPath: conductorSSHKeyDir, ReadOnly: true,
+	})
+	agent.Containers[0].VolumeMounts[0].ReadOnly = false
+	agent.Volumes[2].VolumeSource = corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}
+	agent.Containers[0].VolumeMounts = append(agent.Containers[0].VolumeMounts,
+		corev1.VolumeMount{Name: "host-dev", MountPath: "/dev"},
+		corev1.VolumeMount{Name: "host-sys", MountPath: "/sys"},
+		corev1.VolumeMount{Name: runtimeSSHVolumeName, MountPath: runtimeSSHSecretMountPath, ReadOnly: true},
+	)
+	conductorMounts := slices.Clone(conductor.Containers[0].VolumeMounts)
+	agentMounts := slices.Clone(agent.Containers[0].VolumeMounts)
 	require.NoError(t, configureNodeLocalConductorRuntime(&conductor, BuildFamilyHX, "lpu-wkr-m-0", "ssh-secret"))
 	require.NoError(t, configureNodeLocalAgentRuntime(&agent, BuildFamilyHX, false, "ssh-secret"))
 
 	t.Log("Verify the conductor starts Nova with immutable placement and source behavior")
 	require.Len(t, conductor.Containers, 1)
 	conductorContainer := conductor.Containers[0]
+	require.Equal(t, conductorMounts, conductorContainer.VolumeMounts)
 	require.Equal(t, "conductor", conductorContainer.Name)
 	require.Equal(t, []string{"/bin/sh", "-ec"}, conductorContainer.Command)
 	require.Equal(t, []string{runtimeConfigExpansion + "exec \"$@\"\n", "--", "/configs/datacenter.toml", "/tmp/datacenter.toml", "/bin/nova"}, conductorContainer.Args[:5])
@@ -302,6 +323,7 @@ func TestConfigureNodeLocalLPURuntimeRoles(t *testing.T) {
 	t.Log("Verify the Agent hosts SSHD with local devices and the source resource profile")
 	require.Len(t, agent.Containers, 1)
 	agentContainer := agent.Containers[0]
+	require.Equal(t, agentMounts, agentContainer.VolumeMounts)
 	require.Equal(t, lpuAgentContainerName, agentContainer.Name)
 	require.Equal(t, []string{"/bin/bash"}, agentContainer.Command)
 	require.Equal(t, []string{"-c", lpuWorkerRunCommand}, agentContainer.Args)
@@ -349,10 +371,10 @@ func TestConfigureNodeLocalLPURuntimeRoles(t *testing.T) {
 
 func TestConfigureNodeLocalXTConductorSSHInitUsesMainImage(t *testing.T) {
 	t.Log("Place an unrelated sidecar before the XT conductor main container")
-	podSpec := corev1.PodSpec{Containers: []corev1.Container{
-		{Name: "metrics", Image: "metrics-sidecar", ImagePullPolicy: corev1.PullAlways},
-		{Name: commonconsts.MainContainerName, Image: "lpu-runtime", ImagePullPolicy: corev1.PullIfNotPresent},
-	}}
+	podSpec := renderTestPodSpec()
+	podSpec.Containers[0].Image = "lpu-runtime"
+	podSpec.Containers[0].ImagePullPolicy = corev1.PullIfNotPresent
+	podSpec.Containers = append([]corev1.Container{{Name: "metrics", Image: "metrics-sidecar", ImagePullPolicy: corev1.PullAlways}}, podSpec.Containers...)
 
 	t.Log("Configure the conductor without deriving its runtime identity from list position")
 	require.NoError(t, configureNodeLocalConductorRuntime(&podSpec, BuildFamilyXT, "lpu-wkr-m-0", "ssh-secret"))
@@ -370,10 +392,11 @@ func TestXTSSHSecretNameIsNotUsedAsVolumeName(t *testing.T) {
 	const sshSecretName = "mpi.ssh"
 
 	t.Log("Configure each XT runtime role with a valid dotted SSH Secret name")
-	base := corev1.PodSpec{Containers: []corev1.Container{{Name: commonconsts.MainContainerName, Image: "lpu-runtime"}}}
+	base := renderTestPodSpec()
+	testVolumeByName(t, base.Volumes, runtimeSSHVolumeName).Secret.SecretName = sshSecretName
 	configureAgentScheduling(&base, BuildFamilyXT)
 	direct, agent, conductor := base.DeepCopy(), base.DeepCopy(), base.DeepCopy()
-	require.NoError(t, configureDirectHybridAgentRuntime(direct, "graph-lpu", sshSecretName))
+	require.NoError(t, configureDirectHybridAgentRuntime(direct, "graph-lpu", sshSecretName, false))
 	require.NoError(t, configureNodeLocalAgentRuntime(agent, BuildFamilyXT, false, sshSecretName))
 	require.NoError(t, configureNodeLocalConductorRuntime(conductor, BuildFamilyXT, "lpu-wkr-m-0", sshSecretName))
 
@@ -392,6 +415,110 @@ func TestXTSSHSecretNameIsNotUsedAsVolumeName(t *testing.T) {
 			require.Equal(t, sshSecretName, sshVolume.Secret.SecretName)
 			require.NotContains(t, testVolumeNames(test.pod.Volumes), sshSecretName)
 			require.Contains(t, test.mounts, corev1.VolumeMount{Name: "ssh-secret", MountPath: "/ssh-pk", ReadOnly: true})
+		})
+	}
+}
+
+func TestGeneratedAgentSSHMountRequirements(t *testing.T) {
+	for _, runtime := range []struct {
+		name              string
+		family            BuildFamily
+		direct, multiNode bool
+	}{
+		{"XT", BuildFamilyXT, false, false},
+		{"HX", BuildFamilyHX, false, false},
+		{"direct single-node", BuildFamilyXT, true, false},
+		{"direct multi-node", BuildFamilyXT, true, true},
+	} {
+		for _, test := range []struct {
+			name    string
+			mount   corev1.VolumeMount
+			command []string
+			args    []string
+			wantErr bool
+		}{
+			{name: "missing", wantErr: true},
+			{name: "wrong volume", mount: corev1.VolumeMount{Name: "other", MountPath: "/ssh-pk"}, wantErr: true},
+			{name: "misplaced", mount: corev1.VolumeMount{Name: "ssh-secret", MountPath: "/elsewhere"}, wantErr: true},
+			{name: "subPath", mount: corev1.VolumeMount{Name: "ssh-secret", MountPath: "/ssh-pk", SubPath: "private.key"}, wantErr: true},
+			{name: "subPathExpr", mount: corev1.VolumeMount{Name: "ssh-secret", MountPath: "/ssh-pk", SubPathExpr: "$(KEY)"}, wantErr: true},
+			{name: "writable", mount: corev1.VolumeMount{Name: "ssh-secret", MountPath: "/ssh-pk"}},
+			{name: "read-only", mount: corev1.VolumeMount{Name: runtimeSSHVolumeName, MountPath: runtimeSSHSecretMountPath, ReadOnly: true}},
+			{name: "custom command", command: []string{"/custom-agent"}},
+			{name: "custom args", args: []string{"custom-agent"}},
+		} {
+			custom := len(test.command) != 0 || len(test.args) != 0
+			if runtime.family == BuildFamilyHX && custom {
+				continue
+			}
+			t.Run(runtime.name+"/"+test.name, func(t *testing.T) {
+				t.Log("Author the Agent startup and selected key mount on a fresh runtime fixture")
+				pod := renderTestPodSpec()
+				main := &pod.Containers[0]
+				main.Command, main.Args = test.command, test.args
+				main.Resources = corev1.ResourceRequirements{}
+				main.SecurityContext = &corev1.SecurityContext{ReadOnlyRootFilesystem: ptr.To(true)}
+				main.VolumeMounts = nil
+				if test.mount.Name != "" {
+					main.VolumeMounts = append(main.VolumeMounts, test.mount)
+				}
+				if runtime.family == BuildFamilyXT && !custom {
+					main.VolumeMounts = append(main.VolumeMounts, corev1.VolumeMount{Name: "config", MountPath: "/configs"})
+				}
+				before := pod.DeepCopy()
+				configureAgentScheduling(&pod, runtime.family)
+
+				t.Log("Require SSH only for generated startup that consumes the key directory")
+				var err error
+				if runtime.direct {
+					err = configureDirectHybridAgentRuntime(&pod, "graph-lpu", "ssh-secret", runtime.multiNode)
+				} else {
+					err = configureNodeLocalAgentRuntime(&pod, runtime.family, false, "ssh-secret")
+				}
+				if test.wantErr && (!runtime.direct || runtime.multiNode) {
+					require.ErrorContains(t, err, `requires volume "ssh-secret" mounted at "/ssh-pk" without subPath`)
+				} else {
+					require.NoError(t, err)
+					require.False(t, ptr.Deref(pod.Containers[0].SecurityContext.ReadOnlyRootFilesystem, false))
+				}
+				require.Equal(t, before.Containers[0].VolumeMounts, pod.Containers[0].VolumeMounts)
+				require.Equal(t, before.Volumes, pod.Volumes)
+				if custom {
+					require.Equal(t, test.command, pod.Containers[0].Command)
+					require.Equal(t, test.args, pod.Containers[0].Args)
+				}
+			})
+		}
+	}
+}
+
+func TestGeneratedAgentConfigMountOverrides(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		env     []corev1.EnvVar
+		wantErr bool
+	}{
+		{name: "default", wantErr: true},
+		{name: "empty", env: []corev1.EnvVar{{Name: "LPU_CONFIG_DIR"}}, wantErr: true},
+		{name: "canonical", env: []corev1.EnvVar{{Name: "LPU_CONFIG_DIR", Value: "/configs"}}, wantErr: true},
+		{name: "custom", env: []corev1.EnvVar{{Name: "LPU_CONFIG_DIR", Value: "/custom"}}},
+		{name: "ValueFrom", env: []corev1.EnvVar{{Name: "LPU_CONFIG_DIR", ValueFrom: &corev1.EnvVarSource{
+			ConfigMapKeyRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "custom"}, Key: "config-dir"},
+		}}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Require /configs unless an explicit variable overrides it; EnvFrom alone is insufficient")
+			container := corev1.Container{Env: test.env, EnvFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "unrelated"},
+			}}}}
+			before := container.DeepCopy()
+			err := validateGeneratedAgentMounts(&container, true, false)
+			if test.wantErr {
+				require.ErrorContains(t, err, `requires a volume mounted at "/configs"`)
+			} else {
+				require.NoError(t, err)
+			}
+			require.Equal(t, *before, container)
 		})
 	}
 }
@@ -428,14 +555,21 @@ func TestXTRuntimesValidateHostDeviceVolumes(t *testing.T) {
 					{Name: commonconsts.MainContainerName, Image: "lpu-runtime"},
 					{Name: "sidecar", VolumeMounts: []corev1.VolumeMount{{Name: test.volume.Name, MountPath: "/application"}}},
 				},
-				Volumes: []corev1.Volume{test.volume},
+				Volumes: []corev1.Volume{
+					test.volume,
+					{Name: runtimeSSHVolumeName, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "ssh-secret"}}},
+				},
+			}
+			base.Containers[0].VolumeMounts = []corev1.VolumeMount{
+				{Name: lpuConfigVolumeName, MountPath: lpuConfigMountPath},
+				{Name: runtimeSSHVolumeName, MountPath: runtimeSSHSecretMountPath, ReadOnly: true},
 			}
 			configureAgentScheduling(&base, BuildFamilyXT)
 			direct, agent := base.DeepCopy(), base.DeepCopy()
 
 			t.Log("Reject incompatible bindings through both XT runtime entry points")
 			errors := []error{
-				configureDirectHybridAgentRuntime(direct, "graph-lpu", "ssh-secret"),
+				configureDirectHybridAgentRuntime(direct, "graph-lpu", "ssh-secret", false),
 				configureNodeLocalAgentRuntime(agent, BuildFamilyXT, false, "ssh-secret"),
 			}
 			for _, err := range errors {
@@ -448,6 +582,7 @@ func TestXTRuntimesValidateHostDeviceVolumes(t *testing.T) {
 
 			t.Log("Never rebind the authored volume or its sidecar mount")
 			for _, pod := range []*corev1.PodSpec{direct, agent} {
+				require.Equal(t, base.Volumes, pod.Volumes)
 				require.Equal(t, test.volume.VolumeSource, testVolumeByName(t, pod.Volumes, test.volume.Name))
 				require.Equal(t, base.Containers[1], pod.Containers[1])
 			}
@@ -491,20 +626,22 @@ func TestXTRuntimesValidateTemporaryStorage(t *testing.T) {
 				t.Log("Use either a named tmp volume or an existing /tmp mount")
 				base := corev1.PodSpec{
 					Containers: []corev1.Container{{Name: commonconsts.MainContainerName, Image: "lpu-runtime"}},
-					Volumes:    []corev1.Volume{{Name: name, VolumeSource: test.source}},
+					Volumes: []corev1.Volume{
+						{Name: name, VolumeSource: test.source},
+						{Name: runtimeSSHVolumeName, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "ssh-secret"}}},
+					},
 				}
-				if name != "tmp" || test.readOnly {
-					base.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: name, MountPath: "/tmp", ReadOnly: test.readOnly}}
-				}
+				base.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: name, MountPath: "/tmp", ReadOnly: test.readOnly}, {Name: runtimeSSHVolumeName, MountPath: runtimeSSHSecretMountPath, ReadOnly: true}}
 				if name != "tmp" {
 					base.Volumes = append(base.Volumes, corev1.Volume{Name: "tmp", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "unused"}}})
 				}
+				base.Containers[0].VolumeMounts = append(base.Containers[0].VolumeMounts, corev1.VolumeMount{Name: lpuConfigVolumeName, MountPath: lpuConfigMountPath})
 				configureAgentScheduling(&base, BuildFamilyXT)
 				direct, agent := base.DeepCopy(), base.DeepCopy()
 
 				t.Log("Require writable temporary storage through both XT runtime entry points")
 				for _, err := range []error{
-					configureDirectHybridAgentRuntime(direct, "graph-lpu", "ssh-secret"),
+					configureDirectHybridAgentRuntime(direct, "graph-lpu", "ssh-secret", false),
 					configureNodeLocalAgentRuntime(agent, BuildFamilyXT, false, "ssh-secret"),
 				} {
 					if test.wantErr {
@@ -516,15 +653,39 @@ func TestXTRuntimesValidateTemporaryStorage(t *testing.T) {
 
 				t.Log("Preserve authored storage and the selected mount")
 				for _, pod := range []*corev1.PodSpec{direct, agent} {
-					for _, volume := range base.Volumes {
-						require.Equal(t, volume.VolumeSource, testVolumeByName(t, pod.Volumes, volume.Name))
-					}
+					require.Equal(t, base.Containers[0].VolumeMounts, pod.Containers[0].VolumeMounts)
+					require.Equal(t, base.Volumes, pod.Volumes)
 					if !test.wantErr {
 						require.Contains(t, pod.Containers[0].VolumeMounts, corev1.VolumeMount{Name: name, MountPath: "/tmp"})
 					}
 				}
 			})
 		}
+	}
+}
+
+func TestRuntimeTemporaryStorageBindings(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mounts []corev1.VolumeMount
+		err    string
+	}{
+		{name: "container-local storage"},
+		{name: "missing tmp source", mounts: []corev1.VolumeMount{{Name: "tmp", MountPath: "/tmp"}}, err: `references missing volume "tmp"`},
+		{name: "missing custom source", mounts: []corev1.VolumeMount{{Name: "scratch", MountPath: "/tmp"}}, err: `references missing volume "scratch"`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Use container-local storage or validate the authored mount without inserting storage")
+			pod := corev1.PodSpec{Containers: []corev1.Container{{VolumeMounts: test.mounts}}}
+			before := pod.DeepCopy()
+			err := validateRuntimeTemporaryStorage(&pod, &pod.Containers[0])
+			if test.err != "" {
+				require.ErrorContains(t, err, test.err)
+			} else {
+				require.NoError(t, err)
+			}
+			require.Equal(t, *before, pod)
+		})
 	}
 }
 
@@ -587,9 +748,15 @@ func TestConfigureDirectHybridAgentRuntimePreservesPodOverrides(t *testing.T) {
 			podSpec := corev1.PodSpec{
 				Containers:      []corev1.Container{*test.container.DeepCopy()},
 				SecurityContext: test.podSecurity.DeepCopy(),
+				Volumes: []corev1.Volume{
+					{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+					{Name: runtimeSSHVolumeName, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "ssh-secret"}}},
+				},
 			}
+			podSpec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "tmp", MountPath: "/tmp", SubPath: "workspace"}}
+			authoredVolumes := slices.Clone(podSpec.Volumes)
 			configureAgentScheduling(&podSpec, BuildFamilyXT)
-			err := configureDirectHybridAgentRuntime(&podSpec, "graph-lpu", "ssh-secret")
+			err := configureDirectHybridAgentRuntime(&podSpec, "graph-lpu", "ssh-secret", false)
 			require.NoError(t, err)
 
 			t.Log("Preserve the entrypoint and user probes while supplying defaults when absent")
@@ -598,6 +765,8 @@ func TestConfigureDirectHybridAgentRuntimePreservesPodOverrides(t *testing.T) {
 			require.Equal(t, test.wantArgs, agent.Args)
 			require.Equal(t, test.wantStartup, agent.StartupProbe)
 			require.Equal(t, test.wantReadiness, agent.ReadinessProbe)
+			require.Equal(t, []corev1.VolumeMount{{Name: "tmp", MountPath: "/tmp", SubPath: "workspace"}}, agent.VolumeMounts)
+			require.Equal(t, authoredVolumes, podSpec.Volumes)
 
 			t.Log("Preserve orthogonal Pod security settings while using the root runtime identity")
 			wantSecurity := test.podSecurity.DeepCopy()
@@ -627,7 +796,7 @@ func TestLPXInitContainerNames(t *testing.T) {
 			for _, list := range []string{"containers", "initContainers"} {
 				t.Run(test.name+"/"+name+"/"+list, func(t *testing.T) {
 					t.Log("Author an independent container with an image and command to preserve")
-					spec := corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "runtime"}}}
+					spec := renderTestPodSpec()
 					authored := corev1.Container{Name: name, Image: "custom", Command: []string{"/custom-init"}}
 					if list == "containers" {
 						spec.Containers = append(spec.Containers, authored)

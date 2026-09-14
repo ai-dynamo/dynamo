@@ -97,7 +97,7 @@ func TestRenderSelectedLPXRoleSecurityContext(t *testing.T) {
 			t.Log("Render the role before runtime-specific lowering")
 			template, err := renderSelectedLPXRole(component, source, nil,
 				&configv1alpha1.OperatorConfiguration{}, &mockSecretsRetriever{}, DiscoveryContext{},
-				&lpx.SelectedWorkload{}, &imageEntrypointComponentDefaults{ComponentDefaults: NewWorkerDefaults()}, nil)
+				&imageEntrypointComponentDefaults{ComponentDefaults: NewWorkerDefaults()}, nil)
 			require.NoError(t, err)
 
 			t.Log("Retain authored security context and default only an absent one")
@@ -197,9 +197,6 @@ func TestLPXInputRevision(t *testing.T) {
 		{"component/min-available", true, func(d *v1beta1.DynamoGraphDeployment) { lpx.ServingComponent(d).MinAvailable = ptr.To(int32(1)) }},
 		{"component/namespace", true, func(d *v1beta1.DynamoGraphDeployment) { lpx.ServingComponent(d).GlobalDynamoNamespace = true }},
 		{"component/runtime-version", true, func(d *v1beta1.DynamoGraphDeployment) { lpx.ServingComponent(d).RuntimeVersionOverride = "1.5.0" }},
-		{"component/merge-strategy", true, func(d *v1beta1.DynamoGraphDeployment) {
-			lpx.ServingComponent(d).ExtraPodSpecMergeStrategy = v1beta1.ExtraPodSpecMergeStrategyOverride
-		}},
 		{"component/shared-memory", true, func(d *v1beta1.DynamoGraphDeployment) {
 			lpx.ServingComponent(d).SharedMemorySize = ptr.To(resource.MustParse("16Gi"))
 		}},

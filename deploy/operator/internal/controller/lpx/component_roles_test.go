@@ -21,6 +21,7 @@ import (
 func TestLPXRoleDependenciesIncludeDraftAndConductorFallback(t *testing.T) {
 	t.Log("Give both components consumed Agent claims while the target conductor uses its Agent fallback")
 	source := newLPXSpecDecodeTestSource()
+	lpx.ServingComponent(source).ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate = nil
 	for _, component := range lpx.Components(source) {
 		pod := &component.ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec
 		pod.ResourceClaims = []corev1.PodResourceClaim{{Name: "gpu", ResourceClaimTemplateName: ptr.To(component.ComponentName + "-gpu")}}

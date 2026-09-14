@@ -174,11 +174,13 @@ func TestLPXRenderingPreservesInputs(t *testing.T) {
 		{"node-local-v2-specdecode", lpxv1alpha1.TargetFamilyXt8888, lpxv1alpha1.WorkloadModeV2LPUOnly},
 		{"node-local-v3-hx-lpu-only", lpxv1alpha1.TargetFamilyHx16x8x2x3, lpxv1alpha1.WorkloadModeV3HxLPUOnly},
 		{"node-local-v3-hx-hybrid", lpxv1alpha1.TargetFamilyHx16x8x2x3, lpxv1alpha1.WorkloadModeV3HxStrictHybrid},
+		{"node-local-v3-hx-hybrid-inherited", lpxv1alpha1.TargetFamilyHx16x8x2x3, lpxv1alpha1.WorkloadModeV3HxStrictHybrid},
 		{"node-local-v3-hx-specdecode", lpxv1alpha1.TargetFamilyHx16x8x2x3, lpxv1alpha1.WorkloadModeV3HxLPUOnly},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Resolve the authored engine and its exact child without changing either input")
-			payload, err := os.ReadFile("../../dynamo/testdata/from_dgd_yaml/" + test.name + ".input.yaml")
+			fixture := strings.TrimSuffix(test.name, "-inherited")
+			payload, err := os.ReadFile("../../dynamo/testdata/from_dgd_yaml/" + fixture + ".input.yaml")
 			require.NoError(t, err)
 			source := &v1beta1.DynamoGraphDeployment{}
 			require.NoError(t, yaml.Unmarshal(payload, source))
@@ -213,7 +215,13 @@ func TestLPXRenderingPreservesInputs(t *testing.T) {
 			component := lpx.ServingComponent(source)
 			component.ModelRef = &v1beta1.ModelReference{Name: "test/model"}
 			component.MinAvailable = ptr.To(int32(1))
-			hybrid := strings.HasSuffix(test.name, "-hybrid")
+			hybrid := strings.HasSuffix(fixture, "-hybrid")
+			inherited := fixture != test.name
+			if inherited {
+				t.Log("Let the HX GPU conductor inherit the Agent template and its authored config mount")
+				component.ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate = nil
+				component.ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.Containers[0].Resources.Limits["nvidia.com/gpu"] = resource.MustParse("1")
+			}
 			singleXT := test.name == "node-local-v2-lpu-only"
 			if hybrid {
 				component.Replicas = ptr.To(int32(3))
@@ -223,8 +231,9 @@ func TestLPXRenderingPreservesInputs(t *testing.T) {
 			if singleXT {
 				t.Log("Keep XT's authored readonly mount at the canonical config path")
 				main := &component.ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.Containers[0]
-				main.VolumeMounts = append(main.VolumeMounts,
-					corev1.VolumeMount{Name: "config", MountPath: "/configs", ReadOnly: true})
+				configMount := slices.IndexFunc(main.VolumeMounts, func(mount corev1.VolumeMount) bool { return mount.MountPath == "/configs" })
+				require.GreaterOrEqual(t, configMount, 0)
+				main.VolumeMounts[configMount].ReadOnly = true
 			}
 
 			t.Log("Preserve role metadata and replica units through alpha/beta conversion before freezing the child")
@@ -389,6 +398,15 @@ func TestLPXRenderingPreservesInputs(t *testing.T) {
 				require.Equal(t, "from-component", clique.Labels["shared-label"])
 				require.Equal(t, "false", clique.Annotations[commonconsts.KubeAnnotationEnableMetrics])
 				require.Equal(t, "kubernetes", clique.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend])
+				if clique.Annotations[lpxv1alpha1.PodRoleAnnotation] != lpxv1alpha1.PodRoleCyborgWorker || test.wantFamily == lpxv1alpha1.TargetFamilyXt8888 || inherited {
+					t.Log("Bind the generated immutable ConfigMap alongside authored volumes and mounts")
+					configIndex := slices.IndexFunc(clique.Spec.PodSpec.Volumes, func(volume corev1.Volume) bool { return volume.Name == "config" })
+					require.GreaterOrEqual(t, configIndex, 0)
+					configVolume := clique.Spec.PodSpec.Volumes[configIndex]
+					require.NotNil(t, configVolume.ConfigMap)
+					generatedConfig := getResource[*corev1.ConfigMap](t, firstResources, configVolume.ConfigMap.Name)
+					require.Equal(t, ptr.To(true), generatedConfig.Immutable)
+				}
 				switch clique.Annotations[lpxv1alpha1.PodRoleAnnotation] {
 				case lpxv1alpha1.PodRoleAgent:
 					index, found := projectionIndices[clique.Name]
@@ -459,8 +477,10 @@ func TestLPXSpecDecodeConductorTemplate(t *testing.T) {
 			}
 			target := lpx.ServingComponent(source)
 			wantImage := target.ComponentName + "-runtime"
+			target.ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate = nil
+			template := target.ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate
 			if explicit {
-				template := target.ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.DeepCopy()
+				template = template.DeepCopy()
 				wantImage = "independent-conductor-runtime"
 				template.Spec.Containers[0].Image = wantImage
 				template.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "CONDUCTOR_ONLY", Value: "kept"}}
@@ -473,6 +493,8 @@ func TestLPXSpecDecodeConductorTemplate(t *testing.T) {
 				}}
 				target.ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate = template
 			}
+			template.Spec.Containers[0].VolumeMounts = append(template.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{Name: "single-v2-ssh-key", MountPath: "/tmp/dynamo-lpu-ssh"})
+			template.Spec.Volumes = append(template.Spec.Volumes, corev1.Volume{Name: "single-v2-ssh-key", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
 			before := source.DeepCopy()
 			selected, err := lpx.ResolveSelectedWorkload(t.Context(), source, registry)
 			require.NoError(t, err)
@@ -490,6 +512,11 @@ func TestLPXSpecDecodeConductorTemplate(t *testing.T) {
 			conductors := 0
 			for _, clique := range pcs.Spec.Template.Cliques {
 				container := clique.Spec.PodSpec.Containers[0]
+				for _, mount := range container.VolumeMounts {
+					require.True(t, slices.ContainsFunc(clique.Spec.PodSpec.Volumes, func(volume corev1.Volume) bool {
+						return volume.Name == mount.Name
+					}), "%s mount %s requires a volume", clique.Name, mount.Name)
+				}
 				if clique.Name == plan.ConductorTemplate {
 					conductors++
 					require.Equal(t, wantImage, container.Image)
@@ -1252,7 +1279,7 @@ func TestGenerateGrovePodCliqueSet_ImplicitV2HybridPreservesAgentRuntime(t *test
 		{Key: "lpu.nvidia.com/lpu", Operator: corev1.TolerationOpExists},
 		{Key: "lpu.nvidia.com/node-v2", Operator: corev1.TolerationOpExists},
 	}, agent.Spec.PodSpec.Tolerations)
-	for _, name := range []string{"config", "tmp", "hugepages", "host-dev", "host-sys", "ssh-secret"} {
+	for _, name := range []string{"config", "hugepages", "host-dev", "host-sys", "ssh-secret"} {
 		require.True(t, slices.ContainsFunc(agent.Spec.PodSpec.Volumes, func(volume corev1.Volume) bool { return volume.Name == name }), "missing volume %s", name)
 	}
 	require.True(t, slices.ContainsFunc(main.VolumeMounts, func(mount corev1.VolumeMount) bool { return mount.Name == "host-dev" }))
@@ -1271,7 +1298,7 @@ func TestGenerateGrovePodCliqueSet_ImplicitV2HybridPreservesAgentRuntime(t *test
 	require.Equal(t, []string{"/bin/sh", "-ec"}, cyborgMain.Command)
 	require.Contains(t, cyborgMain.Args[0], `export CYBORG_SWA_CACHE_IDS="${ids}"`)
 	require.Equal(t, []string{"--", "/configs/lpu_servers", "/tmp/lpu_servers", "/opt/gpu-runtime", "serve"}, cyborgMain.Args[1:])
-	require.True(t, slices.ContainsFunc(cyborgMain.VolumeMounts, func(mount corev1.VolumeMount) bool { return mount.Name == "config" }))
+	require.Contains(t, cyborgMain.VolumeMounts, corev1.VolumeMount{Name: "config", MountPath: "/configs"})
 	require.True(t, slices.ContainsFunc(cyborgMain.VolumeMounts, func(mount corev1.VolumeMount) bool { return mount.Name == "infiniband" }))
 
 	volumes := make(map[string]corev1.Volume, len(cyborg.Spec.PodSpec.Volumes))
@@ -1359,8 +1386,16 @@ func TestGenerateGrovePodCliqueSet_V2NodeLocalPreservesImageEntrypoint(t *testin
 		cyborgCommand []string
 		cyborgArgs    []string
 		hybridOnly    bool
+		configPath    *string
+		configRole    int
+		envFrom       bool
 	}{
 		{name: "image entrypoint and image command"},
+		{name: "default startup without config mount", configPath: ptr.To(""), configRole: 1},
+		{name: "default startup with misplaced config mount", configPath: ptr.To("/custom"), configRole: 1},
+		{name: "default Agent without config mount", configPath: ptr.To("")},
+		{name: "default Agent with misplaced config mount", configPath: ptr.To("/custom")},
+		{name: "default Agent without config mount and unrelated EnvFrom", configPath: ptr.To(""), envFrom: true},
 		{name: "image entrypoint with user arguments", args: []string{"serve"}},
 		{name: "explicit executable with image arguments", command: []string{"/opt/custom-runtime"}},
 		{name: "explicit executable and arguments", command: []string{"/opt/custom-runtime"}, args: []string{"serve"}},
@@ -1386,143 +1421,129 @@ func TestGenerateGrovePodCliqueSet_V2NodeLocalPreservesImageEntrypoint(t *testin
 		},
 	}
 
-	t.Log("Exercise both merge algorithms; shared policy tests cover default selection")
-	strategies := []struct {
-		name              string
-		componentStrategy v1beta1.ExtraPodSpecMergeStrategy
-		defaultStrategy   v1alpha1.ExtraPodSpecMergeStrategy
-	}{
-		{
-			name:              "component override",
-			componentStrategy: v1beta1.ExtraPodSpecMergeStrategyOverride,
-			defaultStrategy:   v1alpha1.ExtraPodSpecMergeStrategyStrategic,
-		},
-		{
-			name:              "component strategic",
-			componentStrategy: v1beta1.ExtraPodSpecMergeStrategyStrategic,
-			defaultStrategy:   v1alpha1.ExtraPodSpecMergeStrategyOverride,
-		},
-	}
-
 	for _, mode := range modes {
 		t.Run(mode.name, func(t *testing.T) {
 			payload, err := os.ReadFile(filepath.Join("../../dynamo/testdata", "from_dgd_yaml", mode.file))
 			require.NoError(t, err)
 
-			for _, strategy := range strategies {
-				t.Run(strategy.name, func(t *testing.T) {
-					for _, intent := range intents {
-						if intent.hybridOnly && !mode.hybrid {
-							continue
+			for _, intent := range intents {
+				if intent.hybridOnly && !mode.hybrid {
+					continue
+				}
+				t.Run(intent.name, func(t *testing.T) {
+					t.Log("Render the LPX LPU and GPU roles from the same command intent")
+					dgd := &v1beta1.DynamoGraphDeployment{}
+					require.NoError(t, yaml.Unmarshal(payload, dgd))
+					component := dgd.GetComponentByName("lpu")
+					require.NotNil(t, component)
+					agent := component.ComponentRole(v1beta1.ComponentRoleLPXAgent)
+					templates := []*corev1.PodTemplateSpec{agent.PodTemplate, component.ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate}
+					for roleIndex, template := range templates {
+						main := &template.Spec.Containers[0]
+						require.Equal(t, commonconsts.MainContainerName, main.Name)
+						command := intent.command
+						args := intent.args
+						if roleIndex == 1 && intent.cyborgCommand != nil {
+							command = intent.cyborgCommand
+							args = intent.cyborgArgs
 						}
-						t.Run(intent.name, func(t *testing.T) {
-							t.Log("Render the LPX LPU and GPU roles from the same command intent")
-							dgd := &v1beta1.DynamoGraphDeployment{}
-							require.NoError(t, yaml.Unmarshal(payload, dgd))
-							component := dgd.GetComponentByName("lpu")
-							require.NotNil(t, component)
-							component.ExtraPodSpecMergeStrategy = strategy.componentStrategy
-							agent := component.ComponentRole(v1beta1.ComponentRoleLPXAgent)
-							lpxMain := &agent.PodTemplate.Spec.Containers[0]
-							lpxMain.VolumeMounts = append(lpxMain.VolumeMounts, corev1.VolumeMount{Name: "tmp", MountPath: "/tmp"})
-							templates := []*corev1.PodTemplateSpec{agent.PodTemplate}
-							if mode.hybrid {
-								templates = append(templates, component.ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate)
-							}
-							for roleIndex, template := range templates {
-								main := &template.Spec.Containers[0]
-								require.Equal(t, commonconsts.MainContainerName, main.Name)
-								command := intent.command
-								args := intent.args
-								if roleIndex == 1 && intent.cyborgCommand != nil {
-									command = intent.cyborgCommand
-									args = intent.cyborgArgs
-								}
-								main.Command = slices.Clone(command)
-								main.Args = slices.Clone(args)
-							}
-
-							selected, err := lpx.ResolveSelectedWorkload(t.Context(), dgd, registry)
-							require.NoError(t, err)
-							pcs, _, err := renderPodCliqueSet(
-								t.Context(),
-								dgd,
-								&configv1alpha1.OperatorConfiguration{
-									PodGeneration: configv1alpha1.PodGenerationConfiguration{
-										DefaultExtraPodSpecMergeStrategy: strategy.defaultStrategy,
-									},
-									MPI: configv1alpha1.MPIConfiguration{SSHSecretName: "ssh-secret"},
-								},
-								&controller_common.RuntimeConfig{},
-								kubeClient,
-								nil,
-								selected,
-								mustPlanSelectedLPX(t, dgd, selected),
-								newLPXRenderDeployment(t, dgd),
-							)
-							if mode.single && len(intent.command) == 0 && len(intent.args) > 0 {
-								require.ErrorContains(t, err, "only supports --instance-model-name")
-								return
-							}
-							require.NoError(t, err)
-
-							t.Log("Verify explicit commands are preserved and direct Agents receive their launch defaults")
-							var agents, conductors, cyborgs int
-							for _, clique := range pcs.Spec.Template.Cliques {
-								main := clique.Spec.PodSpec.Containers[0]
-								switch clique.Annotations[lpxv1alpha1.PodRoleAnnotation] {
-								case lpxv1alpha1.PodRoleAgent:
-									agents++
-									require.True(t, slices.ContainsFunc(clique.Spec.PodSpec.Volumes, func(volume corev1.Volume) bool { return volume.Name == "tmp" }))
-									if len(intent.command)+len(intent.args) == 0 {
-										require.Equal(t, []string{"/bin/bash"}, main.Command)
-										require.Len(t, main.Args, 2)
-										require.Equal(t, "-c", main.Args[0])
-										require.Contains(t, main.Args[1], "GROVE_PCLQ_POD_INDEX")
-									} else {
-										wantCommand := intent.command
-										require.Equal(t, wantCommand, main.Command)
-										require.True(t, slices.Equal(intent.args, main.Args))
-									}
-								case lpxv1alpha1.PodRoleConductor:
-									conductors++
-									command := intent.command
-									if len(command) == 0 {
-										command = []string{"/bin/nova"}
-									}
-									require.Equal(t, []string{"/bin/sh", "-ec"}, main.Command)
-									require.Equal(t, append(slices.Clone(command), intent.args...), main.Args[4:4+len(command)+len(intent.args)])
-									allocation := slices.Index(main.Args, "--allocation")
-									require.GreaterOrEqual(t, allocation, 0)
-									require.Equal(t, strings.Join(clique.Spec.StartsAfter, ","), main.Args[allocation+1])
-								case lpxv1alpha1.PodRoleCyborgWorker:
-									cyborgs++
-									wantCommand := intent.command
-									wantArgs := intent.args
-									if intent.cyborgCommand != nil {
-										wantCommand = intent.cyborgCommand
-										wantArgs = intent.cyborgArgs
-									}
-									if len(wantCommand) == 0 {
-										wantCommand = []string{"/usr/local/bin/cyborg"}
-									}
-									require.Equal(t, []string{"/bin/sh", "-ec"}, main.Command)
-									require.Equal(t, append(slices.Clone(wantCommand), wantArgs...), main.Args[4:])
-									require.NotNil(t, main.LivenessProbe)
-									require.NotNil(t, main.ReadinessProbe)
-									require.NotNil(t, main.StartupProbe)
-									require.NotEmpty(t, main.Ports)
-								}
-							}
-							require.Positive(t, agents)
-							if mode.hybrid {
-								require.Zero(t, conductors)
-								require.Equal(t, 1, cyborgs)
+						main.Command = slices.Clone(command)
+						main.Args = slices.Clone(args)
+						if intent.envFrom && roleIndex == 0 {
+							main.EnvFrom = []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "unrelated-env"}}}}
+						}
+						if intent.configPath != nil && roleIndex == intent.configRole {
+							configIndex := slices.IndexFunc(main.VolumeMounts, func(mount corev1.VolumeMount) bool { return mount.Name == "config" })
+							require.NotEqual(t, -1, configIndex)
+							require.Equal(t, "/configs", main.VolumeMounts[configIndex].MountPath)
+							if *intent.configPath == "" {
+								main.VolumeMounts = slices.Delete(main.VolumeMounts, configIndex, configIndex+1)
 							} else {
-								require.Equal(t, 1, conductors)
-								require.Zero(t, cyborgs)
+								main.VolumeMounts[configIndex].MountPath = *intent.configPath
 							}
-						})
+						}
+					}
+
+					selected, err := lpx.ResolveSelectedWorkload(t.Context(), dgd, registry)
+					require.NoError(t, err)
+					pcs, _, err := renderPodCliqueSet(
+						t.Context(),
+						dgd,
+						&configv1alpha1.OperatorConfiguration{
+							MPI: configv1alpha1.MPIConfiguration{SSHSecretName: "ssh-secret"},
+						},
+						&controller_common.RuntimeConfig{},
+						kubeClient,
+						nil,
+						selected,
+						mustPlanSelectedLPX(t, dgd, selected),
+						newLPXRenderDeployment(t, dgd),
+					)
+					if intent.configPath != nil {
+						require.ErrorContains(t, err, `requires a volume mounted at "/configs"`)
+						return
+					}
+					if mode.single && len(intent.command) == 0 && len(intent.args) > 0 {
+						require.ErrorContains(t, err, "only supports --instance-model-name")
+						return
+					}
+					require.NoError(t, err)
+
+					t.Log("Verify explicit commands are preserved and direct Agents receive their launch defaults")
+					var agents, conductors, cyborgs int
+					for _, clique := range pcs.Spec.Template.Cliques {
+						main := clique.Spec.PodSpec.Containers[0]
+						switch clique.Annotations[lpxv1alpha1.PodRoleAnnotation] {
+						case lpxv1alpha1.PodRoleAgent:
+							agents++
+							require.False(t, slices.ContainsFunc(clique.Spec.PodSpec.Volumes, func(volume corev1.Volume) bool { return volume.Name == "tmp" }))
+							if len(intent.command)+len(intent.args) == 0 {
+								require.Equal(t, []string{"/bin/bash"}, main.Command)
+								require.Len(t, main.Args, 2)
+								require.Equal(t, "-c", main.Args[0])
+								require.Contains(t, main.Args[1], "GROVE_PCLQ_POD_INDEX")
+							} else {
+								wantCommand := intent.command
+								require.Equal(t, wantCommand, main.Command)
+								require.True(t, slices.Equal(intent.args, main.Args))
+							}
+						case lpxv1alpha1.PodRoleConductor:
+							conductors++
+							command := intent.command
+							if len(command) == 0 {
+								command = []string{"/bin/nova"}
+							}
+							require.Equal(t, []string{"/bin/sh", "-ec"}, main.Command)
+							require.Equal(t, append(slices.Clone(command), intent.args...), main.Args[4:4+len(command)+len(intent.args)])
+							allocation := slices.Index(main.Args, "--allocation")
+							require.GreaterOrEqual(t, allocation, 0)
+							require.Equal(t, strings.Join(clique.Spec.StartsAfter, ","), main.Args[allocation+1])
+						case lpxv1alpha1.PodRoleCyborgWorker:
+							cyborgs++
+							wantCommand := intent.command
+							wantArgs := intent.args
+							if intent.cyborgCommand != nil {
+								wantCommand = intent.cyborgCommand
+								wantArgs = intent.cyborgArgs
+							}
+							if len(wantCommand) == 0 {
+								wantCommand = []string{"/usr/local/bin/cyborg"}
+							}
+							require.Equal(t, []string{"/bin/sh", "-ec"}, main.Command)
+							require.Equal(t, append(slices.Clone(wantCommand), wantArgs...), main.Args[4:])
+							require.NotNil(t, main.LivenessProbe)
+							require.NotNil(t, main.ReadinessProbe)
+							require.NotNil(t, main.StartupProbe)
+							require.NotEmpty(t, main.Ports)
+						}
+					}
+					require.Positive(t, agents)
+					if mode.hybrid {
+						require.Zero(t, conductors)
+						require.Equal(t, 1, cyborgs)
+					} else {
+						require.Equal(t, 1, conductors)
+						require.Zero(t, cyborgs)
 					}
 				})
 			}
@@ -1551,7 +1572,7 @@ func getResource[T any](t *testing.T, resources []client.Object, name string) T 
 	return resources[i].(T)
 }
 
-func TestLPXRenderingPreservesStrategicCyborgOverrides(t *testing.T) {
+func TestLPXRenderingPreservesCyborgOverrides(t *testing.T) {
 	t.Log("Load an authored hybrid engine and override its independent leader template")
 	payload, err := os.ReadFile(filepath.Join("../../dynamo/testdata", "from_dgd_yaml", "node-local-v2-hybrid.input.yaml"))
 	require.NoError(t, err)
@@ -1561,6 +1582,7 @@ func TestLPXRenderingPreservesStrategicCyborgOverrides(t *testing.T) {
 	leader.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{
 		{Name: "config", MountPath: "/custom-config", ReadOnly: true},
 		{Name: "infiniband", MountPath: "/custom-infiniband", ReadOnly: true},
+		{Name: "model-storage", MountPath: "/nfs"},
 	}
 	leader.Spec.Containers[0].Env = []corev1.EnvVar{
 		{Name: "TOKENIZER_DIR", Value: "/custom-tokenizer"},
@@ -1568,19 +1590,17 @@ func TestLPXRenderingPreservesStrategicCyborgOverrides(t *testing.T) {
 		{Name: "SERVER_HOSTS_FILE", Value: "/custom-servers"},
 		{Name: lpx.CyborgBatchSizeEnv, Value: "2"},
 	}
-	leader.Spec.Volumes = []corev1.Volume{{
+	authoredConfig := corev1.Volume{
 		Name:         "config",
 		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
-	}}
+	}
+	leader.Spec.Volumes = append(leader.Spec.Volumes, authoredConfig)
 
-	t.Log("Render the complete LPX workload with strategic merge enabled by operator default")
+	t.Log("Render the complete LPX workload with ordinary pod spec overrides")
 	selected, err := lpx.ResolveSelectedWorkload(t.Context(), source, newTestDataModelRegistry(t, t.TempDir()))
 	require.NoError(t, err)
 	pcs, _, err := renderPodCliqueSet(t.Context(), source,
 		&configv1alpha1.OperatorConfiguration{
-			PodGeneration: configv1alpha1.PodGenerationConfiguration{
-				DefaultExtraPodSpecMergeStrategy: v1alpha1.ExtraPodSpecMergeStrategyStrategic,
-			},
 			MPI: configv1alpha1.MPIConfiguration{SSHSecretName: "ssh-secret"},
 		},
 		&controller_common.RuntimeConfig{}, newTestLPXClient(t), nil, selected,
@@ -1592,24 +1612,21 @@ func TestLPXRenderingPreservesStrategicCyborgOverrides(t *testing.T) {
 	require.GreaterOrEqual(t, cliqueIndex, 0)
 	podSpec := pcs.Spec.Template.Cliques[cliqueIndex].Spec.PodSpec
 
-	t.Log("Keep one authored config volume without the generated ConfigMap union member")
-	matches := 0
-	var configVolume *corev1.Volume
-	for i := range podSpec.Volumes {
-		if podSpec.Volumes[i].Name == "config" {
-			matches++
-			configVolume = &podSpec.Volumes[i]
+	t.Log("Keep one config volume alongside the authored InfiniBand volume")
+	require.Contains(t, podSpec.Volumes, leader.Spec.Volumes[0])
+	var configVolumes []corev1.Volume
+	for _, volume := range podSpec.Volumes {
+		if volume.Name == authoredConfig.Name {
+			configVolumes = append(configVolumes, volume)
 		}
 	}
-	require.Equal(t, 1, matches)
-	require.NotNil(t, configVolume)
-	require.NotNil(t, configVolume.VolumeSource.EmptyDir)
-	require.Nil(t, configVolume.VolumeSource.ConfigMap)
+	require.Equal(t, []corev1.Volume{authoredConfig}, configVolumes)
 
 	t.Log("Preserve authored mounts and runtime environment over the generated Cyborg defaults")
 	main := podSpec.Containers[0]
 	require.Contains(t, main.VolumeMounts, corev1.VolumeMount{Name: "config", MountPath: "/custom-config", ReadOnly: true})
 	require.Contains(t, main.VolumeMounts, corev1.VolumeMount{Name: "infiniband", MountPath: "/custom-infiniband", ReadOnly: true})
+	require.False(t, slices.ContainsFunc(main.VolumeMounts, func(mount corev1.VolumeMount) bool { return mount.MountPath == "/configs" }))
 	env := make(map[string]string, len(main.Env))
 	for _, variable := range main.Env {
 		env[variable.Name] = variable.Value

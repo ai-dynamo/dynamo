@@ -2176,16 +2176,24 @@ func newLPXTestSource(pipeline lpx.Pipeline, buildID string) *nvidiacomv1beta1.D
 					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{
 							Name: consts.MainContainerName, Image: "lpu-runtime",
-							VolumeMounts: []corev1.VolumeMount{{
-								Name: consts.ModelStorageVolumeName, MountPath: "/models",
-							}},
-						}},
-						Volumes: []corev1.Volume{{
-							Name: consts.ModelStorageVolumeName,
-							VolumeSource: corev1.VolumeSource{
-								EmptyDir: &corev1.EmptyDirVolumeSource{},
+							VolumeMounts: []corev1.VolumeMount{
+								{Name: consts.ModelStorageVolumeName, MountPath: "/models"},
+								{Name: "config", MountPath: "/configs"},
+								{Name: "host-dev", MountPath: "/dev"},
+								{Name: "host-sys", MountPath: "/sys"},
+								{Name: "ssh-secret", MountPath: "/ssh-pk", ReadOnly: true},
+								{Name: "hugepages", MountPath: "/dev/hugepages"},
+								{Name: "single-v2-ssh-key", MountPath: "/tmp/dynamo-lpu-ssh"},
 							},
 						}},
+						Volumes: []corev1.Volume{
+							{Name: consts.ModelStorageVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+							{Name: "host-dev", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/dev", Type: ptr.To(corev1.HostPathDirectory)}}},
+							{Name: "host-sys", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/sys", Type: ptr.To(corev1.HostPathDirectory)}}},
+							{Name: "hugepages", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumHugePages}}},
+							{Name: "ssh-secret", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "ssh-secret", DefaultMode: ptr.To[int32](0644)}}},
+							{Name: "single-v2-ssh-key", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+						},
 					}},
 				}},
 			}},
@@ -2197,7 +2205,15 @@ func newLPXTestSource(pipeline lpx.Pipeline, buildID string) *nvidiacomv1beta1.D
 			Replicas: &one,
 			PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 				ResourceClaims: []corev1.PodResourceClaim{{Name: "gpu", ResourceClaimTemplateName: ptr.To("gpu")}},
-				Containers:     []corev1.Container{{Name: consts.MainContainerName, Image: "cyborg-runtime"}},
+				Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "cyborg-runtime",
+					VolumeMounts: []corev1.VolumeMount{
+						{Name: "config", MountPath: "/configs"},
+						{Name: consts.ModelStorageVolumeName, MountPath: "/models"},
+					},
+				}},
+				Volumes: []corev1.Volume{
+					{Name: consts.ModelStorageVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+				},
 			}},
 		}
 	}

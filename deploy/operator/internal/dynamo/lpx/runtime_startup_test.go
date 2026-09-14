@@ -13,6 +13,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/utils/ptr"
 )
 
 func TestRuntimeStartup(t *testing.T) {
@@ -47,6 +48,21 @@ func TestRuntimeStartup(t *testing.T) {
 }
 
 func TestRuntimeConfigStorage(t *testing.T) {
+	for _, security := range []*corev1.SecurityContext{nil, {ReadOnlyRootFilesystem: ptr.To(false)}, {ReadOnlyRootFilesystem: ptr.To(true)}} {
+		t.Log("Allow container-local expansion unless the retained root filesystem is read-only")
+		pod := corev1.PodSpec{}
+		container := corev1.Container{SecurityContext: security, VolumeMounts: []corev1.VolumeMount{{Name: lpuConfigVolumeName, MountPath: lpuConfigMountPath}}}
+		before := container.DeepCopy()
+		err := validateRuntimeConfigStorage(&pod, &container, "lpu_servers")
+		if security != nil && ptr.Deref(security.ReadOnlyRootFilesystem, false) {
+			require.ErrorContains(t, err, "writable storage")
+		} else {
+			require.NoError(t, err)
+		}
+		require.Empty(t, pod.Volumes)
+		require.Equal(t, *before, container)
+	}
+
 	for _, source := range []corev1.VolumeSource{
 		{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 		{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "shared"}},
@@ -54,15 +70,21 @@ func TestRuntimeConfigStorage(t *testing.T) {
 	} {
 		t.Log("Reuse only a writable Pod-local workspace for expanded runtime configuration")
 		pod := corev1.PodSpec{Volumes: []corev1.Volume{{Name: "scratch", VolumeSource: source}}}
-		container := corev1.Container{VolumeMounts: []corev1.VolumeMount{{Name: "scratch", MountPath: "/tmp"}}}
-		err := addRuntimeConfigStorage(&pod, &container, "lpu_servers")
+		container := corev1.Container{SecurityContext: &corev1.SecurityContext{ReadOnlyRootFilesystem: ptr.To(true)}, VolumeMounts: []corev1.VolumeMount{
+			{Name: "scratch", MountPath: "/tmp"},
+			{Name: lpuConfigVolumeName, MountPath: lpuConfigMountPath},
+		}}
+		authoredPod, authoredContainer := pod.DeepCopy(), container.DeepCopy()
+		err := validateRuntimeConfigStorage(&pod, &container, "lpu_servers")
 		if source.EmptyDir == nil {
 			require.ErrorContains(t, err, "Pod-local emptyDir")
 		} else {
 			require.NoError(t, err)
 			require.Len(t, pod.Volumes, 1)
 		}
+		require.Equal(t, *authoredPod, pod)
+		require.Equal(t, *authoredContainer, container)
 		container.VolumeMounts[0].ReadOnly = true
-		require.ErrorContains(t, addRuntimeConfigStorage(&pod, &container, "lpu_servers"), "writable storage")
+		require.ErrorContains(t, validateRuntimeConfigStorage(&pod, &container, "lpu_servers"), "writable storage")
 	}
 }

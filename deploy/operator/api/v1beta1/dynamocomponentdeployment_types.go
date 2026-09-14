@@ -29,18 +29,6 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
-// +kubebuilder:validation:Enum=override;strategic
-type ExtraPodSpecMergeStrategy string
-
-const (
-	ExtraPodSpecMergeStrategyOverride  ExtraPodSpecMergeStrategy = "override"
-	ExtraPodSpecMergeStrategyStrategic ExtraPodSpecMergeStrategy = "strategic"
-)
-
-func (s ExtraPodSpecMergeStrategy) IsValid() bool {
-	return s == ExtraPodSpecMergeStrategyOverride || s == ExtraPodSpecMergeStrategyStrategic
-}
-
 const (
 	// DynamoComponentDeploymentConditionTypeAvailable indicates the component is
 	// available and serving traffic.
@@ -79,10 +67,9 @@ type DynamoComponentDeploymentSpec struct {
 // volumeMounts, annotations, labels, extraPodMetadata, extraPodSpec) are
 // replaced with a single `podTemplate` field holding a native
 // `corev1.PodTemplateSpec`. The operator injects its defaults into the
-// container named `"main"` and merges user overrides according to
-// `extraPodSpecMergeStrategy`. Users can add sidecars, init containers, and
-// pod-level configuration directly in `podTemplate` without any
-// `extraPodSpec`-style escape hatch.
+// container named `"main"` and merges user overrides. Users can add sidecars,
+// init containers, and pod-level configuration directly in `podTemplate`
+// without any `extraPodSpec`-style escape hatch.
 // +kubebuilder:validation:XValidation:rule="!has(self.eppConfig) || (has(self.type) && self.type == 'epp')",message="eppConfig may only be set when type is epp"
 // +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)",message="minAvailable must be less than or equal to replicas unless replicas is 0"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)",message="minAvailable is immutable after creation"
@@ -154,13 +141,6 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// required fields, including image.
 	// +optional
 	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
-
-	// extraPodSpecMergeStrategy controls how podTemplate is merged with the
-	// operator-generated pod and container defaults. When omitted, the operator
-	// uses its configured defaultExtraPodSpecMergeStrategy, which defaults to
-	// "override".
-	// +optional
-	ExtraPodSpecMergeStrategy ExtraPodSpecMergeStrategy `json:"extraPodSpecMergeStrategy,omitempty"`
 
 	// replicas is the desired number of Pods for this component. When
 	// `scalingAdapter` is set on this component, this field is managed by

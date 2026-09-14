@@ -206,6 +206,14 @@ func RenderSelectedNodeLocal(
 
 	hybrid := projections[0].pipeline == PipelineLPX
 	if hybrid {
+		// HX Cyborg may inherit its Agent's configuration mount.
+		container := common.FindContainerByName(cyborg.Spec.PodSpec.Containers, commonconsts.MainContainerName)
+		if cyborgConfigMap == nil && slices.ContainsFunc(container.VolumeMounts,
+			func(mount corev1.VolumeMount) bool { return mount.Name == lpuConfigVolumeName }) {
+			if err := withLPUConfigVolume(&cyborg.Spec.PodSpec, configMap.Name, true); err != nil {
+				return nil, err
+			}
+		}
 		if err := configureHybridCyborg(
 			cyborg,
 			projections[0],
@@ -258,10 +266,17 @@ func configureLPURolePods(agentPodSpec, conductorPodSpec *corev1.PodSpec, worklo
 	}
 
 	if workload.Pipeline() == PipelineLPX {
+		// Extra Agents beyond one per runtime partition imply multi-node SSH setup.
+		projection := workload.modelProjections[0]
+		partitionCount := len(projection.partitions)
+		if workload.BuildFamily() == BuildFamilyXT {
+			partitionCount = len(projection.configuredBuild.Partitions)
+		}
 		if err := configureDirectHybridAgentRuntime(
 			agentPodSpec,
 			configMapName,
 			sshSecretName,
+			projection.agentReplicas > partitionCount,
 		); err != nil {
 			return err
 		}

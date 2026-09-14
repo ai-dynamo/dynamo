@@ -19,10 +19,9 @@ import (
 
 // Preserve rendered workload identities and image-owned executable paths.
 const (
-	runtimeTemporaryStorageVolumeName = "tmp"
-	runtimeTemporaryStorageMountPath  = "/tmp"
-	lp30InitContainerName             = "prepare-lp30"
-	lp30InitPath                      = "/bin/lp30-agent-v2-init"
+	runtimeTemporaryStorageMountPath = "/tmp"
+	lp30InitContainerName            = "prepare-lp30"
+	lp30InitPath                     = "/bin/lp30-agent-v2-init"
 )
 
 var lp30WorkerEnvironment = []corev1.EnvVar{
@@ -111,6 +110,7 @@ func stripNovaOnlyArgs(args []string) ([]string, bool) {
 func configureDirectHybridAgentRuntime(
 	agentPodSpec *corev1.PodSpec,
 	lpuConfigMapName, sshSecretName string,
+	multiNode bool,
 ) error {
 	if strings.TrimSpace(sshSecretName) == "" {
 		return fmt.Errorf("direct hybrid agent runtime requires an MPI SSH secret name")
@@ -123,6 +123,9 @@ func configureDirectHybridAgentRuntime(
 	agent.Name = lpuAgentContainerName
 	applyLPUWorkerContainerBase(agent, hasCustomStartup)
 	if len(agent.Args) == 0 && !hasCustomStartup {
+		if err := validateGeneratedAgentMounts(agent, true, multiNode); err != nil {
+			return err
+		}
 		agent.Args = []string{"-c", lpuPartitionRunCommand}
 	}
 
@@ -141,8 +144,6 @@ func configureDirectHybridAgentRuntime(
 		corev1.EnvVar{Name: "READINESS_PORT", Value: fmt.Sprintf("%d", LPUReadinessPort)},
 	)
 
-	addLPUHostDeviceVolumeMounts(agent)
-	agent.VolumeMounts = setVolumeMount(agent.VolumeMounts, sshVolumeMount())
 	retargetMainContainerReferences(agentPodSpec, agent)
 
 	agent.Env = append(agent.Env,
@@ -162,7 +163,7 @@ func configureDirectHybridAgentRuntime(
 		},
 	)
 	setNodeLocalPodIPEnv(agent, true)
-	if err := addRuntimeTemporaryStorage(agentPodSpec, agent, false); err != nil {
+	if err := validateRuntimeTemporaryStorage(agentPodSpec, agent); err != nil {
 		return err
 	}
 	updateWorkerPodSpec(agentPodSpec)
@@ -175,19 +176,10 @@ func configureDirectHybridAgentRuntime(
 	agentPodSpec.SecurityContext.RunAsGroup = ptr.To(int64(0))
 	agentPodSpec.SecurityContext.RunAsNonRoot = ptr.To(false)
 
-	if err := addSSHVolume(agentPodSpec, sshSecretName, 0644); err != nil {
+	if err := validateSSHVolume(agentPodSpec, sshSecretName); err != nil {
 		return err
 	}
-	if err := applyLPUHostDeviceVolumes(agentPodSpec, false); err != nil {
-		return err
-	}
-	agentPodSpec.Volumes = appendVolumeIfMissing(agentPodSpec.Volumes, corev1.Volume{
-		Name: "hugepages",
-		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{
-			Medium: corev1.StorageMediumHugePages,
-		}},
-	})
-	return nil
+	return validateLPUHostDeviceVolumes(agentPodSpec)
 }
 
 // configureNodeLocalConductorRuntime consumes a nonnil conductor PodSpec.
@@ -211,7 +203,7 @@ func configureNodeLocalConductorRuntime(
 
 	// Materialize the GPC conductor around the image's Nova binary.
 	setNodeLocalPodIPEnv(conductor, isXT)
-	if err := addRuntimeConfigStorage(conductorPodSpec, conductor, "datacenter.toml"); err != nil {
+	if err := validateRuntimeConfigStorage(conductorPodSpec, conductor, "datacenter.toml"); err != nil {
 		return err
 	}
 	updateLPUConductorContainer(conductor, allocation)
@@ -251,31 +243,30 @@ func configureNodeLocalAgentRuntime(
 	agent.Name = lpuAgentContainerName
 	retargetMainContainerReferences(agentPodSpec, agent)
 	configureNodeLocalAgentWorkerContainer(agent, isXT, preserveAgentEntrypoint)
-	if err := addRuntimeTemporaryStorage(agentPodSpec, agent, !isXT); err != nil {
+	if err := validateRuntimeTemporaryStorage(agentPodSpec, agent); err != nil {
 		return err
 	}
 	agentPodSpec.HostUsers = nil
 	updateWorkerPodSpec(agentPodSpec)
-	if err := applyLPUHostDeviceVolumes(agentPodSpec, !isXT); err != nil {
+	if err := validateLPUHostDeviceVolumes(agentPodSpec); err != nil {
 		return err
 	}
-	if err := addSSHVolume(agentPodSpec, sshSecretName, 0644); err != nil {
+	if err := validateSSHVolume(agentPodSpec, sshSecretName); err != nil {
 		return err
 	}
 
-	// Expose node-local devices and hugetlbfs through host /dev without an unaccounted HugePages volume.
-	addLPUHostDeviceVolumeMounts(agent)
-	agent.VolumeMounts = setVolumeMount(agent.VolumeMounts, sshVolumeMount())
+	// Check only the paths consumed by the selected generated worker script.
+	if !preserveAgentEntrypoint {
+		if err := validateGeneratedAgentMounts(agent, isXT, true); err != nil {
+			return err
+		}
+	}
+
+	// Apply the family-specific worker resource and initialization requirements.
 	if isXT {
 		applyLPUWorkerContainerBase(agent, preserveAgentEntrypoint)
 		agent.SecurityContext.RunAsGroup = ptr.To(int64(0))
 		agent.SecurityContext.RunAsNonRoot = ptr.To(false)
-		agentPodSpec.Volumes = appendVolumeIfMissing(agentPodSpec.Volumes, corev1.Volume{
-			Name: "hugepages",
-			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{
-				Medium: corev1.StorageMediumHugePages,
-			}},
-		})
 	} else {
 		return addLP30InitContainer(agentPodSpec, agent)
 	}
@@ -340,6 +331,12 @@ func addLP30InitContainer(podSpec *corev1.PodSpec, agent *corev1.Container) erro
 	if err := validateRolePodSpecContainerNames(podSpec, field.NewPath("spec"), lp30InitContainerName).ToAggregate(); err != nil {
 		return err
 	}
+	// The generated init mounts fixed names; their host volumes must be authored.
+	for _, name := range []string{"host-dev", "host-sys"} {
+		if !slices.ContainsFunc(podSpec.Volumes, func(volume corev1.Volume) bool { return volume.Name == name }) {
+			return fmt.Errorf("LP30 initialization requires podTemplate volume %q", name)
+		}
+	}
 
 	initContainer := corev1.Container{
 		Name:            lp30InitContainerName,
@@ -358,8 +355,11 @@ func addLP30InitContainer(podSpec *corev1.PodSpec, agent *corev1.Container) erro
 			RunAsGroup:   ptr.To(int64(0)),
 			RunAsNonRoot: ptr.To(false),
 		},
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: "host-sys", MountPath: "/sys"},
+			{Name: "host-dev", MountPath: "/dev"},
+		},
 	}
-	addLPUHostDeviceVolumeMounts(&initContainer)
 	podSpec.InitContainers = append(podSpec.InitContainers, initContainer)
 	return nil
 }
@@ -439,38 +439,48 @@ func retargetResourceFieldReferencesInDownwardAPI(items []corev1.DownwardAPIVolu
 	}
 }
 
-func addRuntimeTemporaryStorage(podSpec *corev1.PodSpec, container *corev1.Container, replaceExisting bool) error {
-	// Give conductor expansion and Agent setup a pod-lifetime writable workspace.
-	volume := corev1.Volume{
-		Name: runtimeTemporaryStorageVolumeName,
-		VolumeSource: corev1.VolumeSource{
-			EmptyDir: &corev1.EmptyDirVolumeSource{},
-		},
+func validateGeneratedAgentMounts(container *corev1.Container, requireConfig, requireSSH bool) error {
+	// Only an explicit configuration override can waive the default mount.
+	usesDefaultConfigDir := true
+	for _, variable := range container.Env {
+		if variable.Name == "LPU_CONFIG_DIR" {
+			usesDefaultConfigDir = variable.ValueFrom == nil && (variable.Value == "" || variable.Value == lpuConfigMountPath)
+		}
 	}
-	mount := corev1.VolumeMount{Name: runtimeTemporaryStorageVolumeName, MountPath: runtimeTemporaryStorageMountPath}
-	if replaceExisting {
-		podSpec.Volumes = setVolumeByName(podSpec.Volumes, volume)
-		container.VolumeMounts = setVolumeMount(container.VolumeMounts, mount)
-		return nil
+	if requireConfig && usesDefaultConfigDir && !slices.ContainsFunc(container.VolumeMounts, func(mount corev1.VolumeMount) bool { return mount.MountPath == lpuConfigMountPath }) {
+		return fmt.Errorf("LPX runtime configuration requires a volume mounted at %q", lpuConfigMountPath)
 	}
 
-	// Validate the selected binding without rebinding authored storage used by other containers.
-	for _, existing := range container.VolumeMounts {
-		if existing.MountPath == mount.MountPath {
-			mount = existing
-		}
+	// Generated SSH setup reads the Secret's keys directly from this directory.
+	if requireSSH && !slices.ContainsFunc(container.VolumeMounts, func(mount corev1.VolumeMount) bool {
+		return mount.Name == runtimeSSHVolumeName && mount.MountPath == runtimeSSHSecretMountPath && mount.SubPath == "" && mount.SubPathExpr == ""
+	}) {
+		return fmt.Errorf("LPX agent requires volume %q mounted at %q without subPath", runtimeSSHVolumeName, runtimeSSHSecretMountPath)
 	}
-	readOnly := mount.ReadOnly
-	for _, existing := range podSpec.Volumes {
-		if existing.Name == mount.Name {
-			readOnly = readOnly || volumeIsReadOnly(existing.VolumeSource)
-		}
+	return nil
+}
+
+func validateRuntimeTemporaryStorage(podSpec *corev1.PodSpec, container *corev1.Container) error {
+	// Agents use writable root filesystems; validate only explicitly mounted workspace storage.
+	mountIndex := slices.IndexFunc(container.VolumeMounts, func(mount corev1.VolumeMount) bool {
+		return mount.MountPath == runtimeTemporaryStorageMountPath
+	})
+	if mountIndex < 0 {
+		return nil
 	}
-	if readOnly {
+	mount := container.VolumeMounts[mountIndex]
+	if mount.ReadOnly {
 		return fmt.Errorf("LPX runtime requires writable storage at %q", mount.MountPath)
 	}
-	container.VolumeMounts = setVolumeMount(container.VolumeMounts, mount)
-	podSpec.Volumes = appendVolumeIfMissing(podSpec.Volumes, volume)
+
+	// Validate the authored source without creating or replacing it.
+	volumeIndex := slices.IndexFunc(podSpec.Volumes, func(volume corev1.Volume) bool { return volume.Name == mount.Name })
+	if volumeIndex < 0 {
+		return fmt.Errorf("LPX runtime mount at %q references missing volume %q", mount.MountPath, mount.Name)
+	}
+	if volumeIsReadOnly(podSpec.Volumes[volumeIndex].VolumeSource) {
+		return fmt.Errorf("LPX runtime requires writable storage at %q", mount.MountPath)
+	}
 	return nil
 }
 

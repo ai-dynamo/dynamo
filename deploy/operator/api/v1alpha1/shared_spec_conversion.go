@@ -160,7 +160,6 @@ func ConvertFromDynamoComponentDeploymentSharedSpec(src *DynamoComponentDeployme
 	dst.GlobalDynamoNamespace = src.GlobalDynamoNamespace
 	dst.Replicas = src.Replicas
 	dst.MinAvailable = src.MinAvailable
-	dst.ExtraPodSpecMergeStrategy = v1beta1.ExtraPodSpecMergeStrategy(src.ExtraPodSpecMergeStrategy)
 
 	if src.Multinode != nil {
 		dst.Multinode = &v1beta1.MultinodeSpec{}
@@ -249,9 +248,6 @@ func restoreSharedAlphaOnlySimpleFields(dst *DynamoComponentDeploymentSharedSpec
 	if dst.Autoscaling == nil && preserved.Autoscaling != nil {
 		cp := *preserved.Autoscaling
 		dst.Autoscaling = &cp
-	}
-	if dst.ExtraPodSpecMergeStrategy == "" && preserved.ExtraPodSpecMergeStrategy != "" {
-		dst.ExtraPodSpecMergeStrategy = preserved.ExtraPodSpecMergeStrategy
 	}
 	if dst.Ingress == nil && preserved.Ingress != nil {
 		cp := *preserved.Ingress
@@ -573,7 +569,6 @@ func ConvertToDynamoComponentDeploymentSharedSpec(src *v1beta1.DynamoComponentDe
 	dst.LPX = src.LPX
 	dst.RuntimeVersionOverride = src.RuntimeVersionOverride
 	dst.ServiceName = src.ComponentName
-	dst.ExtraPodSpecMergeStrategy = ExtraPodSpecMergeStrategy(src.ExtraPodSpecMergeStrategy)
 
 	// sharedMemorySize -> SharedMemorySpec.
 	if src.SharedMemorySize != nil {

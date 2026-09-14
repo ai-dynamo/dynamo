@@ -362,38 +362,3 @@ func TestValidateInfrastructure_TLS(t *testing.T) {
 		}
 	})
 }
-
-func TestValidateOperatorConfiguration_InvalidDefaultExtraPodSpecMergeStrategy(t *testing.T) {
-	cfg := validConfig()
-	cfg.PodGeneration.DefaultExtraPodSpecMergeStrategy = "invalid"
-
-	errs := ValidateOperatorConfiguration(cfg)
-	if len(errs) != 1 {
-		t.Errorf("expected 1 error for invalid extraPodSpec merge strategy, got %d: %v", len(errs), errs)
-	}
-}
-
-func TestValidateOperatorConfiguration_PodGenerationCamelCaseConfigKey(t *testing.T) {
-	cfg := validConfig()
-	rawConfig := []byte(`{
-		"podGeneration": {
-			"defaultExtraPodSpecMergeStrategy": "strategic"
-		}
-	}`)
-
-	if err := json.Unmarshal(rawConfig, cfg); err != nil {
-		t.Fatalf("failed to unmarshal podGeneration config: %v", err)
-	}
-
-	if cfg.PodGeneration.DefaultExtraPodSpecMergeStrategy != "strategic" {
-		t.Fatalf(
-			"expected strategic merge strategy from podGeneration key, got %q",
-			cfg.PodGeneration.DefaultExtraPodSpecMergeStrategy,
-		)
-	}
-
-	errs := ValidateOperatorConfiguration(cfg)
-	if len(errs) != 0 {
-		t.Errorf("expected no errors for camelCase podGeneration config, got: %v", errs)
-	}
-}

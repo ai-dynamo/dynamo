@@ -7,6 +7,7 @@ package lpx
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -27,6 +28,44 @@ const (
 	testAgentTemplateName   = "lpu-wkr-m-0"
 	testTargetStageName     = "target"
 )
+
+func TestHybridSSHMountFollowsRuntimePartitionSize(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		family   BuildFamily
+		physical int
+		runtime  int
+		agents   int
+		wantErr  bool
+	}{
+		{"XT independent single-node", BuildFamilyXT, 2, 2, 2, false},
+		{"XT multi-node", BuildFamilyXT, 1, 1, 2, true},
+		{"XT collapsed chain", BuildFamilyXT, 2, 1, 2, true},
+		{"HX independent single-node", BuildFamilyHX, 2, 0, 2, false},
+		{"HX multi-node", BuildFamilyHX, 1, 0, 2, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Supply resolved runtime counts and an Agent without an SSH mount")
+			workload := &SelectedWorkload{modelProjections: []*ModelProjection{{
+				pipeline: PipelineLPX, agentReplicas: test.agents,
+				partitions:      make([]BuildPartition, test.physical),
+				configuredBuild: Build{Family: test.family, Partitions: make([]BuildPartition, test.runtime)},
+			}}}
+			pod := renderTestPodSpec()
+			pod.Containers[0].VolumeMounts = slices.DeleteFunc(pod.Containers[0].VolumeMounts, func(mount corev1.VolumeMount) bool {
+				return mount.Name == runtimeSSHVolumeName
+			})
+
+			t.Log("Require SSH only when a runtime partition spans multiple Agents")
+			err := configureLPURolePods(&pod, nil, workload, "config", "allocation", "ssh-secret")
+			if test.wantErr {
+				require.ErrorContains(t, err, `requires volume "ssh-secret" mounted at "/ssh-pk"`)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
 
 func renderSelectedForTest(pcs *grovev1alpha1.PodCliqueSet, projections []*ModelProjection, input RenderInput) (*grovev1alpha1.PodCliqueSet, error) {
 	// Attach test projections to their authored stage without inventing templates.
@@ -102,7 +141,8 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 				template.Spec.Containers[0].VolumeMounts = append(template.Spec.Containers[0].VolumeMounts,
 					corev1.VolumeMount{Name: lpuConfigVolumeName, MountPath: "/custom"})
 			} else {
-				template.Spec.Containers[0].VolumeMounts[0].MountPath = "/tmp"
+				template.Spec.Containers[0].VolumeMounts[0].MountPath = "/model-cache"
+				pcs.Spec.Template.Cliques[0].Spec.PodSpec.Containers[0].VolumeMounts[1].MountPath = "/model-cache"
 			}
 
 			t.Log("Render into the fresh PCS without retaining stale runtime identity")
@@ -127,12 +167,14 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 				conductor := namedClique(t, rendered, "lpu-ldr")
 				require.Equal(t, "kept", conductor.Annotations["user"])
 				require.Contains(t, conductor.Spec.PodSpec.Containers[0].VolumeMounts,
+					corev1.VolumeMount{Name: lpuConfigVolumeName, MountPath: "/custom"})
+				require.Contains(t, conductor.Spec.PodSpec.Containers[0].VolumeMounts,
 					corev1.VolumeMount{Name: lpuConfigVolumeName, MountPath: lpuConfigMountPath})
 			} else {
 				cyborg := namedClique(t, rendered, "lpu-engine-gpu").Spec.PodSpec.Containers[0]
-				require.Contains(t, cyborg.VolumeMounts, corev1.VolumeMount{Name: "model-storage", MountPath: "/tmp"})
+				require.Contains(t, cyborg.VolumeMounts, corev1.VolumeMount{Name: "model-storage", MountPath: "/model-cache"})
 				require.Contains(t, cyborg.Env, corev1.EnvVar{
-					Name: "GBUILD_MANIFEST_PATH", Value: "/tmp/model-build/manifest.v2.capnp.bin",
+					Name: "GBUILD_MANIFEST_PATH", Value: "/model-cache/model-build/manifest.v2.capnp.bin",
 				})
 			}
 		})
@@ -329,8 +371,14 @@ func renderTestPCS(hybrid bool) *grovev1alpha1.PodCliqueSet {
 			RoleName: "lpu-engine-gpu", Replicas: 1, MinAvailable: &one,
 			PodSpec: corev1.PodSpec{
 				SchedulerName: corev1.DefaultSchedulerName,
+				Volumes: []corev1.Volume{
+					{Name: "model-storage", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "model-storage"}}},
+				},
 				Containers: []corev1.Container{{Name: "main", Image: "cyborg", Env: []corev1.EnvVar{
 					{Name: selectedCyborgServerHostsFileEnv, Value: "/tmp/lpu_servers"},
+				}, VolumeMounts: []corev1.VolumeMount{
+					{Name: lpuConfigVolumeName, MountPath: lpuConfigMountPath},
+					{Name: "model-storage", MountPath: "/models"},
 				}}},
 				ResourceClaims: []corev1.PodResourceClaim{{
 					Name:                      "candidate",
@@ -349,10 +397,20 @@ func renderTestPodSpec() corev1.PodSpec {
 			VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
 				ClaimName: "model-storage",
 			}},
-		}},
+		},
+			{Name: conductorSSHKeyVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+			{Name: "ssh-secret", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "ssh-secret"}}},
+			{Name: "host-dev", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/dev"}}},
+			{Name: "host-sys", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/sys"}}},
+		},
 		Containers: []corev1.Container{{
 			Name: "main", Image: "runtime",
-			VolumeMounts: []corev1.VolumeMount{{Name: "model-storage", MountPath: "/models"}},
+			VolumeMounts: []corev1.VolumeMount{
+				{Name: "model-storage", MountPath: "/models"},
+				{Name: lpuConfigVolumeName, MountPath: lpuConfigMountPath},
+				{Name: conductorSSHKeyVolumeName, MountPath: conductorSSHKeyDir},
+				{Name: runtimeSSHVolumeName, MountPath: runtimeSSHSecretMountPath, ReadOnly: true},
+			},
 			Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
 				corev1.ResourceName("lpu.nvidia.com/devices"): resource.MustParse("1"),
 			}},
