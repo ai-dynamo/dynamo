@@ -259,7 +259,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         ) as cancellation_task:
             async for res in self._stream_until_cancelled(results, cancellation_task):
                 if not request_id_future.done():
-                    meta_info = res.get("meta_info", {})
+                    meta_info = res.get("meta_info") or (
+                        res.get("engine_data", {})
+                        .get("sglang_response", {})
+                        .get("meta_info", {})
+                    )
                     sglang_request_id = meta_info.get("id")
                     if sglang_request_id:
                         request_id_future.set_result(sglang_request_id)
