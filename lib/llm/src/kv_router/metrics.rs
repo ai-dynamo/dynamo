@@ -855,8 +855,8 @@ pub struct RouterRequestMetrics {
     pub shared_cache_beyond_blocks: prometheus::Histogram,
     pub non_max_overlap_selections_total: IntCounterVec,
     pub overlap_blocks_lost: HistogramVec,
-    pub(crate) decision_counters_prefill: RoutingDecisionCounters,
-    pub(crate) decision_counters_decode: RoutingDecisionCounters,
+    pub decision_counters_prefill: RoutingDecisionCounters,
+    pub decision_counters_decode: RoutingDecisionCounters,
 }
 
 /// The four routing-decision counters for one worker type, resolved at registration.
@@ -869,10 +869,10 @@ pub struct RouterRequestMetrics {
 /// The resolved handles share their atomics with the registered vec, so increments here still
 /// appear under the right label on a scrape.
 pub struct RoutingDecisionCounters {
-    decisions_total: IntCounter,
-    decision_kv_optimal_total: IntCounter,
-    input_f0_total: IntCounter,
-    input_f1_total: IntCounter,
+    pub decisions_total: IntCounter,
+    pub decision_kv_optimal_total: IntCounter,
+    pub input_f0_total: IntCounter,
+    pub input_f1_total: IntCounter,
 }
 
 impl RoutingDecisionCounters {
