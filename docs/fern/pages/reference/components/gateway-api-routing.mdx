@@ -173,34 +173,30 @@ until the reaper clears it.
 
 ### Booking Ownership on Disconnect and Retry
 
-This is the sharpest accuracy limit, and it is specific to the EPP rather than inherited from the
-router.
+The Frontend owns a request end to end and frees its booking when the work ends. The EPP only selects.
+The gateway dispatches, so the EPP's booking is tied to the `ext_proc` stream, and the EPP frees it
+when that stream ends rather than when the worker stops generating.
 
-The Frontend owns a request end to end: it selects a worker, dispatches, and observes completion, so it
-frees the booking exactly when the work ends. The EPP only selects. Envoy dispatches, and the EPP's
-booking lives for the life of the `ext_proc` stream. When that stream ends the EPP frees the booking,
-whether or not the backend request it accounted for has finished.
+Those coincide in the normal case, and they also coincide when the stream ends early, because the
+gateway tears the upstream down with it. agentgateway drops fail-open once request headers are sent
+and has no response-side fail-open, so an `ext_proc` failure mid-response ends the exchange, which
+closes the stream to the worker. The worker's Frontend sidecar sees the disconnect and cancels
+generation. Freeing the booking is therefore correct: nothing keeps running that the EPP has stopped
+accounting for.
 
-At one replica the consequences are self-correcting. At several replicas they are not:
+Two effects remain:
 
-- **A retry can land on a different EPP.** Envoy load-balances `ext_proc` streams across EPP pods with
-  no request affinity, so a retried request is picked by whichever replica Envoy chooses next. Backend
-  load and booking state then diverge, and they move in opposite directions.
-- **Backend work can outlive the stream.** An `ext_proc` disconnect does not cancel work already
-  dispatched to the worker, so the original attempt can still be generating when the retry is
-  dispatched. Two attempts consume capacity for one logical request.
-- **Booking state undercounts that, and briefly overcounts on some replicas.** The replica that placed
-  the original booking frees it when its stream ends, and that `free` propagates. Replicas that receive
-  it stop accounting for the original attempt while it is still running, so the fleet understates the
-  worker. A replica whose `free` has not yet arrived holds the original booking alongside the retry's
-  and counts the request twice until it does.
-- **Expiry bounds the error but does not correct it.** A quiet booking is reclaimed by a router-owned
-  reaper at `DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS` (default `300` seconds). Lease expiry is local to
-  the replica that holds it and publishes no `free`, so peers reclaim their copies on their own timers.
+- **A retry can land on a different EPP.** The gateway load-balances `ext_proc` streams across EPP pods
+  with no request affinity, so a retried request re-enters admission on whichever replica it reaches.
+  Until the original `free` propagates, a replica that has not received it holds both bookings and
+  counts the request twice.
+- **Cancellation is not instant.** A disconnected decode request may hold router state for up to
+  `CLEANUP_DISPATCH_TIMEOUT` (120 seconds) while it finishes reaching its worker, so the free and the
+  release of worker capacity are close but not simultaneous.
 
-The practical effect is a transient over- or under-estimate of one worker's active load, on some
-replicas and not others, lasting until the affected requests complete or the reaper runs. It shifts
-load balancing, not correctness: a misrouted request is still served by a worker that holds the model.
+This reasoning depends on the gateway resetting the upstream. A gateway that instead lets the upstream
+run would leave the EPP accounting for nothing while the worker is still busy, which understates that
+worker across every replica that received the `free`.
 
 ### Selection-to-Booking Race
 
