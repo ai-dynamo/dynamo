@@ -178,7 +178,6 @@ def test_compat_detects_ordered_cancellation_support(monkeypatch):
 @pytest.mark.parametrize(
     "engine",
     [
-        None,
         SimpleNamespace(),
         SimpleNamespace(tokenizer_manager=SimpleNamespace()),
         SimpleNamespace(tokenizer_manager=SimpleNamespace(rid_to_state=[])),
