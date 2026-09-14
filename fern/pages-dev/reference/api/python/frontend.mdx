@@ -156,7 +156,7 @@ from dynamo.frontend.sglang_processor import SglangEngineFactory
 SglangEngineFactory(config: FrontendConfig, debug_perf: bool = False, tool_call_parser_name: str | None = None, reasoning_parser_name: str | None = None, chat_template: str | None = None)
 ```
 
-[`components/src/dynamo/frontend/sglang_processor.py#L949`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_processor.py#L949)
+[`components/src/dynamo/frontend/sglang_processor.py#L965`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_processor.py#L965)
 
 **Public methods**
 
@@ -168,7 +168,7 @@ __init__(config: FrontendConfig, debug_perf: bool = False, tool_call_parser_name
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_processor.py#L950)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_processor.py#L966)
 
 <h4 id="api-dynamo-frontend-sglang-processor-sglangenginefactory-chat-engine-factory">chat_engine_factory</h4>
 
@@ -178,7 +178,7 @@ chat_engine_factory(instance_id: ModelCardInstanceId, mdc: ModelDeploymentCard, 
 
 Called by Rust when a model is discovered.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_processor.py#L977)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_processor.py#L993)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-sglang-prepost-sglangpreprocessresult" title="SglangPreprocessResult (class)">
@@ -244,7 +244,7 @@ from dynamo.frontend.sglang_processor import SglangProcessor
 SglangProcessor(tokenizer, routed_engine: RoutedEngine, tool_call_parser_name: str | None, reasoning_parser_name: str | None, eos_token_ids: list[int] | None, debug_perf: bool = False, preprocess_pool: ProcessPoolExecutor | None = None, preprocess_workers: int = 0, stream_interval: int = 1, default_thinking_mode: str | None = None)
 ```
 
-[`components/src/dynamo/frontend/sglang_processor.py#L483`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_processor.py#L483)
+[`components/src/dynamo/frontend/sglang_processor.py#L499`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_processor.py#L499)
 
 **Public methods**
 
@@ -256,7 +256,7 @@ __init__(tokenizer, routed_engine: RoutedEngine, tool_call_parser_name: str | No
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_processor.py#L484)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_processor.py#L500)
 
 <h4 id="api-dynamo-frontend-sglang-processor-sglangprocessor-generator">generator</h4>
 
@@ -266,7 +266,7 @@ generator(request: dict[str, Any], context: Any | None = None) -> AsyncGenerator
 
 Main entry point: preprocess, route, post-process a chat request.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_processor.py#L528)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/sglang_processor.py#L544)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-sglang-prepost-sglangstreamingpostprocessor" title="SglangStreamingPostProcessor (class)">
