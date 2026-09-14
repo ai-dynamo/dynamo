@@ -3079,18 +3079,11 @@ async fn chat_completions(
         }
         Ok(sse_stream.into_response())
     } else {
-        // Check first event for backend errors before aggregating (non-streaming only)
-        let stream_with_check =
-            check_for_backend_error(stream, None)
-                .await
-                .map_err(|error_response| {
-                    tracing::error!(request_id, "Backend error detected: {:?}", error_response);
-                    inflight_guard.mark_error(extract_error_type_from_response(&error_response));
-                    error_response
-                })?;
-
+        // Observe metrics as frames arrive, ahead of the backend-error preflight:
+        // the preflight buffers leading annotation frames, so observing after it
+        // would stamp TTFT/ITL with release time instead of arrival time (#11349).
         let mut http_queue_guard = Some(http_queue_guard);
-        let stream = stream_with_check.inspect(move |response| {
+        let stream = stream.inspect(move |response| {
             // Calls observe_response() on each token - drops http_queue_guard on first token
             process_chat_response_and_observe_metrics(
                 response,
@@ -3098,6 +3091,15 @@ async fn chat_completions(
                 &mut http_queue_guard,
             );
         });
+
+        // Check first event for backend errors before aggregating (non-streaming only)
+        let stream = check_for_backend_error(stream, None)
+            .await
+            .map_err(|error_response| {
+                tracing::error!(request_id, "Backend error detected: {:?}", error_response);
+                inflight_guard.mark_error(extract_error_type_from_response(&error_response));
+                error_response
+            })?;
 
         let response =
             NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options.clone())
