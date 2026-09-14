@@ -1,0 +1,28 @@
+{
+  "analysis_id": "20260828T123305Z-baseline-23b789-summary",
+  "batch": {
+    "average_completion_rate_rps": null,
+    "completed": null,
+    "duration_seconds": null,
+    "failed": null,
+    "peak_interval_completion_rate_rps": null,
+    "sample_count": 0,
+    "terminal_status": null,
+    "total": null
+  },
+  "data_quality": {
+    "issue_count": 0,
+    "issues": [],
+    "missing_online": true,
+    "missing_progress": true
+  },
+  "online": {
+    "enabled": false,
+    "sample_count": 0
+  },
+  "schema_version": "1.0",
+  "source_exit_code": 0,
+  "source_run_id": "20260828T123305Z-baseline-23b789",
+  "source_run_kind": "preflight",
+  "source_run_status": "completed"
+}
