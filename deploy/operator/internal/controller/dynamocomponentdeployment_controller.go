@@ -91,13 +91,6 @@ type DynamoComponentDeploymentReconciler struct {
 	NodeReader client.Reader
 }
 
-// elasticEPRayPoCEnabled reports whether the operator may act on the Ray elastic-EP
-// path. Gated off, the leader Service, the follower, and the node lookup are all
-// skipped and an elastic-EP component reconciles as an ordinary one.
-func (r *DynamoComponentDeploymentReconciler) elasticEPRayPoCEnabled() bool {
-	return r.RuntimeConfig != nil && r.RuntimeConfig.Gate.Enabled(features.ElasticEPRayPoC)
-}
-
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments/finalizers,verbs=update
@@ -845,11 +838,20 @@ func (r *DynamoComponentDeploymentReconciler) generateElasticEPHeadlessService(c
 	if dcd.GetAnnotations()[commonconsts.KubeAnnotationElasticEPFollower] == commonconsts.KubeLabelValueTrue {
 		return deleteStub, true, nil
 	}
-	// Same gate as the Grove pathway: the selector matches every pod with the component
-	// labels, so this addresses one Ray head only while the component is one pod.
-	// replicas > 1 round-robins across independent clusters; numberOfNodes > 1 publishes
-	// workers as if they were the head.
-	if !dynamo.IsSinglePodElasticEPLeader(&dcd.Spec.DynamoComponentDeploymentSharedSpec, r.elasticEPRayPoCEnabled()) {
+	// Shape, not the gate -- matching the Grove pathway. The selector matches every pod
+	// with the component labels, so this addresses one Ray head only while the component
+	// is one pod: replicas > 1 round-robins across independent clusters, and
+	// numberOfNodes > 1 publishes workers as if they were the head.
+	//
+	// Deliberately not gated even though this Service is new here. A follower's launch
+	// resolves the leader through this name -- it polls <leader>-ray:9090/live and then
+	// joins <leader>-ray:6379 -- so deleting it on a gate flip strands every follower
+	// that the emptiness guard just went out of its way to keep alive. Caught on a
+	// cluster: with the gate turned off, the follower survived at replicas 1 while its
+	// Service disappeared, leaving the pod polling a name that resolves to nothing until
+	// its three-hour deadline. Gate-off means the follower count stops changing, not that
+	// running followers lose their leader.
+	if !dynamo.IsSinglePodElasticEPShape(&dcd.Spec.DynamoComponentDeploymentSharedSpec) {
 		return deleteStub, true, nil
 	}
 	dynamoNamespace := dynamo.GetDCDDynamoNamespace(dcd)

@@ -840,13 +840,20 @@ func TestDynamoComponentDeploymentReconciler_ElasticEPHeadlessServiceGate(t *tes
 			wantDelete: false,
 		},
 		{
-			// The review requires that a gated-off operator create no Ray Services. The
-			// delete stub is what makes that true on upgrade *and* on disable: the same
-			// return both skips creation and removes one a previous operator emitted.
-			name:       "deletes when the ElasticEPRayPoC gate is off",
+			// The Service follows the component's shape, not the gate -- the same rule as
+			// its Grove twin. A follower resolves its leader through this name: it polls
+			// <leader>-ray:9090/live and then joins <leader>-ray:6379. Deleting it on a
+			// gate flip therefore strands every follower the emptiness guard just kept
+			// alive, which is what a cluster run showed -- the follower survived at
+			// replicas 1 while its Service disappeared, leaving the pod polling a name
+			// that resolves to nothing until its three-hour deadline.
+			//
+			// Gate-off means the follower count stops changing, not that running
+			// followers lose their leader.
+			name:       "keeps the Service when the ElasticEPRayPoC gate is off",
 			mutate:     func(*v1alpha1.DynamoComponentDeployment) {},
 			gateOff:    true,
-			wantDelete: true,
+			wantDelete: false,
 		},
 		{
 			name: "deletes for replicas > 1",
