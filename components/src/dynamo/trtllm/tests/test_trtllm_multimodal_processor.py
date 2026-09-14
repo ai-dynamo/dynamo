@@ -583,6 +583,24 @@ def test_extract_prompt_and_media_from_request_uses_multi_modal_data() -> None:
     assert embedding_paths == []
 
 
+def test_extract_prompt_and_media_from_request_classifies_signed_safetensors() -> None:
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+    signed = "https://host/embedding.SAFETENSORS?sig=abc"
+    _, image_urls, embedding_paths = processor.extract_prompt_and_media_from_request(
+        {
+            "extra_args": {"messages": []},
+            "multi_modal_data": {"image_url": [{"Url": signed}]},
+        }
+    )
+    assert image_urls == []
+    assert embedding_paths == [signed]
+
+
 def test_extract_prompt_and_media_from_request_keeps_message_fallback() -> None:
     processor = MultimodalRequestProcessor(
         model_type="multimodal",

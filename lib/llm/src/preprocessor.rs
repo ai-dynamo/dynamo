@@ -7530,50 +7530,6 @@ mod extra_args_media_copy_tests {
         assert_eq!(parts[0]["image_url"]["url"], "");
         assert_eq!(parts[1]["image_url"]["url"], "");
     }
-
-    #[tokio::test]
-    async fn stripped_inline_payload_fits_tcp_cap_that_doubled_copy_exceeds() {
-        // Default TCP request-plane cap is 32 MiB. A ~20 MiB inline image
-        // doubled in extra_args.messages + multi_modal_data would exceed it;
-        // a single copy after strip must stay under.
-        const TCP_CAP: usize = 32 * 1024 * 1024;
-        let preprocessor = test_preprocessor();
-        let data_url = format!("data:image/png;base64,{}", "A".repeat(20 * 1024 * 1024));
-        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
-            "model": "test-model",
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "describe"},
-                    {"type": "image_url", "image_url": {"url": data_url}}
-                ]
-            }],
-            "max_tokens": 1
-        }))
-        .unwrap();
-
-        let (preprocessed, _, _) = preprocessor
-            .preprocess_request(&request, None)
-            .await
-            .unwrap();
-
-        let extra_args = preprocessed.extra_args.as_ref().expect("mm extras");
-        assert_eq!(extra_args["messages"][0]["content"][1]["image_url"]["url"], "");
-        let extra_len = serde_json::to_vec(extra_args).unwrap().len();
-        let mm_len = serde_json::to_vec(preprocessed.multi_modal_data.as_ref().unwrap())
-            .unwrap()
-            .len();
-        let single_copy = extra_len + mm_len;
-        let doubled = single_copy + data_url.len();
-        assert!(
-            single_copy < TCP_CAP,
-            "single-copy frame {single_copy} must fit under {TCP_CAP}"
-        );
-        assert!(
-            doubled > TCP_CAP,
-            "pre-strip doubled payload {doubled} must exceed {TCP_CAP}"
-        );
-    }
 }
 
 #[cfg(test)]

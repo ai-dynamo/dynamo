@@ -100,6 +100,11 @@ def resolve_mm_processor_kwargs(request: Dict[str, Any]) -> Optional[Dict[str, A
     return mm_kwargs
 
 
+def _is_safetensors_url(url: str) -> bool:
+    """True when the URL path (not query) ends with ``.safetensors``."""
+    return urlparse(url).path.lower().endswith(".safetensors")
+
+
 def _urls_from_multi_modal_items(
     items: Any,
 ) -> Tuple[List[str], List[str]]:
@@ -117,7 +122,7 @@ def _urls_from_multi_modal_items(
             continue
         if not url:
             continue
-        if url.endswith(".safetensors"):
+        if _is_safetensors_url(url):
             embedding_paths.append(url)
         else:
             image_urls.append(url)
@@ -333,7 +338,7 @@ class MultimodalRequestProcessor:
                         if not url:
                             continue
                         self.modality = "image"
-                        if url.endswith(".safetensors"):
+                        if _is_safetensors_url(url):
                             embedding_paths.append(url)
                         else:
                             image_urls.append(url)
@@ -474,7 +479,7 @@ class MultimodalRequestProcessor:
                         )
                         continue
 
-                    if url.endswith(".safetensors"):
+                    if _is_safetensors_url(url):
                         embedding_paths.append(url)
                     else:
                         # Keep original item format for load_image_batch
