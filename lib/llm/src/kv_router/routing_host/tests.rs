@@ -1140,6 +1140,26 @@ async fn router_with_worker_configs(
     session_affinity_ttl: Option<Duration>,
     workers: HashMap<u64, ModelRuntimeConfig>,
 ) -> (RoutingHost, Runtime) {
+    let (router, runtime, _) = router_with_worker_policy_updates(
+        session_affinity_ttl,
+        workers,
+        SelectionPolicySource::Registry,
+        None,
+    )
+    .await;
+    (router, runtime)
+}
+
+pub(crate) async fn router_with_worker_policy_updates(
+    session_affinity_ttl: Option<Duration>,
+    workers: HashMap<u64, ModelRuntimeConfig>,
+    policy: SelectionPolicySource,
+    role: Option<crate::worker_type::WorkerType>,
+) -> (
+    RoutingHost,
+    Runtime,
+    watch::Sender<HashMap<u64, ModelRuntimeConfig>>,
+) {
     let runtime = Runtime::from_current().unwrap();
     let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
         .await
@@ -1152,22 +1172,23 @@ async fn router_with_worker_configs(
     let endpoint = component.endpoint("generate");
     let client = endpoint.client().await.unwrap();
     let worker_ids = workers.keys().copied().collect::<Vec<_>>();
-    let (_tx, workers) = watch::channel(workers);
+    let (tx, workers) = watch::channel(workers);
     let config = KvRouterConfig {
         skip_initial_worker_wait: true,
         use_kv_events: false,
         router_track_active_blocks: false,
         ..Default::default()
     };
-    let chooser = KvRouter::new(
+    let chooser = KvRouter::new_with_worker_role(
         endpoint,
         client.clone(),
         workers,
         None,
         16,
-        SelectionPolicySource::Registry,
+        policy,
         Some(config),
         None,
+        role,
         "decode",
         None,
         false,
@@ -1185,7 +1206,7 @@ async fn router_with_worker_configs(
         .client
         .override_discovered_instances(worker_ids.clone());
     router.inner.client.override_instance_avail(worker_ids);
-    (router, runtime)
+    (router, runtime, tx)
 }
 
 /// A dispatch plane that yields before completing, unlike [`CompletedBuiltinDispatch`].

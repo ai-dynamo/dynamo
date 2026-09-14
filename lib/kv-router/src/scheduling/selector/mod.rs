@@ -10,9 +10,9 @@ pub use default::DefaultWorkerSelector;
 
 use default::{DefaultWorkerPicker, DefaultWorkerScorer};
 pub use policy::{
-    ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerFilter, WorkerInputView,
-    WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer, WorkerSelectionContext,
-    WorkerSelectionPolicy,
+    PathPlanningRequirements, PrefillAction, RouteChoice, ScoredWorkerCandidate, WorkerCacheInput,
+    WorkerCandidate, WorkerFilter, WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker,
+    WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
 };
 
 use default::{pick_default_worker, selection_weights};
@@ -251,6 +251,7 @@ impl<'a> MaterializedSelectionInput<'a> {
             } as f64;
             let worker_load = worker_load.unwrap_or_default();
             WorkerLoadInput {
+                total_kv_blocks: None,
                 raw_prefill_blocks: raw_prefill_tokens / self.context.block_size as f64,
                 active_prefill_tokens: worker_load.active_prefill_tokens,
                 decode_cost_blocks: worker_load.potential_decode_blocks() as f64,
@@ -276,6 +277,7 @@ fn selection_result(
     block_size: u32,
 ) -> WorkerSelectionResult {
     WorkerSelectionResult {
+        prefill: PrefillAction::Default,
         worker,
         required_blocks: request.request_blocks(block_size),
         effective_overlap_blocks: request.effective_overlap_blocks_for(worker),
@@ -380,6 +382,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
 
     let weights = selection_weights(kv_router_config, request);
     let input = MaterializedSelectionInput::new(request, block_size, weights);
+    let mut prefill = PrefillAction::Default;
     let selected = match state {
         WorkerSelectionPolicyStateRef::Default(picker) => {
             let scorer = DefaultWorkerScorer {
@@ -394,6 +397,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                 collect_custom_candidates(&mut state, &input, workers, request, eligibility)?;
             let CustomWorkerSelectionState {
                 picker,
+                path_planning,
                 picker_inputs,
                 candidates,
                 cache_inputs,
@@ -423,7 +427,15 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                         .contains(WorkerInputs::LOAD)
                         .then_some(load_inputs.as_slice()),
                 };
-                let row = picker.pick(&input.context, picker_input)?;
+                let choice = if input.context.is_path_planning() && path_planning.is_some() {
+                    picker.pick_route(&input.context, picker_input)?
+                } else {
+                    RouteChoice {
+                        candidate: picker.pick(&input.context, picker_input)?,
+                        prefill: PrefillAction::Default,
+                    }
+                };
+                let row = choice.candidate;
                 let Some(candidate) = candidates.get(row) else {
                     return Err(WorkerSelectionPolicyError::InvalidPickerRow {
                         row,
@@ -431,6 +443,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                     }
                     .into());
                 };
+                prefill = choice.prefill;
                 Some((candidate.worker, candidate.cost))
             }
         }
@@ -445,7 +458,8 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         }
         return Err(KvSchedulerError::NoEndpoints);
     };
-    let result = selection_result(request, worker, block_size);
+    let mut result = selection_result(request, worker, block_size);
+    result.prefill = prefill;
     log_selection(
         workers,
         request,

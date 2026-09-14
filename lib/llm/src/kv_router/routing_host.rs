@@ -245,6 +245,7 @@ pub struct RoutingHost {
 
 /// An admitted KV route awaiting dispatch.
 pub(crate) struct RoutePlan {
+    prefill: dynamo_kv_router::selector::PrefillAction,
     pub(crate) signals: RoutePlanSignals,
     selection: WorkerSelection,
     cleanup: KvRequestCleanup,
@@ -256,6 +257,7 @@ pub(crate) struct RoutePlan {
 
 /// A KV route selected without scheduler admission.
 pub(crate) struct RoutePreview {
+    pub(crate) prefill: dynamo_kv_router::selector::PrefillAction,
     request_id: String,
     phase: RequestPhase,
     pub(crate) signals: RoutePlanSignals,
@@ -831,4 +833,4 @@ fn classify_response_item(item: &Annotated<LLMEngineOutput>) -> ResponseItemOutc
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -321,10 +321,10 @@ impl
             .get_optional::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
             .map_err(|message| anyhow::anyhow!("invalid session affinity context: {message}"))?;
 
-        if self.conditional_disagg_policy.is_enabled() {
-            let conditional_request = context.map(|_| req);
+        if self.conditional_disagg_policy.is_enabled() || self.path_planning().is_some() {
+            let mut conditional_request = context.map(|_| req);
             match self
-                .plan_conditional_disagg_decode(&conditional_request, &request_id)
+                .plan_conditional_disagg_decode(&mut conditional_request, &request_id)
                 .await
             {
                 Ok(Some(decision)) => {
@@ -368,7 +368,10 @@ impl
                 Ok(None) => {
                     (req, context) = conditional_request.into_parts();
                 }
-                Err(error) if crate::kv_router::routing_host::is_cancelled(&error) => {
+                Err(error)
+                    if error.is::<conditional_bypass::PrefillActionError>()
+                        || crate::kv_router::routing_host::is_cancelled(&error) =>
+                {
                     return Err(error);
                 }
                 Err(error) => {
@@ -549,6 +552,12 @@ impl
 }
 
 impl PrefillRouter {
+    fn path_planning(&self) -> Option<dynamo_kv_router::selector::PathPlanningRequirements> {
+        self.decode_routing_host
+            .get()
+            .and_then(|host| host.kv_router().path_planning())
+    }
+
     pub(crate) fn conditional_disagg_enabled(&self) -> bool {
         self.conditional_disagg_policy.is_enabled()
     }

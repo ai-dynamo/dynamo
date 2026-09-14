@@ -82,6 +82,43 @@ pub trait ConditionalDisaggPolicy: Send + Sync {
     }
 }
 
+/// Evaluate the built-in thresholds and optional decode-busy guard using supplied facts.
+/// This helper performs no lookup, admission, or dispatch. Missing load is not idle.
+/// Plugins may reuse it from `pick_route`; `Default` needs no helper invocation.
+pub fn evaluate_conditional_disagg(
+    config: &KvRouterConfig,
+    input: ConditionalDisaggDecisionInput,
+) -> bool {
+    if !config.conditional_disagg_enabled {
+        return false;
+    }
+    let isl = || {
+        isl_bounding_matches(
+            input,
+            config.conditional_disagg_eff_isl_threshold,
+            config.conditional_disagg_eff_isl_ratio_threshold,
+        )
+    };
+    let load = || input.prefill_chosen_worker_busy.unwrap_or(false);
+    let bypass = match config.conditional_disagg_policy {
+        ConditionalDisaggPolicyKind::IslBounding => isl(),
+        ConditionalDisaggPolicyKind::PrefillLoad => load(),
+        ConditionalDisaggPolicyKind::IslOrLoad => isl() || load(),
+    };
+    bypass
+        && (config.conditional_disagg_decode_busy_threshold.is_none()
+            || input.decode_chosen_worker_busy == Some(false))
+}
+
+fn isl_bounding_matches(
+    input: ConditionalDisaggDecisionInput,
+    threshold: usize,
+    ratio: f64,
+) -> bool {
+    let effective = input.net_new_tokens();
+    effective < threshold && (effective as f64 / input.prompt_tokens.max(1) as f64) < ratio
+}
+
 /// Build the configured conditional-disagg policy. Returns a disabled policy
 /// when conditional disagg is not enabled.
 pub fn make_conditional_disagg_policy(
@@ -156,13 +193,7 @@ impl ConditionalDisaggPolicy for IslBoundingPolicy {
         if !self.enabled {
             return false;
         }
-        let eff_isl = input.net_new_tokens();
-        if eff_isl >= self.eff_isl_threshold {
-            return false;
-        }
-        let denom = input.prompt_tokens.max(1) as f64;
-        let ratio = eff_isl as f64 / denom;
-        ratio < self.eff_isl_ratio_threshold
+        isl_bounding_matches(input, self.eff_isl_threshold, self.eff_isl_ratio_threshold)
     }
 }
 
@@ -575,5 +606,43 @@ mod tests {
             ConditionalDisaggDecisionInput::new(1000, 0).with_decode_chosen_worker_busy(Some(true));
         assert_eq!(input.decode_chosen_worker_busy, Some(true));
         assert_eq!(input.prefill_chosen_worker_busy, None);
+    }
+}
+
+#[cfg(test)]
+mod pure_helper_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn pure_helper_matches_all_builtin_policies_and_unknown_load_gates() {
+        for kind in [
+            ConditionalDisaggPolicyKind::IslBounding,
+            ConditionalDisaggPolicyKind::PrefillLoad,
+            ConditionalDisaggPolicyKind::IslOrLoad,
+        ] {
+            for enabled in [false, true] {
+                for gate in [None, Some(0.8)] {
+                    let config = KvRouterConfig {
+                        conditional_disagg_enabled: enabled,
+                        conditional_disagg_policy: kind,
+                        conditional_disagg_decode_busy_threshold: gate,
+                        ..Default::default()
+                    };
+                    let policy = make_conditional_disagg_policy(Some(&config));
+                    for cached in [0, 2048, 4096] {
+                        for prefill in [None, Some(false), Some(true)] {
+                            for decode in [None, Some(false), Some(true)] {
+                                let input = ConditionalDisaggDecisionInput::new(4096, cached)
+                                    .with_prefill_chosen_worker_busy(prefill)
+                                    .with_decode_chosen_worker_busy(decode);
+                                let expected = policy.should_bypass_remote_prefill(input).await
+                                    && (gate.is_none() || decode == Some(false));
+                                assert_eq!(evaluate_conditional_disagg(&config, input), expected);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }

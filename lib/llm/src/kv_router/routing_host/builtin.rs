@@ -85,6 +85,7 @@ impl WorkerSelector<ModelRuntimeConfig> for BuiltinWorkerSelector {
 
 fn selection(worker_id: u64) -> WorkerSelectionResult {
     WorkerSelectionResult {
+        prefill: Default::default(),
         worker: WorkerWithDpRank::from_worker_id(worker_id),
         required_blocks: 0,
         effective_overlap_blocks: 0.0,

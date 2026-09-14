@@ -120,6 +120,35 @@ impl RoutingHost {
         request: &SingleIn<PreprocessedRequest>,
         phase: RequestPhase,
     ) -> Result<RoutePreview, Error> {
+        self.preview_kv_route_with_admission(
+            request,
+            phase,
+            FindBestMatchAdmission::WithoutAdmission,
+        )
+        .await
+    }
+
+    pub(crate) async fn preview_prefill_path(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        prefill_worker_busy: Option<bool>,
+    ) -> Result<RoutePreview, Error> {
+        self.preview_kv_route_with_admission(
+            request,
+            RequestPhase::Decode,
+            FindBestMatchAdmission::PathPlanning {
+                prefill_worker_busy,
+            },
+        )
+        .await
+    }
+
+    async fn preview_kv_route_with_admission(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        phase: RequestPhase,
+        admission: FindBestMatchAdmission,
+    ) -> Result<RoutePreview, Error> {
         // The conditional route's first stage. The budget travels with the
         // preview into the plan and on into dispatch, so the whole route shares
         // one deadline.
@@ -132,21 +161,14 @@ impl RoutingHost {
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let (outcome, _) = self
             .select_with_session_affinity(request, phase, true, &budget, |target| {
-                self.select_request_outcome(
-                    request,
-                    phase,
-                    true,
-                    target,
-                    None,
-                    FindBestMatchAdmission::WithoutAdmission,
-                    &budget,
-                )
+                self.select_request_outcome(request, phase, true, target, None, admission, &budget)
             })
             .await?;
         let selection = outcome.into_result()?;
         let signals = self.route_signals(&selection);
         drop(route_guard);
         Ok(RoutePreview {
+            prefill: selection.prefill,
             request_id: request.context().id().to_string(),
             phase,
             signals,
@@ -173,6 +195,7 @@ impl RoutingHost {
             ));
         }
 
+        self.validate_prefill_action(preview.prefill, preview.signals.worker)?;
         let phase = preview.phase;
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
@@ -195,9 +218,13 @@ impl RoutingHost {
                 }
             })
             .await?;
+        // Admission may wait while worker capabilities change. The booking remains
+        // armed and is released on error; never silently change the destination.
+        self.validate_prefill_action(preview.prefill, selection.worker)?;
         let signals = self.route_signals(&selection);
         drop(route_guard);
         Ok(RoutePlan {
+            prefill: preview.prefill,
             signals,
             cleanup: KvRequestCleanup::new(
                 Arc::clone(self.kv_router()),
@@ -211,12 +238,40 @@ impl RoutingHost {
         })
     }
 
+    fn validate_prefill_action(
+        &self,
+        action: dynamo_kv_router::selector::PrefillAction,
+        worker: WorkerWithDpRank,
+    ) -> Result<(), Error> {
+        if action == dynamo_kv_router::selector::PrefillAction::LocalOnDecode {
+            let supported = self
+                .kv_router()
+                .workers_with_configs
+                .borrow()
+                .get(&worker.worker_id)
+                .and_then(|config| config.runtime_data.get("local_prefill"))
+                .and_then(serde_json::Value::as_bool);
+            if supported != Some(true) {
+                return Err(anyhow::anyhow!(
+                    "worker {} no longer advertises local prefill support",
+                    worker.worker_id
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) async fn dispatch_kv_plan(
         &self,
         request: SingleIn<PreprocessedRequest>,
         plan: RoutePlan,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        if let Err(error) = self.validate_prefill_action(plan.prefill, plan.selection.worker) {
+            plan.cleanup.finish().await;
+            return Err(error);
+        }
         let RoutePlan {
+            prefill,
             mut selection,
             cleanup,
             mut affinity,
@@ -224,13 +279,17 @@ impl RoutingHost {
             ..
         } = plan;
         let selected_target = route_target(selection.worker);
-        let guard = match self
+        let mut guard = match self
             .track_planned_selection(&request, &mut selection, cleanup, &budget)
             .await
         {
             Ok(guard) => guard,
             Err(error) => return Err(error),
         };
+        if let Err(error) = self.validate_prefill_action(prefill, selection.worker) {
+            guard.abort().await;
+            return Err(error);
+        }
         let stream = match self
             .dispatch_selection(request, selection, guard, &budget)
             .await

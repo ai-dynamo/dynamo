@@ -327,6 +327,7 @@ impl SelectionCore {
                     || WorkerSelectionPolicy::default(self.kv_router_config.clone(), worker_label),
                     |factory| factory(&self.kv_router_config, self.worker_type, key.as_ref()),
                 );
+                let path_planning = selector.path_planning();
                 let profile = self
                     .kv_router_config
                     .policy_profile(Some(&key.model_name))
@@ -356,6 +357,7 @@ impl SelectionCore {
                     indexer,
                     workers_tx,
                     scheduler,
+                    path_planning,
                     replica_tx,
                     affinity: OnceCell::new(),
                     replica_config: self.replica_config.clone(),

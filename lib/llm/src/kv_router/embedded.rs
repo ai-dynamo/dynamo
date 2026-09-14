@@ -392,6 +392,12 @@ impl EmbeddedSelection {
             .clone())
     }
 
+    pub(crate) fn path_planning(
+        &self,
+    ) -> Option<dynamo_kv_router::selector::PathPlanningRequirements> {
+        self.partition.path_planning()
+    }
+
     pub(crate) fn partition_key(&self) -> &RoutingPartitionId {
         self.partition.key()
     }
@@ -547,6 +553,10 @@ pub(crate) fn worker_request_from_runtime_config(
                 .max_num_batched_tokens
                 .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS),
         ),
+        local_prefill: config
+            .runtime_data
+            .get("local_prefill")
+            .and_then(serde_json::Value::as_bool),
         total_kv_blocks: config.total_kv_blocks,
         stable_routing_id: config.stable_routing_id.clone(),
         is_eagle: Some(is_eagle),

@@ -113,6 +113,7 @@ fn replay_reservation(selection_id: &str) -> ReservationRequest {
 
 fn worker(worker_id: WorkerId) -> WorkerRequest {
     WorkerRequest {
+        local_prefill: None,
         worker_id,
         model_name: "model".to_string(),
         routing_group: "default".to_string(),
@@ -2646,6 +2647,7 @@ async fn affinity_configuration_rejects_invalid_or_conflicting_config() {
 
 fn hint_config(worker_type: &str, endpoints: &[(u32, &str)]) -> SelectionWorkerConfig {
     SelectionWorkerConfig {
+        local_prefill: None,
         endpoint: "http://worker:8000".to_string(),
         data_parallel_start_rank: 0,
         data_parallel_size: endpoints.len().max(1) as u32,
@@ -2779,4 +2781,187 @@ fn hint_resolves_a_persistent_cache_owner_over_a_state_agent_worker() {
         transfer_hint_for_selection(&configs, WorkerWithDpRank::new(7, 0), 0, Some(&candidates))
             .expect("hint");
     assert_eq!(hint.source_control_endpoint, "tcp://persistent-owner:23280");
+}
+
+/// Uses only the public picker API, as a linked external strategy would.
+struct PrefillPathPicker {
+    action: crate::selector::PrefillAction,
+    calls: Arc<AtomicUsize>,
+    invalid_row: bool,
+}
+
+impl crate::selector::WorkerPicker for PrefillPathPicker {
+    fn path_planning(&self) -> Option<crate::selector::PathPlanningRequirements> {
+        Some(crate::selector::PathPlanningRequirements { prefill_load: true })
+    }
+
+    fn required_worker_inputs(&self) -> crate::selector::WorkerInputs {
+        crate::selector::WorkerInputs::CACHE
+    }
+
+    fn pick(
+        &mut self,
+        context: &crate::selector::WorkerSelectionContext<'_>,
+        _input: crate::selector::WorkerInputView<'_>,
+    ) -> Result<usize, crate::scheduling::WorkerSelectionPolicyError> {
+        assert!(!context.is_path_planning());
+        Ok(0)
+    }
+
+    fn pick_route(
+        &mut self,
+        context: &crate::selector::WorkerSelectionContext<'_>,
+        input: crate::selector::WorkerInputView<'_>,
+    ) -> Result<crate::selector::RouteChoice, crate::scheduling::WorkerSelectionPolicyError> {
+        assert!(context.is_path_planning());
+        assert_eq!(context.prefill_worker_busy(), Some(true));
+        assert_eq!(input.candidates()[0].can_prefill_locally(), Some(true));
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        Ok(crate::selector::RouteChoice {
+            candidate: if self.invalid_row {
+                input.candidates().len()
+            } else {
+                0
+            },
+            prefill: self.action,
+        })
+    }
+}
+
+#[tokio::test]
+async fn prefill_actions_are_advisory_and_do_not_reopen_on_admission_or_query() {
+    use crate::selector::PrefillAction;
+    for action in [
+        PrefillAction::Default,
+        PrefillAction::LocalOnDecode,
+        PrefillAction::Remote,
+    ] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let factory: WorkerSelectionPolicyFactory = Arc::new(move |config, role, _| {
+            WorkerSelectionPolicy::new(
+                config.clone(),
+                role.as_str(),
+                vec![],
+                Box::new(PrefillPathPicker {
+                    action,
+                    calls: observed.clone(),
+                    invalid_row: false,
+                }),
+            )
+        });
+        let core = core_with(
+            test_config(false),
+            SelectionHost::default(),
+            Some(factory),
+            WorkerType::Decode,
+            None,
+            None,
+        );
+        let mut config = worker(1);
+        config.local_prefill = Some(true);
+        core.upsert_worker(config).await.unwrap();
+        assert!(
+            core.partition(&default_key())
+                .unwrap()
+                .path_planning()
+                .unwrap()
+                .prefill_load
+        );
+        let tokens = vec![1; 32];
+        let prompt = PromptRequest {
+            token_ids: Some(tokens),
+            ..Default::default()
+        };
+        let mut operation = lease_operation(prompt.view(), "path", true);
+        operation.admission = SelectionAdmission::PathPlanning {
+            request_id: Some("path".into()),
+            prefill_worker_busy: Some(true),
+        };
+        let SelectionOutcome::Selected(preview) =
+            core.run_selection(operation).await.result.unwrap()
+        else {
+            panic!("preview rejected")
+        };
+        assert_eq!(preview.response.prefill, action);
+        assert!(preview.booking.is_none());
+        let entry = core.entry(&default_key()).unwrap();
+        assert!(!entry.scheduler.has_request("path"));
+        assert_eq!(entry.scheduler.pending_count(), 0);
+        let mut operation = lease_operation(prompt.view(), "path", true);
+        operation.pinned_worker = Some(preview.response.best_worker);
+        let SelectionOutcome::Selected(admitted) =
+            core.run_selection(operation).await.result.unwrap()
+        else {
+            panic!("admission rejected")
+        };
+        assert_eq!(admitted.response.best_worker, preview.response.best_worker);
+        assert_eq!(admitted.response.prefill, PrefillAction::Default);
+        assert!(admitted.booking.is_some());
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        drop(admitted);
+        wait_until("path booking released", || {
+            !entry.scheduler.has_request("path")
+        })
+        .await;
+        let mut query = select_request();
+        query.advisory = true;
+        core.select(query).await.unwrap();
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "external advisory queries must not execute pick_route"
+        );
+        assert!(core.reservation_index.read().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn prefill_action_validates_picker_row_before_accessing_destination() {
+    let factory: WorkerSelectionPolicyFactory = Arc::new(|config, role, _| {
+        WorkerSelectionPolicy::new(
+            config.clone(),
+            role.as_str(),
+            vec![],
+            Box::new(PrefillPathPicker {
+                action: crate::selector::PrefillAction::LocalOnDecode,
+                calls: Arc::new(AtomicUsize::new(0)),
+                invalid_row: true,
+            }),
+        )
+    });
+    let core = core_with(
+        test_config(false),
+        SelectionHost::default(),
+        Some(factory),
+        WorkerType::Decode,
+        None,
+        None,
+    );
+    let mut config = worker(1);
+    config.local_prefill = Some(true);
+    core.upsert_worker(config).await.unwrap();
+    let prompt = PromptRequest {
+        token_ids: Some(vec![1; 32]),
+        ..Default::default()
+    };
+    let mut operation = lease_operation(prompt.view(), "invalid", true);
+    operation.admission = SelectionAdmission::PathPlanning {
+        request_id: Some("invalid".into()),
+        prefill_worker_busy: Some(true),
+    };
+    let result = core.run_selection(operation).await.result;
+    assert!(matches!(
+        result,
+        Err(SelectionError::Scheduler(
+            KvSchedulerError::WorkerSelectionPolicy(_)
+        ))
+    ));
+    assert!(
+        !core
+            .entry(&default_key())
+            .unwrap()
+            .scheduler
+            .has_request("invalid")
+    );
 }

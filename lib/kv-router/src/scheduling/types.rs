@@ -131,6 +131,7 @@ impl KvSchedulerError {
 
 #[derive(Debug)]
 pub struct SchedulingResponse {
+    pub prefill: super::selector::PrefillAction,
     pub best_worker: WorkerWithDpRank,
     pub effective_overlap_blocks: f64,
     pub cached_tokens: usize,
@@ -221,6 +222,11 @@ impl AdvisoryWorkerLoad {
 
 #[derive(Debug, Clone)]
 pub enum ScheduleMode {
+    /// Advisory decode path planning; never a scheduler booking.
+    PathPlanning {
+        request_id: Option<String>,
+        prefill_worker_busy: Option<bool>,
+    },
     QueryOnly {
         request_id: Option<String>,
     },
@@ -252,7 +258,9 @@ impl ScheduleMode {
 
     pub fn request_id(&self) -> Option<&str> {
         match self {
-            Self::QueryOnly { request_id } => request_id.as_deref(),
+            Self::QueryOnly { request_id } | Self::PathPlanning { request_id, .. } => {
+                request_id.as_deref()
+            }
             Self::Tracked { request_id } | Self::TrackedWithLifecycle { request_id } => {
                 Some(request_id)
             }
@@ -269,13 +277,13 @@ impl ScheduleMode {
     pub(crate) fn lifecycle_request_id(&self) -> Option<&str> {
         match self {
             Self::TrackedWithLifecycle { request_id } => Some(request_id),
-            Self::QueryOnly { .. } | Self::Tracked { .. } => None,
+            Self::QueryOnly { .. } | Self::PathPlanning { .. } | Self::Tracked { .. } => None,
         }
     }
 
     pub fn tracked_request_id(&self) -> Option<&str> {
         match self {
-            Self::QueryOnly { .. } => None,
+            Self::QueryOnly { .. } | Self::PathPlanning { .. } => None,
             Self::Tracked { request_id } | Self::TrackedWithLifecycle { request_id } => {
                 Some(request_id)
             }
