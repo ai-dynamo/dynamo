@@ -593,8 +593,9 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     pub aic_system: Option<String>,
 
-    /// AIC backend engine version (e.g., "0.12.0" for vLLM, "0.5.6.post2" for SGLang).
-    /// If None, uses the default version for the backend.
+    /// AIC performance-database slot ("current", "previous", or "next" when available),
+    /// or a version assigned to one of those slots.
+    /// If None, uses the release database's "current" slot.
     #[serde(skip)]
     #[builder(default = "None")]
     pub aic_backend_version: Option<String>,

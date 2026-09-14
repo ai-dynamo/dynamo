@@ -19,7 +19,7 @@ pytestmark = [
 
 AIC_MODEL = "Qwen/Qwen3-32B"
 AIC_SYSTEM = "h200_sxm"
-AIC_BACKEND_VERSION = "0.24.0"
+AIC_BACKEND_VERSION = "current"
 
 
 @pytest.fixture(autouse=True)

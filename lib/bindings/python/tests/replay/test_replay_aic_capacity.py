@@ -33,7 +33,7 @@ def _direct_aic_replay_args() -> MockEngineArgs:
             {
                 "engine_type": "trtllm",
                 "aic_backend": "trtllm",
-                "aic_backend_version": "1.3.0rc10",
+                "aic_backend_version": "current",
                 "aic_system": "gb200",
                 "aic_model_path": "meta-llama/Meta-Llama-3.1-8B",
                 "aic_tp_size": 1,

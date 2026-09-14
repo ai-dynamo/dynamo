@@ -19,7 +19,7 @@ aic_perf_database = pytest.importorskip("aiconfigurator_core.sdk.perf_database")
 AIC_PARITY_MODEL = "Qwen/Qwen3-32B"
 AIC_PARITY_SYSTEM = "h200_sxm"
 AIC_PARITY_VERSIONS = {
-    "vllm": "0.24.0",
+    "vllm": "current",
     "sglang": "current",
 }
 AIC_PARITY_BACKENDS = [
