@@ -44,7 +44,8 @@ func groveScheduledConditionChanged(oldConditions, newConditions []metav1.Condit
 		if oldCondition != nil &&
 			newCondition != nil &&
 			(oldCondition.Status != newCondition.Status ||
-				oldCondition.Reason != newCondition.Reason) {
+				oldCondition.Reason != newCondition.Reason ||
+				oldCondition.Message != newCondition.Message) {
 			return true
 		}
 	}

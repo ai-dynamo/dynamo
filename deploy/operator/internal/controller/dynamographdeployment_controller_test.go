@@ -3868,6 +3868,7 @@ func TestPodCliqueStatusChangeIsSignificant(t *testing.T) {
 		})
 	}
 
+	t.Log("Wake reconciliation when only the PodClique scheduling message changes")
 	oldPodClique := base()
 	oldPodClique.Status.Conditions = []metav1.Condition{{
 		Type:    groveconstants.ConditionTypePodCliqueScheduled,
@@ -3877,7 +3878,7 @@ func TestPodCliqueStatusChangeIsSignificant(t *testing.T) {
 	}}
 	newPodClique := oldPodClique.DeepCopy()
 	newPodClique.Status.Conditions[0].Message = "two nodes unavailable"
-	assert.False(t, controller_common.PodCliqueStatusChangeIsSignificant(oldPodClique, newPodClique))
+	assert.True(t, controller_common.PodCliqueStatusChangeIsSignificant(oldPodClique, newPodClique))
 }
 
 func TestPCSGStatusChangeIsSignificant(t *testing.T) {
@@ -3978,6 +3979,7 @@ func TestPCSGStatusChangeIsSignificant(t *testing.T) {
 		})
 	}
 
+	t.Log("Wake reconciliation when only the scaling group scheduling message changes")
 	oldScalingGroup := base()
 	oldScalingGroup.Status.Conditions = []metav1.Condition{{
 		Type:    groveconstants.ConditionTypeMinAvailableBreached,
@@ -3987,7 +3989,7 @@ func TestPCSGStatusChangeIsSignificant(t *testing.T) {
 	}}
 	newScalingGroup := oldScalingGroup.DeepCopy()
 	newScalingGroup.Status.Conditions[0].Message = "two replicas unavailable"
-	assert.False(t, controller_common.PodCliqueScalingGroupStatusChangeIsSignificant(oldScalingGroup, newScalingGroup))
+	assert.True(t, controller_common.PodCliqueScalingGroupStatusChangeIsSignificant(oldScalingGroup, newScalingGroup))
 }
 
 func TestGroveChildEventPredicates(t *testing.T) {
