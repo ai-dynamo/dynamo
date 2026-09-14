@@ -66,7 +66,7 @@ func (v *DynamoComponentDeploymentValidator) validate(
 		},
 	}
 
-	allErrs := validation.validateDynamoComponentDeployment(dcd)
+	allErrs := validation.validateDynamoComponentDeployment(dcd, nil)
 	allErrs = append(allErrs, validation.validateWorkerClassCheckpointRefOwnership(dcd)...)
 	alpha, err := alphaDynamoComponentDeploymentForValidation(dcd)
 	if err != nil {
@@ -95,7 +95,7 @@ func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 		},
 	}
 
-	allErrs := validation.validateDynamoComponentDeployment(newDCD)
+	allErrs := validation.validateDynamoComponentDeployment(newDCD, oldDCD)
 	allErrs = append(allErrs, validation.validateWorkerClassCheckpointRefOwnership(newDCD)...)
 	newAlpha, err := alphaDynamoComponentDeploymentForValidation(newDCD)
 	if err != nil {
@@ -162,13 +162,19 @@ func (v *dynamoComponentDeploymentValidation) validateWorkerClassCheckpointRefOw
 // validateDynamoComponentDeployment validates dcd. dcd must not be nil.
 func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeployment(
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+	oldDCD *nvidiacomv1beta1.DynamoComponentDeployment,
 ) field.ErrorList {
-	return v.validateDynamoComponentDeploymentSpec(&dcd.Spec, field.NewPath("spec"))
+	var oldSpec *nvidiacomv1beta1.DynamoComponentDeploymentSpec
+	if oldDCD != nil {
+		oldSpec = &oldDCD.Spec
+	}
+	return v.validateDynamoComponentDeploymentSpec(&dcd.Spec, oldSpec, field.NewPath("spec"))
 }
 
 // validateDynamoComponentDeploymentSpec validates spec. spec and fldPath must not be nil.
 func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentSpec(
 	spec *nvidiacomv1beta1.DynamoComponentDeploymentSpec,
+	oldSpec *nvidiacomv1beta1.DynamoComponentDeploymentSpec,
 	fldPath *field.Path,
 ) field.ErrorList {
 	// Standalone DCDs use neither Grove nor live InferencePool discovery.
@@ -176,14 +182,19 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 		grovePathway                      = false
 		validateInferencePoolAvailability = false
 	)
-	// Both rules describe the operator-managed Ray path, so they only apply where the
-	// operator runs it. Gated off, the engine flags are the user's own business: nothing
-	// wraps their command, no Service or follower is derived, and vLLM starts a private
-	// in-process Ray, so a component the rules would reject still serves. Rejecting it
-	// would break a working deployment to enforce a rule about a disabled feature.
-	var allErrs field.ErrorList
+	var oldSharedSpec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+	if oldSpec != nil {
+		oldSharedSpec = &oldSpec.DynamoComponentDeploymentSharedSpec
+	}
+	// Shipped in #12943 and not gated: it guards the Phase 2/3 Ray head, which renders
+	// whether or not this PoC gate is on. Gating it would retire a live rule.
+	allErrs := validateElasticEPRequiresCommand(spec.BackendFramework, &spec.DynamoComponentDeploymentSharedSpec, fldPath)
+	// The single-replica rule is new here, and it only describes the topology the PoC
+	// renderer manages: one follower and one <leader>-ray Service are derived per
+	// component, so two leader replicas would share one DNS name. Gated off nothing is
+	// derived, vLLM starts a private in-process Ray, and a rejected component would still
+	// have served -- so the rule must not outlive the feature it protects.
 	if features.MustGateFrom(v.ctx).Enabled(features.ElasticEPRayPoC) {
-		allErrs = append(allErrs, validateElasticEPRequiresCommand(spec.BackendFramework, &spec.DynamoComponentDeploymentSharedSpec, fldPath)...)
 		allErrs = append(allErrs, validateElasticEPSingleReplica(spec.BackendFramework, &spec.DynamoComponentDeploymentSharedSpec, fldPath)...)
 	}
 	allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpec(
@@ -192,6 +203,7 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 		dynamoComponentDeploymentSharedSpecValidationOptions{
 			grovePathway:                      grovePathway,
 			validateInferencePoolAvailability: validateInferencePoolAvailability,
+			oldComponent:                      oldSharedSpec,
 		},
 	)...)
 	return allErrs

@@ -257,6 +257,18 @@ pub struct PreprocessedRequest {
     #[serde(skip)]
     pub(crate) migration_state: Option<MigrationState>,
 
+    /// Set when remote prefill has staged KV blocks that only this request's
+    /// decode worker can release, so the decode leg must reach that worker even
+    /// after the client disconnects.
+    ///
+    /// Narrower than `RequestPhase::Decode`: the conditional-disaggregation
+    /// bypass reaches decode without running remote prefill and leaves this
+    /// unset. Frontend-only, like `migration_state` — the routing decision it
+    /// feeds is made in-process before the request is serialized to a worker.
+    #[builder(default)]
+    #[serde(skip)]
+    pub(crate) staged_kv_cleanup: bool,
+
     /// Type of prompt
     pub token_ids: Vec<TokenIdType>,
 
@@ -348,6 +360,20 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub migration_link: Option<TraceLink>,
+
+    /// Text withheld by the previous attempt's decoder as a possible (but
+    /// unresolved) prefix of a hidden stop sequence, carried into a migration
+    /// retry so the new attempt's decoder does not silently drop it and can
+    /// still complete the match if the continuation supplies the rest of the
+    /// sequence. Set by the migration `RetryManager` (in-process, on its own
+    /// in-memory `PreprocessedRequest`) from the last successfully processed
+    /// response before a retry, and consumed once by `Backend` -- also
+    /// in-process, one hop later in the same pipeline -- when seeding the
+    /// retry's decoder. `#[serde(skip)]` keeps it that way: it never needs to,
+    /// and must not, reach a remote worker over the wire.
+    #[builder(default)]
+    #[serde(skip)]
+    pub(crate) jail_seed: Option<String>,
 
     /// Bootstrap info for disaggregated serving
     #[builder(default)]

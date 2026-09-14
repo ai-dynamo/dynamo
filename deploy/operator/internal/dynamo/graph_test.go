@@ -5154,13 +5154,28 @@ func TestExpandRolesForService(t *testing.T) {
 			},
 		},
 		{
-			name:          "explicit multinode roles retain node count cardinality",
+			name:          "explicit multinode roles derive node count cardinality",
 			serviceName:   "test-service",
 			numberOfNodes: 5,
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				Roles: []v1alpha1.ComponentRoleSpec{
 					{Name: v1alpha1.ComponentRoleWorker},
 					{Name: v1alpha1.ComponentRoleLeader},
+				},
+			},
+			expected: []ServiceRole{
+				{Name: "test-service-ldr", Role: RoleLeader, Replicas: 1},
+				{Name: "test-service-wkr", Role: RoleWorker, Replicas: 4},
+			},
+		},
+		{
+			name:          "multinode node count remains authoritative over role replicas",
+			serviceName:   "test-service",
+			numberOfNodes: 5,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Roles: []v1alpha1.ComponentRoleSpec{
+					{Name: v1alpha1.ComponentRoleWorker, Replicas: ptr.To(int32(99))},
+					{Name: v1alpha1.ComponentRoleLeader, Replicas: ptr.To(int32(2))},
 				},
 			},
 			expected: []ServiceRole{
@@ -5301,7 +5316,7 @@ func TestExpandRolesForComponent_SingleNodeForceScalingGroup(t *testing.T) {
 	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
 		Replicas: ptr.To(int32(4)),
 		Experimental: &v1beta1.ExperimentalSpec{
-			Grove: &v1beta1.GroveSpec{ForceScalingGroup: true},
+			Grove: &v1beta1.GroveSpec{ForceScalingGroup: ptr.To(true)},
 		},
 	}
 	got := expandRolesForComponent("svc", component.Replicas, 1, component)
@@ -6530,7 +6545,7 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 							},
 							PeriodSeconds:    5,
 							TimeoutSeconds:   4,
-							FailureThreshold: 1,
+							FailureThreshold: 3,
 						},
 						ReadinessProbe: &corev1.Probe{
 							ProbeHandler: corev1.ProbeHandler{
@@ -6667,6 +6682,43 @@ func TestGenerateBasePodSpec_WorkerPreservesHealthCheckOverride(t *testing.T) {
 			t.Fatal("expected DYN_HEALTH_CHECK_ENABLED in main container")
 		})
 	}
+}
+
+func TestGenerateBasePodSpec_WorkerPreservesLivenessProbeOverride(t *testing.T) {
+	t.Log("configure a new runtime with a user-specified liveness failure threshold")
+	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType:   commonconsts.ComponentTypeWorker,
+		DynamoNamespace: ptr.To("default-test-deployment"),
+		ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+			MainContainer: &corev1.Container{
+				Image: "test-image:1.5.0",
+				LivenessProbe: &corev1.Probe{
+					FailureThreshold: 5,
+				},
+			},
+		},
+	})
+
+	t.Log("render the worker pod specification")
+	podSpec, err := GenerateBasePodSpec(
+		component,
+		BackendFrameworkSGLang,
+		&mockSecretsRetriever{},
+		"test-deployment",
+		"default",
+		RoleMain,
+		1,
+		&configv1alpha1.OperatorConfiguration{},
+		commonconsts.MultinodeDeploymentTypeGrove,
+		"test-service",
+		nil,
+		staticContainerGPUCount(0),
+	)
+	require.NoError(t, err)
+
+	t.Log("verify the user-specified threshold takes precedence over the gated default")
+	require.NotNil(t, podSpec.Containers[0].LivenessProbe)
+	require.EqualValues(t, 5, podSpec.Containers[0].LivenessProbe.FailureThreshold)
 }
 
 func TestGenerateBasePodSpec_GPUMemoryServiceExtraClientContainers(t *testing.T) {
@@ -8704,10 +8756,11 @@ func TestGenerateGrovePodCliqueSet_GMSPodsAreNotCheckpointTargets(t *testing.T) 
 
 	infoByService := map[string]*checkpoint.CheckpointInfo{
 		"decode": {
-			Enabled:        true,
-			Exists:         true,
-			Ready:          true,
-			CheckpointName: "decode-checkpoint",
+			Enabled:                   true,
+			Exists:                    true,
+			Ready:                     true,
+			CheckpointName:            "decode-checkpoint",
+			SnapshotCompatibilityHash: "compatibility-v1",
 			NativeSnapshot: &checkpoint.ResolvedPodSnapshot{
 				UID:                  "snapshot-uid",
 				BoundContentName:     "snapshot-content",
@@ -8801,11 +8854,12 @@ func TestGenerateGrovePodCliqueSet_IntraPodFailoverCheckpointTargets(t *testing.
 
 	infoByService := map[string]*checkpoint.CheckpointInfo{
 		"decode": {
-			Enabled:                 true,
-			Exists:                  true,
-			Ready:                   true,
-			CheckpointName:          "decode-checkpoint",
-			RestoreTargetContainers: IntraPodFailoverEngineContainerNames(),
+			Enabled:                   true,
+			Exists:                    true,
+			Ready:                     true,
+			CheckpointName:            "decode-checkpoint",
+			SnapshotCompatibilityHash: "compatibility-v1",
+			RestoreTargetContainers:   IntraPodFailoverEngineContainerNames(),
 			NativeSnapshot: &checkpoint.ResolvedPodSnapshot{
 				UID:                  "snapshot-uid",
 				BoundContentName:     "snapshot-content",
@@ -9027,7 +9081,7 @@ func TestGenerateGrovePodCliqueSet_SingleNodeForceScalingGroup(t *testing.T) {
 	beta := betaDGD(t, dgd)
 	require.Len(t, beta.Spec.Components, 1)
 	beta.Spec.Components[0].Experimental = &v1beta1.ExperimentalSpec{
-		Grove: &v1beta1.GroveSpec{ForceScalingGroup: true},
+		Grove: &v1beta1.GroveSpec{ForceScalingGroup: ptr.To(true)},
 	}
 
 	got, err := GenerateGrovePodCliqueSet(

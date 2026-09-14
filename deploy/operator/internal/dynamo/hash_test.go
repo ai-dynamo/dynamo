@@ -90,6 +90,27 @@ func TestComputeBetaDGDWorkersSpecHash_Deterministic(t *testing.T) {
 	assert.Len(t, h1, 8)
 }
 
+func TestComputeBetaDGDWorkersSpecHash_CanonicalizesForceScalingGroupFalse(t *testing.T) {
+	t.Log("Build equivalent omitted and explicit-false Grove configurations")
+	omitted := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {ComponentType: commonconsts.ComponentTypeWorker},
+	}))
+	omitted.Spec.Components[0].Experimental = &v1beta1.ExperimentalSpec{
+		Grove: &v1beta1.GroveSpec{},
+	}
+	explicitFalse := omitted.DeepCopy()
+	explicitFalse.Spec.Components[0].Experimental.Grove.ForceScalingGroup = ptr.To(false)
+
+	t.Log("Verify presence alone does not create a worker generation")
+	omittedHash := mustComputeBetaDGDWorkersSpecHash(t, omitted)
+	assert.Equal(t, omittedHash, mustComputeBetaDGDWorkersSpecHash(t, explicitFalse))
+
+	t.Log("Verify the effective true opt-in remains part of the worker generation")
+	explicitTrue := omitted.DeepCopy()
+	explicitTrue.Spec.Components[0].Experimental.Grove.ForceScalingGroup = ptr.To(true)
+	assert.NotEqual(t, omittedHash, mustComputeBetaDGDWorkersSpecHash(t, explicitTrue))
+}
+
 func TestComputeBetaDGDWorkersSpecHash_EquivalentExplicitRolesDoNotRoll(t *testing.T) {
 	t.Log("Build a multinode worker with the established implicit leader and worker layout")
 	implicit := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -139,6 +160,14 @@ func TestComputeBetaDGDWorkersSpecHash_CanonicalizesExplicitRoleOrder(t *testing
 
 	t.Log("Verify the order-only update keeps the worker generation stable")
 	assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, dgd), mustComputeBetaDGDWorkersSpecHash(t, reordered))
+
+	t.Log("Make the same cardinality assertions explicit")
+	explicitReplicas := dgd.DeepCopy()
+	explicitReplicas.Spec.Components[0].Roles[0].Replicas = ptr.To(int32(1))
+	explicitReplicas.Spec.Components[0].Roles[1].Replicas = ptr.To(int32(3))
+
+	t.Log("Verify optional role cardinality assertions do not create a worker generation")
+	assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, dgd), mustComputeBetaDGDWorkersSpecHash(t, explicitReplicas))
 }
 
 func TestComputeBetaDGDWorkersSpecHash_IgnoresNonWorkers(t *testing.T) {
@@ -405,12 +434,20 @@ func TestComputeBetaDGDWorkersSpecHash_UsesResolvedRuntimeVersion(t *testing.T) 
 }
 
 func TestRuntimeFeatureGatesDoNotPrecedeVersionHashing(t *testing.T) {
-	t.Log("ensure runtime-gated rendering cannot change a legacy unhashed worker generation")
-	assert.GreaterOrEqual(
-		t,
-		runtimefeatures.CanaryHealthChecks.MinRuntimeVersion.Compare(minimumHashedRuntimeVersion),
-		0,
-	)
+	tests := []struct {
+		name string
+		gate runtimefeatures.Gate
+	}{
+		{name: "canary health checks", gate: runtimefeatures.CanaryHealthChecks},
+		{name: "increased worker failure threshold", gate: runtimefeatures.IncreasedWorkerFailureThreshold},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("ensure runtime-gated rendering cannot change a legacy unhashed worker generation")
+			assert.GreaterOrEqual(t, tt.gate.MinRuntimeVersion.Compare(minimumHashedRuntimeVersion), 0)
+		})
+	}
 }
 
 func TestComputeBetaDGDWorkersSpecHash_TracksPreservedAlphaResourceMetadata(t *testing.T) {

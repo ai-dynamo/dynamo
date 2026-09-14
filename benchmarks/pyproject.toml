@@ -22,7 +22,7 @@ authors = [
     {name = "NVIDIA CORPORATION & AFFILIATES"}
 ]
 license = {text = "Apache-2.0"}
-requires-python = ">=3.10"
+requires-python = ">=3.11,<3.14"
 
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -31,7 +31,6 @@ classifiers = [
     "Intended Audience :: Information Technology",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering",
@@ -41,7 +40,7 @@ classifiers = [
 
 dependencies = [
     "aisimulate==0.1.0.dev2; python_version >= '3.11' and python_version < '3.14'",
-    "aiperf==0.10.0",
+    "aiperf==0.12.0",
     "matplotlib",
     "networkx",
     "numpy",

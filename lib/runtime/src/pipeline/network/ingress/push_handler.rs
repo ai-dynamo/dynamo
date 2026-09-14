@@ -3,6 +3,7 @@
 
 use super::*;
 
+use crate::admission_gate;
 use crate::engine::AsyncEngineContext;
 use crate::metrics::prometheus_names::work_handler;
 use crate::metrics::work_handler_perf::{
@@ -107,6 +108,10 @@ impl WorkHandlerMetrics {
             "Total number of requests cancelled by work handler",
             metrics_labels,
         )?;
+
+        // The gate admits on this endpoint's behalf, so expose its family here
+        // too. Idempotent: the gate is process-global and every endpoint asks.
+        admission_gate::register_metrics(endpoint.get_metrics_registry());
 
         Ok(Self::new(
             request_counter,
@@ -664,11 +669,16 @@ where
 
         let request_context = request.context();
         tracing::trace!("calling generate");
-        let stream = self
-            .segment
-            .get()
-            .expect("segment not set")
-            .generate(request)
+        // Route backend generation through the transport-independent admission
+        // boundary. Admission errors follow the existing generate error path.
+        let stream = admission_gate::global()
+            .admit(
+                Some(request_context.as_ref()),
+                self.segment
+                    .get()
+                    .expect("segment not set")
+                    .generate(request),
+            )
             .await
             .map_err(|error| {
                 if let Some(metrics) = self.metrics() {

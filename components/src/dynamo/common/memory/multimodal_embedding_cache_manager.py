@@ -40,6 +40,11 @@ class CacheMutation(NamedTuple):
     removed_keys: list[str]
 
 
+class CacheReservation(NamedTuple):
+    admitted: bool
+    removed_keys: list[str]
+
+
 class MultimodalEmbeddingCacheManager:
     """
     LRU cache for encoder embeddings.
@@ -116,6 +121,65 @@ class MultimodalEmbeddingCacheManager:
     def keys(self) -> list[str]:
         """Return the current cache keys in LRU order."""
         return list(self._cache.keys())
+
+    def make_room_for(self, key: str, size_bytes: int) -> CacheReservation:
+        """
+        Decide admission for an entry of ``size_bytes`` and evict to fit it.
+
+        Takes a byte count rather than a tensor so a caller that has to
+        allocate the tensor itself — a device copy, say — can learn that the
+        entry will be rejected, and can have the room for it freed, before it
+        pays for the allocation. Nothing is reserved: ``_current_bytes`` is
+        only reduced by what this evicts, so a caller whose allocation then
+        fails leaks no capacity, and the subsequent ``set()`` still does its
+        own accounting and finds its eviction loop with nothing left to do.
+
+        An entry already stored under ``key`` is dropped here rather than
+        counted as a refund against ``set_with_delta()``, which would replace
+        it later. Merely deducting its bytes would keep its storage alive
+        across the caller's allocation, so a full cache would still peak at its
+        capacity plus the new entry — the one thing this method exists to
+        prevent. It is not counted as an eviction, because nothing was
+        displaced for want of capacity; the entry is on its way out either way.
+        A caller that then abandons the store leaves that key uncached, which
+        costs a later miss and no memory. Because the key is gone by the time
+        ``set_with_delta()`` runs, it reports the store as an addition rather
+        than a replacement.
+
+        Args:
+            key: Cache key the caller intends to store under.
+            size_bytes: Size in bytes of the entry the caller intends to store.
+
+        Returns:
+            CacheReservation reporting whether the entry can be stored at all,
+            plus the keys evicted to make room for it. A dropped entry under
+            ``key`` is not among them.
+        """
+        if size_bytes > self._capacity_bytes:
+            logger.warning(
+                f"Tensor too large to cache: {size_bytes / 1024**2:.1f}MB > "
+                f"{self._capacity_bytes / 1024**3:.2f}GB capacity"
+            )
+            return CacheReservation(False, [])
+
+        replaced_entry = self._cache.pop(key, None)
+        if replaced_entry is not None:
+            self._current_bytes -= self._tensor_size(replaced_entry.tensor)
+
+        removed_keys: list[str] = []
+        for candidate in list(self._cache.keys()):
+            if self._current_bytes + size_bytes <= self._capacity_bytes:
+                break
+            evicted_entry = self._cache.pop(candidate)
+            evicted_size = self._tensor_size(evicted_entry.tensor)
+            self._current_bytes -= evicted_size
+            self._evictions += 1
+            removed_keys.append(candidate)
+            logger.debug(
+                f"Evicted key={candidate[:16]}..., size={evicted_size / 1024**2:.2f}MB"
+            )
+
+        return CacheReservation(True, removed_keys)
 
     def set(self, key: str, entry: CachedEmbedding) -> bool:
         return self.set_with_delta(key, entry).stored

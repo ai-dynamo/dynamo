@@ -445,7 +445,7 @@ models:
             namespace: "test-ns".to_string(),
             model_name: "test-model".to_string(),
             tokenizer_service_url: "http://vllm-render:8000".to_string(),
-            tokenizer_protocol: crate::epp_standalone_config::TokenizerProtocol::VllmRender,
+            renderer_protocol: crate::epp_standalone_config::RendererProtocol::VllmRender,
             tokenizer_max_response_bytes: 16 * 1024 * 1024,
             tokenization_timeout_ms: 5_000,
             block_size: 16,
