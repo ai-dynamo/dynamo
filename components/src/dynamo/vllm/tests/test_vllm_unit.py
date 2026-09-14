@@ -1714,7 +1714,7 @@ class TestForwardPassMetricsActivation:
 
     def test_cli_flag_enables_trace_and_exports_env(self, monkeypatch, mock_vllm_cli):
         monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
-        monkeypatch.delenv("DYN_FPM_TRACE", raising=False)
+        monkeypatch.setenv("DYN_FPM_TRACE", "0")
         mock_vllm_cli("--fpm-trace", "--model", "Qwen/Qwen3-0.6B")
 
         config = parse_args()

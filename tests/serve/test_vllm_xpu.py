@@ -65,6 +65,7 @@ vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
 def clear_stale_fpm_env(monkeypatch):
     """Keep serve/XPU tests isolated from stale FPM env vars inherited by CI or parent shells."""
     monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
+    monkeypatch.delenv("DYN_FPM_TRACE", raising=False)
 
 
 # Generated multimodal configs from profile definitions
