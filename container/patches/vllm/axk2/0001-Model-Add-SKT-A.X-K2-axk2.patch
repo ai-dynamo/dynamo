@@ -11,8 +11,8 @@ Architecturally it builds on the DeepSeek-V3 MLA layout and adds:
 
 - Sparse Gated Attention (SGA): a lightweight indexer scores key-value
   candidates and selects top-k (k=2048) per query, combined with a
-  head-specific output gate on the attention output. The gate is fused into
-  q_b_proj at load time.
+  head-specific output gate on the attention output. The gate is pre-fused into
+  q_b_proj offline; vLLM does not merge it at load time.
 - Gated Norm: an input-dependent low-rank gate applied after RMSNorm, which
   suppresses massive activations and keeps the activation distribution
   friendly to narrow low-precision formats.
