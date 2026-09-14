@@ -146,8 +146,11 @@ A payload row stores the client request under `payload.request`, the completed r
 }
 ```
 
-`input_sequence_hashes` are Dynamo's sequence-aware rolling hashes. DynoSim maps them to compact
-internal IDs while loading the original trace; it does not create an intermediate Mooncake file.
+`input_sequence_hashes` are Dynamo's sequence-aware rolling hashes. `output_sequence_hashes`
+continues the same chain across generated tokens. When an input ends mid-block, its first output hash
+replaces the trailing input hash; otherwise output hashes append to the input chain. DynoSim maps
+these hashes to compact internal IDs while loading the original trace; it does not create an
+intermediate Mooncake file.
 
 ## Supported Replay Requests
 
