@@ -577,7 +577,7 @@ class BaseWorkerHandler(
         self.generate_endpoint = generate_endpoint
         self.publisher = publisher
         self.shutdown_event = shutdown_event
-        self._abort_retry_tasks: set[asyncio.Task[Any]] = set()
+        self._abort_tasks: set[asyncio.Task[Any]] = set()
         self._supports_ordered_cancellation = (
             engine is not None and supports_disagg_prefill_cancel_anytime(engine)
         )
@@ -1034,7 +1034,7 @@ class BaseWorkerHandler(
 
     def cleanup(self) -> None:
         """Cleanup resources. Override in subclasses as needed."""
-        self._cancel_abort_retries()
+        self._cancel_abort_tasks()
         if self.publisher is not None:
             self.publisher.cleanup()
 
