@@ -80,6 +80,10 @@ pub(crate) fn build_generate_request(
         .and_then(|routing| routing.priority)
         .unwrap_or(0);
     let priority = dynamo_priority.saturating_neg();
+    let lora_name = routing
+        .as_mut()
+        .and_then(|routing| routing.lora_name.take())
+        .unwrap_or_default();
     let cache_salt = routing
         .as_mut()
         .and_then(|routing| routing.cache_namespace.take());
@@ -146,7 +150,7 @@ pub(crate) fn build_generate_request(
         priority,
         session_id: None,
         media,
-        lora_name: String::new(),
+        lora_name,
         native_sampling_params_json,
     })
 }
@@ -885,16 +889,6 @@ fn validate_request(
     if mode.is_encode() && request.encoder_result.is_some() {
         return Err(client::invalid_argument(
             "encode requests must not include encoder_result",
-        ));
-    }
-    if request
-        .routing
-        .as_ref()
-        .and_then(|routing| routing.lora_name.as_deref())
-        .is_some_and(|name| !name.is_empty())
-    {
-        return Err(client::invalid_argument(
-            "LoRA request selection is not supported by vLLM gRPC",
         ));
     }
     if request.bootstrap_info.is_some() {
