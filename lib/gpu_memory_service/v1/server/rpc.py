@@ -24,6 +24,7 @@ from gpu_memory_service.server.persistent_allocations import (
     PersistentAllocationManager,
     PersistentClaimConflictError,
     PersistentNotFoundError,
+    PersistentPoolIncompatibleError,
 )
 from gpu_memory_service.v1.protocol import (
     CHECKPOINT_CONTROL_TYPES,
@@ -31,6 +32,7 @@ from gpu_memory_service.v1.protocol import (
     ERROR_INVALID_REQUEST,
     ERROR_NOT_CLAIMED,
     ERROR_NOT_FOUND,
+    ERROR_OUT_OF_MEMORY,
     REQUEST_TYPES,
     AbortRequest,
     AllocateRequest,
@@ -53,6 +55,7 @@ from gpu_memory_service.v1.protocol import (
     ListPersistentPoolsRequest,
     ListPersistentPoolsResponse,
     Message,
+    PersistentPoolErrorResponse,
     PersistentPoolRecord,
     Request,
     Response,
@@ -398,6 +401,9 @@ class GMSServerMemoryManager:
             ),
         ):
             return self._handle_persistent_request(session, request)
+        self._require_active(session)
+        if session.mode not in (GrantedLockType.RW, GrantedLockType.RO):
+            raise RuntimeError("transactional operation requires an RW or RO session")
         if isinstance(request, AllocateRequest):
             self._require_rw(session)
             self._allocations.allocate(
@@ -408,7 +414,6 @@ class GMSServerMemoryManager:
             self._allocation_sizes[request.allocation_id] = request.aligned_size
             return SuccessResponse(), -1
         if isinstance(request, ExportRequest):
-            self._require_active(session)
             return ExportResponse(), self._allocations.export(request.allocation_id)
         if isinstance(request, FreeRequest):
             self._require_rw(session)
@@ -416,7 +421,6 @@ class GMSServerMemoryManager:
             del self._allocation_sizes[request.allocation_id]
             return SuccessResponse(), -1
         if isinstance(request, ListAllocationsRequest):
-            self._require_active(session)
             allocations = tuple(
                 AllocationRecord(allocation_id, aligned_size)
                 for allocation_id, aligned_size in self._allocation_sizes.items()
@@ -454,9 +458,9 @@ class GMSServerMemoryManager:
                 try:
                     if key in claims and claims[key] != request.shared:
                         return (
-                            ErrorResponse(
+                            PersistentPoolErrorResponse(
                                 "persistent claim mode differs from this session's claim",
-                                code=ERROR_CLAIM_CONFLICT,
+                                code=ERROR_INVALID_REQUEST,
                             ),
                             -1,
                         )
@@ -475,12 +479,26 @@ class GMSServerMemoryManager:
                             request.aligned_size,
                             shared=request.shared,
                         )
+                except PersistentPoolIncompatibleError as exc:
+                    return (
+                        PersistentPoolErrorResponse(str(exc), ERROR_INVALID_REQUEST),
+                        -1,
+                    )
                 except PersistentClaimConflictError as exc:
-                    return ErrorResponse(str(exc), code=ERROR_CLAIM_CONFLICT), -1
+                    return (
+                        PersistentPoolErrorResponse(str(exc), ERROR_CLAIM_CONFLICT),
+                        -1,
+                    )
                 except ValueError as exc:
-                    return ErrorResponse(str(exc), code=ERROR_INVALID_REQUEST), -1
+                    return (
+                        PersistentPoolErrorResponse(str(exc), ERROR_INVALID_REQUEST),
+                        -1,
+                    )
                 except MemoryError as exc:
-                    return ErrorResponse(str(exc), out_of_memory=True), -1
+                    return (
+                        PersistentPoolErrorResponse(str(exc), ERROR_OUT_OF_MEMORY),
+                        -1,
+                    )
                 claims[key] = request.shared
                 return (
                     ClaimPersistentPoolResponse(
@@ -504,7 +522,7 @@ class GMSServerMemoryManager:
                 key = (request.engine_id, request.tag)
                 if key not in claims and self._persistent.is_claimed(*key):
                     return (
-                        ErrorResponse(
+                        PersistentPoolErrorResponse(
                             "persistent allocation claimed by another session",
                             code=ERROR_NOT_CLAIMED,
                         ),
@@ -513,7 +531,10 @@ class GMSServerMemoryManager:
                 try:
                     destroyed = self._persistent.release(*key)
                 except PersistentClaimConflictError as exc:
-                    return ErrorResponse(str(exc), code=ERROR_CLAIM_CONFLICT), -1
+                    return (
+                        PersistentPoolErrorResponse(str(exc), ERROR_CLAIM_CONFLICT),
+                        -1,
+                    )
                 claims.pop(key, None)
                 if not claims:
                     self._persistent_claims.pop(session, None)
@@ -523,7 +544,7 @@ class GMSServerMemoryManager:
                 key = (request.engine_id, request.tag)
                 if key not in claims:
                     return (
-                        ErrorResponse(
+                        PersistentPoolErrorResponse(
                             "persistent allocation not claimed by session",
                             code=ERROR_NOT_CLAIMED,
                         ),
@@ -532,7 +553,7 @@ class GMSServerMemoryManager:
                 try:
                     _allocation, fd = self._persistent.export(*key)
                 except PersistentNotFoundError as exc:
-                    return ErrorResponse(str(exc), code=ERROR_NOT_FOUND), -1
+                    return PersistentPoolErrorResponse(str(exc), ERROR_NOT_FOUND), -1
                 return ExportPersistentPoolResponse(), fd
 
             if isinstance(request, ListPersistentPoolsRequest):
@@ -570,6 +591,12 @@ class GMSServerMemoryManager:
 
     def allocation_snapshot(self) -> tuple[tuple[str, int], ...]:
         return tuple(sorted(self._allocation_sizes.items()))
+
+    @property
+    def persistent_allocation_count(self) -> int:
+        """Include orphaned backing when checking checkpoint safety."""
+        with self._persistent_lock:
+            return self._persistent.allocation_count
 
     def _clear_allocations(self) -> int:
         cleared = self._allocations.clear()
