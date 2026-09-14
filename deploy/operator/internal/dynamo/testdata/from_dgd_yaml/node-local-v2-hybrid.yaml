@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 data:
   lpu_servers: lpu-${GROVE_PCSG_INDEX}-lpu-wkr-m-0-0
   tokenizer_dir: /testdata/node-local-v2-connected-lpx/tokenizer

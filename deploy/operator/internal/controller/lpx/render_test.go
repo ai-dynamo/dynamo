@@ -1081,7 +1081,9 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 			}
 			goldenPath, err := filepath.Abs("../../dynamo/testdata/" + name + ".yaml")
 			require.NoError(t, err)
-			golden.Assert(t, strings.NewReplacer(replacements...).Replace(strings.Join(out, "---\n")), goldenPath)
+			const header = "# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n" +
+				"# SPDX-License-Identifier: Apache-2.0\n\n"
+			golden.Assert(t, header+strings.NewReplacer(replacements...).Replace(strings.Join(out, "---\n")), goldenPath)
 		})
 	}
 }
