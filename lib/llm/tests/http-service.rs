@@ -2205,13 +2205,21 @@ impl
     }
 }
 
-/// Chat engine that never yields, not even once cancelled.
-///
-/// [`LongRunningEngine`] emits a sentinel when its context stops, which the
-/// pre-commit check accepts as the first event — the `biased` select in
-/// `until_client_disconnects` then prefers it over the disconnect. Producing
-/// nothing is what leaves the wait to end on the disconnect alone.
+/// What [`SilentEngine`] does with the kill a client disconnect delivers.
+#[derive(Clone, Copy)]
+enum OnKill {
+    /// Never resolve, so only the kill arm can end the pre-commit wait.
+    StayPending,
+    /// End the stream, so the check resolves `Ok` in the same poll as the kill.
+    EndStream,
+    /// Yield an error frame, so the check resolves `Err` in the same poll as
+    /// the kill.
+    FailStream,
+}
+
+/// Chat engine that yields nothing until its context is killed.
 struct SilentEngine {
+    on_kill: OnKill,
     started: Arc<AtomicBool>,
     started_notify: Arc<tokio::sync::Notify>,
     cancelled: Arc<AtomicBool>,
@@ -2219,8 +2227,9 @@ struct SilentEngine {
 }
 
 impl SilentEngine {
-    fn new() -> Self {
+    fn new(on_kill: OnKill) -> Self {
         Self {
+            on_kill,
             started: Arc::new(AtomicBool::new(false)),
             started_notify: Arc::new(tokio::sync::Notify::new()),
             cancelled: Arc::new(AtomicBool::new(false)),
@@ -2274,11 +2283,19 @@ impl
 
         let started = self.started.clone();
         let started_notify = self.started_notify.clone();
+        let on_kill = self.on_kill;
+        let kill_ctx = ctx.clone();
         let stream = stream! {
             started.store(true, Ordering::Release);
             started_notify.notify_one();
-            std::future::pending::<()>().await;
-            yield invalid_argument_error_frame();
+            match on_kill {
+                OnKill::StayPending => std::future::pending::<()>().await,
+                OnKill::EndStream => kill_ctx.killed().await,
+                OnKill::FailStream => {
+                    kill_ctx.killed().await;
+                    yield invalid_argument_error_frame();
+                }
+            }
         };
         Ok(ResponseStream::new(Box::pin(stream), ctx))
     }
@@ -2330,7 +2347,7 @@ async fn test_anthropic_pre_commit_backend_error_keeps_its_classification() {
 /// error: same guard, same rewrite, different classification.
 #[tokio::test]
 async fn test_anthropic_pre_commit_disconnect_is_metered_as_cancelled() {
-    let engine = Arc::new(SilentEngine::new());
+    let engine = Arc::new(SilentEngine::new(OnKill::StayPending));
     let (port, metrics, cancel_token, task) =
         start_anthropic_first_event_service(engine.clone()).await;
 
@@ -2362,15 +2379,17 @@ async fn test_anthropic_pre_commit_disconnect_is_metered_as_cancelled() {
     task.await.unwrap();
 }
 
-/// A disconnect during the pre-commit wait is one disconnect.
+/// A disconnect during the pre-commit wait is one disconnect, metered as a
+/// cancellation, whatever the backend does with the kill.
 ///
-/// Route handlers run detached, so a handler outlives its connection. Before
-/// `until_client_disconnects` ended the wait, this disconnect was recorded
-/// twice: once when the armed connection handle dropped, and again when the
-/// response — finished for a client already gone — was dropped unpolled with
-/// its stream handle still armed.
-#[tokio::test]
-async fn test_disconnect_during_pre_commit_wait_is_recorded_once() {
+/// Route handlers run detached, so a handler outlives its connection. A
+/// disconnect during the wait was recorded twice: once when the armed
+/// connection handle dropped, and again when the response — finished for a
+/// client already gone — was dropped unpolled with its stream handle still
+/// armed. A backend that ends its stream on the kill resolves the check `Ok`
+/// in the same poll as the kill, and one that fails its stream resolves it
+/// `Err`; both results are for a connection that is gone.
+async fn assert_pre_commit_disconnect_is_recorded_once(on_kill: OnKill) {
     const MODEL: &str = "slow-first-event-model";
 
     let (listener, port) = bind_random_port().await;
@@ -2389,7 +2408,7 @@ async fn test_disconnect_during_pre_commit_wait_is_recorded_once() {
 
     let metrics = state.metrics_clone();
     let card = ModelDeploymentCard::with_name_only(MODEL);
-    let engine = Arc::new(SilentEngine::new());
+    let engine = Arc::new(SilentEngine::new(on_kill));
     state
         .manager()
         .add_chat_completions_model(MODEL, card.mdcsum(), engine.clone())
@@ -2422,10 +2441,26 @@ async fn test_disconnect_during_pre_commit_wait_is_recorded_once() {
         1,
     )
     .await;
+    // The request counter moves when the handler's guard drops; a second
+    // disconnect, if the handler produced one, is recorded by the connection
+    // monitor task after that. Give it a scheduling window so the assertions
+    // below can see it.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
     assert_eq!(
         metrics.get_client_disconnect_count(),
         1,
         "one disconnect must be recorded once"
+    );
+    let cancellation_labels = dynamo_llm::http::service::metrics::CancellationLabels {
+        model: MODEL.to_string(),
+        endpoint: Endpoint::ChatCompletions.to_string(),
+        request_type: RequestType::Stream.as_str().to_string(),
+    };
+    assert_eq!(
+        metrics.get_cancellation_count(&cancellation_labels),
+        1,
+        "one disconnect must be one cancellation"
     );
     assert_eq!(
         metrics.get_inflight_count(MODEL),
@@ -2435,6 +2470,21 @@ async fn test_disconnect_during_pre_commit_wait_is_recorded_once() {
 
     cancel_token.cancel();
     task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_disconnect_during_pre_commit_wait_is_recorded_once() {
+    assert_pre_commit_disconnect_is_recorded_once(OnKill::StayPending).await;
+}
+
+#[tokio::test]
+async fn test_disconnect_during_pre_commit_wait_is_recorded_once_when_backend_ends_on_kill() {
+    assert_pre_commit_disconnect_is_recorded_once(OnKill::EndStream).await;
+}
+
+#[tokio::test]
+async fn test_disconnect_during_pre_commit_wait_is_recorded_once_when_backend_fails_on_kill() {
+    assert_pre_commit_disconnect_is_recorded_once(OnKill::FailStream).await;
 }
 
 const BATCH_FAILING_PROMPT: &str = "fail-before-first-event";

@@ -2566,26 +2566,34 @@ where
     }
 }
 
-/// Abandon `check` if the client disconnects before it resolves.
+/// Abandon `check` if the client disconnects before it resolves, and discard a
+/// result that resolved after the disconnect.
 ///
 /// Route handlers run in a detached `tokio::spawn`, so a handler outlives the
-/// connection that asked for it. Without this arm, a disconnect during the
+/// connection that asked for it. Without this, a disconnect during the
 /// pre-commit wait is recorded twice: once when the armed connection handle
 /// drops, and again when the finished response — built for a client that is
 /// already gone — is dropped unpolled with its stream handle armed. Ending the
 /// wait keeps it inside the lifetime of its connection.
 ///
-/// `biased` so a check that has already resolved wins a tie: a real backend
-/// status is worth more than a synthetic 499 nobody will read.
+/// The kill also wins when `check` resolves in the same poll. A backend that
+/// ends or fails its stream once its context is killed resolves the check
+/// right then, and that result is a response for a closed connection: an `Ok`
+/// would arm a stream handle nobody polls, and an `Err` would meter a client
+/// hangup as whatever the backend said on its way out. So a result is
+/// returned only while the connection is still open.
 pub(super) async fn until_client_disconnects<T>(
     check: impl std::future::Future<Output = Result<T, ErrorResponse>>,
     ctx: &Arc<dyn AsyncEngineContext>,
 ) -> Result<T, ErrorResponse> {
-    tokio::select! {
-        biased;
+    let result = tokio::select! {
         result = check => result,
-        () = ctx.killed() => Err(ErrorMessage::client_disconnected()),
+        () = ctx.killed() => return Err(ErrorMessage::client_disconnected()),
+    };
+    if ctx.is_killed() {
+        return Err(ErrorMessage::client_disconnected());
     }
+    result
 }
 
 /// Log a failed pre-commit check.
