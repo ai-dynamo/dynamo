@@ -124,6 +124,34 @@ RUN SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')
         find "$CUBINS_DIR" -type d -exec chmod g+rwx {} + ; \
     fi
 
+{% if device == "cuda" %}
+# A.X-K2 support is not present in the upstream vLLM 0.26.0 runtime. Apply the
+# four Python patches directly to the installed package in the
+# standard Dynamo vLLM runtime image. vLLM 0.26.0 already includes the newer
+# upstream DSpark runtime, but needs the later upstream sparse-MLA-plus-SWA-draft
+# KV allocation fix.
+# Validate the port at build time: A.X-K2 and DSpark model registration,
+# DSpark config conversion, and the sparse-MLA + SWA-draft cache-grouping
+# fallback. The validator uses the upstream vLLM 0.26.0 DSpark runtime.
+COPY --chmod=644 container/patches/vllm/axk2/*.patch /tmp/axk2-vllm-patches/
+COPY --chmod=755 container/deps/vllm/validate_axk2_port.py /tmp/validate_axk2_port.py
+RUN set -eux; \
+    cd "${SITE_PACKAGES}"; \
+    for patch_file in /tmp/axk2-vllm-patches/*.patch; do \
+        patch --batch --forward -p1 < "${patch_file}"; \
+    done; \
+    python3 -m compileall -q \
+        vllm/model_executor/models/axk2.py \
+        vllm/transformers_utils/configs/axk2.py; \
+    python3 /tmp/validate_axk2_port.py; \
+    rm -rf /tmp/axk2-vllm-patches /tmp/validate_axk2_port.py
+
+# Disable vLLM-Omni's Quack FP8 override to avoid the torch.compile failure
+# observed during A.X-K2 bring-up. This default applies to all models in the
+# CUDA runtime image and preserves torch.compile and CUDA graph execution.
+ENV VLLM_OMNI_USE_QUACK_FP8=0
+{% endif %}
+
 {% if device != "cuda" %}
 # Copy UCX and NIXL from wheel_builder for CPU/XPU devices
 # (CUDA devices use NIXL from upstream vLLM wheels)
