@@ -47,16 +47,26 @@ from dynamo.common.utils.runtime import run_async
 logger = logging.getLogger(__name__)
 
 
-def _attributable_to_cv2(exc: BaseException) -> bool:
+def _attributable_to_cv2(exc: BaseException, media_io: Any | None = None) -> bool:
     """Whether this decode failure is OpenCV's.
 
     vLLM picks among several video backends. A media_io configured for PyAV or
     DeepStream raises its own ImportError, and reinstalling OpenCV would not
-    repair it, so only errors that name cv2 earn the OpenCV remedy.
+    repair it, so only errors that name cv2 earn the OpenCV remedy. The
+    OpenCV backend's failed-open error is the exception: it is a bare
+    ``ValueError``. Its selected backend identifies that otherwise anonymous
+    error without relabeling another backend's failure.
     ``ModuleNotFoundError`` carries the module in ``name``; the SystemError a
     backendless build raises names the class in its text.
     """
-    return getattr(exc, "name", None) == "cv2" or "cv2" in str(exc)
+    if getattr(exc, "name", None) == "cv2" or "cv2" in str(exc):
+        return True
+    return (
+        isinstance(exc, ValueError)
+        and str(exc) == "Could not open video stream"
+        and (getattr(media_io, "kwargs", None) or {}).get("backend", "opencv")
+        == "opencv"
+    )
 
 
 @functools.lru_cache(maxsize=1)
@@ -238,15 +248,13 @@ class VideoLoader:
             raise video_decoder_missing(
                 "vllm", "opencv-python-headless", "cv2", codec, cause=str(exc)
             ) from exc
-        except SystemError as exc:
-            # A cv2 with no video backend fails inside VideoCapture rather than
-            # on import, as "<class 'cv2.VideoCapture'> returned a result with
-            # an exception set". Require the error to name cv2 as well as the
-            # build to lack a backend: the build says nothing about which
-            # decoder this media_io actually ran, so a configured non-OpenCV
-            # backend raising SystemError would otherwise be hidden behind a
-            # recommendation to reinstall OpenCV.
-            if not _attributable_to_cv2(exc) or not _cv2_lacks_video_backend():
+        except (SystemError, ValueError) as exc:
+            # A cv2 with no video backend fails inside VideoCapture either as
+            # a SystemError naming cv2 or as OpenCV's bare failed-open
+            # ValueError. Require the selected backend as well as the build to
+            # lack a backend: a configured non-OpenCV decoder must keep its
+            # own failure and remediation.
+            if not _attributable_to_cv2(exc, media_io) or not _cv2_lacks_video_backend():
                 raise
             raise video_decoder_missing(
                 "vllm",
