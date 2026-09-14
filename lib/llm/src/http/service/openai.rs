@@ -605,10 +605,12 @@ impl ErrorMessage {
             // An explicit status the worker asserted goes through the shared
             // policy, so a 499 answers with the same sanitized cancellation
             // body as every other HTTP path rather than the worker's own text,
-            // which can name a context id or an internal file. Do not triage
-            // the fallback 400: it is an ordinary validation error, even when
-            // the configured overload status also happens to be 400.
-            if let Some(explicit_status) = explicit_status {
+            // which can name a context id or an internal file. A 400 remains a
+            // validation error, even when the configured overload status also
+            // happens to be 400.
+            if let Some(explicit_status) = explicit_status
+                && explicit_status != StatusCode::BAD_REQUEST
+            {
                 if let BackendStatusAction::Sanitize(variant) =
                     BackendStatusAction::triage(explicit_status)
                 {
