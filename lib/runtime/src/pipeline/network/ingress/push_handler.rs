@@ -828,17 +828,21 @@ where
             .unwrap_or_default()
             .as_nanos() as u64;
         let start_time = std::time::Instant::now();
-        let lifecycle = request_id
-            .as_ref()
-            .map(|id| {
-                LifecycleTrace::from_request_id_with_role(
-                    id.clone(),
-                    self.lifecycle_operation_role(),
-                )
-            })
-            .unwrap_or_else(|| {
-                LifecycleTrace::from_environment_with_role(self.lifecycle_operation_role())
-            });
+        let lifecycle = if self.lifecycle_inference_endpoint.get() == Some(&true) {
+            request_id
+                .as_ref()
+                .map(|id| {
+                    LifecycleTrace::from_request_id_with_role(
+                        id.clone(),
+                        self.lifecycle_operation_role(),
+                    )
+                })
+                .unwrap_or_else(|| {
+                    LifecycleTrace::from_environment_with_role(self.lifecycle_operation_role())
+                })
+        } else {
+            LifecycleTrace::new(false)
+        };
 
         // Increment inflight and ensure it's decremented on all exits via RAII guard
         let _inflight_guard = self.metrics().map(|m| {
@@ -856,16 +860,16 @@ where
             }
         });
 
+        // Hold the timing span through setup without entering it: response
+        // readers capture the current span and live until the request ends.
+        // They must inherit handle_payload, not prolong worker.admission.
         let worker_admission = lifecycle.start(LifecycleStage::WorkerAdmission);
         let ParsedRequest {
             request,
             response_connection_info,
             frontend_send_ts_ns,
             payload_codec,
-        } = self
-            .parse_and_build_request(payload)
-            .instrument(worker_admission.clone())
-            .await?;
+        } = self.parse_and_build_request(payload).await?;
 
         // Compute network transit time (T2 - T1) using cross-process wall-clock timestamps
         if let Some(t1_ns) = frontend_send_ts_ns {
@@ -894,7 +898,6 @@ where
                     response_connection_info,
                     cancellation_counter,
                 )
-                .instrument(worker_admission.clone())
                 .await
                 .map_err(|error| {
                     if let Some(metrics) = self.metrics() {
@@ -925,7 +928,6 @@ where
                         response_connection_info,
                         cancellation_counter,
                     )
-                    .instrument(worker_admission.clone())
                     .await
                     .map_err(|error| {
                         if let Some(metrics) = self.metrics() {
@@ -1082,6 +1084,120 @@ mod tests {
 
         assert_eq!(error.class(), ErrorType::Internal);
         assert_eq!(error.reason().as_str(), "runtime.unclassified");
+    }
+
+    #[derive(Clone, Default)]
+    struct AdmissionCapture {
+        started: Arc<AtomicBool>,
+        closed: Arc<AtomicBool>,
+    }
+
+    impl<S> tracing_subscriber::Layer<S> for AdmissionCapture
+    where
+        S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            _id: &tracing::span::Id,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if attrs.metadata().name() == "worker.admission" {
+                self.started.store(true, Ordering::SeqCst);
+            }
+        }
+
+        fn on_close(&self, id: tracing::span::Id, ctx: tracing_subscriber::layer::Context<'_, S>) {
+            if ctx.span(&id).unwrap().metadata().name() == "worker.admission" {
+                self.closed.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+
+    struct AdmissionProbe(AdmissionCapture, bool);
+
+    #[async_trait]
+    impl crate::engine::AsyncEngine<SingleIn<TestRequest>, ManyOut<TestResponse>, anyhow::Error>
+        for AdmissionProbe
+    {
+        async fn generate(
+            &self,
+            _request: SingleIn<TestRequest>,
+        ) -> anyhow::Result<ManyOut<TestResponse>> {
+            assert_eq!(self.0.started.load(Ordering::SeqCst), self.1);
+            assert_eq!(
+                self.0.closed.load(Ordering::SeqCst),
+                self.1,
+                "admission must close before generation, while the TCP reader is still alive"
+            );
+            anyhow::bail!("admission probe finished")
+        }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_admission_closes_before_generation_and_skips_control_calls() {
+        use tracing::instrument::WithSubscriber;
+        use tracing_subscriber::prelude::*;
+
+        temp_env::async_with_vars(
+            [
+                ("DYN_LIFECYCLE_TRACE_ENABLED", Some("true")),
+                ("DYN_RESPONSE_PLANE", Some("tcp")),
+            ],
+            async {
+                for inference in [true, false] {
+                    let capture = AdmissionCapture::default();
+                    let subscriber = tracing_subscriber::registry().with(capture.clone());
+                    async {
+                        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                        let address = listener.local_addr().unwrap().to_string();
+                        let peer = tokio::spawn(async move {
+                            let (mut socket, _) = listener.accept().await.unwrap();
+                            let _ = tokio::io::copy(&mut socket, &mut tokio::io::sink()).await;
+                        });
+                        let ingress =
+                            TestIngress::for_engine(Arc::new(AdmissionProbe(capture, inference)))
+                                .unwrap();
+                        ingress.lifecycle_inference_endpoint.set(inference).unwrap();
+                        let connection: ConnectionInfo = tcp::TcpStreamConnectionInfo {
+                            address,
+                            subject: "admission-probe".to_string(),
+                            context: "admission-probe".to_string(),
+                            stream_type: crate::pipeline::network::StreamType::Response,
+                        }
+                        .into();
+                        let header = serde_json::to_vec(&serde_json::json!({
+                            "id": "admission-probe",
+                            "request_type": "single_in",
+                            "response_type": "many_out",
+                            "connection_info": connection,
+                        }))
+                        .unwrap();
+                        let payload = TwoPartCodec::default()
+                            .encode_message(TwoPartMessage::from_parts(
+                                header.into(),
+                                Bytes::from_static(b"{}"),
+                            ))
+                            .unwrap();
+                        let error = tokio::time::timeout(
+                            std::time::Duration::from_secs(10),
+                            ingress
+                                .handle_payload_shared(payload, Some("admission-probe".to_string()))
+                                .instrument(tracing::info_span!("handle_payload")),
+                        )
+                        .await
+                        .expect("local admission probe timed out")
+                        .unwrap_err();
+                        assert!(error.to_string().contains("admission probe finished"));
+                        peer.abort();
+                        let _ = peer.await;
+                    }
+                    .with_subscriber(subscriber)
+                    .await;
+                }
+            },
+        )
+        .await;
     }
 
     #[derive(Default)]

@@ -1197,6 +1197,7 @@ pub struct Ingress<Req: PipelineIO, Resp: PipelineIO, Adapter = SerdeIngressPayl
     quic_response_client_pool: OnceLock<Arc<quic_response::QuicResponseClientPool>>,
     payload_adapter: Arc<Adapter>,
     lifecycle_operation_role: OnceLock<Arc<OnceLock<LifecycleOperationRole>>>,
+    lifecycle_inference_endpoint: OnceLock<bool>,
 }
 
 impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
@@ -1243,6 +1244,7 @@ where
             quic_response_client_pool: OnceLock::new(),
             payload_adapter: Arc::new(payload_adapter),
             lifecycle_operation_role: OnceLock::new(),
+            lifecycle_inference_endpoint: OnceLock::new(),
         })
     }
 
@@ -1294,6 +1296,11 @@ where
         let _ = self
             .lifecycle_operation_role
             .set(endpoint.lifecycle_operation_role());
+        // Only generation endpoints participate in the inference lifecycle.
+        // Control-plane RPCs (KV queries, metrics, etc.) keep ordinary tracing.
+        let _ = self
+            .lifecycle_inference_endpoint
+            .set(endpoint.name() == "generate");
         let metrics = WorkHandlerMetrics::from_endpoint(endpoint, metrics_labels)
             .map_err(|e| anyhow::anyhow!("Failed to create work handler metrics: {}", e))?;
 
