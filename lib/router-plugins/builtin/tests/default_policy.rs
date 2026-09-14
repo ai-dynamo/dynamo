@@ -1,0 +1,245 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+mod support;
+use dynamo_custom_policy_builtin::{DefaultWorkerSelector, default_policy, default_registry};
+use dynamo_kv_router::protocols::WorkerWithDpRank;
+use dynamo_kv_router::{
+    KvRouterConfig, RoutingPartitionRef, WorkerInputView, WorkerInputs, WorkerPicker,
+    WorkerSelectionContext, WorkerSelectionInput, WorkerSelectionPolicy,
+    WorkerSelectionPolicyError, WorkerSelector, WorkerType,
+};
+use support::*;
+
+#[test]
+fn seeded_selection_matches_reference_across_cache_and_load_shapes() {
+    for temperature in [0.0, 0.7] {
+        for prompt in [1, 17, 127, 2048] {
+            for mode in 0..4 {
+                let (workers, mut request) = fixture(16, prompt);
+                let config = KvRouterConfig {
+                    router_temperature: temperature,
+                    overlap_score_credit_decay: 0.6,
+                    host_cache_hit_weight: 0.25,
+                    disk_cache_hit_weight: 0.1,
+                    ..Default::default()
+                };
+                match mode {
+                    1 => request.overlap.tier_overlap_blocks = Default::default(),
+                    2 => request.worker_loads.clear(),
+                    3 => request.track_prefill_tokens = false,
+                    _ => {}
+                }
+                let reference = dynamo_kv_router::DefaultWorkerSelector::new_seeded(
+                    Some(config.clone()),
+                    "test",
+                    42,
+                );
+                let plugin = DefaultWorkerSelector::new_seeded(Some(config), "test", 42);
+                for _ in 0..64 {
+                    let input = WorkerSelectionInput::configured(
+                        &workers,
+                        &request,
+                        request.eligibility(),
+                        16,
+                    );
+                    let expected = reference.select_worker(input).unwrap();
+                    let actual = plugin.select_worker(input).unwrap();
+                    assert_eq!(
+                        actual.worker, expected.worker,
+                        "temperature={temperature} prompt={prompt} mode={mode}"
+                    );
+                    assert_eq!(actual.cached_tokens, expected.cached_tokens);
+                    assert_eq!(
+                        actual.potential_decode_blocks,
+                        expected.potential_decode_blocks
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn exact_prompt_and_accounting_inputs_are_available_to_external_pickers() {
+    struct Inspect;
+    impl WorkerPicker for Inspect {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            WorkerInputs::CACHE | WorkerInputs::LOAD
+        }
+        fn pick(
+            &mut self,
+            context: &WorkerSelectionContext<'_>,
+            input: WorkerInputView<'_>,
+        ) -> Result<usize, WorkerSelectionPolicyError> {
+            assert_eq!(context.prompt_tokens(), 17);
+            assert_eq!(context.request_blocks(), 2);
+            assert!(context.has_tier_matches());
+            assert!(input.load().unwrap().iter().all(|load| load.is_available()));
+            for cache in input.cache().unwrap() {
+                let (blocks, tokens) = cache.accounting_cache_estimate();
+                assert_eq!((blocks * 16.0) as usize, tokens);
+            }
+            Ok(0)
+        }
+    }
+    let (workers, request) = fixture(2, 17);
+    WorkerSelectionPolicy::new(KvRouterConfig::default(), "test", vec![], Box::new(Inspect))
+        .select_worker(WorkerSelectionInput::configured(
+            &workers,
+            &request,
+            request.eligibility(),
+            16,
+        ))
+        .unwrap();
+}
+
+#[test]
+fn configured_default_resolves_for_every_role_and_uses_exclusive_affinity() {
+    let registry = default_registry();
+    for role in [
+        WorkerType::Aggregated,
+        WorkerType::Prefill,
+        WorkerType::Decode,
+        WorkerType::Encode,
+    ] {
+        let config = KvRouterConfig::default();
+        let factory = registry
+            .resolve_for_worker_type(&config, role)
+            .unwrap()
+            .unwrap();
+        let policy = factory(&config, role, RoutingPartitionRef::new("model", "default"));
+        assert!(
+            <WorkerSelectionPolicy as WorkerSelector<TestWorker>>::uses_exclusive_affinity_target(
+                &policy
+            )
+        );
+    }
+}
+
+#[test]
+fn mandatory_pin_is_preserved() {
+    let (workers, mut request) = fixture(4, 17);
+    request.pinned_worker = Some(WorkerWithDpRank::new(3, 1));
+    let selected = default_policy(KvRouterConfig::default(), "test")
+        .select_worker(WorkerSelectionInput::configured(
+            &workers,
+            &request,
+            request.eligibility(),
+            16,
+        ))
+        .unwrap();
+    assert_eq!(Some(selected.worker), request.pinned_worker);
+}
+
+#[test]
+fn non_finite_picker_cost_is_rejected() {
+    struct Invalid;
+    impl WorkerPicker for Invalid {
+        fn pick(
+            &mut self,
+            _: &WorkerSelectionContext<'_>,
+            _: WorkerInputView<'_>,
+        ) -> Result<usize, WorkerSelectionPolicyError> {
+            Ok(0)
+        }
+        fn pick_with_cost(
+            &mut self,
+            _: &WorkerSelectionContext<'_>,
+            _: WorkerInputView<'_>,
+        ) -> Result<(usize, Option<f64>), WorkerSelectionPolicyError> {
+            Ok((0, Some(f64::NAN)))
+        }
+    }
+    let (workers, request) = fixture(1, 17);
+    let error =
+        WorkerSelectionPolicy::new(KvRouterConfig::default(), "test", vec![], Box::new(Invalid))
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                16,
+            ))
+            .unwrap_err();
+    assert!(error.to_string().contains("non-finite"));
+}
+
+#[test]
+fn configured_parameters_replace_request_score_overrides() {
+    use dynamo_kv_router::RouterConfigOverride;
+    let (workers, mut request) = fixture(2, 160);
+    for (worker, load) in &mut request.worker_loads {
+        load.active_prefill_tokens = 0;
+        load.active_requests = 0;
+        load.active_decode_blocks = if worker.worker_id == 0 { 8 } else { 0 };
+        load.additional_active_blocks = 0;
+        request
+            .overlap
+            .tier_overlap_blocks
+            .device
+            .insert(*worker, if worker.worker_id == 0 { 10 } else { 0 });
+    }
+    request.router_config_override = Some(RouterConfigOverride {
+        overlap_score_credit: Some(0.0),
+        router_temperature: Some(10.0),
+        ..Default::default()
+    });
+    let config = KvRouterConfig {
+        overlap_score_credit: 2.0,
+        host_cache_hit_weight: 0.0,
+        disk_cache_hit_weight: 0.0,
+        router_temperature: 0.0,
+        ..Default::default()
+    };
+    let policy = default_policy(config, "prefill");
+    for _ in 0..32 {
+        let result = policy
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                16,
+            ))
+            .unwrap();
+        assert_eq!(result.worker.worker_id, 0);
+    }
+}
+
+#[test]
+fn named_default_parameters_resolve_and_reject_invalid_values() {
+    use std::io::Write;
+    for (parameter, succeeds) in [
+        ("overlap_score_credit: 2.0", true),
+        ("overlap_score_credit: -1.0", false),
+        ("unknown: 1", false),
+    ] {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        write!(file, "worker_selection:\n  aggregated: tuned\n  instances:\n    - name: tuned\n      type: dynamo-default-cost-fn\n      parameters:\n        {parameter}\n").unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(file.path().display().to_string()),
+            ..Default::default()
+        };
+        let mut registry = default_registry();
+        dynamo_custom_policy_builtin::register(&mut registry).unwrap();
+        assert_eq!(registry.resolve(&config).is_ok(), succeeds);
+    }
+}
+
+#[test]
+fn pin_does_not_advance_seeded_random_stream() {
+    let (workers, mut request) = fixture(8, 127);
+    let config = KvRouterConfig {
+        router_temperature: 0.7,
+        ..Default::default()
+    };
+    let reference =
+        dynamo_kv_router::DefaultWorkerSelector::new_seeded(Some(config.clone()), "prefill", 42);
+    let plugin = DefaultWorkerSelector::new_seeded(Some(config), "prefill", 42);
+    for pinned in [true, false, true, false, false] {
+        request.pinned_worker = pinned.then_some(WorkerWithDpRank::new(3, 1));
+        let input = WorkerSelectionInput::configured(&workers, &request, request.eligibility(), 16);
+        assert_eq!(
+            reference.select_worker(input).unwrap().worker,
+            plugin.select_worker(input).unwrap().worker
+        );
+    }
+}

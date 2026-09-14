@@ -3,24 +3,27 @@
 
 use std::collections::HashMap;
 
-mod default;
 mod policy;
+#[cfg(any(test, feature = "bench"))]
+mod reference;
 
-pub use default::DefaultWorkerSelector;
+#[cfg(any(test, feature = "bench"))]
+pub use reference::DefaultWorkerSelector;
 
-use default::{DefaultWorkerPicker, DefaultWorkerScorer};
 // TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
 pub use crate::plugins::worker_selection::{
     ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerFilter, WorkerInputView,
     WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer, WorkerSelectionContext,
 };
+#[cfg(any(test, feature = "bench"))]
+use reference::{DefaultWorkerPicker, DefaultWorkerScorer};
 
 pub use policy::WorkerSelectionPolicy;
-
-use default::{pick_default_worker, selection_weights};
 use policy::{
     CustomWorkerSelectionState, WorkerSelectionPolicyStateRef, collect_custom_candidates,
 };
+#[cfg(any(test, feature = "bench"))]
+use reference::{pick_default_worker, selection_weights};
 
 use super::config::KvRouterConfig;
 use super::filter::{RoutingEligibility, WorkerEligibilityError};
@@ -127,6 +130,7 @@ impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg(any(test, feature = "bench"))]
 pub(crate) struct LogitWeights {
     overlap_score_credit: f64,
     overlap_score_credit_decay: f64,
@@ -140,16 +144,26 @@ struct MaterializedSelectionInput<'a> {
 }
 
 impl<'a> MaterializedSelectionInput<'a> {
-    fn new(request: &'a SchedulingRequest, block_size: u32, weights: LogitWeights) -> Self {
+    fn new(
+        request: &'a SchedulingRequest,
+        block_size: u32,
+        #[cfg(any(test, feature = "bench"))] weights: LogitWeights,
+    ) -> Self {
         Self {
             request,
             context: WorkerSelectionContext {
                 request,
+                #[cfg(any(test, feature = "bench"))]
                 request_id: request.mode.request_id().unwrap_or("-"),
                 request_blocks: request.request_blocks(block_size),
                 block_size,
                 track_prefill_tokens: request.track_prefill_tokens,
+                #[cfg(any(test, feature = "bench"))]
                 weights,
+                pinned_worker: request.pinned_worker,
+                has_tier_matches: !request.overlap.tier_overlap_blocks.device.is_empty()
+                    || !request.overlap.tier_overlap_blocks.host_pinned.is_empty()
+                    || !request.overlap.tier_overlap_blocks.disk.is_empty(),
                 router_temperature_override: request
                     .router_config_override
                     .as_ref()
@@ -168,6 +182,8 @@ impl<'a> MaterializedSelectionInput<'a> {
             worker,
             preferred_taint_multiplier,
             inputs,
+            #[cfg(any(test, feature = "bench"))]
+            false,
             |_, device_overlap_blocks| device_overlap_blocks,
         )
     }
@@ -177,6 +193,7 @@ impl<'a> MaterializedSelectionInput<'a> {
         worker: WorkerWithDpRank,
         preferred_taint_multiplier: Option<f64>,
         inputs: WorkerInputs,
+        #[cfg(any(test, feature = "bench"))] reference_formula: bool,
         select_device_overlap: impl FnOnce(f64, f64) -> f64,
     ) -> WorkerCandidate {
         let cached_tokens = if inputs.contains(WorkerInputs::CACHE)
@@ -212,6 +229,7 @@ impl<'a> MaterializedSelectionInput<'a> {
             };
             WorkerCacheInput {
                 effective_overlap_blocks,
+                estimated_cached_tokens: cached_tokens,
                 device_overlap_blocks,
                 host_overlap_blocks: self
                     .request
@@ -235,7 +253,8 @@ impl<'a> MaterializedSelectionInput<'a> {
             WorkerCacheInput::default()
         };
         let load = if inputs.contains(WorkerInputs::LOAD) {
-            let raw_prefill_tokens = if self.request.track_prefill_tokens {
+            #[cfg(any(test, feature = "bench"))]
+            let raw_prefill_tokens = if reference_formula && self.request.track_prefill_tokens {
                 match worker_load {
                     Some(load) => {
                         // Preserve the legacy operation order when overlap exceeds the prompt.
@@ -251,8 +270,11 @@ impl<'a> MaterializedSelectionInput<'a> {
             } else {
                 0
             } as f64;
+            let available = worker_load.is_some();
             let worker_load = worker_load.unwrap_or_default();
             WorkerLoadInput {
+                available,
+                #[cfg(any(test, feature = "bench"))]
                 raw_prefill_blocks: raw_prefill_tokens / self.context.block_size as f64,
                 active_prefill_tokens: worker_load.active_prefill_tokens,
                 decode_cost_blocks: worker_load.potential_decode_blocks() as f64,
@@ -380,9 +402,19 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         }
     }
 
+    #[cfg(any(test, feature = "bench"))]
     let weights = selection_weights(kv_router_config, request);
-    let input = MaterializedSelectionInput::new(request, block_size, weights);
+    #[cfg(not(any(test, feature = "bench")))]
+    let _ = kv_router_config;
+    let mut input = MaterializedSelectionInput::new(
+        request,
+        block_size,
+        #[cfg(any(test, feature = "bench"))]
+        weights,
+    );
+    input.context.pinned_worker = eligibility.pinned_worker();
     let selected = match state {
+        #[cfg(any(test, feature = "bench"))]
         WorkerSelectionPolicyStateRef::Default(picker) => {
             let scorer = DefaultWorkerScorer {
                 kv_router_config,
@@ -425,7 +457,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                         .contains(WorkerInputs::LOAD)
                         .then_some(load_inputs.as_slice()),
                 };
-                let row = picker.pick(&input.context, picker_input)?;
+                let (row, selected_cost) = picker.pick_with_cost(&input.context, picker_input)?;
                 let Some(candidate) = candidates.get(row) else {
                     return Err(WorkerSelectionPolicyError::InvalidPickerRow {
                         row,
@@ -433,7 +465,14 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                     }
                     .into());
                 };
-                Some((candidate.worker, candidate.cost))
+                let cost = selected_cost.unwrap_or(candidate.cost);
+                if !cost.is_finite() {
+                    return Err(WorkerSelectionPolicyError::failed(
+                        "picker returned non-finite cost",
+                    )
+                    .into());
+                }
+                Some((candidate.worker, cost))
             }
         }
     };

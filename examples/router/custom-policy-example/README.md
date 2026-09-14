@@ -372,3 +372,9 @@ python3 -m dynamo.mocker \
 ```
 
 Send the same `curl` request from a fourth terminal. The frontend log records separate prefill and decode selections. Each worker set runs its own filter, scorer, and picker.
+
+## Exact Prompt Length
+
+Filters, scorers, and pickers can read `context.prompt_tokens()` for the exact input token count. This returns the existing request value without a prompt copy or allocation. Use `context.request_blocks()` when the policy needs rounded KV blocks instead. For example, at 16 tokens per block, a 17-token prompt has 2 blocks.
+
+The builtin default now uses the public policy API too. Rust hosts install `dynamo_custom_policy_builtin::default_registry()` before adding custom providers. This supplies default selection for roles that the custom configuration does not replace.

@@ -76,7 +76,9 @@ pub use scheduling::{
     KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse, SessionContext,
     WorkerSelectionInputTrigger, WorkerSelectionPolicyError,
 };
-pub use selector::{DefaultWorkerSelector, WorkerSelectionInput, WorkerSelector};
+#[cfg(any(test, feature = "bench"))]
+pub use selector::DefaultWorkerSelector;
+pub use selector::{WorkerSelectionInput, WorkerSelector};
 // TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
 pub use plugins::worker_selection::{
     ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerFilter, WorkerInputView,

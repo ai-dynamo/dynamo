@@ -13,7 +13,9 @@ use super::request_classifier::RequestClassifierRegistry;
 use super::request_classifier::{
     RequestClassifierFactory, RequestClassifierProvider, RequestClassifierRegistryError,
 };
-use super::worker_selection::{WorkerSelectionPolicy, WorkerSelectionPolicyFactory};
+#[cfg(test)]
+use super::worker_selection::WorkerSelectionPolicy;
+use super::worker_selection::WorkerSelectionPolicyFactory;
 use crate::WorkerType;
 use crate::config::KvRouterConfig;
 use crate::scheduling::config::WorkerSelectionPolicySelections;
@@ -69,6 +71,7 @@ impl WorkerSelectionPolicyProviderError {
 pub struct RouterPluginRegistry {
     providers: HashMap<String, WorkerSelectionPolicyProvider>,
     request_classifiers: RequestClassifierRegistry,
+    default_factory: Option<WorkerSelectionPolicyFactory>,
 }
 
 /// Existing catalogs can retain their worker-selection registration signature.
@@ -80,6 +83,8 @@ pub type WorkerSelectionPolicyRegistry = RouterPluginRegistry;
 pub enum WorkerSelectionPolicyRegistryError {
     #[error("worker-selection policy type must not be empty")]
     EmptyName,
+    #[error("routing host must supply a default worker-selection policy factory")]
+    MissingDefault,
     #[error("worker-selection policy type 'default' is reserved for Dynamo's built-in selector")]
     ReservedDefault,
     #[error("worker-selection policy type {name:?} is already registered")]
@@ -99,6 +104,18 @@ pub enum WorkerSelectionPolicyRegistryError {
 }
 
 impl RouterPluginRegistry {
+    /// Construct a registry with the host's required default policy. Custom registrations
+    /// cannot replace this factory. An empty registry still supports explicit custom policies.
+    pub fn new(default_factory: WorkerSelectionPolicyFactory) -> Self {
+        Self { default_factory: Some(default_factory), ..Self::default() }
+    }
+
+    /// Supply the host default while preserving registered custom plugin types.
+    pub fn with_default_factory(mut self, factory: WorkerSelectionPolicyFactory) -> Self {
+        self.default_factory = Some(factory);
+        self
+    }
+
     /// Resolve every configured plugin once before constructing any routers.
     pub fn resolve_plugins(
         &self,
@@ -215,9 +232,22 @@ impl RouterPluginRegistry {
             self.resolve_selected_cached(policy_config, selected.encode.as_deref(), &mut resolved)?;
 
         if aggregated.is_none() && prefill.is_none() && decode.is_none() && encode.is_none() {
-            return Ok(None);
+            return Ok(self.default_factory.clone());
         }
 
+        #[cfg(not(test))]
+        if self.default_factory.is_none()
+            && [
+                aggregated.is_none(),
+                prefill.is_none(),
+                decode.is_none(),
+                encode.is_none(),
+            ]
+            .contains(&true)
+        {
+            return Err(WorkerSelectionPolicyRegistryError::MissingDefault);
+        }
+        let default_factory = self.default_factory.clone();
         Ok(Some(Arc::new(move |config, worker_type, partition| {
             let selected = match worker_type {
                 WorkerType::Aggregated => aggregated.as_ref(),
@@ -227,10 +257,22 @@ impl RouterPluginRegistry {
             };
             match selected {
                 Some(factory) => factory(config, worker_type, partition),
-                None => WorkerSelectionPolicy::default(
-                    config.clone(),
-                    worker_type.default_selector_label(),
-                ),
+                None => {
+                    #[cfg(test)]
+                    if default_factory.is_none() {
+                        return WorkerSelectionPolicy::default(
+                            config.clone(),
+                            worker_type.default_selector_label(),
+                        );
+                    }
+                    default_factory
+                        .as_ref()
+                        .expect("default factory validated at resolution")(
+                        config,
+                        worker_type,
+                        partition,
+                    )
+                }
             }
         })))
     }
@@ -262,10 +304,10 @@ impl RouterPluginRegistry {
         selected: Option<&str>,
     ) -> Result<Option<WorkerSelectionPolicyFactory>, WorkerSelectionPolicyRegistryError> {
         let Some(selected) = selected else {
-            return Ok(None);
+            return Ok(self.default_factory.clone());
         };
         if selected == "default" {
-            return Ok(None);
+            return Ok(self.default_factory.clone());
         }
         let instance = config
             .and_then(|config| config.instance(selected))

@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use crate::protocols::{WorkerAffinityTarget, WorkerWithDpRank};
 use crate::scheduling::SchedulingRequest;
+#[cfg(any(test, feature = "bench"))]
 use crate::scheduling::selector::LogitWeights;
 use crate::{KvRouterConfig, RoutingPartitionRef, WorkerType};
 
@@ -34,11 +35,15 @@ pub type WorkerSelectionPolicyFactory = Arc<
 /// Request-level values available to custom filters, scorers, and pickers.
 pub struct WorkerSelectionContext<'a> {
     pub(crate) request: &'a SchedulingRequest,
+    #[cfg(any(test, feature = "bench"))]
     pub(crate) request_id: &'a str,
     pub(crate) request_blocks: u64,
     pub(crate) block_size: u32,
     pub(crate) track_prefill_tokens: bool,
+    #[cfg(any(test, feature = "bench"))]
     pub(crate) weights: LogitWeights,
+    pub(crate) has_tier_matches: bool,
+    pub(crate) pinned_worker: Option<WorkerWithDpRank>,
     pub(crate) router_temperature_override: Option<f64>,
 }
 
@@ -74,6 +79,7 @@ impl WorkerInputs {
     pub const PREFERRED_TAINT: Self = Self(1 << 2);
     /// Request host-owned active-request counts.
     pub const OCCUPANCY: Self = Self(1 << 5);
+    #[cfg(any(test, feature = "bench"))]
     pub(crate) const ALL: Self = Self(Self::CACHE.0 | Self::LOAD.0 | Self::PREFERRED_TAINT.0);
 
     pub const fn contains(self, other: Self) -> bool {
@@ -97,6 +103,7 @@ impl BitOr for WorkerInputs {
 #[derive(Clone, Copy, Default)]
 pub struct WorkerCacheInput {
     pub(crate) effective_overlap_blocks: f64,
+    pub(crate) estimated_cached_tokens: usize,
     pub(crate) device_overlap_blocks: f64,
     pub(crate) host_overlap_blocks: f64,
     pub(crate) disk_overlap_blocks: f64,
@@ -106,7 +113,9 @@ pub struct WorkerCacheInput {
 /// Active-load values for one worker.
 #[derive(Clone, Copy, Default)]
 pub struct WorkerLoadInput {
+    #[cfg(any(test, feature = "bench"))]
     pub(crate) raw_prefill_blocks: f64,
+    pub(crate) available: bool,
     pub(crate) active_prefill_tokens: usize,
     pub(crate) decode_cost_blocks: f64,
     pub(crate) active_requests: usize,
@@ -154,6 +163,16 @@ pub trait WorkerFilter: Send {
 
 /// Selects one row after all filters and scorers run.
 pub trait WorkerPicker: Send {
+    /// Return a selected row and an optional policy-computed cost for host diagnostics.
+    /// The host validates both. Existing pickers use the summed scorer cost by default.
+    fn pick_with_cost(
+        &mut self,
+        context: &WorkerSelectionContext<'_>,
+        input: WorkerInputView<'_>,
+    ) -> Result<(usize, Option<f64>), WorkerSelectionPolicyError> {
+        self.pick(context, input).map(|row| (row, None))
+    }
+
     /// Declare the optional worker-signal columns needed by this picker.
     fn required_worker_inputs(&self) -> WorkerInputs {
         WorkerInputs::NONE
@@ -169,6 +188,33 @@ pub trait WorkerPicker: Send {
 }
 
 impl WorkerSelectionContext<'_> {
+    /// The exact worker/rank imposed by the host for this selection, if any.
+    /// Includes explicit pins and eligible exclusive-affinity targets. This is
+    /// read-only routing metadata, not permission to change eligibility.
+    pub fn pinned_worker(&self) -> Option<WorkerWithDpRank> {
+        self.pinned_worker
+    }
+
+    /// Exact incoming prompt length in tokens. Borrowed from this request; no rounding,
+    /// cache weighting, or additional storage is involved.
+    pub fn prompt_tokens(&self) -> usize {
+        self.request.isl_tokens
+    }
+
+    /// Shared-cache ranges from this request's lookup snapshot, if present.
+    /// The ranges are unweighted block offsets. The host owns their lifetime and
+    /// policy inspection does not perform a lookup or change accounting.
+    pub fn shared_cache_hits(&self) -> Option<&crate::SharedCacheHits> {
+        self.request.shared_cache_hits.as_ref()
+    }
+
+    /// Whether this request has any tier-specific cache matches, before worker filtering.
+    /// False means the host only supplied its accounting estimate (or no cache data).
+    /// The value describes the current lookup snapshot, not worker cache capacity.
+    pub fn has_tier_matches(&self) -> bool {
+        self.has_tier_matches
+    }
+
     /// Return the incoming prompt size in KV blocks.
     pub fn request_blocks(&self) -> u64 {
         self.request_blocks
@@ -297,6 +343,14 @@ impl ScoredWorkerCandidate {
 }
 
 impl WorkerCacheInput {
+    /// Host accounting estimate for this worker, in weighted KV blocks and rounded tokens.
+    /// Lower-tier matches use the host's cache weights. Missing estimates are zero;
+    /// neither value is clamped to prompt length. This is the current lookup snapshot,
+    /// not a count of physically resident GPU tokens. Policy scores do not alter it.
+    pub fn accounting_cache_estimate(&self) -> (f64, usize) {
+        (self.effective_overlap_blocks, self.estimated_cached_tokens)
+    }
+
     /// Return device-resident prefix overlap in KV blocks.
     pub fn device_overlap_blocks(&self) -> f64 {
         self.device_overlap_blocks
@@ -319,6 +373,12 @@ impl WorkerCacheInput {
 }
 
 impl WorkerLoadInput {
+    /// Whether the host supplied a load projection for this worker in this selection.
+    /// False distinguishes a missing observation from an observed idle worker.
+    pub fn is_available(&self) -> bool {
+        self.available
+    }
+
     /// Return the tokens active in this worker's prefill stage.
     pub fn active_prefill_tokens(&self) -> usize {
         self.active_prefill_tokens

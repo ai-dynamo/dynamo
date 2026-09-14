@@ -408,7 +408,10 @@ Request context and worker identity are always available. Dynamo calculates opti
 
 | Accessor | Meaning |
 |---|---|
-| `request_blocks()` | Incoming prompt size in KV blocks |
+| `prompt_tokens()` | Exact incoming prompt token count, borrowed from the request without allocation |
+| `request_blocks()` | Incoming prompt size in KV blocks, rounded up |
+| `has_tier_matches()` | Whether the current request lookup contains any tier-specific matches, before policy filters |
+| `shared_cache_hits()` | Optional unweighted shared-cache ranges from the current lookup |
 | `block_size()` | Tokens in one KV block |
 | `tracks_prefill_tokens()` | Whether the request contributes to prefill-load tracking |
 | `session_context()` | Optional session metadata described below |
@@ -596,3 +599,29 @@ Holding a classification future pauses admission before dispatch; it does not in
 - If a signal adds work, storage, allocation, or another scan, run the worker-selection benchmark.
 
 The [example README](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/custom-policy-example/README.md) contains the in-tree package names and build-check commands. For the built-in cost model, see [Routing Concepts](routing-concepts.md). For the standalone selection lifecycle, see [Standalone Selection Service](standalone-selection.md).
+
+## Default Policy Plugin
+
+The default worker selector lives in `dynamo-custom-policy-builtin`, beside the two-tier policy. Routing hosts install `default_registry()` even when they do not link a custom catalog. An omitted policy or the reserved `default` selection uses that factory. A Rust embedding that constructs `SelectionServiceBuilder` must supply a registry with a default factory or an explicit policy factory.
+
+To configure a separate default-policy instance, use the named provider:
+
+```yaml
+worker_selection:
+  aggregated: tuned-default
+  instances:
+    - name: tuned-default
+      type: dynamo-default-cost-fn
+      parameters:
+        overlap_score_credit: 1.0
+        prefill_load_scale: 1.0
+        router_temperature: 0.0
+```
+
+The provider also accepts `overlap_score_credit_decay`, `decode_active_request_weight`, `host_cache_hit_weight`, `disk_cache_hit_weight`, and `shared_cache_multiplier`. Omitted parameters inherit router configuration. Values must be finite and non-negative. The default plugin uses configured parameters and does not apply per-request score or temperature overrides. Plain disaggregated decode remains load-only when prefill tracking is off and conditional disaggregation is disabled.
+
+`WorkerCacheInput::accounting_cache_estimate()` returns the host's weighted block estimate and rounded token estimate. Missing estimates are zero. These estimates are not clamped to prompt length and do not measure physical GPU residency. The plugin can use them without changing the load that the host records. `WorkerLoadInput::is_available()` distinguishes a missing load observation from an observed idle worker. Both values describe the current selection snapshot.
+
+A picker can implement `pick_with_cost()` to return a row and an optional finite cost for host diagnostics. Existing `pick()` implementations remain valid. The host checks the row and cost before booking. `with_exclusive_affinity(true)` asks the host to constrain candidates to an eligible session-affinity target; explicit request pins remain mandatory for every policy.
+
+Direct Rust callers and replay import `DefaultWorkerSelector` from `dynamo_custom_policy_builtin`. Scheduler actors use `default_policy()` directly. The core's old selector is available only as a test and benchmark reference, not in production builds.

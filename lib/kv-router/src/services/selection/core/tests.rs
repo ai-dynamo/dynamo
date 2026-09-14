@@ -39,6 +39,9 @@ fn local_core_with(
         indexer_threads,
         cancel_token,
         SelectionCacheConfig::default(),
+        std::sync::Arc::new(|config, role, _| {
+            crate::WorkerSelectionPolicy::default(config.clone(), role.default_selector_label())
+        }),
     )
     .expect("valid test config")
 }

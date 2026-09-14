@@ -261,6 +261,7 @@ fn default_row(
         worker,
         preferred_taint_multiplier,
         WorkerInputs::ALL,
+        true,
         |effective_overlap_blocks, device_overlap_blocks| {
             context.device_overlap(effective_overlap_blocks, device_overlap_blocks)
         },

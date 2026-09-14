@@ -2464,9 +2464,14 @@ dependencies = [
 name = "dynamo-custom-policy-builtin"
 version = "1.6.0"
 dependencies = [
+ "criterion",
  "dynamo-kv-router",
+ "fastrand",
+ "parking_lot",
+ "rustc-hash 2.1.2",
  "serde",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -2565,6 +2570,7 @@ dependencies = [
  "axum 0.8.4",
  "bytes",
  "dashmap",
+ "dynamo-custom-policy-builtin",
  "dynamo-kv-router",
  "dynamo-llm",
  "dynamo-protocols",
@@ -2691,6 +2697,7 @@ dependencies = [
  "derive_builder",
  "dialoguer",
  "dynamo-bench",
+ "dynamo-custom-policy-builtin",
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",
@@ -2806,6 +2813,7 @@ dependencies = [
  "bytes",
  "dashmap",
  "derive_builder",
+ "dynamo-custom-policy-builtin",
  "dynamo-data-gen",
  "dynamo-kv-router",
  "dynamo-tokens",

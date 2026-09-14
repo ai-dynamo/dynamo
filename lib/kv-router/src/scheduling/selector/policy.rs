@@ -4,14 +4,20 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+#[cfg(any(test, feature = "bench"))]
+use super::DefaultWorkerPicker;
 use super::{
-    DefaultWorkerPicker, MaterializedSelectionInput, WorkerSelectionInput, WorkerSelector,
-    select_worker_with_policy,
+    MaterializedSelectionInput, WorkerSelectionInput, WorkerSelector, select_worker_with_policy,
 };
-use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult};
+
+use crate::protocols::{
+    WorkerConfigLike, WorkerId, WorkerSelectionResult,
+};
 use crate::scheduling::config::KvRouterConfig;
 use crate::scheduling::filter::RoutingEligibility;
-use crate::scheduling::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
+use crate::scheduling::types::{
+    KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError,
+};
 
 use crate::plugins::worker_selection::{
     ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerFilter, WorkerInputs,
@@ -20,12 +26,14 @@ use crate::plugins::worker_selection::{
 
 #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
 pub(super) enum WorkerSelectionPolicyState {
+    #[cfg(any(test, feature = "bench"))]
     Default(DefaultWorkerPicker),
     /// Policy-local state owned and called serially by one scheduler queue actor.
     Custom(RefCell<CustomWorkerSelectionState>),
 }
 
 pub(super) enum WorkerSelectionPolicyStateRef<'a> {
+    #[cfg(any(test, feature = "bench"))]
     Default(&'a DefaultWorkerPicker),
     Custom(&'a RefCell<CustomWorkerSelectionState>),
 }
@@ -50,6 +58,7 @@ pub struct WorkerSelectionPolicy {
     kv_router_config: KvRouterConfig,
     worker_label: &'static str,
     state: WorkerSelectionPolicyState,
+    exclusive_affinity: bool,
 }
 
 impl WorkerSelectionPolicy {
@@ -87,6 +96,7 @@ impl WorkerSelectionPolicy {
         Self {
             kv_router_config,
             worker_label,
+            exclusive_affinity: false,
             state: WorkerSelectionPolicyState::Custom(RefCell::new(CustomWorkerSelectionState {
                 filters,
                 scorers,
@@ -101,15 +111,24 @@ impl WorkerSelectionPolicy {
         }
     }
 
+    /// Ask the host to constrain selection to an eligible affinity target.
+    /// Explicit request pins remain mandatory regardless of this option.
+    pub fn with_exclusive_affinity(mut self, exclusive: bool) -> Self {
+        self.exclusive_affinity = exclusive;
+        self
+    }
+
     /// Wrap Dynamo's built-in selector for a host that uses the policy selector type.
     ///
     /// `worker_label` selects the built-in scoring and logging contract. Typed hosts use
     /// [`crate::WorkerType::default_selector_label`] to preserve Dynamo's historical behavior.
+    #[cfg(any(test, feature = "bench"))]
     pub fn default(kv_router_config: KvRouterConfig, worker_label: &'static str) -> Self {
         let picker = DefaultWorkerPicker::new();
         Self {
             kv_router_config,
             worker_label,
+            exclusive_affinity: false,
             state: WorkerSelectionPolicyState::Default(picker),
         }
     }
@@ -269,11 +288,16 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
 
 impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
     fn uses_exclusive_affinity_target(&self) -> bool {
-        matches!(&self.state, WorkerSelectionPolicyState::Default(_))
+        #[cfg(any(test, feature = "bench"))]
+        if matches!(&self.state, WorkerSelectionPolicyState::Default(_)) {
+            return true;
+        }
+        self.exclusive_affinity
     }
 
     fn required_worker_inputs(&self) -> WorkerInputs {
         match &self.state {
+            #[cfg(any(test, feature = "bench"))]
             WorkerSelectionPolicyState::Default(_) => WorkerInputs::CACHE | WorkerInputs::LOAD,
             WorkerSelectionPolicyState::Custom(state) => {
                 let state = state.borrow();
@@ -289,6 +313,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
         let (workers, request, eligibility, block_size) = input.into_configured()?;
         let state = match &self.state {
+            #[cfg(any(test, feature = "bench"))]
             WorkerSelectionPolicyState::Default(picker) => {
                 WorkerSelectionPolicyStateRef::Default(picker)
             }
@@ -320,9 +345,6 @@ mod tests {
     use super::super::DefaultWorkerSelector;
     use super::super::test_support::*;
     use super::*;
-    use crate::SessionContext;
-    use crate::plugins::worker_selection::WorkerInputView;
-    use crate::protocols::WorkerWithDpRank;
     use crate::scheduling::WorkerSelectionInputTrigger;
 
     fn uses_exclusive_affinity(selector: &impl WorkerSelector<TaintedWorkerConfig>) -> bool {

@@ -327,6 +327,7 @@ impl SelectionCore {
         indexer_threads: usize,
         cancel_token: CancellationToken,
         cache_config: SelectionCacheConfig,
+        policy_factory: WorkerSelectionPolicyFactory,
     ) -> anyhow::Result<Self> {
         kv_router_config
             .validate_config()
@@ -338,7 +339,7 @@ impl SelectionCore {
             indexer_threads,
             cancel_token,
             None,
-            None,
+            Some(policy_factory),
             SelectionHost::default(),
             WorkerType::Aggregated,
             true,

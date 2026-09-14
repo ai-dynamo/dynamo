@@ -14,12 +14,14 @@ static INSTALLED_PLUGINS: OnceLock<RouterPluginRegistry> = OnceLock::new();
 /// Install the linked catalog once for frontend and embedded router construction.
 /// Returns `false` if a catalog has already been installed.
 pub fn install_router_plugin_registry(registry: RouterPluginRegistry) -> bool {
-    INSTALLED_PLUGINS.set(registry).is_ok()
+    INSTALLED_PLUGINS
+        .set(registry.with_default_factory(dynamo_custom_policy_builtin::default_factory()))
+        .is_ok()
 }
 
-/// The installed catalog, or an empty registry for Dynamo's default policies.
+/// The installed catalog, or the required builtin default policy.
 pub fn router_plugin_registry() -> RouterPluginRegistry {
-    INSTALLED_PLUGINS.get().cloned().unwrap_or_default()
+    INSTALLED_PLUGINS.get().cloned().unwrap_or_else(dynamo_custom_policy_builtin::default_registry)
 }
 
 /// Carries configured plugins through the host's shared router construction.

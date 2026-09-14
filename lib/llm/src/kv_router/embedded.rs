@@ -9,7 +9,7 @@
 //! frontend retains transport, stream leases, and request-expiry ownership.
 
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -28,7 +28,7 @@ use dynamo_kv_router::services::selection::{
     HostReplication, HostTelemetry, KvEventIngress, KvIndexSource, SelectionHost,
     SelectionOperation, SelectionOutcome, SelectionPartition, SelectionRun, SelectionScheduler,
     SelectionService, SelectionServiceBuilder, WorkerCatalogRecord, WorkerCatalogSource,
-    WorkerRequest, WorkerSelectionPolicyRegistry,
+    WorkerRequest,
 };
 use dynamo_kv_router::{DEFAULT_ROUTING_GROUP, PrefillLoadEstimator, WorkerSelectionPolicyFactory};
 use tokio_util::sync::CancellationToken;

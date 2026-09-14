@@ -439,13 +439,13 @@ pub(crate) fn linked_worker_selection_policy_registry() -> RouterPluginRegistry 
 
     #[cfg(not(feature = "custom-policy"))]
     {
-        RouterPluginRegistry::default()
+        dynamo_custom_policy_builtin::default_registry()
     }
 }
 
 #[cfg(feature = "custom-policy")]
 fn register_core_with_router_plugins(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    let mut registry = RouterPluginRegistry::default();
+    let mut registry = dynamo_custom_policy_builtin::default_registry();
     // The policies Dynamo ships register first, so a replaced catalog that reuses one of their
     // type names fails here instead of silently overriding it.
     dynamo_custom_policy_builtin::register(&mut registry)
