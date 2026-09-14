@@ -10,8 +10,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
 
+use anyhow::Context;
 use parking_lot::Mutex;
 use pyo3::{exceptions::PyException, prelude::*};
+use serde::{Deserialize, Serialize};
 
 use super::to_pyerr;
 use dynamo_runtime::transports::etcd::{self, Client, KvCache};
@@ -19,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 
 // All three AI's I asked agreed, this is the way
 const NONE_SENTINEL: usize = usize::MAX;
+const DECISION_KEY: &str = "scaling_decision";
 
 struct InnerConnector {
     check_interval: Duration,
@@ -179,60 +182,44 @@ impl VirtualConnectorCoordinator {
                 }
             }
 
-            // Reset the skip timestamp since we're making a decision
-            inner
-                .first_skip_timestamp
-                .store(NONE_SENTINEL, Ordering::Relaxed);
-
             let Some(kv_cache) = inner.kv_cache.lock().as_ref().cloned() else {
                 return Err(PyErr::new::<PyException, _>(
                     "Call async_init before using this object",
                 ));
             };
-            if let Some(new_prefill) = num_prefill {
-                inner
-                    .num_prefill_workers
-                    .store(new_prefill, Ordering::Relaxed);
-                kv_cache
-                    .put(
-                        "num_prefill_workers",
-                        new_prefill.to_string().into_bytes(),
-                        None,
-                    )
-                    .await
-                    .map_err(to_pyerr)?;
-            }
-            if let Some(new_decode) = num_decode {
-                inner
-                    .num_decode_workers
-                    .store(new_decode, Ordering::Relaxed);
-                kv_cache
-                    .put(
-                        "num_decode_workers",
-                        new_decode.to_string().into_bytes(),
-                        None,
-                    )
-                    .await
-                    .map_err(to_pyerr)?;
-            }
+            let new_prefill = num_prefill.unwrap_or(current_prefill);
+            let new_decode = num_decode.unwrap_or(current_decode);
             let new_decision_id = match load(&inner.decision_id) {
-                NONE_SENTINEL => {
-                    inner.decision_id.store(0, Ordering::Relaxed);
-                    0
-                }
-                _ => {
-                    inner.decision_id.fetch_add(1, Ordering::Relaxed);
-                    load(&inner.decision_id)
-                }
+                NONE_SENTINEL => 0,
+                current => current + 1,
             };
+            let decision = PlannerDecision {
+                num_prefill_workers: new_prefill as isize,
+                num_decode_workers: new_decode as isize,
+                decision_id: new_decision_id as isize,
+            };
+
+            // One value keeps counts and ID atomic for both etcd readers and the cache watcher.
             kv_cache
                 .put(
-                    "decision_id",
-                    new_decision_id.to_string().into_bytes(),
+                    DECISION_KEY,
+                    serde_json::to_vec(&decision).map_err(to_pyerr)?,
                     None,
                 )
                 .await
                 .map_err(to_pyerr)?;
+
+            // A failed publication must leave the previous decision available for retry.
+            inner
+                .num_prefill_workers
+                .store(new_prefill, Ordering::Relaxed);
+            inner
+                .num_decode_workers
+                .store(new_decode, Ordering::Relaxed);
+            inner.decision_id.store(new_decision_id, Ordering::Relaxed);
+            inner
+                .first_skip_timestamp
+                .store(NONE_SENTINEL, Ordering::Relaxed);
 
             tracing::info!(
                 decision_id = new_decision_id,
@@ -314,43 +301,16 @@ impl InnerConnector {
                 "Call async_init before using this object",
             ));
         };
-        let all_values = kv_cache.get_all().await;
-
-        if let Some(v) = all_values.get("num_prefill_workers") {
-            match String::from_utf8_lossy(v).parse() {
-                Ok(vv) => self.num_prefill_workers.store(vv, Ordering::Relaxed),
-                Err(err) => {
-                    tracing::error!(
-                        "Failed to parse num_prefill_workers from ETCD, using default 0: {err}"
-                    );
-                    self.num_prefill_workers.store(0, Ordering::Relaxed);
-                }
-            }
-        }
-
-        if let Some(v) = all_values.get("num_decode_workers") {
-            match String::from_utf8_lossy(v).parse() {
-                Ok(vv) => self.num_decode_workers.store(vv, Ordering::Relaxed),
-                Err(err) => {
-                    tracing::error!(
-                        "Failed to parse num_decode_workers from ETCD, using default 0: {err}"
-                    );
-                    self.num_decode_workers.store(0, Ordering::Relaxed);
-                }
-            }
-        }
-
-        if let Some(v) = all_values.get("decision_id") {
-            match String::from_utf8_lossy(v).parse() {
-                Ok(vv) => self.decision_id.store(vv, Ordering::Relaxed),
-                Err(err) => {
-                    tracing::error!(
-                        "Failed to parse decision_id from ETCD, using default None: {err}"
-                    );
-                    self.decision_id.store(NONE_SENTINEL, Ordering::Relaxed);
-                }
-            }
-        }
+        // Read etcd directly: the cache's initial watch snapshot is applied asynchronously.
+        let decision = read_decision(&self.etcd_client, &kv_cache.prefix)
+            .await
+            .map_err(to_pyerr)?;
+        self.num_prefill_workers
+            .store(decision.num_prefill_workers as usize, Ordering::Relaxed);
+        self.num_decode_workers
+            .store(decision.num_decode_workers as usize, Ordering::Relaxed);
+        self.decision_id
+            .store(decision.decision_id as usize, Ordering::Relaxed);
 
         Ok(())
     }
@@ -448,7 +408,7 @@ impl VirtualConnectorClient {
 }
 
 #[pyclass]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 /// The decision Planner made. The client should make necessary changes to the environment to make
 /// this true, and then call `complete` on the VirtualConnectorClient.
 pub struct PlannerDecision {
@@ -469,37 +429,7 @@ struct InnerClient {
 impl InnerClient {
     /// Fetch the latest scaling decision
     async fn get(&self) -> anyhow::Result<PlannerDecision> {
-        let mut num_prefill_workers = -1;
-        let mut num_decode_workers = -1;
-        let mut decision_id = -1;
-        for kv in self.etcd_client.kv_get_prefix(&self.key).await? {
-            match kv.key_str()? {
-                x if x.ends_with("/num_prefill_workers") => {
-                    num_prefill_workers = kv.value_str()?.parse()?;
-                }
-                x if x.ends_with("/num_decode_workers") => {
-                    num_decode_workers = kv.value_str()?.parse()?;
-                }
-                x if x.ends_with("/decision_id") => {
-                    decision_id = kv.value_str()?.parse()?;
-                }
-                x if x.ends_with("/scaled_decision_id") => {
-                    // This is the client's response, it doesn't go in PlannerDecision
-                }
-                x => {
-                    tracing::warn!(
-                        unexpected_key = x,
-                        root = self.key,
-                        "Unexpected key in planner etcd"
-                    );
-                }
-            }
-        }
-        Ok(PlannerDecision {
-            num_prefill_workers,
-            num_decode_workers,
-            decision_id,
-        })
+        read_decision(&self.etcd_client, &self.key).await
     }
 
     /// Mark this decision as having been handled.
@@ -528,6 +458,41 @@ impl InnerClient {
     }
 }
 
+async fn read_decision(client: &Client, prefix: &str) -> anyhow::Result<PlannerDecision> {
+    // A prefix read also gives a consistent snapshot of legacy fields during migration.
+    let kvs = client.kv_get_prefix(prefix).await?;
+    let values = kvs
+        .iter()
+        .map(|kv| {
+            let key = kv.key_str()?;
+            Ok((key.strip_prefix(prefix).unwrap_or(key), kv.value()))
+        })
+        .collect::<anyhow::Result<HashMap<_, _>>>()?;
+    decode_decision(&values)
+}
+
+fn decode_decision(values: &HashMap<&str, &[u8]>) -> anyhow::Result<PlannerDecision> {
+    if let Some(value) = values.get(DECISION_KEY) {
+        return serde_json::from_slice(value).context("Invalid planner scaling decision");
+    }
+
+    // Support persisted decisions from before the single-record format. Once the new
+    // key exists it is authoritative; mixed-version writers are not supported.
+    let legacy_field = |key| -> anyhow::Result<isize> {
+        let Some(value) = values.get(key) else {
+            return Ok(-1);
+        };
+        std::str::from_utf8(value)?
+            .parse()
+            .with_context(|| format!("Invalid planner {key}"))
+    };
+    Ok(PlannerDecision {
+        num_prefill_workers: legacy_field("num_prefill_workers")?,
+        num_decode_workers: legacy_field("num_decode_workers")?,
+        decision_id: legacy_field("decision_id")?,
+    })
+}
+
 // This compiles to a `mov`, it's basically free
 fn load(a: &AtomicUsize) -> usize {
     a.load(Ordering::Relaxed)
@@ -539,7 +504,76 @@ fn root_key(namespace: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{NONE_SENTINEL, scaling_decision_is_ready};
+    use super::{
+        DECISION_KEY, NONE_SENTINEL, PlannerDecision, decode_decision, scaling_decision_is_ready,
+    };
+    use std::collections::HashMap;
+
+    #[test]
+    fn decision_record_overrides_stale_legacy_fields() {
+        let values: HashMap<&str, &[u8]> = HashMap::from([
+            ("num_prefill_workers", b"1".as_slice()),
+            ("num_decode_workers", b"invalid".as_slice()),
+            ("decision_id", b"0".as_slice()),
+            ("scaled_decision_id", b"0".as_slice()),
+            (
+                DECISION_KEY,
+                br#"{"num_prefill_workers":5,"num_decode_workers":8,"decision_id":1}"#.as_slice(),
+            ),
+        ]);
+        assert_eq!(
+            decode_decision(&values).unwrap(),
+            PlannerDecision {
+                num_prefill_workers: 5,
+                num_decode_workers: 8,
+                decision_id: 1
+            },
+        );
+    }
+
+    #[test]
+    fn invalid_record_does_not_fall_back_to_legacy_decision() {
+        for record in [
+            b"not json".as_slice(),
+            br#"{"num_prefill_workers":5,"decision_id":1}"#.as_slice(),
+        ] {
+            let values = HashMap::from([
+                ("num_prefill_workers", b"1".as_slice()),
+                ("num_decode_workers", b"2".as_slice()),
+                ("decision_id", b"0".as_slice()),
+                (DECISION_KEY, record),
+            ]);
+            assert!(decode_decision(&values).is_err());
+        }
+    }
+
+    #[test]
+    fn legacy_snapshot_preserves_counts_and_decision_id() {
+        let mut values = HashMap::from([
+            ("num_prefill_workers", b"0".as_slice()),
+            ("num_decode_workers", b"8".as_slice()),
+            ("decision_id", b"42".as_slice()),
+        ]);
+        assert_eq!(
+            decode_decision(&values).unwrap(),
+            PlannerDecision {
+                num_prefill_workers: 0,
+                num_decode_workers: 8,
+                decision_id: 42
+            },
+        );
+        values.remove("num_prefill_workers");
+        assert_eq!(decode_decision(&values).unwrap().num_prefill_workers, -1);
+        values.clear();
+        assert_eq!(
+            decode_decision(&values).unwrap(),
+            PlannerDecision {
+                num_prefill_workers: -1,
+                num_decode_workers: -1,
+                decision_id: -1
+            },
+        );
+    }
 
     #[test]
     fn scaling_is_ready_before_first_decision() {
