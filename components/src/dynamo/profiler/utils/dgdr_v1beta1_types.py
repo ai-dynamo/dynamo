@@ -176,6 +176,10 @@ class OverridesSpec(BaseModel):
         default=None,
         description="ProfilingJob allows overriding the profiling Job specification. Fields set here are merged into the controller-generated Job spec.",
     )
+    trustRemoteCode: bool = Field(
+        default=False,
+        description="TrustRemoteCode explicitly permits generated vLLM and SGLang workers to execute custom code from the configured model repository. When enabled, the profiler adds --trust-remote-code to every generated worker component after the deployment topology has been generated. Enable this setting only for model repositories you trust.",
+    )
     dgd: Optional[Dict[str, Any]] = Field(
         default=None,
         description="DGD provides a partial, versioned DynamoGraphDeployment override for the profiler-generated deployment. Set apiVersion to nvidia.com/v1alpha1 or nvidia.com/v1beta1 and kind to DynamoGraphDeployment.  The profiler merges the override using the schema for its declared version. If the generated DGD uses another supported version, the complete DGD is converted before the merge and converted back afterward. The final DGD selected or created by a DGDR is nvidia.com/v1beta1.  The override can update DGD fields, but topology entries are limited to services or components already present in the generated DGD. Metadata labels and annotations are merged, metadata.name selects the final DGD name, and other identity or runtime metadata is ignored. V1alpha1 worker argument lists retain legacy append behavior. V1beta1 follows structural schema merge behavior, including map-list merging and atomic-list replacement.  The raw embedded resource preserves either supported schema. The API server validates that it has apiVersion and kind; override processing validates the DGD kind, supported version, and field schema.",

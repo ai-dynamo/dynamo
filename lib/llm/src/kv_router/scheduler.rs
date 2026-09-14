@@ -191,7 +191,7 @@ where
             .map(|(index, class)| (class.name.clone(), index))
             .collect();
 
-        let inner = Arc::new(LocalScheduler::new_with_policy_profile(
+        let inner = Arc::new(LocalScheduler::new(
             slots,
             workers_with_configs.clone(),
             profile,
@@ -206,7 +206,7 @@ where
             cancellation_token.child_token(),
             worker_type,
             watch_worker_configs,
-        )?);
+        ));
         if worker_type == WORKER_TYPE_PREFILL {
             let locality_observer: NonMaxOverlapSelectionObserver =
                 Arc::new(move |request_id, selection| {

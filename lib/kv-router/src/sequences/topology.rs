@@ -91,10 +91,7 @@ pub(super) struct WorkerSlot {
 impl WorkerSlot {
     /// Creates a worker slot with the table's expiry policy.
     fn new(worker: WorkerWithDpRank, block_size: usize, expiry_duration: Option<Duration>) -> Self {
-        let sequences = match expiry_duration {
-            Some(duration) => ActiveSequences::new_with_expiry_duration(block_size, duration),
-            None => ActiveSequences::new_without_expiry(block_size),
-        };
+        let sequences = ActiveSequences::new_with_expiry(block_size, expiry_duration);
         Self {
             worker,
             sequences: RwLock::new(sequences),
@@ -113,28 +110,15 @@ impl WorkerTable {
     /// Creates test worker slots with the default stale-request expiry duration.
     #[cfg(test)]
     pub(super) fn new(block_size: usize, dp_range: &HashMap<u64, (u32, u32)>) -> Self {
-        Self::new_with_expiry_duration(block_size, dp_range, DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION)
-    }
-
-    /// Creates worker slots with an explicit stale-request expiry duration.
-    pub(super) fn new_with_expiry_duration(
-        block_size: usize,
-        dp_range: &HashMap<u64, (u32, u32)>,
-        expiry_duration: Duration,
-    ) -> Self {
-        Self::new_with_expiry(block_size, dp_range, Some(expiry_duration))
-    }
-
-    /// Creates worker slots that rely only on explicit request lifecycle events.
-    pub(super) fn new_without_expiry(
-        block_size: usize,
-        dp_range: &HashMap<u64, (u32, u32)>,
-    ) -> Self {
-        Self::new_with_expiry(block_size, dp_range, None)
+        Self::new_with_expiry(
+            block_size,
+            dp_range,
+            Some(DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION),
+        )
     }
 
     /// Builds worker slots from an optional stale-request expiry policy.
-    fn new_with_expiry(
+    pub(super) fn new_with_expiry(
         block_size: usize,
         dp_range: &HashMap<u64, (u32, u32)>,
         expiry_duration: Option<Duration>,

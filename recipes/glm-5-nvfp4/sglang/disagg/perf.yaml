@@ -57,7 +57,7 @@ spec:
           apt-get update && apt-get install -y --no-install-recommends build-essential && apt-get clean
           # GLM-5's tokenizer_config.json uses tokenizer_class=TokenizersBackend,
           # which is supported by Transformers v5.
-          pip install -q aiperf==0.10.0 transformers==5.8.0 tokenizers==0.22.2
+          pip install -q aiperf==0.12.0 transformers==5.8.0 tokenizers==0.22.2
 
           echo "Waiting for model at http://$ENDPOINT/v1/models..."
           python3 - <<'PY'

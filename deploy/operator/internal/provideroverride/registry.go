@@ -35,11 +35,24 @@ import (
 type Scope string
 
 const (
-	ScopeRoot            Scope = "root"
-	ScopeComponent       Scope = "component"
-	ScopeMultinodeLeader Scope = "multinode.leader"
-	ScopeMultinodeWorker Scope = "multinode.worker"
+	ScopeRoot       Scope = "root"
+	ScopeComponent  Scope = "component"
+	ScopeRoleLeader Scope = "roles.leader"
+	ScopeRoleWorker Scope = "roles.worker"
 )
+
+// ScopeForComponentRole resolves a public component role name to its stable
+// provider context. Unknown roles are rejected by component-type validation.
+func ScopeForComponentRole(name string) (Scope, bool) {
+	switch name {
+	case nvidiacomv1beta1.ComponentRoleLeader:
+		return ScopeRoleLeader, true
+	case nvidiacomv1beta1.ComponentRoleWorker:
+		return ScopeRoleWorker, true
+	default:
+		return "", false
+	}
+}
 
 const (
 	// TargetPodCliqueSet identifies the Grove root resource schema.
@@ -97,7 +110,7 @@ func ExpectedTarget(
 			return TargetPodCliqueScalingGroupConfig, nil
 		}
 		return TargetPodCliqueTemplateSpec, nil
-	case ScopeMultinodeLeader, ScopeMultinodeWorker:
+	case ScopeRoleLeader, ScopeRoleWorker:
 		if component == nil || !component.IsMultinode() {
 			return "", fmt.Errorf("scope %q requires a multinode component", scope)
 		}

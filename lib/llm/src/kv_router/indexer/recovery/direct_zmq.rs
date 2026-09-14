@@ -958,7 +958,17 @@ async fn consume_dedicated_connection(
                 continue;
             }
         };
+        let event_count = events.len();
+        let first_event_id = events.first().map(|event| event.event.event_id);
+        let last_event_id = events.last().map(|event| event.event.event_id);
         client.handle_live_batch(publisher_id, events).await;
+        tracing::trace!(
+            publisher_id,
+            event_count,
+            ?first_event_id,
+            ?last_event_id,
+            "Received KV event batch from worker event plane"
+        );
         metrics.increment_batch();
     }
 }
