@@ -959,7 +959,9 @@ async fn completions_single(
             err_response
         })?;
 
-    let mut response_collector = state.metrics_clone().create_response_collector(&metric_model);
+    let mut response_collector = state
+        .metrics_clone()
+        .create_response_collector(&metric_model);
 
     // prepare to process any annotations
     let annotations = request.annotations();
@@ -4894,9 +4896,7 @@ async fn audio_speech(
         &request_id,
     );
 
-    let mut response_collector = state
-        .metrics_clone()
-        .create_response_collector(&metric_model);
+    let mut response_collector = state.metrics_clone().create_response_collector(&metric_model);
 
     let ctx = request.context();
     inflight.mark_error(ErrorType::Cancelled);
