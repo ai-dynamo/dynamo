@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 # client so callers can distinguish transient from fatal failures instead of
 # treating every ErrorResponse identically.
 GMS_ERR_CLAIM_CONFLICT = 1
+GMS_ERR_OUT_OF_MEMORY = 5
 # A release named an allocation_id that no longer matches the key's backing.
 GMS_ERR_IDENTITY_MISMATCH = 6
 

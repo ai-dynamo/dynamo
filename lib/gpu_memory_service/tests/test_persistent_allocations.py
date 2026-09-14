@@ -480,6 +480,30 @@ def test_claim_release_round_trip_via_rpc(gms):
     assert resp2.released is True
 
 
+@pytest.mark.parametrize("shared", [False, True])
+def test_same_session_claim_is_idempotent_and_mode_change_is_fatal(gms, shared):
+    conn = _make_dummy_conn()
+
+    def claim(mode):
+        response, _, _ = asyncio.run(
+            gms.handle_request(
+                conn,
+                ClaimPersistentAllocationRequest("engine", "kv", 8192, mode),
+                lambda: True,
+            )
+        )
+        return response
+
+    first, second = claim(shared), claim(shared)
+    assert isinstance(second, ClaimPersistentAllocationResponse)
+    assert first.allocation_id == second.allocation_id
+    assert second.reattached
+    assert gms._persistent.shared_claim_count("engine", "kv") == int(shared)
+    conflict = claim(not shared)
+    assert isinstance(conflict, ErrorResponse)
+    assert conflict.code == 2  # Permanent incompatibility, not retryable contention.
+
+
 def test_allocation_state_counts_persistent_allocations(gms):
     conn = _make_dummy_conn()
     asyncio.run(
@@ -516,30 +540,6 @@ def test_repeated_shared_claim_from_one_session_is_idempotent(gms):
 
     asyncio.run(gms.cleanup_connection(conn))
     assert not gms._persistent.is_claimed("eng-X", "kv_pool")
-
-
-@pytest.mark.parametrize("shared", [False, True])
-def test_same_session_claim_is_idempotent_and_mode_change_is_fatal(gms, shared):
-    conn = _make_dummy_conn()
-
-    def claim(mode):
-        response, _, _ = asyncio.run(
-            gms.handle_request(
-                conn,
-                ClaimPersistentAllocationRequest("engine", "kv", 8192, mode),
-                lambda: True,
-            )
-        )
-        return response
-
-    first, second = claim(shared), claim(shared)
-    assert isinstance(second, ClaimPersistentAllocationResponse)
-    assert first.allocation_id == second.allocation_id
-    assert second.reattached
-    assert gms._persistent.shared_claim_count("engine", "kv") == int(shared)
-    conflict = claim(not shared)
-    assert isinstance(conflict, ErrorResponse)
-    assert conflict.code == 2  # Permanent incompatibility, not retryable contention.
 
 
 def test_release_refuses_a_stale_incarnation(gms):
