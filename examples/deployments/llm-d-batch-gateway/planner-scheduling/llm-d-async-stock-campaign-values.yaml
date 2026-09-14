@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Render with envsubst '${NAMESPACE}' after llm-d-async-values.yaml. This keeps
+# the stock Async arm on the released Prometheus readiness gate while targeting
+# the exact campaign namespace.
+ap:
+  imagePullPolicy: IfNotPresent
+  podMonitor:
+    enabled: true
+    interval: 5s
+  redis:
+    gateType: prometheus-query
+    gateParams:
+      pool: dynamo-batch
+      query: 'min(dynamo_frontend_model_ready{model="Qwen/Qwen3-0.6B",namespace="${NAMESPACE}"})'
+      fallback: "0"
