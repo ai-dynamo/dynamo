@@ -34,9 +34,9 @@ dependencies = [
 
 [[package]]
 name = "aisimulate-core"
-version = "0.1.0-dev.2"
+version = "0.12.0-dev.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3aa0422f239fd9b9ca92d4a57fe7069771e158293d266e05a20fde477d15b9af"
+checksum = "d4db6a085073ecb1c2569f796ba44742ed4681f8f4060daaed2456ef4ea9b652"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -45,6 +45,7 @@ dependencies = [
  "derive_builder",
  "flate2",
  "indicatif 0.18.4",
+ "log",
  "parquet",
  "pep440_rs",
  "pyo3",
