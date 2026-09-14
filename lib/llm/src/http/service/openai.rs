@@ -585,7 +585,7 @@ impl ErrorMessage {
             // is not, because reaching this arm means the worker classified the
             // failure as a request problem, and a 5xx body here would bypass the
             // sanitizing the other arms apply.
-            let (message, code, has_explicit_status) =
+            let (message, explicit_status) =
                 match serde_json::from_str::<ErrorPayload>(dynamo_err.message()) {
                     Ok(envelope) => {
                         let explicit_status = envelope
@@ -596,20 +596,22 @@ impl ErrorMessage {
                             envelope
                                 .message
                                 .unwrap_or_else(|| dynamo_err.message().to_string()),
-                            explicit_status.unwrap_or(StatusCode::BAD_REQUEST),
-                            explicit_status.is_some(),
+                            explicit_status,
                         )
                     }
-                    Err(_) => (dynamo_err.message().to_string(), StatusCode::BAD_REQUEST, false),
+                    Err(_) => (dynamo_err.message().to_string(), None),
                 };
+            let code = explicit_status.unwrap_or(StatusCode::BAD_REQUEST);
             // An explicit status the worker asserted goes through the shared
             // policy, so a 499 answers with the same sanitized cancellation
             // body as every other HTTP path rather than the worker's own text,
             // which can name a context id or an internal file. Do not triage
             // the fallback 400: it is an ordinary validation error, even when
             // the configured overload status also happens to be 400.
-            if has_explicit_status {
-                if let BackendStatusAction::Sanitize(variant) = BackendStatusAction::triage(code) {
+            if let Some(explicit_status) = explicit_status {
+                if let BackendStatusAction::Sanitize(variant) =
+                    BackendStatusAction::triage(explicit_status)
+                {
                     return ErrorMessage::sanitized_with_details(variant, message);
                 }
             }
