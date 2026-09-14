@@ -2137,7 +2137,7 @@ async fn handler_chat_completions(
             request_lifecycle.clone(),
             terminal.clone(),
         )
-        .instrument(request_lifecycle),
+        .instrument(request_lifecycle.or_current()),
     )
     .await
     {
@@ -2218,7 +2218,7 @@ fn json_deserialize_error(error: serde_json::Error) -> ErrorResponse {
             error_type: map_error_code_to_error_type(code),
             code: code.as_u16(),
             details: None,
-            metric_error_type: None,
+            metric_error_type: Some(ErrorType::Validation),
         }),
     )
 }
@@ -6313,6 +6313,47 @@ mod tests {
             terminal_outcome_for_error_response(&response),
             TerminalOutcome::Rejected
         );
+    }
+
+    #[test]
+    fn lifecycle_json_rejections_preserve_validation_category() {
+        for body in [b"{".as_slice(), br#"{"model":42}"#.as_slice()] {
+            let response =
+                parse_json_request::<NvCreateChatCompletionRequest>("chat completions", body)
+                    .expect_err("invalid request must be rejected");
+            assert_eq!(response.0, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                extract_error_type_from_response(&response),
+                ErrorType::Validation
+            );
+            assert_eq!(
+                terminal_outcome_for_error_response(&response),
+                TerminalOutcome::Rejected
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lifecycle_disabled_spawn_preserves_http_parent() {
+        use tracing::instrument::WithSubscriber;
+
+        let subscriber = tracing_subscriber::registry();
+        async {
+            let http = tracing::info_span!("http-request");
+            let expected = http.id().expect("HTTP span must be enabled");
+            async {
+                let lifecycle = LifecycleTrace::new(false).start_request();
+                assert!(lifecycle.span().is_disabled());
+                let task = async { tracing::Span::current().id() }
+                    .instrument(lifecycle.span().or_current())
+                    .with_current_subscriber();
+                assert_eq!(tokio::spawn(task).await.unwrap(), Some(expected));
+            }
+            .instrument(http)
+            .await;
+        }
+        .with_subscriber(subscriber)
+        .await;
     }
 
     #[test]
