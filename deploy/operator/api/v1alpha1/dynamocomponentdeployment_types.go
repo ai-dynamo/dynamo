@@ -41,8 +41,7 @@ const (
 // DynamoComponentDeploymentSpec defines the desired state of DynamoComponentDeployment
 // +kubebuilder:validation:XValidation:rule="!(has(self.componentType) && self.componentType == 'lpx')",message="standalone LPX DynamoComponentDeployments are not supported; use DynamoGraphDeployment"
 type DynamoComponentDeploymentSpec struct {
-	// BackendFramework specifies the GPU backend framework (for example,
-	// "sglang", "vllm", or "trtllm").
+	// BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm")
 	// +kubebuilder:validation:Enum=sglang;vllm;trtllm
 	BackendFramework string `json:"backendFramework,omitempty"`
 
