@@ -9,7 +9,6 @@ import pytest
 from dynamo.common.http import HttpStatusError
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.multimodal import audio_loader as audio_loader_module
-from dynamo.common.multimodal import codec_errors
 from dynamo.common.multimodal.audio_loader import AudioLoader
 from dynamo.common.multimodal.codec_errors import MissingMediaDecoderError
 from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
@@ -188,14 +187,14 @@ async def test_load_audio_batch_reads_decoded_variant(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_load_audio_missing_decoder_is_actionable(monkeypatch):
+async def test_load_audio_missing_decoder_is_actionable(carrier_imports):
     """vLLM's own hint here is `pip install vllm[audio]`, which drags in an
     unpinned stack; the wrap must point at the validated bounded install and
     say there is no hardware alternative for audio."""
     loader = AudioLoader()
     # 'av' genuinely absent, independent of what the test machine has
     # installed: _install_hint asks the running interpreter.
-    monkeypatch.setattr(codec_errors.importlib.util, "find_spec", lambda name: None)
+    carrier_imports()
     loader._load_audio_with_vllm = AsyncMock(  # type: ignore[method-assign]
         side_effect=ImportError("Please install vllm[audio] for audio support")
     )

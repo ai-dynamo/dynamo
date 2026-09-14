@@ -20,8 +20,8 @@ module installs anything.
 
 from __future__ import annotations
 
+import importlib
 import importlib.metadata
-import importlib.util
 
 from dynamo.common.multimodal.nvdec_decoder import HW_ROUTED_CODECS, nvdec_available
 from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS, installer_covers
@@ -39,8 +39,29 @@ class MissingMediaDecoderError(RuntimeError):
 
 
 def _carrier_present(module: str) -> bool:
-    """Whether the decode carrier imports here, however it was built."""
-    return importlib.util.find_spec(module) is not None
+    """Whether the decode carrier imports here, however it was built.
+
+    Real import, not ``find_spec``, for the same reason the installer probe in
+    :mod:`dynamo.common.utils.install_media_decoders` uses one: a carrier whose
+    files are present but whose native libraries cannot load -- a partially
+    removed wheel, a missing system library -- still has a spec. Calling that
+    present puts the source-build diagnosis and its wheel-swap remedy on a
+    carrier that is simply broken, telling the operator their OpenCV has no
+    video backend when in truth it does not load at all. The generic branch
+    serves that case better: it offers the validated install, which replaces
+    the broken files.
+
+    Any failure to import answers False, not just ``ImportError``. This runs
+    while an error message is being built for a decode that already failed, so
+    letting an exception out would replace an actionable message with an
+    unrelated traceback; and whatever the carrier raised, it is not usable
+    here, which is the whole question.
+    """
+    try:
+        importlib.import_module(module)
+    except Exception:  # noqa: BLE001 - any import failure means unusable here
+        return False
+    return True
 
 
 def _is_vllm_source_built_cv2(backend: str, package: str, module: str) -> bool:

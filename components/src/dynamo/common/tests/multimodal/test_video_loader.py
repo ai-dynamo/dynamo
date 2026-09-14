@@ -289,7 +289,9 @@ class _ImportErrorMediaIO:
 
 
 @pytest.mark.asyncio
-async def test_decode_video_bytes_missing_decoder_is_actionable(monkeypatch):
+async def test_decode_video_bytes_missing_decoder_is_actionable(
+    monkeypatch, carrier_imports
+):
     """A bare `No module named 'cv2'` must become the actionable codec error.
 
     Reproduced on a real runtime image before this existed: the user-visible
@@ -300,7 +302,7 @@ async def test_decode_video_bytes_missing_decoder_is_actionable(monkeypatch):
     monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: "vp9")
     monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
     # cv2 genuinely absent, independent of what the test machine has installed.
-    monkeypatch.setattr(codec_errors.importlib.util, "find_spec", lambda name: None)
+    carrier_imports()
 
     with pytest.raises(MissingMediaDecoderError) as exc_info:
         await loader._decode_video_bytes(b"vp9-bytes", _ImportErrorMediaIO())
@@ -322,7 +324,9 @@ class _SystemErrorMediaIO:
 
 
 @pytest.mark.asyncio
-async def test_decode_video_bytes_backendless_cv2_is_actionable(monkeypatch):
+async def test_decode_video_bytes_backendless_cv2_is_actionable(
+    monkeypatch, carrier_imports
+):
     """A cv2 built without a video backend must reach the same error.
 
     The runtime images rebuild OpenCV from source with WITH_FFMPEG=OFF, so cv2
@@ -335,7 +339,7 @@ async def test_decode_video_bytes_backendless_cv2_is_actionable(monkeypatch):
     monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
     monkeypatch.setattr(video_loader_module, "_cv2_lacks_video_backend", lambda: True)
 
-    monkeypatch.setattr(codec_errors.importlib.util, "find_spec", lambda name: object())
+    carrier_imports(present=("cv2",))
     monkeypatch.setattr(
         codec_errors.importlib.metadata, "version", lambda p: "5.0.0.93"
     )
@@ -358,7 +362,9 @@ class _FailedOpenMediaIO:
 
 
 @pytest.mark.asyncio
-async def test_decode_video_bytes_failed_open_value_error_is_actionable(monkeypatch):
+async def test_decode_video_bytes_failed_open_value_error_is_actionable(
+    monkeypatch, carrier_imports
+):
     """The failed-open ValueError must reach the same actionable error.
 
     A backendless cv2 fails two ways, and only one of them names cv2: the
@@ -371,7 +377,7 @@ async def test_decode_video_bytes_failed_open_value_error_is_actionable(monkeypa
     monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
     monkeypatch.setattr(video_loader_module, "_cv2_lacks_video_backend", lambda: True)
 
-    monkeypatch.setattr(codec_errors.importlib.util, "find_spec", lambda name: object())
+    carrier_imports(present=("cv2",))
     monkeypatch.setattr(
         codec_errors.importlib.metadata, "version", lambda p: "5.0.0.93"
     )

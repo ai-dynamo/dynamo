@@ -15,9 +15,15 @@ from __future__ import annotations
 
 import importlib
 
+import pytest
 import pytest_asyncio
 
 from dynamo.common.http import close_http_client
+from dynamo.common.multimodal import codec_errors
+
+# The decode carriers ``codec_errors`` probes. Only these names are answered by
+# the ``carrier_imports`` fixture; every other import runs for real.
+_MEDIA_CARRIERS = ("cv2", "av", "decord")
 
 # Cached results of probing optional deps used by multimodal unit tests.
 # `None` = not attempted, `True` = importable, `False` = raised.
@@ -68,6 +74,36 @@ def pytest_ignore_collect(collection_path, config) -> bool | None:
     if filename.startswith("test_") and not can_import_deps():
         return True
     return None
+
+
+@pytest.fixture
+def carrier_imports(monkeypatch):
+    """Pin what ``codec_errors`` sees when it probes a decode carrier.
+
+    The probe is a real import, so the expected message would otherwise depend
+    on whether the machine running the tests happens to have cv2 or av
+    installed. Only the carrier names are answered here; anything else the
+    interpreter imports during the test still imports for real, which a blanket
+    replacement of ``importlib.import_module`` would break.
+
+    Call it with the carriers that should import, and optionally the error a
+    carrier that does not import raises -- a broken wheel and an absent one are
+    different situations and the messages differ.
+    """
+
+    def _set(present: tuple[str, ...] = (), error: str | None = None) -> None:
+        real = importlib.import_module
+
+        def _fake(name: str, *args, **kwargs):
+            if name in _MEDIA_CARRIERS:
+                if name in present:
+                    return object()
+                raise ImportError(error or f"No module named '{name}'")
+            return real(name, *args, **kwargs)
+
+        monkeypatch.setattr(codec_errors.importlib, "import_module", _fake)
+
+    return _set
 
 
 @pytest_asyncio.fixture(autouse=True)
