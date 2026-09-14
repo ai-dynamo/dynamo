@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Optional
+from typing import Literal, Optional
 
 from dynamo.planner.config.planner_config import resolve_min_endpoint
 from dynamo.planner.core.types import ScalingDecision
@@ -39,7 +39,7 @@ class ThroughputScalingMixin:
         demand_rps: float,
         isl: float,
         osl: float,
-        component: str,
+        component: Literal["prefill", "decode"],
         kv_hit_rate: Optional[float] = None,
     ) -> Optional[ScalingDecision]:
         desired = (
@@ -166,6 +166,7 @@ class ThroughputScalingMixin:
             self._diag_throughput_reason = "model_not_ready"
             desired = self._num_d_workers
         else:
+            assert capacity is not None
             actual_ttft = capacity.ttft_ms or 0.0
             actual_itl = capacity.itl_ms or 0.0
             if (
