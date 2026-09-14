@@ -444,7 +444,10 @@ impl ModelManager {
     ///
     /// Callers hold `reservation_lock` so this check is atomic with alias
     /// registration.
-    fn reject_alias_reserved_name(&self, model_name: &str) -> Result<(), ModelManagerError> {
+    fn reject_alias_reserved_name(
+        &self,
+        model_name: &str,
+    ) -> Result<(), ModelManagerError> {
         if self.alias_to_primary.contains_key(model_name) {
             return Err(ModelManagerError::ModelAlreadyExists(model_name.to_string()));
         }
