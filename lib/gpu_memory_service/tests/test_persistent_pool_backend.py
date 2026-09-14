@@ -4,8 +4,13 @@
 from types import SimpleNamespace
 
 import pytest
+from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 from gpu_memory_service.client.persistent_pool import V0PersistentPoolBackend
-from gpu_memory_service.client.rpc import GMS_ERR_CLAIM_CONFLICT, GmsRemoteError
+from gpu_memory_service.client.rpc import (
+    GMS_ERR_CLAIM_CONFLICT,
+    GMS_ERR_OUT_OF_MEMORY,
+    GmsRemoteError,
+)
 from gpu_memory_service.common.persistent_pool import PersistentPoolKey
 
 
@@ -41,6 +46,10 @@ class _Session:
 
     def release_persistent(self, **kwargs):
         self.calls.append(("destroy", kwargs))
+        return True
+
+    def unclaim_persistent(self, **kwargs):
+        self.calls.append(("unclaim", kwargs))
         return True
 
 
@@ -92,9 +101,11 @@ def test_v0_backend_exports_and_destroys_by_stable_key():
     key = PersistentPoolKey("engine-a", "kv_pool")
 
     assert backend.export(key) == 42
+    assert backend.unclaim(key) is True
     assert backend.destroy(key) is True
     assert session.calls == [
         ("export", {"engine_id": "engine-a", "tag": "kv_pool"}),
+        ("unclaim", {"engine_id": "engine-a", "tag": "kv_pool"}),
         ("destroy", {"engine_id": "engine-a", "tag": "kv_pool"}),
     ]
 
@@ -133,3 +144,23 @@ def test_v0_backend_does_not_retry_other_remote_errors(monkeypatch):
         V0PersistentPoolBackend(session).claim(
             PersistentPoolKey("engine-a", "kv_pool"), 8192
         )
+
+
+def test_v0_backend_normalizes_allocation_exhaustion():
+    def fail(**kwargs):
+        raise GmsRemoteError("out of memory", GMS_ERR_OUT_OF_MEMORY)
+
+    session = _Session()
+    session.claim_persistent = fail
+    with pytest.raises(MemoryError, match="out of memory"):
+        V0PersistentPoolBackend(session).claim(PersistentPoolKey("engine", "kv"), 8192)
+
+
+def test_manager_unclaim_uses_selected_backend():
+    # No unclaim method on the transport: rollback must use the backend.
+    manager = GMSClientMemoryManager.__new__(GMSClientMemoryManager)
+    manager._client = object()
+    session = _Session()
+    manager._persistent_pool = V0PersistentPoolBackend(session)
+    assert manager.unclaim_persistent("engine", "kv")
+    assert session.calls == [("unclaim", {"engine_id": "engine", "tag": "kv"})]

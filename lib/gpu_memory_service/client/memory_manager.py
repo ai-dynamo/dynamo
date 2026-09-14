@@ -386,7 +386,7 @@ class GMSClientMemoryManager:
             raise RuntimeError(
                 "Memory manager must be connected before unclaim_persistent",
             )
-        return self._client_rpc.unclaim_persistent(engine_id=engine_id, tag=tag)
+        return self._persistent_pool_backend.unclaim(PersistentPoolKey(engine_id, tag))
 
     def release_persistent(self, engine_id: str, tag: str) -> bool:
         """Explicitly destroy a persistent allocation. Returns True iff

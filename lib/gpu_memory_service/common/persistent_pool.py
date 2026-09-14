@@ -11,9 +11,12 @@ directory.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import math
+import os
+import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, TypeVar
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +61,16 @@ class PersistentPoolBackend(Protocol):
     Closing the owning session drops its claims while retaining backing. Only
     :meth:`destroy` retires backing. File descriptors returned by :meth:`export`
     are owned by the caller and must be consumed or closed exactly once.
+
+    Repeating a claim in the same session is idempotent, not a second claim.
+    Changing its shared/exclusive mode requires unclaim first. Exclusive
+    reattachment requires equal aligned size; shared reattachment accepts a
+    smaller request but never grows backing. Shared claims require external
+    block leases before writing; pool ownership is not a KV write lock.
+
+    Refused operations raise RuntimeError (with backend-specific error details);
+    allocation exhaustion raises MemoryError. Only ownership contention is
+    retried, not incompatible geometry or claim-mode changes.
     """
 
     def claim(
@@ -74,6 +87,10 @@ class PersistentPoolBackend(Protocol):
         """Export claimed backing as a caller-owned file descriptor."""
         ...
 
+    def unclaim(self, key: PersistentPoolKey) -> bool:
+        """Drop this session's claim, retaining bytes; False if already absent."""
+        ...
+
     def inventory(
         self,
         engine_id: str | None = None,
@@ -84,5 +101,35 @@ class PersistentPoolBackend(Protocol):
         ...
 
     def destroy(self, key: PersistentPoolKey) -> bool:
-        """Explicitly retire backing, subject to backend claimant checks."""
+        """Retire backing unless another session claims it; False if absent."""
         ...
+
+
+_T = TypeVar("_T")
+
+
+def retry_persistent_claim(
+    operation: Callable[[], _T], is_busy: Callable[[RuntimeError], bool]
+) -> _T:
+    """Bound contention backoff, not transport RPC time, for either backend.
+
+    GMS_PERSISTENT_CLAIM_RETRY_SECS is a finite nonnegative retry budget
+    (default 2 seconds); zero makes a single attempt. RPC timeouts belong to
+    the connected session and may exceed this backoff budget.
+    """
+    budget = float(os.environ.get("GMS_PERSISTENT_CLAIM_RETRY_SECS", "2.0"))
+    if not math.isfinite(budget) or budget < 0:
+        raise ValueError(
+            "GMS_PERSISTENT_CLAIM_RETRY_SECS must be finite and nonnegative"
+        )
+    deadline = time.monotonic() + budget
+    delay = 0.05
+    while True:
+        try:
+            return operation()
+        except RuntimeError as exc:
+            remaining = deadline - time.monotonic()
+            if not is_busy(exc) or remaining <= 0:
+                raise
+            time.sleep(min(delay, remaining))
+            delay = min(delay * 2, 0.5)
