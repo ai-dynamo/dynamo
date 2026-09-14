@@ -731,6 +731,7 @@ impl<'de> Deserialize<'de> for DynamoError {
 
         let representation = Representation::deserialize(deserializer)?;
         let declared_class = representation.class;
+        let invalid_declared_class = matches!(declared_class, Some(ErrorClass::Unknown));
         let legacy_error_type = representation.error_type;
         let source_class = declared_class
             .or(legacy_error_type)
@@ -745,10 +746,11 @@ impl<'de> Deserialize<'de> for DynamoError {
                 legacy_error_type.unwrap_or(source_class),
             )),
         };
-        let valid_reason = reason
-            .as_ref()
-            .and_then(|reason| ErrorReason::catalog_class(reason.as_str()))
-            .is_some_and(|class| class == canonical_class);
+        let valid_reason = !invalid_declared_class
+            && reason
+                .as_ref()
+                .and_then(|reason| ErrorReason::catalog_class(reason.as_str()))
+                .is_some_and(|class| class == canonical_class);
         let stored_class = legacy_error_type
             .filter(|class| *class != ErrorClass::Unknown && class.normalized() == canonical_class)
             .unwrap_or(canonical_class);
@@ -788,7 +790,11 @@ impl DynamoError {
 
     /// Shorthand to create an internal error with a private diagnostic.
     pub fn msg(message: impl Into<String>) -> Self {
-        Self::builder().diagnostic(message).build()
+        Self::builder()
+            .class(ErrorClass::Internal)
+            .reason(ErrorReason::from_static("runtime.unclassified"))
+            .diagnostic(message)
+            .build()
     }
 
     /// Returns the validated legacy error type without normalization.
@@ -1113,7 +1119,7 @@ mod tests {
     fn test_msg_constructor() {
         let err = DynamoError::msg("something failed");
         assert_eq!(err.error_type(), ErrorClass::Internal);
-        assert_eq!(err.reason().as_str(), "runtime.internal");
+        assert_eq!(err.reason().as_str(), "runtime.unclassified");
         assert_eq!(err.message(), "something failed");
         assert!(err.source().is_none());
     }
@@ -1456,12 +1462,17 @@ mod tests {
 
     #[test]
     fn unknown_class_fails_closed_during_deserialization() {
-        let json = r#"{"class":"FutureErrorClass","reason":"runtime.internal"}"#;
+        let json = r#"{
+            "class":"FutureErrorClass",
+            "reason":"runtime.internal",
+            "public":{"type":"message","message":"must not escape"}
+        }"#;
         let error: DynamoError = serde_json::from_str(json).unwrap();
 
         assert_eq!(error.error_type(), ErrorClass::Internal);
         assert_eq!(error.class(), ErrorClass::Internal);
-        assert_eq!(error.reason().as_str(), "runtime.internal");
+        assert_eq!(error.reason().as_str(), "runtime.invalid_error");
+        assert!(error.public_details().is_none());
     }
 
     #[test]
