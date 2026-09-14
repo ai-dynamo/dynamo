@@ -20,67 +20,9 @@ pytestmark = [
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("ordered_cancellation", "expected_id"),
-    [(True, "internal-request-id"), (False, "internal-request-id")],
-)
-async def test_prefill_selects_request_id_for_runtime_capability(
-    monkeypatch: pytest.MonkeyPatch,
-    ordered_cancellation: bool,
-    expected_id: str,
-):
-    captured_kwargs = {}
-
-    async def empty_results():
-        if False:
-            yield {}
-
-    class _Engine:
-        async def async_generate(self, **kwargs):
-            captured_kwargs.update(kwargs)
-            return empty_results()
-
-    handler = PrefillWorkerHandler.__new__(PrefillWorkerHandler)
-    handler.engine = _Engine()
-    handler.bootstrap_host = "127.0.0.1"
-    handler.bootstrap_port = 1234
-    handler.enable_trace = False
-    handler._consume_tasks = set()
-    handler._supports_ordered_cancellation = ordered_cancellation
-    handler._generate_bootstrap_room = lambda: 17
-    handler._get_input_param = lambda request: {"input_ids": request["token_ids"]}
-    handler._resolve_lora = lambda request: None
-    handler._priority_kwargs = lambda priority: {}
-    monkeypatch.setattr(
-        "dynamo.sglang.request_handlers.llm.prefill_handler.require_reasoning_kwargs",
-        lambda engine, request: {},
-    )
-    monkeypatch.setattr(
-        "dynamo.sglang.request_handlers.llm.prefill_handler.new_sglang_request_id",
-        lambda: "internal-request-id",
-    )
-
-    context = SimpleNamespace(
-        id=lambda: "request-id",
-        trace_id=None,
-        trace_headers=lambda: {},
-    )
-    stream = handler.generate(
-        {
-            "request": {"token_ids": [1, 2, 3], "routing": {}},
-            "sampling_params": {},
-        },
-        context,
-    )
-    await anext(stream)
-
-    assert captured_kwargs["rid"] == expected_id
-    await stream.aclose()
-
-
-@pytest.mark.asyncio
 @pytest.mark.timeout(5)
 @pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("ordered_cancellation", [False, True])
 @pytest.mark.parametrize(
     "phase", ["before_registration", "before_dispatch", "after_dispatch"]
 )
@@ -88,6 +30,7 @@ async def test_prefill_cancellation_waits_for_dispatch_and_drains(
     monkeypatch: pytest.MonkeyPatch,
     phase: str,
     native: bool,
+    ordered_cancellation: bool,
 ):
     request_id = "native-request-id" if native else "request-id"
     engine_request_id = "internal-request-id"
@@ -119,12 +62,12 @@ async def test_prefill_cancellation_waits_for_dispatch_and_drains(
             await allow_dispatch.wait()
             state.time_stats.api_server_dispatch_finish_time = 1.0
             dispatched.set()
+            response = {"meta_info": {"id": rid}}
+            yield response
             await aborted.wait()
         finally:
             registry.pop(rid, None)
             drained.set()
-        if False:
-            yield {}
 
     def abort_request(*, rid, abort_all):
         abort_calls.append((rid, abort_all))
@@ -154,7 +97,7 @@ async def test_prefill_cancellation_waits_for_dispatch_and_drains(
     handler.bootstrap_port = 1234
     handler.enable_trace = False
     handler._consume_tasks = set()
-    handler._supports_ordered_cancellation = True
+    handler._supports_ordered_cancellation = ordered_cancellation
     handler._generate_bootstrap_room = lambda: 17
     handler._get_input_param = lambda request: {"input_ids": request["token_ids"]}
     handler._resolve_lora = lambda request: None
@@ -207,7 +150,10 @@ async def test_prefill_cancellation_waits_for_dispatch_and_drains(
 
     cancelled.set()
     if phase != "after_dispatch":
-        await asyncio.wait_for(polling.wait(), timeout=1)
+        if ordered_cancellation:
+            await asyncio.wait_for(polling.wait(), timeout=1)
+        else:
+            await asyncio.sleep(0)
         assert not abort_calls
         allow_registration.set()
         allow_dispatch.set()

@@ -386,7 +386,7 @@ def test_engine_generate_preserves_native_fields_and_overrides_worker_state():
     native = build_native_generate_request(
         request,
         input_ids=[7, 8],
-        fallback_rid="internal-request-id",
+        request_id="internal-request-id",
         priority=9,
         sampling_overrides={"n": 1, "max_new_tokens": 1},
         bootstrap_host="prefill.internal",
@@ -420,7 +420,7 @@ def test_engine_generate_requires_object_sampling_params_for_prefill_override():
         build_native_generate_request(
             request,
             input_ids=[1],
-            fallback_rid="prefill-request",
+            request_id="prefill-request",
             priority=None,
             sampling_overrides={"max_new_tokens": 1},
         )
@@ -433,7 +433,7 @@ def test_engine_generate_rejects_top_logprobs_by_default(monkeypatch):
         build_native_generate_request(
             {"return_logprob": True, "top_logprobs_num": 1},
             input_ids=[1],
-            fallback_rid="request",
+            request_id="request",
             priority=None,
         )
 
@@ -444,7 +444,7 @@ def test_engine_generate_allows_top_logprobs_with_escape_hatch(monkeypatch):
     native = build_native_generate_request(
         {"return_logprob": True, "top_logprobs_num": 2},
         input_ids=[1],
-        fallback_rid="request",
+        request_id="request",
         priority=None,
     )
 
