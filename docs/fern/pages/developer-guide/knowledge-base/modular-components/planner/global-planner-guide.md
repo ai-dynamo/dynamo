@@ -14,7 +14,7 @@ This guide explains how to deploy `GlobalPlanner` and when to use it. `GlobalPla
 Without `GlobalPlanner`, each DGD's local planner scales only its own deployment directly. That is fine for isolated deployments, but it becomes awkward when you want one place to:
 
 - apply centralized scaling policy across multiple DGDs
-- enforce shared constraints such as authorization or total GPU budget
+- enforce shared constraints such as a caller-namespace allowlist or total GPU budget
 - coordinate scaling for a single-endpoint, multi-pool deployment
 
 `GlobalPlanner` solves that by becoming the common scale-execution endpoint for multiple local planners.
@@ -32,7 +32,7 @@ Use `GlobalPlanner` in one of these two patterns:
 
 | Pattern | Use when | Needs `GlobalRouter` | Public endpoint shape |
 |---------|----------|----------------------|-----------------------|
-| Multiple model endpoints or independent DGDs | Separate DGDs should share centralized scaling policy, such as authorization or total GPU budget | No | One endpoint per DGD, or however each DGD is exposed |
+| Multiple model endpoints or independent DGDs | Separate DGDs should share centralized scaling policy, such as a caller-namespace allowlist or total GPU budget | No | One endpoint per DGD, or however each DGD is exposed |
 | One model endpoint, multiple DGDs | One model should be reachable through one public endpoint, but different request classes should land on different DGDs | Yes | One shared endpoint |
 
 ## Pattern 1: Multiple Model Endpoints Or Independent DGDs
@@ -237,7 +237,16 @@ GlobalPlanner:
 
 The values passed to `--managed-namespaces` are the pool planners' **Dynamo namespaces** (`caller_namespace`), not raw Kubernetes namespaces. In many examples they share the same string prefix, but they are logically different identifiers.
 
-**Management modes**: When `--managed-namespaces` is set (explicit mode), only the listed Dynamo namespaces are authorized to send scale requests, and only their corresponding DGDs count toward the GPU budget. DGD names are derived from the Dynamo namespace using the operator convention `DYN_NAMESPACE = {k8s_namespace}-{dgd_name}`. When omitted (implicit mode), any caller is accepted and all DGDs in the Kubernetes namespace count toward the GPU budget.
+**Management modes**: When `--managed-namespaces` is set (explicit mode), only requests whose `caller_namespace` is listed are admitted, and only the corresponding DGDs count toward the GPU budget. DGD names are derived from the Dynamo namespace using the operator convention `DYN_NAMESPACE = {k8s_namespace}-{dgd_name}`. When omitted (implicit mode), any caller namespace is accepted and all DGDs in the Kubernetes namespace count toward the GPU budget.
+
+> [!WARNING]
+> `--managed-namespaces` validates the `caller_namespace` value carried in the
+> scale request; it does not authenticate the process that sent the request.
+> Keep the Global Planner endpoint on the trusted runtime network and authenticate
+> peers at the transport or service-mesh boundary.
+
+See the [Secure Deployment Guidelines](../../../security/secure-deployment-guidelines.md)
+for the deployment trust model and production checklist.
 
 If you want the central executor to reject scale requests that exceed a total GPU budget, add `--max-total-gpus`. See [examples/global_planner/global-planner-gpu-budget.yaml](https://github.com/ai-dynamo/dynamo/blob/main/examples/global_planner/global-planner-gpu-budget.yaml).
 
