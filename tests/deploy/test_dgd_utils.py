@@ -313,13 +313,22 @@ def _multi_document_manifest(tmp_path):
                                         "command": ["/bin/bash", "-lc"],
                                         "args": ["exec python3 -m dynamo.vllm"],
                                         "volumeMounts": [
-                                            {"name": "cfg", "mountPath": "/etc/engine"}
+                                            {
+                                                "name": "engine-config",
+                                                "mountPath": "/etc/engine",
+                                            }
                                         ],
                                     }
                                 ],
                                 "volumes": [
                                     {
-                                        "name": "cfg",
+                                        # Named after the ConfigMap it mounts, as
+                                        # 22 volumes across ``recipes/`` are. A
+                                        # fixture that names it something else
+                                        # cannot exhibit the collision that
+                                        # test_uniquify_leaves_pod_local_volume_names_alone
+                                        # exists to pin.
+                                        "name": "engine-config",
                                         "configMap": {"name": "engine-config"},
                                     }
                                 ],
@@ -545,18 +554,24 @@ def test_uniquify_rewrites_the_references_that_point_at_companions(
 def test_uniquify_leaves_pod_local_volume_names_alone(tmp_path) -> None:
     """`volumes[].name` names the volume, not the ConfigMap.
 
-    It only has to match `volumeMounts[].name` inside the same pod, so a blanket
-    string substitution would rename it for no reason -- and would have to rename
-    both sides in step to avoid breaking the mount. Recipes routinely name the
-    volume after the ConfigMap, which is what makes this worth pinning.
+    It only has to match `volumeMounts[].name` inside the same pod. 22 volumes
+    across ``recipes/`` are nevertheless named after the ConfigMap they mount,
+    so a rename keyed on the *name* rather than on the reference key would
+    rewrite it -- and the hazard is the **partial** case, where one side of the
+    pairing moves and the other does not. (A substitution consistent enough to
+    rewrite both sides happens to be harmless here; measured, it kills no test
+    in this module. The partial one is caught by
+    ``test_uniquify_leaves_every_volume_mount_resolvable_across_the_corpus``.)
     """
     spec = DeploymentSpec(str(_multi_document_manifest(tmp_path)))
 
     spec.uniquify("-tx-abc123")
 
     pod = spec.spec()["spec"]["components"][0]["podTemplate"]["spec"]
-    assert pod["volumes"][0]["name"] == "cfg"
-    assert pod["containers"][0]["volumeMounts"][0]["name"] == "cfg"
+    # The ConfigMap moved; the volume that mounts it did not.
+    assert pod["volumes"][0]["configMap"]["name"] == "engine-config-tx-abc123"
+    assert pod["volumes"][0]["name"] == "engine-config"
+    assert pod["containers"][0]["volumeMounts"][0]["name"] == "engine-config"
 
 
 def test_uniquify_renames_the_compute_domain_channel_template(tmp_path) -> None:
@@ -746,10 +761,13 @@ def test_uniquify_keeps_every_companion_reference_resolving_across_the_corpus() 
 def test_uniquify_leaves_every_volume_mount_resolvable_across_the_corpus() -> None:
     """`volumes[].name` is pod-local and must keep matching `volumeMounts[].name`.
 
-    Recipes routinely name the volume after the ConfigMap it mounts, so a
-    blanket string substitution would rewrite one side of that pairing. Checked
-    over the corpus because the two sides live in different subtrees and a
-    partial rename would still parse.
+    22 volumes across ``recipes/`` are named after the ConfigMap they mount, so
+    a rename keyed on the name rather than on the reference key can rewrite one
+    side of that pairing and leave the other. Checked over the corpus because
+    the two sides live in different subtrees and a partial rename still parses.
+
+    Measured: this is the only test in this module that fails when
+    ``_rewrite_companion_refs`` is mutated to follow ``volumes[].name``.
     """
     for path in _recipe_manifests():
         spec = DeploymentSpec(str(path))
