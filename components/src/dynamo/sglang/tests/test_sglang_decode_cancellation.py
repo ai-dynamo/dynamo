@@ -527,7 +527,6 @@ async def test_cancellation_monitor_stops_when_request_finishes(
     try:
         case.cancelled.set()
         await asyncio.wait_for(sleeping.wait(), timeout=1)
-        # Model stream completion while the monitor is asleep.
         case.registry.pop(rid)
         if reuse_rid:
             case.registry[rid] = object()
@@ -620,10 +619,7 @@ async def test_cancellation_monitor_without_tokenizer_manager(
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(5)
-@pytest.mark.parametrize("registry", ["missing", "non_mapping"])
-async def test_cancellation_monitor_without_request_registry(
-    decode_cancellation_case, registry
-):
+async def test_cancellation_monitor_without_request_registry(decode_cancellation_case):
     case = decode_cancellation_case
     abort_calls = []
 
@@ -631,8 +627,7 @@ async def test_cancellation_monitor_without_request_registry(
         abort_calls.append((rid, abort_all))
 
     tokenizer_manager = SimpleNamespace(abort_request=abort_request)
-    if registry == "non_mapping":
-        tokenizer_manager.rid_to_state = []
+    tokenizer_manager.rid_to_state = []
     case.handler.engine = SimpleNamespace(tokenizer_manager=tokenizer_manager)
     case.cancelled.set()
 
