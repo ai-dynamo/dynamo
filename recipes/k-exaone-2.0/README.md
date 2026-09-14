@@ -12,15 +12,6 @@ with vLLM via Dynamo.
 20 `full_attention` and 58 `sliding_attention`. 256 experts, top-8 routing. Native context
 262,144 tokens. The NVFP4 (W4A4) checkpoint is ~530 GB on disk.
 
-> [!IMPORTANT]
-> **These recipes reference a development image and cannot be run by external users yet.**
-> Stock vLLM 0.28.0 cannot load this checkpoint: `exaone_moe.py` omits `prefix=` on
-> `ParallelLMHead`, so the checkpoint's quantization exclusion list never matches `lm_head`,
-> which is then wrongly quantized and rejects the BF16 weight. The one-line fix is
-> [ai-dynamo/dynamo#14599](https://github.com/ai-dynamo/dynamo/pull/14599). Once it merges and
-> a public `nvcr.io` tag is cut, the image reference must be swapped to that tag pinned to its
-> **multi-arch index digest**, and `imagePullSecrets` plus `runtimeVersionOverride` removed.
-
 ## Configurations
 
 | Configuration | GPUs | Shape | File |
@@ -125,27 +116,39 @@ curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -
 > so a 256-token smoke test prints `null` on a perfectly healthy deployment. Read
 > `.content // .reasoning_content`.
 
+### 6. Benchmark
+
+```bash
+kubectl apply -f perf/perf.yaml -n ${NAMESPACE}
+```
+
+See [`perf/README.md`](perf/README.md) for staging the trace, running a concurrency sweep, and
+fetching artifacts.
+
 ## Performance results
 
-8× B200, vLLM 0.28.0 / Dynamo 1.4.1. **Mooncake chat trace replay**, all 12,031 requests.
+8x B200, vLLM 0.28.0 / Dynamo 1.4.1. **Mooncake chat trace replay**, the 15% subset
+(1,805 requests) shipped in [`perf/`](perf/) -- the same file the benchmark recipe runs.
 
-SLA gate is joint: **E2E ≥ 50 tok/s/user AND TTFT p50 < 5 s**, where
-`E2E = OSL / (TTFT_p50 + OSL × ITL)`. Results are at the **highest concurrency meeting both
-legs** — not peak throughput.
+SLA gate is joint: **E2E >= 50 tok/s/user AND TTFT p50 < 5 s**, where
+`E2E = OSL / (TTFT_p50 + OSL x ITL)`. Results are at the **highest concurrency meeting both
+legs**, not peak throughput.
 
 | Configuration | Concurrency | tok/s/GPU | E2E tok/s/user | TTFT p50 | ITL |
 |---|---|---|---|---|---|
-| Aggregated (4 GPU) | 8 | **97** | 51.1 | 312 ms | 19.27 ms |
+| Aggregated (4 GPU) | 7 | **87** | 51.4 | 291 ms | 19.15 ms |
+| Disaggregated (8 GPU) | 7 | _pending re-measurement_ | | | |
 
-Measured KV reuse on this trace is **8.8%**. That is not a misconfiguration: the trace's working
-set is ~42× oversubscribed against TP=4's KV capacity, so blocks are evicted before they can be
-hit. It is also why KV-aware routing shows no gain here (9.494% hit rate vs 9.458% for
-round-robin) — the router cannot route to a block that is already gone.
+Aggregated on the **full** 12,031-request trace, for reference: **97 tok/s/GPU** at C=8,
+E2E 51.1, TTFT 312 ms.
 
-Disaggregated trace results are pending re-measurement and will be added before release.
+Measured KV reuse is **8.8%** on the full trace. That is not a misconfiguration: the working set
+is ~42x oversubscribed against TP=4's KV capacity, so blocks are evicted before they can be hit.
+It is also why KV-aware routing shows no gain here (9.494% hit rate vs 9.458% round-robin) --
+the router cannot route to a block that is already gone.
 
 > [!WARNING]
-> Synthetic benchmarks with a shared system prompt report ~3× higher throughput for this model
+> Synthetic benchmarks with a shared system prompt report ~3x higher throughput for this model
 > (68.2% achieved KV reuse vs the trace's 8.8%). Do not compare synthetic and trace numbers.
 
 ## Accuracy
@@ -195,7 +198,9 @@ kubectl logs <worker> -n ${NAMESPACE} | grep -o 'Prefix cache hit rate: [0-9.]*%
 
 ## Limitations
 
-- **Development image only.** See the note at the top.
+- **Development image.** The manifests pin a digest-pinned development build; `imagePullSecrets`
+  and `runtimeVersionOverride` exist only to support it and are removed when a public
+  `nvcr.io` tag is available.
 - **The RDMA resource name is cluster-specific.** The disaggregated recipe requests
   `rdma/shared_ib`; other clusters expose `rdma/ib` or `rdma/rdma_shared_device_a`. Edit it to
   match your device plugin. Prefer a **shared** flavour: with an exclusive-mode resource, two
