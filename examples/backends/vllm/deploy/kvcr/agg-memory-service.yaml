@@ -42,11 +42,6 @@ spec:
         - args:
           - |
             set -euo pipefail
-            if ! compgen -G '/dev/infiniband/uverbs*' >/dev/null; then
-              echo "No RDMA userspace device is mounted" >&2
-              exit 1
-            fi
-
             for _ in $(seq 1 60); do
               if python3 -c "import socket; s=socket.socket(socket.AF_UNIX); s.settimeout(1); s.connect('/run/kvcr/memory.sock'); s.close()" >/dev/null 2>&1; then
                 break
@@ -57,13 +52,6 @@ spec:
               echo "KVCR memory service did not become ready" >&2
               exit 1
             fi
-
-            if [ -e /run/kvcr/hold-engine-start ]; then
-              echo "Waiting for the KVCR resiliency hold to be removed"
-            fi
-            while [ -e /run/kvcr/hold-engine-start ]; do
-              sleep 1
-            done
 
             case "$POD_INDEX" in
               0) owner_slot=00000000000000000000000000000000 ;;
@@ -157,11 +145,6 @@ spec:
         - args:
           - |
             set -euo pipefail
-            if ! compgen -G '/dev/infiniband/uverbs*' >/dev/null; then
-              echo "No RDMA userspace device is mounted" >&2
-              exit 1
-            fi
-
             state_namespace=$DYN_NAMESPACE
             if [ -n "${DYN_NAMESPACE_WORKER_SUFFIX:-}" ]; then
               state_namespace="${state_namespace}-${DYN_NAMESPACE_WORKER_SUFFIX}"
@@ -186,6 +169,7 @@ spec:
             kvcr_pid=$!
             if [ "$POD_INDEX" = "0" ]; then
               env DYN_NAMESPACE="$state_namespace" \
+                DYN_HEALTH_CHECK_ENABLED=false \
                 python3 -m dynamo.kv_state_agent --max-slots 2 &
               state_agent_pid=$!
               wait -n "$kvcr_pid" "$state_agent_pid"

@@ -21,6 +21,8 @@ KVCR-capable Dynamo vLLM runtime image for every process.
 - An `hf-token-secret` in the target namespace.
 - A runtime image containing mutually compatible Dynamo, vLLM, KVCR, NIXL,
   and UCX builds.
+- Linux 6.5 or a kernel with equivalent `SO_PEERPIDFD` support for the
+  memory-service variant.
 - `envsubst` and `kubectl` on the deployment host.
 
 The manifests default to the `rdma/shared_ib` extended resource. The
@@ -40,7 +42,8 @@ image by digest for every component, for example
 available in a Dynamo release image, build that image from matching Dynamo,
 KVCR, and vLLM revisions; the vLLM integration is based on
 [vLLM PR 53624](https://github.com/vllm-project/vllm/pull/53624) on the
-`mv-kvcc/kvcc_repo` branch.
+`mkhazraee/vllm:moein/kvcr_secondary` branch. Record the exact Dynamo, KVCR,
+and vLLM commit IDs with the image digest used for a qualified deployment.
 
 `DYNAMO_KVCR_COMPATIBILITY_DIGEST` is an opaque layout version shared by the
 engine and memory service. Change it whenever model, dtype, block layout, or
@@ -73,8 +76,9 @@ reclaims the same state-agent slot.
 In `agg.yaml`, the state agent and `dynamo.vllm` run under one supervisor in
 worker 0's `main` container. Both workers use etcd discovery because Kubernetes
 container discovery permits one metadata writer per actual container. If the
-state agent, its local vLLM process, or either health endpoint fails, Kubernetes
-restarts worker 0's container and both processes. Worker 1 runs only vLLM.
+state agent or its local vLLM process exits, the supervisor terminates worker
+0's container and Kubernetes restarts both processes. The operator supplies
+the standard HTTP probes for the `main` container. Worker 1 runs only vLLM.
 KVCR uses process-local host memory, so this variant does not preserve its KV
 pool across a restart. Because live state-agent host reselection is not yet
 supported, restart both workers to restore state tracking after worker 0
@@ -89,72 +93,18 @@ sidecar, and that sidecar's probe also checks state-agent health. Kubernetes
 container discovery gives `main` and the real `kvcr-services` sidecar separate
 metadata writers. The explicit sidecar supplies its own downward-API Pod UID;
 the operator injects that identity only into its generated `main` container.
+Kubernetes currently restarts a failed `kvcr-services` container independently.
+Deployments that require vLLM to restart with that sidecar must enforce the
+coordinated restart as Pod-level policy.
 
 The state agent carries routing and residency information; it does not move
 KV payloads. KVCR uses NIXL and UCX for the remote payload transfer.
 
 ## Verify Guard recovery
 
-Use the memory-service variant for this workflow:
-
-Use separate shells to forward each worker's metrics port to a distinct local
-port, for example `kubectl port-forward pod/$POD 19090:9090`.
-
-1. Record `vllm:kvcr_transfer_blocks_total{operation="local_fill"}` and
-   `vllm:kv_offload_tiering_write_bytes_total{tier="1:kvcr"}` on both workers,
-   then send a long-prefix request with temperature zero. The source Pod is the
-   one whose local-fill blocks and tier-write bytes increase. The other Pod's
-   values must remain unchanged.
-2. Terminate the `VLLM::EngineCore` process in that source Pod's `main`
-   container:
-
-   ```bash
-   export SOURCE_POD=REPLACE_WITH_SOURCE_POD
-   kubectl exec "$SOURCE_POD" -c kvcr-services -- \
-     touch /run/kvcr/hold-engine-start
-   kubectl exec "$SOURCE_POD" -c main -- \
-     pkill -9 -f '[V]LLM::EngineCore'
-   ```
-
-   The marker keeps the replacement `main` container from starting vLLM; it
-   does not stop `kvcr-services`.
-3. Confirm `main` has one additional restart while `kvcr-services` remains
-   Ready with an unchanged restart count, and confirm the marker exists in the
-   replacement `main` container:
-
-   ```bash
-   kubectl exec "$SOURCE_POD" -c main -- \
-     test -e /run/kvcr/hold-engine-start
-   ```
-
-4. Confirm the source sidecar logs contain `KVCR_EVENT guard_promoted`:
-
-   ```bash
-   kubectl logs "$SOURCE_POD" -c kvcr-services | \
-     grep 'KVCR_EVENT guard_promoted'
-   ```
-
-5. Send the same prefix while the source engine is unavailable.
-6. Confirm the surviving target's port 9090 metrics increased for:
-   - `vllm:kvcr_transfer_blocks_total{operation="remote_deliver"}`
-   - `vllm:kv_offload_tiering_read_bytes_total{tier="1:kvcr"}`
-   - `vllm:prompt_tokens_by_source_total{source="external_kv_transfer"}`
-7. Compare the post-failure response with the pre-failure baseline for content
-   correctness.
-8. Confirm UCX protocol output names `rc_mlx5` or another configured RDMA
-   transport on both workers.
-
-Remove the fault-injection marker to restore the source engine:
-
-```bash
-kubectl exec "$SOURCE_POD" -c kvcr-services -- \
-  rm -f /run/kvcr/hold-engine-start
-```
-
-The standard Kubernetes and Prometheus interfaces expose every required MVP
-signal, so these examples do not add a separate Guard-checking utility.
-
-The same workflow is automated by the opt-in live-cluster test:
+Use the memory-service variant and the opt-in live-cluster test. The test adds
+a fault gate to its temporary manifest; the deployment example itself contains
+no test-only startup controls.
 
 ```bash
 export DYNAMO_UCX_NET_DEVICES=REPLACE_WITH_GPU_LOCAL_HCA:1
@@ -169,4 +119,8 @@ The namespace must be empty of an earlier deployment with the same name. The
 test requires read-only `hostPath` access to InfiniBand counters and captures
 every worker container's current and previous logs at the before-failure,
 failed, remote-delivery, and recovered phases under `DYN_TEST_OUTPUT_PATH` (or
-the standard `test_output` directory).
+the standard `test_output` directory). It verifies that the workers are on
+separate hosts, one source engine restarts while its KVCR sidecar remains up,
+the Guard serves the preserved cache to the other engine, the response matches,
+the KVCR transfer metrics increase, and the selected active HCA carries the
+transfer with UCX `rc_mlx5`.

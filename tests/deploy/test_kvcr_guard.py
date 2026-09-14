@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -44,11 +45,13 @@ MAIN = "main"
 KVCR_SERVICES = "kvcr-services"
 READINESS_TIMEOUT = 900
 FAILURE_TIMEOUT = 240
+KUBECTL_TIMEOUT = 60
+RENDER_TIMEOUT = 30
 TRANSFER_BLOCKS = "vllm:kvcr_transfer_blocks_total"
 TIER_READ_BYTES = "vllm:kv_offload_tiering_read_bytes_total"
 TIER_WRITE_BYTES = "vllm:kv_offload_tiering_write_bytes_total"
 PROMPT_TOKENS = "vllm:prompt_tokens_by_source_total"
-GUARD_PROMOTED = "KVCR_EVENT guard_promoted"
+GUARD_INITIALIZED = "Initialized NIXL agent: KVCR-Guard-"
 RDMA_PROTOCOL_RE = re.compile(r"\brc_mlx5\b")
 
 # Large enough to make the transfer visible, while remaining comfortably below
@@ -69,6 +72,7 @@ def _kubectl(
         check=check,
         capture_output=True,
         text=True,
+        timeout=KUBECTL_TIMEOUT,
     )
 
 
@@ -152,17 +156,19 @@ def _rdma_counter(
 
 def _wait_until(predicate, description: str, timeout: int) -> None:
     deadline = time.monotonic() + timeout
-    last_error: subprocess.CalledProcessError | None = None
+    last_error: subprocess.CalledProcessError | subprocess.TimeoutExpired | None = None
     while time.monotonic() < deadline:
         try:
             if predicate():
                 return
-        except subprocess.CalledProcessError as error:
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
             last_error = error
         time.sleep(2)
     detail = ""
     if last_error is not None:
-        detail = f": {last_error.stderr.strip() or last_error.stdout.strip()}"
+        stderr = last_error.stderr or ""
+        stdout = last_error.stdout or ""
+        detail = f": {stderr.strip() or stdout.strip() or last_error}"
     raise AssertionError(
         f"Timed out waiting for {description} after {timeout}s{detail}"
     )
@@ -185,6 +191,7 @@ def _render_manifest(tmp_path: Path, image: str) -> Path:
         capture_output=True,
         env=env,
         text=True,
+        timeout=RENDER_TIMEOUT,
     )
     manifest = yaml.safe_load(result.stdout)
     worker = next(
@@ -193,6 +200,20 @@ def _render_manifest(tmp_path: Path, image: str) -> Path:
         if component["name"] == WORKER
     )
     pod_spec = worker["podTemplate"]["spec"]
+    main = next(
+        container for container in pod_spec["containers"] if container["name"] == MAIN
+    )
+    owner_case = 'case "$POD_INDEX" in'
+    assert main["args"][0].count(owner_case) == 1
+    hold_gate = """if [ -e /run/kvcr/hold-engine-start ]; then
+  echo "Waiting for the KVCR resiliency hold to be removed"
+fi
+while [ -e /run/kvcr/hold-engine-start ]; do
+  sleep 1
+done
+
+"""
+    main["args"][0] = main["args"][0].replace(owner_case, hold_gate + owner_case)
     pod_spec["volumes"].append(
         {
             "name": "rdma-counters",
@@ -250,6 +271,34 @@ def test_rdma_counter_uses_configured_active_port(monkeypatch) -> None:
     port_state["value"] = "5: ACTIVE_DEFER"
     with pytest.raises(AssertionError, match="mlx5_8:2 is not active"):
         _rdma_counter("test", "worker-0", "main", "mlx5_8:2", "port_rcv_data")
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.gpu_0
+@pytest.mark.skipif(shutil.which("envsubst") is None, reason="envsubst is unavailable")
+def test_render_manifest_injects_test_only_fault_gate(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("DYNAMO_RDMA_RESOURCE", "rdma/test")
+    monkeypatch.setenv("DYNAMO_UCX_NET_DEVICES", "mlx5_0:1")
+    monkeypatch.setenv("DYNAMO_KVCR_COMPATIBILITY_DIGEST", "qwen3-0.6b-example-v1")
+
+    manifest = yaml.safe_load(_render_manifest(tmp_path, "runtime:test").read_text())
+    worker = next(
+        component
+        for component in manifest["spec"]["components"]
+        if component["name"] == WORKER
+    )
+    main = next(
+        container
+        for container in worker["podTemplate"]["spec"]["containers"]
+        if container["name"] == MAIN
+    )
+    command = main["args"][0]
+
+    assert command.count("/run/kvcr/hold-engine-start") == 2
+    assert command.index("/run/kvcr/hold-engine-start") < command.index(
+        'case "$POD_INDEX" in'
+    )
 
 
 @pytest.mark.framework_with_kvcr
@@ -409,9 +458,9 @@ async def test_kvcr_memory_service_guard_serves_after_engine_restart(
 
         main_before = _container_status(namespace, source.name, MAIN)
         sidecar_before = _container_status(namespace, source.name, KVCR_SERVICES)
-        guard_promotions_before = _logs(namespace, source.name, KVCR_SERVICES).count(
-            GUARD_PROMOTED
-        )
+        guard_initializations_before = _logs(
+            namespace, source.name, KVCR_SERVICES
+        ).count(GUARD_INITIALIZED)
         _exec(
             namespace,
             source.name,
@@ -444,9 +493,11 @@ async def test_kvcr_memory_service_guard_serves_after_engine_restart(
             engine_restarted, "the source vLLM container restart", FAILURE_TIMEOUT
         )
         _wait_until(
-            lambda: _logs(namespace, source.name, KVCR_SERVICES).count(GUARD_PROMOTED)
-            > guard_promotions_before,
-            "KVCR Guard promotion",
+            lambda: _logs(namespace, source.name, KVCR_SERVICES).count(
+                GUARD_INITIALIZED
+            )
+            > guard_initializations_before,
+            "KVCR Guard NIXL agent initialization",
             FAILURE_TIMEOUT,
         )
         sidecar_failed = _container_status(namespace, source.name, KVCR_SERVICES)
@@ -579,8 +630,8 @@ async def test_kvcr_memory_service_guard_serves_after_engine_restart(
             "/run/kvcr/hold-engine-start",
         )
         _wait_until(
-            lambda: bool(_metrics(namespace, source.name, deployment_spec.system_port)),
-            "the source engine metrics endpoint recovery",
+            lambda: _container_status(namespace, source.name, MAIN)["ready"],
+            "the source vLLM container to become ready",
             READINESS_TIMEOUT,
         )
         logger.info(

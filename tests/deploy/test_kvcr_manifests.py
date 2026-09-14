@@ -45,7 +45,6 @@ def test_kvcr_variants_require_two_gpu_rdma_nodes(manifest_name: str) -> None:
     assert env["UCX_TLS"] == "rc_x,cuda"
     assert env["UCX_NET_DEVICES"] == "${DYNAMO_UCX_NET_DEVICES}"
     assert env["UCX_PROTO_INFO"] == "y"
-    assert "No RDMA userspace device is mounted" in main["args"][0]
     assert "IPC_LOCK" in main["securityContext"]["capabilities"]["add"]
 
 
@@ -64,8 +63,10 @@ def test_process_local_variant_couples_state_agent_and_vllm() -> None:
     assert "python3 -m dynamo.kv_state_agent" in command
     assert "python3 -m dynamo.vllm" in command
     assert 'if [ "$POD_INDEX" = "0" ]' in command
+    assert "env -u DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS" in command
     assert "DYN_DISCOVERY_BACKEND=etcd" in command
     assert "DYN_SYSTEM_PORT=9091" in command
+    assert "DYN_HEALTH_CHECK_ENABLED=false" in command
     assert "--max-slots 2" in command
     assert 'wait -n "$state_agent_pid" "$vllm_pid"' in command
     assert "kvcr.kvcr_service" not in command
@@ -73,10 +74,9 @@ def test_process_local_variant_couples_state_agent_and_vllm() -> None:
     assert "owner_slot=00000000000000000000000000000001" in command
     assert all(item["name"] != "POD_UID" for item in main["env"])
 
-    for probe_name in ("startupProbe", "livenessProbe", "readinessProbe"):
-        probe = main[probe_name]["exec"]["command"][-1]
-        assert "9090" in probe
-        assert "9091" in probe
+    assert "startupProbe" not in main
+    assert "livenessProbe" not in main
+    assert "readinessProbe" not in main
 
 
 def test_memory_service_variant_keeps_guard_in_sidecar() -> None:
@@ -100,10 +100,16 @@ def test_memory_service_variant_keeps_guard_in_sidecar() -> None:
     assert "--guard-count 1" in sidecar_command
     assert "--pool-sizes-gb 2" in sidecar_command
     assert 'if [ "$POD_INDEX" = "0" ]' in sidecar_command
+    assert "DYN_HEALTH_CHECK_ENABLED=false" in sidecar_command
+    assert "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS" not in sidecar_command
+    assert all(
+        item["name"] != "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"
+        for item in sidecar["env"]
+    )
     assert "--max-slots 2" in sidecar_command
     assert 'wait -n "$kvcr_pid" "$state_agent_pid"' in sidecar_command
     assert '"kvcr_service_socket_path": "/run/kvcr/memory.sock"' in main_command
-    assert "/run/kvcr/hold-engine-start" in main_command
+    assert "/run/kvcr/hold-engine-start" not in main_command
     assert "owner_slot=00000000000000000000000000000000" in main_command
     assert "owner_slot=00000000000000000000000000000001" in main_command
     assert all(item["name"] != "POD_UID" for item in main["env"])
@@ -149,6 +155,7 @@ def test_deploy_script_renders_selected_variant(memory_service: str) -> None:
         capture_output=True,
         env=env,
         text=True,
+        timeout=30,
     )
 
     rendered = yaml.safe_load(result.stdout)
@@ -184,6 +191,7 @@ def test_deploy_script_rejects_unknown_argument() -> None:
         {
             "DYNAMO_UCX_NET_DEVICES": "mlx5_test:1",
             "DYNAMO_VLLM_IMAGE": "runtime:1.4.0@sha256:test",
+            "KVCR_MEMORY_SERVICE_ENABLED": "false",
         }
     )
 
@@ -193,6 +201,7 @@ def test_deploy_script_rejects_unknown_argument() -> None:
         capture_output=True,
         env=env,
         text=True,
+        timeout=30,
     )
 
     assert result.returncode == 2
@@ -216,6 +225,7 @@ def test_deploy_script_rejects_unsafe_compatibility_digest() -> None:
         capture_output=True,
         env=env,
         text=True,
+        timeout=30,
     )
 
     assert result.returncode == 2

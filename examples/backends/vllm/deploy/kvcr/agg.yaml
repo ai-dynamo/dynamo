@@ -41,11 +41,6 @@ spec:
         - args:
           - |
             set -euo pipefail
-            if ! compgen -G '/dev/infiniband/uverbs*' >/dev/null; then
-              echo "No RDMA userspace device is mounted" >&2
-              exit 1
-            fi
-
             case "$POD_INDEX" in
               0) owner_slot=00000000000000000000000000000000 ;;
               1) owner_slot=00000000000000000000000000000001 ;;
@@ -68,9 +63,10 @@ spec:
             trap cleanup EXIT INT TERM
 
             if [ "$POD_INDEX" = "0" ]; then
-              env \
+              env -u DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS \
                 DYN_COMPONENT=kv_state_agent \
                 DYN_DISCOVERY_BACKEND=etcd \
+                DYN_HEALTH_CHECK_ENABLED=false \
                 DYN_NAMESPACE="$state_namespace" \
                 DYN_SYSTEM_PORT=9091 \
                 python3 -m dynamo.kv_state_agent --max-slots 2 &
@@ -165,25 +161,7 @@ spec:
           - secretRef:
               name: hf-token-secret
           image: ${DYNAMO_VLLM_IMAGE}
-          livenessProbe:
-            exec:
-              command:
-              - python3
-              - -c
-              - import os,urllib.request; urls=['http://127.0.0.1:9090/live']; urls += ['http://127.0.0.1:9091/live'] if os.environ['POD_INDEX'] == '0' else []; [urllib.request.urlopen(url, timeout=1).read() for url in urls]
-            failureThreshold: 3
-            periodSeconds: 5
-            timeoutSeconds: 4
           name: main
-          readinessProbe:
-            exec:
-              command:
-              - python3
-              - -c
-              - import os,urllib.request; urls=['http://127.0.0.1:9090/health']; urls += ['http://127.0.0.1:9091/live'] if os.environ['POD_INDEX'] == '0' else []; [urllib.request.urlopen(url, timeout=1).read() for url in urls]
-            failureThreshold: 3
-            periodSeconds: 10
-            timeoutSeconds: 4
           resources:
             limits:
               ${DYNAMO_RDMA_RESOURCE}: "1"
@@ -196,15 +174,6 @@ spec:
             capabilities:
               add:
               - IPC_LOCK
-          startupProbe:
-            exec:
-              command:
-              - python3
-              - -c
-              - import os,urllib.request; urls=['http://127.0.0.1:9090/live']; urls += ['http://127.0.0.1:9091/live'] if os.environ['POD_INDEX'] == '0' else []; [urllib.request.urlopen(url, timeout=1).read() for url in urls]
-            failureThreshold: 720
-            periodSeconds: 10
-            timeoutSeconds: 5
           workingDir: /workspace/examples/backends/vllm
         tolerations:
         - effect: NoSchedule
