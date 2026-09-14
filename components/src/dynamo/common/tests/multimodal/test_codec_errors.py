@@ -66,8 +66,8 @@ def test_present_but_unusable_carrier_pins_the_installed_version(monkeypatch):
     assert VALIDATED_SPECS["opencv-python-headless"] not in msg
 
 
-def test_present_carrier_without_metadata_falls_back_to_the_spec(monkeypatch):
-    """Importable but with no distribution metadata: the spec is all we have."""
+def test_present_carrier_without_metadata_requests_its_version(monkeypatch):
+    """An unknown source-build version must not be replaced with a range."""
     monkeypatch.setattr(codec_errors.importlib.util, "find_spec", lambda name: object())
 
     def _missing(_package):
@@ -75,7 +75,9 @@ def test_present_carrier_without_metadata_falls_back_to_the_spec(monkeypatch):
 
     monkeypatch.setattr(codec_errors.importlib.metadata, "version", _missing)
     msg = str(video_decoder_missing("vllm", "opencv-python-headless", "cv2", "vp9"))
-    assert VALIDATED_SPECS["opencv-python-headless"] in msg
+    assert "print(cv2.__version__)" in msg
+    assert "opencv-python-headless==<cv2-version>" in msg
+    assert VALIDATED_SPECS["opencv-python-headless"] not in msg
     assert "--force-reinstall" in msg
 
 

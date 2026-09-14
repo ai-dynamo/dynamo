@@ -83,12 +83,20 @@ def _install_hint(backend: str, package: str, module: str) -> str:
         # the version the image ships. That version is whatever the backend
         # resolved, so this is deliberately not called a validated install.
         installed = _installed_version(package)
-        spec = f"{package}=={installed}" if installed else VALIDATED_SPECS[package]
-        hint = (
-            "replace the shipped build with the binary wheel of the same "
-            f"version: `pip install --no-deps --force-reinstall "
-            f"--only-binary {package} '{spec}'`"
-        )
+        if installed:
+            hint = (
+                "replace the shipped build with the binary wheel of the same "
+                f"version: `pip install --no-deps --force-reinstall "
+                f"--only-binary {package} '{package}=={installed}'`"
+            )
+        else:
+            hint = (
+                "first determine the shipped cv2 version with "
+                "`python -c \"import cv2; print(cv2.__version__)\"`, then replace "
+                "it with the binary wheel of that same version: "
+                f"`pip install --no-deps --force-reinstall --only-binary {package} "
+                f"'{package}==<cv2-version>'`"
+            )
     else:
         hint = (
             "install the validated decoder with "
