@@ -28,11 +28,16 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 
+def _is_accelerator_tensor(t: "torch.Tensor") -> bool:
+    """True for CUDA or XPU device tensors (the backends GMS supports)."""
+    return t.is_cuda or getattr(t, "is_xpu", False)
+
+
 def _iter_module_tensors(
     module: torch.nn.Module,
     prefix: str = "",
 ) -> Iterator[Tuple[str, torch.Tensor, str]]:
-    """Iterate over all CUDA tensors in a module tree.
+    """Iterate over all accelerator (CUDA/XPU) tensors in a module tree.
 
     Yields (qualified_name, tensor, tensor_type) for:
     - Parameters (tensor_type="parameter")
@@ -44,17 +49,17 @@ def _iter_module_tensors(
         prefix: Prefix for qualified names (used in recursion).
 
     Yields:
-        (name, tensor, tensor_type) tuples for each CUDA tensor.
+        (name, tensor, tensor_type) tuples for each accelerator tensor.
     """
     # Parameters
     for name, param in module._parameters.items():
-        if param is not None and param.is_cuda:
+        if param is not None and _is_accelerator_tensor(param):
             qualified = f"{prefix}{name}" if prefix else name
             yield (qualified, param, "parameter")
 
     # Buffers
     for name, buf in module._buffers.items():
-        if buf is not None and buf.is_cuda:
+        if buf is not None and _is_accelerator_tensor(buf):
             qualified = f"{prefix}{name}" if prefix else name
             yield (qualified, buf, "buffer")
 
@@ -72,11 +77,11 @@ def _iter_module_tensors(
         except Exception:
             continue
 
-        if torch.is_tensor(attr_val) and attr_val.is_cuda:
+        if torch.is_tensor(attr_val) and _is_accelerator_tensor(attr_val):
             qualified = f"{prefix}{attr_name}" if prefix else attr_name
             yield (qualified, attr_val, "tensor_attr")
         elif isinstance(attr_val, (list, tuple)) and attr_val:
-            if all(torch.is_tensor(x) and x.is_cuda for x in attr_val):
+            if all(torch.is_tensor(x) and _is_accelerator_tensor(x) for x in attr_val):
                 for i, x in enumerate(attr_val):
                     qualified = (
                         f"{prefix}{attr_name}.{i}" if prefix else f"{attr_name}.{i}"

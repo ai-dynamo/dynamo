@@ -51,7 +51,7 @@ spec:
             requests:
               cpu: "16"
               memory: 128Gi
-  - name: PrefillWorker
+  - name: prefill
     type: prefill
     replicas: 1
     multinode:
@@ -189,7 +189,7 @@ spec:
           persistentVolumeClaim:
             claimName: shared-model-cache
 
-  - name: DecodeWorker
+  - name: decode
     type: decode
     replicas: 1
     multinode:

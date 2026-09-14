@@ -5154,13 +5154,28 @@ func TestExpandRolesForService(t *testing.T) {
 			},
 		},
 		{
-			name:          "explicit multinode roles retain node count cardinality",
+			name:          "explicit multinode roles derive node count cardinality",
 			serviceName:   "test-service",
 			numberOfNodes: 5,
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				Roles: []v1alpha1.ComponentRoleSpec{
 					{Name: v1alpha1.ComponentRoleWorker},
 					{Name: v1alpha1.ComponentRoleLeader},
+				},
+			},
+			expected: []ServiceRole{
+				{Name: "test-service-ldr", Role: RoleLeader, Replicas: 1},
+				{Name: "test-service-wkr", Role: RoleWorker, Replicas: 4},
+			},
+		},
+		{
+			name:          "multinode node count remains authoritative over role replicas",
+			serviceName:   "test-service",
+			numberOfNodes: 5,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Roles: []v1alpha1.ComponentRoleSpec{
+					{Name: v1alpha1.ComponentRoleWorker, Replicas: ptr.To(int32(99))},
+					{Name: v1alpha1.ComponentRoleLeader, Replicas: ptr.To(int32(2))},
 				},
 			},
 			expected: []ServiceRole{
@@ -8741,10 +8756,11 @@ func TestGenerateGrovePodCliqueSet_GMSPodsAreNotCheckpointTargets(t *testing.T) 
 
 	infoByService := map[string]*checkpoint.CheckpointInfo{
 		"decode": {
-			Enabled:        true,
-			Exists:         true,
-			Ready:          true,
-			CheckpointName: "decode-checkpoint",
+			Enabled:                   true,
+			Exists:                    true,
+			Ready:                     true,
+			CheckpointName:            "decode-checkpoint",
+			SnapshotCompatibilityHash: "compatibility-v1",
 			NativeSnapshot: &checkpoint.ResolvedPodSnapshot{
 				UID:                  "snapshot-uid",
 				BoundContentName:     "snapshot-content",
@@ -8838,11 +8854,12 @@ func TestGenerateGrovePodCliqueSet_IntraPodFailoverCheckpointTargets(t *testing.
 
 	infoByService := map[string]*checkpoint.CheckpointInfo{
 		"decode": {
-			Enabled:                 true,
-			Exists:                  true,
-			Ready:                   true,
-			CheckpointName:          "decode-checkpoint",
-			RestoreTargetContainers: IntraPodFailoverEngineContainerNames(),
+			Enabled:                   true,
+			Exists:                    true,
+			Ready:                     true,
+			CheckpointName:            "decode-checkpoint",
+			SnapshotCompatibilityHash: "compatibility-v1",
+			RestoreTargetContainers:   IntraPodFailoverEngineContainerNames(),
 			NativeSnapshot: &checkpoint.ResolvedPodSnapshot{
 				UID:                  "snapshot-uid",
 				BoundContentName:     "snapshot-content",
