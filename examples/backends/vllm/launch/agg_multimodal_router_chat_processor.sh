@@ -178,10 +178,8 @@ COMMON_ENV=(
 WORKER_PORTS=()
 KV_EVENTS_PORTS=()
 for i in $(seq 1 "${NUM_WORKERS}"); do
-    HARNESS_SYSTEM_VAR="DYN_SYSTEM_PORT${i}"
-    HARNESS_KV_VAR="DYN_VLLM_KV_EVENT_PORT${i}"
-    WORKER_PORT="${!HARNESS_SYSTEM_VAR:-$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))}"
-    KV_EVENTS_PORT="${!HARNESS_KV_VAR:-$((KV_EVENTS_PORT_BASE + i - 1))}"
+    WORKER_PORT=$(dyn_port DYN_SYSTEM_PORT "$i" $((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2)))
+    KV_EVENTS_PORT=$(dyn_port DYN_VLLM_KV_EVENT_PORT "$i" $((KV_EVENTS_PORT_BASE + i - 1)))
     WORKER_PORTS+=("${WORKER_PORT}")
     KV_EVENTS_PORTS+=("${KV_EVENTS_PORT}")
 
@@ -224,14 +222,8 @@ echo "=== Starting frontend (with vLLM processor + KV router) ==="
 #   2. Runs vLLM's process_inputs() → mm_features with hashes + placeholders
 #   3. Builds mm_routing_info from mm_features → passes to KvRouter
 #   4. Forwards mm_hashes to backend for hash consistency
-FRONTEND_SYSTEM_PORT_BASE="${FRONTEND_SYSTEM_PORT_BASE:-9080}"
-
 for f in $(seq 1 "${NUM_FRONTENDS}"); do
     FE_HTTP_PORT=$((HTTP_PORT + f - 1))
-    # dynamo.frontend pops DYN_SYSTEM_PORT before building its runtime, so
-    # nothing binds this; it keeps a harness run off a worker's system port.
-    HARNESS_FE_SYSTEM_VAR="DYN_SYSTEM_PORT$((NUM_WORKERS + f))"
-    FE_SYSTEM_PORT="${!HARNESS_FE_SYSTEM_VAR:-$((FRONTEND_SYSTEM_PORT_BASE + f - 1))}"
 
     # Enable replica sync when running multiple frontends.
     SYNC_ARGS=""
@@ -240,10 +232,10 @@ for f in $(seq 1 "${NUM_FRONTENDS}"); do
     fi
 
     echo
-    echo "=== Starting frontend replica ${f} (HTTP ${FE_HTTP_PORT}, system ${FE_SYSTEM_PORT}) ==="
-    env "${COMMON_ENV[@]}" \
+    echo "=== Starting frontend replica ${f} (HTTP ${FE_HTTP_PORT}) ==="
+    env -u DYN_SYSTEM_PORT -u DYN_SYSTEM_PORT1 -u DYN_SYSTEM_PORT2 -u DYN_SYSTEM_PORT3 \
+        "${COMMON_ENV[@]}" \
         "DYN_LOG=debug" \
-        "DYN_SYSTEM_PORT=${FE_SYSTEM_PORT}" \
         python -m dynamo.frontend \
             --http-port "${FE_HTTP_PORT}" \
             --dyn-chat-processor vllm \
