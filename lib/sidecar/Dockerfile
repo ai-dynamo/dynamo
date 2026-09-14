@@ -91,7 +91,8 @@ ARG TARGETARCH
 RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH},target=/src/target,sharing=locked \
-    cargo build --release --locked -p dynamo-vllm-sidecar \
+    cargo clean --release -p dynamo-vllm-sidecar \
+    && cargo build --release --locked -p dynamo-vllm-sidecar \
     && strip target/release/dynamo-vllm-sidecar \
     && install -D target/release/dynamo-vllm-sidecar /out/dynamo-vllm-sidecar
 

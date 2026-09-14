@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use dynamo_backend_common::{
     DisaggregationMode, DynamoError, GuidedDecodingOptions, LLMEngineOutput, MultimodalData,
     PrefillResult, PreprocessedRequest, StopReason, TopLogprob, usage,
@@ -9,6 +10,7 @@ use dynamo_backend_common::{
 use crate::client;
 use crate::json::{json_to_struct, struct_to_json};
 use crate::proto as pb;
+use sha2::{Digest, Sha256};
 
 const VLLM_LOGPROB_FLOOR: f64 = -9999.0;
 const MULTIMODAL_PROMPT_TOKEN_IDS_KEY: &str = "_dynamo_sidecar_multimodal_prompt_token_ids";
@@ -18,6 +20,49 @@ const VIDEO_URL_KEY: &str = "video_url";
 const AUDIO_URL_KEY: &str = "audio_url";
 // Must match DYNAMO_CACHE_SALT_PREFIX in lib/kv-router/src/zmq_wire/extra_keys.rs.
 const DYNAMO_CACHE_SALT_PREFIX: &str = "dynamo-cache-salt:";
+const MAX_PREPROCESSED_MM_FEATURES: usize = 64;
+const MAX_PREPROCESSED_MM_BYTES: usize = 16 * 1024 * 1024;
+const MAX_PREPROCESSED_MM_HASH_BYTES: usize = 256;
+const PREPROCESSED_MM_ID_DOMAIN: &[u8] = b"vllm.grpc.preprocessed-mm.v1";
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VllmTitoFeatures {
+    mm_hashes: indexmap::IndexMap<String, Vec<String>>,
+    mm_placeholders: indexmap::IndexMap<String, Vec<VllmTitoPlaceholder>>,
+    kwargs_data: indexmap::IndexMap<String, Vec<String>>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VllmTitoPlaceholder {
+    offset: u64,
+    length: u64,
+    #[serde(default)]
+    is_embed: Option<Vec<bool>>,
+}
+
+fn request_has_raw_media(request: &PreprocessedRequest) -> bool {
+    request
+        .multi_modal_data
+        .as_ref()
+        .is_some_and(|media| media.values().any(|items| !items.is_empty()))
+}
+
+fn request_has_preprocessed_media(request: &PreprocessedRequest) -> bool {
+    request
+        .extra_args
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .and_then(|extra| extra.get("vllm_tito"))
+        .and_then(serde_json::Value::as_object)
+        .and_then(|envelope| envelope.get("features"))
+        .is_some_and(|features| !features.is_null())
+}
+
+pub(crate) fn request_has_multimodal_input(request: &PreprocessedRequest) -> bool {
+    request_has_raw_media(request) || request_has_preprocessed_media(request)
+}
 
 pub(crate) fn build_generate_request(
     request: PreprocessedRequest,
@@ -32,13 +77,19 @@ pub(crate) fn build_generate_request(
         native_sampling_params_json.clear();
     }
 
-    let has_media = request
-        .multi_modal_data
-        .as_ref()
-        .is_some_and(|media| media.values().any(|items| !items.is_empty()));
-    // Decode receives prompt KV from prefill, but vLLM still needs the original
-    // media metadata to initialize model-specific multimodal positions (for
-    // example Qwen-VL mRoPE). A full KV hit prevents duplicate prompt compute.
+    let has_raw_media = request_has_raw_media(&request);
+    let has_preprocessed_media = request_has_preprocessed_media(&request);
+    let has_raw_media_metadata = has_raw_media
+        || request
+            .multi_modal_uuids
+            .as_ref()
+            .is_some_and(|uuids| uuids.values().any(|items| !items.is_empty()));
+    if has_raw_media && has_preprocessed_media {
+        return Err(client::invalid_argument(
+            "raw multimodal data and preprocessed features cannot be mixed",
+        ));
+    }
+    let has_media = has_raw_media || has_preprocessed_media;
     let has_images = request
         .multi_modal_data
         .as_ref()
@@ -51,7 +102,12 @@ pub(crate) fn build_generate_request(
     } else {
         None
     };
-    let media = build_media(&request, forwarded_image_uuids.as_deref())?;
+    let raw_media = if has_raw_media_metadata {
+        build_media(&request, forwarded_image_uuids.as_deref())?
+    } else {
+        Vec::new()
+    };
+    let prompt_token_count = request.token_ids.len();
     let mut prefill_result = request.prefill_result;
     let token_ids = request.token_ids;
     if mode.is_decode() && has_media {
@@ -88,7 +144,26 @@ pub(crate) fn build_generate_request(
     let stop_conditions = request.stop_conditions;
     let encoder_result = request.encoder_result;
     let mut extra_args = request.extra_args;
-    consume_vllm_tito(&mut extra_args)?;
+    let features = consume_vllm_tito(&mut extra_args)?;
+    if features.is_some()
+        && let Some(serde_json::Value::Object(extra)) = extra_args.as_mut()
+    {
+        extra.remove("dynamo_mm_routing_hashes");
+    }
+    let media = if let Some(features) = features {
+        build_preprocessed_media(features, prompt_token_count)?
+    } else {
+        raw_media
+    };
+    if mode.is_encode()
+        && media
+            .iter()
+            .any(|item| item.modality() != pb::Modality::Image)
+    {
+        return Err(client::invalid_argument(
+            "encode requests support image media only",
+        ));
+    }
     consume_redundant_nvext(&mut extra_args, cache_salt.as_deref())?;
     if has_media && let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() {
         // These fields are already represented by token_ids and media.
@@ -146,6 +221,7 @@ pub(crate) fn build_generate_request(
         priority,
         session_id: None,
         media,
+        lora_name: String::new(),
         native_sampling_params_json,
     })
 }
@@ -354,12 +430,14 @@ fn native_logprob_count(value: u32) -> i64 {
     }
 }
 
-fn consume_vllm_tito(extra_args: &mut Option<serde_json::Value>) -> Result<(), DynamoError> {
+fn consume_vllm_tito(
+    extra_args: &mut Option<serde_json::Value>,
+) -> Result<Option<VllmTitoFeatures>, DynamoError> {
     let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() else {
-        return Ok(());
+        return Ok(None);
     };
     let Some(envelope) = extra.remove("vllm_tito") else {
-        return Ok(());
+        return Ok(None);
     };
     let serde_json::Value::Object(envelope) = envelope else {
         return Err(client::invalid_argument(
@@ -377,13 +455,25 @@ fn consume_vllm_tito(extra_args: &mut Option<serde_json::Value>) -> Result<(), D
                 | "cache_salt"
                 | "priority"
                 | "kv_transfer_params"
+                | "features"
         ) {
             return Err(client::invalid_argument(format!(
                 "extra_args.vllm_tito.{key} is not supported by vLLM gRPC"
             )));
         }
     }
-    Ok(())
+    let features = envelope
+        .get("features")
+        .filter(|features| !features.is_null())
+        .map(|features| {
+            serde_json::from_value::<VllmTitoFeatures>(features.clone()).map_err(|error| {
+                client::invalid_argument(format!(
+                    "extra_args.vllm_tito.features is invalid: {error}"
+                ))
+            })
+        })
+        .transpose()?;
+    Ok(features)
 }
 fn consume_redundant_nvext(
     extra_args: &mut Option<serde_json::Value>,
@@ -632,6 +722,186 @@ fn build_media(
     Ok(media)
 }
 
+fn build_preprocessed_media(
+    features: VllmTitoFeatures,
+    prompt_token_count: usize,
+) -> Result<Vec<pb::MediaItem>, DynamoError> {
+    if features.mm_hashes.is_empty() {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito.features.mm_hashes must contain at least one modality",
+        ));
+    }
+    if features.mm_hashes.len() != features.mm_placeholders.len()
+        || features.mm_hashes.len() != features.kwargs_data.len()
+        || !features
+            .mm_hashes
+            .keys()
+            .all(|modality| features.mm_placeholders.contains_key(modality))
+        || !features
+            .mm_hashes
+            .keys()
+            .all(|modality| features.kwargs_data.contains_key(modality))
+    {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito.features hashes, placeholders, and kwargs_data must contain the same modalities",
+        ));
+    }
+
+    let feature_count = features
+        .mm_hashes
+        .values()
+        .try_fold(0usize, |count, hashes| count.checked_add(hashes.len()))
+        .ok_or_else(|| {
+            client::invalid_argument("preprocessed multimodal feature count overflows")
+        })?;
+    if feature_count == 0 || feature_count > MAX_PREPROCESSED_MM_FEATURES {
+        return Err(client::invalid_argument(format!(
+            "extra_args.vllm_tito.features must contain at least 1 and at most {MAX_PREPROCESSED_MM_FEATURES} features"
+        )));
+    }
+
+    let VllmTitoFeatures {
+        mm_hashes,
+        mm_placeholders,
+        kwargs_data,
+    } = features;
+    let prompt_token_count = u64::try_from(prompt_token_count).map_err(|_| {
+        client::invalid_argument("preprocessed multimodal prompt length exceeds platform limits")
+    })?;
+    let mut decoded_bytes = 0usize;
+    let mut media = Vec::with_capacity(feature_count);
+
+    for (modality, hashes) in mm_hashes {
+        let modality_code = match modality.as_str() {
+            "image" => pb::Modality::Image,
+            "video" => pb::Modality::Video,
+            "audio" => pb::Modality::Audio,
+            _ => {
+                return Err(client::invalid_argument(format!(
+                    "extra_args.vllm_tito.features modality `{modality}` is not supported"
+                )));
+            }
+        };
+        let placeholders = &mm_placeholders[&modality];
+        let kwargs = &kwargs_data[&modality];
+        if hashes.len() != placeholders.len() || hashes.len() != kwargs.len() {
+            return Err(client::invalid_argument(format!(
+                "extra_args.vllm_tito.features.{modality} hashes, placeholders, and kwargs_data must have equal lengths"
+            )));
+        }
+
+        for (index, ((producer_hash, placeholder), encoded_kwargs)) in
+            hashes.into_iter().zip(placeholders).zip(kwargs).enumerate()
+        {
+            if producer_hash.is_empty() || producer_hash.len() > MAX_PREPROCESSED_MM_HASH_BYTES {
+                return Err(client::invalid_argument(format!(
+                    "extra_args.vllm_tito.features.mm_hashes.{modality}[{index}] must be between 1 and {MAX_PREPROCESSED_MM_HASH_BYTES} bytes"
+                )));
+            }
+            if placeholder.length == 0 {
+                return Err(client::invalid_argument(format!(
+                    "extra_args.vllm_tito.features.mm_placeholders.{modality}[{index}].length must be positive"
+                )));
+            }
+            let end = placeholder
+                .offset
+                .checked_add(placeholder.length)
+                .ok_or_else(|| {
+                    client::invalid_argument(format!(
+                        "extra_args.vllm_tito.features.mm_placeholders.{modality}[{index}] range overflows"
+                    ))
+                })?;
+            if end > prompt_token_count {
+                return Err(client::invalid_argument(format!(
+                    "extra_args.vllm_tito.features.mm_placeholders.{modality}[{index}] exceeds the prompt token count"
+                )));
+            }
+            if let Some(is_embed) = placeholder.is_embed.as_ref() {
+                let expected = usize::try_from(placeholder.length).map_err(|_| {
+                    client::invalid_argument(format!(
+                        "extra_args.vllm_tito.features.mm_placeholders.{modality}[{index}].length exceeds platform limits"
+                    ))
+                })?;
+                if is_embed.len() != expected {
+                    return Err(client::invalid_argument(format!(
+                        "extra_args.vllm_tito.features.mm_placeholders.{modality}[{index}].is_embed must match length"
+                    )));
+                }
+            }
+
+            let decoded_kwargs =
+                decode_preprocessed_kwargs(encoded_kwargs, &mut decoded_bytes, &modality, index)?;
+            let identifier = preprocessed_mm_identifier(&modality, &decoded_kwargs);
+            media.push(pb::MediaItem {
+                modality: modality_code as i32,
+                source: Some(pb::media_item::Source::Features(
+                    pb::PreprocessedMediaFeatures {
+                        kwargs: Some(decoded_kwargs),
+                        identifier: identifier.clone(),
+                        offset: placeholder.offset,
+                        length: placeholder.length,
+                        mm_hash: Some(identifier.clone()),
+                        is_embed: placeholder.is_embed.clone().unwrap_or_default(),
+                    },
+                )),
+                mime_type: String::new(),
+                uuid: String::new(),
+            });
+        }
+    }
+
+    Ok(media)
+}
+
+fn preprocessed_mm_identifier(modality: &str, raw_kwargs: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(PREPROCESSED_MM_ID_DOMAIN);
+    hasher.update((modality.len() as u64).to_be_bytes());
+    hasher.update(modality.as_bytes());
+    hasher.update((raw_kwargs.len() as u64).to_be_bytes());
+    hasher.update(raw_kwargs);
+    format!("grpc-mm:{:x}", hasher.finalize())
+}
+
+fn decode_preprocessed_kwargs(
+    encoded: &str,
+    decoded_bytes: &mut usize,
+    modality: &str,
+    index: usize,
+) -> Result<Vec<u8>, DynamoError> {
+    if encoded.is_empty() {
+        return Err(client::invalid_argument(format!(
+            "extra_args.vllm_tito.features.kwargs_data.{modality}[{index}] must contain inline base64 kwargs"
+        )));
+    }
+    let remaining = MAX_PREPROCESSED_MM_BYTES.saturating_sub(*decoded_bytes);
+    let max_encoded_len = remaining.div_ceil(3).saturating_mul(4);
+    if encoded.len() > max_encoded_len {
+        return Err(client::invalid_argument(
+            "preprocessed multimodal kwargs exceed 16 MiB",
+        ));
+    }
+    let decoded = BASE64_STANDARD.decode(encoded).map_err(|error| {
+        client::invalid_argument(format!(
+            "extra_args.vllm_tito.features.kwargs_data.{modality}[{index}] is not valid base64: {error}"
+        ))
+    })?;
+    if decoded.is_empty() {
+        return Err(client::invalid_argument(format!(
+            "extra_args.vllm_tito.features.kwargs_data.{modality}[{index}] must contain inline kwargs"
+        )));
+    }
+    *decoded_bytes = decoded_bytes.checked_add(decoded.len()).ok_or_else(|| {
+        client::invalid_argument("preprocessed multimodal kwargs byte count overflows")
+    })?;
+    if *decoded_bytes > MAX_PREPROCESSED_MM_BYTES {
+        return Err(client::invalid_argument(
+            "preprocessed multimodal kwargs exceed 16 MiB",
+        ));
+    }
+    Ok(decoded)
+}
+
 fn top_n_candidates(count: u32) -> Result<pb::CandidateTokens, DynamoError> {
     if count == u32::MAX {
         return Ok(pb::CandidateTokens {
@@ -858,27 +1128,13 @@ fn validate_request(
     }
     if request.mm_processor_kwargs.is_some() {
         return Err(client::invalid_argument(
-            "preprocessed multimodal features are not supported by vLLM gRPC",
+            "mm_processor_kwargs are not supported by vLLM gRPC",
         ));
     }
-    let has_media = request
-        .multi_modal_data
-        .as_ref()
-        .is_some_and(|media| media.values().any(|items| !items.is_empty()));
+    let has_media = request_has_multimodal_input(request);
     if mode.is_encode() && !has_media {
         return Err(client::invalid_argument(
             "encode requests require multimodal media",
-        ));
-    }
-    if mode.is_encode()
-        && request.multi_modal_data.as_ref().is_some_and(|media| {
-            media
-                .iter()
-                .any(|(modality, items)| modality != IMAGE_URL_KEY && !items.is_empty())
-        })
-    {
-        return Err(client::invalid_argument(
-            "encode requests support image media only",
         ));
     }
     if mode.is_encode() && request.encoder_result.is_some() {
@@ -951,10 +1207,7 @@ impl ResponseState {
     pub(crate) fn new(request: &PreprocessedRequest, mode: DisaggregationMode) -> Self {
         Self {
             prompt_tokens: request.token_ids.len() as u32,
-            has_media: request
-                .multi_modal_data
-                .as_ref()
-                .is_some_and(|media| media.values().any(|items| !items.is_empty())),
+            has_media: request_has_multimodal_input(request),
             multimodal_prompt_token_ids: None,
             completion_tokens: 0,
             mode,

@@ -1891,6 +1891,23 @@ async fn mixed_multimodal_media_is_forwarded_with_image_uuid_only() {
 }
 
 #[test]
+fn media_uuids_without_data_are_rejected() {
+    let mut request = request();
+    request.multi_modal_uuids = Some(std::collections::HashMap::from([(
+        "image_url".to_string(),
+        vec![Some("image-cache-id".to_string())],
+    )]));
+
+    let error = build_generate_request(
+        request,
+        "uuid-only".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("UUIDs without media must be rejected");
+    assert!(error.to_string().contains("without multi_modal_data"));
+}
+
+#[test]
 fn unsafe_media_uuids_are_rejected() {
     for uuid in [
         "/tmp/escape",
@@ -2436,6 +2453,292 @@ async fn decode_cancellation_maps_premature_eof_to_cancelled() {
         .expect("cancelled terminal")
         .expect("cancelled output");
     assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
+}
+
+const VALID_MM_KWARGS_BASE64: &str =
+    "gaxwaXhlbF92YWx1ZXOCpGRhdGGTpXVpbnQ4kQPHAwMBAgOlZmllbGSSp2JhdGNoZWSBq2tlZXBfb25fY3B1wg==";
+const ALTERNATE_VALID_MM_KWARGS_BASE64: &str =
+    "gaxwaXhlbF92YWx1ZXOCpGRhdGGTpXVpbnQ4kQPHAwMBAgSlZmllbGSSp2JhdGNoZWSBq2tlZXBfb25fY3B1wg==";
+
+fn request_with_preprocessed_features(features: serde_json::Value) -> PreprocessedRequest {
+    let mut request = request();
+    request.extra_args = Some(json!({
+        "vllm_tito": {
+            "request_id": "request-1",
+            "sampling_params": {},
+            "stream": false,
+            "priority": 0,
+            "features": features
+        }
+    }));
+    request
+}
+
+fn image_features(kwargs: serde_json::Value) -> serde_json::Value {
+    json!({
+        "mm_hashes": {"image": ["image-hash-a"]},
+        "mm_placeholders": {"image": [{"offset": 1, "length": 2}]},
+        "kwargs_data": {"image": [kwargs]}
+    })
+}
+
+#[test]
+fn preprocessed_multimodal_features_are_forwarded_to_vllm_grpc() {
+    let request = request_with_preprocessed_features(image_features(json!(VALID_MM_KWARGS_BASE64)));
+
+    let wire = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("preprocessed features should be forwarded");
+
+    let feature = match wire.media[0].source.as_ref() {
+        Some(pb::media_item::Source::Features(feature)) => feature,
+        other => panic!("expected preprocessed features, got {other:?}"),
+    };
+    assert!(feature.identifier.starts_with("grpc-mm:"));
+    assert_eq!(
+        feature.mm_hash.as_deref(),
+        Some(feature.identifier.as_str())
+    );
+    assert_eq!((feature.offset, feature.length), (1, 2));
+    assert_eq!(feature.kwargs.as_ref().map(Vec::len), Some(64));
+}
+
+#[test]
+fn multimodal_routing_hashes_are_consumed_for_preprocessed_features() {
+    let marker = format!("{}{}", "0123456789abcdef", "0".repeat(48));
+    let mut request =
+        request_with_preprocessed_features(image_features(json!(VALID_MM_KWARGS_BASE64)));
+    request
+        .extra_args
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("object extra_args")
+        .insert("dynamo_mm_routing_hashes".to_string(), json!([marker]));
+
+    let wire = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("routing metadata should be consumed");
+
+    let feature = match wire.media[0].source.as_ref() {
+        Some(pb::media_item::Source::Features(feature)) => feature,
+        other => panic!("expected preprocessed features, got {other:?}"),
+    };
+    assert!(feature.identifier.starts_with("grpc-mm:"));
+    assert_eq!(
+        feature.mm_hash.as_deref(),
+        Some(feature.identifier.as_str())
+    );
+}
+
+#[test]
+fn multimodal_routing_hashes_without_preprocessed_features_are_rejected() {
+    let marker = format!("{}{}", "0123456789abcdef", "0".repeat(48));
+    let mut request = request();
+    request
+        .extra_args
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("object extra_args")
+        .insert("dynamo_mm_routing_hashes".to_string(), json!([marker]));
+
+    let error = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("routing metadata without features must be rejected");
+    assert!(error.to_string().contains("dynamo_mm_routing_hashes"));
+}
+
+#[test]
+fn preprocessed_multimodal_features_support_disaggregated_modes() {
+    for mode in [
+        DisaggregationMode::Encode,
+        DisaggregationMode::Prefill,
+        DisaggregationMode::Decode,
+    ] {
+        let mut request =
+            request_with_preprocessed_features(image_features(json!(VALID_MM_KWARGS_BASE64)));
+        if matches!(mode, DisaggregationMode::Decode) {
+            request.prefill_result = decode_request().prefill_result;
+        }
+
+        let wire = build_generate_request(request, "request-1".to_string(), mode)
+            .expect("image features should support disaggregated execution");
+        assert!(matches!(
+            wire.media[0].source.as_ref(),
+            Some(pb::media_item::Source::Features(_))
+        ));
+    }
+
+    let audio_features = json!({
+        "mm_hashes": {"audio": ["audio-hash-a"]},
+        "mm_placeholders": {"audio": [{"offset": 1, "length": 2}]},
+        "kwargs_data": {"audio": [VALID_MM_KWARGS_BASE64]}
+    });
+    let error = build_generate_request(
+        request_with_preprocessed_features(audio_features),
+        "request-1".to_string(),
+        DisaggregationMode::Encode,
+    )
+    .expect_err("Encode must reject non-image features");
+    assert!(error.to_string().contains("image media only"));
+}
+
+#[test]
+fn preprocessed_multimodal_identifier_is_bound_to_inline_content() {
+    let first = build_generate_request(
+        request_with_preprocessed_features(image_features(json!(VALID_MM_KWARGS_BASE64))),
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("first feature should be forwarded");
+    let second = build_generate_request(
+        request_with_preprocessed_features(image_features(json!(ALTERNATE_VALID_MM_KWARGS_BASE64))),
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("second feature should be forwarded");
+
+    let receiver_cache_key = |request: &pb::GenerateRequest| match request.media[0].source.as_ref()
+    {
+        Some(pb::media_item::Source::Features(feature)) => feature
+            .mm_hash
+            .clone()
+            .unwrap_or_else(|| feature.identifier.clone()),
+        other => panic!("expected preprocessed features, got {other:?}"),
+    };
+    assert_ne!(receiver_cache_key(&first), receiver_cache_key(&second));
+}
+
+#[test]
+fn preprocessed_multimodal_features_require_inline_kwargs() {
+    for kwargs in [
+        serde_json::Value::Null,
+        serde_json::Value::String(String::new()),
+    ] {
+        let error = build_generate_request(
+            request_with_preprocessed_features(image_features(kwargs)),
+            "request-1".to_string(),
+            DisaggregationMode::Aggregated,
+        )
+        .expect_err("empty feature kwargs must be rejected");
+        assert!(error.to_string().contains("features"));
+    }
+}
+
+#[test]
+fn preprocessed_multimodal_features_enforce_hash_and_count_limits() {
+    let mut oversized_hash = image_features(json!(VALID_MM_KWARGS_BASE64));
+    oversized_hash["mm_hashes"]["image"][0] = json!("h".repeat(257));
+    let hash_error = build_generate_request(
+        request_with_preprocessed_features(oversized_hash),
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("producer hashes must be bounded");
+    assert!(hash_error.to_string().contains("between 1 and 256 bytes"));
+
+    let too_many = json!({
+        "mm_hashes": {"image": vec!["image-hash"; 65]},
+        "mm_placeholders": {"image": (0..65).map(|offset| json!({"offset": offset, "length": 1})).collect::<Vec<_>>()},
+        "kwargs_data": {"image": vec![VALID_MM_KWARGS_BASE64; 65]}
+    });
+    let count_error = build_generate_request(
+        request_with_preprocessed_features(too_many),
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("feature count must be bounded");
+    assert!(count_error.to_string().contains("at most 64"));
+}
+
+#[test]
+fn preprocessed_multimodal_features_cannot_mix_with_raw_media() {
+    let mut request =
+        request_with_preprocessed_features(image_features(json!(VALID_MM_KWARGS_BASE64)));
+    request.multi_modal_data = Some(std::collections::HashMap::from([(
+        "image_url".to_string(),
+        vec![MultimodalData::RawUrl(
+            "data:image/png;base64,iVBORw0KGgo=".to_string(),
+        )],
+    )]));
+
+    let error = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("raw media and preprocessed features must not be mixed");
+    assert!(error.to_string().contains("cannot be mixed"));
+}
+
+#[test]
+fn preprocessed_multimodal_features_allow_overlapping_audio_video_spans() {
+    let features = json!({
+        "mm_hashes": {
+            "video": ["video-hash-a"],
+            "audio": ["audio-hash-a"]
+        },
+        "mm_placeholders": {
+            "video": [{"offset": 1, "length": 2}],
+            "audio": [{"offset": 1, "length": 2}]
+        },
+        "kwargs_data": {
+            "video": [VALID_MM_KWARGS_BASE64],
+            "audio": [VALID_MM_KWARGS_BASE64]
+        }
+    });
+
+    let wire = build_generate_request(
+        request_with_preprocessed_features(features),
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("overlapping audio and video features are valid");
+
+    assert_eq!(wire.media.len(), 2);
+    assert_eq!(wire.media[0].modality, pb::Modality::Video as i32);
+    assert_eq!(wire.media[1].modality, pb::Modality::Audio as i32);
+    assert!(wire.media.iter().all(|item| {
+        matches!(
+            item.source.as_ref(),
+            Some(pb::media_item::Source::Features(feature))
+                if (feature.offset, feature.length) == (1, 2)
+        )
+    }));
+}
+
+#[tokio::test]
+async fn preprocessed_multimodal_features_require_model_support() {
+    let engine = engine(
+        "http://127.0.0.1:9",
+        DisaggregationMode::Aggregated,
+        1,
+        model_info(),
+    );
+    let context = dynamo_backend_common::testing::mock_context();
+    let result = engine
+        .generate(
+            request_with_preprocessed_features(image_features(json!(VALID_MM_KWARGS_BASE64))),
+            GenerateContext::new(context, None),
+        )
+        .await;
+    let error = match result {
+        Ok(_) => panic!("a text-only model must reject preprocessed media before RPC submission"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("does not advertise multimodal support")
+    );
 }
 
 #[tokio::test]
