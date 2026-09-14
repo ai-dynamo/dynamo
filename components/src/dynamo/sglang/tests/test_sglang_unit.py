@@ -18,7 +18,9 @@ from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 from sglang.srt.managers.io_struct import ProfileReq
 
 import dynamo.sglang._compat as sglang_compat
+import dynamo.sglang._disagg as disagg_mod
 import dynamo.sglang.args as sglang_args
+import dynamo.sglang.init_llm as init_llm_mod
 import dynamo.sglang.main as sglang_main
 from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
 from dynamo.common.snapshot.constants import SNAPSHOT_CONTROL_DIR_ENV
@@ -1655,6 +1657,41 @@ async def test_worker_teardown_keeps_the_body_failure(caplog):
 
     assert steps == ["handler.cleanup", "run_deferred_handlers"]
     assert "an earlier exception is already propagating" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("warmup_error", "message"),
+    [
+        (asyncio.TimeoutError(), "Prefill warmup timed out"),
+        (ValueError("boom"), "Prefill warmup failed: boom"),
+    ],
+)
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_prefill_warmup_failure_cancels_metrics(
+    monkeypatch, warmup_error, message
+):
+    metrics_started = asyncio.Event()
+
+    async def metrics_loop():
+        metrics_started.set()
+        await asyncio.Event().wait()
+
+    async def fail_warmup(engine, port):
+        raise warmup_error
+
+    monkeypatch.setattr(disagg_mod, "warmup_prefill_engine", fail_warmup)
+    metrics_task = asyncio.create_task(metrics_loop())
+    await metrics_started.wait()
+
+    with pytest.raises(RuntimeError, match=message):
+        await init_llm_mod._warmup_prefill_engine(
+            object(),
+            SimpleNamespace(disaggregation_bootstrap_port=1234),
+            metrics_task,
+        )
+
+    assert metrics_task.cancelled()
 
 
 def test_main_treats_cancellation_as_clean_exit(monkeypatch, caplog):

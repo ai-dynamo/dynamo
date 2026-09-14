@@ -30,16 +30,24 @@ from dynamo.sglang.register import register_model_with_readiness_gate
 from dynamo.sglang.request_handlers import DecodeWorkerHandler, PrefillWorkerHandler
 
 
-async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
-    """Perform warmup request for prefill engine to reduce initial TTFT.
-
-    Raises on failure so the caller can prevent the worker from registering
-    with a broken engine (silent request drops). Delegates to
-    `_disagg.warmup_prefill_engine`.
-    """
+async def _warmup_prefill_engine(
+    engine: sgl.Engine, server_args, metrics_task: asyncio.Task
+) -> None:
+    """Warm the prefill engine and stop metrics if warmup fails."""
     from dynamo.sglang._disagg import warmup_prefill_engine
 
-    await warmup_prefill_engine(engine, server_args.disaggregation_bootstrap_port)
+    try:
+        await warmup_prefill_engine(engine, server_args.disaggregation_bootstrap_port)
+    except asyncio.TimeoutError as exc:
+        await finish_worker_teardown(metrics_task, lambda: None, body_failed=True)
+        logging.error("Prefill warmup timed out after 1800s — aborting worker startup")
+        raise RuntimeError(
+            "Prefill warmup timed out; worker cannot serve requests"
+        ) from exc
+    except Exception as exc:
+        await finish_worker_teardown(metrics_task, lambda: None, body_failed=True)
+        logging.error("Prefill warmup failed: %s — aborting worker startup", exc)
+        raise RuntimeError(f"Prefill warmup failed: {exc}") from exc
 
 
 async def init_decode(
@@ -261,16 +269,7 @@ async def init_prefill(
         await handle_non_leader_node(engine, publisher, metrics_task)
         return
 
-    try:
-        await _warmup_prefill_engine(engine, server_args)
-    except asyncio.TimeoutError as e:
-        logging.error("Prefill warmup timed out after 1800s — aborting worker startup")
-        raise RuntimeError(
-            "Prefill warmup timed out; worker cannot serve requests"
-        ) from e
-    except Exception as e:
-        logging.error(f"Prefill warmup failed: {e} — aborting worker startup")
-        raise RuntimeError(f"Prefill warmup failed: {e}") from e
+    await _warmup_prefill_engine(engine, server_args, metrics_task)
 
     handler = PrefillWorkerHandler(
         engine, config, publisher, generate_endpoint, shutdown_event
