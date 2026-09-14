@@ -455,6 +455,79 @@ func TestXTRuntimesValidateHostDeviceVolumes(t *testing.T) {
 	}
 }
 
+func TestXTRuntimesValidateTemporaryStorage(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		source   corev1.VolumeSource
+		readOnly bool
+		wantErr  bool
+	}{
+		{"emptyDir", corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}, false, false},
+		{"read-only mount", corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}, true, true},
+		{"hostPath", corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/scratch"}}, false, false},
+		{"PVC", corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "scratch"}}, false, false},
+		{"CSI", corev1.VolumeSource{CSI: &corev1.CSIVolumeSource{Driver: "storage.example.com"}}, false, false},
+		{"AzureDisk", corev1.VolumeSource{AzureDisk: &corev1.AzureDiskVolumeSource{DiskName: "scratch", DataDiskURI: "disk-uri"}}, false, false},
+		{"ConfigMap", corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{}}, false, true},
+		{"Secret", corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{}}, false, true},
+		{"DownwardAPI", corev1.VolumeSource{DownwardAPI: &corev1.DownwardAPIVolumeSource{}}, false, true},
+		{"Projected", corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{}}, false, true},
+		{"Image", corev1.VolumeSource{Image: &corev1.ImageVolumeSource{Reference: "runtime:latest"}}, false, true},
+		{"read-only PVC", corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ReadOnly: true}}, false, true},
+		{"read-only NFS", corev1.VolumeSource{NFS: &corev1.NFSVolumeSource{ReadOnly: true}}, false, true},
+		{"read-only CSI", corev1.VolumeSource{CSI: &corev1.CSIVolumeSource{ReadOnly: ptr.To(true)}}, false, true},
+		{"read-only ISCSI", corev1.VolumeSource{ISCSI: &corev1.ISCSIVolumeSource{ReadOnly: true}}, false, true},
+		{"read-only FC", corev1.VolumeSource{FC: &corev1.FCVolumeSource{ReadOnly: true}}, false, true},
+		{"read-only FlexVolume", corev1.VolumeSource{FlexVolume: &corev1.FlexVolumeSource{ReadOnly: true}}, false, true},
+		{"read-only GCE", corev1.VolumeSource{GCEPersistentDisk: &corev1.GCEPersistentDiskVolumeSource{ReadOnly: true}}, false, true},
+		{"read-only AWS", corev1.VolumeSource{AWSElasticBlockStore: &corev1.AWSElasticBlockStoreVolumeSource{ReadOnly: true}}, false, true},
+		{"read-only Cinder", corev1.VolumeSource{Cinder: &corev1.CinderVolumeSource{ReadOnly: true}}, false, true},
+		{"read-only AzureFile", corev1.VolumeSource{AzureFile: &corev1.AzureFileVolumeSource{ReadOnly: true}}, false, true},
+		{"read-only AzureDisk", corev1.VolumeSource{AzureDisk: &corev1.AzureDiskVolumeSource{ReadOnly: ptr.To(true)}}, false, true},
+		{"read-only Portworx", corev1.VolumeSource{PortworxVolume: &corev1.PortworxVolumeSource{ReadOnly: true}}, false, true},
+	} {
+		for _, name := range []string{"tmp", "scratch"} {
+			t.Run(test.name+"/"+name, func(t *testing.T) {
+				t.Log("Use either a named tmp volume or an existing /tmp mount")
+				base := corev1.PodSpec{
+					Containers: []corev1.Container{{Name: commonconsts.MainContainerName, Image: "lpu-runtime"}},
+					Volumes:    []corev1.Volume{{Name: name, VolumeSource: test.source}},
+				}
+				if name != "tmp" || test.readOnly {
+					base.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: name, MountPath: "/tmp", ReadOnly: test.readOnly}}
+				}
+				if name != "tmp" {
+					base.Volumes = append(base.Volumes, corev1.Volume{Name: "tmp", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "unused"}}})
+				}
+				configureAgentScheduling(&base, BuildFamilyXT)
+				direct, agent := base.DeepCopy(), base.DeepCopy()
+
+				t.Log("Require writable temporary storage through both XT runtime entry points")
+				for _, err := range []error{
+					configureDirectHybridAgentRuntime(direct, "graph-lpu", "ssh-secret"),
+					configureNodeLocalAgentRuntime(agent, BuildFamilyXT, false, "ssh-secret"),
+				} {
+					if test.wantErr {
+						require.ErrorContains(t, err, "requires writable storage")
+					} else {
+						require.NoError(t, err)
+					}
+				}
+
+				t.Log("Preserve authored storage and the selected mount")
+				for _, pod := range []*corev1.PodSpec{direct, agent} {
+					for _, volume := range base.Volumes {
+						require.Equal(t, volume.VolumeSource, testVolumeByName(t, pod.Volumes, volume.Name))
+					}
+					if !test.wantErr {
+						require.Contains(t, pod.Containers[0].VolumeMounts, corev1.VolumeMount{Name: name, MountPath: "/tmp"})
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestConfigureDirectHybridAgentRuntimePreservesPodOverrides(t *testing.T) {
 	t.Log("Define custom entrypoint, probe and Pod security preservation cases")
 	customStartup := testExecProbe("custom-startup")

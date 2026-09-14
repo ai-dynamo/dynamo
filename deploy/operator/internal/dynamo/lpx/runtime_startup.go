@@ -61,6 +61,5 @@ func addRuntimeConfigStorage(podSpec *corev1.PodSpec, container *corev1.Containe
 	if mount.Name != runtimeTemporaryStorageVolumeName {
 		return fmt.Errorf("LPX runtime mount at %q references missing volume %q", mount.MountPath, mount.Name)
 	}
-	addRuntimeTemporaryStorage(podSpec, container, false)
-	return nil
+	return addRuntimeTemporaryStorage(podSpec, container, false)
 }

@@ -162,7 +162,9 @@ func configureDirectHybridAgentRuntime(
 		},
 	)
 	setNodeLocalPodIPEnv(agent, true)
-	addRuntimeTemporaryStorage(agentPodSpec, agent, false)
+	if err := addRuntimeTemporaryStorage(agentPodSpec, agent, false); err != nil {
+		return err
+	}
 	updateWorkerPodSpec(agentPodSpec)
 
 	// Keep volume permissions and other Pod settings while forcing the Agent's root identity.
@@ -249,7 +251,9 @@ func configureNodeLocalAgentRuntime(
 	agent.Name = lpuAgentContainerName
 	retargetMainContainerReferences(agentPodSpec, agent)
 	configureNodeLocalAgentWorkerContainer(agent, isXT, preserveAgentEntrypoint)
-	addRuntimeTemporaryStorage(agentPodSpec, agent, !isXT)
+	if err := addRuntimeTemporaryStorage(agentPodSpec, agent, !isXT); err != nil {
+		return err
+	}
 	agentPodSpec.HostUsers = nil
 	updateWorkerPodSpec(agentPodSpec)
 	if err := applyLPUHostDeviceVolumes(agentPodSpec, !isXT); err != nil {
@@ -435,7 +439,7 @@ func retargetResourceFieldReferencesInDownwardAPI(items []corev1.DownwardAPIVolu
 	}
 }
 
-func addRuntimeTemporaryStorage(podSpec *corev1.PodSpec, container *corev1.Container, replaceExisting bool) {
+func addRuntimeTemporaryStorage(podSpec *corev1.PodSpec, container *corev1.Container, replaceExisting bool) error {
 	// Give conductor expansion and Agent setup a pod-lifetime writable workspace.
 	volume := corev1.Volume{
 		Name: runtimeTemporaryStorageVolumeName,
@@ -447,12 +451,42 @@ func addRuntimeTemporaryStorage(podSpec *corev1.PodSpec, container *corev1.Conta
 	if replaceExisting {
 		podSpec.Volumes = setVolumeByName(podSpec.Volumes, volume)
 		container.VolumeMounts = setVolumeMount(container.VolumeMounts, mount)
-		return
+		return nil
 	}
-	if !slices.ContainsFunc(container.VolumeMounts, func(mount corev1.VolumeMount) bool {
-		return mount.MountPath == runtimeTemporaryStorageMountPath
-	}) {
-		container.VolumeMounts = append(container.VolumeMounts, mount)
+
+	// Validate the selected binding without rebinding authored storage used by other containers.
+	for _, existing := range container.VolumeMounts {
+		if existing.MountPath == mount.MountPath {
+			mount = existing
+		}
 	}
+	readOnly := mount.ReadOnly
+	for _, existing := range podSpec.Volumes {
+		if existing.Name == mount.Name {
+			readOnly = readOnly || volumeIsReadOnly(existing.VolumeSource)
+		}
+	}
+	if readOnly {
+		return fmt.Errorf("LPX runtime requires writable storage at %q", mount.MountPath)
+	}
+	container.VolumeMounts = setVolumeMount(container.VolumeMounts, mount)
 	podSpec.Volumes = appendVolumeIfMissing(podSpec.Volumes, volume)
+	return nil
+}
+
+func volumeIsReadOnly(source corev1.VolumeSource) bool {
+	// These sources force a read-only mount even when VolumeMount.ReadOnly is false.
+	return source.ConfigMap != nil || source.Secret != nil || source.DownwardAPI != nil || source.Projected != nil || source.Image != nil ||
+		source.PersistentVolumeClaim != nil && source.PersistentVolumeClaim.ReadOnly ||
+		source.NFS != nil && source.NFS.ReadOnly ||
+		source.CSI != nil && ptr.Deref(source.CSI.ReadOnly, false) ||
+		source.ISCSI != nil && source.ISCSI.ReadOnly ||
+		source.FC != nil && source.FC.ReadOnly ||
+		source.FlexVolume != nil && source.FlexVolume.ReadOnly ||
+		source.GCEPersistentDisk != nil && source.GCEPersistentDisk.ReadOnly ||
+		source.AWSElasticBlockStore != nil && source.AWSElasticBlockStore.ReadOnly ||
+		source.Cinder != nil && source.Cinder.ReadOnly ||
+		source.AzureFile != nil && source.AzureFile.ReadOnly ||
+		source.AzureDisk != nil && ptr.Deref(source.AzureDisk.ReadOnly, false) ||
+		source.PortworxVolume != nil && source.PortworxVolume.ReadOnly
 }
