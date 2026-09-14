@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import sys
-import types
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -20,24 +18,6 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
-
-
-@pytest.fixture(autouse=True)
-def _stub_sglang_io_struct(monkeypatch):
-    """Keep unit tests independent from CUDA-only sglang imports."""
-
-    io_struct = types.ModuleType("sglang.srt.managers.io_struct")
-
-    class _Req:
-        def __init__(self, tags=None):
-            self.tags = tags
-
-    io_struct.PauseGenerationReqInput = _Req
-    io_struct.ReleaseMemoryOccupationReqInput = _Req
-    io_struct.ResumeMemoryOccupationReqInput = _Req
-    io_struct.ContinueGenerationReqInput = _Req
-
-    monkeypatch.setitem(sys.modules, "sglang.srt.managers.io_struct", io_struct)
 
 
 class _TestWorkerHandler(BaseWorkerHandler):
@@ -322,3 +302,20 @@ async def test_clear_kv_blocks_reports_flush_exception(handler):
     chunks = [chunk async for chunk in handler.clear_kv_blocks({})]
 
     assert chunks == [{"status": "error", "message": "flush crashed"}]
+
+
+@pytest.mark.parametrize("flag", ["handoff", "release_failover_lock"])
+@pytest.mark.asyncio
+async def test_cooperative_handoff_fails_closed_without_mutating_worker(handler, flag):
+    lock = SimpleNamespace(release=AsyncMock())
+    handler._gms_failover_lock = lock
+
+    result = await handler.release_memory_occupation({flag: True})
+
+    assert result["status"] == "error"
+    assert "writer-cohort fencing" in result["message"]
+    lock.release.assert_not_awaited()
+    assert handler._gms_failover_lock is lock
+    handler.generate_endpoint.unregister_endpoint_instance.assert_not_awaited()
+    handler.engine.tokenizer_manager.pause_generation.assert_not_awaited()
+    handler.engine.tokenizer_manager.release_memory_occupation.assert_not_awaited()
