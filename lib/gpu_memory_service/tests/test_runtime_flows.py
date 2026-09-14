@@ -1146,6 +1146,7 @@ def _build_sealed_layout(socket_path, size=4096, tag="kv_cache"):
 
 
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+@pytest.mark.cuda_only
 def test_commit_layout_seals_shape_and_narrows_writer_to_rw_data(gms_thread):
     server, socket_path, _thread = gms_thread
     writer, _ = _build_sealed_layout(socket_path)
@@ -1159,6 +1160,7 @@ def test_commit_layout_seals_shape_and_narrows_writer_to_rw_data(gms_thread):
 
 
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+@pytest.mark.cuda_only
 @pytest.mark.parametrize(
     "seal, allocations_after_crash, state_after_crash",
     [(False, 0, ServerState.EMPTY), (True, 1, ServerState.LAYOUT_COMMITTED)],
@@ -1184,6 +1186,7 @@ def test_only_a_committed_layout_survives_the_writer(
 
 
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+@pytest.mark.cuda_only
 def test_standby_adopts_a_committed_layout_and_replays_across_takeovers(gms_thread):
     """The failover path: adopt the same allocation, repeatedly."""
     server, socket_path, thread = gms_thread
@@ -1204,6 +1207,7 @@ def test_standby_adopts_a_committed_layout_and_replays_across_takeovers(gms_thre
 
 
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+@pytest.mark.cuda_only
 def test_requesting_rw_replaces_a_committed_layout(gms_thread):
     """Adopt-vs-replace is chosen by the requested mode, not by server policy."""
     server, socket_path, thread = gms_thread
@@ -1220,6 +1224,7 @@ def test_requesting_rw_replaces_a_committed_layout(gms_thread):
 
 
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+@pytest.mark.cuda_only
 def test_readers_are_refused_while_contents_are_unspecified(gms_thread):
     """A reader must never attach to a live, mutating pool.
 
@@ -1238,6 +1243,7 @@ def test_readers_are_refused_while_contents_are_unspecified(gms_thread):
 
 
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+@pytest.mark.cuda_only
 def test_content_commit_path_is_unchanged(gms_thread):
     """Regression guard: the weights lifecycle must not notice any of this."""
     server, socket_path, _thread = gms_thread
