@@ -27,9 +27,6 @@ mod request;
 
 const DP_RANK: u32 = 0;
 const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 256;
-/// Ceiling on the pump's per-request buffer. Without it the buffer is the
-/// client's own `max_tokens`, so idle streams could pin arbitrary memory.
-const MAX_PUMP_BUFFER: usize = 256;
 /// Recorded requests are a test affordance, not a log; keep the window small.
 const MAX_RECORDED_REQUESTS: usize = 256;
 /// `ServerInfo.schema_revision` is documented as "zero is invalid".
@@ -123,6 +120,11 @@ pub struct TrtllmMockerService {
     /// on the wire rather than only what came back. Bounded: this runs as a
     /// long-lived process under load and the prompts are not worth retaining.
     received: Arc<Mutex<VecDeque<pb::GenerateRequest>>>,
+    /// Test hook: holds a request between registering it and handing it to the
+    /// scheduler. That window is the one place an `Abort` cannot be carried out
+    /// by `LiveEngine::cancel`, and it is too narrow to hit by racing.
+    #[cfg(test)]
+    submit_gate: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl TrtllmMockerService {
@@ -256,7 +258,19 @@ impl TrtllmMockerService {
             request_permits: Arc::new(Semaphore::new(max_concurrent_requests)),
             inflight: Arc::new(DashMap::new()),
             received: Arc::new(Mutex::new(VecDeque::new())),
+            #[cfg(test)]
+            submit_gate: None,
         })
+    }
+
+    /// Holds every request in the window between registration and submission
+    /// until the returned gate is notified, so a test can land an `Abort`
+    /// there.
+    #[cfg(test)]
+    fn gate_submissions(&mut self) -> Arc<tokio::sync::Notify> {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        self.submit_gate = Some(Arc::clone(&gate));
+        gate
     }
 
     pub fn config(&self) -> &MockerServerConfig {
@@ -265,6 +279,14 @@ impl TrtllmMockerService {
 
     pub fn active_request_count(&self) -> usize {
         self.engine.active_request_count()
+    }
+
+    /// Requests the server has accepted, including any not yet handed to the
+    /// scheduler. `active_request_count` reports the scheduler's view, which
+    /// lags this one.
+    #[cfg(test)]
+    fn registered_request_count(&self) -> usize {
+        self.inflight.len()
     }
 
     pub fn metrics_receiver(&self) -> tokio::sync::watch::Receiver<MockerMetrics> {
@@ -332,6 +354,11 @@ impl TrtllmMockerService {
             request_id: prepared.request_id.clone(),
         };
 
+        #[cfg(test)]
+        if let Some(gate) = &self.submit_gate {
+            gate.notified().await;
+        }
+
         let live = self
             .engine
             .submit(prepared.direct_request())
@@ -391,6 +418,38 @@ fn candidate_modes() -> Vec<i32> {
 
 /// The only place a `GenerateResponse` is built, so no call site can emit one
 /// with an empty `event` oneof -- which the sidecar rejects outright.
+/// Why the response loop stopped. Keeping the reason separate from the terminal
+/// event is what lets the terminal be emitted in exactly one place.
+enum Exit {
+    /// The scheduler refused the request for capacity.
+    Rejected,
+    /// The engine produced an output signal with no token in it.
+    MissingToken,
+    /// The engine finished the request normally.
+    Completed,
+    /// A generated token matched one of the request's stop conditions.
+    Stopped(u32),
+    /// The engine's channel closed without a completion.
+    Closed,
+    /// An `Abort` claimed the request while it was streaming.
+    Aborted,
+}
+
+/// A context request's terminal event. The real server reports the context
+/// phase's usage here -- the decode leg cannot reconstruct its cache-hit count
+/// -- so the mocker must too.
+fn prefill_ready(
+    request_id: &str,
+    ready: pb::PrefillReady,
+    usage: pb::Usage,
+) -> pb::GenerateResponse {
+    pb::GenerateResponse {
+        request_id: request_id.to_string(),
+        event: Some(pb::generate_response::Event::PrefillReady(ready)),
+        usage: Some(usage),
+    }
+}
+
 fn response(request_id: &str, event: pb::generate_response::Event) -> pb::GenerateResponse {
     pb::GenerateResponse {
         request_id: request_id.to_string(),
@@ -428,17 +487,15 @@ impl pb::inference_server::Inference for TrtllmMockerService {
         let config = Arc::clone(&self.config);
 
         // Decouple LiveEngine's small fixed per-request buffer from client and
-        // transport pacing. A pump drains the engine promptly into a buffer
-        // capped by MAX_PUMP_BUFFER, so a bursty producer racing ahead of a
-        // slow gRPC consumer is far less likely to trip LiveEngine's
-        // slow-consumer shedding. Dropping the client stream still cancels
-        // unfinished scheduler work.
-        let (signal_tx, mut signal_rx) = tokio::sync::mpsc::channel(
-            prepared
-                .max_output_tokens
-                .saturating_add(1)
-                .min(MAX_PUMP_BUFFER),
-        );
+        // transport pacing. A pump drains the engine promptly so a bursty
+        // producer racing ahead of a slow gRPC consumer does not trip
+        // LiveEngine's slow-consumer shedding, which would surface to the
+        // client as an internal error rather than as backpressure. Sizing to
+        // the whole token budget is what the vLLM and SGLang mockers do: a
+        // smaller cap just moves the shedding threshold. Dropping the client
+        // stream still cancels unfinished scheduler work.
+        let (signal_tx, mut signal_rx) =
+            tokio::sync::mpsc::channel(prepared.max_output_tokens.saturating_add(1));
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -466,85 +523,90 @@ impl pb::inference_server::Inference for TrtllmMockerService {
 
             let mut generated = 0usize;
             let mut cached_tokens = None;
-            while let Some(signal) = signal_rx.recv().await {
+            let exit = loop {
+                // An abort claims the request before it cancels the engine, and
+                // `LiveEngine::cancel` cannot stop a request whose route is not
+                // registered yet (the window between inserting the in-flight
+                // entry and `submit` returning). Honouring the claim here is
+                // what actually stops generation in that window; without it an
+                // aborted request streams its whole budget and only the
+                // terminal reason differs.
+                if claimed.load(Ordering::Acquire) {
+                    break Exit::Aborted;
+                }
+                let Some(signal) = signal_rx.recv().await else {
+                    break Exit::Closed;
+                };
                 if signal.rejected {
-                    if claimed.swap(true, Ordering::AcqRel) {
-                        yield prepared.finished(pb::FinishReason::Cancelled, generated, cached_tokens);
-                    } else {
-                        // An accepted request fails in-band and the RPC still
-                        // closes OK; a non-OK status is reserved for validation
-                        // and transport failures.
-                        yield engine_error(
-                            &request_id,
-                            pb::ErrorCode::Overloaded,
-                            "request exceeds the simulated KV-cache capacity",
-                            true,
-                        );
-                    }
-                    return;
+                    break Exit::Rejected;
                 }
                 cached_tokens = cached_tokens.or(signal.cached_tokens);
                 let Some(token_id) = signal.token_id else {
-                    if claimed.swap(true, Ordering::AcqRel) {
-                        yield prepared.finished(pb::FinishReason::Cancelled, generated, cached_tokens);
-                    } else {
-                        // Accepted requests report failure in-band, per the same
-                        // contract as the capacity rejection above.
-                        yield engine_error(
-                            &request_id,
-                            pb::ErrorCode::Internal,
-                            "Mocker output signal is missing a token ID",
-                            false,
-                        );
-                    }
-                    return;
+                    break Exit::MissingToken;
                 };
+                if prepared.is_stop_token(token_id, generated) {
+                    break Exit::Stopped(token_id);
+                }
                 generated += 1;
                 yield response(
                     &request_id,
                     pb::generate_response::Event::Token(prepared.token_output(token_id)),
                 );
-
                 if signal.completed {
-                    let aborted = claimed.swap(true, Ordering::AcqRel);
-                    if config.mode == ServerMode::Prefill && !aborted {
-                        // PrefillReady is the terminal event for a context
-                        // request; a `finished` after it reads as "request
-                        // complete" and the decode leg never runs.
-                        yield response(
-                            &request_id,
-                            pb::generate_response::Event::PrefillReady(
-                                prepared.prefill_ready(&config),
-                            ),
-                        );
-                    } else {
-                        // An abort may have landed while the engine ran ahead of
-                        // the client; reporting LENGTH would contradict the
-                        // ABORTED its caller was given. Applies to a context
-                        // request too -- an aborted one must not hand a session
-                        // to the decode leg.
-                        let reason = if aborted {
-                            pb::FinishReason::Cancelled
-                        } else {
-                            pb::FinishReason::Length
-                        };
-                        yield prepared.finished(reason, generated, cached_tokens);
-                    }
-                    return;
+                    break Exit::Completed;
                 }
-            }
+            };
 
-            // The stream must never end without a terminal event: the sidecar
-            // fails the request outright if it does.
+            // Exactly one terminal event, chosen here and nowhere else. Whoever
+            // claims first decides: an abort that beat the stream reports
+            // CANCELLED, including on a context request -- an aborted one must
+            // not hand a session to the decode leg.
             if claimed.swap(true, Ordering::AcqRel) {
                 yield prepared.finished(pb::FinishReason::Cancelled, generated, cached_tokens);
             } else {
-                yield engine_error(
-                    &request_id,
-                    pb::ErrorCode::Internal,
-                    "Mocker output channel closed before a terminal response",
-                    false,
-                );
+                match exit {
+                    // An accepted request fails in-band and the RPC still closes
+                    // OK; a non-OK status is reserved for validation and
+                    // transport failures.
+                    Exit::Rejected => yield engine_error(
+                        &request_id,
+                        pb::ErrorCode::Overloaded,
+                        "request exceeds the simulated KV-cache capacity",
+                        true,
+                    ),
+                    Exit::MissingToken => yield engine_error(
+                        &request_id,
+                        pb::ErrorCode::Internal,
+                        "Mocker output signal is missing a token ID",
+                        false,
+                    ),
+                    // The sidecar fails a stream that ends without a terminal.
+                    Exit::Closed => yield engine_error(
+                        &request_id,
+                        pb::ErrorCode::Internal,
+                        "Mocker output channel closed before a terminal response",
+                        false,
+                    ),
+                    Exit::Completed if config.mode == ServerMode::Prefill => {
+                        // PrefillReady is the terminal event for a context
+                        // request; a `finished` after it reads as "request
+                        // complete" and the decode leg never runs.
+                        yield prefill_ready(
+                            &request_id,
+                            prepared.prefill_ready(&config),
+                            prepared.usage(generated, cached_tokens),
+                        );
+                    }
+                    Exit::Completed => {
+                        yield prepared.finished(pb::FinishReason::Length, generated, cached_tokens);
+                    }
+                    Exit::Stopped(token_id) => {
+                        yield prepared.stopped(token_id, generated, cached_tokens);
+                    }
+                    // The claim above is the only way to reach this arm, and it
+                    // took the CANCELLED branch.
+                    Exit::Aborted => unreachable!("an aborted exit has already claimed"),
+                }
             }
         };
         Ok(Response::new(Box::pin(stream)))
@@ -564,13 +626,10 @@ impl pb::control_server::Control for TrtllmMockerService {
         &self,
         request: Request<pb::GetModelInfoRequest>,
     ) -> Result<Response<pb::ModelInfo>, Status> {
-        let requested = request.into_inner().model;
-        if !requested.is_empty() && requested != self.config.model {
-            return Err(Status::not_found(format!(
-                "model '{requested}' is not served; this server serves '{}'",
-                self.config.model
-            )));
-        }
+        // Any name, like the real server: it loads one model and reports it
+        // whatever the request asks for, so a mismatch is not detectable over
+        // this contract and must not be invented here.
+        let _ = request;
         Ok(Response::new((*self.model_info).clone()))
     }
 
