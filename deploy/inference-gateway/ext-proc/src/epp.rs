@@ -19,7 +19,7 @@ use dynamo_kv_router::config::{RouterConfigOverride, try_kv_router_config_from_d
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
 use dynamo_llm::kv_router::prefill_router::PrefillReservation;
-use dynamo_llm::kv_router::{FindBestMatchOutcome, ManagedKvRouter, PrefillRouter, RoutingOptions};
+use dynamo_llm::kv_router::{FindBestMatchOutcome, ManagedKvRouter, PrefillRouter};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::common::extensions::{NvExt, NvExtProvider, routing_constraints_to_kv};
@@ -551,23 +551,24 @@ impl Router {
 
         let outcome = self
             .decode_router
-            .find_best_match_details_with_options(
+            .find_best_match_details_with_policy_class(
                 None,
                 tokens,
                 None,
                 config_override.as_ref(),
                 false,
                 false,
-                RoutingOptions {
-                    cache_namespace,
-                    priority_jump,
-                    strict_priority,
-                    policy_class,
-                    allowed_worker_ids,
-                    routing_constraints,
-                    do_not_queue,
-                    ..Default::default()
-                },
+                None,
+                cache_namespace,
+                priority_jump,
+                strict_priority,
+                policy_class,
+                None,
+                None,
+                None,
+                allowed_worker_ids,
+                routing_constraints,
+                do_not_queue,
             )
             .await
             .context("Decode query failed")?;

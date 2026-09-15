@@ -202,23 +202,24 @@ where
             });
         };
         let outcome = kv_router
-            .find_best_match_details_with_options(
+            .find_best_match_details_with_policy_class(
                 None,
                 token_ids,
                 block_mm_infos,
                 None,
                 false,
                 false,
-                crate::kv_router::RoutingOptions {
-                    lora_name,
-                    cache_namespace,
-                    priority_jump,
-                    strict_priority,
-                    allowed_worker_ids,
-                    routing_constraints,
-                    do_not_queue,
-                    ..Default::default()
-                },
+                lora_name,
+                cache_namespace,
+                priority_jump,
+                strict_priority,
+                None,
+                None,
+                None,
+                None,
+                allowed_worker_ids,
+                routing_constraints,
+                do_not_queue,
             )
             .await?;
         match outcome {
