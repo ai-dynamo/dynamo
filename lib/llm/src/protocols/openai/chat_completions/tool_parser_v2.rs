@@ -32,8 +32,8 @@ use dynamo_parsers::tool_calling::{
     CalledFunction, ToolCallResponse, ToolCallType, ToolDefinition,
 };
 use dynamo_parsers_v2::{
-    Tool as ToolV2, ToolCallDelta, ToolParser, UnifiedEvent, UnifiedParserEvent, UnifiedParserExt,
-    create_tool_parser_for_family, create_unified_parser_for_family,
+    Tool as ToolV2, ToolCallDelta, ToolParser, UnifiedEvent, UnifiedParserEvent,
+    UnifiedParserOutput, assemble, create_tool_parser_for_family, create_unified_parser_for_family,
 };
 
 use crate::protocols::openai::GuidedToolConstraint;
@@ -100,6 +100,36 @@ pub(crate) fn unified_family(
     (is_muse(tool_call_parser) || is_muse(reasoning_parser)).then(|| "muse_glimmer".to_string())
 }
 
+/// Whether `text` is a muse channel header the generation stopped inside, rather than
+/// anything the model meant as output.
+///
+/// The muse grammar frames every message as
+/// `<|start|>assistant to=<channel><|message|>…`. When generation stops between the
+/// header's opener and its `<|message|>` — the ordinary `finish_reason: "length"` cut —
+/// the parser's end-of-stream flush has already stripped the `<|start|>` marker and
+/// hands the `assistant to=user` remainder back as visible text, which is how a channel
+/// specifier reaches `content`.
+///
+/// This matches `^\s*(assistant\s+)?to=\S*$`: the WHOLE event must be a header remnant,
+/// and only an event that came out of `finish()` is ever tested. Ordinary prose
+/// containing `to=user` is emitted during `push` as the body streams and is never
+/// offered to this predicate, so a sentence like `Please send it to=user.` is untouched.
+/// The optional role word covers a turn whose prompt already consumed `assistant`.
+pub(crate) fn is_residual_muse_channel_header(text: &str) -> bool {
+    let rest = text.trim_start();
+    // The role word is optional, but when present it must be followed by whitespace:
+    // `assistantto=user` is not a header.
+    let rest = match rest.strip_prefix("assistant") {
+        Some(after) if after.starts_with(char::is_whitespace) => after.trim_start(),
+        Some(_) => return false,
+        None => rest,
+    };
+    // `\S*$`: the channel name runs to the end of the event with no whitespace in it,
+    // so a header followed by any further text does not match.
+    rest.strip_prefix("to=")
+        .is_some_and(|channel| !channel.contains(char::is_whitespace))
+}
+
 /// Map dynamo's v1 `ToolDefinition`s onto the v2 parser's `Tool` shape.
 fn to_v2_tools(tools: Option<&[ToolDefinition]>) -> Vec<ToolV2> {
     tools
@@ -155,7 +185,31 @@ pub(crate) fn parse_complete_unified(
 ) -> anyhow::Result<(Vec<ToolCallResponse>, String, String)> {
     let v2_tools = to_v2_tools(tools);
     let mut parser = create_unified_parser_for_family(family, &v2_tools)?;
-    let events = parser.parse_complete(content)?;
+
+    // Drive the lifecycle by hand rather than calling `parse_complete`. That helper
+    // appends `finish()` into the same buffer, and the buffer COALESCES adjacent
+    // same-kind events, so a residual channel header would merge into the answer body
+    // and no whole-event test could still see it. Filtering before the append is what
+    // keeps this path on the same content as the streaming path in
+    // `unified_parser::ChoiceState::finish`.
+    let mut output = UnifiedParserOutput::default();
+    parser.parse_into(content, &mut output)?;
+    let mut tail = parser.finish()?;
+    if UNIFIED_FAMILIES.contains(&family) {
+        tail.events.retain(|event| match event {
+            UnifiedParserEvent::Text(text) if is_residual_muse_channel_header(text) => {
+                tracing::debug!(
+                    family,
+                    bytes = text.len(),
+                    "dropping residual muse channel header left by a truncated turn"
+                );
+                false
+            }
+            _ => true,
+        });
+    }
+    output.append(&mut tail);
+    let events = assemble(&output.events);
 
     let mut tool_calls = Vec::new();
     let mut reasoning = String::new();
@@ -1201,7 +1255,17 @@ mod tests {
         assert_eq!(calls[0].0, "get_weather");
         let args: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
         assert_eq!(args["location"], "Paris");
-        for marker in ["<|start|>", "<|message|>", "<|eom|>", "<atem:invoke"] {
+        // `to=user` / `to=self` are in this list because the channel specifier is part
+        // of the framing the parser owes the caller, not just the `<|…|>` markers
+        // around it.
+        for marker in [
+            "<|start|>",
+            "<|message|>",
+            "<|eom|>",
+            "<atem:invoke",
+            "to=user",
+            "to=self",
+        ] {
             assert!(
                 !content.contains(marker) && !reasoning.contains(marker),
                 "raw markup {marker:?} leaked: content={content:?} reasoning={reasoning:?}"
@@ -1240,6 +1304,75 @@ mod tests {
             final_finish_reason(&out),
             Some(FinishReason::Stop),
             "no tool call emitted -> finish_reason stays Stop"
+        );
+    }
+
+    // A turn cut between the answer header's opener and its `<|message|>` — the
+    // ordinary `finish_reason: "length"` cut. The parser's end-of-stream flush hands
+    // back the `assistant to=user` remainder as text; it is framing, not an answer, so
+    // it must not reach `content`. The reasoning that completed before the cut must
+    // still survive.
+    #[tokio::test]
+    async fn muse_unified_drops_truncated_answer_header_at_eof() {
+        let turn = format!("{MUSE_REASONING}<|start|>assistant to=user");
+        let mut chunks: Vec<_> = turn
+            .as_bytes()
+            .chunks(8)
+            .map(|b| chunk(std::str::from_utf8(b).unwrap(), false))
+            .collect();
+        chunks.push(chunk("", true));
+
+        let out: Vec<_> =
+            apply_unified_stream(stream::iter(chunks), None, "muse_glimmer".to_string(), true)
+                .collect::<Vec<_>>()
+                .await;
+
+        let (_calls, content, reasoning) = reassemble_unified(&out);
+        assert_eq!(reasoning, "Look it up.", "reasoning_content mismatch");
+        assert_eq!(
+            content, "",
+            "truncated channel header leaked into content: {content:?}"
+        );
+    }
+
+    // The batch twin of the test above. One request must not depend on `stream` for
+    // its content, so the aggregate path drops the same remnant.
+    #[test]
+    fn muse_unified_batch_drops_truncated_answer_header_at_eof() {
+        let turn = format!("{MUSE_REASONING}<|start|>assistant to=user");
+        let (calls, reasoning, content) =
+            parse_complete_unified(&turn, None, "muse_glimmer").unwrap();
+        assert!(calls.is_empty(), "no tool call expected: {calls:?}");
+        assert_eq!(reasoning, "Look it up.", "reasoning mismatch");
+        assert_eq!(
+            content, "",
+            "truncated channel header leaked into content: {content:?}"
+        );
+    }
+
+    // Blast-radius control for the drop: `to=` inside a real answer body is prose. It
+    // is emitted during push() as the body streams, never offered to the finish-time
+    // predicate, and must survive character for character.
+    #[tokio::test]
+    async fn muse_unified_keeps_to_equals_prose_in_an_answer() {
+        let turn =
+            "<|start|>assistant to=user<|message|>Please send it to=user and cc to=self.<|eot|>";
+        let mut chunks: Vec<_> = turn
+            .as_bytes()
+            .chunks(8)
+            .map(|b| chunk(std::str::from_utf8(b).unwrap(), false))
+            .collect();
+        chunks.push(chunk("", true));
+
+        let out: Vec<_> =
+            apply_unified_stream(stream::iter(chunks), None, "muse_glimmer".to_string(), true)
+                .collect::<Vec<_>>()
+                .await;
+
+        let (_calls, content, _reasoning) = reassemble_unified(&out);
+        assert_eq!(
+            content, "Please send it to=user and cc to=self.",
+            "the drop must not touch prose the parser already classified as content"
         );
     }
 

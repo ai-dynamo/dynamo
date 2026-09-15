@@ -654,7 +654,31 @@ impl ChoiceState {
         match self.parser.finish() {
             // `finish` now hands back the whole `UnifiedParserOutput`; this path only ever
             // wants the ordered events out of it.
-            Ok(output) => output.events,
+            Ok(output) => {
+                let mut events = output.events;
+                // Muse frames a message as `<|start|>assistant to=<channel><|message|>`.
+                // A turn cut inside that header leaves the scanner flushing the
+                // `assistant to=user` remainder as visible text. This is the single
+                // chokepoint for the streaming path — `apply_unified_stream` reaches it
+                // both on a choice's terminating chunk and through the end-of-stream
+                // backstop — so the drop belongs here rather than at either caller.
+                if super::tool_parser_v2::UNIFIED_FAMILIES.contains(&self.family.as_str()) {
+                    events.retain(|event| match event {
+                        UnifiedParserEvent::Text(text)
+                            if super::tool_parser_v2::is_residual_muse_channel_header(text) =>
+                        {
+                            tracing::debug!(
+                                family = self.family,
+                                bytes = text.len(),
+                                "dropping residual muse channel header left by a truncated turn"
+                            );
+                            false
+                        }
+                        _ => true,
+                    });
+                }
+                events
+            }
             Err(error) => {
                 tracing::warn!(
                     error = %error,
