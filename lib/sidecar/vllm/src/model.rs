@@ -106,6 +106,7 @@ impl DiscoveredModel {
     pub(crate) fn rl_worker_metadata(
         &self,
         admin_base_url: Option<RlAdminBaseUrl>,
+        configured_world_size: Option<u32>,
     ) -> Result<RlWorkerMetadata, DynamoError> {
         let parallelism = self.server.parallelism.as_ref().ok_or_else(|| {
             client::protocol_error("RL discovery requires vLLM parallelism metadata")
@@ -116,21 +117,48 @@ impl DiscoveredModel {
             nonzero(parallelism.pipeline_parallel_size).ok_or_else(|| {
                 client::protocol_error("vLLM reports a pipeline-parallel size of zero")
             })?;
-        let engine_world_size = u32::try_from(parallelism.world_size)
-            .ok()
-            .and_then(nonzero)
-            .ok_or_else(|| client::protocol_error("vLLM reports an invalid engine world size"))?;
+        let data_parallel_size = nonzero(parallelism.data_parallel_size)
+            .ok_or_else(|| client::protocol_error("vLLM reports a data-parallel size of zero"))?;
         let expected_minimum_world_size = tensor_parallel_size
             .checked_mul(pipeline_parallel_size)
             .ok_or_else(|| client::protocol_error("vLLM reports an invalid RL world size"))?;
-        if engine_world_size % expected_minimum_world_size != 0 {
-            return Err(client::protocol_error(
-                "vLLM reports an engine world size that is not divisible by TP * PP",
-            ));
-        }
-        let world_size = engine_world_size
-            .checked_mul(parallelism.data_parallel_size)
-            .ok_or_else(|| client::protocol_error("vLLM reports an invalid RL world size"))?;
+        let world_size = match u32::try_from(parallelism.world_size).ok().and_then(nonzero) {
+            Some(engine_world_size) => {
+                if engine_world_size % expected_minimum_world_size != 0 {
+                    return Err(client::protocol_error(
+                        "vLLM reports an engine world size that is not divisible by TP * PP",
+                    ));
+                }
+                engine_world_size
+                    .checked_mul(data_parallel_size)
+                    .ok_or_else(|| {
+                        client::protocol_error("vLLM reports an invalid RL world size")
+                    })?
+            }
+            None if parallelism.world_size == 0 => {
+                let world_size = configured_world_size.ok_or_else(|| {
+                    client::invalid_argument(
+                        "--vllm-rl-world-size is required when vLLM omits engine world size from gRPC metadata",
+                    )
+                })?;
+                let expected_total_world_size = expected_minimum_world_size
+                    .checked_mul(data_parallel_size)
+                    .ok_or_else(|| {
+                        client::protocol_error("vLLM reports an invalid RL world size")
+                    })?;
+                if world_size % expected_total_world_size != 0 {
+                    return Err(client::invalid_argument(
+                        "--vllm-rl-world-size must be divisible by TP * PP * DP",
+                    ));
+                }
+                world_size
+            }
+            None => {
+                return Err(client::protocol_error(
+                    "vLLM reports an invalid engine world size",
+                ));
+            }
+        };
         RlWorkerMetadata::new(world_size, admin_base_url)
             .map_err(|error| client::protocol_error(error.to_string()))
     }

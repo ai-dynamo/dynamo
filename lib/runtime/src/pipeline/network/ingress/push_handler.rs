@@ -1028,16 +1028,14 @@ mod tests {
     }
 
     /// The negative half: a failure that is not a worker's `generate()` error
-    /// has no type to recover, and must not acquire one.
+    /// has no worker classification and uses the canonical internal fallback.
     #[test]
-    fn non_generate_pipeline_error_stays_untyped() {
+    fn non_generate_pipeline_error_is_internal_unclassified() {
         let e = PipelineError::DeserializationError("bad request payload".to_string());
+        let error = typed_error_from_pipeline_error(&e);
 
-        assert_eq!(
-            typed_error_from_pipeline_error(&e).error_type(),
-            ErrorType::Unknown,
-            "a transport-side failure must not be reported as a worker error"
-        );
+        assert_eq!(error.class(), ErrorType::Internal);
+        assert_eq!(error.reason().as_str(), "runtime.unclassified");
     }
 
     #[derive(Default)]
