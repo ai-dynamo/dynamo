@@ -154,12 +154,8 @@ class DynamoWorkerProcess(ManagedProcess):
         env["DYN_SYSTEM_PORT"] = str(self.system_port)
         env["DYN_HTTP_PORT"] = str(frontend_port)
 
-        # Every worker started with --kv-transfer-config opens a NIXL handshake
-        # listener, so each one needs its own port. Left unset, the worker takes
-        # vLLM's host-wide default (5600) and loses the bind race against any
-        # other worker on the host. The engine core then fails to initialize
-        # while the parent process stays up serving "notready", so the failure
-        # surfaces as a health-check timeout rather than a nonzero exit.
+        # Every worker launched with --kv-transfer-config opens a NIXL listener,
+        # so each needs its own port; unset means vLLM's host-wide default 5600.
         if mode != WorkerMode.AGGREGATED:
             self.nixl_side_channel_port = allocate_port(DynamoPortRange.NIXL.value)
             env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(self.nixl_side_channel_port)

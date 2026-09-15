@@ -106,11 +106,8 @@ class DynamoWorkerProcess(ManagedProcess):
                 ]
             )
 
-        # Every worker started with --kv-transfer-config opens a NIXL handshake
-        # listener, so each one needs its own port. Left unset, the worker takes
-        # vLLM's host-wide default (5600) and loses the bind race against any
-        # other worker on the host, so the engine core never finishes
-        # initializing and the worker never reports ready.
+        # Every worker launched with --kv-transfer-config opens a NIXL listener,
+        # so each needs its own port; unset means vLLM's host-wide default 5600.
         if mode != WorkerMode.AGGREGATED:
             self.nixl_side_channel_port = allocate_port(DynamoPortRange.NIXL.value)
             env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(self.nixl_side_channel_port)
