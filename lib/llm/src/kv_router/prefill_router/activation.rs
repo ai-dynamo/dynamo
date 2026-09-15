@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::session_affinity::SessionAffinityBinding;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -114,6 +115,7 @@ impl PrefillRouter<DefaultWorkerSelector> {
             decode_router_mode,
             session_affinity_ttl_secs,
             SessionAffinityMode::Hard,
+            SessionAffinityBinding::default(),
         )
     }
 
@@ -130,6 +132,7 @@ impl PrefillRouter<DefaultWorkerSelector> {
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         session_affinity_ttl_secs: Option<u64>,
         session_affinity_mode: SessionAffinityMode,
+        session_affinity_binding: SessionAffinityBinding,
         model_name: String,
         namespace: String,
         load_thresholds: LoadThresholdHandle,
@@ -150,6 +153,7 @@ impl PrefillRouter<DefaultWorkerSelector> {
             prefill_load_estimator,
             session_affinity_ttl_secs,
             session_affinity_mode,
+            session_affinity_binding,
             model_name,
             namespace,
             load_thresholds,
@@ -168,6 +172,7 @@ where
         decode_router_mode: RouterMode,
         session_affinity_ttl_secs: Option<u64>,
         session_affinity_mode: SessionAffinityMode,
+        session_affinity_binding: SessionAffinityBinding,
     ) -> Arc<Self> {
         Arc::new(Self {
             binding: arc_swap::ArcSwapOption::empty(),
@@ -180,6 +185,7 @@ where
             decode_router_mode,
             session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
             session_affinity_mode,
+            session_affinity_binding,
             conditional_disagg_policy: make_conditional_disagg_policy(None),
             conditional_disagg_prefill_busy_threshold: None,
             conditional_disagg_decode_busy_threshold: None,
@@ -204,6 +210,7 @@ where
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         session_affinity_ttl_secs: Option<u64>,
         session_affinity_mode: SessionAffinityMode,
+        session_affinity_binding: SessionAffinityBinding,
         model_name: String,
         namespace: String,
         load_thresholds: LoadThresholdHandle,
@@ -232,6 +239,7 @@ where
             decode_router_mode,
             session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
             session_affinity_mode,
+            session_affinity_binding,
             conditional_disagg_policy,
             conditional_disagg_prefill_busy_threshold,
             conditional_disagg_decode_busy_threshold,
@@ -403,13 +411,16 @@ where
             )
             .await?;
 
-            Arc::new(RoutingHost::new_with_load_context_and_coordinator(
-                push_router,
-                kv_chooser,
-                load_context.clone(),
-                affinity,
-                context.session_affinity_mode,
-            ))
+            Arc::new(
+                RoutingHost::new_with_load_context_and_coordinator(
+                    push_router,
+                    kv_chooser,
+                    load_context.clone(),
+                    affinity,
+                    context.session_affinity_mode,
+                )
+                .with_session_affinity_binding(context.session_affinity_binding),
+            )
         } else {
             let affinity =
                 create_affinity_coordinator(prefill_session_affinity_ttl, client.clone()).await?;
@@ -424,12 +435,15 @@ where
             )
             .await?;
 
-            Arc::new(RoutingHost::<Sel>::new_builtin_with_coordinator(
-                push_router,
-                load_context.clone(),
-                affinity,
-                context.session_affinity_mode,
-            )?)
+            Arc::new(
+                RoutingHost::<Sel>::new_builtin_with_coordinator(
+                    push_router,
+                    load_context.clone(),
+                    affinity,
+                    context.session_affinity_mode,
+                )?
+                .with_session_affinity_binding(context.session_affinity_binding),
+            )
         };
 
         Ok(PrefillBinding {
@@ -538,6 +552,7 @@ where
                 prefill_load_estimator: router_ref.prefill_load_estimator.clone(),
                 session_affinity_ttl: router_ref.session_affinity_ttl,
                 session_affinity_mode: router_ref.session_affinity_mode,
+                session_affinity_binding: router_ref.session_affinity_binding,
                 model_name: router_ref.model_name.clone(),
                 load_thresholds: load_thresholds.clone(),
                 parent_token: cancel_token.child_token(),
@@ -906,6 +921,7 @@ mod tests {
             None,
             None,
             SessionAffinityMode::Hard,
+            crate::session_affinity::SessionAffinityBinding::default(),
             "test-model".into(),
             namespace,
             LoadThresholdHandle::new(Default::default()),

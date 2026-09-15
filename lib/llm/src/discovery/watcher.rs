@@ -638,6 +638,7 @@ where
                     self.prefill_load_estimator.clone(),
                     router_config.session_affinity_ttl_secs,
                     router_config.session_affinity_mode,
+                    router_config.session_affinity_binding,
                     model_name.clone(),
                     namespace.clone(),
                     load_thresholds.clone(),
@@ -680,6 +681,7 @@ where
                         uses_multimodal_cache_routing(card),
                         router_config.session_affinity_ttl_secs,
                         router_config.session_affinity_mode,
+                        router_config.session_affinity_binding,
                     )
                     .await
                     .context("build_preprocessed_routing")?,
@@ -1277,6 +1279,7 @@ fn effective_router_config<'a>(
         .router_decode_policy
         .clone();
     effective.session_affinity_mode = frontend_config.session_affinity_mode;
+    effective.session_affinity_binding = frontend_config.session_affinity_binding;
     Cow::Owned(effective)
 }
 

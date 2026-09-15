@@ -17,9 +17,12 @@ use dynamo_runtime::{discovery::ModelCardInstanceId, pipeline::RouterMode};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    backend::ExecutionContext, discovery::LoadThresholdConfig, engines::StreamingEngine,
-    local_model::LocalModel, model_card::ModelDeploymentCard,
-    session_affinity::SessionAffinityMode,
+    backend::ExecutionContext,
+    discovery::LoadThresholdConfig,
+    engines::StreamingEngine,
+    local_model::LocalModel,
+    model_card::ModelDeploymentCard,
+    session_affinity::{SessionAffinityBinding, SessionAffinityMode},
     types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine,
 };
 
@@ -55,6 +58,9 @@ pub struct RouterConfig {
     pub session_affinity_ttl_secs: Option<u64>,
     #[serde(default)]
     pub session_affinity_mode: SessionAffinityMode,
+    /// Frontend-only; skipped so a worker card never carries it.
+    #[serde(skip)]
+    pub session_affinity_binding: SessionAffinityBinding,
 }
 
 impl RouterConfig {
@@ -66,6 +72,7 @@ impl RouterConfig {
             enforce_disagg: false,
             session_affinity_ttl_secs: None,
             session_affinity_mode: SessionAffinityMode::Hard,
+            session_affinity_binding: SessionAffinityBinding::default(),
         }
     }
 
