@@ -1366,12 +1366,19 @@ impl DistributedRuntime {
     ///
     /// runtime.register_engine_route("control/start_profile", start_profile)
     /// ```
-    #[pyo3(signature = (route_name, callback))]
+    /// The operator engine-route policy (env-driven) is applied here at
+    /// registration time: a policy-denied route is never wired, so it simply
+    /// 404s. `default_enabled=False` marks a route disabled unless the operator
+    /// explicitly allows it; `gated_by` marks a route as sensitive and served
+    /// only when the gate is True (still overridable by an explicit policy).
+    #[pyo3(signature = (route_name, callback, default_enabled=true, gated_by=None))]
     fn register_engine_route(
         &self,
         py: Python<'_>,
         route_name: String,
         callback: PyObject,
+        default_enabled: bool,
+        gated_by: Option<bool>,
     ) -> PyResult<()> {
         // Capture TaskLocals at registration time when Python's event loop is running.
         // This is needed because later, when the callback is invoked from an HTTP request,
@@ -1423,9 +1430,14 @@ impl DistributedRuntime {
                 })
             });
 
+        let route_default = match gated_by {
+            Some(gate) => rs::engine_routes::RouteDefault::Gated(gate),
+            None if default_enabled => rs::engine_routes::RouteDefault::Enabled,
+            None => rs::engine_routes::RouteDefault::Disabled,
+        };
         self.inner
             .engine_routes()
-            .register(&route_name, rust_callback);
+            .register_with_default(&route_name, rust_callback, route_default);
         tracing::debug!("Registered engine route: /engine/{}", route_name);
         Ok(())
     }

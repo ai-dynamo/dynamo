@@ -588,7 +588,9 @@ async fn call_lora_endpoint(
 
     // 2. Unified-backend engine-update registry fallback. The unified Worker
     //    registers LoRA ops as engine updates under `update/<name>`, so map the
-    //    bare LoRA endpoint name onto that namespaced key.
+    //    bare LoRA endpoint name onto that namespaced key. A policy-disabled route
+    //    is never registered, so the `get` below returns `None` and the shim can't
+    //    become a backdoor to it.
     let update_key = format!("update/{endpoint_name}");
     if let Some(callback) = drt.engine_routes().get(&update_key) {
         tracing::debug!(
@@ -646,6 +648,10 @@ async fn engine_route_handler(
     body: Bytes,
 ) -> impl IntoResponse {
     tracing::trace!("Engine route request to /engine/{path}");
+
+    // The operator engine-route policy is enforced at *registration* time (the
+    // registry never wires a policy-denied route), so a disabled route simply
+    // isn't found below and returns 404 — one enforcement point, in the backend.
 
     // Parse body as JSON (empty object for GET/empty body)
     let body_json: serde_json::Value = if body.is_empty() {
@@ -1413,6 +1419,38 @@ mod integration_tests {
         .await;
     }
 
+    /// The `/v1/loras` shim must respect the engine-route policy: with the route
+    /// disabled, `call_lora_endpoint` must not reach the registered engine-update
+    /// callback and instead returns the "not available" error.
+    #[tokio::test]
+    async fn test_call_lora_endpoint_respects_engine_route_policy() {
+        use crate::config::environment_names::runtime::engine_routes as env_er;
+        temp_env::async_with_vars(
+            [
+                (env_system::DYN_SYSTEM_PORT, None),
+                (env_er::DYN_DISABLE_ENGINE_ROUTES, Some("1")),
+                (env_er::DYN_ENGINE_ROUTES_ALLOW, None::<&str>),
+                (env_er::DYN_ENGINE_ROUTES_DENY, None),
+            ],
+            async {
+                let drt = create_test_drt_async().await;
+
+                let callback: crate::engine_routes::EngineRouteCallback =
+                    Arc::new(|_body| Box::pin(async move { Ok(serde_json::json!({"ok": true})) }));
+                drt.engine_routes().register("update/load_lora", callback);
+
+                let err = call_lora_endpoint(&drt, "load_lora", serde_json::json!({}))
+                    .await
+                    .expect_err("policy-disabled route must not be reachable via /v1/loras");
+                assert!(
+                    err.to_string().contains("LoRA management not available"),
+                    "expected unavailable message, got: {err}"
+                );
+            },
+        )
+        .await;
+    }
+
     /// When neither the local registry nor `engine_routes()` holds the name,
     /// the caller gets an explicit "LoRA management not available" error
     /// rather than an opaque "endpoint not found".
@@ -1460,6 +1498,99 @@ mod integration_tests {
             assert_eq!(response.status, "error");
             assert_eq!(response.message.as_deref(), Some("adapter not found"));
         })
+        .await;
+    }
+
+    /// `DYN_DISABLE_ENGINE_ROUTES=1` denies every `/engine/*` route at *registration*
+    /// time: the route is never wired, so it simply **404s** — indistinguishable from a
+    /// route that was never registered. Enforcement lives in exactly one place (the
+    /// registry), so the dispatch path has no policy branch at all.
+    #[tokio::test]
+    async fn test_engine_route_policy_disable_all_returns_404() {
+        use crate::config::environment_names::runtime::engine_routes as env_er;
+        temp_env::async_with_vars(
+            [
+                (env_system::DYN_SYSTEM_PORT, Some("0")),
+                (env_er::DYN_DISABLE_ENGINE_ROUTES, Some("1")),
+                (env_er::DYN_ENGINE_ROUTES_ALLOW, None),
+                (env_er::DYN_ENGINE_ROUTES_DENY, None),
+            ],
+            async {
+                let drt = Arc::new(create_test_drt_async().await);
+
+                // Attempt to register a route that would succeed if the policy allowed it.
+                // Under DisableAll the registry silently drops it.
+                let callback: crate::engine_routes::EngineRouteCallback =
+                    Arc::new(|_body| Box::pin(async move { Ok(serde_json::json!({"ok": true})) }));
+                drt.engine_routes()
+                    .register("control/start_profile", callback);
+
+                let addr = drt
+                    .system_status_server_info()
+                    .expect("system status server should be started by DRT")
+                    .socket_addr;
+                let client = reqwest::Client::new();
+
+                // Policy-denied route was never registered -> 404.
+                let url = format!("http://{}/engine/control/start_profile", addr);
+                let response = client.post(&url).send().await.unwrap();
+                assert_eq!(response.status(), 404);
+
+                // Genuinely unregistered route -> 404 as well (identical outcome).
+                let url = format!("http://{}/engine/never/registered", addr);
+                let response = client.post(&url).send().await.unwrap();
+                assert_eq!(response.status(), 404);
+            },
+        )
+        .await;
+    }
+
+    /// With an allowlist, only listed routes are ever registered; a registered-but-not-listed
+    /// route is dropped at registration and 404s, exactly like a route that was never
+    /// registered.
+    #[tokio::test]
+    async fn test_engine_route_policy_allowlist_enforced_over_http() {
+        use crate::config::environment_names::runtime::engine_routes as env_er;
+        temp_env::async_with_vars(
+            [
+                (env_system::DYN_SYSTEM_PORT, Some("0")),
+                (env_er::DYN_DISABLE_ENGINE_ROUTES, None),
+                (
+                    env_er::DYN_ENGINE_ROUTES_ALLOW,
+                    Some("control/start_profile,update/model_taints"),
+                ),
+                (env_er::DYN_ENGINE_ROUTES_DENY, None),
+            ],
+            async {
+                let drt = Arc::new(create_test_drt_async().await);
+
+                let ok_cb: crate::engine_routes::EngineRouteCallback =
+                    Arc::new(|_body| Box::pin(async move { Ok(serde_json::json!({"ok": true})) }));
+                let deny_cb: crate::engine_routes::EngineRouteCallback =
+                    Arc::new(|_body| Box::pin(async move { Ok(serde_json::json!({"ok": true})) }));
+                drt.engine_routes().register("control/start_profile", ok_cb);
+                drt.engine_routes()
+                    .register("control/update_weights_from_disk", deny_cb);
+
+                let addr = drt
+                    .system_status_server_info()
+                    .expect("system status server should be started by DRT")
+                    .socket_addr;
+                let client = reqwest::Client::new();
+
+                // Allowed + registered -> 200.
+                let url = format!("http://{}/engine/control/start_profile", addr);
+                assert_eq!(client.post(&url).send().await.unwrap().status(), 200);
+
+                // Not on the allowlist -> dropped at registration -> 404.
+                let url = format!("http://{}/engine/control/update_weights_from_disk", addr);
+                assert_eq!(client.post(&url).send().await.unwrap().status(), 404);
+
+                // On the allowlist but never registered -> also 404 (route does not exist).
+                let url = format!("http://{}/engine/update/model_taints", addr);
+                assert_eq!(client.post(&url).send().await.unwrap().status(), 404);
+            },
+        )
         .await;
     }
 }
