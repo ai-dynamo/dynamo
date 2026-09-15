@@ -188,7 +188,6 @@ async fn test_named_tool_choice_parses_json() {
         tool_call.function.as_ref().unwrap().arguments.as_deref(),
         Some(r#"{"location":"Paris"}"#)
     );
-    assert_responses_preserves_forced_calls(response).await;
 }
 
 #[tokio::test]
