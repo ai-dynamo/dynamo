@@ -334,7 +334,7 @@ impl NativeHttp {
                     ));
                     return;
                 }
-                let response = match serde_json::from_str(data) {
+                let response: Value = match serde_json::from_str(data) {
                     Ok(response) => response,
                     Err(error) => {
                         yield Err(client::protocol_error(format!(
@@ -343,6 +343,16 @@ impl NativeHttp {
                         return;
                     }
                 };
+                // Prefill's raw HTTP payload is not forwarded to the caller.
+                // Surface backend failures before that payload is discarded.
+                if is_prefill
+                    && let Some(finish) = response.pointer("/meta_info/finish_reason")
+                    && let Some(kind @ ("abort" | "error" | "cancelled")) =
+                        finish.get("type").and_then(Value::as_str)
+                {
+                    yield Err(protocol::terminal_failure(kind, finish));
+                    return;
+                }
                 let has_output = response_has_output(&response);
                 let (mut output, terminal) = output(response, &mut prefill_handoff);
                 if !first_output_seen && has_output && (!is_prefill || terminal) {
@@ -628,6 +638,39 @@ mod tests {
         assert!(error.to_string().contains("HTTP 500"));
         assert!(stream.next().await.is_none());
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn prefill_stream_reports_failures_after_success_headers() {
+        for (body, expected) in [
+            ("", "closed before a terminal response"),
+            ("data: broken-json\n\n", "invalid JSON"),
+            (
+                "data: {\"meta_info\":{\"finish_reason\":{\"type\":\"abort\",\"message\":\"prefill rejected\",\"status_code\":400}}}\n\n",
+                "prefill rejected",
+            ),
+        ] {
+            let (port, server) = serve_once(body.to_string(), "200 OK").await;
+            let ctx = GenerateContext::new(dynamo_backend_common::testing::mock_context(), None);
+            let mut stream = native_http(port).generate(
+                NativeRequest {
+                    body: json!({"input_ids": [1], "stream": true}),
+                    is_prefill: true,
+                    prefill_handoff: Some(json!({
+                        "bootstrap_host": "prefill", "bootstrap_port": 1, "bootstrap_room": 7,
+                    })),
+                },
+                ctx,
+                CancellationToken::new(),
+            );
+            let handoff = stream.next().await.unwrap().unwrap();
+            assert!(handoff.disaggregated_params.is_some());
+            assert!(handoff.finish_reason.is_none());
+            let error = stream.next().await.unwrap().unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+            assert!(stream.next().await.is_none());
+            server.await.unwrap();
+        }
     }
 
     #[tokio::test]
