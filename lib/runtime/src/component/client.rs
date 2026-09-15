@@ -15,7 +15,7 @@ use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::component::{Endpoint, Instance};
 use crate::config::environment_names::runtime as env_runtime;
-use crate::discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId};
+use crate::discovery::{Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId};
 use crate::routing_policy::{RoutingOccupancyState, get_or_create_routing_occupancy_state};
 use crate::traits::DistributedRuntimeProvider;
 
@@ -58,8 +58,8 @@ fn inhibited_duration_from_env(mut lookup: impl FnMut(&str) -> Option<String>) -
 /// discovery `list_and_watch` task so clients do not multiply control-plane
 /// watches.
 ///
-/// Dropping the source stops that watch. The backend producers park on their own streams and
-/// only notice a dropped consumer at the next event, so the token is what ends them.
+/// Dropping the source stops that watch. A backend producer can park on its own feed without
+/// noticing that its consumer is gone, as the Kubernetes watcher does, so the token ends it.
 #[derive(Debug)]
 pub(crate) struct EndpointDiscoverySource {
     instance_source: tokio::sync::watch::Receiver<Vec<Instance>>,
@@ -909,8 +909,10 @@ impl Client {
         // Discovery::list_and_watch establishes the backend watch, so it runs outside the
         // registry lock. Holding the lock across it serializes every client construction behind
         // one round trip to the discovery backend.
+        let discovery = endpoint.drt().discovery();
         let discovery_source = Self::spawn_dynamic_discovery_source(
             endpoint,
+            discovery.as_ref(),
             endpoint.drt().primary_token().child_token(),
         )
         .await?;
@@ -932,9 +934,9 @@ impl Client {
     /// fall back to, so shutdown still ends a watch that clients are holding.
     async fn spawn_dynamic_discovery_source(
         endpoint: &Endpoint,
+        discovery: &dyn Discovery,
         cancel_token: CancellationToken,
     ) -> Result<Arc<EndpointDiscoverySource>> {
-        let discovery = endpoint.drt().discovery();
         let discovery_query = crate::discovery::DiscoveryQuery::Endpoint {
             namespace: endpoint.component.namespace.name.clone(),
             component: endpoint.component.name.clone(),
@@ -1010,8 +1012,60 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::discovery::{
+        DiscoveryQuery, DiscoverySpec, DiscoveryStream, MockDiscovery, SharedMockRegistry,
+    };
     use crate::{DistributedRuntime, Runtime, distributed::DistributedConfig};
     use futures::future::try_join_all;
+
+    /// A backend whose watch producer, like the Kubernetes watcher, parks on its own feed and ends
+    /// only when the token it was given cancels.
+    struct ParkedProducerDiscovery {
+        inner: MockDiscovery,
+        producers: StdMutex<Vec<tokio::task::JoinHandle<()>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Discovery for ParkedProducerDiscovery {
+        fn instance_id(&self) -> u64 {
+            self.inner.instance_id()
+        }
+
+        async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
+            self.inner.register_internal(spec).await
+        }
+
+        async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
+            self.inner.unregister(instance).await
+        }
+
+        async fn list(&self, query: DiscoveryQuery) -> Result<Vec<DiscoveryInstance>> {
+            self.inner.list(query).await
+        }
+
+        async fn list_and_watch(
+            &self,
+            _query: DiscoveryQuery,
+            cancel_token: Option<CancellationToken>,
+        ) -> Result<DiscoveryStream> {
+            let (feed_tx, mut feed) =
+                tokio::sync::mpsc::unbounded_channel::<Result<DiscoveryEvent>>();
+            let producer = tokio::spawn(async move {
+                let _feed_tx = feed_tx;
+                match cancel_token {
+                    Some(token) => token.cancelled().await,
+                    None => std::future::pending::<()>().await,
+                }
+            });
+            self.producers.lock().unwrap().push(producer);
+
+            Ok(Box::pin(async_stream::stream! {
+                while let Some(event) = feed.recv().await {
+                    yield event;
+                }
+            }))
+        }
+    }
 
     async fn wait_for_discovery_event(
         receiver: &mut DiscoveryEventReceiver,
@@ -1109,20 +1163,35 @@ mod tests {
             .unwrap()
             .endpoint("decode".to_string());
 
-        let cancel_token = drt.primary_token().child_token();
-        let source = Client::spawn_dynamic_discovery_source(&endpoint, cancel_token.clone())
-            .await
-            .unwrap();
+        let discovery = ParkedProducerDiscovery {
+            inner: MockDiscovery::new(Some(1), SharedMockRegistry::new()),
+            producers: StdMutex::default(),
+        };
+
+        let source = Client::spawn_dynamic_discovery_source(
+            &endpoint,
+            &discovery,
+            drt.primary_token().child_token(),
+        )
+        .await
+        .unwrap();
+        let producer = discovery
+            .producers
+            .lock()
+            .unwrap()
+            .pop()
+            .expect("the source established no backend watch");
+        tokio::task::yield_now().await;
         assert!(
-            !cancel_token.is_cancelled(),
+            !producer.is_finished(),
             "a live source must keep watching the endpoint"
         );
 
         drop(source);
-        assert!(
-            cancel_token.is_cancelled(),
-            "the backend watch outlives the source that established it"
-        );
+        tokio::time::timeout(Duration::from_secs(1), producer)
+            .await
+            .expect("the backend watch outlives the source that established it")
+            .unwrap();
     }
 
     #[tokio::test]
