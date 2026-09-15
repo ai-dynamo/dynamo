@@ -87,18 +87,19 @@ fn insert_metadata_entry(
     Ok(())
 }
 
-fn extract_metadata_from_pairs<'a>(
-    pairs: impl IntoIterator<Item = (&'a str, &'a str)>,
+fn extract_metadata_from_pairs(
+    pairs: impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
     prefix: &str,
 ) -> Result<BTreeMap<String, String>, MetadataHeaderError> {
     let mut out = BTreeMap::new();
     let mut total_bytes = 0;
 
     for (name, value) in pairs {
+        let name = name.as_ref();
         let Some(raw_key) = name.strip_prefix(prefix) else {
             continue;
         };
-        insert_metadata_entry(&mut out, &mut total_bytes, raw_key, value)?;
+        insert_metadata_entry(&mut out, &mut total_bytes, raw_key, value.as_ref())?;
     }
 
     Ok(out)
@@ -118,6 +119,21 @@ pub fn extract_metadata_from_http(
             .iter()
             .filter_map(|(name, value)| value.to_str().ok().map(|value| (name.as_str(), value))),
         prefix,
+    )
+}
+
+/// Extract metadata from raw `(name, value)` header pairs.
+///
+/// If a header is repeated, the first value wins; values are trimmed.
+/// Requests exceeding 64 entries or 64 KiB of key/value payload are rejected.
+pub fn extract_metadata_from_header_pairs(
+    pairs: impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
+) -> Result<BTreeMap<String, String>, MetadataHeaderError> {
+    extract_metadata_from_pairs(
+        pairs
+            .into_iter()
+            .map(|(name, value)| (name.as_ref().to_ascii_lowercase(), value)),
+        metadata_header_prefix(),
     )
 }
 
@@ -265,5 +281,59 @@ mod tests {
         let meta = extract_metadata_from_grpc(&metadata).unwrap();
         assert_eq!(meta.get("tenant").map(String::as_str), Some("acme"));
         assert_eq!(meta.len(), 1);
+    }
+
+    #[test]
+    fn test_extract_metadata_from_header_pairs_matches_frontend_semantics() {
+        // EPP receives headers as ordered (name, value) pairs from Envoy: the
+        // extractor must apply the same prefix, trimming, first-wins, and
+        // case-insensitive name matching as the frontend's HeaderMap path.
+        let headers: Vec<(String, String)> = vec![
+            (
+                format!("{}policy-class", DYNAMO_METADATA_HEADER_PREFIX_DEFAULT),
+                " latency ".to_string(),
+            ),
+            // Mixed-case names (possible from HTTP/1.1 upstreams) must match.
+            ("X-Dynamo-Meta-Tenant".to_string(), "acme".to_string()),
+            // Repeated header: the first value wins.
+            (
+                format!("{}policy-class", DYNAMO_METADATA_HEADER_PREFIX_DEFAULT),
+                "throughput".to_string(),
+            ),
+            ("x-request-id".to_string(), "irrelevant".to_string()),
+        ];
+
+        let meta = extract_metadata_from_header_pairs(
+            headers.iter().map(|(k, v)| (k.as_str(), v.as_str())),
+        )
+        .unwrap();
+        assert_eq!(
+            meta.get("policy-class").map(String::as_str),
+            Some("latency")
+        );
+        assert_eq!(meta.get("tenant").map(String::as_str), Some("acme"));
+        assert!(!meta.contains_key("x-request-id"));
+    }
+
+    #[test]
+    fn test_extract_metadata_from_header_pairs_applies_limits() {
+        let headers: Vec<(String, String)> = (0..DYNAMO_METADATA_MAX_ENTRIES_DEFAULT + 1)
+            .map(|i| {
+                (
+                    format!("{}{i}", DYNAMO_METADATA_HEADER_PREFIX_DEFAULT),
+                    "v".to_string(),
+                )
+            })
+            .collect();
+
+        let err = extract_metadata_from_header_pairs(
+            headers.iter().map(|(k, v)| (k.as_str(), v.as_str())),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, MetadataHeaderError::TooManyEntries { .. }),
+            "unexpected error: {err}"
+        );
     }
 }

@@ -41,9 +41,10 @@ Its main differences are:
 - **Lazy lookup repair**: worker-local reverse lookups are repaired only when a
   stale entry is observed. Cross-thread splits do not need to synchronously patch
   every other thread's lookup table.
-- **Semi-lock-free structural reads**: child maps use `DashMap`, while the edge
-  state is protected separately. Hot read paths do not take the shape gate, and
-  shape-sensitive writes use version validation to retry when a plan becomes
+- **Semi-lock-free structural reads**: child storage uses immutable compact
+  snapshots for up to four children and `DashMap` for higher fanout, while the
+  edge state is protected separately. Hot read paths do not take the shape gate,
+  and shape-sensitive writes use version validation to retry when a plan becomes
   stale.
 - **Versioned shape gates**: the node's `shape_gate` and `shape_version` combine
   a small critical section with explicit stale-plan detection. Shared operations,
@@ -124,6 +125,11 @@ reuse a matching existing suffix. If the new store diverges from that suffix, th
 node is split at the parent position. The suffix becomes a child node and keeps
 the original children, so existing descendants remain reachable after the split.
 
+The suffix retains the original child-storage representation. The prefix starts
+with compact child storage for its new suffix child, even if it previously had a
+sharded map. This avoids allocating a sharded map for a prefix with only a few
+children. The prefix remains logically internal and cannot resume leaf extension.
+
 ## Removal
 
 Removal updates worker coverage but does not structurally split edges.
@@ -176,7 +182,8 @@ shared CRTC nodes concurrently.
 Node internals use separate protection for edge state and child maps:
 
 - `NodeState` is protected by a `parking_lot::RwLock`.
-- `children` is a `DashMap`.
+- `children` publishes compact snapshots through `ArcSwap`, promoting to a
+  `DashMap` when fanout exceeds four children.
 - `shape_gate` and `shape_version` coordinate plans that depend on the relation
   between the edge and child map.
 

@@ -52,6 +52,7 @@ type grovePodCliqueSetRender struct {
 	existing         *grovev1alpha1.PodCliqueSet
 	desired          *grovev1alpha1.PodCliqueSet
 	renderDeployment *nvidiacomv1beta1.DynamoGraphDeployment
+	gpuShapes        map[string]dynamo.GPUShape
 }
 
 func newGroveWorkloadRenderer(
@@ -104,10 +105,15 @@ func (r *groveWorkloadRenderer) Render(
 	if err != nil {
 		return nil, err
 	}
+	gpuShapes, err := dynamo.ResolveGroveGPUShapes(ctx, r.reader, renderDeployment, desired)
+	if err != nil {
+		return nil, err
+	}
 	return &grovePodCliqueSetRender{
 		existing:         existingPodCliqueSet,
 		desired:          desired,
 		renderDeployment: renderDeployment,
+		gpuShapes:        gpuShapes,
 	}, nil
 }
 
@@ -183,7 +189,7 @@ func applyGroveWorkerHashSuffix(
 func shouldRenderGroveWorkerHashSuffix(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	existing *grovev1alpha1.PodCliqueSet,
-	workerGenerationChanged bool,
+	hashChanged bool,
 ) bool {
 	if !dgdHasWorkerComponents(dgd) {
 		return false
@@ -192,7 +198,7 @@ func shouldRenderGroveWorkerHashSuffix(
 		return true
 	}
 
-	return workerGenerationChanged
+	return hashChanged
 }
 
 func dgdHasWorkerComponents(dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
@@ -219,6 +225,38 @@ func podCliqueSetUsesGroveWorkerHashSuffix(
 		}
 	}
 	return true
+}
+
+// podCliqueSetObservesWorkerHash reports whether every worker clique in pcs carries the
+// computed DGD worker hash, or, for a pre-existing legacy PCS, that no clique is stamped.
+func podCliqueSetObservesWorkerHash(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	pcs *grovev1alpha1.PodCliqueSet,
+	acceptAllUnstamped bool,
+) (bool, error) {
+	if !dgdHasWorkerComponents(dgd) {
+		return true, nil
+	}
+	want, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
+	if err != nil {
+		return false, fmt.Errorf("compute desired Grove worker hash: %w", err)
+	}
+	allCanonical := true
+	allUnstamped := acceptAllUnstamped
+	for i := range dgd.Spec.Components {
+		component := &dgd.Spec.Components[i]
+		if !dynamo.IsWorkerComponent(string(component.ComponentType)) {
+			continue
+		}
+		clique := podCliqueSetCliqueForComponent(pcs, component.ComponentName)
+		if clique == nil {
+			return false, nil
+		}
+		hash := clique.Labels[commonconsts.KubeLabelDynamoWorkerHash]
+		allCanonical = allCanonical && hash == want
+		allUnstamped = allUnstamped && hash == ""
+	}
+	return allCanonical || allUnstamped, nil
 }
 
 func podCliqueSetCliqueForComponent(

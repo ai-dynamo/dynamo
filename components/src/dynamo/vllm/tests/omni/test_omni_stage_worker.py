@@ -15,6 +15,7 @@ import yaml
 try:
     from dynamo.vllm.omni.stage_worker import (
         OmniStageWorker,
+        _create_engine,
         _ensure_stage_connectors,
         _normalize_single_stage_runtime_devices,
         _prepare_connector_payload,
@@ -790,3 +791,79 @@ async def test_fetch_stage_inputs_accepts_deserialized_object_payload():
     restored = stage_list[0].engine_outputs[0]
     assert restored is fetched_output
     assert restored.outputs[0].cumulative_token_ids == [4, 5]
+
+
+def _single_stage_deploy_config(stage_config, deploy_config_path=None):
+    """Run _create_engine with AsyncOmni stubbed, returning the deploy dict it wrote."""
+    captured = {}
+
+    def _fake_async_omni(**kwargs):
+        with open(kwargs["deploy_config"]) as handle:
+            captured.update(yaml.safe_load(handle))
+        return MagicMock()
+
+    pipeline = SimpleNamespace(
+        model_type="pipe",
+        stages=(SimpleNamespace(stage_id=0),),
+        default_deploy_config_name=None,
+    )
+    pipeline.get_stage = lambda stage_id: (
+        pipeline.stages[0] if stage_id == 0 else None
+    )
+
+    factory = MagicMock()
+    factory.get_pipeline_config.return_value = pipeline
+
+    with (
+        patch("dynamo.vllm.omni.stage_worker.AsyncOmni", _fake_async_omni),
+        patch("dynamo.vllm.omni.stage_worker.StageConfigFactory", factory),
+        patch("dynamo.vllm.omni.stage_worker.register_pipeline"),
+        patch("dynamo.vllm.omni.stage_worker.replace", lambda obj, **kw: obj),
+        patch.dict("dynamo.vllm.omni.stage_worker.OMNI_PIPELINES", {}, clear=False),
+    ):
+        _create_engine("model", stage_config, "llm", 0, False, deploy_config_path)
+
+    return captured, factory
+
+
+def test_create_engine_carries_runtime_env_into_deploy_config():
+    deploy, _ = _single_stage_deploy_config(
+        SimpleNamespace(
+            engine_args=SimpleNamespace(model_stage="talker"),
+            runtime=SimpleNamespace(devices="0", env={"OMP_NUM_THREADS": "4"}),
+            final_output_type="audio",
+        )
+    )
+
+    entry = deploy["stages"][0]
+    assert entry["env"] == {"OMP_NUM_THREADS": "4"}
+    assert entry["devices"] == "0"
+
+
+def test_create_engine_omits_env_when_stage_declares_none():
+    deploy, _ = _single_stage_deploy_config(
+        SimpleNamespace(
+            engine_args=SimpleNamespace(model_stage="talker"),
+            runtime=SimpleNamespace(devices="0"),
+            final_output_type="audio",
+        )
+    )
+
+    assert "env" not in deploy["stages"][0]
+
+
+def test_create_engine_resolves_pipeline_with_the_configured_deploy_config():
+    _, factory = _single_stage_deploy_config(
+        SimpleNamespace(
+            engine_args=SimpleNamespace(model_stage="dit"),
+            runtime=SimpleNamespace(devices="0"),
+            final_output_type="image",
+        ),
+        deploy_config_path="/deploy/dit_only.yaml",
+    )
+
+    factory.get_pipeline_config.assert_called_once_with(
+        model="model",
+        trust_remote_code=False,
+        deploy_config_path="/deploy/dit_only.yaml",
+    )

@@ -5,15 +5,16 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use derive_builder::Builder;
+pub use dynamo_kv_router::kv_hints::{
+    KV_HINT_TRANSFER_CAPABILITY_KEY, KvHint, KvHintAction, KvSourceLocationsPayload,
+};
 use dynamo_kv_router::{
     config::RouterConfigOverride,
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId},
-    router_hint::{ROUTER_HINT_EXTRA_ARGS_KEY, RouterHint},
 };
 use dynamo_runtime::error::{DynamoError, ErrorType, match_error_chain};
 use serde::{Deserialize, Serialize};
 
-const KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY: &str = "kv_transfer_params";
 use uuid::Uuid;
 
 use super::extensions::{AgentContext, RouterParams};
@@ -256,8 +257,25 @@ pub struct PreprocessedRequest {
     #[serde(skip)]
     pub(crate) migration_state: Option<MigrationState>,
 
-    /// Type of prompt
-    pub token_ids: Vec<TokenIdType>,
+    /// Set when remote prefill has staged KV blocks that only this request's
+    /// decode worker can release, so the decode leg must reach that worker even
+    /// after the client disconnects.
+    ///
+    /// Narrower than `RequestPhase::Decode`: the conditional-disaggregation
+    /// bypass reaches decode without running remote prefill and leaves this
+    /// unset. Frontend-only, like `migration_state` — the routing decision it
+    /// feeds is made in-process before the request is serialized to a worker.
+    #[builder(default)]
+    #[serde(skip)]
+    pub(crate) staged_kv_cleanup: bool,
+
+    /// Prompt tokens shared by prefill and decode request clones.
+    ///
+    /// Disaggregated serving runs those requests concurrently. Keeping the
+    /// immutable prompt behind `Arc` makes cloning the token storage constant-time;
+    /// paths that append generated tokens use `Arc::make_mut`.
+    #[builder(setter(into))]
+    pub token_ids: Arc<Vec<TokenIdType>>,
 
     /// Base64-encoded PyTorch tensor containing pre-computed embeddings
     /// If provided, this takes precedence over token_ids for inference
@@ -348,6 +366,20 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub migration_link: Option<TraceLink>,
 
+    /// Text withheld by the previous attempt's decoder as a possible (but
+    /// unresolved) prefix of a hidden stop sequence, carried into a migration
+    /// retry so the new attempt's decoder does not silently drop it and can
+    /// still complete the match if the continuation supplies the rest of the
+    /// sequence. Set by the migration `RetryManager` (in-process, on its own
+    /// in-memory `PreprocessedRequest`) from the last successfully processed
+    /// response before a retry, and consumed once by `Backend` -- also
+    /// in-process, one hop later in the same pipeline -- when seeding the
+    /// retry's decoder. `#[serde(skip)]` keeps it that way: it never needs to,
+    /// and must not, reach a remote worker over the wire.
+    #[builder(default)]
+    #[serde(skip)]
+    pub(crate) jail_seed: Option<String>,
+
     /// Bootstrap info for disaggregated serving
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -357,6 +389,11 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_args: Option<serde_json::Value>,
+
+    /// Versioned KV hint message from Dynamo's routing layer for the selected backend request.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_hint: Option<KvHint>,
 
     /// Whether the backend should allow a reasoning phase before enforcing
     /// guided output. SGLang consumes this as its per-request
@@ -382,6 +419,13 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mm_processor_kwargs: Option<serde_json::Value>,
+
+    /// Per-request media I/O options, forwarded untouched from the incoming request
+    /// when the worker owns media decoding. Absent when the frontend decoded the
+    /// media itself and already consumed them.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_io_kwargs: Option<serde_json::Value>,
 
     /// Optional request timestamp in milliseconds forwarded from nvext.
     #[builder(default)]
@@ -456,22 +500,6 @@ impl PreprocessedRequest {
         self.routing.get_or_insert_with(RoutingHints::default)
     }
 
-    pub fn attach_router_hint(&mut self, hint: &RouterHint) -> serde_json::Result<()> {
-        let hint_value = serde_json::to_value(hint)?;
-        let mut map = extra_args_object(self.extra_args.take());
-        let mut kv_transfer_params = match map.remove(KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY) {
-            Some(serde_json::Value::Object(params)) => params,
-            Some(_) | None => serde_json::Map::new(),
-        };
-        kv_transfer_params.insert(ROUTER_HINT_EXTRA_ARGS_KEY.to_string(), hint_value);
-        map.insert(
-            KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY.to_string(),
-            serde_json::Value::Object(kv_transfer_params),
-        );
-        self.extra_args = Some(serde_json::Value::Object(map));
-        Ok(())
-    }
-
     /// Extract the token IDs and optional block MM info used for KV cache overlap computation.
     /// Falls back to the request's primary `token_ids` when no multimodal routing info is present.
     pub fn block_mm_routing_info(&self) -> (&[TokenIdType], Option<&[Option<BlockExtraInfo>]>) {
@@ -483,15 +511,6 @@ impl PreprocessedRequest {
             return (&self.token_ids, None);
         }
         (tokens, Some(mm.block_mm_infos.as_slice()))
-    }
-}
-
-fn extra_args_object(
-    extra_args: Option<serde_json::Value>,
-) -> serde_json::Map<String, serde_json::Value> {
-    match extra_args {
-        Some(serde_json::Value::Object(map)) => map,
-        _ => serde_json::Map::new(),
     }
 }
 
@@ -542,6 +561,40 @@ impl PreprocessedEmbeddingRequest {
 mod tests {
     use super::*;
 
+    fn request_with_tokens(token_ids: Vec<TokenIdType>) -> PreprocessedRequest {
+        PreprocessedRequest::builder()
+            .model("test-model".to_string())
+            .token_ids(token_ids)
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .build()
+            .expect("valid request")
+    }
+
+    #[test]
+    fn clone_shares_token_storage_until_mutated() {
+        let request = request_with_tokens(vec![1, 2, 3]);
+        let mut cloned = request.clone();
+
+        assert!(Arc::ptr_eq(&request.token_ids, &cloned.token_ids));
+        Arc::make_mut(&mut cloned.token_ids).push(4);
+
+        assert!(!Arc::ptr_eq(&request.token_ids, &cloned.token_ids));
+        assert_eq!(request.token_ids.as_slice(), &[1, 2, 3]);
+        assert_eq!(cloned.token_ids.as_slice(), &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn shared_tokens_preserve_json_wire_format() {
+        let request = request_with_tokens(vec![11, 22, 33]);
+        let json = serde_json::to_string(&request).expect("serializes");
+        assert!(json.contains(r#""token_ids":[11,22,33]"#), "{json}");
+
+        let decoded: PreprocessedRequest = serde_json::from_str(&json).expect("deserializes");
+        assert_eq!(decoded.token_ids.as_slice(), &[11, 22, 33]);
+    }
+
     #[test]
     fn embedding_encoding_format_serde_omits_none() {
         let mut request = PreprocessedEmbeddingRequest {
@@ -566,88 +619,6 @@ mod tests {
         let explicit = serde_json::to_value(&request).unwrap();
         assert_eq!(explicit["encoding_format"], "float");
         assert_eq!(explicit["truncate_prompt_tokens"], -1);
-    }
-
-    #[test]
-    fn attach_router_hint_preserves_extra_args_object() {
-        use dynamo_kv_router::{
-            protocols::ExternalSequenceBlockHash,
-            router_hint::{ROUTER_HINT_EXTRA_ARGS_KEY, RouterHint},
-        };
-
-        let mut req = PreprocessedRequest::builder()
-            .model("t".to_string())
-            .token_ids(vec![1])
-            .stop_conditions(StopConditions::default())
-            .sampling_options(SamplingOptions::default())
-            .output_options(OutputOptions::default())
-            .extra_args(Some(serde_json::json!({
-                "caller": "kept",
-                "kv_transfer_params": {"existing": "kept"}
-            })))
-            .build()
-            .unwrap();
-        let hint = RouterHint {
-            source_control_endpoint: "tcp://127.0.0.1:23280".to_string(),
-            block_hashes: vec![ExternalSequenceBlockHash(11), ExternalSequenceBlockHash(22)],
-        };
-
-        req.attach_router_hint(&hint).unwrap();
-
-        let extra_args = req.extra_args.unwrap();
-        assert_eq!(extra_args["caller"], "kept");
-        assert_eq!(
-            extra_args[KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY]["existing"],
-            "kept"
-        );
-        assert_eq!(
-            extra_args[KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY][ROUTER_HINT_EXTRA_ARGS_KEY]["source_control_endpoint"],
-            "tcp://127.0.0.1:23280"
-        );
-        assert_eq!(
-            extra_args[KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY][ROUTER_HINT_EXTRA_ARGS_KEY]["block_hashes"],
-            serde_json::json!([11, 22])
-        );
-    }
-
-    #[test]
-    fn attach_router_hint_replaces_non_object_kv_transfer_params() {
-        use dynamo_kv_router::{
-            protocols::ExternalSequenceBlockHash,
-            router_hint::{ROUTER_HINT_EXTRA_ARGS_KEY, RouterHint},
-        };
-
-        for invalid_params in [
-            serde_json::Value::Null,
-            serde_json::json!("invalid"),
-            serde_json::json!(["invalid"]),
-        ] {
-            let mut req = PreprocessedRequest::builder()
-                .model("t".to_string())
-                .token_ids(vec![1])
-                .stop_conditions(StopConditions::default())
-                .sampling_options(SamplingOptions::default())
-                .output_options(OutputOptions::default())
-                .extra_args(Some(serde_json::json!({
-                    "caller": "kept",
-                    "kv_transfer_params": invalid_params
-                })))
-                .build()
-                .unwrap();
-            let hint = RouterHint {
-                source_control_endpoint: "tcp://127.0.0.1:23280".to_string(),
-                block_hashes: vec![ExternalSequenceBlockHash(33)],
-            };
-
-            req.attach_router_hint(&hint).unwrap();
-
-            let extra_args = req.extra_args.unwrap();
-            assert_eq!(extra_args["caller"], "kept");
-            assert_eq!(
-                extra_args[KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY][ROUTER_HINT_EXTRA_ARGS_KEY]["block_hashes"],
-                serde_json::json!([33])
-            );
-        }
     }
 
     #[test]
@@ -745,7 +716,7 @@ mod tests {
             "_HEALTH_CHECK": true,
         }))
         .unwrap();
-        assert_eq!(req.token_ids, vec![1]);
+        assert_eq!(req.token_ids.as_slice(), &[1]);
         assert!(req.is_probe);
         assert_eq!(req.model, "");
     }

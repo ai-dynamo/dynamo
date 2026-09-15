@@ -9,6 +9,7 @@ use dynamo_runtime::{
 use futures::{Stream, StreamExt, stream};
 use std::sync::Arc;
 
+use crate::grpc::service::dispatch_error_status;
 use crate::http::service::metadata::extract_metadata_from_grpc;
 use crate::protocols::openai::ParsingOptions;
 use crate::protocols::openai::completions::{
@@ -119,7 +120,7 @@ pub async fn completion_response_stream(
             );
             return Status::resource_exhausted(e.to_string());
         }
-        Status::internal(format!("Failed to generate completions: {}", e))
+        dispatch_error_status(e.as_ref(), "Failed to generate completions")
     })?;
 
     // capture the context to cancel the stream if the client disconnects

@@ -10,13 +10,14 @@
 mod direct_zmq;
 
 pub use dynamo_kv_router::multi_worker_sequence::{
-    ActiveSequencesMultiWorker, SchedulerLoadSnapshot, SequenceError, SequencePublishQueueError,
-    SequencePublisher, SequenceRequest, SequenceSubscriber,
+    ActiveSequencesMultiWorker, ReplicaRequestLeaseObserver, SchedulerLoadSnapshot, SequenceError,
+    SequencePublishQueueError, SequencePublisher, SequenceRequest, SequenceSubscriber,
 };
 use dynamo_kv_router::protocols::{
     ActiveSequenceEvent, ActiveSequenceEventBatch, MAX_REPLICA_BATCH_DURATION,
     MAX_REPLICA_BATCH_EVENTS, WorkerWithDpRank,
 };
+use dynamo_kv_router::scheduling::queue::SchedulerBookingDescriptor;
 pub use dynamo_kv_router::sequence::{ActiveSequences, RequestId};
 
 use anyhow::Result;
@@ -25,6 +26,7 @@ use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::{
     EventPublisher, EventSubscriber, EventTransportKind, TypedEventSubscriber,
 };
+use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::sync::Arc;
@@ -44,6 +46,107 @@ use dynamo_runtime::transports::event_plane::MsgpackCodec;
 // Match the existing standalone replica-sync queue. Lifecycle callers enqueue without awaiting;
 // if the queue is full, the newest event is dropped without blocking the local mutation.
 const REPLICA_EVENT_CHANNEL_CAPACITY: usize = 100_000;
+
+enum DeferredReplicaLeaseEvent {
+    Admitted(SchedulerBookingDescriptor),
+    Progressed(SchedulerBookingDescriptor),
+    Completed(SchedulerBookingDescriptor),
+}
+
+enum DeferredReplicaLeaseState {
+    Buffering(Vec<DeferredReplicaLeaseEvent>),
+    Installing {
+        target: Arc<dyn ReplicaRequestLeaseObserver>,
+        pending: Vec<DeferredReplicaLeaseEvent>,
+    },
+    Installed(Arc<dyn ReplicaRequestLeaseObserver>),
+}
+
+impl Default for DeferredReplicaLeaseState {
+    fn default() -> Self {
+        Self::Buffering(Vec::new())
+    }
+}
+
+/// Buffers the construction-time event window until `KvRouter` installs its
+/// request lease manager. After installation, calls pass through directly.
+#[derive(Default)]
+pub(crate) struct DeferredReplicaRequestLeaseObserver {
+    state: Mutex<DeferredReplicaLeaseState>,
+}
+
+impl DeferredReplicaRequestLeaseObserver {
+    pub(crate) fn install(&self, target: Arc<dyn ReplicaRequestLeaseObserver>) -> bool {
+        let mut pending = {
+            let mut state = self.state.lock();
+            let DeferredReplicaLeaseState::Buffering(pending) = &mut *state else {
+                return false;
+            };
+            let pending = std::mem::take(pending);
+            *state = DeferredReplicaLeaseState::Installing {
+                target: Arc::clone(&target),
+                pending: Vec::new(),
+            };
+            pending
+        };
+
+        loop {
+            for event in pending {
+                Self::notify(&target, event);
+            }
+            let mut state = self.state.lock();
+            let DeferredReplicaLeaseState::Installing {
+                target: installing_target,
+                pending: queued,
+            } = &mut *state
+            else {
+                unreachable!("observer installation state changed unexpectedly");
+            };
+            if queued.is_empty() {
+                *state = DeferredReplicaLeaseState::Installed(Arc::clone(installing_target));
+                return true;
+            }
+            pending = std::mem::take(queued);
+        }
+    }
+
+    fn observe(&self, event: DeferredReplicaLeaseEvent) {
+        let target = {
+            let mut state = self.state.lock();
+            match &mut *state {
+                DeferredReplicaLeaseState::Buffering(pending)
+                | DeferredReplicaLeaseState::Installing { pending, .. } => {
+                    pending.push(event);
+                    return;
+                }
+                DeferredReplicaLeaseState::Installed(target) => Arc::clone(target),
+            }
+        };
+        Self::notify(&target, event);
+    }
+
+    fn notify(target: &Arc<dyn ReplicaRequestLeaseObserver>, event: DeferredReplicaLeaseEvent) {
+        match event {
+            DeferredReplicaLeaseEvent::Admitted(booking) => target.admitted(booking),
+            DeferredReplicaLeaseEvent::Progressed(booking) => target.progressed(&booking),
+            DeferredReplicaLeaseEvent::Completed(booking) => target.completed(&booking),
+        }
+    }
+}
+
+impl ReplicaRequestLeaseObserver for DeferredReplicaRequestLeaseObserver {
+    fn admitted(&self, booking: SchedulerBookingDescriptor) {
+        self.observe(DeferredReplicaLeaseEvent::Admitted(booking));
+    }
+
+    fn progressed(&self, booking: &SchedulerBookingDescriptor) {
+        self.observe(DeferredReplicaLeaseEvent::Progressed(booking.clone()));
+    }
+
+    fn completed(&self, booking: &SchedulerBookingDescriptor) {
+        self.observe(DeferredReplicaLeaseEvent::Completed(booking.clone()));
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActiveSequenceEventWireFormat {
@@ -424,6 +527,30 @@ pub async fn create_multi_worker_sequences(
     scheduler_load: SchedulerLoadSender,
     cancellation_token: CancellationToken,
 ) -> Result<Arc<ActiveSequencesMulti>> {
+    create_multi_worker_sequences_with_observer(
+        endpoint,
+        block_size,
+        workers_with_configs,
+        replica_sync,
+        router_id,
+        scheduler_load,
+        None,
+        cancellation_token,
+    )
+    .await
+}
+
+#[expect(clippy::too_many_arguments)]
+pub(crate) async fn create_multi_worker_sequences_with_observer(
+    endpoint: Endpoint,
+    block_size: usize,
+    workers_with_configs: HashMap<u64, ModelRuntimeConfig>,
+    replica_sync: bool,
+    router_id: u64,
+    scheduler_load: SchedulerLoadSender,
+    replica_request_lease_observer: Option<Arc<dyn ReplicaRequestLeaseObserver>>,
+    cancellation_token: CancellationToken,
+) -> Result<Arc<ActiveSequencesMulti>> {
     let worker_type = scheduler_load.metric_label();
     let transport_kind = endpoint.drt().default_event_transport_kind();
     let event_sender = if let Some((event_sender, event_rx)) = active_sequence_event_channel(
@@ -476,16 +603,38 @@ pub async fn create_multi_worker_sequences(
         })
         .collect();
 
-    let multi_worker = ActiveSequencesMultiWorker::new(
-        publisher,
-        block_size,
-        dp_range,
-        replica_sync,
-        router_id,
-        worker_type,
-    );
+    let uses_shared_lease_manager = replica_request_lease_observer.is_some();
+    let multi_worker = if uses_shared_lease_manager {
+        // KvRouter's request lease manager owns the single CLOCK reaper for scheduler
+        // and approximate-LRU cleanup. Cache-retention TTL is unrelated.
+        ActiveSequencesMultiWorker::new_without_expiry(
+            publisher,
+            block_size,
+            dp_range,
+            replica_sync,
+            router_id,
+            worker_type,
+        )
+    } else {
+        ActiveSequencesMultiWorker::new(
+            publisher,
+            block_size,
+            dp_range,
+            replica_sync,
+            router_id,
+            worker_type,
+        )
+    };
 
     let arc = Arc::new(multi_worker);
+    if let Some(observer) = replica_request_lease_observer
+        && !arc.set_replica_request_lease_observer(observer)
+    {
+        anyhow::bail!("replica request lease observer is already installed");
+    }
+    if !uses_shared_lease_manager {
+        arc.start_periodic_force_expiry_across_all_workers(cancellation_token.child_token());
+    }
 
     // Worker-origin completion marks are consumed even when router-to-router replica sync is
     // disabled. The tracker filters all other remote lifecycle events in that mode.
@@ -514,8 +663,6 @@ pub async fn create_multi_worker_sequences(
             "active-sequence event ingress unavailable; continuing with response-side cleanup"
         );
     }
-
-    arc.start_periodic_force_expiry_across_all_workers(cancellation_token.child_token());
 
     Ok(arc)
 }

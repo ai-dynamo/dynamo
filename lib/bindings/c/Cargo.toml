@@ -34,7 +34,6 @@ dynamo-kv-router = { path = "../../kv-router" }
 dynamo-runtime = { path = "../../runtime" }
 
 anyhow = { workspace = true }
-serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 

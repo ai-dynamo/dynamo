@@ -56,6 +56,7 @@ else:
         sla_itl_ms=None,
         sla_e2e_ms=None,
         capture_per_request=False,
+        agentic_lanes=None,
     ):
         if isinstance(trace_files, (str, os.PathLike)):
             trace_files = [trace_files]
@@ -67,6 +68,7 @@ else:
             router_config=router_config,
             num_workers=num_workers,
             replay_concurrency=replay_concurrency,
+            agentic_lanes=agentic_lanes,
             replay_mode="offline",
             router_mode=router_mode,
             arrival_speedup_ratio=arrival_speedup_ratio,

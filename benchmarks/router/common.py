@@ -5,11 +5,11 @@
 
 """Common utilities shared across router benchmark scripts."""
 
+import copy
 import json
 import logging
 import os
 
-import numpy as np
 from prefix_data_generator.synthesizer import Synthesizer
 
 # Default values
@@ -63,7 +63,7 @@ def add_common_args(parser):
     parser.add_argument(
         "--use-expected-osl",
         action="store_true",
-        help="Pass agent_hints.osl to nvext for router output block tracking",
+        help="Pass agent_hints.osl through extra.nvext for router output block tracking",
     )
 
 
@@ -122,6 +122,12 @@ def add_synthesis_args(parser):
         type=int,
         default=None,
         help="Minimum input sequence length to include in output (default: None, no filtering)",
+    )
+    parser.add_argument(
+        "--max-rejections",
+        type=int,
+        default=10000,
+        help="Maximum consecutive ISL rejections before failing (default: 10000)",
     )
     parser.add_argument(
         "--min-osl",
@@ -205,12 +211,48 @@ def get_aiperf_cmd_for_trace(
     return cmd
 
 
+def set_trace_agent_hint(request, name, value):
+    """Set an agent hint in the trace envelope forwarded by AIPerf."""
+    extra = request.get("extra")
+    if not isinstance(extra, dict):
+        extra = {}
+        request["extra"] = extra
+
+    nvext = extra.get("nvext")
+    if not isinstance(nvext, dict):
+        nvext = {}
+        extra["nvext"] = nvext
+
+    agent_hints = nvext.get("agent_hints")
+    if not isinstance(agent_hints, dict):
+        agent_hints = {}
+        nvext["agent_hints"] = agent_hints
+
+    agent_hints[name] = value
+
+
+def add_expected_osl(request):
+    """Add the trace output length as the router's expected OSL hint."""
+    osl = request.get("output_length", request.get("output_tokens", 0))
+    set_trace_agent_hint(request, "osl", osl)
+
+
+def tag_requests_with_priority(requests, priority):
+    """Return request copies with extra.nvext.agent_hints.priority merged in."""
+    tagged_requests = []
+    for request in requests:
+        tagged_request = copy.deepcopy(request)
+        set_trace_agent_hint(tagged_request, "priority", priority)
+        tagged_requests.append(tagged_request)
+    return tagged_requests
+
+
 def prepare_trace_dataset(args, output_dir, logger):
     """Prepare a trace dataset, optionally synthesizing or modifying it.
 
     Handles three paths:
     1. No synthesis needed: use the original dataset as-is
-    2. Expected OSL injection only: inject agent_hints.osl into nvext
+    2. Expected OSL injection only: inject agent_hints.osl into extra.nvext
     3. Full synthesis: generate synthetic data from the input dataset
 
     Returns:
@@ -242,7 +284,7 @@ def prepare_trace_dataset(args, output_dir, logger):
         return requests, trace_dataset_path
 
     if not needs_synthesis and args.use_expected_osl:
-        # Only inject agent_hints.osl into nvext, no other synthesis
+        # Only inject agent_hints.osl into extra.nvext, no other synthesis
         logger.info("Injecting agent_hints.osl into original trace dataset...")
 
         requests = []
@@ -251,10 +293,7 @@ def prepare_trace_dataset(args, output_dir, logger):
                 requests.append(json.loads(line.strip()))
 
         for request in requests:
-            osl = request.get("output_tokens", 0)
-            if "nvext" not in request:
-                request["nvext"] = {}
-            request["nvext"].setdefault("agent_hints", {})["osl"] = osl
+            add_expected_osl(request)
 
         trace_dataset_path = os.path.join(output_dir, "trace_with_expected_osl.jsonl")
         with open(trace_dataset_path, "w") as f:
@@ -287,8 +326,6 @@ def prepare_trace_dataset(args, output_dir, logger):
     )
     logger.info(f"  Random seed: {args.seed}")
 
-    np.random.seed(args.seed)
-
     synthesizer = Synthesizer(
         args.input_dataset,
         block_size=args.block_size,
@@ -297,6 +334,7 @@ def prepare_trace_dataset(args, output_dir, logger):
         prefix_root_multiplier=args.prefix_root_multiplier,
         prompt_len_multiplier=args.prompt_len_multiplier,
         osl_multiplier=args.osl_multiplier,
+        seed=args.seed,
     )
 
     if args.num_requests is None:
@@ -310,6 +348,7 @@ def prepare_trace_dataset(args, output_dir, logger):
         num_requests,
         max_isl=args.max_isl,
         min_isl=args.min_isl,
+        max_rejections=args.max_rejections,
         min_osl=args.min_osl,
         max_osl=args.max_osl,
     )
@@ -319,11 +358,8 @@ def prepare_trace_dataset(args, output_dir, logger):
 
     if args.use_expected_osl:
         for request in requests:
-            osl = request.get("output_tokens", 0)
-            if "nvext" not in request:
-                request["nvext"] = {}
-            request["nvext"].setdefault("agent_hints", {})["osl"] = osl
-        logger.info("Injected agent_hints.osl into nvext for each request")
+            add_expected_osl(request)
+        logger.info("Injected agent_hints.osl into extra.nvext for each request")
 
     with open(trace_dataset_path, "w") as f:
         for request in requests:

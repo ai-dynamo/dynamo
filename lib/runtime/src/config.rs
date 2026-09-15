@@ -12,6 +12,8 @@ use std::fmt;
 use std::sync::OnceLock;
 use validator::Validate;
 
+#[doc(hidden)]
+pub mod env_config;
 pub mod environment_names;
 
 /// Default system host for health and metrics endpoints

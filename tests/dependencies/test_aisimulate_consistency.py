@@ -104,9 +104,15 @@ def test_dynamo_pins_matching_published_aisimulate_releases() -> None:
 
     assert python_requirement.marker is not None
     environment = default_environment()
+    environment["python_version"] = "3.10"
+    assert not python_requirement.marker.evaluate(environment)
+    environment["python_version"] = "3.11"
+    assert python_requirement.marker.evaluate(environment)
     environment["python_version"] = "3.12"
     assert python_requirement.marker.evaluate(environment)
     environment["python_version"] = "3.13"
+    assert python_requirement.marker.evaluate(environment)
+    environment["python_version"] = "3.14"
     assert not python_requirement.marker.evaluate(environment)
     assert container_requirement.marker is None
     assert _exact_version(container_requirement) == python_version
@@ -145,9 +151,19 @@ def test_container_stages_the_published_aisimulate_wheel() -> None:
     assert not (ROOT / "aisimulate").exists()
 
 
+def test_planner_ci_image_collects_unified_cli_e2e_tests() -> None:
+    planner_dockerfile = ROOT / "container/templates/planner.Dockerfile"
+    if not planner_dockerfile.is_file():
+        pytest.skip("planner Dockerfile is not staged in this component image")
+    planner_template = planner_dockerfile.read_text(encoding="utf-8")
+
+    assert "components/src/dynamo/replay/tests/e2e" in planner_template
+    assert "components/src/dynamo/replay/tests/test_main.py" not in planner_template
+
+
 def test_installed_aisimulate_matches_the_declared_release() -> None:
-    if sys.version_info >= (3, 13):
-        pytest.skip("AISimulate does not publish a Python 3.13 wheel")
+    if sys.version_info < (3, 11) or sys.version_info >= (3, 14):
+        pytest.skip("AISimulate supports Python 3.11 through 3.13")
     pyproject, _ = _root_configs()
     expected = _exact_version(_python_requirement(pyproject))
 
@@ -161,6 +177,13 @@ def test_ai_dynamo_registers_only_its_aisimulate_providers() -> None:
     extras = set(project.get("optional-dependencies", {}))
     assert {"sweeper", "simulate", "simulation"}.isdisjoint(extras)
     assert project["entry-points"]["aisimulate.sweep_config_providers"] == {
+        "dynamo.planner": "dynamo.planner.simulation:create_provider",
+        "dynamo.router": "dynamo.router.simulation:create_provider",
+    }
+    assert project["entry-points"]["aisimulate.runner_factories"] == {
+        "dynamo": "dynamo.replay.simulation:DynamoReplayRunnerFactory"
+    }
+    assert project["entry-points"]["aisimulate.config_adapters"] == {
         "dynamo.planner": "dynamo.planner.simulation:create_provider",
         "dynamo.router": "dynamo.router.simulation:create_provider",
     }

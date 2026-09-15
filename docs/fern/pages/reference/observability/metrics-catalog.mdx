@@ -13,10 +13,10 @@ The `type` on each field below is a [Prometheus metric type](https://prometheus.
 
 - **counter** — a cumulative value that only increases (or resets to zero on restart), e.g. total requests.
 - **gauge** — a single value that can go up or down, e.g. in-flight requests.
-- **histogram** — samples observations into configurable buckets and exposes `_bucket`, `_sum`, and `_count` series, e.g. request duration. Labeled histograms/counters/gauges register a metric *family*, not one series.
+- **histogram** — samples observations into configurable buckets and exposes `_bucket`, `_sum`, and `_count` series, e.g. request duration. Labeled histograms/counters/gauges register a metric *family*, not one series. The frontend latency and sequence-length histograms take their bucket ranges from environment variables — see [Histogram buckets](../components/frontend-configuration.mdx#histogram-buckets).
 
 <Info>
-  Labeled metrics (`HistogramVec`, `CounterVec`, `GaugeVec`) register a metric *family*, not individual time series. A series for a given label combination appears at `/metrics` only after the first request that populates it. A freshly-started process therefore shows empty families until the first matching request — this is expected Prometheus client behavior, not a missing metric.
+  Labeled metrics (`HistogramVec`, `CounterVec`, `GaugeVec`) register a metric *family*, not individual time series. For request-populated metrics, a series for a given label combination appears at `/metrics` only after the first matching request. Other families create or remove series from runtime state; their entries below document those semantics.
 </Info>
 
 ## Where each family is exposed
@@ -35,7 +35,7 @@ Engine pass-through metrics (`vllm:*`, `sglang:*`, `trtllm_*`) are emitted by th
 
 ## Frontend metrics
 
-Emitted by the HTTP frontend at `/metrics` on port 8000 by default. Most carry a `model` label.
+Emitted by the HTTP frontend at `/metrics` on port 8000 by default. Most carry a `model` label. For endpoints that canonicalize aliases, that label holds the primary served model name — the first `--served-model-name` value — so a request sent to an alias is counted under the primary. A name the frontend has not registered is counted under `unknown_model`.
 
 <ParamField path="dynamo_frontend_active_requests" type="gauge">
   Requests currently being handled by the frontend, from HTTP handler entry until the response stream completes. The top-level in-flight count with no stage breakdown.
@@ -171,9 +171,15 @@ Counters for requests that end early: [cancellations](../../developer-guide/know
   Last observed inter-token latency per worker, in seconds.
 </ParamField>
 
-### Model configuration metrics
+### Model metrics
 
-`dynamo_frontend_model_*` gauges are populated from worker backend registration and all carry a `model` label. When multiple workers register the same model name, only the first instance's configuration is recorded.
+All `dynamo_frontend_model_*` gauges carry a `model` label.
+
+<ParamField path="dynamo_frontend_model_ready" type="gauge">
+  Whether the frontend can currently route at least one inference request for the model. A value of `1` means at least one complete serving topology with a live worker and serving engine is available; `0` means the model is registered but not currently routable. The frontend evaluates this gauge from its live routing catalog at scrape time, so worker registration and removal are reflected in the next scrape. Unlike request-populated metrics, the series appears when the model registers without requiring an inference request. The series is absent while the model is not registered, and the entire family is absent when no models are registered. Detect this state with `absent(dynamo_frontend_model_ready{model="<model>"})`; a `== 0` comparison does not match an absent series. Aliases get no series of their own: a deployment served under several names emits one series, labeled with its primary name, so query an alias through its primary. `/v1/models` still lists alias names, but only the primary has a readiness series. A LoRA adapter is a distinct model rather than a second name for one, and keeps its own series.
+</ParamField>
+
+The remaining model gauges are populated from worker backend registration. When multiple workers register the same model name, only the first instance's configuration is recorded.
 
 <ParamField path="dynamo_frontend_model_total_kv_blocks" type="gauge">
   Total KV blocks available for a worker serving the model.

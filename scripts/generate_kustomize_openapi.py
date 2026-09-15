@@ -14,8 +14,12 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CRD_DIR = REPO_ROOT / "deploy/operator/config/crd/bases"
-OUTPUT_PATH = (
-    REPO_ROOT / "recipes/kustomize/components/dynamo-openapi/dynamo-openapi.json"
+# The matrix workflow and the copy-and-fill scaffold each carry a checked-in copy
+# so that a copied scaffold stays self-contained outside the repository.
+OUTPUT_PATHS = (
+    REPO_ROOT / "recipes/kustomize/components/dynamo-openapi/dynamo-openapi.json",
+    REPO_ROOT
+    / "recipes/templates/kustomize/components/dynamo-openapi/dynamo-openapi.json",
 )
 GENERATED_WARNING = "Generated file. Do not edit this checked-in copy."
 REGENERATE_COMMAND = "python3 scripts/generate_kustomize_openapi.py"
@@ -164,19 +168,25 @@ def main() -> int:
         print(f"generate_kustomize_openapi.py: {exc}", file=sys.stderr)
         return 1
 
-    current = OUTPUT_PATH.read_text(encoding="utf-8") if OUTPUT_PATH.exists() else None
     if args.check:
-        if current == rendered:
+        stale = [
+            path
+            for path in OUTPUT_PATHS
+            if not path.exists() or path.read_text(encoding="utf-8") != rendered
+        ]
+        if not stale:
             return 0
-        print(
-            f"Generated Kustomize OpenAPI schema is stale: {OUTPUT_PATH.relative_to(REPO_ROOT)}",
-            file=sys.stderr,
-        )
+        for path in stale:
+            print(
+                f"Generated Kustomize OpenAPI schema is stale: {path.relative_to(REPO_ROOT)}",
+                file=sys.stderr,
+            )
         print(f"Run: {REGENERATE_COMMAND}", file=sys.stderr)
         return 1
 
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT_PATH.write_text(rendered, encoding="utf-8")
+    for path in OUTPUT_PATHS:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(rendered, encoding="utf-8")
     return 0
 
 

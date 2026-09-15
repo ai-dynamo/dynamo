@@ -22,7 +22,7 @@ const TOMBSTONE_TTL: Duration = Duration::from_secs(5);
 use bytes::Bytes;
 use derive_builder::Builder;
 use futures::{SinkExt, StreamExt};
-use local_ip_address::{Error, list_afinet_netifas, local_ip, local_ipv6};
+use local_ip_address::Error;
 use parking_lot::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -42,31 +42,15 @@ use crate::engine::AsyncEngineContext;
 use crate::pipeline::{
     PipelineError,
     network::{
-        ResponseService, ResponseStreamPrologue,
+        ResponseService, ResponseStreamPrologue, StreamPrologueError,
         codec::{TwoPartMessage, TwoPartMessageType},
         tcp::StreamType,
     },
 };
-use anyhow::{Context, Result, anyhow as error};
+use crate::utils::ip_resolver::resolve_host_or_interface;
+use anyhow::{Result, anyhow as error};
 
-// Trait for IP address resolution - allows dependency injection for testing
-pub trait IpResolver {
-    fn local_ip(&self) -> Result<std::net::IpAddr, Error>;
-    fn local_ipv6(&self) -> Result<std::net::IpAddr, Error>;
-}
-
-// Default implementation using the real local_ip_address crate
-pub struct DefaultIpResolver;
-
-impl IpResolver for DefaultIpResolver {
-    fn local_ip(&self) -> Result<std::net::IpAddr, Error> {
-        local_ip()
-    }
-
-    fn local_ipv6(&self) -> Result<std::net::IpAddr, Error> {
-        local_ipv6()
-    }
-}
+pub use crate::utils::ip_resolver::{DefaultIpResolver, IpResolver};
 
 #[allow(dead_code)]
 type ResponseType = TwoPartMessage;
@@ -76,6 +60,8 @@ pub struct ServerOptions {
     #[builder(default = "0")]
     pub port: u16,
 
+    /// IP literal or exact network interface name used to bind and advertise the server.
+    /// When unset, Dynamo selects a local address automatically.
     #[builder(default)]
     pub interface: Option<String>,
 }
@@ -90,7 +76,7 @@ impl ServerOptions {
 /// A Response connection is a connection that is established by a client with the intention of sending
 /// specific data back to the server.
 pub struct TcpStreamServer {
-    local_ip: String,
+    local_ip: IpAddr,
     local_port: u16,
     state: Arc<Mutex<State>>,
 }
@@ -104,7 +90,7 @@ pub struct TcpStreamServer {
 #[allow(dead_code)]
 struct RequestedSendConnection {
     context: Arc<dyn AsyncEngineContext>,
-    connection: oneshot::Sender<Result<StreamSender, String>>,
+    connection: oneshot::Sender<Result<StreamSender, StreamPrologueError>>,
     /// Capacity of the per-stream mpsc buffer between the socket task and the
     /// engine producer; carried from the registration [`StreamOptions`].
     send_buffer_count: usize,
@@ -112,7 +98,7 @@ struct RequestedSendConnection {
 
 struct RequestedRecvConnection {
     context: Arc<dyn AsyncEngineContext>,
-    connection: oneshot::Sender<Result<StreamReceiver, String>>,
+    connection: oneshot::Sender<Result<StreamReceiver, StreamPrologueError>>,
     /// Capacity of the per-stream mpsc buffer between the socket task and the
     /// engine consumer; carried from the registration [`StreamOptions`].
     send_buffer_count: usize,
@@ -173,6 +159,10 @@ fn prune_tombstones(tombstones: &mut HashMap<EndpointInstanceId, Instant>, now: 
 }
 
 impl TcpStreamServer {
+    pub fn local_address(&self) -> Result<SocketAddr> {
+        Ok(SocketAddr::new(self.local_ip, self.local_port))
+    }
+
     pub fn options_builder() -> ServerOptionsBuilder {
         ServerOptionsBuilder::default()
     }
@@ -185,19 +175,12 @@ impl TcpStreamServer {
         options: ServerOptions,
         resolver: R,
     ) -> Result<Arc<Self>, PipelineError> {
-        let local_ip = match options.interface {
-            Some(interface) => {
-                let interfaces: HashMap<String, std::net::IpAddr> =
-                    list_afinet_netifas()?.into_iter().collect();
-
-                interfaces
-                    .get(&interface)
-                    .ok_or(PipelineError::Generic(format!(
-                        "Interface not found: {}",
-                        interface
-                    )))?
-                    .to_string()
-            }
+        let local_ip = match options.interface.as_deref() {
+            Some(host) => resolve_host_or_interface(host, &resolver).map_err(|error| {
+                PipelineError::Generic(format!(
+                    "Failed to resolve configured TCP host '{host}': {error}"
+                ))
+            })?,
             None => {
                 let resolved_ip = resolver.local_ip().or_else(|err| match err {
                     Error::LocalIpAddressNotFound => resolver.local_ipv6(),
@@ -222,7 +205,6 @@ impl TcpStreamServer {
                         )));
                     }
                 }
-                .to_string()
             }
         };
 
@@ -233,13 +215,14 @@ impl TcpStreamServer {
             PipelineError::Generic(format!("Failed to build TCP TLS acceptor: {}", e))
         })?;
 
-        let local_port = Self::start(local_ip.clone(), options.port, state.clone(), tls_acceptor)
+        let local_port = Self::start(local_ip, options.port, state.clone(), tls_acceptor)
             .await
             .map_err(|e| {
                 PipelineError::Generic(format!("Failed to start TcpStreamServer: {}", e))
             })?;
 
-        tracing::debug!("tcp transport service on {local_ip}:{local_port}");
+        let local_addr = SocketAddr::new(local_ip, local_port);
+        tracing::debug!("tcp transport service on {local_addr}");
 
         Ok(Arc::new(Self {
             local_ip,
@@ -297,6 +280,27 @@ impl TcpStreamServer {
         if let Some(s) = send_subject {
             entry.insert((StreamType::Request, s.to_string()));
         }
+        true
+    }
+
+    /// Associate a request-only callback registration with a backend instance.
+    /// QUIC response mode still uses TCP for bidirectional request callbacks.
+    pub async fn associate_request_instance(&self, subject: &str, id: &EndpointInstanceId) -> bool {
+        let mut state = self.state.lock();
+        let now = Instant::now();
+        prune_tombstones(&mut state.removed_instances, now);
+        if state.removed_instances.contains_key(id) {
+            state.tx_subjects.remove(subject);
+            return false;
+        }
+        state
+            .subject_instance
+            .insert(subject.to_string(), id.clone());
+        state
+            .instance_subjects
+            .entry(id.clone())
+            .or_default()
+            .insert((StreamType::Request, subject.to_string()));
         true
     }
 
@@ -387,12 +391,12 @@ impl TcpStreamServer {
     }
 
     async fn start(
-        local_ip: String,
+        local_ip: IpAddr,
         local_port: u16,
         state: Arc<Mutex<State>>,
         tls_acceptor: Option<TlsAcceptor>,
     ) -> Result<u16> {
-        let addr = format!("{}:{}", local_ip, local_port);
+        let addr = SocketAddr::new(local_ip, local_port);
         let state_clone = state.clone();
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<u16>>();
         {
@@ -477,7 +481,7 @@ impl ResponseService for TcpStreamServer {
     async fn register(&self, options: StreamOptions) -> PendingConnections {
         // oneshot channels to pass back the sender and receiver objects
 
-        let address = format!("{}:{}", self.local_ip, self.local_port);
+        let address = SocketAddr::new(self.local_ip, self.local_port).to_string();
         tracing::debug!("Registering new TcpStream on {address}");
 
         let send_stream = if options.enable_request_stream {
@@ -769,12 +773,12 @@ type BoxWrite = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
 // the sender, then we spawn a task to forward all bytes from the tcp stream
 // to the sender
 async fn tcp_listener(
-    addr: String,
+    addr: SocketAddr,
     state: Arc<Mutex<State>>,
     tls_acceptor: Option<TlsAcceptor>,
     read_tx: tokio::sync::oneshot::Sender<Result<u16>>,
 ) -> Result<()> {
-    let listener = tokio::net::TcpListener::bind(&addr)
+    let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to start TcpListender on {}: {}", addr, e));
 
@@ -1082,9 +1086,19 @@ async fn tcp_listener(
         // deserialize prologue
         let prologue = match prologue.into_message_type() {
             TwoPartMessageType::HeaderOnly(header) => {
-                let prologue: ResponseStreamPrologue = serde_json::from_slice(&header)
-                    .map_err(|e| error!("Failed to deserialize ControlMessage: {}", e))?;
-                prologue
+                match serde_json::from_slice::<ResponseStreamPrologue>(&header) {
+                    Ok(prologue) => prologue,
+                    Err(e) => {
+                        // Notify the requester as the sibling arm does. Returning on
+                        // `?` alone drops the oneshot un-sent, and the requester then
+                        // reports a bare disconnect that names neither the worker's
+                        // failure nor this one.
+                        let msg = format!("malformed prologue: {e}");
+                        let _ =
+                            connection.send(Err(StreamPrologueError::from_message(msg.clone())));
+                        return Err(error!(msg));
+                    }
+                }
             }
             _ => {
                 // Worker sent a non-HeaderOnly frame in the prologue slot
@@ -1092,7 +1106,7 @@ async fn tcp_listener(
                 // requester so the generate call chain fails cleanly, then
                 // return Err so the connection task ends without panicking.
                 let msg = "malformed prologue: expected HeaderOnly ControlMessage";
-                let _ = connection.send(Err(msg.to_string()));
+                let _ = connection.send(Err(StreamPrologueError::from_message(msg)));
                 return Err(error!(msg));
             }
         };
@@ -1103,9 +1117,15 @@ async fn tcp_listener(
         // note: this second control message might be delayed, but the expensive part of setting up the connection
         // is both complete and ready for data flow; awaiting here is not a performance hit or problem and it allows
         // us to trace the initial setup time vs the time to prologue
-        if let Some(error) = &prologue.error {
-            let _ = connection.send(Err(error.clone()));
-            return Err(error!("Received error prologue: {}", error));
+        if let Some(error) = prologue.error {
+            let returned = error!("Received error prologue: {error}");
+            // Forward the worker's typed error so the requesting side can classify
+            // the failure instead of parsing the message. An older worker sends none.
+            let _ = connection.send(Err(StreamPrologueError {
+                message: error,
+                typed_error: prologue.typed_error,
+            }));
+            return Err(returned);
         }
 
         // Buffer size is driven by the registration options
@@ -1320,28 +1340,13 @@ fn process_control_message(message: Bytes) -> Result<ControlAction> {
 mod tests {
     use super::*;
     use crate::engine::AsyncEngineContextProvider;
+    use crate::error::{BackendError, DynamoError, ErrorType};
     use crate::pipeline::Context;
     use crate::pipeline::network::DEFAULT_SEND_BUFFER_COUNT;
     use crate::pipeline::network::tcp::client::TcpClient;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
+    use crate::tls_utils::test_certs::self_signed_pair;
     use tokio::io::{AsyncWriteExt, ReadHalf, WriteHalf};
     use tokio::net::TcpStream;
-
-    fn make_cert_files() -> (NamedTempFile, NamedTempFile) {
-        let key_pair = rcgen::KeyPair::generate().unwrap();
-        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
-            .unwrap()
-            .self_signed(&key_pair)
-            .unwrap();
-        let mut cert_file = NamedTempFile::new().unwrap();
-        cert_file.write_all(cert.pem().as_bytes()).unwrap();
-        let mut key_file = NamedTempFile::new().unwrap();
-        key_file
-            .write_all(key_pair.serialize_pem().as_bytes())
-            .unwrap();
-        (cert_file, key_file)
-    }
 
     #[test]
     fn build_tls_acceptor_no_env_vars_is_plaintext() {
@@ -1361,7 +1366,7 @@ mod tests {
 
     #[test]
     fn build_tls_acceptor_partial_config_errors() {
-        let (cert, key) = make_cert_files();
+        let (cert, key) = self_signed_pair();
         let cert_str = cert.path().to_str().unwrap();
         let key_str = key.path().to_str().unwrap();
         // only cert
@@ -1384,7 +1389,7 @@ mod tests {
 
     #[test]
     fn build_tls_acceptor_both_paths_is_tls() {
-        let (cert, key) = make_cert_files();
+        let (cert, key) = self_signed_pair();
         temp_env::with_vars(
             [
                 ("DYN_TCP_TLS_CERT_PATH", Some(cert.path().to_str().unwrap())),
@@ -1397,7 +1402,7 @@ mod tests {
     #[test]
     fn build_tls_acceptor_with_client_ca_is_mtls() {
         // A client CA turns the response-stream server into an mTLS acceptor.
-        let (cert, key) = make_cert_files();
+        let (cert, key) = self_signed_pair();
         temp_env::with_vars(
             [
                 ("DYN_TCP_TLS_CERT_PATH", Some(cert.path().to_str().unwrap())),
@@ -1413,7 +1418,7 @@ mod tests {
 
     #[test]
     fn build_tls_acceptor_client_ca_without_server_identity_errors() {
-        let (cert, _key) = make_cert_files();
+        let (cert, _key) = self_signed_pair();
         temp_env::with_vars(
             [
                 ("DYN_TCP_TLS_CERT_PATH", None),
@@ -1596,6 +1601,51 @@ mod tests {
         assert!(socket_addr.port() > 0, "Server should have a valid port");
     }
 
+    #[tokio::test]
+    async fn configured_ip_literals_bind_and_format_addresses() {
+        let ipv6_available = TcpListener::bind("[::1]:0").is_ok();
+
+        for (host, expected_ip) in [
+            ("127.0.0.1", "127.0.0.1".parse::<IpAddr>().unwrap()),
+            ("::1", "::1".parse::<IpAddr>().unwrap()),
+        ] {
+            if expected_ip.is_ipv6() && !ipv6_available {
+                eprintln!("skipping IPv6 bind because this host does not support IPv6 loopback");
+                continue;
+            }
+
+            let server = TcpStreamServer::new_with_resolver(
+                ServerOptions {
+                    port: 0,
+                    interface: Some(host.to_string()),
+                },
+                FailingIpResolver,
+            )
+            .await
+            .unwrap();
+            let context = Context::new(());
+            let pending = server
+                .register(
+                    StreamOptions::builder()
+                        .context(context.context())
+                        .enable_request_stream(false)
+                        .enable_response_stream(true)
+                        .build()
+                        .unwrap(),
+                )
+                .await;
+            let connection_info = pending.recv_stream.unwrap().connection_info;
+            let tcp_info: TcpStreamConnectionInfo = connection_info.try_into().unwrap();
+            let address = tcp_info.address.parse::<SocketAddr>().unwrap();
+
+            assert_eq!(address.ip(), expected_ip);
+            assert_ne!(address.port(), 0);
+            if expected_ip.is_ipv6() {
+                assert!(tcp_info.address.starts_with('['));
+            }
+        }
+    }
+
     /// Create a test server using the failing IP resolver (falls back to loopback).
     async fn test_server() -> Arc<TcpStreamServer> {
         TcpStreamServer::new_with_resolver(
@@ -1611,7 +1661,7 @@ mod tests {
         server: &TcpStreamServer,
     ) -> (
         String,
-        tokio::sync::oneshot::Receiver<Result<super::StreamReceiver, String>>,
+        tokio::sync::oneshot::Receiver<Result<super::StreamReceiver, StreamPrologueError>>,
     ) {
         let context = Context::new(());
         let options = StreamOptions::builder()
@@ -1649,9 +1699,9 @@ mod tests {
         server: &TcpStreamServer,
     ) -> (
         String,
-        tokio::sync::oneshot::Receiver<Result<super::StreamSender, String>>,
+        tokio::sync::oneshot::Receiver<Result<super::StreamSender, StreamPrologueError>>,
         String,
-        tokio::sync::oneshot::Receiver<Result<super::StreamReceiver, String>>,
+        tokio::sync::oneshot::Receiver<Result<super::StreamReceiver, StreamPrologueError>>,
     ) {
         let context = Context::new(());
         let options = StreamOptions::builder()
@@ -2190,9 +2240,12 @@ mod tests {
             .unwrap();
         framed_writer
             .send(TwoPartMessage::from_header(
-                serde_json::to_vec(&ResponseStreamPrologue { error: None })
-                    .unwrap()
-                    .into(),
+                serde_json::to_vec(&ResponseStreamPrologue {
+                    error: None,
+                    typed_error: None,
+                })
+                .unwrap()
+                .into(),
             ))
             .await
             .unwrap();
@@ -2345,6 +2398,65 @@ mod tests {
         }
     }
 
+    /// A prologue from a newer worker may carry an `ErrorType` this build does
+    /// not know; its legacy error must still reach the requester.
+    #[tokio::test]
+    async fn test_unknown_typed_error_preserves_the_legacy_prologue_error() {
+        let options = ServerOptions::builder().port(0).build().unwrap();
+        let server = TcpStreamServer::new_with_resolver(options, FailingIpResolver)
+            .await
+            .unwrap();
+        let context = Context::new(());
+        let stream_options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(false)
+            .enable_response_stream(true)
+            .build()
+            .unwrap();
+        let pending_connection = server.register(stream_options).await;
+        let (connection_info, stream_provider) =
+            pending_connection.recv_stream.unwrap().into_parts();
+        let tcp_info: TcpStreamConnectionInfo = connection_info.try_into().unwrap();
+
+        let stream = TcpStream::connect(&tcp_info.address).await.unwrap();
+        let (_read_half, write_half) = tokio::io::split(stream);
+        let mut framed_writer = FramedWrite::new(write_half, TwoPartCodec::default());
+
+        let handshake = CallHomeHandshake {
+            subject: tcp_info.subject,
+            stream_type: StreamType::Response,
+        };
+        framed_writer
+            .send(TwoPartMessage::from_header(
+                serde_json::to_vec(&handshake).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+
+        // Correctly framed HeaderOnly, but the typed error names a variant this
+        // build does not know.
+        framed_writer
+            .send(TwoPartMessage::from_header(Bytes::from_static(
+                br#"{"error":"Generate Error: boom","typed_error":{"error_type":"VariantFromTheFuture","message":"boom"}}"#,
+            )))
+            .await
+            .unwrap();
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), stream_provider)
+            .await
+            .expect("stream provider should resolve quickly")
+            .expect("the oneshot must be notified, not dropped");
+
+        // `StreamReceiver` is not `Debug`, so match instead of `expect_err`.
+        match outcome {
+            Err(err) => {
+                assert_eq!(err.message, "Generate Error: boom");
+                assert!(err.typed_error.is_none());
+            }
+            Ok(_) => panic!("an error prologue must not yield a usable stream"),
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_concurrent_response_registration_and_call_home() {
         const STREAMS: usize = 128;
@@ -2399,6 +2511,58 @@ mod tests {
         assert!(
             result.is_ok(),
             "concurrent response registration and call-home timed out"
+        );
+    }
+
+    /// A worker that refuses a request before producing any response bytes must
+    /// keep its error type all the way to the requesting side.
+    #[tokio::test]
+    async fn test_typed_prologue_error_survives_to_requester() {
+        let server = test_server().await;
+        let context = Context::new(());
+        let options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(false)
+            .enable_response_stream(true)
+            .build()
+            .unwrap();
+
+        let pending = server.register(options).await;
+        let (connection_info, stream_provider) = pending.recv_stream.unwrap().into_parts();
+        let client_context =
+            Context::with_id_and_metadata((), context.id().to_string(), Default::default());
+
+        let worker_error = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+            .message("multimodal input is not supported by this backend")
+            .build();
+
+        let mut sender =
+            TcpClient::create_response_stream(client_context.context(), connection_info, None)
+                .await
+                .unwrap();
+        sender
+            .send_prologue_typed(Some(StreamPrologueError::new(
+                "Generate Error: multimodal input is not supported by this backend",
+                worker_error,
+            )))
+            .await
+            .unwrap();
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), stream_provider)
+            .await
+            .expect("stream provider should resolve quickly")
+            .expect("stream provider channel should not be dropped");
+
+        // `StreamReceiver` is not `Debug`, so match instead of `expect_err`.
+        let prologue_error = match outcome {
+            Err(err) => err,
+            Ok(_) => panic!("an error prologue must not yield a usable stream"),
+        };
+        assert_eq!(
+            prologue_error.typed_error.as_ref().map(|e| e.error_type()),
+            Some(ErrorType::Backend(BackendError::InvalidArgument)),
+            "the worker's error type must survive the prologue round trip"
         );
     }
 

@@ -15,6 +15,9 @@
 
 global:
   secretName: batch-gateway-secrets
+  # Batch Gateway images run as UID/GID 65532 and share this file store.
+  podSecurityContext:
+    fsGroup: 65532
   dbClient:
     type: redis
   fileClient:

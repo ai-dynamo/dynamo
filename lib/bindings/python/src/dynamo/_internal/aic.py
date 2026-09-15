@@ -15,11 +15,11 @@ _NEXTN_ACCEPT_RATES_LEN = 5
 # Dynamo's historical default when conditional acceptance rates are omitted.
 _DEFAULT_NEXTN_ACCEPT_RATES = [0.85, 0.3, 0.0, 0.0, 0.0]
 
-# Default backend versions match the AIC-core v0.11.0 perf DB.
+# Resolve defaults through the queryable slots in the pinned AISimulate perf DB.
 DEFAULT_BACKEND_VERSIONS = {
-    "vllm": "0.19.0",
-    "sglang": "0.5.10",
-    "trtllm": "1.3.0rc10",
+    "vllm": "current",
+    "sglang": "current",
+    "trtllm": "current",
 }
 _KV_CAPACITY_BACKENDS = frozenset(DEFAULT_BACKEND_VERSIONS)
 DEFAULT_STATIC_STRIDE = 32
@@ -39,7 +39,7 @@ def _validate_kv_capacity_backend(backend_name: str) -> None:
 
 
 def resolve_backend_version(backend_name: str, backend_version: str | None) -> str:
-    """Return the pinned backend version used for AIC perf lookups."""
+    """Preserve explicit versions; otherwise use the release database current slot."""
     if backend_version is not None:
         return backend_version
     return DEFAULT_BACKEND_VERSIONS.get(backend_name, DEFAULT_BACKEND_VERSIONS["vllm"])
@@ -145,7 +145,7 @@ def _load_aiconfigurator():
         if exc.name != "aiconfigurator_core":
             raise
         raise RuntimeError(
-            "aiconfigurator-core is required for AIC perf modeling but is not installed"
+            "aisimulate is required for AIC perf modeling but is not installed"
         ) from exc
 
     return {
@@ -443,9 +443,8 @@ def estimate_num_gpu_blocks(
         memory_fraction_kind = "of_total"
         memory_fraction_value = gpu_memory_utilization
 
-    # Imported lazily because aiconfigurator-core is provided by the optional
-    # `mocker` extra. An AIC-backed call requires that extra and fails fast when
-    # it is absent.
+    # Imported lazily from the compatibility namespace shipped by AISimulate.
+    # An AIC-backed call requires AISimulate and fails fast when it is absent.
     # TODO: account for whether specdec is enabled (pass `nextn=...`). Currently
     #   omitted due to a downstream AIC bug where `_get_memory_usage` predicts
     #   negative KV capacity with Eagle.
@@ -459,8 +458,8 @@ def estimate_num_gpu_blocks(
             "aiconfigurator_core."
         ):
             raise RuntimeError(
-                "aiconfigurator-core is required for AIC KV-cache estimation but is "
-                "not installed; install the 'mocker' extra"
+                "aisimulate is required for AIC KV-cache estimation but is "
+                "not installed"
             ) from exc
         raise
 

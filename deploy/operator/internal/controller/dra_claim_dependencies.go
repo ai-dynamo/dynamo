@@ -10,10 +10,8 @@ import (
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -37,22 +35,24 @@ func deploymentEventFilter(
 	})
 }
 
+// componentReferencesDRAClaim reports whether any application or init container in the
+// non-nil component references the named claim or claim template.
 func componentReferencesDRAClaim(
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	objectName string,
 	template bool,
 ) bool {
-	if component == nil || !component.IsMultinode() || component.PodTemplate == nil {
+	if component.PodTemplate == nil {
 		return false
 	}
-	mainContainer := dynamo.GetMainContainer(component)
-	if mainContainer == nil || len(mainContainer.Resources.Claims) == 0 {
-		return false
+	containerClaimNames := make(map[string]struct{})
+	for _, container := range dra.AllContainers(&component.PodTemplate.Spec) {
+		for _, claim := range container.Resources.Claims {
+			containerClaimNames[claim.Name] = struct{}{}
+		}
 	}
-
-	containerClaimNames := make(map[string]struct{}, len(mainContainer.Resources.Claims))
-	for _, claim := range mainContainer.Resources.Claims {
-		containerClaimNames[claim.Name] = struct{}{}
+	if len(containerClaimNames) == 0 {
+		return false
 	}
 
 	for _, podClaim := range component.PodTemplate.Spec.ResourceClaims {
@@ -69,8 +69,18 @@ func componentReferencesDRAClaim(
 	return false
 }
 
+// componentUsesDRAClaims reports whether any application or init container in the non-nil
+// component references DRA claims.
 func componentUsesDRAClaims(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) bool {
-	return component != nil && component.IsMultinode() && len(dynamo.GetMainContainerResources(component).Claims) > 0
+	if component.PodTemplate == nil {
+		return false
+	}
+	for _, container := range dra.AllContainers(&component.PodTemplate.Spec) {
+		if len(container.Resources.Claims) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *DynamoComponentDeploymentReconciler) mapResourceClaimToDCDRequests(
@@ -149,17 +159,6 @@ func (r *DynamoGraphDeploymentReconciler) mapResourceClaimTemplateToDGDRequests(
 	return r.mapDRAClaimToDGDRequests(ctx, obj, true)
 }
 
-func (r *DynamoGraphDeploymentReconciler) shouldMapDRAEventToDGD(
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-) bool {
-	// DGD-level DRA events serve Grove; unselected legacy DGDs remain eligible until adoption.
-	if !r.RuntimeConfig.Gate.Enabled(features.Grove) {
-		return false
-	}
-	provider, selected := dgd.Annotations[consts.KubeAnnotationWorkloadProvider]
-	return !selected || provider == consts.WorkloadProviderGrove
-}
-
 func (r *DynamoGraphDeploymentReconciler) mapDRAClaimToDGDRequests(
 	ctx context.Context,
 	obj client.Object,
@@ -174,9 +173,6 @@ func (r *DynamoGraphDeploymentReconciler) mapDRAClaimToDGDRequests(
 	requests := make([]ctrl.Request, 0)
 	for i := range deployments.Items {
 		deployment := &deployments.Items[i]
-		if !r.shouldMapDRAEventToDGD(deployment) {
-			continue
-		}
 		for componentIndex := range deployment.Spec.Components {
 			if componentReferencesDRAClaim(&deployment.Spec.Components[componentIndex], obj.GetName(), template) {
 				requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{
@@ -203,8 +199,7 @@ func (r *DynamoGraphDeploymentReconciler) mapDeviceClassToDGDRequests(
 	requests := make([]ctrl.Request, 0)
 	for i := range deployments.Items {
 		deployment := &deployments.Items[i]
-		if !commonController.NamespaceAllowed(r.Config, r.RuntimeConfig, deployment, deployment.Namespace) ||
-			!r.shouldMapDRAEventToDGD(deployment) {
+		if !commonController.NamespaceAllowed(r.Config, r.RuntimeConfig, deployment, deployment.Namespace) {
 			continue
 		}
 		for componentIndex := range deployment.Spec.Components {

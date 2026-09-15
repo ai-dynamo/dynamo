@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::env;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -59,18 +58,15 @@ impl Default for MultiNodeConfig {
 // Example echo engines
 //
 
+const DEFAULT_TOKEN_ECHO_DELAY_MS: u64 = 10;
+
 /// How long to sleep between echoed tokens.
-/// Default is 10ms which gives us 100 tok/s.
-/// Can be configured via the DYN_TOKEN_ECHO_DELAY_MS environment variable.
+/// The default is 10ms, which gives us 100 tok/s.
 pub static TOKEN_ECHO_DELAY: LazyLock<Duration> = LazyLock::new(|| {
-    const DEFAULT_DELAY_MS: u64 = 10;
-
-    let delay_ms = env::var("DYN_TOKEN_ECHO_DELAY_MS")
-        .ok()
-        .and_then(|val| val.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_DELAY_MS);
-
-    Duration::from_millis(delay_ms)
+    Duration::from_millis(dynamo_runtime::config::env_config::parse_or_default(
+        dynamo_runtime::config::environment_names::llm::DYN_TOKEN_ECHO_DELAY_MS,
+        DEFAULT_TOKEN_ECHO_DELAY_MS,
+    ))
 });
 
 /// Engine that accepts un-preprocessed requests and echos the prompt back as the response

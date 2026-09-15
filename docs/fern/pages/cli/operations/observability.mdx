@@ -247,18 +247,44 @@ not export request trace records. In Grafana, query Loki for scope `dynamo.reque
 
 ### Replay a Capture
 
-Pass `dynamo.request.trace.v1` JSONL or JSONL.GZ shards directly to DynoSim:
+Save `/tmp/request-trace-prediction.yaml` with the `dynamo.request.trace.v1` JSONL or JSONL.GZ
+shards:
 
-```bash
-python -m dynamo.replay /tmp/dynamo-request-trace.*.jsonl.gz \
-  --trace-format dynamo \
-  --replay-mode offline \
-  --router-mode kv_router \
-  --num-workers 4 \
-  --report-json /tmp/request-trace-replay-report.json
+```yaml
+traffic:
+  source:
+    type: trace
+    format: dynamo
+    paths: [/tmp/dynamo-request-trace.0000.jsonl.gz]
+  load: {type: trace_timestamps, speedup: 1.0}
+engine:
+  mode: aggregated
+  model: meta-llama/Meta-Llama-3.1-8B-Instruct
+  hardware: h200_sxm
+  backend: vllm
+  context_length: max
+  workers:
+    aggregated:
+      parallelism: {replicas: 4, tensor: 1, pipeline: 1, attention_data: 1, moe_tensor: 1, moe_expert: 1}
+      scheduler: {max_batched_tokens: 8192, max_sequences: 256}
+      kv_cache: {block_size: 64, prefix_caching: true, capacity: {type: default, memory_fraction: 0.9}}
+      timing: {type: default}
+router:
+  policy: kv_router
+  prefill_load_model: {type: none}
+planner: {policy: disabled}
 ```
 
-No Mooncake conversion is required. DynoSim derives and validates the trace block size. It preserves
+Add every shard to `traffic.source.paths`, then run the offline prediction:
+
+```bash
+aisimulate predict \
+  --stack dynamo \
+  --config /tmp/request-trace-prediction.yaml \
+  --output-dir /tmp/request-trace-prediction
+```
+
+No Mooncake conversion is required. AISimulate derives and validates the trace block size. It preserves
 session dependencies and tool waits when every request has session context and rejects mixed
 session-aware and context-free trace sets.
 

@@ -176,7 +176,7 @@ The operator maintains observed state under `status`.
 </Indent>
 
 <ParamField path="status.checkpoints" type="map[string]ComponentCheckpointStatus">
-  Per-component checkpoint status, keyed by component name. See the [DynamoCheckpoint API](full-api-reference.mdx#dynamocheckpoint).
+  Per-component checkpoint status, keyed by component name. See the [ComponentCheckpointStatus API](full-api-reference.mdx#componentcheckpointstatus).
 
   See: [ComponentCheckpointStatus](#componentcheckpointstatus)
 </ParamField>
@@ -245,15 +245,15 @@ Replica information for a single component, keyed by component name in `status.c
 Checkpoint information for a single component, keyed by component name in `status.checkpoints`.
 
 <ParamField path="checkpointName" type="string">
-  Name of the associated `DynamoCheckpoint` CR.
+  Name of the active `PodSnapshot`.
 </ParamField>
 
-<ParamField path="checkpointID" type="string">
-  Artifact ID used by the snapshot protocol.
+<ParamField path="checkpointID" type="string" deprecated={true}>
+  Deprecated legacy Dynamo artifact ID. Standalone snapshots leave this field empty.
 </ParamField>
 
 <ParamField path="identityHash" type="string" deprecated={true}>
-  Computed hash of the checkpoint identity. Deprecated: automatic checkpoints use `checkpointID`; this field is retained for older status consumers.
+  Deprecated legacy checkpoint identity hash. Standalone snapshots leave this field empty.
 </ParamField>
 
 <ParamField path="ready" type="boolean">

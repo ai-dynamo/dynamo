@@ -17,9 +17,9 @@ use tokio::sync::oneshot;
 
 use super::{
     ApproximateLruClient, ApproximateLruCommandSink, ApproximateLruIncarnation,
-    ApproximateLruLease, ApproximateLruRequestId, ApproximateLruStats, ApproximateLruTask,
-    ApproximateRetentionConfig, KvIndexerInterface, KvIndexerMetrics, KvRouterError,
-    ShardSizeSnapshot, SyncIndexer, WorkerLookupStats, WorkerTask, panic_payload_message,
+    ApproximateLruLease, ApproximateLruStats, ApproximateLruTask, ApproximateRetentionConfig,
+    KvIndexerInterface, KvIndexerMetrics, KvRouterError, ShardSizeSnapshot, SyncIndexer,
+    WorkerLookupStats, WorkerTask, panic_payload_message,
 };
 #[cfg(feature = "bench")]
 use super::{
@@ -28,6 +28,7 @@ use super::{
 };
 use crate::indexer::pruning::{BlockEntry, PruneConfig, WorkerPruneManager};
 use crate::protocols::*;
+use crate::scheduling::AttemptId;
 use dynamo_tokens::SequenceHash;
 #[cfg(feature = "bench")]
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
@@ -361,10 +362,10 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         &self,
         worker: WorkerWithDpRank,
         incarnation: ApproximateLruIncarnation,
-        lru_request_id: ApproximateLruRequestId,
+        attempt_id: AttemptId,
     ) -> Option<ApproximateLruLease> {
         let client = self.approximate_lru_client_for_worker(worker)?;
-        Some(client.begin_request(worker, incarnation, lru_request_id))
+        Some(client.begin_request(worker, incarnation, attempt_id))
     }
 
     pub async fn set_approximate_lru_capacity(

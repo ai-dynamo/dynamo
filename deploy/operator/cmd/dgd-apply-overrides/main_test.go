@@ -55,12 +55,41 @@ func TestRunWithEmptyOverridePreservesBlueprint(t *testing.T) {
 	assert.Equal(t, mustDecodeDGD(t, []byte(betaBlueprintJSON)), mustDecodeDGD(t, stdout.Bytes()))
 }
 
-func TestRunEmitsWarningsForIgnoredTopology(t *testing.T) {
+func TestRunEmitsMigrationWarningForTranslatedTarget(t *testing.T) {
 	t.Parallel()
 
+	t.Log("Apply a deprecated override target to a blueprint with its replacement name")
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
+	blueprint := strings.ReplaceAll(betaBlueprintJSON, `"Worker"`, `"worker"`)
+	err := run(
+		nil,
+		applyRequestReader(t, blueprint, `{
+			"apiVersion": "nvidia.com/v1beta1",
+			"kind": "DynamoGraphDeployment",
+			"spec": {"components": [{
+				"name": "VllmWorker",
+				"podTemplate": {"spec": {"containers": [{"name": "main", "image": "new-image"}]}}
+			}]}
+		}`),
+		stdout,
+		stderr,
+	)
+	require.NoError(t, err)
 
+	t.Log("Verify the CLI reports the exact translation and materializes the override")
+	const expectedWarning = `warning: spec.components[name=VllmWorker]: deprecated override target ` +
+		`"VllmWorker" translated to "worker"; use "worker" directly. ` +
+		`Legacy-name translation will be removed in a future release`
+	assert.Contains(t, stderr.String(), expectedWarning)
+	assert.Equal(t, "new-image", mainContainerImage(t, mustDecodeDGD(t, stdout.Bytes())))
+}
+
+func TestRunRejectsUnknownOverrideTarget(t *testing.T) {
+	t.Parallel()
+
+	t.Log("Apply an override whose target is absent from the generated blueprint")
+	stdout := &bytes.Buffer{}
 	err := run(
 		nil,
 		applyRequestReader(t, betaBlueprintJSON, `{
@@ -69,15 +98,13 @@ func TestRunEmitsWarningsForIgnoredTopology(t *testing.T) {
 			"spec": {"components": [{"name": "Missing", "replicas": 2}]}
 		}`),
 		stdout,
-		stderr,
+		&bytes.Buffer{},
 	)
-	require.NoError(t, err)
-	assert.Contains(
-		t,
-		stderr.String(),
-		"warning: spec.components[name=Missing]: ignored because the generated blueprint has no such component",
-	)
-	assert.Equal(t, "old-image", mainContainerImage(t, mustDecodeDGD(t, stdout.Bytes())))
+
+	t.Log("Verify the CLI fails without emitting a partially materialized DGD")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `override target "Missing" is not present in the generated blueprint`)
+	assert.Empty(t, stdout.String())
 }
 
 func TestRunDoesNotWriteOutputOnFailure(t *testing.T) {
@@ -231,7 +258,7 @@ func mainContainerImage(t *testing.T, dgd *unstructured.Unstructured) string {
 	require.True(t, found)
 	for _, value := range components {
 		component, ok := value.(map[string]interface{})
-		if !ok || component["name"] != "Worker" {
+		if !ok || (component["name"] != "Worker" && component["name"] != "worker") {
 			continue
 		}
 		containers, found, err := unstructured.NestedSlice(component, "podTemplate", "spec", "containers")

@@ -229,25 +229,24 @@ impl ListenerLoop {
                     }
                 }
             };
-            if msg.len() != 4 {
-                tracing::warn!(
-                    worker_id,
-                    dp_rank,
-                    "Unexpected replay frame count: {}",
-                    msg.len()
-                );
-                break;
-            }
-
-            // vLLM replay responses include the DEALER identity delimiter plus the
-            // original PUB topic, so the payload shape is:
-            // [empty delimiter, topic, sequence number, encoded event batch].
-            let payload = msg.get(3).expect("frame count checked above");
+            // DEALER strips the ROUTER identity. vLLM includes the PUB topic;
+            // SGLang sends only the delimiter, sequence number, and payload.
+            let (seq_bytes, payload) = match msg.as_slice() {
+                [_, seq, payload] | [_, _, seq, payload] => (seq, payload),
+                _ => {
+                    tracing::warn!(
+                        worker_id,
+                        dp_rank,
+                        "Unexpected replay frame count: {}",
+                        msg.len()
+                    );
+                    break;
+                }
+            };
             if payload.is_empty() {
                 break;
             }
 
-            let seq_bytes = msg.get(2).expect("frame count checked above");
             if seq_bytes.len() != 8 {
                 tracing::warn!(
                     worker_id,
@@ -553,5 +552,89 @@ async fn connect_replay_socket(
             );
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocols::compute_block_hash_for_seq;
+    use crate::services::indexer::backend::create_indexer;
+    use std::time::Duration;
+
+    #[rstest::rstest]
+    #[case::sglang(false)]
+    #[case::vllm(true)]
+    #[tokio::test]
+    async fn replay_accepts_engine_framing(#[case] include_topic: bool) {
+        let context = zmq::Context::new();
+        let router = context.socket(zmq::ROUTER).unwrap();
+        router.set_linger(0).unwrap();
+        router.set_rcvtimeo(5000).unwrap();
+        router.set_sndtimeo(5000).unwrap();
+        router.bind("tcp://127.0.0.1:*").unwrap();
+        let endpoint = router.get_last_endpoint().unwrap().unwrap();
+        let replay_socket = connect_dealer_socket(&endpoint).unwrap();
+        let publisher = context.socket(zmq::PUB).unwrap();
+        publisher.bind("tcp://127.0.0.1:*").unwrap();
+        let live_socket =
+            connect_sub_socket(&publisher.get_last_endpoint().unwrap().unwrap()).unwrap();
+
+        let server = tokio::task::spawn_blocking(move || {
+            let request = router.recv_multipart(0).unwrap();
+            assert_eq!(&request[1..], &[vec![], 0_u64.to_be_bytes().to_vec()]);
+            for seq in 0_u64..=2 {
+                let mut frames = vec![request[0].clone(), vec![]];
+                if include_topic {
+                    frames.push(b"kv-events".to_vec());
+                }
+                if seq == 2 {
+                    frames.extend([u64::MAX.to_be_bytes().to_vec(), vec![]]);
+                } else {
+                    let event = (
+                        "BlockStored",
+                        vec![seq + 100],
+                        if seq == 0 { None } else { Some(100_u64) },
+                        vec![1_u32 + seq as u32; 4],
+                        4_usize,
+                        Option::<u64>::None,
+                        "GPU",
+                    );
+                    let payload = rmp_serde::to_vec(&(0.0_f64, vec![event], Some(0_i32))).unwrap();
+                    frames.extend([seq.to_be_bytes().to_vec(), payload]);
+                }
+                router.send_multipart(frames, 0).unwrap();
+            }
+            // Keep the socket open until the client consumes the queued replies.
+            assert_eq!(router.recv_multipart(0).unwrap()[1], b"done");
+        });
+        let indexer = create_indexer(4, 1);
+        let watermark = Arc::new(AtomicU64::new(WATERMARK_UNSET));
+        let cancel = CancellationToken::new();
+        let mut listener = ListenerLoop::new(
+            1,
+            0,
+            4,
+            indexer.clone(),
+            cancel.clone(),
+            live_socket,
+            Some(replay_socket.clone()),
+            watermark.clone(),
+        );
+        let replayed = tokio::time::timeout(Duration::from_secs(5), listener.replay_gap(0, 2))
+            .await
+            .expect("replay completion marker")
+            .unwrap();
+        send_multipart(&replay_socket, vec![b"done".to_vec()])
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(replayed, 2);
+        assert_eq!(watermark.load(Ordering::Acquire), 1);
+        indexer.dump_events().await.expect("flush indexer");
+        let hashes = compute_block_hash_for_seq(&[1, 1, 1, 1, 2, 2, 2, 2], 4, Default::default());
+        let matches = indexer.find_matches(hashes).await.unwrap();
+        assert_eq!(matches.scores.get(&WorkerWithDpRank::new(1, 0)), Some(&2));
+        cancel.cancel();
     }
 }

@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+traffic:
+  source:
+    type: synthetic-session
+    new_input_tokens_per_turn: 16
+    output_tokens_per_turn: 4
+    session: {turns: 3, shared_prefix_ratio: 0.5, prefix_groups: 2, inter_turn_delay_ms: 5.0}
+  load: {type: concurrency, concurrency: {choices: [1, 2]}}
+  stop: {sessions: 3}
+engine:
+  mode: aggregated
+  model: components/src/dynamo/replay/tests/e2e/configs/unified_cli/fixtures/tiny-model
+  hardware: h200_sxm
+  backend: vllm
+  context_length: 2048
+  workers:
+    aggregated:
+      parallelism:
+        preset:
+          - {replicas: 2, tensor: 1, pipeline: 1, attention_data: 1, moe_tensor: 1, moe_expert: 1}
+      scheduler: {max_batched_tokens: 8192, max_sequences: 256}
+      kv_cache: {block_size: 64, prefix_caching: true, capacity: {type: fixed, blocks: 256}}
+      timing: {type: fixed, prefill_ms: 1, decode_ms: 1}
+router:
+  policy: kv_router
+  prefill_load_model: {type: aic}
+  overlap_score_credit: {choices: [0.5, 1.0]}
+  prefill_load_scale: {choices: [0.5, 1.0, 2.0]}
+  temperature: {choices: [0.0, 0.2]}
+planner:
+  policy: enabled
+  scaling_policy:
+    preset:
+      - {enable_throughput_scaling: false, enable_load_scaling: true, throughput_adjustment_interval_seconds: 180, load_adjustment_interval_seconds: 5}
+  fpm_sampling:
+    preset:
+      - {max_num_fpm_samples: 64, fpm_sample_bucket_size: 16}
+  load_sensitivity:
+    preset:
+      - {load_scaling_down_sensitivity: 80, load_min_observations: 5}
+  load_predictor:
+    preset:
+      - {load_predictor: arima, load_predictor_log1p: false, prophet_window_size: 50, kalman_q_level: 1.0, kalman_q_trend: 0.1, kalman_r: 10.0, kalman_min_points: 5}
+  max_num_gpus: 2
+  min_workers: 1
+optimization:
+  target: pareto
+  constraints: {max_candidate_gpus: 2}
+optimizer: {algorithm: random, max_trials: 4, parallelism: 1, candidate_timeout_seconds: 30.0, seed: 25}

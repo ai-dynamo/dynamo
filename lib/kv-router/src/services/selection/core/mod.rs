@@ -14,8 +14,8 @@ use tokio_util::sync::CancellationToken;
 use crate::identity::RoutingPartitionId;
 use crate::indexer::TieredMatchDetails;
 use crate::protocols::{
-    ActiveSequenceEvent, LocalBlockHash, PrefillLoadHint, RoutingConstraints, WorkerId,
-    WorkerWithDpRank,
+    ActiveSequenceEvent, LocalBlockHash, PrefillLoadHint, RoutingConstraints, WorkerAffinityTarget,
+    WorkerId, WorkerWithDpRank,
 };
 use crate::scheduling::config::RouterConfigOverride;
 use crate::scheduling::selector::WorkerSelectionPolicy;
@@ -83,6 +83,7 @@ struct SelectionOperation {
     strict_priority: u32,
     policy_class: Option<String>,
     session_id: Option<String>,
+    affinity_target: Option<WorkerAffinityTarget>,
     pinned_worker: Option<WorkerWithDpRank>,
     allowed_worker_ids: Option<HashSet<WorkerId>>,
     routing_constraints: RoutingConstraints,
@@ -143,28 +144,6 @@ impl SelectionCore {
             .collect()
     }
 
-    /// Create an intentionally local selector without replica synchronization
-    /// or startup recovery.
-    ///
-    /// # Panics
-    ///
-    /// Panics when the tracking-hash configuration is invalid. Use
-    /// [`Self::try_new_local`] when configuration errors must be reported.
-    pub fn new_local(
-        kv_router_config: crate::config::KvRouterConfig,
-        indexer_threads: usize,
-        cancel_token: CancellationToken,
-        cache_config: SelectionCacheConfig,
-    ) -> Self {
-        Self::try_new_local(
-            kv_router_config,
-            indexer_threads,
-            cancel_token,
-            cache_config,
-        )
-        .expect("selection tracking hash configuration must be valid")
-    }
-
     /// Create a local selector and report invalid tracking configuration.
     pub fn try_new_local(
         kv_router_config: crate::config::KvRouterConfig,
@@ -202,10 +181,10 @@ impl SelectionCore {
         tracking_hash: Arc<TrackingHashContext>,
     ) -> Self {
         let cancel_token = cancel_token.child_token();
-        let indexer_registry = Arc::new(WorkerRegistry::new_with_cancel_token(
-            indexer_threads,
-            cancel_token.clone(),
-        ));
+        let indexer_registry = Arc::new(
+            WorkerRegistry::new_with_cancel_token(indexer_threads, cancel_token.clone())
+                .with_retained_indexers(),
+        );
         if signal_indexer_ready {
             indexer_registry.signal_ready();
         }
@@ -488,7 +467,7 @@ impl SelectionCore {
                     .kv_router_config
                     .policy_profile(Some(&key.model_name))
                     .map_err(|error| SelectionError::BadRequest(error.to_string()))?;
-                let scheduler = LocalScheduler::new_with_policy_profile(
+                let scheduler = LocalScheduler::new(
                     slots,
                     workers_rx,
                     profile,
@@ -504,7 +483,7 @@ impl SelectionCore {
                     self.cancel_token.child_token(),
                     worker_label,
                     true,
-                )?;
+                );
                 Ok(Arc::new(SelectionEntry {
                     key: key.clone(),
                     block_size,
@@ -649,6 +628,7 @@ impl SelectionCore {
                 strict_priority: req.strict_priority.unwrap_or(0),
                 policy_class,
                 session_id: req.session_id,
+                affinity_target: req.affinity_target,
                 pinned_worker: req.pinned_worker,
                 allowed_worker_ids: req.allowed_worker_ids,
                 routing_constraints: req.routing_constraints,
@@ -684,6 +664,7 @@ impl SelectionCore {
                 strict_priority: req.strict_priority.unwrap_or(0),
                 policy_class,
                 session_id: req.session_id,
+                affinity_target: req.affinity_target,
                 pinned_worker: req.pinned_worker,
                 allowed_worker_ids: req.allowed_worker_ids,
                 routing_constraints: req.routing_constraints,
@@ -708,6 +689,7 @@ impl SelectionCore {
             strict_priority,
             policy_class,
             session_id,
+            affinity_target,
             pinned_worker,
             allowed_worker_ids,
             routing_constraints,
@@ -765,16 +747,17 @@ impl SelectionCore {
             block_hashes: Some(block_hashes),
             isl_tokens,
             overlap,
-            router_hint_candidates: None,
-            retain_router_hint_chain: false,
+            kv_transfer_candidates: None,
+            retain_kv_transfer_chain: false,
             router_config_override,
             lora_name: prompt.lora_name,
             priority_jump,
             strict_priority,
             policy_class,
             session_context: session_id
-                .map(|session_id| SessionContext::new(session_id, None, None, None, None)),
+                .map(|session_id| SessionContext::new(session_id, None, None, None)),
             expected_output_tokens,
+            affinity_target,
             pinned_worker,
             allowed_worker_ids,
             routing_constraints,
@@ -1310,6 +1293,7 @@ mod tests {
             priority_jump: None,
             strict_priority: None,
             session_id: None,
+            affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: RoutingConstraints::default(),
@@ -1327,6 +1311,7 @@ mod tests {
             priority_jump: None,
             strict_priority: None,
             session_id: None,
+            affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: RoutingConstraints::default(),
@@ -1357,12 +1342,13 @@ mod tests {
     #[test]
     fn parent_cancel_cancels_core() {
         let parent = CancellationToken::new();
-        let core = SelectionCore::new_local(
+        let core = SelectionCore::try_new_local(
             test_config(false),
             1,
             parent.clone(),
             SelectionCacheConfig::default(),
-        );
+        )
+        .expect("valid test config");
 
         assert!(!core.cancel_token.is_cancelled());
         parent.cancel();
@@ -1406,31 +1392,16 @@ mod tests {
         }
     }
 
-    #[test]
-    fn shutdown_keeps_parent_alive() {
+    #[tokio::test]
+    async fn shutdown_cancels_listeners_but_keeps_parent_alive() {
         let parent = CancellationToken::new();
-        let core = SelectionCore::new_local(
-            test_config(false),
+        let core = SelectionCore::try_new_local(
+            test_config(true),
             1,
             parent.clone(),
             SelectionCacheConfig::default(),
-        );
-
-        core.shutdown();
-
-        assert!(core.cancel_token.is_cancelled());
-        assert!(!parent.is_cancelled());
-    }
-
-    #[tokio::test]
-    async fn shutdown_cancels_listeners() {
-        let parent = CancellationToken::new();
-        let core = SelectionCore::new_local(
-            test_config(true),
-            1,
-            parent,
-            SelectionCacheConfig::default(),
-        );
+        )
+        .expect("valid test config");
 
         let record = core
             .upsert_worker(worker_with_kv_events(1))
@@ -1440,17 +1411,78 @@ mod tests {
         assert_eq!(core.indexer_registry.listener_cancelled(1, 0), Some(false));
 
         core.shutdown();
+        assert!(core.cancel_token.is_cancelled());
+        assert!(!parent.is_cancelled());
         assert_eq!(core.indexer_registry.listener_cancelled(1, 0), Some(true));
+    }
+
+    #[rstest::rstest]
+    #[case(1)]
+    #[case(2)]
+    #[tokio::test]
+    async fn selection_sees_cache_after_last_worker_replacement(#[case] indexer_threads: usize) {
+        let core = SelectionCore::try_new_local(
+            test_config(true),
+            indexer_threads,
+            CancellationToken::new(),
+            SelectionCacheConfig::default(),
+        )
+        .expect("valid test config");
+        let key = RoutingPartitionId::new("model", "default");
+        let request = || {
+            let mut request = select_request();
+            request.prompt.token_ids = None;
+            request.prompt.block_hashes = Some(vec![11]);
+            request.prompt.sequence_hashes = Some(vec![101]);
+            request.prompt.isl_tokens = Some(4);
+            request
+        };
+
+        // Exercise an in-place update, then removing the last worker and adding a new one.
+        for worker_id in [1, 1, 2] {
+            if worker_id == 2 {
+                core.delete_worker(1).await.expect("delete last worker");
+            }
+            core.upsert_worker(worker_with_kv_events(worker_id))
+                .await
+                .expect("worker upsert");
+            assert_eq!(core.select(request()).await.unwrap().overlap.gpu, 0);
+
+            // Write through the registry used by listeners, not the selector's saved reference.
+            let indexer = core
+                .indexer_registry
+                .get_indexer(&key)
+                .unwrap()
+                .indexer
+                .clone();
+            indexer
+                .apply_event_routed(store_event(
+                    worker_id,
+                    0,
+                    1,
+                    &[],
+                    &[11],
+                    StorageTier::Device,
+                ))
+                .await
+                .unwrap();
+            indexer.dump_events().await.expect("flush indexer");
+            let selected = core.select(request()).await.expect("select cached worker");
+            assert_eq!(selected.worker_id, worker_id);
+            assert_eq!(selected.overlap.gpu, 4);
+        }
+        core.shutdown();
     }
 
     #[tokio::test]
     async fn upsert_moves_global_worker_id_between_routing_groups() {
-        let core = SelectionCore::new_local(
+        let core = SelectionCore::try_new_local(
             test_config(true),
             1,
             CancellationToken::new(),
             SelectionCacheConfig::default(),
-        );
+        )
+        .expect("valid test config");
         let mut group_a = worker_with_kv_events(1);
         group_a.routing_group = "group-a".to_string();
         core.upsert_worker(group_a).await.expect("group A upsert");
@@ -1499,12 +1531,13 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_reports_not_ready_and_rejects_new_work() {
-        let core = SelectionCore::new_local(
+        let core = SelectionCore::try_new_local(
             test_config(false),
             1,
             CancellationToken::new(),
             SelectionCacheConfig::default(),
-        );
+        )
+        .expect("valid test config");
         core.upsert_worker(worker(1)).await.expect("worker upsert");
         assert!(core.ready().ready);
 
@@ -1566,12 +1599,15 @@ mod tests {
     async fn queued_selection_errors_on_shutdown() {
         let mut config = test_config(false);
         config.router_queue_threshold = Some(0.0);
-        let core = Arc::new(SelectionCore::new_local(
-            config,
-            1,
-            CancellationToken::new(),
-            SelectionCacheConfig::default(),
-        ));
+        let core = Arc::new(
+            SelectionCore::try_new_local(
+                config,
+                1,
+                CancellationToken::new(),
+                SelectionCacheConfig::default(),
+            )
+            .expect("valid test config"),
+        );
 
         let record = core.upsert_worker(worker(1)).await.expect("worker upsert");
         assert_eq!(record.lifecycle, WorkerLifecycle::Schedulable);
@@ -1600,12 +1636,13 @@ mod tests {
     async fn lifecycle_operations_find_reservation_in_later_entry() {
         let mut config = test_config(false);
         config.router_track_prefill_tokens = true;
-        let core = SelectionCore::new_local(
+        let core = SelectionCore::try_new_local(
             config,
             1,
             CancellationToken::new(),
             SelectionCacheConfig::default(),
-        );
+        )
+        .expect("valid test config");
 
         for (worker_id, routing_group) in [(1, "group-a"), (2, "group-b")] {
             let mut request = worker(worker_id);
@@ -1654,16 +1691,19 @@ mod tests {
         ));
     }
 
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    #[tokio::test(flavor = "current_thread")]
     async fn queued_selection_returns_refreshed_overlap_snapshot() {
         let mut config = test_config(false);
         config.router_queue_threshold = Some(0.0);
-        let core = Arc::new(SelectionCore::new_local(
-            config,
-            1,
-            CancellationToken::new(),
-            SelectionCacheConfig::default(),
-        ));
+        let core = Arc::new(
+            SelectionCore::try_new_local(
+                config,
+                1,
+                CancellationToken::new(),
+                SelectionCacheConfig::default(),
+            )
+            .expect("valid test config"),
+        );
 
         for worker_id in [1, 2] {
             let mut request = worker(worker_id);
@@ -1729,6 +1769,7 @@ mod tests {
                     priority_jump: None,
                     strict_priority: None,
                     session_id: None,
+                    affinity_target: None,
                     pinned_worker: None,
                     allowed_worker_ids: None,
                     routing_constraints: RoutingConstraints::default(),
@@ -1743,6 +1784,8 @@ mod tests {
             .await
             .unwrap();
         entry.indexer.dump_events().await.expect("flush indexer");
+        // Freeze time only after async setup so background timers cannot expire the fixture.
+        tokio::time::pause();
         tokio::time::advance(Duration::from_secs(11)).await;
         core.free_reservation("occupy-2")
             .await

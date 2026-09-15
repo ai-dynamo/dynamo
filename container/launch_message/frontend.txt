@@ -46,21 +46,14 @@ The frontend container includes:
 Benefits:
 - Minimal dependencies for purely CPU-based processes
 - Fast deployment for integration testing on GPU-constrained clusters
-- Can spin up frontend with mock workers for rapid testing
+- Supports frontend integration testing with separately managed workers
 
 Quick Start:
 
-Start mocker with custom configuration:
-> python -m dynamo.mocker \
-  --model-path TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
-  --num-gpu-blocks-override 8192 \
-  --block-size 16 \
-  --speedup-ratio 10.0 \
-  --max-num-seqs 512 \
-  --num-workers 4 \
-  --enable-prefix-caching
+Use aisimulate predict --stack dynamo for offline virtual-clock simulation. The former public
+Replay online CLI is temporarily unavailable. Live Mocker workers remain available from a full
+Dynamo installation or the planner image; this frontend-only image does not include their
+dependencies.
 
 Start frontend server:
 > python -m dynamo.frontend --http-port 8000
-
-

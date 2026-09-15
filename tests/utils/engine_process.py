@@ -128,12 +128,17 @@ class EngineProcess(ManagedProcess):
             EngineResponseError: If the response is invalid or missing expected content
         """
 
-        if response.status_code != 200:
+        if response.status_code != payload.expected_status_code:
             logger.error(
-                "Response returned non-200 status code: %d", response.status_code
+                "Response returned unexpected status code: got %d, expected %d",
+                response.status_code,
+                payload.expected_status_code,
             )
 
-            error_msg = f"Response returned non-200 status code: {response.status_code}"
+            error_msg = (
+                "Response returned unexpected status code: "
+                f"got {response.status_code}, expected {payload.expected_status_code}"
+            )
             try:
                 error_data = response.json()
                 if "error" in error_data:

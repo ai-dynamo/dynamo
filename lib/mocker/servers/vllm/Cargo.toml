@@ -25,10 +25,10 @@ async-stream = { workspace = true }
 blake3 = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 futures = { workspace = true }
-prost-types = { workspace = true }
+prost-types-v14 = { workspace = true }
 tokio = { workspace = true }
-tonic = { workspace = true }
-tonic-health = { workspace = true }
+tonic-v14 = { workspace = true }
+tonic-health-v14 = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }

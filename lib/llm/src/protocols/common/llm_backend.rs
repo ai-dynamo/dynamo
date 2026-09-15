@@ -149,6 +149,13 @@ pub struct BackendOutput {
     /// consumed by the frontend and not surfaced to clients. See [`RoutingData`](crate::protocols::common::timing::RoutingData).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_data: Option<crate::protocols::common::timing::RoutingData>,
+
+    /// Text the `Backend` decoder is currently withholding as a possible (but
+    /// unresolved) prefix of a hidden stop sequence, as of this chunk. Frontend-only
+    /// (Dynamo-internal): consumed by the migration `RetryManager` so a retry's fresh
+    /// decoder can resume with the same pending text instead of silently dropping it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jailed_text: Option<String>,
 }
 
 /// The LLM engine and backnd with manage it's own state, specifically translating how a
@@ -235,6 +242,14 @@ pub struct LLMEngineOutput {
     /// Dynamo-internal; consumed by the frontend. See [`RoutingData`](crate::protocols::common::timing::RoutingData).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_data: Option<crate::protocols::common::timing::RoutingData>,
+
+    /// Text the `Backend` decoder is currently withholding as a possible (but
+    /// unresolved) prefix of a hidden stop sequence, as of this chunk. Engines never
+    /// set this; the frontend's `Backend` stage populates it locally (it is never
+    /// sent by a worker) so the migration `RetryManager` can seed a retry's fresh
+    /// decoder with it instead of silently dropping the withheld text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jailed_text: Option<String>,
 }
 
 impl LLMEngineOutput {
@@ -258,6 +273,7 @@ impl LLMEngineOutput {
             completion_usage: None,
             engine_data: None,
             routing_data: None,
+            jailed_text: None,
         }
     }
 
@@ -281,6 +297,7 @@ impl LLMEngineOutput {
             completion_usage: None,
             engine_data: None,
             routing_data: None,
+            jailed_text: None,
         }
     }
 
@@ -304,6 +321,7 @@ impl LLMEngineOutput {
             completion_usage: None,
             engine_data: None,
             routing_data: None,
+            jailed_text: None,
         }
     }
 
@@ -327,6 +345,7 @@ impl LLMEngineOutput {
             completion_usage: None,
             engine_data: None,
             routing_data: None,
+            jailed_text: None,
         }
     }
 
@@ -364,6 +383,7 @@ impl LLMEngineOutput {
             completion_usage: None,
             engine_data: None,
             routing_data: None,
+            jailed_text: None,
         }
     }
 }

@@ -21,6 +21,7 @@ from tests.utils.multimodal import (
     make_image_payload_b64,
     make_image_payload_cached_tokens,
     make_image_payload_uuid_passthrough,
+    make_mixed_image_video_payload,
     make_qwen35_custom_encoder_multi_image_payload,
     make_qwen35_custom_encoder_payload,
     make_video_payload,
@@ -281,7 +282,12 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 ],
             ),
             "epd_video": TopologyConfig(
-                marks=[pytest.mark.post_merge, pytest.mark.installs_extra_dependencies],
+                # E/P/D regression gate: the decode handoff must retain both
+                # the reconstructed image placeholder and reloaded video.
+                marks=[
+                    pytest.mark.post_merge,
+                    pytest.mark.installs_extra_dependencies,
+                ],
                 timeout_s=600,
                 delayed_start=60,
                 single_gpu=True,
@@ -296,7 +302,22 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                         "opencv-python-headless"
                     ],
                 },
-                tests=[MmCase(payload=make_video_payload(MULTIMODAL_VIDEO_EXPECTED))],
+                tests=[
+                    MmCase(
+                        suffix="mixed_frontend_decoding",
+                        payload=make_mixed_image_video_payload(
+                            MULTIMODAL_VIDEO_EXPECTED,
+                            frontend_decoding=True,
+                        ),
+                        followup_payloads=[
+                            make_video_payload(
+                                MULTIMODAL_VIDEO_EXPECTED,
+                                frontend_decoding=True,
+                            )
+                        ],
+                        extra_script_args=["--frontend-decoding"],
+                    )
+                ],
             ),
             "p_d": TopologyConfig(
                 marks=[pytest.mark.post_merge],

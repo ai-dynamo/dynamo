@@ -1,0 +1,231 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "GLM-5.3-Flash"
+subtitle: "Serve GLM-5.3-Flash with Dynamo and vLLM on GB200 or H200, aggregated or with prefill/decode disaggregation."
+---
+
+This recipe references an upstream third-party vLLM container image. NVIDIA does not publish or distribute this image. Users should review the upstream image’s open-source license and codec terms before use or redistribution.
+
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
+Each target below is an NVIDIA Dynamo + vLLM deployment of Z.AI's GLM-5.3-Flash, a GLA/KDA hybrid-attention model. All targets load the same FP8-quantized checkpoint with BF16 KV cache and support up to 1,048,576 tokens of context. The GB200 targets use TP4 workers over MNNVL. The H200 targets add MTP7 speculative decoding and TP8 workers. Pick your GPU architecture and serving topology.
+
+<div className="dynamo-target-picker">
+<p className="dynamo-target-picker-title">Choose your deployment target</p>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">GPU</span>
+<input type="radio" id="recipe-sku-gb200" name="recipe-sku" value="gb200" defaultChecked />
+<label htmlFor="recipe-sku-gb200">GB200 <span className="dynamo-target-picker-hint">Recommended</span></label>
+<input type="radio" id="recipe-sku-h200" name="recipe-sku" value="h200" />
+<label htmlFor="recipe-sku-h200">H200</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Topology</span>
+<input type="radio" id="recipe-variant-agg" name="recipe-variant" value="agg" defaultChecked />
+<label htmlFor="recipe-variant-agg">Aggregated</label>
+<input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" />
+<label htmlFor="recipe-variant-disagg">Disaggregated</label>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="h200" data-variant="agg">
+<span><b>Checkpoint</b> zai-org/GLM-5.3-Flash</span>
+<span><b>Precision</b> FP8-quantized checkpoint + BF16 KV cache</span>
+<span><b>GPUs</b> 8x H200, one worker</span>
+<span><b>Parallelism</b> TP8</span>
+<span><b>Speculation</b> MTP7</span>
+<span><b>Context</b> Up to 1,048,576 tokens</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="h200" data-variant="disagg">
+<span><b>Checkpoint</b> zai-org/GLM-5.3-Flash</span>
+<span><b>Precision</b> FP8-quantized checkpoint + BF16 KV cache</span>
+<span><b>GPUs</b> 8x H200 prefill + 8x H200 decode</span>
+<span><b>Parallelism</b> TP8 prefill / TP8 decode</span>
+<span><b>Routing</b> KV-aware, NIXL KV transfer</span>
+<span><b>Speculation</b> MTP7 on prefill and decode</span>
+<span><b>Context</b> Up to 1,048,576 tokens</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="gb200" data-variant="agg">
+<span><b>Checkpoint</b> zai-org/GLM-5.3-Flash</span>
+<span><b>Precision</b> FP8-quantized checkpoint + BF16 KV cache</span>
+<span><b>GPUs</b> 4x GB200, one worker</span>
+<span><b>Parallelism</b> TP4 over MNNVL</span>
+<span><b>Routing</b> KV-aware</span>
+<span><b>Context</b> Up to 1,048,576 tokens</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="gb200" data-variant="disagg">
+<span><b>Checkpoint</b> zai-org/GLM-5.3-Flash</span>
+<span><b>Precision</b> FP8-quantized checkpoint + BF16 KV cache</span>
+<span><b>GPUs</b> 4x GB200 prefill + 4x GB200 decode</span>
+<span><b>Parallelism</b> TP4 prefill / TP4 decode over MNNVL</span>
+<span><b>Routing</b> KV-aware, NIXL/UCX KV transfer over TCP</span>
+<span><b>Context</b> Up to 1,048,576 tokens</span>
+</div>
+</div>
+
+## Prerequisites
+
+<div data-sku="gb200">
+
+- A Kubernetes cluster with the Dynamo platform installed and GB200 GPUs available: 4x on one ARM64 node for aggregated, or 8x across two ARM64 nodes for disaggregated. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
+- The NVIDIA DRA driver with ComputeDomain support installed. Both GB200 targets require a ComputeDomain spanning the full NVL72 rack.
+- Access to `zai-org/GLM-5.3-Flash` and the `vllm/vllm-openai:glm53-flash` image.
+- A ReadWriteMany PVC named `model-cache`, populated with the checkpoint in the standard Hugging Face cache layout.
+
+</div>
+
+<div data-sku="h200">
+
+- A Kubernetes cluster with the Dynamo platform installed and H200 GPUs available: 8x on one node for aggregated, or 16x across two nodes for disaggregated. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
+- Eight RDMA resource claims on each GPU node for disaggregated serving. Update `rdma/ib` if your device plugin advertises a different resource name.
+- Access to `zai-org/GLM-5.3-Flash` and the `vllm/vllm-openai:glm53-flash` image.
+- A ReadWriteMany PVC named `model-cache`, populated with the checkpoint in the standard Hugging Face cache layout.
+
+</div>
+
+Create the namespace and token secret:
+
+```bash
+export NAMESPACE=your-namespace
+kubectl create namespace ${NAMESPACE}
+kubectl label namespace ${NAMESPACE} kai.scheduler/enabled=true
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="your-token" \
+  -n ${NAMESPACE}
+```
+
+<Warning>
+Edit namespace, node selectors, tolerations, storage, image tags, and resource claims in the manifests to match your cluster.
+</Warning>
+
+## Deploy
+
+All four targets read the checkpoint from the `model-cache` PVC with `HF_HUB_OFFLINE=1`. Create and populate the PVC with the recipe's [storage manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3-flash/model-cache/model-cache.yaml) and [model-download job](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3-flash/model-cache/model-download.yaml):
+
+```bash
+kubectl apply -f recipes/glm-5.3-flash/model-cache/model-cache.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/glm-5.3-flash/model-cache/model-download.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=7200s
+```
+
+Then apply the manifest for your target.
+
+<div data-sku="h200" data-variant="agg">
+
+```bash
+kubectl apply -f recipes/glm-5.3-flash/vllm/agg-h200-agentic/deploy.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="h200" data-variant="disagg">
+
+```bash
+kubectl apply -f recipes/glm-5.3-flash/vllm/disagg-h200-agentic/deploy.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="gb200" data-variant="agg">
+
+```bash
+kubectl apply -f recipes/glm-5.3-flash/vllm/agg-gb200-agentic/deploy.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="gb200" data-variant="disagg">
+
+```bash
+kubectl apply -f recipes/glm-5.3-flash/vllm/disagg-gb200-agentic/deploy.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+First worker launch loads the model and captures CUDA graphs and can take tens of minutes.
+
+## Smoke Test
+
+Send a test request to verify the deployment serves traffic. First forward the frontend port for your target:
+
+<div data-sku="h200" data-variant="agg">
+
+```bash
+kubectl port-forward svc/glm53-flash-agg-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="h200" data-variant="disagg">
+
+```bash
+kubectl port-forward svc/glm53-flash-disagg-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="gb200" data-variant="agg">
+
+```bash
+kubectl port-forward svc/glm53-flash-agg-gb200-agentic-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="gb200" data-variant="disagg">
+
+```bash
+kubectl port-forward svc/glm53-flash-disagg-gb200-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+All targets serve under the same model name, `zai-org/GLM-5.3-Flash`:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"zai-org/GLM-5.3-Flash","messages":[{"role":"user","content":"Reply with exactly: READY"}],"temperature":0,"max_tokens":64}'
+```
+
+GLM-5.3-Flash reasons before answering. The deployments support streaming chat, completions, tool calls, one image per prompt, and schema-constrained output through the `glm45` reasoning and `glm47` tool-call parsers.
+
+## Compare All Targets
+
+All four targets serve the same FP8-quantized GLM-5.3-Flash checkpoint on vLLM with BF16 KV cache. The GB200 aggregated target and both H200 targets enable prefix caching. The H200 targets add MTP7 speculative decoding, DeepGEMM, and FLASHMLA_SPARSE attention. The GB200 targets use MNNVL for TP4 collectives.
+
+| | GB200 Aggregated | GB200 Disaggregated | H200 Aggregated | H200 Disaggregated |
+|---|---|---|---|---|
+| **Topology** | DynamoGraphDeployment | DynamoGraphDeployment, 1P1D | DynamoGraphDeployment | DynamoGraphDeployment, 1P1D |
+| **GPUs** | 4x GB200 | 4x GB200 prefill + 4x GB200 decode | 8x H200 | 8x H200 prefill + 8x H200 decode |
+| **Parallelism** | TP4 | TP4 prefill / TP4 decode | TP8 | TP8 prefill / TP8 decode |
+| **Precision** | FP8 checkpoint + BF16 KV | FP8 checkpoint + BF16 KV | FP8 checkpoint + BF16 KV | FP8 checkpoint + BF16 KV |
+| **Speculation** | None | None | MTP7 | MTP7 on prefill and decode |
+| **Maximum context** | 1,048,576 | 1,048,576 | 1,048,576 | 1,048,576 |
+| **Maximum sequences** | 256 | 32 prefill / 256 decode | 32 | 16 prefill / 128 decode |
+| **Maximum batched tokens** | 8,192 | 16,384 prefill / 8,192 decode | 8,192 | 8,192 prefill / 2,048 decode |
+| **GPU memory utilization** | 0.92 | 0.92 prefill / 0.92 decode | 0.80 | 0.80 prefill / 0.85 decode |
+| **KV transfer** | N/A | NIXL/UCX over TCP | N/A | NIXL with GPU buffers and RDMA resources |
+| **Routing** | KV-aware | KV-aware | Round-robin | KV-aware |
+
+## Related Feature Benchmarks
+
+No controlled feature benchmark is linked to this recipe. Browse the [Feature Benchmarks](../feature-benchmarks/browse-all-benchmarks.mdx) for comparable KV-routing, disaggregation, and speculative-decoding studies.
+
+## Notes
+
+- The H200 targets enable prefix caching with a match unit of 128 and use MTP with seven speculative tokens.
+- The H200 disaggregated target sets the same MTP configuration, `VLLM_SSM_CONV_STATE_LAYOUT=DS`, and `VLLM_KV_CACHE_LAYOUT=HND` on prefill and decode. These values must match for the NIXL compatibility handshake and KV layout.
+- The GB200 targets use MNNVL for TP4 collectives. The disaggregated target excludes `cuda_ipc` from UCX and transfers KV data over `cuda_copy` and TCP because the GLM image's UCX build lacks MNNVL IPC support.
+- To enable MNNVL IPC for GB200 KV transfer, rebuild on the vLLM runtime base and set `UCX_TLS=cuda_copy,cuda_ipc,tcp` with `UCX_CUDA_IPC_ENABLE_MNNVL=y`.
+- A `sitecustomize.py` overlay disables cuDNN to avoid a convolution crash during multimodal initialization with the GLM-specific vLLM image.
+- `n>1` requests are not supported by the disaggregated targets.
+
+## Source
+
+- Source README: [recipes/glm-5.3-flash/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3-flash/README.md)
+- Aggregated GB200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3-flash/vllm/agg-gb200-agentic/deploy.yaml)
+- Disaggregated GB200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3-flash/vllm/disagg-gb200-agentic/deploy.yaml)
+- Aggregated H200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3-flash/vllm/agg-h200-agentic/deploy.yaml)
+- Disaggregated H200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5.3-flash/vllm/disagg-h200-agentic/deploy.yaml)

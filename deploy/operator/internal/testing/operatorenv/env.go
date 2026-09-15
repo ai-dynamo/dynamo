@@ -21,7 +21,9 @@ import (
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/podcache"
+	snapshotcrds "github.com/ai-dynamo/snapshot/api/v1alpha1/crds"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
@@ -35,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
+	"sigs.k8s.io/yaml"
 )
 
 // AdmissionWebhooks selects the Helm-rendered admission registrations installed in envtest.
@@ -186,8 +189,13 @@ func startRuntime(opts Options) (*runtimeEnv, error) {
 	if err != nil {
 		return nil, err
 	}
+	snapshotCRDs, err := defaultSnapshotCRDs(opts, operatorCfg)
+	if err != nil {
+		return nil, err
+	}
 	testEnv := &envtest.Environment{
 		Scheme:                scheme,
+		CRDs:                  snapshotCRDs,
 		CRDDirectoryPaths:     crdDirectoryPaths(opts),
 		ErrorIfCRDPathMissing: false,
 		BinaryAssetsDirectory: binaryAssetsDirectory(opts),
@@ -485,10 +493,33 @@ func crdDirectoryPaths(opts Options) []string {
 		filepath.Join(root, "internal", "controller", "testing", "prometheus"),
 		filepath.Join(root, "internal", "controller", "testing", "volcano.sh"),
 		filepath.Join(root, "internal", "controller", "testing", "run.ai"),
-		filepath.Join(root, "internal", "controller", "testing", "nvidia"),
 		filepath.Join(root, "internal", "controller", "testing", "inference.networking.k8s.io"),
 		filepath.Join(root, "internal", "controller", "testing", "grove.io"),
 	}
+}
+
+// defaultSnapshotCRDs installs the exact CRDs shipped by the Snapshot API
+// dependency. Explicit CRD directory overrides remain authoritative for tests
+// that intentionally construct a narrower environment. A nil configuration or
+// a disabled checkpoint gate installs no Snapshot CRDs.
+func defaultSnapshotCRDs(
+	opts Options,
+	config *configv1alpha1.OperatorConfiguration,
+) ([]*apiextensionsv1.CustomResourceDefinition, error) {
+	if len(opts.CRDDirectoryPaths) > 0 || config == nil || !config.Checkpoint.Enabled {
+		return nil, nil
+	}
+
+	manifests := snapshotcrds.All()
+	crds := make([]*apiextensionsv1.CustomResourceDefinition, 0, len(manifests))
+	for _, manifest := range manifests {
+		crd := &apiextensionsv1.CustomResourceDefinition{}
+		if err := yaml.Unmarshal([]byte(manifest), crd); err != nil {
+			return nil, fmt.Errorf("decode embedded Snapshot CRD: %w", err)
+		}
+		crds = append(crds, crd)
+	}
+	return crds, nil
 }
 
 func binaryAssetsDirectory(opts Options) string {

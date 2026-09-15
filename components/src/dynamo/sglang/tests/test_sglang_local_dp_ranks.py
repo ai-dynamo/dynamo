@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +10,7 @@ import pytest
 from dynamo.sglang.capacity import (
     local_dp_rank_bounds,
     model_card_dp_rank_bounds,
+    per_rank_max_running_requests,
     publishes_kv_events,
 )
 
@@ -19,10 +19,6 @@ pytestmark = [
     pytest.mark.sglang,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
-    pytest.mark.skipif(
-        importlib.util.find_spec("sglang") is None,
-        reason="sglang not installed in this container",
-    ),
 ]
 
 
@@ -45,6 +41,10 @@ def _args(**kwargs) -> SimpleNamespace:
 
 def test_single_node_publishes_kv_events():
     assert publishes_kv_events(_args()) is True
+
+
+def test_single_node_pure_dp_exposes_every_local_rank():
+    assert local_dp_rank_bounds(_args(dp_size=4)) == (0, 4)
 
 
 def test_multinode_without_dp_attention_publishes_only_from_leader():
@@ -75,3 +75,19 @@ def test_dp_size_one_with_dp_attention_still_leader_only():
         publishes_kv_events(_args(enable_dp_attention=True, nnodes=2, node_rank=1))
         is False
     )
+
+
+def test_pure_dp_keeps_per_scheduler_max_running_requests():
+    server_args = _args(dp_size=4, max_running_requests=128)
+
+    assert per_rank_max_running_requests(server_args) == 128
+
+
+def test_dp_attention_splits_global_max_running_requests():
+    server_args = _args(
+        dp_size=4,
+        enable_dp_attention=True,
+        max_running_requests=128,
+    )
+
+    assert per_rank_max_running_requests(server_args) == 32

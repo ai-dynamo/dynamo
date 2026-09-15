@@ -33,7 +33,7 @@ from tests.deploy.dgd_utils import (
     _get_workspace_dir,
     validate_chat_response,
 )
-from tests.utils.client import send_request, wait_for_model_availability
+from tests.utils.client import wait_for_model_availability
 
 logger = logging.getLogger(__name__)
 
@@ -137,17 +137,25 @@ async def test_deployment(
     # gpu-memory-utilization so vLLM 0.23.0+ flashinfer sampler warmup fits
     # without triggering cudaMalloc -> NVML query, which is restricted on MIG.
     # TODO (ops): remove this if CI transitions to e.g. CUDA MPS
-    if framework == "vllm":
-        deployment_spec.add_arg_to_service(
-            "VllmDecodeWorker", "--gpu-memory-utilization", "0.7"
-        )
-
-    model = next((s.model for s in deployment_spec.services if s.model), None)
-    if not model:
+    services = deployment_spec.services
+    model_service = next((service for service in services if service.model), None)
+    if model_service is None:
         pytest.fail(
             f"Could not determine model name from deployment spec for "
             f"{framework}/{profile}"
         )
+
+    if framework == "vllm":
+        worker_service = next(
+            (service for service in services if service.name in {"worker", "decode"}),
+            model_service,
+        )
+        deployment_spec.add_arg_to_service(
+            worker_service.name, "--gpu-memory-utilization", "0.7"
+        )
+
+    model = model_service.model
+    assert model is not None
 
     if validate_agg_logging:
         validate_agg_logging_configuration(deployment_spec)
@@ -200,8 +208,8 @@ async def test_deployment(
             model_ready
         ), f"Model '{model}' did not become available within the timeout period"
 
-        # Send test request
-        url = f"{base_url}{endpoint}"
+        # This chat-completion request is side-effect free, so one retry after a
+        # dropped port-forward is safe.
         payload = {
             "model": model,
             "messages": [{"role": "user", "content": TEST_PROMPT}],
@@ -214,8 +222,13 @@ async def test_deployment(
             if validate_agg_logging
             else 0
         )
-        response = send_request(
-            url, payload, timeout=float(DEFAULT_REQUEST_TIMEOUT), method="POST"
+        response = deployment.send_request_with_port_forward_retry(
+            pod=frontend_pod,
+            remote_port=port,
+            endpoint=endpoint,
+            payload=payload,
+            timeout=float(DEFAULT_REQUEST_TIMEOUT),
+            port_forward=port_forward,
         )
 
         # Validate response
@@ -277,7 +290,7 @@ async def test_gaie_deployment(
     logger.info(f"Worker image: {worker_image}")
 
     deployment_spec.set_image(frontend_image, service_name="Epp")
-    for worker in ("VllmPrefillWorker", "VllmDecodeWorker"):
+    for worker in ("prefill", "decode"):
         deployment_spec.set_image(worker_image, service_name=worker)
         deployment_spec.set_frontend_sidecar_image(frontend_image, service_name=worker)
 

@@ -193,7 +193,7 @@ pub(super) async fn run_request_task(
             .driver
             .lock()
             .unwrap()
-            .on_complete(uuid, completion_ms)?;
+            .on_terminal(uuid, completion_ms, status)?;
         workload.wakeup.notify_waiters();
         if let Some(guard) = guard.as_mut() {
             guard.mark_completed();

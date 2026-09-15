@@ -12,9 +12,12 @@ pub mod codec;
 pub mod egress;
 pub mod ingress;
 pub mod manager;
+pub mod quic_response;
 pub mod tcp;
 
 use crate::SystemHealth;
+use crate::error::{DynamoError, ErrorType};
+use crate::traits::DistributedRuntimeProvider;
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
@@ -40,18 +43,68 @@ use prometheus::{CounterVec, Histogram, IntCounter, IntCounterVec, IntGauge};
 /// Shared default maximum TCP message size across request-plane components.
 pub(crate) const DEFAULT_TCP_MAX_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
 
-static TCP_MAX_MESSAGE_SIZE: OnceLock<usize> = OnceLock::new();
-static REQUEST_PLANE_PAYLOAD_CODEC: OnceLock<RequestPlanePayloadCodec> = OnceLock::new();
+/// Prefix a request-plane server writes on the request connection to reject a request it cannot
+/// serve. The client matches on it to classify the reply as a rejection rather than the success
+/// ACK; anything it does not recognise is read as the ACK and it waits for a response stream.
+/// Both ends must use this constant.
+pub(crate) const ACK_UNAVAILABLE_PREFIX: &str = "Server unavailable:";
 
-/// Read the configured TCP max message size once and share it across client,
-/// server, and zero-copy decoder code paths.
-pub(crate) fn get_tcp_max_message_size() -> usize {
-    *TCP_MAX_MESSAGE_SIZE.get_or_init(|| {
-        std::env::var("DYN_TCP_MAX_MESSAGE_SIZE")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(DEFAULT_TCP_MAX_MESSAGE_SIZE)
-    })
+static REQUEST_PLANE_PAYLOAD_CODEC: OnceLock<RequestPlanePayloadCodec> = OnceLock::new();
+static RESPONSE_PLANE_MODE: OnceLock<ResponsePlaneMode> = OnceLock::new();
+
+/// Process-wide response transport. Frontends and workers must use the same mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ResponsePlaneMode {
+    #[default]
+    Tcp,
+    Quic,
+}
+
+impl ResponsePlaneMode {
+    pub fn configured() -> Result<Self> {
+        if let Some(mode) = RESPONSE_PLANE_MODE.get() {
+            return Ok(*mode);
+        }
+        let value =
+            std::env::var(crate::config::environment_names::response_plane::DYN_RESPONSE_PLANE)
+                .ok();
+        let mode = Self::from_config_value(value.as_deref())?;
+        Ok(*RESPONSE_PLANE_MODE.get_or_init(|| mode))
+    }
+
+    fn from_config_value(value: Option<&str>) -> Result<Self> {
+        match value {
+            None | Some("tcp") => Ok(Self::Tcp),
+            Some("quic") => Ok(Self::Quic),
+            Some(other) => anyhow::bail!(
+                "invalid {} value '{other}'; expected 'tcp' or 'quic'",
+                crate::config::environment_names::response_plane::DYN_RESPONSE_PLANE
+            ),
+        }
+    }
+
+    pub fn from_transport_name(transport: &str) -> Result<Self> {
+        match transport {
+            "tcp_server" => Ok(Self::Tcp),
+            quic_response::TRANSPORT_NAME => Ok(Self::Quic),
+            other => anyhow::bail!("unsupported response transport '{other}'"),
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Tcp => "tcp",
+            Self::Quic => "quic",
+        }
+    }
+}
+
+crate::env_config! {
+    /// Read the configured TCP max message size once and share it across client,
+    /// server, and zero-copy decoder code paths.
+    pub(crate) fn get_tcp_max_message_size() -> usize =
+        crate::config::environment_names::request_plane::DYN_TCP_MAX_MESSAGE_SIZE,
+        default = DEFAULT_TCP_MAX_MESSAGE_SIZE;
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -106,6 +159,22 @@ impl RequestPlanePayloadCodec {
         }
     }
 
+    /// Encode into a caller-owned writer, so a hot path can reuse one buffer
+    /// across frames instead of allocating per frame.
+    ///
+    /// Emits the same bytes as [`Self::encode`], which
+    /// `encode_into_matches_encode_byte_for_byte` pins for both codecs.
+    pub fn encode_into<T, W>(&self, value: &T, writer: &mut W) -> Result<()>
+    where
+        T: Serialize + ?Sized,
+        W: std::io::Write,
+    {
+        match self {
+            Self::Json => Ok(serde_json::to_writer(writer, value)?),
+            Self::Msgpack => Ok(rmp_serde::encode::write_named(writer, value)?),
+        }
+    }
+
     pub fn decode<T: DeserializeOwned>(&self, bytes: &[u8]) -> Result<T> {
         match self {
             Self::Json => Ok(serde_json::from_slice(bytes)?),
@@ -113,6 +182,12 @@ impl RequestPlanePayloadCodec {
         }
     }
 }
+
+/// Starting capacity for a buffer that one response frame is encoded into.
+///
+/// Matches `serde_json::to_vec`'s own default so msgpack — which otherwise
+/// starts at zero — stops regrowing its buffer on every streamed frame.
+pub const RESPONSE_ENCODE_CAPACITY_HINT: usize = 128;
 
 pub trait Codable: PipelineIO + Serialize + for<'de> Deserialize<'de> {}
 impl<T: PipelineIO + Serialize + for<'de> Deserialize<'de>> Codable for T {}
@@ -183,9 +258,120 @@ pub enum ControlMessage {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ResponseStreamPrologue {
     error: Option<String>,
+
+    /// The same failure as `error`, but keeping the worker's
+    /// [`crate::error::ErrorType`] instead of only its display text, so the
+    /// frontend can classify a
+    /// pre-stream failure (for example, a backend refusing a request it can
+    /// never serve) rather than guessing from a message.
+    ///
+    /// `Option` plus `#[serde(default)]` is a compatibility requirement, not a
+    /// convenience: worker and frontend are deployed independently, so during a
+    /// rolling upgrade an old worker sends a prologue without this field and a
+    /// new worker sends one an old frontend does not know. A required field
+    /// would break the handshake in both directions; an absent field or unrecognized legacy
+    /// `error_type` decodes to `None` and the frontend falls back to the untyped behavior.
+    /// A payload with the semantic `class` field uses `DynamoError`'s fail-closed policy.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_typed_error",
+        skip_serializing_if = "Option::is_none"
+    )]
+    typed_error: Option<DynamoError>,
 }
 
-pub type StreamProvider<T> = tokio::sync::oneshot::Receiver<Result<T, String>>;
+fn deserialize_typed_error<'de, D>(deserializer: D) -> Result<Option<DynamoError>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let typed_error = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(typed_error.and_then(|typed_error| {
+        // The legacy enum decoder rejected future variants. ErrorClass is tolerant, so
+        // compare the raw value with its canonical round trip to preserve that fallback.
+        if typed_error.get("class").is_none()
+            && let Some(wire_error_type) = typed_error.get("error_type")
+        {
+            let round_trip = serde_json::from_value::<ErrorType>(wire_error_type.clone())
+                .ok()
+                .and_then(|error_type| serde_json::to_value(error_type).ok());
+            if round_trip.as_ref() != Some(wire_error_type) {
+                return None;
+            }
+        }
+        serde_json::from_value(typed_error).ok()
+    }))
+}
+
+/// A pre-stream failure as it reaches the requesting side of the transport.
+///
+/// `message` is the display text the prologue has always carried.
+/// `typed_error` is the worker's own [`DynamoError`] when the worker was new
+/// enough to send one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamPrologueError {
+    pub message: String,
+    pub typed_error: Option<DynamoError>,
+}
+
+impl StreamPrologueError {
+    /// A failure detected by the transport itself, with no worker error behind it.
+    pub fn from_message(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            typed_error: None,
+        }
+    }
+
+    /// A worker failure, keeping the display text the prologue has always
+    /// carried alongside the worker's typed error.
+    pub fn new(message: impl Into<String>, typed_error: DynamoError) -> Self {
+        Self {
+            message: message.into(),
+            typed_error: Some(typed_error),
+        }
+    }
+}
+
+impl std::fmt::Display for StreamPrologueError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// Derefs to the message so code written against the previous `String` error
+/// keeps working: `err.contains(..)`, `err.len()`, `&err[..]` all still resolve.
+/// Only an explicit `String` type annotation or signature needs updating.
+impl std::ops::Deref for StreamPrologueError {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.message
+    }
+}
+
+impl AsRef<str> for StreamPrologueError {
+    fn as_ref(&self) -> &str {
+        &self.message
+    }
+}
+
+impl From<String> for StreamPrologueError {
+    fn from(message: String) -> Self {
+        Self::from_message(message)
+    }
+}
+
+impl From<&str> for StreamPrologueError {
+    fn from(message: &str) -> Self {
+        Self::from_message(message)
+    }
+}
+
+/// Resolves once the worker's response stream is established, or with a
+/// [`StreamPrologueError`] carrying both the failure's display text and, when
+/// the worker sent one, its [`crate::error::ErrorType`], so the requesting side
+/// can classify a pre-stream failure without parsing the message.
+pub type StreamProvider<T> = tokio::sync::oneshot::Receiver<Result<T, StreamPrologueError>>;
 
 /// Owning `Drop` here (rather than on `RegisteredStream`) lets `into_parts()`
 /// move the public fields out by plain destructure.
@@ -205,6 +391,7 @@ impl Drop for Cleanup {
 pub struct RegisteredStream<T> {
     pub connection_info: ConnectionInfo,
     pub stream_provider: StreamProvider<T>,
+    registration_id: Option<uuid::Uuid>,
     cleanup: Cleanup,
 }
 
@@ -221,8 +408,18 @@ impl<T> RegisteredStream<T> {
         Self {
             connection_info,
             stream_provider,
+            registration_id: None,
             cleanup: Cleanup(None),
         }
+    }
+
+    pub(crate) fn with_registration_id(mut self, registration_id: uuid::Uuid) -> Self {
+        self.registration_id = Some(registration_id);
+        self
+    }
+
+    pub(crate) fn registration_id(&self) -> Option<uuid::Uuid> {
+        self.registration_id
     }
 
     pub(crate) fn with_cleanup<F>(mut self, cleanup: F) -> Self
@@ -239,6 +436,7 @@ impl<T> RegisteredStream<T> {
         let Self {
             connection_info,
             stream_provider,
+            registration_id: _,
             mut cleanup,
         } = self;
         cleanup.0.take();
@@ -289,7 +487,7 @@ mod registered_stream_tests {
         let flag = Arc::new(AtomicBool::new(false));
         let flag_clone = flag.clone();
 
-        let (_tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+        let (_tx, rx) = tokio::sync::oneshot::channel::<Result<(), StreamPrologueError>>();
         let stream = RegisteredStream::new(dummy_conn_info(), rx).with_cleanup(move || {
             flag_clone.store(true, Ordering::SeqCst);
         });
@@ -309,7 +507,7 @@ mod registered_stream_tests {
         let flag = Arc::new(AtomicBool::new(false));
         let flag_clone = flag.clone();
 
-        let (_tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+        let (_tx, rx) = tokio::sync::oneshot::channel::<Result<(), StreamPrologueError>>();
         let stream = RegisteredStream::new(dummy_conn_info(), rx).with_cleanup(move || {
             flag_clone.store(true, Ordering::SeqCst);
         });
@@ -327,7 +525,7 @@ mod registered_stream_tests {
     /// `RegisteredStream` with no cleanup configured must drop cleanly.
     #[test]
     fn drop_without_cleanup_is_a_noop() {
-        let (_tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+        let (_tx, rx) = tokio::sync::oneshot::channel::<Result<(), StreamPrologueError>>();
         let stream: RegisteredStream<()> = RegisteredStream::new(dummy_conn_info(), rx);
         drop(stream); // must not panic; nothing observable to assert beyond that
     }
@@ -375,14 +573,29 @@ impl StreamSender {
             .await?)
     }
 
-    #[allow(clippy::needless_update)]
+    /// Send the prologue, reporting an untyped failure.
+    ///
+    /// A caller holding the worker's typed error uses
+    /// [`Self::send_prologue_typed`] instead, which keeps that type on the wire.
     pub async fn send_prologue(&mut self, error: Option<String>) -> Result<(), String> {
+        self.send_prologue_typed(error.map(StreamPrologueError::from_message))
+            .await
+    }
+
+    pub async fn send_prologue_typed(
+        &mut self,
+        error: Option<StreamPrologueError>,
+    ) -> Result<(), String> {
         // leaving the original logic in place for now
-        // error overrides the dissolved prologue, but the only field on `ResponseStreamPrologue` is `error`
-        // so the second argument can never be used, and the value of error passed by the caller would always be used
         if let Some(_prologue) = self.prologue.take() {
-            // let prologue = ResponseStreamPrologue { error, ..prologue };
-            let prologue = ResponseStreamPrologue { error };
+            let (error, typed_error) = match error {
+                Some(StreamPrologueError {
+                    message,
+                    typed_error,
+                }) => (Some(message), typed_error),
+                None => (None, None),
+            };
+            let prologue = ResponseStreamPrologue { error, typed_error };
             let header_bytes: Bytes = match serde_json::to_vec(&prologue) {
                 Ok(b) => b.into(),
                 Err(err) => {
@@ -470,11 +683,15 @@ pub struct Egress<Req: PipelineIO, Resp: PipelineIO> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_SEND_BUFFER_COUNT, NetworkStreamWrapper, RequestControlMessage,
-        RequestPlanePayloadCodec, RequestType, ResponseType, StreamOptions,
+        DEFAULT_SEND_BUFFER_COUNT, IngressResponseEncoder, NetworkStreamWrapper,
+        RequestControlMessage, RequestPlanePayloadCodec, RequestType, ResponsePlaneMode,
+        ResponseStreamPrologue, ResponseType, SerdeIngressPayloadAdapter, StreamOptions,
+        StreamPrologueError,
     };
     use crate::engine::AsyncEngineContextProvider;
+    use crate::error::{BackendError, DynamoError, ErrorType};
     use crate::pipeline::Context;
+    use crate::protocols::annotated::Annotated;
     use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -482,6 +699,158 @@ mod tests {
         id: u64,
         text: String,
         tokens: Vec<u32>,
+    }
+
+    #[test]
+    fn prologue_without_typed_error_field_still_decodes() {
+        let legacy = br#"{"error":"Generate Error: something went wrong"}"#;
+        let prologue: ResponseStreamPrologue =
+            serde_json::from_slice(legacy).expect("a prologue without the typed field must decode");
+
+        assert_eq!(
+            prologue.error.as_deref(),
+            Some("Generate Error: something went wrong")
+        );
+        assert!(
+            prologue.typed_error.is_none(),
+            "an absent typed error must decode to None, not fail"
+        );
+    }
+
+    /// Pins the `String` compat shim on the widened `StreamProvider` error:
+    /// `str` methods and `String` conversion must keep resolving without a
+    /// field access, or the source break gets wider than intended.
+    #[test]
+    fn stream_prologue_error_substitutes_for_the_previous_string() {
+        let err = StreamPrologueError::from_message("malformed prologue: bad header");
+
+        assert!(err.contains("malformed prologue"));
+        assert!(err.starts_with("malformed"));
+        assert_eq!(err.len(), "malformed prologue: bad header".len());
+        assert_eq!(&err[..9], "malformed");
+        assert_eq!(err.as_ref() as &str, "malformed prologue: bad header");
+
+        let converted: StreamPrologueError = "from a &str".into();
+        assert_eq!(converted.message, "from a &str");
+        assert!(converted.typed_error.is_none());
+
+        let converted: StreamPrologueError = String::from("from a String").into();
+        assert_eq!(converted.message, "from a String");
+    }
+
+    #[test]
+    fn prologue_round_trips_the_typed_error() {
+        let prologue = ResponseStreamPrologue {
+            error: Some("Generate Error: unsupported input".to_string()),
+            typed_error: Some(
+                DynamoError::builder()
+                    .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                    .message("unsupported input")
+                    .build(),
+            ),
+        };
+
+        let encoded = serde_json::to_vec(&prologue).expect("prologue should serialize");
+        let decoded: ResponseStreamPrologue =
+            serde_json::from_slice(&encoded).expect("prologue should deserialize");
+
+        assert_eq!(decoded, prologue);
+        assert_eq!(
+            decoded.typed_error.map(|e| e.error_type()),
+            Some(ErrorType::Backend(BackendError::InvalidArgument))
+        );
+    }
+
+    #[test]
+    fn prologue_accepts_a_known_legacy_typed_error() {
+        let legacy = br#"{
+            "error":"Generate Error: unsupported input",
+            "typed_error":{"error_type":"InvalidArgument","message":"unsupported input"}
+        }"#;
+        let prologue: ResponseStreamPrologue =
+            serde_json::from_slice(legacy).expect("a known legacy typed error must decode");
+        let error = prologue
+            .typed_error
+            .expect("a known legacy typed error must remain typed");
+
+        assert_eq!(error.error_type(), ErrorType::InvalidArgument);
+        assert_eq!(error.class(), ErrorType::InvalidRequest);
+        assert_eq!(error.reason().as_str(), "request.invalid_argument");
+    }
+
+    #[test]
+    fn prologue_ignores_a_future_legacy_typed_error() {
+        let future = br#"{
+            "error":"Generate Error: future failure",
+            "typed_error":{"error_type":"VariantFromTheFuture","message":"future failure"}
+        }"#;
+        let prologue: ResponseStreamPrologue = serde_json::from_slice(future)
+            .expect("a future legacy typed error must not reject the prologue");
+
+        assert!(prologue.typed_error.is_none());
+    }
+
+    #[test]
+    fn prologue_fails_closed_for_a_future_semantic_class() {
+        let future = br#"{
+            "error":"Generate Error: future failure",
+            "typed_error":{
+                "class":"FutureErrorClass",
+                "reason":"runtime.internal",
+                "public":{"type":"message","message":"must not escape"}
+            }
+        }"#;
+        let prologue: ResponseStreamPrologue = serde_json::from_slice(future)
+            .expect("a future semantic class must not reject the prologue");
+        let error = prologue
+            .typed_error
+            .expect("semantic errors use the DynamoError fail-closed identity");
+
+        assert_eq!(error.class(), ErrorType::Internal);
+        assert_eq!(error.reason().as_str(), "runtime.invalid_error");
+        assert!(error.public_details().is_none());
+    }
+
+    #[test]
+    fn response_plane_mode_parses_supported_values() {
+        assert_eq!(
+            ResponsePlaneMode::from_config_value(None).unwrap(),
+            ResponsePlaneMode::Tcp
+        );
+        assert_eq!(
+            ResponsePlaneMode::from_config_value(Some("tcp")).unwrap(),
+            ResponsePlaneMode::Tcp
+        );
+        assert_eq!(
+            ResponsePlaneMode::from_config_value(Some("quic")).unwrap(),
+            ResponsePlaneMode::Quic
+        );
+        assert!(ResponsePlaneMode::from_config_value(Some("")).is_err());
+        assert!(ResponsePlaneMode::from_config_value(Some("invalid")).is_err());
+    }
+
+    #[test]
+    fn encode_into_matches_encode_byte_for_byte() {
+        let payload = NetworkStreamWrapper {
+            data: Some(TestPayload {
+                id: 7,
+                text: "hello".to_string(),
+                tokens: vec![1, 200, 70_000],
+            }),
+            complete_final: false,
+        };
+
+        for codec in [
+            RequestPlanePayloadCodec::Json,
+            RequestPlanePayloadCodec::Msgpack,
+        ] {
+            let expected = codec.encode(&payload).expect("encode");
+            let mut actual = Vec::new();
+            codec
+                .encode_into(&payload, &mut actual)
+                .expect("encode_into");
+            assert_eq!(expected, actual, "codec={}", codec.name());
+        }
     }
 
     #[test]
@@ -619,6 +988,53 @@ mod tests {
             assert_eq!(decoded, wrapper);
         }
     }
+
+    /// `encode_into` must stay byte-compatible with `encode` for both codecs.
+    #[tokio::test]
+    async fn serde_ingress_encoder_matches_encode_byte_for_byte() {
+        let data = Annotated::from_data(serde_json::json!({
+            "token_ids": [128, 9001],
+            "index": 3,
+        }));
+        let error = Annotated::<serde_json::Value>::from_error("engine failed");
+
+        for codec in [
+            RequestPlanePayloadCodec::Json,
+            RequestPlanePayloadCodec::Msgpack,
+        ] {
+            for (case, response, complete_final, expect_error) in [
+                ("data frame", Some(data.clone()), false, false),
+                ("error frame", Some(error.clone()), false, true),
+                ("complete final", None, true, false),
+            ] {
+                let expected = codec
+                    .encode(&NetworkStreamWrapper {
+                        data: response.clone(),
+                        complete_final,
+                    })
+                    .expect("reference encode");
+
+                let frame = SerdeIngressPayloadAdapter
+                    .encode_response(codec, response, complete_final)
+                    .await
+                    .expect("adapter encode");
+
+                assert_eq!(
+                    frame.bytes.as_ref(),
+                    expected.as_slice(),
+                    "codec={} case={case}",
+                    codec.name()
+                );
+                assert_eq!(
+                    frame.is_error,
+                    expect_error,
+                    "codec={} case={case}",
+                    codec.name()
+                );
+                assert!(!frame.stop_stream, "codec={} case={case}", codec.name());
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -728,13 +1144,17 @@ where
             data: response,
             complete_final,
         };
-        let encoded = payload_codec.encode(&wrapper).map_err(|err| {
-            PipelineError::SerializationError(format!(
-                "Failed serializing {} request-plane response: {}",
-                payload_codec.name(),
-                err
-            ))
-        });
+        let mut bytes = Vec::with_capacity(RESPONSE_ENCODE_CAPACITY_HINT);
+        let encoded = payload_codec
+            .encode_into(&wrapper, &mut bytes)
+            .map(|()| bytes)
+            .map_err(|err| {
+                PipelineError::SerializationError(format!(
+                    "Failed serializing {} request-plane response: {}",
+                    payload_codec.name(),
+                    err
+                ))
+            });
         std::future::ready(encoded.map(|bytes| EncodedResponseFrame {
             bytes: bytes.into(),
             is_error,
@@ -748,6 +1168,7 @@ pub struct Ingress<Req: PipelineIO, Resp: PipelineIO, Adapter = SerdeIngressPayl
     metrics: OnceLock<Arc<WorkHandlerMetrics>>,
     /// Endpoint-specific notifier for health check timer resets
     endpoint_health_check_notifier: OnceLock<Arc<tokio::sync::Notify>>,
+    quic_response_client_pool: OnceLock<Arc<quic_response::QuicResponseClientPool>>,
     payload_adapter: Arc<Adapter>,
 }
 
@@ -784,6 +1205,7 @@ where
             segment: OnceLock::new(),
             metrics: OnceLock::new(),
             endpoint_health_check_notifier: OnceLock::new(),
+            quic_response_client_pool: OnceLock::new(),
             payload_adapter: Arc::new(payload_adapter),
         })
     }
@@ -792,6 +1214,25 @@ where
         self.segment
             .set(segment)
             .map_err(|_| anyhow::anyhow!("Segment already set"))
+    }
+
+    pub(crate) fn set_quic_response_client_pool(
+        &self,
+        pool: Arc<quic_response::QuicResponseClientPool>,
+    ) -> Result<()> {
+        self.quic_response_client_pool
+            .set(pool)
+            .map_err(|_| anyhow::anyhow!("QUIC response client pool already set"))
+    }
+
+    pub(crate) fn quic_response_client_pool(
+        &self,
+    ) -> Result<Arc<quic_response::QuicResponseClientPool>, PipelineError> {
+        if let Some(pool) = self.quic_response_client_pool.get() {
+            return Ok(pool.clone());
+        }
+        let pool = quic_response::process_client_pool_from_env()?;
+        Ok(self.quic_response_client_pool.get_or_init(|| pool).clone())
     }
 
     pub fn add_metrics(

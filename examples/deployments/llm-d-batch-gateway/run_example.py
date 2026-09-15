@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Run the llm-d Batch Gateway to Dynamo example."""
+"""Run the offline batch inference example with Dynamo."""
 
 from __future__ import annotations
 
@@ -37,6 +37,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tenant", default="dynamo-batch-example")
     parser.add_argument("--model", default="Qwen/Qwen3-0.6B")
     parser.add_argument("--timeout-seconds", type=int, default=600)
+    parser.add_argument(
+        "--success-only",
+        action="store_true",
+        help="run only the successful batch, for readiness-gate validation",
+    )
     return parser.parse_args()
 
 
@@ -342,9 +347,12 @@ def main() -> None:
     client = BatchClient(args.base_url, args.tenant, args.timeout_seconds)
 
     validate_success(client, input_path, args.model)
+    if args.success_only:
+        print("Dynamo offline batch success path passed", flush=True)
+        return
     validate_error_file(client)
     validate_cancellation(client, args.model)
-    print("llm-d Batch Gateway -> dedicated Dynamo example passed", flush=True)
+    print("Dynamo offline batch example passed", flush=True)
 
 
 if __name__ == "__main__":

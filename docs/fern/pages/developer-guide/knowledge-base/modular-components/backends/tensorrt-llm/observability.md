@@ -44,11 +44,17 @@ Launch a frontend and TensorRT-LLM backend to test metrics:
 # Start frontend (default port 8000, override with --http-port or DYN_HTTP_PORT env var)
 $ python -m dynamo.frontend
 
-# Enable system metrics server on port 8081 and enable metrics collection
-$ DYN_SYSTEM_PORT=8081 python -m dynamo.trtllm --model <model_name> --publish-events-and-metrics
+# Enable system metrics server on port 8081 and TRT-LLM metrics collection
+$ DYN_SYSTEM_PORT=8081 python -m dynamo.trtllm --model <model_name> \
+    --publish-metrics
 ```
 
 **Note:** The `backend` must be set to `"pytorch"` for metrics collection (enforced in `components/src/dynamo/trtllm/main.py`). TensorRT-LLM's `MetricsCollector` integration has only been tested/validated with the PyTorch backend.
+
+KV-event publication is configured independently with `--publish-kv-events`.
+Use both flags when a worker must publish both event and metric telemetry. For
+backward compatibility, the deprecated `--publish-events-and-metrics` flag
+continues to enable both controls for one release.
 
 Wait for the TensorRT-LLM worker to start, then send requests and check metrics:
 
@@ -138,7 +144,7 @@ TensorRT-LLM provides Prometheus metrics through the `MetricsCollector` class (s
 
 ### Additional Operational Metrics
 
-Dynamo adds the following operational metrics for TensorRT-LLM workers. These complement the engine's native metrics above with request-level observability that the engine does not provide. All metrics use the `trtllm_` prefix and are automatically enabled when `--publish-events-and-metrics` is set.
+Dynamo adds the following operational metrics for TensorRT-LLM workers. These complement the engine's native metrics above with request-level observability that the engine does not provide. All metrics use the `trtllm_` prefix. Enable their required iteration statistics with `--publish-metrics`.
 
 Metric name constants are defined in `lib/runtime/src/metrics/prometheus_names.rs` (`trtllm_additional` module).
 
@@ -211,8 +217,8 @@ TensorRT-LLM provides extensive performance data beyond the basic Prometheus met
 
 - **Prometheus Integration**: Uses the `MetricsCollector` class from `tensorrt_llm.metrics` (see [collector.py](https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/metrics/collector.py))
 - **Dynamo Integration**: Uses `register_engine_metrics_callback()` function with `metric_prefix_filter=["trtllm_"]`
-- **Engine Configuration**: `LlmArgs.return_perf_metrics` defaults to `False`. It enables TensorRT-LLM's detailed per-step timing collector, whose `time_breakdown_metrics` payload Dynamo never reads, and which costs measurable throughput. Set `return_perf_metrics: true` in `--extra-engine-args` or `--override-engine-args` to re-enable engine-level collection for custom worker instrumentation.
-- **Per-request Metrics**: `SamplingParams.return_perf_metrics` is a separate switch that shares the same name. It follows `--publish-kv-events`, because its only consumer — the KV-transfer histogram — is registered only when publishing is enabled. Token usage reporting, including `usage.prompt_tokens_details.cached_tokens`, is unaffected either way: it comes from the engine's own cached-token count, not from `request_perf_metrics`.
+- **Engine Configuration**: `LlmArgs.return_perf_metrics` remains `False`. It enables TensorRT-LLM's detailed per-step timing collector, whose `time_breakdown_metrics` payload Dynamo never reads and which costs measurable throughput. `--publish-metrics` enables only `enable_iter_perf_stats`, which Dynamo needs for iteration and Prometheus metrics.
+- **Per-request Metrics**: `SamplingParams.return_perf_metrics` is a separate switch that follows `--publish-metrics`. Token usage reporting, including `usage.prompt_tokens_details.cached_tokens`, is unaffected either way: it comes from the engine's own cached-token count, not from `request_perf_metrics`.
 - **Request Arrival Timestamp**: When engine-level metrics are off, TensorRT-LLM stamps request arrival during C++ request construction rather than at Python submission, so E2E latency, TTFT, and queue time exclude some submission and IPC time. Other request timing fields keep their existing anchors.
 - **Initialization**: Metrics appear after TensorRT-LLM engine initialization completes
 - **Metadata**: `MetricsCollector` initialized with model metadata (model name, engine type)

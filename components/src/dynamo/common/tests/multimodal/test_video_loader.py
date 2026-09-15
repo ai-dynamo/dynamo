@@ -133,6 +133,18 @@ async def test_load_video_batch_prioritizes_typed_client_error(client_error):
 
 
 @pytest.mark.asyncio
+async def test_load_video_batch_preserves_value_error():
+    loader = VideoLoader()
+    client_error = ValueError("invalid num_frames")
+    loader.load_video = AsyncMock(side_effect=client_error)  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError) as exc_info:
+        await loader.load_video_batch([{"Url": "https://example.com/bad.mp4"}])
+
+    assert exc_info.value is client_error
+
+
+@pytest.mark.asyncio
 async def test_load_video_batch_reads_decoded_variant_with_metadata(monkeypatch):
     loader = VideoLoader(enable_frontend_decoding=False)
     loader._enable_frontend_decoding = True
@@ -202,7 +214,9 @@ async def test_decode_video_bytes_routes_h264_to_nvdec(monkeypatch):
     monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: "h264")
     monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: True)
     monkeypatch.setattr(
-        video_loader_module, "decode_video_nvdec", lambda b, n: (frames, meta)
+        video_loader_module,
+        "decode_video_nvdec",
+        lambda content, **kwargs: (frames, meta),
     )
     media_io = _RecordingMediaIO(frames)
 

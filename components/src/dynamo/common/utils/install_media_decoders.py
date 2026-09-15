@@ -121,9 +121,9 @@ VALIDATED_SPECS: dict[str, str] = {d.package: d.spec for d in (_OPENCV, _PYAV, _
 # image cannot otherwise handle, without rebuilding the in-tree FFmpeg.
 #
 # Excluded on purpose, for two different reasons:
-#   * PyNvVideoCodec -- already shipped in every runtime image as the NVDEC
-#     path, so H.264/H.265 decode needs no install. Listing it here would
-#     reinstall what is already present.
+#   * PyNvVideoCodec -- already shipped in every CUDA runtime image as the
+#     NVDEC path, so H.264/H.265 decode needs no install there. Listing it
+#     here would reinstall what is already present.
 #   * torchcodec, PyAV-on-SGLang, opencv-on-SGLang -- no Dynamo decode path
 #     imports them, so installing them would add a carrier nothing calls.
 _BACKEND_DECODERS: dict[str, tuple[_Decoder, ...]] = {

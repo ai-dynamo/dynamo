@@ -20,14 +20,12 @@ package controller
 import (
 	"context"
 	"errors"
-	"fmt"
 	"testing"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
@@ -35,12 +33,14 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
@@ -49,6 +49,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
+
+const friendlyCheckpointName = "friendly-checkpoint"
 
 func newTestDGDCheckpointsReconciler(
 	reconciler *DynamoGraphDeploymentReconciler,
@@ -61,229 +63,145 @@ func newTestDGDCheckpointsReconciler(
 	)
 }
 
-func TestDGDCheckpointsReconciler_CreateDoesNotReuseExistingCapture(t *testing.T) {
-	t.Log("Build an existing checkpoint and a DGD-managed checkpoint request")
-	ctx := context.Background()
-	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
-	identity := v1alpha1.DynamoCheckpointIdentity{
-		Model:            "meta-llama/Llama-2-7b-hf",
-		BackendFramework: "vllm",
-	}
-	hash, err := checkpoint.ComputeIdentityHash(identity)
-	if err != nil {
-		t.Fatalf("Failed to compute checkpoint hash: %v", err)
-	}
-
-	existing := &v1alpha1.DynamoCheckpoint{
+func dgdTestPodSnapshot(name string, compatibilityHash string, ready bool) *snapshotv1alpha1.PodSnapshot {
+	snapshot := &snapshotv1alpha1.PodSnapshot{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "existing-worker-checkpoint",
+			Name:      name,
 			Namespace: "default",
+			UID:       types.UID("snapshot-uid"),
+			Annotations: map[string]string{
+				commonconsts.SnapshotCompatibilityVersionAnnotation: commonconsts.SnapshotCompatibilityVersion,
+				commonconsts.SnapshotCompatibilityHashAnnotation:    compatibilityHash,
+				commonconsts.SnapshotGMSModeAnnotation:              commonconsts.SnapshotGMSModeDisabled,
+			},
 		},
-		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity: identity,
-			Job: v1alpha1.DynamoCheckpointJobConfig{
-				PodTemplateSpec: corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{
-							Name:  "main",
-							Image: "keep-existing:latest",
-						}},
-					},
+		Spec: snapshotv1alpha1.PodSnapshotSpec{
+			Source: snapshotv1alpha1.PodSnapshotSource{
+				PodRef: snapshotv1alpha1.PodReference{
+					Name:       "capture-worker",
+					Containers: []string{"main"},
 				},
 			},
 		},
-		Status: v1alpha1.DynamoCheckpointStatus{
-			IdentityHash: hash,
-		},
 	}
-
-	reconciler := &DynamoGraphDeploymentReconciler{
-		Client: fake.NewClientBuilder().
-			WithScheme(testScheme).
-			WithObjects(existing).
-			Build(),
-		Config:        &configv1alpha1.OperatorConfiguration{},
-		RuntimeConfig: &controller_common.RuntimeConfig{},
-		Recorder:      events.NewFakeRecorder(10),
+	if ready {
+		snapshot.Status = snapshotv1alpha1.PodSnapshotStatus{
+			BoundPodSnapshotContentName: ptr.To("content-a"),
+			Conditions: []metav1.Condition{{
+				Type:   snapshotv1alpha1.PodSnapshotConditionReady,
+				Status: metav1.ConditionTrue,
+			}},
+		}
 	}
+	return snapshot
+}
 
-	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd",
-			Namespace: "default",
-			UID:       types.UID("dgd-uid"),
+func dgdTestSnapshotCompatibilityHash(
+	t *testing.T,
+	dgd *v1beta1.DynamoGraphDeployment,
+) string {
+	t.Helper()
+	component := dgd.GetComponentByName("worker")
+	require.NotNil(t, component)
+	hash, err := (&dgdCheckpointsReconciler{
+		config: &configv1alpha1.OperatorConfiguration{},
+	}).snapshotCompatibilityHashForComponent(dgd, "worker", component)
+	require.NoError(t, err)
+	require.NotEmpty(t, hash)
+	return hash
+}
+
+func TestSnapshotGMSCompatibilityResolvesDeviceClass(t *testing.T) {
+	tests := []struct {
+		name            string
+		spec            *v1alpha1.GPUMemoryServiceSpec
+		wantMode        string
+		wantDeviceClass string
+	}{
+		{
+			name:     "disabled",
+			wantMode: commonconsts.SnapshotGMSModeDisabled,
 		},
-	})
-	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
-		ComponentType: string(commonconsts.ComponentTypeWorker),
-		Checkpoint: &v1alpha1.ServiceCheckpointConfig{
-			Enabled: true,
-			Mode:    v1alpha1.CheckpointModeAuto,
-			Identity: &v1alpha1.DynamoCheckpointIdentity{
-				Model:                identity.Model,
-				BackendFramework:     identity.BackendFramework,
-				TensorParallelSize:   1,
-				PipelineParallelSize: 1,
-				ExtraParameters:      map[string]string{},
+		{
+			name:            "enabled with default device class",
+			spec:            &v1alpha1.GPUMemoryServiceSpec{Enabled: true, Mode: v1alpha1.GMSModeIntraPod},
+			wantMode:        string(v1alpha1.GMSModeIntraPod),
+			wantDeviceClass: dra.DefaultDeviceClassName,
+		},
+		{
+			name: "enabled with custom device class",
+			spec: &v1alpha1.GPUMemoryServiceSpec{
+				Enabled:         true,
+				Mode:            v1alpha1.GMSModeIntraPod,
+				DeviceClassName: "gpu.nvidia.com/h100",
 			},
-		},
-		ExtraPodSpec: &v1alpha1.ExtraPodSpec{
-			MainContainer: &corev1.Container{
-				Name:  "main",
-				Image: "new-writer:latest",
-			},
+			wantMode:        string(v1alpha1.GMSModeIntraPod),
+			wantDeviceClass: "gpu.nvidia.com/h100",
 		},
 	}
 
-	t.Log("Create the DGD-managed checkpoint")
-	ckpt, err := newTestDGDCheckpointsReconciler(reconciler).createCheckpointCR(ctx, dgd, "worker", betaComponent(t, component))
-	if err != nil {
-		t.Fatalf("createCheckpointCR() error = %v", err)
-	}
-
-	t.Log("Verify a deterministic owned checkpoint was created without mutating the existing one")
-	if ckpt.Name == "existing-worker-checkpoint" {
-		t.Fatalf("createCheckpointCR() reused existing checkpoint")
-	}
-	workerHash, err := checkpointWorkerHashForComponent(dgd, "worker")
-	if err != nil {
-		t.Fatalf("checkpointWorkerHashForComponent() error = %v", err)
-	}
-	expectedID := checkpoint.DGDCheckpointID(
-		dgd.Namespace,
-		dgd.Name,
-		string(dgd.UID),
-		"worker",
-		workerHash,
-	)
-	expectedName := fmt.Sprintf("checkpoint-%s", expectedID)
-	if ckpt.Name != expectedName {
-		t.Fatalf("createCheckpointCR() returned checkpoint %s, want %s", ckpt.Name, expectedName)
-	}
-	if got := ckpt.Labels[snapshotprotocol.CheckpointIDLabel]; got != expectedID {
-		t.Fatalf("checkpoint ID label = %s, want %s", got, expectedID)
-	}
-
-	updated := &v1alpha1.DynamoCheckpoint{}
-	if err := reconciler.Get(ctx, types.NamespacedName{Name: "existing-worker-checkpoint", Namespace: "default"}, updated); err != nil {
-		t.Fatalf("Failed to get checkpoint: %v", err)
-	}
-	if len(updated.Spec.Job.PodTemplateSpec.Spec.Containers) != 1 {
-		t.Fatalf("expected one job container, got %d", len(updated.Spec.Job.PodTemplateSpec.Spec.Containers))
-	}
-	if updated.Spec.Job.PodTemplateSpec.Spec.Containers[0].Image != "keep-existing:latest" {
-		t.Fatalf("existing job image was mutated to %s", updated.Spec.Job.PodTemplateSpec.Spec.Containers[0].Image)
-	}
-	created := &v1alpha1.DynamoCheckpoint{}
-	if err := reconciler.Get(ctx, types.NamespacedName{Name: ckpt.Name, Namespace: "default"}, created); err != nil {
-		t.Fatalf("Failed to get created checkpoint: %v", err)
-	}
-	if len(created.OwnerReferences) != 1 || created.OwnerReferences[0].UID != dgd.UID {
-		t.Fatalf("expected created checkpoint to be owned by DGD UID %q, got %#v", dgd.UID, created.OwnerReferences)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			mode, deviceClass, err := snapshotGMSCompatibility(test.spec)
+			require.NoError(t, err)
+			assert.Equal(t, test.wantMode, mode)
+			assert.Equal(t, test.wantDeviceClass, deviceClass)
+		})
 	}
 }
 
-func TestDGDCheckpointsReconciler_CreateDoesNotAdoptLegacyIdentityTemplate(t *testing.T) {
-	t.Log("Build a legacy checkpoint and ResourceClaimTemplate with existing ownership")
-	ctx := context.Background()
-	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
-	identity := v1alpha1.DynamoCheckpointIdentity{
-		Model:            "meta-llama/Llama-2-7b-hf",
-		BackendFramework: "vllm",
-	}
-	hash, err := checkpoint.ComputeIdentityHash(identity)
+func reconcileAutomaticSnapshotJobForTest(
+	t *testing.T,
+	reconciler *DynamoGraphDeploymentReconciler,
+	dgd *v1beta1.DynamoGraphDeployment,
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+) *snapshotv1alpha1.SnapshotJob {
+	t.Helper()
+	const componentName = "worker"
+	workerHash, err := checkpointWorkerHashForComponent(dgd, componentName)
+	require.NoError(t, err)
+	checkpointReconciler := newTestDGDCheckpointsReconciler(reconciler)
+	compatibilityHash, err := checkpointReconciler.snapshotCompatibilityHashForComponent(
+		dgd,
+		componentName,
+		component,
+	)
+	require.NoError(t, err)
+	_, err = checkpointReconciler.reconcileAutomaticSnapshotJob(
+		context.Background(),
+		dgd,
+		componentName,
+		component,
+		workerHash,
+		v1alpha1.CheckpointStartupPolicyImmediate,
+	)
 	require.NoError(t, err)
 
-	existing := &v1alpha1.DynamoCheckpoint{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "existing-worker-checkpoint",
-			Namespace: "default",
-			UID:       types.UID("checkpoint-uid"),
-		},
-		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity:         identity,
-			GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{Enabled: true},
-		},
-		Status: v1alpha1.DynamoCheckpointStatus{
-			IdentityHash: hash,
-		},
-	}
-	dgd := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd",
-			Namespace: "default",
-			UID:       types.UID("dgd-uid"),
-		},
-	}
-	claimTemplateName := checkpointGMSResourceClaimTemplateName(hash)
-	template := &resourcev1.ResourceClaimTemplate{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      claimTemplateName,
-			Namespace: "default",
-			OwnerReferences: []metav1.OwnerReference{
-				*metav1.NewControllerRef(dgd, v1beta1.GroupVersion.WithKind("DynamoGraphDeployment")),
-			},
-		},
-	}
-	reconciler := &DynamoGraphDeploymentReconciler{
-		Client: fake.NewClientBuilder().
-			WithScheme(testScheme).
-			WithObjects(existing, dgd, template).
-			Build(),
-		Config:   &configv1alpha1.OperatorConfiguration{},
-		Recorder: events.NewFakeRecorder(10),
-		RuntimeConfig: &controller_common.RuntimeConfig{
-			Gate: features.Gates{},
-		},
-	}
-	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
-		ComponentName: "worker",
-		ComponentType: v1beta1.ComponentTypeWorker,
-		Experimental: &v1beta1.ExperimentalSpec{
-			Checkpoint: &v1beta1.ComponentCheckpointConfig{
-				Enabled: true,
-				Mode:    v1beta1.CheckpointModeAuto,
-				Identity: &v1beta1.DynamoCheckpointIdentity{
-					Model:            identity.Model,
-					BackendFramework: identity.BackendFramework,
-				},
-			},
-		},
-	}
-
-	t.Log("Create the DGD-managed checkpoint")
-	ckpt, err := newTestDGDCheckpointsReconciler(reconciler).createCheckpointCR(ctx, dgd, "worker", component)
-	require.NoError(t, err)
-
-	t.Log("Verify the new checkpoint does not adopt the legacy template")
-	workerHash, err := checkpointWorkerHashForComponent(dgd, "worker")
-	require.NoError(t, err)
 	checkpointID := checkpoint.DGDCheckpointID(
 		dgd.Namespace,
 		dgd.Name,
 		string(dgd.UID),
-		"worker",
+		componentName,
 		workerHash,
+		compatibilityHash,
+		commonconsts.SnapshotCompatibilityVersion,
 	)
-	assert.Equal(t, "checkpoint-"+checkpointID, ckpt.Name)
-	assert.NotEqual(t, existing.Name, ckpt.Name)
-
-	updatedTemplate := &resourcev1.ResourceClaimTemplate{}
-	require.NoError(t, reconciler.Get(ctx, client.ObjectKey{Name: claimTemplateName, Namespace: "default"}, updatedTemplate))
-	controllerRef := metav1.GetControllerOf(updatedTemplate)
-	require.NotNil(t, controllerRef)
-	assert.Equal(t, "DynamoGraphDeployment", controllerRef.Kind)
-	assert.Equal(t, dgd.Name, controllerRef.Name)
+	job := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKey{
+		Namespace: dgd.Namespace,
+		Name:      "checkpoint-" + checkpointID,
+	}, job))
+	jobCompatibilityHash := job.Spec.PodSnapshotTemplate.Metadata.Annotations[commonconsts.SnapshotCompatibilityHashAnnotation]
+	assert.Equal(t, compatibilityHash, jobCompatibilityHash)
+	assert.Regexp(t, "^[0-9a-f]{64}$", jobCompatibilityHash)
+	assert.NotEqual(t, workerHash, jobCompatibilityHash)
+	return job
 }
 
-func TestDGDCheckpointsReconciler_CreatePreservesGMSSaverClient(t *testing.T) {
+func TestDGDCheckpointsReconciler_SnapshotJobPreservesGMSSaverClient(t *testing.T) {
 	t.Log("Build a GMS checkpoint component with a saver client")
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
-	identity := v1alpha1.DynamoCheckpointIdentity{
-		Model:            "meta-llama/Llama-2-7b-hf",
-		BackendFramework: "vllm",
-	}
 	deviceClass := &resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: dra.DefaultDeviceClassName}}
 
 	reconciler := &DynamoGraphDeploymentReconciler{
@@ -304,6 +222,9 @@ func TestDGDCheckpointsReconciler_CreatePreservesGMSSaverClient(t *testing.T) {
 			Namespace: "default",
 			UID:       types.UID("dgd-uid"),
 		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+		},
 	})
 	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
 		ComponentType: string(commonconsts.ComponentTypeWorker),
@@ -317,13 +238,6 @@ func TestDGDCheckpointsReconciler_CreatePreservesGMSSaverClient(t *testing.T) {
 		Checkpoint: &v1alpha1.ServiceCheckpointConfig{
 			Enabled: true,
 			Mode:    v1alpha1.CheckpointModeAuto,
-			Identity: &v1alpha1.DynamoCheckpointIdentity{
-				Model:                identity.Model,
-				BackendFramework:     identity.BackendFramework,
-				TensorParallelSize:   1,
-				PipelineParallelSize: 1,
-				ExtraParameters:      map[string]string{},
-			},
 		},
 		ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 			MainContainer: &corev1.Container{
@@ -345,20 +259,11 @@ func TestDGDCheckpointsReconciler_CreatePreservesGMSSaverClient(t *testing.T) {
 		},
 	}
 
-	t.Log("Create the GMS-backed checkpoint")
-	ckpt, err := newTestDGDCheckpointsReconciler(reconciler).createCheckpointCR(ctx, dgd, "worker", betaComponent(t, component))
-	if err != nil {
-		t.Fatalf("createCheckpointCR() error = %v", err)
-	}
+	t.Log("Create the GMS-backed SnapshotJob")
+	job := reconcileAutomaticSnapshotJobForTest(t, reconciler, dgd, betaComponent(t, component))
 
 	t.Log("Verify GMS clients, containers, claims, and templates are preserved")
-	if ckpt.Spec.GPUMemoryService == nil || !ckpt.Spec.GPUMemoryService.Enabled {
-		t.Fatalf("expected auto-created checkpoint to carry enabled GMS spec, got %#v", ckpt.Spec.GPUMemoryService)
-	}
-	if diff := cmp.Diff([]string{"gms-saver"}, ckpt.Spec.GPUMemoryService.ExtraClientContainers); diff != "" {
-		t.Fatalf("checkpoint GMS extra clients mismatch (-want +got):\n%s", diff)
-	}
-	saver := findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.Containers, "gms-saver")
+	saver := findContainer(job.Spec.PodTemplate.Spec.Containers, "gms-saver")
 	if saver == nil {
 		t.Fatalf("expected checkpoint job pod template to include saver")
 	}
@@ -368,11 +273,17 @@ func TestDGDCheckpointsReconciler_CreatePreservesGMSSaverClient(t *testing.T) {
 	if got := saver.Command; len(got) != 1 || got[0] != "/bin/custom-saver" {
 		t.Fatalf("checkpoint saver command = %#v, want [/bin/custom-saver]", got)
 	}
-	main := findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.Containers, commonconsts.MainContainerName)
+	main := findContainer(job.Spec.PodTemplate.Spec.Containers, commonconsts.MainContainerName)
 	require.NotNil(t, main)
 	assert.Contains(t, main.Resources.Claims, corev1.ResourceClaim{Name: dra.ClaimName})
 	assert.Contains(t, saver.VolumeMounts, corev1.VolumeMount{Name: gms.SharedVolumeName, MountPath: gms.SharedMountPath})
-	assert.NotNil(t, findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.InitContainers, gms.ServerContainerName))
+	server := findContainer(job.Spec.PodTemplate.Spec.InitContainers, gms.ServerContainerName)
+	require.NotNil(t, server)
+	assert.Empty(t, server.Args)
+	assert.Contains(t, server.Env, corev1.EnvVar{Name: gms.EnvUseV1, Value: "true"})
+	assert.Contains(t, main.Env, corev1.EnvVar{Name: gms.EnvUseV1, Value: "true"})
+	assert.Equal(t, string(v1alpha1.GMSModeIntraPod),
+		job.Spec.PodSnapshotTemplate.Metadata.Annotations[commonconsts.SnapshotGMSModeAnnotation])
 	workerHash, err := checkpointWorkerHashForComponent(dgd, "worker")
 	require.NoError(t, err)
 	checkpointID := checkpoint.DGDCheckpointID(
@@ -381,9 +292,11 @@ func TestDGDCheckpointsReconciler_CreatePreservesGMSSaverClient(t *testing.T) {
 		string(dgd.UID),
 		"worker",
 		workerHash,
+		job.Spec.PodSnapshotTemplate.Metadata.Annotations[commonconsts.SnapshotCompatibilityHashAnnotation],
+		commonconsts.SnapshotCompatibilityVersion,
 	)
 	claimTemplateName := checkpointGMSResourceClaimTemplateName(checkpointID)
-	assert.Contains(t, ckpt.Spec.Job.PodTemplateSpec.Spec.ResourceClaims, corev1.PodResourceClaim{
+	assert.Contains(t, job.Spec.PodTemplate.Spec.ResourceClaims, corev1.PodResourceClaim{
 		Name:                      dra.ClaimName,
 		ResourceClaimTemplateName: &claimTemplateName,
 	})
@@ -397,8 +310,35 @@ func TestDGDCheckpointsReconciler_CreatePreservesGMSSaverClient(t *testing.T) {
 	assert.Equal(t, dra.DefaultDeviceClassName, request.Exactly.DeviceClassName)
 	controllerRef := metav1.GetControllerOf(template)
 	require.NotNil(t, controllerRef)
-	assert.Equal(t, "DynamoCheckpoint", controllerRef.Kind)
-	assert.Equal(t, ckpt.Name, controllerRef.Name)
+	assert.Equal(t, "SnapshotJob", controllerRef.Kind)
+	assert.Equal(t, job.Name, controllerRef.Name)
+}
+
+func TestPrepareCheckpointGMSPodTemplateRejectsMissingClient(t *testing.T) {
+	t.Log("Build a capture Pod template that omits a requested GMS client")
+	podTemplate := &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+		Containers: []corev1.Container{{Name: commonconsts.MainContainerName}},
+	}}
+	gmsSpec := &v1alpha1.GPUMemoryServiceSpec{
+		Enabled:               true,
+		Mode:                  v1alpha1.GMSModeIntraPod,
+		ExtraClientContainers: []string{"missing-saver"},
+	}
+
+	t.Log("Render the GMS capture wiring")
+	err := prepareCheckpointGMSPodTemplate(
+		podTemplate,
+		commonconsts.MainContainerName,
+		"checkpoint-id",
+		gmsSpec,
+	)
+
+	t.Log("Verify the typo fails before partially mutating the Pod template")
+	require.ErrorContains(t, err, `gpuMemoryService client container "missing-saver"`)
+	require.ErrorContains(t, err, `pod spec has no container named "missing-saver"`)
+	assert.Empty(t, podTemplate.Spec.InitContainers)
+	assert.Empty(t, podTemplate.Spec.ResourceClaims)
+	assert.Empty(t, podTemplate.Spec.Volumes)
 }
 
 func TestDGDCheckpointsReconciler_SyncGMSResourceClaimTemplateUsesTemporaryDGDOwner(t *testing.T) {
@@ -443,15 +383,9 @@ func TestDGDCheckpointsReconciler_SyncGMSResourceClaimTemplateUsesTemporaryDGDOw
 	assert.True(t, metav1.IsControlledBy(template, dgd))
 }
 
-func TestDGDCheckpointsReconciler_CreateAppliesDGDDefaults(t *testing.T) {
+func TestDGDCheckpointsReconciler_SnapshotJobAppliesDGDDefaults(t *testing.T) {
 	t.Log("Build a checkpoint component with graph-level defaults")
-	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
-	identity := v1alpha1.DynamoCheckpointIdentity{
-		Model:            "meta-llama/Llama-2-7b-hf",
-		BackendFramework: "vllm",
-	}
-
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client: fake.NewClientBuilder().WithScheme(testScheme).Build(),
 		Config: &configv1alpha1.OperatorConfiguration{
@@ -464,6 +398,7 @@ func TestDGDCheckpointsReconciler_CreateAppliesDGDDefaults(t *testing.T) {
 	dgd := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
 			Env: []corev1.EnvVar{
 				{Name: "HF_HOME", Value: "/models/huggingface"},
 				{Name: "OVERRIDE_ME", Value: "graph"},
@@ -486,41 +421,96 @@ func TestDGDCheckpointsReconciler_CreateAppliesDGDDefaults(t *testing.T) {
 			Checkpoint: &v1beta1.ComponentCheckpointConfig{
 				Enabled: true,
 				Mode:    v1beta1.CheckpointModeAuto,
-				Identity: &v1beta1.DynamoCheckpointIdentity{
-					Model:                identity.Model,
-					BackendFramework:     identity.BackendFramework,
-					TensorParallelSize:   1,
-					PipelineParallelSize: 1,
-					ExtraParameters:      map[string]string{},
-				},
 			},
 		},
 	}
 
-	t.Log("Create the checkpoint job pod template")
-	ckpt, err := newTestDGDCheckpointsReconciler(reconciler).createCheckpointCR(ctx, dgd, "worker", component)
-	require.NoError(t, err)
+	t.Log("Create the SnapshotJob pod template")
+	job := reconcileAutomaticSnapshotJobForTest(t, reconciler, dgd, component)
 
-	t.Log("Verify graph defaults reach the checkpoint job")
-	main := findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.Containers, commonconsts.MainContainerName)
+	t.Log("Verify graph defaults reach the SnapshotJob")
+	main := findContainer(job.Spec.PodTemplate.Spec.Containers, commonconsts.MainContainerName)
 	require.NotNil(t, main)
 	assert.Contains(t, main.Env, corev1.EnvVar{Name: "HF_HOME", Value: "/models/huggingface"})
 	assert.Contains(t, main.Env, corev1.EnvVar{Name: "OVERRIDE_ME", Value: "component"})
 	assert.Equal(t,
 		discovery.GetK8sDiscoveryServiceAccountName("test-dgd"),
-		ckpt.Spec.Job.PodTemplateSpec.Spec.ServiceAccountName,
+		job.Spec.PodTemplate.Spec.ServiceAccountName,
 	)
+
+	t.Log("Verify the SnapshotJob retains the default shared-memory volume")
+	sharedMemoryVolume := findVolume(job.Spec.PodTemplate.Spec.Volumes, commonconsts.KubeValueNameSharedMemory)
+	require.NotNil(t, sharedMemoryVolume)
+	require.NotNil(t, sharedMemoryVolume.EmptyDir)
+	assert.Equal(t, corev1.StorageMediumMemory, sharedMemoryVolume.EmptyDir.Medium)
+	require.NotNil(t, sharedMemoryVolume.EmptyDir.SizeLimit)
+	assert.Equal(t,
+		resource.MustParse(commonconsts.DefaultSharedMemorySize),
+		*sharedMemoryVolume.EmptyDir.SizeLimit,
+	)
+	assert.Contains(t, main.VolumeMounts, corev1.VolumeMount{
+		Name:      commonconsts.KubeValueNameSharedMemory,
+		MountPath: commonconsts.DefaultSharedMemoryMountPath,
+	})
 }
 
-func TestDGDCheckpointsReconciler_CreateUsesTargetContainer(t *testing.T) {
-	t.Log("Build a checkpoint component with an explicit target container")
-	ctx := context.Background()
+func TestDGDCheckpointsReconciler_CompatibilityHashChangeRecaptures(t *testing.T) {
+	t.Log("Build an automatic checkpoint component with a stable worker generation")
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
-	identity := v1alpha1.DynamoCheckpointIdentity{
-		Model:            "meta-llama/Llama-2-7b-hf",
-		BackendFramework: "vllm",
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:        fake.NewClientBuilder().WithScheme(testScheme).Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
 	}
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+			UID:       types.UID("dgd-uid"),
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:  commonconsts.MainContainerName,
+						Image: "checkpoint-writer:latest",
+					}},
+				}},
+				Experimental: &v1beta1.ExperimentalSpec{Checkpoint: &v1beta1.ComponentCheckpointConfig{
+					Enabled: true,
+					Mode:    v1beta1.CheckpointModeAuto,
+				}},
+			}},
+		},
+	}
+	workerHash := betaDGDWorkersSpecHash(t, dgd)
+	dgd.Annotations = map[string]string{commonconsts.AnnotationCurrentWorkerHashV2: workerHash}
+	component := dgd.GetComponentByName("worker")
+	require.NotNil(t, component)
 
+	t.Log("Create the first immutable capture job")
+	first := reconcileAutomaticSnapshotJobForTest(t, reconciler, dgd, component)
+	firstHash := first.Spec.PodSnapshotTemplate.Metadata.Annotations[commonconsts.SnapshotCompatibilityHashAnnotation]
+
+	t.Log("Change an operator-rendered process input outside the DGD worker hash")
+	reconciler.Config.Infrastructure.NATSTLSCAPath = "/etc/dynamo/tls/new-nats-ca.pem"
+	second := reconcileAutomaticSnapshotJobForTest(t, reconciler, dgd, component)
+	secondHash := second.Spec.PodSnapshotTemplate.Metadata.Annotations[commonconsts.SnapshotCompatibilityHashAnnotation]
+
+	t.Log("Verify the new compatibility contract selects a fresh job")
+	assert.NotEqual(t, firstHash, secondHash)
+	assert.NotEqual(t, first.Name, second.Name)
+	jobs := &snapshotv1alpha1.SnapshotJobList{}
+	require.NoError(t, reconciler.List(context.Background(), jobs, client.InNamespace(dgd.Namespace)))
+	assert.Len(t, jobs.Items, 2)
+}
+
+func TestDGDCheckpointsReconciler_SnapshotJobUsesTargetContainer(t *testing.T) {
+	t.Log("Build a checkpoint component with an explicit target container")
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client: fake.NewClientBuilder().WithScheme(testScheme).Build(),
 		Config: &configv1alpha1.OperatorConfiguration{},
@@ -530,11 +520,10 @@ func TestDGDCheckpointsReconciler_CreateUsesTargetContainer(t *testing.T) {
 	}
 	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default", UID: types.UID("dgd-uid")},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+		},
 	})
-	checkpointIdentity := v1beta1.DynamoCheckpointIdentity{
-		Model:            identity.Model,
-		BackendFramework: identity.BackendFramework,
-	}
 	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
 		ComponentName: "worker",
 		ComponentType: v1beta1.ComponentTypeWorker,
@@ -555,7 +544,6 @@ func TestDGDCheckpointsReconciler_CreateUsesTargetContainer(t *testing.T) {
 				Enabled:             true,
 				Mode:                v1beta1.CheckpointModeAuto,
 				TargetContainerName: "snapshot-me",
-				Identity:            &checkpointIdentity,
 				Job: &v1beta1.ComponentCheckpointJobConfig{
 					GMSClientContainers: []string{"gms-saver"},
 					PodTemplate: &corev1.PodTemplateSpec{
@@ -571,17 +559,15 @@ func TestDGDCheckpointsReconciler_CreateUsesTargetContainer(t *testing.T) {
 		},
 	}
 
-	t.Log("Create the target-container checkpoint")
-	ckpt, err := newTestDGDCheckpointsReconciler(reconciler).createCheckpointCR(ctx, dgd, "worker", component)
-	require.NoError(t, err)
+	t.Log("Create the target-container SnapshotJob")
+	job := reconcileAutomaticSnapshotJobForTest(t, reconciler, dgd, component)
 
 	t.Log("Verify target and GMS containers are retained")
-	assert.Equal(t, "snapshot-me", ckpt.Spec.Job.TargetContainerName)
-	assert.NotNil(t, findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.Containers, "snapshot-me"))
-	assert.NotNil(t, findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.Containers, "gms-saver"))
-	assert.Equal(t, []string{"gms-saver"}, ckpt.Spec.GPUMemoryService.ExtraClientContainers)
-	assert.Nil(t, findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.Containers, commonconsts.MainContainerName))
-	assert.Nil(t, findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.Containers, "serve-sidecar"))
+	assert.Equal(t, []string{"snapshot-me"}, job.Spec.PodSnapshotTemplate.TargetContainers)
+	assert.NotNil(t, findContainer(job.Spec.PodTemplate.Spec.Containers, "snapshot-me"))
+	assert.NotNil(t, findContainer(job.Spec.PodTemplate.Spec.Containers, "gms-saver"))
+	assert.Nil(t, findContainer(job.Spec.PodTemplate.Spec.Containers, commonconsts.MainContainerName))
+	assert.Nil(t, findContainer(job.Spec.PodTemplate.Spec.Containers, "serve-sidecar"))
 }
 
 func TestDGDCheckpointsReconciler_AutoUsesTargetContainerWithoutIdentity(t *testing.T) {
@@ -622,6 +608,9 @@ func TestDGDCheckpointsReconciler_AutoUsesTargetContainerWithoutIdentity(t *test
 			}},
 		},
 	}
+	dgd.Annotations = map[string]string{
+		commonconsts.AnnotationCurrentWorkerHashV2: betaDGDWorkersSpecHash(t, dgd),
+	}
 
 	t.Log("Reconcile the auto checkpoint")
 	checkpointResult, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
@@ -629,18 +618,385 @@ func TestDGDCheckpointsReconciler_AutoUsesTargetContainerWithoutIdentity(t *test
 	checkpointInfos := checkpointResult.Infos
 	require.NoError(t, err)
 
-	t.Log("Verify target-container restore state and managed checkpoint identity")
+	t.Log("Verify the pending native capture and generated SnapshotJob")
 	info := checkpointInfos["worker"]
 	require.NotNil(t, info)
 	assert.Equal(t, []string{"snapshot-me"}, info.RestoreTargetContainers)
-	require.NotEmpty(t, checkpointStatuses["worker"].CheckpointName)
-	require.NotEmpty(t, checkpointStatuses["worker"].CheckpointID)
+	assert.Empty(t, checkpointStatuses["worker"].CheckpointName)
+	assert.Empty(t, checkpointStatuses["worker"].CheckpointID)
 
-	ckpt := &v1alpha1.DynamoCheckpoint{}
-	require.NoError(t, reconciler.Get(ctx, types.NamespacedName{Name: checkpointStatuses["worker"].CheckpointName, Namespace: "default"}, ckpt))
-	assert.Equal(t, "snapshot-me", ckpt.Spec.Job.TargetContainerName)
-	assert.Equal(t, string(dynamo.BackendFrameworkVLLM), ckpt.Spec.Identity.BackendFramework)
-	assert.Equal(t, checkpointStatuses["worker"].CheckpointID, ckpt.Spec.Identity.ExtraParameters["checkpointID"])
+	jobs := &snapshotv1alpha1.SnapshotJobList{}
+	require.NoError(t, reconciler.List(ctx, jobs, client.InNamespace("default")))
+	require.Len(t, jobs.Items, 1)
+	assert.Equal(t, []string{"snapshot-me"}, jobs.Items[0].Spec.PodSnapshotTemplate.TargetContainers)
+	assert.NotNil(t, findContainer(jobs.Items[0].Spec.PodTemplate.Spec.Containers, "snapshot-me"))
+	firstJobName := jobs.Items[0].Name
+
+	t.Log("Change a worker-hash input and verify automatic capture rotates")
+	dgd.Spec.Components[0].PodTemplate.Spec.Containers[1].Image = "target:v2"
+	_, err = newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
+	require.NoError(t, err)
+	require.NoError(t, reconciler.List(ctx, jobs, client.InNamespace("default")))
+	require.Len(t, jobs.Items, 2)
+	rotatedJobName := jobs.Items[0].Name
+	if rotatedJobName == firstJobName {
+		rotatedJobName = jobs.Items[1].Name
+	}
+	assert.NotEqual(t, firstJobName, rotatedJobName)
+}
+
+func TestDGDCheckpointsReconciler_AutomaticCaptureWaitsForActiveWorkerHash(t *testing.T) {
+	t.Log("Build a first-generation worker before its active hash is initialized")
+	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:        fake.NewClientBuilder().WithScheme(testScheme).Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
+	}
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+			UID:       types.UID("dgd-uid"),
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: commonconsts.MainContainerName, Image: "worker:latest"}},
+				}},
+				Experimental: &v1beta1.ExperimentalSpec{Checkpoint: &v1beta1.ComponentCheckpointConfig{
+					Enabled: true,
+					Mode:    v1beta1.CheckpointModeAuto,
+				}},
+			}},
+		},
+	}
+
+	t.Log("Reconcile while the worker generation has no durable identity")
+	result, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
+	require.NoError(t, err)
+
+	t.Log("Verify automatic capture remains pending without creating a generation-less SnapshotJob")
+	info := result.Infos["worker"]
+	require.NotNil(t, info)
+	assert.True(t, info.AutomaticCapture)
+	assert.False(t, info.Ready)
+	jobs := &snapshotv1alpha1.SnapshotJobList{}
+	require.NoError(t, reconciler.List(ctx, jobs, client.InNamespace("default")))
+	assert.Empty(t, jobs.Items)
+
+	t.Log("Record the active worker hash and reconcile capture again")
+	workerHash := betaDGDWorkersSpecHash(t, dgd)
+	dgd.Annotations = map[string]string{
+		commonconsts.AnnotationCurrentWorkerHashV2: workerHash,
+	}
+	_, err = newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
+	require.NoError(t, err)
+
+	t.Log("Verify exactly one generation-bound SnapshotJob is created")
+	require.NoError(t, reconciler.List(ctx, jobs, client.InNamespace("default")))
+	require.Len(t, jobs.Items, 1)
+	assert.Equal(t, workerHash, jobs.Items[0].Labels[commonconsts.KubeLabelDynamoWorkerHash])
+}
+
+func TestDGDCheckpointsReconciler_CompatibilityVersionUpgradeRecaptures(t *testing.T) {
+	t.Log("Build an automatic checkpoint DGD with a completed pre-versioned SnapshotJob")
+	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+			UID:       types.UID("dgd-uid"),
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: string(commonconsts.ComponentTypeWorker),
+					ExtraPodSpec: &v1alpha1.ExtraPodSpec{MainContainer: &corev1.Container{
+						Name:  commonconsts.MainContainerName,
+						Image: "worker:latest",
+					}},
+					Checkpoint: &v1alpha1.ServiceCheckpointConfig{
+						Enabled: true,
+						Mode:    v1alpha1.CheckpointModeAuto,
+					},
+				},
+			},
+		},
+	})
+	workerHash := betaDGDWorkersSpecHash(t, dgd)
+	dgd.Annotations = map[string]string{commonconsts.AnnotationCurrentWorkerHashV2: workerHash}
+	legacyCheckpointID := checkpoint.DGDCheckpointID(
+		dgd.Namespace,
+		dgd.Name,
+		string(dgd.UID),
+		"worker",
+		workerHash,
+		"",
+		"",
+	)
+	legacyJob := &snapshotv1alpha1.SnapshotJob{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "checkpoint-" + legacyCheckpointID,
+			Namespace: dgd.Namespace,
+			UID:       types.UID("legacy-job-uid"),
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+				commonconsts.KubeLabelDynamoComponent:           "worker",
+				commonconsts.KubeLabelDynamoWorkerHash:          workerHash,
+			},
+			Annotations: map[string]string{
+				commonconsts.CheckpointAutoAnnotation:           commonconsts.KubeLabelValueTrue,
+				commonconsts.CheckpointDeletionPolicyAnnotation: string(v1alpha1.CheckpointDeletionPolicyDelete),
+				commonconsts.CheckpointOwnerUIDAnnotation:       string(dgd.UID),
+			},
+		},
+		Spec: snapshotv1alpha1.SnapshotJobSpec{
+			PodSnapshotTemplate: snapshotv1alpha1.PodSnapshotTemplate{
+				Metadata: &snapshotv1alpha1.PodSnapshotTemplateMetadata{Annotations: map[string]string{
+					commonconsts.SnapshotCompatibilityVersionAnnotation: "v1",
+					"nvidia.com/dynamo-snapshot-worker-hash":            workerHash,
+				}},
+				TargetContainers: []string{commonconsts.MainContainerName},
+			},
+		},
+		Status: snapshotv1alpha1.SnapshotJobStatus{
+			PodSnapshotName: "legacy-snapshot",
+			PodSnapshotUID:  types.UID("legacy-snapshot-uid"),
+			Conditions: []metav1.Condition{{
+				Type:   snapshotv1alpha1.SnapshotJobConditionCompleted,
+				Status: metav1.ConditionTrue,
+			}},
+		},
+	}
+	legacySnapshot := &snapshotv1alpha1.PodSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      legacyJob.Status.PodSnapshotName,
+			Namespace: dgd.Namespace,
+			UID:       legacyJob.Status.PodSnapshotUID,
+			Labels: map[string]string{
+				snapshotv1alpha1.SnapshotJobOwnerLabel:    legacyJob.Name,
+				snapshotv1alpha1.SnapshotJobOwnerUIDLabel: string(legacyJob.UID),
+			},
+			Annotations: map[string]string{
+				commonconsts.CheckpointAutoAnnotation:               commonconsts.KubeLabelValueTrue,
+				commonconsts.CheckpointOwnerUIDAnnotation:           string(dgd.UID),
+				commonconsts.SnapshotCompatibilityVersionAnnotation: "v1",
+				"nvidia.com/dynamo-snapshot-worker-hash":            workerHash,
+				commonconsts.SnapshotGMSModeAnnotation:              commonconsts.SnapshotGMSModeDisabled,
+				commonconsts.CheckpointDeletionPolicyAnnotation:     string(v1alpha1.CheckpointDeletionPolicyDelete),
+			},
+		},
+		Spec: snapshotv1alpha1.PodSnapshotSpec{Source: snapshotv1alpha1.PodSnapshotSource{
+			PodRef: snapshotv1alpha1.PodReference{
+				Name:       "legacy-capture-worker",
+				Containers: []string{commonconsts.MainContainerName},
+			},
+		}},
+		Status: snapshotv1alpha1.PodSnapshotStatus{
+			BoundPodSnapshotContentName: ptr.To("legacy-content"),
+			Conditions: []metav1.Condition{{
+				Type:   snapshotv1alpha1.PodSnapshotConditionReady,
+				Status: metav1.ConditionTrue,
+			}},
+		},
+	}
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(testScheme).
+			WithObjects(legacyJob, legacySnapshot).
+			Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
+	}
+	checkpointReconciler := newTestDGDCheckpointsReconciler(reconciler)
+
+	t.Log("Reconcile after the compatibility contract upgrade")
+	result, err := checkpointReconciler.Reconcile(ctx, dgd)
+	require.NoError(t, err)
+	require.NotNil(t, result.Infos["worker"])
+	assert.False(t, result.Infos["worker"].Ready)
+
+	t.Log("Verify v2 selects a fresh immutable job without deleting the legacy capture")
+	currentCompatibilityHash, err := checkpointReconciler.snapshotCompatibilityHashForComponent(
+		dgd,
+		"worker",
+		dgd.GetComponentByName("worker"),
+	)
+	require.NoError(t, err)
+	currentCheckpointID := checkpoint.DGDCheckpointID(
+		dgd.Namespace,
+		dgd.Name,
+		string(dgd.UID),
+		"worker",
+		workerHash,
+		currentCompatibilityHash,
+		commonconsts.SnapshotCompatibilityVersion,
+	)
+	currentJob := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, reconciler.Get(ctx, client.ObjectKey{
+		Namespace: dgd.Namespace,
+		Name:      "checkpoint-" + currentCheckpointID,
+	}, currentJob))
+	require.NotNil(t, currentJob.Spec.PodSnapshotTemplate.Metadata)
+	assert.Equal(t, commonconsts.SnapshotCompatibilityVersion,
+		currentJob.Spec.PodSnapshotTemplate.Metadata.Annotations[commonconsts.SnapshotCompatibilityVersionAnnotation])
+	require.NoError(t, reconciler.Get(ctx, client.ObjectKeyFromObject(legacyJob), &snapshotv1alpha1.SnapshotJob{}))
+	require.NoError(t, reconciler.Get(ctx, client.ObjectKeyFromObject(legacySnapshot), &snapshotv1alpha1.PodSnapshot{}))
+
+	t.Log("Complete the replacement capture and verify reconciliation converges on v2")
+	currentJob.UID = types.UID("current-job-uid")
+	currentSnapshot := dgdTestPodSnapshot("current-snapshot", dgdTestSnapshotCompatibilityHash(t, dgd), true)
+	currentSnapshot.UID = types.UID("current-snapshot-uid")
+	currentSnapshot.Labels = map[string]string{
+		snapshotv1alpha1.SnapshotJobOwnerLabel:    currentJob.Name,
+		snapshotv1alpha1.SnapshotJobOwnerUIDLabel: string(currentJob.UID),
+	}
+	currentSnapshot.Annotations[commonconsts.CheckpointAutoAnnotation] = commonconsts.KubeLabelValueTrue
+	currentSnapshot.Annotations[commonconsts.CheckpointOwnerUIDAnnotation] = string(dgd.UID)
+	currentJob.Status = snapshotv1alpha1.SnapshotJobStatus{
+		PodSnapshotName: currentSnapshot.Name,
+		PodSnapshotUID:  currentSnapshot.UID,
+		Conditions: []metav1.Condition{{
+			Type:   snapshotv1alpha1.SnapshotJobConditionCompleted,
+			Status: metav1.ConditionTrue,
+		}},
+	}
+	require.NoError(t, reconciler.Update(ctx, currentJob))
+	require.NoError(t, reconciler.Create(ctx, currentSnapshot))
+	result, err = checkpointReconciler.Reconcile(ctx, dgd)
+	require.NoError(t, err)
+	require.NotNil(t, result.Infos["worker"])
+	assert.True(t, result.Infos["worker"].Ready)
+	require.NotNil(t, result.Infos["worker"].NativeSnapshot)
+	assert.Equal(t, currentSnapshot.UID, result.Infos["worker"].NativeSnapshot.UID)
+}
+
+func TestDGDCheckpointsReconciler_ExplicitRestoreDoesNotDependOnActiveWorkerHash(t *testing.T) {
+	t.Log("Build a first-generation worker with an explicit reference before its rollout hash is initialized")
+	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	ref := friendlyCheckpointName
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+			UID:       types.UID("dgd-uid"),
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				Experimental: &v1beta1.ExperimentalSpec{Checkpoint: &v1beta1.ComponentCheckpointConfig{
+					Enabled:       true,
+					CheckpointRef: &ref,
+				}},
+			}},
+		},
+	}
+
+	t.Log("Create a referenced PodSnapshot carrying the independent compatibility hash")
+	referenced := dgdTestPodSnapshot(ref, dgdTestSnapshotCompatibilityHash(t, dgd), true)
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:        fake.NewClientBuilder().WithScheme(testScheme).WithObjects(referenced).Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
+	}
+
+	t.Log("Reconcile without an active rollout hash")
+	result, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
+	require.NoError(t, err)
+
+	t.Log("Verify the explicit snapshot resolves without waiting for a worker generation")
+	info := result.Infos["worker"]
+	require.NotNil(t, info)
+	assert.True(t, info.Exists)
+	assert.True(t, info.Ready)
+	require.NotNil(t, info.NativeSnapshot)
+	assert.Equal(t, referenced.UID, info.NativeSnapshot.UID)
+}
+
+func TestDGDCheckpointsReconciler_ExplicitRestoreIsPortableAcrossDGDIdentity(t *testing.T) {
+	t.Log("Build equivalent capture and restore workers under different DGD identities")
+	ref := friendlyCheckpointName
+	component := v1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentName: "worker",
+		ComponentType: v1beta1.ComponentTypeWorker,
+		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name:    commonconsts.MainContainerName,
+			Image:   "worker:1.5.0",
+			Command: []string{"python3", "-m", "dynamo.vllm"},
+			Args:    []string{"--model", "Qwen/Qwen3-0.6B"},
+		}}}},
+		Experimental: &v1beta1.ExperimentalSpec{Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true}},
+	}
+	source := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "capture-dgd", Namespace: "default", UID: types.UID("capture-uid")},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			Components:       []v1beta1.DynamoComponentDeploymentSharedSpec{*component.DeepCopy()},
+		},
+	}
+	targetComponent := component.DeepCopy()
+	targetComponent.Experimental.Checkpoint.CheckpointRef = &ref
+	target := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "restore-dgd", Namespace: "default", UID: types.UID("restore-uid")},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			Components:       []v1beta1.DynamoComponentDeploymentSharedSpec{*targetComponent},
+		},
+	}
+
+	t.Log("Verify the rollout identities differ while the snapshot contract remains portable")
+	assert.NotEqual(t, betaDGDWorkersSpecHash(t, source), betaDGDWorkersSpecHash(t, target))
+	sourceCompatibilityHash := dgdTestSnapshotCompatibilityHash(t, source)
+	assert.Equal(t, sourceCompatibilityHash, dgdTestSnapshotCompatibilityHash(t, target))
+
+	t.Log("Resolve the source snapshot from the target DGD without initializing its rollout hash")
+	referenced := dgdTestPodSnapshot(ref, sourceCompatibilityHash, true)
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+			WithObjects(referenced).
+			Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
+	}
+	result, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(context.Background(), target)
+	require.NoError(t, err)
+	require.NotNil(t, result.Infos["worker"])
+	assert.True(t, result.Infos["worker"].Ready)
+}
+
+func TestCheckpointWorkerHashForComponent_WaitsForCommittedGeneration(t *testing.T) {
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+			}},
+		},
+	}
+
+	t.Log("No annotation: generation is uncommitted; must return empty hash")
+	hash, err := checkpointWorkerHashForComponent(dgd, "worker")
+	require.NoError(t, err)
+	assert.Empty(t, hash, "checkpointWorkerHashForComponent must return empty before the active generation is committed")
+
+	t.Log("Annotation present: generation is committed; must return the active hash")
+	workerHash := betaDGDWorkersSpecHash(t, dgd)
+	dgd.Annotations = map[string]string{commonconsts.AnnotationCurrentWorkerHashV2: workerHash}
+	hash, err = checkpointWorkerHashForComponent(dgd, "worker")
+	require.NoError(t, err)
+	assert.Equal(t, workerHash, hash)
 }
 
 func TestDGDCheckpointsReconciler_RejectsDisabledFeatureBeforeCreatingResources(t *testing.T) {
@@ -648,19 +1004,8 @@ func TestDGDCheckpointsReconciler_RejectsDisabledFeatureBeforeCreatingResources(
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	reconciler := &DynamoGraphDeploymentReconciler{
-		Client: fake.NewClientBuilder().WithScheme(testScheme).Build(),
-		Config: &configv1alpha1.OperatorConfiguration{
-			Checkpoint: configv1alpha1.CheckpointConfiguration{
-				Storage: configv1alpha1.CheckpointStorageConfiguration{
-					Type: configv1alpha1.CheckpointStorageTypePVC,
-					PVC: configv1alpha1.CheckpointPVCConfig{
-						PVCName: "checkpoint-storage",
-						Create:  true,
-						Size:    "1Gi",
-					},
-				},
-			},
-		},
+		Client:        fake.NewClientBuilder().WithScheme(testScheme).Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
 		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{}},
 	}
 	dgd := &v1beta1.DynamoGraphDeployment{
@@ -679,17 +1024,17 @@ func TestDGDCheckpointsReconciler_RejectsDisabledFeatureBeforeCreatingResources(
 	_, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
 	require.ErrorContains(t, err, "checkpoint functionality is disabled")
 
-	t.Log("Verify rejection happens before checkpoint or storage resources are created")
-	checkpoints := &v1alpha1.DynamoCheckpointList{}
-	require.NoError(t, reconciler.List(ctx, checkpoints, client.InNamespace("default")))
-	assert.Empty(t, checkpoints.Items)
+	t.Log("Verify rejection happens before capture or storage resources are created")
+	jobs := &snapshotv1alpha1.SnapshotJobList{}
+	require.NoError(t, reconciler.List(ctx, jobs, client.InNamespace("default")))
+	assert.Empty(t, jobs.Items)
 	pvcs := &corev1.PersistentVolumeClaimList{}
 	require.NoError(t, reconciler.List(ctx, pvcs, client.InNamespace("default")))
 	assert.Empty(t, pvcs.Items)
 }
 
-func TestDGDCheckpointsReconciler_PropagatesManagedCheckpointResolveError(t *testing.T) {
-	t.Log("Build an auto-checkpoint DGD and inject a checkpoint read failure")
+func TestDGDCheckpointsReconciler_PropagatesSnapshotJobReadError(t *testing.T) {
+	t.Log("Build an auto-checkpoint DGD and inject a SnapshotJob read failure")
 	ctx := context.Background()
 	resolveErr := errors.New("checkpoint read failed")
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
@@ -697,7 +1042,7 @@ func TestDGDCheckpointsReconciler_PropagatesManagedCheckpointResolveError(t *tes
 		WithScheme(testScheme).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-				if _, ok := obj.(*v1alpha1.DynamoCheckpoint); ok {
+				if _, ok := obj.(*snapshotv1alpha1.SnapshotJob); ok {
 					return resolveErr
 				}
 				return c.Get(ctx, key, obj, opts...)
@@ -716,6 +1061,7 @@ func TestDGDCheckpointsReconciler_PropagatesManagedCheckpointResolveError(t *tes
 			UID:       types.UID("dgd-uid"),
 		},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
 				ComponentName: "worker",
 				ComponentType: v1beta1.ComponentTypeWorker,
@@ -728,8 +1074,11 @@ func TestDGDCheckpointsReconciler_PropagatesManagedCheckpointResolveError(t *tes
 			}},
 		},
 	}
+	dgd.Annotations = map[string]string{
+		commonconsts.AnnotationCurrentWorkerHashV2: betaDGDWorkersSpecHash(t, dgd),
+	}
 
-	t.Log("Reconcile the managed checkpoint")
+	t.Log("Reconcile the managed capture")
 	_, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
 
 	t.Log("Verify the read failure is returned instead of dereferencing a nil result")
@@ -782,18 +1131,21 @@ func TestDGDCheckpointsReconciler_AutoPreservesPodTemplateMetadata(t *testing.T)
 			}},
 		},
 	}
+	dgd.Annotations = map[string]string{
+		commonconsts.AnnotationCurrentWorkerHashV2: betaDGDWorkersSpecHash(t, dgd),
+	}
 
 	t.Log("Reconcile the auto checkpoint")
 	checkpointResult, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
-	checkpointStatuses := checkpointResult.Statuses
 	require.NoError(t, err)
-	require.NotEmpty(t, checkpointStatuses["worker"].CheckpointName)
+	assert.Empty(t, checkpointResult.Statuses["worker"].CheckpointName)
 
-	t.Log("Verify workload metadata and managed labels on the checkpoint job")
-	ckpt := &v1alpha1.DynamoCheckpoint{}
-	require.NoError(t, reconciler.Get(ctx, types.NamespacedName{Name: checkpointStatuses["worker"].CheckpointName, Namespace: "default"}, ckpt))
+	t.Log("Verify workload metadata and managed labels on the SnapshotJob")
+	jobs := &snapshotv1alpha1.SnapshotJobList{}
+	require.NoError(t, reconciler.List(ctx, jobs, client.InNamespace("default")))
+	require.Len(t, jobs.Items, 1)
 
-	jobMeta := ckpt.Spec.Job.PodTemplateSpec.ObjectMeta
+	jobMeta := jobs.Items[0].Spec.PodTemplate.ObjectMeta
 	assert.Equal(t, "keep-me", jobMeta.Labels["workload-label"])
 	assert.Equal(t, "false", jobMeta.Annotations[commonconsts.KubeAnnotationIstioSidecarInject])
 	assert.Equal(t, "yes", jobMeta.Annotations["policy.example.com/keep"])
@@ -801,168 +1153,71 @@ func TestDGDCheckpointsReconciler_AutoPreservesPodTemplateMetadata(t *testing.T)
 }
 
 func TestDGDCheckpointsReconciler_SyncsExistingAutoLifecycle(t *testing.T) {
-	t.Log("Build a DGD-managed checkpoint with lifecycle fields requiring synchronization")
+	t.Log("Build an existing SnapshotJob with lifecycle fields requiring synchronization")
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
-	reconciler := &DynamoGraphDeploymentReconciler{
-		Config:        &configv1alpha1.OperatorConfiguration{},
-		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
-	}
 	dgd := &v1beta1.DynamoGraphDeployment{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: v1beta1.GroupVersion.String(),
+			Kind:       "DynamoGraphDeployment",
+		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd",
 			Namespace: "default",
 			UID:       types.UID("dgd-uid"),
 		},
-		Spec: v1beta1.DynamoGraphDeploymentSpec{
-			BackendFramework: string(dynamo.BackendFrameworkVLLM),
-			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
-				ComponentName: "worker",
-				ComponentType: v1beta1.ComponentTypeWorker,
-				PodTemplate: &corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{
-							Name:  commonconsts.MainContainerName,
-							Image: "main:latest",
-						}},
-					},
-				},
-				Experimental: &v1beta1.ExperimentalSpec{
-					Checkpoint: &v1beta1.ComponentCheckpointConfig{
-						Enabled:        true,
-						Mode:           v1beta1.CheckpointModeAuto,
-						DeletionPolicy: v1beta1.CheckpointDeletionPolicyRetain,
-					},
-				},
-			}},
-		},
 	}
-	workerHash, err := checkpointWorkerHashForComponent(dgd, "worker")
-	require.NoError(t, err)
-	checkpointID := checkpoint.DGDCheckpointID(
-		dgd.Namespace,
-		dgd.Name,
-		string(dgd.UID),
+	desired := buildAutomaticSnapshotJob(
+		dgd,
 		"worker",
-		workerHash,
+		"capture-id",
+		"worker-hash",
+		"compatibility-hash",
+		corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name:  commonconsts.MainContainerName,
+			Image: "main:latest",
+		}}}},
+		commonconsts.MainContainerName,
+		v1alpha1.CheckpointDeletionPolicyRetain,
+		commonconsts.SnapshotGMSModeDisabled,
 	)
-	existing := &v1alpha1.DynamoCheckpoint{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("checkpoint-%s", checkpointID),
-			Namespace: "default",
-			Labels: map[string]string{
-				snapshotprotocol.CheckpointIDLabel:              checkpointID,
-				commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-				commonconsts.KubeLabelDynamoComponent:           "worker",
-				commonconsts.KubeLabelDynamoWorkerHash:          workerHash,
-			},
-			Annotations: map[string]string{
-				commonconsts.CheckpointAutoAnnotation:           commonconsts.KubeLabelValueTrue,
-				commonconsts.CheckpointDeletionPolicyAnnotation: string(v1alpha1.CheckpointDeletionPolicyDelete),
-			},
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: v1beta1.GroupVersion.String(),
-				Kind:       "DynamoGraphDeployment",
-				Name:       dgd.Name,
-				UID:        dgd.UID,
-				Controller: ptr.To(true),
-			}},
-		},
-		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity: v1alpha1.DynamoCheckpointIdentity{
-				Model:            "default/test-dgd",
-				BackendFramework: string(dynamo.BackendFrameworkVLLM),
-			},
-			Job: v1alpha1.DynamoCheckpointJobConfig{
-				PodTemplateSpec: corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{
-							Name:  commonconsts.MainContainerName,
-							Image: "existing:latest",
-						}},
-					},
-				},
-			},
-		},
-		Status: v1alpha1.DynamoCheckpointStatus{
-			CheckpointID: checkpointID,
-			Phase:        v1alpha1.DynamoCheckpointPhaseCreating,
-		},
-	}
-	reconciler.Client = fake.NewClientBuilder().
-		WithScheme(testScheme).
-		WithObjects(existing).
-		WithStatusSubresource(existing).
-		Build()
-
-	t.Log("Reconcile the existing managed checkpoint")
-	checkpointResult, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
-	checkpointStatuses := checkpointResult.Statuses
-	checkpointInfos := checkpointResult.Infos
-	require.NoError(t, err)
-	assert.Equal(t, existing.Name, checkpointStatuses["worker"].CheckpointName)
-	assert.Equal(t, checkpointID, checkpointStatuses["worker"].CheckpointID)
-	require.NotNil(t, checkpointInfos["worker"])
-	assert.True(t, checkpointInfos["worker"].Exists)
-
-	t.Log("Verify lifecycle annotations, ownership, finalizer, and labels were synchronized")
-	updated := &v1alpha1.DynamoCheckpoint{}
-	require.NoError(t, reconciler.Get(ctx, types.NamespacedName{Name: existing.Name, Namespace: "default"}, updated))
-	assert.Equal(t, string(v1alpha1.CheckpointDeletionPolicyRetain),
-		updated.Annotations[commonconsts.CheckpointDeletionPolicyAnnotation])
-	assert.Empty(t, updated.OwnerReferences)
-	assert.True(t, controller_common.ContainsFinalizer(updated))
-	assert.Equal(t, "test-dgd", updated.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName])
-	assert.Equal(t, "worker", updated.Labels[commonconsts.KubeLabelDynamoComponent])
-}
-
-func TestDGDCheckpointsReconciler_CheckpointRefSkipsAutoCreateWhileReferencedCRIsNotReady(t *testing.T) {
-	t.Log("Build a DGD referencing a checkpoint that is not ready")
-	ctx := context.Background()
-	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
-	identity := v1alpha1.DynamoCheckpointIdentity{
-		Model:            "meta-llama/Llama-2-7b-hf",
-		BackendFramework: "vllm",
-	}
-	hash, err := checkpoint.ComputeIdentityHash(identity)
-	if err != nil {
-		t.Fatalf("Failed to compute checkpoint hash: %v", err)
-	}
-
-	referenced := &v1alpha1.DynamoCheckpoint{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      friendlyCheckpointName,
-			Namespace: "default",
-		},
-		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity: identity,
-			Job: v1alpha1.DynamoCheckpointJobConfig{
-				PodTemplateSpec: corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{
-							Name:  "main",
-							Image: "keep-existing:latest",
-						}},
-					},
-				},
-			},
-		},
-		Status: v1alpha1.DynamoCheckpointStatus{
-			Phase:        v1alpha1.DynamoCheckpointPhaseCreating,
-			IdentityHash: hash,
-		},
-	}
-
+	existing := desired.DeepCopy()
+	existing.Spec.PodTemplate.Spec.Containers[0].Image = "captured:latest"
+	existing.Annotations[commonconsts.CheckpointDeletionPolicyAnnotation] = string(v1alpha1.CheckpointDeletionPolicyDelete)
+	existing.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(
+		dgd,
+		v1beta1.GroupVersion.WithKind("DynamoGraphDeployment"),
+	)}
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client: fake.NewClientBuilder().
 			WithScheme(testScheme).
-			WithObjects(referenced).
-			WithStatusSubresource(referenced).
+			WithObjects(existing).
 			Build(),
-		Config:        &configv1alpha1.OperatorConfiguration{},
-		Recorder:      events.NewFakeRecorder(10),
-		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
 	}
+
+	t.Log("Synchronize the retained SnapshotJob lifecycle metadata")
+	updated, err := newTestDGDCheckpointsReconciler(reconciler).syncAutomaticSnapshotJob(
+		ctx,
+		dgd,
+		desired,
+		v1alpha1.CheckpointDeletionPolicyRetain,
+	)
+	require.NoError(t, err)
+
+	t.Log("Verify the desired policy is recorded and DGD ownership is removed")
+	assert.Equal(t, string(v1alpha1.CheckpointDeletionPolicyRetain),
+		updated.Annotations[commonconsts.CheckpointDeletionPolicyAnnotation])
+	assert.Empty(t, updated.OwnerReferences)
+	assert.Equal(t, "test-dgd", updated.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName])
+	assert.Equal(t, "worker", updated.Labels[commonconsts.KubeLabelDynamoComponent])
+	assert.Equal(t, "captured:latest", updated.Spec.PodTemplate.Spec.Containers[0].Image,
+		"non-invalidating input changes must not replace the one-shot capture")
+}
+
+func TestDGDCheckpointsReconciler_CheckpointRefSkipsAutoCreateWhilePodSnapshotIsNotReady(t *testing.T) {
+	t.Log("Build a DGD referencing a PodSnapshot that is not Ready")
+	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 
 	ref := friendlyCheckpointName
 	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
@@ -972,6 +1227,7 @@ func TestDGDCheckpointsReconciler_CheckpointRefSkipsAutoCreateWhileReferencedCRI
 			UID:       types.UID("dgd-uid"),
 		},
 		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
 			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 				"worker": {
 					ComponentType: string(commonconsts.ComponentTypeWorker),
@@ -984,8 +1240,22 @@ func TestDGDCheckpointsReconciler_CheckpointRefSkipsAutoCreateWhileReferencedCRI
 			},
 		},
 	})
+	dgd.Annotations = map[string]string{
+		commonconsts.AnnotationCurrentWorkerHashV2: betaDGDWorkersSpecHash(t, dgd),
+	}
+	referenced := dgdTestPodSnapshot(ref, dgdTestSnapshotCompatibilityHash(t, dgd), false)
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(testScheme).
+			WithObjects(referenced).
+			WithStatusSubresource(referenced).
+			Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		Recorder:      events.NewFakeRecorder(10),
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
+	}
 
-	t.Log("Reconcile the not-ready checkpoint reference")
+	t.Log("Reconcile the not-Ready native reference")
 	checkpointResult, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
 	checkpointStatuses := checkpointResult.Statuses
 	checkpointInfos := checkpointResult.Infos
@@ -993,7 +1263,7 @@ func TestDGDCheckpointsReconciler_CheckpointRefSkipsAutoCreateWhileReferencedCRI
 		t.Fatalf("reconcileCheckpoints() error = %v", err)
 	}
 
-	t.Log("Verify the reference remains pending without creating an automatic checkpoint")
+	t.Log("Verify the reference remains pending without creating a legacy checkpoint")
 	info, ok := checkpointInfos["worker"]
 	if !ok {
 		t.Fatalf("expected checkpoint info for worker service")
@@ -1004,62 +1274,23 @@ func TestDGDCheckpointsReconciler_CheckpointRefSkipsAutoCreateWhileReferencedCRI
 	if !info.Exists {
 		t.Fatalf("expected referenced checkpoint to exist")
 	}
-	if info.Hash != hash {
-		t.Fatalf("checkpoint hash = %s, want %s", info.Hash, hash)
-	}
+	require.NotNil(t, info.NativeSnapshot)
+	assert.Equal(t, referenced.UID, info.NativeSnapshot.UID)
 	if checkpointStatuses["worker"].CheckpointName != friendlyCheckpointName {
 		t.Fatalf("checkpoint status name = %s, want friendly-checkpoint", checkpointStatuses["worker"].CheckpointName)
 	}
 
-	checkpoints := &v1alpha1.DynamoCheckpointList{}
-	if err := reconciler.List(ctx, checkpoints, client.InNamespace("default")); err != nil {
-		t.Fatalf("failed to list checkpoints: %v", err)
+	jobs := &snapshotv1alpha1.SnapshotJobList{}
+	if err := reconciler.List(ctx, jobs, client.InNamespace("default")); err != nil {
+		t.Fatalf("failed to list SnapshotJobs: %v", err)
 	}
-	if len(checkpoints.Items) != 1 {
-		t.Fatalf("expected only the referenced checkpoint to exist, found %d", len(checkpoints.Items))
-	}
-	if checkpoints.Items[0].Name != friendlyCheckpointName {
-		t.Fatalf("unexpected checkpoint %s", checkpoints.Items[0].Name)
-	}
+	assert.Empty(t, jobs.Items)
 }
 
-func TestDGDCheckpointsReconciler_CheckpointRefUsesReadyReferencedCR(t *testing.T) {
-	t.Log("Build a DGD referencing a ready checkpoint")
+func TestDGDCheckpointsReconciler_CheckpointRefUsesReadyPodSnapshot(t *testing.T) {
+	t.Log("Build a DGD referencing a Ready compatible PodSnapshot")
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
-	identity := v1alpha1.DynamoCheckpointIdentity{
-		Model:            "meta-llama/Llama-2-7b-hf",
-		BackendFramework: "vllm",
-	}
-	hash, err := checkpoint.ComputeIdentityHash(identity)
-	if err != nil {
-		t.Fatalf("Failed to compute checkpoint hash: %v", err)
-	}
-
-	referenced := &v1alpha1.DynamoCheckpoint{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      friendlyCheckpointName,
-			Namespace: "default",
-		},
-		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity: identity,
-		},
-		Status: v1alpha1.DynamoCheckpointStatus{
-			Phase:        v1alpha1.DynamoCheckpointPhaseReady,
-			IdentityHash: hash,
-		},
-	}
-
-	reconciler := &DynamoGraphDeploymentReconciler{
-		Client: fake.NewClientBuilder().
-			WithScheme(testScheme).
-			WithObjects(referenced).
-			WithStatusSubresource(referenced).
-			Build(),
-		Config:        &configv1alpha1.OperatorConfiguration{},
-		Recorder:      events.NewFakeRecorder(10),
-		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
-	}
 
 	ref := friendlyCheckpointName
 	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
@@ -1069,6 +1300,7 @@ func TestDGDCheckpointsReconciler_CheckpointRefUsesReadyReferencedCR(t *testing.
 			UID:       types.UID("dgd-uid"),
 		},
 		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
 			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 				"worker": {
 					ComponentType: string(commonconsts.ComponentTypeWorker),
@@ -1081,8 +1313,22 @@ func TestDGDCheckpointsReconciler_CheckpointRefUsesReadyReferencedCR(t *testing.
 			},
 		},
 	})
+	dgd.Annotations = map[string]string{
+		commonconsts.AnnotationCurrentWorkerHashV2: betaDGDWorkersSpecHash(t, dgd),
+	}
+	referenced := dgdTestPodSnapshot(ref, dgdTestSnapshotCompatibilityHash(t, dgd), true)
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(testScheme).
+			WithObjects(referenced).
+			WithStatusSubresource(referenced).
+			Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		Recorder:      events.NewFakeRecorder(10),
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
+	}
 
-	t.Log("Reconcile the ready checkpoint reference")
+	t.Log("Reconcile the Ready PodSnapshot reference")
 	checkpointResult, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
 	checkpointStatuses := checkpointResult.Statuses
 	checkpointInfos := checkpointResult.Infos
@@ -1090,7 +1336,7 @@ func TestDGDCheckpointsReconciler_CheckpointRefUsesReadyReferencedCR(t *testing.
 		t.Fatalf("reconcileCheckpoints() error = %v", err)
 	}
 
-	t.Log("Verify ready checkpoint information and status are projected")
+	t.Log("Verify native artifact information and status are projected without legacy IDs")
 	info, ok := checkpointInfos["worker"]
 	if !ok {
 		t.Fatalf("expected checkpoint info for worker service")
@@ -1101,57 +1347,27 @@ func TestDGDCheckpointsReconciler_CheckpointRefUsesReadyReferencedCR(t *testing.
 	if !info.Exists {
 		t.Fatalf("expected referenced checkpoint to exist")
 	}
-	if info.Hash != hash {
-		t.Fatalf("checkpoint hash = %s, want %s", info.Hash, hash)
-	}
+	require.NotNil(t, info.NativeSnapshot)
+	assert.Equal(t, "content-a", info.NativeSnapshot.BoundContentName)
 	if checkpointStatuses["worker"].CheckpointName != friendlyCheckpointName {
 		t.Fatalf("checkpoint status name = %s, want friendly-checkpoint", checkpointStatuses["worker"].CheckpointName)
 	}
 	if !checkpointStatuses["worker"].Ready {
 		t.Fatalf("expected checkpoint status to be ready")
 	}
+	assert.Empty(t, checkpointStatuses["worker"].CheckpointID)
+	assert.Empty(t, checkpointStatuses["worker"].IdentityHash)
+
+	t.Log("Verify explicit native restore does not create Dynamo legacy storage")
+	pvc := &corev1.PersistentVolumeClaim{}
+	err = reconciler.Get(ctx, types.NamespacedName{Name: "legacy-storage", Namespace: "default"}, pvc)
+	assert.True(t, apierrors.IsNotFound(err), "expected no legacy PVC, got %v", err)
 }
 
 func TestDGDCheckpointsReconciler_OverlaysServiceGMSLoader(t *testing.T) {
-	t.Log("Build a checkpoint reference with component-level GMS clients")
+	t.Log("Build a native GMS snapshot reference with component-level clients")
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
-	identity := v1alpha1.DynamoCheckpointIdentity{
-		Model:            "meta-llama/Llama-2-7b-hf",
-		BackendFramework: "vllm",
-	}
-	hash, err := checkpoint.ComputeIdentityHash(identity)
-	if err != nil {
-		t.Fatalf("Failed to compute checkpoint hash: %v", err)
-	}
-
-	referenced := &v1alpha1.DynamoCheckpoint{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      friendlyCheckpointName,
-			Namespace: "default",
-		},
-		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity:         identity,
-			GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{Enabled: true},
-		},
-		Status: v1alpha1.DynamoCheckpointStatus{
-			Phase:        v1alpha1.DynamoCheckpointPhaseReady,
-			IdentityHash: hash,
-		},
-	}
-
-	reconciler := &DynamoGraphDeploymentReconciler{
-		Client: fake.NewClientBuilder().
-			WithScheme(testScheme).
-			WithObjects(referenced).
-			WithStatusSubresource(referenced).
-			Build(),
-		Config:   &configv1alpha1.OperatorConfiguration{},
-		Recorder: events.NewFakeRecorder(10),
-		RuntimeConfig: &controller_common.RuntimeConfig{
-			Gate: features.Gates{Checkpoint: true},
-		},
-	}
 
 	ref := friendlyCheckpointName
 	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
@@ -1161,9 +1377,14 @@ func TestDGDCheckpointsReconciler_OverlaysServiceGMSLoader(t *testing.T) {
 			UID:       types.UID("dgd-uid"),
 		},
 		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
 			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 				"worker": {
 					ComponentType: string(commonconsts.ComponentTypeWorker),
+					ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+						PodSpec:       &corev1.PodSpec{Containers: []corev1.Container{{Name: "gms-loader", Image: "loader:latest"}}},
+						MainContainer: &corev1.Container{Name: commonconsts.MainContainerName, Image: "worker:latest"},
+					},
 					GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
 						Enabled:               true,
 						Mode:                  v1alpha1.GMSModeIntraPod,
@@ -1178,6 +1399,19 @@ func TestDGDCheckpointsReconciler_OverlaysServiceGMSLoader(t *testing.T) {
 			},
 		},
 	})
+	dgd.Annotations = map[string]string{
+		commonconsts.AnnotationCurrentWorkerHashV2: betaDGDWorkersSpecHash(t, dgd),
+	}
+	referenced := dgdTestPodSnapshot(ref, dgdTestSnapshotCompatibilityHash(t, dgd), true)
+	referenced.Annotations[commonconsts.SnapshotGMSModeAnnotation] = string(v1alpha1.GMSModeIntraPod)
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:   fake.NewClientBuilder().WithScheme(testScheme).WithObjects(referenced).Build(),
+		Config:   &configv1alpha1.OperatorConfiguration{},
+		Recorder: events.NewFakeRecorder(10),
+		RuntimeConfig: &controller_common.RuntimeConfig{
+			Gate: features.Gates{Checkpoint: true},
+		},
+	}
 
 	t.Log("Reconcile the referenced GMS checkpoint")
 	checkpointResult, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
@@ -1197,40 +1431,9 @@ func TestDGDCheckpointsReconciler_OverlaysServiceGMSLoader(t *testing.T) {
 }
 
 func TestDGDCheckpointsReconciler_RejectsServiceGMSWithNonGMSCheckpoint(t *testing.T) {
-	t.Log("Build a GMS component referencing a non-GMS checkpoint")
+	t.Log("Build a GMS component referencing a snapshot captured without GMS")
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
-	identity := v1alpha1.DynamoCheckpointIdentity{
-		Model:            "meta-llama/Llama-2-7b-hf",
-		BackendFramework: "vllm",
-	}
-	hash, err := checkpoint.ComputeIdentityHash(identity)
-	require.NoError(t, err)
-
-	referenced := &v1alpha1.DynamoCheckpoint{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      friendlyCheckpointName,
-			Namespace: "default",
-		},
-		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity: identity,
-		},
-		Status: v1alpha1.DynamoCheckpointStatus{
-			Phase:        v1alpha1.DynamoCheckpointPhaseReady,
-			IdentityHash: hash,
-		},
-	}
-
-	reconciler := &DynamoGraphDeploymentReconciler{
-		Client: fake.NewClientBuilder().
-			WithScheme(testScheme).
-			WithObjects(referenced).
-			WithStatusSubresource(referenced).
-			Build(),
-		Config:        &configv1alpha1.OperatorConfiguration{},
-		Recorder:      events.NewFakeRecorder(10),
-		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
-	}
 
 	ref := friendlyCheckpointName
 	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
@@ -1239,9 +1442,14 @@ func TestDGDCheckpointsReconciler_RejectsServiceGMSWithNonGMSCheckpoint(t *testi
 			Namespace: "default",
 		},
 		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
 			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 				"worker": {
 					ComponentType: string(commonconsts.ComponentTypeWorker),
+					ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+						PodSpec:       &corev1.PodSpec{Containers: []corev1.Container{{Name: "gms-loader", Image: "loader:latest"}}},
+						MainContainer: &corev1.Container{Name: commonconsts.MainContainerName, Image: "worker:latest"},
+					},
 					GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
 						Enabled:               true,
 						Mode:                  v1alpha1.GMSModeIntraPod,
@@ -1256,158 +1464,31 @@ func TestDGDCheckpointsReconciler_RejectsServiceGMSWithNonGMSCheckpoint(t *testi
 			},
 		},
 	})
-
-	t.Log("Reconcile the incompatible checkpoint reference")
-	_, err = newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
-
-	t.Log("Verify the incompatibility is returned with checkpoint context")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "gpuMemoryService restore requires resolved checkpoint")
-	assert.Contains(t, err.Error(), friendlyCheckpointName)
-}
-
-func TestDGDCheckpointsReconciler_CreatesCheckpointStoragePVC(t *testing.T) {
-	t.Log("Build checkpoint storage configuration that creates a PVC")
-	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
-	ctx := context.Background()
-	identity := v1alpha1.DynamoCheckpointIdentity{
-		Model:            "meta-llama/Llama-2-7b-hf",
-		BackendFramework: "vllm",
+	dgd.Annotations = map[string]string{
+		commonconsts.AnnotationCurrentWorkerHashV2: betaDGDWorkersSpecHash(t, dgd),
 	}
-	hash, err := checkpoint.ComputeIdentityHash(identity)
-	if err != nil {
-		t.Fatalf("Failed to compute checkpoint hash: %v", err)
-	}
-
-	referenced := &v1alpha1.DynamoCheckpoint{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      friendlyCheckpointName,
-			Namespace: "default",
-		},
-		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity: identity,
-		},
-		Status: v1alpha1.DynamoCheckpointStatus{
-			Phase:        v1alpha1.DynamoCheckpointPhaseReady,
-			IdentityHash: hash,
-		},
-	}
-
+	referenced := dgdTestPodSnapshot(ref, dgdTestSnapshotCompatibilityHash(t, dgd), true)
 	reconciler := &DynamoGraphDeploymentReconciler{
-		Client: fake.NewClientBuilder().
-			WithScheme(testScheme).
-			WithObjects(referenced).
-			WithStatusSubresource(referenced).
-			Build(),
-		Config: &configv1alpha1.OperatorConfiguration{
-			Checkpoint: configv1alpha1.CheckpointConfiguration{
-				Storage: configv1alpha1.CheckpointStorageConfiguration{
-					Type: configv1alpha1.CheckpointStorageTypePVC,
-					PVC: configv1alpha1.CheckpointPVCConfig{
-						PVCName:          "snapshot-pvc",
-						BasePath:         "/checkpoints",
-						Create:           true,
-						Size:             "2Gi",
-						StorageClassName: "efs-sc",
-						AccessMode:       string(corev1.ReadWriteMany),
-					},
-				},
-			},
-		},
-		Recorder:      events.NewFakeRecorder(10),
-		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
-	}
-
-	ref := friendlyCheckpointName
-	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd",
-			Namespace: "default",
-		},
-		Spec: v1alpha1.DynamoGraphDeploymentSpec{
-			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
-				"worker": {
-					ComponentType: string(commonconsts.ComponentTypeWorker),
-					Checkpoint: &v1alpha1.ServiceCheckpointConfig{
-						Enabled:       true,
-						Mode:          v1alpha1.CheckpointModeAuto,
-						CheckpointRef: &ref,
-					},
-				},
-			},
-		},
-	})
-
-	t.Log("Reconcile checkpoint resources")
-	if _, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd); err != nil {
-		t.Fatalf("reconcileCheckpoints() error = %v", err)
-	}
-
-	t.Log("Verify the checkpoint storage PVC settings")
-	pvc := &corev1.PersistentVolumeClaim{}
-	if err := reconciler.Get(ctx, types.NamespacedName{Name: "snapshot-pvc", Namespace: "default"}, pvc); err != nil {
-		t.Fatalf("expected checkpoint storage PVC to be created: %v", err)
-	}
-	storageRequest := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
-	if storageRequest.String() != "2Gi" {
-		t.Fatalf("PVC storage request = %s, want 2Gi", storageRequest.String())
-	}
-	if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName != "efs-sc" {
-		t.Fatalf("PVC storageClassName = %v, want efs-sc", pvc.Spec.StorageClassName)
-	}
-	if len(pvc.Spec.AccessModes) != 1 || pvc.Spec.AccessModes[0] != corev1.ReadWriteMany {
-		t.Fatalf("PVC accessModes = %v, want [ReadWriteMany]", pvc.Spec.AccessModes)
-	}
-}
-
-func TestDGDCheckpointsReconciler_AutoModeWaitsForExistingCreatingCheckpoint(t *testing.T) {
-	t.Log("Build an auto-checkpoint DGD with an existing checkpoint still creating")
-	ctx := context.Background()
-	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
-	identity := v1alpha1.DynamoCheckpointIdentity{
-		Model:            "meta-llama/Llama-2-7b-hf",
-		BackendFramework: "vllm",
-	}
-	hash, err := checkpoint.ComputeIdentityHash(identity)
-	if err != nil {
-		t.Fatalf("Failed to compute checkpoint hash: %v", err)
-	}
-
-	existing := &v1alpha1.DynamoCheckpoint{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "existing-worker-checkpoint",
-			Namespace: "default",
-		},
-		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity: identity,
-			Job: v1alpha1.DynamoCheckpointJobConfig{
-				PodTemplateSpec: corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{
-							Name:  "main",
-							Image: "keep-existing:latest",
-						}},
-					},
-				},
-			},
-		},
-		Status: v1alpha1.DynamoCheckpointStatus{
-			Phase:        v1alpha1.DynamoCheckpointPhaseCreating,
-			IdentityHash: hash,
-		},
-	}
-
-	reconciler := &DynamoGraphDeploymentReconciler{
-		Client: fake.NewClientBuilder().
-			WithScheme(testScheme).
-			WithObjects(existing).
-			WithStatusSubresource(existing).
-			Build(),
+		Client:        fake.NewClientBuilder().WithScheme(testScheme).WithObjects(referenced).Build(),
 		Config:        &configv1alpha1.OperatorConfiguration{},
 		Recorder:      events.NewFakeRecorder(10),
 		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
 	}
 
+	t.Log("Reconcile the incompatible checkpoint reference")
+	_, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
+
+	t.Log("Verify the incompatibility is returned with checkpoint context")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "gpuMemoryService topology for PodSnapshot")
+	assert.Contains(t, err.Error(), "snapshot enabled=false, workload enabled=true")
+	assert.Contains(t, err.Error(), friendlyCheckpointName)
+}
+
+func TestDGDCheckpointsReconciler_AutomaticRestoreWaitsForSnapshotJobCompletion(t *testing.T) {
+	t.Log("Build an automatic checkpoint DGD")
+	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd",
@@ -1415,79 +1496,112 @@ func TestDGDCheckpointsReconciler_AutoModeWaitsForExistingCreatingCheckpoint(t *
 			UID:       types.UID("dgd-uid"),
 		},
 		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
 			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 				"worker": {
 					ComponentType: string(commonconsts.ComponentTypeWorker),
+					ExtraPodSpec: &v1alpha1.ExtraPodSpec{MainContainer: &corev1.Container{
+						Name:  commonconsts.MainContainerName,
+						Image: "worker:latest",
+					}},
 					Checkpoint: &v1alpha1.ServiceCheckpointConfig{
 						Enabled: true,
 						Mode:    v1alpha1.CheckpointModeAuto,
-						Identity: &v1alpha1.DynamoCheckpointIdentity{
-							Model:            identity.Model,
-							BackendFramework: identity.BackendFramework,
-						},
-					},
-					ExtraPodSpec: &v1alpha1.ExtraPodSpec{
-						MainContainer: &corev1.Container{
-							Name:  "main",
-							Image: "new-writer:latest",
-						},
 					},
 				},
 			},
 		},
 	})
+	dgd.Annotations = map[string]string{
+		commonconsts.AnnotationCurrentWorkerHashV2: betaDGDWorkersSpecHash(t, dgd),
+	}
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:        fake.NewClientBuilder().WithScheme(testScheme).Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
+	}
+	checkpointReconciler := newTestDGDCheckpointsReconciler(reconciler)
 
-	t.Log("Reconcile the automatic checkpoint")
-	checkpointResult, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
-	checkpointStatuses := checkpointResult.Statuses
-	checkpointInfos := checkpointResult.Infos
-	if err != nil {
-		t.Fatalf("reconcileCheckpoints() error = %v", err)
+	t.Log("Create the SnapshotJob and simulate a Ready capture before helper completion")
+	_, err := checkpointReconciler.Reconcile(ctx, dgd)
+	require.NoError(t, err)
+	jobs := &snapshotv1alpha1.SnapshotJobList{}
+	require.NoError(t, reconciler.List(ctx, jobs, client.InNamespace("default")))
+	require.Len(t, jobs.Items, 1)
+	job := jobs.Items[0].DeepCopy()
+	// controller-runtime's fake client does not assign API-server UIDs.
+	job.UID = types.UID("snapshot-job-uid")
+	snapshot := dgdTestPodSnapshot(job.Name, dgdTestSnapshotCompatibilityHash(t, dgd), true)
+	snapshot.Labels = map[string]string{
+		snapshotv1alpha1.SnapshotJobOwnerLabel:    job.Name,
+		snapshotv1alpha1.SnapshotJobOwnerUIDLabel: string(job.UID),
+	}
+	snapshot.Annotations[commonconsts.CheckpointAutoAnnotation] = commonconsts.KubeLabelValueTrue
+	snapshot.Annotations[commonconsts.CheckpointOwnerUIDAnnotation] = string(dgd.UID)
+	job.Status.PodSnapshotName = snapshot.Name
+	job.Status.PodSnapshotUID = snapshot.UID
+	job.Status.Conditions = []metav1.Condition{{
+		Type:   snapshotv1alpha1.SnapshotJobConditionCaptured,
+		Status: metav1.ConditionTrue,
+	}}
+	require.NoError(t, reconciler.Update(ctx, job))
+	require.NoError(t, reconciler.Create(ctx, snapshot))
+
+	t.Log("Verify Captured alone never makes the artifact restorable")
+	result, err := checkpointReconciler.Reconcile(ctx, dgd)
+	require.NoError(t, err)
+	info := result.Infos["worker"]
+	require.NotNil(t, info)
+	assert.False(t, info.Exists)
+	assert.False(t, info.Ready)
+	assert.Nil(t, info.NativeSnapshot)
+	assert.Equal(t, snapshot.Name, result.Statuses["worker"].CheckpointName)
+	require.NoError(t, reconciler.Get(ctx, client.ObjectKeyFromObject(snapshot), snapshot))
+	assert.Equal(t, string(v1alpha1.CheckpointDeletionPolicyDelete),
+		snapshot.Annotations[commonconsts.CheckpointDeletionPolicyAnnotation])
+
+	t.Log("Complete the SnapshotJob and verify the same PodSnapshot becomes the restore source")
+	require.NoError(t, reconciler.Get(ctx, client.ObjectKeyFromObject(job), job))
+	job.Status.Conditions = append(job.Status.Conditions, metav1.Condition{
+		Type:   snapshotv1alpha1.SnapshotJobConditionCompleted,
+		Status: metav1.ConditionTrue,
+	})
+	require.NoError(t, reconciler.Update(ctx, job))
+	result, err = checkpointReconciler.Reconcile(ctx, dgd)
+	require.NoError(t, err)
+	info = result.Infos["worker"]
+	require.NotNil(t, info)
+	assert.True(t, info.Exists)
+	assert.True(t, info.Ready)
+	require.NotNil(t, info.NativeSnapshot)
+	assert.Equal(t, snapshot.UID, info.NativeSnapshot.UID)
+}
+
+func TestDGDCheckpointsReconciler_AutomaticCaptureReportsSnapshotJobFailure(t *testing.T) {
+	t.Log("Build a terminally failed automatic SnapshotJob")
+	job := &snapshotv1alpha1.SnapshotJob{
+		ObjectMeta: metav1.ObjectMeta{Name: "checkpoint-worker", Namespace: "default"},
+		Status: snapshotv1alpha1.SnapshotJobStatus{Conditions: []metav1.Condition{{
+			Type:    snapshotv1alpha1.SnapshotJobConditionFailed,
+			Status:  metav1.ConditionTrue,
+			Reason:  snapshotv1alpha1.ReasonDeadlineExceeded,
+			Message: "capture exceeded its active deadline",
+		}}},
 	}
 
-	t.Log("Verify the DGD-owned checkpoint remains pending without reusing the legacy identity")
-	info, ok := checkpointInfos["worker"]
-	if !ok {
-		t.Fatalf("expected checkpoint info for worker service")
-	}
-	if info.Ready {
-		t.Fatalf("expected existing checkpoint to remain not ready")
-	}
-	if !info.Exists {
-		t.Fatalf("expected auto checkpoint to exist")
-	}
-	if info.Hash == hash {
-		t.Fatalf("auto checkpoint unexpectedly reused legacy identity hash %s", hash)
-	}
-	workerHash, err := checkpointWorkerHashForComponent(dgd, "worker")
-	if err != nil {
-		t.Fatalf("checkpointWorkerHashForComponent() error = %v", err)
-	}
-	expectedName := fmt.Sprintf("checkpoint-%s", checkpoint.DGDCheckpointID(
-		dgd.Namespace,
-		dgd.Name,
-		string(dgd.UID),
-		"worker",
-		workerHash,
-	))
-	if checkpointStatuses["worker"].CheckpointName != expectedName {
-		t.Fatalf("checkpoint status name = %s, want %s", checkpointStatuses["worker"].CheckpointName, expectedName)
-	}
+	t.Log("Resolve the automatic capture")
+	_, err := (&dgdCheckpointsReconciler{}).resolveAutomaticSnapshotJob(
+		context.Background(),
+		job,
+		&v1alpha1.ServiceCheckpointConfig{},
+		"compatibility-hash",
+		v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+	)
 
-	updated := &v1alpha1.DynamoCheckpoint{}
-	if err := reconciler.Get(ctx, types.NamespacedName{Name: "existing-worker-checkpoint", Namespace: "default"}, updated); err != nil {
-		t.Fatalf("Failed to get checkpoint: %v", err)
-	}
-	if len(updated.Spec.Job.PodTemplateSpec.Spec.Containers) != 1 {
-		t.Fatalf("expected one job container, got %d", len(updated.Spec.Job.PodTemplateSpec.Spec.Containers))
-	}
-	if updated.Spec.Job.PodTemplateSpec.Spec.Containers[0].Image != "keep-existing:latest" {
-		t.Fatalf("existing job image was mutated to %s", updated.Spec.Job.PodTemplateSpec.Spec.Containers[0].Image)
-	}
-	created := &v1alpha1.DynamoCheckpoint{}
-	if err := reconciler.Get(ctx, types.NamespacedName{Name: expectedName, Namespace: "default"}, created); err != nil {
-		t.Fatalf("failed to get auto checkpoint %s: %v", expectedName, err)
-	}
+	t.Log("Verify the terminal reason is surfaced instead of reported as pending")
+	require.ErrorContains(t, err, "automatic SnapshotJob default/checkpoint-worker failed")
+	require.ErrorContains(t, err, snapshotv1alpha1.ReasonDeadlineExceeded)
+	require.ErrorContains(t, err, "capture exceeded its active deadline")
 }
 
 func TestCheckpointWorkerHashForComponentUsesActiveGeneration(t *testing.T) {
@@ -1530,110 +1644,209 @@ func TestCheckpointWorkerHashForComponentUsesActiveGeneration(t *testing.T) {
 	}
 }
 
-func TestDGDCheckpointsReconciler_DeleteAutoCheckpointsForDGD(t *testing.T) {
-	t.Log("Build automatic, retained, manual, and foreign checkpoint fixtures")
+func TestDGDCheckpointsReconciler_DeleteAutomaticSnapshotResourcesForDGD(t *testing.T) {
+	t.Log("Build delete, retain, and same-name foreign native snapshot resources")
 	ctx := context.Background()
-	s := newDynamoGraphDeploymentControllerTestScheme(t)
-	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd",
-			Namespace: "default",
-		},
-	})
-
-	auto := &v1alpha1.DynamoCheckpoint{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "auto",
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	dgd := &v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{
+		Name:      "test-dgd",
+		Namespace: "default",
+		UID:       types.UID("dgd-uid"),
+	}}
+	metadata := func(policy v1alpha1.CheckpointDeletionPolicy, ownerUID string) metav1.ObjectMeta {
+		return metav1.ObjectMeta{
 			Namespace: "default",
 			Labels: map[string]string{
-				commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+				commonconsts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
 			},
 			Annotations: map[string]string{
-				commonconsts.CheckpointAutoAnnotation: commonconsts.KubeLabelValueTrue,
+				commonconsts.CheckpointAutoAnnotation:           commonconsts.KubeLabelValueTrue,
+				commonconsts.CheckpointDeletionPolicyAnnotation: string(policy),
+				commonconsts.CheckpointOwnerUIDAnnotation:       ownerUID,
 			},
-		},
-		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity: v1alpha1.DynamoCheckpointIdentity{Model: "m", BackendFramework: "vllm"},
-		},
+		}
 	}
-	manual := &v1alpha1.DynamoCheckpoint{
+	deleteJob := &snapshotv1alpha1.SnapshotJob{ObjectMeta: metadata(v1alpha1.CheckpointDeletionPolicyDelete, string(dgd.UID))}
+	deleteJob.Name = "delete-job"
+	retainedJob := &snapshotv1alpha1.SnapshotJob{ObjectMeta: metadata(v1alpha1.CheckpointDeletionPolicyRetain, string(dgd.UID))}
+	retainedJob.Name = "retained-job"
+	retainedJob.UID = types.UID("retained-job-uid")
+	retainedJob.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: v1beta1.GroupVersion.String(),
+		Kind:       "DynamoGraphDeployment",
+		Name:       dgd.Name,
+		UID:        dgd.UID,
+		Controller: ptr.To(true),
+	}}
+	foreignJob := &snapshotv1alpha1.SnapshotJob{ObjectMeta: metadata(v1alpha1.CheckpointDeletionPolicyDelete, "other-dgd-uid")}
+	foreignJob.Name = "foreign-job"
+	deleteSnapshot := &snapshotv1alpha1.PodSnapshot{ObjectMeta: metadata(v1alpha1.CheckpointDeletionPolicyDelete, string(dgd.UID))}
+	deleteSnapshot.Name = "delete-snapshot"
+	retainedSnapshot := &snapshotv1alpha1.PodSnapshot{ObjectMeta: metadata(v1alpha1.CheckpointDeletionPolicyRetain, string(dgd.UID))}
+	retainedSnapshot.Name = "retained-snapshot"
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(testScheme).
+			WithObjects(deleteJob, retainedJob, foreignJob, deleteSnapshot, retainedSnapshot).
+			Build(),
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: false}},
+	}
+	checkpointReconciler := newTestDGDCheckpointsReconciler(reconciler)
+
+	t.Log("Delete SnapshotJobs before allowing artifact cleanup")
+	err := checkpointReconciler.deleteAutoCheckpointsForDGD(ctx, dgd)
+	require.ErrorIs(t, err, errAutomaticSnapshotCleanupPending)
+	assert.True(t, apierrors.IsNotFound(reconciler.Get(ctx, client.ObjectKeyFromObject(deleteJob), &snapshotv1alpha1.SnapshotJob{})))
+	require.NoError(t, reconciler.Get(ctx, client.ObjectKeyFromObject(deleteSnapshot), &snapshotv1alpha1.PodSnapshot{}))
+
+	t.Log("Delete artifacts after capture jobs are gone and detach retained resources")
+	require.NoError(t, checkpointReconciler.deleteAutoCheckpointsForDGD(ctx, dgd))
+	assert.True(t, apierrors.IsNotFound(reconciler.Get(ctx, client.ObjectKeyFromObject(deleteSnapshot), &snapshotv1alpha1.PodSnapshot{})))
+	require.NoError(t, reconciler.Get(ctx, client.ObjectKeyFromObject(foreignJob), &snapshotv1alpha1.SnapshotJob{}))
+
+	retainedJobAfter := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, reconciler.Get(ctx, client.ObjectKeyFromObject(retainedJob), retainedJobAfter))
+	assert.Empty(t, retainedJobAfter.OwnerReferences)
+	assert.Equal(t, dgd.Name, retainedJobAfter.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName])
+	retainedSnapshotAfter := &snapshotv1alpha1.PodSnapshot{}
+	require.NoError(t, reconciler.Get(ctx, client.ObjectKeyFromObject(retainedSnapshot), retainedSnapshotAfter))
+	assert.Equal(t, dgd.Name, retainedSnapshotAfter.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName])
+}
+
+func TestDGDCheckpointsReconciler_DeletingSnapshotJobDoesNotBlockFinalization(t *testing.T) {
+	t.Log("Build a delete-policy SnapshotJob held by an external finalizer")
+	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	dgd := &v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{
+		Name:      "test-dgd",
+		Namespace: "default",
+		UID:       types.UID("dgd-uid"),
+	}}
+	job := &snapshotv1alpha1.SnapshotJob{ObjectMeta: metav1.ObjectMeta{
+		Name:       "delete-job",
+		Namespace:  dgd.Namespace,
+		UID:        types.UID("delete-job-uid"),
+		Finalizers: []string{"snapshot.nvidia.com/external-cleanup"},
+		Labels: map[string]string{
+			commonconsts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+		},
+		Annotations: map[string]string{
+			commonconsts.CheckpointAutoAnnotation:           commonconsts.KubeLabelValueTrue,
+			commonconsts.CheckpointDeletionPolicyAnnotation: string(v1alpha1.CheckpointDeletionPolicyDelete),
+			commonconsts.CheckpointOwnerUIDAnnotation:       string(dgd.UID),
+		},
+	}}
+	snapshot := &snapshotv1alpha1.PodSnapshot{ObjectMeta: metav1.ObjectMeta{
+		Name:      "delete-artifact",
+		Namespace: dgd.Namespace,
+		Labels: map[string]string{
+			commonconsts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+			snapshotv1alpha1.SnapshotJobOwnerLabel:          job.Name,
+			snapshotv1alpha1.SnapshotJobOwnerUIDLabel:       string(job.UID),
+		},
+		Annotations: map[string]string{
+			commonconsts.CheckpointAutoAnnotation:           commonconsts.KubeLabelValueTrue,
+			commonconsts.CheckpointDeletionPolicyAnnotation: string(v1alpha1.CheckpointDeletionPolicyDelete),
+			commonconsts.CheckpointOwnerUIDAnnotation:       string(dgd.UID),
+		},
+	}}
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(testScheme).
+		WithObjects(job, snapshot).
+		Build()
+	checkpointReconciler := newTestDGDCheckpointsReconciler(&DynamoGraphDeploymentReconciler{Client: kubeClient})
+
+	t.Log("Request SnapshotJob deletion and observe cleanup pending once")
+	err := checkpointReconciler.deleteAutoCheckpointsForDGD(ctx, dgd)
+	require.ErrorIs(t, err, errAutomaticSnapshotCleanupPending)
+	deletingJob := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(job), deletingJob))
+	require.NotNil(t, deletingJob.DeletionTimestamp)
+
+	t.Log("Reconcile again while Snapshot still owns final Job cleanup")
+	require.NoError(t, checkpointReconciler.deleteAutoCheckpointsForDGD(ctx, dgd))
+
+	t.Log("Verify Dynamo deletes its artifact without waiting on the foreign finalizer")
+	assert.True(t, apierrors.IsNotFound(kubeClient.Get(
+		ctx,
+		client.ObjectKeyFromObject(snapshot),
+		&snapshotv1alpha1.PodSnapshot{},
+	)))
+	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(job), &snapshotv1alpha1.SnapshotJob{}))
+}
+
+func TestDGDCheckpointsReconciler_RetainProtectsArtifactCreatedDuringFinalization(t *testing.T) {
+	t.Log("Build a retained SnapshotJob whose artifact appears after lifecycle synchronization")
+	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	dgd := &v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{
+		Name:      "test-dgd",
+		Namespace: "default",
+		UID:       types.UID("dgd-uid"),
+	}}
+	job := &snapshotv1alpha1.SnapshotJob{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "manual",
-			Namespace: "default",
+			Name:      "retained-job",
+			Namespace: dgd.Namespace,
+			UID:       types.UID("retained-job-uid"),
 			Labels: map[string]string{
-				commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+				commonconsts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
 			},
-		},
-		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity: v1alpha1.DynamoCheckpointIdentity{Model: "m", BackendFramework: "vllm"},
-		},
-	}
-	retained := &v1alpha1.DynamoCheckpoint{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "retained",
-			Namespace: "default",
-			Labels: map[string]string{
-				commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+			Annotations: map[string]string{
+				commonconsts.CheckpointAutoAnnotation:           commonconsts.KubeLabelValueTrue,
+				commonconsts.CheckpointDeletionPolicyAnnotation: string(v1alpha1.CheckpointDeletionPolicyRetain),
+				commonconsts.CheckpointOwnerUIDAnnotation:       string(dgd.UID),
 			},
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: v1beta1.GroupVersion.String(),
 				Kind:       "DynamoGraphDeployment",
-				Name:       "test-dgd",
+				Name:       dgd.Name,
 				UID:        dgd.UID,
+				Controller: ptr.To(true),
 			}},
-			Annotations: map[string]string{
-				commonconsts.CheckpointAutoAnnotation:           commonconsts.KubeLabelValueTrue,
-				commonconsts.CheckpointDeletionPolicyAnnotation: string(v1alpha1.CheckpointDeletionPolicyRetain),
-			},
 		},
-		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity: v1alpha1.DynamoCheckpointIdentity{Model: "m", BackendFramework: "vllm"},
-		},
+		Status: snapshotv1alpha1.SnapshotJobStatus{PodSnapshotName: "retained-artifact"},
 	}
-	otherDGD := &v1alpha1.DynamoCheckpoint{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "other-dgd",
-			Namespace: "default",
-			Labels: map[string]string{
-				commonconsts.KubeLabelDynamoGraphDeploymentName: "other-dgd",
-			},
-			Annotations: map[string]string{
-				commonconsts.CheckpointAutoAnnotation: commonconsts.KubeLabelValueTrue,
-			},
+	snapshot := &snapshotv1alpha1.PodSnapshot{ObjectMeta: metav1.ObjectMeta{
+		Name:      job.Status.PodSnapshotName,
+		Namespace: dgd.Namespace,
+		Labels: map[string]string{
+			commonconsts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+			snapshotv1alpha1.SnapshotJobOwnerLabel:          job.Name,
+			snapshotv1alpha1.SnapshotJobOwnerUIDLabel:       string(job.UID),
 		},
-		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity: v1alpha1.DynamoCheckpointIdentity{Model: "m", BackendFramework: "vllm"},
+		Annotations: map[string]string{
+			commonconsts.CheckpointAutoAnnotation:     commonconsts.KubeLabelValueTrue,
+			commonconsts.CheckpointOwnerUIDAnnotation: string(dgd.UID),
 		},
-	}
-	reconciler := &DynamoGraphDeploymentReconciler{
-		Client: fake.NewClientBuilder().
-			WithScheme(s).
-			WithObjects(auto, manual, retained, otherDGD).
-			Build(),
-	}
+	}}
+	hideArtifactFromLifecycleSync := true
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(testScheme).
+		WithObjects(job, snapshot).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*snapshotv1alpha1.PodSnapshot); ok && key == client.ObjectKeyFromObject(snapshot) && hideArtifactFromLifecycleSync {
+					hideArtifactFromLifecycleSync = false
+					return apierrors.NewNotFound(
+						snapshotv1alpha1.GroupVersion.WithResource("podsnapshots").GroupResource(),
+						key.Name,
+					)
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).
+		Build()
+	reconciler := &DynamoGraphDeploymentReconciler{Client: kubeClient}
 
-	t.Log("Delete automatic checkpoints owned by the DGD")
-	if err := newTestDGDCheckpointsReconciler(reconciler).deleteAutoCheckpointsForDGD(ctx, dgd); err != nil {
-		t.Fatalf("deleteAutoCheckpointsForDGD() error = %v", err)
-	}
+	t.Log("Finalize while the retained artifact is absent from the point read but present in the following list")
+	require.NoError(t, newTestDGDCheckpointsReconciler(reconciler).deleteAutoCheckpointsForDGD(ctx, dgd))
 
-	t.Log("Verify only eligible automatic checkpoints were deleted")
-	if err := reconciler.Get(ctx, types.NamespacedName{Name: "auto", Namespace: "default"}, &v1alpha1.DynamoCheckpoint{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("auto checkpoint get err = %v, want not found", err)
-	}
-	for _, name := range []string{"manual", "retained", "other-dgd"} {
-		if err := reconciler.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, &v1alpha1.DynamoCheckpoint{}); err != nil {
-			t.Fatalf("checkpoint %s should remain, get error = %v", name, err)
-		}
-	}
-	retainedAfter := &v1alpha1.DynamoCheckpoint{}
-	if err := reconciler.Get(ctx, types.NamespacedName{Name: "retained", Namespace: "default"}, retainedAfter); err != nil {
-		t.Fatalf("retained checkpoint should remain, get error = %v", err)
-	}
-	if len(retainedAfter.OwnerReferences) != 0 {
-		t.Fatalf("retained checkpoint should be detached from DGD owner references, got %#v", retainedAfter.OwnerReferences)
-	}
-	if _, ok := retainedAfter.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName]; ok {
-		t.Fatalf("retained checkpoint should not keep DGD label after finalizer detach")
-	}
+	t.Log("Verify SnapshotJob identity protects the artifact without relying on its mutable policy annotation")
+	retainedSnapshot := &snapshotv1alpha1.PodSnapshot{}
+	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(snapshot), retainedSnapshot))
+	assert.NotContains(t, retainedSnapshot.Annotations, commonconsts.CheckpointDeletionPolicyAnnotation)
+	retainedJob := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(job), retainedJob))
+	assert.Empty(t, retainedJob.OwnerReferences)
 }

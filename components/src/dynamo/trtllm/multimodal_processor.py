@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 from urllib.parse import urlparse
 
-import httpx
+import aiohttp
 import torch
 from safetensors.torch import load as safetensors_load
 from safetensors.torch import load_file as safetensors_load_file
@@ -87,6 +87,17 @@ class TokenizerProtocol(Protocol):
         clean_up_tokenization_spaces: bool = True,
     ) -> str:
         ...
+
+
+def resolve_mm_processor_kwargs(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Per-request processor overrides, canonical field first.
+
+    Presence-based: an explicit top-level {} must not fall through to extra_args.
+    """
+    mm_kwargs = request.get("mm_processor_kwargs")
+    if mm_kwargs is None:
+        mm_kwargs = (request.get("extra_args") or {}).get("mm_processor_kwargs")
+    return mm_kwargs
 
 
 class MultimodalRequestProcessor:
@@ -181,7 +192,7 @@ class MultimodalRequestProcessor:
             return next(iter(data.values()))
         return data
 
-    def load_tensor_from_path_or_url(
+    async def load_tensor_from_path_or_url(
         self, path: str
     ) -> "torch.Tensor | Dict[str, torch.Tensor]":
         """Load tensors from a local .safetensors path or URL.
@@ -204,8 +215,32 @@ class MultimodalRequestProcessor:
             if parsed.scheme not in ("http", "https"):
                 raise RuntimeError(f"Unsupported URL scheme: {parsed.scheme}")
             try:
-                with httpx.Client(timeout=300.0) as client:
-                    with client.stream("GET", path) as resp:
+                # Per-operation budget (connect + per-read), not a single
+                # whole-request cap: a large embedding on a slow link keeps
+                # downloading as long as it makes progress, while a stalled
+                # connect or a read that hangs still fast-fails at 300s.
+                timeout = aiohttp.ClientTimeout(sock_connect=300.0, sock_read=300.0)
+                # trust_env=True honors HTTP_PROXY / HTTPS_PROXY / NO_PROXY, which
+                # aiohttp ignores by default.
+                async with aiohttp.ClientSession(
+                    timeout=timeout, trust_env=True
+                ) as client:
+                    # Do not follow redirects: this path applies no destination
+                    # policy, so following Location would turn one unvalidated
+                    # fetch into an attacker-chained multi-hop one.
+                    async with client.get(path, allow_redirects=False) as resp:
+                        # raise_for_status() only fires at >= 400, so a 3xx would
+                        # otherwise fall through to an empty-body read and surface
+                        # as a cryptic "safetensors: empty buffer". Redirecting
+                        # .safetensors URLs are common (CDN / presigned), so give
+                        # the operator an actionable message. Do not echo Location
+                        # or the path — both are caller-controlled and unbounded.
+                        if 300 <= resp.status < 400:
+                            raise RuntimeError(
+                                f"Embedding URL returned HTTP {resp.status}; this "
+                                "path does not follow redirects because it applies "
+                                "no destination policy. Supply the final URL."
+                            )
                         resp.raise_for_status()
                         content_length = resp.headers.get("content-length")
                         if (
@@ -219,7 +254,7 @@ class MultimodalRequestProcessor:
                             )
                         chunks = []
                         downloaded = 0
-                        for chunk in resp.iter_bytes():
+                        async for chunk in resp.content.iter_chunked(1 << 20):
                             downloaded += len(chunk)
                             if downloaded > self.max_file_size_bytes:
                                 raise RuntimeError(
@@ -229,8 +264,8 @@ class MultimodalRequestProcessor:
                                 )
                             chunks.append(chunk)
                         content = b"".join(chunks)
-                    data = safetensors_load(content)
-                    return self._unwrap_safetensors(data)
+                data = safetensors_load(content)
+                return self._unwrap_safetensors(data)
             except RuntimeError:
                 raise
             except Exception as e:
@@ -340,12 +375,21 @@ class MultimodalRequestProcessor:
 
         # Initialize result in TokensPrompt format
         # mm_processor_kwargs must be a dict (not None) for TRT-LLM's processor
-        processed_inputs: Dict[str, Any] = {"mm_processor_kwargs": {}}
+        extra_args = request.get("extra_args") or {}
+        mm_kwargs = resolve_mm_processor_kwargs(request)
+        if mm_kwargs is not None and not isinstance(mm_kwargs, dict):
+            raise HttpStatusError(
+                400,
+                "Malformed mm_processor_kwargs field: expected an object",
+                str(mm_kwargs),
+            )
+        processed_inputs: Dict[str, Any] = {
+            "mm_processor_kwargs": mm_kwargs if mm_kwargs is not None else {}
+        }
 
         # TODO(TRTLLM-11294): Remove the fallback to text_prompt for EPD-NIXL and embeddings cases.
         # This is a temporary workaround to bypass TRT-LLM's bug where token IDs & embeddings
         # are not processed correctly.
-        extra_args = request.get("extra_args") or {}
         formatted_prompt_from_frontend = extra_args.get("formatted_prompt")
 
         # EPD Flow Case 2: Embeddings received via NIXL from encode worker
@@ -434,7 +478,7 @@ class MultimodalRequestProcessor:
                 if embedding_paths:
                     try:
                         raw_loaded = [
-                            self.load_tensor_from_path_or_url(path)
+                            await self.load_tensor_from_path_or_url(path)
                             for path in embedding_paths
                         ]
                         loaded_embeddings = []
@@ -608,8 +652,17 @@ class MultimodalRequestProcessor:
         # Post-expansion prompt length, so an omitted max_tokens can be sized
         # against the real context usage rather than the unexpanded placeholders.
         mm_data = processed_inputs.get("multi_modal_data")
-        expanded_len = self._expanded_prompt_len(
-            token_ids, mm_data.get("image") if mm_data else None
+        # Skipped when the request overrides the processor: the sizing
+        # calculator is not override-aware (Qwen2-VL ignores the kwargs while
+        # counting) and is not guaranteed non-mutating (Gemma-4 writes them
+        # into class-level defaults). Falling back to the engine default beats
+        # a stale or leaked estimate.
+        expanded_len = (
+            None
+            if processed_inputs.get("mm_processor_kwargs")
+            else self._expanded_prompt_len(
+                token_ids, mm_data.get("image") if mm_data else None
+            )
         )
         if expanded_len is not None:
             processed_inputs["expanded_prompt_len"] = expanded_len

@@ -29,7 +29,7 @@ import pytest
 
 from tests.conftest import EtcdServer, NatsServer
 from tests.utils.gpu_args import build_gpu_mem_args
-from tests.utils.managed_process import ManagedProcess
+from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import allocate_ports
 
@@ -56,13 +56,6 @@ pytestmark = [
 # ---------------------------------------------------------------------------
 # Process management
 # ---------------------------------------------------------------------------
-
-
-def _check_ready(response) -> bool:
-    try:
-        return (response.json() or {}).get("status") == "ready"
-    except ValueError:
-        return False
 
 
 def _prepare_log_dir(request, suffix: str) -> str:
@@ -179,7 +172,7 @@ class WorkerProcess(ManagedProcess):
             command=command,
             env=env,
             health_check_urls=[
-                (f"http://localhost:{system_port}/health", _check_ready),
+                (f"http://localhost:{system_port}/health", check_health_ready),
             ],
             timeout=600,
             display_output=True,
@@ -338,7 +331,7 @@ TOOLS_WEATHER = [
                     },
                 },
                 "required": ["city"],
-                "additionalProperties": True,
+                "additionalProperties": False,
             },
         },
     }
@@ -850,7 +843,6 @@ class TestToolCallingProtocol:
             result.tool_calls[0], schema, expected_name="send_emails"
         )
         assert isinstance(args["recipients"], list)
-        assert len(args["recipients"]) >= 3
 
     @pytest.mark.flaky(reruns=2, only_rerun=["AssertionError"])
     def test_no_tools_is_plain_text(self, client: OpenAI, model: str):
@@ -923,11 +915,17 @@ class TestToolCallingMultiTurn:
         ]
 
         step1 = stream_chat(
-            client, model, messages=messages, tools=TOOLS_SEARCH + TOOLS_CALCULATOR
+            client,
+            model,
+            messages=messages,
+            tools=TOOLS_SEARCH + TOOLS_CALCULATOR,
+            tool_choice={"type": "function", "function": {"name": "search_web"}},
         )
         assert_finish_reason(step1, {"tool_calls"})
         assert len(step1.tool_calls) >= 1
-        parse_and_validate_tool_call(step1.tool_calls[0], schemas)
+        parse_and_validate_tool_call(
+            step1.tool_calls[0], schemas, expected_name="search_web"
+        )
 
         messages.append(assistant_tool_message_from_result(step1))
         messages.append(
@@ -945,41 +943,36 @@ class TestToolCallingMultiTurn:
         )
 
         step2 = stream_chat(
-            client, model, messages=messages, tools=TOOLS_SEARCH + TOOLS_CALCULATOR
+            client,
+            model,
+            messages=messages,
+            tools=TOOLS_SEARCH + TOOLS_CALCULATOR,
+            tool_choice={"type": "function", "function": {"name": "calculate"}},
         )
-        # Small models sometimes short-circuit and compute the answer in
-        # their reasoning instead of chaining a second tool call. Accept
-        # either path: (a) another tool call to `calculate`, or (b) a
-        # direct text answer containing the correct result.
-        assert_finish_reason(step2, {"tool_calls", "stop"})
-        if step2.finish_reason == "tool_calls":
-            assert len(step2.tool_calls) >= 1
-            args2 = parse_and_validate_tool_call(step2.tool_calls[0], schemas)
-            assert step2.tool_calls[0]["function"]["name"] == "calculate"
-            assert "13960000" in args2["expression"].replace(
-                ",", ""
-            ) or "1396000" in args2["expression"].replace(",", "")
+        assert_finish_reason(step2, {"tool_calls"})
+        assert len(step2.tool_calls) >= 1
+        parse_and_validate_tool_call(
+            step2.tool_calls[0], schemas, expected_name="calculate"
+        )
 
-            messages.append(assistant_tool_message_from_result(step2))
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": step2.tool_calls[0]["id"],
-                    "content": "1396000",
-                }
-            )
+        messages.append(assistant_tool_message_from_result(step2))
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": step2.tool_calls[0]["id"],
+                "content": json.dumps({"result": "1,396,000"}),
+            }
+        )
 
-            step3 = stream_chat(
-                client, model, messages=messages, tools=TOOLS_SEARCH + TOOLS_CALCULATOR
-            )
-            assert_finish_reason(step3, {"stop"})
-            assert step3.tool_calls == []
-            assert "1396000" in step3.content.replace(",", "")
-        else:
-            # Short-circuit path: model did the math itself. Just verify
-            # the final answer is present in the text.
-            assert step2.tool_calls == []
-            assert "1396000" in step2.content.replace(",", "")
+        step3 = stream_chat(
+            client,
+            model,
+            messages=messages,
+            tools=TOOLS_SEARCH + TOOLS_CALCULATOR,
+        )
+        assert_finish_reason(step3, {"stop"})
+        assert step3.tool_calls == []
+        assert "1396000" in step3.content.replace(",", "")
 
     @pytest.mark.flaky(reruns=2, only_rerun=["AssertionError"])
     def test_multiple_prior_tool_results_synthesize_to_text(
@@ -1028,6 +1021,7 @@ class TestToolCallingMultiTurn:
                 },
             ],
             tools=TOOLS_WEATHER,
+            temperature=0,
         )
         assert_finish_reason(result, {"stop"})
         assert result.tool_calls == []

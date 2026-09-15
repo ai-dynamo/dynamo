@@ -318,22 +318,40 @@ def test_online_trace_replay_supports_agentic_mooncake(tmp_path):
     trace_path = tmp_path / "agentic.jsonl"
     records = [
         {
+            "schema": "dynamo.agentic_mooncake",
+            "version": 2,
+            "block_size": 64,
+            "hash_id_scope": "local",
+            "source": {"format": "test-fixture", "digest": "online-replay"},
+        },
+        {
             "request_id": "root",
+            "play_id": "play",
             "session_id": "root",
-            "timestamp": 0.0,
+            "model": "test-model",
             "input_length": 64,
             "output_length": 2,
             "hash_ids": [1],
+            "not_before_ms": 0.0,
+            "dependencies": [],
         },
         {
             "request_id": "dependent",
+            "play_id": "play",
             "session_id": "dependent",
-            "timestamp": 0.0,
-            "delay": 5.0,
-            "wait_for": ["root"],
+            "model": "test-model",
             "input_length": 64,
             "output_length": 2,
             "hash_ids": [2],
+            "not_before_ms": 0.0,
+            "dependencies": [
+                {
+                    "request_id": "root",
+                    "trigger": "completion",
+                    "delay_ms": 5.0,
+                    "relation": "sequence",
+                }
+            ],
         },
     ]
     trace_path.write_text(

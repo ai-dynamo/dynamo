@@ -18,7 +18,7 @@ The planner supports four optimization targets that determine how scaling decisi
 - **`throughput`** (default): Uses static thresholds on queue depth and KV cache utilization. No SLA targets or profiling needed. Works out of the box.
 - **`latency`**: Same approach as `throughput` but with more aggressive thresholds — scales up earlier and tolerates less queuing. Ideal for latency-sensitive workloads.
 - **`load`**: Uses user-defined prefill queue token thresholds and decode KV utilization thresholds for reactive load-based scaling.
-- **`sla`**: Uses the Planner engine-query layer with forward-pass estimates from the `aiconfigurator-core` Python wheel, plus online FPM tuning or FPM regression fallback, to target specific TTFT/ITL values. Supports both throughput-based (predictive) and load-based (reactive) scaling modes. For advanced users who need precise SLA control.
+- **`sla`**: Uses the Planner engine-query layer with forward-pass estimates from the AIConfigurator compatibility API in the `aisimulate` wheel, plus online FPM tuning or FPM regression fallback, to target specific TTFT/ITL values. Supports both throughput-based (predictive) and load-based (reactive) scaling modes. For advanced users who need precise SLA control.
 
 **When to use which:**
 
@@ -118,6 +118,7 @@ spec:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `throughput_adjustment_interval_seconds` | int | `180` | Seconds between throughput-based scaling decisions. |
+| `max_throughput_scaling_replicas` | int | `8` | Maximum replica-count change per component from one throughput observation. The capped target persists until the next throughput observation. GPU and power budgets may reduce it further; endpoint and out-of-band budget recovery take precedence. |
 | `throughput_metrics_source` | string | `frontend` | Prometheus traffic source for throughput scaling: `frontend` reads `dynamo_frontend_*` metrics from the public Frontend; `router` reads `dynamo_component_router_*` metrics from a LocalRouter. Use `router` for pool-local Planner in GlobalPlanner deployments. |
 | `min_endpoint` | int | `1` | Minimum endpoints for `agg` mode. In `disagg` mode, applies the same minimum to prefill and decode. In `prefill` or `decode` mode, supplies the active role when its role-specific field is `null`. May be `0` for scale-to-zero compatibility. |
 | `prefill_min_endpoint` | int or `null` | `null` | Minimum prefill endpoints for `disagg` and `prefill` modes. When set, replaces the prefill value from `min_endpoint`. Must be at least `1`. |
@@ -173,23 +174,26 @@ KV hit rate and speculative decode accept length are runtime engine/router signa
 | `report_interval_hours` | float or `null` | `24.0` | Generate an HTML diagnostics report every N hours (simulated time). Set to `null` to disable periodic report generation. |
 | `report_output_dir` | string | `./planner_reports` | Directory for HTML diagnostics reports. |
 | `live_dashboard_port` | int | `8080` | Port for the live diagnostics dashboard HTTP server. Set to `0` to disable. When enabled, visit `http://host:port/` to view a real-time Plotly report of accumulated snapshots. |
-| `control_api_port` | int | `9086` | Port for the loopback-only runtime minimum-endpoint API. Set to `0` to disable. |
+| `control_api_port` | int | `9086` | Port for the loopback-only runtime endpoint and GPU budget API. Set to `0` to disable. |
 
 ### Runtime Minimum Endpoint API
 
-The Planner listens on `127.0.0.1:<control_api_port>` and supports `GET` and partial `PATCH` requests at `/v1/min-endpoints`. The API has no authentication and is not exposed by a Kubernetes Service. It uses `prefill_min_endpoint` and `decode_min_endpoint` in disaggregated mode, the active component's field in single-component mode, and `min_endpoint` in aggregated mode. Updates are process-local, are not written back to the Planner ConfigMap, and apply to the next planner tick.
+The Planner listens on `127.0.0.1:<control_api_port>` and supports `GET` and partial `PATCH` requests at `/v1/min-endpoints`. The API has no authentication and is not exposed by a Kubernetes Service. It uses `prefill_min_endpoint` and `decode_min_endpoint` in disaggregated mode, the active component's field in single-component mode, and `min_endpoint` in aggregated mode. Every mode also accepts `min_gpu_budget` and `max_gpu_budget`. A response includes the active endpoint fields and both GPU budgets. Updates are process-local, are not written back to the Planner ConfigMap, and apply to the next planner tick.
 
-In Kubernetes, port-forward to the Planner pod and patch the active mode's field:
+In Kubernetes, port-forward to the Planner pod and patch the active mode's field. The following example updates a Planner in `disagg` mode:
 
 ```bash
 kubectl port-forward pod/<planner-pod> 9086:9086
 curl http://127.0.0.1:9086/v1/min-endpoints
 curl --request PATCH http://127.0.0.1:9086/v1/min-endpoints \
   --header 'Content-Type: application/json' \
-  --data '{"decode_min_endpoint": 3}'
+  --data '{"prefill_min_endpoint": 8, "decode_min_endpoint": 8, "min_gpu_budget": 16, "max_gpu_budget": 64}'
 ```
 
-The update is atomic. The Planner rejects malformed values, fields that are inactive for the current mode, and minimum footprints that exceed `max_gpu_budget` or the configured power budget. The same footprint checks run at startup, so an infeasible minimum configuration fails before the Planner enters its tick loop. Scale-up has no per-component maximum endpoint setting; the existing GPU, power, Global Planner, and cluster-capacity limits remain the upper bounds.
+The update is atomic. Use `-1` to disable either GPU budget. The Planner rejects malformed values, fields that are inactive for the current mode, a `min_gpu_budget` greater than `max_gpu_budget` when both are enabled, and minimum footprints that exceed `max_gpu_budget` or the configured power budget. The same checks run at startup, so an infeasible minimum configuration fails before the Planner enters its tick loop. Scale-up has no per-component maximum endpoint setting; the existing GPU, power, Global Planner, and cluster-capacity limits remain the upper bounds.
+
+> [!WARNING]
+> If a scaling submission loses its acknowledgement after the Planner stops waiting for it, a later submission error leaves the outcome unknown. The Planner then stops automatic effect submission to avoid duplicating an action that the remote service might have applied. Runtime `GET` and `PATCH` remain available. Verify the deployment's desired and Ready replica counts, then restart the Planner to resume automatic submission.
 
 The same diagnostic signals surfaced in these reports are also exported as Prometheus metrics under the `dynamo_planner_*` prefix—for example estimated TTFT/ITL (`dynamo_planner_estimated_ttft_ms`, `dynamo_planner_estimated_itl_ms`), recommended replica counts (`dynamo_planner_predicted_num_prefill_replicas`, `dynamo_planner_predicted_num_decode_replicas`), per-engine capacity and FPM queue depths, and load/throughput scaling decision enums.
 

@@ -4,6 +4,7 @@
 import logging
 import os
 import time
+from contextlib import ExitStack
 from typing import Any, Callable, ContextManager
 
 from tests.router.common import (
@@ -63,11 +64,17 @@ class ManagedEngineProcessMixin:
             len(self.worker_processes),
         )
 
-        for i, process in enumerate(self.worker_processes):
-            logger.info(
-                "[%s] Starting %s %d...", self.__class__.__name__, self.process_name, i
-            )
-            try:
+        with ExitStack() as stack:
+            for i, process in enumerate(self.worker_processes):
+                logger.info(
+                    "[%s] Starting %s %d...",
+                    self.__class__.__name__,
+                    self.process_name,
+                    i,
+                )
+                # Register cleanup before startup so partially started workers and
+                # every previously started worker are closed on any later failure.
+                stack.push(process)
                 process._logger = logging.getLogger(process.__class__.__name__)
                 process._command_name = process.command[0]
                 process.log_dir = resolve_test_output_path(process.log_dir)
@@ -103,46 +110,29 @@ class ManagedEngineProcessMixin:
                     )
                     time.sleep(self.init_delay_seconds)
 
-            except Exception:
-                logger.exception(
-                    "[%s] Failed to start worker %d", self.__class__.__name__, i
-                )
-                try:
-                    process.__exit__(None, None, None)
-                except Exception as cleanup_err:
-                    logger.warning(
-                        "[%s] Error during cleanup: %s",
-                        self.__class__.__name__,
-                        cleanup_err,
-                    )
-                raise
-
-        logger.info(
-            "[%s] All %d workers launched with sequential initialization.",
-            self.__class__.__name__,
-            len(self.worker_processes),
-        )
-        logger.info(
-            "[%s] Waiting for health checks to complete...", self.__class__.__name__
-        )
-
-        for i, process in enumerate(self.worker_processes):
             logger.info(
-                "[%s] Checking health for worker %d...", self.__class__.__name__, i
+                "[%s] All %d workers launched with sequential initialization.",
+                self.__class__.__name__,
+                len(self.worker_processes),
             )
-            try:
+            logger.info(
+                "[%s] Waiting for health checks to complete...",
+                self.__class__.__name__,
+            )
+
+            for i, process in enumerate(self.worker_processes):
+                logger.info(
+                    "[%s] Checking health for worker %d...",
+                    self.__class__.__name__,
+                    i,
+                )
                 elapsed = process._check_ports(process.timeout)
                 process._check_urls(process.timeout - elapsed)
                 process._check_funcs(process.timeout - elapsed)
                 logger.info(
                     "[%s] Worker %d health checks passed", self.__class__.__name__, i
                 )
-            except Exception:
-                logger.error(
-                    "[%s] Worker %d health check failed", self.__class__.__name__, i
-                )
-                self.__exit__(None, None, None)
-                raise
+            self._process_exit_stack = stack.pop_all()
 
         logger.info(
             "[%s] All workers started successfully and passed health checks!",
@@ -151,12 +141,15 @@ class ManagedEngineProcessMixin:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        for i, process in enumerate(self.worker_processes):
-            logger.info("Stopping %s %d", self.process_name, i)
-            process.__exit__(exc_type, exc_val, exc_tb)
-
-        logger.info("Waiting for %s to fully clean up...", self.cleanup_name)
-        time.sleep(self.cleanup_delay_seconds)
+        try:
+            stack = getattr(self, "_process_exit_stack", None)
+            if stack is not None:
+                return stack.__exit__(exc_type, exc_val, exc_tb)
+            return None
+        finally:
+            self._process_exit_stack = None
+            logger.info("Waiting for %s to fully clean up...", self.cleanup_name)
+            time.sleep(self.cleanup_delay_seconds)
 
 
 def _create_engine_process(

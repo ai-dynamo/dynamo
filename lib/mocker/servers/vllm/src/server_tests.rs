@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use prost_types_v14 as prost_types;
+use tonic_v14 as tonic;
+
 use super::request::*;
 use super::*;
 use futures::StreamExt;
@@ -42,6 +45,14 @@ fn request(id: &str) -> pb::GenerateRequest {
         }),
         ..Default::default()
     }
+}
+
+#[test]
+fn lora_requests_are_rejected() {
+    let mut request = request("lora");
+    request.lora_name = "adapter".to_string();
+    let error = PreparedRequest::new(request, &MockerServerConfig::default()).unwrap_err();
+    assert_eq!(error.code(), tonic::Code::Unimplemented);
 }
 
 #[test]

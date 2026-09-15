@@ -9,7 +9,6 @@ use utoipa::ToSchema;
 use validator::Validate;
 
 use crate::engines::ValidateRequest;
-use crate::preprocessor::media::MediaDecoder;
 
 use super::{
     OpenAIOutputOptionsProvider, OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider,
@@ -112,11 +111,12 @@ pub struct NvCreateChatCompletionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<serde_json::Value>,
 
-    /// Runtime media decoding parameters.
-    /// When provided, these override the MDC defaults
+    /// Runtime media decoding parameters, forwarded verbatim to the worker when the
+    /// worker owns decoding. When the frontend decodes, these override the MDC defaults.
+    /// Kept opaque so options the frontend does not own pass through untouched.
     /// Example: `{"video": {"num_frames": 16}}`
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub media_io_kwargs: Option<MediaDecoder>,
+    pub media_io_kwargs: Option<serde_json::Value>,
 
     /// When true, logprob token fields are returned as "token_id:`<id>`" instead
     /// of decoded text.
@@ -591,6 +591,7 @@ impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
 impl ValidateRequest for NvCreateChatCompletionRequest {
     fn validate(&self) -> Result<(), anyhow::Error> {
         validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
+        validate::validate_guided_decoding(self)?;
         validate::validate_chat_template_args(self.chat_template_args.as_ref())?;
         validate::validate_messages(&self.inner.messages)?;
         validate::validate_model(&self.inner.model)?;
@@ -649,10 +650,121 @@ mod tests {
     use super::*;
     use crate::engines::ValidateRequest;
     use crate::protocols::common::{
-        OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider,
+        GuidedDecodingOptions, OutputOptionsProvider, SamplingOptionsProvider,
+        StopConditionsProvider,
     };
     use dynamo_protocols::types::{ChatCompletionTool, ChatCompletionToolType, FunctionObject};
     use serde_json::json;
+
+    /// Builds a minimal chat request and merges `extra` into its top-level fields.
+    fn chat_request_with(extra: &serde_json::Value) -> NvCreateChatCompletionRequest {
+        let mut body = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 20
+        });
+        for (key, value) in extra.as_object().expect("fixture is an object") {
+            body[key] = value.clone();
+        }
+        serde_json::from_value(body).expect("Failed to deserialize request")
+    }
+
+    /// Extracts sampling options for `extra` and returns the guided-decoding options it
+    /// produced, failing if extraction rejected the request or engaged nothing.
+    fn guided_for(extra: &serde_json::Value) -> GuidedDecodingOptions {
+        chat_request_with(extra)
+            .extract_sampling_options()
+            .unwrap_or_else(|e| panic!("{extra} must stay valid, got: {e}"))
+            .guided_decoding
+            .unwrap_or_else(|| panic!("{extra} must produce guided decoding options"))
+    }
+
+    #[test]
+    fn test_conflicting_guided_decoding_options_return_invalid_argument() {
+        // Each pair is two constraints set at once; every one of them must be rejected.
+        let conflicts = [
+            json!({"guided_json": {"type": "object"}, "guided_regex": "a+"}),
+            json!({"guided_regex": "a+", "guided_choice": ["x", "y"]}),
+            json!({"guided_grammar": "root ::= \"a\"", "guided_json": {"type": "object"}}),
+        ];
+
+        for extra in conflicts {
+            let request = chat_request_with(&extra);
+            let error = ValidateRequest::validate(&request).expect_err("constraints conflict");
+            assert!(
+                error
+                    .to_string()
+                    .contains("Only one guided-decoding constraint"),
+                "validation error should name the conflict, got: {error}"
+            );
+        }
+    }
+
+    /// The guard for the above: a legal request must keep validating, so the conflict
+    /// check cannot be satisfied by rejecting guided decoding outright.
+    ///
+    /// `whitespace_pattern` is a modifier, not a constraint -- it changes how a JSON
+    /// grammar is applied. `GuidedDecodingOptions::validate` used to count it toward the
+    /// exclusivity limit, which rejected `guided_json` + `guided_whitespace_pattern` even
+    /// though the error text never named `whitespace_pattern` and the Python frontend
+    /// (`components/src/dynamo/frontend/prepost.py`) builds that exact pair. Every case
+    /// asserts the resulting options, not merely that extraction returned `Ok`.
+    #[test]
+    fn test_guided_decoding_constraint_with_modifier_stays_valid() {
+        let json_only = guided_for(&json!({"guided_json": {"type": "object"}}));
+        assert!(json_only.json.is_some());
+
+        let regex_only = guided_for(&json!({"guided_regex": "a+"}));
+        assert_eq!(regex_only.regex.as_deref(), Some("a+"));
+
+        let choice_only = guided_for(&json!({"guided_choice": ["x", "y"]}));
+        assert_eq!(
+            choice_only.choice,
+            Some(vec!["x".to_string(), "y".to_string()])
+        );
+
+        // The companion pair: whitespace_pattern modifies the JSON grammar rather than
+        // being a second grammar, so setting both is one constraint, not two.
+        let json_with_modifier = guided_for(
+            &json!({"guided_json": {"type": "object"}, "guided_whitespace_pattern": "[\n ]?"}),
+        );
+        assert!(json_with_modifier.json.is_some());
+        assert_eq!(
+            json_with_modifier.whitespace_pattern.as_deref(),
+            Some("[\n ]?")
+        );
+
+        let regex_with_modifier =
+            guided_for(&json!({"guided_regex": "a+", "guided_whitespace_pattern": "[\n ]?"}));
+        assert_eq!(regex_with_modifier.regex.as_deref(), Some("a+"));
+        assert_eq!(
+            regex_with_modifier.whitespace_pattern.as_deref(),
+            Some("[\n ]?")
+        );
+    }
+
+    /// A modifier on its own describes how to apply a constraint that was never supplied.
+    /// It must engage no guided decoding at all: emitting a constraint-less
+    /// `GuidedDecodingOptions` makes vLLM raise `ValueError` on the worker and disables
+    /// request migration, for a request the caller never meant as structured output.
+    #[test]
+    fn test_guided_decoding_modifier_alone_engages_nothing() {
+        for extra in [
+            json!({"guided_whitespace_pattern": "[\n ]?"}),
+            json!({"guided_decoding_backend": "xgrammar"}),
+        ] {
+            let request = chat_request_with(&extra);
+            ValidateRequest::validate(&request)
+                .unwrap_or_else(|e| panic!("{extra} must pass request validation, got: {e}"));
+            let sampling = request
+                .extract_sampling_options()
+                .unwrap_or_else(|e| panic!("{extra} must stay valid, got: {e}"));
+            assert!(
+                sampling.guided_decoding.is_none(),
+                "{extra} sets no constraint, so guided decoding must not be engaged",
+            );
+        }
+    }
 
     #[test]
     fn test_top_k_sentinel_contract() {
@@ -836,6 +948,73 @@ mod tests {
             serde_json::from_value(invalid_stop_token_ids).expect("Failed to deserialize request");
         let err = ValidateRequest::validate(&request).expect_err("invalid stop_token_ids");
         assert!(err.to_string().contains("stop_token_ids"));
+    }
+
+    #[test]
+    fn test_stop_sequence_limit_enforced_consistently() {
+        use crate::protocols::openai::validate::MAX_STOP_SEQUENCES;
+
+        let max_stops: Vec<String> = (0..MAX_STOP_SEQUENCES).map(|i| i.to_string()).collect();
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop": max_stops,
+        }))
+        .expect("Failed to deserialize request");
+        ValidateRequest::validate(&request).expect("max stops must validate");
+        request
+            .extract_stop_conditions()
+            .expect("max stops must extract");
+
+        let over_max_stops: Vec<String> = (0..=MAX_STOP_SEQUENCES).map(|i| i.to_string()).collect();
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop": over_max_stops,
+        }))
+        .expect("Failed to deserialize request");
+        let err =
+            ValidateRequest::validate(&request).expect_err("over-max stops must fail validation");
+        let expected = format!(
+            "InvalidRequest: Maximum of {} stop sequences allowed, got {}",
+            MAX_STOP_SEQUENCES,
+            MAX_STOP_SEQUENCES + 1
+        );
+        assert_eq!(err.to_string(), expected);
+        let err = request
+            .extract_stop_conditions()
+            .expect_err("over-max stops must fail extraction");
+        assert_eq!(err.to_string(), expected);
+
+        let over_max_token_ids: Vec<u32> = (0..=MAX_STOP_SEQUENCES as u32).collect();
+        let expected_token_ids = format!(
+            "InvalidRequest: Maximum of {} stop token IDs allowed, got {}",
+            MAX_STOP_SEQUENCES,
+            MAX_STOP_SEQUENCES + 1
+        );
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop": over_max_token_ids,
+        }))
+        .expect("Failed to deserialize request");
+        let err = ValidateRequest::validate(&request)
+            .expect_err("over-max stop token IDs must fail validation");
+        assert_eq!(err.to_string(), expected_token_ids);
+        let err = request
+            .extract_stop_conditions()
+            .expect_err("over-max stop token IDs must fail extraction");
+        assert_eq!(err.to_string(), expected_token_ids);
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop_token_ids": over_max_token_ids,
+        }))
+        .expect("Failed to deserialize request");
+        let err = ValidateRequest::validate(&request)
+            .expect_err("over-max passthrough stop token IDs must fail validation");
+        assert_eq!(err.to_string(), expected_token_ids);
     }
 
     #[test]

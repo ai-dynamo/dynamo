@@ -9252,6 +9252,15 @@ spec:
                       required:
                         - template
                       type: object
+                    trustRemoteCode:
+                      default: false
+                      description: |-
+                        TrustRemoteCode explicitly permits generated vLLM and SGLang workers to
+                        execute custom code from the configured model repository. When enabled,
+                        the profiler adds --trust-remote-code to every generated worker component
+                        after the deployment topology has been generated. Enable this setting only
+                        for model repositories you trust.
+                      type: boolean
                   type: object
                 runtimeVersionOverride:
                   description: |-

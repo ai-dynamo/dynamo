@@ -72,13 +72,9 @@ impl WorkerSelectionInstance {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RawWorkerSelectionConfig {
-    #[serde(default)]
     aggregated: Option<String>,
-    #[serde(default)]
     prefill: Option<String>,
-    #[serde(default)]
     decode: Option<String>,
-    #[serde(default)]
     encode: Option<String>,
     #[serde(default)]
     instances: Vec<RawWorkerSelectionInstance>,

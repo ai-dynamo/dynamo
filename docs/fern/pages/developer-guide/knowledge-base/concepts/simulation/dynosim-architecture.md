@@ -6,8 +6,10 @@ subtitle: How the replay harness composes simulated engines, routing, and Planne
 ---
 
 DynoSim connects a workload driver to one or more Mocker engine cores and records request and token
-timing for analysis. It supports a direct offline path for fast simulation and an online path that
-uses live Dynamo workers and runtime services.
+timing for analysis. The unified `aisimulate predict` and `aisimulate recommend` commands run this
+simulation offline. The former public Replay online CLI is unavailable, although the Python replay
+SDK retains online mode. The separate `python3 -m dynamo.mocker` command launches live Mocker
+workers without replay orchestration.
 
 For task-oriented instructions, see [Run a DynoSim Simulation](../../../../cli/operations/simulation-with-dynosim/dynosim-replay.mdx),
 [Sweep DynoSim Configurations](../../../../cli/operations/simulation-with-dynosim/dynosim-sweeps.mdx), and
@@ -84,15 +86,15 @@ flowchart TD
 The engine core owns scheduling, KV allocation, prefix caching, preemption, and forward-pass timing.
 The multi-engine layer adds behavior that requires coordination across engine instances.
 
-## Offline and online execution
+## Execution model
 
 Offline execution drives Mocker engine cores directly. It uses a logical clock and does not require
 a frontend, worker registration, etcd, NATS, or HTTP traffic. This path is appropriate for fast,
 repeatable configuration comparisons and continuous-integration tests.
 
-Online execution launches mock workers through the live runtime path. It is useful when an
-experiment must include worker registration, request transport, event publication, or runtime
-coordination. The simulated engine remains the source of inference timing in both modes.
+Run `python3 -m dynamo.mocker` for the supported live worker CLI. The Python replay SDK retains
+online mode for programmatic callers, but no public Replay CLI currently exposes online replay
+orchestration.
 
 ## Routing simulation
 
@@ -117,11 +119,8 @@ flowchart LR
     Q --> D["Deficit round-robin dispatch"]
 ```
 
-The replay CLI loads the startup-only policy YAML, selects an exact model profile when `--model-name`
-is set, and otherwise uses the root profile. A recognized family combines with the router-observed
-uncached Input Sequence Length (ISL) bucket. An exact explicit class bypasses bucketing. Ordinary
-physical-class names do not bypass classification; they fall back to the selected profile's default
-family.
+The trace loader preserves `policy_class` metadata for the replay runtime. The unified public YAML
+does not expose the former startup policy-file and `--model-name` CLI controls.
 
 ## Planner simulation adapter
 
@@ -149,14 +148,15 @@ part of the analysis.
 
 ## Timing models
 
-DynoSim can use polynomial, profile-derived, or AIConfigurator-backed forward-pass timing. The
-timing model predicts prefill and decode duration. The Mocker engine still owns batching, KV-cache
-state, prefix reuse, preemption, and request progression.
+DynoSim can use the default AIConfigurator-backed timing model or explicit fixed and polynomial
+timing from `engine.workers.<role>.timing`. The timing model predicts prefill and decode duration.
+The Mocker engine still owns batching, KV-cache state, prefix reuse, preemption, and request
+progression.
 
-AIConfigurator is used in two distinct places:
+AIConfigurator compatibility APIs from the `aisimulate` wheel are used in two distinct places:
 
-- engine-args fields configure the Mocker forward-pass timing model
-- top-level replay AIC flags configure router-side prompt-load estimation
+- `engine.workers.<role>.timing.type: default` configures the Mocker forward-pass timing model
+- `router.prefill_load_model.type: aic` configures router-side prompt-load estimation
 
 Keeping these paths separate makes it possible to test router estimates independently from engine
 timing.

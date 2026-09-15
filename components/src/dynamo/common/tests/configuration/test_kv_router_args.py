@@ -27,6 +27,7 @@ def _clear_rejection_threshold_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC",
         "DYN_ADMISSION_CONTROL",
         "DYN_ROUTER_QUEUE_THRESHOLD",
+        "DYN_ROUTER_SESSION_AFFINITY_MODE",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -422,6 +423,30 @@ def test_frontend_reasoning_field_name_rejects_invalid_choice() -> None:
         parser.parse_args(["--reasoning-field-name", "invalid"])
 
 
+def test_frontend_response_plane_defaults_to_tcp_and_accepts_quic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DYN_RESPONSE_PLANE", raising=False)
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    default_config = FrontendConfig.from_cli_args(parser.parse_args([]))
+    quic_config = FrontendConfig.from_cli_args(
+        parser.parse_args(["--response-plane", "quic"])
+    )
+    monkeypatch.setenv("DYN_RESPONSE_PLANE", "quic")
+    env_parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(env_parser)
+    env_config = FrontendConfig.from_cli_args(env_parser.parse_args([]))
+
+    assert default_config.response_plane == "tcp"
+    assert quic_config.response_plane == "quic"
+    assert env_config.response_plane == "quic"
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--response-plane", "invalid"])
+
+
 def test_conditional_disagg_config_cli_lowers_to_router_kwargs() -> None:
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)
@@ -565,6 +590,7 @@ def test_frontend_rejection_thresholds_default_to_none(
         "active_prefill_tokens_threshold": None,
         "active_prefill_tokens_threshold_frac": None,
         "session_affinity_ttl_secs": None,
+        "session_affinity_mode": "hard",
     }
     assert "busy-worker rejection disabled" in caplog.text
 
@@ -693,6 +719,7 @@ def test_all_rejection_thresholds_and_queue_override_are_forwarded(
         "active_prefill_tokens_threshold": 1000,
         "active_prefill_tokens_threshold_frac": 2.0,
         "session_affinity_ttl_secs": None,
+        "session_affinity_mode": "hard",
     }
     assert config.kv_router_kwargs()["router_queue_threshold"] == 32.0
 
@@ -859,6 +886,28 @@ def test_session_affinity_ttl_cli_and_environment(monkeypatch) -> None:
     )
     config.validate()
     assert config.session_affinity_ttl_secs == 900
+
+
+def test_session_affinity_mode_cli_and_environment(monkeypatch) -> None:
+    monkeypatch.delenv("DYN_ROUTER_SESSION_AFFINITY_MODE", raising=False)
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(parser.parse_args([]))
+    assert config.session_affinity_mode == "hard"
+    assert config.router_kwargs()["session_affinity_mode"] == "hard"
+
+    monkeypatch.setenv("DYN_ROUTER_SESSION_AFFINITY_MODE", "soft")
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(parser.parse_args([]))
+    assert config.session_affinity_mode == "soft"
+
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(["--router-session-affinity-mode", "hard"])
+    )
+    assert config.session_affinity_mode == "hard"
 
 
 @pytest.mark.parametrize("ttl", [0, 31_536_001])

@@ -66,7 +66,11 @@ import pytest
 from tests.utils.client import send_request
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, DynamoPortRange
 from tests.utils.gpu_args import build_gpu_mem_args
-from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
+from tests.utils.managed_process import (
+    DynamoFrontendProcess,
+    ManagedProcess,
+    check_health_ready,
+)
 from tests.utils.payloads import check_health_generate, check_models_api
 from tests.utils.port_utils import allocate_port, deallocate_port, deallocate_ports
 
@@ -275,7 +279,7 @@ class _DynamoBenchmarkWorker(ManagedProcess):
                 ]
             )
             health_check_urls = [
-                (f"http://localhost:{self.system_port}/health", self._is_ready),
+                (f"http://localhost:{self.system_port}/health", check_health_ready),
             ]
         elif is_prefill is False:
             command.extend(["--disaggregation-mode", "decode"])
@@ -286,13 +290,13 @@ class _DynamoBenchmarkWorker(ManagedProcess):
                 ]
             )
             health_check_urls = [
-                (f"http://localhost:{self.system_port}/health", self._is_ready),
+                (f"http://localhost:{self.system_port}/health", check_health_ready),
                 (f"http://localhost:{frontend_port}/v1/models", check_models_api),
                 (f"http://localhost:{frontend_port}/health", check_health_generate),
             ]
         else:
             health_check_urls = [
-                (f"http://localhost:{self.system_port}/health", self._is_ready),
+                (f"http://localhost:{self.system_port}/health", check_health_ready),
                 (f"http://localhost:{frontend_port}/v1/models", check_models_api),
                 (f"http://localhost:{frontend_port}/health", check_health_generate),
             ]
@@ -363,27 +367,6 @@ class _DynamoBenchmarkWorker(ManagedProcess):
         except Exception as e:
             logger.warning(f"Failed to release worker FPM port: {e}")
         return super().__exit__(exc_type, exc_val, exc_tb)
-
-    def _is_ready(self, response) -> bool:
-        try:
-            data = response.json()
-            if data.get("status") == "ready":
-                kind = (
-                    "Prefill"
-                    if self.is_prefill is True
-                    else "Decode"
-                    if self.is_prefill is False
-                    else "Aggregated"
-                )
-                logger.info(
-                    f"{kind} worker ready (bench_mode={self.bench_mode}, "
-                    f"system_port={self.system_port})"
-                )
-                return True
-            logger.warning(f"Worker status not ready yet: {data.get('status')!r}")
-        except ValueError:
-            logger.warning("Worker /health response was not valid JSON")
-        return False
 
 
 def _send_chat_completion(frontend_port: int) -> str:

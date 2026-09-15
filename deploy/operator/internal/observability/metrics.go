@@ -30,35 +30,6 @@ const (
 )
 
 var (
-	// Reconciliation metrics
-	reconcileDuration = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Namespace: metricsNamespace,
-			Name:      "reconcile_duration_seconds",
-			Help:      "Duration of reconciliation loops in seconds",
-			Buckets:   []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60},
-		},
-		[]string{"resource_type", "namespace", "result"},
-	)
-
-	reconcileTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Name:      "reconcile_total",
-			Help:      "Total number of reconciliations by resource type",
-		},
-		[]string{"resource_type", "namespace", "result"},
-	)
-
-	reconcileErrors = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Name:      "reconcile_errors_total",
-			Help:      "Total number of reconciliation errors by resource type and error type",
-		},
-		[]string{"resource_type", "namespace", "error_type"},
-	)
-
 	// Resource metrics (populated by resource counter)
 	resourcesTotal = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -102,29 +73,11 @@ var (
 // InitMetrics registers all custom metrics with the controller-runtime metrics registry
 func InitMetrics() {
 	ctrlmetrics.Registry.MustRegister(
-		reconcileDuration,
-		reconcileTotal,
-		reconcileErrors,
 		resourcesTotal,
 		webhookDuration,
 		webhookRequestsTotal,
 		webhookDenialsTotal,
 	)
-}
-
-// RecordReconciliation records metrics for a reconciliation loop
-func RecordReconciliation(resourceType, namespace string, err error, requeue bool, duration time.Duration) {
-	result := "success"
-	if err != nil {
-		result = "error"
-		errorType := categorizeError(err)
-		reconcileErrors.WithLabelValues(resourceType, namespace, errorType).Inc()
-	} else if requeue {
-		result = "requeue"
-	}
-
-	reconcileDuration.WithLabelValues(resourceType, namespace, result).Observe(duration.Seconds())
-	reconcileTotal.WithLabelValues(resourceType, namespace, result).Inc()
 }
 
 // RecordWebhookAdmission records metrics for a webhook admission request

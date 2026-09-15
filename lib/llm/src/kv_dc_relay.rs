@@ -9,8 +9,10 @@ mod host;
 mod identity;
 mod load;
 mod pool_registry;
+mod publication;
 mod resolution;
 mod topology;
+pub mod wan;
 
 pub use discovery::KvDcRelayDiscoveryConfig;
 pub use host::{
@@ -30,6 +32,10 @@ pub use identity::{
     ModelAlias, ModelAliasError, ModelTarget, PoolIdentitySources, WorkerRole,
 };
 pub use load::PoolLoadSnapshot;
+pub use publication::{
+    PoolPublicationStream, PublicationError, PublicationErrorKind, PublicationFrame,
+    PublicationFrameKind, RelayPublicationSource,
+};
 pub use topology::{
     AdapterReadiness, TopologyEntry, TopologyMember, TopologyReadinessState, TopologySnapshot,
 };

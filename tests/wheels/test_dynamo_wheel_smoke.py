@@ -83,8 +83,8 @@ def test_core_and_kvbm_install_clean_room(wheelhouse: Path) -> None:
 
 @pytest.mark.aiconfigurator
 @pytest.mark.mocker
-def test_mocker_extra_install_clean_room(wheelhouse: Path) -> None:
-    smoke_install.install_mocker_extra(wheelhouse, sys.executable)
+def test_mocker_support_install_clean_room(wheelhouse: Path) -> None:
+    smoke_install.install_mocker_support(wheelhouse, sys.executable)
 
 
 def test_runtime_wheel_has_no_bundled_libraries(wheelhouse: Path) -> None:

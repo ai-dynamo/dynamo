@@ -376,7 +376,7 @@ def llm_worker(frontend_server, test_directory, runtime_services, engine_type):
             str(
                 config_path.absolute()
             ),  # Use absolute path to avoid working directory issues
-            "--publish-events-and-metrics",
+            "--publish-kv-events",
         ]
 
     # Environment
@@ -825,7 +825,7 @@ class TestConsolidatorRouterE2E:
                     str(
                         config_path.absolute()
                     ),  # Use absolute path to avoid working directory issues
-                    "--publish-events-and-metrics",
+                    "--publish-kv-events",
                 ]
 
             worker_env = os.environ.copy()

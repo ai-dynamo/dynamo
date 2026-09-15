@@ -109,7 +109,8 @@ python3 -m "$WORKER_MODULE" \
   --served-model-name "$MODEL" \
   --extra-engine-args  "$PREFILL_ENGINE_ARGS" \
   --modality "$MODALITY" \
-  --publish-events-and-metrics \
+  --publish-kv-events \
+  --publish-metrics \
   --disaggregation-mode prefill \
   "${OVERRIDE_ARGS[@]}" &
 
@@ -129,7 +130,8 @@ python3 -m "$WORKER_MODULE" \
   --served-model-name "$MODEL" \
   --extra-engine-args  "$DECODE_ENGINE_ARGS" \
   --modality "$MODALITY" \
-  --publish-events-and-metrics \
+  --publish-kv-events \
+  --publish-metrics \
   --disaggregation-mode decode \
   "${OVERRIDE_ARGS[@]}" &
 

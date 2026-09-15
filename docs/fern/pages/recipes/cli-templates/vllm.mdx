@@ -218,7 +218,7 @@ The default model is `Qwen/Qwen3-VL-2B-Instruct`.
 | `ETCD_ENDPOINTS` | `http://127.0.0.1:2379` | etcd endpoint used for Dynamo discovery state. |
 | `VLLM_SYSTEM_PORT_BASE` | `18081` | Starting system and metrics port for vLLM workers. |
 | `KV_EVENTS_PORT_BASE` | `29080` | Starting port for per-worker KV event publishers. |
-| `DYN_MM_IMAGE_CACHE_SIZE` | `32` | Frontend multimodal image-cache capacity. |
+| `DYN_MM_IMAGE_CACHE_SIZE` | `8` | Multimodal image-cache capacity, applied by every component that loads images; `0` disables caching. |
 | `DYNAMO_MM_TRANSFER` | `shm` | Transport used to transfer preprocessed multimodal data. |
 | `VLLM_EXTRA_ARGS` | `Empty` | Additional arguments appended to each `dynamo.vllm` worker command. |
 | `FRONTEND_EXTRA_ARGS` | `Empty` | Additional arguments appended to each frontend command. |
@@ -1274,7 +1274,7 @@ The default model is `Qwen/Qwen3-VL-2B-Instruct`.
 | `ETCD_ENDPOINTS` | `http://127.0.0.1:2379` | etcd endpoint used for Dynamo discovery state. |
 | `VLLM_SYSTEM_PORT_BASE` | `18081` | Starting system and metrics port for vLLM workers. |
 | `KV_EVENTS_PORT_BASE` | `29080` | Starting port for per-worker KV event publishers. |
-| `DYN_MM_IMAGE_CACHE_SIZE` | `32` | Frontend multimodal image-cache capacity. |
+| `DYN_MM_IMAGE_CACHE_SIZE` | `8` | Multimodal image-cache capacity, applied by every component that loads images; `0` disables caching. |
 | `DYNAMO_MM_TRANSFER` | `shm` | Transport used to transfer preprocessed multimodal data. |
 | `VLLM_EXTRA_ARGS` | `Empty` | Additional arguments appended to each `dynamo.vllm` worker command. |
 | `FRONTEND_EXTRA_ARGS` | `Empty` | Additional arguments appended to each frontend command. |

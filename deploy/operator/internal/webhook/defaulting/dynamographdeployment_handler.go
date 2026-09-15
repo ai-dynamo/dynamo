@@ -55,7 +55,8 @@ func NewDGDDefaulter(operatorVersion string) *DGDDefaulter {
 }
 
 // Default implements admission.CustomDefaulter.
-// On every operation: defaults nil Replicas to 1 for all components.
+// On every operation: defaults nil component Replicas to 1 and persists the
+// replica counts implied by explicit multinode roles.
 // On CREATE: sets the controller-owned workload provider from routing intent before provider-specific defaults.
 // Existing unannotated DGDs remain unselected for controller-side workload adoption.
 // On the Grove pathway: defaults nil MinAvailable to 1. Scaling to replicas=0
@@ -96,6 +97,7 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 		if component.Replicas == nil {
 			component.Replicas = ptr.To(int32(1))
 		}
+		defaultMultinodeRoleReplicas(component)
 
 		// Default Grove's minimum available replicas only for Grove-selected DGDs.
 		if providerSelected && provider == consts.WorkloadProviderGrove && component.MinAvailable == nil {
@@ -112,25 +114,17 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 			)
 		}
 
-		// Default the explicit leader and worker provider contexts for multinode components.
-		if component.Multinode != nil {
-			if component.Multinode.Leader != nil && component.Multinode.Leader.ProviderOverride != nil {
-				provideroverride.DefaultTarget(
-					component.Multinode.Leader.ProviderOverride,
-					provider,
-					provideroverride.ScopeMultinodeLeader,
-					component,
-				)
+		// Default each explicit role's provider context independently.
+		for roleIndex := range component.Roles {
+			role := &component.Roles[roleIndex]
+			if role.ProviderOverride == nil {
+				continue
 			}
-
-			if component.Multinode.Worker != nil && component.Multinode.Worker.ProviderOverride != nil {
-				provideroverride.DefaultTarget(
-					component.Multinode.Worker.ProviderOverride,
-					provider,
-					provideroverride.ScopeMultinodeWorker,
-					component,
-				)
+			scope, ok := provideroverride.ScopeForComponentRole(role.Name)
+			if !ok {
+				continue
 			}
+			provideroverride.DefaultTarget(role.ProviderOverride, provider, scope, component)
 		}
 	}
 

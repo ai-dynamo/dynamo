@@ -28,23 +28,15 @@ pub struct MmRoutingInfoRequest {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct PromptRequest {
-    #[serde(default)]
     pub token_ids: Option<Vec<u32>>,
-    #[serde(default)]
     pub mm_routing_info: Option<MmRoutingInfoRequest>,
-    #[serde(default)]
     pub block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
-    #[serde(default)]
     pub block_hashes: Option<Vec<i64>>,
-    #[serde(default)]
     pub sequence_hashes: Option<Vec<i64>>,
-    #[serde(default)]
     pub isl_tokens: Option<usize>,
-    #[serde(default)]
     pub lora_name: Option<String>,
     #[serde(default, rename = "cache_salt")]
     pub cache_namespace: Option<String>,
-    #[serde(default)]
     pub is_eagle: Option<bool>,
 }
 

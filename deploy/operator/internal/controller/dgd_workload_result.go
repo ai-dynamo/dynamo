@@ -25,6 +25,8 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"k8s.io/utils/ptr"
 )
 
 type Reason string
@@ -43,6 +45,34 @@ type ReconcileResult struct {
 	Reason          Reason
 	Message         Message
 	ComponentStatus map[string]nvidiacomv1beta1.ComponentReplicaStatus
+}
+
+// clearComponentGPUShapes removes previously projected GPU shapes before a
+// provider can fail while rendering a replacement.
+func clearComponentGPUShapes(statuses map[string]nvidiacomv1beta1.ComponentReplicaStatus) {
+	for componentName, status := range statuses {
+		status.GPUsPerEngine = nil
+		status.GPUsPerReplica = nil
+		statuses[componentName] = status
+	}
+}
+
+// applyComponentGPUShapes projects provider-resolved shapes onto observed
+// component statuses. Explicit zero distinguishes a successful non-GPU
+// observation from a missing or cleared shape.
+func applyComponentGPUShapes(
+	statuses map[string]nvidiacomv1beta1.ComponentReplicaStatus,
+	shapes map[string]dynamo.GPUShape,
+) {
+	for componentName, shape := range shapes {
+		status, ok := statuses[componentName]
+		if !ok {
+			continue
+		}
+		status.GPUsPerEngine = ptr.To(shape.GPUsPerEngine)
+		status.GPUsPerReplica = ptr.To(shape.GPUsPerReplica)
+		statuses[componentName] = status
+	}
 }
 
 func checkResourcesReadiness(resources []Resource) ReconcileResult {

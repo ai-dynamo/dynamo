@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Block dynamo.vllm/sglang from shadowing the installed vllm/sglang.
+"""Block dynamo.vllm/sglang/triton from shadowing the installed packages.
 
 Pytest collection puts components/src/dynamo on sys.path, which makes
 `import vllm` resolve to dynamo.vllm. Spawned subprocesses (EngineCore,
-sglang scheduler) inherit that and crash on `from vllm.v1 ...`.
+sglang scheduler) inherit that and crash on `from vllm.v1 ...`. The same
+applies to dynamo.triton vs. the triton compiler package torch imports.
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ _UNMANAGED_ROOTS = frozenset({"examples", "skills", ".agents"})
 _REPO_ROOT = Path(__file__).resolve().parent
 
 # Seed sys.modules with the venv copies before pytest collection runs.
-for _name in ("vllm", "sglang"):
+for _name in ("vllm", "sglang", "triton"):
     try:
         importlib.import_module(_name)
     except ImportError:

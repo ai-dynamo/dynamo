@@ -52,7 +52,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         type=str,
         default="vllm",
         choices=("vllm", "sglang", "trtllm"),
-        help="DynamoCheckpoint backend to test.",
+        help="Snapshot checkpoint backend to test.",
     )
     parser.addoption(
         "--model-cache-pvc",

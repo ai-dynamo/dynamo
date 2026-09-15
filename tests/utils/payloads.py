@@ -29,6 +29,8 @@ import requests
 
 from dynamo import prometheus_names  # type: ignore[attr-defined]
 from tests.utils.constants import DefaultPort
+from tests.utils.http_checks import check_health_generate as check_health_generate
+from tests.utils.http_checks import check_models_api as check_models_api
 from tests.utils.prometheus import find_metric_samples, sum_metric_samples
 from tests.utils.router_nvext import RouterNvextExpectation, validate_router_nvext
 
@@ -42,6 +44,7 @@ class BasePayload:
     body: Dict[str, Any]
     expected_response: List[Any]  # Can be List[str] or List[List[str]] for alternatives
     expected_log: List[str]
+    expected_status_code: int = field(default=200, kw_only=True)
     # Number of times to send this exact request in sequence. Each call must
     # pass validation independently. Use >1 for cache/repeatability tests
     # (e.g., CachedTokensChatPayload asserts a cache hit on the 2nd+ call).
@@ -127,6 +130,16 @@ class BasePayload:
         content = self.response_handler(response)
         self.validate(response, content)
         return content
+
+
+@dataclass
+class HttpErrorPayload(BasePayload):
+    """Payload that validates an expected HTTP error response."""
+
+    expected_status_code: int = field(default=400, kw_only=True)
+
+    def response_handler(self, response: Any) -> str:
+        return response.text
 
 
 @dataclass
@@ -2159,6 +2172,76 @@ class SGLangDisaggMetricsPayload(SGLangMetricsPayload):
 
 
 @dataclass
+class SGLangDisaggRouterMetricsPayload(MetricsPayload):
+    """Validate request accounting across disaggregated prefill workers."""
+
+    def _get_common_metric_checks(self) -> list[MetricCheck]:
+        request_counter_name = (
+            f"{prometheus_names.name_prefix.COMPONENT}_"
+            f"{prometheus_names.work_handler.REQUESTS_TOTAL}"
+        )
+        return [
+            check
+            for check in super()._get_common_metric_checks()
+            if check.name != request_counter_name
+        ]
+
+    def validate(self, response: Any, content: str) -> None:
+        # Preserve the existing common metrics checks on the primary prefill
+        # worker, but account for routed requests across every configured
+        # prefill worker.
+        super().validate(response, content)
+
+        if not self.system_ports:
+            raise AssertionError("No prefill worker metrics ports were configured")
+
+        counter_name = (
+            f"{prometheus_names.name_prefix.COMPONENT}_"
+            f"{prometheus_names.work_handler.REQUESTS_TOTAL}"
+        )
+        labels = {
+            prometheus_names.labels.COMPONENT: "prefill",
+            prometheus_names.labels.ENDPOINT: "generate",
+        }
+        counts: dict[int, float] = {}
+
+        for port in self.system_ports:
+            worker_content = content
+            if port != self.port:
+                worker_response = requests.get(
+                    f"http://{self.host}:{port}/metrics",
+                    timeout=self.timeout,
+                )
+                worker_response.raise_for_status()
+                worker_content = worker_response.text
+
+            samples = find_metric_samples(worker_content, counter_name, labels)
+            if not samples:
+                raise AssertionError(
+                    f"Metric {counter_name} with labels {labels} was not found "
+                    f"on prefill worker metrics port {port}"
+                )
+            counts[port] = sum(samples)
+
+        total_requests = sum(counts.values())
+        per_worker = ", ".join(
+            f"port {port}={count:g}" for port, count in counts.items()
+        )
+        if total_requests < self.min_num_requests:
+            raise AssertionError(
+                f"{counter_name} has aggregate count {total_requests:g}, less than "
+                f"required {self.min_num_requests} across prefill workers "
+                f"({per_worker})"
+            )
+        logger.info(
+            "SUCCESS: Found %s with aggregate count %g across prefill workers (%s)",
+            counter_name,
+            total_requests,
+            per_worker,
+        )
+
+
+@dataclass
 class TRTLLMMetricsPayload(MetricsPayload):
     """Metrics validation for TensorRT-LLM backend"""
 
@@ -2218,56 +2301,6 @@ class TRTLLMMetricsPayload(MetricsPayload):
             )
 
         return checks
-
-
-def check_models_api(response):
-    """Check if models API is working and returns models"""
-    try:
-        if response.status_code != 200:
-            return False
-        data = response.json()
-        time.sleep(
-            1
-        )  # temporary to avoid /completions race condition where we get 404 error
-        return data.get("data") and len(data["data"]) > 0
-    except Exception:
-        return False
-
-
-# Additional health check helpers
-def check_health_generate(response):
-    """Validate /health reports a 'generate' endpoint.
-
-    Returns True if either of the following is found:
-      - "endpoints" contains a string mentioning 'generate'
-      - "instances" contains an object with endpoint == 'generate'
-    """
-    try:
-        if response.status_code != 200:
-            return False
-        data = response.json()
-
-        # Check endpoints list for any entry containing 'generate'
-        endpoints = data.get("endpoints", []) or []
-        for ep in endpoints:
-            if isinstance(ep, str) and "generate" in ep:
-                time.sleep(
-                    1
-                )  # temporary to avoid /completions race condition where we get 404 error
-                return True
-
-        # Check instances for an entry with endpoint == 'generate'
-        instances = data.get("instances", []) or []
-        for inst in instances:
-            if isinstance(inst, dict) and inst.get("endpoint") == "generate":
-                time.sleep(
-                    1
-                )  # temporary to avoid /completions race condition where we get 404 error
-                return True
-
-        return False
-    except Exception:
-        return False
 
 
 # backwards compatiability

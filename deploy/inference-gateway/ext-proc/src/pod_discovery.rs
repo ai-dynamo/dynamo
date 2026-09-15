@@ -7,6 +7,12 @@
 //! Maintains an index of `Ready`, non-terminating pods using the pool's match
 //! labels and target port. Workers are keyed by `hash_pod_name(pod_name)` for
 //! selector registration and endpoint resolution.
+//!
+//! # Required k8s RBAC
+//!
+//! Standalone mode only (`DYN_EPP_MODE=standalone`). Needs the following
+//! permission granted to SA `dynamo-epp` in `examples/onramp/agg.yaml`:
+//! - `pods:list/watch`
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};

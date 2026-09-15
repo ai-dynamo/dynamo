@@ -36,6 +36,25 @@ def _vllm_config():
     )
 
 
+def _core_engine_launch_object(engine_manager, addresses):
+    """The shape vLLM 0.28 yields: a ``CoreEngineLaunch`` dataclass.
+
+    Reproduced locally rather than imported, because the name does not exist
+    in the vLLM releases that yield the tuple below.
+    """
+    return SimpleNamespace(
+        engine_manager=engine_manager,
+        coordinator=None,
+        addresses=addresses,
+        tensor_queue=None,
+    )
+
+
+def _core_engine_launch_tuple(engine_manager, addresses):
+    """The shape vLLM yields before 0.28, including the 0.27.1 XPU images."""
+    return (engine_manager, None, addresses, None)
+
+
 def test_child_environment_offsets_system_port_by_index(monkeypatch):
     monkeypatch.setenv("DYN_SYSTEM_PORT", "19401")
     env = processes._child_environment(
@@ -193,7 +212,41 @@ def test_process_group_reports_unexpected_child_exit():
     group._stopping.set()
 
 
-def test_parent_launches_n_minus_one_children_and_one_engine(monkeypatch):
+def _assert_names_verified_versions(message):
+    for version in processes._VERIFIED_VLLM_VERSIONS:
+        assert version in message
+
+
+def test_unpack_core_engine_launch_names_a_renamed_field():
+    """An upstream rename must say which field went missing."""
+    launch = SimpleNamespace(engine_manager=Mock(), coordinator=None, addresses=Mock())
+
+    with pytest.raises(RuntimeError) as raised:
+        processes._unpack_core_engine_launch(launch)
+
+    message = str(raised.value)
+    assert "tensor_queue" in message
+    _assert_names_verified_versions(message)
+    assert isinstance(raised.value.__cause__, AttributeError)
+
+
+@pytest.mark.parametrize("size", [3, 5], ids=["short-tuple", "long-tuple"])
+def test_unpack_core_engine_launch_rejects_a_resized_tuple(size):
+    """A tuple of the wrong arity must not reach the caller's four-name unpack."""
+    with pytest.raises(RuntimeError) as raised:
+        processes._unpack_core_engine_launch(tuple(range(size)))
+
+    message = str(raised.value)
+    assert f"{size}-tuple" in message
+    _assert_names_verified_versions(message)
+
+
+@pytest.mark.parametrize(
+    "make_launch",
+    [_core_engine_launch_object, _core_engine_launch_tuple],
+    ids=["core-engine-launch-object", "legacy-tuple"],
+)
+def test_parent_launches_n_minus_one_children_and_one_engine(monkeypatch, make_launch):
     process_count = 4
     addresses = SimpleNamespace(
         inputs=[f"in{i}" for i in range(process_count)],
@@ -210,9 +263,11 @@ def test_parent_launches_n_minus_one_children_and_one_engine(monkeypatch):
         children.append(child)
         return child
 
+    # Mirrors vLLM's launch_core_engines signature exactly: no *args, so a
+    # call with the wrong arity fails here instead of at startup.
     @contextmanager
-    def launch_context(*_args, **_kwargs):
-        yield engine_manager, None, addresses, None
+    def launch_context(vllm_config, executor_class, log_stats, addresses):
+        yield make_launch(engine_manager, addresses)
 
     parent_client = Mock()
     parent_config = _vllm_config()

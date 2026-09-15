@@ -205,7 +205,7 @@ impl KvReplayRouter {
             .configured_policy_profile()
             .map_err(anyhow::Error::from)?;
         let scheduler_cancel = CancellationToken::new();
-        let scheduler = Arc::new(dynamo_kv_router::LocalScheduler::new_with_policy_profile(
+        let scheduler = Arc::new(dynamo_kv_router::LocalScheduler::new(
             slots,
             worker_config_rx,
             profile,
@@ -220,7 +220,7 @@ impl KvReplayRouter {
             scheduler_cancel.clone(),
             "replay",
             false,
-        )?);
+        ));
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
         let indexer_clone = indexer.clone();
         let event_task = tokio::spawn(async move {

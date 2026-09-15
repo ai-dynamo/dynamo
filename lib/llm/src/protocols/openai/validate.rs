@@ -7,6 +7,7 @@ use dynamo_runtime::config::{
     env_is_truthy, environment_names::llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
 };
 
+use super::common_ext::{CommonExtProvider, extract_guided_decoding_options};
 use super::tools::{ToolChoiceError, validate_openai_tool_choice};
 
 //
@@ -146,8 +147,15 @@ fn validate_no_unsupported_fields_with_ignore(
         anyhow::bail!("`cache_salt` must be a string");
     }
     if let Some(value) = unsupported_fields.get("stop_token_ids") {
-        serde_json::from_value::<Vec<crate::types::TokenIdType>>(value.clone())
+        let token_ids: Vec<crate::types::TokenIdType> = serde_json::from_value(value.clone())
             .map_err(|_| anyhow::anyhow!("`stop_token_ids` must be an array of token IDs"))?;
+        if token_ids.len() > MAX_STOP_SEQUENCES {
+            return Err(crate::protocols::common::invalid_argument_error(format!(
+                "Maximum of {} stop token IDs allowed, got {}",
+                MAX_STOP_SEQUENCES,
+                token_ids.len()
+            )));
+        }
     }
     if let Some(value) = unsupported_fields.get("detokenize")
         && !value.is_boolean()
@@ -444,11 +452,11 @@ pub fn validate_stop(stop: &Option<dynamo_protocols::types::Stop>) -> Result<(),
                     anyhow::bail!("Stop sequences array cannot be empty");
                 }
                 if sequences.len() > MAX_STOP_SEQUENCES {
-                    anyhow::bail!(
+                    return Err(crate::protocols::common::invalid_argument_error(format!(
                         "Maximum of {} stop sequences allowed, got {}",
                         MAX_STOP_SEQUENCES,
                         sequences.len()
-                    );
+                    )));
                 }
                 for (i, sequence) in sequences.iter().enumerate() {
                     if sequence.is_empty() {
@@ -461,11 +469,11 @@ pub fn validate_stop(stop: &Option<dynamo_protocols::types::Stop>) -> Result<(),
                     anyhow::bail!("Stop token IDs array cannot be empty");
                 }
                 if token_ids.len() > MAX_STOP_SEQUENCES {
-                    anyhow::bail!(
+                    return Err(crate::protocols::common::invalid_argument_error(format!(
                         "Maximum of {} stop token IDs allowed, got {}",
                         MAX_STOP_SEQUENCES,
                         token_ids.len()
-                    );
+                    )));
                 }
             }
         }
@@ -869,6 +877,23 @@ pub fn validate_chat_template_args(
     Ok(())
 }
 
+/// Rejects a request with conflicting guided-decoding options.
+///
+/// The conflict rule itself lives in [`crate::protocols::common::GuidedDecodingOptions::validate`],
+/// reached here through `from_optional`, so this function adds no second copy of it. What it adds is
+/// the call at the request-validation boundary: every other field is checked here, where
+/// a failure becomes a 400 naming the problem, while guided decoding was checked only
+/// later inside `extract_sampling_options`. By that point the error is an untyped
+/// `anyhow` with nothing for the HTTP layer to branch on, so a malformed request was
+/// reported to the caller as `500 Internal Server Error`.
+///
+/// `structural_tag` has no `CommonExtProvider` getter, matching `extract_sampling_options`,
+/// which also passes `None` for it.
+pub fn validate_guided_decoding(request: &impl CommonExtProvider) -> Result<(), anyhow::Error> {
+    extract_guided_decoding_options(request)?;
+    Ok(())
+}
+
 /// vLLM `ChatCompletionRequest` (`mode="before"`): both flags true on the raw
 /// payload is an error. Omitted `add_generation_prompt` finalizes to true (vLLM
 /// 0.27.1 and the Python frontend), so `continue_final_message=true` requires
@@ -1020,5 +1045,67 @@ mod tests {
         }))
         .unwrap();
         validate_response_format(&Some(fmt)).unwrap();
+    }
+
+    #[test]
+    fn validate_stop_accepts_up_to_max_sequences() {
+        let max_strings = Some(dynamo_protocols::types::Stop::StringArray(
+            (0..MAX_STOP_SEQUENCES).map(|i| i.to_string()).collect(),
+        ));
+        validate_stop(&max_strings).unwrap();
+
+        let max_token_ids = Some(dynamo_protocols::types::Stop::TokenIdArray(
+            (0..MAX_STOP_SEQUENCES as u32).collect(),
+        ));
+        validate_stop(&max_token_ids).unwrap();
+    }
+
+    #[test]
+    fn validate_stop_rejects_over_max_sequences() {
+        let over_max_strings = Some(dynamo_protocols::types::Stop::StringArray(
+            (0..=MAX_STOP_SEQUENCES).map(|i| i.to_string()).collect(),
+        ));
+        let err = validate_stop(&over_max_strings).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "InvalidRequest: Maximum of {} stop sequences allowed, got {}",
+                MAX_STOP_SEQUENCES,
+                MAX_STOP_SEQUENCES + 1
+            )
+        );
+
+        let over_max_token_ids = Some(dynamo_protocols::types::Stop::TokenIdArray(
+            (0..=MAX_STOP_SEQUENCES as u32).collect(),
+        ));
+        let err = validate_stop(&over_max_token_ids).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "InvalidRequest: Maximum of {} stop token IDs allowed, got {}",
+                MAX_STOP_SEQUENCES,
+                MAX_STOP_SEQUENCES + 1
+            )
+        );
+    }
+
+    #[test]
+    fn validate_no_unsupported_fields_rejects_over_max_stop_token_ids() {
+        let over_max: Vec<u32> = (0..=MAX_STOP_SEQUENCES as u32).collect();
+        let unsupported_fields = HashMap::from([("stop_token_ids".to_string(), json!(over_max))]);
+
+        let err = validate_no_unsupported_fields(&unsupported_fields).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "InvalidRequest: Maximum of {} stop token IDs allowed, got {}",
+                MAX_STOP_SEQUENCES,
+                MAX_STOP_SEQUENCES + 1
+            )
+        );
+
+        let at_max: Vec<u32> = (0..MAX_STOP_SEQUENCES as u32).collect();
+        let ok_fields = HashMap::from([("stop_token_ids".to_string(), json!(at_max))]);
+        validate_no_unsupported_fields(&ok_fields).unwrap();
     }
 }

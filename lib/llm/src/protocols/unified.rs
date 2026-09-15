@@ -37,7 +37,6 @@ use dynamo_protocols::types::anthropic::CacheControl;
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
 
-use crate::preprocessor::media::MediaDecoder;
 use dynamo_renderer::{OAIChatLikeRequest, TextInput};
 
 use crate::protocols::common::extensions::{NvExt, NvExtProvider};
@@ -84,8 +83,7 @@ pub struct AnthropicContext {
     pub cache_breakpoints: Vec<CacheBreakpoint>,
 
     /// When true, the model should not issue parallel tool calls.
-    /// The Anthropic API supports `disable_parallel_tool_use` on the tool_choice
-    /// object but there is no OpenAI equivalent field.
+    /// Also mapped to the inverse of Chat Completions' `parallel_tool_calls`.
     #[serde(default)]
     pub disable_parallel_tool_use: bool,
 
@@ -261,7 +259,7 @@ fn extract_cache_breakpoints(req: &AnthropicCreateMessageRequest) -> Vec<CacheBr
 
 /// Extract `disable_parallel_tool_use` from the Anthropic tool_choice.
 /// The Anthropic API allows `{"type": "auto", "disable_parallel_tool_use": true}`
-/// but there's no OpenAI Chat equivalent.
+/// and the equivalent field on named tool choices.
 fn extract_disable_parallel_tool_use(req: &AnthropicCreateMessageRequest) -> bool {
     use super::anthropic::types::AnthropicToolChoice;
 
@@ -501,7 +499,7 @@ impl OAIChatLikeRequest for UnifiedRequest {
 }
 
 impl crate::preprocessor::prompt::MediaRequestExt for UnifiedRequest {
-    fn media_io_kwargs(&self) -> Option<&MediaDecoder> {
+    fn media_io_kwargs(&self) -> Option<&serde_json::Value> {
         self.inner.media_io_kwargs.as_ref()
     }
 }

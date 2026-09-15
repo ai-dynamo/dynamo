@@ -68,14 +68,19 @@ runs:
       run: |
         make check
 
-    - name: Test Go/Python DGD override boundary
+    - name: Test Go/Python integration boundaries
       if: ${{ inputs.component == 'operator' }}
       shell: bash
       env:
         DYNAMO_RUN_DGD_OVERRIDE_GO_INTEGRATION: "1"
+        DYNAMO_REQUIRE_SNAPSHOT_ENV_PARITY: "1"
         PYTHONPATH: ${{ github.workspace }}/components/src
       run: |
         go version
+        go -C deploy/operator test \
+          ./internal/checkpoint \
+          -run '^TestSnapshotRestoreEnvironmentNamesMatchPythonRuntime$' \
+          -count=1
         python -m pytest \
           -c /dev/null \
           --confcutdir=components/src/dynamo/profiler/tests/integration \

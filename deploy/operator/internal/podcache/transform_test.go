@@ -8,6 +8,7 @@ package podcache
 import (
 	"testing"
 
+	podcontract "github.com/ai-dynamo/snapshot/api/podcontract"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -95,6 +96,12 @@ func TestProjectConsumerContract(t *testing.T) {
 			Conditions: []corev1.PodCondition{
 				{Type: corev1.PodScheduled, Status: corev1.ConditionTrue, Message: "discard-me"},
 				{Type: corev1.PodReady, Status: corev1.ConditionTrue, Reason: "discard-me"},
+				{
+					Type:    corev1.PodConditionType(podcontract.RestoredCondition),
+					Status:  corev1.ConditionFalse,
+					Reason:  podcontract.RestoreReasonFailed,
+					Message: "discard-me",
+				},
 			},
 			ContainerStatuses: []corev1.ContainerStatus{
 				{
@@ -148,7 +155,14 @@ func TestProjectConsumerContract(t *testing.T) {
 	t.Run("model retains Ready identity command and arguments", func(t *testing.T) {
 		require.Len(t, got.Spec.Containers, 1)
 		assert.Equal(t, corev1.Container{Name: "main", Command: []string{"python"}, Args: []string{"-m", "dynamo"}}, got.Spec.Containers[0])
-		assert.Equal(t, []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}, got.Status.Conditions)
+		assert.Equal(t, []corev1.PodCondition{
+			{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			{
+				Type:   corev1.PodConditionType(podcontract.RestoredCondition),
+				Status: corev1.ConditionFalse,
+				Reason: podcontract.RestoreReasonFailed,
+			},
+		}, got.Status.Conditions)
 	})
 	t.Run("failover DGDR GMS replacement and Recreate retain status state", func(t *testing.T) {
 		assert.Equal(t, corev1.PodRunning, got.Status.Phase)

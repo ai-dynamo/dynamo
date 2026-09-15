@@ -28,6 +28,7 @@ use dynamo_kv_router::config::try_kv_router_config_from_dynamo_env;
 use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
 use dynamo_kv_router::protocols::compute_block_hash_for_seq;
 use dynamo_kv_router::protocols::*;
+use dynamo_kv_router::scheduling::AdmissionAttempt;
 #[cfg(feature = "kv-indexer")]
 use dynamo_kv_router::services::indexer::{self, IndexerConfig};
 #[cfg(feature = "select-service")]
@@ -59,6 +60,7 @@ type RsManagedKvRouter = llm_rs::kv_router::ManagedKvRouter<WorkerSelectionPolic
 use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};
 use llm_rs::protocols::common::timing::RequestTracker;
 use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+use llm_rs::session_affinity::SessionAffinityMode as RsSessionAffinityMode;
 
 use super::aic_callback::create_aic_prefill_load_estimator;
 use super::entrypoint::AicPerfConfig;
@@ -1116,6 +1118,7 @@ pub(crate) struct KvEventPublisher {
     dp_rank: DpRank,
     warning_count: Arc<AtomicU32>,
     image_token_id: Option<u32>,
+    video_token_id: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -1158,9 +1161,10 @@ impl KvEventPublisher {
             kv_block_size,
             dp_rank,
             warning_count: Arc::new(AtomicU32::new(0)),
-            // This bridge has no image-token configuration. Python callers can
-            // set one through the public constructor when needed.
+            // This bridge has no placeholder-token configuration. Python callers
+            // can set one through the public constructor when needed.
             image_token_id: None,
+            video_token_id: None,
         }
     }
 
@@ -1194,6 +1198,7 @@ impl KvEventPublisher {
                     block_mm_infos,
                     is_eagle,
                     self.image_token_id,
+                    self.video_token_id,
                 ),
             }),
             dp_rank: self.dp_rank,
@@ -1236,11 +1241,15 @@ impl KvEventPublisher {
     ///         so compatible events within that list are still coalesced.
     ///         Use ``50`` to allow compatible tails to span lists for up to 50 ms.
     ///         Maximum allowed is 15_000 (15 seconds); larger values are capped.
+    ///     image_token_id: Optional model image-placeholder token used to
+    ///         normalize vLLM KV events for exact MM routing.
     ///     kv_state_endpoint: Optional endpoint that owns this publisher's KV event
     ///         and recovery state. When None, KV state maps to ``endpoint``; this
     ///         does not change the endpoint used for request routing.
+    ///     video_token_id: Optional model video-placeholder token used to
+    ///         normalize vLLM KV events for exact MM routing.
     #[new]
-    #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS, image_token_id=None, kv_state_endpoint=None))]
+    #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS, image_token_id=None, kv_state_endpoint=None, video_token_id=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         endpoint: Endpoint,
@@ -1253,11 +1262,13 @@ impl KvEventPublisher {
         batching_timeout_ms: Option<u64>,
         image_token_id: Option<u32>,
         kv_state_endpoint: Option<String>,
+        video_token_id: Option<u32>,
     ) -> PyResult<Self> {
         let source_config = zmq_endpoint.map(|ep| KvEventSourceConfig::Zmq {
             endpoint: ep,
             topic: zmq_topic.unwrap_or_default(),
             image_token_id,
+            video_token_id,
         });
 
         if kv_block_size == 0 {
@@ -1286,6 +1297,7 @@ impl KvEventPublisher {
             dp_rank,
             warning_count: Arc::new(AtomicU32::new(0)),
             image_token_id,
+            video_token_id,
         })
     }
 
@@ -2190,7 +2202,8 @@ impl KvRouter {
     ///
     /// Worker role and Prometheus metric labels come from the endpoint's model card.
     #[new]
-    #[pyo3(signature = (endpoint, block_size, kv_router_config, aic_perf_config=None, session_affinity_ttl_secs=None, *, load_threshold_config=None))]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (endpoint, block_size, kv_router_config, aic_perf_config=None, session_affinity_ttl_secs=None, *, load_threshold_config=None, session_affinity_mode="hard"))]
     fn new(
         py: Python<'_>,
         endpoint: &Endpoint,
@@ -2199,12 +2212,16 @@ impl KvRouter {
         aic_perf_config: Option<&AicPerfConfig>,
         session_affinity_ttl_secs: Option<u64>,
         load_threshold_config: Option<&LoadThresholdConfig>,
+        session_affinity_mode: &str,
     ) -> PyResult<Self> {
         if session_affinity_ttl_secs.is_some_and(|ttl| !(1..=31_536_000).contains(&ttl)) {
             return Err(PyValueError::new_err(
                 "session_affinity_ttl_secs must be between 1 and 31536000",
             ));
         }
+        let session_affinity_mode = session_affinity_mode
+            .parse::<RsSessionAffinityMode>()
+            .map_err(PyValueError::new_err)?;
         let kv_router_config = kv_router_config.inner();
         let load_threshold_config = load_threshold_config
             .map(LoadThresholdConfig::as_rust)
@@ -2274,6 +2291,7 @@ impl KvRouter {
                     managed_router.router().clone(),
                     managed_router.load_context().clone(),
                     session_affinity_ttl_secs.map(Duration::from_secs),
+                    session_affinity_mode,
                 )
                 .map_err(to_pyerr)?;
 
@@ -2466,8 +2484,8 @@ impl KvRouter {
         let update_states = request_id.is_some();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let outcome = chooser
-                .find_best_match_details_with_policy_class(
+            let admitted = chooser
+                .find_best_match_details_with_policy_class_admitted(
                     request_id.as_deref(),
                     &token_ids,
                     block_mm_infos.as_deref(),
@@ -2487,6 +2505,7 @@ impl KvRouter {
                 )
                 .await
                 .map_err(to_pyerr)?;
+            let (outcome, attempt) = admitted.into_parts();
             let (best_worker, overlap_blocks) = match outcome {
                 llm_rs::kv_router::FindBestMatchOutcome::Routed {
                     worker,
@@ -2498,7 +2517,7 @@ impl KvRouter {
                 }
             };
 
-            if update_indexer {
+            let routing_decision = if update_indexer {
                 let cfg = chooser.kv_router_config();
                 if !cfg.use_kv_events || cfg.predict_on_route_enabled() {
                     let mut tokens_with_hashes =
@@ -2514,11 +2533,34 @@ impl KvRouter {
                         tokens_with_hashes =
                             tokens_with_hashes.with_cache_namespace(cache_namespace.clone());
                     }
-                    chooser
-                        .record_routing_decision(tokens_with_hashes, best_worker)
-                        .await
-                        .map_err(to_pyerr)?;
+                    Some(tokens_with_hashes)
+                } else {
+                    None
                 }
+            } else {
+                None
+            };
+
+            if let Some(request_id) = request_id {
+                let AdmissionAttempt::Tracked(attempt_id) = attempt else {
+                    return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                        "tracked admission returned no attempt identity",
+                    ));
+                };
+                chooser
+                    .enroll_public_request_attempt(
+                        request_id,
+                        best_worker,
+                        attempt_id,
+                        routing_decision,
+                    )
+                    .await
+                    .map_err(to_pyerr)?;
+            } else if let Some(tokens_with_hashes) = routing_decision {
+                chooser
+                    .record_query_only_routing_decision(tokens_with_hashes, best_worker)
+                    .await
+                    .map_err(to_pyerr)?;
             }
 
             Ok((best_worker.worker_id, best_worker.dp_rank, overlap_blocks))

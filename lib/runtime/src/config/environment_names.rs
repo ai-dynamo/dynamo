@@ -14,7 +14,7 @@
 //! - **Runtime**: Tokio runtime configuration and system server settings
 //! - **NATS**: NATS client connection and authentication
 //! - **ETCD**: ETCD client connection and authentication
-//! - **TCP Response Stream**: TCP response stream server (CallHome) port and host
+//! - **TCP Request Callback**: bidirectional request callback listener port and host
 //! - **Event Plane**: Event transport selection (NATS)
 //! - **KVBM**: Key-Value Block Manager configuration
 //! - **LLM**: Language model inference configuration
@@ -75,6 +75,37 @@ pub mod logging {
 
         /// Service name for OTLP traces and logs
         pub const OTEL_SERVICE_NAME: &str = "OTEL_SERVICE_NAME";
+
+        /// Set to "otlp" to export metrics over OTLP. Any other value disables it.
+        /// Prometheus scraping is unaffected either way.
+        pub const OTEL_METRICS_EXPORTER: &str = "OTEL_METRICS_EXPORTER";
+
+        /// OTLP exporter endpoint URL for metrics. Falls back to OTEL_EXPORTER_OTLP_ENDPOINT.
+        pub const OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT";
+
+        /// OTLP exporter transport protocol for metrics. Defaults to OTEL_EXPORTER_OTLP_PROTOCOL.
+        pub const OTEL_EXPORTER_OTLP_METRICS_PROTOCOL: &str = "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL";
+
+        /// Headers sent with every OTLP request, as `key=value` pairs separated
+        /// by commas. Used for authenticated collectors (bearer token, API key).
+        pub const OTEL_EXPORTER_OTLP_HEADERS: &str = "OTEL_EXPORTER_OTLP_HEADERS";
+
+        /// Headers for metrics specifically. Replaces OTEL_EXPORTER_OTLP_HEADERS
+        /// when set, rather than merging with it, per the OTLP exporter spec.
+        pub const OTEL_EXPORTER_OTLP_METRICS_HEADERS: &str = "OTEL_EXPORTER_OTLP_METRICS_HEADERS";
+
+        /// Headers for traces specifically. Replaces OTEL_EXPORTER_OTLP_HEADERS when set.
+        pub const OTEL_EXPORTER_OTLP_TRACES_HEADERS: &str = "OTEL_EXPORTER_OTLP_TRACES_HEADERS";
+
+        /// Headers for logs specifically. Replaces OTEL_EXPORTER_OTLP_HEADERS when set.
+        pub const OTEL_EXPORTER_OTLP_LOGS_HEADERS: &str = "OTEL_EXPORTER_OTLP_LOGS_HEADERS";
+
+        /// Resource attributes applied to every exported signal, as `key=value`
+        /// pairs separated by commas.
+        pub const OTEL_RESOURCE_ATTRIBUTES: &str = "OTEL_RESOURCE_ATTRIBUTES";
+
+        /// Metric export interval in milliseconds. Spec default is 60000.
+        pub const OTEL_METRIC_EXPORT_INTERVAL: &str = "OTEL_METRIC_EXPORT_INTERVAL";
     }
 }
 
@@ -205,6 +236,9 @@ pub mod etcd {
     /// ETCD lease TTL in seconds (default: 10)
     pub const ETCD_LEASE_TTL: &str = "ETCD_LEASE_TTL";
 
+    /// Maximum time in seconds to retry the initial ETCD connection (default: 120)
+    pub const ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS: &str = "ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS";
+
     /// ETCD authentication environment variables
     pub mod auth {
         /// Username for ETCD authentication
@@ -316,6 +350,9 @@ pub mod kvbm {
 
 /// LLM (Language Model) inference environment variables
 pub mod llm {
+    /// Delay between tokens emitted by the token echo engine, in milliseconds.
+    pub const DYN_TOKEN_ECHO_DELAY_MS: &str = "DYN_TOKEN_ECHO_DELAY_MS";
+
     /// HTTP body size limit in MB
     pub const DYN_HTTP_BODY_LIMIT_MB: &str = "DYN_HTTP_BODY_LIMIT_MB";
 
@@ -423,9 +460,10 @@ pub mod llm {
     /// Set to `0` or leave unset to disable the timeout (default: disabled).
     pub const DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS: &str = "DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS";
 
-    /// Pre-commit peek window in milliseconds for the streaming chat/responses
-    /// paths. Controls how long the frontend polls the engine stream for a
-    /// synchronous backend error before committing HTTP 200.
+    /// Pre-commit peek window in milliseconds for the streaming chat,
+    /// completions, responses, and Anthropic messages paths. Controls how long
+    /// the frontend polls the engine stream for a synchronous backend error
+    /// before committing HTTP 200.
     /// Trades a small first-token latency budget
     /// for the ability to surface `Backend(InvalidArgument)` and other
     /// request-validation errors as HTTP 4xx instead of an SSE error frame.
@@ -435,6 +473,9 @@ pub mod llm {
     /// request-parse / admission p99 latency to opt in — request-validation
     /// errors within the window surface as HTTP 4xx; anything past the window
     /// stays as an SSE error frame. Setting to `0` also disables the peek.
+    ///
+    /// Read once when the HTTP service is built. A policy supplied through
+    /// `HttpServiceConfigBuilder::streaming_backend_error_check` replaces it.
     pub const DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS: &str = "DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS";
 
     /// Enable the LoRA allocation controller (set to "true" to enable)
@@ -469,14 +510,47 @@ pub mod llm {
     /// EMA smoothing factor (alpha) for the EMA predictor. Range [0.0, 1.0].
     pub const DYN_LORA_ALLOCATION_EMA_ALPHA: &str = "DYN_LORA_ALLOCATION_EMA_ALPHA";
 
+    /// Bounded startup wait, in seconds, for the KV state-agent host
+    /// advertisement before an opted-in worker gives up on KV routing.
+    /// `0` fails after a single discovery snapshot; invalid values use the
+    /// 30-second default.
+    pub const DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS: &str =
+        "DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS";
+
     /// Metrics configuration
     pub mod metrics {
         /// Custom metrics prefix (overrides default "dynamo_frontend")
         pub const DYN_METRICS_PREFIX: &str = "DYN_METRICS_PREFIX";
 
-        /// Histogram bucket configuration (pattern: `<PREFIX>_MIN`, `<PREFIX>_MAX`, `<PREFIX>_COUNT`)
-        /// Example: DYN_HISTOGRAM_TTFT_MIN, DYN_HISTOGRAM_TTFT_MAX, DYN_HISTOGRAM_TTFT_COUNT
-        pub const HISTOGRAM_PREFIX: &str = "DYN_HISTOGRAM_";
+        /// Histogram bucket configuration prefixes. Each is suffixed with `_MIN`,
+        /// `_MAX`, or `_COUNT` to form the variable that tunes one frontend
+        /// histogram's log-spaced buckets, for example `DYN_METRICS_ITL_MAX`.
+        /// Values are read once, when the frontend builds its metrics.
+        pub const DYN_METRICS_REQUEST_DURATION: &str = "DYN_METRICS_REQUEST_DURATION";
+        /// See [`DYN_METRICS_REQUEST_DURATION`].
+        pub const DYN_METRICS_INPUT_SEQUENCE: &str = "DYN_METRICS_INPUT_SEQUENCE";
+        /// See [`DYN_METRICS_REQUEST_DURATION`].
+        pub const DYN_METRICS_OUTPUT_SEQUENCE: &str = "DYN_METRICS_OUTPUT_SEQUENCE";
+        /// See [`DYN_METRICS_REQUEST_DURATION`].
+        pub const DYN_METRICS_TTFT: &str = "DYN_METRICS_TTFT";
+        /// See [`DYN_METRICS_REQUEST_DURATION`].
+        pub const DYN_METRICS_ITL: &str = "DYN_METRICS_ITL";
+        /// See [`DYN_METRICS_REQUEST_DURATION`].
+        pub const DYN_METRICS_EMBEDDING_LATENCY: &str = "DYN_METRICS_EMBEDDING_LATENCY";
+
+        /// Deprecated prefix for the histogram bucket variables above.
+        ///
+        /// This was once prepended to prefixes that already started with
+        /// `DYN_METRICS_`, so the variables were read under doubled names such as
+        /// `DYN_HISTOGRAM_DYN_METRICS_ITL_MAX`. The doubled form is still accepted
+        /// as a fallback, with a warning, and will be removed in a future release.
+        pub const DEPRECATED_HISTOGRAM_PREFIX: &str = "DYN_HISTOGRAM_";
+
+        /// Former name of [`DEPRECATED_HISTOGRAM_PREFIX`], kept so that code outside
+        /// this workspace importing it keeps compiling. Remove together with the
+        /// doubled-name fallback.
+        #[deprecated(note = "use DEPRECATED_HISTOGRAM_PREFIX")]
+        pub const HISTOGRAM_PREFIX: &str = DEPRECATED_HISTOGRAM_PREFIX;
     }
 
     /// Forward-pass-metrics trace configuration.
@@ -718,15 +792,30 @@ pub mod request_plane {
     /// The process-wide value is cached on first use and defaults to "msgpack". Outbound requests
     /// use the destination endpoint's advertised codec, or "json" for a legacy destination.
     pub const DYN_REQUEST_PLANE_CODEC: &str = "DYN_REQUEST_PLANE_CODEC";
+
+    /// Maximum TCP request-plane message size, in bytes.
+    pub const DYN_TCP_MAX_MESSAGE_SIZE: &str = "DYN_TCP_MAX_MESSAGE_SIZE";
+
+    /// Buffer size above which the TCP decoder shrinks an empty buffer, in bytes.
+    pub const DYN_TCP_SHRINK_MESSAGE_SIZE: &str = "DYN_TCP_SHRINK_MESSAGE_SIZE";
 }
 
-/// TCP response stream server (CallHome listener) environment variables
+/// Response plane transport configuration.
+pub mod response_plane {
+    /// Response transport used by every runtime in this process: "tcp" or "quic".
+    /// Defaults to "tcp".
+    pub const DYN_RESPONSE_PLANE: &str = "DYN_RESPONSE_PLANE";
+}
+
+/// TCP request callback listener environment variables. Names are retained for compatibility.
 pub mod tcp_response_stream {
-    /// Port for the TCP response stream server.
+    /// Port shared by the TCP request callback and QUIC response listeners.
     /// If unset or 0, the OS assigns a free ephemeral port.
     pub const DYN_TCP_RESPONSE_STREAM_PORT: &str = "DYN_TCP_RESPONSE_STREAM_PORT";
 
-    /// Host/interface for the TCP response stream server.
+    /// IP address or exact interface shared by the TCP request callback and QUIC response
+    /// listeners.
+    /// Unspecified addresses are rejected.
     /// If unset, the server auto-detects a routable local IP.
     pub const DYN_TCP_RESPONSE_STREAM_HOST: &str = "DYN_TCP_RESPONSE_STREAM_HOST";
 
@@ -773,6 +862,15 @@ pub mod tcp_response_stream {
     }
 }
 
+/// Fixed-lane QUIC response transport.
+pub mod quic_response {
+    /// Bulk-lane batch interval in microseconds. Defaults to 5,000. Registration,
+    /// prologue, first-data, and priority-end frames always flush immediately.
+    pub const DYN_QUIC_RESPONSE_BATCH_INTERVAL_US: &str = "DYN_QUIC_RESPONSE_BATCH_INTERVAL_US";
+    /// Per-response frontend mailbox capacity. Defaults to 16,384 frames.
+    pub const DYN_QUIC_RESPONSE_BUFFER_CAPACITY: &str = "DYN_QUIC_RESPONSE_BUFFER_CAPACITY";
+}
+
 /// Event Plane transport environment variables
 pub mod event_plane {
     /// Event transport selection: "zmq" or "nats".
@@ -786,6 +884,11 @@ pub mod event_plane {
 
     /// Event plane codec selection: "json" or "msgpack".
     pub const DYN_EVENT_PLANE_CODEC: &str = "DYN_EVENT_PLANE_CODEC";
+
+    /// IP address or exact interface advertised by direct ZMQ event publishers.
+    /// Unspecified addresses are rejected.
+    /// If unset, the runtime auto-detects a local IP address.
+    pub const DYN_EVENT_PLANE_HOST: &str = "DYN_EVENT_PLANE_HOST";
 
     /// Bounded capacity of the direct ZMQ event-subscriber's merged event channel.
     ///
@@ -930,6 +1033,7 @@ mod tests {
             // ETCD
             etcd::ETCD_ENDPOINTS,
             etcd::ETCD_LEASE_TTL,
+            etcd::ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS,
             etcd::auth::ETCD_AUTH_USERNAME,
             etcd::auth::ETCD_AUTH_PASSWORD,
             etcd::auth::ETCD_AUTH_CA,
@@ -967,6 +1071,7 @@ mod tests {
             llm::DYN_REASONING_FIELD_NAME,
             llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
             llm::DYN_ENABLE_GUIDED_TOOL_STREAMING,
+            llm::DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS,
             llm::DYN_LORA_ALLOCATION_ENABLED,
             llm::DYN_LORA_ALLOCATION_ALGORITHM,
             llm::DYN_LORA_ALLOCATION_TIMESTEP_SECS,
@@ -976,8 +1081,15 @@ mod tests {
             llm::DYN_LORA_ALLOCATION_PREDICTOR_TYPE,
             llm::DYN_LORA_ALLOCATION_EMA_ALPHA,
             llm::DYN_LORA_MCF_CONFIG,
+            llm::DYN_TOKEN_ECHO_DELAY_MS,
             llm::DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS,
             llm::metrics::DYN_METRICS_PREFIX,
+            llm::metrics::DYN_METRICS_REQUEST_DURATION,
+            llm::metrics::DYN_METRICS_INPUT_SEQUENCE,
+            llm::metrics::DYN_METRICS_OUTPUT_SEQUENCE,
+            llm::metrics::DYN_METRICS_TTFT,
+            llm::metrics::DYN_METRICS_ITL,
+            llm::metrics::DYN_METRICS_EMBEDDING_LATENCY,
             llm::audit::DYN_AUDIT_SINKS,
             llm::audit::DYN_AUDIT_FORCE_LOGGING,
             llm::audit::DYN_AUDIT_CAPACITY,
@@ -1027,6 +1139,9 @@ mod tests {
             router::DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS,
             request_plane::DYN_REQUEST_PLANE,
             request_plane::DYN_REQUEST_PLANE_CODEC,
+            response_plane::DYN_RESPONSE_PLANE,
+            request_plane::DYN_TCP_MAX_MESSAGE_SIZE,
+            request_plane::DYN_TCP_SHRINK_MESSAGE_SIZE,
             // TCP Response Stream
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST,
@@ -1039,9 +1154,12 @@ mod tests {
             tcp_response_stream::tls::DYN_TCP_TLS_CLIENT_KEY_PATH,
             tcp_response_stream::tls::DYN_TCP_TLS_CLIENT_CA_CERT_PATH,
             tcp_response_stream::tls::DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS,
+            quic_response::DYN_QUIC_RESPONSE_BATCH_INTERVAL_US,
+            quic_response::DYN_QUIC_RESPONSE_BUFFER_CAPACITY,
             // Event Plane
             event_plane::DYN_EVENT_PLANE,
             event_plane::DYN_EVENT_PLANE_CODEC,
+            event_plane::DYN_EVENT_PLANE_HOST,
             event_plane::DYN_ZMQ_EVENT_SUBSCRIBER_CHANNEL_CAPACITY,
             // ZMQ Broker
             zmq_broker::DYN_ZMQ_BROKER_URL,

@@ -41,10 +41,10 @@ where
         };
 
         if let Some(error) = first_output.err() {
-            return Err(PrefillError::PrefillError(
-                "Prefill router returned error in output".to_string(),
-                Some(Box::new(error)),
-            ));
+            // Include the worker's text. `to_pyerr` keeps only `Display`, so a
+            // `#[source]` is lost. See `PrefillError::PrefillError`.
+            let detail = format!("Prefill router returned error in output: {error}");
+            return Err(PrefillError::PrefillError(detail, Some(Box::new(error))));
         }
 
         if let Some(ref tracker) = tracker {
@@ -72,10 +72,8 @@ where
         if !is_bootstrap {
             while let Some(next) = prefill_response.next().await {
                 if let Some(error) = next.err() {
-                    return Err(PrefillError::PrefillError(
-                        "Prefill router returned error in output stream".to_string(),
-                        Some(Box::new(error)),
-                    ));
+                    let detail = format!("Prefill router returned error in output stream: {error}");
+                    return Err(PrefillError::PrefillError(detail, Some(Box::new(error))));
                 }
                 if let Some(output) = next.data.as_ref()
                     && prompt_tokens_details.is_none()
@@ -247,7 +245,11 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_err());
+        // The text must survive: `to_pyerr` only keeps `Display`.
+        let Err(err) = result else {
+            panic!("expected a first output error");
+        };
+        assert!(err.to_string().contains("prefill failed"), "{err}");
         assert!(tracker.record_prefill_complete());
     }
 
@@ -264,7 +266,10 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_err());
+        let Err(err) = result else {
+            panic!("expected a later output error");
+        };
+        assert!(err.to_string().contains("prefill stream failed"), "{err}");
         assert!(!tracker.record_prefill_complete());
     }
 

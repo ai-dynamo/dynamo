@@ -657,7 +657,7 @@ mod cached_multimodal_uuid {
     }
 
     #[tokio::test]
-    async fn preserves_url_and_uuid_only_slot_alignment() {
+    async fn preserves_multimodal_cache_uuid_alignment() {
         let messages = r#"[
             {
                 "role": "user",
@@ -672,6 +672,16 @@ mod cached_multimodal_uuid {
                         "type": "image_url",
                         "image_url": null,
                         "uuid": "image-b"
+                    },
+                    {
+                        "type": "video_url",
+                        "video_url": {"url": "https://example.com/video.mp4"},
+                        "uuid": "video-a"
+                    },
+                    {
+                        "type": "audio_url",
+                        "audio_url": {"url": "https://example.com/audio.wav"},
+                        "uuid": "audio-a"
                     }
                 ]
             }
@@ -695,17 +705,24 @@ mod cached_multimodal_uuid {
             .await
             .unwrap();
 
-        let images = &preprocessed.multi_modal_data.as_ref().unwrap()["image_url"];
+        let media = preprocessed.multi_modal_data.as_ref().unwrap();
+        let uuids = preprocessed.multi_modal_uuids.as_ref().unwrap();
+        for (modality, expected_uuid) in [
+            ("image_url", "image-a"),
+            ("video_url", "video-a"),
+            ("audio_url", "audio-a"),
+        ] {
+            assert!(matches!(media[modality][0], MultimodalData::Url(_)));
+            assert_eq!(uuids[modality][0], Some(expected_uuid.to_string()));
+        }
+
+        let images = &media["image_url"];
         assert_eq!(images.len(), 2);
-        assert!(matches!(images[0], MultimodalData::Url(_)));
         assert!(matches!(
             &images[1],
             MultimodalData::UuidOnly(value) if value == "image-b"
         ));
-        assert_eq!(
-            preprocessed.multi_modal_uuids.as_ref().unwrap()["image_url"],
-            vec![Some("image-a".to_string()), Some("image-b".to_string())]
-        );
+        assert_eq!(uuids["image_url"][1], Some("image-b".to_string()));
         assert!(
             preprocessed
                 .extra_args
@@ -717,33 +734,28 @@ mod cached_multimodal_uuid {
     }
 
     #[tokio::test]
-    async fn rejects_audio_and_video_cache_uuids() {
-        for messages in [
-            r#"[{
-                "role": "user",
-                "content": [{
-                    "type": "video_url",
-                    "video_url": {"url": "https://example.com/video.mp4"},
-                    "uuid": "cached-video"
-                }]
-            }]"#,
-            r#"[{
-                "role": "user",
-                "content": [{
-                    "type": "audio_url",
-                    "audio_url": {"url": "https://example.com/audio.wav"},
-                    "uuid": "cached-audio"
-                }]
-            }]"#,
-        ] {
-            let request = Request::from(messages, None, None, "test-model".to_string());
+    async fn rejects_uuid_only_audio_and_video() {
+        for (part_type, uuid) in [("video_url", "cached-video"), ("audio_url", "cached-audio")] {
+            let messages = format!(
+                r#"[{{
+                    "role": "user",
+                    "content": [{{
+                        "type": "{part_type}",
+                        "{part_type}": null,
+                        "uuid": "{uuid}"
+                    }}]
+                }}]"#
+            );
+            let request = Request::from(&messages, None, None, "test-model".to_string());
             let error = make_preprocessor()
                 .preprocess_request(&request, None)
                 .await
-                .expect_err("audio and video cache UUIDs must be rejected");
+                .expect_err("UUID-only audio and video must be rejected");
 
             assert!(
-                format!("{error:#}").contains("supported only for image_url parts with vLLM"),
+                format!("{error:#}").contains(&format!(
+                    "UUID-only cache reuse is not supported for media modality `{part_type}`"
+                )),
                 "unexpected error: {error:#}"
             );
             assert_invalid_argument(&error);
@@ -802,6 +814,94 @@ mod cached_multimodal_uuid {
             "unexpected error: {error_chain}"
         );
         assert_invalid_argument(&error);
+    }
+}
+
+/// The frontend's contract for `media_io_kwargs`: forward it to the worker untouched
+/// when the worker owns media decoding, and withhold it when the frontend decodes.
+mod media_io_kwargs_forwarding {
+    use std::sync::Arc;
+
+    use super::Request;
+    use dynamo_llm::model_card::ModelDeploymentCard;
+    use dynamo_llm::preprocessor::OpenAIPreprocessor;
+    use dynamo_llm::preprocessor::media::MediaDecoder;
+    use rstest::rstest;
+
+    const MODEL_PATH: &str = "tests/data/sample-models/mock-llama-3.1-8b-instruct";
+
+    /// Preprocessor with no media decoder on its MDC, so the worker owns decoding.
+    fn make_preprocessor() -> Arc<OpenAIPreprocessor> {
+        let mut mdc = ModelDeploymentCard::load_from_disk(MODEL_PATH, None).unwrap();
+        mdc.set_name("test-model");
+        OpenAIPreprocessor::new(mdc).unwrap()
+    }
+
+    /// Preprocessor whose MDC carries a media decoder, so the frontend owns decoding.
+    /// Returns `None` when NIXL/UCX is unavailable: `MediaLoader::new` calls
+    /// `get_nixl_agent()?`, so the preprocessor cannot be built at all. Mirrors the
+    /// skip-with-message idiom in `preprocessor/media/loader.rs`.
+    fn make_frontend_decoding_preprocessor() -> Option<Arc<OpenAIPreprocessor>> {
+        let mut mdc = ModelDeploymentCard::load_from_disk(MODEL_PATH, None).unwrap();
+        mdc.set_name("test-model");
+        mdc.media_decoder = Some(MediaDecoder::default());
+        OpenAIPreprocessor::new(mdc).ok()
+    }
+
+    /// `media_io_kwargs` reaches the worker exactly when the worker owns decoding,
+    /// and when it does it is byte-identical to what the client sent -- no MDC
+    /// `limits`, no `fps: null`, no `strict: false` injected by a round-trip through
+    /// the frontend's decoder schema.
+    ///
+    /// The request is text-only on purpose: the forwarding rule lives in
+    /// `builder_with_lora` and keys off `self.media_loader` alone, so no media part is
+    /// needed and nothing is fetched, decoded, or NIXL-registered.
+    #[rstest]
+    // Worker decodes: a key the frontend's schema happens to know...
+    #[case::worker_known_key(false, serde_json::json!({"video": {"fps": 2.0}}))]
+    // ...and one it does not. Both must pass through untouched.
+    #[case::worker_unknown_key(false, serde_json::json!({"video": {"do_sample_frames": false}}))]
+    // Frontend decodes: it consumes the kwargs itself, so the worker must not see them.
+    // Only a known key here -- an unknown one is a decode-time error, a separate concern.
+    #[case::frontend_known_key(true, serde_json::json!({"video": {"fps": 2.0}}))]
+    #[tokio::test]
+    async fn media_io_kwargs_forwarded_only_when_worker_decodes(
+        #[case] frontend_decodes: bool,
+        #[case] media_io_kwargs: serde_json::Value,
+    ) {
+        let preprocessor = if frontend_decodes {
+            match make_frontend_decoding_preprocessor() {
+                Some(preprocessor) => preprocessor,
+                None => {
+                    println!(
+                        "test media_io_kwargs_forwarded_only_when_worker_decodes ... \
+                         ignored (NIXL/UCX not available)"
+                    );
+                    return;
+                }
+            }
+        } else {
+            make_preprocessor()
+        };
+
+        let messages = r#"[{"role": "user", "content": "describe this"}]"#;
+        let mut request = Request::from(messages, None, None, "test-model".to_string());
+        request.media_io_kwargs = Some(media_io_kwargs.clone());
+
+        let (preprocessed, _, _) = preprocessor
+            .preprocess_request(&request, None)
+            .await
+            .unwrap();
+        let worker_request = serde_json::to_value(preprocessed).unwrap();
+
+        let expected = (!frontend_decodes).then_some(media_io_kwargs);
+        assert_eq!(
+            worker_request.get("media_io_kwargs"),
+            expected.as_ref(),
+            "frontend_decodes={frontend_decodes}: worker-bound media_io_kwargs must be \
+             absent when the frontend decodes, and preserve the request JSON exactly \
+             otherwise"
+        );
     }
 }
 

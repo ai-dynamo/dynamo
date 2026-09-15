@@ -42,8 +42,8 @@
 #     This secret is required only for gated models; the public model used below
 #     does not require it.
 #
-# Replace `dynamo/dynamo-rust-epp:dev` before applying this manifest unless that
-# image is already available to the cluster.
+# Replace `<VLLM_IMAGE>` and `dynamo/dynamo-epp:dev` with images available to
+# the cluster before applying this manifest.
 #
 # Apply with: kubectl apply -n <ns> -f agg.yaml
 # Test:
@@ -76,7 +76,7 @@ spec:
     spec:
       containers:
         - name: vllm
-          image: vllm/vllm-openai:v0.27.1
+          image: <VLLM_IMAGE>
           args:
             - --model
             - Qwen/Qwen3-0.6B
@@ -244,7 +244,7 @@ spec:
       serviceAccountName: dynamo-epp
       containers:
         - name: epp
-          image: dynamo/dynamo-rust-epp:dev
+          image: dynamo/dynamo-epp:dev
           imagePullPolicy: IfNotPresent
           env:
             # Standalone mode: runtime-free selector in-process (no Dynamo

@@ -1,12 +1,12 @@
 name: 'Setup Snapshot Agent'
-description: 'Install the github.com/ai-dynamo/snapshot Helm chart (agent + operator) in a vCluster namespace'
+description: 'Install one cluster-wide github.com/ai-dynamo/snapshot release inside a checkpoint vCluster'
 
 inputs:
   kubeconfig_base64:
     description: 'Base64-encoded kubeconfig for the vCluster'
     required: true
   namespace:
-    description: 'Kubernetes namespace for the snapshot-agent'
+    description: 'Release namespace inside the vCluster'
     required: false
     default: default
   release_name:
@@ -16,27 +16,18 @@ inputs:
   chart_version:
     description: 'github.com/ai-dynamo/snapshot chart version to install (pinned, never latest)'
     required: false
-    default: 0.1.0-alpha.1
+    default: 0.1.0-rc.1
   storage_size:
-    description: 'Checkpoint PVC size for agentMount mode'
+    description: 'Snapshot-managed checkpoint PVC size'
     required: false
     default: 1Gi
-  storage_access_mode:
-    description: 'How the snapshot-agent accesses checkpoint storage'
-    required: false
-    default: podMount
+  storage_class:
+    description: 'RWX-capable StorageClass visible inside the vCluster'
+    required: true
   storage_pvc_name:
     description: 'Checkpoint PVC name used by snapshot metadata'
     required: false
     default: snapshot-pvc
-  storage_pvc_access_mode:
-    description: 'Checkpoint PVC Kubernetes access mode'
-    required: false
-    default: ReadWriteOnce
-  storage_base_path:
-    description: 'Checkpoint PVC mount path inside checkpoint and restore pods'
-    required: false
-    default: /checkpoints
 
 runs:
   using: "composite"
@@ -58,47 +49,71 @@ runs:
         RELEASE_NAME: ${{ inputs.release_name }}
         CHART_VERSION: ${{ inputs.chart_version }}
         STORAGE_SIZE: ${{ inputs.storage_size }}
-        STORAGE_ACCESS_MODE: ${{ inputs.storage_access_mode }}
+        STORAGE_CLASS: ${{ inputs.storage_class }}
         STORAGE_PVC_NAME: ${{ inputs.storage_pvc_name }}
-        STORAGE_PVC_ACCESS_MODE: ${{ inputs.storage_pvc_access_mode }}
-        STORAGE_BASE_PATH: ${{ inputs.storage_base_path }}
       run: |
         echo "::group::Install snapshot-agent"
         set -euo pipefail
+        if [[ -z "${STORAGE_CLASS}" ]]; then
+          echo "::error::storage_class input is required"
+          exit 1
+        fi
 
         # Install the externally published github.com/ai-dynamo/snapshot chart
         # at a pinned version, using its own default (pinned-to-chart-appVersion)
-        # images.
+        # images. Snapshot watches the entire virtual cluster; the vCluster API
+        # boundary, rather than a removed namespace-restriction mode, isolates
+        # this test installation from other checkpoint test environments.
+        if ! kubectl get storageclass "${STORAGE_CLASS}" >/dev/null; then
+          echo "::error::RWX StorageClass ${STORAGE_CLASS} is not visible inside the vCluster"
+          kubectl get storageclass -o wide
+          exit 1
+        fi
+
         helm upgrade --install "${RELEASE_NAME}" oci://ghcr.io/ai-dynamo/snapshot/snapshot \
           --version "${CHART_VERSION}" \
           --namespace "${NAMESPACE}" \
           --create-namespace \
           --wait \
           --timeout 15m \
-          --set rbac.namespaceRestricted=true \
-          --set storage.accessMode="${STORAGE_ACCESS_MODE}" \
           --set storage.pvc.name="${STORAGE_PVC_NAME}" \
-          --set storage.pvc.accessMode="${STORAGE_PVC_ACCESS_MODE}" \
-          --set storage.pvc.basePath="${STORAGE_BASE_PATH}" \
-          --set storage.pvc.create=false \
+          --set storage.pvc.create=true \
           --set storage.pvc.size="${STORAGE_SIZE}" \
+          --set-string storage.pvc.storageClass="${STORAGE_CLASS}" \
           --debug
 
-        DAEMONSET_NAME="$(kubectl get daemonset \
+        kubectl wait --for=condition=Established \
+          crd/podsnapshots.nvidia.com \
+          crd/podsnapshotcontents.nvidia.com \
+          crd/snapshotjobs.nvidia.com \
+          --timeout=120s
+
+        OPERATOR_DEPLOYMENT_NAME="$(kubectl get deployment \
           -n "${NAMESPACE}" \
-          -l "app.kubernetes.io/name=snapshot,app.kubernetes.io/instance=${RELEASE_NAME}" \
-          -o jsonpath='{.items[0].metadata.name}')"
-        if [[ -z "${DAEMONSET_NAME}" ]]; then
-          echo "::error::snapshot-agent DaemonSet was not created"
+          -l "app.kubernetes.io/name=snapshot,app.kubernetes.io/instance=${RELEASE_NAME},app.kubernetes.io/component=operator" \
+          -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+        if [[ -z "${OPERATOR_DEPLOYMENT_NAME}" ]]; then
+          echo "::error::Snapshot operator Deployment was not created"
+          kubectl get deployment,daemonset,pods -n "${NAMESPACE}" -o wide
           exit 1
         fi
 
-        RESTRICTED_NAMESPACE_FIELD="$(kubectl get daemonset "${DAEMONSET_NAME}" \
+        DAEMONSET_NAME="$(kubectl get daemonset \
           -n "${NAMESPACE}" \
-          -o jsonpath='{.spec.template.spec.containers[?(@.name=="agent")].env[?(@.name=="RESTRICTED_NAMESPACE")].valueFrom.fieldRef.fieldPath}')"
-        if [[ "${RESTRICTED_NAMESPACE_FIELD}" != "metadata.namespace" ]]; then
-          echo "::error::snapshot-agent is not configured for namespace-restricted pod watching"
-          kubectl get daemonset "${DAEMONSET_NAME}" -n "${NAMESPACE}" -o yaml
+          -l "app.kubernetes.io/name=snapshot,app.kubernetes.io/instance=${RELEASE_NAME},app.kubernetes.io/component=snapshot-agent" \
+          -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+        if [[ -z "${DAEMONSET_NAME}" ]]; then
+          echo "::error::snapshot-agent DaemonSet was not created"
+          kubectl get deployment,daemonset,pods -n "${NAMESPACE}" -o wide
+          exit 1
+        fi
+
+        PVC_ACCESS_MODES="$(kubectl get pvc "${STORAGE_PVC_NAME}" \
+          -n "${NAMESPACE}" \
+          -o jsonpath='{.spec.accessModes[*]}')"
+        if [[ "${PVC_ACCESS_MODES}" != *"ReadWriteMany"* ]]; then
+          echo "::error::Snapshot PVC must support ReadWriteMany, got: ${PVC_ACCESS_MODES}"
+          kubectl get pvc "${STORAGE_PVC_NAME}" -n "${NAMESPACE}" -o yaml
           exit 1
         fi
 
@@ -112,10 +127,13 @@ runs:
           exit 1
         fi
 
+        kubectl rollout status "deployment/${OPERATOR_DEPLOYMENT_NAME}" \
+          -n "${NAMESPACE}" \
+          --timeout=900s
         kubectl rollout status "daemonset/${DAEMONSET_NAME}" \
           -n "${NAMESPACE}" \
           --timeout=900s
-        kubectl get daemonset,pods,pvc \
+        kubectl get deployment,daemonset,pods,pvc \
           -n "${NAMESPACE}" \
           -l app.kubernetes.io/name=snapshot \
           -o wide
@@ -129,9 +147,12 @@ runs:
       run: |
         set +e
         echo "::group::Snapshot-agent status"
-        kubectl get daemonset,pods,pvc -n "${NAMESPACE}" -o wide
+        kubectl get deployment,daemonset,pods,pvc -n "${NAMESPACE}" -o wide
+        kubectl get storageclass -o wide
+        kubectl get crd podsnapshots.nvidia.com podsnapshotcontents.nvidia.com snapshotjobs.nvidia.com
         echo "::endgroup::"
         echo "::group::Snapshot-agent describe"
+        kubectl describe deployment -n "${NAMESPACE}" -l app.kubernetes.io/name=snapshot
         kubectl describe daemonset -n "${NAMESPACE}" -l app.kubernetes.io/name=snapshot
         kubectl describe pods -n "${NAMESPACE}" -l app.kubernetes.io/name=snapshot
         echo "::endgroup::"

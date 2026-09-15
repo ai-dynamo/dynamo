@@ -50,13 +50,13 @@ func TestComposeGroveOverrides(t *testing.T) {
 						TargetPodCliqueScalingGroupConfig,
 						`{"topologyConstraint":{"topologyName":"cluster","pack":{"required":"rack"}}}`,
 					),
-					Multinode: &nvidiacomv1beta1.MultinodeSpec{
-						NodeCount: 2,
-						Leader: &nvidiacomv1beta1.MultinodeRoleSpec{ProviderOverride: providerOverrideFixture(
+					Multinode: &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
+					Roles: []nvidiacomv1beta1.ComponentRoleSpec{
+						{Name: nvidiacomv1beta1.ComponentRoleLeader, ProviderOverride: providerOverrideFixture(
 							TargetPodCliqueTemplateSpec,
 							`{"topologyConstraint":{"topologyName":"cluster","pack":{"required":"host"}}}`,
 						)},
-						Worker: &nvidiacomv1beta1.MultinodeRoleSpec{ProviderOverride: providerOverrideFixture(
+						{Name: nvidiacomv1beta1.ComponentRoleWorker, ProviderOverride: providerOverrideFixture(
 							TargetPodCliqueTemplateSpec,
 							`{"topologyConstraint":{"topologyName":"cluster","pack":{"required":"host"},"newProviderField":"preserved"}}`,
 						)},

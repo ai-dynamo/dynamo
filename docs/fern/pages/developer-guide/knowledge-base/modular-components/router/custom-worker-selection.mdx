@@ -26,6 +26,12 @@ flowchart LR
 
 For multiple compile-checked policies, see the [custom policy examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example). Repository contributors who use a coding agent must also provide the [worker-selection API rules](https://github.com/ai-dynamo/dynamo/blob/main/lib/kv-router/src/scheduling/CLAUDE.md).
 
+## Use a Built-In Policy First
+
+The Dynamo frontend ships built-in worker-selection policies, in [`lib/router-plugins`](https://github.com/ai-dynamo/dynamo/tree/main/lib/router-plugins). Selecting one needs router-policy YAML only — no policy crate, no rebuild, no private image. See [Worker-Selection Policies](configuration-and-tuning.md#worker-selection-policies) for the available types and how to select one.
+
+Write your own policy when no shipped policy expresses the rule you need. The rest of this page covers that case; a custom policy is added alongside the shipped ones, so you keep both.
+
 ## Choose the Policy Stage
 
 | Stage | Input | Output | Use this stage for |
@@ -316,6 +322,7 @@ Request context and worker identity are always available. Dynamo calculates opti
 | `block_size()` | Tokens in one KV block |
 | `tracks_prefill_tokens()` | Whether the request contributes to prefill-load tracking |
 | `session_context()` | Optional session metadata described below |
+| `affinity_target()` | Optional advisory worker and data-parallel rank from soft session affinity |
 | `expected_output_tokens()` | Optional expected output length |
 | `priority_jump()` | Scheduler priority boost. Queue policies treat negative values as zero |
 | `strict_priority()` | Strict integer priority. The queue orders larger values first |
@@ -330,11 +337,27 @@ Request context and worker identity are always available. Dynamo calculates opti
 | `session_id()` | Stable reasoning or tool-session identifier |
 | `parent_session_id()` | Optional parent session for subagents |
 | `session_final()` | Optional terminal marker for lifecycle-aware policies |
-| `kv_hints()` | Optional KV lifecycle hints |
-| `kv_hints().evict_session()` | Whether the request asks consumers to evict session state |
 | `input_trigger()` | Optional `UserMessage`, `ToolResult`, or `Other` request trigger |
 
 The [custom policy examples](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/custom-policy-example/README.md) use `input_trigger()` to give tool-result turns a cache-local picker path.
+
+### Soft Session Affinity
+
+Set `--router-session-affinity-mode soft` with a session-affinity TTL to let a custom policy influence an existing session binding. The current binding enters the normal selection pipeline as `affinity_target()`. The policy still receives the full host-eligible candidate set, subject to its own filters, and may select another worker. Dynamo rebinds the session after dispatch returns a response stream.
+
+```mermaid
+flowchart LR
+    Lookup["Session binding lookup"] --> Context["affinity_target()"]
+    Context --> Policy["Custom filter, score, and pick"]
+    Policy --> Dispatch["Dispatch selected worker"]
+    Dispatch --> Rebind["Commit selected worker as new binding"]
+```
+
+Match both fields when a policy wants to recognize the target. A target with `dp_rank: None` matches every rank on its worker; a populated rank matches only that worker-rank pair. The target can be absent from the candidate table when the worker is unavailable or a custom filter rejects it.
+
+Hard affinity remains the default. A hard binding and every explicit request target take the exact-target path instead of advisory custom selection. A selection, setup, or dispatch failure before a response stream leaves the previous soft binding intact. An error or cancellation after the stream is returned does not roll back a completed rebind.
+
+The [custom policy examples](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/custom-policy-example/README.md) include an overload-aware soft pinning policy that retains the advisory target until its active-request count exceeds a configured threshold, then selects the least-loaded alternative. Its two-Mocker walkthrough holds the first request open and verifies an `A -> B -> B` worker sequence: overload moves the second request to B, and the third request retains B after load drains, proving that the plugin-selected dispatch updated the binding.
 
 ### Worker Identity and Cost
 
@@ -373,6 +396,10 @@ Both paths use the same policy crate, catalog, and YAML file. Choose the process
 <Tab title="Python Frontend">
 
 Add the catalog to the Python binding manifest. Keep the dependency alias `dynamo-worker-selection-policy-catalog`:
+
+<Note>
+Your catalog is registered alongside the [policies Dynamo ships](#use-a-built-in-policy-first), not instead of them, so both remain selectable. Your catalog cannot reuse a shipped policy's type name; the registry rejects the duplicate at startup rather than overriding it.
+</Note>
 
 ```bash
 # Link the policy catalog into the Python extension.

@@ -57,6 +57,15 @@ impl Resources {
 
                 tracing::debug!("Creating NIXL backends");
 
+                if let Ok((_, ucx_params)) = agent.get_plugin_params("UCX") {
+                    let backend = agent.create_backend("UCX", &ucx_params)?;
+                    nixl_backends.insert("UCX".to_string(), Arc::new(backend));
+                } else {
+                    tracing::warn!(
+                        "No UCX plugin found; host and device NIXL registration will fail"
+                    );
+                }
+
                 if config.disk_layout.is_some() {
                     if let Ok((_, gds_mt_params)) = agent.get_plugin_params("GDS_MT") {
                         let backend = agent.create_backend("GDS_MT", &gds_mt_params)?;

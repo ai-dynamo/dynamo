@@ -40,7 +40,7 @@ def _config() -> PlannerConfig:
             hf_id="Qwen/Qwen3-32B",
             system="h200_sxm",
             backend="vllm",
-            backend_version="0.19.0",
+            backend_version="current",
             prefill_pick=pick,
             decode_pick=pick,
         ),

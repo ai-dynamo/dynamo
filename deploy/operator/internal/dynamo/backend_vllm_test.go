@@ -52,15 +52,6 @@ func TestShellQuotePOSIX_ArgvRoundTrip(t *testing.T) {
 	}
 }
 
-func findEnvVar(env []corev1.EnvVar, name string) *corev1.EnvVar {
-	for i := range env {
-		if env[i].Name == name {
-			return &env[i]
-		}
-	}
-	return nil
-}
-
 func TestVLLMBackend_UpdateContainer(t *testing.T) {
 	tests := []struct {
 		name                string

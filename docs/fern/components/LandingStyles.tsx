@@ -288,18 +288,6 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
   outline-offset: 4px;
 }
 
-.dynamo-welcome__cta--secondary {
-  background: transparent;
-  border-color: #76b900;
-  color: #d8e8c0 !important;
-}
-
-.dynamo-welcome__cta--secondary:hover {
-  background: rgba(118, 185, 0, 0.12);
-  border-color: #76b900;
-  box-shadow: none;
-}
-
 .dynamo-welcome__cta svg {
   width: 1rem;
   height: 1rem;
@@ -309,22 +297,6 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
   stroke-linecap: round;
   stroke-linejoin: round;
   transition: transform 160ms ease;
-}
-
-.dynamo-welcome__cta--secondary {
-  border-color: color-mix(in srgb, var(--grayscale-a12) 16%, transparent);
-  background: var(--grayscale-a1);
-  color: var(--grayscale-a12) !important;
-  box-shadow: none;
-}
-
-.dynamo-welcome__cta--secondary:hover {
-  border-color: rgba(118, 185, 0, 0.55);
-  background: color-mix(in srgb, var(--grayscale-a2) 84%, rgba(118, 185, 0, 0.12));
-}
-
-.dynamo-welcome__cta--secondary svg {
-  stroke: currentColor;
 }
 
 .dynamo-welcome__cta:hover svg {

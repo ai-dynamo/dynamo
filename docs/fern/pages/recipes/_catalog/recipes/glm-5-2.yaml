@@ -2,12 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 id: glm-5-2
-title: GLM-5.2
+title: GLM-5.3/5.2
 page: pages/recipes/model-recipes/glm-5-2.mdx
 provider: zai
 model:
-  name: GLM-5.2
-  hf_id: nvidia/GLM-5.2-NVFP4 (B200) / zai-org/GLM-5.2-FP8 (H200)
+  name: GLM-5.3/5.2
+  hf_id: RadixArk/GLM-5.3-NVFP4 (B200) / nvidia/GLM-5.2-NVFP4 (B200) / zai-org/GLM-5.3 (H200) / zai-org/GLM-5.2-FP8 (H200)
   precision: NVFP4 + FP8 KV (B200) / FP8 + FP8 KV (H200)
 status: validated
 artifacts:

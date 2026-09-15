@@ -39,7 +39,15 @@ oneshot = "0.1.11"
 
 # Optional
 cudarc = { workspace = true, optional = true }
-aws-sdk-s3 = { version = "1.120.0", optional = true }
+# Default features minus "rustls": the SDK connects over "default-https-client"
+# (hyper 1.x), and "rustls" only adds a second, never-constructed hyper-0.14
+# connector stack on top. The remaining three are the rest of the default set.
+aws-sdk-s3 = { version = "1.120.0", optional = true, default-features = false, features = [
+    "default-https-client",
+    "http-1x",
+    "rt-tokio",
+    "sigv4a",
+] }
 aws-config = { version = "1.8.11", optional = true }
 rayon = { version = "1", optional = true }
 tokio-rayon = { version = "2", optional = true }

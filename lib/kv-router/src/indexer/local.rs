@@ -396,6 +396,11 @@ impl LocalKvIndexer {
             });
         }
 
+        // NOTE: KV RECOVERY CONTRACT: Decide Events versus TreeDump here, against history
+        // retained when the query is handled. A client's ordinary range request does not
+        // guarantee buffered replay: expired/unavailable history falls back to a snapshot.
+        // See test_local_indexer_get_events_in_id_range_all_cases and
+        // test_local_indexer_buffer_response_starts_at_last_all_domain_clear.
         let buffer = self.event_buffer.lock().unwrap();
         let (first_id, last_id) = if buffer.is_empty() {
             (None, None)

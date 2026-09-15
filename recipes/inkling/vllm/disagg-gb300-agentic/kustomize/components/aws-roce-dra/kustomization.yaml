@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# RoCE over Dynamic Resource Allocation, as exposed by EKS through the
+# `roce.networking.k8s.aws` device class. Each worker claims one RoCE device;
+# the base image's fabric-discovery prologue then finds the allocated HCA and
+# points UCX at it.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - resourceclaimtemplate.yaml
+patches:
+  - target:
+      group: nvidia.com
+      version: v1beta1
+      kind: DynamoGraphDeployment
+    path: patch-dgd.yaml

@@ -111,13 +111,19 @@ def test_batch_endpoint_cannot_be_changed_at_runtime():
 
 
 @pytest.fixture(scope="function", autouse=False)
-async def http_server(runtime: DistributedRuntime):
-    """Fixture to start a mock HTTP server using HttpService, contributed by Baseten."""
-    port = 8008
+async def http_server(request, unused_tcp_port: int, runtime: DistributedRuntime):
+    """Fixture to start a mock HTTP server using HttpService, contributed by Baseten.
+
+    Parametrize indirectly with a bool to set ``wait_for_first_item`` on the
+    service; the default is False.
+    """
+    wait_for_first_item = getattr(request, "param", False)
+    port = unused_tcp_port
     model_name = "test_model"
     start_done = asyncio.Event()
     checksum = "abc123"  # Checksum of ModelDeplomentCard for that model
-    service = HttpService(port=port)  # Create service outside worker so we can shutdown
+    # Create service outside worker so we can shutdown
+    service = HttpService(port=port, wait_for_first_item=wait_for_first_item)
 
     async def worker():
         """The server worker task."""
@@ -182,10 +188,19 @@ async def http_server(runtime: DistributedRuntime):
     await stop_server()
 
 
+WAIT_FOR_FIRST_ITEM = pytest.param(True, id="wait_for_first_item")
+DEFAULT_SERVICE = pytest.param(False, id="default")
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "http_server", [DEFAULT_SERVICE, WAIT_FOR_FIRST_ITEM], indirect=True
+)
+@pytest.mark.timeout(60)
 @pytest.mark.forked
 async def test_chat_completion_success(http_server):
-    """Tests a successful chat completion request."""
+    """A streaming completion arrives in full, including its first chunk, whether
+    or not the service waits for the first item before committing the status."""
     base_url, model_name = http_server
     url = f"{base_url}/v1/chat/completions"
     data = {
@@ -214,31 +229,46 @@ async def test_chat_completion_success(http_server):
             assert content == "This is a mock response."
 
 
+HTTP_ERROR_CASES = (
+    (MSG_CONTAINS_ERROR, 400, MSG_CONTAINS_ERROR, "Bad Request"),
+    (
+        MSG_CONTAINS_STATUS_ERROR,
+        415,
+        MSG_CONTAINS_STATUS_ERROR,
+        "Unsupported Media Type",
+    ),
+    (
+        MSG_CONTAINS_INVALID_ARGUMENT,
+        400,
+        f"ValueError: {MSG_CONTAINS_INVALID_ARGUMENT}",
+        "Bad Request",
+    ),
+    (
+        MSG_CONTAINS_INTERNAL_ERROR,
+        500,
+        "Internal server error",
+        "Internal Server Error",
+    ),
+)
+
+
+def expected_error_body(status: int, message: str, error_type: str) -> Dict:
+    body = {"message": message, "type": error_type, "code": status}
+    # A backend-asserted 500 that carries no retry semantics tunnels
+    # its own status into `details` so it survives for debugging,
+    # while the backend's own message text stays server-side. See
+    # `BackendStatusAction::CoerceToInternal` in
+    # lib/llm/src/http/service/openai.rs.
+    if status == 500:
+        body["details"] = {"backend_status": 500}
+    return body
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("trigger", "status", "expected_message", "expected_type"),
-    [
-        (MSG_CONTAINS_ERROR, 400, MSG_CONTAINS_ERROR, "Bad Request"),
-        (
-            MSG_CONTAINS_STATUS_ERROR,
-            415,
-            MSG_CONTAINS_STATUS_ERROR,
-            "Unsupported Media Type",
-        ),
-        (
-            MSG_CONTAINS_INVALID_ARGUMENT,
-            400,
-            f"ValueError: {MSG_CONTAINS_INVALID_ARGUMENT}",
-            "Bad Request",
-        ),
-        (
-            MSG_CONTAINS_INTERNAL_ERROR,
-            500,
-            "Internal server error",
-            "Internal Server Error",
-        ),
-    ],
+    ("trigger", "status", "expected_message", "expected_type"), HTTP_ERROR_CASES
 )
+@pytest.mark.timeout(60)
 @pytest.mark.forked
 async def test_chat_completion_http_error(
     http_server,
@@ -259,17 +289,69 @@ async def test_chat_completion_http_error(
     ) as session:
         async with session.post(url, json=data) as response:
             assert response.status == status
-            error_json = await response.json()
-            expected_body = {
-                "message": expected_message,
-                "type": expected_type,
-                "code": status,
-            }
-            # A backend-asserted 500 that carries no retry semantics tunnels
-            # its own status into `details` so it survives for debugging,
-            # while the backend's own message text stays server-side. See
-            # `BackendStatusAction::CoerceToInternal` in
-            # lib/llm/src/http/service/openai.rs.
-            if status == 500:
-                expected_body["details"] = {"backend_status": 500}
-            assert error_json == expected_body
+            assert await response.json() == expected_error_body(
+                status, expected_message, expected_type
+            )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("http_server", [WAIT_FOR_FIRST_ITEM], indirect=True)
+@pytest.mark.timeout(60)
+@pytest.mark.forked
+async def test_streaming_chat_completion_http_error_waits_for_first_item(http_server):
+    """With wait_for_first_item, an exception raised before the generator's first
+    yield maps to the same HTTP error response for a streaming request as for a
+    non-streaming one.
+
+    The status mapping itself belongs to test_chat_completion_http_error; this
+    pairs with test_streaming_chat_completion_http_error_default_commits_200 on
+    the same trigger, so the only difference is the option under test."""
+    base_url, model_name = http_server
+    url = f"{base_url}/v1/chat/completions"
+    data = {
+        "model": model_name,
+        "messages": [{"role": "user", "content": MSG_CONTAINS_ERROR}],
+        "stream": True,
+    }
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=10)
+    ) as session:
+        async with session.post(url, json=data) as response:
+            assert response.status == 400
+            assert await response.json() == expected_error_body(
+                400, MSG_CONTAINS_ERROR, "Bad Request"
+            )
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(60)
+@pytest.mark.forked
+async def test_streaming_chat_completion_http_error_default_commits_200(http_server):
+    """Without wait_for_first_item, a streaming request commits HTTP 200 before
+    the generator runs, so an exception raised before its first yield arrives
+    inside the SSE stream instead."""
+    base_url, model_name = http_server
+    url = f"{base_url}/v1/chat/completions"
+    data = {
+        "model": model_name,
+        "messages": [{"role": "user", "content": MSG_CONTAINS_ERROR}],
+        "stream": True,
+    }
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=10)
+    ) as session:
+        async with session.post(url, json=data) as response:
+            assert response.status == 200
+            assert response.content_type == "text/event-stream"
+            body = await response.text()
+
+    # The frame carries the sanitized stream error, not the backend's own
+    # message: HTTP 200 is already committed, so there is no status left to
+    # carry the 400, and the stream formatter does not forward backend text.
+    assert (
+        '"error"' in body
+    ), f"the pre-yield failure must arrive as an SSE error frame; got: {body}"
+    assert "mock response" not in body, (
+        f"the generator raised before its first yield, so the stream must "
+        f"carry no content; got: {body}"
+    )

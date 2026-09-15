@@ -14,7 +14,8 @@ import pytest
 pytest.importorskip("vllm.lora.request")
 
 from dynamo.common.constants import (  # noqa: E402
-    ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+    KV_HINT_TRANSFER_CAPABILITY_KEY,
+    KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
     DisaggregationMode,
 )
 from dynamo.common.lora.manager import LoRAInfo  # noqa: E402
@@ -102,6 +103,7 @@ async def test_prefill_load_records_and_publishes_without_eager_engine_add(
     assert str(kwargs["model_type"]) == str(ModelType.Prefill)
     assert kwargs["worker_type"] == WorkerType.Prefill
     assert kwargs["needs"] == [[WorkerType.Decode]]
+    assert kwargs["ignore_weights"] is True
     runtime_config = kwargs["runtime_config"]
     assert runtime_config.context_length == 8192
     assert json.loads(runtime_config.runtime_data["token_budget"]) == {
@@ -128,7 +130,7 @@ async def test_prefill_lora_registration_preserves_worker_dp_range(monkeypatch):
             "secondary_tiers": [
                 {
                     "type": "custom",
-                    "router_capabilities": ["router_hint"],
+                    "router_capabilities": [KV_HINT_TRANSFER_CAPABILITY_KEY],
                     "control_advertise_host": "worker-a",
                     "control_ports": ["24000", "24001"],
                 }
@@ -158,7 +160,9 @@ async def test_prefill_lora_registration_preserves_worker_dp_range(monkeypatch):
     assert runtime_config.data_parallel_start_rank == 4
     assert runtime_config.data_parallel_size == 2
     assert json.loads(
-        runtime_config.runtime_data[ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY]
+        runtime_config.runtime_data[
+            KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY
+        ]
     ) == {"4": "tcp://worker-a:24000", "5": "tcp://worker-a:24001"}
 
 
