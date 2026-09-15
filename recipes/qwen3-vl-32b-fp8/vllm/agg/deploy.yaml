@@ -27,8 +27,6 @@ spec:
       envs:
         - name: HF_HOME
           value: /opt/models
-        - name: DYN_STORE_KV
-          value: "mem"
         - name: DYN_REQUEST_PLANE
           value: "tcp"
         - name: DYN_TCP_MAX_MESSAGE_SIZE
@@ -58,8 +56,6 @@ spec:
               value: "Qwen/Qwen3-VL-32B-Instruct-FP8"
             - name: HF_HOME
               value: /opt/models
-            - name: DYN_STORE_KV
-              value: "mem"
             - name: DYN_REQUEST_PLANE
               value: "tcp"
             - name: DYN_TCP_MAX_MESSAGE_SIZE
