@@ -821,6 +821,7 @@ impl Decoder {
     /// In the future, this method may kick off async cpu/tokio tasks and or async cuda tasks to
     /// handle logits post-processing and/or other tasks.
     pub fn step(&mut self, token_id: TokenIdType) -> Result<StepResult> {
+        let below_min_tokens = self.generated_tokens < self.min_tokens;
         // increment the generated tokens
         self.generated_tokens += 1;
 
@@ -835,7 +836,7 @@ impl Decoder {
         }
 
         // stop conditions to not apply until the minimum number of tokens have been generated
-        if self.generated_tokens < self.min_tokens {
+        if below_min_tokens {
             return Ok(StepResult::ok(token));
         }
 
