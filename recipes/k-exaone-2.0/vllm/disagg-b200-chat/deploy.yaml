@@ -118,6 +118,17 @@ spec:
               resources:
                 requests: {memory: 200Gi, nvidia.com/gpu: "4", rdma/shared_ib: "4"}
                 limits: {memory: 480Gi, nvidia.com/gpu: "4", rdma/shared_ib: "4"}
+              # 530 GB of weights over a shared PVC, then torch.compile and cudagraph
+              # capture: first start is tens of minutes. 60 x 60 s of grace, matching the
+              # other 1T-class recipes. Without an explicit probe the operator default is
+              # far shorter and kills the worker mid-load.
+              startupProbe:
+                failureThreshold: 60
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 20
               volumeMounts:
                 - {mountPath: /model-cache, name: model-cache, readOnly: true}
                 - {mountPath: /dev/shm, name: dshm}
@@ -185,6 +196,17 @@ spec:
               resources:
                 requests: {memory: 200Gi, nvidia.com/gpu: "4", rdma/shared_ib: "4"}
                 limits: {memory: 480Gi, nvidia.com/gpu: "4", rdma/shared_ib: "4"}
+              # 530 GB of weights over a shared PVC, then torch.compile and cudagraph
+              # capture: first start is tens of minutes. 60 x 60 s of grace, matching the
+              # other 1T-class recipes. Without an explicit probe the operator default is
+              # far shorter and kills the worker mid-load.
+              startupProbe:
+                failureThreshold: 60
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 20
               volumeMounts:
                 - {mountPath: /model-cache, name: model-cache, readOnly: true}
                 - {mountPath: /dev/shm, name: dshm}
