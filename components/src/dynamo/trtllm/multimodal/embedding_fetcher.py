@@ -252,7 +252,7 @@ def _create_request_with_urls(
 
     mm_data = modified_request.get("multi_modal_data")
     if isinstance(mm_data, dict) and isinstance(mm_data.get("image_url"), list):
-        filtered_items = []
+        filtered_items: List[Any] = []
         for item in mm_data["image_url"]:
             if isinstance(item, dict) and item.get("Url") in image_urls:
                 filtered_items.append(item)
