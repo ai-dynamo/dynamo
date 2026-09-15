@@ -303,7 +303,7 @@ where
 
         // Start runtime config watcher for this endpoint (needed for get_disaggregated_endpoint)
         // This must be done before creating the router so bootstrap info is available
-        context
+        let runtime_config_watch = context
             .model_manager
             .get_or_create_runtime_config_watcher(endpoint)
             .await?;
@@ -436,6 +436,7 @@ where
             target_id,
             endpoint_id,
             router,
+            _runtime_config_watch: runtime_config_watch,
             prefill_router_mode,
         })
     }
