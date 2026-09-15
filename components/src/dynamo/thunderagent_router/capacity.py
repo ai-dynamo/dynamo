@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -99,6 +100,41 @@ class WorkerCapacityProvider:
         except Exception as exc:
             logger.debug("WorkerCapacityProvider liveness snapshot error: %s", exc)
             return set()
+
+    async def wait_for_consistent_model_card(self) -> str:
+        """Return the complete model card shared by all current workers."""
+        if self._subscriber is None:
+            raise RuntimeError("WorkerCapacityProvider must be started first")
+
+        worker_ids = {
+            str(worker_id) for worker_id in await self._client.wait_for_instances()
+        }
+        if not worker_ids:
+            raise RuntimeError("ThunderAgent found no backing workers")
+        while True:
+            cards = self._subscriber.get_model_cards()
+            if worker_ids.issubset(cards):
+                break
+            await asyncio.sleep(0.05)
+
+        canonical_cards: dict[str, str] = {}
+        for worker_id in sorted(worker_ids):
+            try:
+                body = json.loads(cards[worker_id])
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Worker {worker_id} published an invalid model card"
+                ) from exc
+            canonical_cards[worker_id] = json.dumps(
+                body, sort_keys=True, separators=(",", ":")
+            )
+
+        if len(set(canonical_cards.values())) != 1:
+            raise RuntimeError(
+                "ThunderAgent backing workers published different model cards: "
+                f"{sorted(canonical_cards)}"
+            )
+        return next(iter(canonical_cards.values()))
 
     def _parse_card(self, card_json: str) -> _Card:
         """Parse one card body, memoised on the body itself."""
