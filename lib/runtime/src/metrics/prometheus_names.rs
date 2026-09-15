@@ -925,12 +925,11 @@ pub fn sanitize_prometheus_label(raw: &str) -> anyhow::Result<String> {
         sanitized = format!("_{}", sanitized);
     }
 
-    // Prevent __ prefix (reserved for Prometheus internal use) but allow __ elsewhere
+    // Prevent __ prefix (reserved for Prometheus internal use) but allow __ elsewhere.
+    // Every leading underscore has to go, not just the first two: removing one "__"
+    // from "___label" leaves "_label", and the re-prefix below then restores "__label".
     if sanitized.starts_with("__") {
-        sanitized = sanitized
-            .strip_prefix("__")
-            .unwrap_or(&sanitized)
-            .to_string();
+        sanitized = sanitized.trim_start_matches('_').to_string();
         if sanitized.is_empty() || !sanitized.chars().next().unwrap().is_ascii_alphabetic() {
             sanitized = format!("_{}", sanitized);
         }
@@ -1170,6 +1169,50 @@ mod tests {
         // Test that strings with only invalid characters return error
         assert!(sanitize_prometheus_label("@#$%").is_err()); // @#$% -> ____ -> ___ -> all underscores error
         assert!(sanitize_prometheus_label("!!!!").is_err()); // !!!! -> ____ -> ___ -> all underscores error
+    }
+
+    #[test]
+    fn test_sanitize_prometheus_label_strips_every_leading_underscore() {
+        // Three or more leading underscores: removing a single "__" left "_test",
+        // whose leading underscore was then re-prefixed back to the reserved "__test".
+        assert_eq!(sanitize_prometheus_label("___test").unwrap(), "test");
+        assert_eq!(sanitize_prometheus_label("____test").unwrap(), "test");
+
+        // Same path when the leading characters only become underscores after
+        // invalid-character replacement.
+        assert_eq!(sanitize_prometheus_label("...test").unwrap(), "test");
+        assert_eq!(sanitize_prometheus_label("-.-test").unwrap(), "test");
+        assert_eq!(sanitize_prometheus_label(":::test").unwrap(), "test");
+
+        // A leading digit still needs exactly one underscore in front of it.
+        assert_eq!(sanitize_prometheus_label("___1test").unwrap(), "_1test");
+
+        // The postcondition the doc comment promises, over every accepted spelling
+        // exercised here and in test_sanitize_prometheus_label.
+        for raw in [
+            "___test",
+            "____test",
+            "...test",
+            "-.-test",
+            ":::test",
+            "___1test",
+            "__test",
+            "__1abc",
+            "test___label",
+            "@test",
+            "123test",
+            "valid_label",
+        ] {
+            let sanitized = sanitize_prometheus_label(raw).unwrap();
+            assert!(
+                !sanitized.starts_with("__"),
+                "sanitize_prometheus_label({raw:?}) returned reserved name {sanitized:?}"
+            );
+        }
+
+        // All-underscore inputs still error rather than sanitizing to "_".
+        assert!(sanitize_prometheus_label("___").is_err());
+        assert!(sanitize_prometheus_label("_____").is_err());
     }
 
     #[test]
