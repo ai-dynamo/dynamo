@@ -577,6 +577,14 @@ impl Client {
         self.instance_source.borrow().clone()
     }
 
+    pub(crate) fn instance_by_id(&self, instance_id: u64) -> Option<Instance> {
+        self.instance_source
+            .borrow()
+            .iter()
+            .find(|instance| instance.id() == instance_id)
+            .cloned()
+    }
+
     pub fn instance_ids(&self) -> Vec<u64> {
         self.instances().into_iter().map(|ep| ep.id()).collect()
     }
@@ -977,6 +985,53 @@ impl Client {
 mod tests {
     use super::*;
     use crate::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+
+    #[tokio::test]
+    async fn test_instance_by_id_returns_owned_current_instance() {
+        use crate::component::TransportType;
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_instance_lookup".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("test_endpoint".to_string());
+        let mut client = endpoint.client().await.unwrap();
+        let instances: Vec<_> = (1..=2)
+            .map(|instance_id| Instance {
+                namespace: "test_instance_lookup".to_string(),
+                component: "test_component".to_string(),
+                endpoint: "test_endpoint".to_string(),
+                instance_id,
+                transport: TransportType::Tcp(format!("127.0.0.1:{}", 9000 + instance_id)),
+                device_type: None,
+                request_plane_codec: None,
+            })
+            .collect();
+        let (tx, rx) = tokio::sync::watch::channel(instances.clone());
+        client.instance_source = Arc::new(rx);
+
+        assert_eq!(client.instance_by_id(1), Some(instances[0].clone()));
+        let selected = client.instance_by_id(2).unwrap();
+        assert_eq!(selected, instances[1]);
+        assert!(client.instance_by_id(3).is_none());
+
+        let mut updated = selected.clone();
+        updated.transport = TransportType::Nats("updated.subject".to_string());
+        tx.send(vec![instances[0].clone(), updated.clone()])
+            .unwrap();
+        assert_eq!(client.instance_by_id(2), Some(updated));
+
+        tx.send(vec![instances[0].clone()]).unwrap();
+        assert!(client.instance_by_id(2).is_none());
+        assert_eq!(client.instance_by_id(1), Some(instances[0].clone()));
+
+        rt.shutdown();
+    }
 
     async fn wait_for_discovery_event(
         receiver: &mut DiscoveryEventReceiver,

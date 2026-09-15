@@ -1843,19 +1843,15 @@ where
         use crate::component::TransportType;
 
         let lookup = |id: u64| {
-            self.client
-                .instances()
-                .iter()
-                .find(|i| i.instance_id == id)
-                .map(|instance| {
-                    let (addr, kind) = match &instance.transport {
-                        TransportType::Tcp(tcp_endpoint) => {
-                            (tcp_endpoint.clone(), "transport.tcp.request")
-                        }
-                        TransportType::Nats(subject) => (subject.clone(), "transport.nats.request"),
-                    };
-                    (addr, kind, instance.clone())
-                })
+            self.client.instance_by_id(id).map(|instance| {
+                let (addr, kind) = match &instance.transport {
+                    TransportType::Tcp(tcp_endpoint) => {
+                        (tcp_endpoint.clone(), "transport.tcp.request")
+                    }
+                    TransportType::Nats(subject) => (subject.clone(), "transport.nats.request"),
+                };
+                (addr, kind, instance)
+            })
         };
 
         if let Some((addr, kind, inst)) = lookup(instance_id) {
