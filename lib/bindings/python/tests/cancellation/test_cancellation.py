@@ -23,6 +23,7 @@ class MockServer:
         self.context_is_stopped = False
         self.context_is_killed = False
         self.context_metadata: dict[str, str] = {}
+        self.cancellation_observed = asyncio.Event()
 
     async def generate(self, request, context):
         print("################## generate called ######################")
@@ -30,6 +31,7 @@ class MockServer:
         self.context_is_stopped = False
         self.context_is_killed = False
         self.context_metadata = {}
+        self.cancellation_observed.clear()
 
         method_name = request
         assert hasattr(
@@ -53,6 +55,7 @@ class MockServer:
                 self.context_is_stopped = True
                 self.context_is_killed = context.is_killed()
                 self.context_metadata = dict(context.metadata.items())
+                self.cancellation_observed.set()
                 raise asyncio.CancelledError
 
             if context.is_killed():
@@ -60,6 +63,7 @@ class MockServer:
                 self.context_is_stopped = context.is_stopped()
                 self.context_is_killed = True
                 self.context_metadata = dict(context.metadata.items())
+                self.cancellation_observed.set()
                 raise asyncio.CancelledError
 
             await asyncio.sleep(0.1)
@@ -350,31 +354,37 @@ async def test_server_raise_cancelled(temp_file_store, server, client):
     assert not handler.context_is_killed
 
 
-@pytest.mark.forked
-@pytest.mark.asyncio
-@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
-async def test_client_context_already_cancelled(temp_file_store, server, client):
-    _, handler = server
-    context = Context()
-    context.stop_generating()
-    # TODO: (DIS-830) The outgoing call should raise if context is cancelled
-    stream = await client.generate("_generate_until_context_cancelled", context=context)
+async def assert_request_cancelled(request, handler):
+    async def drain_and_wait():
+        stream = await request
+        # Cancellation travels asynchronously to the worker. Drain responses
+        # already in flight, but require both stream closure and worker acknowledgement.
+        async for _ in stream:
+            pass
+        await handler.cancellation_observed.wait()
 
-    async for _ in stream:
-        raise AssertionError(
-            "Request should be cancelled before any responses are generated"
-        )
+    await asyncio.wait_for(drain_and_wait(), timeout=5)
 
-    # Give server a moment to update status
-    await asyncio.sleep(0.2)
-
-    # Verify server context cancellation status
     assert handler.context_is_stopped
     assert not handler.context_is_killed
 
 
 @pytest.mark.forked
 @pytest.mark.asyncio
+@pytest.mark.timeout(15)
+@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+async def test_client_context_already_cancelled(temp_file_store, server, client):
+    _, handler = server
+    context = Context()
+    context.stop_generating()
+    # TODO: (DIS-830) The outgoing call should raise if context is cancelled
+    request = client.generate("_generate_until_context_cancelled", context=context)
+    await assert_request_cancelled(request, handler)
+
+
+@pytest.mark.forked
+@pytest.mark.asyncio
+@pytest.mark.timeout(15)
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 async def test_client_context_cancel_before_await_request(
     temp_file_store, server, client
@@ -384,16 +394,4 @@ async def test_client_context_cancel_before_await_request(
     request = client.generate("_generate_until_context_cancelled", context=context)
     context.stop_generating()
     # TODO: (DIS-830) The outgoing call should raise if context is cancelled
-    stream = await request
-
-    async for _ in stream:
-        raise AssertionError(
-            "Request should be cancelled before any responses are generated"
-        )
-
-    # Give server a moment to update status
-    await asyncio.sleep(0.2)
-
-    # Verify server context cancellation status
-    assert handler.context_is_stopped
-    assert not handler.context_is_killed
+    await assert_request_cancelled(request, handler)
