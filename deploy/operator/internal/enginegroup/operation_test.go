@@ -35,20 +35,28 @@ const testBackendOperationID = "backend-1"
 var testNow = time.Date(2026, time.September, 14, 12, 0, 0, 0, time.UTC)
 
 type fakeMembershipAdapter struct {
-	capabilities         *MembershipCapabilities
-	capabilitiesErr      error
-	capabilitiesCalls    int
-	topology             MembershipTopology
-	topologyObservations []MembershipTopology
-	topologyErr          error
-	topologyCalls        int
-	operation            BackendOperation
-	operationErr         error
-	submitResult         BackendOperation
-	submitErr            error
-	submitCalls          []MembershipRequest
-	observeCalls         []operationAttempt
-	submittedRequests    map[operationAttempt]MembershipRequest
+	capabilities                         *MembershipCapabilities
+	capabilitiesErr                      error
+	capabilitiesCalls                    int
+	validatePlanErr                      error
+	validatePlanCalls                    []OperationPlan
+	validateObservedTransitionErr        error
+	validateObservedTransitionCapability *ResolvedOperationCapability
+	validateObservedTransitionCalls      []ObservedMembershipTransition
+	validateRequestErr                   error
+	validateRequestCalls                 []MembershipRequest
+	acceptedShapes                       map[OperationShape]struct{}
+	topology                             MembershipTopology
+	topologyObservations                 []MembershipTopology
+	topologyErr                          error
+	topologyCalls                        int
+	operation                            BackendOperation
+	operationErr                         error
+	submitResult                         BackendOperation
+	submitErr                            error
+	submitCalls                          []MembershipRequest
+	observeCalls                         []operationAttempt
+	submittedRequests                    map[operationAttempt]MembershipRequest
 }
 
 type operationAttempt struct {
@@ -64,7 +72,50 @@ func (f *fakeMembershipAdapter) ObserveCapabilities(context.Context, GroupID) (M
 	if f.capabilities == nil {
 		return allTestMembershipCapabilities(), nil
 	}
-	return MembershipCapabilities{Intents: slices.Clone(f.capabilities.Intents)}, nil
+	return cloneTestMembershipCapabilities(*f.capabilities), nil
+}
+
+func (f *fakeMembershipAdapter) ValidatePlan(
+	_ context.Context,
+	_ GroupID,
+	topology MembershipTopology,
+	plan OperationPlan,
+) (ResolvedOperationCapability, error) {
+	f.validatePlanCalls = append(f.validatePlanCalls, normalizePlan(plan))
+	if f.validatePlanErr != nil {
+		return ResolvedOperationCapability{}, f.validatePlanErr
+	}
+	if err := validatePlan(plan, topology); err != nil {
+		return ResolvedOperationCapability{}, err
+	}
+
+	capability, err := resolveTestOperationCapability(plan, topology, f.currentCapabilities())
+	if err != nil {
+		return ResolvedOperationCapability{}, err
+	}
+	if f.acceptedShapes == nil {
+		f.acceptedShapes = make(map[OperationShape]struct{})
+	}
+	f.acceptedShapes[capability.Shape] = struct{}{}
+	return capability, nil
+}
+
+func (f *fakeMembershipAdapter) ValidateObservedTransition(
+	_ context.Context,
+	_ GroupID,
+	transition ObservedMembershipTransition,
+) (ResolvedOperationCapability, error) {
+	f.validateObservedTransitionCalls = append(
+		f.validateObservedTransitionCalls,
+		cloneObservedMembershipTransition(transition),
+	)
+	if f.validateObservedTransitionErr != nil {
+		return ResolvedOperationCapability{}, f.validateObservedTransitionErr
+	}
+	if f.validateObservedTransitionCapability != nil {
+		return *f.validateObservedTransitionCapability, nil
+	}
+	return resolveTestObservedTransitionCapability(transition, f.currentCapabilities())
 }
 
 func (f *fakeMembershipAdapter) ObserveTopology(context.Context, GroupID) (MembershipTopology, error) {
@@ -95,17 +146,48 @@ func (f *fakeMembershipAdapter) ObserveOperation(
 		return BackendOperation{Phase: BackendOperationPhaseAbsent}, nil
 	}
 	operation := cloneBackendOperation(f.operation)
+	if operation.Phase == BackendOperationPhaseAbsent {
+		return BackendOperation{Phase: BackendOperationPhaseAbsent}, nil
+	}
 	if operation.Attempt == 0 {
 		operation.Attempt = attempt
 	}
 	return operation, nil
 }
 
+func (f *fakeMembershipAdapter) ValidateRequest(
+	_ context.Context,
+	_ GroupID,
+	request MembershipRequest,
+) error {
+	f.validateRequestCalls = append(f.validateRequestCalls, cloneTestMembershipRequest(request))
+	if f.validateRequestErr != nil {
+		return f.validateRequestErr
+	}
+	return f.validateRequest(request)
+}
+
 func (f *fakeMembershipAdapter) SubmitOperation(_ context.Context, _ GroupID, request MembershipRequest) (BackendOperation, error) {
-	request.BaseReplicas = slices.Clone(request.BaseReplicas)
+	request.BaseTopology = cloneTopology(request.BaseTopology)
 	request.JoiningReplicas = slices.Clone(request.JoiningReplicas)
 	request.NominatedReplicas = slices.Clone(request.NominatedReplicas)
+	request.TargetMembership = cloneReplicaMemberships(request.TargetMembership)
 	f.submitCalls = append(f.submitCalls, request)
+
+	// Keep submission authoritative even when every caller-side preflight previously succeeded.
+	if err := f.validateRequest(request); err != nil {
+		return BackendOperation{
+			ID:             request.ID,
+			Attempt:        request.Attempt,
+			TargetReplicas: request.TargetReplicas,
+			Phase:          BackendOperationPhaseFailed,
+			Failure: &OperationFailure{
+				Classification: FailureClassificationTerminal,
+				Reason:         "AtomicRequestRejected",
+				Message:        err.Error(),
+			},
+		}, nil
+	}
 
 	// Model backend idempotency by operation and attempt while rejecting payload reuse.
 	key := operationAttempt{ID: request.ID, Attempt: request.Attempt}
@@ -124,6 +206,9 @@ func (f *fakeMembershipAdapter) SubmitOperation(_ context.Context, _ GroupID, re
 	}
 	if f.submitResult.Phase != "" {
 		operation := cloneBackendOperation(f.submitResult)
+		if operation.Phase == BackendOperationPhaseAbsent {
+			return BackendOperation{Phase: BackendOperationPhaseAbsent}, nil
+		}
 		if operation.Attempt == 0 {
 			operation.Attempt = request.Attempt
 		}
@@ -136,6 +221,41 @@ func (f *fakeMembershipAdapter) SubmitOperation(_ context.Context, _ GroupID, re
 		TargetReplicas: request.TargetReplicas,
 		Phase:          BackendOperationPhaseAccepted,
 	}, nil
+}
+
+func (f *fakeMembershipAdapter) currentCapabilities() MembershipCapabilities {
+	if f.capabilities == nil {
+		return allTestMembershipCapabilities()
+	}
+	return cloneTestMembershipCapabilities(*f.capabilities)
+}
+
+func (f *fakeMembershipAdapter) validateRequest(request MembershipRequest) error {
+	if request.ID == "" {
+		return errors.New("membership request ID must not be empty")
+	}
+	if request.Attempt < 1 {
+		return errors.New("membership request attempt must be positive")
+	}
+	if !servingVerificationTopologiesEqual(request.BaseTopology, f.topology) {
+		return errors.New("membership request base topology is stale")
+	}
+	if err := validateCapabilityForTestRequest(request.Capability, request); err != nil {
+		return err
+	}
+	if _, accepted := f.acceptedShapes[request.Capability.Shape]; accepted {
+		return nil
+	}
+	for _, shape := range f.currentCapabilities().OperationShapes {
+		if shape == request.Capability.Shape {
+			return nil
+		}
+	}
+	return fmt.Errorf(
+		"membership operation shape %q is not supported: %w",
+		request.Capability.Shape,
+		ErrMembershipOperationUnsupported,
+	)
 }
 
 type fakeOperationIDGenerator struct {
@@ -170,6 +290,8 @@ func TestOperationCoordinatorPersistsBeforeSubmitting(t *testing.T) {
 	assert.Equal(t, OperationPhasePending, result.Operation.Phase)
 	assert.Equal(t, "operation-1", result.Operation.ID)
 	assert.Equal(t, int32(4), result.Operation.TargetReplicas)
+	assert.Equal(t, OperationShapeFreshGrowth, result.Operation.Capability.Shape)
+	assert.Len(t, adapter.validatePlanCalls, 1)
 	assert.Empty(t, adapter.submitCalls)
 
 	t.Log("Keep the operation Pending until capacity or traffic preconditions are durable")
@@ -181,10 +303,16 @@ func TestOperationCoordinatorPersistsBeforeSubmitting(t *testing.T) {
 	assert.Empty(t, adapter.submitCalls)
 
 	t.Log("Freeze exact joining identities in Submitting without calling the membership backend")
-	prepared, err := coordinator.PrepareSubmission(result.Operation, []ReplicaID{"replica-3", "replica-2"})
+	prepared, err := coordinator.PrepareSubmission(
+		context.Background(),
+		input.GroupID,
+		result.Operation,
+		membershipReplicaIncarnations("replica-3", "replica-2"),
+	)
 	require.NoError(t, err)
 	assert.Equal(t, OperationPhaseSubmitting, prepared.Phase)
-	assert.Equal(t, []ReplicaID{"replica-2", "replica-3"}, prepared.JoiningReplicas)
+	assert.Equal(t, membershipReplicaIncarnations("replica-2", "replica-3"), prepared.JoiningReplicas)
+	assert.Len(t, adapter.validateRequestCalls, 1)
 	assert.Empty(t, adapter.submitCalls)
 
 	t.Log("Observe that the persisted operation is absent before requesting submission")
@@ -199,36 +327,195 @@ func TestOperationCoordinatorPersistsBeforeSubmitting(t *testing.T) {
 	result, err = coordinator.Submit(context.Background(), input.GroupID, result.Operation)
 	require.NoError(t, err)
 	assert.Equal(t, OperationPhaseAccepted, result.Operation.Phase)
+	assert.Len(t, adapter.validateRequestCalls, 2)
 	require.Len(t, adapter.submitCalls, 1)
 	assert.Equal(t, MembershipRequest{
-		ID:                     "operation-1",
-		Attempt:                1,
-		Intent:                 OperationIntentGrow,
-		BaseTopologyGeneration: 1,
-		BaseReplicas:           []ReplicaID{"replica-0", "replica-1"},
-		TargetReplicas:         4,
-		JoiningReplicas:        []ReplicaID{"replica-2", "replica-3"},
+		ID:              "operation-1",
+		Attempt:         1,
+		Intent:          OperationIntentGrow,
+		Capability:      testOperationCapability(OperationShapeFreshGrowth),
+		BaseTopology:    membershipTopology(1, 2),
+		TargetReplicas:  4,
+		JoiningReplicas: membershipReplicaIncarnations("replica-2", "replica-3"),
 	}, adapter.submitCalls[0])
 }
 
-func TestOperationCoordinatorRechecksCapabilityImmediatelyBeforeSubmit(t *testing.T) {
-	capabilities := MembershipCapabilities{Intents: []OperationIntent{OperationIntentShrink}}
+func TestOperationCoordinatorRechecksExactRequestImmediatelyBeforeSubmit(t *testing.T) {
+	capabilities := MembershipCapabilities{OperationShapes: []OperationShape{
+		OperationShapePlannedHighRankSuffixShrink,
+	}}
 	adapter := &fakeMembershipAdapter{
-		capabilities: &capabilities,
-		topology:     membershipTopology(1, 2),
+		capabilities:       &capabilities,
+		topology:           membershipTopology(1, 2),
+		validateRequestErr: errors.New("request capability is no longer valid for this group"),
 	}
 	coordinator := newTestOperationCoordinator(adapter, emptyOperationID)
 
-	t.Log("Reject a persisted growth operation when support is absent at the mutation boundary")
+	t.Log("Reject a persisted growth operation when its exact request fails preflight at the mutation boundary")
 	result, err := coordinator.Submit(
 		context.Background(),
 		"group-0",
 		durableOperation(OperationPhaseSubmitting, 4),
 	)
-	require.ErrorContains(t, err, "membership operation \"Grow\" is not supported")
+	require.ErrorContains(t, err, "request capability is no longer valid")
 	assert.Equal(t, OperationPhaseSubmitting, result.Operation.Phase)
-	assert.Equal(t, 1, adapter.capabilitiesCalls)
+	assert.Len(t, adapter.validateRequestCalls, 1)
 	assert.Empty(t, adapter.submitCalls)
+}
+
+func TestOperationCoordinatorValidatesFrozenIdentitiesBeforeSubmitting(t *testing.T) {
+	adapter := &fakeMembershipAdapter{
+		topology:           membershipTopology(1, 2),
+		validateRequestErr: errors.New("joining identities are unsupported"),
+	}
+	coordinator := newTestOperationCoordinator(adapter, emptyOperationID)
+	operation := durableOperation(OperationPhasePending, 4)
+
+	t.Log("Freeze joining identities but refuse the request before returning a durable Submitting transition")
+	prepared, err := coordinator.PrepareSubmission(
+		context.Background(),
+		"group-0",
+		operation,
+		membershipReplicaIncarnations("replica-2", "replica-3"),
+	)
+	require.ErrorContains(t, err, "joining identities are unsupported")
+	assert.Nil(t, prepared)
+	assert.Equal(t, OperationPhasePending, operation.Phase)
+	assert.Empty(t, operation.JoiningReplicas)
+	assert.Len(t, adapter.validateRequestCalls, 1)
+	assert.Empty(t, adapter.submitCalls)
+}
+
+func TestMembershipSubmissionRemainsAtomicAfterSuccessfulPreflight(t *testing.T) {
+	adapter := &fakeMembershipAdapter{topology: membershipTopology(1, 2)}
+	request := membershipRequest(*durableOperation(OperationPhaseSubmitting, 4))
+
+	t.Log("Preflight the complete request against its original base topology")
+	require.NoError(t, adapter.ValidateRequest(context.Background(), "group-0", request))
+
+	t.Log("Advance membership after preflight and reject the stale request atomically at submission")
+	adapter.topology = membershipTopology(2, 2)
+	result, err := adapter.SubmitOperation(context.Background(), "group-0", request)
+	require.NoError(t, err)
+	assert.Equal(t, BackendOperationPhaseFailed, result.Phase)
+	require.NotNil(t, result.Failure)
+	assert.Equal(t, FailureClassificationTerminal, result.Failure.Classification)
+	assert.Contains(t, result.Failure.Message, "base topology is stale")
+	assert.Empty(t, adapter.submittedRequests)
+}
+
+func TestOperationCoordinatorKeepsAcceptedPlanSupportStable(t *testing.T) {
+	capabilities := allTestMembershipCapabilities()
+	adapter := &fakeMembershipAdapter{
+		capabilities: &capabilities,
+		topology:     membershipTopology(1, 2),
+	}
+	coordinator := newTestOperationCoordinator(adapter, func() string { return "operation-1" })
+
+	t.Log("Resolve fresh growth before making the operation durable")
+	result, err := coordinator.Step(context.Background(), OperationInput{
+		GroupID:         "group-0",
+		SpecGeneration:  1,
+		DesiredReplicas: 4,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, OperationShapeFreshGrowth, result.Operation.Capability.Shape)
+
+	t.Log("Remove freshly advertised growth while preserving support accepted by the durable operation")
+	adapter.capabilities = &MembershipCapabilities{OperationShapes: []OperationShape{
+		OperationShapePlannedHighRankSuffixShrink,
+	}}
+	prepared, err := coordinator.PrepareSubmission(
+		context.Background(),
+		"group-0",
+		result.Operation,
+		membershipReplicaIncarnations("replica-2", "replica-3"),
+	)
+	require.NoError(t, err)
+	_, err = coordinator.Submit(context.Background(), "group-0", prepared)
+	require.NoError(t, err)
+	assert.Len(t, adapter.submitCalls, 1)
+}
+
+func TestOperationCoordinatorValidatesOperationShapeBeforePending(t *testing.T) {
+	suffixOnly := MembershipCapabilities{OperationShapes: []OperationShape{
+		OperationShapePlannedHighRankSuffixShrink,
+	}}
+	tests := []struct {
+		name                string
+		capabilities        MembershipCapabilities
+		desiredReplicas     int32
+		plan                *OperationPlan
+		wantShape           OperationShape
+		wantErr             string
+		wantValidationCalls int
+	}{
+		{
+			name:            "suffix-only adapter accepts suffix retirement",
+			capabilities:    suffixOnly,
+			desiredReplicas: 3,
+			plan: &OperationPlan{
+				ID:                "plan-1",
+				Intent:            OperationIntentShrink,
+				TargetReplicas:    3,
+				NominatedReplicas: []ReplicaID{"replica-3"},
+			},
+			wantShape:           OperationShapePlannedHighRankSuffixShrink,
+			wantValidationCalls: 1,
+		},
+		{
+			name:            "suffix-only adapter rejects selected retirement",
+			capabilities:    suffixOnly,
+			desiredReplicas: 3,
+			plan: &OperationPlan{
+				ID:                "plan-1",
+				Intent:            OperationIntentShrink,
+				TargetReplicas:    3,
+				NominatedReplicas: []ReplicaID{"replica-1"},
+			},
+			wantErr:             "does not support plan",
+			wantValidationCalls: 1,
+		},
+		{
+			name: "automatic growth is validated like an explicit plan",
+			capabilities: MembershipCapabilities{OperationShapes: []OperationShape{
+				OperationShapePlannedHighRankSuffixShrink,
+			}},
+			desiredReplicas:     5,
+			wantErr:             "does not support plan",
+			wantValidationCalls: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			adapter := &fakeMembershipAdapter{
+				capabilities: &tt.capabilities,
+				topology:     membershipTopology(1, 4),
+			}
+			coordinator := newTestOperationCoordinator(adapter, func() string { return "operation-1" })
+
+			t.Log("Resolve semantic support before creating a durable operation or allowing prework")
+			result, err := coordinator.Step(context.Background(), OperationInput{
+				GroupID:         "group-0",
+				SpecGeneration:  1,
+				DesiredReplicas: tt.desiredReplicas,
+				Plan:            tt.plan,
+			})
+			assert.Len(t, adapter.validatePlanCalls, tt.wantValidationCalls)
+			assert.Empty(t, adapter.submitCalls)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				assert.Nil(t, result.Operation)
+				return
+			}
+
+			require.NoError(t, err)
+			require.NotNil(t, result.Operation)
+			assert.Equal(t, OperationPhasePending, result.Operation.Phase)
+			assert.Equal(t, tt.wantShape, result.Operation.Capability.Shape)
+		})
+	}
 }
 
 func TestOperationCoordinatorDoesNothingForConvergedMembership(t *testing.T) {
@@ -321,6 +608,37 @@ func TestOperationCoordinatorRecoversAmbiguousSubmissionAfterRestart(t *testing.
 	assert.Len(t, adapter.submitCalls, 1, "restart must observe instead of submitting a competitor")
 }
 
+func TestOperationCoordinatorRecordsDefinitiveSubmitRejection(t *testing.T) {
+	failure := &OperationFailure{
+		Classification: FailureClassificationTerminal,
+		Reason:         "RequestRejected",
+		Message:        "the exact request cannot be applied",
+	}
+	adapter := &fakeMembershipAdapter{
+		topology: membershipTopology(1, 2),
+		submitResult: BackendOperation{
+			ID:             "operation-1",
+			Attempt:        1,
+			TargetReplicas: 4,
+			Phase:          BackendOperationPhaseFailed,
+			Failure:        failure,
+		},
+	}
+	coordinator := newTestOperationCoordinator(adapter, emptyOperationID)
+
+	t.Log("Persist a correlated terminal failure when the backend guarantees that submission did not mutate membership")
+	result, err := coordinator.Submit(
+		context.Background(),
+		"group-0",
+		durableOperation(OperationPhaseSubmitting, 4),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, OperationPhaseFailed, result.Operation.Phase)
+	assert.Equal(t, failure, result.Operation.Failure)
+	assert.True(t, result.OperationChanged)
+	require.Len(t, adapter.submitCalls, 1)
+}
+
 func TestOperationCoordinatorKeepsUnobservableSubmissionRetryable(t *testing.T) {
 	adapter := &fakeMembershipAdapter{
 		topology: membershipTopology(1, 2),
@@ -370,12 +688,12 @@ func TestOperationCoordinatorReplaysOnlyTheExactAttemptPayload(t *testing.T) {
 	t.Log("Reject reuse of that operation attempt with a different immutable target and joining set")
 	conflicting := cloneOperation(original)
 	conflicting.TargetReplicas = 3
-	conflicting.JoiningReplicas = []ReplicaID{"replica-2"}
+	conflicting.JoiningReplicas = membershipReplicaIncarnations("replica-2")
 	_, err = coordinator.Submit(context.Background(), "group-0", conflicting)
 	require.ErrorContains(t, err, "conflicting payload")
 }
 
-func TestOperationCoordinatorBeginsCompensationWhenBaseTopologyChangesBeforeSubmit(t *testing.T) {
+func TestOperationCoordinatorFailsClosedWhenBaseTopologyChangesBeforeSubmit(t *testing.T) {
 	tests := []struct {
 		name     string
 		topology MembershipTopology
@@ -389,8 +707,8 @@ func TestOperationCoordinatorBeginsCompensationWhenBaseTopologyChangesBeforeSubm
 			topology: MembershipTopology{
 				Generation: 1,
 				Replicas: []ReplicaMembership{
-					{ReplicaID: "replica-0", NativeMembers: []NativeMemberID{"dp-0"}},
-					{ReplicaID: "replica-9", NativeMembers: []NativeMemberID{"dp-9"}},
+					membershipReplicaMembership("replica-0", "dp-0"),
+					membershipReplicaMembership("replica-9", "dp-9"),
 				},
 			},
 		},
@@ -402,12 +720,12 @@ func TestOperationCoordinatorBeginsCompensationWhenBaseTopologyChangesBeforeSubm
 			coordinator := newTestOperationCoordinator(adapter, emptyOperationID)
 			operation := durableOperation(OperationPhaseSubmitting, 4)
 
-			t.Log("Persist compensation after proving the stale request cannot be submitted")
+			t.Log("Fail closed after proving the stale request cannot be submitted")
 			result, err := coordinator.Submit(context.Background(), "group-0", operation)
 			require.NoError(t, err)
-			assert.Equal(t, OperationPhaseAborting, result.Operation.Phase)
-			require.NotNil(t, result.Operation.Failure)
-			assert.Equal(t, "BaseTopologyChanged", result.Operation.Failure.Reason)
+			assert.Equal(t, OperationPhaseUnknown, result.Operation.Phase)
+			assert.Nil(t, result.Operation.Failure)
+			assert.Nil(t, result.Operation.CompensationTopology)
 			assert.True(t, result.OperationChanged)
 			assert.Equal(t, []operationAttempt{{ID: operation.ID, Attempt: operation.Attempt}}, adapter.observeCalls)
 			assert.Empty(t, adapter.submitCalls)
@@ -415,12 +733,12 @@ func TestOperationCoordinatorBeginsCompensationWhenBaseTopologyChangesBeforeSubm
 	}
 }
 
-func TestOperationCoordinatorCompensatesSubmittingOperationAfterAbsentBaseDrift(t *testing.T) {
+func TestOperationCoordinatorFailsClosedForSubmittingOperationAfterAbsentBaseDrift(t *testing.T) {
 	adapter := &fakeMembershipAdapter{topology: membershipTopology(2, 3)}
 	coordinator := newTestOperationCoordinator(adapter, emptyOperationID)
 	operation := durableOperation(OperationPhaseSubmitting, 4)
 
-	t.Log("Begin compensation before requesting any prerequisite or backend replay")
+	t.Log("Fail closed before requesting any prerequisite or backend replay")
 	result, err := coordinator.Step(context.Background(), OperationInput{
 		GroupID:         "group-0",
 		SpecGeneration:  1,
@@ -428,16 +746,16 @@ func TestOperationCoordinatorCompensatesSubmittingOperationAfterAbsentBaseDrift(
 		Operation:       operation,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, OperationPhaseAborting, result.Operation.Phase)
-	require.NotNil(t, result.Operation.Failure)
-	assert.Equal(t, "BaseTopologyChanged", result.Operation.Failure.Reason)
+	assert.Equal(t, OperationPhaseUnknown, result.Operation.Phase)
+	assert.Nil(t, result.Operation.Failure)
+	assert.Nil(t, result.Operation.CompensationTopology)
 	assert.True(t, result.OperationChanged)
 	assert.False(t, result.SubmissionNeeded)
 	assert.Equal(t, []operationAttempt{{ID: operation.ID, Attempt: operation.Attempt}}, adapter.observeCalls)
 	assert.Empty(t, adapter.submitCalls)
 }
 
-func TestOperationCoordinatorPersistsCompensationBeforeGrowthIdentitiesAreFrozen(t *testing.T) {
+func TestOperationCoordinatorFailsClosedBeforeGrowthIdentitiesAreFrozenAfterBaseDrift(t *testing.T) {
 	adapter := &fakeMembershipAdapter{topology: membershipTopology(2, 2)}
 	coordinator := newTestOperationCoordinator(adapter, emptyOperationID)
 	input := OperationInput{
@@ -447,19 +765,24 @@ func TestOperationCoordinatorPersistsCompensationBeforeGrowthIdentitiesAreFrozen
 		Operation:       durableOperation(OperationPhasePending, 4),
 	}
 
-	t.Log("Record base-topology compensation even though no joining identities were frozen yet")
+	t.Log("Fail closed because the changed base has not been validated as a recovery transition")
 	result, err := coordinator.Step(context.Background(), input)
 	require.NoError(t, err)
 	require.NotNil(t, result.Operation)
-	assert.Equal(t, OperationPhaseAborting, result.Operation.Phase)
+	assert.Equal(t, OperationPhaseUnknown, result.Operation.Phase)
 	assert.Empty(t, result.Operation.JoiningReplicas)
+	assert.Nil(t, result.Operation.CompensationTopology)
 	assert.True(t, result.OperationChanged)
 
-	t.Log("Keep the persisted compensation record stable for the workflow to execute after restart")
+	t.Log("Turn definitive backend absence into durable compensation after restart")
 	input.Operation = result.Operation
 	result, err = coordinator.Step(context.Background(), input)
 	require.NoError(t, err)
 	assert.Equal(t, OperationPhaseAborting, result.Operation.Phase)
+	require.NotNil(t, result.Operation.CompensationTopology)
+	assert.True(t, servingVerificationTopologiesEqual(input.Operation.BaseTopology, *result.Operation.CompensationTopology))
+	require.NotNil(t, result.Operation.Failure)
+	assert.Equal(t, "OperationAbsentAfterTopologyDrift", result.Operation.Failure.Reason)
 	assert.Empty(t, adapter.submitCalls)
 }
 
@@ -490,7 +813,7 @@ func TestOperationCoordinatorRequiresIdentityAwareShrinkPlan(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result.Operation)
 	assert.Equal(t, OperationPhasePending, result.Operation.Phase)
-	assert.Equal(t, []ReplicaID{"replica-0", "replica-1"}, result.Operation.BaseReplicas)
+	assert.Equal(t, []ReplicaID{"replica-0", "replica-1"}, topologyReplicaIDs(result.Operation.BaseTopology))
 	assert.Equal(t, []ReplicaID{"replica-1"}, result.Operation.NominatedReplicas)
 }
 
@@ -549,11 +872,11 @@ func TestOperationCoordinatorRetainsCommittedOperationForWorkflowFinalization(t 
 	adapter := &fakeMembershipAdapter{
 		topology: membershipTopology(2, 4),
 		operation: BackendOperation{
-			ID:                          "operation-1",
-			BackendID:                   testBackendOperationID,
-			TargetReplicas:              4,
-			Phase:                       BackendOperationPhaseCommitted,
-			CommittedTopologyGeneration: 2,
+			ID:                "operation-1",
+			BackendID:         testBackendOperationID,
+			TargetReplicas:    4,
+			Phase:             BackendOperationPhaseCommitted,
+			CommittedTopology: topologyPointer(membershipTopology(2, 4)),
 		},
 	}
 	ids := &fakeOperationIDGenerator{ids: []string{"operation-2"}}
@@ -570,7 +893,8 @@ func TestOperationCoordinatorRetainsCommittedOperationForWorkflowFinalization(t 
 	require.NoError(t, err)
 	assert.Equal(t, OperationPhaseCommitted, result.Operation.Phase)
 	assert.Equal(t, int32Pointer(6), result.Operation.QueuedTargetReplicas)
-	assert.Equal(t, int64(2), result.Operation.CommittedTopologyGeneration)
+	require.NotNil(t, result.Operation.CommittedTopology)
+	assert.Equal(t, membershipTopology(2, 4), *result.Operation.CommittedTopology)
 
 	t.Log("Retain the committed operation until the workflow finishes traffic and capacity work")
 	input.Operation = result.Operation
@@ -581,6 +905,43 @@ func TestOperationCoordinatorRetainsCommittedOperationForWorkflowFinalization(t 
 	assert.Equal(t, int32(4), result.Operation.TargetReplicas)
 	assert.Equal(t, int32Pointer(6), result.Operation.QueuedTargetReplicas)
 	assert.Equal(t, 0, ids.calls)
+}
+
+func TestOperationCoordinatorFreezesExactServingVerificationTargetAtCommit(t *testing.T) {
+	committedTopology := membershipTopology(2, 4)
+	committedTopology.Replicas[3].NativeMembers = []NativeMemberID{"native-3-a", "native-3-b"}
+	adapter := &fakeMembershipAdapter{
+		topology: committedTopology,
+		operation: BackendOperation{
+			ID:                "operation-1",
+			BackendID:         testBackendOperationID,
+			TargetReplicas:    4,
+			Phase:             BackendOperationPhaseCommitted,
+			CommittedTopology: topologyPointer(committedTopology),
+		},
+	}
+	coordinator := newTestOperationCoordinator(adapter, emptyOperationID)
+	operation := durableOperation(OperationPhaseCommitting, 4)
+	operation.Capability.VerificationRequirement = ServingVerificationRequired
+	operation.Capability.TrafficRequirement = ReconfigurationTrafficQuiesceGroup
+
+	result, err := coordinator.Step(context.Background(), OperationInput{
+		GroupID:         "group-0",
+		SpecGeneration:  1,
+		DesiredReplicas: 4,
+		Operation:       operation,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, OperationPhaseCommitted, result.Operation.Phase)
+	require.NotNil(t, result.Operation.CommittedTopology)
+	require.NotNil(t, result.Operation.ServingVerificationTarget)
+	assert.Equal(t, committedTopology, *result.Operation.CommittedTopology)
+	assert.Equal(t, committedTopology, *result.Operation.ServingVerificationTarget)
+	assert.Equal(t, int32(1), result.Operation.ServingVerificationAttempt)
+
+	committedTopology.Replicas[3].NativeMembers[0] = "mutated-after-observation"
+	assert.NotEqual(t, committedTopology, *result.Operation.CommittedTopology)
+	assert.Equal(t, *result.Operation.CommittedTopology, *result.Operation.ServingVerificationTarget)
 }
 
 func TestOperationCoordinatorHandlesExplicitBackendFailure(t *testing.T) {
@@ -639,14 +1000,19 @@ func TestOperationCoordinatorHandlesExplicitBackendFailure(t *testing.T) {
 			assert.Equal(t, "operation-1", result.Operation.ID)
 
 			t.Log("Prepare only an explicitly retryable failure for idempotent resubmission")
-			prepared, prepareErr := coordinator.PrepareSubmission(result.Operation, nil)
+			prepared, prepareErr := coordinator.PrepareSubmission(
+				context.Background(),
+				input.GroupID,
+				result.Operation,
+				nil,
+			)
 			if tt.wantRetryPrepared {
 				require.NoError(t, prepareErr)
 				assert.Equal(t, OperationPhaseSubmitting, prepared.Phase)
 				assert.Equal(t, "operation-1", prepared.ID)
 				assert.Equal(t, int32(2), prepared.Attempt)
 				assert.Nil(t, prepared.Failure)
-				assert.Equal(t, []ReplicaID{"replica-2", "replica-3"}, prepared.JoiningReplicas)
+				assert.Equal(t, membershipReplicaIncarnations("replica-2", "replica-3"), prepared.JoiningReplicas)
 			} else {
 				require.Error(t, prepareErr)
 				assert.Nil(t, prepared)
@@ -716,6 +1082,81 @@ func TestOperationCoordinatorRejectsChangedBackendIdentityAndStaleProgress(t *te
 			assert.Equal(t, tt.wantPhase, result.Operation.Phase)
 			assert.Equal(t, tt.wantBackendID, result.Operation.BackendOperationID)
 			assert.Equal(t, tt.wantStateChange, result.OperationChanged)
+		})
+	}
+}
+
+func TestOperationCoordinatorFailsClosedOnPhaseContradictoryBackendOperation(t *testing.T) {
+	tests := []struct {
+		name        string
+		observation BackendOperation
+	}{
+		{
+			name: "accepted result carries committed topology",
+			observation: BackendOperation{
+				Phase:             BackendOperationPhaseAccepted,
+				CommittedTopology: topologyPointer(membershipTopology(2, 4)),
+			},
+		},
+		{
+			name: "committing result carries failure",
+			observation: BackendOperation{
+				Phase: BackendOperationPhaseCommitting,
+				Failure: &OperationFailure{
+					Classification: FailureClassificationTerminal,
+					Reason:         "ContradictoryState",
+				},
+			},
+		},
+		{
+			name: "committed result also carries failure",
+			observation: BackendOperation{
+				Phase:             BackendOperationPhaseCommitted,
+				CommittedTopology: topologyPointer(membershipTopology(2, 4)),
+				Failure: &OperationFailure{
+					Classification: FailureClassificationTerminal,
+					Reason:         "ContradictoryState",
+				},
+			},
+		},
+		{
+			name: "failed result also carries committed topology",
+			observation: BackendOperation{
+				Phase:             BackendOperationPhaseFailed,
+				CommittedTopology: topologyPointer(membershipTopology(2, 4)),
+				Failure: &OperationFailure{
+					Classification: FailureClassificationTerminal,
+					Reason:         "ContradictoryState",
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			operation := durableOperation(OperationPhaseCommitting, 4)
+			observation := cloneBackendOperation(tt.observation)
+			observation.ID = operation.ID
+			observation.Attempt = operation.Attempt
+			observation.TargetReplicas = operation.TargetReplicas
+			adapter := &fakeMembershipAdapter{
+				topology:  membershipTopology(1, 2),
+				operation: observation,
+			}
+			coordinator := newTestOperationCoordinator(adapter, emptyOperationID)
+
+			result, err := coordinator.Step(context.Background(), OperationInput{
+				GroupID:         "group-0",
+				SpecGeneration:  1,
+				DesiredReplicas: 4,
+				Operation:       operation,
+			})
+			require.NoError(t, err)
+			require.NotNil(t, result.Operation)
+			assert.Equal(t, OperationPhaseUnknown, result.Operation.Phase)
+			assert.Nil(t, result.Operation.CommittedTopology)
+			assert.Nil(t, result.Operation.Failure)
+			assert.Empty(t, adapter.submitCalls)
 		})
 	}
 }
@@ -790,17 +1231,18 @@ func TestOperationCoordinatorFailsClosedAndRecoversCorrelation(t *testing.T) {
 	t.Log("Recover from Unknown only after the exact committed operation and topology reappear")
 	adapter.topology = membershipTopology(2, 4)
 	adapter.operation = BackendOperation{
-		ID:                          "operation-1",
-		BackendID:                   testBackendOperationID,
-		TargetReplicas:              4,
-		Phase:                       BackendOperationPhaseCommitted,
-		CommittedTopologyGeneration: 2,
+		ID:                "operation-1",
+		BackendID:         testBackendOperationID,
+		TargetReplicas:    4,
+		Phase:             BackendOperationPhaseCommitted,
+		CommittedTopology: topologyPointer(membershipTopology(2, 4)),
 	}
 	input.Operation = result.Operation
 	result, err = coordinator.Step(context.Background(), input)
 	require.NoError(t, err)
 	assert.Equal(t, OperationPhaseCommitted, result.Operation.Phase)
-	assert.Equal(t, int64(2), result.Operation.CommittedTopologyGeneration)
+	require.NotNil(t, result.Operation.CommittedTopology)
+	assert.Equal(t, membershipTopology(2, 4), *result.Operation.CommittedTopology)
 	assert.Empty(t, adapter.submitCalls)
 }
 
@@ -837,7 +1279,7 @@ func TestOperationCoordinatorDoesNotRegressUnknownCommittedProof(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			operation := durableOperation(OperationPhaseUnknown, 4)
 			operation.BackendOperationID = testBackendOperationID
-			operation.CommittedTopologyGeneration = 2
+			operation.CommittedTopology = topologyPointer(membershipTopology(2, 4))
 			observation := tt.observation
 			observation.ID = operation.ID
 			observation.Attempt = operation.Attempt
@@ -867,16 +1309,16 @@ func TestOperationCoordinatorDoesNotRegressUnknownCommittedProof(t *testing.T) {
 func TestOperationCoordinatorKeepsUnknownCommitProofWhileTopologyObservationLags(t *testing.T) {
 	operation := durableOperation(OperationPhaseUnknown, 4)
 	operation.BackendOperationID = testBackendOperationID
-	operation.CommittedTopologyGeneration = 2
+	operation.CommittedTopology = topologyPointer(membershipTopology(2, 4))
 	adapter := &fakeMembershipAdapter{
 		topology: membershipTopology(1, 2),
 		operation: BackendOperation{
-			ID:                          operation.ID,
-			Attempt:                     operation.Attempt,
-			BackendID:                   operation.BackendOperationID,
-			TargetReplicas:              operation.TargetReplicas,
-			Phase:                       BackendOperationPhaseCommitted,
-			CommittedTopologyGeneration: operation.CommittedTopologyGeneration,
+			ID:                operation.ID,
+			Attempt:           operation.Attempt,
+			BackendID:         operation.BackendOperationID,
+			TargetReplicas:    operation.TargetReplicas,
+			Phase:             BackendOperationPhaseCommitted,
+			CommittedTopology: cloneTopologyPointer(operation.CommittedTopology),
 		},
 	}
 	coordinator := newTestOperationCoordinator(adapter, emptyOperationID)
@@ -896,38 +1338,32 @@ func TestOperationCoordinatorKeepsUnknownCommitProofWhileTopologyObservationLags
 
 func TestOperationCoordinatorRequiresExactCommittedTopology(t *testing.T) {
 	wrongIdentityTopology := membershipTopology(2, 4)
-	wrongIdentityTopology.Replicas[3] = ReplicaMembership{
-		ReplicaID:     "replica-9",
-		NativeMembers: []NativeMemberID{"dp-9"},
-	}
+	wrongIdentityTopology.Replicas[3] = membershipReplicaMembership("replica-9", "dp-9")
 	laterUnexpectedTopology := membershipTopology(3, 3)
-	laterUnexpectedTopology.Replicas[2] = ReplicaMembership{
-		ReplicaID:     "replica-9",
-		NativeMembers: []NativeMemberID{"dp-9"},
-	}
+	laterUnexpectedTopology.Replicas[2] = membershipReplicaMembership("replica-9", "dp-9")
 
 	tests := []struct {
 		name                 string
 		topology             MembershipTopology
-		committedGeneration  int64
+		committedTopology    *MembershipTopology
 		backendTarget        int32
 		wantPhase            OperationPhase
-		wantCommitProof      int64
+		wantCommitProof      bool
 		wantTopologyReplicas int32
 	}{
 		{
 			name:                 "exact topology commits",
 			topology:             membershipTopology(2, 4),
-			committedGeneration:  2,
+			committedTopology:    topologyPointer(membershipTopology(2, 4)),
 			backendTarget:        4,
 			wantPhase:            OperationPhaseCommitted,
-			wantCommitProof:      2,
+			wantCommitProof:      true,
 			wantTopologyReplicas: 4,
 		},
 		{
 			name:                 "stale topology keeps committing",
 			topology:             membershipTopology(1, 2),
-			committedGeneration:  2,
+			committedTopology:    topologyPointer(membershipTopology(2, 4)),
 			backendTarget:        4,
 			wantPhase:            OperationPhaseCommitting,
 			wantTopologyReplicas: 2,
@@ -935,7 +1371,7 @@ func TestOperationCoordinatorRequiresExactCommittedTopology(t *testing.T) {
 		{
 			name:                 "wrong topology cardinality is unknown",
 			topology:             membershipTopology(2, 3),
-			committedGeneration:  2,
+			committedTopology:    topologyPointer(membershipTopology(2, 4)),
 			backendTarget:        4,
 			wantPhase:            OperationPhaseUnknown,
 			wantTopologyReplicas: 3,
@@ -943,7 +1379,7 @@ func TestOperationCoordinatorRequiresExactCommittedTopology(t *testing.T) {
 		{
 			name:                 "wrong replica identity at the expected cardinality is unknown",
 			topology:             wrongIdentityTopology,
-			committedGeneration:  2,
+			committedTopology:    topologyPointer(membershipTopology(2, 4)),
 			backendTarget:        4,
 			wantPhase:            OperationPhaseUnknown,
 			wantTopologyReplicas: 4,
@@ -951,7 +1387,7 @@ func TestOperationCoordinatorRequiresExactCommittedTopology(t *testing.T) {
 		{
 			name:                 "later topology with unexpected identity is unknown without commit proof",
 			topology:             laterUnexpectedTopology,
-			committedGeneration:  2,
+			committedTopology:    topologyPointer(membershipTopology(2, 4)),
 			backendTarget:        4,
 			wantPhase:            OperationPhaseUnknown,
 			wantTopologyReplicas: 3,
@@ -959,16 +1395,16 @@ func TestOperationCoordinatorRequiresExactCommittedTopology(t *testing.T) {
 		{
 			name:                 "later topology generation is unknown",
 			topology:             membershipTopology(3, 4),
-			committedGeneration:  2,
+			committedTopology:    topologyPointer(membershipTopology(2, 4)),
 			backendTarget:        4,
 			wantPhase:            OperationPhaseUnknown,
-			wantCommitProof:      2,
+			wantCommitProof:      true,
 			wantTopologyReplicas: 4,
 		},
 		{
 			name:                 "mismatched backend target is unknown",
 			topology:             membershipTopology(2, 4),
-			committedGeneration:  2,
+			committedTopology:    topologyPointer(membershipTopology(2, 4)),
 			backendTarget:        5,
 			wantPhase:            OperationPhaseUnknown,
 			wantTopologyReplicas: 4,
@@ -980,10 +1416,10 @@ func TestOperationCoordinatorRequiresExactCommittedTopology(t *testing.T) {
 			adapter := &fakeMembershipAdapter{
 				topology: tt.topology,
 				operation: BackendOperation{
-					ID:                          "operation-1",
-					TargetReplicas:              tt.backendTarget,
-					Phase:                       BackendOperationPhaseCommitted,
-					CommittedTopologyGeneration: tt.committedGeneration,
+					ID:                "operation-1",
+					TargetReplicas:    tt.backendTarget,
+					Phase:             BackendOperationPhaseCommitted,
+					CommittedTopology: cloneTopologyPointer(tt.committedTopology),
 				},
 			}
 			coordinator := newTestOperationCoordinator(adapter, emptyOperationID)
@@ -998,20 +1434,25 @@ func TestOperationCoordinatorRequiresExactCommittedTopology(t *testing.T) {
 			result, err := coordinator.Step(context.Background(), input)
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantPhase, result.Operation.Phase)
-			assert.Equal(t, tt.wantCommitProof, result.Operation.CommittedTopologyGeneration)
+			if tt.wantCommitProof {
+				assert.Equal(t, tt.committedTopology, result.Operation.CommittedTopology)
+			} else {
+				assert.Nil(t, result.Operation.CommittedTopology)
+			}
 			assert.Equal(t, tt.wantTopologyReplicas, result.Topology.ReplicaCount())
 		})
 	}
 }
 
 func TestOperationCoordinatorPreservesCommitProofWhenTopologyObservationSkipsToSurvivors(t *testing.T) {
+	committedTopology := membershipTopology(2, 4)
 	adapter := &fakeMembershipAdapter{
 		topology: membershipTopology(3, 3),
 		operation: BackendOperation{
-			ID:                          "operation-1",
-			TargetReplicas:              4,
-			Phase:                       BackendOperationPhaseCommitted,
-			CommittedTopologyGeneration: 2,
+			ID:                "operation-1",
+			TargetReplicas:    4,
+			Phase:             BackendOperationPhaseCommitted,
+			CommittedTopology: topologyPointer(committedTopology),
 		},
 	}
 	coordinator := newTestOperationCoordinator(adapter, emptyOperationID)
@@ -1025,7 +1466,8 @@ func TestOperationCoordinatorPreservesCommitProofWhenTopologyObservationSkipsToS
 	})
 	require.NoError(t, err)
 	assert.Equal(t, OperationPhaseUnknown, result.Operation.Phase)
-	assert.Equal(t, int64(2), result.Operation.CommittedTopologyGeneration)
+	require.NotNil(t, result.Operation.CommittedTopology)
+	assert.Equal(t, committedTopology, *result.Operation.CommittedTopology)
 	assert.Equal(t, int32(3), result.Topology.ReplicaCount())
 	assert.NoError(t, validateOperation(*result.Operation))
 
@@ -1038,40 +1480,212 @@ func TestOperationCoordinatorPreservesCommitProofWhenTopologyObservationSkipsToS
 	})
 	require.NoError(t, err)
 	assert.Equal(t, OperationPhaseUnknown, stable.Operation.Phase)
-	assert.Equal(t, int64(2), stable.Operation.CommittedTopologyGeneration)
+	require.NotNil(t, stable.Operation.CommittedTopology)
+	assert.Equal(t, committedTopology, *stable.Operation.CommittedTopology)
 	assert.False(t, stable.OperationChanged)
 }
 
-func TestOperationCoordinatorRejectsCommitThatRemovedWrongReplica(t *testing.T) {
+func TestOperationCoordinatorAdoptsRecoveryAgainstExactPreviousCommittedTopology(t *testing.T) {
+	previousTopology := membershipTopology(2, 4)
+	previousTopology.Replicas[0].NativeMembers = []NativeMemberID{"previous-native-0-a", "previous-native-0-b"}
+	previous := durableOperation(OperationPhaseUnknown, 4)
+	previous.BaseTopology.Replicas = cloneReplicaMemberships(previousTopology.Replicas[:2])
+	previous.CommittedTopology = topologyPointer(previousTopology)
+
+	observedTopology := MembershipTopology{
+		Generation: 3,
+		Replicas:   cloneReplicaMemberships(previousTopology.Replicas[:3]),
+	}
+	capability := testOperationCapability(OperationShapeSurvivorReduction)
+	capability.VerificationRequirement = ServingVerificationRequired
 	adapter := &fakeMembershipAdapter{
-		topology: MembershipTopology{
-			Generation: 2,
-			Replicas: []ReplicaMembership{
-				{ReplicaID: "replica-0", NativeMembers: []NativeMemberID{"dp-0"}},
-				{ReplicaID: "replica-1", NativeMembers: []NativeMemberID{"dp-1"}},
-			},
+		topology:                             observedTopology,
+		validateObservedTransitionCapability: &capability,
+	}
+	coordinator := newTestOperationCoordinator(adapter, func() string { return "adopt-operation-1" })
+	plan := &OperationPlan{
+		ID:                "adopt-plan-1",
+		Intent:            OperationIntentRecover,
+		TargetReplicas:    3,
+		NominatedReplicas: []ReplicaID{"replica-3"},
+	}
+
+	t.Log("Validate adoption against the exact durable logical-to-native mapping, not reconstructed replica IDs")
+	result, err := coordinator.Step(context.Background(), OperationInput{
+		GroupID:         "group-0",
+		SpecGeneration:  2,
+		DesiredReplicas: 3,
+		Plan:            plan,
+		Operation:       previous,
+	})
+	require.NoError(t, err)
+	require.Len(t, adapter.validateObservedTransitionCalls, 1)
+	transition := adapter.validateObservedTransitionCalls[0]
+	assert.Equal(t, previousTopology, transition.PreviousTopology)
+	assert.Equal(t, observedTopology, transition.ObservedTopology)
+
+	require.NotNil(t, result.Operation)
+	assert.True(t, result.Operation.Adopted)
+	assert.Equal(t, OperationPhaseCommitted, result.Operation.Phase)
+	require.NotNil(t, result.Operation.CommittedTopology)
+	assert.Equal(t, observedTopology, *result.Operation.CommittedTopology)
+	assert.Empty(t, adapter.submitCalls)
+}
+
+func TestOperationCoordinatorRejectsObservedAdoptionWithRestoredReplicas(t *testing.T) {
+	previousTopology := membershipTopology(2, 4)
+	previous := durableOperation(OperationPhaseUnknown, 4)
+	previous.CommittedTopology = topologyPointer(previousTopology)
+	adapter := &fakeMembershipAdapter{topology: membershipTopology(3, 3)}
+	coordinator := newTestOperationCoordinator(adapter, func() string { return "unused-operation" })
+
+	result, err := coordinator.Step(context.Background(), OperationInput{
+		GroupID:         "group-0",
+		SpecGeneration:  2,
+		DesiredReplicas: 3,
+		Plan: &OperationPlan{
+			ID:                 "invalid-adoption-plan",
+			Intent:             OperationIntentRecover,
+			TargetReplicas:     3,
+			NominatedReplicas:  []ReplicaID{"replica-3"},
+			RestoredMembership: membershipReplicaNativeMemberships("replica-3"),
 		},
+		Operation: previous,
+	})
+	require.ErrorContains(t, err, "restored replicas are only valid for a recovery expansion")
+	assert.Equal(t, previous, result.Operation)
+	assert.Empty(t, adapter.validateObservedTransitionCalls)
+	assert.Empty(t, adapter.submitCalls)
+}
+
+func TestOperationCoordinatorSkipsServingVerificationForEmptyCommittedTopology(t *testing.T) {
+	baseTopology := membershipTopology(1, 2)
+	emptyTopology := membershipTopology(2, 0)
+	operation := &Operation{
+		ID:      "operation-1",
+		Attempt: 1,
+		PlanID:  "retire-all-plan",
+		Intent:  OperationIntentRetire,
+		Capability: ResolvedOperationCapability{
+			Shape:                   OperationShapeFullRetirement,
+			TrafficRequirement:      ReconfigurationTrafficQuiesceGroup,
+			VerificationRequirement: ServingVerificationRequired,
+		},
+		SpecGeneration:     2,
+		BaseTopology:       baseTopology,
+		TargetReplicas:     0,
+		NominatedReplicas:  topologyReplicaIDs(baseTopology),
+		Phase:              OperationPhaseCommitting,
+		StartedAt:          testNow.Add(-time.Minute),
+		LastTransitionTime: testNow.Add(-time.Second),
+	}
+	adapter := &fakeMembershipAdapter{
+		topology: emptyTopology,
 		operation: BackendOperation{
-			ID:                          "operation-1",
-			TargetReplicas:              2,
-			Phase:                       BackendOperationPhaseCommitted,
-			CommittedTopologyGeneration: 2,
+			ID:                operation.ID,
+			Attempt:           operation.Attempt,
+			TargetReplicas:    operation.TargetReplicas,
+			Phase:             BackendOperationPhaseCommitted,
+			CommittedTopology: topologyPointer(emptyTopology),
+		},
+	}
+	coordinator := newTestOperationCoordinator(adapter, emptyOperationID)
+
+	result, err := coordinator.Step(context.Background(), OperationInput{
+		GroupID:         "group-0",
+		SpecGeneration:  2,
+		DesiredReplicas: 0,
+		Operation:       operation,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result.Operation)
+	assert.Equal(t, OperationPhaseCommitted, result.Operation.Phase)
+	assert.Equal(t, int32(0), result.Operation.ServingVerificationAttempt)
+	assert.Nil(t, result.Operation.ServingVerificationTarget)
+	assert.Nil(t, result.Operation.ServingVerificationProof)
+}
+
+func TestOperationCoordinatorSkipsServingVerificationForEmptyAdoptedTopology(t *testing.T) {
+	previousTopology := membershipTopology(2, 2)
+	previous := &Operation{
+		ID:                 "previous-operation",
+		Attempt:            1,
+		PlanID:             "previous-plan",
+		Intent:             OperationIntentShrink,
+		Capability:         testOperationCapability(OperationShapePlannedHighRankSuffixShrink),
+		SpecGeneration:     2,
+		BaseTopology:       membershipTopology(1, 3),
+		TargetReplicas:     2,
+		NominatedReplicas:  []ReplicaID{"replica-2"},
+		Phase:              OperationPhaseUnknown,
+		CommittedTopology:  topologyPointer(previousTopology),
+		StartedAt:          testNow.Add(-time.Minute),
+		LastTransitionTime: testNow.Add(-time.Second),
+	}
+	emptyTopology := membershipTopology(3, 0)
+	capability := ResolvedOperationCapability{
+		Shape:                   OperationShapeSurvivorReduction,
+		TrafficRequirement:      ReconfigurationTrafficKeepServing,
+		VerificationRequirement: ServingVerificationRequired,
+	}
+	adapter := &fakeMembershipAdapter{
+		topology:                             emptyTopology,
+		validateObservedTransitionCapability: &capability,
+	}
+	coordinator := newTestOperationCoordinator(adapter, func() string { return "adopt-operation-1" })
+
+	result, err := coordinator.Step(context.Background(), OperationInput{
+		GroupID:         "group-0",
+		SpecGeneration:  3,
+		DesiredReplicas: 0,
+		Plan: &OperationPlan{
+			ID:                "adopt-empty-plan",
+			Intent:            OperationIntentRecover,
+			TargetReplicas:    0,
+			NominatedReplicas: topologyReplicaIDs(previousTopology),
+		},
+		Operation: previous,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result.Operation)
+	assert.True(t, result.Operation.Adopted)
+	assert.Equal(t, OperationPhaseCommitted, result.Operation.Phase)
+	assert.Equal(t, int32(0), result.Operation.ServingVerificationAttempt)
+	assert.Nil(t, result.Operation.ServingVerificationTarget)
+	assert.Nil(t, result.Operation.ServingVerificationProof)
+}
+
+func TestOperationCoordinatorRejectsCommitThatRemovedWrongReplica(t *testing.T) {
+	committedTopology := MembershipTopology{
+		Generation: 2,
+		Replicas: []ReplicaMembership{
+			membershipReplicaMembership("replica-0", "dp-0"),
+			membershipReplicaMembership("replica-1", "dp-1"),
+		},
+	}
+	adapter := &fakeMembershipAdapter{
+		topology: committedTopology,
+		operation: BackendOperation{
+			ID:                "operation-1",
+			TargetReplicas:    2,
+			Phase:             BackendOperationPhaseCommitted,
+			CommittedTopology: topologyPointer(committedTopology),
 		},
 	}
 	coordinator := newTestOperationCoordinator(adapter, emptyOperationID)
 	operation := &Operation{
-		ID:                     "operation-1",
-		Attempt:                1,
-		PlanID:                 "plan-1",
-		Intent:                 OperationIntentShrink,
-		SpecGeneration:         1,
-		BaseTopologyGeneration: 1,
-		BaseReplicas:           []ReplicaID{"replica-0", "replica-1", "replica-2", "replica-3"},
-		TargetReplicas:         2,
-		NominatedReplicas:      []ReplicaID{"replica-1", "replica-3"},
-		Phase:                  OperationPhaseCommitting,
-		StartedAt:              testNow.Add(-time.Minute),
-		LastTransitionTime:     testNow.Add(-time.Second),
+		ID:                 "operation-1",
+		Attempt:            1,
+		PlanID:             "plan-1",
+		Intent:             OperationIntentShrink,
+		Capability:         testOperationCapability(OperationShapePlannedSelectedRetirement),
+		SpecGeneration:     1,
+		BaseTopology:       membershipTopology(1, 4),
+		TargetReplicas:     2,
+		NominatedReplicas:  []ReplicaID{"replica-1", "replica-3"},
+		Phase:              OperationPhaseCommitting,
+		StartedAt:          testNow.Add(-time.Minute),
+		LastTransitionTime: testNow.Add(-time.Second),
 	}
 
 	t.Log("Reject the expected replica count when the backend retired a retained identity")
@@ -1111,6 +1725,157 @@ func TestOperationCoordinatorPreservesNominatedReplicaIdentities(t *testing.T) {
 	t.Log("Mutate the caller-owned plan and verify durable operation state is unchanged")
 	nominations[0] = "replica-mutated"
 	assert.Equal(t, []ReplicaID{"replica-3", "replica-7"}, result.Operation.NominatedReplicas)
+}
+
+func TestOperationCoordinatorPersistsAndReplaysExactNativeMemberRemap(t *testing.T) {
+	targetMembership := []ReplicaMembership{
+		membershipReplicaMembership("replica-1", "dp-new-1-b", "dp-new-1-a"),
+		membershipReplicaMembership("replica-0", "dp-new-0"),
+	}
+	adapter := &fakeMembershipAdapter{topology: membershipTopology(1, 2)}
+	coordinator := newTestOperationCoordinator(adapter, func() string { return "remap-operation-1" })
+	input := OperationInput{
+		GroupID:         "group-0",
+		SpecGeneration:  2,
+		DesiredReplicas: 2,
+		Plan: &OperationPlan{
+			ID:               "remap-plan-1",
+			Intent:           OperationIntentRecover,
+			TargetReplicas:   2,
+			TargetMembership: targetMembership,
+		},
+	}
+
+	t.Log("Persist a canonical copy of the exact desired native-member mapping")
+	result, err := coordinator.Step(context.Background(), input)
+	require.NoError(t, err)
+	require.NotNil(t, result.Operation)
+	assert.Equal(t, OperationShapeNativeMemberRemapping, result.Operation.Capability.Shape)
+	wantTarget := []ReplicaMembership{
+		membershipReplicaMembership("replica-0", "dp-new-0"),
+		membershipReplicaMembership("replica-1", "dp-new-1-a", "dp-new-1-b"),
+	}
+	assert.Equal(t, wantTarget, result.Operation.TargetMembership)
+
+	t.Log("Mutate caller-owned input without changing the durable operation")
+	targetMembership[0].NativeMembers[0] = "mutated"
+	assert.Equal(t, wantTarget, result.Operation.TargetMembership)
+
+	t.Log("Freeze and preflight the exact remap request")
+	prepared, err := coordinator.PrepareSubmission(context.Background(), input.GroupID, result.Operation, nil)
+	require.NoError(t, err)
+	require.Len(t, adapter.validateRequestCalls, 1)
+	assert.Equal(t, wantTarget, adapter.validateRequestCalls[0].TargetMembership)
+
+	t.Log("Recover after restart and accept only the exact committed mapping")
+	adapter.topology = MembershipTopology{Generation: 2, Replicas: cloneReplicaMemberships(wantTarget)}
+	adapter.operation = BackendOperation{
+		ID:                prepared.ID,
+		Attempt:           prepared.Attempt,
+		TargetReplicas:    prepared.TargetReplicas,
+		Phase:             BackendOperationPhaseCommitted,
+		CommittedTopology: topologyPointer(adapter.topology),
+	}
+	restarted := newTestOperationCoordinator(adapter, emptyOperationID)
+	input.Plan = &OperationPlan{
+		ID:               "remap-plan-1",
+		Intent:           OperationIntentRecover,
+		TargetReplicas:   2,
+		TargetMembership: cloneReplicaMemberships(wantTarget),
+	}
+	input.Operation = prepared
+	result, err = restarted.Step(context.Background(), input)
+	require.NoError(t, err)
+	assert.Equal(t, OperationPhaseCommitted, result.Operation.Phase)
+	require.NotNil(t, result.Operation.CommittedTopology)
+	assert.Equal(t, adapter.topology, *result.Operation.CommittedTopology)
+	assert.Equal(t, wantTarget, result.Operation.TargetMembership)
+}
+
+func TestOperationCoordinatorRejectsCommittedNativeMemberRemapWithWrongMapping(t *testing.T) {
+	targetMembership := []ReplicaMembership{
+		membershipReplicaMembership("replica-0", "dp-new-0"),
+		membershipReplicaMembership("replica-1", "dp-new-1"),
+	}
+	operation := &Operation{
+		ID:                 "remap-operation-1",
+		Attempt:            1,
+		PlanID:             "remap-plan-1",
+		Intent:             OperationIntentRecover,
+		Capability:         testOperationCapability(OperationShapeNativeMemberRemapping),
+		SpecGeneration:     2,
+		BaseTopology:       membershipTopology(1, 2),
+		TargetReplicas:     2,
+		TargetMembership:   targetMembership,
+		Phase:              OperationPhaseSubmitting,
+		StartedAt:          testNow.Add(-time.Minute),
+		LastTransitionTime: testNow.Add(-time.Second),
+	}
+	adapter := &fakeMembershipAdapter{
+		topology: MembershipTopology{
+			Generation: 2,
+			Replicas: []ReplicaMembership{
+				membershipReplicaMembership("replica-0", "dp-new-0"),
+				membershipReplicaMembership("replica-1", "dp-wrong-1"),
+			},
+		},
+		operation: BackendOperation{
+			ID:             operation.ID,
+			Attempt:        operation.Attempt,
+			TargetReplicas: operation.TargetReplicas,
+			Phase:          BackendOperationPhaseCommitted,
+		},
+	}
+	adapter.operation.CommittedTopology = topologyPointer(adapter.topology)
+	coordinator := newTestOperationCoordinator(adapter, emptyOperationID)
+
+	t.Log("Fail closed when restart observation has the right logical replicas but a different native mapping")
+	result, err := coordinator.Step(context.Background(), OperationInput{
+		GroupID:         "group-0",
+		SpecGeneration:  2,
+		DesiredReplicas: 2,
+		Operation:       operation,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, OperationPhaseUnknown, result.Operation.Phase)
+	assert.Nil(t, result.Operation.CommittedTopology)
+}
+
+func TestOperationCoordinatorKeepsDurableRemapWhenCandidatePayloadChanges(t *testing.T) {
+	adapter := &fakeMembershipAdapter{topology: membershipTopology(1, 2)}
+	coordinator := newTestOperationCoordinator(adapter, func() string { return "remap-operation-1" })
+	plan := &OperationPlan{
+		ID:             "remap-plan-1",
+		Intent:         OperationIntentRecover,
+		TargetReplicas: 2,
+		TargetMembership: []ReplicaMembership{
+			membershipReplicaMembership("replica-0", "dp-new-0"),
+			membershipReplicaMembership("replica-1", "dp-new-1"),
+		},
+	}
+	result, err := coordinator.Step(context.Background(), OperationInput{
+		GroupID:         "group-0",
+		SpecGeneration:  2,
+		DesiredReplicas: 2,
+		Plan:            plan,
+	})
+	require.NoError(t, err)
+	observations := adapter.topologyCalls
+
+	t.Log("Keep the durable mapping authoritative while the candidate cannot be consumed")
+	conflictingPlan := *plan
+	conflictingPlan.TargetMembership = cloneReplicaMemberships(plan.TargetMembership)
+	conflictingPlan.TargetMembership[1].NativeMembers[0] = "dp-other-1"
+	stable, err := coordinator.Step(context.Background(), OperationInput{
+		GroupID:         "group-0",
+		SpecGeneration:  2,
+		DesiredReplicas: 2,
+		Plan:            &conflictingPlan,
+		Operation:       result.Operation,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, result.Operation, stable.Operation)
+	assert.Equal(t, observations+1, adapter.topologyCalls)
 }
 
 func TestOperationCoordinatorRejectsInvalidPlans(t *testing.T) {
@@ -1169,6 +1934,50 @@ func TestOperationCoordinatorRejectsInvalidPlans(t *testing.T) {
 				NominatedReplicas: []ReplicaID{"replica-9"},
 			},
 		},
+		{
+			name: "stable recovery omits target membership",
+			plan: OperationPlan{Intent: OperationIntentRecover, TargetReplicas: 2},
+		},
+		{
+			name: "stable recovery preserves the existing native mapping",
+			plan: OperationPlan{
+				Intent:           OperationIntentRecover,
+				TargetReplicas:   2,
+				TargetMembership: membershipTopology(1, 2).Replicas,
+			},
+		},
+		{
+			name: "stable recovery changes a logical replica identity",
+			plan: OperationPlan{
+				Intent:         OperationIntentRecover,
+				TargetReplicas: 2,
+				TargetMembership: []ReplicaMembership{
+					membershipReplicaMembership("replica-0", "dp-new-0"),
+					membershipReplicaMembership("replica-9", "dp-new-9"),
+				},
+			},
+		},
+		{
+			name: "stable recovery duplicates a native member",
+			plan: OperationPlan{
+				Intent:         OperationIntentRecover,
+				TargetReplicas: 2,
+				TargetMembership: []ReplicaMembership{
+					membershipReplicaMembership("replica-0", "dp-new"),
+					membershipReplicaMembership("replica-1", "dp-new"),
+				},
+			},
+		},
+		{
+			name: "growth carries target membership",
+			plan: OperationPlan{
+				Intent:         OperationIntentGrow,
+				TargetReplicas: 3,
+				TargetMembership: []ReplicaMembership{
+					membershipReplicaMembership("replica-0", "dp-new-0"),
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1194,6 +2003,65 @@ func TestOperationCoordinatorRejectsInvalidPlans(t *testing.T) {
 	}
 }
 
+func TestRuntimeIdentityContinuityRejectsIncarnationAliasing(t *testing.T) {
+	baseTopology := membershipTopology(1, 2)
+	replacementTopology := cloneTopology(baseTopology)
+	replacementTopology.Generation = 2
+	replacementTopology.Replicas[1].Incarnation.CapacityRefs[0].UID = operationRestorationReplacementUID
+	replacementTopology.Replicas[1].Incarnation.RuntimeID = operationRestorationReplacementRun
+	reusedRuntimeTopology := cloneTopology(replacementTopology)
+	reusedRuntimeTopology.Replicas[1].Incarnation.RuntimeID =
+		baseTopology.Replicas[1].Incarnation.RuntimeID
+
+	t.Log("Reject an explicit fixed-slot replacement that gives a new Pod the old process identity")
+	err := validatePlan(OperationPlan{
+		ID:               "replacement-plan",
+		Intent:           OperationIntentRecover,
+		TargetReplicas:   2,
+		TargetMembership: reusedRuntimeTopology.Replicas,
+	}, baseTopology)
+	require.ErrorContains(t, err, "runtime identity continuity")
+
+	t.Log("Reject the same alias if it appears in a restored durable operation")
+	operation := Operation{
+		ID:                 "replacement-operation",
+		Attempt:            1,
+		PlanID:             "replacement-plan",
+		Intent:             OperationIntentRecover,
+		Capability:         testOperationCapability(OperationShapeFixedSlotReplacement),
+		SpecGeneration:     2,
+		BaseTopology:       baseTopology,
+		TargetReplicas:     2,
+		TargetMembership:   reusedRuntimeTopology.Replicas,
+		Phase:              OperationPhasePending,
+		StartedAt:          testNow,
+		LastTransitionTime: testNow,
+	}
+	err = validateOperation(operation)
+	require.ErrorContains(t, err, "runtime identity continuity")
+
+	t.Log("Reject an externally observed cardinal recovery with the same alias")
+	err = validateObservedMembershipTransition(ObservedMembershipTransition{
+		PreviousTopology: baseTopology,
+		ObservedTopology: reusedRuntimeTopology,
+		Plan: OperationPlan{
+			ID:               "replacement-plan",
+			Intent:           OperationIntentRecover,
+			TargetReplicas:   2,
+			TargetMembership: reusedRuntimeTopology.Replicas,
+		},
+	})
+	require.ErrorContains(t, err, "runtime identity continuity")
+
+	t.Log("Accept the replacement when the new Pod also has a new runtime identity")
+	require.NoError(t, validatePlan(OperationPlan{
+		ID:               "replacement-plan",
+		Intent:           OperationIntentRecover,
+		TargetReplicas:   2,
+		TargetMembership: replacementTopology.Replicas,
+	}, baseTopology))
+}
+
 func TestOperationCoordinatorRejectsInvalidTopologies(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1217,8 +2085,8 @@ func TestOperationCoordinatorRejectsInvalidTopologies(t *testing.T) {
 			topology: MembershipTopology{
 				Generation: 1,
 				Replicas: []ReplicaMembership{
-					{ReplicaID: "replica-0", NativeMembers: []NativeMemberID{"dp-0"}},
-					{ReplicaID: "replica-0", NativeMembers: []NativeMemberID{"dp-1"}},
+					membershipReplicaMembership("replica-0", "dp-0"),
+					membershipReplicaMembership("replica-0", "dp-1"),
 				},
 			},
 		},
@@ -1227,7 +2095,7 @@ func TestOperationCoordinatorRejectsInvalidTopologies(t *testing.T) {
 			topology: MembershipTopology{
 				Generation: 1,
 				Replicas: []ReplicaMembership{
-					{ReplicaID: "replica-0"},
+					{Incarnation: membershipReplicaIncarnation("replica-0")},
 				},
 			},
 		},
@@ -1236,7 +2104,7 @@ func TestOperationCoordinatorRejectsInvalidTopologies(t *testing.T) {
 			topology: MembershipTopology{
 				Generation: 1,
 				Replicas: []ReplicaMembership{
-					{ReplicaID: "replica-0", NativeMembers: []NativeMemberID{""}},
+					membershipReplicaMembership("replica-0", ""),
 				},
 			},
 		},
@@ -1245,8 +2113,8 @@ func TestOperationCoordinatorRejectsInvalidTopologies(t *testing.T) {
 			topology: MembershipTopology{
 				Generation: 1,
 				Replicas: []ReplicaMembership{
-					{ReplicaID: "replica-0", NativeMembers: []NativeMemberID{"dp-0"}},
-					{ReplicaID: "replica-1", NativeMembers: []NativeMemberID{"dp-0"}},
+					membershipReplicaMembership("replica-0", "dp-0"),
+					membershipReplicaMembership("replica-1", "dp-0"),
 				},
 			},
 		},
@@ -1273,11 +2141,9 @@ func TestOperationCoordinatorRejectsInvalidTopologies(t *testing.T) {
 }
 
 func TestOperationCoordinatorRejectsInvalidStateBeforeBackendAccess(t *testing.T) {
-	conflictingPlanOperation := durableOperation(OperationPhaseCommitting, 4)
-	conflictingPlanOperation.PlanID = "plan-1"
 	committedProofWithoutJoiners := durableOperation(OperationPhaseUnknown, 4)
 	committedProofWithoutJoiners.JoiningReplicas = nil
-	committedProofWithoutJoiners.CommittedTopologyGeneration = 2
+	committedProofWithoutJoiners.CommittedTopology = topologyPointer(membershipTopology(2, 4))
 	abortingWithoutFailure := durableOperation(OperationPhaseAborting, 4)
 	abortingWithRetryableFailure := durableOperation(OperationPhaseAborting, 4)
 	abortingWithRetryableFailure.Failure = &OperationFailure{
@@ -1286,8 +2152,9 @@ func TestOperationCoordinatorRejectsInvalidStateBeforeBackendAccess(t *testing.T
 	}
 
 	tests := []struct {
-		name  string
-		input OperationInput
+		name              string
+		input             OperationInput
+		wantTopologyCalls int
 	}{
 		{
 			name: "empty group ID",
@@ -1316,20 +2183,7 @@ func TestOperationCoordinatorRejectsInvalidStateBeforeBackendAccess(t *testing.T
 					NominatedReplicas: []ReplicaID{"replica-1"},
 				},
 			},
-		},
-		{
-			name: "plan identity reused with another payload",
-			input: OperationInput{
-				GroupID:         "group-0",
-				SpecGeneration:  2,
-				DesiredReplicas: 4,
-				Plan: &OperationPlan{
-					ID:             "plan-1",
-					Intent:         OperationIntentGrow,
-					TargetReplicas: 5,
-				},
-				Operation: conflictingPlanOperation,
-			},
+			wantTopologyCalls: 1,
 		},
 		{
 			name: "failed operation without structured failure",
@@ -1377,7 +2231,7 @@ func TestOperationCoordinatorRejectsInvalidStateBeforeBackendAccess(t *testing.T
 			t.Log("Reject invalid durable input without observing or mutating the backend")
 			_, err := coordinator.Step(context.Background(), tt.input)
 			require.Error(t, err)
-			assert.Zero(t, adapter.topologyCalls)
+			assert.Equal(t, tt.wantTopologyCalls, adapter.topologyCalls)
 			assert.Empty(t, adapter.observeCalls)
 			assert.Empty(t, adapter.submitCalls)
 		})
@@ -1390,12 +2244,54 @@ func membershipTopology(generation int64, replicas int) MembershipTopology {
 		Replicas:   make([]ReplicaMembership, replicas),
 	}
 	for i := range replicas {
+		replicaID := ReplicaID(fmt.Sprintf("replica-%d", i))
 		topology.Replicas[i] = ReplicaMembership{
-			ReplicaID:     ReplicaID(fmt.Sprintf("replica-%d", i)),
+			Incarnation:   membershipReplicaIncarnation(replicaID),
 			NativeMembers: []NativeMemberID{NativeMemberID(fmt.Sprintf("dp-%d", i))},
 		}
 	}
 	return topology
+}
+
+func membershipReplicaIncarnation(replicaID ReplicaID) ReplicaIncarnation {
+	podName := "pod-" + string(replicaID[len("replica-"):])
+	return ReplicaIncarnation{
+		ReplicaID: replicaID,
+		SlotID:    "slot-" + CapacitySlotID(replicaID),
+		CapacityRefs: []CapacityRef{{
+			Namespace: "test",
+			Name:      podName,
+			UID:       PodUID("uid-" + podName),
+		}},
+		RuntimeID: "runtime-" + RuntimeIncarnationID(replicaID),
+	}
+}
+
+func membershipReplicaIncarnations(replicaIDs ...ReplicaID) []ReplicaIncarnation {
+	incarnations := make([]ReplicaIncarnation, len(replicaIDs))
+	for i, replicaID := range replicaIDs {
+		incarnations[i] = membershipReplicaIncarnation(replicaID)
+	}
+	return incarnations
+}
+
+func membershipReplicaNativeMemberships(replicaIDs ...ReplicaID) []ReplicaNativeMembership {
+	memberships := make([]ReplicaNativeMembership, len(replicaIDs))
+	for i, replicaID := range replicaIDs {
+		memberships[i] = ReplicaNativeMembership{
+			ReplicaID:     replicaID,
+			SlotID:        membershipReplicaIncarnation(replicaID).SlotID,
+			NativeMembers: []NativeMemberID{"dp-" + NativeMemberID(replicaID[len("replica-"):])},
+		}
+	}
+	return memberships
+}
+
+func membershipReplicaMembership(replicaID ReplicaID, nativeMembers ...NativeMemberID) ReplicaMembership {
+	return ReplicaMembership{
+		Incarnation:   membershipReplicaIncarnation(replicaID),
+		NativeMembers: slices.Clone(nativeMembers),
+	}
 }
 
 func durableOperation(
@@ -1403,26 +2299,27 @@ func durableOperation(
 	targetReplicas int32,
 ) *Operation {
 	operation := &Operation{
-		ID:                     "operation-1",
-		Attempt:                1,
-		Intent:                 OperationIntentGrow,
-		SpecGeneration:         1,
-		BaseTopologyGeneration: 1,
-		BaseReplicas:           []ReplicaID{"replica-0", "replica-1"},
-		TargetReplicas:         targetReplicas,
-		Phase:                  phase,
-		StartedAt:              testNow.Add(-time.Minute),
-		LastTransitionTime:     testNow.Add(-time.Second),
+		ID:                 "operation-1",
+		Attempt:            1,
+		Intent:             OperationIntentGrow,
+		Capability:         testOperationCapability(OperationShapeFreshGrowth),
+		SpecGeneration:     1,
+		BaseTopology:       membershipTopology(1, 2),
+		TargetReplicas:     targetReplicas,
+		Phase:              phase,
+		StartedAt:          testNow.Add(-time.Minute),
+		LastTransitionTime: testNow.Add(-time.Second),
 	}
 
 	// Every submitted growth record freezes the exact logical replica identities being added.
 	if targetReplicas == 4 && phase != OperationPhasePending {
-		operation.JoiningReplicas = []ReplicaID{"replica-2", "replica-3"}
+		operation.JoiningReplicas = membershipReplicaIncarnations("replica-2", "replica-3")
 	}
 	return operation
 }
 
 func cloneBackendOperation(operation BackendOperation) BackendOperation {
+	operation.CommittedTopology = cloneTopologyPointer(operation.CommittedTopology)
 	operation.Failure = cloneFailure(operation.Failure)
 	return operation
 }
@@ -1451,10 +2348,136 @@ func int32Pointer(value int32) *int32 {
 }
 
 func allTestMembershipCapabilities() MembershipCapabilities {
-	return MembershipCapabilities{Intents: []OperationIntent{
-		OperationIntentGrow,
-		OperationIntentShrink,
-		OperationIntentRecover,
-		OperationIntentRetire,
+	return MembershipCapabilities{OperationShapes: []OperationShape{
+		OperationShapeFreshGrowth,
+		OperationShapePlannedHighRankSuffixShrink,
+		OperationShapePlannedSelectedRetirement,
+		OperationShapeSurvivorReduction,
+		OperationShapeReplacementRestoration,
+		OperationShapeFixedSlotReplacement,
+		OperationShapeNativeMemberRemapping,
+		OperationShapeFullRetirement,
 	}}
+}
+
+func testOperationCapability(shape OperationShape) ResolvedOperationCapability {
+	return ResolvedOperationCapability{
+		Shape:                   shape,
+		TrafficRequirement:      ReconfigurationTrafficKeepServing,
+		VerificationRequirement: ServingVerificationNotRequired,
+	}
+}
+
+func cloneTestMembershipCapabilities(capabilities MembershipCapabilities) MembershipCapabilities {
+	return MembershipCapabilities{OperationShapes: slices.Clone(capabilities.OperationShapes)}
+}
+
+func cloneTestMembershipRequest(request MembershipRequest) MembershipRequest {
+	request.BaseTopology = cloneTopology(request.BaseTopology)
+	request.JoiningReplicas = cloneReplicaIncarnations(request.JoiningReplicas)
+	request.RestoredMembership = cloneReplicaNativeMemberships(request.RestoredMembership)
+	request.NominatedReplicas = slices.Clone(request.NominatedReplicas)
+	request.TargetMembership = cloneReplicaMemberships(request.TargetMembership)
+	return request
+}
+
+func resolveTestOperationCapability(
+	plan OperationPlan,
+	topology MembershipTopology,
+	capabilities MembershipCapabilities,
+) (ResolvedOperationCapability, error) {
+	var shapes []OperationShape
+	switch plan.Intent {
+	case OperationIntentGrow:
+		shapes = []OperationShape{OperationShapeFreshGrowth}
+	case OperationIntentShrink:
+		if isTestSuffix(topologyReplicaIDs(topology), plan.NominatedReplicas) {
+			shapes = append(shapes, OperationShapePlannedHighRankSuffixShrink)
+		}
+		shapes = append(shapes, OperationShapePlannedSelectedRetirement)
+	case OperationIntentRecover:
+		switch {
+		case plan.TargetReplicas < topology.ReplicaCount():
+			shapes = []OperationShape{OperationShapeSurvivorReduction}
+		case plan.TargetReplicas > topology.ReplicaCount():
+			shapes = []OperationShape{OperationShapeReplacementRestoration}
+		default:
+			shapes = []OperationShape{OperationShapeNativeMemberRemapping}
+		}
+	case OperationIntentRetire:
+		shapes = []OperationShape{OperationShapeFullRetirement}
+	default:
+		return ResolvedOperationCapability{}, fmt.Errorf("invalid operation intent %q", plan.Intent)
+	}
+
+	for _, shape := range shapes {
+		for _, supportedShape := range capabilities.OperationShapes {
+			if supportedShape == shape {
+				return testOperationCapability(shape), nil
+			}
+		}
+	}
+	return ResolvedOperationCapability{}, fmt.Errorf(
+		"membership operation does not support plan intent %q and nominees %v: %w",
+		plan.Intent,
+		plan.NominatedReplicas,
+		ErrMembershipOperationUnsupported,
+	)
+}
+
+func resolveTestObservedTransitionCapability(
+	transition ObservedMembershipTransition,
+	capabilities MembershipCapabilities,
+) (ResolvedOperationCapability, error) {
+	if err := validateObservedMembershipTransition(transition); err != nil {
+		return ResolvedOperationCapability{}, err
+	}
+	shape := OperationShapeSurvivorReduction
+	if transition.Plan.TargetReplicas == transition.PreviousTopology.ReplicaCount() {
+		shape = OperationShapeNativeMemberRemapping
+	}
+	for _, supportedShape := range capabilities.OperationShapes {
+		if supportedShape == shape {
+			return testOperationCapability(shape), nil
+		}
+	}
+	return ResolvedOperationCapability{}, fmt.Errorf(
+		"membership operation shape %q is not supported: %w",
+		shape,
+		ErrMembershipOperationUnsupported,
+	)
+}
+
+func validateCapabilityForTestRequest(capability ResolvedOperationCapability, request MembershipRequest) error {
+	operation := Operation{
+		Intent:             request.Intent,
+		Capability:         capability,
+		BaseTopology:       cloneTopology(request.BaseTopology),
+		TargetReplicas:     request.TargetReplicas,
+		JoiningReplicas:    cloneReplicaIncarnations(request.JoiningReplicas),
+		RestoredMembership: cloneReplicaNativeMemberships(request.RestoredMembership),
+		NominatedReplicas:  slices.Clone(request.NominatedReplicas),
+		TargetMembership:   cloneReplicaMemberships(request.TargetMembership),
+		Phase:              OperationPhaseSubmitting,
+	}
+	if err := validateCapabilityForOperation(capability, operation); err != nil {
+		return err
+	}
+	if err := validateOperationReplicaGeometry(operation); err != nil {
+		return err
+	}
+	if capability.Shape == OperationShapePlannedHighRankSuffixShrink &&
+		!isTestSuffix(topologyReplicaIDs(request.BaseTopology), request.NominatedReplicas) {
+		return errors.New("planned suffix shrink request nominates a non-suffix replica")
+	}
+	return nil
+}
+
+func isTestSuffix(baseReplicas, nominatedReplicas []ReplicaID) bool {
+	base := normalizeReplicaIDs(baseReplicas)
+	nominated := normalizeReplicaIDs(nominatedReplicas)
+	if len(nominated) > len(base) {
+		return false
+	}
+	return sameReplicaIDs(nominated, base[len(base)-len(nominated):])
 }

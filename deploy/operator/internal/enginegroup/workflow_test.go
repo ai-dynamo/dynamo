@@ -30,8 +30,9 @@ import (
 )
 
 const (
-	workflowTestOperationID = "workflow-operation-1"
-	workflowTestReleaseID   = "workflow-release-1"
+	workflowTestOperationID         = "workflow-operation-1"
+	workflowTestRecoveryOperationID = "recovery-operation"
+	workflowTestReleaseID           = "workflow-release-1"
 )
 
 var workflowTestTime = time.Date(2026, time.September, 14, 13, 0, 0, 0, time.UTC)
@@ -106,15 +107,26 @@ func (f *workflowCapacityAdapter) Release(
 }
 
 type workflowMembershipAdapter struct {
-	capabilities            *MembershipCapabilities
-	capabilitiesErr         error
-	observeCapabilityCalls  int
-	topology                MembershipTopology
-	operation               BackendOperation
-	observeTopologyCalls    int
-	observeOperationCalls   []operationAttempt
-	submitCalls             []MembershipRequest
-	externalMutationHistory *[]string
+	capabilities                         *MembershipCapabilities
+	capabilitiesErr                      error
+	observeCapabilityCalls               int
+	validatePlanErr                      error
+	validatePlanCapability               *ResolvedOperationCapability
+	validatePlanCalls                    []OperationPlan
+	validateObservedTransitionErr        error
+	validateObservedTransitionCapability *ResolvedOperationCapability
+	validateObservedTransitionCalls      []ObservedMembershipTransition
+	validateRequestErr                   error
+	validateRequestCalls                 []MembershipRequest
+	acceptedShapes                       map[OperationShape]struct{}
+	topology                             MembershipTopology
+	topologyObservations                 []MembershipTopology
+	operation                            BackendOperation
+	submitErr                            error
+	observeTopologyCalls                 int
+	observeOperationCalls                []operationAttempt
+	submitCalls                          []MembershipRequest
+	externalMutationHistory              *[]string
 }
 
 func (f *workflowMembershipAdapter) ObserveCapabilities(context.Context, GroupID) (MembershipCapabilities, error) {
@@ -125,11 +137,107 @@ func (f *workflowMembershipAdapter) ObserveCapabilities(context.Context, GroupID
 	if f.capabilities == nil {
 		return allTestMembershipCapabilities(), nil
 	}
-	return MembershipCapabilities{Intents: slices.Clone(f.capabilities.Intents)}, nil
+	return cloneTestMembershipCapabilities(*f.capabilities), nil
+}
+
+func (f *workflowMembershipAdapter) ValidatePlan(
+	_ context.Context,
+	_ GroupID,
+	topology MembershipTopology,
+	plan OperationPlan,
+) (ResolvedOperationCapability, error) {
+	f.validatePlanCalls = append(f.validatePlanCalls, normalizePlan(plan))
+	if f.validatePlanErr != nil {
+		return ResolvedOperationCapability{}, f.validatePlanErr
+	}
+	if err := validatePlan(plan, topology); err != nil {
+		return ResolvedOperationCapability{}, err
+	}
+	if f.validatePlanCapability != nil {
+		capability := *f.validatePlanCapability
+		if f.acceptedShapes == nil {
+			f.acceptedShapes = make(map[OperationShape]struct{})
+		}
+		f.acceptedShapes[capability.Shape] = struct{}{}
+		return capability, nil
+	}
+
+	capability, err := resolveTestOperationCapability(plan, topology, f.currentCapabilities())
+	if err != nil {
+		return ResolvedOperationCapability{}, err
+	}
+	if f.acceptedShapes == nil {
+		f.acceptedShapes = make(map[OperationShape]struct{})
+	}
+	f.acceptedShapes[capability.Shape] = struct{}{}
+	return capability, nil
+}
+
+func (f *workflowMembershipAdapter) ValidateObservedTransition(
+	_ context.Context,
+	_ GroupID,
+	transition ObservedMembershipTransition,
+) (ResolvedOperationCapability, error) {
+	f.validateObservedTransitionCalls = append(
+		f.validateObservedTransitionCalls,
+		cloneObservedMembershipTransition(transition),
+	)
+	if f.validateObservedTransitionErr != nil {
+		return ResolvedOperationCapability{}, f.validateObservedTransitionErr
+	}
+	if f.validateObservedTransitionCapability != nil {
+		return *f.validateObservedTransitionCapability, nil
+	}
+	capability, err := resolveTestObservedTransitionCapability(transition, f.currentCapabilities())
+	if err != nil {
+		return ResolvedOperationCapability{}, err
+	}
+	capability.VerificationRequirement = ServingVerificationRequired
+	return capability, nil
+}
+
+func (f *workflowMembershipAdapter) ValidateRequest(
+	_ context.Context,
+	_ GroupID,
+	request MembershipRequest,
+) error {
+	f.validateRequestCalls = append(f.validateRequestCalls, cloneTestMembershipRequest(request))
+	if f.validateRequestErr != nil {
+		return f.validateRequestErr
+	}
+	if err := validateCapabilityForTestRequest(request.Capability, request); err != nil {
+		return err
+	}
+	if _, accepted := f.acceptedShapes[request.Capability.Shape]; accepted {
+		return nil
+	}
+	for _, shape := range f.currentCapabilities().OperationShapes {
+		if shape == request.Capability.Shape {
+			return nil
+		}
+	}
+	return fmt.Errorf(
+		"membership operation shape %q is not supported: %w",
+		request.Capability.Shape,
+		ErrMembershipOperationUnsupported,
+	)
+}
+
+func (f *workflowMembershipAdapter) currentCapabilities() MembershipCapabilities {
+	if f.capabilities == nil {
+		return allTestMembershipCapabilities()
+	}
+	return cloneTestMembershipCapabilities(*f.capabilities)
 }
 
 func (f *workflowMembershipAdapter) ObserveTopology(context.Context, GroupID) (MembershipTopology, error) {
 	f.observeTopologyCalls++
+	if len(f.topologyObservations) != 0 {
+		topology := cloneTopology(f.topologyObservations[0])
+		f.topologyObservations = f.topologyObservations[1:]
+		f.topology = cloneTopology(topology)
+		return topology, nil
+	}
 	return cloneTopology(f.topology), nil
 }
 
@@ -147,6 +255,9 @@ func (f *workflowMembershipAdapter) ObserveOperation(
 		return BackendOperation{Phase: BackendOperationPhaseAbsent}, nil
 	}
 	observed := f.operation
+	if observed.Phase == BackendOperationPhaseAbsent {
+		return BackendOperation{Phase: BackendOperationPhaseAbsent}, nil
+	}
 	if observed.Attempt == 0 {
 		observed.Attempt = attempt
 	}
@@ -159,11 +270,11 @@ func (f *workflowMembershipAdapter) SubmitOperation(
 	_ GroupID,
 	request MembershipRequest,
 ) (BackendOperation, error) {
-	clonedRequest := request
-	clonedRequest.BaseReplicas = slices.Clone(request.BaseReplicas)
-	clonedRequest.JoiningReplicas = slices.Clone(request.JoiningReplicas)
-	clonedRequest.NominatedReplicas = slices.Clone(request.NominatedReplicas)
+	clonedRequest := cloneTestMembershipRequest(request)
 	f.submitCalls = append(f.submitCalls, clonedRequest)
+	if f.submitErr != nil {
+		return BackendOperation{}, f.submitErr
+	}
 	*f.externalMutationHistory = append(*f.externalMutationHistory, "membership.submit:"+request.ID)
 
 	return BackendOperation{
@@ -186,6 +297,86 @@ type workflowTrafficAdapter struct {
 	externalMutationHistory *[]string
 }
 
+type workflowServingVerifier struct {
+	proof                   ServingVerificationProof
+	observeErr              error
+	ensureErr               error
+	observeCalls            []servingVerificationAttempt
+	ensureRequests          []ServingVerificationRequest
+	requests                map[servingVerificationAttempt]ServingVerificationRequest
+	externalMutationHistory *[]string
+}
+
+type servingVerificationAttempt struct {
+	OperationID         string
+	OperationAttempt    int32
+	VerificationAttempt int32
+}
+
+func (f *workflowServingVerifier) ObserveVerification(
+	_ context.Context,
+	_ GroupID,
+	operationID string,
+	attempt int32,
+	verificationAttempt int32,
+) (ServingVerificationProof, error) {
+	f.observeCalls = append(f.observeCalls, servingVerificationAttempt{
+		OperationID:         operationID,
+		OperationAttempt:    attempt,
+		VerificationAttempt: verificationAttempt,
+	})
+	if f.observeErr != nil {
+		return ServingVerificationProof{}, f.observeErr
+	}
+	if f.proof.Phase == "" {
+		return ServingVerificationProof{
+			OperationID:         operationID,
+			Attempt:             attempt,
+			VerificationAttempt: verificationAttempt,
+			Phase:               ServingVerificationPhaseAbsent,
+		}, nil
+	}
+	return *cloneServingVerificationProof(&f.proof), nil
+}
+
+func (f *workflowServingVerifier) EnsureVerification(
+	_ context.Context,
+	_ GroupID,
+	request ServingVerificationRequest,
+) error {
+	if f.ensureErr != nil {
+		return f.ensureErr
+	}
+	if err := validateServingVerificationRequest(request); err != nil {
+		return err
+	}
+
+	cloned := cloneServingVerificationRequest(request)
+	f.ensureRequests = append(f.ensureRequests, cloned)
+	if f.requests == nil {
+		f.requests = make(map[servingVerificationAttempt]ServingVerificationRequest)
+	}
+	key := servingVerificationAttempt{
+		OperationID:         request.OperationID,
+		OperationAttempt:    request.Attempt,
+		VerificationAttempt: request.VerificationAttempt,
+	}
+	if existing, found := f.requests[key]; found {
+		if !servingVerificationRequestsEqual(existing, request) {
+			return fmt.Errorf("conflicting serving verification request for %q attempt %d", request.OperationID, request.Attempt)
+		}
+	} else {
+		f.requests[key] = cloned
+	}
+	if f.externalMutationHistory != nil {
+		*f.externalMutationHistory = append(
+			*f.externalMutationHistory,
+			"serving.verify:"+request.OperationID,
+		)
+	}
+	return nil
+}
+
 func (f *workflowTrafficAdapter) ObserveTraffic(context.Context, GroupID) (TrafficSnapshot, error) {
 	f.observeTrafficCalls++
 	return cloneTrafficSnapshot(f.snapshot), nil
@@ -202,11 +393,15 @@ func (f *workflowTrafficAdapter) Admit(
 			f.unresolvedOperationID,
 		)
 	}
-	clonedRequest := request
-	clonedRequest.Replicas = slices.Clone(request.Replicas)
+	clonedRequest, err := f.acceptTrafficCommand(TrafficActionAdmit, request)
+	if err != nil {
+		return err
+	}
 	f.admitRequests = append(f.admitRequests, clonedRequest)
-	f.admitCalls = append(f.admitCalls, slices.Clone(request.Replicas))
-	*f.externalMutationHistory = append(*f.externalMutationHistory, "traffic.admit:"+request.OperationID)
+	f.admitCalls = append(f.admitCalls, replicaIncarnationIDs(request.Replicas))
+	if f.externalMutationHistory != nil {
+		*f.externalMutationHistory = append(*f.externalMutationHistory, "traffic.admit:"+request.OperationID)
+	}
 	return nil
 }
 
@@ -221,12 +416,55 @@ func (f *workflowTrafficAdapter) Withdraw(
 			f.unresolvedOperationID,
 		)
 	}
-	clonedRequest := request
-	clonedRequest.Replicas = slices.Clone(request.Replicas)
+	clonedRequest, err := f.acceptTrafficCommand(TrafficActionWithdraw, request)
+	if err != nil {
+		return err
+	}
 	f.withdrawRequests = append(f.withdrawRequests, clonedRequest)
-	f.withdrawCalls = append(f.withdrawCalls, slices.Clone(request.Replicas))
-	*f.externalMutationHistory = append(*f.externalMutationHistory, "traffic.withdraw:"+request.OperationID)
+	f.withdrawCalls = append(f.withdrawCalls, replicaIncarnationIDs(request.Replicas))
+	if f.externalMutationHistory != nil {
+		*f.externalMutationHistory = append(*f.externalMutationHistory, "traffic.withdraw:"+request.OperationID)
+	}
 	return nil
+}
+
+func (f *workflowTrafficAdapter) acceptTrafficCommand(
+	action TrafficAction,
+	request TrafficRequest,
+) (TrafficRequest, error) {
+	command := TrafficCommand{
+		Action: action,
+		Request: TrafficRequest{
+			Revision:           request.Revision,
+			OperationID:        request.OperationID,
+			TopologyGeneration: request.TopologyGeneration,
+			Replicas:           cloneReplicaIncarnations(request.Replicas),
+		},
+	}
+	if err := validateTrafficCommand(command); err != nil {
+		return TrafficRequest{}, err
+	}
+	if latest := f.snapshot.LatestCommand; latest != nil {
+		switch {
+		case request.Revision < latest.Command.Request.Revision:
+			return TrafficRequest{}, fmt.Errorf(
+				"traffic revision %d is older than accepted revision %d",
+				request.Revision,
+				latest.Command.Request.Revision,
+			)
+		case request.Revision == latest.Command.Request.Revision && !sameTrafficCommand(latest.Command, command):
+			return TrafficRequest{}, fmt.Errorf("traffic revision %d conflicts with the accepted command", request.Revision)
+		case request.Revision == latest.Command.Request.Revision && latest.Phase == TrafficCommandPhaseRefused:
+			return TrafficRequest{}, fmt.Errorf("traffic revision %d was definitively refused", request.Revision)
+		case request.Revision == latest.Command.Request.Revision && latest.Phase == TrafficCommandPhaseFailed:
+			return TrafficRequest{}, fmt.Errorf("traffic revision %d has already stopped after failure", request.Revision)
+		}
+	}
+	f.snapshot.LatestCommand = &TrafficCommandObservation{
+		Command: command,
+		Phase:   TrafficCommandPhaseAccepted,
+	}
+	return command.Request, nil
 }
 
 func TestWorkflowCoordinatorOrdersGrowthAcrossDurableRestartBoundaries(t *testing.T) {
@@ -244,7 +482,7 @@ func TestWorkflowCoordinatorOrdersGrowthAcrossDurableRestartBoundaries(t *testin
 	}
 	traffic := &workflowTrafficAdapter{
 		snapshot: TrafficSnapshot{
-			Admitted: []ReplicaID{"replica-0", "replica-1"},
+			Admitted: workflowReplicaIncarnations("replica-0", "replica-1"),
 		},
 		externalMutationHistory: &externalMutations,
 	}
@@ -271,7 +509,7 @@ func TestWorkflowCoordinatorOrdersGrowthAcrossDurableRestartBoundaries(t *testin
 		OperationID:        workflowTestOperationID,
 		TopologyGeneration: 1,
 		TargetReplicas:     4,
-		RequiredReplicas:   []ReplicaID{"replica-0", "replica-1"},
+		RequiredReplicas:   workflowRequiredReplicaAllocations("replica-0", "replica-1"),
 	}}, capacity.ensureCalls)
 	assert.Equal(t, OperationPhasePending, result.Operation.Phase)
 	assert.False(t, result.OperationChanged)
@@ -288,7 +526,7 @@ func TestWorkflowCoordinatorOrdersGrowthAcrossDurableRestartBoundaries(t *testin
 	result, err = coordinator.Reconcile(context.Background(), input)
 	require.NoError(t, err)
 	assert.Equal(t, OperationPhaseSubmitting, result.Operation.Phase)
-	assert.Equal(t, []ReplicaID{"replica-2", "replica-3"}, result.Operation.JoiningReplicas)
+	assert.Equal(t, workflowReplicaIncarnations("replica-2", "replica-3"), result.Operation.JoiningReplicas)
 	assert.True(t, result.OperationChanged)
 	assert.Empty(t, membership.submitCalls)
 	input.Operation = result.Operation
@@ -299,19 +537,40 @@ func TestWorkflowCoordinatorOrdersGrowthAcrossDurableRestartBoundaries(t *testin
 	require.NoError(t, err)
 	assert.Equal(t, OperationPhaseAccepted, result.Operation.Phase)
 	require.Len(t, membership.submitCalls, 1)
-	assert.Equal(t, []ReplicaID{"replica-2", "replica-3"}, membership.submitCalls[0].JoiningReplicas)
+	assert.Equal(t, workflowReplicaIncarnations("replica-2", "replica-3"), membership.submitCalls[0].JoiningReplicas)
 	assert.Empty(t, traffic.admitCalls)
 	input.Operation = result.Operation
 
-	t.Log("Persist the committed topology before admitting its joining replicas")
+	t.Log("Fence the newly observed topology before persisting the backend commit")
 	membership.topology = workflowTopology(2, "replica-0", "replica-1", "replica-2", "replica-3")
 	membership.operation = BackendOperation{
-		ID:                          workflowTestOperationID,
-		BackendID:                   "backend-" + workflowTestOperationID,
-		TargetReplicas:              4,
-		Phase:                       BackendOperationPhaseCommitted,
-		CommittedTopologyGeneration: 2,
+		ID:                workflowTestOperationID,
+		BackendID:         "backend-" + workflowTestOperationID,
+		TargetReplicas:    4,
+		Phase:             BackendOperationPhaseCommitted,
+		CommittedTopology: topologyPointer(membership.topology),
 	}
+	result, err = coordinator.Reconcile(context.Background(), input)
+	require.NoError(t, err)
+	assert.Equal(t, OperationPhaseAccepted, result.Operation.Phase)
+	assert.False(t, result.OperationChanged)
+	fenceOperationID := workflowTestOperationID
+	fencedIncarnations := workflowReplicaIncarnations("replica-2", "replica-3")
+	assert.Empty(t, traffic.withdrawRequests)
+	result = dispatchScheduledWorkflowTraffic(t, coordinator, &input, result)
+	assert.Equal(t, []TrafficRequest{{
+		Revision:           1,
+		OperationID:        fenceOperationID,
+		TopologyGeneration: membership.topology.Generation,
+		Replicas:           fencedIncarnations,
+	}}, traffic.withdrawRequests)
+	traffic.snapshot = workflowTrafficSnapshotWithCommand(
+		TrafficActionWithdraw, 1, fenceOperationID, membership.topology.Generation,
+		workflowReplicaIncarnations("replica-0", "replica-1"), fencedIncarnations,
+	)
+
+	t.Log("Persist the committed topology after the exact fence is observable after restart")
+	coordinator = newWorkflowCoordinatorForTest(capacity, membership, traffic)
 	result, err = coordinator.Reconcile(context.Background(), input)
 	require.NoError(t, err)
 	assert.Equal(t, OperationPhaseCommitted, result.Operation.Phase)
@@ -324,15 +583,19 @@ func TestWorkflowCoordinatorOrdersGrowthAcrossDurableRestartBoundaries(t *testin
 	result, err = coordinator.Reconcile(context.Background(), input)
 	require.NoError(t, err)
 	assert.False(t, result.OperationChanged)
+	assert.Empty(t, traffic.admitCalls)
+	result = dispatchScheduledWorkflowTraffic(t, coordinator, &input, result)
 	assert.Equal(t, [][]ReplicaID{{"replica-2", "replica-3"}}, traffic.admitCalls)
 	assert.Equal(t, []TrafficRequest{{
+		Revision:           2,
 		OperationID:        workflowTestOperationID,
 		TopologyGeneration: 2,
-		Replicas:           []ReplicaID{"replica-2", "replica-3"},
+		Replicas:           workflowReplicaIncarnations("replica-2", "replica-3"),
 	}}, traffic.admitRequests)
 	assert.Equal(t, []string{
 		"capacity.ensure:4",
 		"membership.submit:" + workflowTestOperationID,
+		"traffic.withdraw:" + fenceOperationID,
 		"traffic.admit:" + workflowTestOperationID,
 	}, externalMutations)
 }
@@ -374,8 +637,8 @@ func TestWorkflowCoordinatorRepairsCommittedJoiningCapacityBeforeTrafficAdmissio
 			}
 			capacity := &workflowCapacityAdapter{
 				snapshot: CapacitySnapshot{
-					Allocations:    allocations,
-					FencedReplicas: slices.Clone(tt.fencedReplicas),
+					Allocations:        allocations,
+					FencedReplicaSlots: workflowReplicaSlotBindings(tt.fencedReplicas...),
 				},
 				externalMutationHistory: &externalMutations,
 			}
@@ -385,50 +648,71 @@ func TestWorkflowCoordinatorRepairsCommittedJoiningCapacityBeforeTrafficAdmissio
 			}
 			traffic := &workflowTrafficAdapter{
 				snapshot: TrafficSnapshot{
-					Admitted: []ReplicaID{"replica-0", "replica-1"},
+					Admitted: workflowReplicaIncarnations("replica-0", "replica-1"),
 				},
 				externalMutationHistory: &externalMutations,
 			}
 			operation := &Operation{
-				ID:                          workflowTestOperationID,
-				Attempt:                     1,
-				Intent:                      OperationIntentGrow,
-				SpecGeneration:              2,
-				BaseTopologyGeneration:      1,
-				BaseReplicas:                []ReplicaID{"replica-0", "replica-1"},
-				TargetReplicas:              4,
-				JoiningReplicas:             []ReplicaID{"replica-2", "replica-3"},
-				Phase:                       OperationPhaseCommitted,
-				CommittedTopologyGeneration: 2,
-				StartedAt:                   workflowTestTime.Add(-time.Minute),
-				LastTransitionTime:          workflowTestTime,
+				ID:                 workflowTestOperationID,
+				Attempt:            1,
+				Intent:             OperationIntentGrow,
+				Capability:         testOperationCapability(OperationShapeFreshGrowth),
+				SpecGeneration:     2,
+				BaseTopology:       workflowTopology(1, "replica-0", "replica-1"),
+				TargetReplicas:     4,
+				JoiningReplicas:    workflowReplicaIncarnations("replica-2", "replica-3"),
+				Phase:              OperationPhaseCommitted,
+				CommittedTopology:  topologyPointer(membership.topology),
+				StartedAt:          workflowTestTime.Add(-time.Minute),
+				LastTransitionTime: workflowTestTime,
 			}
 			coordinator := newWorkflowCoordinatorForTest(capacity, membership, traffic)
-
-			t.Log("Repair every authoritative allocation before admitting committed joining replicas")
-			result, err := coordinator.Reconcile(context.Background(), ReconcileInput{
+			input := ReconcileInput{
 				GroupID:         "group-0",
 				SpecGeneration:  2,
 				DesiredReplicas: 4,
 				Operation:       operation,
-			})
+			}
+			fenceOperationID := unverifiedTopologyTrafficOperationID(*operation, membership.topology)
+			fencedIncarnations := unverifiedTopologyDrainReplicas(*operation, membership.topology)
+
+			t.Log("Fence the complete exact topology before repairing a committed incarnation regression")
+			result, err := coordinator.Reconcile(context.Background(), input)
 			require.NoError(t, err)
 			assert.Equal(t, OperationPhaseCommitted, result.Operation.Phase)
 			assert.False(t, result.OperationChanged)
+			assert.Empty(t, traffic.withdrawRequests)
+			result = dispatchScheduledWorkflowTraffic(t, coordinator, &input, result)
+			assert.Equal(t, []TrafficRequest{{
+				Revision:           1,
+				OperationID:        fenceOperationID,
+				TopologyGeneration: membership.topology.Generation,
+				Replicas:           fencedIncarnations,
+			}}, traffic.withdrawRequests)
+			assert.Empty(t, capacity.ensureCalls)
+
+			t.Log("Repair every authoritative allocation only after the exact fence is observable after restart")
+			traffic.snapshot = workflowTrafficSnapshotWithCommand(
+				TrafficActionWithdraw, 1, fenceOperationID, membership.topology.Generation,
+				nil, fencedIncarnations,
+			)
+			coordinator = newWorkflowCoordinatorForTest(capacity, membership, traffic)
+			result, err = coordinator.Reconcile(context.Background(), input)
+			require.NoError(t, err)
 			assert.Equal(t, []CapacityRequest{{
 				OperationID:        workflowTestOperationID,
 				TopologyGeneration: 2,
 				TargetReplicas:     4,
-				RequiredReplicas: []ReplicaID{
-					"replica-0",
-					"replica-1",
-					"replica-2",
-					"replica-3",
-				},
+				RequiredReplicas: workflowRequiredReplicaAllocations(
+					"replica-0", "replica-1", "replica-2", "replica-3",
+				),
 			}}, capacity.ensureCalls)
 			assert.Empty(t, traffic.admitRequests)
 			assert.Empty(t, membership.submitCalls)
-			assert.Equal(t, []string{"capacity.ensure:4"}, externalMutations)
+			assert.Equal(t, []string{
+				"traffic.withdraw:" + fenceOperationID,
+				"capacity.ensure:4",
+			}, externalMutations)
 		})
 	}
 }
@@ -456,22 +740,22 @@ func TestWorkflowCoordinatorRestartObservesSubmittedOperationBeforeReplay(t *tes
 	}
 	traffic := &workflowTrafficAdapter{
 		snapshot: TrafficSnapshot{
-			Admitted: []ReplicaID{"replica-0", "replica-1"},
+			Admitted: workflowReplicaIncarnations("replica-0", "replica-1"),
 		},
 		externalMutationHistory: &externalMutations,
 	}
 	operation := &Operation{
-		ID:                     workflowTestOperationID,
-		Attempt:                1,
-		Intent:                 OperationIntentGrow,
-		SpecGeneration:         2,
-		BaseTopologyGeneration: 1,
-		BaseReplicas:           []ReplicaID{"replica-0", "replica-1"},
-		TargetReplicas:         4,
-		JoiningReplicas:        []ReplicaID{"replica-2", "replica-3"},
-		Phase:                  OperationPhaseSubmitting,
-		StartedAt:              workflowTestTime.Add(-time.Minute),
-		LastTransitionTime:     workflowTestTime,
+		ID:                 workflowTestOperationID,
+		Attempt:            1,
+		Intent:             OperationIntentGrow,
+		Capability:         testOperationCapability(OperationShapeFreshGrowth),
+		SpecGeneration:     2,
+		BaseTopology:       workflowTopology(1, "replica-0", "replica-1"),
+		TargetReplicas:     4,
+		JoiningReplicas:    workflowReplicaIncarnations("replica-2", "replica-3"),
+		Phase:              OperationPhaseSubmitting,
+		StartedAt:          workflowTestTime.Add(-time.Minute),
+		LastTransitionTime: workflowTestTime,
 	}
 	coordinator := newWorkflowCoordinatorForTest(capacity, membership, traffic)
 
@@ -507,36 +791,44 @@ func TestWorkflowCoordinatorFailsClosedOnUnresolvedTrafficOperation(t *testing.T
 		externalMutationHistory: &externalMutations,
 	}
 	traffic := &workflowTrafficAdapter{
-		snapshot: TrafficSnapshot{
-			OperationID: "foreign-operation",
-			Admitted:    []ReplicaID{"replica-0", "replica-1"},
-		},
+		snapshot: workflowTrafficSnapshotWithCommand(
+			TrafficActionAdmit, 1, "foreign-operation", 1,
+			workflowReplicaIncarnations("replica-0", "replica-1"), nil,
+		),
 		unresolvedOperationID:   "foreign-operation",
 		externalMutationHistory: &externalMutations,
 	}
 	operation := &Operation{
-		ID:                          workflowTestOperationID,
-		Attempt:                     1,
-		Intent:                      OperationIntentGrow,
-		SpecGeneration:              2,
-		BaseTopologyGeneration:      1,
-		BaseReplicas:                []ReplicaID{"replica-0", "replica-1"},
-		TargetReplicas:              4,
-		JoiningReplicas:             []ReplicaID{"replica-2", "replica-3"},
-		Phase:                       OperationPhaseCommitted,
-		CommittedTopologyGeneration: 2,
-		StartedAt:                   workflowTestTime.Add(-time.Minute),
-		LastTransitionTime:          workflowTestTime,
+		ID:                 workflowTestOperationID,
+		Attempt:            1,
+		Intent:             OperationIntentGrow,
+		Capability:         testOperationCapability(OperationShapeFreshGrowth),
+		SpecGeneration:     2,
+		BaseTopology:       workflowTopology(1, "replica-0", "replica-1"),
+		TargetReplicas:     4,
+		JoiningReplicas:    workflowReplicaIncarnations("replica-2", "replica-3"),
+		Phase:              OperationPhaseCommitted,
+		CommittedTopology:  topologyPointer(membership.topology),
+		StartedAt:          workflowTestTime.Add(-time.Minute),
+		LastTransitionTime: workflowTestTime,
 	}
 	coordinator := newWorkflowCoordinatorForTest(capacity, membership, traffic)
-
-	t.Log("Refuse to overwrite a different unresolved traffic mutation after membership commits")
-	_, err := coordinator.Reconcile(context.Background(), ReconcileInput{
+	input := ReconcileInput{
 		GroupID:         "group-0",
 		SpecGeneration:  2,
 		DesiredReplicas: 4,
 		Operation:       operation,
-	})
+	}
+
+	t.Log("Persist a newer exact admission command before contacting the unresolved runtime adapter")
+	result, err := coordinator.Reconcile(context.Background(), input)
+	require.NoError(t, err)
+	assert.True(t, result.TrafficStateChanged)
+	assert.Empty(t, traffic.admitCalls)
+	persistWorkflowTrafficState(&input, result)
+
+	t.Log("Refuse to dispatch over a different unresolved traffic mutation")
+	_, err = coordinator.Reconcile(context.Background(), input)
 	require.ErrorContains(t, err, "foreign-operation")
 	assert.Empty(t, traffic.admitCalls)
 	assert.Empty(t, externalMutations)
@@ -561,19 +853,19 @@ func TestWorkflowCoordinatorRejectsInvalidDurableStateBeforeAdapterAccess(t *tes
 				SpecGeneration:  1,
 				DesiredReplicas: 4,
 				Operation: &Operation{
-					ID:                          workflowTestOperationID,
-					Attempt:                     1,
-					PlanID:                      "plan-1",
-					Intent:                      OperationIntentShrink,
-					SpecGeneration:              1,
-					BaseTopologyGeneration:      1,
-					BaseReplicas:                []ReplicaID{"replica-0", "replica-1"},
-					TargetReplicas:              4,
-					JoiningReplicas:             []ReplicaID{"replica-2", "replica-3"},
-					Phase:                       OperationPhaseCommitted,
-					CommittedTopologyGeneration: 2,
-					StartedAt:                   workflowTestTime.Add(-time.Minute),
-					LastTransitionTime:          workflowTestTime,
+					ID:                 workflowTestOperationID,
+					Attempt:            1,
+					PlanID:             "plan-1",
+					Intent:             OperationIntentShrink,
+					Capability:         testOperationCapability(OperationShapePlannedSelectedRetirement),
+					SpecGeneration:     1,
+					BaseTopology:       workflowTopology(1, "replica-0", "replica-1"),
+					TargetReplicas:     4,
+					JoiningReplicas:    workflowReplicaIncarnations("replica-2", "replica-3"),
+					Phase:              OperationPhaseCommitted,
+					CommittedTopology:  topologyPointer(workflowTopology(2, "replica-0", "replica-1", "replica-2", "replica-3")),
+					StartedAt:          workflowTestTime.Add(-time.Minute),
+					LastTransitionTime: workflowTestTime,
 				},
 			},
 		},
@@ -617,7 +909,7 @@ func TestWorkflowCoordinatorOrdersSelectedShrinkAndExactRelease(t *testing.T) {
 	}
 	traffic := &workflowTrafficAdapter{
 		snapshot: TrafficSnapshot{
-			Admitted: []ReplicaID{"replica-0", "replica-1", "replica-2", "replica-3"},
+			Admitted: workflowReplicaIncarnations("replica-0", "replica-1", "replica-2", "replica-3"),
 		},
 		externalMutationHistory: &externalMutations,
 	}
@@ -645,16 +937,19 @@ func TestWorkflowCoordinatorOrdersSelectedShrinkAndExactRelease(t *testing.T) {
 	t.Log("Withdraw only the nominated victims while membership remains unchanged")
 	result, err = coordinator.Reconcile(context.Background(), input)
 	require.NoError(t, err)
+	assert.Empty(t, traffic.withdrawCalls)
+	result = dispatchScheduledWorkflowTraffic(t, coordinator, &input, result)
 	assert.Equal(t, [][]ReplicaID{{"replica-1", "replica-3"}}, traffic.withdrawCalls)
+	assert.Equal(t, int64(1), traffic.withdrawRequests[0].Revision)
 	assert.Empty(t, membership.submitCalls)
 	assert.Equal(t, OperationPhasePending, result.Operation.Phase)
 
 	t.Log("Observe operation-scoped drain after restart and persist Submitting")
-	traffic.snapshot = TrafficSnapshot{
-		OperationID: workflowTestOperationID,
-		Admitted:    []ReplicaID{"replica-0", "replica-2"},
-		Drained:     []ReplicaID{"replica-1", "replica-3"},
-	}
+	traffic.snapshot = workflowTrafficSnapshotWithCommand(
+		TrafficActionWithdraw, 1, workflowTestOperationID, 1,
+		workflowReplicaIncarnations("replica-0", "replica-2"),
+		workflowReplicaIncarnations("replica-1", "replica-3"),
+	)
 	coordinator = newWorkflowCoordinatorForTest(capacity, membership, traffic)
 	result, err = coordinator.Reconcile(context.Background(), input)
 	require.NoError(t, err)
@@ -671,19 +966,22 @@ func TestWorkflowCoordinatorOrdersSelectedShrinkAndExactRelease(t *testing.T) {
 	assert.Equal(t, []ReplicaID{"replica-1", "replica-3"}, membership.submitCalls[0].NominatedReplicas)
 	input.Operation = result.Operation
 
-	t.Log("Observe and persist the committed survivor topology without releasing capacity")
+	t.Log("Fence the newly observed survivor topology before persisting the backend commit")
 	membership.topology = workflowTopology(2, "replica-0", "replica-2")
 	membership.operation = BackendOperation{
-		ID:                          workflowTestOperationID,
-		BackendID:                   "backend-" + workflowTestOperationID,
-		TargetReplicas:              2,
-		Phase:                       BackendOperationPhaseCommitted,
-		CommittedTopologyGeneration: 2,
+		ID:                workflowTestOperationID,
+		BackendID:         "backend-" + workflowTestOperationID,
+		TargetReplicas:    2,
+		Phase:             BackendOperationPhaseCommitted,
+		CommittedTopology: topologyPointer(membership.topology),
 	}
 	result, err = coordinator.Reconcile(context.Background(), input)
 	require.NoError(t, err)
 	assert.Equal(t, OperationPhaseCommitted, result.Operation.Phase)
-	assert.Empty(t, capacity.releaseCalls)
+	assert.True(t, result.OperationChanged)
+	assert.Len(t, traffic.withdrawRequests, 1)
+	assert.Equal(t, []ReplicaID{"replica-1", "replica-3"}, traffic.withdrawCalls[0])
+
 	input.Operation = result.Operation
 
 	t.Log("Persist UID-bound release authorization before invoking the workload manager")
@@ -740,7 +1038,7 @@ func TestWorkflowCoordinatorOrdersSelectedShrinkAndExactRelease(t *testing.T) {
 			workflowReplicaAllocation("replica-0", "pod-0"),
 			workflowReplicaAllocation("replica-2", "pod-2"),
 		},
-		FencedReplicas: []ReplicaID{"replica-1", "replica-3"},
+		FencedReplicaSlots: workflowReplicaSlotBindings("replica-1", "replica-3"),
 	}
 	result, err = coordinator.Reconcile(context.Background(), input)
 	require.NoError(t, err)
@@ -760,13 +1058,16 @@ func TestWorkflowCoordinatorRefusesStaleReleaseAuthorization(t *testing.T) {
 			Allocations: []ReplicaAllocation{
 				workflowReplicaAllocation("replica-0", "pod-0"),
 				{
-					ID:     "replica-1",
-					SlotID: "slot-replica-1",
-					CapacityRefs: []CapacityRef{{
-						Namespace: "test",
-						Name:      "pod-1",
-						UID:       "replacement-uid",
-					}},
+					Incarnation: ReplicaIncarnation{
+						ReplicaID: "replica-1",
+						SlotID:    "slot-replica-1",
+						CapacityRefs: []CapacityRef{{
+							Namespace: "test",
+							Name:      "pod-1",
+							UID:       "replacement-uid",
+						}},
+						RuntimeID: operationRestorationReplacementRun,
+					},
 					Availability: ReplicaAvailabilityAvailable,
 				},
 			},
@@ -777,15 +1078,19 @@ func TestWorkflowCoordinatorRefusesStaleReleaseAuthorization(t *testing.T) {
 		topology:                workflowTopology(2, "replica-0"),
 		externalMutationHistory: &externalMutations,
 	}
+	membership.topology.Replicas[0].Incarnation = cloneReplicaIncarnation(capacity.snapshot.Allocations[0].Incarnation)
+	operation := workflowCommittedShrinkOperation()
+	operation.BaseTopology.Replicas[0].Incarnation = cloneReplicaIncarnation(capacity.snapshot.Allocations[0].Incarnation)
+	operation.BaseTopology.Replicas[1].Incarnation = cloneReplicaIncarnation(capacity.snapshot.Allocations[1].Incarnation)
+	operation.CommittedTopology = topologyPointer(membership.topology)
 	traffic := &workflowTrafficAdapter{
-		snapshot: TrafficSnapshot{
-			OperationID: workflowTestOperationID,
-			Admitted:    []ReplicaID{"replica-0"},
-			Drained:     []ReplicaID{"replica-1"},
-		},
+		snapshot: workflowTrafficSnapshotWithCommand(
+			TrafficActionWithdraw, 1, workflowTestOperationID, membership.topology.Generation,
+			topologyReplicaIncarnations(membership.topology),
+			topologyReplicaIncarnationsForIDs(operation.BaseTopology, operation.NominatedReplicas),
+		),
 		externalMutationHistory: &externalMutations,
 	}
-	operation := workflowCommittedShrinkOperation()
 	authorization := &ReleaseAuthorization{
 		ID:                 workflowTestReleaseID,
 		OperationID:        workflowTestOperationID,
@@ -826,17 +1131,20 @@ func TestWorkflowCoordinatorDoesNotApplyStaleAuthorizationToReplacementAfterTime
 			Allocations: []ReplicaAllocation{
 				workflowReplicaAllocation("replica-0", "pod-0"),
 				{
-					ID:     "replica-1",
-					SlotID: "slot-replica-1",
-					CapacityRefs: []CapacityRef{{
-						Namespace: "test",
-						Name:      "pod-1",
-						UID:       "replacement-uid",
-					}},
+					Incarnation: ReplicaIncarnation{
+						ReplicaID: "replica-1",
+						SlotID:    "slot-replica-1",
+						CapacityRefs: []CapacityRef{{
+							Namespace: "test",
+							Name:      "pod-1",
+							UID:       "replacement-uid",
+						}},
+						RuntimeID: operationRestorationReplacementRun,
+					},
 					Availability: ReplicaAvailabilityAvailable,
 				},
 			},
-			FencedReplicas: []ReplicaID{"replica-1"},
+			FencedReplicaSlots: workflowReplicaSlotBindings("replica-1"),
 		},
 		releaseObservation: CapacityReleaseObservation{
 			ReleaseID: workflowTestReleaseID,
@@ -849,11 +1157,10 @@ func TestWorkflowCoordinatorDoesNotApplyStaleAuthorizationToReplacementAfterTime
 		externalMutationHistory: &externalMutations,
 	}
 	traffic := &workflowTrafficAdapter{
-		snapshot: TrafficSnapshot{
-			OperationID: workflowTestOperationID,
-			Admitted:    []ReplicaID{"replica-0"},
-			Drained:     []ReplicaID{"replica-1"},
-		},
+		snapshot: workflowTrafficSnapshotWithCommand(
+			TrafficActionWithdraw, 1, workflowTestOperationID, 2,
+			workflowReplicaIncarnations("replica-0"), workflowReplicaIncarnations("replica-1"),
+		),
 		externalMutationHistory: &externalMutations,
 	}
 	authorization := &ReleaseAuthorization{
@@ -911,26 +1218,32 @@ func TestReleaseAuthorizationBindsReplicaSlotAndPodIdentity(t *testing.T) {
 		{
 			name: "logical replica moves to another slot",
 			capacity: CapacitySnapshot{Allocations: []ReplicaAllocation{{
-				ID:     "replica-1",
-				SlotID: "replacement-slot",
-				CapacityRefs: []CapacityRef{{
-					Namespace: "test",
-					Name:      "pod-1",
-					UID:       "uid-pod-1",
-				}},
+				Incarnation: ReplicaIncarnation{
+					ReplicaID: "replica-1",
+					SlotID:    "replacement-slot",
+					CapacityRefs: []CapacityRef{{
+						Namespace: "test",
+						Name:      "pod-1",
+						UID:       "uid-pod-1",
+					}},
+					RuntimeID: "runtime-replica-1",
+				},
 				Availability: ReplicaAvailabilityAvailable,
 			}}},
 		},
 		{
 			name: "authorized Pod moves to another logical allocation",
 			capacity: CapacitySnapshot{Allocations: []ReplicaAllocation{{
-				ID:     "replica-9",
-				SlotID: "slot-replica-9",
-				CapacityRefs: []CapacityRef{{
-					Namespace: "test",
-					Name:      "pod-1",
-					UID:       "uid-pod-1",
-				}},
+				Incarnation: ReplicaIncarnation{
+					ReplicaID: "replica-9",
+					SlotID:    "slot-replica-9",
+					CapacityRefs: []CapacityRef{{
+						Namespace: "test",
+						Name:      "pod-1",
+						UID:       "uid-pod-1",
+					}},
+					RuntimeID: "runtime-replica-9",
+				},
 				Availability: ReplicaAvailabilityAvailable,
 			}}},
 		},
@@ -958,15 +1271,19 @@ func TestWorkflowCoordinatorAuthorizesEveryPodInMultiPodReplica(t *testing.T) {
 		topology:                workflowTopology(2, "replica-0"),
 		externalMutationHistory: &externalMutations,
 	}
+	membership.topology.Replicas[0].Incarnation = cloneReplicaIncarnation(capacity.snapshot.Allocations[0].Incarnation)
+	operation := workflowCommittedShrinkOperation()
+	operation.BaseTopology.Replicas[0].Incarnation = cloneReplicaIncarnation(capacity.snapshot.Allocations[0].Incarnation)
+	operation.BaseTopology.Replicas[1].Incarnation = cloneReplicaIncarnation(capacity.snapshot.Allocations[1].Incarnation)
+	operation.CommittedTopology = topologyPointer(membership.topology)
 	traffic := &workflowTrafficAdapter{
-		snapshot: TrafficSnapshot{
-			OperationID: workflowTestOperationID,
-			Admitted:    []ReplicaID{"replica-0"},
-			Drained:     []ReplicaID{"replica-1"},
-		},
+		snapshot: workflowTrafficSnapshotWithCommand(
+			TrafficActionWithdraw, 1, workflowTestOperationID, membership.topology.Generation,
+			topologyReplicaIncarnations(membership.topology),
+			topologyReplicaIncarnationsForIDs(operation.BaseTopology, operation.NominatedReplicas),
+		),
 		externalMutationHistory: &externalMutations,
 	}
-	operation := workflowCommittedShrinkOperation()
 	coordinator := newWorkflowCoordinatorForTest(capacity, membership, traffic)
 
 	t.Log("Build one indivisible release authorization containing every Pod in the selected replica")
@@ -1019,9 +1336,9 @@ func TestWorkflowCoordinatorDegradesThenRestoresFailedReplica(t *testing.T) {
 		}},
 		externalMutationHistory: &externalMutations,
 	}
-	capabilities := MembershipCapabilities{Intents: []OperationIntent{
-		OperationIntentRecover,
-		OperationIntentGrow,
+	capabilities := MembershipCapabilities{OperationShapes: []OperationShape{
+		OperationShapeSurvivorReduction,
+		OperationShapeFreshGrowth,
 	}}
 	membership := &workflowMembershipAdapter{
 		capabilities:            &capabilities,
@@ -1030,7 +1347,7 @@ func TestWorkflowCoordinatorDegradesThenRestoresFailedReplica(t *testing.T) {
 	}
 	traffic := &workflowTrafficAdapter{
 		snapshot: TrafficSnapshot{
-			Admitted: []ReplicaID{"replica-0", "replica-1", "replica-2"},
+			Admitted: workflowReplicaIncarnations("replica-0", "replica-1", "replica-2"),
 		},
 		externalMutationHistory: &externalMutations,
 	}
@@ -1059,34 +1376,39 @@ func TestWorkflowCoordinatorDegradesThenRestoresFailedReplica(t *testing.T) {
 	input.Operation = result.Operation
 
 	t.Log("Withdraw the failed replica and persist Submitting after operation-scoped drain is observed")
-	_, err = coordinator.Reconcile(context.Background(), input)
+	result, err = coordinator.Reconcile(context.Background(), input)
 	require.NoError(t, err)
-	traffic.snapshot = TrafficSnapshot{
-		OperationID: degradeOperationID,
-		Admitted:    []ReplicaID{"replica-0", "replica-1", "replica-2"},
-		Drained:     []ReplicaID{"replica-3"},
-	}
+	assert.Empty(t, traffic.withdrawRequests)
+	result = dispatchScheduledWorkflowTraffic(t, coordinator, &input, result)
+	assert.Equal(t, int64(1), traffic.withdrawRequests[0].Revision)
+	traffic.snapshot = workflowTrafficSnapshotWithCommand(
+		TrafficActionWithdraw, 1, degradeOperationID, 1,
+		workflowReplicaIncarnations("replica-0", "replica-1", "replica-2"),
+		workflowReplicaIncarnations("replica-3"),
+	)
 	result, err = coordinator.Reconcile(context.Background(), input)
 	require.NoError(t, err)
 	assert.Equal(t, OperationPhaseSubmitting, result.Operation.Phase)
 	input.Operation = result.Operation
 
-	t.Log("Submit and commit the exact survivor topology before authorizing failed capacity release")
+	t.Log("Submit the exact survivor topology")
 	result, err = coordinator.Reconcile(context.Background(), input)
 	require.NoError(t, err)
 	assert.Equal(t, OperationPhaseAccepted, result.Operation.Phase)
 	input.Operation = result.Operation
 	membership.topology = workflowTopology(2, "replica-0", "replica-1", "replica-2")
 	membership.operation = BackendOperation{
-		ID:                          degradeOperationID,
-		BackendID:                   "backend-" + degradeOperationID,
-		TargetReplicas:              3,
-		Phase:                       BackendOperationPhaseCommitted,
-		CommittedTopologyGeneration: 2,
+		ID:                degradeOperationID,
+		BackendID:         "backend-" + degradeOperationID,
+		TargetReplicas:    3,
+		Phase:             BackendOperationPhaseCommitted,
+		CommittedTopology: topologyPointer(membership.topology),
 	}
 	result, err = coordinator.Reconcile(context.Background(), input)
 	require.NoError(t, err)
 	assert.Equal(t, OperationPhaseCommitted, result.Operation.Phase)
+	assert.True(t, result.OperationChanged)
+	assert.Len(t, traffic.withdrawRequests, 1, "normal KeepServing reduction reuses its exact retiree drain")
 	input.Operation = result.Operation
 	result, err = coordinator.Reconcile(context.Background(), input)
 	require.NoError(t, err)
@@ -1106,7 +1428,7 @@ func TestWorkflowCoordinatorDegradesThenRestoresFailedReplica(t *testing.T) {
 			workflowReplicaAllocation("replica-1", "pod-1"),
 			workflowReplicaAllocation("replica-2", "pod-2"),
 		},
-		FencedReplicas: []ReplicaID{"replica-3"},
+		FencedReplicaSlots: workflowReplicaSlotBindings("replica-3"),
 	}
 	result, err = coordinator.Reconcile(context.Background(), input)
 	require.NoError(t, err)
@@ -1118,10 +1440,11 @@ func TestWorkflowCoordinatorDegradesThenRestoresFailedReplica(t *testing.T) {
 	input.Operation = result.Operation
 	input.ReleaseAuthorization = nil
 
-	t.Log("Persist post-commit completion as a separate durable level before replacing the recovery operation")
+	t.Log("Persist post-commit completion after exact release; unaffected survivors remained admitted")
 	membership.operation = BackendOperation{Phase: BackendOperationPhaseAbsent}
 	result, err = coordinator.Reconcile(context.Background(), input)
 	require.NoError(t, err)
+	assert.Empty(t, traffic.admitCalls)
 	assert.Equal(t, degradeOperationID, result.Operation.ID)
 	assert.Equal(t, OperationPhaseCommitted, result.Operation.Phase)
 	assert.True(t, result.Operation.PostCommitComplete)
@@ -1143,12 +1466,13 @@ func TestWorkflowCoordinatorDegradesThenRestoresFailedReplica(t *testing.T) {
 	_, err = coordinator.Reconcile(context.Background(), input)
 	require.NoError(t, err)
 	replacement := workflowReplicaAllocation("replica-3", "pod-3")
-	replacement.CapacityRefs[0].UID = "replacement-uid"
+	replacement.Incarnation.CapacityRefs[0].UID = "replacement-uid"
+	replacement.Incarnation.RuntimeID = operationRestorationReplacementRun
 	capacity.snapshot.Allocations = append(capacity.snapshot.Allocations, replacement)
-	capacity.snapshot.FencedReplicas = nil
+	capacity.snapshot.FencedReplicaSlots = nil
 	result, err = coordinator.Reconcile(context.Background(), input)
 	require.NoError(t, err)
-	assert.Equal(t, []ReplicaID{"replica-3"}, result.Operation.JoiningReplicas)
+	assert.Equal(t, []ReplicaIncarnation{replacement.Incarnation}, result.Operation.JoiningReplicas)
 	assert.Equal(t, OperationPhaseSubmitting, result.Operation.Phase)
 	input.Operation = result.Operation
 	result, err = coordinator.Reconcile(context.Background(), input)
@@ -1156,42 +1480,189 @@ func TestWorkflowCoordinatorDegradesThenRestoresFailedReplica(t *testing.T) {
 	assert.Equal(t, OperationPhaseAccepted, result.Operation.Phase)
 	input.Operation = result.Operation
 
-	t.Log("Commit the restored topology before readmitting the replacement replica")
+	t.Log("Fence the restored topology before persisting its commit")
 	membership.topology = workflowTopology(3, "replica-0", "replica-1", "replica-2", "replica-3")
+	membership.topology.Replicas[3].Incarnation = cloneReplicaIncarnation(replacement.Incarnation)
 	membership.operation = BackendOperation{
-		ID:                          restoreOperationID,
-		BackendID:                   "backend-" + restoreOperationID,
-		TargetReplicas:              4,
-		Phase:                       BackendOperationPhaseCommitted,
-		CommittedTopologyGeneration: 3,
+		ID:                restoreOperationID,
+		BackendID:         "backend-" + restoreOperationID,
+		TargetReplicas:    4,
+		Phase:             BackendOperationPhaseCommitted,
+		CommittedTopology: topologyPointer(membership.topology),
 	}
+	result, err = coordinator.Reconcile(context.Background(), input)
+	require.NoError(t, err)
+	assert.Equal(t, OperationPhaseAccepted, result.Operation.Phase)
+	restoreFenceOperationID := restoreOperationID
+	restoreFenceIncarnations := []ReplicaIncarnation{replacement.Incarnation}
+	assert.Len(t, traffic.withdrawRequests, 1)
+	result = dispatchScheduledWorkflowTraffic(t, coordinator, &input, result)
+	assert.Equal(t, TrafficRequest{
+		Revision:           2,
+		OperationID:        restoreFenceOperationID,
+		TopologyGeneration: membership.topology.Generation,
+		Replicas:           restoreFenceIncarnations,
+	}, traffic.withdrawRequests[len(traffic.withdrawRequests)-1])
+	traffic.snapshot = TrafficSnapshot{
+		LatestCommand: workflowAcceptedTrafficObservation(
+			TrafficActionWithdraw, 2, restoreFenceOperationID,
+			membership.topology.Generation, restoreFenceIncarnations,
+		),
+		Admitted: topologyReplicaIncarnations(workflowTopology(2, "replica-0", "replica-1", "replica-2")),
+		Drained: append(
+			workflowReplicaIncarnations("replica-3"),
+			cloneReplicaIncarnations(restoreFenceIncarnations)...,
+		),
+	}
+
+	t.Log("Persist the restored commit after its exact fence is observable")
+	coordinator = newWorkflowCoordinatorForTest(capacity, membership, traffic)
 	result, err = coordinator.Reconcile(context.Background(), input)
 	require.NoError(t, err)
 	assert.Equal(t, OperationPhaseCommitted, result.Operation.Phase)
 	input.Operation = result.Operation
 	result, err = coordinator.Reconcile(context.Background(), input)
 	require.NoError(t, err)
-	assert.Equal(t, [][]ReplicaID{{"replica-3"}}, traffic.admitCalls)
+	assert.Empty(t, traffic.admitCalls)
+	result = dispatchScheduledWorkflowTraffic(t, coordinator, &input, result)
+	assert.Equal(t, [][]ReplicaID{
+		{"replica-3"},
+	}, traffic.admitCalls)
 	assert.Equal(t, []string{
 		"traffic.withdraw:" + degradeOperationID,
 		"membership.submit:" + degradeOperationID,
 		"capacity.release:" + workflowTestReleaseID,
 		"capacity.ensure:4",
 		"membership.submit:" + restoreOperationID,
+		"traffic.withdraw:" + restoreFenceOperationID,
 		"traffic.admit:" + restoreOperationID,
 	}, externalMutations)
+}
+
+type workflowCoordinatorTestHarness struct {
+	*WorkflowCoordinator
+	traffic TrafficAdapter
+}
+
+func (h *workflowCoordinatorTestHarness) Reconcile(
+	ctx context.Context,
+	input ReconcileInput,
+) (ReconcileResult, error) {
+	// Most workflow fixtures start from an already accepted traffic state. Seed the matching durable command so these
+	// fixtures exercise workflow behavior rather than the adapter-ahead invariant, which has focused tests below.
+	if input.TrafficRevision == 0 && input.TrafficCommand == nil {
+		if traffic, ok := h.traffic.(*workflowTrafficAdapter); ok && traffic.snapshot.LatestCommand != nil {
+			input.TrafficRevision = traffic.snapshot.LatestCommand.Command.Request.Revision
+			input.TrafficCommand = cloneTrafficCommand(&traffic.snapshot.LatestCommand.Command)
+		}
+	}
+	return h.WorkflowCoordinator.Reconcile(ctx, input)
+}
+
+func persistWorkflowTrafficState(input *ReconcileInput, result ReconcileResult) {
+	input.TrafficRevision = result.TrafficRevision
+	input.TrafficCommand = cloneTrafficCommand(result.TrafficCommand)
+}
+
+func dispatchScheduledWorkflowTraffic(
+	t *testing.T,
+	coordinator *workflowCoordinatorTestHarness,
+	input *ReconcileInput,
+	scheduled ReconcileResult,
+) ReconcileResult {
+	t.Helper()
+	require.True(t, scheduled.TrafficStateChanged, "reconcile did not schedule a durable traffic command")
+	persistWorkflowTrafficState(input, scheduled)
+	dispatched, err := coordinator.Reconcile(context.Background(), *input)
+	require.NoError(t, err)
+	assert.False(t, dispatched.TrafficStateChanged)
+	assert.Equal(t, scheduled.TrafficRevision, dispatched.TrafficRevision)
+	assert.Equal(t, scheduled.TrafficCommand, dispatched.TrafficCommand)
+	return dispatched
+}
+
+func workflowAcceptedTrafficCommand(
+	action TrafficAction,
+	revision int64,
+	operationID string,
+	topologyGeneration int64,
+	replicas []ReplicaIncarnation,
+) *TrafficCommand {
+	return &TrafficCommand{
+		Action: action,
+		Request: TrafficRequest{
+			Revision:           revision,
+			OperationID:        operationID,
+			TopologyGeneration: topologyGeneration,
+			Replicas:           cloneReplicaIncarnations(replicas),
+		},
+	}
+}
+
+func workflowAcceptedTrafficObservation(
+	action TrafficAction,
+	revision int64,
+	operationID string,
+	topologyGeneration int64,
+	replicas []ReplicaIncarnation,
+) *TrafficCommandObservation {
+	return &TrafficCommandObservation{
+		Command: *workflowAcceptedTrafficCommand(
+			action,
+			revision,
+			operationID,
+			topologyGeneration,
+			replicas,
+		),
+		Phase: TrafficCommandPhaseAccepted,
+	}
+}
+
+func workflowTrafficSnapshotWithCommand(
+	action TrafficAction,
+	revision int64,
+	operationID string,
+	topologyGeneration int64,
+	admitted []ReplicaIncarnation,
+	drained []ReplicaIncarnation,
+) TrafficSnapshot {
+	replicas := admitted
+	if action == TrafficActionWithdraw {
+		replicas = drained
+	}
+	return TrafficSnapshot{
+		LatestCommand: workflowAcceptedTrafficObservation(
+			action, revision, operationID, topologyGeneration, replicas,
+		),
+		Admitted: cloneReplicaIncarnations(admitted),
+		Drained:  cloneReplicaIncarnations(drained),
+	}
 }
 
 func newWorkflowCoordinatorForTest(
 	capacity CapacityAdapter,
 	membership MembershipAdapter,
 	traffic TrafficAdapter,
-) *WorkflowCoordinator {
-	coordinator := NewWorkflowCoordinator(capacity, membership, traffic)
+) *workflowCoordinatorTestHarness {
+	return newWorkflowCoordinatorWithVerifierForTest(
+		capacity,
+		membership,
+		traffic,
+		&workflowServingVerifier{},
+	)
+}
+
+func newWorkflowCoordinatorWithVerifierForTest(
+	capacity CapacityAdapter,
+	membership MembershipAdapter,
+	traffic TrafficAdapter,
+	verifier ServingVerifier,
+) *workflowCoordinatorTestHarness {
+	coordinator := NewWorkflowCoordinator(capacity, membership, traffic, verifier)
 	coordinator.operations.now = workflowFixedTime
 	coordinator.operations.newOperationID = workflowFixedOperationID
 	coordinator.newReleaseID = workflowFixedReleaseID
-	return coordinator
+	return &workflowCoordinatorTestHarness{WorkflowCoordinator: coordinator, traffic: traffic}
 }
 
 func workflowFixedTime() time.Time {
@@ -1215,24 +1686,92 @@ func workflowTopology(generation int64, replicaIDs ...ReplicaID) MembershipTopol
 	// Give every logical replica one unique engine-native member for authoritative correlation.
 	for i, replicaID := range replicaIDs {
 		topology.Replicas[i] = ReplicaMembership{
-			ReplicaID:     replicaID,
+			Incarnation:   workflowReplicaIncarnation(replicaID),
 			NativeMembers: []NativeMemberID{"native-" + NativeMemberID(replicaID)},
 		}
 	}
 	return topology
 }
 
+func workflowReplicaIncarnation(replicaID ReplicaID) ReplicaIncarnation {
+	podName := "pod-" + string(replicaID[len("replica-"):])
+	return ReplicaIncarnation{
+		ReplicaID: replicaID,
+		SlotID:    "slot-" + CapacitySlotID(replicaID),
+		CapacityRefs: []CapacityRef{{
+			Namespace: "test",
+			Name:      podName,
+			UID:       PodUID("uid-" + podName),
+		}},
+		RuntimeID: "runtime-" + RuntimeIncarnationID(replicaID),
+	}
+}
+
+func workflowReplicaIncarnations(replicaIDs ...ReplicaID) []ReplicaIncarnation {
+	incarnations := make([]ReplicaIncarnation, len(replicaIDs))
+	for i, replicaID := range replicaIDs {
+		incarnations[i] = workflowReplicaIncarnation(replicaID)
+	}
+	return incarnations
+}
+
+func workflowReplicaSlotBindings(replicaIDs ...ReplicaID) []ReplicaSlotBinding {
+	bindings := make([]ReplicaSlotBinding, len(replicaIDs))
+	for i, replicaID := range replicaIDs {
+		incarnation := workflowReplicaIncarnation(replicaID)
+		bindings[i] = ReplicaSlotBinding{
+			ReplicaID: incarnation.ReplicaID,
+			SlotID:    incarnation.SlotID,
+		}
+	}
+	return bindings
+}
+
+func workflowRequiredReplicaAllocations(replicaIDs ...ReplicaID) []RequiredReplicaAllocation {
+	required := make([]RequiredReplicaAllocation, len(replicaIDs))
+	for i, replicaID := range replicaIDs {
+		incarnation := workflowReplicaIncarnation(replicaID)
+		required[i] = RequiredReplicaAllocation{
+			ReplicaID: incarnation.ReplicaID,
+			SlotID:    incarnation.SlotID,
+		}
+	}
+	return required
+}
+
+func workflowReplicaNativeMemberships(replicaIDs ...ReplicaID) []ReplicaNativeMembership {
+	memberships := make([]ReplicaNativeMembership, len(replicaIDs))
+	for i, replicaID := range replicaIDs {
+		memberships[i] = ReplicaNativeMembership{
+			ReplicaID:     replicaID,
+			SlotID:        workflowReplicaIncarnation(replicaID).SlotID,
+			NativeMembers: []NativeMemberID{"native-" + NativeMemberID(replicaID)},
+		}
+	}
+	return memberships
+}
+
+func workflowReplicaMembership(replicaID ReplicaID, nativeMembers ...NativeMemberID) ReplicaMembership {
+	return ReplicaMembership{
+		Incarnation:   workflowReplicaIncarnation(replicaID),
+		NativeMembers: slices.Clone(nativeMembers),
+	}
+}
+
 func workflowReplicaAllocation(replicaID ReplicaID, podNames ...string) ReplicaAllocation {
 	allocation := ReplicaAllocation{
-		ID:           replicaID,
-		SlotID:       "slot-" + CapacitySlotID(replicaID),
-		CapacityRefs: make([]CapacityRef, len(podNames)),
+		Incarnation: ReplicaIncarnation{
+			ReplicaID:    replicaID,
+			SlotID:       "slot-" + CapacitySlotID(replicaID),
+			CapacityRefs: make([]CapacityRef, len(podNames)),
+			RuntimeID:    "runtime-" + RuntimeIncarnationID(replicaID),
+		},
 		Availability: ReplicaAvailabilityAvailable,
 	}
 
 	// Build physically disjoint concrete identities for the requested logical allocation.
 	for i, podName := range podNames {
-		allocation.CapacityRefs[i] = CapacityRef{
+		allocation.Incarnation.CapacityRefs[i] = CapacityRef{
 			Namespace: "test",
 			Name:      podName,
 			UID:       PodUID("uid-" + podName),
@@ -1243,18 +1782,18 @@ func workflowReplicaAllocation(replicaID ReplicaID, podNames ...string) ReplicaA
 
 func workflowCommittedShrinkOperation() *Operation {
 	return &Operation{
-		ID:                          workflowTestOperationID,
-		Attempt:                     1,
-		PlanID:                      "plan-1",
-		Intent:                      OperationIntentShrink,
-		SpecGeneration:              2,
-		BaseTopologyGeneration:      1,
-		BaseReplicas:                []ReplicaID{"replica-0", "replica-1"},
-		TargetReplicas:              1,
-		NominatedReplicas:           []ReplicaID{"replica-1"},
-		Phase:                       OperationPhaseCommitted,
-		CommittedTopologyGeneration: 2,
-		StartedAt:                   workflowTestTime.Add(-time.Minute),
-		LastTransitionTime:          workflowTestTime,
+		ID:                 workflowTestOperationID,
+		Attempt:            1,
+		PlanID:             "plan-1",
+		Intent:             OperationIntentShrink,
+		Capability:         testOperationCapability(OperationShapePlannedHighRankSuffixShrink),
+		SpecGeneration:     2,
+		BaseTopology:       workflowTopology(1, "replica-0", "replica-1"),
+		TargetReplicas:     1,
+		NominatedReplicas:  []ReplicaID{"replica-1"},
+		Phase:              OperationPhaseCommitted,
+		CommittedTopology:  topologyPointer(workflowTopology(2, "replica-0")),
+		StartedAt:          workflowTestTime.Add(-time.Minute),
+		LastTransitionTime: workflowTestTime,
 	}
 }
