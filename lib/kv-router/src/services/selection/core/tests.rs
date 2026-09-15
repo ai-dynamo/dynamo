@@ -2245,13 +2245,9 @@ fn lease_count(core: &SelectionCore, session_id: &str) -> Option<usize> {
     table.lease_count(session_id)
 }
 
-/// Two workers, so both requests must land on the replacement; with more
-/// workers the joiner could book elsewhere while still counting toward the
-/// session's binding, which is the same split a plain `Bound` lease has.
 /// r2 holds the departed binding when r3 re-initializes the session; r2's
-/// commit then finds r3's initialization in progress and must join it, not
-/// route without a lease, so the replacement binding cannot idle out while
-/// r2 is still active.
+/// successful booking binds the replacement immediately. r3 can later join
+/// the same target, and the binding stays alive until both requests finish.
 #[tokio::test]
 async fn failover_commit_behind_an_initializing_hold_keeps_a_lease() {
     let (core, first) = bound_session(SessionAffinityMode::Hard).await;
@@ -2279,11 +2275,11 @@ async fn failover_commit_behind_an_initializing_hold_keeps_a_lease() {
         .await
         .expect("a departure after the hold is not a client fault");
     assert_eq!(r2.worker_id, replacement);
-    assert_eq!(bound_worker(&core, "s"), None, "r3 has not committed yet");
+    assert_eq!(bound_worker(&core, "s"), Some(replacement));
     assert_eq!(
         lease_count(&core, "s"),
-        Some(1),
-        "r2 must hold a pending lease on r3's initialization"
+        Some(2),
+        "r2 and the queued initializer both keep the binding alive"
     );
 
     let r3 = r3.await.expect("r3 binds the replacement");
@@ -2302,6 +2298,85 @@ async fn failover_commit_behind_an_initializing_hold_keeps_a_lease() {
     let entry = core.entry(&key).expect("default partition");
     entry.affinity.get().expect("table").expire_for_test("s");
     assert_eq!(bound_worker(&core, "s"), None);
+}
+
+#[rstest::rstest]
+#[case::initializer_cancelled(false)]
+#[case::initializer_selects_another_worker(true)]
+#[tokio::test]
+async fn joined_failover_preserves_the_successful_bookings_binding(#[case] commit_other: bool) {
+    let (core, first) = bound_session(SessionAffinityMode::Hard).await;
+    let key = default_key();
+    let replacement = if first.worker_id == 1 { 2 } else { 1 };
+    core.upsert_worker(worker(3)).await.expect("third worker");
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+
+    let mut r2_request = session_reservation("r2", "s");
+    r2_request.allowed_worker_ids = Some(HashSet::from([replacement]));
+    let mut r2 = Box::pin(core.select_and_reserve(r2_request));
+    assert!(r2.as_mut().poll(&mut context).is_pending());
+    core.catalog
+        .set_lifecycle(first.worker_id, WorkerLifecycle::Draining, Vec::new());
+    core.publish_scheduler_config(&key);
+
+    let mut r3_request = session_reservation("r3", "s");
+    r3_request.allowed_worker_ids = Some(HashSet::from([3]));
+    let mut r3 = Box::pin(core.select_and_reserve(r3_request));
+    assert!(r3.as_mut().poll(&mut context).is_pending());
+    assert_eq!(bound_worker(&core, "s"), None);
+
+    let r2 = r2.await.expect("successful failover booking");
+    assert_eq!(r2.worker_id, replacement);
+    if commit_other {
+        assert!(
+            matches!(r3.await, Err(SelectionError::BadRequest(_))),
+            "Hard affinity must reject the conflicting initializer"
+        );
+    } else {
+        drop(r3);
+    }
+    assert_eq!(bound_worker(&core, "s"), Some(replacement));
+    assert_eq!(lease_count(&core, "s"), Some(1));
+    assert!(!core.reservation_index.read().contains_key("r3"));
+    let entry = core.entry(&key).expect("entry");
+    wait_until("initializer booking rollback", || {
+        !entry.scheduler.has_request("r3")
+    })
+    .await;
+    core.free_reservation("r2").await.expect("free r2");
+    wait_until("successful booking release", || {
+        lease_count(&core, "s") == Some(0)
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn late_failover_mismatch_preserves_the_committed_replacement() {
+    let (core, first) = bound_session(SessionAffinityMode::Hard).await;
+    core.upsert_worker(worker(3)).await.expect("third worker");
+    let key = default_key();
+    let entry = core.entry(&key).expect("entry");
+    let table = entry.affinity.get().expect("affinity table");
+    let old_hold = core.hold_session(table, "s", &key).await.unwrap().unwrap();
+    core.catalog
+        .set_lifecycle(first.worker_id, WorkerLifecycle::Draining, Vec::new());
+    let replacement = if first.worker_id == 1 { 2 } else { 1 };
+    let new_hold = core.hold_session(table, "s", &key).await.unwrap().unwrap();
+    let lease = core
+        .commit_session(
+            table,
+            new_hold,
+            "s",
+            WorkerWithDpRank::new(replacement, 0),
+            &key,
+        )
+        .expect("bind replacement");
+    let result = core.commit_session(table, old_hold, "s", WorkerWithDpRank::new(3, 0), &key);
+    assert!(matches!(result, Err(SelectionError::BadRequest(_))));
+    assert_eq!(bound_worker(&core, "s"), Some(replacement));
+    assert_eq!(lease_count(&core, "s"), Some(1));
+    drop(lease);
+    assert_eq!(lease_count(&core, "s"), Some(0));
 }
 
 #[tokio::test]

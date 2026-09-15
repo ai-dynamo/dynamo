@@ -24,10 +24,10 @@
 //!   the binding is committed while the booking is held. The commit never
 //!   waits: `commit_session` is a synchronous fn that re-binds only through
 //!   `try_acquire`. A commit that finds another request initializing the
-//!   session joins that initialization instead of waiting: it takes a lease
-//!   that counts once the initializer commits
+//!   session completes that initialization with its selected target and takes
+//!   a bound lease immediately, even if the initializer is later cancelled
 //!   (`failover_commit_behind_an_initializing_hold_keeps_a_lease`); a joiner
-//!   that finishes first is uncounted again
+//!   that finishes first releases its lease normally
 //!   (`joined_lease_released_before_the_commit_is_not_counted`). When the
 //!   table is full, or the join misses twice, it returns `Ok(None)` and
 //!   the request routes unpinned rather than waiting on a request queued
@@ -42,6 +42,7 @@
 //!   (`dropped_selection_future_frees_its_booking`,
 //!   `dropped_book_selection_during_routing_record_frees_booking_and_claim`).
 
+use super::super::affinity::{SessionAffinityMode, validate_dispatch_target};
 use super::hint::{hint_capable_partition, transfer_hint_for_selection};
 
 /// `try_acquire` then `join_initializing` attempts before a commit that finds
@@ -628,20 +629,28 @@ impl SelectionCore {
                 }
                 // `commit` invalidated the stale binding. Another request may
                 // already be initializing the replacement: join it rather
-                // than wait, so this booking holds a lease on the new
-                // binding. The join misses only if that initialization
+                // than wait, binding it to this successful booking's target.
+                // The join misses only if that initialization
                 // resolved between the two calls; one retry covers that, and
                 // a booking never waits on a request queued behind it.
                 for _ in 0..JOIN_ATTEMPTS {
                     match table.try_acquire(session_id, None) {
                         Ok(AcquireStep::Held(hold)) => {
+                            if table.mode() == SessionAffinityMode::Hard
+                                && let Some(target) = hold.target()
+                            {
+                                // A competing failover already bound a valid
+                                // target; reject a mismatch without erasing it.
+                                validate_dispatch_target(session_id, target, dispatched)
+                                    .map_err(affinity_error)?;
+                            }
                             return table
                                 .commit(hold, dispatched)
                                 .map(Some)
                                 .map_err(affinity_error);
                         }
                         Ok(AcquireStep::Wait(_)) => {
-                            if let Some(lease) = table.join_initializing(session_id) {
+                            if let Some(lease) = table.join_initializing(session_id, dispatched) {
                                 return Ok(Some(lease));
                             }
                         }
