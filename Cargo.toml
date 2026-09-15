@@ -55,8 +55,8 @@ repository = "https://github.com/ai-dynamo/dynamo.git"
 keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
 [workspace.dependencies]
-# TODO(AIC-1810): replace this public review revision with the matching exact
-# crates.io dev release before merge.
+# TODO: replace this public review revision with the matching exact crates.io
+# release once it exports the Weka graph-loading API.
 aisimulate-core = { git = "https://github.com/ai-dynamo/aisimulate.git", rev = "d71203e489541bc98c5f4a616dcec3b225b8fb72" }
 
 # Local crates

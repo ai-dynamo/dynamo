@@ -106,7 +106,7 @@ conflicts = [
 ]
 
 [tool.uv.sources]
-# TODO(AIC-1810): remove this source override once AISimulate 0.12.0 is on PyPI.
+# Remove this source override once the matching AISimulate release is on PyPI.
 aisimulate = { git = "https://github.com/ai-dynamo/aisimulate.git", rev = "d71203e489541bc98c5f4a616dcec3b225b8fb72", subdirectory = "python/aisimulate" }
 
 
