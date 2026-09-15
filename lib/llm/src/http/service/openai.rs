@@ -2439,7 +2439,7 @@ fn requested_request_id_annotations<T: serde::Serialize>(
         .as_ref()
         .is_some_and(|names| names.iter().any(|name| name == ANNOTATION_REQUEST_ID))
     {
-        Annotated::from_annotation(ANNOTATION_REQUEST_ID, request_id)
+        Annotated::from_annotation(ANNOTATION_REQUEST_ID, &request_id)
             .ok()
             .into_iter()
             .collect()
@@ -7486,9 +7486,10 @@ mod tests {
             result.is_err(),
             "deduped request_id annotations must leave room for the default peek to see the refusal"
         );
-        let error_response = result.expect_err("backend refusal");
-        assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
-        assert_eq!(error_response.1.message, "bad input from client");
+        if let Err(error_response) = result {
+            assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
+            assert_eq!(error_response.1.message, "bad input from client");
+        }
     }
 
     #[tokio::test]
