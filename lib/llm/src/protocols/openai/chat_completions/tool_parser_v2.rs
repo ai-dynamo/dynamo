@@ -186,12 +186,8 @@ pub(crate) fn parse_complete_unified(
     let v2_tools = to_v2_tools(tools);
     let mut parser = create_unified_parser_for_family(family, &v2_tools)?;
 
-    // Drive the lifecycle by hand rather than calling `parse_complete`. That helper
-    // appends `finish()` into the same buffer, and the buffer COALESCES adjacent
-    // same-kind events, so a residual channel header would merge into the answer body
-    // and no whole-event test could still see it. Filtering before the append is what
-    // keeps this path on the same content as the streaming path in
-    // `unified_parser::ChoiceState::finish`.
+    // Not `parse_complete`: it appends `finish()` into the same buffer, which coalesces
+    // adjacent same-kind events, hiding the remnant inside the answer body.
     let mut output = UnifiedParserOutput::default();
     parser.parse_into(content, &mut output)?;
     let mut tail = parser.finish()?;
@@ -1255,9 +1251,8 @@ mod tests {
         assert_eq!(calls[0].0, "get_weather");
         let args: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
         assert_eq!(args["location"], "Paris");
-        // `to=user` / `to=self` are in this list because the channel specifier is part
-        // of the framing the parser owes the caller, not just the `<|…|>` markers
-        // around it.
+        // `to=user` / `to=self` are here because the channel specifier is framing the
+        // parser owes the caller, not just the `<|…|>` markers around it.
         for marker in [
             "<|start|>",
             "<|message|>",
@@ -1307,11 +1302,8 @@ mod tests {
         );
     }
 
-    // A turn cut between the answer header's opener and its `<|message|>` — the
-    // ordinary `finish_reason: "length"` cut. The parser's end-of-stream flush hands
-    // back the `assistant to=user` remainder as text; it is framing, not an answer, so
-    // it must not reach `content`. The reasoning that completed before the cut must
-    // still survive.
+    // A turn cut between the answer header's opener and its `<|message|>` — the ordinary
+    // `finish_reason: "length"` cut — leaves framing that must not reach `content`.
     #[tokio::test]
     async fn muse_unified_drops_truncated_answer_header_at_eof() {
         let turn = format!("{MUSE_REASONING}<|start|>assistant to=user");
@@ -1350,9 +1342,8 @@ mod tests {
         );
     }
 
-    // Blast-radius control for the drop: `to=` inside a real answer body is prose. It
-    // is emitted during push() as the body streams, never offered to the finish-time
-    // predicate, and must survive character for character.
+    // Blast-radius control: `to=` inside a real answer body is prose. It streams out of
+    // `push`, never reaches the finish-time predicate, and must survive.
     #[tokio::test]
     async fn muse_unified_keeps_to_equals_prose_in_an_answer() {
         let turn =
