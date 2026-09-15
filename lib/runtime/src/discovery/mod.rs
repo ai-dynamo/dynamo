@@ -1221,7 +1221,12 @@ impl ModelRegistrationIdentity {
         if self.is_lora || other.is_lora {
             self.base_identity() == other.base_identity()
         } else {
+            // The same served name can use different local model paths. Distinct
+            // served names may also share an endpoint when their sources match.
             self.display_name == other.display_name
+                || self.source_path.as_deref().is_some_and(|source| {
+                    !source.is_empty() && other.source_path.as_deref() == Some(source)
+                })
         }
     }
 }
