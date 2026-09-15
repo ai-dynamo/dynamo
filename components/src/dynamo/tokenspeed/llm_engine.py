@@ -373,7 +373,11 @@ def _finish_reason_type(finish_reason: Any) -> str:
     if hasattr(finish_reason, "to_json"):
         finish_reason = finish_reason.to_json()
     if isinstance(finish_reason, dict):
-        return str(finish_reason.get("type") or "unknown")
+        reason = str(finish_reason.get("type") or "unknown")
+        if reason == "abort":
+            message = finish_reason.get("message") or "Unknown backend error"
+            raise RuntimeError(f"TokenSpeed generation aborted: {message}")
+        return reason
     return str(finish_reason)
 
 

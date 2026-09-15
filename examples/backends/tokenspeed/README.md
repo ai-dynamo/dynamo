@@ -19,7 +19,10 @@ registers its `LongcatFlashForCausalLM` architecture.
 
 - Three hosts with eight H200 GPUs each: one host per replica. The model owner's
   [FP8 deployment guide](https://github.com/meituan-longcat/LongCat-Flash-Chat/blob/main/docs/deployment_guide.md)
-  lists eight H20 GPUs with 141 GB each. H200 is the target for this example.
+  lists eight H20 GPUs with 141 GB each. TokenSpeed explicitly lists H200 among
+  its [supported GPUs](https://github.com/lightseekorg/tokenspeed/blob/1b859c107b1d8450b750403f9c2e00251ecc59f3/.github/ISSUE_TEMPLATE/1-bug-report.yml#L13-L15),
+  with CUDA 13 and driver 580 or newer recommended. H200 is the target for this
+  example; TokenSpeed does not publish a separate LongCat/H200 recipe.
 - A working RDMA fabric between hosts, with GPU memory registration available to
   Mooncake. Expose `/dev/infiniband` to containers and use unlimited locked memory.
 - Shared etcd and NATS services reachable from all processes. See
