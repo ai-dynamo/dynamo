@@ -51,6 +51,7 @@ COPY --chmod=755 --chown=dynamo:0 \
 # Required: blocks dynamo.vllm/sglang from shadowing the installed packages.
 COPY --chmod=664 --chown=dynamo:0 conftest.py /workspace/conftest.py
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
+COPY --chmod=775 --chown=dynamo:0 lib/gpu_memory_service/tests/ /workspace/lib/gpu_memory_service/tests/
 
 # The ARC runner executes the job pod as uid 1001 with a non-dynamo gid (see
 # shared-test.yml), which lands in "other" perms on this baked dynamo:0 tree.

@@ -69,6 +69,7 @@ setup(
         "gpu_memory_service.common",
         "gpu_memory_service.common.protocol",
         "gpu_memory_service.common.vmm",
+        "gpu_memory_service.common.vmm._sycl_vmm",
         "gpu_memory_service.server",
         "gpu_memory_service.client",
         "gpu_memory_service.client.torch",
@@ -97,6 +98,7 @@ setup(
         "gpu_memory_service.common": "common",
         "gpu_memory_service.common.protocol": "common/protocol",
         "gpu_memory_service.common.vmm": "common/vmm",
+        "gpu_memory_service.common.vmm._sycl_vmm": "common/vmm/_sycl_vmm",
         "gpu_memory_service.server": "server",
         "gpu_memory_service.client": "client",
         "gpu_memory_service.client.torch": "client/torch",
@@ -113,6 +115,7 @@ setup(
     },
     package_data={
         "gpu_memory_service.client.torch.extensions": ["*.cpp"],
+        "gpu_memory_service.common.vmm._sycl_vmm": ["*.so"],
     },
     entry_points={
         "console_scripts": [
