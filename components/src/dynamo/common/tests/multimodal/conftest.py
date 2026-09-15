@@ -77,18 +77,7 @@ def pytest_ignore_collect(collection_path, config) -> bool | None:
 
 @pytest.fixture
 def carrier_imports(monkeypatch):
-    """Pin what ``codec_errors`` sees when it probes a decode carrier.
-
-    The probe is a real import, so the expected message would otherwise depend
-    on whether the machine running the tests happens to have cv2 or av
-    installed. Only the carrier names are answered here; anything else the
-    interpreter imports during the test still imports for real, which a blanket
-    replacement of ``importlib.import_module`` would break.
-
-    Call it with the carriers that should import, and optionally the error a
-    carrier that does not import raises. A string produces ``ImportError``;
-    an exception instance models a native-loader failure such as ``OSError``.
-    """
+    """Mock media-carrier imports while leaving unrelated imports intact."""
     # Import after collection's optional-dependency guard: the multimodal
     # package imports torch, which CPU-only runtime images may not ship.
     from dynamo.common.multimodal import codec_errors

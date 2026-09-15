@@ -468,13 +468,8 @@ RUN rm -rf /workspace/vllm
 # Remove the codec-bearing video-DECODE wheels inherited from the vllm-openai
 # base. Each bundles its own full ffmpeg carrying software H.264/H.265/AAC;
 # PyAV and decord additionally ship GPL libx264/libx265. Dynamo's vLLM component
-# imports none of av/decord/torchcodec, so those are unused decode-side dead
-# weight. OpenCV is the exception and is rebuilt from source at the end of this
-# RUN: mistral_common resizes every still image with cv2.resize, and vLLM
-# requires it directly and through mistral_common[image]. WITH_FFMPEG=OFF leaves
-# no libav* in its DT_NEEDED, so the rebuilt cv2 opens no video at all -- the
-# same codec surface as removing it. The version is read off the base image so
-# it cannot drift from the one vLLM resolved.
+# keeps OpenCV for mistral_common's cv2.resize, rebuilt at the base image's
+# version with video backends disabled. Other codec-bearing wheels are removed.
 # (PyNvVideoCodec is KEPT for NVDEC hardware decode -- see the note below.) The in-tree
 # LGPL ffmpeg + imageio-ffmpeg installed above are intentionally KEPT for the
 # omni video-encode path, which uses the royalty-free VP9 (libvpx_vp9) encoder —

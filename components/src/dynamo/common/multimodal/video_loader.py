@@ -48,17 +48,7 @@ logger = logging.getLogger(__name__)
 
 
 def _attributable_to_cv2(exc: BaseException, media_io: Any | None = None) -> bool:
-    """Whether this decode failure is OpenCV's.
-
-    vLLM picks among several video backends. A media_io configured for PyAV or
-    DeepStream raises its own ImportError, and reinstalling OpenCV would not
-    repair it, so only errors that name cv2 earn the OpenCV remedy. The
-    OpenCV backend's failed-open error is the exception: it is a bare
-    ``ValueError``. Its selected backend identifies that otherwise anonymous
-    error without relabeling another backend's failure.
-    ``ModuleNotFoundError`` carries the module in ``name``; the SystemError a
-    backendless build raises names the class in its text.
-    """
+    """Identify OpenCV errors without relabeling failures from other video backends."""
     if getattr(exc, "name", None) == "cv2" or "cv2" in str(exc):
         return True
     return (
@@ -71,12 +61,7 @@ def _attributable_to_cv2(exc: BaseException, media_io: Any | None = None) -> boo
 
 @functools.lru_cache(maxsize=1)
 def _cv2_lacks_video_backend() -> bool:
-    """Whether the installed OpenCV imports but can open no video.
-
-    Such a build fails through ``SystemError`` from ``VideoCapture`` rather
-    than the ``ImportError`` the decode path converts. An absent cv2 answers
-    False: the ImportError path names that case more precisely.
-    """
+    """Return whether OpenCV imports but lacks FFmpeg and GStreamer."""
     try:
         import cv2
     except ImportError:
@@ -208,15 +193,8 @@ class VideoLoader:
     ) -> tuple[np.ndarray, Dict[str, Any]]:
         """Decode video bytes: H.264/H.265 on NVDEC, all else software.
 
-        The runtime images carry no software video decoder: av, decord and
-        torchcodec are purged, and OpenCV is rebuilt without a video backend so
-        mistral_common can resize still images. The software fallback therefore
-        only resolves where a decoder was installed separately. Absent one, vLLM
-        surfaces either a bare ``No module named 'cv2'`` or a ``SystemError``
-        from ``VideoCapture``, neither carrying a codec or a remedy -- both
-        become the actionable unsupported-codec error, which can name the codec
-        because the probe already ran here. Both are translated on failure
-        rather than pre-empted, so a configured non-OpenCV backend still runs.
+        vLLM ships OpenCV for still images without video backends. Translate
+        its decode failures into install guidance; preserve other backends.
 
         The NVDEC path honors the two ``media_io_kwargs`` that decide *which*
         frames come back -- ``num_frames`` and ``fps`` -- because it samples
@@ -249,11 +227,7 @@ class VideoLoader:
                 "vllm", "opencv-python-headless", "cv2", codec, cause=str(exc)
             ) from exc
         except (SystemError, ValueError) as exc:
-            # A cv2 with no video backend fails inside VideoCapture either as
-            # a SystemError naming cv2 or as OpenCV's bare failed-open
-            # ValueError. Require the selected backend as well as the build to
-            # lack a backend: a configured non-OpenCV decoder must keep its
-            # own failure and remediation.
+            # Confirm both the error source and missing video support.
             if not (_attributable_to_cv2(exc, media_io) and _cv2_lacks_video_backend()):
                 raise
             raise video_decoder_missing(

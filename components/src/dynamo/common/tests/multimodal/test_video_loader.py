@@ -327,13 +327,7 @@ class _SystemErrorMediaIO:
 async def test_decode_video_bytes_backendless_cv2_is_actionable(
     monkeypatch, carrier_imports
 ):
-    """A cv2 built without a video backend must reach the same error.
-
-    The runtime images rebuild OpenCV from source with WITH_FFMPEG=OFF, so cv2
-    imports and resizes but opens no video. vLLM raises SystemError from
-    VideoCapture rather than ImportError, which would otherwise escape the
-    handler and reach the client with no codec and no remedy.
-    """
+    """Translate codec-free OpenCV failures into actionable decoder guidance."""
     loader = VideoLoader()
     monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: "vp9")
     monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
@@ -365,13 +359,7 @@ class _FailedOpenMediaIO:
 async def test_decode_video_bytes_failed_open_value_error_is_actionable(
     monkeypatch, carrier_imports
 ):
-    """The failed-open ValueError must reach the same actionable error.
-
-    A backendless cv2 fails two ways, and only one of them names cv2: the
-    OpenCV backend's own failed-open error is a bare ValueError whose text
-    mentions neither cv2 nor the codec. Without this conversion that message
-    reaches the client with no remedy at all.
-    """
+    """Translate OpenCV failed-open errors when its video backend is absent."""
     loader = VideoLoader()
     monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: "vp9")
     monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
@@ -394,12 +382,7 @@ async def test_decode_video_bytes_failed_open_value_error_is_actionable(
 
 @pytest.mark.asyncio
 async def test_backendless_cv2_does_not_pre_empt_a_working_decode(monkeypatch):
-    """The check must not short-circuit a decoder that would have succeeded.
-
-    On the shipped image the predicate is always true, so gating the call on it
-    would reject every VideoMediaIO -- including a configured non-OpenCV
-    video_backend, and the stubbed load_bytes the worker tests rely on.
-    """
+    """Allow configured video backends to decode before checking OpenCV."""
     loader = VideoLoader()
     monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: "vp9")
     monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
@@ -420,13 +403,7 @@ async def test_backendless_cv2_does_not_pre_empt_a_working_decode(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_other_backend_import_error_is_not_blamed_on_opencv(monkeypatch):
-    """A media_io configured for another backend keeps its own ImportError.
-
-    vLLM selects among several video backends and PyAV is absent from the
-    shipped images too, so its ImportError would otherwise be rewritten into
-    advice to reinstall OpenCV -- which cannot repair a VideoMediaIO still
-    configured for PyAV.
-    """
+    """Preserve import errors from other video backends."""
     loader = VideoLoader()
     monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: "vp9")
     monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
@@ -441,13 +418,7 @@ async def test_other_backend_import_error_is_not_blamed_on_opencv(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_other_backend_system_error_is_not_blamed_on_opencv(monkeypatch):
-    """A different decoder's SystemError must survive on a backendless image.
-
-    _cv2_lacks_video_backend() describes the installed cv2 build; it does not
-    prove this media_io ran OpenCV. On the shipped image it is always true, so
-    keying only on it would relabel every backend's SystemError as a missing
-    OpenCV and bury the real failure.
-    """
+    """Preserve other backend failures even when OpenCV lacks video support."""
     loader = VideoLoader()
     monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: "vp9")
     monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)

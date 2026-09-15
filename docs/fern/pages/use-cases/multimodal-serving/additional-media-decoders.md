@@ -26,11 +26,12 @@ Each backend decodes such input through a specific Python package whose wheel bu
 
 | Backend | Input | Package (validated version bounds) | Import |
 |---------|-------|------------------------------------|--------|
+| vLLM | video | `opencv-python-headless`, matching the installed version | `cv2` |
 | vLLM | audio | `av>=18.0.0,<19` | `av` |
 | SGLang | video | `decord2>=3.4.0,<4` | `decord` |
 | TensorRT-LLM | video | `opencv-python-headless>=4.13.0.92,<5` | `cv2` |
 
-The lower bound of each spec is the version validated against Dynamo's multimodal test suite; the upper bound excludes the next major release so an install cannot silently pick up an unvalidated version. PyNvVideoCodec is not in this list because every CUDA runtime image already ships it — it is the NVDEC path, not a fallback, so there is nothing to install. torchcodec is left out because no Dynamo decode path imports it.
+For vLLM video, the installer replaces codec-free OpenCV with a binary wheel of the installed version. If OpenCV is absent, it uses `opencv-python-headless>=4.13.0.92,<5`. For the bounded specs, the lower bound is the version validated against Dynamo's multimodal test suite; the upper bound excludes the next major release so an install cannot silently pick up an unvalidated version. PyNvVideoCodec is not in this list because every CUDA runtime image already ships it — it is the NVDEC path, not a fallback, so there is nothing to install. torchcodec is left out because no Dynamo decode path imports it.
 
 ## Install with pip
 
@@ -51,13 +52,13 @@ pip install --no-deps 'opencv-python-headless>=4.13.0.92,<5'
 
 ## Install with the bundled installer
 
-For exactly the tested combinations above, every runtime image also ships an installer as part of the `ai-dynamo` package. Run it in the worker container (not the frontend) for the backend you deploy:
+Every runtime image ships an installer for the packages above as part of the `ai-dynamo` package. Run it in the worker container (not the frontend) for the backend you deploy:
 
 ```bash
 python -m dynamo.common.utils.install_media_decoders vllm
 ```
 
-Compared to the raw pip commands it adds: skip-if-already-importable, a cross-process lock for concurrent runs, a post-install import verification in a fresh interpreter, and a non-zero exit if anything did not land. It deliberately installs only the validated specs — it has no package-selection flags. To see what it would do first:
+It skips usable decoders, serializes concurrent installs, and verifies imports in a fresh interpreter. For OpenCV, it also checks for a video backend. On vLLM, it replaces codec-free OpenCV with a same-version binary wheel using `--force-reinstall --only-binary` and installs missing PyAV. Other packages use the validated bounds. It exits non-zero if verification fails. To see what it would do first:
 
 ```bash
 python -m dynamo.common.utils.install_media_decoders vllm --dry-run
@@ -101,14 +102,12 @@ The default pip timeout is 600 seconds (`--timeout-s` overrides it; `0` disables
 
 ```bash
 VERSION=$(pip show opencv-python-headless | awk '/^Version:/{print $2}')
-# No distribution metadata leaves VERSION empty, and `opencv-python-headless==`
-# fails. Fall back to the OpenCV library version, which stops at three
-# components while the distribution adds a packaging revision, so match on it
-# as a prefix.
+# Without metadata, match the library version plus its packaging revision.
 [ -n "$VERSION" ] || VERSION="$(python -c 'import cv2; print(cv2.__version__)').*"
 pip install --no-deps --force-reinstall --only-binary opencv-python-headless \
   "opencv-python-headless==${VERSION}"
 ```
 
-Every part of that command is load-bearing. `--force-reinstall` and `--only-binary` are both needed because the source build already registers as `opencv-python-headless`, so a plain install reports the requirement as satisfied and leaves it in place. Pinning the installed version keeps the swap to source-build-for-wheel — a version range would risk moving you off the release the backend resolved, and the prefix fallback stays on the same OpenCV library version for the same reason. The wheel restores the bundled FFmpeg and its codecs, which is exactly the codec surface the image is built to exclude, so review it against your distribution policy. The bundled installer does not do this: it installs only PyAV for vLLM.
+`--force-reinstall --only-binary` replaces the source build even when its version already satisfies pip. Pinning preserves the image's OpenCV version. The wheel restores bundled FFmpeg and codecs, so review it against your distribution policy. The bundled vLLM installer performs this replacement and installs missing PyAV.
+
 - The optional Rust frontend decoder (`--frontend-decoding`) links FFmpeg's compiled-in decoders and always decodes VP8/VP9 regardless of installed Python packages; backend decoding is what an install extends. Re-encoding an input to VP9 (`ffmpeg -i input.mp4 -c:v libvpx-vp9 -an output.webm`) is an alternative that needs no additional packages.

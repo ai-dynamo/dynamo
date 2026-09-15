@@ -39,24 +39,7 @@ class MissingMediaDecoderError(RuntimeError):
 
 
 def _carrier_present(module: str) -> bool:
-    """Whether the decode carrier imports here, however it was built.
-
-    Real import, not ``find_spec``, for the same reason the installer probe in
-    :mod:`dynamo.common.utils.install_media_decoders` uses one: a carrier whose
-    files are present but whose native libraries cannot load -- a partially
-    removed wheel, a missing system library -- still has a spec. Calling that
-    present puts the source-build diagnosis and its wheel-swap remedy on a
-    carrier that is simply broken, telling the operator their OpenCV has no
-    video backend when in truth it does not load at all. The generic branch
-    serves that case better: it offers the validated install, which replaces
-    the broken files.
-
-    Any failure to import answers False, not just ``ImportError``. This runs
-    while an error message is being built for a decode that already failed, so
-    letting an exception out would replace an actionable message with an
-    unrelated traceback; and whatever the carrier raised, it is not usable
-    here, which is the whole question.
-    """
+    """Return whether the carrier imports; keep import errors out of diagnostics."""
     try:
         importlib.import_module(module)
     except Exception:  # noqa: BLE001 - any import failure means unusable here
@@ -83,26 +66,8 @@ def _installed_version(package: str) -> str | None:
 
 
 def _install_hint(backend: str, package: str, module: str) -> str:
-    """The remedy line: a pip command that works from where the caller is.
-
-    Where the carrier is absent, install the validated spec. Where it is
-    already importable but unusable for this input -- the vLLM images ship an
-    OpenCV built from source with no video backend -- the remedy is to swap
-    that build for the binary wheel, so it pins the version already installed.
-    Reusing the validated spec there would be wrong twice over: it can be
-    satisfied by what is present, so pip changes nothing, and its upper bound
-    can be below the version the image ships, so a caller who ran it anyway
-    would be downgraded off what the backend resolved.
-
-    The bundled installer is offered only where it installs this package for
-    this backend; elsewhere it exits 0 having fixed nothing.
-    """
+    """Use the installed OpenCV version for vLLM replacements, validated bounds otherwise."""
     if _is_vllm_source_built_cv2(backend, package, module):
-        # Replacing a build that is already here, so pin what is installed. The
-        # validated range would be wrong twice: it can be satisfied by what is
-        # present, so pip changes nothing, and its upper bound can sit below
-        # the version the image ships. That version is whatever the backend
-        # resolved, so this is deliberately not called a validated install.
         installed = _installed_version(package)
         if installed:
             hint = (
@@ -111,14 +76,7 @@ def _install_hint(backend: str, package: str, module: str) -> str:
                 f"--only-binary {package} '{package}=={installed}'`"
             )
         else:
-            # Nothing to pin from, so the operator reads the version off the
-            # module -- but the two version strings are not the same string.
-            # ``cv2.__version__`` is the OpenCV library version and stops at
-            # three components, while the distribution appends its own
-            # packaging revision (5.0.0 against 5.0.0.93). An exact pin built
-            # from the former therefore names a release that was never
-            # published, and pip fails to find it; the prefix match selects
-            # the published wheel built from that library version.
+            # cv2 omits the distribution packaging revision.
             hint = (
                 "first determine the shipped cv2 version with "
                 '`python -c "import cv2; print(cv2.__version__)"`, then replace '
@@ -175,9 +133,6 @@ def video_decoder_missing(
             "driver capability (NVIDIA_DRIVER_CAPABILITIES) to enable it, or "
         )
     elif _is_vllm_source_built_cv2(backend, package, module):
-        # Present but useless for video: the vLLM images ship an OpenCV built
-        # from source with no video backend. Saying it is "not installed"
-        # would send the reader looking for a package that is already there.
         lead = (
             f"this video ({codec_desc}) has no decoder in this image: shipped "
             "images decode only H.264/H.265 (in hardware, via NVDEC), and the "

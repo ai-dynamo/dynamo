@@ -166,10 +166,7 @@ binary wheel of the same version, not installing a range:
 
 ```bash
 VERSION=$(pip show opencv-python-headless | awk '/^Version:/{print $2}')
-# No distribution metadata leaves VERSION empty, and `opencv-python-headless==`
-# fails. Fall back to the OpenCV library version, which stops at three
-# components while the distribution adds a packaging revision, so match on it
-# as a prefix.
+# Without metadata, match the library version plus its packaging revision.
 [ -n "$VERSION" ] || VERSION="$(python -c 'import cv2; print(cv2.__version__)').*"
 pip install --no-deps --force-reinstall --only-binary opencv-python-headless \
   "opencv-python-headless==${VERSION}"
@@ -177,8 +174,8 @@ pip install --no-deps --force-reinstall --only-binary opencv-python-headless \
 
 Nothing installs automatically — this is a deliberate operator step. The images also ship
 an installer with the same bounds plus idempotency and air-gap support
-(`python -m dynamo.common.utils.install_media_decoders <backend>`). It does not cover the
-vLLM OpenCV case above: the vLLM installer mapping installs only PyAV. See
+(`python -m dynamo.common.utils.install_media_decoders <backend>`). For vLLM, it replaces
+codec-free OpenCV with a same-version binary wheel and installs missing PyAV. See
 [Additional Media Decoders](additional-media-decoders.md) for the full workflow,
 including baking the install into an image layer for Kubernetes.
 

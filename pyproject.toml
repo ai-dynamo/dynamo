@@ -460,10 +460,7 @@ follow_imports = "skip"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-# OpenCV: the vLLM runtime image ships a source build with no video backend
-# (common/multimodal/video_loader.py reads its build information), and no other
-# image ships it at all. Absent from the lint env and ships no type stubs, so
-# mypy would raise import-not-found on the guarded `import cv2`.
+# OpenCV is optional and absent from the lint environment.
 module = ["cv2", "cv2.*"]
 follow_imports = "skip"
 ignore_missing_imports = true

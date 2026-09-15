@@ -134,11 +134,7 @@ def _assert_python_carriers_absent(ships_cv2: bool) -> None:
     are marked ``installs_extra_dependencies``. An unmodified image must not have
     them, or a green multimodal run says nothing about what customers receive.
 
-    ``ships_cv2`` covers the one image that carries a decode carrier on purpose:
-    the vLLM runtime rebuilds OpenCV from source without any video backend,
-    because mistral_common cannot tokenize a still image without ``cv2.resize``.
-    Presence is not what this file polices -- codecs are -- so that build is
-    checked by :func:`_assert_cv2_carries_no_codec` instead of by absence.
+    vLLM's codec-free OpenCV is checked by _assert_cv2_carries_no_codec.
     """
     carriers = [("av", "PyAV")]
     if not ships_cv2:
@@ -152,14 +148,7 @@ def _assert_python_carriers_absent(ships_cv2: bool) -> None:
 
 
 def _assert_cv2_carries_no_codec() -> None:
-    """A shipped OpenCV must be the in-tree build with every video backend off.
-
-    The PyPI wheel vendors a full ffmpeg under ``opencv_python_headless.libs/``
-    and names it in the extension's DT_NEEDED, so installing it would put a
-    software H.264/H.265/AAC decoder back on disk. Ask the library what it was
-    built with rather than trusting the version, and check the vendored payload
-    is absent -- a wheel swapped in later would satisfy neither.
-    """
+    """Reject video backends and vendored media libraries in shipped OpenCV."""
     import cv2
 
     build_info = cv2.getBuildInformation()

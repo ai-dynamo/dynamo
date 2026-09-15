@@ -35,6 +35,11 @@ def sandboxed(monkeypatch):
     monkeypatch.setattr(
         install_media_decoders, "_modules_missing_fresh", lambda mods: list(mods)
     )
+    monkeypatch.setattr(
+        install_media_decoders,
+        "_vllm_opencv_spec",
+        lambda: install_media_decoders.VALIDATED_SPECS["opencv-python-headless"],
+    )
     return monkeypatch
 
 
@@ -133,20 +138,27 @@ def test_already_present_installs_nothing(sandboxed):
     assert calls == []
 
 
-def test_vllm_installs_bounded_audio_spec(sandboxed):
+def test_vllm_installs_video_and_audio(sandboxed):
     present: set[str] = set()
     _set_available(sandboxed, present)
-    calls = _record_pip_and_mark(sandboxed, present, "av")
+    sandboxed.setattr(
+        install_media_decoders,
+        "_vllm_opencv_spec",
+        lambda: "opencv-python-headless==5.0.0.93",
+    )
+    calls = _record_pip_and_mark(sandboxed, present, "cv2", "av")
     installed = install_media_decoders.install_media_decoders("vllm")
-    assert installed == [install_media_decoders.VALIDATED_SPECS["av"]]
+    assert installed == [
+        "opencv-python-headless==5.0.0.93",
+        install_media_decoders.VALIDATED_SPECS["av"],
+    ]
     (cmd,) = calls
     assert "--break-system-packages" in cmd
+    assert "--force-reinstall" in cmd
+    assert cmd[cmd.index("--only-binary") + 1] == "opencv-python-headless"
     for spec in installed:
         assert spec in cmd
-    # Never installed: pynvvideocodec and opencv because the images already ship
-    # both -- NVDEC, and a source-built cv2 with no video backend -- and the
-    # rest because no vLLM decode path imports them.
-    for banned in ("torchcodec", "pynvvideocodec", "decord2", "libx264", "opencv"):
+    for banned in ("torchcodec", "pynvvideocodec", "decord2", "libx264"):
         assert not any(banned in part for part in cmd)
 
 
@@ -237,17 +249,15 @@ def test_dry_run_reports_without_installing(sandboxed):
     calls = _record_pip(sandboxed)
     _set_available(sandboxed, set())
     specs = install_media_decoders.install_media_decoders("vllm", dry_run=True)
-    assert specs == [install_media_decoders.VALIDATED_SPECS["av"]]
+    assert specs == [
+        install_media_decoders.VALIDATED_SPECS["opencv-python-headless"],
+        install_media_decoders.VALIDATED_SPECS["av"],
+    ]
     assert calls == []
 
 
 def test_racing_install_between_probe_and_lock_runs_no_pip(sandboxed):
-    """A racing process may install the carrier while we wait on the lock.
-
-    Probe round 1 (pre-check) sees the vLLM audio carrier missing; round 2
-    (post-lock re-check) sees the racing process already installed it, so pip
-    must not run at all.
-    """
+    """Skip pip when a concurrent installer makes both decoders usable."""
     rounds = {"n": 0}
 
     def probe(mods):

@@ -18,13 +18,7 @@ pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
 
 @pytest.fixture(autouse=True)
 def _carrier_absent(carrier_imports):
-    """Pin the hint's view of the interpreter to "carrier not installed".
-
-    ``_install_hint`` asks whether the carrier is already importable, so
-    without this the expected message would depend on whether the machine
-    running the tests happens to have cv2 or av installed. Tests covering the
-    present-but-unusable case override it.
-    """
+    """Make missing-carrier messages independent of installed packages."""
     carrier_imports()
 
 
@@ -39,9 +33,7 @@ def test_video_message_names_codec_and_spec(monkeypatch):
     # The bounded spec comes verbatim from the installer's constants, so the
     # message and the documented install can never drift apart.
     assert VALIDATED_SPECS["opencv-python-headless"] in msg
-    # The installer does not install OpenCV for vLLM, so offering it here would
-    # send the reader to a command that exits 0 and decodes nothing.
-    assert "install_media_decoders vllm" not in msg
+    assert "install_media_decoders vllm" in msg
     # Non-hardware codec: the hardware alternative is re-encoding.
     assert "H.264/H.265" in msg
 
@@ -49,14 +41,7 @@ def test_video_message_names_codec_and_spec(monkeypatch):
 def test_present_but_unusable_carrier_pins_the_installed_version(
     monkeypatch, carrier_imports
 ):
-    """A carrier already on the path needs more than a plain install.
-
-    The vLLM images ship an OpenCV built from source with no video backend, so
-    the remedy is to swap that build for the wheel of the SAME version. The
-    validated range would be wrong here twice: what is installed can satisfy
-    it, so pip would change nothing, and its upper bound is below the 5.x those
-    images ship, so following it would downgrade off what vLLM resolved.
-    """
+    """Replacing codec-free OpenCV must preserve the installed version."""
     carrier_imports(present=("cv2",))
     monkeypatch.setattr(
         codec_errors.importlib.metadata, "version", lambda p: "5.0.0.93"
@@ -71,14 +56,7 @@ def test_present_but_unusable_carrier_pins_the_installed_version(
 def test_present_carrier_without_metadata_requests_its_version(
     monkeypatch, carrier_imports
 ):
-    """An unknown source-build version must not be replaced with a range.
-
-    With no distribution metadata the only version the operator can read is
-    ``cv2.__version__``, which is the OpenCV library version and carries no
-    packaging revision. Pinning it exactly would name a distribution release
-    that was never published, so the command has to match on the prefix --
-    still the one library version, not the validated range.
-    """
+    """Without metadata, match the library version plus its packaging revision."""
     carrier_imports(present=("cv2",))
 
     def _missing(_package):
@@ -93,15 +71,7 @@ def test_present_carrier_without_metadata_requests_its_version(
 
 
 def test_broken_carrier_is_not_treated_as_the_source_build(carrier_imports):
-    """A cv2 that is discoverable but will not import is broken, not codec-free.
-
-    A wheel whose native libraries are gone keeps its spec, so a spec-only
-    probe calls it present and the message tells the operator their OpenCV was
-    built without a video backend -- which is not what went wrong, and the
-    wheel-swap remedy it offers pins the same broken version. Importing tells
-    the two apart, and the generic branch is the right one here: it offers the
-    validated install, which replaces the broken files.
-    """
+    """Broken imports need a reinstall, not a missing-video-backend diagnosis."""
     carrier_imports(error=OSError("libGL.so.1: cannot open shared object file"))
 
     msg = str(
