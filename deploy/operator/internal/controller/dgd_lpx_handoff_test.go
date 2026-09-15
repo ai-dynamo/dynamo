@@ -75,7 +75,7 @@ func projectLPXChildStatus(
 ) {
 	previousLPX := status.LPX
 	*result, status.LPX = mergeLPXChildStatus(source, child, *result)
-	status.Placement = lpxPlacementProjection(source, child, status.Placement, previousLPX, status.LPX)
+	status.Placement = lpxPlacementProjection(source, status.Placement, previousLPX, status.LPX)
 }
 
 func TestOrdinaryGroveProjectionExcludesLPXWithoutMutatingSource(t *testing.T) {
@@ -632,6 +632,87 @@ func TestSpecDecodeRestartRollsTheSharedChildOnce(t *testing.T) {
 			require.Equal(t, 1, pcsReads)
 			require.Equal(t, beforeSource, source)
 			require.Equal(t, []string{"draft", "frontend", "lpx", "prefill", "removed"}, requested)
+		})
+	}
+}
+
+func TestLPXRemovalSurvivesOrdinaryReconcileFailure(t *testing.T) {
+	for _, test := range []struct {
+		name                 string
+		retainLPX            bool
+		childGone            bool
+		independentPlacement bool
+	}{
+		{name: "remove"},
+		{name: "retain", retainLPX: true},
+		{name: "independent placement", independentPlacement: true},
+		{name: "pending child already gone", childGone: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Edit a mixed DGD while ordinary shared-resource reconciliation will fail")
+			child, source, kube := newLPXHandoffFixture(t, "node-local-v2-lpu-only")
+			if test.childGone {
+				require.NoError(t, kube.Delete(t.Context(), child))
+			} else {
+				child.Finalizers = []string{"test.example/child-cleanup"}
+				require.NoError(t, kube.Update(t.Context(), child))
+			}
+			if !test.retainLPX {
+				source.Spec.Components = nil
+			} else {
+				source.Spec.Components[0].Replicas = ptr.To(int32(2))
+			}
+			source.Spec.Components = append(source.Spec.Components, v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "prefill", ComponentType: v1beta1.ComponentTypePrefill,
+			})
+			source.Generation++
+			require.NoError(t, kube.Update(t.Context(), source))
+			source.Status.LPX = &v1beta1.DynamoGraphDeploymentLPXStatus{
+				Placement: &v1beta1.PlacementStatus{Score: ptr.To(0.92)},
+			}
+			source.Status.Placement = source.Status.LPX.Placement.DeepCopy()
+			source.Status.Components = map[string]v1beta1.ComponentReplicaStatus{
+				"lpx": {Replicas: 1}, "prefill": {Replicas: 2},
+			}
+			if test.independentPlacement {
+				source.Status.Placement = &v1beta1.PlacementStatus{Score: ptr.To(0.5)}
+			}
+			if test.childGone {
+				source.Status.LPX, source.Status.Placement = nil, nil
+				source.Status.Components["lpx"] = v1beta1.ComponentReplicaStatus{ComponentKind: v1beta1.ComponentKindPodCliqueScalingGroup}
+			}
+			previousStatus := source.Status.DeepCopy()
+			program := (&DynamoGraphDeploymentReconciler{
+				Client: kube, Config: &configv1alpha1.OperatorConfiguration{}, Recorder: events.NewFakeRecorder(10),
+				RuntimeConfig: &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true, LPX: true}},
+			}).newGroveProgram()
+
+			t.Log("Preserve the ordinary error while deleting only a deselected child")
+			result, err := program.Reconcile(t.Context(), workloadProgramRequest{DGD: source})
+			require.ErrorContains(t, err, "RBAC manager not initialized")
+			require.Equal(t, v1beta1.DGDStateFailed, result.Status.State)
+			stored := &v1alpha1.LPXGraphDeployment{}
+			if test.childGone {
+				require.True(t, apierrors.IsNotFound(kube.Get(t.Context(), client.ObjectKeyFromObject(child), stored)))
+			} else {
+				require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(child), stored))
+				require.Equal(t, !test.retainLPX, !stored.DeletionTimestamp.IsZero())
+				require.Equal(t, child.Spec, stored.Spec)
+			}
+			require.Equal(t, previousStatus, &source.Status)
+			require.Equal(t, source.Status.Components["prefill"], result.Status.Components["prefill"])
+			if !test.retainLPX {
+				require.Nil(t, result.Status.LPX)
+				require.NotContains(t, result.Status.Components, "lpx")
+			} else {
+				require.Equal(t, source.Status.LPX, result.Status.LPX)
+				require.Equal(t, source.Status.Components, result.Status.Components)
+			}
+			if test.retainLPX || test.independentPlacement {
+				require.Equal(t, source.Status.Placement, result.Status.Placement)
+			} else {
+				require.Nil(t, result.Status.Placement)
+			}
 		})
 	}
 }

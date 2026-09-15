@@ -84,7 +84,6 @@ func mergeLPXChildStatus(
 // but mirrors current LPX placement and clears stale mirrors.
 func lpxPlacementProjection(
 	source *v1beta1.DynamoGraphDeployment,
-	child *v1alpha1.LPXGraphDeployment,
 	current *v1beta1.PlacementStatus,
 	previousLPX *v1beta1.DynamoGraphDeploymentLPXStatus,
 	nextLPX *v1beta1.DynamoGraphDeploymentLPXStatus,
@@ -92,7 +91,7 @@ func lpxPlacementProjection(
 	if nextLPX != nil {
 		return nextLPX.Placement
 	}
-	if len(lpx.Components(source)) > 0 || child != nil {
+	if len(lpx.Components(source)) > 0 {
 		return nil
 	}
 	if previousLPX != nil && apiequality.Semantic.DeepEqual(current, previousLPX.Placement) {

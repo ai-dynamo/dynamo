@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"time"
 
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -114,6 +115,25 @@ func (p *groveProgram) Reconcile(
 		"hasMultinode", req.DGD.HasAnyMultinodeComponent(),
 	)
 
+	// Removing LPX must not depend on ordinary workloads reconciling successfully.
+	var child *nvidiacomv1alpha1.LPXGraphDeployment
+	var err error
+	if !req.DGD.HasLPXComponent() {
+		child, err = p.lpx.Reconcile(ctx, req.DGD)
+		if err != nil {
+			return programResult, fmt.Errorf("reconcile LPX child: %w", err)
+		}
+
+		// Do not keep reporting retired LPX capacity when ordinary reconciliation fails.
+		programResult.Status.Placement = lpxPlacementProjection(req.DGD, programResult.Status.Placement, programResult.Status.LPX, nil)
+		programResult.Status.LPX = nil
+		for name := range programResult.Status.Components {
+			if req.DGD.GetComponentByName(name) == nil {
+				delete(programResult.Status.Components, name)
+			}
+		}
+	}
+
 	if err := p.rollout.migrateCurrentWorkerHashIfNeeded(ctx, req.DGD); err != nil {
 		log.FromContext(ctx).Error(err, "Failed to migrate worker hash")
 		return programResult, failWorkloadProgram(reasonFailedToMigrateWorkerHash, err)
@@ -166,15 +186,19 @@ func (p *groveProgram) Reconcile(
 		}
 		return programResult, fmt.Errorf("failed to reconcile Grove workloads: %w", err)
 	}
-	child, err := p.lpx.Reconcile(ctx, req.DGD)
-	if err != nil {
-		return programResult, fmt.Errorf("reconcile LPX child: %w", err)
+
+	// Keep LPX creation and updates after ordinary reconciliation and restart selection.
+	if req.DGD.HasLPXComponent() {
+		child, err = p.lpx.Reconcile(ctx, req.DGD)
+		if err != nil {
+			return programResult, fmt.Errorf("reconcile LPX child: %w", err)
+		}
 	}
+
 	previousLPX := programResult.Status.LPX
 	result, programResult.Status.LPX = mergeLPXChildStatus(req.DGD, child, result)
 	programResult.Status.Placement = lpxPlacementProjection(
 		req.DGD,
-		child,
 		programResult.Status.Placement,
 		previousLPX,
 		programResult.Status.LPX,
