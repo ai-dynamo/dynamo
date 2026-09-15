@@ -524,7 +524,6 @@ mod tests {
             discovery_backend: DiscoveryBackend::KvStore(kv::Selector::File(store.path().into())),
             nats_config: None,
             request_plane: RequestPlaneMode::Tcp,
-            response_plane: None,
             event_transport_kind: EventTransportKind::Zmq,
         };
         let namespace = format!("encoder-admission-{}", uuid::Uuid::new_v4());

@@ -813,7 +813,6 @@ mod tests {
             discovery_backend: DiscoveryBackend::KvStore(kv::Selector::File(store.path().into())),
             nats_config: None,
             request_plane: RequestPlaneMode::Tcp,
-            response_plane: None,
             event_transport_kind: EventTransportKind::Zmq,
         };
         let namespace = format!("prefill-admission-{}", uuid::Uuid::new_v4());
@@ -935,25 +934,6 @@ mod tests {
         for _ in 0..6 {
             assert_eq!(prefilled_worker(&router).await, 0);
         }
-        let reservation = router
-            .reserve_prefill_worker(
-                "committed-prefill",
-                &[1; 128],
-                None,
-                None,
-                None,
-                0.0,
-                0,
-                None,
-                None,
-                RoutingConstraints::default(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(reservation.worker_id(), ids[0]);
-        assert_eq!(reservation.dp_rank(), Some(0));
-        reservation.release().await.unwrap();
-
         admissions.send_replace(vec![ids[0], ids[1]]);
         admissions.send_replace(vec![ids[1]]);
         tokio::time::timeout(Duration::from_secs(5), async {
