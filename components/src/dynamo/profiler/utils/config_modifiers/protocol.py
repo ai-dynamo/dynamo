@@ -731,3 +731,25 @@ class BaseConfigModifier:
             )
         component.replicas = replicas
         return cfg.model_dump()
+    @classmethod
+    def set_config_backend_framework(cls, config: dict, backend: str) -> dict:
+        """Apply the evaluated Candidate's backend to spec.backendFramework.
+
+        Spec-level, not per-component (unlike set_config_replicas/
+        set_config_model) -- v1beta1.DynamoGraphDeploymentSpec.BackendFramework
+        is a single top-level enum field (sglang/vllm/trtllm), confirmed via
+        the real Go type. No CLI flag involved, so this lives once here
+        rather than duplicated per backend.
+
+        Without this call, spec.backendFramework is never set anywhere in
+        this pipeline -- confirmed by checking every base template (all six
+        agg/disagg x vllm/sglang/trtllm), patch_dgd_manifest, the legacy
+        materialize_dgd() finalization it delegates to, and every
+        CONFIG_MODIFIERS file. A real DynamoGraphDeploymentCandidate's own
+        printcolumn reads .spec.backendFramework directly
+        (+kubebuilder:printcolumn:name="Backend"); without this, every DGDC
+        materialized by this pipeline would show a blank Backend column.
+        """
+        cfg = Config.model_validate(config)
+        cfg.spec.backendFramework = backend
+        return cfg.model_dump()

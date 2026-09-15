@@ -139,6 +139,29 @@ def test_tp_strategy_materializes_successfully_on_all_three_backends() -> None:
         assert args, f"no args materialized for {backend}"
 
 
+def test_backend_framework_is_written_into_the_dgd_spec() -> None:
+    """Regression test: spec.backendFramework was never set anywhere in
+    this pipeline (confirmed by checking every base template, patch_dgd_
+    manifest, the legacy materialize_dgd() finalization it delegates to,
+    and every CONFIG_MODIFIERS file). A real DynamoGraphDeploymentCandidate
+    prints its Backend column from .spec.backendFramework directly --
+    without this, every DGDC materialized here would show a blank column.
+    """
+    for backend in ("vllm", "sglang", "trtllm"):
+        candidate = dict(REAL_CANDIDATE_TEP_TRTLLM, backend=backend, strategy="tp")
+        result = materialize_dgd_from_candidate(candidate, image=_IMAGE)
+        assert result.dgd["spec"]["backendFramework"] == backend, (
+            f"{backend}: spec.backendFramework missing or wrong: {result.dgd['spec']}"
+        )
+
+
+def test_backend_framework_set_once_per_dgd_not_per_disagg_role() -> None:
+    result = materialize_dgd_from_candidate(
+        REAL_SHAPED_DISAGG_CANDIDATE, image=_IMAGE
+    )
+    assert result.dgd["spec"]["backendFramework"] == "vllm"
+
+
 def test_evaluated_model_is_written_into_the_dgd_not_the_template_placeholder() -> None:
     """Regression test for a real bug found running a live end-to-end sweep:
     the sweep evaluated and scored Qwen/Qwen3-8B, but the materialized DGD
