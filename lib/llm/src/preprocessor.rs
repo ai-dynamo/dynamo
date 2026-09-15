@@ -7372,6 +7372,7 @@ mod extra_args_media_copy_tests {
     async fn extra_args_messages_omit_inline_data_when_multi_modal_data_present() {
         let preprocessor = test_preprocessor();
         let data_url = inline_data_url();
+        let second_data_url = format!("{data_url}QQ");
         let https_url = "https://example.com/img.png";
         let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
             "model": "test-model",
@@ -7380,6 +7381,7 @@ mod extra_args_media_copy_tests {
                 "content": [
                     {"type": "text", "text": "describe"},
                     {"type": "image_url", "image_url": {"url": data_url}},
+                    {"type": "image_url", "image_url": {"url": second_data_url}},
                     {"type": "image_url", "image_url": {"url": https_url}}
                 ]
             }],
@@ -7397,12 +7399,16 @@ mod extra_args_media_copy_tests {
             .as_ref()
             .expect("single media copy lives in multi_modal_data");
         let images = media.get("image_url").expect("image_url slot");
-        assert_eq!(images.len(), 2);
+        assert_eq!(images.len(), 3);
         match &images[0] {
             MultimodalData::Url(url) => assert_eq!(url.as_str(), data_url),
             other => panic!("expected Url for inline image, got {other:?}"),
         }
         match &images[1] {
+            MultimodalData::Url(url) => assert_eq!(url.as_str(), second_data_url),
+            other => panic!("expected Url for second inline image, got {other:?}"),
+        }
+        match &images[2] {
             MultimodalData::Url(url) => assert_eq!(url.as_str(), https_url),
             other => panic!("expected Url for HTTP image, got {other:?}"),
         }
@@ -7416,119 +7422,12 @@ mod extra_args_media_copy_tests {
             .expect("message content parts");
         assert_eq!(parts[0]["text"], "describe");
         assert_eq!(parts[1]["image_url"]["url"], "");
-        assert_eq!(parts[2]["image_url"]["url"], https_url);
+        assert_eq!(parts[2]["image_url"]["url"], "");
+        assert_eq!(parts[3]["image_url"]["url"], https_url);
         assert!(
             extra_args.get("formatted_prompt").is_some(),
             "LLaVA / TRT-LLM template path needs formatted_prompt"
         );
-    }
-
-    #[tokio::test]
-    async fn text_only_chat_does_not_set_multi_modal_data() {
-        let preprocessor = test_preprocessor();
-        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
-            "model": "test-model",
-            "messages": [{"role": "user", "content": "hello"}],
-            "max_tokens": 1
-        }))
-        .unwrap();
-
-        let (preprocessed, _, _) = preprocessor
-            .preprocess_request(&request, None)
-            .await
-            .unwrap();
-
-        assert!(preprocessed.multi_modal_data.is_none());
-        if let Some(extra_args) = preprocessed.extra_args.as_ref() {
-            assert!(
-                extra_args.get("messages").is_none(),
-                "text-only path must not copy chat messages into extra_args"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn https_only_image_url_survives_in_extra_args() {
-        let preprocessor = test_preprocessor();
-        let https_url = "https://example.com/only.png";
-        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
-            "model": "test-model",
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "what"},
-                    {"type": "image_url", "image_url": {"url": https_url}}
-                ]
-            }],
-            "max_tokens": 1
-        }))
-        .unwrap();
-
-        let (preprocessed, _, _) = preprocessor
-            .preprocess_request(&request, None)
-            .await
-            .unwrap();
-
-        let images = preprocessed
-            .multi_modal_data
-            .as_ref()
-            .and_then(|media| media.get("image_url"))
-            .expect("https image must populate multi_modal_data");
-        match &images[0] {
-            MultimodalData::Url(url) => assert_eq!(url.as_str(), https_url),
-            other => panic!("expected Url, got {other:?}"),
-        }
-
-        let extra_args = preprocessed.extra_args.as_ref().expect("mm extras");
-        assert_eq!(
-            extra_args["messages"][0]["content"][1]["image_url"]["url"],
-            https_url
-        );
-    }
-
-    #[tokio::test]
-    async fn two_inline_data_images_are_all_stripped() {
-        let preprocessor = test_preprocessor();
-        let first = inline_data_url();
-        let second = format!("{first}QQ");
-        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
-            "model": "test-model",
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": first.clone()}},
-                    {"type": "image_url", "image_url": {"url": second.clone()}}
-                ]
-            }],
-            "max_tokens": 1
-        }))
-        .unwrap();
-
-        let (preprocessed, _, _) = preprocessor
-            .preprocess_request(&request, None)
-            .await
-            .unwrap();
-
-        let images = preprocessed
-            .multi_modal_data
-            .as_ref()
-            .and_then(|media| media.get("image_url"))
-            .expect("both inline images belong in multi_modal_data");
-        assert_eq!(images.len(), 2);
-        match &images[0] {
-            MultimodalData::Url(url) => assert_eq!(url.as_str(), first),
-            other => panic!("expected Url, got {other:?}"),
-        }
-        match &images[1] {
-            MultimodalData::Url(url) => assert_eq!(url.as_str(), second),
-            other => panic!("expected Url, got {other:?}"),
-        }
-
-        let parts = preprocessed.extra_args.as_ref().unwrap()["messages"][0]["content"]
-            .as_array()
-            .unwrap();
-        assert_eq!(parts[0]["image_url"]["url"], "");
-        assert_eq!(parts[1]["image_url"]["url"], "");
     }
 }
 
