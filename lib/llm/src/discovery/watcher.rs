@@ -1603,13 +1603,20 @@ mod tests {
                     .output(),
             )
             .await
-            .unwrap()
-            .unwrap();
+            .expect("classify subprocess must finish within its deadline")
+            .expect("classify subprocess must start");
             assert!(
                 output.status.success(),
                 "{}\n{}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
+            );
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                stdout
+                    .lines()
+                    .any(|line| line.starts_with("test result: ok. 1 passed; 0 failed;")),
+                "classify subprocess must run exactly one passing test: {stdout}"
             );
             return;
         }
@@ -1743,7 +1750,7 @@ mod tests {
         serving.shutdown().await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
             while manager.get_committed_model("alias-a").is_some() {
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
         .await

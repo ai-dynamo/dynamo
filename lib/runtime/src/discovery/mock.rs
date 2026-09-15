@@ -616,7 +616,6 @@ mod tests {
             ("alias-b", Some("org/base"), Some("org/other"), false),
             ("alias-b", Some("org/base"), None, false),
             ("alias-b", None, Some("org/base"), false),
-            ("alias-b", None, None, false),
             ("alias-b", Some(""), Some(""), false),
             ("alias-b", Some("org/base"), Some(""), false),
             ("alias-b", Some(""), Some("org/base"), false),
@@ -659,6 +658,83 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(instances.len(), if compatible { 2 } else { 1 });
+        }
+    }
+
+    #[tokio::test]
+    async fn register_shared_source_requires_disjoint_served_names() {
+        for (name_b, aliases_a, aliases_b, compatible) in [
+            ("b", vec!["b"], vec![], false),
+            ("b", vec![], vec!["a"], false),
+            ("b", vec!["shared"], vec!["shared"], false),
+            ("b", vec!["a", "extra-a"], vec!["b", "extra-b"], true),
+            ("a", vec!["shared"], vec!["shared"], true),
+        ] {
+            let registry = SharedMockRegistry::new();
+            let first = MockDiscovery::new(Some(1), registry.clone());
+            let second = MockDiscovery::new(Some(2), registry);
+            let spec = |name: &str, aliases: Vec<&str>| DiscoverySpec::Model {
+                namespace: "ns".into(),
+                component: "comp".into(),
+                endpoint: "generate".into(),
+                card_json: serde_json::json!({
+                    "display_name": name,
+                    "aliases": aliases,
+                    "source_path": "org/base",
+                }),
+                model_suffix: None,
+            };
+            let incumbent = first.register(spec("a", aliases_a)).await.unwrap();
+            let result = second.register(spec(name_b, aliases_b)).await;
+            assert_eq!(result.is_ok(), compatible, "{result:?}");
+            let instances = first
+                .list(DiscoveryQuery::EndpointModels {
+                    namespace: "ns".into(),
+                    component: "comp".into(),
+                    endpoint: "generate".into(),
+                })
+                .await
+                .unwrap();
+            assert!(instances.contains(&incumbent));
+            assert_eq!(instances.len(), if compatible { 2 } else { 1 });
+        }
+    }
+
+    #[tokio::test]
+    async fn register_checks_every_existing_model() {
+        // B is compatible with A by name and C by source, but A and C conflict.
+        for order in [[0, 1, 2], [2, 1, 0]] {
+            let registry = SharedMockRegistry::new();
+            let cards = [("a", "/mount/a"), ("a", "/mount/b"), ("b", "/mount/b")];
+            let mut accepted = Vec::new();
+            for (position, index) in order.into_iter().enumerate() {
+                let discovery = MockDiscovery::new(Some(index as u64 + 1), registry.clone());
+                let (name, source) = cards[index];
+                let result = discovery
+                    .register(DiscoverySpec::Model {
+                        namespace: "ns".into(),
+                        component: "comp".into(),
+                        endpoint: "generate".into(),
+                        card_json: serde_json::json!({"display_name": name, "source_path": source}),
+                        model_suffix: None,
+                    })
+                    .await;
+                if position < 2 {
+                    accepted.push(result.unwrap());
+                } else {
+                    assert!(result.is_err());
+                    let instances = discovery
+                        .list(DiscoveryQuery::EndpointModels {
+                            namespace: "ns".into(),
+                            component: "comp".into(),
+                            endpoint: "generate".into(),
+                        })
+                        .await
+                        .unwrap();
+                    assert_eq!(instances.len(), accepted.len());
+                    assert!(accepted.iter().all(|instance| instances.contains(instance)));
+                }
+            }
         }
     }
 
