@@ -251,6 +251,7 @@ async fn test_required_tool_choice_parses_json_array() {
             .as_deref(),
         Some(r#"{"topic":"memory"}"#)
     );
+    assert_responses_preserves_forced_calls(response).await;
 }
 
 #[tokio::test]
@@ -1103,4 +1104,37 @@ async fn test_harmony_tool_choice_named_wrong_tool_filtered() {
         calls.is_empty(),
         "wrong tool must be filtered; got {calls:?}"
     );
+}
+
+async fn assert_responses_preserves_forced_calls(response: NvCreateChatCompletionStreamResponse) {
+    use dynamo_llm::protocols::{
+        Annotated,
+        openai::{
+            ParsingOptions,
+            chat_completions::{
+                NvCreateChatCompletionResponse, aggregator::ChatCompletionAggregator,
+            },
+            responses::{ResponseParams, chat_completion_to_response},
+        },
+    };
+    use dynamo_protocols::types::responses::OutputItem;
+
+    let expected = response.inner.choices[0].delta.tool_calls.clone().unwrap();
+    let chat = NvCreateChatCompletionResponse::from_annotated_stream(
+        futures::stream::iter([Annotated::from_data(response)]),
+        ParsingOptions::default(),
+    )
+    .await
+    .unwrap();
+    let response = chat_completion_to_response(chat, &ResponseParams::default(), None).unwrap();
+    assert_eq!(response.inner.output.len(), expected.len());
+    for (item, expected) in response.inner.output.iter().zip(expected) {
+        let OutputItem::FunctionCall(call) = item else {
+            panic!("expected a guided tool call without a model parser");
+        };
+        assert_eq!(Some(&call.call_id), expected.id.as_ref());
+        let function = expected.function.unwrap();
+        assert_eq!(Some(call.name.as_str()), function.name.as_deref());
+        assert_eq!(Some(call.arguments.as_str()), function.arguments.as_deref());
+    }
 }
