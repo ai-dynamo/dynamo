@@ -38,7 +38,7 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
 | `max_thinking_tokens` | `u32` | `None` | Backend | Maximum thinking tokens allowed (passed through to backends). |
 | `cache_salt` | `string` | `None` | Router / supported backends | Namespaces Dynamo KV routing. vLLM and TensorRT-LLM also isolate backend KV-cache reuse; see [Backend support](#backend-support). This is the recommended cache-isolation input. |
 | `extra_fields` | `string[]` | `None` | Response builder | Fields to include in the response `nvext`. Supported: `"worker_id"`, `"timing"`, `"routed_experts"`, `"engine_data"`, `"stop_reason"`, `"detailed_finish_reason"`, `"prompt_token_ids"`, `"completion_token_ids"`, `"prompt_logprobs"`. |
-| `metadata_upload` | object | `None` | SGLang backend | Uploads final cumulative SGLang `meta_info` out of band. Accepts required `url` and optional `fallback_url` strings. Requires an RL-enabled SGLang worker. |
+| `metadata_upload` | object | `None` | SGLang backend | Uploads final cumulative SGLang `meta_info` out of band. The object accepts one required `url` field. Requires an RL-enabled SGLang worker. |
 | `prefill_worker_id` | `u64` | `None` | Router | Routes the request to a specific prefill worker (disaggregated serving). |
 | `decode_worker_id` | `u64` | `None` | Router | Routes the request to a specific decode worker (disaggregated serving). |
 | `dp_rank` | `u32` | `None` | Router/backend | Data-parallel rank for the decode worker. Typically set by EPP routing headers. |
@@ -55,14 +55,6 @@ Related root-level Dynamo output option:
 token IDs, pass integer IDs in the normal `stop` array, for example
 `"stop": [576]`. Strings such as `"token_id:576"` remain literal string stop
 sequences and are not parsed as token IDs.
-
-For `metadata_upload`, the Python SGLang worker uses the installed fsspec
-backends. The SGLang sidecar uses OpenDAL and includes `file://`, `s3://`,
-`gs://`, and `az://` support. Both implementations try `fallback_url` only
-after the primary upload fails. The sidecar supports this field on
-`/v1/chat/completions`, `/v1/completions`, and `/v1/responses`, but not on the
-native SGLang `/generate` frontend API. In disaggregated serving, only the
-decode worker uploads metadata.
 
 ### Header Overrides
 
