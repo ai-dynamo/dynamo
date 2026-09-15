@@ -128,6 +128,7 @@ type parsedSGLangProfileGeometry struct {
 	moeDataParallelSize  int64
 	expertParallelSize   int64
 	nodes                int64
+	elasticInitialSize   int64
 	elasticMaximumSize   int64
 	elasticBackend       string
 	moeA2ABackend        string
@@ -139,6 +140,7 @@ type sglangEngineGeometryProjection struct {
 	PipelineParallelSize int64  `json:"pipelineParallelSize"`
 	AttentionContextSize int64  `json:"attentionContextParallelSize"`
 	MoEDataParallelSize  int64  `json:"moeDataParallelSize"`
+	StorageEPSize        int64  `json:"storageEPSize"`
 	ElasticMaximumSize   int64  `json:"elasticMaximumSize"`
 	ElasticBackend       string `json:"elasticBackend"`
 	MoEA2ABackend        string `json:"moeA2ABackend"`
@@ -303,6 +305,7 @@ func parseSGLangProfileGeometry(command, args []string) (parsedSGLangProfileGeom
 		moeDataParallelSize:  moeDataParallelSize,
 		expertParallelSize:   expertParallelSize,
 		nodes:                nodes,
+		elasticInitialSize:   elasticInitialSize,
 		elasticMaximumSize:   elasticMaximumSize,
 		elasticBackend:       values[sglangElasticBackendOption],
 		moeA2ABackend:        values[sglangMoEA2ABackendOption],
@@ -586,13 +589,15 @@ func parseOptionalPositiveSGLangInteger(values map[string]string, option string,
 }
 
 func digestSGLangEngineGeometry(geometry parsedSGLangProfileGeometry) (string, error) {
-	// Exclude TP, DP, node count, and initial EP because they are creation-time replica targets.
+	// Exclude mutable replica targets while retaining the initial EP width because it fixes
+	// each rank's expert-storage partition for the lifetime of the SGLang engine world.
 	projection := sglangEngineGeometryProjection{
 		Version:              sglangEngineGeometryDigestVersion,
 		ReplicaWidth:         1,
 		PipelineParallelSize: geometry.pipelineParallelSize,
 		AttentionContextSize: geometry.attentionContextSize,
 		MoEDataParallelSize:  geometry.moeDataParallelSize,
+		StorageEPSize:        geometry.elasticInitialSize,
 		ElasticMaximumSize:   geometry.elasticMaximumSize,
 		ElasticBackend:       geometry.elasticBackend,
 		MoEA2ABackend:        geometry.moeA2ABackend,
