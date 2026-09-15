@@ -416,6 +416,41 @@ func TestBugDGD_ChangedCompilationCacheDoesNotRestoreStaleVolumeMounts(t *testin
 	}
 }
 
+func TestBugDGD_ChangedCompilationCacheSubPathDoesNotRestoreStaleVolumeMount(t *testing.T) {
+	in := &DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "cache-subpath-changed", Namespace: "ns"},
+		Spec: DynamoGraphDeploymentSpec{
+			Services: map[string]*DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: "worker",
+					VolumeMounts: []VolumeMount{
+						{Name: "model-cache", MountPoint: "/models", SubPath: "v1", UseAsCompilationCache: true},
+					},
+				},
+			},
+		},
+	}
+
+	hub := &v1beta1.DynamoGraphDeployment{}
+	if err := in.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	hub.Spec.Components[0].CompilationCache = &v1beta1.CompilationCacheConfig{
+		PVCName:   "model-cache",
+		MountPath: "/models",
+		SubPath:   "v2",
+	}
+
+	out := &DynamoGraphDeployment{}
+	if err := out.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	want := []VolumeMount{{Name: "model-cache", MountPoint: "/models", SubPath: "v2", UseAsCompilationCache: true}}
+	if diff := cmp.Diff(want, out.Spec.Services["worker"].VolumeMounts); diff != "" {
+		t.Fatalf("changed SubPath was not applied correctly (-want +got):\n%s", diff)
+	}
+}
+
 func TestBugDGD_DeletedSecondaryCompilationCacheDoesNotRestore(t *testing.T) {
 	in := &DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "secondary-cache-deleted", Namespace: "ns"},
