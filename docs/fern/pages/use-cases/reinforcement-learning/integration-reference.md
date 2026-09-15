@@ -122,6 +122,7 @@ A protocol version `1` response has this shape. Optional fields such as `model`,
         "liveness_probe",
         "pause_generation",
         "resume_generation",
+        "set_weight_version",
         "update_weights_from_disk"
       ]
     }
@@ -167,11 +168,48 @@ The backends do not share one administration schema. Use the exact route returne
 | Stop and resume work | Python `pause_generation` / `resume_generation`; native-sidecar control routes reflect the installed vLLM RL API | `release_memory_occupation` unregisters and drains the worker; `resume_memory_occupation` restores it |
 | Clear KV state | Python `flush_cache`; native-sidecar behavior follows the advertised lifecycle route and vLLM configuration | `clear_kv_blocks` is a Dynamo worker request-plane endpoint, not a built-in `/engine/control/*` route, and rejects active requests |
 | Apply weights | Python disk or distributed update routes and group lifecycle; native sidecar init/start/update/finish routes when weight transfer is enabled | Built-in disk, tensor, distributed, or IPC update routes using the installed SGLang request schemas |
-| Weight version | Python `get_weight_version` reads caller-supplied update metadata; native sidecar exposes get/update controls | `update_weight_version` changes metadata and can abort requests; it does not replace tensors |
+| Weight version | Python `get_weight_version` reads the last declared version; `set_weight_version` declares metadata without loading weights; native sidecar exposes get/update controls | `update_weight_version` changes metadata and can abort requests; it does not replace tensors |
 | Custom controls | Python integrations can register and advertise trusted engine routes | Allowlist methods with `--engine-route` or `DYN_SGLANG_ENGINE_ROUTES` using <code>path[=method][:engine&#124;tm]</code> |
 | Success body | Python RL routes commonly return a `status` field; native-sidecar routes follow vLLM's RL schemas | Built-in update routes commonly return `success` and `message`; check both HTTP status and body |
 
 Even two vLLM deployments can expose different route families because the Python worker and native sidecar adapt different backend control APIs. Never prepend, remove, or rename route segments returned in `routes`.
+
+### Read and Declare the Weight Version
+
+A Python vLLM worker reports the last weight version declared to it through `get_weight_version`:
+
+```bash
+curl http://10.0.0.12:8081/engine/get_weight_version \
+  -H 'Content-Type: application/json' \
+  -d '{}'
+```
+
+```json
+{"status": "ok", "version": "42", "version_declared": true}
+```
+
+A worker tracks only the versions declared to it. `version_declared` is `false`, with `version` set to `null`, until something declares one, either through a `/engine/` weight-update route that carries `weight_version` or through `set_weight_version`. Branch on `version_declared` rather than comparing `version` against a placeholder string: any string, including `"initial"`, is a legal version tag that a caller can declare.
+
+Version declarations accept any JSON value, including `null`. An explicit `{"weight_version": null}` is a declaration: `get_weight_version` then returns `"version": null` with `"version_declared": true`.
+
+A weight-update route that omits `weight_version` returns `"version": "unknown"` and leaves the previous declaration unchanged. A worker with no previous declaration remains undeclared. Pass `weight_version` on every update whose version you want the worker to report.
+
+> [!WARNING]
+> A worker reports the last version declared to it, not the weights loaded in its GPU memory. Dynamo observes only the weight updates that traverse its own `/engine/` routes. Loading weights by another path, such as calling `collective_rpc` on the engine object directly, leaves the reported version stale unless the loader declares the new version.
+
+When an RL framework loads weights outside Dynamo, declare the resulting version so the worker reports it. `set_weight_version` records the version without loading weights:
+
+```bash
+curl http://10.0.0.12:8081/engine/set_weight_version \
+  -H 'Content-Type: application/json' \
+  -d '{"weight_version": "43"}'
+```
+
+```json
+{"status": "ok", "version": "43"}
+```
+
+The route requires `weight_version` in the body and returns `{"status": "error"}` when it is missing. It neither pauses generation nor invalidates the prefix cache, so a caller that changed the weights must handle both itself.
 
 ## Framework Compatibility
 

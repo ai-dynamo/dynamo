@@ -574,6 +574,11 @@ async def parse_args(args: list[str]) -> Config:
                 "DYN_GMS_USE_V1=true cannot be combined with --load-format gms"
             )
         parsed_args.enable_memory_saver = True
+    elif is_snapshot_enabled():
+        # SGLang's scheduler launcher reads the raw flag to configure LD_PRELOAD
+        # before spawning children. A later resolved override enables allocation
+        # tracking in the child but cannot install its required preload library.
+        parsed_args.enable_memory_saver = True
 
     fpm_source = _forward_pass_metrics_source(dynamo_config)
     if (
