@@ -40,6 +40,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
+              optional: true
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           name: main
     replicas: 1
@@ -65,6 +66,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
+              optional: true
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:my-tag
           name: main
           resources:
@@ -104,6 +106,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
+              optional: true
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:my-tag
           name: main
           resources:

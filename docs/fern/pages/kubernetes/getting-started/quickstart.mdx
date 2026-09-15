@@ -85,20 +85,6 @@ kubectl get pods --namespace "$NAMESPACE"
     For the NVIDIA GPU DGDR path, `DYNAMO_IMAGE` points to the Dynamo planner image from the selector above. The planner profiles the model and creates the worker deployment; you do not need to choose a separate runtime image for that path.
   </Step>
 
-  <Step title="Create the model access secret">
-    `Qwen/Qwen3-0.6B` is public and does not require a Hugging Face token. The DGDR profiler and
-    example DGD expect a Secret named `hf-token-secret`, so create it with an empty token:
-
-```bash
-kubectl create secret generic hf-token-secret \
-  --namespace "$NAMESPACE" \
-  --from-literal=HF_TOKEN= \
-  --dry-run=client -o yaml | kubectl apply -f -
-```
-
-    For a gated or private model, replace the empty value with your Hugging Face token.
-  </Step>
-
   <Step title="Deploy Qwen3 0.6B">
     <Tabs>
       <Tab title="NVIDIA GPU">

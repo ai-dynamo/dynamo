@@ -309,6 +309,15 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			Expect(profilerEnvNames).ShouldNot(HaveKey("NATS_SERVER"))
 			Expect(profilerEnvNames).ShouldNot(HaveKey("ETCD_ENDPOINTS"))
 			Expect(profilerEnvNames).ShouldNot(HaveKey(EnvDGDOverrideToolPath))
+			GinkgoT().Log("Verify optional Hugging Face token SecretKeyRef")
+			hfToken := findEnv(job.Spec.Template.Spec.Containers[0].Env, "HUGGING_FACE_HUB_TOKEN")
+			Expect(hfToken).ShouldNot(BeNil())
+			Expect(hfToken.ValueFrom).ShouldNot(BeNil())
+			Expect(hfToken.ValueFrom.SecretKeyRef).Should(Equal(&corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "hf-token-secret"},
+				Key:                  "HF_TOKEN",
+				Optional:             ptr.To(true),
+			}))
 			Expect(job.Spec.Template.Spec.InitContainers).Should(BeEmpty())
 
 			// Verify both alpha-only profiling fields were restored from the
