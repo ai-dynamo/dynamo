@@ -9,8 +9,6 @@
 //! The CRD schema is defined at:
 //! `deploy/operator/config/crd/bases/nvidia.com_dynamoworkermetadatas.yaml`
 
-use std::time::Duration;
-
 use anyhow::Result;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use kube::{
@@ -23,7 +21,6 @@ use crate::discovery::{DiscoveryMetadata, EventScope};
 
 /// Field manager name for server-side apply - identifies this client as the owner of fields it sets
 const FIELD_MANAGER: &str = "dynamo-worker";
-const SLOW_WRITE_WARNING: Duration = Duration::from_secs(30);
 
 /// Spec for DynamoWorkerMetadata custom resource
 /// The `data` field stores the serialized `DiscoveryMetadata` as a JSON blob.
@@ -186,30 +183,15 @@ pub async fn apply_cr(
     let params = PatchParams::apply(FIELD_MANAGER).force();
 
     let patch = Patch::Apply(cr);
-    let request = api.patch(cr_name, &params, &patch);
-    tokio::pin!(request);
-    let result = tokio::select! {
-        result = &mut request => result,
-        _ = tokio::time::sleep(SLOW_WRITE_WARNING) => {
-            tracing::warn!(
-                namespace,
-                cr_name,
-                elapsed_secs = SLOW_WRITE_WARNING.as_secs(),
-                "Kubernetes discovery metadata write is still pending; subsequent registrations may be blocked"
-            );
-            // Keep awaiting the same request: cancelling it could release the
-            // caller's metadata lock while Kubernetes still commits the write.
-            request.await
-        }
-    };
-    result.map_err(|e| {
+    let applied = api.patch(cr_name, &params, &patch).await.map_err(|e| {
         anyhow::anyhow!("Failed to apply DynamoWorkerMetadata {namespace}/{cr_name}: {e}")
     })?;
 
-    tracing::debug!(
-        "Applied DynamoWorkerMetadata CR: name={}, namespace={}",
+    tracing::info!(
+        namespace,
         cr_name,
-        namespace
+        resource_version = ?applied.metadata.resource_version,
+        "Applied DynamoWorkerMetadata CR"
     );
 
     Ok(())
@@ -225,55 +207,43 @@ mod tests {
     use crate::protocols::EndpointId;
     use kube::Resource;
 
-    #[tokio::test(start_paused = true)]
-    async fn slow_write_warns_without_cancelling_or_retrying_the_request() {
+    #[tokio::test]
+    async fn successful_write_logs_resource_identity_at_info() {
         use axum::http::{Request, Response};
         use kube::client::Body;
         use std::convert::Infallible;
         use tracing::instrument::WithSubscriber;
 
-        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-        let mut gates = Some((started_tx, release_rx));
-        let service = tower::service_fn(move |request: Request<Body>| {
-            let (started, release) = gates.take().expect("the write must not be retried");
-            async move {
-                assert_eq!(request.method(), "PATCH");
-                started.send(()).unwrap();
-                release.await.unwrap();
-                Ok::<_, Infallible>(Response::new(request.into_body()))
-            }
+        let service = tower::service_fn(|request: Request<Body>| async move {
+            assert_eq!(request.method(), "PATCH");
+            Ok::<_, Infallible>(Response::new(request.into_body()))
         });
         let client = KubeClient::new(service, "test-namespace");
         let log = tempfile::NamedTempFile::new().unwrap();
         let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
             .with_ansi(false)
             .without_time()
             .with_writer(log.reopen().unwrap())
             .finish();
-        let task = tokio::spawn(
-            async move {
-                let cr = build_cr(
-                    "test-worker",
-                    "test-worker",
-                    "test-uid",
-                    &DiscoveryMetadata::new(),
-                )
-                .unwrap();
-                apply_cr(&client, "test-namespace", &cr).await
-            }
-            .with_subscriber(subscriber),
-        );
-        started_rx.await.unwrap();
-        tokio::time::advance(Duration::from_secs(31)).await;
-        tokio::task::yield_now().await;
+        let mut cr = build_cr(
+            "test-worker",
+            "test-worker",
+            "test-uid",
+            &DiscoveryMetadata::new(),
+        )
+        .unwrap();
+        cr.metadata.resource_version = Some("123".to_string());
+        apply_cr(&client, "test-namespace", &cr)
+            .with_subscriber(subscriber)
+            .await
+            .unwrap();
         let output = std::fs::read_to_string(log.path()).unwrap();
-        assert!(output.contains("Kubernetes discovery metadata write is still pending"));
+        assert!(output.contains("INFO"));
+        assert!(output.contains("Applied DynamoWorkerMetadata CR"));
         assert!(output.contains("test-namespace"));
         assert!(output.contains("test-worker"));
-        assert!(!task.is_finished(), "a slow write must remain in flight");
-        release_tx.send(()).unwrap();
-        task.await.unwrap().unwrap();
+        assert!(output.contains("123"));
     }
 
     #[test]
