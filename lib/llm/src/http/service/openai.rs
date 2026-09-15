@@ -981,22 +981,7 @@ async fn completions_single(
     // capture the context to cancel the stream if the client disconnects
     let ctx = stream.context();
 
-    let annotations = annotations.map_or(Vec::new(), |annotations| {
-        annotations
-            .iter()
-            .filter_map(|annotation| {
-                if annotation == ANNOTATION_REQUEST_ID {
-                    Annotated::<NvCreateCompletionResponse>::from_annotation(
-                        ANNOTATION_REQUEST_ID,
-                        &request_id,
-                    )
-                    .ok()
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>()
-    });
+    let annotations = requested_request_id_annotations(annotations, &request_id);
 
     // apply any annotations to the front of the stream
     let stream = stream::iter(annotations).chain(stream);
@@ -1310,22 +1295,7 @@ async fn completions_batch(
     // capture the context to cancel the stream if the client disconnects
     let ctx = first_ctx.expect("At least one stream should be generated");
 
-    let annotations_vec = annotations.map_or(Vec::new(), |annotations| {
-        annotations
-            .iter()
-            .filter_map(|annotation| {
-                if annotation == ANNOTATION_REQUEST_ID {
-                    Annotated::<NvCreateCompletionResponse>::from_annotation(
-                        ANNOTATION_REQUEST_ID,
-                        &request_id,
-                    )
-                    .ok()
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>()
-    });
+    let annotations_vec = requested_request_id_annotations(annotations, &request_id);
 
     // apply any annotations to the front of the stream
     let merged_stream = stream::iter(annotations_vec).chain(merged_stream);
@@ -2456,6 +2426,28 @@ fn is_annotation_frame<T>(e: &Annotated<T>) -> bool {
 /// (currently just `request_id`) fits well under this cap.
 const MAX_LEADING_ANNOTATIONS: usize = 16;
 
+/// Build the `request_id` annotation frames requested via `nvext.annotations`.
+///
+/// That list is a free-form `Vec<String>`, so a client can repeat
+/// `"request_id"` enough times to fill [`MAX_LEADING_ANNOTATIONS`] before the
+/// pre-commit peek sees a backend refusal. Emit at most one frame.
+fn requested_request_id_annotations<T: serde::Serialize>(
+    requested: Option<Vec<String>>,
+    request_id: &str,
+) -> Vec<Annotated<T>> {
+    if requested
+        .as_ref()
+        .is_some_and(|names| names.iter().any(|name| name == ANNOTATION_REQUEST_ID))
+    {
+        Annotated::from_annotation(ANNOTATION_REQUEST_ID, request_id)
+            .ok()
+            .into_iter()
+            .collect()
+    } else {
+        Vec::new()
+    }
+}
+
 /// Inspect the first non-annotation event in the stream for a backend error.
 ///
 /// `timeout = None` — await stream events indefinitely (non-streaming preflight).
@@ -2941,18 +2933,7 @@ async fn chat_completions(
     let ctx = stream.context();
 
     // prepare any requested annotations
-    let annotations = annotations.map_or(Vec::new(), |annotations| {
-        annotations
-            .iter()
-            .filter_map(|annotation| {
-                if annotation == ANNOTATION_REQUEST_ID {
-                    Annotated::from_annotation(ANNOTATION_REQUEST_ID, &request_id).ok()
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>()
-    });
+    let annotations = requested_request_id_annotations(annotations, &request_id);
 
     // apply any annotations to the front of the stream
     let stream = stream::iter(annotations).chain(stream);
@@ -7450,6 +7431,64 @@ mod tests {
         assert_eq!(first.event.as_deref(), Some(ANNOTATION_REQUEST_ID));
         let second = returned.remove(0);
         assert_eq!(second.id, Some("msg-1".to_string()));
+    }
+
+    #[test]
+    fn requested_request_id_annotations_emits_at_most_one_frame() {
+        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+
+        let repeated = vec![ANNOTATION_REQUEST_ID.to_string(); MAX_LEADING_ANNOTATIONS + 1];
+        let frames = requested_request_id_annotations::<NvCreateChatCompletionStreamResponse>(
+            Some(repeated),
+            "req-123",
+        );
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].event.as_deref(), Some(ANNOTATION_REQUEST_ID));
+
+        let none = requested_request_id_annotations::<NvCreateChatCompletionStreamResponse>(
+            Some(vec!["other".to_string()]),
+            "req-123",
+        );
+        assert!(none.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_request_id_annotations_still_surface_backend_error() {
+        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use futures::stream;
+
+        let mut events = requested_request_id_annotations::<NvCreateChatCompletionStreamResponse>(
+            Some(vec![
+                ANNOTATION_REQUEST_ID.to_string();
+                MAX_LEADING_ANNOTATIONS + 1
+            ]),
+            "req-123",
+        );
+        events.push(Annotated::<NvCreateChatCompletionStreamResponse> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: Some(vec![
+                r#"{"message":"bad input from client","code":400}"#.to_string(),
+            ]),
+            error: None,
+        });
+
+        let result = check_for_backend_error(
+            stream::iter(events),
+            Some(std::time::Duration::from_millis(
+                DEFAULT_PRE_COMMIT_ERROR_PEEK_MS,
+            )),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "deduped request_id annotations must leave room for the default peek to see the refusal"
+        );
+        let error_response = result.expect_err("backend refusal");
+        assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(error_response.1.message, "bad input from client");
     }
 
     #[tokio::test]
