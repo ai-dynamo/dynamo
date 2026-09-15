@@ -62,7 +62,7 @@ impl HarnessService {
         .await
     }
 
-    async fn start_with_engine(engine: Arc<ScriptedChatEngine>) -> Self {
+    pub async fn start_with_engine(engine: Arc<ScriptedChatEngine>) -> Self {
         let client = reqwest::Client::builder()
             .no_proxy()
             .build()
