@@ -67,6 +67,7 @@ def run_sweep(
     print(f"  Sweep mode:    {sweep_mode}")
     print(f"  Sweep values:  {sweep_values}")
     print(f"  OSL:           {config.osl}")
+    print(f"  UUID strip:    {config.uuid_and_strip}")
     if config.conversation_num is not None:
         print(f"  Conversations: {config.conversation_num} per {sweep_mode}")
     print(
@@ -179,6 +180,7 @@ def _run_config(
                     input_file=input_file,
                     osl=config.osl,
                     artifact_dir=artifact_dir,
+                    uuid_and_strip=config.uuid_and_strip,
                 )
             finally:
                 if config.restart_server_every_benchmark:

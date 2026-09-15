@@ -41,6 +41,7 @@ class SweepConfig:
     output_dir: str = "benchmarks/results/multimodal_default"
     skip_plots: bool = False
     restart_server_every_benchmark: bool = True
+    uuid_and_strip: bool = False
     env: Dict[str, str] = field(default_factory=dict)
 
     @property
@@ -136,6 +137,7 @@ def load_config(
         output_dir=raw.get("output_dir", "benchmarks/results/multimodal_default"),
         skip_plots=raw.get("skip_plots", False),
         restart_server_every_benchmark=raw.get("restart_server_every_benchmark", True),
+        uuid_and_strip=raw.get("uuid_and_strip", False),
         env=raw.get("env", {}),
     )
 
