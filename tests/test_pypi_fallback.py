@@ -41,7 +41,6 @@ def run_wrapper(
     command_stub,
     *,
     output,
-    enabled="true",
     first_exit="23",
     second_exit="0",
     index_url=(
@@ -50,7 +49,7 @@ def run_wrapper(
 ):
     wrapper = (
         Path(__file__).resolve().parents[1]
-        / ".github/scripts/run_with_pypi_fallback.sh"
+        / ".github/scripts/run_with_pypi_fallback.py"
     )
     state = tmp_path / "calls.json"
     log = tmp_path / "build.log"
@@ -63,10 +62,9 @@ def run_wrapper(
         "OUTPUT_2": "fallback attempt",
         "PIP_INDEX_URL": index_url,
         "UV_DEFAULT_INDEX": index_url,
-        "PYPI_FALLBACK_ENABLED": enabled,
     }
     result = subprocess.run(
-        ["bash", str(wrapper), str(log), *command_stub],
+        [sys.executable, str(wrapper), str(log), *command_stub],
         capture_output=True,
         text=True,
         timeout=5,
@@ -111,27 +109,17 @@ def test_success_does_not_retry(tmp_path, command_stub):
 
 
 @pytest.mark.parametrize(
-    ("output", "enabled"),
+    "output",
     [
         pytest.param(
-            "https://d1j32scj9xxftt.cloudfront.net/torch.whl: 403 Request blocked",
-            "false",
-            id="fallback-disabled",
-        ),
-        pytest.param(
             "https://artifactory.nvidia.com/artifactory/api/pypi/pypi-remote: 403",
-            "true",
             id="artifactory-auth-failure",
         ),
-        pytest.param("dependency resolution failed", "true", id="unrelated-failure"),
+        pytest.param("dependency resolution failed", id="unrelated-failure"),
     ],
 )
-def test_non_retryable_failure_preserves_exit_code(
-    tmp_path, command_stub, output, enabled
-):
-    result, calls, _ = run_wrapper(
-        tmp_path, command_stub, output=output, enabled=enabled
-    )
+def test_non_retryable_failure_preserves_exit_code(tmp_path, command_stub, output):
+    result, calls, _ = run_wrapper(tmp_path, command_stub, output=output)
 
     assert result.returncode == 23
     assert len(calls) == 1

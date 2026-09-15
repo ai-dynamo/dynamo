@@ -167,7 +167,7 @@ runs:
         fi
 
         set +e
-        .github/scripts/run_with_pypi_fallback.sh "${BUILD_LOG_FILE}" \
+        .github/scripts/run_with_pypi_fallback.py "${BUILD_LOG_FILE}" \
           docker buildx build \
           --progress=plain \
           --tag "$IMAGE_TAG" \
