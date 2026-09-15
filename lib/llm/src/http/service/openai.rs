@@ -816,7 +816,8 @@ async fn handler_completions(
     body: Body,
 ) -> Result<Response, ErrorResponse> {
     let body = read_json_request_body(&headers, body).await?;
-    let mut request: NvCreateCompletionRequest = parse_json_request("completions", &body)?;
+    let mut request: NvCreateCompletionRequest =
+        parse_completion_json_request("completions", &body)?;
     if *FORCE_INCLUDE_USAGE && request.inner.stream.unwrap_or(false) {
         delta_common::force_include_usage(&mut request.inner.stream_options);
     }
@@ -1987,7 +1988,8 @@ async fn handler_chat_completions(
     body: Body,
 ) -> Result<Response, ErrorResponse> {
     let body = read_json_request_body(&headers, body).await?;
-    let mut request: NvCreateChatCompletionRequest = parse_json_request("chat completions", &body)?;
+    let mut request: NvCreateChatCompletionRequest =
+        parse_completion_json_request("chat completions", &body)?;
     if *FORCE_INCLUDE_USAGE && request.inner.stream.unwrap_or(false) {
         delta_common::force_include_usage(&mut request.inner.stream_options);
     }
@@ -2064,6 +2066,141 @@ async fn handler_chat_completions(
     connection_handle.disarm();
 
     response
+}
+
+// The protocol crate requires include_usage and uses non-nullable booleans,
+// while clients may omit stream_options flags or serialize them as null.
+fn parse_completion_json_request<T>(endpoint: &'static str, body: &[u8]) -> Result<T, ErrorResponse>
+where
+    T: DeserializeOwned,
+{
+    let original_error = match parse_json_request(endpoint, body) {
+        Ok(request) => return Ok(request),
+        Err(error) => error,
+    };
+    let mut value = match parse_json_request::<DuplicateCheckedJsonValue>(endpoint, body) {
+        Ok(value) => value.0,
+        Err(_) => return Err(original_error),
+    };
+    let Some(options) = value
+        .get_mut("stream_options")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return Err(original_error);
+    };
+    let mut normalized = false;
+    for key in ["include_usage", "continuous_usage_stats"] {
+        if options.get(key).is_none_or(serde_json::Value::is_null) {
+            options.insert(key.to_string(), serde_json::Value::Bool(false));
+            normalized = true;
+        }
+    }
+    if !normalized {
+        return Err(original_error);
+    }
+    serde_json::from_value(value).map_err(json_deserialize_error)
+}
+
+/// A JSON value that rejects duplicate object keys at every nesting level.
+struct DuplicateCheckedJsonValue(serde_json::Value);
+
+impl<'de> Deserialize<'de> for DuplicateCheckedJsonValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(DuplicateCheckedJsonValueVisitor)
+    }
+}
+
+struct DuplicateCheckedJsonValueVisitor;
+
+impl<'de> serde::de::Visitor<'de> for DuplicateCheckedJsonValueVisitor {
+    type Value = DuplicateCheckedJsonValue;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON value without duplicate object keys")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+        Ok(DuplicateCheckedJsonValue(serde_json::Value::Bool(value)))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+        Ok(DuplicateCheckedJsonValue(serde_json::Value::Number(
+            value.into(),
+        )))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+        Ok(DuplicateCheckedJsonValue(serde_json::Value::Number(
+            value.into(),
+        )))
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        serde_json::Number::from_f64(value)
+            .map(serde_json::Value::Number)
+            .map(DuplicateCheckedJsonValue)
+            .ok_or_else(|| E::custom("invalid JSON number"))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.visit_string(value.to_string())
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+        Ok(DuplicateCheckedJsonValue(serde_json::Value::String(value)))
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(DuplicateCheckedJsonValue(serde_json::Value::Null))
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(DuplicateCheckedJsonValue(serde_json::Value::Null))
+    }
+
+    fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        DuplicateCheckedJsonValue::deserialize(deserializer)
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        let mut values = Vec::new();
+        while let Some(value) = sequence.next_element::<DuplicateCheckedJsonValue>()? {
+            values.push(value.0);
+        }
+        Ok(DuplicateCheckedJsonValue(serde_json::Value::Array(values)))
+    }
+
+    fn visit_map<A>(self, mut object: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::MapAccess<'de>,
+    {
+        let mut values = serde_json::Map::new();
+        while let Some(key) = object.next_key::<String>()? {
+            if values.contains_key(&key) {
+                return Err(serde::de::Error::custom(format_args!(
+                    "duplicate field `{key}`"
+                )));
+            }
+            let value = object.next_value::<DuplicateCheckedJsonValue>()?;
+            values.insert(key, value.0);
+        }
+        Ok(DuplicateCheckedJsonValue(serde_json::Value::Object(values)))
+    }
 }
 
 fn parse_json_request<T>(endpoint: &'static str, body: &[u8]) -> Result<T, ErrorResponse>
@@ -5330,11 +5467,123 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_completion_stream_options_null_flags() {
+        for (options, expected) in [
+            (serde_json::json!(null), None),
+            (serde_json::json!({}), Some((false, false))),
+            (
+                serde_json::json!({"continuous_usage_stats": null}),
+                Some((false, false)),
+            ),
+            (
+                serde_json::json!({"continuous_usage_stats": true}),
+                Some((false, true)),
+            ),
+            (
+                serde_json::json!({"include_usage": null}),
+                Some((false, false)),
+            ),
+            (
+                serde_json::json!({"include_usage": true, "continuous_usage_stats": null}),
+                Some((true, false)),
+            ),
+            (
+                serde_json::json!({"include_usage": null, "continuous_usage_stats": true}),
+                Some((false, true)),
+            ),
+        ] {
+            let mut payload = serde_json::json!({
+                "model": "test-model", "stream": true, "stream_options": options,
+                "cache_salt": null, "stop_token_ids": null,
+                "messages": [{"role": "user", "content": "hello"}],
+            });
+            let chat: NvCreateChatCompletionRequest = parse_completion_json_request(
+                "chat completions",
+                &serde_json::to_vec(&payload).unwrap(),
+            )
+            .unwrap();
+            payload.as_object_mut().unwrap().remove("messages");
+            payload["prompt"] = serde_json::json!("hello");
+            let completion: NvCreateCompletionRequest = parse_completion_json_request(
+                "completions",
+                &serde_json::to_vec(&payload).unwrap(),
+            )
+            .unwrap();
+            crate::engines::ValidateRequest::validate(&chat).unwrap();
+            crate::engines::ValidateRequest::validate(&completion).unwrap();
+            for parsed in [chat.inner.stream_options, completion.inner.stream_options] {
+                assert_eq!(
+                    parsed.map(|opts| (opts.include_usage, opts.continuous_usage_stats)),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_completion_stream_options_rejects_invalid_types() {
+        for options in [
+            serde_json::json!(false),
+            serde_json::json!({"include_usage": "true", "continuous_usage_stats": null}),
+            serde_json::json!({"include_usage": null, "continuous_usage_stats": 0}),
+        ] {
+            let body = serde_json::to_vec(&serde_json::json!({
+                "model": "test-model", "messages": [{"role": "user", "content": "hello"}],
+                "prompt": "hello", "stream_options": options,
+            }))
+            .unwrap();
+            assert_eq!(
+                parse_completion_json_request::<NvCreateChatCompletionRequest>(
+                    "chat completions",
+                    &body
+                )
+                .unwrap_err()
+                .0,
+                StatusCode::BAD_REQUEST
+            );
+            assert_eq!(
+                parse_completion_json_request::<NvCreateCompletionRequest>("completions", &body)
+                    .unwrap_err()
+                    .0,
+                StatusCode::BAD_REQUEST
+            );
+        }
+        let body =
+            br#"{"model":"test-model","messages":42,"stream_options":{"include_usage":null}}"#;
+        assert_eq!(
+            parse_completion_json_request::<NvCreateChatCompletionRequest>(
+                "chat completions",
+                body
+            )
+            .unwrap_err()
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn test_parse_completion_stream_options_preserves_duplicate_field_errors() {
+        let chat_body = br#"{
+            "model":"first-model",
+            "model":"second-model",
+            "messages":[{"role":"user","content":"hello"}],
+            "stream_options":{"include_usage":null}
+        }"#;
+        let chat_error = parse_completion_json_request::<NvCreateChatCompletionRequest>(
+            "chat completions",
+            chat_body,
+        )
+        .unwrap_err();
+        assert_eq!(chat_error.0, StatusCode::BAD_REQUEST);
+        assert!(chat_error.1.message.contains("duplicate field `model`"));
+    }
+
+    #[test]
     fn test_parse_chat_completion_request_escapes_control_chars_in_strings() {
         let body = b"{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"log \x1b[33mPK\x03\x04\"}]}";
 
         let request: NvCreateChatCompletionRequest =
-            parse_json_request("chat completions", body).expect("request should parse");
+            parse_completion_json_request("chat completions", body).expect("request should parse");
 
         let message = request
             .inner
@@ -5355,7 +5604,7 @@ mod tests {
         let body = b"{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"raw \xff data\"}]}";
 
         let request: NvCreateChatCompletionRequest =
-            parse_json_request("chat completions", body).expect("request should parse");
+            parse_completion_json_request("chat completions", body).expect("request should parse");
 
         let message = request
             .inner
@@ -5376,7 +5625,7 @@ mod tests {
         let body = b"{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"slash \\\nnext\"}]}";
 
         let request: NvCreateChatCompletionRequest =
-            parse_json_request("chat completions", body).expect("request should parse");
+            parse_completion_json_request("chat completions", body).expect("request should parse");
 
         let message = request
             .inner
@@ -5396,11 +5645,13 @@ mod tests {
     fn test_parse_chat_completion_request_keeps_schema_errors() {
         let body = br#"{"model":"test-model","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"working"}]}]}"#;
 
-        let err =
-            match parse_json_request::<NvCreateChatCompletionRequest>("chat completions", body) {
-                Ok(_) => panic!("schema should still fail"),
-                Err(err) => err,
-            };
+        let err = match parse_completion_json_request::<NvCreateChatCompletionRequest>(
+            "chat completions",
+            body,
+        ) {
+            Ok(_) => panic!("schema should still fail"),
+            Err(err) => err,
+        };
 
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(
@@ -5417,7 +5668,7 @@ mod tests {
         let body = br#"{"model":"test-model","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":""},"uuid":"image-42"}]}]}"#;
 
         let request: NvCreateChatCompletionRequest =
-            parse_json_request("chat completions", body).expect("request should parse");
+            parse_completion_json_request("chat completions", body).expect("request should parse");
         let request = serde_json::to_value(request).expect("request should serialize");
         assert_eq!(request["messages"][0]["content"][0]["uuid"], "image-42");
         assert_eq!(
@@ -5437,7 +5688,7 @@ mod tests {
             );
 
             let request: NvCreateChatCompletionRequest =
-                parse_json_request("chat completions", body.as_bytes())
+                parse_completion_json_request("chat completions", body.as_bytes())
                     .expect("request should parse");
             let request = serde_json::to_value(request).expect("request should serialize");
             assert_eq!(request["messages"][0]["content"][0]["uuid"], uuid);
@@ -5453,7 +5704,7 @@ mod tests {
         let body = b"{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"raw \xff \x1b data\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"\"},\"uuid\":\"image-42\"}]}]}";
 
         let request: NvCreateChatCompletionRequest =
-            parse_json_request("chat completions", body).expect("request should parse");
+            parse_completion_json_request("chat completions", body).expect("request should parse");
         let request = serde_json::to_value(request).expect("request should serialize");
         assert_eq!(
             request["messages"][0]["content"][0]["text"],
@@ -5472,7 +5723,7 @@ mod tests {
             b"{\"model\":\"test-model\",\"prompt\":\"log \x1b[33mPK\x03\x04\",\"max_tokens\":1}";
 
         let request: NvCreateCompletionRequest =
-            parse_json_request("completions", body).expect("request should parse");
+            parse_completion_json_request("completions", body).expect("request should parse");
 
         let Prompt::String(prompt) = &request.inner.prompt else {
             panic!("expected string prompt");
@@ -5485,7 +5736,7 @@ mod tests {
         let body = b"{\"model\":\"test-model\",\"prompt\":\"raw \xff data\",\"max_tokens\":1}";
 
         let request: NvCreateCompletionRequest =
-            parse_json_request("completions", body).expect("request should parse");
+            parse_completion_json_request("completions", body).expect("request should parse");
 
         let Prompt::String(prompt) = &request.inner.prompt else {
             panic!("expected string prompt");
