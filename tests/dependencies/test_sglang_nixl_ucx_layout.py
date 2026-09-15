@@ -47,7 +47,8 @@ def _load_discovery_module() -> ModuleType:
     spec = importlib.util.spec_from_file_location(
         "test_sglang_nixl_ucx_layout_discovery", DISCOVERY_SCRIPT
     )
-    assert spec is not None and spec.loader is not None
+    if spec is None or spec.loader is None:
+        pytest.fail("failed to load the discovery script")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -73,7 +74,8 @@ def _run_installer_helper(
     helpers, separator, _main = installer.partition(
         '[[ "${OUTPUT_DIR}" == /* && "${OUTPUT_DIR}" != "/" ]]'
     )
-    assert separator, "installer helper/main boundary changed"
+    if not separator:
+        pytest.fail("installer helper/main boundary changed")
 
     environment = os.environ.copy()
     environment["CANNED_LDD_OUTPUT"] = ldd_output
