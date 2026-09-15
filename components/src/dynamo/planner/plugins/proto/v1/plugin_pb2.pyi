@@ -161,14 +161,78 @@ class PipelineContext(_message.Message):
     def __init__(self, request_id: _Optional[str] = ..., decision_id: _Optional[str] = ..., observations: _Optional[_Union[ObservationData, _Mapping]] = ..., predictions: _Optional[_Union[PredictionData, _Mapping]] = ..., proposal: _Optional[_Union[ScalingProposal, _Mapping]] = ..., constrained: _Optional[_Union[ScalingProposal, _Mapping]] = ...) -> None: ...
 
 class ObservationData(_message.Message):
-    __slots__ = ("traffic", "fpm", "workers")
+    __slots__ = ("traffic", "fpm", "workers", "batch")
     TRAFFIC_FIELD_NUMBER: _ClassVar[int]
     FPM_FIELD_NUMBER: _ClassVar[int]
     WORKERS_FIELD_NUMBER: _ClassVar[int]
+    BATCH_FIELD_NUMBER: _ClassVar[int]
     traffic: TrafficMetrics
     fpm: FpmData
     workers: WorkerState
-    def __init__(self, traffic: _Optional[_Union[TrafficMetrics, _Mapping]] = ..., fpm: _Optional[_Union[FpmData, _Mapping]] = ..., workers: _Optional[_Union[WorkerState, _Mapping]] = ...) -> None: ...
+    batch: BatchSchedulingData
+    def __init__(self, traffic: _Optional[_Union[TrafficMetrics, _Mapping]] = ..., fpm: _Optional[_Union[FpmData, _Mapping]] = ..., workers: _Optional[_Union[WorkerState, _Mapping]] = ..., batch: _Optional[_Union[BatchSchedulingData, _Mapping]] = ...) -> None: ...
+
+class BatchSchedulingData(_message.Message):
+    __slots__ = ("job_demands", "pool_traffic", "dispatcher_feedback")
+    JOB_DEMANDS_FIELD_NUMBER: _ClassVar[int]
+    POOL_TRAFFIC_FIELD_NUMBER: _ClassVar[int]
+    DISPATCHER_FEEDBACK_FIELD_NUMBER: _ClassVar[int]
+    job_demands: _containers.RepeatedCompositeFieldContainer[BatchJobDemand]
+    pool_traffic: _containers.RepeatedCompositeFieldContainer[PoolTrafficDemand]
+    dispatcher_feedback: _containers.RepeatedCompositeFieldContainer[BatchDispatcherFeedback]
+    def __init__(self, job_demands: _Optional[_Iterable[_Union[BatchJobDemand, _Mapping]]] = ..., pool_traffic: _Optional[_Iterable[_Union[PoolTrafficDemand, _Mapping]]] = ..., dispatcher_feedback: _Optional[_Iterable[_Union[BatchDispatcherFeedback, _Mapping]]] = ...) -> None: ...
+
+class BatchJobDemand(_message.Message):
+    __slots__ = ("observed_at_s", "pool_id", "job_id", "status", "total_requests", "completed_requests", "failed_requests", "deadline_at_s", "work_class", "remaining_requests")
+    OBSERVED_AT_S_FIELD_NUMBER: _ClassVar[int]
+    POOL_ID_FIELD_NUMBER: _ClassVar[int]
+    JOB_ID_FIELD_NUMBER: _ClassVar[int]
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    TOTAL_REQUESTS_FIELD_NUMBER: _ClassVar[int]
+    COMPLETED_REQUESTS_FIELD_NUMBER: _ClassVar[int]
+    FAILED_REQUESTS_FIELD_NUMBER: _ClassVar[int]
+    DEADLINE_AT_S_FIELD_NUMBER: _ClassVar[int]
+    WORK_CLASS_FIELD_NUMBER: _ClassVar[int]
+    REMAINING_REQUESTS_FIELD_NUMBER: _ClassVar[int]
+    observed_at_s: float
+    pool_id: str
+    job_id: str
+    status: str
+    total_requests: int
+    completed_requests: int
+    failed_requests: int
+    deadline_at_s: float
+    work_class: str
+    remaining_requests: int
+    def __init__(self, observed_at_s: _Optional[float] = ..., pool_id: _Optional[str] = ..., job_id: _Optional[str] = ..., status: _Optional[str] = ..., total_requests: _Optional[int] = ..., completed_requests: _Optional[int] = ..., failed_requests: _Optional[int] = ..., deadline_at_s: _Optional[float] = ..., work_class: _Optional[str] = ..., remaining_requests: _Optional[int] = ...) -> None: ...
+
+class PoolTrafficDemand(_message.Message):
+    __slots__ = ("observed_at_s", "pool_id", "online_offered_rps")
+    OBSERVED_AT_S_FIELD_NUMBER: _ClassVar[int]
+    POOL_ID_FIELD_NUMBER: _ClassVar[int]
+    ONLINE_OFFERED_RPS_FIELD_NUMBER: _ClassVar[int]
+    observed_at_s: float
+    pool_id: str
+    online_offered_rps: float
+    def __init__(self, observed_at_s: _Optional[float] = ..., pool_id: _Optional[str] = ..., online_offered_rps: _Optional[float] = ...) -> None: ...
+
+class BatchDispatcherFeedback(_message.Message):
+    __slots__ = ("observed_at_s", "pool_id", "observation_window_s", "queued_requests", "inflight_requests", "actual_dispatch_rps", "applied_max_admission_rps")
+    OBSERVED_AT_S_FIELD_NUMBER: _ClassVar[int]
+    POOL_ID_FIELD_NUMBER: _ClassVar[int]
+    OBSERVATION_WINDOW_S_FIELD_NUMBER: _ClassVar[int]
+    QUEUED_REQUESTS_FIELD_NUMBER: _ClassVar[int]
+    INFLIGHT_REQUESTS_FIELD_NUMBER: _ClassVar[int]
+    ACTUAL_DISPATCH_RPS_FIELD_NUMBER: _ClassVar[int]
+    APPLIED_MAX_ADMISSION_RPS_FIELD_NUMBER: _ClassVar[int]
+    observed_at_s: float
+    pool_id: str
+    observation_window_s: float
+    queued_requests: int
+    inflight_requests: int
+    actual_dispatch_rps: float
+    applied_max_admission_rps: float
+    def __init__(self, observed_at_s: _Optional[float] = ..., pool_id: _Optional[str] = ..., observation_window_s: _Optional[float] = ..., queued_requests: _Optional[int] = ..., inflight_requests: _Optional[int] = ..., actual_dispatch_rps: _Optional[float] = ..., applied_max_admission_rps: _Optional[float] = ...) -> None: ...
 
 class TrafficMetrics(_message.Message):
     __slots__ = ("duration_s", "num_req", "isl", "osl", "kv_hit_rate", "accept_length")

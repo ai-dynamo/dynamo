@@ -11,6 +11,7 @@ based on the previous tick's ``ScheduledTick`` requirements.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
@@ -44,6 +45,9 @@ class ScheduledTick:
     traffic_metrics_duration_s: float = 0.0
     need_worker_states: bool = False
     need_worker_fpm: bool = False
+    # Collect the complete batch scheduling snapshot (Gateway jobs, strict
+    # online demand, and dispatcher feedback) for the native batch policy.
+    need_batch_scheduling: bool = False
     at_monotonic_s: Optional[float] = None
 
 
@@ -80,6 +84,130 @@ class FpmObservations:
 
 
 @dataclass
+class BatchJobDemand:
+    """Batch job demand observed for one inference pool.
+
+    ``observed_at_s`` and ``deadline_at_s`` are absolute wall-clock
+    timestamps. ``deadline_at_s=None`` means the job has no SLA deadline.
+    ``work_class`` is an opaque request/workload class understood by the
+    capacity model; it is deliberately not tied to a Batch Gateway enum.
+
+    The raw counters and status are retained for auditability.
+    ``remaining_requests`` is derived so contradictory observations cannot
+    enter the planner contract.
+    """
+
+    observed_at_s: float
+    pool_id: str
+    job_id: str
+    status: str
+    total_requests: int
+    completed_requests: int
+    failed_requests: int
+    deadline_at_s: Optional[float]
+    work_class: str
+
+    def __post_init__(self) -> None:
+        _require_finite_non_negative("observed_at_s", self.observed_at_s)
+        _require_non_empty_string("pool_id", self.pool_id)
+        _require_non_empty_string("job_id", self.job_id)
+        _require_non_empty_string("status", self.status)
+        _require_non_empty_string("work_class", self.work_class)
+        counters = (
+            self.total_requests,
+            self.completed_requests,
+            self.failed_requests,
+        )
+        if any(
+            isinstance(count, bool) or not isinstance(count, int) or count < 0
+            for count in counters
+        ):
+            raise ValueError("batch request counters must be non-negative integers")
+        if self.completed_requests + self.failed_requests > self.total_requests:
+            raise ValueError(
+                "completed_requests + failed_requests must not exceed total_requests"
+            )
+        if self.deadline_at_s is not None:
+            _require_finite_non_negative("deadline_at_s", self.deadline_at_s)
+
+    @property
+    def remaining_requests(self) -> int:
+        """Requests not yet reported completed or failed."""
+
+        return self.total_requests - self.completed_requests - self.failed_requests
+
+
+@dataclass
+class PoolTrafficDemand:
+    """Online (non-batch) offered load for one inference pool.
+
+    This is intentionally separate from Batch Gateway state. The Planner
+    derives safe capacity from its existing worker and capability inputs.
+    ``observed_at_s`` is an absolute wall-clock timestamp.
+    """
+
+    observed_at_s: float
+    pool_id: str
+    online_offered_rps: float
+
+    def __post_init__(self) -> None:
+        _require_finite_non_negative("observed_at_s", self.observed_at_s)
+        _require_non_empty_string("pool_id", self.pool_id)
+        _require_finite_non_negative("online_offered_rps", self.online_offered_rps)
+
+
+@dataclass
+class BatchDispatcherFeedback:
+    """Observed dispatcher state for one inference pool.
+
+    ``actual_dispatch_rps`` is the achieved batch admission rate over
+    ``observation_window_s``. ``applied_max_admission_rps=None`` means the
+    dispatcher did not report an applied Planner cap; ``0.0`` means an
+    explicit pause. ``observed_at_s`` is an absolute wall-clock timestamp.
+    """
+
+    observed_at_s: float
+    pool_id: str
+    observation_window_s: float
+    queued_requests: int
+    inflight_requests: int
+    actual_dispatch_rps: float
+    applied_max_admission_rps: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        _require_finite_non_negative("observed_at_s", self.observed_at_s)
+        _require_non_empty_string("pool_id", self.pool_id)
+        _require_positive_finite("observation_window_s", self.observation_window_s)
+        if any(
+            isinstance(count, bool) or not isinstance(count, int) or count < 0
+            for count in (self.queued_requests, self.inflight_requests)
+        ):
+            raise ValueError("dispatcher request counts must be non-negative integers")
+        _require_finite_non_negative("actual_dispatch_rps", self.actual_dispatch_rps)
+        if self.applied_max_admission_rps is not None:
+            _require_finite_non_negative(
+                "applied_max_admission_rps", self.applied_max_admission_rps
+            )
+
+
+@dataclass
+class BatchSchedulingObservation:
+    """Batch scheduling inputs sampled independently by their adapters.
+
+    The durable job source is authoritative: a present observation means its
+    ``job_demands`` snapshot succeeded, including the valid empty-list case.
+    Traffic and dispatcher entries are independently optional per pool. An
+    absent pool entry means that source is unknown or unusable for this tick;
+    it must never be interpreted as a numeric zero. A known idle pool is
+    represented explicitly by ``PoolTrafficDemand.online_offered_rps == 0``.
+    """
+
+    job_demands: list[BatchJobDemand] = field(default_factory=list)
+    pool_traffic: list[PoolTrafficDemand] = field(default_factory=list)
+    dispatcher_feedback: list[BatchDispatcherFeedback] = field(default_factory=list)
+
+
+@dataclass
 class TickInput:
     """What the adapter provides to the core on each tick.
 
@@ -91,6 +219,7 @@ class TickInput:
     traffic: Optional[TrafficObservation] = None
     worker_counts: Optional[WorkerCounts] = None
     fpm_observations: Optional[FpmObservations] = None
+    batch: Optional[BatchSchedulingObservation] = None
 
 
 @dataclass
@@ -101,6 +230,49 @@ class ScalingDecision:
 
     num_prefill: Optional[int] = None
     num_decode: Optional[int] = None
+
+
+@dataclass
+class BatchDrainLimitDecision:
+    """Leased batch admission limit for one inference pool.
+
+    ``max_admission_rps`` is the maximum rate at which new batch requests
+    may be admitted; ``0.0`` explicitly pauses admission. ``valid_until_s``
+    is an absolute wall-clock lease expiry. The dispatcher must stop using
+    the limit after expiry. ``decision_id`` identifies the decision for
+    idempotent application and audit correlation.
+    """
+
+    pool_id: str
+    max_admission_rps: float
+    valid_until_s: float
+    decision_id: str
+
+    def __post_init__(self) -> None:
+        _require_non_empty_string("pool_id", self.pool_id)
+        _require_non_empty_string("decision_id", self.decision_id)
+        _require_finite_non_negative("max_admission_rps", self.max_admission_rps)
+        _require_finite_non_negative("valid_until_s", self.valid_until_s)
+
+
+def _require_non_empty_string(name: str, value: object) -> None:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{name} must be a non-empty string")
+
+
+def _require_finite_non_negative(name: str, value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be numeric")
+    normalized = float(value)
+    if not math.isfinite(normalized) or normalized < 0:
+        raise ValueError(f"{name} must be finite and non-negative")
+    return normalized
+
+
+def _require_positive_finite(name: str, value: object) -> None:
+    normalized = _require_finite_non_negative(name, value)
+    if normalized <= 0:
+        raise ValueError(f"{name} must be positive and finite")
 
 
 @dataclass
@@ -192,6 +364,7 @@ class PlannerEffects:
     scale_to: Optional[ScalingDecision] = None
     next_tick: Optional[ScheduledTick] = None
     diagnostics: TickDiagnostics = field(default_factory=TickDiagnostics)
+    batch_drain_limits: list[BatchDrainLimitDecision] = field(default_factory=list)
 
 
 @dataclass

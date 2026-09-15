@@ -207,10 +207,64 @@ class WorkerState(_ProtoMirror):
     decode_scaling_in_progress: Optional[bool] = None
 
 
+class BatchJobDemand(_ProtoMirror):
+    """Auditable batch-job demand for one inference pool.
+
+    Both timestamps are absolute wall-clock values. ``deadline_at_s=None``
+    denotes a job without an SLA deadline. ``remaining_requests`` is included
+    on the wire for external plugins and is derived from the raw counters by
+    the core adapter.
+    """
+
+    observed_at_s: float = 0.0
+    pool_id: str = ""
+    job_id: str = ""
+    status: str = ""
+    total_requests: int = 0
+    completed_requests: int = 0
+    failed_requests: int = 0
+    deadline_at_s: Optional[float] = None
+    work_class: str = ""
+    remaining_requests: int = 0
+
+
+class PoolTrafficDemand(_ProtoMirror):
+    """Online (non-batch) offered load, sampled for one inference pool."""
+
+    observed_at_s: float = 0.0
+    pool_id: str = ""
+    online_offered_rps: float = 0.0
+
+
+class BatchDispatcherFeedback(_ProtoMirror):
+    """Observed batch dispatcher state for one inference pool.
+
+    ``applied_max_admission_rps=None`` means no applied Planner cap was
+    reported; ``0.0`` is an explicit pause.
+    """
+
+    observed_at_s: float = 0.0
+    pool_id: str = ""
+    observation_window_s: float = 0.0
+    queued_requests: int = 0
+    inflight_requests: int = 0
+    actual_dispatch_rps: float = 0.0
+    applied_max_admission_rps: Optional[float] = None
+
+
+class BatchSchedulingData(_ProtoMirror):
+    """Flat batch scheduling inputs, each carrying its source timestamp."""
+
+    job_demands: list[BatchJobDemand] = Field(default_factory=list)
+    pool_traffic: list[PoolTrafficDemand] = Field(default_factory=list)
+    dispatcher_feedback: list[BatchDispatcherFeedback] = Field(default_factory=list)
+
+
 class ObservationData(_ProtoMirror):
     traffic: Optional[TrafficMetrics] = None
     fpm: Optional[FpmData] = None
     workers: Optional[WorkerState] = None
+    batch: Optional[BatchSchedulingData] = None
 
 
 class PredictionData(_ProtoMirror):
@@ -448,6 +502,10 @@ __all__ = [
     "TrafficMetrics",
     "FpmData",
     "WorkerState",
+    "BatchJobDemand",
+    "PoolTrafficDemand",
+    "BatchDispatcherFeedback",
+    "BatchSchedulingData",
     "ObservationData",
     "PredictionData",
     "ComponentTarget",
