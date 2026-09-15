@@ -1546,6 +1546,7 @@ mod tests {
         );
         assert_eq!(ErrorClass::ResponseTimeout.to_string(), "ResponseTimeout");
         assert_eq!(ErrorClass::Cancelled.to_string(), "Cancelled");
+        assert_eq!(ErrorClass::DeadlineExceeded.to_string(), "DeadlineExceeded");
         assert_eq!(
             ErrorClass::ResourceExhausted.to_string(),
             "ResourceExhausted"
