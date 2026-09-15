@@ -544,6 +544,14 @@ class VllmProcessor:
             v = getattr(request_for_sampling, k, None)
             if v is not None:
                 setattr(sampling_params, k, v)
+        # Reasoning parsers split model output on special control delimiters, so
+        # those delimiters must survive detokenization for the parser to see them.
+        # This overrides the request value, including an explicit true, which
+        # matches what 22 of the upstream tool parsers already do in their own
+        # adjust_request(). The delimiters are consumed by the configured
+        # reasoning/tool parsers and are not exposed in the OpenAI response.
+        if self.reasoning_parser_class is not None:
+            sampling_params.skip_special_tokens = False
         # nvext.max_thinking_tokens is enforced on the worker, not here. The
         # frontend's InputProcessor is built without reasoning_config (it only
         # tokenizes), so setting sampling_params.thinking_token_budget would

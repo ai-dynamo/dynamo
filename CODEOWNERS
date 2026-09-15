@@ -273,6 +273,7 @@
 /container/deps/                                                             @ai-dynamo/dynamo-ops-codeowners
 /.coderabbit.yaml                                                            @ai-dynamo/dynamo-ops-codeowners
 /container/run.sh                                                            @ai-dynamo/dynamo-ops-codeowners
+/container/patches/                                                          @ai-dynamo/dynamo-ops-codeowners
 /container/README.md                                                         @ai-dynamo/dynamo-ops-codeowners
 /container/render.py                                                         @ai-dynamo/dynamo-ops-codeowners
 /dev/sanity_check.py                                                         @ai-dynamo/dynamo-ops-codeowners
