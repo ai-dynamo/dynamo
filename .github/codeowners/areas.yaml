@@ -232,6 +232,7 @@ areas:
   - components/src/dynamo/common/memory/
   - components/src/dynamo/common/tests/
   - components/src/dynamo/common/utils/
+  - components/src/dynamo/experimental/
   - examples/backends/sample/
   - examples/backends/tritonserver/
   - examples/common/
@@ -458,6 +459,7 @@ areas:
   github_team: '@ai-dynamo/dynamo-rl-codeowners'
   path_globs:
   - components/src/dynamo/common/rl/
+  - examples/rl/
   - lib/rl/
   - tests/rl/
 - label: performance
@@ -538,6 +540,19 @@ required_owners:
   owners:
   - operator
 shared:
+- glob: .github/review-prompts/README.md
+  owners:
+  - ops
+  - frontend
+  - runtime
+- glob: .github/review-prompts/frontend.md
+  owners:
+  - ops
+  - frontend
+- glob: .github/review-prompts/runtime.md
+  owners:
+  - ops
+  - runtime
 # CODEOWNERS is a generated artifact, so co-ownership here is about who may
 # approve it, not who reviews its contents. Every area is listed because under
 # "any one approves" any single team satisfies the gate: without this, adding a
