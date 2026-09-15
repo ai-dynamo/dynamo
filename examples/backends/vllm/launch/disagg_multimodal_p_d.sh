@@ -63,7 +63,8 @@ print_launch_banner --multimodal "Launching Disaggregated Multimodal P/D ($GPU_L
 
 # Start frontend
 echo "Starting frontend..."
-python -m dynamo.frontend &
+env -u DYN_SYSTEM_PORT -u DYN_SYSTEM_PORT1 -u DYN_SYSTEM_PORT2 \
+    python -m dynamo.frontend &
 
 EXTRA_ARGS=""
 PD_EXTRA_ARGS=""
@@ -101,9 +102,13 @@ else
 fi
 
 # Start prefill worker (handles image loading internally, no --route-to-encoder)
+VLLM_NIXL_SIDE_CHANNEL_PORT_PREFILL="$(dyn_port DYN_VLLM_NIXL_SIDE_CHANNEL_PORT 1 "${VLLM_NIXL_SIDE_CHANNEL_PORT_PREFILL:-20098}")"
+VLLM_NIXL_SIDE_CHANNEL_PORT_DECODE="$(dyn_port DYN_VLLM_NIXL_SIDE_CHANNEL_PORT 2 "${VLLM_NIXL_SIDE_CHANNEL_PORT_DECODE:-20099}")"
+VLLM_ZMQ_PORT_PREFILL="$(dyn_port DYN_VLLM_KV_EVENT_PORT 1 "${VLLM_ZMQ_PORT_PREFILL:-20081}")"
+VLLM_ZMQ_PORT_DECODE="$(dyn_port DYN_VLLM_KV_EVENT_PORT 2 "${VLLM_ZMQ_PORT_DECODE:-20082}")"
 echo "Starting prefill worker on GPU $DYN_PREFILL_WORKER_GPU (${PREFILL_GPU_MEM_ARGS})..."
-VLLM_NIXL_SIDE_CHANNEL_PORT=20098 \
-DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-${DYN_SYSTEM_PORT:-8081}} \
+VLLM_NIXL_SIDE_CHANNEL_PORT=$VLLM_NIXL_SIDE_CHANNEL_PORT_PREFILL \
+DYN_SYSTEM_PORT="$(dyn_port DYN_SYSTEM_PORT 1 "${DYN_SYSTEM_PORT:-8081}")" \
 CUDA_VISIBLE_DEVICES=$DYN_PREFILL_WORKER_GPU \
 python -m "$WORKER_MODULE" \
   --disaggregation-mode prefill \
@@ -113,12 +118,12 @@ python -m "$WORKER_MODULE" \
   $EXTRA_ARGS \
   $PD_EXTRA_ARGS \
   --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
-  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081"}' &
+  --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_ZMQ_PORT_PREFILL}\"}" &
 
 # Start decode worker
 echo "Starting decode worker on GPU $DYN_DECODE_WORKER_GPU (${DECODE_GPU_MEM_ARGS})..."
-VLLM_NIXL_SIDE_CHANNEL_PORT=20099 \
-DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
+VLLM_NIXL_SIDE_CHANNEL_PORT=$VLLM_NIXL_SIDE_CHANNEL_PORT_DECODE \
+DYN_SYSTEM_PORT="$(dyn_port DYN_SYSTEM_PORT 2 8082)" \
 CUDA_VISIBLE_DEVICES=$DYN_DECODE_WORKER_GPU \
 python -m "$WORKER_MODULE" \
   --disaggregation-mode decode \
@@ -129,7 +134,7 @@ python -m "$WORKER_MODULE" \
   $EXTRA_ARGS \
   $PD_EXTRA_ARGS \
   --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
-  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20082"}' &
+  --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_ZMQ_PORT_DECODE}\"}" &
 
 echo "=================================================="
 echo "All components started. Waiting for initialization..."
