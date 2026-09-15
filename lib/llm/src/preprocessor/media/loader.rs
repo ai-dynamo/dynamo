@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashSet;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
@@ -87,9 +87,84 @@ static BLOCKED_HOSTS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     .collect()
 });
 
+/// Well-known NAT64 prefix (RFC 6052). Addresses inside it carry the IPv4
+/// destination in the low 32 bits, so an IPv6-only cluster reaches IPv4 hosts
+/// through it. A network-specific prefix may use a different length and is not
+/// identifiable from the address alone.
+const NAT64_WELL_KNOWN: [u16; 2] = [0x0064, 0xff9b];
+
+/// Return the IPv4 addresses an IPv6 transition address actually reaches.
+///
+/// Without this, a blocked IPv4 wrapped in 6to4, Teredo or NAT64 form passes
+/// the range check, because that check only sees the IPv6 form.
+fn embedded_ipv4(ip: &Ipv6Addr) -> Vec<Ipv4Addr> {
+    let segments = ip.segments();
+
+    // 6to4 (RFC 3056): 2002:V4ADDR::/48.
+    if segments[0] == 0x2002 {
+        return vec![Ipv4Addr::new(
+            (segments[1] >> 8) as u8,
+            segments[1] as u8,
+            (segments[2] >> 8) as u8,
+            segments[2] as u8,
+        )];
+    }
+
+    // Teredo (RFC 4380): 2001:0::/32, server in segments 2-3, client in the
+    // last two segments stored obfuscated (bitwise NOT).
+    if segments[0] == 0x2001 && segments[1] == 0 {
+        let server = Ipv4Addr::new(
+            (segments[2] >> 8) as u8,
+            segments[2] as u8,
+            (segments[3] >> 8) as u8,
+            segments[3] as u8,
+        );
+        let client_hi = !segments[6];
+        let client_lo = !segments[7];
+        let client = Ipv4Addr::new(
+            (client_hi >> 8) as u8,
+            client_hi as u8,
+            (client_lo >> 8) as u8,
+            client_lo as u8,
+        );
+        return vec![server, client];
+    }
+
+    // NAT64 well-known prefix: the address sits in the low 32 bits.
+    if segments[0] == NAT64_WELL_KNOWN[0]
+        && segments[1] == NAT64_WELL_KNOWN[1]
+        && segments[2] == 0
+        && segments[3] == 0
+        && segments[4] == 0
+        && segments[5] == 0
+    {
+        return vec![Ipv4Addr::new(
+            (segments[6] >> 8) as u8,
+            segments[6] as u8,
+            (segments[7] >> 8) as u8,
+            segments[7] as u8,
+        )];
+    }
+
+    Vec::new()
+}
+
 /// Return `true` if `ip` falls inside any of the blocked ranges.
+///
+/// IPv6 transition addresses are resolved to the IPv4 address they reach and
+/// that address is checked too, so a blocked IPv4 cannot be smuggled through
+/// in 6to4, Teredo or NAT64 form.
 pub fn is_blocked_ip(ip: &IpAddr) -> bool {
-    BLOCKED_IP_NETWORKS.iter().any(|net| net.contains(ip))
+    if BLOCKED_IP_NETWORKS.iter().any(|net| net.contains(ip)) {
+        return true;
+    }
+    if let IpAddr::V6(v6) = ip {
+        return embedded_ipv4(v6).into_iter().any(|v4| {
+            let addr = IpAddr::V4(v4);
+            BLOCKED_IP_NETWORKS.iter().any(|net| net.contains(&addr))
+        });
+    }
+    false
 }
 
 /// Build a policy refusal that the HTTP service maps to 400.
@@ -1084,6 +1159,44 @@ mod tests_non_nixl {
             let url = url::Url::parse(&format!("{scheme}://example.com/x")).unwrap();
             let error = fetcher.check_if_url_allowed(&url).unwrap_err();
             assert_invalid_argument_in_chain(error.as_ref());
+        }
+    }
+
+    #[test]
+    fn test_is_blocked_ip_blocks_ipv4_smuggled_through_transition_formats() {
+        // One row per transition format, since the format is what this test
+        // protects; the blocklist membership of each IPv4 is covered directly
+        // by test_is_blocked_ip_ranges. The Teredo client is stored bitwise
+        // negated, so 5601:5601 is 169.254.169.254.
+        for (ip, reaches) in [
+            ("64:ff9b::a9fe:a9fe", "169.254.169.254"),
+            ("2002:a9fe:a9fe::", "169.254.169.254"),
+            ("2001:0:808:808:0:0:5601:5601", "169.254.169.254"),
+        ] {
+            let target: IpAddr = reaches.parse().unwrap();
+            assert!(is_blocked_ip(&target), "fixture expects {reaches} blocked");
+            let addr: IpAddr = ip.parse().unwrap();
+            assert!(
+                is_blocked_ip(&addr),
+                "{ip} reaches {reaches}, must be blocked"
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_blocked_ip_allows_transition_formats_reaching_public_ipv4() {
+        // An IPv6-only cluster reaches public IPv4 through NAT64, so the
+        // prefixes must not be blocked wholesale.
+        for ip in [
+            "64:ff9b::808:808",
+            "2002:808:808::",
+            "2001:0:808:808:0:0:f7f7:f7f7",
+        ] {
+            let addr: IpAddr = ip.parse().unwrap();
+            assert!(
+                !is_blocked_ip(&addr),
+                "{ip} reaches 8.8.8.8, must be allowed"
+            );
         }
     }
 
