@@ -988,7 +988,7 @@ mod selection_service_lifecycle_tests {
     fn idempotent_shutdown() {
         pyo3::prepare_freethreaded_python();
         let service =
-            Python::with_gil(|py| SelectionService::new(py, 1, None, None, None, None, None, None))
+            Python::with_gil(|py| SelectionService::new(py, 1, None, None, None, None, None))
                 .unwrap();
         Python::with_gil(|py| {
             service.shutdown(py);
