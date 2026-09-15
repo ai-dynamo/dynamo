@@ -760,7 +760,10 @@ mod tests {
         assert_eq!(error_class_for_http_status(499), ErrorClass::Cancelled);
         assert_eq!(error_class_for_http_status(418), ErrorClass::InvalidRequest);
         assert_eq!(error_class_for_http_status(501), ErrorClass::NotImplemented);
-        assert_eq!(error_class_for_http_status(502), ErrorClass::BackendProtocol);
+        assert_eq!(
+            error_class_for_http_status(502),
+            ErrorClass::BackendProtocol
+        );
         assert_eq!(error_class_for_http_status(503), ErrorClass::Unavailable);
         assert_eq!(
             error_class_for_http_status(504),
