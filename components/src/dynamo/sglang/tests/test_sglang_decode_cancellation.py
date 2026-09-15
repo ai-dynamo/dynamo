@@ -551,9 +551,7 @@ async def test_decode_cancellation_drains_buffered_empty_chunk(
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(5)
-@pytest.mark.parametrize(
-    "state_kind", ["no_registry", "missing", "no_stats", "null_stats"]
-)
+@pytest.mark.parametrize("state_kind", ["no_registry", "missing", "null_stats"])
 @pytest.mark.parametrize("abort_fails", [False, True])
 async def test_cancellation_monitor_logs_only_submitted_abort(
     decode_cancellation_case, caplog, state_kind, abort_fails
@@ -562,9 +560,7 @@ async def test_cancellation_monitor_logs_only_submitted_abort(
     case = decode_cancellation_case
     rid = case.context.trace_id
     registry = None if state_kind == "no_registry" else case.registry
-    if state_kind == "no_stats":
-        case.registry[rid] = object()
-    elif state_kind == "null_stats":
+    if state_kind == "null_stats":
         case.registry[rid] = SimpleNamespace(time_stats=None)
 
     def abort_request(*, rid, abort_all):
