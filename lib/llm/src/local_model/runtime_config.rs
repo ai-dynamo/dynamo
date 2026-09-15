@@ -114,6 +114,13 @@ pub const VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY: &str = "vllm_enable_towe
 /// to the other engine.
 pub const SGLANG_GENERATE_CAPABILITY: &str = "sglang_generate";
 
+/// Worker-advertised guarantee that disaggregated prefill cancellation is safe
+/// at any point before the prefill stream finishes.
+///
+/// Both prefill and decode workers must advertise this versioned capability.
+/// Absence is conservative and leaves remote prefill cancellation disabled.
+pub const DISAGG_PREFILL_CANCEL_ANYTIME_V1: &str = "disagg_prefill_cancel_anytime_v1";
+
 /// Tokenizer backend used by the Rust preprocessor for BPE tokenizer.json models.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
