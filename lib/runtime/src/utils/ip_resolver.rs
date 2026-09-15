@@ -64,10 +64,27 @@ fn host_override_from_lookup(
     Ok((!value.is_empty()).then(|| value.to_string()))
 }
 
+/// Decide whether an interface address can be used to bind and advertise.
+///
+/// Unspecified, broadcast, multicast, and link-local addresses are skipped
+/// because binding to them fails or advertises an unreachable endpoint.
+/// Loopback is intentionally allowed on both families so interfaces like `lo`
+/// keep working for local-only setups.
+fn is_usable_unicast(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            !v4.is_unspecified() && !v4.is_broadcast() && !v4.is_multicast() && !v4.is_link_local()
+        }
+        IpAddr::V6(v6) => !v6.is_unspecified() && !v6.is_multicast() && !v6.is_unicast_link_local(),
+    }
+}
+
 /// Resolve a configured host as an IP literal or exact network interface name.
 ///
-/// Interface lookup preserves the existing TCP response-stream behavior: when
-/// an interface name occurs more than once, the last enumerated address wins.
+/// IP literals are used as-is. Interface lookup skips link-local, multicast,
+/// broadcast, and unspecified addresses, and among the remaining usable
+/// addresses the last enumerated one wins (the existing TCP response-stream
+/// tie-break).
 pub(crate) fn resolve_host_or_interface<R: IpResolver>(
     host_or_interface: &str,
     resolver: &R,
@@ -75,16 +92,28 @@ pub(crate) fn resolve_host_or_interface<R: IpResolver>(
     let host_or_interface = host_or_interface.trim();
     let ip = match host_or_interface.parse::<IpAddr>() {
         Ok(ip) => ip,
-        Err(_) => resolver
-            .list_afinet_netifas()?
-            .into_iter()
-            .filter_map(|(name, ip)| (name == host_or_interface).then_some(ip))
-            .next_back()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
+        Err(_) => {
+            let mut seen = false;
+            let mut selected = None;
+            for (name, candidate) in resolver.list_afinet_netifas()? {
+                if name != host_or_interface {
+                    continue;
+                }
+                seen = true;
+                if is_usable_unicast(&candidate) {
+                    selected = Some(candidate);
+                }
+            }
+            match selected {
+                Some(ip) => ip,
+                None if seen => bail!(
+                    "interface '{host_or_interface}' has no usable unicast address (link-local, multicast, broadcast, and unspecified addresses are skipped)"
+                ),
+                None => bail!(
                     "'{host_or_interface}' is not a valid IP address and no network interface with that name was found"
-                )
-            })?,
+                ),
+            }
+        }
     };
     if ip.to_canonical().is_unspecified() {
         bail!("unspecified IP addresses cannot be advertised");
@@ -259,6 +288,95 @@ mod tests {
                 .to_string(),
             "'missing0' is not a valid IP address and no network interface with that name was found"
         );
+    }
+
+    #[test]
+    fn interface_lookup_skips_link_local_addresses() {
+        for interfaces in [
+            vec![
+                ("eth0".to_string(), "fe80::1".parse().unwrap()),
+                ("eth0".to_string(), "169.254.10.10".parse().unwrap()),
+                ("eth0".to_string(), "192.0.2.10".parse().unwrap()),
+            ],
+            vec![
+                ("eth0".to_string(), "192.0.2.10".parse().unwrap()),
+                ("eth0".to_string(), "169.254.10.10".parse().unwrap()),
+                ("eth0".to_string(), "fe80::1".parse().unwrap()),
+            ],
+        ] {
+            let resolver = MockIpResolver {
+                v4: Err(Error::LocalIpAddressNotFound),
+                v6: Err(Error::LocalIpAddressNotFound),
+                interfaces,
+            };
+            assert_eq!(
+                resolve_host_or_interface("eth0", &resolver).unwrap(),
+                "192.0.2.10".parse::<IpAddr>().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn interface_lookup_skips_multicast_and_broadcast() {
+        let resolver = MockIpResolver {
+            v4: Err(Error::LocalIpAddressNotFound),
+            v6: Err(Error::LocalIpAddressNotFound),
+            interfaces: vec![
+                ("eth0".to_string(), "224.0.0.1".parse().unwrap()),
+                ("eth0".to_string(), "255.255.255.255".parse().unwrap()),
+                ("eth0".to_string(), "ff02::1".parse().unwrap()),
+                ("eth0".to_string(), "192.0.2.20".parse().unwrap()),
+            ],
+        };
+
+        assert_eq!(
+            resolve_host_or_interface("eth0", &resolver).unwrap(),
+            "192.0.2.20".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn interface_with_only_unusable_addresses_is_rejected() {
+        let resolver = MockIpResolver {
+            v4: Err(Error::LocalIpAddressNotFound),
+            v6: Err(Error::LocalIpAddressNotFound),
+            interfaces: vec![("eth0".to_string(), "fe80::1".parse().unwrap())],
+        };
+
+        assert_eq!(
+            resolve_host_or_interface("eth0", &resolver)
+                .unwrap_err()
+                .to_string(),
+            "interface 'eth0' has no usable unicast address (link-local, multicast, broadcast, and unspecified addresses are skipped)"
+        );
+    }
+
+    #[test]
+    fn loopback_interface_addresses_remain_usable() {
+        for (interfaces, expected) in [
+            (
+                vec![("lo".to_string(), "127.0.0.1".parse().unwrap())],
+                "127.0.0.1",
+            ),
+            (
+                vec![
+                    ("lo".to_string(), "127.0.0.1".parse().unwrap()),
+                    ("lo".to_string(), "::1".parse().unwrap()),
+                ],
+                "::1",
+            ),
+        ] {
+            let resolver = MockIpResolver {
+                v4: Err(Error::LocalIpAddressNotFound),
+                v6: Err(Error::LocalIpAddressNotFound),
+                interfaces,
+            };
+
+            assert_eq!(
+                resolve_host_or_interface("lo", &resolver).unwrap(),
+                expected.parse::<IpAddr>().unwrap()
+            );
+        }
     }
 
     #[test]
