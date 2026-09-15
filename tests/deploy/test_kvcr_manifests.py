@@ -52,7 +52,11 @@ def test_kvcr_variants_require_two_gpu_rdma_nodes(manifest_name: str) -> None:
     env = {item["name"]: item.get("value") for item in main["env"]}
     assert env["UCX_TLS"] == "rc_x,cuda"
     assert env["UCX_NET_DEVICES"] == "${DYNAMO_UCX_NET_DEVICES}"
-    assert env["UCX_PROTO_INFO"] == "y"
+    assert all(
+        item["name"] != "UCX_PROTO_INFO"
+        for container in pod_spec["containers"]
+        for item in container["env"]
+    )
     assert env["KVCR_CACHE_SLOT_COUNT"] == "2"
     slot = next(item for item in main["env"] if item["name"] == "KVCR_CACHE_SLOT")
     assert slot["valueFrom"]["fieldRef"]["fieldPath"] == (

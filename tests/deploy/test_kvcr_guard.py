@@ -52,8 +52,6 @@ TIER_READ_BYTES = "vllm:kv_offload_tiering_read_bytes_total"
 TIER_WRITE_BYTES = "vllm:kv_offload_tiering_write_bytes_total"
 PROMPT_TOKENS = "vllm:prompt_tokens_by_source_total"
 GUARD_INITIALIZED = "Initialized NIXL agent: KVCR-Guard-"
-RDMA_PROTOCOL_RE = re.compile(r"\brc_mlx5\b")
-
 # Large enough to make the transfer visible, while remaining comfortably below
 # the small model's context limit and the example's 2 GiB host-memory pool.
 LONG_PREFIX = (
@@ -518,12 +516,6 @@ async def test_kvcr_memory_service_guard_serves_after_engine_restart(
         _capture_workers(deployment, pods, ".source-failed")
 
         target_before = _metrics(namespace, target.name, deployment_spec.system_port)
-        source_protocols_before = len(
-            RDMA_PROTOCOL_RE.findall(_logs(namespace, source.name, KVCR_SERVICES))
-        )
-        target_protocols_before = len(
-            RDMA_PROTOCOL_RE.findall(_logs(namespace, target.name, MAIN))
-        )
         xmit_before = _rdma_counter(
             namespace,
             source.name,
@@ -571,14 +563,6 @@ async def test_kvcr_memory_service_guard_serves_after_engine_restart(
         tier_bytes = transfer_deltas["tier_bytes"]
         external_tokens = transfer_deltas["external_tokens"]
 
-        source_logs = _logs(namespace, source.name, KVCR_SERVICES)
-        target_logs = _logs(namespace, target.name, MAIN)
-        assert (
-            len(RDMA_PROTOCOL_RE.findall(source_logs)) > source_protocols_before
-        ), "Source Guard did not select UCX rc_mlx5 for the remote request"
-        assert (
-            len(RDMA_PROTOCOL_RE.findall(target_logs)) > target_protocols_before
-        ), "Target did not select UCX rc_mlx5 for the remote request"
         xmit_bytes = (
             _rdma_counter(
                 namespace,
@@ -609,8 +593,7 @@ async def test_kvcr_memory_service_guard_serves_after_engine_restart(
         )
         logger.info(
             "KVCR_TEST transfer source=%s target=%s blocks=%d bytes=%d "
-            "external_tokens=%d hca_xmit_bytes=%d hca_recv_bytes=%d "
-            "protocol=rc_mlx5",
+            "external_tokens=%d hca_xmit_bytes=%d hca_recv_bytes=%d",
             source.name,
             target.name,
             int(blocks),

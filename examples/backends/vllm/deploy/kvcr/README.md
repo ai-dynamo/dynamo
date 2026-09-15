@@ -30,8 +30,7 @@ process-local variant requests one share per GPU node; the memory-service
 variant requests two shares per node because both `main` and `kvcr-services`
 use RDMA. Set
 `DYNAMO_RDMA_RESOURCE=rdma/ib` or another cluster-specific resource name when
-required. `UCX_TLS=rc_x,cuda` prevents TCP fallback. `UCX_PROTO_INFO=y` prints
-the selected UCX transport without enabling debug logs. Set
+required. `UCX_TLS=rc_x,cuda` prevents TCP fallback. Set
 `DYNAMO_UCX_NET_DEVICES` to the GPU-local HCA and port exposed by the selected
 RDMA resource, such as `mlx5_0:1`; do not copy that example device name without
 checking the target nodes.
@@ -40,16 +39,14 @@ The image tag must contain a Dynamo semantic release version. Pin the same
 image by digest for every component, for example
 `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0@sha256:REPLACE_ME`. Until KVCR is
 available in a Dynamo release image, build that image from matching Dynamo,
-KVCR, and vLLM revisions; the vLLM integration is based on
-[vLLM PR 53624](https://github.com/vllm-project/vllm/pull/53624) on the
-[`mkhazraee/vllm:moein/kvcr_secondary`](https://github.com/mkhazraee/vllm/tree/moein/kvcr_secondary)
-branch and uses [KVCR](https://github.com/ai-dynamo/kvcr) as a separate
-dependency. The most recent two-host validation used vLLM commit
-[`a48bbcfc`](https://github.com/mkhazraee/vllm/commit/a48bbcfcdd2ac09cb729cf595026c5aec9b69ea0)
-and KVCR commit
-[`94b4762b`](https://github.com/ai-dynamo/kvcr/commit/94b4762b6a49d6e9abadb700e02946c93925fc0a).
-Record the exact Dynamo, KVCR, and vLLM commit IDs with the image digest used
-for every qualified deployment.
+KVCR, and vLLM revisions. Use [KVCR tag
+`v0.1.0`](https://github.com/ai-dynamo/kvcr/tree/v0.1.0). Until
+[vLLM PR 53624](https://github.com/vllm-project/vllm/pull/53624) is merged, pin
+vLLM to the PR's immutable head SHA; at the time of this update it is
+[`7015687c`](https://github.com/vllm-project/vllm/commit/7015687c390442fae384b78fc62e6621b3bf6e56).
+After the PR merges, pin the commit that lands on vLLM `main`. Record the exact
+Dynamo, KVCR, and vLLM commit IDs with the image digest used for every qualified
+deployment.
 
 `DYNAMO_KVCR_COMPATIBILITY_DIGEST` is an opaque layout version shared by the
 engine and memory service. Change it whenever model, dtype, block layout, or
@@ -133,4 +130,4 @@ the standard `test_output` directory). It verifies that the workers are on
 separate hosts, one source engine restarts while its KVCR sidecar remains up,
 the Guard serves the preserved cache to the other engine, the response matches,
 the KVCR transfer metrics increase, and the selected active HCA carries the
-transfer with UCX `rc_mlx5`.
+transfer.

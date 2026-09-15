@@ -173,8 +173,6 @@ spec:
             value: rc_x,cuda
           - name: UCX_NET_DEVICES
             value: ${DYNAMO_UCX_NET_DEVICES}
-          - name: UCX_PROTO_INFO
-            value: "y"
           envFrom:
           - secretRef:
               name: hf-token-secret
