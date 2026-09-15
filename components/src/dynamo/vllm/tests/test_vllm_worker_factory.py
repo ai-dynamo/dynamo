@@ -1905,3 +1905,26 @@ class TestShadowStandbyEntry:
         # promotion, so it must not report itself Ready.
         runtime.set_health_status.assert_not_called()
         elect_and_wake.assert_not_awaited()
+
+    @pytest.mark.parametrize("raw_timeout", ["nan", "inf", "-inf"])
+    @pytest.mark.timeout(30)
+    async def test_non_finite_bound_is_refused_instead_of_waiting_forever(
+        self, monkeypatch, raw_timeout
+    ):
+        """float() takes "nan" and "inf", and both defeat the bound: NaN
+        compares false against 0 and falls to the unbounded branch, and
+        wait_for(inf) never fires. Either one restores the indefinite standby
+        wait this bound exists to remove."""
+        monkeypatch.setenv("ENGINE_ID", "2")
+        monkeypatch.setenv("DYN_GMS_SHADOW_PAUSE_TIMEOUT_SECONDS", raw_timeout)
+        elect_and_wake = AsyncMock()
+        monkeypatch.setattr("dynamo.vllm.worker_factory.elect_and_wake", elect_and_wake)
+
+        with pytest.raises(RuntimeError, match="finite number of seconds"):
+            await _make_factory()._maybe_wait_for_failover_lock(
+                self._handler_that_never_pauses(),
+                Mock(),
+                _make_config(gms_shadow_mode=True),
+            )
+
+        elect_and_wake.assert_not_awaited()

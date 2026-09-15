@@ -32,6 +32,7 @@ if not HAS_GMS:
 if HAS_PYNVML:
     import pynvml
 
+import gpu_memory_service.client.session as _session_module
 import gpu_memory_service.common.vmm as _vmm_module
 from _fake_vmm import FakeVMM
 from gpu_memory_service.client.memory_manager import (
@@ -72,9 +73,9 @@ _ALLOCATION_BLOCK_ASSERTION_SECONDS = 5.0
 _GPU_MEMORY_RECOVERY_TIMEOUT_SECONDS = 30.0
 _FAST_POLL_INTERVAL_SECONDS = 0.01
 _SLOW_POLL_INTERVAL_SECONDS = 0.1
-# Stand in for the production shadow default, which is minutes long.
-_SHADOW_CONNECT_TIMEOUT_MS = 200
-_QUEUED_WRITER_TIMEOUT_MS = 2000
+# Room for retry jitter above the 150 ms ceiling the connect test installs,
+# while staying far below any lock-admission deadline a caller might pass.
+_CONNECT_CEILING_ASSERTION_SECONDS = 5.0
 
 
 def _gpu_memory_free_bytes(device: int = 0) -> int:
@@ -498,71 +499,19 @@ def test_waiting_writer_blocks_new_readers_until_last_reader_disconnects(
 
 
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
-def test_third_shadow_client_times_out_behind_queued_writer(running_gms, monkeypatch):
-    """Three clients on one weights socket: the shape a numShadows=2 pool makes.
+def test_a_long_lock_deadline_does_not_stretch_the_connect_wait(tmp_path, monkeypatch):
+    """A caller's lock-admission deadline is a workload-shaped wait; the wait
+    for the server socket to exist is not. A missing or misconfigured socket
+    must still fail against the availability ceiling."""
+    monkeypatch.setattr(_session_module, "_CONNECT_TIMEOUT_MS", 150)
+    missing_socket = str(tmp_path / "absent.sock")
 
-    A shadow engine resolves its admission deadline through
-    ``configure_gms_lock_mode``. Without the shadow default that deadline is
-    ``None``, and the third client's handshake never returns.
-    """
-    from types import SimpleNamespace
+    started = time.monotonic()
+    with pytest.raises(ConnectionError, match="GMS server not running"):
+        _GMSClientSession(missing_socket, RequestedLockType.RO, 600_000)
+    elapsed = time.monotonic() - started
 
-    from gpu_memory_service.integrations.common.utils import (
-        get_gms_ro_connect_timeout_ms,
-    )
-    from gpu_memory_service.integrations.vllm import utils as vllm_gms_utils
-
-    server, socket_path = running_gms
-
-    # engine-0, the primary, publishes the weight layout.
-    primary = _GMSClientSession(socket_path, RequestedLockType.RW, None)
-    primary.commit()
-
-    # engine-1, the first shadow, attaches read-only and stays attached.
-    first_shadow = _GMSClientSession(socket_path, RequestedLockType.RO, None)
-
-    queued_writer: dict[str, object] = {}
-
-    def open_writer() -> None:
-        try:
-            queued_writer["session"] = _GMSClientSession(
-                socket_path,
-                RequestedLockType.RW,
-                _QUEUED_WRITER_TIMEOUT_MS,
-            )
-        except Exception as exc:
-            queued_writer["error"] = exc
-
-    thread = threading.Thread(target=open_writer)
-    thread.start()
-    try:
-        # A writer is now queued behind the attached reader, so no further
-        # reader can be admitted.
-        _wait_for_waiting_writers(server, 1)
-
-        monkeypatch.setattr(
-            vllm_gms_utils,
-            "SHADOW_RO_CONNECT_TIMEOUT_MS",
-            _SHADOW_CONNECT_TIMEOUT_MS,
-        )
-        monkeypatch.setenv("ENGINE_ID", "2")
-        engine_args = SimpleNamespace(model_loader_extra_config=None)
-        vllm_gms_utils.configure_gms_lock_mode(engine_args)
-        timeout_ms = get_gms_ro_connect_timeout_ms(
-            engine_args.model_loader_extra_config
-        )
-        assert timeout_ms == _SHADOW_CONNECT_TIMEOUT_MS
-
-        # engine-2, the second shadow, is refused and must say so.
-        with pytest.raises(TimeoutError, match="Timeout waiting for lock"):
-            _GMSClientSession(socket_path, RequestedLockType.RO, timeout_ms)
-    finally:
-        first_shadow.close()
-        thread.join(timeout=_BLOCKED_WRITER_JOIN_TIMEOUT_SECONDS)
-        granted = queued_writer.get("session")
-        if isinstance(granted, _GMSClientSession):
-            granted.close()
-        primary.close()
+    assert elapsed < _CONNECT_CEILING_ASSERTION_SECONDS
 
 
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
