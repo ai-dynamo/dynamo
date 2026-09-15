@@ -54,6 +54,7 @@ class StageOutput(BaseModel):
                 "original_prompt",
                 "stage_connector_refs",
                 "sampling_params_list",
+                "formatted_response",
                 "finished",
                 "error",
             }
@@ -67,6 +68,11 @@ class StageOutput(BaseModel):
 
     # TODO: shm_meta should be gone, its a WAR right now to send final output to the router via shm
     shm_meta: dict | None = None
+    # Final stage already encoded + uploaded media on the worker (worker-side
+    # persist path): the small formatted response chunk (media url / b64) that
+    # the router forwards verbatim instead of fetching raw frames from
+    # SHM/connectors. Mutually exclusive with shm_meta / stage_connector_refs.
+    formatted_response: dict | None = None
     original_prompt: dict | None = None
     # stage_connector_refs maps stage_id (str key from JSON) → opaque connector metadata
     # returned by connector.put(). This metadata is an address ticket passed to
@@ -112,6 +118,11 @@ class StageRequest(BaseModel):
     # StageOutput.stage_connector_refs). Callers normalize string keys to int via _int_keyed().
     stage_connector_refs: dict[str, Any] | None = None
     sampling_params_list: dict | None = None
+    # Set by the router on the final stage's request only: OutputFormatter
+    # kwargs (fps/response_format/output_format) + serialized request_type,
+    # so the final stage worker can encode + upload media itself instead of
+    # shipping raw frames to the router.
+    format_context: dict | None = None
 
 
 def _int_keyed(d: dict | None) -> dict[int, Any]:

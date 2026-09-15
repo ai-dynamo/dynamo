@@ -7,14 +7,20 @@ No GPU, no vllm_omni — uses mock StageEngine matching AsyncOmni.generate() sig
 """
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import yaml
 
 try:
+    import numpy as np
+    import PIL.Image
+
+    from dynamo.common.storage import get_fs
+    from dynamo.vllm.omni.output_formatter import OutputFormatter
     from dynamo.vllm.omni.stage_worker import (
         OmniStageWorker,
+        _build_media_formatter,
         _create_engine,
         _ensure_stage_connectors,
         _normalize_single_stage_runtime_devices,
@@ -566,6 +572,37 @@ def test_stage_config_to_dict_preserves_runtime_devices():
     assert result["runtime"]["devices"] == "1"
 
 
+def test_media_formatter_only_initializes_for_final_stage():
+    config = SimpleNamespace(
+        model="model",
+        served_model_name="served-model",
+        media_output_fs_url="s3://bucket/prefix",
+        media_output_http_url="https://media.example",
+        default_video_fps=24,
+    )
+
+    with (
+        patch("dynamo.vllm.omni.stage_worker.get_fs") as get_fs,
+        patch("dynamo.vllm.omni.stage_worker.OutputFormatter") as formatter,
+    ):
+        assert _build_media_formatter(config, stage_id=1, stage_count=3) is None
+        get_fs.assert_not_called()
+        formatter.assert_not_called()
+
+        media_fs = object()
+        get_fs.return_value = media_fs
+        result = _build_media_formatter(config, stage_id=2, stage_count=3)
+
+    get_fs.assert_called_once_with("s3://bucket/prefix")
+    formatter.assert_called_once_with(
+        model_name="served-model",
+        media_fs=media_fs,
+        media_http_url="https://media.example",
+        default_fps=24,
+    )
+    assert result is formatter.return_value
+
+
 def test_single_stage_runtime_devices_normalized_when_visibility_is_narrowed(
     monkeypatch,
 ):
@@ -867,3 +904,306 @@ def test_create_engine_resolves_pipeline_with_the_configured_deploy_config():
         trust_remote_code=False,
         deploy_config_path="/deploy/dit_only.yaml",
     )
+
+
+# ── #13805: final-stage worker persists media itself ─────────────────
+
+
+def _make_media_formatter(tmp_path):
+    return OutputFormatter(
+        model_name="test-model",
+        media_fs=get_fs(f"file://{tmp_path}"),
+        default_fps=12,
+    )
+
+
+def _video_frames(n=4, size=8):
+    return [np.full((size, size, 3), (i * 40) % 256, dtype=np.uint8) for i in range(n)]
+
+
+@pytest.mark.asyncio
+async def test_final_video_stage_persists_on_worker(tmp_path):
+    """Final video stage encodes + uploads on the worker; yields formatted_response, not frames."""
+    in_connector = MagicMock()
+    in_connector.get.return_value = {"engine_inputs": {"latents": [0.1]}}
+    last_result = SimpleNamespace(final_output_type="video", images=_video_frames())
+    engine = _MockEngine(output=last_result)
+
+    worker = OmniStageWorker(
+        engine=engine,
+        stage_config=_make_stage_config(final_output=True, final_output_type="video"),
+        connectors={("0", "1"): in_connector},
+        stage_id=1,
+        media_formatter=_make_media_formatter(tmp_path),
+    )
+    request = {
+        "request_id": "req-video",
+        "original_prompt": {"prompt": "a cat"},
+        "stage_connector_refs": {"0": {"name": "ref0"}},
+        "format_context": {
+            "request_type": "video_generation",
+            "response_format": "url",
+            "fps": 12,
+        },
+    }
+
+    with patch(
+        "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
+        return_value=b"fake-mp4",
+    ):
+        chunks = [chunk async for chunk in worker.generate(request, _MockContext())]
+
+    assert len(chunks) == 1
+    assert "shm_meta" not in chunks[0]
+    assert "stage_connector_refs" not in chunks[0]
+    formatted = chunks[0]["formatted_response"]
+    assert formatted["status"] == "completed"
+    url = formatted["data"][0]["url"]
+    assert url.endswith("videos/req-video.mp4")
+    stored = tmp_path / "videos" / "req-video.mp4"
+    assert stored.read_bytes() == b"fake-mp4"
+
+
+@pytest.mark.asyncio
+async def test_final_media_stage_skips_router_connector_when_persisting(tmp_path):
+    """With worker persist active, no frames are put on the stage→router connector edge."""
+    in_connector = MagicMock()
+    in_connector.get.return_value = {"engine_inputs": {"latents": [0.1]}}
+    router_connector = MagicMock()
+    router_connector.put.return_value = (True, 16, {"rdma": "meta"})
+    last_result = SimpleNamespace(final_output_type="videos", images=_video_frames())
+    engine = _MockEngine(output=last_result)
+
+    worker = OmniStageWorker(
+        engine=engine,
+        stage_config=_make_stage_config(final_output=True, final_output_type="videos"),
+        connectors={
+            ("0", "1"): in_connector,
+            ("1", "router"): router_connector,
+        },
+        stage_id=1,
+        media_formatter=_make_media_formatter(tmp_path),
+    )
+    request = {
+        "request_id": "req-video-nc",
+        "original_prompt": {"prompt": "a cat"},
+        "stage_connector_refs": {"0": {"name": "ref0"}},
+        "format_context": {"request_type": "video_generation"},
+    }
+
+    with patch(
+        "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
+        return_value=b"fake-mp4",
+    ):
+        chunks = [chunk async for chunk in worker.generate(request, _MockContext())]
+
+    router_connector.put.assert_not_called()
+    assert chunks[0].get("formatted_response", {}).get("status") == "completed"
+    assert "stage_connector_refs" not in chunks[0]
+
+
+@pytest.mark.asyncio
+async def test_routed_media_stage_without_format_context_falls_back_to_shm():
+    """Old routers omit format_context, so workers keep the legacy path."""
+    in_connector = MagicMock()
+    in_connector.get.return_value = {"engine_inputs": {"latents": [0.1]}}
+    last_result = SimpleNamespace(final_output_type="image", images=_video_frames())
+    media_formatter = MagicMock()
+    worker = OmniStageWorker(
+        engine=_MockEngine(output=last_result),
+        stage_config=_make_stage_config(final_output=True, final_output_type="image"),
+        connectors={("0", "1"): in_connector},
+        stage_id=1,
+        media_formatter=media_formatter,
+    )
+
+    request = {
+        "request_id": "req-old-router",
+        "original_prompt": {"prompt": "a cat"},
+        "stage_connector_refs": {"0": {"name": "ref0"}},
+    }
+    with (
+        patch("dynamo.vllm.omni.stage_worker.serialize_obj", return_value=b"shm-bytes"),
+        patch(
+            "dynamo.vllm.omni.stage_worker.shm_write_bytes",
+            return_value={"name": "fake-shm"},
+        ),
+    ):
+        chunks = [chunk async for chunk in worker.generate(request, _MockContext())]
+
+    media_formatter.format.assert_not_called()
+    assert chunks == [{"shm_meta": {"name": "fake-shm"}, "finished": True}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [OSError, ValueError, RuntimeError])
+async def test_media_persist_error_yields_error_chunk(error_type):
+    """Formatter failures remain visible instead of sending raw media onward."""
+    in_connector = MagicMock()
+    in_connector.get.return_value = {"engine_inputs": {"latents": [0.1]}}
+    media_formatter = MagicMock()
+    media_formatter.format.side_effect = error_type("formatter exploded")
+    worker = OmniStageWorker(
+        engine=_MockEngine(
+            output=SimpleNamespace(final_output_type="image", images=_video_frames())
+        ),
+        stage_config=_make_stage_config(final_output=True, final_output_type="image"),
+        connectors={("0", "1"): in_connector},
+        stage_id=1,
+        media_formatter=media_formatter,
+    )
+
+    request = {
+        "request_id": "req-media-error",
+        "original_prompt": {"prompt": "a cat"},
+        "stage_connector_refs": {"0": {"name": "ref0"}},
+        "format_context": {"request_type": "video_generation"},
+    }
+    if error_type is RuntimeError:
+        with pytest.raises(RuntimeError, match="formatter exploded"):
+            _ = [chunk async for chunk in worker.generate(request, _MockContext())]
+        return
+
+    chunks = [chunk async for chunk in worker.generate(request, _MockContext())]
+
+    assert chunks == [
+        {"error": "media persist failed: formatter exploded", "finished": True}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_media_persist_none_yields_error_without_raw_transfer():
+    """A persist attempt that returns no response must not ship raw media."""
+    in_connector = MagicMock()
+    in_connector.get.return_value = {"engine_inputs": {"latents": [0.1]}}
+    router_connector = MagicMock()
+    media_formatter = MagicMock()
+    media_formatter.format = AsyncMock(return_value=None)
+    worker = OmniStageWorker(
+        engine=_MockEngine(
+            output=SimpleNamespace(final_output_type="video", images=_video_frames())
+        ),
+        stage_config=_make_stage_config(final_output=True, final_output_type="video"),
+        connectors={("0", "1"): in_connector, ("1", "router"): router_connector},
+        stage_id=1,
+        media_formatter=media_formatter,
+    )
+
+    request = {
+        "request_id": "req-media-none",
+        "original_prompt": {"prompt": "a cat"},
+        "stage_connector_refs": {"0": {"name": "ref0"}},
+        "format_context": {"request_type": "video_generation"},
+    }
+    with (
+        patch("dynamo.vllm.omni.stage_worker.serialize_obj") as serialize,
+        patch("dynamo.vllm.omni.stage_worker.shm_write_bytes") as shm_write,
+    ):
+        chunks = [chunk async for chunk in worker.generate(request, _MockContext())]
+
+    assert chunks == [
+        {
+            "error": "media persist returned no output for final_output_type='video'",
+            "finished": True,
+        }
+    ]
+    router_connector.put.assert_not_called()
+    serialize.assert_not_called()
+    shm_write.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_final_image_stage_persists_on_worker_direct_request(tmp_path):
+    """Direct frontend→stage image request: context resolved from the raw request; PNG uploaded."""
+    last_result = SimpleNamespace(
+        final_output_type="image",
+        images=[PIL.Image.new("RGB", (4, 4), color=(255, 0, 0))],
+    )
+    engine = _MockEngine(output=last_result)
+
+    worker = OmniStageWorker(
+        engine=engine,
+        stage_config=_make_stage_config(final_output=True, final_output_type="image"),
+        connectors={},
+        stage_id=0,
+        output_modalities=["image"],
+        media_formatter=_make_media_formatter(tmp_path),
+    )
+    request = {"prompt": "a red apple", "response_format": "url"}
+
+    chunks = [chunk async for chunk in worker.generate(request, _MockContext())]
+
+    assert len(chunks) == 1
+    assert "shm_meta" not in chunks[0]
+    formatted = chunks[0]["formatted_response"]
+    url = formatted["data"][0]["url"]
+    assert url.endswith(".png")
+    stored_dir = tmp_path / "images" / "test-req-id"
+    stored = next(stored_dir.iterdir())
+    assert stored.read_bytes().startswith(b"\x89PNG")
+
+
+@pytest.mark.asyncio
+async def test_text_stage_with_media_formatter_keeps_shm_path():
+    """Text outputs keep the legacy router path even when a media formatter is configured."""
+    last_result = SimpleNamespace(
+        final_output_type="text",
+        request_output=SimpleNamespace(
+            outputs=[SimpleNamespace(text="hi", token_ids=[1], finish_reason=None)]
+        ),
+    )
+    engine = _MockEngine(output=last_result)
+
+    worker = OmniStageWorker(
+        engine=engine,
+        stage_config=_make_stage_config(final_output=True, final_output_type="text"),
+        connectors={},
+        stage_id=0,
+        media_formatter=MagicMock(),
+    )
+
+    with (
+        patch("dynamo.vllm.omni.stage_worker.serialize_obj", return_value=b"shm-bytes"),
+        patch(
+            "dynamo.vllm.omni.stage_worker.shm_write_bytes",
+            return_value={"name": "fake-shm"},
+        ),
+    ):
+        chunks = [
+            chunk
+            async for chunk in worker.generate({"prompt": "hello"}, _MockContext())
+        ]
+
+    assert len(chunks) == 1
+    assert chunks[0]["shm_meta"] == {"name": "fake-shm"}
+    assert "formatted_response" not in chunks[0]
+
+
+@pytest.mark.asyncio
+async def test_media_stage_without_formatter_falls_back_to_shm():
+    """No media formatter configured (opt-out): media output keeps the SHM path."""
+    last_result = SimpleNamespace(final_output_type="image", images=_video_frames())
+    engine = _MockEngine(output=last_result)
+
+    worker = OmniStageWorker(
+        engine=engine,
+        stage_config=_make_stage_config(final_output=True, final_output_type="image"),
+        connectors={},
+        stage_id=0,
+    )
+
+    with (
+        patch("dynamo.vllm.omni.stage_worker.serialize_obj", return_value=b"shm-bytes"),
+        patch(
+            "dynamo.vllm.omni.stage_worker.shm_write_bytes",
+            return_value={"name": "fake-shm"},
+        ),
+    ):
+        chunks = [
+            chunk
+            async for chunk in worker.generate({"prompt": "hello"}, _MockContext())
+        ]
+
+    assert len(chunks) == 1
+    assert chunks[0]["shm_meta"] == {"name": "fake-shm"}
+    assert "formatted_response" not in chunks[0]

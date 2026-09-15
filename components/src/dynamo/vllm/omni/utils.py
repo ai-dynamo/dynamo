@@ -40,6 +40,40 @@ def _coerce_dimension(value: Any, name: str) -> int:
     return dim
 
 
+def build_media_format_context(
+    request: dict, request_type: RequestType
+) -> dict[str, Any]:
+    """Collect OutputFormatter kwargs (fps/speed/response_format/output_format) from a request.
+
+    Shared by the stage router (forwards the context to the final stage so it
+    can persist media itself) and stage workers (direct frontend→stage path
+    with no router in between).
+    """
+    nvext = request.get("nvext") or {}
+    fmt_ctx: dict[str, Any] = {}
+    if nvext.get("fps") is not None:
+        fmt_ctx["fps"] = nvext["fps"]
+    if nvext.get("speed") is not None:
+        fmt_ctx["speed"] = nvext["speed"]
+    # If the request type is AUDIO_GENERATION, we need to normalize the
+    # data_source and response_format to align with other modalities.
+    response_format = (
+        request.get("data_source")
+        if request_type == RequestType.AUDIO_GENERATION
+        else request.get("response_format")
+    )
+    output_format = (
+        request.get("response_format")
+        if request_type == RequestType.AUDIO_GENERATION
+        else request.get("output_format")
+    )
+    if response_format is not None:
+        fmt_ctx["response_format"] = response_format
+    if output_format is not None:
+        fmt_ctx["output_format"] = output_format
+    return fmt_ctx
+
+
 def streaming_sampling_params(
     engine_client: Any, sampling_params_list: list[Any] | None = None
 ) -> list[Any]:

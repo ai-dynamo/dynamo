@@ -34,6 +34,7 @@ from dynamo.vllm.omni.stage_worker import (
 )
 from dynamo.vllm.omni.types import StageOutput
 from dynamo.vllm.omni.utils import (
+    build_media_format_context,
     ensure_awaited,
     is_empty_payload,
     shm_deserialize,
@@ -114,8 +115,10 @@ class OmniStageRouter:
     ) -> AsyncGenerator[dict, None]:
         request_id = str(uuid.uuid4())
         _, request_type = parse_request_type(request, self.config.output_modalities)
+        fmt_ctx = build_media_format_context(request, request_type)
 
         stage_outputs: List[StageOutput] = []
+        final_stage_idx = len(self.stage_configs) - 1
         for stage_idx, stage_cfg in enumerate(self.stage_configs):
             model_stage = getattr(
                 stage_cfg.engine_args, "model_stage", f"stage{stage_idx}"
@@ -133,6 +136,16 @@ class OmniStageRouter:
                 stage_request = {"request_id": request_id, **request}
             else:
                 stage_request = stage_outputs[-1].to_next_stage_request(request_id)
+            if stage_idx == final_stage_idx:
+                # Formatting context enables persistence on the final worker.
+                stage_request["format_context"] = {
+                    **fmt_ctx,
+                    "request_type": (
+                        request_type.value
+                        if isinstance(request_type, RequestType)
+                        else request_type
+                    ),
+                }
 
             raw_stage_output = {}
             logger.info(
@@ -163,7 +176,11 @@ class OmniStageRouter:
             and str(final_stage_id) in final.stage_connector_refs
             and connectors.get(_connector_key(final_stage_id, "router")) is not None
         )
-        if not has_connector_output and not final.shm_meta:
+        if (
+            final.formatted_response is None
+            and not has_connector_output
+            and not final.shm_meta
+        ):
             error_msg = (
                 "No output from final stage (no connector ref and no SHM)"
                 if connectors
@@ -171,31 +188,6 @@ class OmniStageRouter:
             )
             yield {"error": error_msg, "finished": True}
             return
-
-        # Build formatting context from the original request
-        nvext = request.get("nvext") or {}
-        fmt_ctx: Dict[str, Any] = {}
-        if nvext.get("fps") is not None:
-            fmt_ctx["fps"] = nvext["fps"]
-        if nvext.get("speed") is not None:
-            fmt_ctx["speed"] = nvext["speed"]
-        # If the request type is AUDIO_GENERATION,
-        # we need to normalize the data_source and response_format to
-        # align with other modalities.
-        response_format = (
-            request.get("data_source")
-            if request_type == RequestType.AUDIO_GENERATION
-            else request.get("response_format")
-        )
-        output_format = (
-            request.get("response_format")
-            if request_type == RequestType.AUDIO_GENERATION
-            else request.get("output_format")
-        )
-        if response_format is not None:
-            fmt_ctx["response_format"] = response_format
-        if output_format is not None:
-            fmt_ctx["output_format"] = output_format
 
         async for chunk in self._format_output(
             final,
@@ -215,6 +207,11 @@ class OmniStageRouter:
         final_stage_id: int = 0,
     ) -> AsyncGenerator[dict, None]:
         """Read OmniRequestOutput from connector (multi-node) or SHM (single-node) and format."""
+        formatted = stage_output.formatted_response
+        if formatted is not None:
+            yield formatted
+            return
+
         # --- Connector path (multi-node: router and final stage on different machines) ---
         router_connector = getattr(self, "connectors", {}).get(
             _connector_key(final_stage_id, "router")
