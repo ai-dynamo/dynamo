@@ -464,22 +464,28 @@ impl SelectionCore {
             }
             Err(error) => return Err(error.into()),
         };
-        let endpoint = self
-            .catalog
-            .schedulable_endpoint(response.best_worker.worker_id, &key);
-        if endpoint.is_none() && !matches!(admission, SelectionAdmission::Lease { .. }) {
-            return Err(SelectionError::Internal(format!(
-                "selected worker {} is no longer schedulable",
-                response.best_worker.worker_id
-            )));
-        }
+        let (endpoint, total_kv_blocks) = if matches!(admission, SelectionAdmission::Lease { .. }) {
+            // The embedding host dispatches by worker id and discards wire metadata.
+            (None, None)
+        } else {
+            let endpoint = self
+                .catalog
+                .schedulable_endpoint(response.best_worker.worker_id, &key)
+                .ok_or_else(|| {
+                    SelectionError::Internal(format!(
+                        "selected worker {} is no longer schedulable",
+                        response.best_worker.worker_id
+                    ))
+                })?;
+            let total_kv_blocks = advisory_load
+                .and_then(|load| load.total_kv_blocks.map(|blocks| blocks as u64))
+                .or_else(|| {
+                    self.catalog
+                        .total_kv_blocks(response.best_worker.worker_id, &key)
+                });
+            (Some(endpoint), total_kv_blocks)
+        };
         let effective_prefill = effective_prefill_tokens(isl_tokens, response.cached_tokens);
-        let total_kv_blocks = advisory_load
-            .and_then(|load| load.total_kv_blocks.map(|blocks| blocks as u64))
-            .or_else(|| {
-                self.catalog
-                    .total_kv_blocks(response.best_worker.worker_id, &key)
-            });
         let kv_hint = if retain_kv_transfer_chain && response.kv_transfer_candidates.is_some() {
             transfer_hint_for_selection(
                 &entry.workers_tx.borrow(),

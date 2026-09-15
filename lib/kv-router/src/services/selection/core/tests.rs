@@ -1253,8 +1253,7 @@ async fn booking_is_freed_when_selected_worker_drained_while_queued() {
 
 /// The embedded host dispatches by worker id, so a worker that drains
 /// while the request queues still comes back selected: the transport
-/// reports the departure and migration takes over. The endpoint is the
-/// only thing missing.
+/// reports the departure and migration takes over.
 #[tokio::test]
 async fn lease_admission_keeps_a_selection_whose_worker_drained_while_queued() {
     let core = saturated_core();
@@ -1302,7 +1301,12 @@ async fn lease_admission_keeps_a_selection_whose_worker_drained_while_queued() {
 #[tokio::test]
 async fn lease_admission_installs_no_index_row_and_records_nothing() {
     let core = local_core(test_config(false));
-    core.upsert_worker(worker(1)).await.expect("worker upsert");
+    core.upsert_worker(WorkerRequest {
+        total_kv_blocks: Some(2048),
+        ..worker(1)
+    })
+    .await
+    .expect("worker upsert");
     let key = default_key();
     let entry = core.entry(&key).expect("entry");
 
@@ -1324,6 +1328,8 @@ async fn lease_admission_installs_no_index_row_and_records_nothing() {
     );
     assert!(selected.sequence_hashes.is_none());
     assert!(selected.routing_hashes.is_none());
+    assert!(selected.endpoint.is_none());
+    assert!(selected.total_kv_blocks.is_none());
     // Nothing was recorded for the leased prompt: once the indexer has
     // applied everything enqueued so far, a query restricted to the booked
     // worker sees no cached blocks.

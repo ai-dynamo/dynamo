@@ -127,11 +127,10 @@ pub struct Selected {
     pub key: RoutingPartitionId,
     pub response: SchedulingResponse,
     pub advisory_load: Option<AdvisoryWorkerLoad>,
-    /// The chosen worker's KV capacity as known when it was selected.
+    /// The chosen worker's KV capacity for wire responses; omitted for `Lease`.
     pub total_kv_blocks: Option<u64>,
-    /// `None` only for `Lease` admission when the worker left the catalog
-    /// after it was booked: the host dispatches by worker id and lets the
-    /// transport report the departure, which is what drives migration.
+    /// The endpoint for wire responses; omitted for `Lease`. The embedding
+    /// host dispatches by worker id and lets transport report departures.
     pub endpoint: Option<String>,
     pub block_size: u32,
     pub isl_tokens: usize,
