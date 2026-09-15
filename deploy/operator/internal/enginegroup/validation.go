@@ -513,6 +513,14 @@ func validateTransitionCapacityEvidence(status GroupStatus) error {
 			replica.Bootstrap.BaseTopologyGeneration != transition.Spec.BaseTopologyGeneration {
 			return fmt.Errorf("capacity bootstrap for replica %q refers to another base topology", replica.ReplicaID)
 		}
+		if status.Membership.Desired != nil &&
+			membershipTargetMatchesTransition(*status.Membership.Desired, *transition) &&
+			replica.Bootstrap != nil {
+			return fmt.Errorf(
+				"capacity bootstrap for replica %q remains after membership target creation",
+				replica.ReplicaID,
+			)
+		}
 	}
 	for _, fence := range target.ReleaseFences {
 		if _, found := status.Topologies.Snapshot(fence.AuthorizingTopologyGeneration); !found {

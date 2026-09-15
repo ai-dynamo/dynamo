@@ -27,9 +27,15 @@ import (
 	"time"
 )
 
+const (
+	testReplacementRuntime = RuntimeIncarnationID("runtime-1-v2")
+	testReplacementPodUID  = PodUID("pod-uid-1-v2")
+)
+
 type testCapacityAdapter struct {
 	observation CapacityObservation
 	planned     map[ReplicaID]ReplicaIncarnation
+	firstTarget *CapacityTarget
 	lastTarget  *CapacityTarget
 	applyCalls  int
 	available   bool
@@ -98,6 +104,9 @@ func (a *testCapacityAdapter) Apply(
 	a.observation.AppliedRevision = target.ControlRevision
 	a.observation.Allocations = allocations
 	a.observation.ReleaseFences = convergeReleaseFences(a.observation.ReleaseFences, target)
+	if a.firstTarget == nil {
+		a.firstTarget = cloneCapacityTarget(&target)
+	}
 	a.lastTarget = cloneCapacityTarget(&target)
 	return ApplyResult{}, nil
 }
@@ -127,6 +136,7 @@ type testTrafficAdapter struct {
 	applyCalls      int
 	autoDrain       bool
 	confirmInactive bool
+	rejectNext      *Failure
 	events          *[]string
 }
 
@@ -148,6 +158,11 @@ func (a *testTrafficAdapter) Apply(
 		if a.lastTarget == nil || !sameTrafficTargetIntent(*a.lastTarget, target) {
 			return rejected("ConflictingTrafficRevision", "traffic revision payload changed"), nil
 		}
+	}
+	if target.ControlRevision > a.observation.AppliedRevision && a.rejectNext != nil {
+		rejection := cloneFailure(a.rejectNext)
+		a.rejectNext = nil
+		return ApplyResult{Rejection: rejection}, nil
 	}
 
 	// Applying an absolute traffic set withdraws everything else without implicitly admitting engine members.

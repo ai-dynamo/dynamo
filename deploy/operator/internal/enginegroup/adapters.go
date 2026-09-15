@@ -27,7 +27,8 @@ type CapacityReplicaTarget struct {
 	Bootstrap   *CapacityBootstrap
 }
 
-// CapacityBootstrap is the profile-resolved process intent for one new orchestrator-owned allocation.
+// CapacityBootstrap is the profile-resolved process intent for one new orchestrator-owned allocation. After the
+// allocation becomes available, the coordinator replaces this intent with its exact Incarnation before membership.
 type CapacityBootstrap struct {
 	Mode                   BootstrapMode
 	BaseTopologyGeneration int64
@@ -186,7 +187,8 @@ type CapacityAdapter interface {
 	// Revisions are group-global and monotonic. Repeating an equal revision and payload is idempotent; an equal revision
 	// must repair observable drift, while an equal revision with another payload or a lower revision is definitively
 	// rejected. Deletion uses Pod UID preconditions, and an applied fence remains observable until a later target
-	// explicitly reopens the stable replica slot.
+	// explicitly reopens the stable replica slot. An exact Incarnation is an identity assertion, not permission to
+	// recreate a missing process or Pod UID.
 	Apply(ctx context.Context, groupID GroupID, target CapacityTarget) (ApplyResult, error)
 }
 

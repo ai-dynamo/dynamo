@@ -19,6 +19,7 @@ package enginegroup
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -53,16 +54,23 @@ func TestCoordinatorGrowthOrdersCapacityCommitVerificationAndAdmission(t *testin
 	if !sameMemberships(scenario.traffic.observation.Admitted, engineTopology(1, 2).Replicas) {
 		t.Fatalf("joining replica became routable before commit: %#v", scenario.traffic.observation.Admitted)
 	}
+	bootstrapTarget := scenario.capacity.firstTarget
 	capacityTarget := scenario.capacity.lastTarget
-	if capacityTarget == nil {
-		t.Fatal("joining capacity target was not retained")
+	if bootstrapTarget == nil || capacityTarget == nil {
+		t.Fatal("joining capacity targets were not retained")
 	}
-	joiningCapacity := capacityTarget.Replicas[len(capacityTarget.Replicas)-1]
+	joiningCapacity := bootstrapTarget.Replicas[len(bootstrapTarget.Replicas)-1]
 	if joiningCapacity.Bootstrap == nil ||
 		joiningCapacity.Bootstrap.Mode != BootstrapModeJoin ||
 		joiningCapacity.Bootstrap.BaseTopologyGeneration != 1 ||
 		!slices.Equal(joiningCapacity.Bootstrap.NativeMembers, joining.NativeMembers) {
 		t.Fatalf("joining bootstrap lacks resolved topology and native identity: %#v", joiningCapacity.Bootstrap)
+	}
+	pinnedCapacity := capacityTarget.Replicas[len(capacityTarget.Replicas)-1]
+	if pinnedCapacity.Bootstrap != nil || pinnedCapacity.Incarnation == nil ||
+		!sameIncarnation(*pinnedCapacity.Incarnation, joiningIncarnation) ||
+		capacityTarget.ControlRevision <= bootstrapTarget.ControlRevision {
+		t.Fatalf("joining capacity was not pinned before membership: %#v", pinnedCapacity)
 	}
 
 	t.Log("Commit the exact topology produced by the engine")
@@ -214,6 +222,85 @@ func TestCoordinatorReassertsCompletedTargetsAfterObservedDrift(t *testing.T) {
 	scenario.mustReconcile("observe repaired terminal targets")
 	if scenario.status.Transition.Outcome != TransitionOutcomeCompleted {
 		t.Fatalf("steady-state repair changed the completed outcome: %#v", scenario.status.Transition)
+	}
+}
+
+func TestCoordinatorRequiresRecoveryForCommittedCapacityIncarnationDrift(t *testing.T) {
+	testCases := []struct {
+		name     string
+		mutation string
+	}{
+		{name: "replacement incarnation", mutation: "replace"},
+		{name: "missing incarnation", mutation: "remove"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			base := engineTopology(1, 1)
+			scenario := newCoordinatorScenario(t, base)
+			joining := engineReplica(1)
+			joiningIncarnation := replicaIncarnation(1)
+			scenario.capacity.planned[joining.ReplicaID] = joiningIncarnation
+			plan := growPlan("capacity-drift", ReplicaTarget{
+				ReplicaID: joining.ReplicaID,
+				SlotID:    joiningIncarnation.SlotID,
+				Bootstrap: BootstrapModeJoin,
+			}, VerificationRequirementNone)
+			scenario.desired = &plan
+
+			t.Log("Commit growth with capacity pinned to the exact joining runtime and Pod UID")
+			scenario.runUntil("apply growth", func(s *coordinatorScenario) bool {
+				return s.membership.applyCalls == 1
+			})
+			committed := MembershipTopology{
+				Generation: 2,
+				Replicas: append(
+					cloneReplicaMemberships(base.Replicas),
+					cloneReplicaMembership(joining),
+				),
+			}
+			scenario.membership.commit(scenario.status.Membership.Desired.TransitionID, committed)
+			scenario.runUntil("complete growth", func(s *coordinatorScenario) bool {
+				return s.status.Transition.Outcome == TransitionOutcomeCompleted
+			})
+
+			t.Log("Change committed physical capacity without an engine membership recovery transition")
+			switch testCase.mutation {
+			case "replace":
+				allocation, found := allocationByID(scenario.capacity.observation, joining.ReplicaID)
+				if !found {
+					t.Fatal("joining allocation is absent before replacement")
+				}
+				allocation.Incarnation.RuntimeIncarnation = testReplacementRuntime
+				allocation.Incarnation.CapacityRefs[0].UID = testReplacementPodUID
+				for index := range scenario.capacity.observation.Allocations {
+					if scenario.capacity.observation.Allocations[index].Incarnation.ReplicaID == joining.ReplicaID {
+						scenario.capacity.observation.Allocations[index] = allocation
+					}
+				}
+			case "remove":
+				allocations := scenario.capacity.observation.Allocations[:0]
+				for _, allocation := range scenario.capacity.observation.Allocations {
+					if allocation.Incarnation.ReplicaID != joining.ReplicaID {
+						allocations = append(allocations, allocation)
+					}
+				}
+				scenario.capacity.observation.Allocations = allocations
+			default:
+				t.Fatalf("unknown test mutation %q", testCase.mutation)
+			}
+
+			capacityCalls := scenario.capacity.applyCalls
+			err := scenario.reconcile("detect committed capacity drift")
+			if !errors.Is(err, ErrRecoveryRequired) {
+				t.Fatalf("expected recovery-required error, got %v", err)
+			}
+			if scenario.capacity.applyCalls != capacityCalls {
+				t.Fatalf("capacity drift replayed bootstrap or exact creation: %d applications", scenario.capacity.applyCalls)
+			}
+			if scenario.status.Transition.Outcome != TransitionOutcomeCompleted {
+				t.Fatalf("capacity drift rewrote the completed transition: %#v", scenario.status.Transition)
+			}
+		})
 	}
 }
 
@@ -683,6 +770,65 @@ func TestCoordinatorServingFailureDoesNotRewriteMembershipCommit(t *testing.T) {
 	if len(scenario.traffic.observation.Admitted) != 0 {
 		t.Fatalf("failed topology became routable: %#v", scenario.traffic.observation.Admitted)
 	}
+
+	t.Log("Reassert the accepted fail-closed traffic target after routing drifts while blocked")
+	trafficCalls := scenario.traffic.applyCalls
+	scenario.traffic.observation.Admitted = cloneReplicaMemberships(committed.Replicas)
+	scenario.mustReconcile("remove routing drift after verification failure")
+	if scenario.traffic.applyCalls != trafficCalls+1 || len(scenario.traffic.observation.Admitted) != 0 {
+		t.Fatalf(
+			"blocked transition did not preserve fail-closed traffic: calls=%d observation=%#v",
+			scenario.traffic.applyCalls,
+			scenario.traffic.observation,
+		)
+	}
+}
+
+func TestCoordinatorDoesNotReplayRejectedTrafficTargetWhileBlocked(t *testing.T) {
+	base := engineTopology(1, 1)
+	scenario := newCoordinatorScenario(t, base)
+	joining := engineReplica(1)
+	joiningIncarnation := replicaIncarnation(1)
+	scenario.capacity.planned[joining.ReplicaID] = joiningIncarnation
+	plan := growPlan("rejected-admission", ReplicaTarget{
+		ReplicaID: joining.ReplicaID,
+		SlotID:    joiningIncarnation.SlotID,
+		Bootstrap: BootstrapModeJoin,
+	}, VerificationRequirementNone)
+	scenario.desired = &plan
+	scenario.runUntil("apply growth", func(s *coordinatorScenario) bool {
+		return s.membership.applyCalls == 1
+	})
+	committed := MembershipTopology{
+		Generation: 2,
+		Replicas: append(
+			cloneReplicaMemberships(base.Replicas),
+			cloneReplicaMembership(joining),
+		),
+	}
+	scenario.membership.commit(scenario.status.Membership.Desired.TransitionID, committed)
+	scenario.traffic.rejectNext = &Failure{
+		Classification: FailureClassificationTerminal,
+		Reason:         "AdmissionRejected",
+		Message:        "runtime rejected the committed traffic target",
+	}
+
+	t.Log("Block after the new committed-traffic revision is definitively rejected")
+	scenario.runUntil("reject committed traffic", func(s *coordinatorScenario) bool {
+		return s.status.Transition.Outcome == TransitionOutcomeBlocked
+	})
+	trafficCalls := scenario.traffic.applyCalls
+	if scenario.status.Traffic.Desired.ControlRevision <= scenario.traffic.observation.AppliedRevision {
+		t.Fatalf("rejected traffic revision appears accepted: %#v", scenario.status.Traffic)
+	}
+
+	t.Log("Keep the rejected target durable for diagnosis without replaying it")
+	for iteration := 1; iteration <= 3; iteration++ {
+		scenario.mustReconcile("observe blocked rejected target")
+	}
+	if scenario.traffic.applyCalls != trafficCalls {
+		t.Fatalf("definitively rejected traffic target was replayed: %d applications", scenario.traffic.applyCalls)
+	}
 }
 
 func TestCoordinatorFailsClosedOnInvalidCommittedMembership(t *testing.T) {
@@ -805,8 +951,8 @@ func TestCoordinatorRejectsStaleExactReleaseFence(t *testing.T) {
 
 	t.Log("Replace the selected Pod after authorization but before the workload manager applies it")
 	replacement := replicaIncarnation(1)
-	replacement.RuntimeIncarnation = "runtime-1-v2"
-	replacement.CapacityRefs[0].UID = "pod-uid-1-v2"
+	replacement.RuntimeIncarnation = testReplacementRuntime
+	replacement.CapacityRefs[0].UID = testReplacementPodUID
 	for index := range scenario.capacity.observation.Allocations {
 		if scenario.capacity.observation.Allocations[index].Incarnation.ReplicaID == retiringReplicaID {
 			scenario.capacity.observation.Allocations[index].Incarnation = replacement

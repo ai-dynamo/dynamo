@@ -25,6 +25,9 @@ import (
 	"strings"
 )
 
+// ErrRecoveryRequired means committed membership no longer has its exact physical or runtime incarnation.
+var ErrRecoveryRequired = errors.New("engine group capacity recovery required")
+
 func (c *Coordinator) reconcilePlanPreflight(
 	ctx context.Context,
 	groupID GroupID,
@@ -222,31 +225,42 @@ func (c *Coordinator) reconcileRollbackTraffic(
 	return true, false, nil
 }
 
-// reconcileTerminalTargets keeps the last accepted physical and traffic levels converged after the transition that
-// produced them has completed or rolled back. Membership incarnation drift remains a separate recovery event and is
-// rejected by the durable registry and topology invariants rather than being silently adopted here.
-func (c *Coordinator) reconcileTerminalTargets(
+// reconcileMaintainedTargets keeps accepted physical and traffic levels converged after progress stops. A blocked
+// transition reasserts only targets whose observed revision proves acceptance, never a definitively rejected target.
+func (c *Coordinator) reconcileMaintainedTargets(
 	ctx context.Context,
 	groupID GroupID,
 	status GroupStatus,
 ) (ReconcileResult, error) {
-	current, found := status.Topologies.Current()
-	if !found || !sameTopology(current, status.Membership.Observed.CommittedTopology) {
-		return ReconcileResult{Status: status}, errors.New("terminal transition does not match authoritative membership")
+	if status.Transition.Outcome != TransitionOutcomeBlocked {
+		current, found := status.Topologies.Current()
+		if !found || !sameTopology(current, status.Membership.Observed.CommittedTopology) {
+			return ReconcileResult{Status: status}, errors.New(
+				"terminal transition does not match authoritative membership",
+			)
+		}
 	}
 
 	if status.Traffic.Desired != nil &&
+		acceptedTargetMayBeReasserted(
+			status.Transition.Outcome,
+			status.Traffic.Desired.ControlRevision,
+			status.Traffic.Observed.AppliedRevision,
+		) &&
 		!trafficTargetConverged(*status.Traffic.Desired, status.Traffic.Observed) {
 		result, err := c.traffic.Apply(ctx, groupID, *status.Traffic.Desired)
 		if err != nil {
-			return ReconcileResult{Status: status, Requeue: true}, fmt.Errorf("reassert terminal traffic target: %w", err)
+			return ReconcileResult{Status: status, Requeue: true}, fmt.Errorf(
+				"reassert maintained traffic target: %w",
+				err,
+			)
 		}
 		if result.Rejection != nil {
 			if err := validateRejection(result.Rejection); err != nil {
-				return ReconcileResult{Status: status}, fmt.Errorf("invalid terminal traffic rejection: %w", err)
+				return ReconcileResult{Status: status}, fmt.Errorf("invalid maintained traffic rejection: %w", err)
 			}
 			return ReconcileResult{Status: status}, fmt.Errorf(
-				"terminal traffic target was rejected: %s: %s",
+				"maintained traffic target was rejected: %s: %s",
 				result.Rejection.Reason,
 				result.Rejection.Message,
 			)
@@ -255,17 +269,32 @@ func (c *Coordinator) reconcileTerminalTargets(
 	}
 
 	if status.Capacity.Desired != nil &&
+		acceptedTargetMayBeReasserted(
+			status.Transition.Outcome,
+			status.Capacity.Desired.ControlRevision,
+			status.Capacity.Observed.AppliedRevision,
+		) &&
 		!terminalCapacityTargetConverged(*status.Capacity.Desired, status.Capacity.Observed) {
+		// A committed topology must enter explicit recovery instead of recreating or adopting a new incarnation.
+		if membershipCommittedForTransition(status) {
+			if err := validatePinnedCapacity(*status.Capacity.Desired, status.Capacity.Observed); err != nil {
+				return ReconcileResult{Status: status}, err
+			}
+		}
+
 		result, err := c.capacity.Apply(ctx, groupID, *status.Capacity.Desired)
 		if err != nil {
-			return ReconcileResult{Status: status, Requeue: true}, fmt.Errorf("reassert terminal capacity target: %w", err)
+			return ReconcileResult{Status: status, Requeue: true}, fmt.Errorf(
+				"reassert maintained capacity target: %w",
+				err,
+			)
 		}
 		if result.Rejection != nil {
 			if err := validateRejection(result.Rejection); err != nil {
-				return ReconcileResult{Status: status}, fmt.Errorf("invalid terminal capacity rejection: %w", err)
+				return ReconcileResult{Status: status}, fmt.Errorf("invalid maintained capacity rejection: %w", err)
 			}
 			return ReconcileResult{Status: status}, fmt.Errorf(
-				"terminal capacity target was rejected: %s: %s",
+				"maintained capacity target was rejected: %s: %s",
 				result.Rejection.Reason,
 				result.Rejection.Message,
 			)
@@ -274,6 +303,43 @@ func (c *Coordinator) reconcileTerminalTargets(
 	}
 
 	return ReconcileResult{Status: status}, nil
+}
+
+func acceptedTargetMayBeReasserted(
+	outcome TransitionOutcome,
+	desiredRevision int64,
+	appliedRevision int64,
+) bool {
+	return outcome != TransitionOutcomeBlocked || appliedRevision >= desiredRevision
+}
+
+func validatePinnedCapacity(target CapacityTarget, observation CapacityObservation) error {
+	for _, replica := range target.Replicas {
+		if replica.Incarnation == nil {
+			return fmt.Errorf(
+				"%w: committed replica %q retains bootstrap-only capacity intent",
+				ErrRecoveryRequired,
+				replica.ReplicaID,
+			)
+		}
+
+		allocation, found := allocationByID(observation, replica.ReplicaID)
+		if !found {
+			return fmt.Errorf(
+				"%w: committed replica %q has no physical allocation",
+				ErrRecoveryRequired,
+				replica.ReplicaID,
+			)
+		}
+		if !sameIncarnation(*replica.Incarnation, allocation.Incarnation) {
+			return fmt.Errorf(
+				"%w: committed replica %q changed physical or runtime incarnation",
+				ErrRecoveryRequired,
+				replica.ReplicaID,
+			)
+		}
+	}
+	return nil
 }
 
 func terminalCapacityTargetConverged(target CapacityTarget, observation CapacityObservation) bool {
@@ -812,7 +878,11 @@ func buildCapacityTarget(
 			return CapacityTarget{}, fmt.Errorf("target replica %q has no canonical registry record", replicaID)
 		}
 		target := CapacityReplicaTarget{ReplicaID: replicaID, SlotID: record.SlotID}
-		if joining, found := joiningByID[replicaID]; found {
+		joining, isJoining := joiningByID[replicaID]
+		if record.Current != nil {
+			incarnation := cloneReplicaIncarnation(*record.Current)
+			target.Incarnation = &incarnation
+		} else if isJoining {
 			if status.Transition.Spec.Plan.ProcessLifecycleOwner == ProcessLifecycleOwnerOrchestrator {
 				target.Bootstrap = &CapacityBootstrap{
 					Mode:                   joining.Bootstrap,
@@ -820,9 +890,6 @@ func buildCapacityTarget(
 					NativeMembers:          joiningNativeMembers(resolution, joining),
 				}
 			}
-		} else if record.Current != nil {
-			incarnation := cloneReplicaIncarnation(*record.Current)
-			target.Incarnation = &incarnation
 		} else {
 			return CapacityTarget{}, fmt.Errorf("target replica %q has neither capacity nor bootstrap intent", replicaID)
 		}

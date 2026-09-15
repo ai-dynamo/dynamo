@@ -254,8 +254,8 @@ func TestCoordinatorRestoresStableReplicaWithNewPhysicalIncarnation(t *testing.T
 		}},
 	})
 	replacement := cloneReplicaIncarnation(excludedIncarnation)
-	replacement.RuntimeIncarnation = "runtime-1-v2"
-	replacement.CapacityRefs[0].UID = "pod-uid-1-v2"
+	replacement.RuntimeIncarnation = testReplacementRuntime
+	replacement.CapacityRefs[0].UID = testReplacementPodUID
 	scenario.capacity.planned[excluded.ReplicaID] = replacement
 	plan := ResolvedPlan{
 		ID:                      "restore-fixed-slot",

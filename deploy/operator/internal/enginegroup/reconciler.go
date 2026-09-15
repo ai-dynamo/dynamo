@@ -81,18 +81,19 @@ func (c *Coordinator) Reconcile(
 		return result, err
 	}
 	if handled {
-		if hasTerminalSteadyState(result.Status) {
-			return c.reconcileTerminalTargets(ctx, groupID, result.Status)
+		if maintainsAcceptedTargets(result.Status) {
+			return c.reconcileMaintainedTargets(ctx, groupID, result.Status)
 		}
 		return result, nil
 	}
 	return c.reconcileActiveTransition(ctx, groupID, result.Status, topology)
 }
 
-func hasTerminalSteadyState(status GroupStatus) bool {
+func maintainsAcceptedTargets(status GroupStatus) bool {
 	return status.Transition != nil &&
 		(status.Transition.Outcome == TransitionOutcomeCompleted ||
-			status.Transition.Outcome == TransitionOutcomeRolledBack)
+			status.Transition.Outcome == TransitionOutcomeRolledBack ||
+			status.Transition.Outcome == TransitionOutcomeBlocked)
 }
 
 func (c *Coordinator) observeGroup(
