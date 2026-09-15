@@ -465,8 +465,8 @@ where
             isl_tokens,
             overlap: OverlapSignals {
                 tier_overlap_blocks,
-                effective_overlap_blocks,
-                effective_cached_tokens,
+                effective_overlap_blocks: effective_overlap_blocks.into_iter().collect(),
+                effective_cached_tokens: effective_cached_tokens.into_iter().collect(),
             },
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,

@@ -1127,7 +1127,7 @@ impl SelectionCore {
         Ok(entry.scheduler.get_potential_loads(
             Some(prepared.sequence_hashes),
             prepared.isl_tokens,
-            prepared.overlap.effective_cached_tokens,
+            prepared.overlap.effective_cached_tokens.into_iter().collect(),
             track_prefill_tokens,
         ))
     }

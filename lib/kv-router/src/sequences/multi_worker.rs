@@ -343,6 +343,8 @@ impl LifecycleMutationOutcome {
     }
 }
 
+pub(crate) struct PreparedReplicaPrompt(Option<Vec<SequenceHash>>);
+
 /// Multi-worker extension of [`ActiveSequences`] with per-worker `parking_lot::RwLock` for
 /// fine-grained concurrent access.
 ///
@@ -770,6 +772,25 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         self.add_request_admitted(req, decay_now).map(|_| ())
     }
 
+    /// Copy only the replica-owned prompt before serialized admission. This does
+    /// not mutate state or publish anything, and is unused when replica sync is off.
+    pub(crate) fn prepare_replica_prompt(
+        &self,
+        tokens: Option<&[SequenceHash]>,
+    ) -> Option<PreparedReplicaPrompt> {
+        self.replica_sync
+            .then(|| PreparedReplicaPrompt(tokens.map(<[_]>::to_vec)))
+    }
+
+    pub(crate) fn add_request_admitted_prepared(
+        &self,
+        req: SequenceRequest,
+        decay_now: Instant,
+        prompt: Option<PreparedReplicaPrompt>,
+    ) -> Result<AttemptId, SequenceError> {
+        self.add_request_impl_prepared(req, decay_now, true, prompt)
+    }
+
     pub(crate) fn add_request_admitted(
         &self,
         req: SequenceRequest,
@@ -796,11 +817,21 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         decay_now: Instant,
         lazily_register_worker: bool,
     ) -> Result<AttemptId, SequenceError> {
+        self.add_request_impl_prepared(req, decay_now, lazily_register_worker, None)
+    }
+
+    fn add_request_impl_prepared(
+        &self,
+        req: SequenceRequest,
+        decay_now: Instant,
+        lazily_register_worker: bool,
+        prompt: Option<PreparedReplicaPrompt>,
+    ) -> Result<AttemptId, SequenceError> {
         let event = self.replica_sync.then(|| ActiveSequenceEvent {
             request_id: req.request_id.clone(),
             worker: req.worker,
             data: ActiveSequenceEventData::AddRequest {
-                token_sequence: req.token_sequence.clone(),
+                token_sequence: prompt.map_or_else(|| req.token_sequence.clone(), |p| p.0),
                 track_prefill_tokens: req.track_prefill_tokens,
                 expected_output_tokens: req.expected_output_tokens,
                 prefill_load_hint: req.prefill_load_hint,
@@ -1218,15 +1249,25 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         token_sequence: Option<&[SequenceHash]>,
         decay_now: Instant,
     ) -> FxHashMap<WorkerWithDpRank, WorkerLoadProjection> {
+        let mut projections = FxHashMap::default();
+        self.project_worker_loads_into(token_sequence, decay_now, &mut projections);
+        projections
+    }
+
+    pub(crate) fn project_worker_loads_into(
+        &self,
+        token_sequence: Option<&[SequenceHash]>,
+        decay_now: Instant,
+        projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    ) {
         #[cfg(feature = "bench")]
         let start = tokio::time::Instant::now();
 
         #[cfg(feature = "bench")]
         let num_workers = self.workers.read().slots.len();
 
-        let result = self
-            .prompt_registry
-            .project_worker_loads(token_sequence, decay_now);
+        self.prompt_registry
+            .project_worker_loads_into(token_sequence, decay_now, projections);
 
         #[cfg(feature = "bench")]
         {
@@ -1237,8 +1278,17 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 "project_worker_loads completed"
             );
         }
+    }
 
-        result
+    #[cfg(feature = "bench")]
+    #[doc(hidden)]
+    pub fn bench_project_worker_loads_into(
+        &self,
+        token_sequence: Option<&[SequenceHash]>,
+        decay_now: Instant,
+        projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    ) {
+        self.project_worker_loads_into(token_sequence, decay_now, projections);
     }
 
     /// Query all workers for their current number of active blocks.
@@ -2064,9 +2114,29 @@ mod tests {
         let worker = WorkerWithDpRank::new(1, 0);
         let request_id = "ordered".to_string();
 
+        let request = local_sequence_request(&request_id, worker);
+        let prompt = sequences.prepare_replica_prompt(request.token_sequence.as_deref());
+        let prepared_address = prompt.as_ref().unwrap().0.as_ref().unwrap().as_ptr();
+        let expected_tokens = request.token_sequence.clone();
+        let expected_hint = request.prefill_load_hint;
+        assert!(state.events.lock().unwrap().is_empty());
         sequences
-            .add_request(local_sequence_request(&request_id, worker), Instant::now())
+            .add_request_admitted_prepared(request, Instant::now(), prompt)
             .unwrap();
+        {
+            let events = state.events.lock().unwrap();
+            let ActiveSequenceEventData::AddRequest {
+                token_sequence,
+                prefill_load_hint,
+                ..
+            } = &events[0]
+            else {
+                panic!("expected replica add");
+            };
+            assert_eq!(*token_sequence, expected_tokens);
+            assert_eq!(*prefill_load_hint, expected_hint);
+            assert_eq!(token_sequence.as_ref().unwrap().as_ptr(), prepared_address);
+        }
         sequences
             .mark_prefill_completed(&request_id, Instant::now())
             .unwrap();
@@ -2098,6 +2168,7 @@ mod tests {
         );
         let worker = WorkerWithDpRank::new(1, 0);
         let request_id = "disabled".to_string();
+        assert!(sequences.prepare_replica_prompt(Some(&[1, 2, 3])).is_none());
 
         sequences
             .add_request(local_sequence_request(&request_id, worker), Instant::now())
