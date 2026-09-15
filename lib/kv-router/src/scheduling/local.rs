@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use rustc_hash::FxHashMap;
@@ -18,6 +18,9 @@ use super::policy_config::PolicyProfile;
 use super::prefill_load::PrefillLoadEstimator;
 use super::queue::{
     ClassQueueStats, SchedulerBookingCleanup, SchedulerBookingDescriptor, SchedulerQueue,
+};
+use super::request_classifier::{
+    ClassifyRequest, RequestClassifier, RequestClassifierRuntime, RequestLifecycle,
 };
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
@@ -52,6 +55,7 @@ where
     slots: Arc<ActiveSequencesMultiWorker<P>>,
     queue: Arc<SchedulerQueue<P, C, Sel, RF>>,
     queue_updates: watch::Sender<()>,
+    request_classifier: OnceLock<Arc<RequestClassifierRuntime>>,
     track_prefill_tokens_default: bool,
     worker_type: &'static str,
 }
@@ -270,6 +274,7 @@ where
             slots,
             queue,
             queue_updates,
+            request_classifier: OnceLock::new(),
             track_prefill_tokens_default,
             worker_type,
         }
@@ -290,13 +295,25 @@ where
         &self,
         request: ScheduleRequest,
     ) -> Result<AdmittedSchedulingResponse, KvSchedulerError> {
-        let tracked = request.mode.is_tracked();
+        self.schedule_request_admitted_with_context(request, Instant::now())
+            .await
+    }
+
+    /// Schedule with the router's original ingress timing.
+    #[doc(hidden)]
+    pub async fn schedule_request_admitted_with_context(
+        &self,
+        request: ScheduleRequest,
+        ingress_at: Instant,
+    ) -> Result<AdmittedSchedulingResponse, KvSchedulerError> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let (attempt_tx, attempt_rx) = tokio::sync::oneshot::channel();
+        let (request, block_hashes) = self.make_scheduling_request(request, Some(resp_tx));
+        let tracked = request.mode.is_tracked();
+        let classified_request = self.classify_request(&request, ingress_at).await?;
         let lifecycle_lease = self
             .queue
             .new_request_lifecycle_lease(request.mode.lifecycle_request_id());
-        let (request, block_hashes) = self.make_scheduling_request(request, Some(resp_tx));
 
         let mut lifecycle_lease = self
             .queue
@@ -305,6 +322,8 @@ where
                 block_hashes,
                 lifecycle_lease,
                 tracked.then_some(attempt_tx),
+                classified_request,
+                ingress_at,
             )
             .await;
 
@@ -324,6 +343,56 @@ where
             lease.disarm();
         }
         Ok(AdmittedSchedulingResponse { response, attempt })
+    }
+
+    async fn classify_request(
+        &self,
+        request: &SchedulingRequest,
+        ingress_at: Instant,
+    ) -> Result<Option<ClassifyRequest>, KvSchedulerError> {
+        let Some(classifier) = self.request_classifier.get() else {
+            return Ok(None);
+        };
+        let Some(request_id) = request.mode.tracked_request_id() else {
+            return Ok(None);
+        };
+        // A tracked admission with no registered lifecycle (Python bindings
+        // `best_worker`, `RouterRequest::New`) never emits lifecycle events, so
+        // classifying it would corrupt plugin bookkeeping. It uses the default
+        // queue inputs, exactly as if no classifier were installed.
+        if !classifier.has_request(request_id) {
+            return Ok(None);
+        }
+        classifier
+            .classify_with(self.queue.build_classify_request(request, ingress_at))
+            .await
+            .map(Some)
+    }
+
+    /// Install the request classifier plugin. Must be called from within a
+    /// Tokio runtime: it spawns the classifier's event-delivery task.
+    ///
+    /// Returns `false` when a classifier is already installed.
+    #[doc(hidden)]
+    pub fn install_request_classifier(
+        &self,
+        classifier: Box<dyn RequestClassifier>,
+        shutdown: CancellationToken,
+    ) -> bool {
+        self.request_classifier
+            .set(RequestClassifierRuntime::new(classifier, shutdown))
+            .is_ok()
+    }
+
+    #[doc(hidden)]
+    pub fn begin_request_lifecycle(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<RequestLifecycle>, KvSchedulerError> {
+        self.request_classifier
+            .get()
+            .map(|classifier| classifier.begin_request(request_id))
+            .transpose()
     }
 
     /// Select a worker from current scheduler state without queue admission or booking.
@@ -691,6 +760,7 @@ where
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use tokio::sync::{mpsc, watch};
@@ -698,6 +768,7 @@ mod tests {
     use super::*;
     use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
     use crate::scheduling::PrefillLoadEstimator;
+    use crate::scheduling::request_classifier::ClassifyFuture;
     use crate::scheduling::selector::DefaultWorkerSelector;
     use crate::sequences::SequenceSubscriber;
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
@@ -888,6 +959,55 @@ mod tests {
 
         let loads = scheduler.get_potential_loads(None, 0, HashMap::new(), false);
         assert_eq!(loads[0].active_requests, 0);
+        cancel_token.cancel();
+    }
+
+    struct CountingClassifier {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl RequestClassifier for CountingClassifier {
+        fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async move { Ok(request) })
+        }
+    }
+
+    /// A tracked admission with no registered lifecycle takes the default
+    /// path without reaching the plugin; only `begin_request_lifecycle` opts
+    /// a request into classification. The runtime itself rejects ids it does
+    /// not know, so this bypass lives here in the scheduler.
+    #[tokio::test]
+    async fn tracked_request_without_lifecycle_bypasses_the_classifier() {
+        let workers = HashMap::from([(0, SimpleWorkerConfig::default())]);
+        let (scheduler, _slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true, None);
+        let calls = Arc::new(AtomicUsize::new(0));
+        assert!(scheduler.install_request_classifier(
+            Box::new(CountingClassifier {
+                calls: Arc::clone(&calls),
+            }),
+            cancel_token.clone(),
+        ));
+
+        scheduler
+            .schedule_request(request(ScheduleMode::Tracked {
+                request_id: "unregistered".to_string(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+
+        let _lifecycle = scheduler
+            .begin_request_lifecycle("registered")
+            .unwrap()
+            .unwrap();
+        scheduler
+            .schedule_request(request(ScheduleMode::TrackedWithLifecycle {
+                request_id: "registered".to_string(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
         cancel_token.cancel();
     }
 
