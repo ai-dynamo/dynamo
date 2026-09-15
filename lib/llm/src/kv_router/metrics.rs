@@ -842,7 +842,9 @@ impl RoutingOverheadMetrics {
 /// decode pool). Component-scoped metrics let each local router emit metrics with
 /// distinct `dynamo_component` labels, so pools can be monitored and scaled
 /// independently.
+#[cfg_attr(test, derive(Clone))]
 pub struct RouterRequestMetrics {
+    /// Total requests admitted by the router scheduler.
     pub requests_started_total: prometheus::IntCounter,
     pub requests_total: prometheus::IntCounter,
     pub time_to_first_token_seconds: prometheus::Histogram,
@@ -863,11 +865,6 @@ impl RouterRequestMetrics {
     /// Returns the registered metrics if `from_component()` was called earlier.
     pub fn get() -> Option<Arc<Self>> {
         ROUTER_REQUEST_METRICS.get().cloned()
-    }
-
-    /// Total requests admitted by the router scheduler.
-    pub fn requests_started_total(&self) -> &prometheus::IntCounter {
-        &self.requests_started_total
     }
 
     /// Create from a Component, memoized in a static OnceLock.
@@ -999,34 +996,14 @@ impl RouterRequestMetrics {
             .clone()
     }
 
-    /// Create unregistered metrics owned by one test router.
+    /// Use fresh, unregistered lifecycle counters and retain all other metric handles.
     #[cfg(test)]
-    pub(crate) fn for_test() -> Arc<Self> {
-        fn hist(name: &str) -> prometheus::Histogram {
-            prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(name, name)).unwrap()
-        }
-        fn hist_vec(name: &str) -> prometheus::HistogramVec {
-            prometheus::HistogramVec::new(prometheus::HistogramOpts::new(name, name), &["reason"])
-                .unwrap()
-        }
+    pub(crate) fn with_isolated_counters_for_test(&self) -> Arc<Self> {
         Arc::new(Self {
             requests_started_total: prometheus::IntCounter::new("requests_started_total", "test")
                 .unwrap(),
             requests_total: prometheus::IntCounter::new("requests_total", "test").unwrap(),
-            time_to_first_token_seconds: hist("ttft_seconds"),
-            inter_token_latency_seconds: hist("itl_seconds"),
-            input_sequence_tokens: hist("isl_tokens"),
-            output_sequence_tokens: hist("osl_tokens"),
-            kv_hit_rate: hist("kv_hit_rate"),
-            kv_transfer_estimated_latency_seconds: hist("kv_transfer_seconds"),
-            shared_cache_hit_rate: hist("shared_cache_hit_rate"),
-            shared_cache_beyond_blocks: hist("shared_cache_beyond_blocks"),
-            non_max_overlap_selections_total: prometheus::IntCounterVec::new(
-                prometheus::Opts::new("non_max_overlap_selections_total", "test"),
-                &["reason"],
-            )
-            .unwrap(),
-            overlap_blocks_lost: hist_vec("overlap_blocks_lost"),
+            ..self.clone()
         })
     }
 

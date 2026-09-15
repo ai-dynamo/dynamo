@@ -621,7 +621,7 @@ where
         let track_output_blocks =
             attempt_id.is_some() && chooser.kv_router_config().router_track_output_blocks;
         if attempt_id.is_some() {
-            request_metrics.requests_started_total().inc();
+            request_metrics.requests_started_total.inc();
         }
         let approximate_lru = cleanup.approximate_lru.clone();
         let output_hashes = approximate_lru
@@ -652,7 +652,7 @@ where
         lora_load: Option<LoraLoadGuard>,
         request: &PreprocessedRequest,
     ) -> Self {
-        request_metrics.requests_started_total().inc();
+        request_metrics.requests_started_total.inc();
         Self {
             cleanup: match occupancy_reservation {
                 Some(reservation) => RequestCleanup::Occupancy {
@@ -990,11 +990,40 @@ mod prefill_start_tests {
             .unwrap()
     }
 
+    fn test_metrics() -> Arc<RouterRequestMetrics> {
+        fn hist(name: &str) -> prometheus::Histogram {
+            prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(name, name)).unwrap()
+        }
+        fn hist_vec(name: &str) -> prometheus::HistogramVec {
+            prometheus::HistogramVec::new(prometheus::HistogramOpts::new(name, name), &["reason"])
+                .unwrap()
+        }
+        Arc::new(RouterRequestMetrics {
+            requests_started_total: prometheus::IntCounter::new("requests_started_total", "test")
+                .unwrap(),
+            requests_total: prometheus::IntCounter::new("requests_total", "test").unwrap(),
+            time_to_first_token_seconds: hist("ttft_seconds"),
+            inter_token_latency_seconds: hist("itl_seconds"),
+            input_sequence_tokens: hist("isl_tokens"),
+            output_sequence_tokens: hist("osl_tokens"),
+            kv_hit_rate: hist("kv_hit_rate"),
+            kv_transfer_estimated_latency_seconds: hist("kv_transfer_seconds"),
+            shared_cache_hit_rate: hist("shared_cache_hit_rate"),
+            shared_cache_beyond_blocks: hist("shared_cache_beyond_blocks"),
+            non_max_overlap_selections_total: prometheus::IntCounterVec::new(
+                prometheus::Opts::new("non_max_overlap_selections_total", "test"),
+                &["reason"],
+            )
+            .unwrap(),
+            overlap_blocks_lost: hist_vec("overlap_blocks_lost"),
+        })
+    }
+
     async fn dispatch_once(phase: RequestPhase, annotations: Vec<String>) -> Arc<RequestTracker> {
         let tracker = Arc::new(RequestTracker::new());
         let _permit = tracker.set_phase(phase).await;
         let request = test_request(tracker.clone(), annotations);
-        RequestObservability::new(request.tracker.clone(), RouterRequestMetrics::for_test())
+        RequestObservability::new(request.tracker.clone(), test_metrics())
             .record_prefill_start(&request);
         tracker
     }
@@ -1035,7 +1064,7 @@ mod prefill_start_tests {
     #[tokio::test]
     async fn decode_after_prefill_retains_the_prefill_timestamp() {
         let tracker = Arc::new(RequestTracker::new());
-        let metrics = RouterRequestMetrics::for_test();
+        let metrics = test_metrics();
         let request = test_request(tracker.clone(), Vec::new());
 
         let prefill_permit = tracker.set_phase(RequestPhase::Prefill).await;
