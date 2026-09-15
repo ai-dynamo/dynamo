@@ -144,10 +144,14 @@ def _sampling_option_params(values: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _ordered_cancellation_request_id(
-    request_id: str, sampling_params: Any, *, supported: bool
+    request_id: str,
+    sampling_params: Any,
+    *,
+    supported: bool,
+    batched: bool = False,
 ) -> str | None:
     """Use pre-output cancellation only when SGLang preserves the submitted ID."""
-    if not supported:
+    if not supported or batched:
         return None
     if isinstance(sampling_params, list):
         sampling_params = sampling_params[0] if sampling_params else {}
@@ -160,6 +164,23 @@ def _ordered_cancellation_request_id(
         if sample_count > 1 and beam_width <= 1:
             return None
     return request_id
+
+
+def _native_payload_is_batched(native_payload: Mapping[str, Any]) -> bool:
+    for field in ("prompt", "text"):
+        if isinstance(native_payload.get(field), list):
+            return True
+    input_ids = native_payload.get("input_ids")
+    if isinstance(input_ids, list) and input_ids and isinstance(input_ids[0], list):
+        return True
+    input_embeds = native_payload.get("input_embeds")
+    return bool(
+        isinstance(input_embeds, list)
+        and input_embeds
+        and isinstance(input_embeds[0], list)
+        and input_embeds[0]
+        and isinstance(input_embeds[0][0], list)
+    )
 
 
 def _user_stop_token_ids(request: Dict[str, Any]) -> set[int]:
@@ -519,6 +540,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 sglang_request_id,
                 native_payload.get("sampling_params"),
                 supported=getattr(self, "_supports_ordered_cancellation", False),
+                batched=_native_payload_is_batched(native_payload),
             )
             stream = self._native_generate_stream(
                 request,
