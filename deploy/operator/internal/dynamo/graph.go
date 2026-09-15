@@ -2176,8 +2176,8 @@ func applyDGDTemplateDefaults(
 		applyKvTransferPolicyToWorkerComponent(component, dynamoDeployment.Spec.Experimental.KvTransferPolicy, groveClusterTopologyDomains)
 	}
 
-	propagateDGDAnnotations(dynamoDeployment.GetAnnotations(), component)
 	propagateDGDSpecMetadata(dynamoDeployment, component)
+	propagateDGDAnnotations(dynamoDeployment.GetAnnotations(), component)
 }
 
 func shouldApplyKvTransferPolicyToWorkerComponent(
