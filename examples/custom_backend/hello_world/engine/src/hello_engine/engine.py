@@ -25,6 +25,8 @@ import os
 from collections.abc import AsyncGenerator
 from typing import Optional
 
+from tokenizers import Tokenizer
+
 from dynamo._core import Context
 from dynamo.common.backend import (
     EngineConfig,
@@ -120,9 +122,9 @@ class HelloEngine(LLMEngine):
     # start: load "the model"   [called once at boot]
     # ------------------------------------------------------------------
     async def start(self, worker_id: int) -> EngineConfig:
+        # This toy engine has no per-worker state, so worker_id is unused.
+        # (Engines that shard state or seed RNGs per replica need it.)
         del worker_id
-        from tokenizers import Tokenizer
-
         local_file = os.path.join(self.tokenizer_repo, "tokenizer.json")
         if os.path.exists(local_file):
             tokenizer = Tokenizer.from_file(local_file)
@@ -137,7 +139,10 @@ class HelloEngine(LLMEngine):
 
         return EngineConfig(
             model=self.tokenizer_repo,
-            served_model_name=None,  # Worker uses WorkerConfig.served_model_name
+            # None = defer to WorkerConfig.served_model_name (set in
+            # from_args). An engine that only learns the real name while
+            # loading (e.g. from the checkpoint) can override it here.
+            served_model_name=None,
             llm=LlmRegistration(
                 context_length=4096,
                 kv_cache_block_size=BLOCK_SIZE,  # REQUIRED for KV events to flow
@@ -212,8 +217,7 @@ class HelloEngine(LLMEngine):
         return [PushSource(on_ready=self._on_publisher_ready, dp_rank=0)]
 
     def _on_publisher_ready(self, publisher) -> None:
-        # The framework hands us a live KvEventPublisher (wired to ZMQ
-        # or NATS — we never know which). We just keep it.
+        # Keep the live KvEventPublisher the framework hands us.
         self._publisher = publisher
 
     def _publish_prompt_blocks(self, prompt_tokens: list[int]) -> None:
