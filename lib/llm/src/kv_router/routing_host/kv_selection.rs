@@ -229,8 +229,9 @@ where
                 return Err(anyhow::anyhow!(error));
             }
         }
-        let return_routing_hashes =
-            !is_query_only && self.kv_router().indexer().records_routing_decisions();
+        let return_routing_hashes = !is_query_only
+            && (self.kv_router().indexer().records_routing_decisions()
+                || self.cache_history.is_some());
         let SelectionOptions {
             pinned_target,
             affinity_target,
