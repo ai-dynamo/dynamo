@@ -286,9 +286,9 @@ class _TextPrefill:
             self._updates.put_nowait((text, False))
 
     def commit(self) -> None:
-        if not self.task.done():
-            self._updates.put_nowait(("", True))
-            self._updates.put_nowait(None)
+        # Final generation reuses completed prefix blocks. Finishing another
+        # warming generation here would put speculative work on its critical path.
+        self.task.cancel()
 
     async def cancel(self) -> None:
         self.task.cancel()
@@ -415,8 +415,8 @@ class RealtimeTextHandler:
         finish_reason = None
         try:
             if turn.prefill_task is not None:
-                # Prefill is an optimization. Its failure must not change the
-                # exact final chat-completion behavior.
+                # Join cancelled speculative work before final generation;
+                # neither its output nor its failure changes the final prompt.
                 await asyncio.gather(turn.prefill_task, return_exceptions=True)
             stream = await self._chat_completion_factory(
                 turn.messages, turn.max_output_tokens

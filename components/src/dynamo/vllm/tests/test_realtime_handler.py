@@ -97,9 +97,11 @@ def _session(*, turn_detection=None) -> dict:
     }
 
 
-async def _drive(handler, events):
+async def _drive(handler, events, *, before_commit: asyncio.Event | None = None):
     async def request_stream():
         for event in events:
+            if event["type"] == "input_text.commit" and before_commit is not None:
+                await asyncio.wait_for(before_commit.wait(), timeout=5)
             yield event
 
     return [event async for event in handler.generate(request_stream(), _Context())]
@@ -272,16 +274,22 @@ def test_text_session_streams_canonical_response_and_preserves_usage():
     }
 
 
-def test_text_buffer_prefills_cumulative_input_before_generation():
+def test_text_commit_cancels_warming_before_final_generation():
     updates_seen = []
     prefill_messages = []
     prefill_done = asyncio.Event()
+    prefill_seen = asyncio.Event()
 
     async def prefill(messages, updates):
         prefill_messages.extend(messages)
-        async for update in updates:
-            updates_seen.append(update)
-        prefill_done.set()
+        try:
+            async for update in updates:
+                updates_seen.append(update)
+                if len(updates_seen) == 2:
+                    prefill_seen.set()
+        except asyncio.CancelledError:
+            prefill_done.set()
+            raise
 
     async def chat_completion(messages, max_output_tokens):
         assert prefill_done.is_set()
@@ -309,6 +317,7 @@ def test_text_buffer_prefills_cumulative_input_before_generation():
                 {"type": "input_text.commit"},
                 {"type": "response.create"},
             ],
+            before_commit=prefill_seen,
         )
     )
 
@@ -316,7 +325,6 @@ def test_text_buffer_prefills_cumulative_input_before_generation():
     assert updates_seen == [
         ("Hello", False),
         (" world", False),
-        ("", True),
     ]
     user_items = [
         event["item"]
@@ -325,15 +333,20 @@ def test_text_buffer_prefills_cumulative_input_before_generation():
     ]
     assert len(user_items) == 1
     assert user_items[0]["content"] == [{"type": "input_text", "text": "Hello world"}]
+    done = next(event for event in result if event["type"] == "response.done")
+    assert done["response"]["status"] == "completed"
 
 
 def test_text_buffer_clear_discards_input_and_allows_replay():
     prefill_texts = []
+    prefill_seen = asyncio.Event()
 
     async def prefill(messages, updates):
         del messages
         async for text, _ in updates:
             prefill_texts.append(text)
+            if text == "correct":
+                prefill_seen.set()
 
     async def chat_completion(messages, max_output_tokens):
         del max_output_tokens
@@ -359,6 +372,7 @@ def test_text_buffer_clear_discards_input_and_allows_replay():
                 {"type": "input_text.commit"},
                 {"type": "response.create"},
             ],
+            before_commit=prefill_seen,
         )
     )
 
@@ -370,14 +384,18 @@ def test_text_buffer_clear_discards_input_and_allows_replay():
     assert len(user_items) == 1
     assert user_items[0]["content"][0]["text"] == "correct"
     assert "correct" in prefill_texts
+    done = next(event for event in result if event["type"] == "response.done")
+    assert done["response"]["status"] == "completed"
 
 
 def test_text_prefill_failure_does_not_fail_final_generation():
+    prefill_failed = asyncio.Event()
+
     async def failed_prefill(messages, updates):
         del messages
         async for _ in updates:
-            pass
-        raise RuntimeError("prefill failed")
+            prefill_failed.set()
+            raise RuntimeError("prefill failed")
 
     async def chat_completion(messages, max_output_tokens):
         del messages, max_output_tokens
@@ -400,6 +418,7 @@ def test_text_prefill_failure_does_not_fail_final_generation():
                 {"type": "input_text.commit"},
                 {"type": "response.create"},
             ],
+            before_commit=prefill_failed,
         )
     )
 
