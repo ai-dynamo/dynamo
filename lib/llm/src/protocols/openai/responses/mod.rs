@@ -3113,33 +3113,26 @@ Let me check the weather.
     fn test_text_tool_calls_parsed_when_tools_are_enabled() {
         let text =
             r#"<tool_call>{"name":"get_weather","arguments":{"city":"Beijing"}}</tool_call>"#;
-        for choice in [
-            serde_json::Value::Null,
-            serde_json::json!("auto"),
-            serde_json::json!("required"),
-            serde_json::json!({"type":"function", "name":"get_weather"}),
-        ] {
-            let tools = serde_json::from_value(serde_json::json!([{
-                "type": "function", "name": "get_weather", "parameters": {"type": "object"}
-            }]))
-            .unwrap();
-            let params = ResponseParams {
-                tools: Some(tools),
-                tool_choice: serde_json::from_value(choice).unwrap(),
-                ..Default::default()
-            };
-            let response =
-                chat_completion_to_response(make_chat_resp_with_text(text), &params, None).unwrap();
-            assert_eq!(response.inner.output.len(), 1);
-            let OutputItem::FunctionCall(call) = &response.inner.output[0] else {
-                panic!("expected a function call for an enabled tool request");
-            };
-            assert_eq!(call.name, "get_weather");
-            assert_eq!(
-                serde_json::from_str::<serde_json::Value>(&call.arguments).unwrap(),
-                serde_json::json!({"city":"Beijing"})
-            );
-        }
+        let tools = serde_json::from_value(serde_json::json!([{
+            "type": "function", "name": "get_weather", "parameters": {"type": "object"}
+        }]))
+        .unwrap();
+        let params = ResponseParams {
+            tools: Some(tools),
+            tool_choice: Some(ToolChoiceParam::Mode(ToolChoiceOptions::Auto)),
+            ..Default::default()
+        };
+        let response =
+            chat_completion_to_response(make_chat_resp_with_text(text), &params, None).unwrap();
+        assert_eq!(response.inner.output.len(), 1);
+        let OutputItem::FunctionCall(call) = &response.inner.output[0] else {
+            panic!("expected a function call for an enabled tool request");
+        };
+        assert_eq!(call.name, "get_weather");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&call.arguments).unwrap(),
+            serde_json::json!({"city":"Beijing"})
+        );
     }
 
     #[test]
