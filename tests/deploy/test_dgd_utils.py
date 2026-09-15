@@ -3,6 +3,8 @@
 
 """Unit tests for schema-aware DynamoGraphDeployment helpers."""
 
+import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -12,7 +14,9 @@ import kr8s
 import pytest
 import requests
 import yaml
+from kubernetes_asyncio import client
 
+from tests.deploy import dgd_utils
 from tests.deploy.dgd_utils import DeploymentSpec, ManagedDeployment
 
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
@@ -231,3 +235,144 @@ async def test_in_flight_restart_preserves_bounded_previous_log(tmp_path) -> Non
         previous=True,
         tail_lines=50000,
     )
+
+
+@pytest.mark.parametrize("stage", ["success", "setup", "call", "skip"])
+async def test_discovery_capture_precedes_deletion_only_on_failure(tmp_path, stage):
+    deployment = managed_deployment(tmp_path)
+    events = []
+
+    async def capture():
+        events.append("capture")
+
+    async def delete():
+        events.append("delete")
+
+    deployment._capture_discovery_state = capture
+    deployment._delete_deployment = delete
+    deployment._get_service_logs = MagicMock()
+    if stage == "setup":
+        original = ValueError("setup failed")
+        deployment._init_kubernetes = AsyncMock(side_effect=original)
+        with pytest.raises(ValueError) as raised:
+            await deployment.__aenter__()
+        assert raised.value is original
+    elif stage == "call":
+        original = ValueError("call failed")
+        with pytest.raises(ValueError) as raised:
+            try:
+                raise original
+            except ValueError as error:
+                assert await deployment.__aexit__(type(error), error, None) is False
+                raise
+        assert raised.value is original
+    elif stage == "skip":
+        await deployment.__aexit__(
+            pytest.skip.Exception, pytest.skip.Exception("skip"), None
+        )
+    else:
+        await deployment.__aexit__(None, None, None)
+    assert events == (
+        ["capture", "delete"] if stage in ("setup", "call") else ["delete"]
+    )
+
+
+@pytest.mark.parametrize("fault", [None, "timeout", "write_error", "api_error"])
+async def test_discovery_snapshot_keeps_partial_state_and_allows_cleanup(
+    monkeypatch, tmp_path, fault
+):
+    deployment = managed_deployment(tmp_path)
+    metadata = {
+        "name": "worker",
+        "resourceVersion": "123",
+        "uid": "pod-uid",
+        "labels": {"app": "worker"},
+        "ownerReferences": [{"uid": "owner-uid"}],
+    }
+    body = {
+        "items": [
+            {
+                "metadata": metadata,
+                "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+                "endpoints": [{"conditions": {"ready": True}}],
+            }
+        ]
+    }
+
+    async def stalled(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    async with client.ApiClient() as api_client:
+        deployment._core_api = SimpleNamespace(
+            api_client=api_client,
+            list_namespaced_pod=AsyncMock(return_value=body),
+            list_namespaced_service=AsyncMock(return_value=body),
+        )
+        deployment._custom_api = SimpleNamespace(
+            list_namespaced_custom_object=AsyncMock(return_value=body)
+        )
+        endpoints = AsyncMock(return_value=body)
+        monkeypatch.setattr(
+            dgd_utils.client,
+            "DiscoveryV1Api",
+            lambda _: SimpleNamespace(list_namespaced_endpoint_slice=endpoints),
+        )
+        monkeypatch.setattr(dgd_utils, "DISCOVERY_RESOURCE_TIMEOUT", 0.01)
+        if fault == "timeout":
+            deployment._core_api.list_namespaced_pod = stalled
+        elif fault == "api_error":
+            deployment._core_api.list_namespaced_pod = AsyncMock(
+                side_effect=RuntimeError("API unavailable")
+            )
+        elif fault == "write_error":
+            directory = tmp_path / "discovery"
+            directory.mkdir()
+            (directory / "pods.json").mkdir()
+        deployment._get_service_logs = MagicMock()
+        deployment._delete_deployment = AsyncMock()
+        original = ValueError("original test failure")
+        assert await deployment.__aexit__(ValueError, original, None) is False
+        deployment._delete_deployment.assert_awaited_once()
+        for name in ("dgd", "dwm", "services", "endpointslices"):
+            record = json.loads((tmp_path / "discovery" / f"{name}.json").read_text())
+            assert record["response"] == body
+            assert record["captured_at"]
+        if fault in ("timeout", "api_error"):
+            record = json.loads((tmp_path / "discovery" / "pods.json").read_text())
+            assert "error" in record
+        if fault is None:
+            record = json.loads((tmp_path / "discovery" / "pods.json").read_text())
+            assert record["response"] == body
+        endpoints.assert_awaited_once_with("default", _request_timeout=0.01)
+        calls = deployment._custom_api.list_namespaced_custom_object.call_args_list
+        assert {call.args[3] for call in calls} == {
+            "dynamographdeployments",
+            "dynamoworkermetadatas",
+        }
+
+
+@pytest.mark.parametrize("fault", ["timeout", "directory_error"])
+async def test_snapshot_failure_cannot_replace_original_error(
+    monkeypatch, tmp_path, fault
+):
+    deployment = managed_deployment(tmp_path)
+    deployment._get_service_logs = MagicMock()
+    deployment._delete_deployment = AsyncMock()
+    if fault == "timeout":
+
+        async def stalled():
+            await asyncio.Event().wait()
+
+        deployment._capture_discovery_state = stalled
+        monkeypatch.setattr(dgd_utils, "DISCOVERY_SNAPSHOT_TIMEOUT", 0.01)
+    else:
+        (tmp_path / "discovery").write_text("not a directory")
+    original = ValueError("original")
+    with pytest.raises(ValueError) as raised:
+        try:
+            raise original
+        except ValueError:
+            assert await deployment.__aexit__(ValueError, original, None) is False
+            raise
+    assert raised.value is original
+    deployment._delete_deployment.assert_awaited_once()
