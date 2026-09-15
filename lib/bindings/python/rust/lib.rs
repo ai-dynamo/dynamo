@@ -199,9 +199,8 @@ fn wait_for_bridge_tasks_at_exit(py: Python<'_>) {
     let Some(runtime) = rs::Worker::existing_process_runtime() else {
         return;
     };
-    // Releasing the GIL is load-bearing: an atexit callback holds it, and the tasks being
-    // waited on need it to finish. Waiting while holding it would deadlock against exactly
-    // the threads this is waiting for.
+    // An atexit callback holds the GIL and the tasks being waited on need it, so
+    // waiting without releasing it would deadlock against those same threads.
     py.allow_threads(|| {
         let deadline = std::time::Instant::now() + BRIDGE_DRAIN_TIMEOUT;
         while runtime.metrics().num_alive_tasks() > 0 {
@@ -242,9 +241,8 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         ),
     }
 
-    // atexit runs before the interpreter is finalized, which is the only point where a bridge
-    // task still touching Python objects can still be waited for. See
-    // `wait_for_bridge_tasks_at_exit`.
+    // atexit runs before the interpreter is finalized, the last point where a bridge task
+    // still touching Python objects can be waited for.
     m.py().import("atexit")?.call_method1(
         "register",
         (wrap_pyfunction!(wait_for_bridge_tasks_at_exit, m)?,),
