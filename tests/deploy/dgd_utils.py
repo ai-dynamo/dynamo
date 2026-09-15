@@ -22,6 +22,7 @@ import yaml
 from kr8s.objects import Pod, Service
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client import exceptions
+from openai.types.chat import ChatCompletion
 
 from tests.deploy.response_checks import validate_chat
 from tests.deploy.vcluster_utils import (
@@ -73,7 +74,7 @@ def validate_chat_response(
     min_content_length: int = MIN_RESPONSE_CONTENT_LENGTH,
     max_tokens: int | None = None,
     stop: str | None = None,
-) -> dict[str, Any]:
+) -> ChatCompletion:
     """Validate the structure and content of a chat completion response.
 
     Args:
@@ -84,7 +85,7 @@ def validate_chat_response(
         stop: Stop sequence; permits empty or shortened response content
 
     Returns:
-        Parsed response JSON on success
+        Validated chat completion on success
 
     Raises:
         AssertionError: If validation fails
@@ -100,42 +101,22 @@ def validate_chat_response(
     except ValueError as e:
         pytest.fail(f"Response is not valid JSON: {e}. Response: {response.text[:500]}")
 
-    if max_tokens is not None:
-        validate_chat(data, max_tokens, stop)
-
-    assert "choices" in data, f"Response missing 'choices' field: {data}"
-    assert len(data["choices"]) > 0, f"Response has empty 'choices': {data}"
-
-    choice = data["choices"][0]
-    assert "message" in choice, f"Choice missing 'message' field: {choice}"
-
-    message = choice["message"]
-    assert (
-        message.get("role") == "assistant"
-    ), f"Expected role 'assistant', got '{message.get('role')}'"
-    assert "content" in message, f"Message missing 'content' field: {message}"
-
-    content = message["content"]
-    if stop is not None and content is None:
-        content = ""
-    assert isinstance(content, str), f"Expected text content: {message}"
+    result = validate_chat(data, max_tokens, stop)
+    content = result.choices[0].message.content or ""
     if stop is None:
         assert len(content) >= min_content_length, (
             f"Response content too short: {len(content)} chars (min: {min_content_length}). "
             f"Content: {content[:200]}"
         )
-
-    assert "model" in data, f"Response missing 'model' field: {data}"
     assert (
-        data["model"] == expected_model
-    ), f"Expected model '{expected_model}', got '{data['model']}'"
-
+        result.model == expected_model
+    ), f"Expected model '{expected_model}', got '{result.model}'"
     logger.info(
-        f"Response validation passed: model={data['model']}, "
-        f"content_length={len(content)}"
+        "Response validation passed: model=%s, content_length=%s",
+        result.model,
+        len(content),
     )
-
-    return data
+    return result
 
 
 def _get_workspace_dir() -> str:

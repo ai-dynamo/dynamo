@@ -23,7 +23,7 @@ import pytest
 import requests
 import yaml
 
-from tests.deploy.api_checks import check_deployment_api
+from tests.deploy.api_checks import check_chat_api, check_embedding_api
 from tests.deploy.conftest import DeploymentTarget
 from tests.deploy.dgd_utils import (
     DEFAULT_MAX_TOKENS,
@@ -198,13 +198,15 @@ async def test_deployment(
         base_url = f"http://localhost:{port_forward.local_port}"
         logger.info(f"Port forwarding established: {base_url}")
 
-        scenario = "embedding" if profile == "agg_embed" else "chat"
-        endpoint = (
-            "/v1/embeddings" if scenario == "embedding" else deployment_spec.endpoint
-        )
-        ready_payload = (
-            {"model": model, "input": "test"} if scenario == "embedding" else None
-        )
+        if profile == "agg_embed":
+            endpoint = "/v1/embeddings"
+            ready_payload = {"model": model, "input": "test"}
+            check_api = check_embedding_api
+        else:
+            endpoint = deployment_spec.endpoint
+            ready_payload = None
+            check_api = check_chat_api
+        url = base_url + endpoint
         model_ready = await asyncio.to_thread(
             wait_for_model_availability,
             base_url,
@@ -233,12 +235,10 @@ async def test_deployment(
             )
 
         await asyncio.to_thread(
-            check_deployment_api,
-            base_url,
+            check_api,
+            url,
             model,
-            scenario,
             Path(resolve_test_output_path(request.node.name)) / "responses",
-            endpoint=endpoint,
             request_sender=send_with_retry,
         )
 

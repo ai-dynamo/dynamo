@@ -3,63 +3,83 @@
 
 """Response contracts shared by deployment and component compatibility tests."""
 
+import base64
 import json
 import math
+import struct
+
+from openai.types import CreateEmbeddingResponse
+from openai.types.chat import ChatCompletion, ChatCompletionChunk
 
 
-def validate_embedding(body, count, dimensions):
-    assert body["object"] == "list", body
-    assert len(body["data"]) == count, body
-    for index, item in enumerate(body["data"]):
-        assert item["index"] == index, item
-        assert item["object"] == "embedding", item
-        vector = item["embedding"]
-        assert isinstance(
-            vector, list
-        ), f"Expected float array, got {type(vector).__name__}"
-        assert len(vector) == dimensions, len(vector)
-        assert all(
-            (type(x) in (int, float) and math.isfinite(x) for x in vector)
-        ), "Embedding vector must contain finite numbers"
+def validate_embedding(
+    body, count, dimensions, expected_model, encoding="float"
+) -> CreateEmbeddingResponse:
+    if encoding == "base64":
+        items = []
+        for item in body["data"]:
+            encoded = item["embedding"]
+            assert isinstance(encoded, str), "Expected base64 embedding"
+            raw = base64.b64decode(encoded, validate=True)
+            assert len(raw) == dimensions * 4, "Unexpected float32 byte count"
+            vector = list(struct.unpack(f"<{dimensions}f", raw))
+            items.append({**item, "embedding": vector})
+        # Preserve the original wire response for failure artifacts.
+        body = {**body, "data": items}
+    result = CreateEmbeddingResponse.model_validate(body, strict=True)
+    assert result.model == expected_model, result
+    assert len(result.data) == count, result
+    assert result.usage.prompt_tokens > 0, result.usage
+    assert result.usage.total_tokens == result.usage.prompt_tokens, result.usage
+    for index, item in enumerate(result.data):
+        assert item.index == index, item
+        assert len(item.embedding) == dimensions, len(item.embedding)
+        assert all(math.isfinite(x) for x in item.embedding), "Nonfinite embedding"
+    return result
 
 
-def validate_chat(body, max_tokens, stop=None):
+def validate_chat(body, max_tokens=None, stop=None) -> ChatCompletion:
+    result = ChatCompletion.model_validate(body, strict=True)
     assert "error" not in body, body
-    assert len(body["choices"]) == 1, body
-    choice = body["choices"][0]
-    assert choice["index"] == 0, choice
-    assert choice["finish_reason"] in ("stop", "length"), choice
-    message = choice["message"]
-    assert message["role"] == "assistant", message
-    content = message["content"]
+    assert len(result.choices) == 1, result
+    choice = result.choices[0]
+    assert choice.index == 0, choice
+    assert choice.finish_reason in ("stop", "length"), choice
+    message = choice.message
+    content = message.content
     if stop is None:
-        assert isinstance(content, str), body
-        if max_tokens > 1:
-            assert content.strip(), body
-    tokens = body["usage"]["completion_tokens"]
-    assert type(tokens) is int and 0 <= tokens <= max_tokens, body
+        assert content is not None, message
+        if max_tokens is not None and max_tokens > 1:
+            assert content.strip(), message
+    if max_tokens is not None:
+        assert result.usage is not None, result
+        assert 0 <= result.usage.completion_tokens <= max_tokens, result.usage
     if stop is not None:
-        assert content is None or isinstance(content, str), body
-        assert stop not in (content or ""), body
-        assert choice["finish_reason"] == "stop", body
-        assert not message.get("refusal") and (not message.get("tool_calls")), body
-        assert not message.get("function_call"), body
+        assert stop not in (content or ""), message
+        assert choice.finish_reason == "stop", choice
+        assert not message.refusal and not message.tool_calls, message
+        assert not message.function_call, message
+    return result
 
 
-def validate_stop_response(body, baseline, stop):
-    content = body["choices"][0]["message"]["content"] or ""
-    original = baseline["choices"][0]["message"]["content"]
-    stop_index = original.index(stop)
+def validate_stop_response(body: ChatCompletion, baseline: ChatCompletion, stop: str):
+    content = body.choices[0].message.content or ""
+    original = baseline.choices[0].message.content
+    assert original is not None, baseline
+    expected = original[: original.index(stop)]
     assert content.strip(), "Interior stop suppressed preceding text"
-    assert original.startswith(content), "Stopped output diverged from baseline"
-    assert len(content) <= stop_index, "Output continued past the stop position"
     assert (
-        body["usage"]["completion_tokens"] < baseline["usage"]["completion_tokens"]
+        content.rstrip() == expected.rstrip()
+    ), "Stopped output lost or changed prefix"
+    assert body.usage is not None and baseline.usage is not None
+    assert (
+        body.usage.completion_tokens < baseline.usage.completion_tokens
     ), "Stop did not reduce generated tokens"
 
 
-def validate_stream(lines):
+def validate_stream(lines, expected_model):
     content, finished, done = ([], False, False)
+    response_id = None
     for line in lines:
         if not line or line.startswith(":"):
             continue
@@ -73,21 +93,25 @@ def validate_stream(lines):
         if data == "[DONE]":
             done = True
             continue
-        chunk = json.loads(data)
-        assert "error" not in chunk, chunk
-        choices = chunk["choices"]
-        assert isinstance(choices, list) and len(choices) <= 1, chunk
-        for choice in choices:
-            assert choice["index"] == 0, choice
-            text = choice.get("delta", {}).get("content")
-            if text is not None:
-                assert isinstance(text, str), "Stream content must be a string"
+        body = json.loads(data)
+        assert "error" not in body, body
+        chunk = ChatCompletionChunk.model_validate(body, strict=True)
+        assert chunk.model == expected_model, chunk
+        if response_id is None:
+            response_id = chunk.id
+        assert chunk.id == response_id, "Response ID changed during stream"
+        assert len(chunk.choices) <= 1, chunk
+        for choice in chunk.choices:
+            assert choice.index == 0, choice
+            if choice.delta.role is not None:
+                assert choice.delta.role == "assistant", choice.delta
+            text = choice.delta.content
             if text:
                 assert not finished, "Content after finish_reason"
                 content.append(text)
-            if choice.get("finish_reason") is not None:
+            if choice.finish_reason is not None:
                 assert not finished, "Duplicate finish_reason"
-                assert choice["finish_reason"] in ("stop", "length"), choice
+                assert choice.finish_reason in ("stop", "length"), choice
                 finished = True
     assert done and finished, "Incomplete SSE response"
     assert "".join(content).strip(), "Empty streamed content"

@@ -1,18 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import base64
 import json
+import struct
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 import requests
+from pydantic import ValidationError
 
 from tests.deploy import api_checks
 from tests.deploy.conftest import deployment_spec
 from tests.deploy.dgd_utils import validate_chat_response
 from tests.deploy.response_checks import (
+    validate_chat,
     validate_embedding,
     validate_stop_response,
     validate_stream,
@@ -34,6 +38,9 @@ def response(content="hello", finish="stop", tokens=1):
     result._content_consumed = True
     result._content = json.dumps(
         {
+            "id": "chat-test",
+            "created": 1,
+            "object": "chat.completion",
             "model": "model",
             "choices": [
                 {
@@ -42,7 +49,11 @@ def response(content="hello", finish="stop", tokens=1):
                     "message": {"role": "assistant", "content": content},
                 }
             ],
-            "usage": {"completion_tokens": tokens},
+            "usage": {
+                "completion_tokens": tokens,
+                "prompt_tokens": 10,
+                "total_tokens": 10 + tokens,
+            },
         }
     ).encode()
     return result
@@ -70,45 +81,113 @@ def test_token_limit_and_finish_reason():
         validate_chat_response(response(finish="tool_calls"), "model", 0, max_tokens=30)
 
 
+def stream_chunk(content=None, finish=None, **fields):
+    return {
+        "id": "chat-test",
+        "created": 1,
+        "model": "model",
+        "object": "chat.completion.chunk",
+        "choices": [
+            {"index": 0, "delta": {"content": content}, "finish_reason": finish}
+        ],
+        **fields,
+    }
+
+
+def stream_lines(*chunks):
+    return ["data: " + json.dumps(chunk) for chunk in chunks] + ["data: [DONE]"]
+
+
 def test_stream_requires_one_finish_and_done():
-    content = 'data: {"choices":[{"index":0,"delta":{"content":"hello"}}]}'
-    finish = 'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}'
-    validate_stream([content, finish, "data: [DONE]"])
+    content, finish, done = stream_lines(
+        stream_chunk("hello"), stream_chunk(finish="stop")
+    )
+    validate_stream([content, finish, done], "model")
     for lines in (
-        ["event:error", content, finish, "data: [DONE]"],
-        ["event: error", content, finish, "data: [DONE]"],
+        ["event:error", content, finish, done],
+        ["event: error", content, finish, done],
         [content, finish],
-        [content, finish, finish, "data: [DONE]"],
-        [content, finish, content, "data: [DONE]"],
+        [content, finish, finish, done],
+        [content, finish, content, done],
+        [content, finish, done, content],
     ):
         with pytest.raises(AssertionError):
-            validate_stream(lines)
+            validate_stream(lines, "model")
 
 
-def test_embedding_contract_rejects_wire_base64_and_nonfinite_vectors():
-    body = {
+@pytest.mark.parametrize("fault", ["model", "id", "role"])
+def test_stream_rejects_wrong_model_changed_id_and_nonassistant_role(fault):
+    first = stream_chunk("hello")
+    last = stream_chunk(finish="stop")
+    if fault == "role":
+        first["choices"][0]["delta"]["role"] = "user"
+    else:
+        last[fault] = "wrong"
+    with pytest.raises(AssertionError):
+        validate_stream(stream_lines(first, last), "model")
+
+
+def embedding_body(vectors):
+    return {
+        "model": "model",
         "object": "list",
-        "data": [{"index": 0, "object": "embedding", "embedding": [0.1, 0.2]}],
+        "usage": {"prompt_tokens": len(vectors), "total_tokens": len(vectors)},
+        "data": [
+            {"index": i, "object": "embedding", "embedding": vector}
+            for i, vector in enumerate(vectors)
+        ],
     }
-    validate_embedding(body, 1, 2)
-    for vector in ("base64", [float("nan"), 0.2], [0.1], [True, 0.2]):
-        body["data"][0]["embedding"] = vector
-        with pytest.raises(AssertionError):
-            validate_embedding(body, 1, 2)
 
 
-@pytest.mark.parametrize("inject_sender", [False, True])
-@pytest.mark.parametrize("endpoint", [None, "/custom/chat/completions"])
-def test_api_cases_use_shared_client_and_preserve_invalid_response(
-    monkeypatch, tmp_path, endpoint, inject_sender
-):
-    calls = []
+def encode_embedding(vector):
+    return base64.b64encode(struct.pack(f"<{len(vector)}f", *vector)).decode("ascii")
 
+
+@pytest.mark.parametrize(
+    "vector,encoding",
+    [
+        ("base64", "float"),
+        ([float("nan"), 0.2], "float"),
+        ([0.1], "float"),
+        ([True, 0.2], "float"),
+        ("!!!", "base64"),
+        (encode_embedding([0.1]), "base64"),
+        (encode_embedding([float("inf"), 0.2]), "base64"),
+        ([0.1, 0.2], "base64"),
+    ],
+)
+def test_embedding_rejects_invalid_vectors_and_encoding(vector, encoding):
+    with pytest.raises((AssertionError, ValueError)):
+        validate_embedding(embedding_body([vector]), 1, 2, "model", encoding)
+
+
+@pytest.mark.parametrize("kind", ["chat", "stream", "embedding"])
+def test_response_schemas_reject_wrong_field_types(kind):
+    if kind == "chat":
+        body = response().json()
+        body["usage"]["completion_tokens"] = "1"
+        with pytest.raises(ValidationError):
+            validate_chat(body, 30)
+    elif kind == "stream":
+        chunk = stream_chunk("hello", finish="stop")
+        chunk["created"] = "1"
+        with pytest.raises(ValidationError):
+            validate_stream(stream_lines(chunk), "model")
+    else:
+        body = embedding_body([[0.1, 0.2]])
+        body["usage"]["prompt_tokens"] = "1"
+        with pytest.raises(ValidationError):
+            validate_embedding(body, 1, 2, "model")
+
+
+@pytest.fixture
+def chat_sender():
     def send(url, payload, **kwargs):
-        calls.append((url, payload))
         if payload.get("stream"):
             result = response()
-            result._content = b'data: {"choices":[{"index":0,"delta":{"content":"hello"}}]}\n\ndata: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n'
+            result._content = "\n\n".join(
+                stream_lines(stream_chunk("hello"), stream_chunk(finish="stop"))
+            ).encode()
             return result
         if payload.get("max_tokens") == 1:
             return response("The", "length", tokens=1)
@@ -119,6 +198,17 @@ def test_api_cases_use_shared_client_and_preserve_invalid_response(
             tokens=30,
         )
 
+    return send
+
+
+@pytest.mark.parametrize("inject_sender", [False, True])
+@pytest.mark.parametrize(
+    "endpoint", ["/v1/chat/completions", "/custom/chat/completions"]
+)
+def test_api_cases_use_shared_client_and_preserve_invalid_response(
+    monkeypatch, tmp_path, endpoint, inject_sender, chat_sender
+):
+    send = Mock(side_effect=chat_sender)
     options = {"request_sender": send} if inject_sender else {}
     if inject_sender:
         monkeypatch.setattr(
@@ -126,14 +216,11 @@ def test_api_cases_use_shared_client_and_preserve_invalid_response(
         )
     else:
         monkeypatch.setattr(api_checks, "send_request", send)
-    api_checks.check_deployment_api(
-        "http://test", "model", "chat", tmp_path, endpoint=endpoint, **options
-    )
-    assert len(calls) == 4
-    assert all(
-        url == "http://test" + (endpoint or "/v1/chat/completions") for url, _ in calls
-    )
-    assert calls[-1][1]["stop"] == "air"
+    url = "http://test" + endpoint
+    api_checks.check_chat_api(url, "model", tmp_path, **options)
+    assert send.call_count == 4
+    assert all(call.args[0] == url for call in send.call_args_list)
+    assert send.call_args.args[1]["stop"] == "air"
     assert (
         json.loads((tmp_path / "stop.json").read_text())["response"]
         == response("The", tokens=2).text
@@ -142,38 +229,97 @@ def test_api_cases_use_shared_client_and_preserve_invalid_response(
         api_checks, "send_request", lambda *a, **k: response(tokens=100)
     )
     with pytest.raises(AssertionError):
-        api_checks.check_deployment_api(
-            "http://test", "model", "chat", tmp_path, endpoint=endpoint
-        )
+        api_checks.check_chat_api(url, "model", tmp_path)
     assert "100" in json.loads((tmp_path / "unary.json").read_text())["response"]
 
 
-def test_embedding_api_uses_default_endpoint(monkeypatch, tmp_path):
-    calls = []
-
+@pytest.mark.parametrize("tokens,finish", [(0, "length"), (1, "stop")])
+def test_limited_case_rejects_zero_tokens_and_wrong_finish(
+    tmp_path, chat_sender, tokens, finish
+):
     def send(url, payload, **kwargs):
-        calls.append((url, payload))
-        count = len(payload["input"]) if isinstance(payload["input"], list) else 1
+        if payload.get("max_tokens") == 1:
+            return response("", finish, tokens=tokens)
+        return chat_sender(url, payload, **kwargs)
+
+    with pytest.raises(AssertionError):
+        api_checks.check_chat_api(
+            "http://test/chat", "model", tmp_path, request_sender=send
+        )
+    saved = json.loads((tmp_path / "limited.json").read_text())
+    assert json.loads(saved["response"])["usage"]["completion_tokens"] == tokens
+
+
+@pytest.fixture
+def embedding_sender():
+    def send(url, payload, **kwargs):
+        inputs = payload["input"]
+        inputs = inputs if isinstance(inputs, list) else [inputs]
+        dimensions = payload.get("dimensions", 1024)
+        vectors = [[0.1 if text == "Hello" else 0.5] * dimensions for text in inputs]
+        if len(inputs) > 1:
+            vectors = [[x + 1e-5 for x in vector] for vector in vectors]
+        if payload.get("encoding_format") == "base64":
+            vectors = [encode_embedding(vector) for vector in vectors]
         result = response()
-        result._content = json.dumps(
-            {
-                "model": "model",
-                "object": "list",
-                "data": [
-                    {"index": i, "object": "embedding", "embedding": [0.1] * 1024}
-                    for i in range(count)
-                ],
-            }
-        ).encode()
+        result._content = json.dumps(embedding_body(vectors)).encode()
         return result
 
-    monkeypatch.setattr(api_checks, "send_request", send)
-    api_checks.check_deployment_api("http://test", "model", "embedding", tmp_path)
-    assert len(calls) == 3
-    assert all(url == "http://test/v1/embeddings" for url, _ in calls)
-    assert "encoding_format" not in calls[0][1]
-    assert calls[1][1]["encoding_format"] == "float"
-    assert calls[2][1]["input"] == ["Hello", "World"]
+    return send
+
+
+def test_embedding_api_checks_formats_dimensions_and_batch(tmp_path, embedding_sender):
+    send = Mock(side_effect=embedding_sender)
+    url = "http://test/custom/embeddings"
+    api_checks.check_embedding_api(url, "model", tmp_path, request_sender=send)
+    assert send.call_count == 6
+    assert all(call.args[0] == url for call in send.call_args_list)
+    payloads = [call.args[1] for call in send.call_args_list]
+    assert "encoding_format" not in payloads[0]
+    assert payloads[1]["encoding_format"] == "float"
+    assert payloads[3]["input"] == ["Hello", "World"]
+    assert payloads[4]["dimensions"] == payloads[5]["dimensions"] == 128
+    saved = json.loads((tmp_path / "base64.json").read_text())
+    assert saved["request"]["encoding_format"] == "base64"
+    wire = json.loads(saved["response"])
+    encoded = wire["data"][0]["embedding"]
+    result = validate_embedding(wire, 1, 128, "model", "base64")
+    assert result.data[0].embedding == pytest.approx([0.1] * 128)
+    assert wire["data"][0]["embedding"] == encoded
+
+
+@pytest.mark.parametrize(
+    "fault", ["duplicate", "swap", "zero_usage", "total_usage", "batch_usage"]
+)
+def test_embedding_rejects_wrong_batch_contents_and_usage(
+    tmp_path, embedding_sender, fault
+):
+    def send(url, payload, **kwargs):
+        result = embedding_sender(url, payload, **kwargs)
+        if not isinstance(payload["input"], list):
+            return result
+        body = result.json()
+        if fault == "duplicate":
+            body["data"][1]["embedding"] = body["data"][0]["embedding"]
+        elif fault == "swap":
+            body["data"][0]["embedding"], body["data"][1]["embedding"] = (
+                body["data"][1]["embedding"],
+                body["data"][0]["embedding"],
+            )
+        elif fault == "zero_usage":
+            body["usage"] = {"prompt_tokens": 0, "total_tokens": 0}
+        elif fault == "total_usage":
+            body["usage"]["total_tokens"] = 3
+        else:
+            body["usage"] = {"prompt_tokens": 3, "total_tokens": 3}
+        result._content = json.dumps(body).encode()
+        return result
+
+    with pytest.raises(AssertionError):
+        api_checks.check_embedding_api(
+            "http://test/embed", "model", tmp_path, request_sender=send
+        )
+    assert (tmp_path / "batch.json").exists()
 
 
 def test_embedding_readiness_uses_embedding_payload(monkeypatch):
@@ -206,7 +352,7 @@ def test_deploy_fixture_overrides_frontend_separately():
 
 @pytest.mark.parametrize("content", ["The", "The "])
 def test_stop_allows_text_before_stop(content):
-    baseline = response("The air in the ruins", tokens=30).json()
+    baseline = validate_chat(response("The air in the ruins", tokens=30).json(), 30)
     stopped = response(content, tokens=2)
     body = validate_chat_response(stopped, "model", max_tokens=30, stop="air")
     validate_stop_response(body, baseline, "air")
@@ -216,6 +362,7 @@ def test_stop_allows_text_before_stop(content):
     "content,finish,tokens",
     [
         ("", "stop", 2),
+        ("T", "stop", 2),
         ("The air", "stop", 2),
         ("Other", "stop", 2),
         ("The ", "length", 2),
@@ -226,8 +373,8 @@ def test_stop_allows_text_before_stop(content):
 def test_stop_rejects_leaked_stop_divergence_and_no_early_termination(
     content, finish, tokens
 ):
-    baseline = response("The air in the ruins", tokens=30).json()
-    with pytest.raises(AssertionError):
+    baseline = validate_chat(response("The air in the ruins", tokens=30).json(), 30)
+    with pytest.raises((AssertionError, ValidationError)):
         body = validate_chat_response(
             response(content, finish, tokens), "model", max_tokens=30, stop="air"
         )
