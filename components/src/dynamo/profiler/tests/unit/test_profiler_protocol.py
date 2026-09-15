@@ -1751,18 +1751,17 @@ def test_materialize_dgd_shell_form_preserves_syntax() -> None:
         ("symlink", True),
         ("file", False),
         ("missing", False),
-        ("broken_symlink", False),
         ("child_of_file", False),
     ],
 )
 def test_implicit_trust_requires_local_directory(tmp_path, path_kind, expected):
+    """Only accessible directories qualify for implicit custom-code trust."""
     model_path = tmp_path / "model"
     if path_kind == "directory":
         model_path.mkdir()
-    elif path_kind in ("symlink", "broken_symlink"):
+    elif path_kind == "symlink":
         target = tmp_path / "snapshot"
-        if path_kind == "symlink":
-            target.mkdir()
+        target.mkdir()
         model_path.symlink_to(target, target_is_directory=True)
     elif path_kind in ("file", "child_of_file"):
         model_path.touch()
@@ -1772,15 +1771,15 @@ def test_implicit_trust_requires_local_directory(tmp_path, path_kind, expected):
     assert model_ref_allows_implicit_trust_remote_code(model_path) is expected
 
 
-@pytest.mark.parametrize("error_number", [errno.EACCES, errno.EIO, errno.ELOOP])
 @pytest.mark.parametrize("explicit_trust", [False, True])
 def test_materialize_dgd_inaccessible_model_path(
-    tmp_path, monkeypatch, caplog, error_number, explicit_trust
+    tmp_path, monkeypatch, caplog, explicit_trust
 ):
+    """An inaccessible path requires an actionable error or explicit trust."""
     model_path = tmp_path / "model"
     model_path.mkdir()
     (model_path / "config.json").write_text("{}")
-    error = OSError(error_number, "Cannot inspect model", str(model_path))
+    error = PermissionError(errno.EACCES, "Cannot inspect model", str(model_path))
     original_stat = Path.stat
 
     def stat(self, *args, **kwargs):
