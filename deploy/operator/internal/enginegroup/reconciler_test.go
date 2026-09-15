@@ -395,6 +395,73 @@ func TestCoordinatorResumesWhenUnknownMembershipAuthorityRecovers(t *testing.T) 
 	})
 }
 
+func TestCoordinatorRollsBackRecoveredRejectionBeforeAcceptingReplacementPlan(t *testing.T) {
+	base := engineTopology(1, 2)
+	scenario := newCoordinatorScenario(t, base)
+	retiring := base.Replicas[1].ReplicaID
+	plan := retirePlan(
+		"rejected-retirement",
+		retiring,
+		TrafficRequirementKeepServing,
+		VerificationRequirementNone,
+	)
+	scenario.desired = &plan
+	scenario.runUntil("apply retirement target", func(s *coordinatorScenario) bool {
+		return s.membership.applyCalls == 1
+	})
+	target := *scenario.status.Membership.Desired
+	scenario.membership.transitions[target.TransitionID] = MembershipTransitionObservation{
+		TransitionID:    target.TransitionID,
+		ControlRevision: target.ControlRevision,
+		TargetDigest:    target.TargetDigest,
+		Phase:           MembershipTransitionPhaseUnknown,
+		Failure: &Failure{
+			Classification: FailureClassificationRetryable,
+			Reason:         "AuthorityUnavailable",
+			Message:        "adapter temporarily lost authoritative state",
+		},
+	}
+	scenario.runUntil("block unknown retirement", func(s *coordinatorScenario) bool {
+		return s.status.Transition.Outcome == TransitionOutcomeBlocked
+	})
+
+	replacement := retirePlan(
+		"replacement-retirement",
+		retiring,
+		TrafficRequirementKeepServing,
+		VerificationRequirementNone,
+	)
+	scenario.desired = &replacement
+	scenario.membership.transitions[target.TransitionID] = MembershipTransitionObservation{
+		TransitionID:    target.TransitionID,
+		ControlRevision: target.ControlRevision,
+		TargetDigest:    target.TargetDigest,
+		Phase:           MembershipTransitionPhaseRejected,
+		Failure: &Failure{
+			Classification: FailureClassificationTerminal,
+			Reason:         "Rejected",
+			Message:        "the exact retirement target was rejected without mutation",
+		},
+	}
+
+	t.Log("Interpret and persist the recovered rejection before considering the newer plan")
+	scenario.mustReconcile("begin rollback of rejected retirement")
+	if scenario.status.Transition.Outcome != TransitionOutcomeReverting ||
+		scenario.status.Transition.Spec.Plan.ID != plan.ID {
+		t.Fatalf("replacement bypassed rollback of the rejected plan: %#v", scenario.status.Transition)
+	}
+
+	t.Log("Restore the old plan's preparatory state before starting the replacement")
+	scenario.runUntil("finish rejected retirement rollback", func(s *coordinatorScenario) bool {
+		return s.status.Transition.Outcome == TransitionOutcomeRolledBack
+	})
+	scenario.mustReconcile("start replacement retirement")
+	if scenario.status.Transition.Spec.Plan.ID != replacement.ID ||
+		scenario.status.Transition.Outcome != TransitionOutcomeProgressing {
+		t.Fatalf("replacement did not start after rollback: %#v", scenario.status.Transition)
+	}
+}
+
 func TestCoordinatorRollsBackPreparatoryStateAfterDefinitiveRejection(t *testing.T) {
 	base := engineTopology(1, 1)
 	scenario := newCoordinatorScenario(t, base)

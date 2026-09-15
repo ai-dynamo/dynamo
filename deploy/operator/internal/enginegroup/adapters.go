@@ -132,7 +132,9 @@ type ValidationEvidence struct {
 	CapabilityGeneration string
 }
 
-// PreflightResult is either durable validation evidence or a definitive rejection of the validated subject.
+// PreflightResult is either durable validation evidence or a definitive rejection of the validated subject. With a
+// nil method error exactly one field is set. With a non-nil method error neither field is authoritative. A rejection is
+// terminal for the correlated request and guarantees that the adapter cannot later commit it.
 type PreflightResult struct {
 	Evidence  *ValidationEvidence
 	Rejection *Failure

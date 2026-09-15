@@ -132,6 +132,12 @@ func (c *Coordinator) reconcileDesiredPlan(
 	desiredPlan *ResolvedPlan,
 	observedTopology MembershipTopology,
 ) (handled bool, result ReconcileResult, err error) {
+	// Finish interpreting a recovered membership result before considering a replacement plan. In particular, a
+	// correlated rejection must restore preparatory capacity and traffic state even when a newer plan is already desired.
+	if recovered, recoveredStatus := c.recoverMembershipAuthority(status, observedTopology); recovered {
+		return true, ReconcileResult{Status: recoveredStatus, Requeue: true}, nil
+	}
+
 	// A completed or safely blocked transition may be replaced only by a distinct explicit plan.
 	if status.Transition != nil &&
 		(status.Transition.Outcome == TransitionOutcomeCompleted ||
@@ -166,9 +172,6 @@ func (c *Coordinator) reconcileDesiredPlan(
 			desiredPlan.ID,
 		)
 	}
-	if recovered, recoveredStatus := c.recoverMembershipAuthority(status, observedTopology); recovered {
-		return true, ReconcileResult{Status: recoveredStatus, Requeue: true}, nil
-	}
 	if status.Transition.Outcome == TransitionOutcomeBlocked ||
 		status.Transition.Outcome == TransitionOutcomeCompleted ||
 		status.Transition.Outcome == TransitionOutcomeRolledBack {
@@ -181,7 +184,8 @@ func (c *Coordinator) recoverMembershipAuthority(
 	status GroupStatus,
 	observedTopology MembershipTopology,
 ) (bool, GroupStatus) {
-	if status.Transition.Outcome != TransitionOutcomeBlocked || status.Transition.Failure == nil ||
+	if status.Transition == nil || status.Transition.Outcome != TransitionOutcomeBlocked ||
+		status.Transition.Failure == nil ||
 		status.Transition.Failure.Reason != "UnknownMembershipOutcome" ||
 		status.Membership.Observed.Transition == nil {
 		return false, status
