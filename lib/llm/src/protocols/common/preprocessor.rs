@@ -269,8 +269,13 @@ pub struct PreprocessedRequest {
     #[serde(skip)]
     pub(crate) staged_kv_cleanup: bool,
 
-    /// Type of prompt
-    pub token_ids: Vec<TokenIdType>,
+    /// Prompt tokens shared by prefill and decode request clones.
+    ///
+    /// Disaggregated serving runs those requests concurrently. Keeping the
+    /// immutable prompt behind `Arc` makes cloning the token storage constant-time;
+    /// paths that append generated tokens use `Arc::make_mut`.
+    #[builder(setter(into))]
+    pub token_ids: Arc<Vec<TokenIdType>>,
 
     /// Base64-encoded PyTorch tensor containing pre-computed embeddings
     /// If provided, this takes precedence over token_ids for inference
@@ -556,6 +561,40 @@ impl PreprocessedEmbeddingRequest {
 mod tests {
     use super::*;
 
+    fn request_with_tokens(token_ids: Vec<TokenIdType>) -> PreprocessedRequest {
+        PreprocessedRequest::builder()
+            .model("test-model".to_string())
+            .token_ids(token_ids)
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .build()
+            .expect("valid request")
+    }
+
+    #[test]
+    fn clone_shares_token_storage_until_mutated() {
+        let request = request_with_tokens(vec![1, 2, 3]);
+        let mut cloned = request.clone();
+
+        assert!(Arc::ptr_eq(&request.token_ids, &cloned.token_ids));
+        Arc::make_mut(&mut cloned.token_ids).push(4);
+
+        assert!(!Arc::ptr_eq(&request.token_ids, &cloned.token_ids));
+        assert_eq!(request.token_ids.as_slice(), &[1, 2, 3]);
+        assert_eq!(cloned.token_ids.as_slice(), &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn shared_tokens_preserve_json_wire_format() {
+        let request = request_with_tokens(vec![11, 22, 33]);
+        let json = serde_json::to_string(&request).expect("serializes");
+        assert!(json.contains(r#""token_ids":[11,22,33]"#), "{json}");
+
+        let decoded: PreprocessedRequest = serde_json::from_str(&json).expect("deserializes");
+        assert_eq!(decoded.token_ids.as_slice(), &[11, 22, 33]);
+    }
+
     #[test]
     fn embedding_encoding_format_serde_omits_none() {
         let mut request = PreprocessedEmbeddingRequest {
@@ -677,7 +716,7 @@ mod tests {
             "_HEALTH_CHECK": true,
         }))
         .unwrap();
-        assert_eq!(req.token_ids, vec![1]);
+        assert_eq!(req.token_ids.as_slice(), &[1]);
         assert!(req.is_probe);
         assert_eq!(req.model, "");
     }
