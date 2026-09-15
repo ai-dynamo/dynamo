@@ -505,7 +505,11 @@ mod tests {
                 .env("DYN_TCP_RPC_PORT", "0")
                 .env(
                     "DYN_TCP_RESPONSE_STREAM_HOST",
-                    if cfg!(target_os = "macos") { "lo0" } else { "lo" },
+                    if cfg!(target_os = "macos") {
+                        "lo0"
+                    } else {
+                        "lo"
+                    },
                 )
                 .env("DYN_TCP_RESPONSE_STREAM_PORT", "0")
                 .kill_on_drop(true);
