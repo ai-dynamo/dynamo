@@ -16,13 +16,13 @@ use crate::tracking_hash::TrackingHashContext;
 use super::core::{SelectionCore, SelectionServiceConfig};
 use super::error::SelectionError;
 use super::pending::SelectionCacheConfig;
-use super::policy_registry::WorkerSelectionPolicyRegistry;
 use super::types::{
     ModelLoadResponse, OverlapScoresRequest, OverlapScoresResponse, PotentialLoadsRequest,
     ReadyResponse, ReservationRequest, ReservationResponse, SelectAndReserveRequest, SelectRequest,
     SelectResponse, WorkerCatalogRecord, WorkerPatchRequest, WorkerRequest,
 };
 use crate::WorkerType;
+use crate::plugins::WorkerSelectionPolicyRegistry;
 
 pub struct SelectionServiceBuilder {
     kv_router_config: KvRouterConfig,

@@ -12,7 +12,6 @@ use anyhow::Context as _;
 use async_trait::async_trait;
 use dynamo_kv_router::{
     DEFAULT_ROUTING_GROUP, PrefillLoadEstimator, RoutingPartitionRef,
-    scheduling::RequestClassifierFactory,
     selector::{DefaultWorkerSelector, WorkerSelector},
 };
 use dynamo_runtime::{
@@ -33,7 +32,8 @@ use crate::{
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
     kv_router::{
-        EncoderRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext, WorkerSelectorFactory,
+        EncoderRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext,
+        plugins::RouterPluginBuilder,
     },
     local_model::runtime_config::{
         ModelRuntimeConfig, TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
@@ -211,8 +211,7 @@ where
     /// Worker capabilities accepted by the frontend's engine-native Generate routes.
     /// Keep raw pipelines out of default-off and backend-mismatched paths.
     generate_engine_capabilities: Vec<&'static str>,
-    worker_selector_factory: WorkerSelectorFactory<Sel>,
-    request_classifier_factory: Option<RequestClassifierFactory>,
+    plugins: RouterPluginBuilder<Sel>,
     /// Custom selector dispatch cannot infer whether an untyped legacy card is decode or aggregated.
     require_typed_worker_role: bool,
 }
@@ -282,7 +281,7 @@ impl ModelWatcher<DefaultWorkerSelector> {
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         metrics: Arc<Metrics>,
     ) -> ModelWatcher {
-        Self::new_with_worker_selector_factory(
+        Self::new_with_plugins(
             runtime,
             model_manager,
             router_config,
@@ -292,12 +291,7 @@ impl ModelWatcher<DefaultWorkerSelector> {
             prefill_load_estimator,
             metrics,
             false,
-            Arc::new(|config, worker_type, _partition| {
-                DefaultWorkerSelector::new(
-                    Some(config.clone()),
-                    worker_type.default_selector_label(),
-                )
-            }),
+            RouterPluginBuilder::default(),
         )
     }
 }
@@ -307,7 +301,7 @@ where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new_with_worker_selector_factory(
+    pub(crate) fn new_with_plugins(
         runtime: DistributedRuntime,
         model_manager: Arc<ModelManager>,
         router_config: RouterConfig,
@@ -317,7 +311,7 @@ where
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         metrics: Arc<Metrics>,
         require_typed_worker_role: bool,
-        worker_selector_factory: WorkerSelectorFactory<Sel>,
+        plugins: RouterPluginBuilder<Sel>,
     ) -> Self {
         Self {
             manager: model_manager,
@@ -335,21 +329,13 @@ where
             tokenizer_backend: None,
             tokenizer_fallback_enabled: None,
             generate_engine_capabilities: Vec::new(),
-            worker_selector_factory,
-            request_classifier_factory: None,
+            plugins,
             require_typed_worker_role,
         }
     }
 
     pub fn set_notify_on_model_update(&mut self, tx: Sender<ModelUpdate>) {
         self.model_update_tx = Some(tx);
-    }
-
-    pub(crate) fn set_request_classifier_factory(
-        &mut self,
-        factory: Option<RequestClassifierFactory>,
-    ) {
-        self.request_classifier_factory = factory;
     }
 
     pub fn set_local_model_path(&mut self, path: Option<PathBuf>) {
@@ -587,21 +573,18 @@ where
             // need the shared chooser in KV mode.
             let kv_chooser =
                 if router_config.router_mode == RouterMode::KV && needs_preprocessed_routing {
-                    let selector = (self.worker_selector_factory)(
-                        &router_config.kv_router_config,
-                        effective_worker_type(card.worker_type, card.model_type),
-                        RoutingPartitionRef::new(&card.display_name, DEFAULT_ROUTING_GROUP),
-                    );
                     let mut chooser = self
                         .manager
-                        .kv_chooser_for_with_selector_and_client(
+                        .kv_chooser_for_with_plugins_and_client(
                             load_context
                                 .as_ref()
                                 .expect("routing load context must exist")
                                 .client()
                                 .clone(),
                             card.kv_cache_block_size,
-                            selector,
+                            &self.plugins,
+                            effective_worker_type(card.worker_type, card.model_type),
+                            RoutingPartitionRef::new(&card.display_name, DEFAULT_ROUTING_GROUP),
                             Some(router_config.kv_router_config.clone()),
                             self.prefill_load_estimator.clone(),
                             card.worker_type,
@@ -618,9 +601,6 @@ where
                                 .cancellation_token(),
                         )
                         .await?;
-                    if let Some(factory) = &self.request_classifier_factory {
-                        chooser.install_request_classifier(factory())?;
-                    }
                     Arc::get_mut(&mut chooser)
                         .expect("new KV chooser must have one owner")
                         .set_teardown_task_guard(allocator_trim.clone());
@@ -647,7 +627,7 @@ where
                     router_config.router_mode,
                     card.kv_cache_block_size,
                     Some(prefill_config),
-                    self.worker_selector_factory.clone(),
+                    self.plugins.selector_factory.clone(),
                     self.prefill_load_estimator.clone(),
                     router_config.session_affinity_ttl_secs,
                     router_config.session_affinity_mode,
@@ -1759,10 +1739,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn classifier_factory_is_installed_per_discovered_model() {
+    async fn plugin_bundle_is_installed_per_discovered_model() {
         const TEST: &str = concat!(
             module_path!(),
-            "::classifier_factory_is_installed_per_discovered_model"
+            "::plugin_bundle_is_installed_per_discovered_model"
         );
         let test_name = TEST.split_once("::").unwrap().1;
         if std::env::var("DYNAMO_CLASSIFIER_CATALOG_TEST").as_deref() != Ok(test_name) {
@@ -1821,16 +1801,31 @@ mod tests {
             }
         }
 
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            r#"
+worker_selection:
+  aggregated: test
+  instances:
+    - name: test
+      type: test
+request_classifier:
+  type: test
+"#,
+        )
+        .unwrap();
         let router_config = RouterConfig::new(
             RouterMode::KV,
             dynamo_kv_router::KvRouterConfig {
                 use_kv_events: false,
+                router_policy_config: Some(policy_file.path().display().to_string()),
                 ..Default::default()
             },
         );
         let instances = Arc::new(AtomicUsize::new(0));
         let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
-        let factory: RequestClassifierFactory = Arc::new({
+        let factory: dynamo_kv_router::scheduling::RequestClassifierFactory = Arc::new({
             let instances = instances.clone();
             move || {
                 Box::new(RejectingClassifier {
@@ -1840,11 +1835,37 @@ mod tests {
                 })
             }
         });
+        let selectors = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let mut registry = dynamo_kv_router::plugins::RouterPluginRegistry::default();
+        registry
+            .register_request_classifier("test", Arc::new(move |_| Ok(factory.clone())))
+            .unwrap();
+        registry
+            .register_worker_selection(
+                "test",
+                Arc::new({
+                    let selectors = selectors.clone();
+                    move |_| {
+                        let selectors = selectors.clone();
+                        Ok(Arc::new(move |config, role, partition| {
+                            selectors.lock().push((role, partition.into_owned()));
+                            dynamo_kv_router::WorkerSelectionPolicy::default(
+                                config.clone(),
+                                role.default_selector_label(),
+                            )
+                        }))
+                    }
+                }),
+            )
+            .unwrap();
+        let plugins = registry
+            .resolve_plugins(&router_config.kv_router_config)
+            .unwrap();
         let runtime = Runtime::from_current().unwrap();
         let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
             .await
             .unwrap();
-        let mut watcher = ModelWatcher::new(
+        let watcher = ModelWatcher::new_with_plugins(
             drt,
             Arc::new(ModelManager::new()),
             router_config,
@@ -1853,8 +1874,9 @@ mod tests {
             None,
             None,
             Arc::new(Metrics::new()),
+            true,
+            RouterPluginBuilder::new(plugins),
         );
-        watcher.set_request_classifier_factory(Some(factory));
 
         for instance in 0..2 {
             let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1917,6 +1939,18 @@ mod tests {
             cancellation.cancel();
         }
         assert_eq!(instances.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            *selectors.lock(),
+            (0..2)
+                .map(|instance| (
+                    WorkerType::Aggregated,
+                    dynamo_kv_router::RoutingPartitionId::new(
+                        format!("classifier-model-{instance}"),
+                        DEFAULT_ROUTING_GROUP
+                    ),
+                ))
+                .collect::<Vec<_>>()
+        );
         runtime.shutdown();
     }
 

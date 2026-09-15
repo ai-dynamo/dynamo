@@ -13,7 +13,7 @@ use crate::{
         FrontendRouteExtension,
         service_v2::{self, HttpService},
     },
-    kv_router::WorkerSelectorFactory,
+    kv_router::plugins::RouterPluginBuilder,
     local_model::runtime_config::{ModelRuntimeConfig, TokenizerBackend},
     model_type::ModelType,
     namespace::NamespaceFilter,
@@ -23,26 +23,29 @@ use crate::{
     },
 };
 use dynamo_kv_router::{
-    KvRouterConfig, RoutingPartitionRef, WorkerSelectionPolicy, WorkerType,
-    scheduling::RequestClassifierFactory,
-    selector::{DefaultWorkerSelector, WorkerSelector},
+    KvRouterConfig, RoutingPartitionRef, WorkerSelectionPolicy, WorkerType, plugins::RouterPlugins,
+    scheduling::RequestClassifierFactory, selector::WorkerSelector,
 };
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::metrics::MetricsHierarchy;
 
 /// Dynamo's complete discovery-backed HTTP frontend.
 ///
-/// The default frontend uses [`DefaultWorkerSelector`] and pass-through request classification.
-/// Statically linked plugins install through [`Self::worker_selection_policy_factory`] and
-/// [`Self::request_classifier_factory`].
+/// The default frontend uses [`dynamo_kv_router::DefaultWorkerSelector`] and pass-through request classification.
+/// Statically linked plugins install together through [`Self::plugins`].
 #[derive(Default)]
 pub struct HttpFrontend {
     frontend_route_extensions: Vec<FrontendRouteExtension>,
-    worker_selection_policy_factory: Option<WorkerSelectorFactory<WorkerSelectionPolicy>>,
-    request_classifier_factory: Option<RequestClassifierFactory>,
+    plugins: RouterPlugins,
 }
 
 impl HttpFrontend {
+    /// Install a resolved plugin bundle for all routers created by this frontend.
+    pub fn plugins(mut self, plugins: RouterPlugins) -> Self {
+        self.plugins = plugins;
+        self
+    }
+
     /// Add system route extensions to the frontend.
     pub fn frontend_route_extensions(
         mut self,
@@ -69,13 +72,13 @@ impl HttpFrontend {
             + Sync
             + 'static,
     {
-        self.worker_selection_policy_factory = Some(Arc::new(factory));
+        self.plugins = self.plugins.with_worker_selection(Arc::new(factory));
         self
     }
 
     /// Install one catalog-created request classifier per routed decode or aggregated model.
     pub fn request_classifier_factory(mut self, factory: RequestClassifierFactory) -> Self {
-        self.request_classifier_factory = Some(factory);
+        self.plugins = self.plugins.with_request_classifier(factory);
         self
     }
 
@@ -85,7 +88,7 @@ impl HttpFrontend {
         distributed_runtime: DistributedRuntime,
         engine_config: EngineConfig,
     ) -> anyhow::Result<()> {
-        if self.request_classifier_factory.is_some()
+        if self.plugins.request_classifier().is_some()
             && !engine_config
                 .local_model()
                 .router_config()
@@ -94,10 +97,7 @@ impl HttpFrontend {
         {
             anyhow::bail!("request classifiers require --router-mode kv");
         }
-        if (self.worker_selection_policy_factory.is_some()
-            || self.request_classifier_factory.is_some())
-            && !matches!(&engine_config, EngineConfig::Dynamic { .. })
-        {
+        if !self.plugins.is_empty() && !matches!(&engine_config, EngineConfig::Dynamic { .. }) {
             anyhow::bail!("custom router plugins require a dynamic engine");
         }
 
@@ -112,34 +112,24 @@ impl HttpFrontend {
 
         super::initialize_input(&distributed_runtime, &engine_config).await;
 
-        let result = match self.worker_selection_policy_factory {
-            Some(factory) => {
-                run_with_worker_selector_factory(
-                    distributed_runtime,
-                    engine_config,
-                    self.frontend_route_extensions,
-                    true,
-                    factory,
-                    self.request_classifier_factory,
-                )
-                .await
-            }
-            None => {
-                run_with_worker_selector_factory(
-                    distributed_runtime,
-                    engine_config,
-                    self.frontend_route_extensions,
-                    false,
-                    Arc::new(|config, worker_type, _partition| {
-                        DefaultWorkerSelector::new(
-                            Some(config.clone()),
-                            worker_type.default_selector_label(),
-                        )
-                    }),
-                    self.request_classifier_factory,
-                )
-                .await
-            }
+        let result = if self.plugins.worker_selection().is_some() {
+            run_with_router_plugins(
+                distributed_runtime,
+                engine_config,
+                self.frontend_route_extensions,
+                true,
+                RouterPluginBuilder::new(self.plugins),
+            )
+            .await
+        } else {
+            run_with_router_plugins(
+                distributed_runtime,
+                engine_config,
+                self.frontend_route_extensions,
+                false,
+                RouterPluginBuilder::with_default_selector(self.plugins)?,
+            )
+            .await
         };
 
         active_input.release_and_drain().await;
@@ -170,13 +160,12 @@ pub async fn run_with_frontend_route_extensions(
         .await
 }
 
-async fn run_with_worker_selector_factory<Sel>(
+async fn run_with_router_plugins<Sel>(
     distributed_runtime: DistributedRuntime,
     engine_config: EngineConfig,
     frontend_route_extensions: Vec<FrontendRouteExtension>,
     require_typed_worker_role: bool,
-    worker_selector_factory: WorkerSelectorFactory<Sel>,
-    request_classifier_factory: Option<RequestClassifierFactory>,
+    plugins: RouterPluginBuilder<Sel>,
 ) -> anyhow::Result<()>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
@@ -284,8 +273,7 @@ where
                 model.runtime_config().tokenizer_fallback_enabled,
                 generate_engine_capabilities,
                 require_typed_worker_role,
-                worker_selector_factory.clone(),
-                request_classifier_factory,
+                plugins,
             )
             .await?;
             http_service
@@ -375,8 +363,7 @@ async fn run_watcher<Sel>(
     tokenizer_fallback_enabled: Option<bool>,
     generate_engine_capabilities: Vec<&'static str>,
     require_typed_worker_role: bool,
-    worker_selector_factory: WorkerSelectorFactory<Sel>,
-    request_classifier_factory: Option<RequestClassifierFactory>,
+    plugins: RouterPluginBuilder<Sel>,
 ) -> anyhow::Result<()>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
@@ -389,7 +376,7 @@ where
         let _controller_handle = model_manager.start_lora_controller(cancel_token);
     }
 
-    let mut watch_obj = ModelWatcher::new_with_worker_selector_factory(
+    let mut watch_obj = ModelWatcher::new_with_plugins(
         runtime.clone(),
         model_manager,
         router_config,
@@ -399,9 +386,8 @@ where
         prefill_load_estimator,
         metrics.clone(),
         require_typed_worker_role,
-        worker_selector_factory,
+        plugins,
     );
-    watch_obj.set_request_classifier_factory(request_classifier_factory);
     watch_obj.set_local_model_path(local_model_path);
     watch_obj.set_tokenizer_backend(tokenizer_backend);
     watch_obj.set_tokenizer_fallback_enabled(tokenizer_fallback_enabled);

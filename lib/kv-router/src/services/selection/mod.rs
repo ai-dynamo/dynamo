@@ -11,7 +11,6 @@ mod core;
 mod error;
 mod input;
 mod pending;
-mod policy_registry;
 mod server;
 mod service;
 mod types;
@@ -20,17 +19,17 @@ mod types;
 mod tests;
 
 pub use crate::WorkerSelectionPolicyFactory;
-pub use crate::services::common::replica_sync::ReplicaPeerError;
-pub use core::{SelectionCore, SelectionServiceConfig};
-pub use error::SelectionError;
-pub use input::PromptRequest;
-pub use pending::SelectionCacheConfig;
-pub use policy_registry::{
+pub use crate::plugins::{
     DYN_ROUTER_DECODE_POLICY, DYN_ROUTER_PREFILL_POLICY, DYN_ROUTER_WORKER_SELECTION_POLICY,
     RouterPluginRegistry, WorkerSelectionPolicyParameters, WorkerSelectionPolicyProvider,
     WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistry,
     WorkerSelectionPolicyRegistryError,
 };
+pub use crate::services::common::replica_sync::ReplicaPeerError;
+pub use core::{SelectionCore, SelectionServiceConfig};
+pub use error::SelectionError;
+pub use input::PromptRequest;
+pub use pending::SelectionCacheConfig;
 pub use server::{AppState, run_server};
 pub use service::{
     SelectionService, SelectionServiceBuilder, warn_for_unserved_worker_selection_policies,

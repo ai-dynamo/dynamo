@@ -3,7 +3,6 @@
 
 //! Startup registration for statically linked request-classifier plugins.
 
-#[cfg(any(test, feature = "standalone-selection"))]
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -11,7 +10,6 @@ use serde::de::DeserializeOwned;
 use thiserror::Error;
 
 use super::RequestClassifier;
-#[cfg(any(test, feature = "standalone-selection"))]
 use super::config::KvRouterConfig;
 
 /// Creates one classifier per routed model during router construction, not per request.
@@ -54,7 +52,6 @@ impl RequestClassifierProviderError {
     }
 }
 
-#[cfg(any(test, feature = "standalone-selection"))]
 #[derive(Clone, Default)]
 pub(crate) struct RequestClassifierRegistry {
     providers: HashMap<String, RequestClassifierProvider>,
@@ -84,8 +81,11 @@ pub enum RequestClassifierRegistryError {
     },
 }
 
-#[cfg(any(test, feature = "standalone-selection"))]
 impl RequestClassifierRegistry {
+    pub fn is_empty(&self) -> bool {
+        self.providers.is_empty()
+    }
+
     pub fn register(
         &mut self,
         name: impl Into<String>,
