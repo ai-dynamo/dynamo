@@ -122,8 +122,6 @@ class HelloEngine(LLMEngine):
     # start: load "the model"   [called once at boot]
     # ------------------------------------------------------------------
     async def start(self, worker_id: int) -> EngineConfig:
-        # This toy engine has no per-worker state, so worker_id is unused.
-        # (Engines that shard state or seed RNGs per replica need it.)
         del worker_id
         local_file = os.path.join(self.tokenizer_repo, "tokenizer.json")
         if os.path.exists(local_file):
@@ -139,10 +137,7 @@ class HelloEngine(LLMEngine):
 
         return EngineConfig(
             model=self.tokenizer_repo,
-            # None = defer to WorkerConfig.served_model_name (set in
-            # from_args). An engine that only learns the real name while
-            # loading (e.g. from the checkpoint) can override it here.
-            served_model_name=None,
+            served_model_name=None,  # Worker uses WorkerConfig.served_model_name
             llm=LlmRegistration(
                 context_length=4096,
                 kv_cache_block_size=BLOCK_SIZE,  # REQUIRED for KV events to flow
