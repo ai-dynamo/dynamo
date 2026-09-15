@@ -395,14 +395,10 @@ pub(crate) fn map_python_exception(error: PyErr) -> DynamoError {
         }
 
         if let Some((code, message)) = extract_http_like_error(py, &error) {
-            let class = error_class_for_http_status(code);
-            let mut builder = DynamoError::builder()
-                .class(class)
-                .diagnostic(format!("Python HTTP {code}: {message}"));
-            if (400..499).contains(&code) {
-                builder = builder.public_message(message);
-            }
-            return builder.build();
+            return DynamoError::builder()
+                .class(error_class_for_http_status(code))
+                .diagnostic(format!("Python HTTP {code}: {message}"))
+                .build();
         }
 
         if error.is_instance_of::<pyo3::exceptions::PyGeneratorExit>(py) {
