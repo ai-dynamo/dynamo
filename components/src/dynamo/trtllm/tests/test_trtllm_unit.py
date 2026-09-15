@@ -182,8 +182,11 @@ def test_deprecated_publish_events_flag_alias_maps_to_both_controls(
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_METRICS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS", raising=False)
-    with caplog.at_level("WARNING"), pytest.warns(
-        DeprecationWarning, match="--publish-events-and-metrics is deprecated"
+    with (
+        caplog.at_level("WARNING"),
+        pytest.warns(
+            DeprecationWarning, match="--publish-events-and-metrics is deprecated"
+        ),
     ):
         config = parse_args(["--publish-events-and-metrics"])
     assert config.publish_kv_events is True
@@ -206,8 +209,12 @@ def test_deprecated_publish_events_env_alias_maps_to_both_controls(monkeypatch, 
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_METRICS", raising=False)
     monkeypatch.setenv("DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS", "true")
-    with caplog.at_level("WARNING"), pytest.warns(
-        DeprecationWarning, match="DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS is deprecated"
+    with (
+        caplog.at_level("WARNING"),
+        pytest.warns(
+            DeprecationWarning,
+            match="DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS is deprecated",
+        ),
     ):
         config = parse_args([])
     assert config.publish_kv_events is True
@@ -745,3 +752,75 @@ async def test_init_llm_worker_strips_num_postprocess_workers_from_extra_engine_
     engine_args = exc_info.value.engine_args
     assert "num_postprocess_workers" not in engine_args
     assert any("num_postprocess_workers=4" in r.message for r in caplog.records)
+
+
+@pytest.mark.core
+def test_warn_override_collisions_names_the_source(caplog):
+    """The shared collision warner labels the message with the config source."""
+    target = {"max_seq_len": 1024}
+    source = {"max_seq_len": 2048}
+    with caplog.at_level("WARNING"):
+        warn_override_collisions(target, source, source_name="extra_engine_args")
+    assert any(
+        "extra_engine_args will replace max_seq_len" in r.message
+        and "1024" in r.message
+        and "2048" in r.message
+        for r in caplog.records
+    )
+
+
+@pytest.mark.core
+def test_warn_override_collisions_recurses_nested_and_skips_identical(caplog):
+    """Nested changes report the dotted path; identical values stay silent."""
+    target = {"kv_cache_config": {"max_tokens": 1000, "free_gpu_memory_fraction": 0.85}}
+    source = {"kv_cache_config": {"max_tokens": 2592, "free_gpu_memory_fraction": 0.85}}
+    with caplog.at_level("WARNING"):
+        warn_override_collisions(target, source)
+    assert any("kv_cache_config.max_tokens" in r.message for r in caplog.records)
+    assert not any("free_gpu_memory_fraction" in r.message for r in caplog.records)
+
+
+@pytest.mark.core
+@pytest.mark.asyncio
+async def test_extra_engine_args_overwrite_is_warned(tmp_path, monkeypatch, caplog):
+    """extra_engine_args silently replacing an existing arg_map value now warns.
+
+    --override-engine-args has warned via warn_override_collisions;
+    --extra-engine-args went through TRT-LLM's
+    update_llm_args_with_extra_options with no equivalent warning.
+    """
+    monkeypatch.delenv("DYN_TRTLLM_MAX_BATCH_SIZE", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_MAX_NUM_TOKENS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_MAX_SEQ_LEN", raising=False)
+
+    yaml_file = tmp_path / "engine_config.yaml"
+    yaml_file.write_text("max_batch_size: 999\n")
+
+    config = parse_args(
+        ["--model", "fake-model", "--extra-engine-args", str(yaml_file)]
+    )
+
+    with (
+        caplog.at_level("WARNING"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.nixl_connect.Connector"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.LLMBackendMetrics"),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.get_llm_engine",
+            side_effect=_mock_get_llm_engine,
+        ),
+    ):
+        with pytest.raises(EngineArgsCaptured) as exc_info:
+            await init_llm_worker(
+                runtime=mock.MagicMock(),
+                config=config,
+                shutdown_event=asyncio.Event(),
+            )
+
+    assert exc_info.value.engine_args["max_batch_size"] == 999
+    assert any(
+        "extra_engine_args will replace max_batch_size" in r.message
+        and "999" in r.message
+        for r in caplog.records
+    )
