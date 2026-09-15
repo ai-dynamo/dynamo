@@ -2342,6 +2342,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_text_tool_calls_remain_text_in_stream_when_disabled() {
+        let text = r#"Example: <tool_call>{"name":"get_weather","arguments":{}}</tool_call>"#;
+        let params = ResponseParams {
+            tools: Some(vec![
+                serde_json::from_value(serde_json::json!({
+                    "type": "function", "name": "get_weather", "parameters": {"type": "object"}
+                }))
+                .unwrap(),
+            ]),
+            tool_choice: Some(ToolChoiceParam::Mode(ToolChoiceOptions::None)),
+            ..default_params()
+        };
+        let mut conv = ResponseStreamConverter::new("test-model".into(), params);
+        let mut events = conv.emit_start_events();
+        events.extend(conv.process_chunk(&text_chunk(text)));
+        events.extend(conv.process_chunk(&finish_chunk(FinishReason::Stop)));
+        events.extend(conv.emit_end_events());
+        assert!(
+            !event_types(&events)
+                .iter()
+                .any(|event| event.starts_with("response.function_call_arguments."))
+        );
+        let output = conv.output_with_status(OutputStatus::Completed);
+        assert_eq!(output.len(), 1);
+        let OutputItem::Message(message) = &output[0] else {
+            panic!("expected a text message");
+        };
+        let OutputMessageContent::OutputText(content) = &message.content[0] else {
+            panic!("expected output text");
+        };
+        assert_eq!(content.text, text);
+    }
+
     /// Text followed by tool call: both handled correctly.
     #[test]
     fn test_text_then_tool_call() {
