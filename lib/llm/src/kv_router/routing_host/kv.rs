@@ -93,10 +93,78 @@ where
         is_query_only: bool,
         budget: &CleanupBudget,
     ) -> Result<(WorkerSelection, Option<AffinityAcquire>), Error> {
-        self.select_with_session_affinity(request, phase, is_query_only, budget, |target| {
-            self.select_request(request, phase, is_query_only, target, budget)
-        })
-        .await
+        let select = || {
+            self.select_with_session_affinity(request, phase, is_query_only, budget, |target| {
+                self.select_request(request, phase, is_query_only, target, budget)
+            })
+        };
+        if is_query_only {
+            return select().await;
+        }
+        self.select_with_request_lifecycle(request, select).await
+    }
+
+    /// Claim or begin the classifier lifecycle for `request`, run the selection
+    /// future built by `select` under it, and attach it to the selection.
+    /// Selection failures either park the lifecycle for a migration retry or
+    /// abort it with the cause.
+    ///
+    /// `select` is a constructor rather than a future so the selection future
+    /// lives in exactly one slot: taking it by value gave the caller's future a
+    /// second copy, and in debug builds that doubled footprint overflowed the
+    /// test-thread stack under `block_on`.
+    async fn select_with_request_lifecycle<Fut>(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        select: impl FnOnce() -> Fut,
+    ) -> Result<(WorkerSelection, Option<AffinityAcquire>), Error>
+    where
+        Fut: Future<Output = Result<(WorkerSelection, Option<AffinityAcquire>), Error>>,
+    {
+        let mut lifecycle = request
+            .migration_state
+            .as_ref()
+            .and_then(|state| state.take_request_lifecycle());
+        if lifecycle.is_none() {
+            lifecycle = self
+                .kv_router()
+                .begin_request_lifecycle(request.context().id())
+                .map_err(|error| classifier_failure_response(request.context().id(), &error))?
+                .map(Box::new);
+        }
+
+        let (mut selection, affinity) = match select().await {
+            Ok(selection) => selection,
+            Err(error) => {
+                if let Some(mut lifecycle) = lifecycle.take() {
+                    if let Some(classifier_error) = classification_failure(&error) {
+                        lifecycle.abort(Some(classifier_abort_error(classifier_error)));
+                        return Err(classifier_failure_response(
+                            request.context().id(),
+                            classifier_error,
+                        ));
+                    }
+                    if crate::migration::is_migratable(error.as_ref())
+                        && let Some(state) = request.migration_state.as_ref()
+                    {
+                        lifecycle.prepare_retry();
+                        state.store_request_lifecycle(lifecycle);
+                    } else {
+                        lifecycle.abort(Some(
+                            crate::protocols::common::preprocessor::owned_abort_error(
+                                error.as_ref(),
+                            ),
+                        ));
+                    }
+                }
+                return Err(error);
+            }
+        };
+        if let Some(lifecycle) = lifecycle.as_mut() {
+            lifecycle.selected(selection.worker);
+        }
+        selection.request_lifecycle = lifecycle;
+        Ok((selection, affinity))
     }
 
     fn route_signals(&self, selection: &WorkerSelection) -> RoutePlanSignals {
@@ -182,8 +250,8 @@ where
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let planned_worker = preview.signals.worker;
-        let (selection, affinity) = self
-            .select_with_session_affinity(request, phase, false, &budget, |target| {
+        let select = || {
+            self.select_with_session_affinity(request, phase, false, &budget, |target| {
                 let budget = &budget;
                 async move {
                     self.select_request_outcome(
@@ -201,7 +269,8 @@ where
                     .into_result()
                 }
             })
-            .await?;
+        };
+        let (selection, affinity) = self.select_with_request_lifecycle(request, select).await?;
         let signals = self.route_signals(&selection);
         drop(route_guard);
         Ok(RoutePlan {
@@ -341,9 +410,12 @@ where
         let block_size = chooser.block_size() as usize;
         let selected_worker = selection.worker;
         let mut guard = match cleanup {
-            Some(cleanup) => {
-                RequestGuard::new_kv_with_cleanup(self.request_metrics.clone(), cleanup, request)
-            }
+            Some(cleanup) => RequestGuard::new_kv_with_cleanup(
+                self.request_metrics.clone(),
+                cleanup,
+                request,
+                selection.request_lifecycle.take(),
+            ),
             None => RequestGuard::new_kv(
                 Arc::clone(chooser),
                 self.request_metrics.clone(),
@@ -351,6 +423,7 @@ where
                 selected_worker,
                 selection.attempt,
                 request,
+                selection.request_lifecycle.take(),
             ),
         };
 
@@ -438,7 +511,7 @@ where
         .await;
 
         if let Err(error) = record_result {
-            guard.abort().await;
+            guard.abort_with_error(Some(error.as_ref())).await;
             return Err(error);
         }
         Ok(guard)
@@ -516,7 +589,11 @@ where
                     .chain()
                     .find_map(|cause| cause.downcast_ref::<DynamoError>().cloned());
                 guard.record_migration_failure(typed_error);
-                guard.abort().await;
+                if !crate::migration::is_migratable(error.as_ref())
+                    || !guard.release_for_retry().await
+                {
+                    guard.abort_with_error(Some(error.as_ref())).await;
+                }
                 return Err(error);
             }
         };
@@ -587,7 +664,7 @@ where
         let metadata = match prepare(&mut request, selected_target) {
             Ok(metadata) => metadata,
             Err(error) => {
-                guard.abort().await;
+                guard.abort_with_error(Some(error.as_ref())).await;
                 return Err(error);
             }
         };
