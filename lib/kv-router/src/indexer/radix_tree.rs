@@ -53,6 +53,7 @@ impl RadixBlock {
     fn prune_unreachable(node: &SharedRadixBlock) {
         let (parent, key) = {
             let mut node_ref = node.borrow_mut();
+            debug_assert!(!node_ref.state.edge.is_empty(), "cannot prune the root");
             if node_ref.state.full_edge_workers.is_empty() {
                 node_ref.children.clear();
             }
@@ -858,7 +859,7 @@ mod tests {
         let mut tree = RadixTree::new();
         tree.apply_event(create_store_event(1, 0, vec![1, 2, 3], None))
             .unwrap();
-        for hash in 4..36 {
+        for hash in [4, 5, 6, 7, 8] {
             for worker in [1, 2] {
                 tree.apply_event(create_store_event(worker, hash, vec![1, 2, hash], None))
                     .unwrap();
@@ -892,6 +893,72 @@ mod tests {
             assert_eq!(tree.edge_lengths_for_test(), vec![1, 1, 1, 1]);
             assert_eq!(tree.current_size(), if hash % 4 == 0 { 6 } else { 4 });
         }
+    }
+
+    #[test]
+    fn removing_detached_node_preserves_replacement() {
+        let mut tree = RadixTree::new();
+        for blocks in [vec![1, 2, 3, 4], vec![1, 2, 3, 9]] {
+            tree.apply_event(create_store_event(2, 0, blocks, None))
+                .unwrap();
+        }
+        tree.apply_event(create_store_event(1, 0, vec![1, 2, 3], None))
+            .unwrap();
+        let old_branch = Rc::downgrade(
+            &tree.lookup[&WorkerWithDpRank::new(2, 0)][&ExternalSequenceBlockHash(400)],
+        );
+        for worker in [1, 2] {
+            tree.apply_event(create_remove_event(worker, 1, vec![3]))
+                .unwrap();
+        }
+        // The existing descendant-invalidation gap leaves worker 2's old node
+        // in its lookup after the parent has disconnected it.
+        assert!(old_branch.upgrade().is_some());
+        tree.apply_event(create_store_event(
+            1,
+            2,
+            vec![3],
+            Some(ExternalSequenceBlockHash(200)),
+        ))
+        .unwrap();
+        tree.apply_event(create_store_event(
+            1,
+            3,
+            vec![4],
+            Some(ExternalSequenceBlockHash(300)),
+        ))
+        .unwrap();
+        tree.apply_event(create_remove_event(2, 3, vec![4]))
+            .unwrap();
+
+        assert!(old_branch.upgrade().is_none());
+        let scores = tree.find_matches((1..=4).map(LocalBlockHash).collect(), false);
+        assert_eq!(scores.scores.get(&WorkerWithDpRank::new(1, 0)), Some(&4));
+    }
+
+    #[test]
+    fn split_releases_unowned_suffix() {
+        let mut tree = RadixTree::new();
+        for worker in [1, 2] {
+            tree.apply_event(create_store_event(worker, 0, vec![1, 2, 3], None))
+                .unwrap();
+        }
+        tree.apply_event(create_remove_event(1, 1, vec![2]))
+            .unwrap();
+        tree.apply_event(create_remove_event(2, 1, vec![1]))
+            .unwrap();
+        assert_eq!(tree.edge_lengths_for_test(), vec![3]);
+
+        tree.apply_event(create_store_event(
+            1,
+            2,
+            vec![9],
+            Some(ExternalSequenceBlockHash(100)),
+        ))
+        .unwrap();
+
+        assert_eq!(tree.edge_lengths_for_test(), vec![1, 1]);
+        assert_eq!(tree.current_size(), 2);
     }
 
     #[test]
