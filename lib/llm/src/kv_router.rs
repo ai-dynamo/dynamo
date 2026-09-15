@@ -60,6 +60,7 @@ pub mod encoder_router;
 pub mod indexer;
 pub mod metrics;
 pub(crate) mod metrics_subscriber;
+pub mod plugins;
 pub mod prefill_router;
 pub mod publisher;
 mod request_lease;
@@ -886,16 +887,21 @@ where
     }
 
     /// Attach a request classifier before placing this router into service.
-    // TODO: wire a production installer (Python bindings / router config); hidden until then.
-    #[doc(hidden)]
     pub fn with_request_classifier(self, classifier: impl RequestClassifier) -> Result<Self> {
+        self.install_request_classifier(Box::new(classifier))?;
+        Ok(self)
+    }
+
+    /// Attach a catalog-created request classifier before placing this router into service.
+    pub fn install_request_classifier(&self, classifier: Box<dyn RequestClassifier>) -> Result<()> {
         if !self
             .scheduler
-            .install_request_classifier(Box::new(classifier), self.cancellation_token.child_token())
+            .install_request_classifier(classifier, self.cancellation_token.child_token())
         {
             anyhow::bail!("request classifier is already configured");
         }
-        Ok(self)
+        tracing::info!(model = %self.tracking_model_name, "installed linked request classifier");
+        Ok(())
     }
 
     pub(crate) fn begin_request_lifecycle(

@@ -310,6 +310,86 @@ cargo check --manifest-path "$POLICY_DIR/catalog/Cargo.toml"
 
 Add one focused test for each policy decision and one registration test for every type name.
 
+## Register a Request Classifier
+
+**Experimental.** Request classifiers use the same statically linked catalog as worker filters, scorers, and pickers. Keep the catalog's single `register` function and call `register_request_classifier` for each classifier type. `RouterPluginRegistry` also accepts the existing worker-selection providers; `WorkerSelectionPolicyRegistry` remains an alias, so existing catalogs compile unchanged.
+
+Implement `RequestClassifier` in your policy crate. Its provider validates `RequestClassifierParameters` at startup and returns a `RequestClassifierFactory`: a closure that creates a fresh `Box<dyn RequestClassifier>` for each routed model. Register that provider alongside your worker-selection providers:
+
+```rust
+use std::sync::Arc;
+use dynamo_kv_router::plugins::RouterPluginRegistry;
+
+pub fn register(registry: &mut RouterPluginRegistry) -> Result<(), Box<dyn std::error::Error>> {
+    acme_worker_policy::register(registry)?;
+    registry.register_request_classifier("acme-admission", Arc::new(acme_admission::provider))?;
+    Ok(())
+}
+```
+
+The provider signature is:
+
+```rust
+use dynamo_kv_router::scheduling::{
+    RequestClassifierFactory, RequestClassifierParameters, RequestClassifierProviderError,
+};
+
+pub fn provider(
+    parameters: &RequestClassifierParameters,
+) -> Result<RequestClassifierFactory, RequestClassifierProviderError>;
+```
+
+Select the classifier in the same `--router-policy-config` YAML:
+
+```yaml
+request_classifier:
+  type: acme-admission
+  parameters:
+    max_in_flight: 32
+```
+
+The parameter mapping belongs to the plugin; `max_in_flight` above is an example plugin setting. Omit `request_classifier` to retain pass-through admission. Unknown types and invalid parameters fail startup. Build and link the catalog with the existing `custom-policy` workflow below; no second catalog export or build flag is required.
+
+The discovery-backed HTTP frontend and Python `KvRouter.generate` path install classifiers on their KV routers. Classification applies to decode/aggregated admission before queue ordering and worker selection. Selection is fixed at frontend startup and is process-wide; per-model queue profiles do not select different classifier types. A classifier can change the policy class, due time, and scheduling cost through the existing `ClassifyRequest` API. Dynamo retains queueing, worker selection, reservations, and lifecycle delivery.
+
+### Shared Plugin Construction
+
+The catalog registers plugin providers once. `RouterPluginRegistry::resolve_plugins` validates the selected configuration and returns a `RouterPlugins` bundle containing the configured factories. Both the HTTP frontend and Python router pass this bundle to the shared router construction path. Each router receives fresh plugin instances; factories run during construction, not for each request.
+
+Rust embedders can use the same setup:
+
+```rust
+use dynamo_kv_router::plugins::RouterPluginRegistry;
+use dynamo_llm::entrypoint::input::http::HttpFrontend;
+
+let mut registry = RouterPluginRegistry::default();
+acme_routing_catalog::register(&mut registry)?;
+let plugins = registry.resolve_plugins(&kv_router_config)?;
+HttpFrontend::default()
+    .plugins(plugins)
+    .run(distributed_runtime, engine_config)
+    .await?;
+```
+
+```mermaid
+flowchart LR
+    Catalog["catalog::register"] --> Registry[RouterPluginRegistry]
+    Config[Router policy YAML] --> Registry
+    Registry -->|resolve_plugins| Bundle[RouterPlugins]
+    Bundle --> HTTP[HTTP discovery]
+    Bundle --> Python[Python KvRouter]
+    HTTP --> Build[Shared router construction]
+    Python --> Build
+    Build --> Selector[Per-router worker selector]
+    Build --> Classifier[Per-router request classifier]
+```
+
+The host's `RouterPluginBuilder` preserves its concrete selector type and installs the remaining plugins before the router is exposed to requests. Adding another plugin trait requires a typed registration slot, a factory in the bundle, and its construction hook. Entry points continue to carry one bundle. Execution and lifecycle callbacks stay on each trait; the bundle does not add per-request dispatch.
+
+The existing `WorkerSelectionPolicyRegistry` name, worker-only registration methods, and frontend factory setters remain available. An empty bundle retains the default selector and pass-through admission.
+
+The disaggregated prefill hop and query-only probes do not run classifiers. Stateful low-level `best_worker` calls also lack classifier lifecycle enrollment. Offline replay and standalone selection reject `request_classifier` configuration because they cannot run its lifecycle.
+
 ## Available Signals
 
 Request context and worker identity are always available. Dynamo calculates optional per-worker signals only for groups that a filter, scorer, or picker requests.

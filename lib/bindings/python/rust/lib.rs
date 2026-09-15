@@ -40,8 +40,8 @@ use dynamo_runtime::{
 };
 
 #[cfg(any(feature = "custom-policy", feature = "select-service"))]
-use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
-use dynamo_kv_router::{KvRouterConfig, WorkerSelectionPolicyFactory};
+use dynamo_kv_router::plugins::RouterPluginRegistry;
+use dynamo_kv_router::{KvRouterConfig, plugins::RouterPlugins};
 use dynamo_llm::entrypoint::RouterConfig;
 use dynamo_llm::{self as llm_rs};
 
@@ -117,7 +117,7 @@ type PythonBidirectionalIngress = Ingress<
 static INIT: OnceCell<()> = OnceCell::new();
 
 #[cfg(feature = "custom-policy")]
-static WORKER_SELECTION_POLICY_REGISTRY: OnceCell<WorkerSelectionPolicyRegistry> = OnceCell::new();
+static ROUTER_PLUGIN_REGISTRY: OnceCell<RouterPluginRegistry> = OnceCell::new();
 
 const DEFAULT_ANNOTATED_SETTING: Option<bool> = Some(true);
 const SKIP_PYTHON_LOG_INIT_ENV: &str = "DYNAMO_SKIP_PYTHON_LOG_INIT";
@@ -290,48 +290,40 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-pub(crate) fn worker_selection_policy_factory(
-    config: &KvRouterConfig,
-) -> anyhow::Result<Option<WorkerSelectionPolicyFactory>> {
+pub(crate) fn router_plugins(config: &KvRouterConfig) -> anyhow::Result<RouterPlugins> {
     #[cfg(feature = "custom-policy")]
-    {
-        Ok(WORKER_SELECTION_POLICY_REGISTRY
-            .get()
-            .map(|registry| registry.resolve(config))
-            .transpose()?
-            .flatten())
+    if let Some(registry) = ROUTER_PLUGIN_REGISTRY.get() {
+        return Ok(registry.resolve_plugins(config)?);
     }
-
-    #[cfg(not(feature = "custom-policy"))]
-    {
-        if let Some(instance) = config.selected_worker_selection_policy_instance()? {
-            anyhow::bail!(
-                "worker-selection instance {instance:?} is configured, but this Dynamo build has no linked worker-selection policy catalog; rebuild with --features custom-policy"
-            );
-        }
-        Ok(None)
+    if let Some(instance) = config.selected_worker_selection_policy_instance()? {
+        anyhow::bail!(
+            "worker-selection instance {instance:?} is configured, but this Dynamo build has no linked router plugin catalog; rebuild with --features custom-policy"
+        );
     }
+    if config.request_classifier_config()?.is_some() {
+        anyhow::bail!(
+            "request_classifier is configured, but no router plugin catalog is installed; rebuild with --features custom-policy"
+        );
+    }
+    Ok(RouterPlugins::default())
 }
 
 #[cfg(feature = "select-service")]
-pub(crate) fn linked_worker_selection_policy_registry() -> WorkerSelectionPolicyRegistry {
+pub(crate) fn linked_worker_selection_policy_registry() -> RouterPluginRegistry {
     #[cfg(feature = "custom-policy")]
     {
-        WORKER_SELECTION_POLICY_REGISTRY
-            .get()
-            .cloned()
-            .unwrap_or_default()
+        ROUTER_PLUGIN_REGISTRY.get().cloned().unwrap_or_default()
     }
 
     #[cfg(not(feature = "custom-policy"))]
     {
-        WorkerSelectionPolicyRegistry::default()
+        RouterPluginRegistry::default()
     }
 }
 
 #[cfg(feature = "custom-policy")]
-fn register_core_with_custom_worker_selection_policy(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    let mut registry = WorkerSelectionPolicyRegistry::default();
+fn register_core_with_router_plugins(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    let mut registry = RouterPluginRegistry::default();
     // The policies Dynamo ships register first, so a replaced catalog that reuses one of their
     // type names fails here instead of silently overriding it.
     dynamo_custom_policy_builtin::register(&mut registry)
@@ -339,11 +331,9 @@ fn register_core_with_custom_worker_selection_policy(m: &Bound<'_, PyModule>) ->
     dynamo_worker_selection_policy_catalog::register(&mut registry)
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
 
-    WORKER_SELECTION_POLICY_REGISTRY
+    ROUTER_PLUGIN_REGISTRY
         .set(registry)
-        .map_err(|_| {
-            PyRuntimeError::new_err("worker-selection policy registry already installed")
-        })?;
+        .map_err(|_| PyRuntimeError::new_err("router plugin registry already installed"))?;
     register_core(m)
 }
 
@@ -351,7 +341,7 @@ fn register_core_with_custom_worker_selection_policy(m: &Bound<'_, PyModule>) ->
 #[cfg(feature = "custom-policy")]
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    register_core_with_custom_worker_selection_policy(m)
+    register_core_with_router_plugins(m)
 }
 
 /// The stock extension-module entrypoint.
