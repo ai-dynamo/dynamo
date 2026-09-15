@@ -189,12 +189,18 @@ impl NamespaceMembership {
         cancel: CancellationToken,
     ) {
         let mut source_invalid = false;
+        let mut discovery_dirty = false;
+        let mut refresh = tokio::time::interval(Duration::from_millis(50));
+        refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut last_reconcile_error = None;
         let mut desired = self.selection.clone();
         let mut retry = tokio::time::interval(Duration::from_secs(1));
         retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut reconcile = tokio::time::interval(RECONCILE_INTERVAL);
         reconcile.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Startup already installed a snapshot; wait for the first refresh window.
+        reconcile.tick().await;
+        refresh.tick().await;
         loop {
             let update = tokio::select! {
                 _ = cancel.cancelled() => return,
@@ -224,6 +230,10 @@ impl NamespaceMembership {
                         },
                     }
                 },
+                _ = refresh.tick(), if discovery_dirty => {
+                    discovery_dirty = false;
+                    desired.clone()
+                },
                 _ = reconcile.tick() => desired.clone(),
                 _ = retry.tick(), if desired != self.selection || desired.as_ref().is_some_and(|selection| self.watches.len() != selection.namespaces.len()) => desired.clone(),
                 event = self.streams.next(), if !self.streams.is_empty() => {
@@ -239,7 +249,11 @@ impl NamespaceMembership {
                                     publish_membership_if_changed(&self.sender, self.state.view(&self.filter));
                                 }
                                 None
-                            } else {desired.clone()}
+                            } else {
+                                // Coalesce replay and update bursts before reading a fresh snapshot.
+                                discovery_dirty = true;
+                                None
+                            }
                         }
                         _ => None,
                     }
@@ -344,6 +358,96 @@ mod tests {
     use crate::{model_card::ModelDeploymentCard, worker_type::WorkerType};
     use dynamo_runtime::discovery::{DiscoverySpec, MockDiscovery, SharedMockRegistry};
     use dynamo_runtime::protocols::EndpointId;
+
+    struct CountingDiscovery {
+        inner: MockDiscovery,
+        lists: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl Discovery for CountingDiscovery {
+        fn instance_id(&self) -> u64 {
+            self.inner.instance_id()
+        }
+
+        async fn register_internal(
+            &self,
+            spec: DiscoverySpec,
+        ) -> anyhow::Result<DiscoveryInstance> {
+            self.inner.register_internal(spec).await
+        }
+
+        async fn unregister(&self, instance: DiscoveryInstance) -> anyhow::Result<()> {
+            self.inner.unregister(instance).await
+        }
+
+        async fn list(&self, query: DiscoveryQuery) -> anyhow::Result<Vec<DiscoveryInstance>> {
+            self.lists
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.inner.list(query).await
+        }
+
+        async fn list_and_watch(
+            &self,
+            query: DiscoveryQuery,
+            cancel: Option<CancellationToken>,
+        ) -> anyhow::Result<dynamo_runtime::discovery::DiscoveryStream> {
+            self.inner.list_and_watch(query, cancel).await
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn discovery_replay_coalesces_snapshot_reads() {
+        for watch_all in [false, true] {
+            let discovery = Arc::new(CountingDiscovery {
+                inner: MockDiscovery::new(Some(1), SharedMockRegistry::new()),
+                lists: Default::default(),
+            });
+            let namespaces = (0..20).map(|i| format!("ns{i}")).collect::<Vec<_>>();
+            for namespace in &namespaces {
+                for index in 0..10 {
+                    let mut card =
+                        ModelDeploymentCard::with_name_only(&format!("{namespace}-{index}"));
+                    card.source_path = Some(format!("test/{namespace}/{index}"));
+                    card.kv_cache_block_size = 64;
+                    card.worker_type = Some(WorkerType::Aggregated);
+                    discovery
+                        .register(DiscoverySpec::Model {
+                            namespace: namespace.clone(),
+                            component: format!("worker{index}"),
+                            endpoint: "generate".into(),
+                            card_json: serde_json::to_value(card).unwrap(),
+                            model_suffix: None,
+                        })
+                        .await
+                        .unwrap();
+                }
+            }
+            discovery
+                .lists
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            let relay = DcMembershipWatch::start_sources(
+                discovery.clone(),
+                super::super::host::KvDcRelaySources::Discovery(KvDcRelayDiscoveryConfig {
+                    namespaces: if watch_all { vec![] } else { namespaces },
+                    watch_all,
+                    ..Default::default()
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            // Virtual time bounds the observation before periodic reconciliation.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert_eq!(relay.subscribe().borrow().endpoints.len(), 200);
+            let lists = discovery.lists.load(std::sync::atomic::Ordering::Relaxed);
+            assert!(
+                lists <= 63,
+                "watch_all={watch_all}: {lists} snapshot reads for one replay"
+            );
+            relay.shutdown().await;
+        }
+    }
 
     fn document(names: &[&str]) -> SourcesDocument {
         let mut doc = SourcesDocument {

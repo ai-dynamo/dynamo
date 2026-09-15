@@ -147,7 +147,12 @@ async def test_http_state(
 @pytest.mark.parametrize("system_port", [False], indirect=True)
 async def test_file_sources_reload_on_same_relay(relay_factory, sources_file):
     async with relay_factory(sources_file=str(sources_file)) as relay:
-        previous = (await relay.health())["sources"]["appliedRevision"]
+        state = (await relay.health())["sources"]
+        assert state["count"] == 0
+        assert state["appliedRevision"] is not None
+        assert state["desiredRevision"] == state["appliedRevision"]
+        assert state["lastError"] is None
+        previous = state["appliedRevision"]
         for namespaces in (["a", "b"], ["b"], []):
             write_sources(sources_file, namespaces)
             state = await wait_for_sources(
@@ -206,13 +211,3 @@ async def test_invalid_initial_sources_fail_startup(
         async with relay_factory(sources_file=str(sources_file)):
             pytest.fail("Relay accepted invalid initial sources")
     assert "private-invalid-file" not in str(error.value)
-
-
-@pytest.mark.parametrize("system_port", [False], indirect=True)
-async def test_file_sources_start_without_http(relay_factory, sources_file):
-    async with relay_factory(sources_file=str(sources_file)) as relay:
-        state = (await relay.health())["sources"]
-        assert state["count"] == 0
-        assert state["appliedRevision"] is not None
-        assert state["desiredRevision"] == state["appliedRevision"]
-        assert state["lastError"] is None

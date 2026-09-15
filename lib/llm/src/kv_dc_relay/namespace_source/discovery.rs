@@ -127,7 +127,11 @@ impl NamespaceSource for DiscoveryNamespaces {
                 if let Ok(Ok(mut events)) = opened {
                     let mut reconcile = tokio::time::interval(RECONCILE_INTERVAL);
                     reconcile.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                    loop {
+                    reconcile.tick().await;
+                    let mut refresh = tokio::time::interval(Duration::from_millis(50));
+                    refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                    refresh.tick().await;
+                    'snapshots: loop {
                         let result = tokio::select! {
                             _ = cancel.cancelled() => return,
                             result = tokio::time::timeout(Duration::from_secs(10), self.discovery.list(DiscoveryQuery::AllModels)) => result,
@@ -146,11 +150,16 @@ impl NamespaceSource for DiscoveryNamespaces {
                             }
                             _ => Err(anyhow::anyhow!("namespace discovery snapshot failed")),
                         };
-                        tokio::select! {
-                            _ = cancel.cancelled() => return,
-                            _ = reconcile.tick() => {},
-                            event = events.next() => {
-                                if !matches!(event, Some(Ok(_))) { break; }
+                        let mut dirty = false;
+                        loop {
+                            tokio::select! {
+                                _ = cancel.cancelled() => return,
+                                _ = reconcile.tick() => break,
+                                _ = refresh.tick(), if dirty => break,
+                                event = events.next() => {
+                                    if !matches!(event, Some(Ok(_))) { break 'snapshots; }
+                                    dirty = true;
+                                }
                             }
                         }
                     }
