@@ -30,6 +30,7 @@ from dynamo.sglang.request_handlers.llm.decode_handler import (
     _nvext_extra_field_requested,
     _openai_stop_sampling_params,
     _ordered_cancellation_request_id,
+    _public_native_response_id,
     _user_stop_token_ids,
 )
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
@@ -446,6 +447,7 @@ async def test_native_generate_stream_maps_internal_id_without_mutation():
             stream(),
             _Context(),
             submitted_request_id="internal-request-id",
+            internal_request_id="internal-request-id",
             response_request_id="caller-visible-id",
         )
     )
@@ -455,6 +457,62 @@ async def test_native_generate_stream_maps_internal_id_without_mutation():
     assert native_response["meta_info"]["id"] == "internal-request-id"
     assert mapped_response is not native_response
     assert mapped_response["meta_info"] is not native_response["meta_info"]
+
+
+@pytest.mark.asyncio
+async def test_native_generate_stream_maps_batched_ids_without_collapsing():
+    native_responses = [
+        {
+            "output_ids": [101 + index],
+            "index": index,
+            "meta_info": {"id": f"internal-request-id_{index}"},
+        }
+        for index in range(2)
+    ]
+
+    async def stream():
+        for native_response in native_responses:
+            yield {
+                "token_ids": [],
+                "engine_data": {"sglang_response": native_response},
+            }
+
+    handler = _new_decode_handler()
+    chunks = await _collect(
+        handler._process_native_generate_stream(
+            stream(),
+            _Context(),
+            submitted_request_id=None,
+            internal_request_id="internal-request-id",
+            response_request_id=["caller-request-0", "caller-request-1"],
+        )
+    )
+
+    assert [
+        chunk["engine_data"]["sglang_response"]["meta_info"]["id"] for chunk in chunks
+    ] == ["caller-request-0", "caller-request-1"]
+    assert [response["meta_info"]["id"] for response in native_responses] == [
+        "internal-request-id_0",
+        "internal-request-id_1",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("engine_id", "index", "public_id", "expected"),
+    [
+        ("internal_0", 0, "caller", "caller_0"),
+        ("actual-child-a", 0, "caller", "actual-child-a"),
+        ("internal_2", 2, ["caller-0", "caller-1"], "internal_2"),
+        ("internal_0", True, "caller", "internal_0"),
+        ("internal_0", 0, [123], "internal_0"),
+    ],
+)
+def test_public_native_response_id_maps_only_derived_string_ids(
+    engine_id, index, public_id, expected
+):
+    assert (
+        _public_native_response_id(engine_id, index, "internal", public_id) == expected
+    )
 
 
 def _new_token_input_handler(maximum_input_token_id: int = 151935):
