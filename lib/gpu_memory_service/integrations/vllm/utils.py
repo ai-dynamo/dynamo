@@ -44,11 +44,8 @@ def configure_gms_worker_logging() -> None:
     gms_root.propagate = False
 
 
-# Default weight-admission deadline for a non-primary (shadow) engine, in ms.
-# Deliberately generous: it has to sit behind a real writer's disk load and
-# commit, so it exists to catch a permanent wedge, not to race a slow start.
-# It stays well inside the operator's two-hour startup-probe window so an
-# expiry kills the pod while Kubernetes is still willing to replace it.
+# Default weight-admission deadline for a shadow engine, in ms. Generous: it
+# sits behind a real writer's load, and must stay under the 2h startup probe.
 SHADOW_RO_CONNECT_TIMEOUT_MS = 900_000
 
 

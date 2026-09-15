@@ -1898,9 +1898,8 @@ class TestShadowStandbyEntry:
         # The stalled stage has to be named, or a cluster log cannot tell a
         # weights-admission stall from any other unfinished startup step.
         assert "sleep" in message
-        # The bound has to be reported as it was configured. Rounding a
-        # sub-second bound to "0s" would print the value that means the
-        # opposite, because "0" disables the bound.
+        # The bound has to print as configured: rounding a sub-second bound to
+        # "0s" would print the value that disables the bound.
         assert "0.2s" in message
         # A shadow that never paused holds no lock and cannot take a
         # promotion, so it must not report itself Ready.

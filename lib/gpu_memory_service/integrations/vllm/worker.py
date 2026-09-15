@@ -175,10 +175,8 @@ class GMSWorker(_BaseWorker):
         )
         mode = get_gms_lock_mode(extra)
         self.gms_ro_connect_timeout_ms = get_gms_ro_connect_timeout_ms(extra)
-        # The first weights admission must honour the same deadline as the
-        # wake_up remap below. A shadow queued behind a writer is refused
-        # admission, and without a timeout the handshake blocks with no log and
-        # no traceback, which wedges the worker before it can report health.
+        # Must honour the same deadline as the wake_up remap below: without it,
+        # a shadow refused admission blocks with no log and no traceback.
         get_or_create_gms_client_memory_manager(
             get_socket_path(device, "weights"),
             device,
