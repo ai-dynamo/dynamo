@@ -90,6 +90,13 @@ RUN apt-get update && \
     fi && \
     rm -f /tmp/xpu-smi.deb && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# _sycl_vmm requires DPC++ for its -fsycl compilation.
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        intel-oneapi-compiler-dpcpp-cpp-2025.3 && \
+    ln -s "$(find /opt/intel/oneapi/compiler -type f -name icpx -print -quit)" /usr/local/bin/icpx && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 {% endif %}
 
 {% if device == "xpu" or device == "cpu" %}

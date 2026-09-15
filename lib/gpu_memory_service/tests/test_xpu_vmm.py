@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Real-device smoke coverage for the GMS XPU virtual memory backend."""
-
 from __future__ import annotations
 
 import pytest
@@ -30,7 +28,6 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.integration,
     pytest.mark.none,
-    pytest.mark.gpu_1,
     pytest.mark.xpu_1,
 ]
 
