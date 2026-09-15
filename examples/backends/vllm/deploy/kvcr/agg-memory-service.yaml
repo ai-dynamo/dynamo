@@ -53,16 +53,27 @@ spec:
               exit 1
             fi
 
-            case "$POD_INDEX" in
-              0) owner_slot=00000000000000000000000000000000 ;;
-              1) owner_slot=00000000000000000000000000000001 ;;
-              *) echo "Unsupported Grove Pod index: $POD_INDEX" >&2; exit 1 ;;
-            esac
-            export KVCR_CACHE_OWNER="01010101010101010101010101010101:02020202020202020202020202020202/0303030303030303/${owner_slot}"
             kv_transfer_config=$(
               python3 - <<'PY'
             import json
             import os
+
+            def cache_owner_id():
+                raw_slot = os.environ["KVCR_CACHE_SLOT"]
+                raw_count = os.environ["KVCR_CACHE_SLOT_COUNT"]
+                if not raw_slot.isdecimal() or not raw_count.isdecimal():
+                    raise SystemExit("KVCR cache slot and count must be decimal integers")
+                slot = int(raw_slot)
+                slot_count = int(raw_count)
+                if slot_count <= 0 or slot >= slot_count:
+                    raise SystemExit(
+                        f"KVCR cache slot {slot} is outside [0, {slot_count})"
+                    )
+                return (
+                    "01010101010101010101010101010101:"
+                    "02020202020202020202020202020202/"
+                    f"0303030303030303/{slot:032x}"
+                )
 
             print(json.dumps({
                 "kv_connector": "OffloadingConnector",
@@ -73,7 +84,7 @@ spec:
                     "self_describing_kv_events": True,
                     "dynamo_state_agent": {
                         "raw_advertise_host": os.environ["POD_IP"],
-                        "cache_owner_ids": {"0": os.environ["KVCR_CACHE_OWNER"]},
+                        "cache_owner_ids": {"0": cache_owner_id()},
                     },
                     "secondary_tiers": [{
                         "type": "kvcr",
@@ -103,6 +114,12 @@ spec:
             value: container
           - name: DYN_SYSTEM_PORT
             value: "9090"
+          - name: KVCR_CACHE_SLOT
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.labels['grove.io/podclique-pod-index']
+          - name: KVCR_CACHE_SLOT_COUNT
+            value: "2"
           - name: POD_IP
             valueFrom:
               fieldRef:
@@ -170,7 +187,8 @@ spec:
             if [ "$POD_INDEX" = "0" ]; then
               env DYN_NAMESPACE="$state_namespace" \
                 DYN_HEALTH_CHECK_ENABLED=false \
-                python3 -m dynamo.kv_state_agent --max-slots 2 &
+                python3 -m dynamo.kv_state_agent \
+                  --max-slots "$KVCR_CACHE_SLOT_COUNT" &
               state_agent_pid=$!
               wait -n "$kvcr_pid" "$state_agent_pid"
             else
@@ -198,6 +216,8 @@ spec:
                 fieldPath: metadata.labels['nvidia.com/dynamo-worker-hash']
           - name: DYN_SYSTEM_PORT
             value: "9091"
+          - name: KVCR_CACHE_SLOT_COUNT
+            value: "2"
           - name: POD_INDEX
             valueFrom:
               fieldRef:

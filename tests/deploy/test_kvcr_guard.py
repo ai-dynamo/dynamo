@@ -203,8 +203,8 @@ def _render_manifest(tmp_path: Path, image: str) -> Path:
     main = next(
         container for container in pod_spec["containers"] if container["name"] == MAIN
     )
-    owner_case = 'case "$POD_INDEX" in'
-    assert main["args"][0].count(owner_case) == 1
+    config_start = "kv_transfer_config=$("
+    assert main["args"][0].count(config_start) == 1
     hold_gate = """if [ -e /run/kvcr/hold-engine-start ]; then
   echo "Waiting for the KVCR resiliency hold to be removed"
 fi
@@ -213,7 +213,9 @@ while [ -e /run/kvcr/hold-engine-start ]; do
 done
 
 """
-    main["args"][0] = main["args"][0].replace(owner_case, hold_gate + owner_case)
+    main["args"][0] = main["args"][0].replace(
+        config_start, hold_gate + config_start
+    )
     pod_spec["volumes"].append(
         {
             "name": "rdma-counters",
@@ -297,7 +299,7 @@ def test_render_manifest_injects_test_only_fault_gate(monkeypatch, tmp_path) -> 
 
     assert command.count("/run/kvcr/hold-engine-start") == 2
     assert command.index("/run/kvcr/hold-engine-start") < command.index(
-        'case "$POD_INDEX" in'
+        "kv_transfer_config=$("
     )
 
 

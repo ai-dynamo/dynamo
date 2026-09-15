@@ -42,8 +42,14 @@ image by digest for every component, for example
 available in a Dynamo release image, build that image from matching Dynamo,
 KVCR, and vLLM revisions; the vLLM integration is based on
 [vLLM PR 53624](https://github.com/vllm-project/vllm/pull/53624) on the
-`mkhazraee/vllm:moein/kvcr_secondary` branch. Record the exact Dynamo, KVCR,
-and vLLM commit IDs with the image digest used for a qualified deployment.
+[`mkhazraee/vllm:moein/kvcr_secondary`](https://github.com/mkhazraee/vllm/tree/moein/kvcr_secondary)
+branch and uses [KVCR](https://github.com/ai-dynamo/kvcr) as a separate
+dependency. The most recent two-host validation used vLLM commit
+[`a48bbcfc`](https://github.com/mkhazraee/vllm/commit/a48bbcfcdd2ac09cb729cf595026c5aec9b69ea0)
+and KVCR commit
+[`94b4762b`](https://github.com/ai-dynamo/kvcr/commit/94b4762b6a49d6e9abadb700e02946c93925fc0a).
+Record the exact Dynamo, KVCR, and vLLM commit IDs with the image digest used
+for every qualified deployment.
 
 `DYNAMO_KVCR_COMPATIBILITY_DIGEST` is an opaque layout version shared by the
 engine and memory service. Change it whenever model, dtype, block layout, or
@@ -68,8 +74,12 @@ Run `./deploy.sh --render-only` to inspect the selected DGD. Both manifests
 use required Pod anti-affinity, so the second worker remains Pending unless a
 second eligible node is available. After apply, the script also verifies that
 the operator materialized Grove as the DGD's workload provider. Each engine's
-cache-owner ID uses its stable Grove replica index, so a replacement Pod
-reclaims the same state-agent slot.
+`KVCR_CACHE_SLOT` is populated from its stable Grove replica index in this
+example. The slot identifies a logical DP slot in the cache pool, not a Pod or
+process. Its assignment must remain unchanged when an engine is restarted or
+replaced and must be unique among DP ranks sharing the pool. The startup command
+validates the slot against `KVCR_CACHE_SLOT_COUNT` before constructing the
+cache-owner ID, so a replacement Pod reclaims the same state-agent slot.
 
 ## Understand the process lifecycle
 

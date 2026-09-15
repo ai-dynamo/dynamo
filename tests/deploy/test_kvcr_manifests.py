@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import os
 import shutil
 import subprocess
@@ -25,6 +26,13 @@ def _worker(manifest_name: str) -> dict:
     )
 
 
+def _kv_transfer_config_python(command: str) -> str:
+    marker = "python3 - <<'PY'\n"
+    start = command.index(marker) + len(marker)
+    end = command.index("\nPY\n", start)
+    return command[start:end]
+
+
 @pytest.mark.parametrize("manifest_name", _MANIFESTS)
 def test_kvcr_variants_require_two_gpu_rdma_nodes(manifest_name: str) -> None:
     worker = _worker(manifest_name)
@@ -45,7 +53,50 @@ def test_kvcr_variants_require_two_gpu_rdma_nodes(manifest_name: str) -> None:
     assert env["UCX_TLS"] == "rc_x,cuda"
     assert env["UCX_NET_DEVICES"] == "${DYNAMO_UCX_NET_DEVICES}"
     assert env["UCX_PROTO_INFO"] == "y"
+    assert env["KVCR_CACHE_SLOT_COUNT"] == "2"
+    slot = next(item for item in main["env"] if item["name"] == "KVCR_CACHE_SLOT")
+    assert slot["valueFrom"]["fieldRef"]["fieldPath"] == (
+        "metadata.labels['grove.io/podclique-pod-index']"
+    )
     assert "IPC_LOCK" in main["securityContext"]["capabilities"]["add"]
+
+
+@pytest.mark.parametrize("manifest_name", _MANIFESTS)
+def test_kvcr_cache_slot_is_validated_and_formatted(manifest_name: str) -> None:
+    main = _worker(manifest_name)["podTemplate"]["spec"]["containers"][0]
+    script = _kv_transfer_config_python(main["args"][0])
+    env = {
+        **os.environ,
+        "KVCR_CACHE_SLOT": "1",
+        "KVCR_CACHE_SLOT_COUNT": "2",
+        "POD_IP": "192.0.2.1",
+    }
+
+    result = subprocess.run(
+        ["python3", "-c", script],
+        check=True,
+        capture_output=True,
+        env=env,
+        text=True,
+        timeout=30,
+    )
+    config = json.loads(result.stdout)
+    owner = config["kv_connector_extra_config"]["dynamo_state_agent"][
+        "cache_owner_ids"
+    ]["0"]
+    assert owner.endswith("/00000000000000000000000000000001")
+
+    env["KVCR_CACHE_SLOT"] = "2"
+    result = subprocess.run(
+        ["python3", "-c", script],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode != 0
+    assert "outside [0, 2)" in result.stderr
 
 
 def test_process_local_variant_couples_state_agent_and_vllm() -> None:
@@ -67,11 +118,11 @@ def test_process_local_variant_couples_state_agent_and_vllm() -> None:
     assert "DYN_DISCOVERY_BACKEND=etcd" in command
     assert "DYN_SYSTEM_PORT=9091" in command
     assert "DYN_HEALTH_CHECK_ENABLED=false" in command
-    assert "--max-slots 2" in command
+    assert '--max-slots "$KVCR_CACHE_SLOT_COUNT"' in command
     assert 'wait -n "$state_agent_pid" "$vllm_pid"' in command
     assert "kvcr.kvcr_service" not in command
-    assert "owner_slot=00000000000000000000000000000000" in command
-    assert "owner_slot=00000000000000000000000000000001" in command
+    assert 'case "$POD_INDEX" in' not in command
+    assert '"cache_owner_ids": {"0": cache_owner_id()}' in command
     assert all(item["name"] != "POD_UID" for item in main["env"])
 
     assert "startupProbe" not in main
@@ -106,12 +157,12 @@ def test_memory_service_variant_keeps_guard_in_sidecar() -> None:
         item["name"] != "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"
         for item in sidecar["env"]
     )
-    assert "--max-slots 2" in sidecar_command
+    assert '--max-slots "$KVCR_CACHE_SLOT_COUNT"' in sidecar_command
     assert 'wait -n "$kvcr_pid" "$state_agent_pid"' in sidecar_command
     assert '"kvcr_service_socket_path": "/run/kvcr/memory.sock"' in main_command
     assert "/run/kvcr/hold-engine-start" not in main_command
-    assert "owner_slot=00000000000000000000000000000000" in main_command
-    assert "owner_slot=00000000000000000000000000000001" in main_command
+    assert 'case "$POD_INDEX" in' not in main_command
+    assert '"cache_owner_ids": {"0": cache_owner_id()}' in main_command
     assert all(item["name"] != "POD_UID" for item in main["env"])
     pod_uid = next(item for item in sidecar["env"] if item["name"] == "POD_UID")
     assert pod_uid["valueFrom"]["fieldRef"]["fieldPath"] == "metadata.uid"
