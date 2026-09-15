@@ -1194,7 +1194,9 @@ async fn router_with_worker_configs(
     let inner = PushRouter::from_client(client, RouterMode::KV)
         .await
         .unwrap();
-    let router = RoutingHost::new(inner, Arc::new(chooser), session_affinity_ttl).unwrap();
+    let mut router = RoutingHost::new(inner, Arc::new(chooser), session_affinity_ttl).unwrap();
+    // Parallel tests must not share the process-global request counters.
+    router.request_metrics = RouterRequestMetrics::for_test();
     router
         .inner
         .client
@@ -1303,7 +1305,9 @@ async fn router_with_recorded_dispatch_and_affinity(
     )
     .await
     .unwrap();
-    let router = RoutingHost::new(inner, Arc::new(chooser), session_affinity_ttl).unwrap();
+    let mut router = RoutingHost::new(inner, Arc::new(chooser), session_affinity_ttl).unwrap();
+    // Parallel tests must not share the process-global request counters.
+    router.request_metrics = RouterRequestMetrics::for_test();
     (router, dispatch, worker_id, runtime)
 }
 
@@ -1406,7 +1410,6 @@ async fn track_request(
 }
 
 #[tokio::test]
-#[serial_test::serial]
 async fn route_plan_from_preview_holds_and_releases_the_decode_reservation() {
     let (router, runtime) = router(None).await;
     let request = Context::new(request());
@@ -1461,7 +1464,6 @@ async fn route_plan_from_preview_holds_and_releases_the_decode_reservation() {
 }
 
 #[tokio::test]
-#[serial_test::serial]
 async fn route_preview_does_not_admit_a_request() {
     let (router, runtime) = router(None).await;
     let request = Context::new(request());
@@ -1557,7 +1559,6 @@ async fn route_preview_does_not_acquire_session_affinity() {
 }
 
 #[tokio::test]
-#[serial_test::serial]
 async fn planned_dispatch_transfers_the_reservation_to_request_cleanup() {
     let (router, runtime) = router(None).await;
     let requests_started_before = router.request_metrics.requests_started_total().get();
@@ -1588,7 +1589,6 @@ async fn planned_dispatch_transfers_the_reservation_to_request_cleanup() {
 }
 
 #[tokio::test]
-#[serial_test::serial]
 async fn prefill_busy_probe_does_not_admit_a_request() {
     let (router, runtime) = router(None).await;
     let request = Context::new(request());
@@ -1653,7 +1653,6 @@ async fn session_affinity_disabled_does_not_create_coordinator() {
 }
 
 #[tokio::test]
-#[serial_test::serial]
 async fn router_request_counters_follow_admission_and_completion_lifecycle() {
     let (router, runtime) = router(None).await;
     let metrics = router.request_metrics.clone();
@@ -1750,6 +1749,18 @@ async fn router_request_counters_follow_admission_and_completion_lifecycle() {
     builtin_guard.abort().await;
     drop(builtin_guard);
     assert_eq!(metrics.requests_total.get(), completed_before + 1);
+
+    // Another test router must not change either lifecycle counter.
+    let (other_router, other_runtime) = router_with_workers(None, &[8]).await;
+    let (_, _, mut other_guard) = track_request(&other_router, false).await;
+    other_guard.start_dispatch("aggregated");
+    other_guard.mark_dispatched();
+    other_guard.finish().await;
+    drop(other_guard);
+    assert_eq!(metrics.requests_started_total().get(), started_before + 4);
+    assert_eq!(metrics.requests_total.get(), completed_before + 1);
+    drop(other_router);
+    other_runtime.shutdown();
 
     drop(router);
     runtime.shutdown();
