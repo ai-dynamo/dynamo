@@ -134,6 +134,9 @@ pub struct SchedulingResponse {
     pub best_worker: WorkerWithDpRank,
     pub effective_overlap_blocks: f64,
     pub cached_tokens: usize,
+    /// Greatest router-visible cached-token count among eligible workers when
+    /// worker-stage telemetry is enabled.
+    pub max_cached_tokens: Option<usize>,
     pub selected_worker_tiers: SelectedWorkerTierSnapshot,
     pub target_cached_prefix_blocks: u32,
     pub kv_transfer_candidates: Option<KvTransferCandidates>,

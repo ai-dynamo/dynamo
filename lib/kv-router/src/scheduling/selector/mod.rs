@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::{cell::Cell, collections::HashMap};
 
 mod default;
 mod policy;
@@ -23,7 +23,10 @@ use policy::{
 use super::config::KvRouterConfig;
 use super::filter::{RoutingEligibility, WorkerEligibilityError};
 use super::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
-use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
+use crate::protocols::{
+    WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank,
+    cache_reuse_worker_stages_enabled,
+};
 
 /// Low-level selector used by routing hosts.
 ///
@@ -135,10 +138,29 @@ struct LogitWeights {
 struct MaterializedSelectionInput<'a> {
     request: &'a SchedulingRequest,
     context: WorkerSelectionContext<'a>,
+    // Both default and custom selection materialize a row for every worker rank
+    // accepted by RoutingEligibility before returning a successful selection.
+    // That is the same worker set an eligibility-scoped maximum would scan, so
+    // accumulating here preserves F2 without a second traversal.
+    max_cached_tokens: Cell<Option<usize>>,
 }
 
 impl<'a> MaterializedSelectionInput<'a> {
     fn new(request: &'a SchedulingRequest, block_size: u32, weights: LogitWeights) -> Self {
+        Self::new_with_worker_stage_tracking(
+            request,
+            block_size,
+            weights,
+            cache_reuse_worker_stages_enabled() && request.mode.is_tracked(),
+        )
+    }
+
+    fn new_with_worker_stage_tracking(
+        request: &'a SchedulingRequest,
+        block_size: u32,
+        weights: LogitWeights,
+        track_worker_stages: bool,
+    ) -> Self {
         Self {
             request,
             context: WorkerSelectionContext {
@@ -153,7 +175,12 @@ impl<'a> MaterializedSelectionInput<'a> {
                     .as_ref()
                     .and_then(|config| config.router_temperature),
             },
+            max_cached_tokens: Cell::new(track_worker_stages.then_some(0)),
         }
+    }
+
+    fn max_cached_tokens(&self) -> Option<usize> {
+        self.max_cached_tokens.get()
     }
 
     fn row(
@@ -177,13 +204,18 @@ impl<'a> MaterializedSelectionInput<'a> {
         inputs: WorkerInputs,
         select_device_overlap: impl FnOnce(f64, f64) -> f64,
     ) -> WorkerCandidate {
-        let cached_tokens = if inputs.contains(WorkerInputs::CACHE)
+        let cached_tokens = if self.max_cached_tokens.get().is_some()
+            || inputs.contains(WorkerInputs::CACHE)
             || (inputs.contains(WorkerInputs::LOAD) && self.request.track_prefill_tokens)
         {
             self.request.effective_cached_tokens_for(worker)
         } else {
             0
         };
+        if let Some(current_max) = self.max_cached_tokens.get() {
+            self.max_cached_tokens
+                .set(Some(current_max.max(cached_tokens)));
+        }
         let worker_load = if inputs.contains(WorkerInputs::LOAD) {
             self.request.worker_loads.get(&worker).copied()
         } else {
@@ -274,12 +306,14 @@ fn selection_result(
     request: &SchedulingRequest,
     worker: WorkerWithDpRank,
     block_size: u32,
+    max_cached_tokens: Option<usize>,
 ) -> WorkerSelectionResult {
     WorkerSelectionResult {
         worker,
         required_blocks: request.request_blocks(block_size),
         effective_overlap_blocks: request.effective_overlap_blocks_for(worker),
         cached_tokens: request.effective_cached_tokens_for(worker),
+        max_cached_tokens,
         potential_decode_blocks: request
             .potential_decode_blocks_after_admission(worker, block_size),
     }
@@ -445,7 +479,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         }
         return Err(KvSchedulerError::NoEndpoints);
     };
-    let result = selection_result(request, worker, block_size);
+    let result = selection_result(request, worker, block_size, input.max_cached_tokens());
     log_selection(
         workers,
         request,
@@ -540,5 +574,57 @@ mod test_support {
                 )
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod worker_stage_tests {
+    use super::test_support::base_request;
+    use super::*;
+
+    fn weights() -> LogitWeights {
+        LogitWeights {
+            overlap_score_credit: 0.0,
+            overlap_score_credit_decay: 0.0,
+            prefill_load_scale: 0.0,
+            shared_cache_multiplier: 0.0,
+        }
+    }
+
+    #[test]
+    fn enabled_worker_stage_tracking_accumulates_during_materialization() {
+        let mut request = base_request(128);
+        let first = WorkerWithDpRank::from_worker_id(1);
+        let second = WorkerWithDpRank::from_worker_id(2);
+        request.overlap.effective_cached_tokens.insert(first, 32);
+        request.overlap.effective_cached_tokens.insert(second, 96);
+        let input = MaterializedSelectionInput::new_with_worker_stage_tracking(
+            &request,
+            16,
+            weights(),
+            true,
+        );
+
+        input.row(first, None, WorkerInputs::NONE);
+        input.row(second, None, WorkerInputs::NONE);
+
+        assert_eq!(input.max_cached_tokens(), Some(96));
+    }
+
+    #[test]
+    fn disabled_worker_stage_tracking_keeps_optional_result_empty() {
+        let mut request = base_request(128);
+        let worker = WorkerWithDpRank::from_worker_id(1);
+        request.overlap.effective_cached_tokens.insert(worker, 96);
+        let input = MaterializedSelectionInput::new_with_worker_stage_tracking(
+            &request,
+            16,
+            weights(),
+            false,
+        );
+
+        input.row(worker, None, WorkerInputs::NONE);
+
+        assert_eq!(input.max_cached_tokens(), None);
     }
 }
