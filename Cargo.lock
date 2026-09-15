@@ -3142,7 +3142,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic 0.13.1",
- "tonic-health",
+ "tonic-health 0.13.1",
  "tracing",
  "tracing-subscriber",
  "uuid",

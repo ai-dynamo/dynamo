@@ -6,8 +6,8 @@
 //! contract the sidecar actually enforces, these fail.
 
 use dynamo_backend_common::{
-    DisaggregationMode, FinishReason, GenerateContext, LLMEngine, OutputOptions, PrefillResult,
-    PreprocessedRequest, SamplingOptions, StopConditions,
+    DisaggregationMode, ErrorType, FinishReason, GenerateContext, LLMEngine, OutputOptions,
+    PrefillResult, PreprocessedRequest, SamplingOptions, StopConditions,
 };
 use dynamo_mocker::common::protocols::{EngineType, MockEngineArgs};
 use dynamo_trtllm_mocker::{MockerServerConfig, ServerMode, TrtllmMockerService};
@@ -211,8 +211,13 @@ async fn sidecar_streams_mocker_tokens_logprobs_and_usage() {
     assert_eq!(server.service.active_request_count(), 0);
 }
 
+/// A model-name mismatch is not detectable over this contract: a real
+/// TensorRT-LLM server loads one model and answers `GetModelInfo` for whatever
+/// name it is asked about, so the sidecar registers under its own
+/// `--model-path` either way. Pinning that here stops a future change from
+/// inventing a check the engine cannot back.
 #[tokio::test]
-async fn sidecar_start_fails_when_the_model_is_not_served() {
+async fn sidecar_start_does_not_check_the_served_model_name() {
     let server = RunningServer::start_with(
         MockerServerConfig {
             model: "some-other-model".to_string(),
@@ -223,7 +228,13 @@ async fn sidecar_start_fails_when_the_model_is_not_served() {
     )
     .await;
     let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
-    assert!(engine.start(0).await.is_err());
+
+    let config = engine.start(0).await.expect("start is not a name check");
+    assert_eq!(
+        config.llm.expect("llm registration").context_length,
+        Some(4_096),
+        "the window comes from the engine, whatever it calls its model"
+    );
 }
 
 /// The flagship: a real prefill sidecar hands off to a real decode sidecar, and
@@ -421,17 +432,28 @@ async fn capacity_rejection_surfaces_as_a_sidecar_error() {
     engine.start(0).await.unwrap();
 
     let mut oversized = request(4);
-    oversized.token_ids = vec![1, 2, 3, 4, 5];
+    oversized.token_ids = std::sync::Arc::new(vec![1, 2, 3, 4, 5]);
     let context = dynamo_backend_common::testing::mock_context();
     let stream = engine
         .generate(oversized, GenerateContext::new(context, None))
         .await
         .unwrap();
-    let failed = stream
-        .map(|item| item.is_err())
-        .any(|failed| async move { failed })
-        .await;
-    assert!(failed, "an in-band EngineError must fail the request");
+    let mut stream = stream;
+    let mut error = None;
+    while let Some(item) = stream.next().await {
+        if let Err(failure) = item {
+            error = Some(failure);
+            break;
+        }
+    }
+    let error = error.expect("an in-band EngineError must fail the request");
+    // The type, not just the failure: the router sheds and migrates on an
+    // overload, so flattening it to a generic backend error turns a retryable
+    // condition into an opaque 500 with nothing in the suite to catch it.
+    assert!(
+        matches!(error.error_type(), ErrorType::WorkerOverloaded),
+        "a capacity rejection must reach the router as an overload: {error}"
+    );
 }
 
 /// The only path in this crate with real concurrency: the sidecar's abort
