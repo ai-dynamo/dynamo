@@ -4,9 +4,10 @@
 from typing import Any
 
 import pytest
-import torch
 
-from dynamo.common.external_encoder import (
+torch = pytest.importorskip("torch")
+
+from dynamo.common.external_encoder import (  # noqa: E402
     ExternalEncoderResult,
     decode_request_plane_tensor,
     encode_request_plane_tensor,
