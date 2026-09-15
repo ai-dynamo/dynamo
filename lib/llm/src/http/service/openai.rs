@@ -116,7 +116,7 @@ pub(super) fn rl_router(
     drt: Arc<dynamo_runtime::DistributedRuntime>,
 ) -> anyhow::Result<axum::Router> {
     let config = dynamo_rl::RlDiscoveryConfig::from_env(drt);
-    let state = dynamo_rl::RlDiscoveryState::new(config);
+    let state = dynamo_rl::RlDiscoveryState::new_from_env(config);
     Ok(dynamo_rl::rl_router(state))
 }
 
