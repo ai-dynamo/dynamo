@@ -99,7 +99,7 @@ spec:
             valueFrom:
               fieldRef:
                 fieldPath: metadata.uid
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-cb301ba93943e0165deda36f65a8fd291b89beb2-vllm-runtime
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-a.x-k2-post.1
           imagePullPolicy: IfNotPresent
           name: main
           ports:
@@ -120,8 +120,6 @@ spec:
               cpu: "4"
               memory: 16Gi
           workingDir: /workspace
-        imagePullSecrets:
-        - name: runtime-imagepullsecret
         schedulerName: default-scheduler
     replicas: 1
     runtimeVersionOverride: 1.4.1
@@ -207,7 +205,7 @@ spec:
             value: "1024"
           - name: UCX_TLS
             value: rc_x,rc,cuda_copy,cuda_ipc
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-cb301ba93943e0165deda36f65a8fd291b89beb2-vllm-runtime
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-a.x-k2-post.1
           imagePullPolicy: IfNotPresent
           name: main
           resources:
@@ -237,8 +235,6 @@ spec:
           - mountPath: /tmp
             name: runtime-tmp
           workingDir: /workspace
-        imagePullSecrets:
-        - name: runtime-imagepullsecret
         schedulerName: default-scheduler
         tolerations:
         - effect: NoSchedule
@@ -335,7 +331,7 @@ spec:
             value: "1024"
           - name: UCX_TLS
             value: rc_x,rc,cuda_copy,cuda_ipc
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-cb301ba93943e0165deda36f65a8fd291b89beb2-vllm-runtime
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-a.x-k2-post.1
           imagePullPolicy: IfNotPresent
           name: main
           resources:
@@ -365,8 +361,6 @@ spec:
           - mountPath: /tmp
             name: runtime-tmp
           workingDir: /workspace
-        imagePullSecrets:
-        - name: runtime-imagepullsecret
         schedulerName: default-scheduler
         tolerations:
         - effect: NoSchedule

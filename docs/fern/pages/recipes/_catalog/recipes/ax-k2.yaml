@@ -29,7 +29,7 @@ targets:
     count: 8
   runtime:
     framework: vllm
-    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-cb301ba93943e0165deda36f65a8fd291b89beb2-vllm-runtime
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-a.x-k2-post.1
   topology: aggregated
   techniques:
   - nvfp4
@@ -45,7 +45,7 @@ targets:
     available: true
     summary: 'C=16, chat 15%: 76.49 output toks/sec/GPU, 55.83 mean toks/sec/user, 0.525 s p50 TTFT. Historical
       synthetic EAGLE3 AL=2.12 run; 1765/1765 successful requests, 0 failed, 20 warmup requests. Predates
-      the pinned CI runtime update.'
+      the published NVCR runtime update.'
   benchmark:
     tool: aiperf
     asset: recipes/ax-k2/perf/perf.yaml
@@ -56,7 +56,7 @@ targets:
     count: 12
   runtime:
     framework: vllm
-    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-cb301ba93943e0165deda36f65a8fd291b89beb2-vllm-runtime
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-a.x-k2-post.1
   topology: disaggregated
   techniques:
   - nvfp4
@@ -72,9 +72,9 @@ targets:
     available: true
     summary: 'C=16, chat 15%: 61.97 output toks/sec/GPU, 83 mean toks/sec/user, 3.879 s p50 TTFT. Historical
       synthetic EAGLE3 AL=2.12 run; 1755/1765 successful requests, 10 failed, 32 warmup requests. Predates
-      the pinned CI runtime update.'
+      the published NVCR runtime update.'
 related_benchmarks: []
 maintainer: Vanshil Shah
 gaps:
-- Published C16 short-trace results predate the pinned CI runtime; no measurements for this image.
+- Published C16 short-trace results predate the published NVCR runtime; no measurements for this image.
 - Disaggregated C16 run had 10 failed requests out of 1765; warmup differed between topologies.

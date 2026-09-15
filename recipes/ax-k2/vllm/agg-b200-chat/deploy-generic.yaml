@@ -81,7 +81,7 @@ spec:
             valueFrom:
               fieldRef:
                 fieldPath: metadata.uid
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-cb301ba93943e0165deda36f65a8fd291b89beb2-vllm-runtime
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-a.x-k2-post.1
           imagePullPolicy: IfNotPresent
           name: main
           ports:
@@ -102,8 +102,6 @@ spec:
               cpu: "4"
               memory: 16Gi
           workingDir: /workspace
-        imagePullSecrets:
-        - name: runtime-imagepullsecret
     replicas: 1
     runtimeVersionOverride: 1.4.1
     type: frontend
@@ -164,7 +162,7 @@ spec:
               configMapKeyRef:
                 key: speculative-config
                 name: axk2-agg-b200-chat-specdec-config
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-cb301ba93943e0165deda36f65a8fd291b89beb2-vllm-runtime
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-a.x-k2-post.1
           imagePullPolicy: IfNotPresent
           name: main
           resources:
@@ -192,8 +190,6 @@ spec:
           - mountPath: /tmp
             name: runtime-tmp
           workingDir: /workspace
-        imagePullSecrets:
-        - name: runtime-imagepullsecret
         tolerations:
         - effect: NoSchedule
           key: nvidia.com/gpu

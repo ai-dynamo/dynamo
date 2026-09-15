@@ -76,12 +76,10 @@ spec:
             axk2.nvidia.com/role: frontend
             axk2.nvidia.com/routing: kv-aware
         spec:
-          imagePullSecrets:
-            - name: runtime-imagepullsecret
           schedulerName: default-scheduler
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-cb301ba93943e0165deda36f65a8fd291b89beb2-vllm-runtime
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-a.x-k2-post.1
               imagePullPolicy: IfNotPresent
               workingDir: /workspace
               command:
@@ -130,8 +128,6 @@ spec:
             axk2.nvidia.com/role: prefill-worker
             axk2.nvidia.com/routing: kv-aware
         spec:
-          imagePullSecrets:
-            - name: runtime-imagepullsecret
           affinity:
             nodeAffinity:
               requiredDuringSchedulingIgnoredDuringExecution:
@@ -154,7 +150,7 @@ spec:
                     topologyKey: kubernetes.io/hostname
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-cb301ba93943e0165deda36f65a8fd291b89beb2-vllm-runtime
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-a.x-k2-post.1
               imagePullPolicy: IfNotPresent
               workingDir: /workspace
               command:
@@ -264,8 +260,6 @@ spec:
             axk2.nvidia.com/role: decode-worker
             axk2.nvidia.com/routing: kv-aware
         spec:
-          imagePullSecrets:
-            - name: runtime-imagepullsecret
           affinity:
             nodeAffinity:
               requiredDuringSchedulingIgnoredDuringExecution:
@@ -288,7 +282,7 @@ spec:
                     topologyKey: kubernetes.io/hostname
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-cb301ba93943e0165deda36f65a8fd291b89beb2-vllm-runtime
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-a.x-k2-post.1
               imagePullPolicy: IfNotPresent
               workingDir: /workspace
               command:
