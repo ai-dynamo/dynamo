@@ -523,6 +523,56 @@ def test_compute_kv_bytes_reads_local_config_json_without_transformers(
     assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) == 256
 
 
+def test_compute_kv_bytes_uses_head_dim_when_the_config_declares_one(
+    monkeypatch, tmp_path
+):
+    """A declared head_dim is authoritative.
+
+    Several model families size their heads independently of
+    hidden_size / num_attention_heads, so deriving it under-counts the cache
+    and the mocker then simulates more capacity than the engine has.
+    """
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "num_hidden_layers": 2,
+                "num_key_value_heads": 4,
+                "num_attention_heads": 16,
+                "hidden_size": 3584,
+                "head_dim": 256,
+                "torch_dtype": "bfloat16",
+            }
+        )
+    )
+    monkeypatch.setitem(sys.modules, "transformers", None)
+
+    # Deriving 3584 // 16 = 224 would give 7168 instead.
+    assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) == 8192
+
+
+@pytest.mark.parametrize("head_dim", [0, "128", True])
+def test_compute_kv_bytes_derives_head_dim_when_declared_but_unusable(
+    monkeypatch, tmp_path, head_dim
+):
+    """A declared but unusable head_dim falls back to the derived value.
+
+    `True` is in here because `isinstance(True, int)` holds, so a JSON `true`
+    would otherwise be taken as an authoritative head dimension of 1.
+    """
+    config = {
+        "num_hidden_layers": 2,
+        "num_key_value_heads": 4,
+        "num_attention_heads": 16,
+        "hidden_size": 3584,
+        "torch_dtype": "bfloat16",
+    }
+    config["head_dim"] = head_dim
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    monkeypatch.setitem(sys.modules, "transformers", None)
+
+    assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) == 7168
+
+
 def test_compute_kv_bytes_unwraps_multimodal_text_config_json(tmp_path):
     (tmp_path / "config.json").write_text(
         json.dumps(
