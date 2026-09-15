@@ -173,7 +173,31 @@ fn create_request_context(
     }
 }
 
-/// Longest the exit hook will wait for the process runtime to go quiet.
+/// The runtime the PyO3 bridge settled on, recorded so the exit hook can name it.
+///
+/// There is no way to ask PyO3 for it at exit: `get_runtime()` builds a runtime rather than
+/// report that there is none, and an exiting process has no business starting worker threads.
+static BRIDGE_RUNTIME: std::sync::OnceLock<&'static tokio::runtime::Runtime> =
+    std::sync::OnceLock::new();
+
+/// Offer `primary` to the PyO3 bridge and report the runtime the bridge is using.
+///
+/// Recording that runtime is what lets [`wait_for_bridge_tasks_at_exit`] reach the bridge when
+/// something got to `future_into_py` first and PyO3 built a runtime of its own. Reading it
+/// straight after the offer is what makes the read safe: by then the bridge holds either
+/// `primary` or the runtime it already had, so nothing is constructed here either.
+pub(crate) fn adopt_bridge_runtime(
+    primary: &'static tokio::runtime::Runtime,
+) -> &'static tokio::runtime::Runtime {
+    // `Err(())` only means that the bridge runtime was already selected. It may already be
+    // borrowing `primary`, so identity has to be checked independently by the caller.
+    let _ = pyo3_async_runtimes::tokio::init_with_runtime(primary);
+    let bridge = pyo3_async_runtimes::tokio::get_runtime();
+    let _ = BRIDGE_RUNTIME.set(bridge);
+    bridge
+}
+
+/// Longest the exit hook will wait for the runtimes it drains to go quiet.
 ///
 /// The race it closes is sub-millisecond, so this is still a margin of hundreds. It is also
 /// paid in full, on every exit, by a process whose service tasks never finish: a frontend holds
@@ -191,26 +215,48 @@ const BRIDGE_DRAIN_POLL: std::time::Duration = std::time::Duration::from_millis(
 /// `PyObject_GC_Del` against a half-torn-down interpreter. The process dies by `SIGSEGV` with
 /// all of its output already correctly written.
 ///
-/// Drains the process runtime, which is the runtime the bridge uses whenever
-/// `ensure_fetch_model_runtime` got there first. When the bridge picked up a different runtime
-/// it warns about the mismatch, and this hook cannot reach it: `get_runtime()` would build a
-/// runtime rather than report that there is none.
+/// Drains both runtimes a bridge task can be on: Dynamo's process runtime, and the runtime the
+/// bridge actually settled on when that is a different one. They differ whenever something
+/// reached `future_into_py` before [`adopt_bridge_runtime`] could offer the process runtime —
+/// the mismatch the bindings already warn about, and the case where every bridge task lives on
+/// the runtime PyO3 built for itself rather than on the process runtime.
+///
+/// A process that reaches the bridge without ever passing through [`adopt_bridge_runtime`] is
+/// still out of reach, because nothing recorded which runtime the bridge chose and
+/// `get_runtime()` would build one rather than report that there is none.
 #[pyfunction]
 fn wait_for_bridge_tasks_at_exit(py: Python<'_>) {
-    // No runtime was ever built, so nothing was ever spawned. Costs an untouched process nothing.
-    let Some(runtime) = rs::Worker::existing_process_runtime() else {
+    let mut runtimes: Vec<&'static tokio::runtime::Runtime> = Vec::new();
+    if let Some(process) = rs::Worker::existing_process_runtime() {
+        runtimes.push(process);
+    }
+    if let Some(bridge) = BRIDGE_RUNTIME.get().copied() {
+        // Usually the bridge borrowed the process runtime; then there is one runtime to drain.
+        if !runtimes.iter().any(|rt| std::ptr::eq(*rt, bridge)) {
+            runtimes.push(bridge);
+        }
+    }
+    // Nothing was ever spawned anywhere this hook can see. Costs an untouched process nothing.
+    if runtimes.is_empty() {
         return;
+    }
+    let alive = || -> usize {
+        runtimes
+            .iter()
+            .map(|rt| rt.metrics().num_alive_tasks())
+            .sum()
     };
     // An atexit callback holds the GIL and the tasks being waited on need it, so
     // waiting without releasing it would deadlock against those same threads.
     py.allow_threads(|| {
         let deadline = std::time::Instant::now() + BRIDGE_DRAIN_TIMEOUT;
-        while runtime.metrics().num_alive_tasks() > 0 {
+        while alive() > 0 {
             if std::time::Instant::now() >= deadline {
                 // At the default level, and once per process at most: it is the only thing
                 // that accounts for the extra exit delay the operator just waited through.
                 tracing::info!(
-                    alive_tasks = runtime.metrics().num_alive_tasks(),
+                    alive_tasks = alive(),
+                    runtimes = runtimes.len(),
                     "tasks still running at interpreter exit; continuing without them"
                 );
                 break;
@@ -903,10 +949,7 @@ static FETCH_MODEL_RUNTIME_MISMATCH_WARNING: std::sync::Once = std::sync::Once::
 fn ensure_fetch_model_runtime() -> anyhow::Result<&'static tokio::runtime::Runtime> {
     let primary = rs::Worker::ensure_process_runtime()?;
 
-    // `Err(())` only means that the bridge runtime was already selected. It may already be
-    // borrowing `primary`, so identity has to be checked independently.
-    let _ = pyo3_async_runtimes::tokio::init_with_runtime(primary);
-    let bridge = pyo3_async_runtimes::tokio::get_runtime();
+    let bridge = adopt_bridge_runtime(primary);
 
     if !std::ptr::eq(bridge, primary) {
         FETCH_MODEL_RUNTIME_MISMATCH_WARNING.call_once(|| {

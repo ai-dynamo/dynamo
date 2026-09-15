@@ -591,7 +591,7 @@ impl Worker {
         // to the worker's DistributedRuntime, not the process-wide executor, and
         // are resolved directly by RsWorker without changing environment vars.
         let primary = rs::Worker::ensure_process_runtime().map_err(to_pyerr)?;
-        let _ = pyo3_async_runtimes::tokio::init_with_runtime(primary);
+        crate::adopt_bridge_runtime(primary);
 
         Ok(Self {
             engine: Arc::new(engine),
