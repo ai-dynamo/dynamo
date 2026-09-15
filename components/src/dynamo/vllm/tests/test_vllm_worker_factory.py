@@ -1857,3 +1857,48 @@ class TestEncodeWorkerEmbeddingCacheCapacity:
         handler_cls = await self._create_encode_worker(0.0)
 
         assert handler_cls.call_args.kwargs["embedding_cache_capacity_gb"] == 0.0
+
+
+class TestShadowStandbyEntry:
+    """Cover the real ``_maybe_wait_for_failover_lock``.
+
+    Every other test in this file replaces it with an ``AsyncMock``, so the
+    bound on the pause would otherwise never be executed.
+    """
+
+    @staticmethod
+    def _handler_that_never_pauses():
+        class _NeverPauses:
+            async def pause(self, *_args: object) -> bool:
+                await asyncio.sleep(3600)
+                return True
+
+        return SimpleNamespace(_pause_controller=_NeverPauses())
+
+    @pytest.mark.timeout(30)
+    async def test_pause_that_never_returns_raises_naming_engine_and_stage(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("ENGINE_ID", "2")
+        monkeypatch.setenv("DYN_GMS_SHADOW_PAUSE_TIMEOUT_SECONDS", "0.2")
+        elect_and_wake = AsyncMock()
+        monkeypatch.setattr("dynamo.vllm.worker_factory.elect_and_wake", elect_and_wake)
+        runtime = Mock()
+
+        with pytest.raises(RuntimeError) as excinfo:
+            await _make_factory()._maybe_wait_for_failover_lock(
+                self._handler_that_never_pauses(),
+                runtime,
+                _make_config(gms_shadow_mode=True),
+            )
+
+        message = str(excinfo.value)
+        assert "engine-2" in message
+        assert "did not finish pausing for standby" in message
+        # The stalled stage has to be named, or a cluster log cannot tell a
+        # weights-admission stall from any other unfinished startup step.
+        assert "sleep" in message
+        # A shadow that never paused holds no lock and cannot take a
+        # promotion, so it must not report itself Ready.
+        runtime.set_health_status.assert_not_called()
+        elect_and_wake.assert_not_awaited()

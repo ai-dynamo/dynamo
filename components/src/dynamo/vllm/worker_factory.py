@@ -67,6 +67,16 @@ BENCHMARK_SOFT_TIMEOUT_GRACE_SECONDS = 90
 # serving nor error propagation may hang on it.
 WORKER_GC_STOP_TIMEOUT_SECONDS = 30.0
 
+# Bound for a shadow engine's pause before it enters standby. The pause crosses
+# ZMQ into the engine core and then into GMS, where a weight admission can be
+# refused behind a queued writer; with no bound the worker parks there forever,
+# never publishes health, and the pod stays Running and NotReady for the whole
+# startup-probe window, invisible to the restart policy and the cascade
+# controller. Generous because it spans a real engine sleep. Override with
+# DYN_GMS_SHADOW_PAUSE_TIMEOUT_SECONDS; "0" restores the unbounded wait.
+SHADOW_PAUSE_TIMEOUT_SECONDS = 900.0
+ENV_SHADOW_PAUSE_TIMEOUT_SECONDS = "DYN_GMS_SHADOW_PAUSE_TIMEOUT_SECONDS"
+
 # (engine_client, vllm_config, default_sampling_params, cleanup_resource, component_gauges)
 # component_gauges is None on the embedding-worker path: pooling engines
 # have no KV cache / scheduler gauges, so setup_vllm_engine() skips the
@@ -1155,7 +1165,35 @@ class WorkerFactory:
         if config.gms_shadow_mode is not True:
             return False
 
-        await handler._pause_controller.pause(1)
+        engine_id = os.environ.get("ENGINE_ID", "0")
+        raw_timeout = os.environ.get(ENV_SHADOW_PAUSE_TIMEOUT_SECONDS)
+        timeout_s = float(raw_timeout) if raw_timeout else SHADOW_PAUSE_TIMEOUT_SECONDS
+        # This is the last line a wedged shadow prints, so it has to name both
+        # the engine and the bound a reader should expect it to die by.
+        logger.info(
+            "[Shadow] engine-%s pausing before standby (bound %.0fs)",
+            engine_id,
+            timeout_s,
+        )
+        try:
+            if timeout_s > 0:
+                await asyncio.wait_for(
+                    handler._pause_controller.pause(1), timeout=timeout_s
+                )
+            else:
+                await handler._pause_controller.pause(1)
+        except asyncio.TimeoutError as exc:
+            # Fail loudly rather than hold a shadow slot. The worker exits
+            # non-zero, the pod reaches Failed, and the operator's documented
+            # recovery path (pod exit) can run. Health is deliberately not
+            # published here: a shadow that never paused cannot take a
+            # promotion, so it must not report itself Ready.
+            raise RuntimeError(
+                f"[Shadow] engine-{engine_id} did not finish pausing for standby "
+                f"within {timeout_s:.0f}s; the engine pause (pause_generation + "
+                "sleep, which waits on GMS weight admission) never completed, so "
+                "this engine cannot enter standby"
+            ) from exc
         lock = await elect_and_wake(
             handler._pause_controller,
             runtime,
