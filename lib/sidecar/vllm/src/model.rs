@@ -107,6 +107,7 @@ impl DiscoveredModel {
         &self,
         admin_base_url: Option<RlAdminBaseUrl>,
         configured_world_size: Option<u32>,
+        configured_prefill_context_parallel_size: Option<u32>,
     ) -> Result<RlWorkerMetadata, DynamoError> {
         let parallelism = self.server.parallelism.as_ref().ok_or_else(|| {
             client::protocol_error("RL discovery requires vLLM parallelism metadata")
@@ -141,14 +142,22 @@ impl DiscoveredModel {
                         "--vllm-rl-world-size is required when vLLM omits engine world size from gRPC metadata",
                     )
                 })?;
+                let prefill_context_parallel_size = configured_prefill_context_parallel_size
+                    .and_then(nonzero)
+                    .ok_or_else(|| {
+                        client::invalid_argument(
+                            "--vllm-rl-prefill-context-parallel-size is required when vLLM omits engine world size from gRPC metadata",
+                        )
+                    })?;
                 let expected_total_world_size = expected_minimum_world_size
-                    .checked_mul(data_parallel_size)
+                    .checked_mul(prefill_context_parallel_size)
+                    .and_then(|size| size.checked_mul(data_parallel_size))
                     .ok_or_else(|| {
                         client::protocol_error("vLLM reports an invalid RL world size")
                     })?;
-                if world_size % expected_total_world_size != 0 {
+                if world_size != expected_total_world_size {
                     return Err(client::invalid_argument(
-                        "--vllm-rl-world-size must be divisible by TP * PP * DP",
+                        "--vllm-rl-world-size must equal TP * PP * PCP * DP",
                     ));
                 }
                 world_size

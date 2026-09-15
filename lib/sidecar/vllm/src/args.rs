@@ -27,8 +27,12 @@ pub(crate) struct Args {
     pub vllm_http_endpoint: Option<HttpEndpoint>,
 
     /// Optional total RL process world size for vLLM versions that omit it from gRPC metadata.
-    ///
-    /// The value includes tensor, pipeline, prefill-context, and data parallelism.
     #[arg(long, env = "DYN_VLLM_RL_WORLD_SIZE")]
     pub vllm_rl_world_size: Option<NonZeroU32>,
+
+    /// Optional prefill-context parallel size for legacy RL world-size validation.
+    ///
+    /// Required with --vllm-rl-world-size when vLLM omits world size from gRPC metadata.
+    #[arg(long, env = "DYN_VLLM_RL_PREFILL_CONTEXT_PARALLEL_SIZE")]
+    pub vllm_rl_prefill_context_parallel_size: Option<NonZeroU32>,
 }
