@@ -23,7 +23,7 @@ spec:
         - name: HF_HOME
           value: /opt/models
       replicas: 1
-    VllmPrefillWorker:
+    prefill:
       componentType: worker
       subComponentType: prefill
       envFromSecret: hf-token-secret
@@ -97,7 +97,7 @@ spec:
           gpu: "2"
           custom:
             rdma/ib: "2"
-    VllmDecodeWorker:
+    decode:
       componentType: worker
       subComponentType: decode
       envFromSecret: hf-token-secret

@@ -20,6 +20,7 @@ package validation
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -131,6 +132,19 @@ func readGroveClusterTopology(ctx context.Context, mgr ctrl.Manager, name string
 	}
 	sort.Strings(info.domains)
 	return info, nil
+}
+
+// supportedWorkloadProviders lists the workload programs the controller
+// implements. Both the create-side and update-side metadata rules read this so
+// the set is stated once.
+func supportedWorkloadProviders() []string {
+	return []string{consts.WorkloadProviderComponent, consts.WorkloadProviderGrove}
+}
+
+// isSupportedWorkloadProvider reports whether value names a workload program
+// the controller implements.
+func isSupportedWorkloadProvider(value string) bool {
+	return slices.Contains(supportedWorkloadProviders(), value)
 }
 
 func grovePathwayForDynamoGraphDeployment(

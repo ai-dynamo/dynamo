@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     build_disagg_mm_kwargs,
     extract_media_urls,
@@ -103,7 +104,9 @@ class TestMultimodalGuard:
         ids=["top_level_messages", "extra_args_messages"],
     )
     def test_raises_for_image_url(self, request_factory):
-        with pytest.raises(RuntimeError, match="multi_modal_data"):
+        # InvalidArgument, not RuntimeError: the type is what makes the
+        # frontend answer 4xx instead of 500.
+        with pytest.raises(InvalidArgument, match="multi_modal_data"):
             raise_if_unextracted_multimodal(request_factory(self._image_message()))
 
     def test_raises_for_audio_url(self):
@@ -122,7 +125,7 @@ class TestMultimodalGuard:
             ],
         }
 
-        with pytest.raises(RuntimeError, match="audio_url"):
+        with pytest.raises(InvalidArgument, match="audio_url"):
             raise_if_unextracted_multimodal(request)
 
     def test_text_only_request_bypasses_guard(self):

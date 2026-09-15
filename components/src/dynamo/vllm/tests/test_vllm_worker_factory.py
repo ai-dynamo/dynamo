@@ -19,6 +19,7 @@ from dynamo.vllm.worker_factory import (
     WorkerFactory,
     _await_benchmark_then_restore_workers,
     _DecodeWorkerLifecycle,
+    _merge_benchmark_rank_results,
     _stop_worker_gc_policy,
     _wait_and_load_benchmark,
 )
@@ -1272,6 +1273,88 @@ async def test_embedding_worker_registration_and_cleanup(
     assert shutdown_endpoints == [endpoint]
 
 
+def _rank_artifact(dp_rank: int, regime: str) -> dict:
+    point = {
+        "point_type": "decode",
+        "benchmark_id": 1,
+        "total_prefill_tokens": 0,
+        "total_kv_read_tokens": 64,
+        "batch_size": 2,
+        "expected_cudagraph_mode": "FULL",
+        "expected_capture_size": 2,
+        "padding_tokens": 0,
+        "sample_reasons": ["explicit"],
+        "partition": None,
+        "rows": None,
+    }
+    fpm = {
+        "version": 1,
+        "worker_id": "w",
+        "dp_rank": dp_rank,
+        "counter_id": 1,
+        "wall_time": 0.01,
+        "scheduled_requests": {
+            "num_prefill_requests": 0,
+            "sum_prefill_tokens": 0,
+            "var_prefill_length": 0.0,
+            "sum_prefill_kv_tokens": 0,
+            "num_decode_requests": 2,
+            "sum_decode_kv_tokens": 64,
+            "var_decode_kv_tokens": 0.0,
+        },
+        "queued_requests": {
+            "num_prefill_requests": 0,
+            "sum_prefill_tokens": 0,
+            "var_prefill_length": 0.0,
+            "num_decode_requests": 0,
+            "sum_decode_kv_tokens": 0,
+            "var_decode_kv_tokens": 0.0,
+        },
+    }
+    return {
+        "schema_version": 2,
+        "artifact_type": "rank",
+        "status": "complete",
+        "valid": True,
+        "usable": True,
+        "stop_reason": None,
+        "timing_valid": True,
+        "run_id": "run",
+        "grid_digest": "g" * 64,
+        "timing": {
+            "started_at": "2026-01-01T00:00:00Z",
+            "completed_at": "2026-01-01T00:00:01Z",
+            "benchmark_elapsed_seconds": 1.0,
+            "measured_iteration_seconds": 0.01,
+        },
+        "dp": {"rank": dp_rank, "size": 1},
+        "coverage": {"expected_points": 1, "completed_points": 1, "skipped_points": 0},
+        "results": [{"point": point, "kv_seed_regime": regime, "fpms": [fpm]}],
+        "iteration_groups": [
+            {
+                "benchmark_id": 1,
+                "point": point,
+                "expected_dp_ranks": [0],
+                "complete": True,
+                "wall_time": 0.01,
+                "rank_results": [{"dp_rank": 0, "fpms": [fpm]}],
+            }
+        ],
+        "skipped_points": [],
+        "missing_phases": [],
+        "error": None,
+    }
+
+
+def test_merge_benchmark_rank_results_carries_kv_seed_regime(tmp_path):
+    artifact = _rank_artifact(0, "fake_fallback")
+    merged = _merge_benchmark_rank_results(
+        [(0, tmp_path / "rank0.json", artifact)], tmp_path / "merged.json"
+    )
+    assert merged["results"][0]["kv_seed_regime"] == "fake_fallback"
+    assert merged["results"][0]["point"]["dp_rank"] == 0
+
+
 @pytest.mark.asyncio
 async def test_benchmark_wait_success_stops_workers_then_returns(monkeypatch):
     calls = []
@@ -1716,3 +1799,61 @@ async def test_decode_call_site_stops_workers_when_benchmark_wait_raises(
     assert order == ["wait", "stop"]
     register.assert_not_awaited()
     engine_client.shutdown.assert_called_once_with(timeout=5.0)
+
+
+@pytest.mark.asyncio
+class TestEncodeWorkerEmbeddingCacheCapacity:
+    """The encode worker gets its cache capacity from the configured flag.
+
+    ``--multimodal-embedding-cache-capacity-gb`` defaults to 0, which disables
+    the cache, so the disabled case is the stock deployment rather than an edge
+    case. The handler decides whether to build a cache at all; the factory's
+    part is to hand it the configured value unchanged.
+    """
+
+    @staticmethod
+    async def _create_encode_worker(capacity_gb):
+        """Run ``_create_multimodal_encode_worker`` with everything external stubbed.
+
+        Returns the patched handler constructor.
+        """
+        endpoint = Mock()
+        endpoint.serve_endpoint = AsyncMock()
+        runtime = Mock()
+        runtime.endpoint = Mock(return_value=endpoint)
+
+        handler = Mock()
+        handler.async_init = AsyncMock()
+
+        config = _make_config(
+            namespace="dynamo",
+            component="encoder",
+            endpoint="generate",
+            model="/models/qwen-vl",
+            served_model_name="qwen-vl",
+            frontend_decoding=False,
+            multimodal_embedding_cache_capacity_gb=capacity_gb,
+        )
+
+        with patch(
+            "dynamo.vllm.worker_factory.EncodeWorkerHandler", return_value=handler
+        ) as handler_cls, patch(
+            "dynamo.vllm.worker_factory.register_model", AsyncMock()
+        ), patch(
+            "dynamo.vllm.worker_factory.register_model_taint_route"
+        ):
+            await _make_factory()._create_multimodal_encode_worker(
+                runtime, config, asyncio.Event(), []
+            )
+
+        return handler_cls
+
+    async def test_passes_the_configured_capacity_to_the_handler(self) -> None:
+        handler_cls = await self._create_encode_worker(4.0)
+
+        assert handler_cls.call_args.kwargs["embedding_cache_capacity_gb"] == 4.0
+
+    async def test_passes_the_disabling_default_through_unchanged(self) -> None:
+        handler_cls = await self._create_encode_worker(0.0)
+
+        assert handler_cls.call_args.kwargs["embedding_cache_capacity_gb"] == 0.0

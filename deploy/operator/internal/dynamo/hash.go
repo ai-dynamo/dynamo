@@ -102,7 +102,14 @@ func workerHashSpec(dcd *v1beta1.DynamoComponentDeployment) v1beta1.DynamoCompon
 	spec.RuntimeVersionOverride = ""
 
 	// Roles are a Kubernetes map-list keyed by name. Canonicalize the copied
-	// slice so declaration order does not create a new worker generation.
+	// slice so declaration order does not create a new worker generation. Role
+	// replicas only assert cardinality already defined by the component shape,
+	// so their optional presence must not create a generation either.
+	if spec.Multinode != nil {
+		for i := range spec.Roles {
+			spec.Roles[i].Replicas = nil
+		}
+	}
 	sort.Slice(spec.Roles, func(i, j int) bool {
 		return spec.Roles[i].Name < spec.Roles[j].Name
 	})

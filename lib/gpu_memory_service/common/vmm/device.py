@@ -76,7 +76,7 @@ class VMMDevice(ABC):
         """Return a POSIX FD that can be passed cross-process via SCM_RIGHTS."""
 
     @abstractmethod
-    def import_shareable_handle_close_fd(self, fd: int) -> int:
+    def import_shareable_handle_close_fd(self, fd: int, import_size: int = 0) -> int:
         """Import a shareable FD into a local physical-memory handle.
 
         The FD is closed on success or failure (matches the existing CUDA
