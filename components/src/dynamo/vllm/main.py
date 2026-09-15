@@ -236,7 +236,7 @@ async def worker(argv: list[str] | None = None) -> None:
 
     # [gluo FIXME] should be after init() below? 'shutdown_endpoints' are populated
     # there
-    install_signal_handlers(
+    wait_for_shutdown = install_signal_handlers(
         loop,
         runtime,
         shutdown_endpoints,
@@ -254,13 +254,19 @@ async def worker(argv: list[str] | None = None) -> None:
         setup_metrics_collection_fn=setup_metrics_collection,
         state_agent_lifecycle=state_agent_lifecycle,
     )
-    await factory.create(
-        runtime,
-        config,
-        shutdown_event,
-        shutdown_endpoints,
-        snapshot_engine=snapshot_engine,
-    )
+    try:
+        await factory.create(
+            runtime,
+            config,
+            shutdown_event,
+            shutdown_endpoints,
+            snapshot_engine=snapshot_engine,
+        )
+    finally:
+        # The serve loop returns as soon as `shutdown_event` is set, which the
+        # shutdown sequence does *before* awaiting the runtime teardown. Without
+        # this join the loop closes here and the teardown is destroyed pending.
+        await wait_for_shutdown()
 
     logger.debug("Worker function completed, exiting...")
 

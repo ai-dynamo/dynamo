@@ -20,6 +20,7 @@ use parking_lot::{Mutex, RwLock};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use std::time::Instant;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -484,7 +485,12 @@ impl SharedTcpServer {
         Ok(())
     }
 
-    pub async fn remove_handler(&self, endpoint_path: &str, endpoint_name: &str) {
+    pub async fn remove_handler(
+        &self,
+        endpoint_path: &str,
+        endpoint_name: &str,
+        drain_timeout: Duration,
+    ) {
         if let Some((_, handler)) = self.handlers.remove(endpoint_path) {
             handler
                 .system_health
@@ -500,7 +506,7 @@ impl SharedTcpServer {
                 handler.inflight.clone(),
                 handler.notify.clone(),
                 endpoint_name,
-                crate::runtime::graceful_shutdown_timeout(),
+                drain_timeout,
             )
             .await;
         }
@@ -756,10 +762,19 @@ impl super::unified_server::RequestPlaneServer for SharedTcpServer {
         .await
     }
 
-    async fn unregister_endpoint(&self, endpoint_name: &str, instance_id: u64) -> Result<()> {
+    async fn unregister_endpoint(
+        &self,
+        endpoint_name: &str,
+        instance_id: u64,
+        drain_timeout: Duration,
+    ) -> Result<()> {
         // Other instances in this process may serve the same endpoint name; remove only ours.
-        self.remove_handler(&instance_path(endpoint_name, instance_id), endpoint_name)
-            .await;
+        self.remove_handler(
+            &instance_path(endpoint_name, instance_id),
+            endpoint_name,
+            drain_timeout,
+        )
+        .await;
         Ok(())
     }
 
@@ -941,7 +956,9 @@ mod tests {
             let server = server.clone();
             let endpoint_path = endpoint_path.clone();
             async move {
-                server.remove_handler(&endpoint_path, "test_endpoint").await;
+                server
+                    .remove_handler(&endpoint_path, "test_endpoint", Duration::from_secs(5))
+                    .await;
                 Instant::now()
             }
         });
@@ -1045,7 +1062,10 @@ mod tests {
                 .unwrap();
         }
 
-        plane.unregister_endpoint("generate", 0xa).await.unwrap();
+        plane
+            .unregister_endpoint("generate", 0xa, Duration::from_secs(5))
+            .await
+            .unwrap();
 
         let client = TcpRequestClient::new().unwrap();
 

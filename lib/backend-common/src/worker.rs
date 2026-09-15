@@ -28,6 +28,7 @@ use dynamo_runtime::pipeline::network::Ingress;
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::system_health::ReadinessHold;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
+use dynamo_runtime::worker::EXIT_CODE_SHUTDOWN_TIMEOUT;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 use tokio_util::sync::CancellationToken;
 
@@ -528,7 +529,7 @@ impl Worker {
         // once a signal arrives, the orchestrator + cleanup must finish
         // within `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT` seconds (plus the
         // grace-period sleep, which is a fixed wait rather than a hang
-        // risk), otherwise we exit(911). Healthy long-running workers
+        // risk), otherwise we force-exit. Healthy long-running workers
         // never hit this — the timer only starts after `shutdown_token`
         // is cancelled.
         let outcome = {
@@ -551,11 +552,12 @@ impl Worker {
                         Ok(result) => result,
                         Err(_) => {
                             tracing::error!(
-                                "Graceful shutdown exceeded {}s; force-exiting with code 911. \
+                                "Graceful shutdown exceeded {}s; force-exiting with code {}. \
                                  Set DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT to override.",
-                                deadline.as_secs()
+                                deadline.as_secs(),
+                                EXIT_CODE_SHUTDOWN_TIMEOUT,
                             );
-                            std::process::exit(911);
+                            std::process::exit(EXIT_CODE_SHUTDOWN_TIMEOUT);
                         }
                     }
                 }
@@ -1397,7 +1399,7 @@ fn drain_timeout_secs() -> f64 {
 
 /// Read the post-signal shutdown deadline from
 /// `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT` (matching `dynamo_runtime::Worker`).
-/// On expiry the worker hard-exits with code 911 — same contract as the
+/// On expiry the worker hard-exits with [`EXIT_CODE_SHUTDOWN_TIMEOUT`] — same contract as the
 /// upstream `worker.execute` flow we bypass. Defaults are imported from
 /// `dynamo_runtime::worker` so a default change there propagates here
 /// without manual sync.
