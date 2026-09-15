@@ -54,6 +54,7 @@ use crate::{
             embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
             images::{NvCreateImageRequest, NvImagesResponse},
             pooling::{NvCreatePoolingRequest, NvCreatePoolingResponse},
+            rerank::{NvCreateRerankRequest, NvCreateRerankResponse},
             videos::{NvCreateVideoRequest, NvVideosResponse},
         },
         tensor::{NvCreateTensorRequest, NvCreateTensorResponse},
@@ -241,6 +242,7 @@ const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Realtime,
     ModelType::Classify,
     ModelType::Pooling,
+    ModelType::Rerank,
 ];
 
 /// Returns true if no models in the manager support the given model type.
@@ -857,6 +859,17 @@ where
                 worker_set.pooling_engine = Some(Arc::new(push_router));
             }
 
+            if card.model_type.supports_rerank() {
+                let push_router = PushRouter::<
+                    NvCreateRerankRequest,
+                    Annotated<NvCreateRerankResponse>,
+                >::from_client_with_monitor(
+                    client.clone(), router_config.router_mode, None
+                )
+                .await?;
+                worker_set.rerank_engine = Some(Arc::new(push_router));
+            }
+
             if card.model_type.supports_chat() {
                 let chat_router = PushRouter::<
                     NvCreateChatCompletionRequest,
@@ -996,7 +1009,7 @@ where
             // prefill is routed off `worker_type`.)
             anyhow::bail!(
                 "Unsupported model configuration: {} with {} input. Supported combinations: \
-                Tokens+(Chat|Completions), Text+(Chat|Completions|Images|Audios|Videos|Embeddings|Classify|Pooling|Realtime), \
+                Tokens+(Chat|Completions), Text+(Chat|Completions|Images|Audios|Videos|Embeddings|Classify|Pooling|Rerank|Realtime), \
                 Tokens+Embeddings, Tensor+TensorBased",
                 card.model_type,
                 card.model_input.as_str()
@@ -2168,6 +2181,7 @@ mod tests {
         assert!(is_model_type_list_empty(&mm, ModelType::Realtime));
         assert!(is_model_type_list_empty(&mm, ModelType::Classify));
         assert!(is_model_type_list_empty(&mm, ModelType::Pooling));
+        assert!(is_model_type_list_empty(&mm, ModelType::Rerank));
     }
 
     #[test]
@@ -2195,10 +2209,10 @@ mod tests {
     fn removal_cards_contain_only_the_empty_model_type() {
         let mm = ModelManager::new();
         let mut card = ModelDeploymentCard::with_name_only("model");
-        card.model_type = ModelType::Classify | ModelType::Pooling;
+        card.model_type = ModelType::Classify | ModelType::Pooling | ModelType::Rerank;
 
         let removed_cards = removed_model_cards(&mm, &card);
-        assert_eq!(removed_cards.len(), 2);
+        assert_eq!(removed_cards.len(), 3);
         assert!(
             removed_cards
                 .iter()
@@ -2208,6 +2222,11 @@ mod tests {
             removed_cards
                 .iter()
                 .any(|card| card.model_type == ModelType::Pooling)
+        );
+        assert!(
+            removed_cards
+                .iter()
+                .any(|card| card.model_type == ModelType::Rerank)
         );
         assert!(
             removed_cards
