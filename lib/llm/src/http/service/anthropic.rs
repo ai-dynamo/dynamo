@@ -665,9 +665,9 @@ async fn anthropic_messages(
             .into_marked_response(&mut inflight_guard);
         }
         if let Some(error) = find_canonical_error_in_chain(e.as_ref())
-            && let Some(response) = anthropic_semantic_error(error)
+            && let Some(response) =
+                anthropic_semantic_error_into_marked_response(error, &mut inflight_guard)
         {
-            inflight_guard.mark_error(super::openai::metric_error_type_for_class(error.class()));
             return response;
         }
         if super::metrics::request_was_unavailable(e.as_ref()) {
@@ -729,10 +729,7 @@ async fn anthropic_messages(
             // response carries rather than letting `into_marked_response`
             // re-derive it from the status.
             super::openai::log_pre_commit_error(&request_id, &error_response);
-            inflight_guard.mark_error(super::openai::extract_error_type_from_response(
-                &error_response,
-            ));
-            anthropic_backend_error_response(error_response)
+            anthropic_backend_error_into_marked_response(error_response, &mut inflight_guard)
         })?;
 
         stream_handle.arm();
@@ -870,10 +867,7 @@ async fn anthropic_messages(
         let stream_with_check = super::openai::check_for_backend_error(engine_stream, check)
             .await
             .map_err(|error_response| {
-                inflight_guard.mark_error(super::openai::extract_error_type_from_response(
-                    &error_response,
-                ));
-                anthropic_backend_error_response(error_response)
+                anthropic_backend_error_into_marked_response(error_response, &mut inflight_guard)
             })?;
 
         let mut http_queue_guard = Some(http_queue_guard);
@@ -889,13 +883,7 @@ async fn anthropic_messages(
             NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options.clone())
                 .await
                 .map_err(|error| {
-                    let error_type = if super::metrics::request_was_cancelled(&error) {
-                        super::metrics::ErrorType::Cancelled
-                    } else {
-                        super::openai::metric_error_type_for_class(error.class())
-                    };
-                    inflight_guard.mark_error(error_type);
-                    anthropic_non_streaming_aggregation_error(error)
+                    anthropic_aggregation_error_into_marked_response(error, &mut inflight_guard)
                 })?;
 
         let response = chat_completion_to_anthropic_response(
@@ -1230,6 +1218,16 @@ fn anthropic_backend_error_response(error_response: super::openai::ErrorResponse
     anthropic_error_unrecorded(status, error_type, error.message())
 }
 
+fn anthropic_backend_error_into_marked_response(
+    error_response: super::openai::ErrorResponse,
+    inflight_guard: &mut InflightGuard,
+) -> Response {
+    inflight_guard.mark_error(super::openai::extract_error_type_from_response(
+        &error_response,
+    ));
+    anthropic_backend_error_response(error_response)
+}
+
 /// Build an Anthropic-formatted error response from a canonical
 /// [`SanitizedError`] variant. The status, public message, and Anthropic
 /// `error_type` all come from the variant; `details` are logged
@@ -1308,6 +1306,28 @@ fn anthropic_non_streaming_aggregation_error(error: DynamoError) -> Response {
     }
     anthropic_semantic_error(&error)
         .unwrap_or_else(|| anthropic_sanitized_error_with_details(SanitizedError::Internal, error))
+}
+
+fn anthropic_aggregation_error_into_marked_response(
+    error: DynamoError,
+    inflight_guard: &mut InflightGuard,
+) -> Response {
+    let error_type = if super::metrics::request_was_cancelled(&error) {
+        ErrorType::Cancelled
+    } else {
+        super::openai::metric_error_type_for_class(error.class())
+    };
+    inflight_guard.mark_error(error_type);
+    anthropic_non_streaming_aggregation_error(error)
+}
+
+fn anthropic_semantic_error_into_marked_response(
+    error: &DynamoError,
+    inflight_guard: &mut InflightGuard,
+) -> Option<Response> {
+    let response = anthropic_semantic_error(error)?;
+    inflight_guard.mark_error(super::openai::metric_error_type_for_class(error.class()));
+    Some(response)
 }
 
 fn anthropic_semantic_error(error: &dynamo_runtime::error::DynamoError) -> Option<Response> {
@@ -1413,6 +1433,81 @@ pub(crate) fn unmatched_route_response(method: &Method, uri: &Uri) -> Response {
 mod tests {
     use super::*;
     use crate::protocols::common::extensions::parse_nvext;
+
+    fn assert_legacy_error_metric(
+        metrics: &super::super::metrics::Metrics,
+        error_type: &ErrorType,
+    ) {
+        assert_eq!(
+            metrics.get_request_counter(
+                "test-model",
+                &Endpoint::AnthropicMessages,
+                &super::super::metrics::RequestType::Unary,
+                &super::super::metrics::Status::Error,
+                error_type,
+            ),
+            1
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(failure_metrics)]
+    fn semantic_error_marks_legacy_metric_with_response() {
+        let metrics = Arc::new(super::super::metrics::Metrics::new());
+        let mut guard = metrics.clone().create_inflight_guard(
+            "test-model",
+            Endpoint::AnthropicMessages,
+            false,
+            "semantic-error",
+        );
+        let error = DynamoError::builder()
+            .class(ErrorClass::InvalidRequest)
+            .build();
+
+        let response = anthropic_semantic_error_into_marked_response(&error, &mut guard)
+            .expect("invalid request response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        drop(guard);
+
+        assert_legacy_error_metric(&metrics, &ErrorType::Validation);
+    }
+
+    #[test]
+    fn backend_error_marks_embedded_metric_with_response() {
+        let metrics = Arc::new(super::super::metrics::Metrics::new());
+        let mut guard = metrics.clone().create_inflight_guard(
+            "test-model",
+            Endpoint::AnthropicMessages,
+            false,
+            "backend-error",
+        );
+        let error_response = super::super::openai::ErrorMessage::_service_unavailable();
+
+        let response = anthropic_backend_error_into_marked_response(error_response, &mut guard);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        drop(guard);
+
+        assert_legacy_error_metric(&metrics, &ErrorType::Unavailable);
+    }
+
+    #[test]
+    #[serial_test::serial(failure_metrics)]
+    fn aggregation_error_marks_cancellation_with_response() {
+        let metrics = Arc::new(super::super::metrics::Metrics::new());
+        let mut guard = metrics.clone().create_inflight_guard(
+            "test-model",
+            Endpoint::AnthropicMessages,
+            false,
+            "aggregation-error",
+        );
+        let error = DynamoError::builder().class(ErrorClass::Cancelled).build();
+
+        let response = anthropic_aggregation_error_into_marked_response(error, &mut guard);
+        assert_eq!(response.status().as_u16(), 499);
+        drop(guard);
+
+        assert_legacy_error_metric(&metrics, &ErrorType::Cancelled);
+    }
 
     fn request_with_nvext() -> AnthropicCreateMessageRequest {
         serde_json::from_value(serde_json::json!({
