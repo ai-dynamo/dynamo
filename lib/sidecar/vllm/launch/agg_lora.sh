@@ -36,7 +36,7 @@ while [[ $# -gt 0 ]]; do
             echo
             echo "Environment overrides:"
             echo "  MODEL                   Model to serve (default: Qwen/Qwen3-0.6B)"
-            echo "  LORA_NAME               Adapter name used in the printed examples"
+            echo "  LORA_NAME               Example adapter (default: codelion/Qwen3-0.6B-accuracy-recovery-lora)"
             echo "  MAX_LORAS               GPU-resident adapter capacity (default: 4)"
             echo "  MAX_LORA_RANK           Maximum adapter rank (default: 64)"
             echo "  DYN_LORA_PATH           S3 download root (default: /tmp/dynamo_loras_minio)"
@@ -67,20 +67,17 @@ VLLM_RS_HTTP_PORT="${VLLM_RS_HTTP_PORT:-8100}"
 VLLM_GRPC_PORT="${VLLM_GRPC_PORT:-50051}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
-export AWS_ENDPOINT_URL_S3="${AWS_ENDPOINT_URL_S3:-${AWS_ENDPOINT:-http://localhost:9000}}"
-export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-minioadmin}"
-export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-minioadmin}"
-export AWS_REGION="${AWS_REGION:-us-east-1}"
-export AWS_ALLOW_HTTP="${AWS_ALLOW_HTTP:-true}"
-
 export DYN_LORA_ENABLED=true
 export VLLM_ALLOW_RUNTIME_LORA_UPDATING=true
 export DYN_LORA_PATH="${DYN_LORA_PATH:-/tmp/dynamo_loras_minio}"
 mkdir -p "$DYN_LORA_PATH"
 
 # Both processes must see adapter paths at the same absolute location.
-HF_CACHE="${HF_HUB_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}/hub}"
-export VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES="${VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES:-${DYN_LORA_PATH}:${HF_CACHE}}"
+if [[ -z "${VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES:-}" ]]; then
+    HF_CACHE="${HF_HUB_CACHE:-${HF_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}/huggingface}/hub}"
+    mkdir -p "$HF_CACHE"
+    export VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES="${DYN_LORA_PATH}:${HF_CACHE}"
+fi
 
 DEFAULT_KV_CACHE_BYTES="${DEFAULT_KV_CACHE_BYTES:-1119388000}"
 GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)

@@ -36,6 +36,10 @@ while [[ $# -gt 0 ]]; do
             echo
             echo "Environment overrides:"
             echo "  MODEL                           Model to serve (default: Qwen/Qwen3-0.6B)"
+            echo "  LORA_NAME                       Example adapter (default: codelion/Qwen3-0.6B-accuracy-recovery-lora)"
+            echo "  MAX_LORAS                       GPU-resident adapter capacity (default: 4)"
+            echo "  MAX_LORA_RANK                    Maximum adapter rank (default: 64)"
+            echo "  DYN_LORA_PATH                   S3 download root (default: /tmp/dynamo_loras_minio)"
             echo "  DYN_HTTP_PORT                   Dynamo frontend port (default: 8000)"
             echo "  DYN_SYSTEM_PORT1                Decode sidecar system port (default: 8081)"
             echo "  DYN_SYSTEM_PORT2                Prefill sidecar system port (default: 8082)"
@@ -88,20 +92,17 @@ VLLM_PREFILL_GPU="${VLLM_PREFILL_GPU:-1}"
 VLLM_DECODE_NIXL_SIDE_CHANNEL_PORT="${VLLM_DECODE_NIXL_SIDE_CHANNEL_PORT:-5600}"
 VLLM_PREFILL_NIXL_SIDE_CHANNEL_PORT="${VLLM_PREFILL_NIXL_SIDE_CHANNEL_PORT:-20097}"
 
-export AWS_ENDPOINT_URL_S3="${AWS_ENDPOINT_URL_S3:-${AWS_ENDPOINT:-http://localhost:9000}}"
-export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-minioadmin}"
-export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-minioadmin}"
-export AWS_REGION="${AWS_REGION:-us-east-1}"
-export AWS_ALLOW_HTTP="${AWS_ALLOW_HTTP:-true}"
-
 export DYN_LORA_ENABLED=true
 export VLLM_ALLOW_RUNTIME_LORA_UPDATING=true
 export DYN_LORA_PATH="${DYN_LORA_PATH:-/tmp/dynamo_loras_minio}"
 mkdir -p "$DYN_LORA_PATH"
 
 # Both engines must see the adapter cache at the same absolute location.
-HF_CACHE="${HF_HUB_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}/hub}"
-export VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES="${VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES:-${DYN_LORA_PATH}:${HF_CACHE}}"
+if [[ -z "${VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES:-}" ]]; then
+    HF_CACHE="${HF_HUB_CACHE:-${HF_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}/huggingface}/hub}"
+    mkdir -p "$HF_CACHE"
+    export VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES="${DYN_LORA_PATH}:${HF_CACHE}"
+fi
 
 DEFAULT_KV_CACHE_BYTES="${DEFAULT_KV_CACHE_BYTES:-1119388000}"
 GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
@@ -121,6 +122,11 @@ echo "    curl -s -X POST http://localhost:\$port/v1/loras \\"
 echo "      -H 'Content-Type: application/json' \\"
 echo "      -d '{\"lora_name\": \"${LORA_NAME}\", \"source\": {\"uri\": \"hf://${LORA_NAME}\"}}' | jq ."
 echo "  done"
+echo ""
+echo "  # Adapter inference"
+echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
+echo "    -H 'Content-Type: application/json' \\"
+echo "    -d '{\"model\": \"${LORA_NAME}\", \"messages\": [{\"role\": \"user\", \"content\": \"What is deep learning?\"}], \"max_tokens\": 300, \"temperature\": 0.0}' | jq ."
 echo ""
 
 python -m dynamo.frontend &
