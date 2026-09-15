@@ -20,7 +20,7 @@ limitations under the License.
 As a large scale distributed inference serving framework in addition
 to providing high throughput and low latency, Dynamo needs to
 provide fault detection, resilency, and quick recovery in the face of
-unforseen failures. In order to test Dynamo we are developing a test
+unforeseen failures. In order to test Dynamo we are developing a test
 suite to inject and measure the impact of different types of failure
 conditions.
 
