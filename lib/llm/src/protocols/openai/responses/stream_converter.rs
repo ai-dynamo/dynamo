@@ -407,10 +407,13 @@ impl ResponseStreamConverter {
                 self.incomplete_reason = Some(reason);
             }
 
+            // Raw reasoning_content is preserved whenever the backend returns it, whether
+            // or not the caller asked for reasoning.summary: the backend/parser already did
+            // the work, and dropping it silently loses information the caller can otherwise
+            // only get via reasoning.summary. See issue #14069.
             if let Some(reasoning) = delta.reasoning_content.as_deref()
                 && !reasoning.is_empty()
                 && !self.message_started
-                && self.params.reasoning_summary_requested()
             {
                 self.append_reasoning_delta(reasoning, events);
             }
@@ -1936,13 +1939,25 @@ mod tests {
     }
 
     #[test]
-    fn test_reasoning_without_requested_summary_emits_no_events() {
+    fn test_reasoning_without_requested_summary_still_streams_raw_reasoning() {
         let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
 
-        let events = conv.process_chunk(&reasoning_chunk("private reasoning"));
+        let reasoning_events = conv.process_chunk(&reasoning_chunk("private reasoning"));
+        assert_eq!(
+            event_types(&reasoning_events),
+            vec![
+                "response.output_item.added".to_string(),
+                "response.content_part.added".to_string(),
+                "response.reasoning_text.delta".to_string(),
+            ]
+        );
 
-        assert!(events.is_empty());
-        assert!(conv.completed_output().is_empty());
+        let output = conv.completed_output();
+        let OutputItem::Reasoning(reasoning) = &output[0] else {
+            panic!("expected reasoning output even without a requested summary");
+        };
+        assert!(reasoning.summary.is_empty());
+        assert_eq!(reasoning_text(reasoning), "private reasoning");
     }
 
     #[test]
