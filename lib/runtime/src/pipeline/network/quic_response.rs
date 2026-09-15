@@ -932,7 +932,7 @@ async fn run_server_connection(
                     )
                     .await;
                     if let Err(error) = result {
-                        tracing::warn!(connection_id, %error, "QUIC response lane failed; closing connection");
+                        tracing::warn!(connection_id, error = %format!("{error:#}"), close_reason = ?lane_connection.close_reason(), "QUIC response lane failed; closing connection");
                         fail_server_connection(&lane_state, connection_id);
                         lane_connection
                             .close(CLOSE_CODE_INVARIANT, b"response lane invariant failure");
@@ -1848,14 +1848,14 @@ fn spawn_client_lane(
                 &writer_connections,
                 &writer_contexts,
                 &writer_healthy,
-                &error.to_string(),
+                &format!("{error:#}"),
             );
         }
     });
 
     tokio::spawn(async move {
         if let Err(error) = run_client_control_reader(recv, contexts.clone()).await {
-            fail_client_connection_bundle(&connections, &contexts, &healthy, &error.to_string());
+            fail_client_connection_bundle(&connections, &contexts, &healthy, &format!("{error:#}"));
         }
     });
 }
