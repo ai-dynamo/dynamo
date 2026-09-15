@@ -25,7 +25,7 @@ registers its `LongcatFlashForCausalLM` architecture.
 - Shared etcd and NATS services reachable from all processes. See
   [runtime services](../../README.md#getting-started).
 - The same model checkpoint and TokenSpeed revision on every worker. Reserve at
-  least 700 GB of disk per host; the pinned checkpoint contains about 562 GB of weights.
+  least 900 GB of disk per host; the pinned checkpoint contains about 748 GB of weights.
 
 Attention data parallelism must be one inside each worker. Scale with independent
 replicas. Both prefill and decode must use matching tensor/expert parallelism and
