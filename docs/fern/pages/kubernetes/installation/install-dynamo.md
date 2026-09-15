@@ -46,6 +46,54 @@ kubectl version --client
 helm version
 ```
 
+## Existing Platforms
+
+Before installing the chart, run the [Quickstart preflight](../getting-started/quickstart.mdx).
+For an existing Helm-managed operator, inspect its release using the name and namespace from
+`helm list --all-namespaces --all`:
+
+```bash
+helm status "$PLATFORM_RELEASE" --namespace "$PLATFORM_NAMESPACE"
+helm get values "$PLATFORM_RELEASE" --namespace "$PLATFORM_NAMESPACE" --all
+```
+
+Set `PLATFORM_RELEASE` and `PLATFORM_NAMESPACE` to the discovered values before running these
+commands. Treat Helm values as private configuration; they may contain credentials.
+
+Confirm `dynamo-operator.namespaceRestriction.enabled` is `false` for the cluster-wide operator.
+A namespace-restricted operator is a development/test controller, not a replacement for the
+cluster-wide operator that owns CRDs and conversion webhooks. Check with the platform owner
+before using a namespace managed by a restricted operator. For installations managed outside
+Helm, have their owner verify the operator configuration and CRD version.
+
+Reuse a healthy, matching-version platform for the Quickstart. Keep the workload namespace
+separate from `PLATFORM_NAMESPACE`; do not reinstall Dynamo under another release name. If the
+installed release differs from the selected documentation version, stop before creating workload
+resources. Use the installed release's documentation and manifests, or plan an upgrade with the
+platform owner. A successful server-side dry run validates admission, not runtime compatibility.
+
+### Upgrade Checks
+
+The Quickstart is not a platform upgrade or rollback procedure. Before changing an existing
+release, the platform owner must review the target release's
+[chart upgrade notes](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md)
+and [release notes](../../reference/general/releases/release-history.mdx), including:
+
+- Preserve and review the existing Helm values, image overrides, and external service settings.
+  Do not apply the Quickstart's fresh-install defaults to a shared release.
+- Decide whether to retain bundled NATS with `global.nats.install=true` or preserve external
+  `dynamo-operator.natsAddr`. Removing NATS settings can trigger workload rollouts and break
+  explicitly selected NATS transports.
+- Check mandatory admission webhooks, certificates, and the target release's CRD conversion and
+  migration requirements. Do not delete CRDs to resolve installation conflicts.
+- Match Grove to the target Dynamo release using the
+  [multinode compatibility matrix](#multinode). Do not upgrade one independently of the other.
+- Validate the operator, webhooks, and existing workloads after the upgrade, then server-side
+  dry-run new workload manifests before applying them.
+- Agree on recovery steps before upgrading. Do not assume `helm rollback` restores migrated CRDs
+  or stored custom resources; retain the previous configuration and verify downgrade support for
+  the specific release transition.
+
 ## Overview
 
 Every Dynamo deployment requires accelerator support and the **Dynamo Platform**. NVIDIA GPU clusters can use the NVIDIA GPU Operator. Intel GPU clusters use the Intel resource driver with DRA. The Dynamo Platform installation is the same after the cluster exposes its accelerator resources. Everything else is optional.
