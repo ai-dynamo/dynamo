@@ -1755,7 +1755,6 @@ def test_materialize_dgd_shell_form_preserves_syntax() -> None:
     ],
 )
 def test_implicit_trust_requires_local_directory(tmp_path, path_kind, expected):
-    """Only accessible directories qualify for implicit custom-code trust."""
     model_path = tmp_path / "model"
     if path_kind == "directory":
         model_path.mkdir()
@@ -1775,7 +1774,6 @@ def test_implicit_trust_requires_local_directory(tmp_path, path_kind, expected):
 def test_materialize_dgd_inaccessible_model_path(
     tmp_path, monkeypatch, caplog, explicit_trust
 ):
-    """An inaccessible path requires an actionable error or explicit trust."""
     model_path = tmp_path / "model"
     model_path.mkdir()
     (model_path / "config.json").write_text("{}")
