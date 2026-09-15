@@ -1,9 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeSet;
+
 use dynamo_mocker::common::protocols::DirectRequest;
 use dynamo_mocker::live::{deterministic_token_id, stable_request_uuid};
-use dynamo_trtllm_sidecar::disagg::{CONTEXT_ONLY, REQUEST_TYPE_KEY};
 use dynamo_trtllm_sidecar::proto as pb;
 use prost_types::{Struct, value::Kind};
 use tonic::Status;
@@ -11,6 +12,13 @@ use uuid::Uuid;
 
 use super::handoff;
 use super::{BoxedStatusResult, MockerServerConfig, ServerMode};
+
+/// Spelled out rather than imported from the sidecar: this pair is the one part
+/// of the contract the real TensorRT-LLM servicer binds by literal string, so
+/// sharing the constant with the code under test would let a rename pass the
+/// whole integration suite and fail against a real engine.
+const REQUEST_TYPE_KEY: &str = "request_type";
+const CONTEXT_ONLY: &str = "context_only";
 
 pub(super) const DEFAULT_MAX_NEW_TOKENS: u32 = 20;
 // Bound the request-owned synthetic token plan independently of LiveEngine's
@@ -32,8 +40,17 @@ pub(super) struct PreparedRequest {
     /// what a real generation worker does with the handoff. The sidecar drops
     /// the prefill leg's tokens, so the token is delivered to the client once.
     replayed_first_token: Option<u32>,
+    /// The replayed token's logprob, when the context phase computed one. A
+    /// decode leg asked for logprobs after a context leg that was not reports
+    /// its first token without one, exactly as a real engine does.
+    replayed_first_logprob: Option<f64>,
     prompt_tokens: Vec<u32>,
     pub(super) max_output_tokens: usize,
+    /// Token IDs that end the request with `STOP` instead of `LENGTH`. Stop
+    /// *strings* are accepted and never match: this server has no tokenizer, so
+    /// it has no text to match them against.
+    stop_token_ids: BTreeSet<u32>,
+    min_output_tokens: usize,
     return_output_logprobs: bool,
     return_prompt_logprobs: bool,
     output_candidates: Option<pb::CandidateTokenSelection>,
@@ -44,16 +61,16 @@ impl PreparedRequest {
         request: pb::GenerateRequest,
         config: &MockerServerConfig,
     ) -> BoxedStatusResult<Self> {
+        // Only emptiness is rejected. A real TensorRT-LLM server loads one
+        // model and serves it under whatever non-empty name the request names
+        // -- verified against 1.3.0rc26, which answers `Generate` and
+        // `GetModelInfo` for an unrelated name with the loaded model's info.
+        // Rejecting a mismatch here would fail requests the real engine serves,
+        // which is the one thing this mocker must never do.
         if request.model.is_empty() {
             return Err(Box::new(Status::invalid_argument(
                 "model must be non-empty",
             )));
-        }
-        if request.model != config.model {
-            return Err(Box::new(Status::not_found(format!(
-                "model '{}' is not served; this server serves '{}'",
-                request.model, config.model
-            ))));
         }
         reject_unsupported(&request)?;
 
@@ -115,9 +132,19 @@ impl PreparedRequest {
             session_id,
             seed: config.seed,
             replayed_first_token: kv.session.as_ref().and_then(handoff::first_gen_token),
+            replayed_first_logprob: kv.session.as_ref().and_then(handoff::first_gen_logprob),
             request_id,
             prompt_tokens,
             max_output_tokens,
+            stop_token_ids: stopping
+                .conditions
+                .iter()
+                .filter_map(|condition| match condition.condition {
+                    Some(pb::stop_condition::Condition::StopTokenId(id)) => Some(id),
+                    _ => None,
+                })
+                .collect(),
+            min_output_tokens: stopping.min_tokens.unwrap_or(0) as usize,
             return_output_logprobs: response.return_output_logprobs == Some(true),
             return_prompt_logprobs: response.return_prompt_logprobs == Some(true),
             output_candidates: response.output_candidates,
@@ -137,6 +164,30 @@ impl PreparedRequest {
             ),
             ..Default::default()
         }
+    }
+
+    /// Whether this token ends the request. A real engine keeps generating
+    /// until `min_tokens`, so a stop condition before that does not fire.
+    pub(super) fn is_stop_token(&self, token_id: u32, generated: usize) -> bool {
+        generated >= self.min_output_tokens && self.stop_token_ids.contains(&token_id)
+    }
+
+    /// The terminal a stop condition produces. The matched token is reported
+    /// but not streamed, which is what the engine does unless the client asks
+    /// for it back with `include_stop_in_output`.
+    pub(super) fn stopped(
+        &self,
+        token_id: u32,
+        generated: usize,
+        cached_tokens: Option<usize>,
+    ) -> pb::GenerateResponse {
+        let mut response = self.finished(pb::FinishReason::Stop, generated, cached_tokens);
+        if let Some(pb::generate_response::Event::Finished(finished)) = response.event.as_mut() {
+            finished.stop_match = Some(pb::StopMatch {
+                r#match: Some(pb::stop_match::Match::StopTokenId(token_id)),
+            });
+        }
+        response
     }
 
     pub(super) fn prompt_len(&self) -> usize {
@@ -164,8 +215,17 @@ impl PreparedRequest {
         }
     }
 
+    /// The replayed token's logprob comes from the handoff, not from this
+    /// engine, so a context phase that computed none leaves a hole the decode
+    /// leg cannot fill.
+    fn replays_without_a_logprob(&self, token_id: u32) -> bool {
+        self.replayed_first_token == Some(token_id) && self.replayed_first_logprob.is_none()
+    }
+
     pub(super) fn token_output(&self, token_id: u32) -> pb::TokenOutput {
-        let info = self.token_info(token_id, self.return_output_logprobs);
+        let with_logprobs =
+            self.return_output_logprobs && !self.replays_without_a_logprob(token_id);
+        let info = self.token_info(token_id, with_logprobs);
         pb::TokenOutput {
             output_index: Some(0),
             text: info.token.clone(),
@@ -194,7 +254,13 @@ impl PreparedRequest {
             prompt_tokens,
             completion_tokens,
             total_tokens: prompt_tokens + completion_tokens,
-            cached_prompt_tokens: cached_tokens.map(|tokens| tokens as u32),
+            // A real engine always recomputes the last prompt token, so a fully
+            // cached prompt reports `prompt_len - 1`, never `prompt_len`
+            // (measured against 1.3.0rc26: 95 of 96 on a repeated prompt).
+            // Reporting the whole prompt would make a 100% hit rate look
+            // reachable when it is not.
+            cached_prompt_tokens: cached_tokens
+                .map(|tokens| (tokens as u32).min(prompt_tokens.saturating_sub(1))),
             reasoning_tokens: None,
         }
     }
@@ -222,13 +288,16 @@ impl PreparedRequest {
 
     /// The terminal event a context request ends with instead of `finished`.
     pub(super) fn prefill_ready(&self, config: &MockerServerConfig) -> pb::PrefillReady {
+        let first_token = self.output_token(0);
         pb::PrefillReady {
             kv_session: Some(handoff::build_session(
                 config,
                 self.session_id.clone(),
                 &self.request_id,
                 self.prompt_len(),
-                self.output_token(0),
+                first_token,
+                self.return_output_logprobs
+                    .then(|| selected_logprob(first_token)),
             )),
         }
     }

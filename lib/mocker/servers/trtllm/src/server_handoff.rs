@@ -29,6 +29,12 @@ pub(super) const ATTR_REQUEST_ID: &str = "mocker_request_id";
 pub(super) const ATTR_PROMPT_TOKENS: &str = "mocker_prompt_tokens";
 pub(super) const ATTR_TTFT_MS: &str = "mocker_ttft_ms";
 pub(super) const ATTR_FIRST_GEN_TOKENS: &str = "mocker_first_gen_tokens";
+/// Present only when the context request asked for logprobs, mirroring the real
+/// server's `first_gen_log_probs`. The decode leg replays the context phase's
+/// first token, so that token's logprob exists only if the context phase
+/// computed it; a client that asks the decode leg for logprobs after a context
+/// leg that did not gets a token with none.
+pub(super) const ATTR_FIRST_GEN_LOG_PROBS: &str = "mocker_first_gen_log_probs";
 
 /// Deliberately fractional: a codec that rounded Struct numbers to integers
 /// would round-trip every other numeric attribute unnoticed.
@@ -48,8 +54,9 @@ pub(super) fn build_session(
     request_id: &str,
     prompt_tokens: usize,
     first_gen_token: u32,
+    first_gen_logprob: Option<f64>,
 ) -> pb::KvSessionRef {
-    let attributes = [
+    let mut attributes = vec![
         (ATTR_REQUEST_ID, string_value(request_id)),
         (ATTR_PROMPT_TOKENS, number_value(prompt_tokens as f64)),
         (ATTR_TTFT_MS, number_value(TTFT_MS)),
@@ -62,6 +69,16 @@ pub(super) fn build_session(
             },
         ),
     ];
+    if let Some(logprob) = first_gen_logprob {
+        attributes.push((
+            ATTR_FIRST_GEN_LOG_PROBS,
+            Value {
+                kind: Some(Kind::ListValue(ListValue {
+                    values: vec![number_value(logprob)],
+                })),
+            },
+        ));
+    }
 
     pb::KvSessionRef {
         session_id,
@@ -78,6 +95,24 @@ pub(super) fn build_session(
                 .map(|(key, value)| (key.to_string(), value))
                 .collect(),
         }),
+    }
+}
+
+/// The logprob the context phase computed for its first generated token, if it
+/// computed one at all.
+pub(super) fn first_gen_logprob(session: &pb::KvSessionRef) -> Option<f64> {
+    let attributes = session.attributes_struct.as_ref()?;
+    let Some(Kind::ListValue(list)) = attributes
+        .fields
+        .get(ATTR_FIRST_GEN_LOG_PROBS)?
+        .kind
+        .as_ref()
+    else {
+        return None;
+    };
+    match list.values.first()?.kind.as_ref()? {
+        Kind::NumberValue(value) if value.is_finite() => Some(*value),
+        _ => None,
     }
 }
 
