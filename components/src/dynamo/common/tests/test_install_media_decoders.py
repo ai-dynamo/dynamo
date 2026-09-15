@@ -300,6 +300,32 @@ def test_probe_treats_present_but_broken_package_as_missing(tmp_path, monkeypatc
     assert install_media_decoders._modules_missing_fresh(["brokenmod"]) == ["brokenmod"]
 
 
+def test_opencv_spec_falls_back_when_the_version_probe_fails(monkeypatch):
+    """An unreadable OpenCV version must not abort the install.
+
+    A cv2 that raises on import (rather than being absent) kills the probe
+    child, and check=True turns that into CalledProcessError in the caller.
+    The bounded spec is the right answer there, exactly as for an empty probe.
+    """
+
+    def _boom(cmd, **kwargs):
+        raise subprocess.CalledProcessError(1, cmd)
+
+    monkeypatch.setattr(install_media_decoders.subprocess, "run", _boom)
+    assert (
+        install_media_decoders._vllm_opencv_spec()
+        == install_media_decoders.VALIDATED_SPECS["opencv-python-headless"]
+    )
+
+
+def test_opencv_version_probe_survives_a_broken_cv2(tmp_path, monkeypatch):
+    """The probe child must exit cleanly when importing cv2 raises."""
+    (tmp_path / "cv2.py").write_text("raise RuntimeError('native libs gone')\n")
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    spec = install_media_decoders._vllm_opencv_spec()
+    assert spec.startswith("opencv-python-headless")
+
+
 def test_lock_refuses_symlink_and_preserves_target(tmp_path, monkeypatch):
     """A pre-planted symlink at the fixed lock path must not be followed.
 

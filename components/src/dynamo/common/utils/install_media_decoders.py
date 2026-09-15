@@ -192,19 +192,24 @@ def _vllm_opencv_spec() -> str:
         "if not version:\n"
         "    try:\n"
         "        import cv2\n"
-        "    except ImportError:\n"
+        # A cv2 that raises anything is as unusable as a missing one.
+        "    except Exception:\n"
         "        pass\n"
         "    else:\n"
         "        version = cv2.__version__ + '.*'\n"
         "print(version)\n"
     )
-    out = subprocess.run(
-        [sys.executable, "-c", probe],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=True,
-    )
+    try:
+        out = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=True,
+        )
+    except Exception as exc:  # noqa: BLE001 - an unreadable version is not fatal
+        logger.warning("OpenCV version probe failed to run: %s", exc)
+        return _OPENCV.spec
     version = out.stdout.strip()
     return f"{_OPENCV.package}=={version}" if version else _OPENCV.spec
 

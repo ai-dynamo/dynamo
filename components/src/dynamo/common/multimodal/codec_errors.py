@@ -47,11 +47,15 @@ def _carrier_present(module: str) -> bool:
     return True
 
 
+def _needs_binary_wheel(backend: str, package: str) -> bool:
+    """Whether this package must come from a wheel: vLLM's OpenCV sdist has no codecs."""
+    return backend == "vllm" and package == "opencv-python-headless"
+
+
 def _is_vllm_source_built_cv2(backend: str, package: str, module: str) -> bool:
     """Whether this is the codec-free OpenCV build shipped by vLLM."""
     return (
-        backend == "vllm"
-        and package == "opencv-python-headless"
+        _needs_binary_wheel(backend, package)
         and module == "cv2"
         and _carrier_present(module)
     )
@@ -86,10 +90,13 @@ def _install_hint(backend: str, package: str, module: str) -> str:
                 f"'{package}==<cv2-version>.*'`"
             )
     else:
+        only_binary = (
+            f"--only-binary {package} " if _needs_binary_wheel(backend, package) else ""
+        )
         hint = (
             "install the validated decoder with "
             f"`pip install --no-deps --force-reinstall "
-            f"'{VALIDATED_SPECS[package]}'`"
+            f"{only_binary}'{VALIDATED_SPECS[package]}'`"
         )
     if installer_covers(backend, package):
         hint += f" (or `{INSTALLER_CMD} {backend}`)"

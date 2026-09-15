@@ -226,7 +226,7 @@ class VideoLoader:
             raise video_decoder_missing(
                 "vllm", "opencv-python-headless", "cv2", codec, cause=str(exc)
             ) from exc
-        except (SystemError, ValueError) as exc:
+        except (OSError, SystemError, ValueError) as exc:
             # Confirm both the error source and missing video support.
             if not (_attributable_to_cv2(exc, media_io) and _cv2_lacks_video_backend()):
                 raise

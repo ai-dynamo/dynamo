@@ -380,6 +380,53 @@ async def test_decode_video_bytes_failed_open_value_error_is_actionable(
     assert "video backend" in msg
 
 
+class _InitErrorMediaIO:
+    """What a lazily initialised cv2 raises when its own libraries fail to load."""
+
+    def load_bytes(self, content: bytes):
+        raise OSError("cv2: libavcodec.so.60: cannot open shared object file")
+
+
+@pytest.mark.asyncio
+async def test_decode_video_bytes_cv2_os_error_is_actionable(
+    monkeypatch, carrier_imports
+):
+    """Keep the remedy visible when cv2 initialisation fails inside the decode."""
+    loader = VideoLoader()
+    monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: "vp9")
+    monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
+    monkeypatch.setattr(video_loader_module, "_cv2_lacks_video_backend", lambda: True)
+
+    carrier_imports(present=("cv2",))
+    monkeypatch.setattr(
+        codec_errors.importlib.metadata, "version", lambda p: "5.0.0.93"
+    )
+
+    with pytest.raises(MissingMediaDecoderError) as exc_info:
+        await loader._decode_video_bytes(b"vp9-bytes", _InitErrorMediaIO())
+
+    msg = str(exc_info.value)
+    assert "'vp9'" in msg
+    assert "opencv-python-headless==5.0.0.93" in msg
+    assert "--force-reinstall" in msg
+
+
+@pytest.mark.asyncio
+async def test_unrelated_os_error_is_not_blamed_on_opencv(monkeypatch):
+    """An I/O failure that never mentions the carrier keeps its own error."""
+    loader = VideoLoader()
+    monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: "vp9")
+    monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
+    monkeypatch.setattr(video_loader_module, "_cv2_lacks_video_backend", lambda: True)
+
+    class _DiskFullMediaIO:
+        def load_bytes(self, content: bytes):
+            raise OSError("[Errno 28] No space left on device: '/tmp/clip.mp4'")
+
+    with pytest.raises(OSError, match="No space left"):
+        await loader._decode_video_bytes(b"vp9-bytes", _DiskFullMediaIO())
+
+
 @pytest.mark.asyncio
 async def test_backendless_cv2_does_not_pre_empt_a_working_decode(monkeypatch):
     """Allow configured video backends to decode before checking OpenCV."""
