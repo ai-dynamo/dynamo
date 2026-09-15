@@ -221,8 +221,8 @@ const BRIDGE_DRAIN_POLL: std::time::Duration = std::time::Duration::from_millis(
 /// the mismatch the bindings already warn about, and the case where every bridge task lives on
 /// the runtime PyO3 built for itself rather than on the process runtime.
 ///
-/// A process that reaches the bridge without ever passing through [`adopt_bridge_runtime`] is
-/// still out of reach, because nothing recorded which runtime the bridge chose and
+/// A process that reaches the bridge without runtime adoption or a `Context` waiter is
+/// still out of reach if nothing recorded which runtime the bridge chose, because
 /// `get_runtime()` would build one rather than report that there is none.
 #[pyfunction]
 fn wait_for_bridge_tasks_at_exit(py: Python<'_>) {
