@@ -862,6 +862,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn request_plane_unregisters_only_the_requested_instance() {
+        let server =
+            SharedTcpServer::new("127.0.0.1:0".parse().unwrap(), CancellationToken::new()).unwrap();
+        let system_health = Arc::new(Mutex::new(SystemHealth::new(
+            crate::HealthStatus::Ready,
+            vec![],
+            false,
+            "/health".to_string(),
+            "/live".to_string(),
+        )));
+
+        for instance_id in [1, 2] {
+            crate::pipeline::network::ingress::unified_server::RequestPlaneServer::register_endpoint(
+                server.as_ref(),
+                "shared".to_string(),
+                Arc::new(SlowMockHandler::new(Duration::ZERO)),
+                instance_id,
+                "test".to_string(),
+                "component".to_string(),
+                Arc::clone(&system_health),
+            )
+            .await
+            .unwrap();
+        }
+
+        crate::pipeline::network::ingress::unified_server::RequestPlaneServer::unregister_endpoint(
+            server.as_ref(),
+            "shared",
+            1,
+        )
+        .await
+        .unwrap();
+
+        assert!(!server.handlers.contains_key("1/shared"));
+        assert!(server.handlers.contains_key("2/shared"));
+
+        crate::pipeline::network::ingress::unified_server::RequestPlaneServer::unregister_endpoint(
+            server.as_ref(),
+            "shared",
+            2,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
     async fn test_graceful_shutdown_waits_for_inflight_tcp_requests() {
         // Initialize tracing for test debugging
         crate::logging::init();
