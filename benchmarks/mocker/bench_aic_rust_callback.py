@@ -65,7 +65,7 @@ from dynamo.replay import run_synthetic_trace_replay
 MODEL = "Qwen/Qwen3-32B"
 SYSTEM = "h200_sxm"
 BACKEND = "vllm"
-BACKEND_VERSION = "0.19.0"
+BACKEND_VERSION = "current"
 
 # Workloads chosen to stress the predict hot path differently. ``num_workers`` > 1
 # is where the Python GIL serialises predictions, so the Rust win is largest there.

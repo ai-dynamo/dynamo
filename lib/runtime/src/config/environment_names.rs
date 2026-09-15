@@ -460,9 +460,10 @@ pub mod llm {
     /// Set to `0` or leave unset to disable the timeout (default: disabled).
     pub const DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS: &str = "DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS";
 
-    /// Pre-commit peek window in milliseconds for the streaming chat/responses
-    /// paths. Controls how long the frontend polls the engine stream for a
-    /// synchronous backend error before committing HTTP 200.
+    /// Pre-commit peek window in milliseconds for the streaming chat,
+    /// completions, responses, and Anthropic messages paths. Controls how long
+    /// the frontend polls the engine stream for a synchronous backend error
+    /// before committing HTTP 200.
     /// Trades a small first-token latency budget
     /// for the ability to surface `Backend(InvalidArgument)` and other
     /// request-validation errors as HTTP 4xx instead of an SSE error frame.
@@ -472,6 +473,9 @@ pub mod llm {
     /// request-parse / admission p99 latency to opt in — request-validation
     /// errors within the window surface as HTTP 4xx; anything past the window
     /// stays as an SSE error frame. Setting to `0` also disables the peek.
+    ///
+    /// Read once when the HTTP service is built. A policy supplied through
+    /// `HttpServiceConfigBuilder::streaming_backend_error_check` replaces it.
     pub const DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS: &str = "DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS";
 
     /// Enable the LoRA allocation controller (set to "true" to enable)
