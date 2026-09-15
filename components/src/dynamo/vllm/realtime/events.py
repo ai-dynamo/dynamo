@@ -129,13 +129,14 @@ def response_created_event(
     response_id: str,
     *,
     output_modalities: list[str],
+    max_output_tokens: int | str = "inf",
 ) -> dict[str, Any]:
     return {
         "type": "response.created",
         "event_id": event_id(),
         "response": {
             "id": response_id,
-            "max_output_tokens": "inf",
+            "max_output_tokens": max_output_tokens,
             "object": "realtime.response",
             "output": [],
             "output_modalities": output_modalities,
@@ -150,17 +151,22 @@ def response_done_event(
     output_modalities: list[str],
     status: str = "completed",
     status_details: dict[str, Any] | None = None,
+    max_output_tokens: int | str = "inf",
+    output: list[dict[str, Any]] | None = None,
+    usage: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     response: dict[str, Any] = {
         "id": response_id,
-        "max_output_tokens": "inf",
+        "max_output_tokens": max_output_tokens,
         "object": "realtime.response",
-        "output": [],
+        "output": output or [],
         "output_modalities": output_modalities,
         "status": status,
     }
     if status_details is not None:
         response["status_details"] = status_details
+    if usage is not None:
+        response["usage"] = usage
     return {
         "type": "response.done",
         "event_id": event_id(),
@@ -232,3 +238,93 @@ def response_output_audio_transcript_delta_event(
         "content_index": 0,
         "delta": delta,
     }
+
+
+def _conversation_item_event(
+    event_type: str,
+    item: dict[str, Any],
+    previous_item_id: str | None,
+) -> dict[str, Any]:
+    return {
+        "type": event_type,
+        "event_id": event_id(),
+        "previous_item_id": previous_item_id,
+        "item": item,
+    }
+
+
+def conversation_item_added_event(
+    item: dict[str, Any],
+    previous_item_id: str | None,
+) -> dict[str, Any]:
+    return _conversation_item_event("conversation.item.added", item, previous_item_id)
+
+
+def conversation_item_done_event(
+    item: dict[str, Any],
+    previous_item_id: str | None,
+) -> dict[str, Any]:
+    return _conversation_item_event("conversation.item.done", item, previous_item_id)
+
+
+def _response_item_event(
+    event_type: str,
+    response_id: str,
+    item: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "type": event_type,
+        "event_id": event_id(),
+        "response_id": response_id,
+        "output_index": 0,
+        "item": item,
+    }
+
+
+def response_output_item_added_event(
+    response_id: str,
+    item: dict[str, Any],
+) -> dict[str, Any]:
+    return _response_item_event("response.output_item.added", response_id, item)
+
+
+def response_output_item_done_event(
+    response_id: str,
+    item: dict[str, Any],
+) -> dict[str, Any]:
+    return _response_item_event("response.output_item.done", response_id, item)
+
+
+def response_content_part_event(
+    event_type: str,
+    response_id: str,
+    item_id: str,
+    text: str,
+) -> dict[str, Any]:
+    return {
+        "type": event_type,
+        "event_id": event_id(),
+        "response_id": response_id,
+        "item_id": item_id,
+        "output_index": 0,
+        "content_index": 0,
+        "part": {"type": "text", "text": text},
+    }
+
+
+def response_output_text_event(
+    event_type: str,
+    response_id: str,
+    item_id: str,
+    text: str,
+) -> dict[str, Any]:
+    event = {
+        "type": event_type,
+        "event_id": event_id(),
+        "response_id": response_id,
+        "item_id": item_id,
+        "output_index": 0,
+        "content_index": 0,
+    }
+    event["delta" if event_type.endswith(".delta") else "text"] = text
+    return event
