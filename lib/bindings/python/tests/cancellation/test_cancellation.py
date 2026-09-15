@@ -355,13 +355,15 @@ async def test_server_raise_cancelled(temp_file_store, server, client):
 
 
 async def assert_request_cancelled(request, handler):
-    async with asyncio.timeout(5):
+    async def drain_and_wait():
         stream = await request
         # Cancellation travels asynchronously to the worker. Drain responses
         # already in flight, but require both stream closure and worker acknowledgement.
         async for _ in stream:
             pass
         await handler.cancellation_observed.wait()
+
+    await asyncio.wait_for(drain_and_wait(), timeout=5)
 
     assert handler.context_is_stopped
     assert not handler.context_is_killed
