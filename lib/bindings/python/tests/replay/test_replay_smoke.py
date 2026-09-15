@@ -497,10 +497,15 @@ def test_weka_nested_timestamp_override_reaches_native_replay(
     )
 
     assert report.summary["completed_requests"] == 2
-    assert sorted(record["arrival_time_ms"] for record in report.per_request) == [
-        0.0,
-        child_start_ms / arrival_speedup_ratio,
-    ]
+    root, child = sorted(
+        report.per_request, key=lambda record: record["arrival_time_ms"]
+    )
+    assert root["arrival_time_ms"] == 0.0
+    # With no recorded root API duration, the graph's child delay starts when
+    # the replayed root completes. Only that delay is scaled by the speedup.
+    assert child["arrival_time_ms"] == (
+        root["terminal_time_ms"] + child_start_ms / arrival_speedup_ratio
+    )
 
 
 def test_direct_agentic_dynamo_trace_rejects_replay_concurrency():
