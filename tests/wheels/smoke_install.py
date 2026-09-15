@@ -406,7 +406,7 @@ package_root = Path(aiconfigurator_core.__file__).resolve().parent
 assert (package_root / "model_configs/Qwen--Qwen3-32B_config.json").is_file()
 assert (package_root / "systems/h200_sxm.yaml").is_file()
 parquet_files = list(
-    (package_root / "systems/data/h200_sxm").glob("*/vllm/0.19.0/*.parquet")
+    (package_root / "systems/data/h200_sxm").glob("*/vllm/0.24.0/*.parquet")
 )
 assert parquet_files
 for path in parquet_files:
@@ -419,7 +419,7 @@ model = RustForwardPassPerfModel.from_native(
         "model_name": "Qwen/Qwen3-32B",
         "system_name": "h200_sxm",
         "backend": "vllm",
-        "backend_version": "0.19.0",
+        "backend_version": "0.24.0",
         "kv_block_size": None,
         "tp_size": 1,
         "pp_size": 1,

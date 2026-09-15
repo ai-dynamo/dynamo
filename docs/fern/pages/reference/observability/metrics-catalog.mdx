@@ -13,7 +13,7 @@ The `type` on each field below is a [Prometheus metric type](https://prometheus.
 
 - **counter** — a cumulative value that only increases (or resets to zero on restart), e.g. total requests.
 - **gauge** — a single value that can go up or down, e.g. in-flight requests.
-- **histogram** — samples observations into configurable buckets and exposes `_bucket`, `_sum`, and `_count` series, e.g. request duration. Labeled histograms/counters/gauges register a metric *family*, not one series.
+- **histogram** — samples observations into configurable buckets and exposes `_bucket`, `_sum`, and `_count` series, e.g. request duration. Labeled histograms/counters/gauges register a metric *family*, not one series. The frontend latency and sequence-length histograms take their bucket ranges from environment variables — see [Histogram buckets](../components/frontend-configuration.mdx#histogram-buckets).
 
 <Info>
   Labeled metrics (`HistogramVec`, `CounterVec`, `GaugeVec`) register a metric *family*, not individual time series. For request-populated metrics, a series for a given label combination appears at `/metrics` only after the first matching request. Other families create or remove series from runtime state; their entries below document those semantics.
