@@ -11,7 +11,7 @@
 #
 # Audex has a single built-in voice, so it rejects `voice`/`ref_audio`/
 # `ref_text` rather than silently synthesizing something else, and it is the
-# only audio model here that accepts `cfg_scale` (omit or 1.0 to decode
+# only audio model here that accepts `nvext.cfg_scale` (omit or 1.0 to decode
 # unguided). The curl footer below adapts to the selected model.
 #
 # The 30B-A3B needs an explicit stage config, because both Audex checkpoints
@@ -61,7 +61,7 @@ print_curl_footer <<CURL
     -d '{
       "input": "Hey, this is generated using Dynamo!",
       "model": "${MODEL}",
-      "cfg_scale": 1.5
+      "nvext": {"cfg_scale": 1.5}
     }' \\
     -o dynamo-audio.wav
 CURL

@@ -432,7 +432,7 @@ class TestAudexEngineInputs:
         """
         handler = _make_audex_handler("audex_thinker", "audex_code2wav")
         handler.engine_client.default_sampling_params_list = []
-        req = NvCreateAudioSpeechRequest(input="hello", cfg_scale=1.5)
+        req = NvCreateAudioSpeechRequest(input="hello", nvext=AudioNvExt(cfg_scale=1.5))
 
         with pytest.raises(RuntimeError, match="no default_sampling_params_list"):
             await handler.build_engine_inputs(req, request_id="r1")
@@ -451,7 +451,7 @@ class TestAudexEngineInputs:
     async def test_tts_cfg_scale_one_stays_unguided(self):
         """cfg_scale=1.0 is a no-op scale, so it must not start a CFG pair."""
         handler = _make_audex_handler("audex_thinker", "audex_code2wav")
-        req = NvCreateAudioSpeechRequest(input="hello", cfg_scale=1.0)
+        req = NvCreateAudioSpeechRequest(input="hello", nvext=AudioNvExt(cfg_scale=1.0))
         inputs = await handler.build_engine_inputs(req, request_id="r1")
         assert "cfg_scale" not in inputs.sampling_params_list[0].extra_args
 
@@ -464,7 +464,7 @@ class TestAudexEngineInputs:
 
         monkeypatch.setattr(audex_prompt, "build_null_prompt", lambda cond, tok: "NULL")
 
-        req = NvCreateAudioSpeechRequest(input="hello", cfg_scale=1.5)
+        req = NvCreateAudioSpeechRequest(input="hello", nvext=AudioNvExt(cfg_scale=1.5))
         inputs = await handler.build_engine_inputs(req, request_id="r1")
 
         stage0 = inputs.sampling_params_list[0]
@@ -476,12 +476,14 @@ class TestAudexEngineInputs:
         assert stage0.temperature == 0.05
 
     @pytest.mark.asyncio
-    async def test_cfg_ignored_without_request_id(self):
-        """Without a pair id, decode unguided rather than corrupt a pair."""
+    async def test_guided_request_fails_without_request_id(self):
+        """A guided request needs a pair id; decoding unguided would answer it
+        with different-sounding audio instead of reporting the broken contract.
+        """
         handler = _make_audex_handler("audex_thinker", "audex_code2wav")
-        req = NvCreateAudioSpeechRequest(input="hello", cfg_scale=1.5)
-        inputs = await handler.build_engine_inputs(req)
-        assert "cfg_pair_id" not in inputs.sampling_params_list[0].extra_args
+        req = NvCreateAudioSpeechRequest(input="hello", nvext=AudioNvExt(cfg_scale=1.5))
+        with pytest.raises(RuntimeError, match="needs a request id"):
+            await handler.build_engine_inputs(req)
 
     @pytest.mark.asyncio
     async def test_shared_engine_defaults_not_mutated(self):
@@ -568,7 +570,9 @@ class TestAudexValidation:
     async def test_cfg_scale_out_of_range_rejected(self):
         """cfg_scale outside the supported range fails fast."""
         handler = _make_audex_handler("audex_thinker", "audex_code2wav")
-        req = NvCreateAudioSpeechRequest(input="hello", cfg_scale=50.0)
+        req = NvCreateAudioSpeechRequest(
+            input="hello", nvext=AudioNvExt(cfg_scale=50.0)
+        )
         with pytest.raises(ValueError, match="cfg_scale"):
             await handler.build_engine_inputs(req, request_id="r1")
 

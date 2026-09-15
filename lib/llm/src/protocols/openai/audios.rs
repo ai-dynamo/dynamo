@@ -67,12 +67,6 @@ pub struct NvCreateAudioSpeechRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_new_tokens: Option<i32>,
 
-    /// Classifier-free guidance scale (Audex). Unset or 1.0 decodes unguided;
-    /// higher values follow the prompt more closely. Without this field serde
-    /// drops the client's cfg_scale and guidance is silently never applied.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cfg_scale: Option<f64>,
-
     /// Optional user identifier
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
@@ -273,7 +267,6 @@ mod tests {
             ref_audio: None,
             ref_text: None,
             max_new_tokens: None,
-            cfg_scale: None,
             user: None,
             nvext: None,
             extra_args: None,
@@ -285,11 +278,11 @@ mod tests {
 
     #[test]
     fn audio_request_cfg_scale_reaches_the_worker() {
-        // Unknown fields are dropped silently, so a missing cfg_scale field
+        // Unknown nvext keys are dropped silently, so a missing cfg_scale field
         // would disable guidance without any error surfacing to the client.
-        let json = r#"{"input":"hi","cfg_scale":1.5}"#;
+        let json = r#"{"input":"hi","nvext":{"cfg_scale":1.5}}"#;
         let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.cfg_scale, Some(1.5));
+        assert_eq!(req.nvext.as_ref().and_then(|n| n.cfg_scale), Some(1.5));
 
         let out = serde_json::to_string(&req).unwrap();
         assert!(out.contains("\"cfg_scale\":1.5"));
@@ -297,10 +290,20 @@ mod tests {
 
     #[test]
     fn audio_request_cfg_scale_omitted_when_absent() {
-        let json = r#"{"input":"hi"}"#;
+        let json = r#"{"input":"hi","nvext":{}}"#;
         let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.cfg_scale, None);
+        assert_eq!(req.nvext.as_ref().and_then(|n| n.cfg_scale), None);
         assert!(!serde_json::to_string(&req).unwrap().contains("cfg_scale"));
+    }
+
+    #[test]
+    fn audio_request_top_level_cfg_scale_is_not_a_typed_field() {
+        // A top-level cfg_scale is a client mistake: it lands in passthrough
+        // (and so in extra_args for the worker), never in the Audex contract.
+        let json = r#"{"input":"hi","cfg_scale":1.5}"#;
+        let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
+        assert!(req.nvext.is_none());
+        assert_eq!(req.passthrough["cfg_scale"], serde_json::json!(1.5));
     }
 
     #[test]

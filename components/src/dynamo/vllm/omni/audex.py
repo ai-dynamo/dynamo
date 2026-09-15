@@ -92,6 +92,15 @@ TTA_CODEC_CAP = 4000
 GUIDED_TTS_TEMPERATURE = 0.05
 
 
+def _requested_cfg_scale(req: NvCreateAudioSpeechRequest) -> Optional[float]:
+    """Return the caller's guidance scale, or None when it was not requested.
+
+    CFG is Audex-only, so it rides in ``nvext`` rather than as a top-level
+    OpenAI field (vLLM-Omni likewise takes it under ``extra_params``).
+    """
+    return req.nvext.cfg_scale if req.nvext is not None else None
+
+
 def _require_audex(module: Any, name: str) -> Any:
     """Return an Audex submodule, or fail the request if the build lacks it.
 
@@ -224,10 +233,10 @@ class AudexRequestAdapter:
                 "Audex does not support reference audio (no voice cloning)."
             )
 
-        cfg_scale = req.cfg_scale
+        cfg_scale = _requested_cfg_scale(req)
         if cfg_scale is not None and not (CFG_SCALE_MIN <= cfg_scale <= CFG_SCALE_MAX):
             raise ValueError(
-                f"cfg_scale must be within [{CFG_SCALE_MIN}, {CFG_SCALE_MAX}]; "
+                f"nvext.cfg_scale must be within [{CFG_SCALE_MIN}, {CFG_SCALE_MAX}]; "
                 f"got {cfg_scale}. 1.0 disables guidance."
             )
 
@@ -249,12 +258,13 @@ class AudexRequestAdapter:
         the engine on its own defaults; a request that does need an override
         fails instead, since the defaults are the only channel for it.
         """
+        requested_cfg = _requested_cfg_scale(req)
         defaults = list(self.engine_client.default_sampling_params_list or [])
         if not defaults:
             if (
                 model_type == MODEL_TYPE_TTA
                 or req.max_new_tokens is not None
-                or (req.cfg_scale is not None and req.cfg_scale > CFG_SCALE_MIN)
+                or (requested_cfg is not None and requested_cfg > CFG_SCALE_MIN)
             ):
                 # Dropping the contract here would answer with different-sounding
                 # audio (unguided, or for TTA a phase-invalid codec stream that
@@ -276,7 +286,7 @@ class AudexRequestAdapter:
             extra_args = {}
             stage0.extra_args = extra_args
 
-        cfg_scale = req.cfg_scale
+        cfg_scale = requested_cfg
         if model_type == MODEL_TYPE_TTA:
             # The RVQ phase contract gates which codec ids are sampleable per
             # position; without it the stream is phase-invalid and decode is
@@ -285,21 +295,20 @@ class AudexRequestAdapter:
             if cfg_scale is None:
                 cfg_scale = TTA_DEFAULT_CFG_SCALE
 
-        if cfg_scale is None or cfg_scale <= 1.0:
+        if cfg_scale is None or cfg_scale <= CFG_SCALE_MIN:
             extra_args.pop("cfg_scale", None)
             return params_list
 
         if request_id is None:
-            # The pair id must be unique per request; without it the guided and
-            # unconditional sequences cannot be matched, so fall back to
-            # unguided decoding rather than corrupting a concurrent pair.
-            logger.warning(
-                "Audex: no request id available; ignoring cfg_scale=%s "
-                "and decoding unguided",
-                cfg_scale,
+            # The pair id must be unique per request, and it is the final Dynamo
+            # request id, which every serving path has. Decoding unguided instead
+            # would answer a guided request with different-sounding audio, so a
+            # caller that reached here without an id gets the broken contract
+            # reported rather than silently downgraded output.
+            raise RuntimeError(
+                f"Audex: cfg_scale={cfg_scale} needs a request id to pair the "
+                "guided and unconditional sequences, but none was supplied"
             )
-            extra_args.pop("cfg_scale", None)
-            return params_list
 
         _, build_null = self._prompt_builders(model_type)
         null_prompt = build_null(cond_prompt, self.tokenizer(model_type))

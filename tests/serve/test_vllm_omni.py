@@ -228,11 +228,11 @@ vllm_omni_configs = {
                 body={
                     "model": "nvidia/Nemotron-Labs-Audex-2B",
                     "input": "Hey, this is generated using Dynamo!",
-                    # Audex is the only audio model that takes cfg_scale, and it
-                    # travels as a top-level protocol field: unknown fields are
-                    # dropped silently, so a plumbing regression would leave
-                    # guidance unapplied without failing the request.
-                    "cfg_scale": 1.5,
+                    # Audex is the only audio model that takes cfg_scale, so it
+                    # travels in nvext rather than as an OpenAI field: unknown
+                    # keys are dropped silently, so a plumbing regression would
+                    # leave guidance unapplied without failing the request.
+                    "nvext": {"cfg_scale": 1.5},
                 },
                 repeat_count=1,
                 # Stage 1 is a streaming causal decoder: it emits one ~100 ms

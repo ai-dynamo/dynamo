@@ -5,7 +5,6 @@ import functools
 import logging
 import os
 import random
-from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import (
     Any,
@@ -48,6 +47,10 @@ from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
 from dynamo.vllm.handlers import get_lora_manager
 from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
 from dynamo.vllm.omni.base_handler import BaseOmniHandler
+
+# Re-exported: EngineInputs moved to its own module so the per-modality
+# builders can annotate it without importing this handler.
+from dynamo.vllm.omni.engine_inputs import EngineInputs
 from dynamo.vllm.omni.output_formatter import (
     AudioAggregateState,
     AudioStreamState,
@@ -95,33 +98,6 @@ def _apply_media_passthrough(
                 "no extra_args",
                 sorted(knobs),
             )
-
-
-@dataclass
-class EngineInputs:
-    """Parsed engine inputs ready for AsyncOmni.generate().
-
-    Attributes:
-        prompt: OmniTextPrompt dict for the engine.
-        sampling_params_list: Per-stage sampling parameters, or None for defaults.
-        request_type: The resolved request type (may differ from the initial parse
-            when a chat completion request carries video params).
-        fps: Frames per second, only meaningful for video requests.
-        response_format: Desired response format (e.g. "url" or "b64_json" for
-            image requests). None means use the default for the request type.
-        output_format: The output format to use for the response.
-            None means use the default for the request type.
-    """
-
-    prompt: Union[OmniTextPrompt, Dict[str, Any]]
-    sampling_params_list: list | None = None
-    request_type: RequestType = RequestType.CHAT_COMPLETION
-    fps: int = 0
-    speed: float = 1.0
-    response_format: str | None = None
-    output_format: str | None = None
-    lora_request: LoRARequest | None = None
-    stream_audio: bool = False
 
 
 class OmniHandler(BaseOmniHandler):
