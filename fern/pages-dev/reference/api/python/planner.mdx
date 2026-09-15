@@ -320,7 +320,7 @@ from dynamo.planner.core import EngineCapabilities
 EngineCapabilities(num_gpu: Optional[int] = None, gpu_cost_per_replica: Optional[int] = None, max_num_batched_tokens: Optional[int] = None, max_num_seqs: Optional[int] = None, context_length: Optional[int] = None, max_kv_tokens: Optional[int] = None, kv_cache_block_size: Optional[int] = None, speculative_nextn: Optional[int] = None, power_watts_per_replica: Optional[int] = None) -> None
 ```
 
-[`components/src/dynamo/planner/core/types.py#L197`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L197)
+[`components/src/dynamo/planner/core/types.py#L206`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L206)
 
 **Public methods**
 
@@ -346,7 +346,7 @@ from dynamo.planner.core import FpmObservations
 FpmObservations(prefill: Optional[dict[tuple[str, int], ForwardPassMetrics]] = None, decode: Optional[dict[tuple[str, int], ForwardPassMetrics]] = None) -> None
 ```
 
-[`components/src/dynamo/planner/core/types.py#L74`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L74)
+[`components/src/dynamo/planner/core/types.py#L83`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L83)
 
 **Public methods**
 
@@ -634,7 +634,7 @@ from dynamo.planner import KubernetesConnector
 KubernetesConnector(dynamo_namespace: str, model_name: Optional[str] = None, k8s_namespace: Optional[str] = None, parent_dgd_name: Optional[str] = None, raise_not_ready: bool = False)
 ```
 
-[`components/src/dynamo/planner/connectors/kubernetes.py#L69`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L69)
+[`components/src/dynamo/planner/connectors/kubernetes.py#L73`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L73)
 
 **Public methods**
 
@@ -646,7 +646,7 @@ __init__(dynamo_namespace: str, model_name: Optional[str] = None, k8s_namespace:
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L70)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L74)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-async-init">async_init</h4>
 
@@ -656,7 +656,7 @@ async_init()
 
 No-op asynchronous lifecycle hook.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L101)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L111)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-get-worker-runtime-namespace">get_worker_runtime_namespace</h4>
 
@@ -671,7 +671,7 @@ component status. Older operators expose only the active worker hash, so
 the planner falls back to appending that hash only for Deployment-backed
 and LeaderWorkerSet-backed workers.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L105)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L115)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-add-component">add_component</h4>
 
@@ -681,7 +681,7 @@ add_component(sub_component_type: SubComponentType, blocking: bool = True)
 
 Add a component by increasing its replica count by 1
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L174)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L184)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-remove-component">remove_component</h4>
 
@@ -691,7 +691,7 @@ remove_component(sub_component_type: SubComponentType, blocking: bool = True)
 
 Remove a component by decreasing its replica count by 1
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L192)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L202)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-validate-deployment">validate_deployment</h4>
 
@@ -706,7 +706,7 @@ Verify that the deployment contains prefill/decode components and the model name
 - `DynamoGraphDeploymentNotFoundError` — If the deployment is not found
 - `DeploymentValidationError` — If the deployment does not contain required prefill/decode components
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L211)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L221)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-get-model-name">get_model_name</h4>
 
@@ -716,7 +716,7 @@ get_model_name(require_prefill: bool = True, require_decode: bool = True) -> str
 
 Get the model name from the current deployment.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L265)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L275)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-get-graph-deployment">get_graph_deployment</h4>
 
@@ -731,7 +731,7 @@ Kubernetes-local and must not expand that ABC. The environment checks
 ``is_power_aware_connector(controller)`` (all four methods present)
 rather than duck-typing via ``getattr``.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L352)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L362)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-get-gpu-counts">get_gpu_counts</h4>
 
@@ -741,7 +741,7 @@ get_gpu_counts(require_prefill: bool = True, require_decode: bool = True, deploy
 
 Get per-engine GPU counts for prefill and decode components.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L362)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L372)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-get-gpu-shapes">get_gpu_shapes</h4>
 
@@ -754,7 +754,7 @@ Get per-engine performance width and per-replica GPU cost.
 Pass ``deployment`` to reuse an already-fetched DGD (avoids a second
 GET when the environment also resolves power configs on the same tick).
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L386)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L396)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-get-component-power-configs">get_component_power_configs</h4>
 
@@ -776,7 +776,7 @@ The typed parser errors (``PowerAnnotationMissingError`` /
 propagate so the environment can apply the startup-fail vs
 runtime-conservative policy rather than the planner guessing a cap.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L485)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L495)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-get-frontend-metrics-url">get_frontend_metrics_url</h4>
 
@@ -794,7 +794,7 @@ http://&#123;dgd_name&#125;-&#123;component_name_lowercase&#125;:&#123;port&#125
 
 - `Optional[str]` — The metrics URL string, or None if no frontend component is found.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L517)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L527)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-wait-for-deployment-ready">wait_for_deployment_ready</h4>
 
@@ -817,7 +817,7 @@ readiness. This lets the planner read MDC from worker pods
 without waiting for itself to be marked ready in the DGD.
 </ParamField>
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L539)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L549)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-wait-for-settled-graph-deployment">wait_for_settled_graph_deployment</h4>
 
@@ -847,7 +847,7 @@ have rolled onto that generation. Active rolling updates
 (``status.rollingUpdate.phase`` Pending/InProgress/Failed) also
 block settlement because old Pods still carry the previous cap.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L558)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L568)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-get-worker-info">get_worker_info</h4>
 
@@ -866,7 +866,22 @@ PREFILL or DECODE
 Backend framework name (for default fallback)
 </ParamField>
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L715)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L725)
+
+<h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-get-worker-inventory">get_worker_inventory</h4>
+
+```python
+get_worker_inventory(prefill_component_name: Optional[str] = None, decode_component_name: Optional[str] = None) -> Optional[WorkerCounts]
+```
+
+Read selected roles' serving/pending inventory off the event loop.
+
+DGD status and Pods supply startup, drain, and rollout checks, including
+the power-aware readiness guarantees. An omitted component name reports
+zero counts for that role; pending counts never include draining workers.
+Return None on a Pod-list 403 so callers can retain legacy behavior.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L875)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-get-actual-worker-counts">get_actual_worker_counts</h4>
 
@@ -876,7 +891,7 @@ get_actual_worker_counts(prefill_component_name: Optional[str] = None, decode_co
 
 Get ready worker counts from DGD status without listing Pods.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L785)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L928)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-get-power-aware-worker-counts">get_power_aware_worker_counts</h4>
 
@@ -890,7 +905,7 @@ One thread dispatch contains the synchronous DGD GET and the single
 DGD-scoped Pod LIST. The returned Pod snapshot is partitioned locally by
 component before terminating-Pod checks run.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L798)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L941)
 
 <h4 id="api-dynamo-planner-connectors-kubernetes-kubernetesconnector-set-component-replicas">set_component_replicas</h4>
 
@@ -900,7 +915,7 @@ set_component_replicas(target_replicas: list[TargetReplica], blocking: bool = Tr
 
 Set the replicas for multiple components at once
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L910)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/kubernetes.py#L1053)
 </Accordion>
 
 <Accordion id="api-dynamo-planner-errors-modelnamenotfounderror" title="ModelNameNotFoundError (class)">
@@ -970,7 +985,7 @@ surface callers rely on is also wider than what is declared here:
 ``construct_environment`` feature-detects ``get_worker_runtime_namespace``,
 which all three connectors provide.
 
-[`components/src/dynamo/planner/connectors/base.py#L35`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/base.py#L35)
+[`components/src/dynamo/planner/connectors/base.py#L36`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/base.py#L36)
 
 **Public methods**
 
@@ -982,7 +997,7 @@ async_init() -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/base.py#L73)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/base.py#L74)
 
 <h4 id="api-dynamo-planner-connectors-base-plannerconnector-validate-deployment">validate_deployment</h4>
 
@@ -992,7 +1007,7 @@ validate_deployment(prefill_component_name: Optional[str] = None, decode_compone
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/base.py#L76)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/base.py#L77)
 
 <h4 id="api-dynamo-planner-connectors-base-plannerconnector-wait-for-deployment-ready">wait_for_deployment_ready</h4>
 
@@ -1002,7 +1017,7 @@ wait_for_deployment_ready(include_planner: bool = True) -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/base.py#L85)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/base.py#L86)
 
 <h4 id="api-dynamo-planner-connectors-base-plannerconnector-get-model-name">get_model_name</h4>
 
@@ -1012,7 +1027,7 @@ get_model_name(require_prefill: bool = True, require_decode: bool = True) -> str
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/base.py#L88)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/base.py#L89)
 
 <h4 id="api-dynamo-planner-connectors-base-plannerconnector-get-gpu-counts">get_gpu_counts</h4>
 
@@ -1022,7 +1037,7 @@ get_gpu_counts(require_prefill: bool = True, require_decode: bool = True) -> tup
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/base.py#L95)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/base.py#L96)
 
 <h4 id="api-dynamo-planner-connectors-base-plannerconnector-get-gpu-shapes">get_gpu_shapes</h4>
 
@@ -1032,7 +1047,7 @@ get_gpu_shapes(require_prefill: bool = True, require_decode: bool = True) -> tup
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/base.py#L102)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/base.py#L103)
 
 <h4 id="api-dynamo-planner-connectors-base-plannerconnector-get-actual-worker-counts">get_actual_worker_counts</h4>
 
@@ -1042,7 +1057,7 @@ get_actual_worker_counts(prefill_component_name: Optional[str] = None, decode_co
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/base.py#L109)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/base.py#L110)
 
 <h4 id="api-dynamo-planner-connectors-base-plannerconnector-set-component-replicas">set_component_replicas</h4>
 
@@ -1052,7 +1067,7 @@ set_component_replicas(target_replicas: list[TargetReplica], blocking: bool = Tr
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/base.py#L116)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/connectors/base.py#L117)
 </Accordion>
 
 <Accordion id="api-dynamo-planner-core-types-plannereffects" title="PlannerEffects (class)">
@@ -1066,7 +1081,7 @@ from dynamo.planner.core import PlannerEffects
 PlannerEffects(scale_to: Optional[ScalingDecision] = None, next_tick: Optional[ScheduledTick] = None, diagnostics: TickDiagnostics = TickDiagnostics()) -> None
 ```
 
-[`components/src/dynamo/planner/core/types.py#L188`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L188)
+[`components/src/dynamo/planner/core/types.py#L197`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L197)
 
 **Public methods**
 
@@ -1136,7 +1151,7 @@ update_capabilities(capabilities: WorkerCapabilities) -> None
 
 Replace the current worker capabilities.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L137)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L139)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-load-benchmark-fpms">load_benchmark_fpms</h4>
 
@@ -1146,7 +1161,7 @@ load_benchmark_fpms(prefill_fpms: Optional[list[ForwardPassMetrics]] = None, dec
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L158)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L160)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-begin-tick">begin_tick</h4>
 
@@ -1156,7 +1171,7 @@ begin_tick() -> None
 
 Reset per-tick diagnostics before builtin plugins run.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L179)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L181)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-observe-worker-counts">observe_worker_counts</h4>
 
@@ -1166,7 +1181,7 @@ observe_worker_counts(counts: WorkerCounts) -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L183)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L185)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-observe-fpm">observe_fpm</h4>
 
@@ -1176,7 +1191,7 @@ observe_fpm(obs: FpmObservations) -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L186)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L188)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-observe-runtime-metadata">observe_runtime_metadata</h4>
 
@@ -1186,7 +1201,7 @@ observe_runtime_metadata(*, kv_hit_rate: Optional[float] = None, accept_length: 
 
 Update last-value runtime metadata without touching prediction history.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L191)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L193)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-install-regressions">install_regressions</h4>
 
@@ -1196,7 +1211,7 @@ install_regressions(*, prefill: Optional[PlannerEnginePerfModel] = None, decode:
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L202)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L204)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-advance-load">advance_load</h4>
 
@@ -1206,7 +1221,7 @@ advance_load(obs: FpmObservations, *, predicted_kv_hit_rate: Optional[float] = N
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L216)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L218)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-advance-throughput-from-prediction">advance_throughput_from_prediction</h4>
 
@@ -1220,7 +1235,7 @@ The PREDICT plugin owns load prediction history. This method consumes
 only explicit prediction output so PROPOSE never re-runs prediction or
 depends on hidden predictor state.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L229)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L316)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-diagnostics">diagnostics</h4>
 
@@ -1230,7 +1245,7 @@ diagnostics() -> TickDiagnostics
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L284)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L371)
 </Accordion>
 
 <Accordion id="api-dynamo-planner-errors-powerannotationinvaliderror" title="PowerAnnotationInvalidError (class)">
@@ -1349,7 +1364,7 @@ from dynamo.planner.core import ScalingDecision
 ScalingDecision(num_prefill: Optional[int] = None, num_decode: Optional[int] = None) -> None
 ```
 
-[`components/src/dynamo/planner/core/types.py#L96`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L96)
+[`components/src/dynamo/planner/core/types.py#L105`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L105)
 
 **Public methods**
 
@@ -1458,7 +1473,7 @@ TickInput(now_s: float, traffic: Optional[TrafficObservation] = None, worker_cou
 Fields are filled according to the previous ``ScheduledTick``'s
 declared requirements.
 
-[`components/src/dynamo/planner/core/types.py#L82`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L82)
+[`components/src/dynamo/planner/core/types.py#L91`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L91)
 
 **Public methods**
 
@@ -1721,7 +1736,7 @@ they come from the simulated engine args.
 
 For agg mode, only ``decode`` is populated (single engine type).
 
-[`components/src/dynamo/planner/core/types.py#L223`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L223)
+[`components/src/dynamo/planner/core/types.py#L232`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L232)
 
 **Public methods**
 
@@ -1744,7 +1759,7 @@ from dynamo.planner.core import WorkerCounts
 ```
 
 ```python
-WorkerCounts(ready_num_prefill: Optional[int] = None, ready_num_decode: Optional[int] = None, expected_num_prefill: Optional[int] = None, expected_num_decode: Optional[int] = None, prefill_scaling_in_progress: bool = False, decode_scaling_in_progress: bool = False) -> None
+WorkerCounts(ready_num_prefill: Optional[int] = None, ready_num_decode: Optional[int] = None, expected_num_prefill: Optional[int] = None, expected_num_decode: Optional[int] = None, prefill_scaling_in_progress: bool = False, decode_scaling_in_progress: bool = False, pending_num_prefill: int = 0, pending_num_decode: int = 0) -> None
 ```
 
 [`components/src/dynamo/planner/core/types.py#L62`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/types.py#L62)
@@ -1754,7 +1769,7 @@ WorkerCounts(ready_num_prefill: Optional[int] = None, ready_num_decode: Optional
 <h4 id="api-dynamo-planner-core-types-workercounts-init">__init__</h4>
 
 ```python
-__init__(ready_num_prefill: Optional[int] = None, ready_num_decode: Optional[int] = None, expected_num_prefill: Optional[int] = None, expected_num_decode: Optional[int] = None, prefill_scaling_in_progress: bool = False, decode_scaling_in_progress: bool = False) -> None
+__init__(ready_num_prefill: Optional[int] = None, ready_num_decode: Optional[int] = None, expected_num_prefill: Optional[int] = None, expected_num_decode: Optional[int] = None, prefill_scaling_in_progress: bool = False, decode_scaling_in_progress: bool = False, pending_num_prefill: int = 0, pending_num_decode: int = 0) -> None
 ```
 
 No summary available.
