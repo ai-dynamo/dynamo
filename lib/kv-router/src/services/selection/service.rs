@@ -98,6 +98,9 @@ impl SelectionServiceBuilder {
         self.kv_router_config
             .validate_config()
             .map_err(anyhow::Error::msg)?;
+        if self.kv_router_config.request_classifier_config()?.is_some() {
+            anyhow::bail!("standalone selection does not support request_classifier plugins");
+        }
         let worker_selection_policy_factory = self
             .worker_selection_policy_registry
             .resolve_for_worker_type(&self.kv_router_config, self.worker_type)?;
@@ -449,6 +452,31 @@ mod tests {
             .local_addr()
             .unwrap()
             .port()
+    }
+
+    #[tokio::test]
+    async fn standalone_selection_rejects_request_classifier() {
+        let policy = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(policy.path(), "request_classifier: {type: test}").unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(policy.path().display().to_string()),
+            ..test_config()
+        };
+        let result = SelectionServiceBuilder::new(
+            config,
+            WorkerType::Aggregated,
+            WorkerSelectionPolicyRegistry::default(),
+        )
+        .build()
+        .await;
+        let Err(error) = result else {
+            panic!("classifier ignored")
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("standalone selection does not support request_classifier")
+        );
     }
 
     #[tokio::test]

@@ -27,7 +27,7 @@ pub use input::PromptRequest;
 pub use pending::SelectionCacheConfig;
 pub use policy_registry::{
     DYN_ROUTER_DECODE_POLICY, DYN_ROUTER_PREFILL_POLICY, DYN_ROUTER_WORKER_SELECTION_POLICY,
-    WorkerSelectionPolicyParameters, WorkerSelectionPolicyProvider,
+    RouterPluginRegistry, WorkerSelectionPolicyParameters, WorkerSelectionPolicyProvider,
     WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistry,
     WorkerSelectionPolicyRegistryError,
 };

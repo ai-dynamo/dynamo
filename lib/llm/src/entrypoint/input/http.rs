@@ -24,6 +24,7 @@ use crate::{
 };
 use dynamo_kv_router::{
     KvRouterConfig, RoutingPartitionRef, WorkerSelectionPolicy, WorkerType,
+    scheduling::RequestClassifierFactory,
     selector::{DefaultWorkerSelector, WorkerSelector},
 };
 use dynamo_runtime::DistributedRuntime;
@@ -31,12 +32,14 @@ use dynamo_runtime::metrics::MetricsHierarchy;
 
 /// Dynamo's complete discovery-backed HTTP frontend.
 ///
-/// The default frontend uses [`DefaultWorkerSelector`]. A statically linked external crate can
-/// replace only worker selection with [`Self::worker_selection_policy_factory`].
+/// The default frontend uses [`DefaultWorkerSelector`] and pass-through request classification.
+/// Statically linked plugins install through [`Self::worker_selection_policy_factory`] and
+/// [`Self::request_classifier_factory`].
 #[derive(Default)]
 pub struct HttpFrontend {
     frontend_route_extensions: Vec<FrontendRouteExtension>,
     worker_selection_policy_factory: Option<WorkerSelectorFactory<WorkerSelectionPolicy>>,
+    request_classifier_factory: Option<RequestClassifierFactory>,
 }
 
 impl HttpFrontend {
@@ -70,16 +73,32 @@ impl HttpFrontend {
         self
     }
 
+    /// Install one catalog-created request classifier per routed decode or aggregated model.
+    pub fn request_classifier_factory(mut self, factory: RequestClassifierFactory) -> Self {
+        self.request_classifier_factory = Some(factory);
+        self
+    }
+
     /// Run the frontend until it exits.
     pub async fn run(
         self,
         distributed_runtime: DistributedRuntime,
         engine_config: EngineConfig,
     ) -> anyhow::Result<()> {
-        if self.worker_selection_policy_factory.is_some()
+        if self.request_classifier_factory.is_some()
+            && !engine_config
+                .local_model()
+                .router_config()
+                .router_mode
+                .is_kv_routing()
+        {
+            anyhow::bail!("request classifiers require --router-mode kv");
+        }
+        if (self.worker_selection_policy_factory.is_some()
+            || self.request_classifier_factory.is_some())
             && !matches!(&engine_config, EngineConfig::Dynamic { .. })
         {
-            anyhow::bail!("custom worker-selection policies require a dynamic engine");
+            anyhow::bail!("custom router plugins require a dynamic engine");
         }
 
         // Callers that reach the frontend without going through `run_input`
@@ -101,6 +120,7 @@ impl HttpFrontend {
                     self.frontend_route_extensions,
                     true,
                     factory,
+                    self.request_classifier_factory,
                 )
                 .await
             }
@@ -116,6 +136,7 @@ impl HttpFrontend {
                             worker_type.default_selector_label(),
                         )
                     }),
+                    self.request_classifier_factory,
                 )
                 .await
             }
@@ -155,6 +176,7 @@ async fn run_with_worker_selector_factory<Sel>(
     frontend_route_extensions: Vec<FrontendRouteExtension>,
     require_typed_worker_role: bool,
     worker_selector_factory: WorkerSelectorFactory<Sel>,
+    request_classifier_factory: Option<RequestClassifierFactory>,
 ) -> anyhow::Result<()>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
@@ -263,6 +285,7 @@ where
                 generate_engine_capabilities,
                 require_typed_worker_role,
                 worker_selector_factory.clone(),
+                request_classifier_factory,
             )
             .await?;
             http_service
@@ -353,6 +376,7 @@ async fn run_watcher<Sel>(
     generate_engine_capabilities: Vec<&'static str>,
     require_typed_worker_role: bool,
     worker_selector_factory: WorkerSelectorFactory<Sel>,
+    request_classifier_factory: Option<RequestClassifierFactory>,
 ) -> anyhow::Result<()>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
@@ -377,6 +401,7 @@ where
         require_typed_worker_role,
         worker_selector_factory,
     );
+    watch_obj.set_request_classifier_factory(request_classifier_factory);
     watch_obj.set_local_model_path(local_model_path);
     watch_obj.set_tokenizer_backend(tokenizer_backend);
     watch_obj.set_tokenizer_fallback_enabled(tokenizer_fallback_enabled);

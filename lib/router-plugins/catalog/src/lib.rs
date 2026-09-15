@@ -12,6 +12,10 @@ use dynamo_kv_router::services::selection::{
 /// Custom catalogs replace this crate and register their own factories. The default catalog is
 /// intentionally empty so `default` always selects Dynamo's built-in worker selector.
 ///
+/// The same registry also accepts request classifiers through `register_request_classifier`.
+/// A catalog that supplies both plugin types can return `Result<(), Box<dyn std::error::Error>>`
+/// and use `RouterPluginRegistry` (the existing registry name remains an alias).
+///
 /// The policies Dynamo ships are registered separately from `dynamo-custom-policy-builtin`, so
 /// replacing this crate adds policies alongside them rather than displacing them.
 pub fn register(

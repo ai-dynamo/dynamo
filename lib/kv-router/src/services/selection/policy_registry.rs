@@ -16,7 +16,11 @@ use crate::scheduling::config::WorkerSelectionPolicySelections;
 pub use crate::scheduling::config::{
     DYN_ROUTER_DECODE_POLICY, DYN_ROUTER_PREFILL_POLICY, DYN_ROUTER_WORKER_SELECTION_POLICY,
 };
+use crate::scheduling::request_classifier_registry::RequestClassifierRegistry;
 use crate::scheduling::selector::WorkerSelectionPolicy;
+use crate::scheduling::{
+    RequestClassifierFactory, RequestClassifierProvider, RequestClassifierRegistryError,
+};
 
 /// Parses one policy instance's YAML parameters and creates its partition factory.
 pub type WorkerSelectionPolicyProvider = Arc<
@@ -61,11 +65,15 @@ impl WorkerSelectionPolicyProviderError {
     }
 }
 
-/// A startup-only registry of policy types linked into a custom Dynamo image.
+/// A startup-only registry of worker-selection and request-classifier plugins linked into an image.
 #[derive(Clone, Default)]
-pub struct WorkerSelectionPolicyRegistry {
+pub struct RouterPluginRegistry {
     providers: HashMap<String, WorkerSelectionPolicyProvider>,
+    request_classifiers: RequestClassifierRegistry,
 }
+
+/// Existing catalogs can retain their worker-selection registration signature.
+pub type WorkerSelectionPolicyRegistry = RouterPluginRegistry;
 
 /// An error from policy registration or startup resolution.
 #[derive(Debug, Error)]
@@ -90,7 +98,24 @@ pub enum WorkerSelectionPolicyRegistryError {
     },
 }
 
-impl WorkerSelectionPolicyRegistry {
+impl RouterPluginRegistry {
+    /// Register a request-classifier type through the same catalog entry point as worker selection.
+    pub fn register_request_classifier(
+        &mut self,
+        name: impl Into<String>,
+        provider: RequestClassifierProvider,
+    ) -> Result<(), RequestClassifierRegistryError> {
+        self.request_classifiers.register(name, provider)
+    }
+
+    /// Resolve the configured request classifier once at frontend startup.
+    pub fn resolve_request_classifier(
+        &self,
+        config: &KvRouterConfig,
+    ) -> Result<Option<RequestClassifierFactory>, RequestClassifierRegistryError> {
+        self.request_classifiers.resolve(config)
+    }
+
     /// Whether this image has no linked custom worker-selection policy types.
     pub fn is_empty(&self) -> bool {
         self.providers.is_empty()

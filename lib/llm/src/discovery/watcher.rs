@@ -12,6 +12,7 @@ use anyhow::Context as _;
 use async_trait::async_trait;
 use dynamo_kv_router::{
     DEFAULT_ROUTING_GROUP, PrefillLoadEstimator, RoutingPartitionRef,
+    scheduling::RequestClassifierFactory,
     selector::{DefaultWorkerSelector, WorkerSelector},
 };
 use dynamo_runtime::{
@@ -211,6 +212,7 @@ where
     /// Keep raw pipelines out of default-off and backend-mismatched paths.
     generate_engine_capabilities: Vec<&'static str>,
     worker_selector_factory: WorkerSelectorFactory<Sel>,
+    request_classifier_factory: Option<RequestClassifierFactory>,
     /// Custom selector dispatch cannot infer whether an untyped legacy card is decode or aggregated.
     require_typed_worker_role: bool,
 }
@@ -334,12 +336,20 @@ where
             tokenizer_fallback_enabled: None,
             generate_engine_capabilities: Vec::new(),
             worker_selector_factory,
+            request_classifier_factory: None,
             require_typed_worker_role,
         }
     }
 
     pub fn set_notify_on_model_update(&mut self, tx: Sender<ModelUpdate>) {
         self.model_update_tx = Some(tx);
+    }
+
+    pub(crate) fn set_request_classifier_factory(
+        &mut self,
+        factory: Option<RequestClassifierFactory>,
+    ) {
+        self.request_classifier_factory = factory;
     }
 
     pub fn set_local_model_path(&mut self, path: Option<PathBuf>) {
@@ -608,6 +618,9 @@ where
                                 .cancellation_token(),
                         )
                         .await?;
+                    if let Some(factory) = &self.request_classifier_factory {
+                        chooser.install_request_classifier(factory())?;
+                    }
                     Arc::get_mut(&mut chooser)
                         .expect("new KV chooser must have one owner")
                         .set_teardown_task_guard(allocator_trim.clone());
@@ -1743,6 +1756,168 @@ mod tests {
             &card,
             &[OTHER_GENERATE_CAPABILITY]
         ));
+    }
+
+    #[tokio::test]
+    async fn classifier_factory_is_installed_per_discovered_model() {
+        const TEST: &str = concat!(
+            module_path!(),
+            "::classifier_factory_is_installed_per_discovered_model"
+        );
+        let test_name = TEST.split_once("::").unwrap().1;
+        if std::env::var("DYNAMO_CLASSIFIER_CATALOG_TEST").as_deref() != Ok(test_name) {
+            // Isolate the process-global request plane and give the debug routing future
+            // more than libtest's default 2 MiB stack, like the prefill routing tests.
+            let output = tokio::time::timeout(
+                Duration::from_secs(30),
+                tokio::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", test_name, "--nocapture"])
+                    .env("DYNAMO_CLASSIFIER_CATALOG_TEST", test_name)
+                    .env("RUST_MIN_STACK", (4 * 1024 * 1024).to_string())
+                    .env("DYN_TCP_RPC_HOST", "127.0.0.1")
+                    .env("DYN_TCP_RPC_PORT", "0")
+                    .env("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1")
+                    .env("DYN_TCP_RESPONSE_STREAM_PORT", "0")
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await
+            .expect("classifier subprocess timed out")
+            .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        use dynamo_kv_router::scheduling::{
+            ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct RejectingClassifier {
+            instance: usize,
+            calls: usize,
+            events: tokio::sync::mpsc::UnboundedSender<(usize, &'static str, usize)>,
+        }
+        #[async_trait]
+        impl RequestClassifier for RejectingClassifier {
+            fn classify(&mut self, _request: ClassifyRequest) -> ClassifyFuture {
+                self.calls += 1;
+                self.events
+                    .send((self.instance, "classify", self.calls))
+                    .unwrap();
+                Box::pin(async { Err(Box::new(std::io::Error::other("catalog rejection")) as _) })
+            }
+
+            async fn on_event(&mut self, event: ClassifyEvent) {
+                if matches!(event, ClassifyEvent::Aborted { .. }) {
+                    self.events
+                        .send((self.instance, "aborted", self.calls))
+                        .unwrap();
+                }
+            }
+        }
+
+        let router_config = RouterConfig::new(
+            RouterMode::KV,
+            dynamo_kv_router::KvRouterConfig {
+                use_kv_events: false,
+                ..Default::default()
+            },
+        );
+        let instances = Arc::new(AtomicUsize::new(0));
+        let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let factory: RequestClassifierFactory = Arc::new({
+            let instances = instances.clone();
+            move || {
+                Box::new(RejectingClassifier {
+                    instance: instances.fetch_add(1, Ordering::Relaxed),
+                    calls: 0,
+                    events: events.clone(),
+                })
+            }
+        });
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let mut watcher = ModelWatcher::new(
+            drt,
+            Arc::new(ModelManager::new()),
+            router_config,
+            0,
+            None,
+            None,
+            None,
+            Arc::new(Metrics::new()),
+        );
+        watcher.set_request_classifier_factory(Some(factory));
+
+        for instance in 0..2 {
+            let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+            let mut card = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+            card.set_name(&format!("classifier-model-{instance}"));
+            card.model_type = ModelType::Chat;
+            card.model_input = ModelInput::Tokens;
+            card.kv_cache_block_size = 16;
+            card.worker_type = Some(WorkerType::Aggregated);
+            let DiscoveryEvent::Added(discovery) = discovered_card("classifier-test", 1, &card)
+            else {
+                unreachable!()
+            };
+            let desired = watcher
+                .normalize(discovery, &NamespaceFilter::Global)
+                .unwrap()
+                .unwrap();
+            let spec = GroupSpec {
+                key: desired.group_key.clone(),
+                mdc_checksum: desired.mdc_checksum.clone(),
+                generation: instance as u64 + 1,
+                representative: desired,
+            };
+            let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
+            let cancellation = runtime.child_token();
+            let prepared = watcher
+                .prepare_worker_set(&spec, admission_rx, cancellation.clone())
+                .await
+                .unwrap();
+            let engine = prepared
+                .worker_set
+                .as_ref()
+                .unwrap()
+                .chat_engine
+                .as_ref()
+                .unwrap();
+            let request =
+                serde_json::from_value::<NvCreateChatCompletionRequest>(serde_json::json!({
+                    "model": card.display_name,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "stream": true,
+                }))
+                .unwrap();
+            assert!(
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    engine.generate(SingleIn::new(request))
+                )
+                .await
+                .expect("request stalled before classifier rejection")
+                .is_err()
+            );
+            for event in ["classify", "aborted"] {
+                let observed = tokio::time::timeout(Duration::from_secs(5), received.recv())
+                    .await
+                    .unwrap();
+                assert_eq!(observed, Some((instance, event, 1)));
+            }
+            cancellation.cancel();
+        }
+        assert_eq!(instances.load(Ordering::Relaxed), 2);
+        runtime.shutdown();
     }
 
     #[tokio::test]

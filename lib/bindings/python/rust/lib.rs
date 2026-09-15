@@ -290,6 +290,21 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
+pub(crate) fn request_classifier_factory(
+    config: &KvRouterConfig,
+) -> anyhow::Result<Option<dynamo_kv_router::scheduling::RequestClassifierFactory>> {
+    #[cfg(feature = "custom-policy")]
+    if let Some(registry) = WORKER_SELECTION_POLICY_REGISTRY.get() {
+        return Ok(registry.resolve_request_classifier(config)?);
+    }
+    if config.request_classifier_config()?.is_some() {
+        anyhow::bail!(
+            "request_classifier is configured, but no router plugin catalog is installed; rebuild with --features custom-policy"
+        );
+    }
+    Ok(None)
+}
+
 pub(crate) fn worker_selection_policy_factory(
     config: &KvRouterConfig,
 ) -> anyhow::Result<Option<WorkerSelectionPolicyFactory>> {

@@ -1883,6 +1883,11 @@ async fn create_kv_router_from_endpoint(
     prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
     worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
 ) -> anyhow::Result<RsManagedKvRouter> {
+    let request_classifier_factory = kv_router_config
+        .as_ref()
+        .map(crate::request_classifier_factory)
+        .transpose()?
+        .flatten();
     // Create ModelManager and use it to create KvRouter (ensures registration)
     let model_manager = Arc::new(llm_rs::discovery::ModelManager::new());
     let endpoint_id = endpoint.id();
@@ -2058,6 +2063,10 @@ async fn create_kv_router_from_endpoint(
             )
             .await?
     };
+
+    if let Some(factory) = request_classifier_factory {
+        kv_router.install_request_classifier(factory())?;
+    }
 
     Ok(llm_rs::kv_router::ManagedKvRouter::new(
         load_context,
