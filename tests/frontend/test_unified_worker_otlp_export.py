@@ -13,6 +13,7 @@ with its attributes intact.
 
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -29,6 +30,7 @@ from tests.utils.managed_process import DynamoFrontendProcess
 from tests.utils.otel import (
     get_engine_generate_roles,
     get_span_attribute,
+    has_complete_span_chain,
     wait_for_engine_generate_count,
 )
 
@@ -276,6 +278,113 @@ def test_client_cancellation_keeps_request_spans_unset(
     assert any(
         event.name == "request cancellation received" for event in worker.events
     ), "worker span is missing its upstream cancellation event"
+
+
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+@pytest.mark.parametrize("event_plane", ["zmq"], indirect=True)
+@pytest.mark.parametrize("num_system_ports", [3], indirect=True)
+@pytest.mark.parametrize("cancel", [False, True], ids=["complete", "cancel"])
+def test_python_routers_preserve_trace_and_worker_cancellation(
+    sample_worker_with_python_routers,
+    otlp_collector,
+    cancel,
+):
+    """Cross real Python/PyO3 routers; inspect exported spans before teardown."""
+    collector, _ = otlp_collector
+    trace_id = "55555555555555555555555555555555"
+    inbound_span_id = "6666666666666666"
+    request_id = "otlp-python-router"
+    with _send_chat_completions_with_headers(
+        sample_worker_with_python_routers,
+        headers={
+            "traceparent": f"00-{trace_id}-{inbound_span_id}-01",
+            "x-request-id": request_id,
+        },
+        max_tokens=1000 if cancel else 5,
+        stream=True,
+    ) as response:
+        assert response.status_code == 200, response.text
+        data_lines = (
+            line for line in response.iter_lines() if line.startswith(b"data:")
+        )
+        for line in data_lines:
+            assert line != b"data: [DONE]", "stream finished without a generated token"
+            chunk = json.loads(line.removeprefix(b"data:"))
+            if any(
+                choice.get("delta", {}).get("content") for choice in chunk["choices"]
+            ):
+                break
+        else:
+            pytest.fail("no generated token before cancellation")
+        if not cancel:
+            assert b"data: [DONE]" in list(data_lines), "stream did not finish"
+
+    # Natural completion takes ~50s in the cancellation case. Requiring the
+    # worker's exported span within 20s, while all services are still alive,
+    # excludes natural completion and teardown-induced cancellation.
+    deadline = time.monotonic() + 20.0
+    while time.monotonic() < deadline:
+        spans = collector.spans_for_trace_id(trace_id)
+        roots = [span for span in spans if span.name == "http-request"]
+        dispatches = [
+            span
+            for span in spans
+            if span.name == "client_request"
+            and get_span_attribute(span, "operation")
+            == "kv_router.generate_from_request"
+        ]
+        if (
+            sum(span.name == "router.route_request" for span in spans) == 2
+            and sum(span.name == "kv_router.route_request" for span in spans) == 1
+            and sum(span.name == "handle_payload" for span in spans) == 3
+            and len(roots) == 1
+            and len(dispatches) == 1
+            and has_complete_span_chain(
+                spans, span_id=dispatches[0].span_id, ancestor_id=roots[0].span_id
+            )
+        ):
+            break
+        time.sleep(0.2)
+
+    routes = [span for span in spans if span.name == "router.route_request"]
+    kv_routes = [span for span in spans if span.name == "kv_router.route_request"]
+    handlers = [span for span in spans if span.name == "handle_payload"]
+    assert len(roots) == 1, f"expected one HTTP span, got {len(roots)}"
+    assert len(routes) == 2, f"expected frontend/global route spans, got {len(routes)}"
+    assert len(kv_routes) == 1, "missing downstream KV route span"
+    assert (
+        len(handlers) == 3
+    ), f"expected global/local/worker handler spans, got {handlers}"
+    assert len(dispatches) == 1, "missing real PyO3 KvRouter dispatch span"
+    root = roots[0]
+    dispatch = dispatches[0]
+    assert root.parent_span_id == bytes.fromhex(inbound_span_id)
+
+    # Follow exported parent IDs, rather than assuming that matching trace IDs
+    # or mocked context identity proves the Python boundary preserved parentage.
+    assert has_complete_span_chain(
+        spans, span_id=dispatch.span_id, ancestor_id=root.span_id
+    ), "PyO3 dispatch is not a descendant of the inbound HTTP span"
+
+    route = kv_routes[0]
+    assert (
+        route.parent_span_id == dispatch.span_id
+    ), "KV route is not a child of the PyO3 dispatch"
+    assert route.kind == trace_pb2.Span.SPAN_KIND_CLIENT
+    workers = [span for span in handlers if span.parent_span_id == route.span_id]
+    assert len(workers) == 1, "worker is not a child of the Python route"
+    worker = workers[0]
+    outcome = "cancelled" if cancel else "success"
+    assert get_span_attribute(root, "request.outcome") == outcome
+    assert get_span_attribute(route, "request.outcome") == outcome
+    assert get_span_attribute(dispatch, "request_id") == get_span_attribute(
+        root, "request_id"
+    )
+    assert get_span_attribute(dispatch, "x_request_id") == request_id
+    if cancel:
+        assert any(
+            event.name == "request cancellation received" for event in worker.events
+        ), "cancellation did not reach the downstream worker through Python routers"
 
 
 def test_unsampled_traceparent_does_not_export_spans_over_otlp(
