@@ -1911,6 +1911,105 @@ class TestEmbeddingWorkerHandlerCancellation:
                 pass
 
 
+class TestWeightVersionObservation:
+    @pytest.fixture
+    def handler(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler._weight_version = "checkpoint-1"
+        handler.runtime = MagicMock()
+        handler.engine_client = SimpleNamespace(is_paused=AsyncMock(return_value=False))
+        return handler
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("paused", [False, True])
+    @pytest.mark.parametrize("body", [None, {}])
+    async def test_returns_version_and_engine_pause_state(self, handler, paused, body):
+        handler._paused = not paused
+        handler.engine_client.is_paused.return_value = paused
+
+        response = await handler.get_weight_version(body)
+
+        assert response == {
+            "status": "ok",
+            "version": "checkpoint-1",
+            "paused": paused,
+        }
+        assert response["paused"] is paused
+        handler.engine_client.is_paused.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("paused", [None, 0, 1, "false", [], {}])
+    async def test_rejects_non_bool_pause_state(self, handler, paused):
+        handler.engine_client.is_paused.return_value = paused
+
+        assert await handler.get_weight_version({}) == {
+            "status": "error",
+            "message": "engine returned an invalid pause state",
+        }
+        assert not handler._pause_lock.locked()
+
+    @pytest.mark.asyncio
+    async def test_engine_dead_uses_existing_shutdown(self, handler, monkeypatch):
+        handler.engine_client.is_paused.side_effect = mod.EngineDeadError("engine dead")
+        exit_mock = MagicMock(side_effect=SystemExit(1))
+        monkeypatch.setattr(mod.os, "_exit", exit_mock)
+
+        with pytest.raises(SystemExit) as exc_info:
+            await handler.get_weight_version({})
+
+        assert exc_info.value.code == 1
+        handler.runtime.shutdown.assert_called_once_with()
+        exit_mock.assert_called_once_with(1)
+        assert not handler._pause_lock.locked()
+
+    @pytest.mark.asyncio
+    async def test_query_error_returns_error(self, handler):
+        handler.engine_client.is_paused.side_effect = RuntimeError("query failed")
+
+        assert await handler.get_weight_version({}) == {
+            "status": "error",
+            "message": "query failed",
+        }
+        handler.runtime.shutdown.assert_not_called()
+        assert not handler._pause_lock.locked()
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_observation_serializes_with_mutations(self, handler):
+        async def read_pause_state():
+            assert handler._pause_lock.locked()
+            return True
+
+        handler.engine_client.is_paused.side_effect = read_pause_state
+        async with handler._pause_lock:
+            observation = asyncio.create_task(handler.get_weight_version({}))
+            await asyncio.sleep(0)
+            pending = not observation.done()
+            query_started = handler.engine_client.is_paused.await_count > 0
+            handler._weight_version = "checkpoint-2"
+
+        response = await asyncio.wait_for(observation, timeout=1)
+
+        assert pending
+        assert not query_started
+        assert response == {
+            "status": "ok",
+            "version": "checkpoint-2",
+            "paused": True,
+        }
+        assert not handler._pause_lock.locked()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("body", [[], "invalid", 1])
+    async def test_rejects_non_object_body(self, handler, body):
+        assert await handler.get_weight_version(body) == {
+            "status": "error",
+            "message": "request body must be a JSON object",
+        }
+        handler.engine_client.is_paused.assert_not_awaited()
+
+
 class TestRLAdminRouteHardening:
     """Regressions for the codex round-2 RL admin fixes."""
 
