@@ -422,9 +422,10 @@ func TestDCDAndDirectDisaggregatedSetRenderingParity(t *testing.T) {
 		},
 	}
 	checkpointInfo := &checkpoint.CheckpointInfo{
-		Enabled:          true,
-		AutomaticCapture: true,
-		StartupPolicy:    nvidiacomv1alpha1.CheckpointStartupPolicyImmediate,
+		Enabled:                   true,
+		AutomaticCapture:          true,
+		StartupPolicy:             nvidiacomv1alpha1.CheckpointStartupPolicyImmediate,
+		SnapshotCompatibilityHash: "compatibility-v1",
 		AutomaticSnapshotJob: &checkpoint.SnapshotJobReference{
 			Name: "render-parity-checkpoint",
 			UID:  types.UID("render-parity-checkpoint-uid"),
