@@ -96,6 +96,60 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     LIBSTDCPP=/usr/lib/${ARCH_ALT}-linux-gnu/libstdc++.so.6 && \
     test -f "$LIBSTDCPP" && ln -sf "$LIBSTDCPP" /opt/dynamo/libstdc++.so.6
 
+# Upstream's Triton is the NGC PyTorch build (3.7.0+git...nv26.5), not the PyPI
+# wheel TensorRT-LLM pulled in through 1.3.0rc24 (`triton==3.6.0`). rc25 pins
+# `triton==3.7.0`, which PEP 440 treats as satisfied by the NGC build's
+# `3.7.0+...` local version, so pip no longer installs the wheel over it. The NGC
+# build ships triton/backends/nvidia/ WITHOUT the include/ (cuda.h) and bin/
+# (ptxas, cuobjdump, nvdisasm) trees the wheel vendors, and relies on image ENV
+# instead: TRITON_CUDACRT_PATH, TRITON_CUDART_PATH, TRITON_PTXAS_PATH, ... all
+# pointing into /usr/local/cuda. Image ENV never reaches the MPI ranks the
+# operator starts over ssh on multinode worker pods -- only mpirun's -x
+# allowlist does -- so Triton's cuda_utils JIT there ran gcc without
+# -I/usr/local/cuda/include, and any multinode TRT-LLM deploy whose worker-pod
+# ranks JIT a Triton kernel died in warmup with "fatal error: cuda.h: No such
+# file or directory" (GH-14864 / NVBug 6772753). Leader-pod ranks and
+# single-node deploys inherit the ENV and were unaffected.
+#
+# Restore the wheel layout so Triton's env-free defaults resolve
+# (backends/nvidia/driver.py: include_dirs = [dirname/include]; knobs.py:
+# env_nvidia_tool default_path = backends/nvidia/bin/<tool>). Per-file symlinks
+# inside real directories, NOT a directory symlink: pip unlinks an existing
+# destination before writing, so a later `pip install triton` (PyPI wheel,
+# which vendors these headers and tools) replaces the links with real files,
+# whereas a directory symlink would make that install write THROUGH into
+# /usr/local/cuda and overwrite the toolkit's own headers. driver.c includes
+# only cuda.h from CUDA; the JIT check below fails the build if that changes.
+# Guarded both ways: a base that already ships the real trees is left
+# untouched, and the build fails if Triton's cuda_utils JIT -- the exact code
+# path that failed -- cannot compile and load with every TRITON_*_PATH
+# variable (and CPATH) unset. There is no GPU at build time, so the check
+# links and loads against the toolkit's libcuda stub and keeps Triton's cache
+# out of $HOME. This lets launchers such as ssh and mpirun use Triton's default
+# paths even when they do not propagate the image ENV.
+RUN set -eu; \
+    tb=$(/usr/bin/python3 -c 'import os, triton.backends.nvidia as b; print(os.path.dirname(b.__file__))'); \
+    echo "triton nvidia backend: $tb"; \
+    mkdir -p "$tb/include" "$tb/bin"; \
+    for hdr in cuda.h; do \
+        p="$tb/include/$hdr"; \
+        [ -e "$p" ] || [ -L "$p" ] || ln -s "/usr/local/cuda/include/$hdr" "$p"; \
+        test -f "$p"; \
+    done; \
+    for tool in ptxas cuobjdump nvdisasm; do \
+        p="$tb/bin/$tool"; \
+        [ -e "$p" ] || [ -L "$p" ] || ln -s "/usr/local/cuda/bin/$tool" "$p"; \
+        test -x "$p"; \
+    done; \
+    chk=/tmp/dynamo-triton-check; \
+    mkdir -p "$chk/stubs" && ln -sf /usr/local/cuda/lib64/stubs/libcuda.so "$chk/stubs/libcuda.so.1"; \
+    env -u TRITON_CUDACRT_PATH -u TRITON_CUDART_PATH -u TRITON_PTXAS_PATH -u TRITON_CUOBJDUMP_PATH -u TRITON_NVDISASM_PATH \
+        -u CPATH -u C_INCLUDE_PATH \
+        TRITON_HOME="$chk/home" TRITON_CACHE_DIR="$chk/cache" TRITON_LIBCUDA_PATH="$chk/stubs" \
+        LD_LIBRARY_PATH="$chk/stubs:${LD_LIBRARY_PATH}" \
+        /usr/bin/python3 -c 'from triton import knobs; from triton.backends.nvidia.driver import CudaUtils; CudaUtils(); print("triton env-free cuda_utils JIT ok; tools:", knobs.nvidia.ptxas.path, knobs.nvidia.cuobjdump.path, knobs.nvidia.nvdisasm.path)'; \
+    rm -rf "$chk"
+
 # Bring base-image OS packages up to the current patch releases published in
 # the distro archives. --only-upgrade skips anything not already installed, so
 # no new packages are added; versions are left unpinned so a cache-busted
@@ -665,6 +719,14 @@ RUN rm -rf /usr/local/cuda-*/NsightSystems-cli-*/target-linux-*/plugins/efa_metr
         find /usr/local -type d -name efa_metrics >&2; \
         exit 1; \
     fi
+
+# Post-overlay guard for the Triton wheel-layout symlinks runtime_full created
+# (GH-14864). The env-free JIT check there ran before the overlay; assert here,
+# where the shipped filesystem is assembled, that the links came through and
+# still resolve. Existence checks only -- `test -f`/`-x` follow symlinks.
+RUN tb=$(/usr/bin/python3 -c 'import os, triton.backends.nvidia as b; print(os.path.dirname(b.__file__))') && \
+    test -f "$tb/include/cuda.h" && \
+    test -x "$tb/bin/ptxas" && test -x "$tb/bin/cuobjdump" && test -x "$tb/bin/nvdisasm"
 
 # Mirrors runtime_full's ENV — must stay in sync. Re-declaration is required
 # because `FROM ${RUNTIME_IMAGE}` here does not inherit runtime_full's config.
