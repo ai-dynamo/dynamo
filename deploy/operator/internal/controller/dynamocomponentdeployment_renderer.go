@@ -121,7 +121,11 @@ func (r *dcdWorkloadRenderer) renderMultinodePodTemplateSpecsForDGDComponent(
 	checkpointInfo *checkpoint.CheckpointInfo,
 ) (*corev1.PodTemplateSpec, *corev1.PodTemplateSpec, error) {
 	podLabels := dynamo.GetDGDComponentResourceLabels(dgd, componentName, component)
-	podAnnotations := dynamo.GetDGDComponentResourceAnnotations(dgd, componentName, component)
+	podAnnotations := dynamo.ApplyDGDComponentTopologyAnnotations(
+		dynamo.GetDGDComponentResourceAnnotations(dgd, componentName, component),
+		dgd,
+		component,
+	)
 	podLabels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dgd.Name
 	podLabels[commonconsts.KubeLabelDynamoComponent] = componentName
 	podLabels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
@@ -137,7 +141,7 @@ func (r *dcdWorkloadRenderer) renderMultinodePodTemplateSpecsForDGDComponent(
 	if err != nil {
 		return nil, nil, err
 	}
-	containerGPUs := dynamo.ContainerGPUCount(func() (int64, error) {
+	containerGPUs := sync.OnceValues(func() (int64, error) {
 		return dynamo.ResolveContainerGPUs(ctx, r.reader, dgd.Namespace, component)
 	})
 
@@ -292,80 +296,54 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 	role dynamo.Role,
 	containerGPUs dynamo.ContainerGPUCount,
 ) (*corev1.PodTemplateSpec, error) {
-	component := &dcd.Spec.DynamoComponentDeploymentSharedSpec
+	component := dynamo.ConvertDynamoComponentDeploymentToSpec(dcd)
 	componentType, err := r.getDCDWorkloadComponentType(ctx, dcd)
 	if err != nil {
 		return nil, err
 	}
 	podLabels := dynamo.GetDCDKubeLabels(dcd)
 	podAnnotations := dynamo.GetDCDKubeAnnotations(dcd)
-	kubeName := dcd.Name
-
-	// Convert user-provided metrics annotation into controller-managed label.
-	// By default (no annotation), metrics are enabled.
-	if podAnnotations[commonconsts.KubeAnnotationEnableMetrics] != commonconsts.KubeLabelValueFalse {
-		podLabels[commonconsts.KubeLabelMetricsEnabled] = commonconsts.KubeLabelValueTrue
-	}
-	if parentName := dcd.GetLabels()[commonconsts.KubeLabelDynamoGraphDeploymentName]; parentName != "" {
-		podLabels[commonconsts.KubeLabelDynamoGraphDeploymentName] = parentName
-	} else if parentName := dcd.GetParentGraphDeploymentName(); parentName != "" {
+	if parentName := dcd.GetParentGraphDeploymentName(); podLabels[commonconsts.KubeLabelDynamoGraphDeploymentName] == "" && parentName != "" {
 		podLabels[commonconsts.KubeLabelDynamoGraphDeploymentName] = parentName
 	}
-	if componentType != "" {
-		podLabels[commonconsts.KubeLabelDynamoComponentType] = componentType
-	}
-	if componentName := dynamo.GetDCDComponentName(dcd); componentName != "" {
-		podLabels[commonconsts.KubeLabelDynamoComponent] = componentName
-	}
-	if dynamoNamespace := dynamo.GetDCDDynamoNamespace(dcd); dynamoNamespace != "" {
-		podLabels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
-	}
-	if workerHash := dcd.GetLabels()[commonconsts.KubeLabelDynamoWorkerHash]; workerHash != "" {
-		podLabels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
+	if workerHash := dynamo.GetDCDEffectiveWorkerHash(dcd); workerHash != "" && dynamo.IsWorkerComponent(componentType) {
+		if component.PodTemplate == nil {
+			component.PodTemplate = &corev1.PodTemplateSpec{}
+		}
+		if component.PodTemplate.Labels == nil {
+			component.PodTemplate.Labels = map[string]string{}
+		}
+		component.PodTemplate.Labels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
 	}
 
 	checkpointInfo, err := r.resolveCheckpointInfo(ctx, dcd, component)
 	if err != nil {
 		return nil, err
 	}
-
-	podSpec, err := dynamo.GenerateBasePodSpecForController(
-		dcd,
-		r.dockerSecretRetriever,
-		r.config,
-		role,
-		commonconsts.MultinodeDeploymentTypeLWS,
-		containerGPUs,
-		dynamo.GenerateBasePodSpecForControllerOptions{WorkloadComponentType: nvidiacomv1beta1.ComponentType(componentType)},
-	)
+	backendFramework, err := dynamo.GetBackendFrameworkFromDynamoComponent(dcd)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to generate base pod spec")
+		return nil, err
 	}
-	if len(podSpec.Containers) == 0 {
-		return nil, errors.New("no containers found in base pod spec")
+	parentGraphDeploymentName := dcd.GetParentGraphDeploymentName()
+	if parentGraphDeploymentName == "" {
+		parentGraphDeploymentName = dcd.Name
 	}
-	podLabels[commonconsts.KubeLabelDynamoSelector] = kubeName
-	if commonController.IsK8sDiscoveryEnabled(r.config.Discovery.Backend, podAnnotations) {
-		podLabels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
-		podLabels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
-	}
-	if r.runtimeConfig.Gate.Enabled(features.Checkpoint) {
-		if err := checkpoint.ApplyRestoreCandidateMetadata(podAnnotations, checkpointInfo); err != nil {
-			return nil, errors.Wrap(err, "failed to apply checkpoint candidate metadata")
-		}
-	}
-	if podSpec.ServiceAccountName == "" {
-		serviceAccounts := &corev1.ServiceAccountList{}
-		if err := r.reader.List(ctx, serviceAccounts, client.InNamespace(dcd.Namespace), client.MatchingLabels{commonconsts.KubeLabelDynamoComponentPod: commonconsts.KubeLabelValueTrue}); err != nil {
-			return nil, errors.Wrapf(err, "failed to list service accounts in namespace %s", dcd.Namespace)
-		}
-		if len(serviceAccounts.Items) > 0 {
-			podSpec.ServiceAccountName = serviceAccounts.Items[0].Name
-		} else {
-			podSpec.ServiceAccountName = DefaultServiceAccountName
-		}
-	}
-	return &corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: podLabels, Annotations: podAnnotations}, Spec: *podSpec}, nil
+	return r.generateComponentPodTemplateSpec(
+		ctx,
+		component,
+		podLabels,
+		podAnnotations,
+		componentType,
+		dcd.Name,
+		parentGraphDeploymentName,
+		dcd.Namespace,
+		dynamo.GetDCDComponentName(dcd),
+		dynamo.GetDCDDynamoNamespace(dcd),
+		backendFramework,
+		role,
+		checkpointInfo,
+		containerGPUs,
+	)
 }
 
 func (r *dcdWorkloadRenderer) generateComponentPodTemplateSpec(
@@ -394,9 +372,6 @@ func (r *dcdWorkloadRenderer) generateComponentPodTemplateSpec(
 
 	if podAnnotations[commonconsts.KubeAnnotationEnableMetrics] != commonconsts.KubeLabelValueFalse {
 		podLabels[commonconsts.KubeLabelMetricsEnabled] = commonconsts.KubeLabelValueTrue
-	}
-	if parentGraphDeploymentName != "" {
-		podLabels[commonconsts.KubeLabelDynamoGraphDeploymentName] = parentGraphDeploymentName
 	}
 	if componentType != "" {
 		podLabels[commonconsts.KubeLabelDynamoComponentType] = componentType

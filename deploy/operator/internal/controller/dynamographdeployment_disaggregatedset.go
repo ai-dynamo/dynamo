@@ -21,10 +21,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"sort"
-	"strconv"
 	"strings"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -72,7 +72,13 @@ const (
 	dynamoGraphDeploymentKind           = "DynamoGraphDeployment"
 	dynamoComponentDeploymentKind       = "DynamoComponentDeployment"
 	resourceNotFoundReason              = "resource not found"
+	managedServiceMetadataAnnotation    = "nvidia.com/dynamo-managed-service-metadata"
 )
+
+type managedServiceMetadata struct {
+	Labels      []string `json:"labels,omitempty"`
+	Annotations []string `json:"annotations,omitempty"`
+}
 
 type disaggregatedSetSelection struct {
 	componentToRole map[string]string
@@ -863,8 +869,14 @@ func (r *disaggregatedSetWorkloadsReconciler) syncDGDStableService(
 		if !apierrors.IsNotFound(err) {
 			return err
 		}
-		setDGDControllerOwnerReference(dgd, desired)
-		if err := r.Create(ctx, desired); err != nil {
+		created := desired.DeepCopy()
+		var metadataErr error
+		created.Labels, created.Annotations, metadataErr = reconcileDGDStableServiceMetadata(nil, desired)
+		if metadataErr != nil {
+			return metadataErr
+		}
+		setDGDControllerOwnerReference(dgd, created)
+		if err := r.Create(ctx, created); err != nil {
 			return err
 		}
 		return nil
@@ -886,16 +898,11 @@ func (r *disaggregatedSetWorkloadsReconciler) syncDGDStableService(
 	updated := existing.DeepCopy()
 	updated.Spec = *desired.Spec.DeepCopy()
 	normalizeDGDStableServiceSpec(&updated.Spec)
-	updated.Labels = maps.Clone(existing.Labels)
-	if updated.Labels == nil {
-		updated.Labels = map[string]string{}
+	var metadataErr error
+	updated.Labels, updated.Annotations, metadataErr = reconcileDGDStableServiceMetadata(existing, desired)
+	if metadataErr != nil {
+		return metadataErr
 	}
-	maps.Copy(updated.Labels, desired.Labels)
-	updated.Annotations = maps.Clone(existing.Annotations)
-	if updated.Annotations == nil {
-		updated.Annotations = map[string]string{}
-	}
-	maps.Copy(updated.Annotations, desired.Annotations)
 	setDGDControllerOwnerReference(dgd, updated)
 
 	// These fields are allocated by the apiserver and must survive a desired
@@ -916,6 +923,58 @@ func (r *disaggregatedSetWorkloadsReconciler) syncDGDStableService(
 		return err
 	}
 	return nil
+}
+
+// reconcileDGDStableServiceMetadata removes fields recorded as controller-owned
+// by the previous reconcile, applies the complete desired metadata, and records
+// the new ownership inventory. Metadata not present in the inventory is retained.
+func reconcileDGDStableServiceMetadata(
+	existing *corev1.Service,
+	desired *corev1.Service,
+) (map[string]string, map[string]string, error) {
+	labels := map[string]string{}
+	annotations := map[string]string{}
+	previous := managedServiceMetadata{}
+	if existing != nil {
+		maps.Copy(labels, existing.Labels)
+		maps.Copy(annotations, existing.Annotations)
+		if raw := existing.Annotations[managedServiceMetadataAnnotation]; raw != "" {
+			if err := json.Unmarshal([]byte(raw), &previous); err != nil {
+				return nil, nil, fmt.Errorf("decode managed Service metadata inventory: %w", err)
+			}
+		}
+	}
+	for _, key := range previous.Labels {
+		delete(labels, key)
+	}
+	for _, key := range previous.Annotations {
+		delete(annotations, key)
+	}
+
+	desiredAnnotations := maps.Clone(desired.Annotations)
+	delete(desiredAnnotations, managedServiceMetadataAnnotation)
+	maps.Copy(labels, desired.Labels)
+	maps.Copy(annotations, desiredAnnotations)
+
+	next := managedServiceMetadata{
+		Labels:      sortedMetadataKeys(desired.Labels),
+		Annotations: sortedMetadataKeys(desiredAnnotations),
+	}
+	raw, err := json.Marshal(next)
+	if err != nil {
+		return nil, nil, fmt.Errorf("encode managed Service metadata inventory: %w", err)
+	}
+	annotations[managedServiceMetadataAnnotation] = string(raw)
+	return labels, annotations, nil
+}
+
+func sortedMetadataKeys(metadata map[string]string) []string {
+	keys := make([]string, 0, len(metadata))
+	for key := range metadata {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // normalizeDGDStableServiceSpec applies the defaults that the apiserver adds
@@ -1046,7 +1105,11 @@ func (r *disaggregatedSetWorkloadsReconciler) deleteOwnedSelectedDCDs(
 	}
 	for i := range dcds {
 		dcd := &dcds[i]
-		if err := r.Delete(ctx, dcd); err != nil && !apierrors.IsNotFound(err) {
+		deleteOptions := []client.DeleteOption{}
+		if dcd.UID != "" {
+			deleteOptions = append(deleteOptions, client.Preconditions{UID: &dcd.UID})
+		}
+		if err := r.Delete(ctx, dcd, deleteOptions...); err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("failed to delete selected DynamoComponentDeployment %s/%s: %w", dcd.Namespace, dcd.Name, err)
 		}
 	}
@@ -1068,17 +1131,14 @@ func (r *disaggregatedSetWorkloadsReconciler) deleteStaleDisaggregatedSetService
 		if !isControlledByBetaDGD(service, dgd) {
 			continue
 		}
-		// The controller owner is the authoritative scope; labels only classify
-		// the owned Service as a component or model endpoint.
-		componentName := service.Labels[consts.KubeLabelDynamoComponent]
-		modelHash := service.Labels[consts.KubeLabelDynamoBaseModelHash]
-		if componentName == "" && modelHash == "" {
-			continue
-		}
 		if _, desired := desiredServiceNames[service.Name]; desired {
 			continue
 		}
-		if err := r.Delete(ctx, service); err != nil && !apierrors.IsNotFound(err) {
+		deleteOptions := []client.DeleteOption{}
+		if service.UID != "" {
+			deleteOptions = append(deleteOptions, client.Preconditions{UID: &service.UID})
+		}
+		if err := r.Delete(ctx, service, deleteOptions...); err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("failed to delete stale Service %s/%s: %w", service.Namespace, service.Name, err)
 		}
 	}
@@ -1231,24 +1291,13 @@ func disaggregatedSetSliceCount(ds *unstructured.Unstructured) int32 {
 	return int32(value)
 }
 
-func disaggregatedSetChildSlice(labels map[string]string) (int, bool) {
-	value := labels[disaggregatedsetv1.SliceLabelKey]
-	if value == "" {
-		return 0, true
-	}
-	slice, err := strconv.Atoi(value)
-	return slice, err == nil && slice >= 0
-}
-
 func (r *disaggregatedSetWorkloadsReconciler) checkDisaggregatedSetReadiness(
 	ctx context.Context,
 	ds *unstructured.Unstructured,
 	selection disaggregatedSetSelection,
 ) (bool, string, map[string]nvidiacomv1beta1.ComponentReplicaStatus, error) {
 	children := &leaderworkersetv1.LeaderWorkerSetList{}
-	if err := r.List(ctx, children, client.InNamespace(ds.GetNamespace()), client.MatchingLabels{
-		disaggregatedsetv1.SetNameLabelKey: ds.GetName(),
-	}); err != nil {
+	if err := r.List(ctx, children, client.InNamespace(ds.GetNamespace())); err != nil {
 		return false, "", nil, fmt.Errorf("failed to list DisaggregatedSet child LeaderWorkerSets: %w", err)
 	}
 	targetRevision, err := disaggregatedSetTargetRevision(ds)
@@ -1258,18 +1307,26 @@ func (r *disaggregatedSetWorkloadsReconciler) checkDisaggregatedSetReadiness(
 	targetByIdentity := make(map[disaggregatedSetChildIdentity][]*leaderworkersetv1.LeaderWorkerSet)
 	childrenByRole := make(map[string][]*leaderworkersetv1.LeaderWorkerSet)
 	sliceCount := int(disaggregatedSetSliceCount(ds))
+	expectedIdentityByName := make(map[string]disaggregatedSetChildIdentity, len(selection.componentToRole)*sliceCount)
+	for _, roleName := range selection.componentToRole {
+		for slice := range sliceCount {
+			identity := disaggregatedSetChildIdentity{slice: slice, role: roleName}
+			name := disaggregatedsetutils.GenerateName(ds.GetName(), slice, targetRevision, roleName)
+			expectedIdentityByName[name] = identity
+		}
+	}
 	for i := range children.Items {
 		child := &children.Items[i]
 		if !metav1.IsControlledBy(child, ds) {
 			continue
 		}
-		roleName := child.Labels[disaggregatedsetv1.RoleLabelKey]
-		childrenByRole[roleName] = append(childrenByRole[roleName], child)
-		slice, validSlice := disaggregatedSetChildSlice(child.Labels)
-		if !validSlice || slice >= sliceCount || child.Labels[disaggregatedsetv1.RevisionLabelKey] != targetRevision {
+		identity, target := expectedIdentityByName[child.Name]
+		if !target {
+			roleName := child.Labels[disaggregatedsetv1.RoleLabelKey]
+			childrenByRole[roleName] = append(childrenByRole[roleName], child)
 			continue
 		}
-		identity := disaggregatedSetChildIdentity{slice: slice, role: roleName}
+		childrenByRole[identity.role] = append(childrenByRole[identity.role], child)
 		targetByIdentity[identity] = append(targetByIdentity[identity], child)
 	}
 	if len(disaggregatedSetRoleStatuses(ds)) > 0 && disaggregatedSetStatusHasObservation(ds) {
@@ -1510,15 +1567,22 @@ func newDisaggregatedSetWatchMapper(reader client.Reader) *disaggregatedSetWatch
 }
 
 func (r *disaggregatedSetWatchMapper) MapChildLWSToDGD(ctx context.Context, obj client.Object) []ctrl.Request {
-	setName := obj.GetLabels()[disaggregatedsetv1.SetNameLabelKey]
-	if setName == "" {
+	childOwner := metav1.GetControllerOf(obj)
+	if childOwner == nil ||
+		childOwner.APIVersion != disaggregatedsetv1.GroupVersion.String() ||
+		childOwner.Kind != disaggregatedSetGVK.Kind ||
+		childOwner.Name == "" ||
+		childOwner.UID == "" {
 		return nil
 	}
 	ds := newDisaggregatedSetObject()
-	if err := r.reader.Get(ctx, types.NamespacedName{Name: setName, Namespace: obj.GetNamespace()}, ds); err != nil {
+	if err := r.reader.Get(ctx, types.NamespacedName{Name: childOwner.Name, Namespace: obj.GetNamespace()}, ds); err != nil {
 		if !apierrors.IsNotFound(err) {
 			log.FromContext(ctx).Error(err, "failed to map DisaggregatedSet child LeaderWorkerSet", "leaderWorkerSet", obj.GetName())
 		}
+		return nil
+	}
+	if ds.GetUID() != childOwner.UID {
 		return nil
 	}
 	owner := metav1.GetControllerOf(ds)

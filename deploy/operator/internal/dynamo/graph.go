@@ -505,9 +505,7 @@ func generateSingleDCDFromNormalized(
 	if err := applyDGDComponentAlphaCompatibilityToDCD(parentDGD, componentName, deployment); err != nil {
 		return nil, err
 	}
-	for _, annotationKey := range commonconsts.KubeTopologySourceAnnotationKeys() {
-		delete(deployment.Annotations, annotationKey)
-	}
+	deployment.Annotations = ApplyDGDComponentTopologyAnnotations(deployment.Annotations, parentDGD, component)
 
 	labels := make(map[string]string)
 	maps.Copy(labels, GetPodTemplateLabels(component))
@@ -525,14 +523,6 @@ func generateSingleDCDFromNormalized(
 			labels[commonconsts.KubeLabelDynamoComponentClass] = commonconsts.ComponentClassWorker
 			podTemplate.Labels[commonconsts.KubeLabelDynamoComponentClass] = commonconsts.ComponentClassWorker
 		}
-	}
-
-	// Topology label controller marker: set on the DCD so it propagates to pods.
-	if shouldApplyKvTransferPolicyToWorkerComponent(component, parentDGD) {
-		if deployment.Annotations == nil {
-			deployment.Annotations = make(map[string]string)
-		}
-		applyKvTransferPolicyTopologyAnnotations(deployment.Annotations, parentDGD.Spec.Experimental.KvTransferPolicy)
 	}
 
 	if component.Replicas != nil {
@@ -578,6 +568,9 @@ func GetDGDComponentResourceLabels(dgd *v1beta1.DynamoGraphDeployment, component
 	if dgd != nil {
 		maps.Copy(labels, dgd.Spec.Labels)
 		maps.Copy(labels, getDGDComponentAlphaLabels(dgd, componentName))
+		if subComponentType := getDGDComponentAlphaSubComponentType(dgd, componentName); subComponentType != "" {
+			labels[commonconsts.KubeLabelDynamoSubComponentType] = subComponentType
+		}
 	}
 	maps.Copy(labels, GetPodTemplateLabels(component))
 	return labels
@@ -2302,6 +2295,28 @@ func applyKvTransferPolicyTopologyAnnotations(annotations map[string]string, kvt
 	if kvt.ClusterTopologyName != "" {
 		annotations[commonconsts.KubeAnnotationTopologyClusterTopologyName] = kvt.ClusterTopologyName
 	}
+}
+
+// ApplyDGDComponentTopologyAnnotations returns workload annotations with the
+// topology source derived from the graph's KV-transfer policy. User-supplied
+// topology source annotations are removed so every workload provider observes
+// the same controller-owned policy.
+func ApplyDGDComponentTopologyAnnotations(
+	annotations map[string]string,
+	dgd *v1beta1.DynamoGraphDeployment,
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+) map[string]string {
+	result := maps.Clone(annotations)
+	if result == nil {
+		result = map[string]string{}
+	}
+	for _, annotationKey := range commonconsts.KubeTopologySourceAnnotationKeys() {
+		delete(result, annotationKey)
+	}
+	if dgd != nil && shouldApplyKvTransferPolicyToWorkerComponent(component, dgd) {
+		applyKvTransferPolicyTopologyAnnotations(result, dgd.Spec.Experimental.KvTransferPolicy)
+	}
+	return result
 }
 
 func workerKvTransferPolicyEnvVars(kvt *v1beta1.KvTransferPolicy) []corev1.EnvVar {

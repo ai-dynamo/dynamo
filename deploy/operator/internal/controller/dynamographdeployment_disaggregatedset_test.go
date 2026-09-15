@@ -10,11 +10,16 @@ import (
 	"strings"
 	"testing"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -105,6 +110,48 @@ func TestSyncDisaggregatedSetPreservesUnmanagedMetadata(t *testing.T) {
 	require.NoError(t, workloads.Get(t.Context(), client.ObjectKeyFromObject(current), persisted))
 	require.Equal(t, "label", persisted.GetLabels()["example.com/keep"])
 	require.Equal(t, "annotation", persisted.GetAnnotations()["example.com/desired"])
+}
+
+func TestSyncDGDStableServicePrunesManagedMetadataAndPreservesExternalMetadata(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, nvidiacomv1beta1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default", UID: "demo-uid"},
+	}
+	desired := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "demo-prefill",
+			Namespace:   dgd.Namespace,
+			Labels:      map[string]string{"example.com/managed-label": "old"},
+			Annotations: map[string]string{"example.com/managed-annotation": "old"},
+		},
+		Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{{Port: 8080}}},
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dgd).Build()
+	workloads := &disaggregatedSetWorkloadsReconciler{Client: kubeClient}
+	require.NoError(t, workloads.syncDGDStableService(t.Context(), dgd, desired))
+
+	stored := &corev1.Service{}
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(desired), stored))
+	stored.Labels["external.example.com/keep"] = "label"
+	stored.Annotations["external.example.com/keep"] = "annotation"
+	require.NoError(t, kubeClient.Update(t.Context(), stored))
+
+	updatedDesired := desired.DeepCopy()
+	updatedDesired.Labels = map[string]string{"example.com/current-label": "new"}
+	updatedDesired.Annotations = map[string]string{"example.com/current-annotation": "new"}
+	require.NoError(t, workloads.syncDGDStableService(t.Context(), dgd, updatedDesired))
+
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(desired), stored))
+	require.NotContains(t, stored.Labels, "example.com/managed-label")
+	require.NotContains(t, stored.Annotations, "example.com/managed-annotation")
+	require.Equal(t, "new", stored.Labels["example.com/current-label"])
+	require.Equal(t, "new", stored.Annotations["example.com/current-annotation"])
+	require.Equal(t, "label", stored.Labels["external.example.com/keep"])
+	require.Equal(t, "annotation", stored.Annotations["external.example.com/keep"])
+	require.NotEmpty(t, stored.Annotations[managedServiceMetadataAnnotation])
 }
 
 func TestDisaggregatedSetServiceSelectorIsRevisionScoped(t *testing.T) {
@@ -216,9 +263,12 @@ func TestDeleteStaleDisaggregatedSetServicesRemovesUndesiredModelService(t *test
 		consts.KubeLabelDynamoBaseModelHash: dynamo.HashModelName("foreign-model"),
 	})
 	foreignModel.OwnerReferences = nil
+	staleUnlabeled := controlledService("demo-unlabeled", nil)
+	foreignUnlabeled := controlledService("foreign-unlabeled", nil)
+	foreignUnlabeled.OwnerReferences = nil
 
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).
-		WithObjects(dgd, desiredComponent, staleComponent, staleModel, foreignModel).
+		WithObjects(dgd, desiredComponent, staleComponent, staleModel, foreignModel, staleUnlabeled, foreignUnlabeled).
 		Build()
 	workloads := newDisaggregatedSetWorkloadsReconciler(
 		k8sClient,
@@ -233,11 +283,11 @@ func TestDeleteStaleDisaggregatedSetServicesRemovesUndesiredModelService(t *test
 	require.NoError(t, workloads.deleteStaleDisaggregatedSetServices(t.Context(), dgd, map[string]struct{}{
 		desiredComponent.Name: {},
 	}))
-	for _, name := range []string{staleComponent.Name, staleModel.Name} {
+	for _, name := range []string{staleComponent.Name, staleModel.Name, staleUnlabeled.Name} {
 		err := k8sClient.Get(t.Context(), client.ObjectKey{Name: name, Namespace: dgd.Namespace}, &corev1.Service{})
 		require.True(t, apierrors.IsNotFound(err))
 	}
-	for _, name := range []string{desiredComponent.Name, foreignModel.Name} {
+	for _, name := range []string{desiredComponent.Name, foreignModel.Name, foreignUnlabeled.Name} {
 		require.NoError(t, k8sClient.Get(t.Context(), client.ObjectKey{Name: name, Namespace: dgd.Namespace}, &corev1.Service{}))
 	}
 }
@@ -359,6 +409,90 @@ func TestSelectDisaggregatedSetComponents(t *testing.T) {
 		_, reason := selectDisaggregatedSetComponents(dgd)
 		require.Contains(t, reason, "scalingAdapter")
 	})
+}
+
+func TestDCDAndDirectDisaggregatedSetRenderingParity(t *testing.T) {
+	dgd := newEnvtestDSHappyPathDGD("render-parity")
+	dgd.Spec.Labels = map[string]string{"example.com/graph-label": "value"}
+	dgd.Spec.Annotations = map[string]string{"example.com/graph-annotation": "value"}
+	dgd.Spec.Experimental = &nvidiacomv1beta1.DynamoGraphDeploymentExperimentalSpec{
+		KvTransferPolicy: &nvidiacomv1beta1.KvTransferPolicy{
+			LabelKey: "topology.kubernetes.io/zone",
+			Domain:   nvidiacomv1beta1.TopologyDomain("zone"),
+		},
+	}
+	checkpointInfo := &checkpoint.CheckpointInfo{
+		Enabled:          true,
+		AutomaticCapture: true,
+		StartupPolicy:    nvidiacomv1alpha1.CheckpointStartupPolicyImmediate,
+		AutomaticSnapshotJob: &checkpoint.SnapshotJobReference{
+			Name: "render-parity-checkpoint",
+			UID:  types.UID("render-parity-checkpoint-uid"),
+		},
+	}
+	dgd.Spec.Components[0].Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+		Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
+	}
+	dgd.Spec.Components[0].PodTemplate.Annotations = map[string]string{}
+	require.NoError(t, checkpoint.ApplyRestoreCandidateMetadata(
+		dgd.Spec.Components[0].PodTemplate.Annotations,
+		checkpointInfo,
+	))
+	rollingUpdateCtx := dynamo.RollingUpdateContext{NewWorkerHash: "worker123"}
+	normalized, err := dynamo.NormalizeDynamoGraphDeploymentComponents(dgd, nil, nil, rollingUpdateCtx)
+	require.NoError(t, err)
+	component := normalized["prefill"]
+	require.NotNil(t, component)
+	dcds, err := dynamo.GenerateDynamoComponentsDeploymentsFromNormalized(
+		dgd,
+		map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{"prefill": component},
+		rollingUpdateCtx,
+	)
+	require.NoError(t, err)
+	dcd := dcds["prefill"]
+	require.NotNil(t, dcd)
+	dcd.SetOwnerReferences([]metav1.OwnerReference{*dgdControllerOwnerReference(dgd)})
+
+	renderScheme := runtime.NewScheme()
+	require.NoError(t, appsv1.AddToScheme(renderScheme))
+	require.NoError(t, corev1.AddToScheme(renderScheme))
+	require.NoError(t, leaderworkersetv1.AddToScheme(renderScheme))
+	kubeClient := fake.NewClientBuilder().WithScheme(renderScheme).Build()
+	config := &configv1alpha1.OperatorConfiguration{
+		Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
+	}
+	renderer := newDCDWorkloadRenderer(
+		kubeClient,
+		config,
+		&commoncontroller.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
+		&mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }},
+	)
+	dcdLeader, dcdWorker, err := renderer.renderMultinodePodTemplateSpecs(t.Context(), dcd)
+	require.NoError(t, err)
+	backendFramework, err := dynamo.BackendFrameworkForComponent(component, dgd)
+	require.NoError(t, err)
+	directLeader, directWorker, err := renderer.renderMultinodePodTemplateSpecsForDGDComponent(
+		t.Context(),
+		dgd,
+		component,
+		"prefill",
+		dcd.Name,
+		dynamo.GetDynamoNamespace(dgd, component),
+		backendFramework,
+		checkpointInfo,
+	)
+	require.NoError(t, err)
+
+	require.Equal(t, dcdLeader, directLeader)
+	require.Equal(t, dcdWorker, directWorker)
+	for _, template := range []*corev1.PodTemplateSpec{directLeader, directWorker} {
+		require.Equal(t, "topology.kubernetes.io/zone", template.Annotations[consts.KubeAnnotationTopologyLabelKey])
+		require.Equal(t, "worker123", template.Labels[consts.KubeLabelDynamoWorkerHash])
+		require.Equal(t, "kubernetes", template.Labels[consts.KubeLabelDynamoDiscoveryBackend])
+		require.Equal(t, "value", template.Labels["example.com/graph-label"])
+		require.Equal(t, "value", template.Annotations["example.com/graph-annotation"])
+		require.Equal(t, "render-parity-checkpoint", template.Annotations[consts.CheckpointNameAnnotation])
+	}
 }
 
 func TestDisaggregatedSetChildNamesFitDNSLabelLimit(t *testing.T) {
@@ -544,14 +678,15 @@ func TestCheckDisaggregatedSetReadinessTracksEverySlice(t *testing.T) {
 	require.Equal(t, int32(2), statuses["prefill"].UpdatedReplicas)
 	require.Equal(t, int32(2), ptr.Deref(statuses["prefill"].ReadyReplicas, 0))
 
-	t.Log("legacy and slice-aware children cannot both claim slice 0")
+	t.Log("a child whose labels claim a target identity but whose name does not match is stale")
 	duplicate := readyChild(0, "prefill")
 	duplicate.Name += "-duplicate"
 	require.NoError(t, workloads.Create(t.Context(), duplicate))
 	ready, reason, _, err = workloads.checkDisaggregatedSetReadiness(t.Context(), ds, selection)
 	require.NoError(t, err)
 	require.False(t, ready)
-	require.Contains(t, reason, "2 target LeaderWorkerSets")
+	require.Contains(t, reason, "stale role \"prefill\" child LeaderWorkerSet")
+	require.Contains(t, reason, duplicate.Name)
 	require.NoError(t, workloads.Delete(t.Context(), duplicate))
 
 	t.Log("one missing slice role cannot be hidden by aggregate replica counts")
@@ -615,10 +750,159 @@ func TestDisaggregatedSetPathwayObservesWorkerHash(t *testing.T) {
 	require.False(t, observed)
 }
 
+func TestDisaggregatedSetReadinessDiscoversOwnedChildrenByOwnerReference(t *testing.T) {
+	typedDS := &disaggregatedsetv1.DisaggregatedSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo-ds",
+			Namespace: disaggregatedSetUnitTestNamespace,
+			UID:       "demo-ds-uid",
+		},
+		Spec: disaggregatedsetv1.DisaggregatedSetSpec{
+			Roles: []disaggregatedsetv1.DisaggregatedRoleSpec{{Name: "prefill"}, {Name: "decode"}},
+		},
+	}
+	dsObject, err := runtime.DefaultUnstructuredConverter.ToUnstructured(typedDS)
+	require.NoError(t, err)
+	ds := newDisaggregatedSetObject()
+	ds.Object = dsObject
+	ds.SetGroupVersionKind(disaggregatedSetGVK)
+	revision := disaggregatedsetutils.ComputeRevision(typedDS.Spec.Roles)
+	controllerOwner := metav1.OwnerReference{
+		APIVersion: disaggregatedsetv1.GroupVersion.String(),
+		Kind:       disaggregatedSetGVK.Kind,
+		Name:       ds.GetName(),
+		UID:        ds.GetUID(),
+		Controller: ptr.To(true),
+	}
+	readyChild := func(role string) *leaderworkersetv1.LeaderWorkerSet {
+		return &leaderworkersetv1.LeaderWorkerSet{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            disaggregatedsetutils.GenerateName(ds.GetName(), 0, revision, role),
+				Namespace:       ds.GetNamespace(),
+				Generation:      1,
+				Labels:          disaggregatedsetutils.GenerateLabels(ds.GetName(), 0, revision, role),
+				OwnerReferences: []metav1.OwnerReference{controllerOwner},
+			},
+			Spec: leaderworkersetv1.LeaderWorkerSetSpec{Replicas: ptr.To[int32](1)},
+			Status: leaderworkersetv1.LeaderWorkerSetStatus{
+				ObservedGeneration: 1,
+				Replicas:           1,
+				UpdatedReplicas:    1,
+				ReadyReplicas:      1,
+			},
+		}
+	}
+	ownedMissingLabel := readyChild("removed-missing-label")
+	ownedMissingLabel.Labels[disaggregatedsetv1.RevisionLabelKey] = "old-revision"
+	delete(ownedMissingLabel.Labels, disaggregatedsetv1.SetNameLabelKey)
+	ownedStaleLabel := readyChild("removed-stale-label")
+	ownedStaleLabel.Labels[disaggregatedsetv1.RevisionLabelKey] = "old-revision"
+	ownedStaleLabel.Labels[disaggregatedsetv1.SetNameLabelKey] = "old-ds-name"
+	foreignLabeled := readyChild("foreign-labeled")
+	foreignLabeled.OwnerReferences = nil
+	foreignUnlabeled := readyChild("foreign-unlabeled")
+	foreignUnlabeled.OwnerReferences = nil
+	delete(foreignUnlabeled.Labels, disaggregatedsetv1.SetNameLabelKey)
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, leaderworkersetv1.AddToScheme(scheme))
+	objects := []client.Object{
+		readyChild("prefill"),
+		readyChild("decode"),
+		ownedMissingLabel,
+		ownedStaleLabel,
+		foreignLabeled,
+		foreignUnlabeled,
+	}
+	workloads := &disaggregatedSetWorkloadsReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build(),
+	}
+	selection := disaggregatedSetSelection{
+		componentToRole: map[string]string{"prefill": "prefill", "decode": "decode"},
+		desiredReplicas: map[string]int32{"prefill": 1, "decode": 1},
+	}
+
+	ready, reason, _, err := workloads.checkDisaggregatedSetReadiness(t.Context(), ds, selection)
+	require.NoError(t, err)
+	require.False(t, ready)
+	require.Contains(t, reason, ownedMissingLabel.Name)
+	require.Contains(t, reason, ownedStaleLabel.Name)
+	require.NotContains(t, reason, foreignLabeled.Name)
+	require.NotContains(t, reason, foreignUnlabeled.Name)
+}
+
+func TestDisaggregatedSetReadinessDoesNotTrustChildIdentityLabels(t *testing.T) {
+	typedDS := &disaggregatedsetv1.DisaggregatedSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo-ds",
+			Namespace: disaggregatedSetUnitTestNamespace,
+			UID:       "demo-ds-uid",
+		},
+		Spec: disaggregatedsetv1.DisaggregatedSetSpec{
+			Roles: []disaggregatedsetv1.DisaggregatedRoleSpec{{Name: "prefill"}, {Name: "decode"}},
+		},
+	}
+	dsObject, err := runtime.DefaultUnstructuredConverter.ToUnstructured(typedDS)
+	require.NoError(t, err)
+	ds := newDisaggregatedSetObject()
+	ds.Object = dsObject
+	ds.SetGroupVersionKind(disaggregatedSetGVK)
+	revision := disaggregatedsetutils.ComputeRevision(typedDS.Spec.Roles)
+	controllerOwner := metav1.OwnerReference{
+		APIVersion: disaggregatedsetv1.GroupVersion.String(),
+		Kind:       disaggregatedSetGVK.Kind,
+		Name:       ds.GetName(),
+		UID:        ds.GetUID(),
+		Controller: ptr.To(true),
+	}
+	readyChild := func(name, role string) *leaderworkersetv1.LeaderWorkerSet {
+		return &leaderworkersetv1.LeaderWorkerSet{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            name,
+				Namespace:       ds.GetNamespace(),
+				Generation:      1,
+				Labels:          disaggregatedsetutils.GenerateLabels(ds.GetName(), 0, revision, role),
+				OwnerReferences: []metav1.OwnerReference{controllerOwner},
+			},
+			Spec: leaderworkersetv1.LeaderWorkerSetSpec{Replicas: ptr.To[int32](1)},
+			Status: leaderworkersetv1.LeaderWorkerSetStatus{
+				ObservedGeneration: 1,
+				Replicas:           1,
+				UpdatedReplicas:    1,
+				ReadyReplicas:      1,
+			},
+		}
+	}
+	decodeName := disaggregatedsetutils.GenerateName(ds.GetName(), 0, revision, "decode")
+	decode := readyChild(decodeName, "decode")
+	decode.Labels[disaggregatedsetv1.RoleLabelKey] = "stale-role-label"
+	forgedPrefill := readyChild("old-prefill-workload", "prefill")
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, leaderworkersetv1.AddToScheme(scheme))
+	workloads := &disaggregatedSetWorkloadsReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+			decode,
+			forgedPrefill,
+		).Build(),
+	}
+	selection := disaggregatedSetSelection{
+		componentToRole: map[string]string{"prefill": "prefill", "decode": "decode"},
+		desiredReplicas: map[string]int32{"prefill": 1, "decode": 1},
+	}
+
+	ready, reason, _, err := workloads.checkDisaggregatedSetReadiness(t.Context(), ds, selection)
+	require.NoError(t, err)
+	require.False(t, ready)
+	require.Contains(t, reason, "prefill role \"prefill\" slice 0 has 0 target LeaderWorkerSets")
+	require.Contains(t, reason, forgedPrefill.Name)
+}
+
 func TestDisaggregatedSetWatchMapperMapsNonzeroSlice(t *testing.T) {
 	ds := newDisaggregatedSetObject()
 	ds.SetName("demo-ds")
 	ds.SetNamespace(disaggregatedSetUnitTestNamespace)
+	ds.SetUID("demo-ds-uid")
 	ds.SetOwnerReferences([]metav1.OwnerReference{{
 		APIVersion: nvidiacomv1beta1.GroupVersion.String(),
 		Kind:       dynamoGraphDeploymentKind,
@@ -633,14 +917,26 @@ func TestDisaggregatedSetWatchMapperMapsNonzeroSlice(t *testing.T) {
 		Name:      "demo-ds-1-abc12345-prefill",
 		Namespace: disaggregatedSetUnitTestNamespace,
 		Labels: map[string]string{
-			disaggregatedsetv1.SetNameLabelKey: "demo-ds",
+			disaggregatedsetv1.SetNameLabelKey: "stale-ds-name",
 			disaggregatedsetv1.SliceLabelKey:   "1",
 		},
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: disaggregatedsetv1.GroupVersion.String(),
+			Kind:       disaggregatedSetGVK.Kind,
+			Name:       ds.GetName(),
+			UID:        ds.GetUID(),
+			Controller: ptr.To(true),
+		}},
 	}}
 
 	require.Equal(t, []ctrl.Request{{NamespacedName: types.NamespacedName{
 		Name: "demo", Namespace: disaggregatedSetUnitTestNamespace,
 	}}}, mapper.MapChildLWSToDGD(t.Context(), child))
+
+	child.Labels = nil
+	require.Len(t, mapper.MapChildLWSToDGD(t.Context(), child), 1, "owner reference must remain authoritative when the label is missing")
+	child.OwnerReferences[0].UID = "foreign-ds-uid"
+	require.Empty(t, mapper.MapChildLWSToDGD(t.Context(), child), "a name-reused foreign owner must not enqueue the DGD")
 }
 
 func TestDisaggregatedSetStatusReadinessWaitsForRemovedRoleChildren(t *testing.T) {
