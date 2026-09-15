@@ -201,7 +201,7 @@ func TestComputeBetaDGDWorkersSpecHash_ExcludesSynthesizedElasticEPFollower(t *t
 	}
 
 	t.Log("generate the DCDs the hash is computed from")
-	dcds, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{}, true)
+	dcds, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
 	if err != nil {
 		t.Fatalf("GenerateDynamoComponentsDeployments: %v", err)
 	}

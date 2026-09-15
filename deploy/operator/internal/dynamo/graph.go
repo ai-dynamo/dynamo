@@ -252,7 +252,6 @@ func GenerateDynamoComponentsDeployments(
 	restartState *RestartState,
 	existingRestartAnnotations map[string]string,
 	rollingUpdateCtx RollingUpdateContext,
-	elasticEPRayPoCEnabled bool,
 ) (map[string]*v1beta1.DynamoComponentDeployment, error) {
 	deployments := make(map[string]*v1beta1.DynamoComponentDeployment)
 	backendFramework, err := backendFrameworkForGeneratedDCDs(parentDGD)
@@ -297,7 +296,7 @@ func GenerateDynamoComponentsDeployments(
 		// An elastic-EP leader also gets an optional follower: its own DCD resting at
 		// zero replicas, scaled up on demand without gang-blocking the leader. It lives
 		// on this pathway because a Grove clique cannot rest at zero (grove#676).
-		follower := synthesizeElasticEPFollowerDCD(dcd, componentName, elasticEPRayPoCEnabled)
+		follower := synthesizeElasticEPFollowerDCD(dcd, componentName)
 		if follower == nil {
 			continue
 		}
@@ -430,8 +429,42 @@ func IsSinglePodElasticEPLeader(component *v1beta1.DynamoComponentDeploymentShar
 // useful where a leader Service exists to join. Gating on the launch flags alone would
 // derive followers for shapes that never get one: replicas > 1, or multinode, which takes
 // the LWS path and never renders RoleFollower at all.
-func synthesizeElasticEPFollowerDCD(leaderDCD *v1beta1.DynamoComponentDeployment, leaderComponentName string, elasticEPRayPoCEnabled bool) *v1beta1.DynamoComponentDeployment {
-	if !IsSinglePodElasticEPLeader(&leaderDCD.Spec.DynamoComponentDeploymentSharedSpec, elasticEPRayPoCEnabled) {
+// ElasticEPFollowerReplicas returns how many follower pods a leader's declared
+// data-parallel size implies at launch.
+//
+// The sizing rule is one pod per node per data-parallel rank, and the leader is itself
+// rank 0, so a leader declaring --data-parallel-size N needs N-1 followers to reach its
+// declared width. EP16 at TP4 is DP4: one leader and three followers, four pods.
+//
+// This is the launch footprint, not a ceiling. The gate governs whether the count can
+// then be *changed*; it does not decide whether the followers exist. With the gate off a
+// deployment still renders its full declared width and simply cannot be resized.
+//
+// A leader with no --data-parallel-size yields zero followers. getFlagValue already
+// defaults an absent flag to 1, so that falls out rather than being special-cased -- and
+// it is what keeps every pre-existing single-rank deployment rendering exactly as before.
+func ElasticEPFollowerReplicas(leaderContainer *corev1.Container) int32 {
+	dataParallelSize := getFlagValue(getExpandedArgs(leaderContainer), dataParallelSizeFlag)
+	if dataParallelSize <= 1 {
+		return 0
+	}
+	return int32(dataParallelSize - 1)
+}
+
+// Deliberately NOT gated on features.ElasticEPRayPoC. The followers are the deployment's
+// declared width, not extra capacity the PoC invents: a leader asking for
+// --data-parallel-size 4 is asking for four ranks, and on the one-pod-per-rank sizing rule
+// that is four pods. Gating synthesis would mean a default-off operator silently renders a
+// quarter of the requested engine, and the leader would wait forever for ranks nothing
+// created. What the gate governs is whether that count may later be *changed* -- see
+// preserveExistingDCDState.
+//
+// The shape predicate still applies, because a follower is only useful where a leader
+// Service exists to join. Keying on the launch flags alone would derive followers for
+// shapes that never get one: replicas > 1, or multinode, which takes the LWS path and
+// never renders RoleFollower at all.
+func synthesizeElasticEPFollowerDCD(leaderDCD *v1beta1.DynamoComponentDeployment, leaderComponentName string) *v1beta1.DynamoComponentDeployment {
+	if !IsSinglePodElasticEPShape(&leaderDCD.Spec.DynamoComponentDeploymentSharedSpec) {
 		return nil
 	}
 	// Synthesis needs strictly more than Service emission does: a Ray head must actually
@@ -440,13 +473,14 @@ func synthesizeElasticEPFollowerDCD(leaderDCD *v1beta1.DynamoComponentDeployment
 	// it alone and never injects a head. A follower derived from it would poll a /live
 	// endpoint that never comes up. The Service is still emitted for that leader -- it
 	// is harmless and the shape may gain a Command later -- but no follower is derived.
-	if leader := GetMainContainer(&leaderDCD.Spec.DynamoComponentDeploymentSharedSpec); leader == nil || len(leader.Command) == 0 {
+	leaderContainer := GetMainContainer(&leaderDCD.Spec.DynamoComponentDeploymentSharedSpec)
+	if leaderContainer == nil || len(leaderContainer.Command) == 0 {
 		return nil
 	}
 	followerComponentName := elasticEPFollowerName(leaderComponentName)
 	follower := leaderDCD.DeepCopy()
 	follower.Name = elasticEPFollowerName(leaderDCD.Name)
-	follower.Spec.Replicas = ptr.To(int32(0))
+	follower.Spec.Replicas = ptr.To(ElasticEPFollowerReplicas(leaderContainer))
 
 	// Drop the leader's checkpoint configuration. The deep copy carries
 	// spec.experimental.checkpoint verbatim, and an explicit checkpointRef there is
@@ -1747,14 +1781,9 @@ func BackendFactory(backendFramework BackendFramework, operatorConfig *configv1a
 	case BackendFrameworkSGLang:
 		return &SGLangBackend{}
 	case BackendFrameworkVLLM:
-		// Read straight from configuration rather than features.Gates, which is not
-		// threaded this deep. The two cannot disagree: features.New resolves
-		// ElasticEPRayPoC from this field with no capability detection. Add detection
-		// there and this needs the resolved gate passed in instead.
-		return &VLLMBackend{
-			ParentGraphDeploymentName: parentGraphDeploymentName,
-			ElasticEPRayPoCEnabled:    operatorConfig != nil && operatorConfig.ElasticEPRayPoC.Enabled,
-		}
+		// No elastic-EP gate is passed down: both arms the backend renders are ungated
+		// by design. See the VLLMBackend doc comment.
+		return &VLLMBackend{ParentGraphDeploymentName: parentGraphDeploymentName}
 	case BackendFrameworkTRTLLM:
 		return &TRTLLMBackend{
 			MpiRunSecretName: operatorConfig.MPI.SSHSecretName,

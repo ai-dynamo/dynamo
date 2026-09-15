@@ -144,7 +144,7 @@ func TestSynthesizeElasticEPFollowerDCD_OnlyForElasticEP(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("deriving the follower from the leader DCD")
-			follower := synthesizeElasticEPFollowerDCD(leaderDCD(tt.component), leaderComponent, true)
+			follower := synthesizeElasticEPFollowerDCD(leaderDCD(tt.component), leaderComponent)
 
 			t.Log("a follower is synthesized only for a shape whose leader Service is emitted")
 			if gotSynthesis := follower != nil; gotSynthesis != tt.wantSynthesis {
@@ -169,7 +169,7 @@ func TestSynthesizeElasticEPFollowerDCD_StripsCheckpointConfig(t *testing.T) {
 	}
 
 	t.Log("derive the follower from a leader with an explicit checkpoint reference")
-	follower := synthesizeElasticEPFollowerDCD(leader, leaderComponent, true)
+	follower := synthesizeElasticEPFollowerDCD(leader, leaderComponent)
 	if follower == nil {
 		t.Fatal("expected a follower to be synthesized")
 	}
@@ -236,7 +236,7 @@ func TestElasticEPComponentIdentity(t *testing.T) {
 		{
 			name: "a synthesized follower resolves under the leader's name",
 			component: func() *v1beta1.DynamoComponentDeploymentSharedSpec {
-				follower := synthesizeElasticEPFollowerDCD(leaderDCD(elasticEPComponent()), leaderComponent, true)
+				follower := synthesizeElasticEPFollowerDCD(leaderDCD(elasticEPComponent()), leaderComponent)
 				if follower == nil {
 					t.Fatal("expected a follower to be synthesized")
 				}
@@ -346,7 +346,7 @@ func TestGenerateDynamoComponentsDeployments_RejectsFollowerNameCollision(t *tes
 	}
 
 	t.Log("generate with an elastic-EP leader and a declared component of the derived name")
-	_, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{}, true)
+	_, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
 
 	t.Log("generation fails loudly rather than silently dropping one of them")
 	if err == nil {
@@ -362,7 +362,7 @@ func TestSynthesizeElasticEPFollowerDCD_DerivesADistinctIdentity(t *testing.T) {
 	wantSuffixed := "decode-" + commonconsts.GroveRoleSuffixFollower
 
 	t.Log("deriving the follower from a single-pod elastic-EP leader")
-	follower := synthesizeElasticEPFollowerDCD(leader, leaderComponent, true)
+	follower := synthesizeElasticEPFollowerDCD(leader, leaderComponent)
 	if follower == nil {
 		t.Fatal("expected a follower DCD for an elastic-EP leader")
 	}
@@ -460,9 +460,15 @@ func TestInjectElasticEPRayLaunchFlags_Follower(t *testing.T) {
 				t.Errorf("follower must not build its address from its own name %q; got: %s", tt.serviceName, script)
 			}
 
-			t.Log("it health-gates on the leader /live so the join lands after the leader has placed its data-parallel group")
-			if !strings.Contains(script, "/live") {
-				t.Errorf("follower must health-gate on the leader /live; got: %s", script)
+			t.Log("it gates on the leader's Ray head, not the leader's engine, so a full-width launch can converge")
+			if !strings.Contains(script, "create_connection((") || !strings.Contains(script, VLLMPort) {
+				t.Errorf("follower must gate on a TCP connect to the leader Ray port; got: %s", script)
+			}
+			// Gating on /live is what the multinode RoleWorker arm does, and it deadlocks a
+			// launch sized to --data-parallel-size: the leader cannot reach /live until the
+			// ranks it is waiting for have joined, and they will not join until /live answers.
+			if strings.Contains(script, "/live") {
+				t.Errorf("follower must not gate on the leader engine /live; got: %s", script)
 			}
 
 			t.Log("the follower never serves -- the leader spawns the real DP-rank worker on its GPU as a Ray actor -- so the serve flags must not survive")
@@ -569,65 +575,135 @@ func elasticEPDGDForGate() *v1beta1.DynamoGraphDeployment {
 	}
 }
 
-// TestElasticEPRayPoCGateIsUpgradeSafe is the regression guard for the property the
-// whole gate exists to protect: rolling out an operator that carries this feature must
-// not change a deployment that already exists.
+// TestElasticEPGenerationIsIndependentOfTheGate pins where features.ElasticEPRayPoC does
+// and does not reach.
 //
-// The risk is specific. Everything the Ray path does -- wrapping the leader's command in
-// a Ray head, deriving a follower, emitting a Service -- alters the rendered spec, and
-// altering a pod template rolls a serving deployment. An administrator upgrading the
-// operator for an unrelated fix must not lose their engines to it. Asserting the
-// gated-off render is byte-identical to a graph that never mentioned elastic EP is the
-// only way that property survives changes nobody has written yet.
+// Generation is deliberately gate-free. The followers are the deployment's declared
+// width, not capacity the PoC invents: a leader asking for --data-parallel-size N is
+// asking for N ranks, and on the one-pod-per-rank rule that is N pods. A gated-off
+// operator that rendered only the leader would silently under-provision the engine, and
+// the leader would wait forever for ranks nothing created. So both gate positions
+// generate the same objects, and the gate decides only whether the follower count may
+// later be *changed* -- which lives in preserveExistingDCDState, not here.
 //
-// Verified by mutation: neutering the gate check in IsSinglePodElasticEPLeader fails this
-// on three separate assertions. If you change what this asserts, re-run that check --
-// a guard that no longer fails when the gate is removed is decoration, not coverage.
-func TestElasticEPRayPoCGateIsUpgradeSafe(t *testing.T) {
-	t.Log("Generate an existing elastic-EP graph with the gate off, as a fresh upgrade would")
-	off, err := GenerateDynamoComponentsDeployments(elasticEPDGDForGate(), nil, nil, RollingUpdateContext{}, false)
+// The upgrade-safety property that does belong to generation is the narrow one: the
+// LEADER's spec must not move. Altering a pod template rolls a serving deployment, so an
+// administrator upgrading the operator for an unrelated fix must not lose their engines
+// to it.
+//
+// Verified by mutation: reintroducing a gate term in synthesizeElasticEPFollowerDCD fails
+// the count assertion below. If you change what this asserts, re-run that check -- a
+// guard that no longer fails when the behaviour is reverted is decoration, not coverage.
+func TestElasticEPGenerationIsIndependentOfTheGate(t *testing.T) {
+	t.Log("Generate the same graph twice; generation takes no gate, so the two must agree")
+	off, err := GenerateDynamoComponentsDeployments(elasticEPDGDForGate(), nil, nil, RollingUpdateContext{})
 	if err != nil {
-		t.Fatalf("generation with the gate off failed: %v", err)
+		t.Fatalf("generation failed: %v", err)
 	}
-
-	t.Log("No follower is derived: nothing new appears in the user's namespace")
-	for name, dcd := range off {
-		if dcd.GetAnnotations()[commonconsts.KubeAnnotationElasticEPFollower] == commonconsts.KubeLabelValueTrue {
-			t.Errorf("gate off derived a follower %q; an upgrade must not create workloads", name)
-		}
-	}
-	if len(off) != 1 {
-		t.Errorf("gate off generated %d DCDs, want exactly the declared leader", len(off))
-	}
-
-	t.Log("The leader is not treated as an elastic-EP leader, so nothing downstream fires")
-	leader := off[leaderComponent]
-	if leader == nil {
-		t.Fatalf("gate off dropped the declared leader; generated %v", maps.Keys(off))
-	}
-	if IsSinglePodElasticEPLeader(&leader.Spec.DynamoComponentDeploymentSharedSpec, false) {
-		t.Error("gate off still reports a single-pod elastic-EP leader; the Service and follower would follow")
-	}
-
-	t.Log("Gate on: the follower appears, proving the switch is not simply broken in the off position")
-	on, err := GenerateDynamoComponentsDeployments(elasticEPDGDForGate(), nil, nil, RollingUpdateContext{}, true)
+	on, err := GenerateDynamoComponentsDeployments(elasticEPDGDForGate(), nil, nil, RollingUpdateContext{})
 	if err != nil {
-		t.Fatalf("generation with the gate on failed: %v", err)
+		t.Fatalf("generation failed: %v", err)
 	}
-	if len(on) != len(off)+1 {
-		t.Fatalf("gate on generated %d DCDs, want one more than the %d generated off", len(on), len(off))
+
+	t.Log("The follower is derived regardless: a gated-off operator still renders full width")
+	if len(off) != 2 || len(on) != 2 {
+		t.Fatalf("generated %d and %d DCDs, want the declared leader plus its follower in both cases",
+			len(off), len(on))
 	}
-	follower := on[elasticEPFollowerName(leaderComponent)]
+	follower := off[elasticEPFollowerName(leaderComponent)]
 	if follower == nil {
-		t.Fatalf("gate on derived no follower; generated %v", slices.Sorted(maps.Keys(on)))
+		t.Fatalf("no follower derived; generated %v", slices.Sorted(maps.Keys(off)))
 	}
-	if got := ptr.Deref(follower.Spec.Replicas, -1); got != 0 {
-		t.Errorf("follower replicas = %d, want 0", got)
+	if follower.GetAnnotations()[commonconsts.KubeAnnotationElasticEPFollower] != commonconsts.KubeLabelValueTrue {
+		t.Error("derived follower is missing the follower annotation the renderer keys RoleFollower off")
 	}
 
-	t.Log("The leader itself is byte-identical either way: no pod-template change, so no rollout")
+	t.Log("This fixture declares no --data-parallel-size, so its declared width is one rank: the leader alone")
+	if got := ptr.Deref(follower.Spec.Replicas, -1); got != 0 {
+		t.Errorf("follower replicas = %d, want 0 for a leader with no --data-parallel-size", got)
+	}
+
+	t.Log("The leader itself is byte-identical: no pod-template change, so no rollout")
 	if diff := cmp.Diff(off[leaderComponent].Spec, on[leaderComponent].Spec); diff != "" {
-		t.Errorf("the gate changed the leader's spec, which would roll a serving deployment (-off +on):\n%s", diff)
+		t.Errorf("the leader's spec moved between generations (-a +b):\n%s", diff)
+	}
+}
+
+// TestSynthesizeElasticEPFollowerDCD_SeedsDeclaredWidth pins that synthesis actually
+// *uses* the sizing rule, not merely that the rule computes correctly in isolation.
+//
+// Testing ElasticEPFollowerReplicas alone does not cover this: reverting
+// synthesizeElasticEPFollowerDCD to a hardcoded zero leaves that test passing, because
+// the helper is still correct -- it has simply stopped being called. Caught by mutation.
+func TestSynthesizeElasticEPFollowerDCD_SeedsDeclaredWidth(t *testing.T) {
+	leader := leaderDCD(vllmComponent(
+		"--enable-elastic-ep", "--data-parallel-backend", "ray", "--data-parallel-size", "4",
+	))
+
+	follower := synthesizeElasticEPFollowerDCD(leader, leaderComponent)
+	if follower == nil {
+		t.Fatal("no follower derived for a declared elastic-EP leader")
+	}
+
+	t.Log("EP16 at TP4 is four ranks: the leader holds rank 0, so three followers")
+	if got := ptr.Deref(follower.Spec.Replicas, -1); got != 3 {
+		t.Errorf("follower replicas = %d, want 3 for --data-parallel-size 4; "+
+			"a hardcoded seed makes the declared width unreachable", got)
+	}
+}
+
+// TestElasticEPFollowerReplicasTracksDeclaredWidth pins the sizing rule: one pod per node
+// per data-parallel rank, with the leader holding rank 0.
+//
+// This is the launch footprint, and it is what makes an EP16 deployment four pods rather
+// than one. Before this the follower was seeded at zero unconditionally, so a leader
+// declaring --data-parallel-size 4 rendered a single pod and could never reach the width
+// it asked for.
+func TestElasticEPFollowerReplicasTracksDeclaredWidth(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		args []string
+		want int32
+	}{
+		{
+			// The pre-existing shape: no declared width, so nothing is derived and every
+			// deployment that predates this change renders exactly as it did.
+			name: "no --data-parallel-size yields no followers",
+			args: []string{"--enable-elastic-ep", "--data-parallel-backend", "ray"},
+			want: 0,
+		},
+		{
+			name: "dp=1 is the leader alone",
+			args: []string{"--enable-elastic-ep", "--data-parallel-backend", "ray", "--data-parallel-size", "1"},
+			want: 0,
+		},
+		{
+			name: "dp=2 is the leader plus one follower",
+			args: []string{"--enable-elastic-ep", "--data-parallel-backend", "ray", "--data-parallel-size", "2"},
+			want: 1,
+		},
+		{
+			// EP16 at TP4: four ranks, four pods, one leader and three followers.
+			name: "dp=4 is the leader plus three followers",
+			args: []string{"--enable-elastic-ep", "--data-parallel-backend", "ray", "--data-parallel-size", "4"},
+			want: 3,
+		},
+		{
+			name: "an unparseable value falls back to the leader alone",
+			args: []string{"--enable-elastic-ep", "--data-parallel-backend", "ray", "--data-parallel-size", "four"},
+			want: 0,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ElasticEPFollowerReplicas(&corev1.Container{
+				Name:    commonconsts.MainContainerName,
+				Command: []string{"python3", "-m", "dynamo.vllm"},
+				Args:    tt.args,
+			})
+			if got != tt.want {
+				t.Errorf("ElasticEPFollowerReplicas() = %d, want %d (args: %v)", got, tt.want, tt.args)
+			}
+		})
 	}
 }
 
@@ -666,7 +742,7 @@ func TestSynthesizeElasticEPFollowerDCD_AffinityUsesPodStampedNamespace(t *testi
 	}
 
 	t.Log("Synthesize the follower from a leader whose two namespace values disagree")
-	follower := synthesizeElasticEPFollowerDCD(leader, leaderComponent, true)
+	follower := synthesizeElasticEPFollowerDCD(leader, leaderComponent)
 	if follower == nil {
 		t.Fatal("no follower derived")
 	}

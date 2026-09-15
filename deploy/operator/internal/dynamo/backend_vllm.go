@@ -30,15 +30,16 @@ const (
 	dataParallelBackendRay       = "ray"
 )
 
+// VLLMBackend renders vLLM launch commands.
+//
+// It deliberately carries no features.ElasticEPRayPoC gate. Both elastic-EP arms are
+// ungated on purpose -- the leader's Ray head shipped in #12943, and the follower's
+// Ray-join is keyed off the operator-set follower annotation that only gated synthesis
+// ever writes -- so plumbing the gate to this level would only invite someone to apply
+// it. See injectElasticEPRayLaunchFlags and IsElasticEPLeader for which parts
+// of this feature the gate does govern.
 type VLLMBackend struct {
 	ParentGraphDeploymentName string
-	// ElasticEPRayPoCEnabled carries the features.ElasticEPRayPoC gate. When false the
-	// backend leaves an elastic-EP container exactly as the user wrote it: no Ray
-	// head wrapped around the leader's command, no Ray-join rewrite on a follower,
-	// and none of the environment either arm injects. Rewriting the command changes
-	// the pod template, which rolls a serving deployment, so this has to be off by
-	// default rather than inferred from the engine flags.
-	ElasticEPRayPoCEnabled bool
 }
 
 func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUCount ContainerGPUCount) error {
@@ -127,7 +128,16 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 				corev1.EnvVar{Name: commonconsts.VLLMDPMasterIPEnvVar, ValueFrom: podIPRef()},
 			)
 		}
-	} else if role == RoleFollower && b.elasticEPRayLaunch(container) {
+	} else if role == RoleFollower && IsElasticEPRayLaunch(container) {
+		// No gate term here, deliberately. RoleFollower is assigned from the operator-set
+		// follower annotation, and only gated synthesis ever writes that annotation -- so
+		// re-checking the gate is redundant on the way in and harmful on the way out: a
+		// follower DCD that outlives a gate flip would render without the Ray-join rewrite
+		// and run the leader's full serve command, which it carries verbatim from the deep
+		// copy that created it. A follower also fails the leader predicate by construction
+		// (it rests at zero replicas), so it inherits its leader's guarantee rather than
+		// re-testing it.
+		//
 		// The leader's Service name is carried on the follower rather than rebuilt here.
 		// Its absence means synthesis and rendering have gone out of step, and guessing
 		// an address would produce a pod that polls a hostname nothing backs for three
@@ -604,47 +614,50 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 		//   - --node-ip-address is pinned to the pod IP so the leader can find this
 		//     rank's GPU. The follower never serves; the leader spawns the real DP-rank
 		//     worker on that GPU as a Ray actor.
-		//   - The /live gate matches the worker's: join only once the leader has placed
-		//     its data-parallel group.
+		//   - It waits for the leader's RAY HEAD, not the leader's engine.
+		//
+		// That last point is the one that differs from the multinode RoleWorker arm above,
+		// and it is deliberate. The worker's /live gate exists to keep workers out of Ray
+		// until after create_dp_placement_groups has run, so every initial rank lands on
+		// the leader node -- the warm-standby shape. A follower set sized to the declared
+		// --data-parallel-size needs the opposite: all ranks must be in Ray *before* the
+		// engine places them, or the placement cannot be satisfied.
+		//
+		// Gating on /live here would deadlock a full-width launch outright: the leader
+		// blocks waiting for GPUs that only the followers can supply, so its /live never
+		// returns 200, so the followers never join, so the leader keeps waiting. Gating on
+		// the Ray head instead is satisfiable immediately -- `ray start --head` is the
+		// first thing the leader runs, well before the engine.
+		//
+		// Joining early is harmless in the other direction too: a follower that joins a
+		// cluster whose engine is already serving is just an idle Ray node until
+		// scale_elastic_ep places a rank on it.
 		//
 		// leaderService is carried on the follower rather than rebuilt here. The name is
 		// DGD- and generation-scoped and may be hash-truncated, so deriving it from the
 		// follower's own identity is exactly what let the emitter and the joiner drift
 		// apart.
 		leaderHostname := leaderService
-		healthGate := fmt.Sprintf(
-			`i=0; until python3 -c "import urllib.request; urllib.request.urlopen('http://%s:%d/live', timeout=5)" `+
+		// 360 x 5s = 30 min, which has to cover the leader's image pull and scheduling,
+		// not just its startup -- at launch the followers are created at the same moment
+		// the leader is. Bounded rather than unbounded so a leader that never schedules
+		// surfaces as a failed follower instead of a pod that waits forever. The address
+		// does not resolve at all until the leader's Service has an endpoint, which raises
+		// inside python and is swallowed by the same retry.
+		readyGate := fmt.Sprintf(
+			`i=0; until python3 -c "import socket; s=socket.create_connection(('%s',%s),timeout=5); s.close()" `+
 				`2>/dev/null; do `+
-				`i=$((i+1)); [ "$i" -ge 720 ] && { echo "ERROR: leader /live did not become ready within 3h" >&2; exit 1; }; `+
-				`echo 'waiting for leader dynamo.vllm /live to return 200...'; sleep 15; done`,
-			leaderHostname, commonconsts.DynamoSystemPort,
+				`i=$((i+1)); [ "$i" -ge 360 ] && { echo "ERROR: leader Ray head did not accept connections within 30m" >&2; exit 1; }; `+
+				`echo 'waiting for leader Ray head on %s:%s...'; sleep 5; done`,
+			leaderHostname, VLLMPort, leaderHostname, VLLMPort,
 		)
 		container.Args = []string{fmt.Sprintf(
 			`%s && ray start --address=%s:%s --node-ip-address="$%s" --block`,
-			healthGate, leaderHostname, VLLMPort, commonconsts.PodIPEnvVar,
+			readyGate, leaderHostname, VLLMPort, commonconsts.PodIPEnvVar,
 		)}
 	}
 	container.Command = []string{"/bin/sh", "-c"}
 	return true
-}
-
-// elasticEPRayLaunch reports whether the container asks for the Ray elastic-EP path
-// and the operator is allowed to act on it. IsElasticEPRayLaunch answers the first
-// half -- what the engine intends -- and the gate answers the second, which is the
-// administrator's to grant.
-//
-// Only the RoleFollower arm uses this. A follower deliberately fails the leader
-// predicate -- it rests at zero replicas -- and exists only because gated synthesis
-// already applied that predicate to its leader, so it inherits the guarantee rather
-// than re-testing it.
-//
-// Not gated. RoleFollower is assigned from the operator-set follower annotation with no
-// gate term, and only gated synthesis ever writes that annotation, so re-checking the
-// gate here is redundant on the way in and harmful on the way out: a follower DCD that
-// outlives a gate flip would render without the Ray-join rewrite and run the leader's
-// full serve command, which it carries verbatim from the deep copy.
-func (b *VLLMBackend) elasticEPRayLaunch(container *corev1.Container) bool {
-	return IsElasticEPRayLaunch(container)
 }
 
 // IsElasticEPRayLaunch reports whether the container asks for the elastic-EP Ray

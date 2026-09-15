@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/onsi/gomega"
@@ -468,7 +469,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
-			backend := &VLLMBackend{ElasticEPRayPoCEnabled: true}
+			backend := &VLLMBackend{}
 
 			initialContainerArgs := append([]string{}, tt.initialContainer.Args...)
 
@@ -544,7 +545,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 }
 
 func TestVLLMBackend_ShellCommandInjection(t *testing.T) {
-	backend := &VLLMBackend{ElasticEPRayPoCEnabled: true}
+	backend := &VLLMBackend{}
 
 	tests := []struct {
 		name              string
@@ -636,7 +637,7 @@ func TestVLLMBackend_ShellCommandInjection(t *testing.T) {
 }
 
 func TestVLLMBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
-	backend := &VLLMBackend{ElasticEPRayPoCEnabled: true}
+	backend := &VLLMBackend{}
 
 	tests := []struct {
 		name                  string
@@ -1006,7 +1007,7 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 }
 
 func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
-	backend := &VLLMBackend{ParentGraphDeploymentName: "test-dgd", ElasticEPRayPoCEnabled: true}
+	backend := &VLLMBackend{ParentGraphDeploymentName: "test-dgd"}
 	mpMultinodePodSpec := func(image string) *corev1.PodSpec {
 		return &corev1.PodSpec{
 			Containers: []corev1.Container{
@@ -1362,7 +1363,7 @@ func TestVLLMBackend_UpdateContainer_InterPodGMS(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			backend := &VLLMBackend{ElasticEPRayPoCEnabled: true}
+			backend := &VLLMBackend{}
 			component := betaComponent(t, tt.component)
 			container := &corev1.Container{
 				Command: []string{"python3"},
@@ -1398,7 +1399,7 @@ func TestVLLMBackend_UpdateContainer_InterPodGMS(t *testing.T) {
 // invariant: when inter-pod GMS is not enabled, the vLLM backend must not
 // inject the inter-pod GMS load path or shadow/standby mode.
 func TestVLLMBackend_UpdateContainer_NoInterPodGMS(t *testing.T) {
-	backend := &VLLMBackend{ElasticEPRayPoCEnabled: true}
+	backend := &VLLMBackend{}
 	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{})
 	container := &corev1.Container{
 		Command: []string{"python3"},
@@ -1498,7 +1499,16 @@ func TestVLLMBackend_ElasticEPRayPoCGateDoesNotChangeLeaderRender(t *testing.T) 
 				}
 				tt.mutate(alpha)
 				container := alpha.ExtraPodSpec.MainContainer.DeepCopy()
-				backend := &VLLMBackend{ElasticEPRayPoCEnabled: gate}
+				// Built through BackendFactory rather than a literal, because the factory
+				// is the one place the operator's gate setting could reach this backend.
+				// Constructing VLLMBackend directly would make this assertion vacuous.
+				backend := BackendFactory(
+					BackendFrameworkVLLM,
+					&configv1alpha1.OperatorConfiguration{
+						ElasticEPRayPoC: configv1alpha1.ElasticEPRayPoCConfiguration{Enabled: gate},
+					},
+					"test-dgd",
+				)
 				require.NoError(t, backend.UpdateContainer(
 					container, 1, RoleMain, betaComponent(t, alpha), "test-service",
 					&GroveMultinodeDeployer{}, staticContainerGPUCount(1),
@@ -1570,7 +1580,13 @@ func TestVLLMBackend_FollowerRayJoinIsNotGated(t *testing.T) {
 				ReadinessProbe: &corev1.Probe{},
 				StartupProbe:   &corev1.Probe{},
 			}
-			backend := &VLLMBackend{ElasticEPRayPoCEnabled: gate}
+			backend := BackendFactory(
+				BackendFrameworkVLLM,
+				&configv1alpha1.OperatorConfiguration{
+					ElasticEPRayPoC: configv1alpha1.ElasticEPRayPoCConfiguration{Enabled: gate},
+				},
+				"test-dgd",
+			)
 			require.NoError(t, backend.UpdateContainer(
 				container, 1, RoleFollower, component, "test-service",
 				&GroveMultinodeDeployer{}, staticContainerGPUCount(1),
@@ -1579,8 +1595,15 @@ func TestVLLMBackend_FollowerRayJoinIsNotGated(t *testing.T) {
 			require.Equal(t, []string{"/bin/sh", "-c"}, container.Command,
 				"the follower must get its Ray join at either gate position; without it the pod "+
 					"runs the leader's serve command, which it inherited by deep copy")
-			require.Contains(t, strings.Join(container.Args, " "), "mydgd-decode-ray",
+			joined := strings.Join(container.Args, " ")
+			require.Contains(t, joined, "mydgd-decode-ray",
 				"the follower must join the leader Service carried on its annotation")
+			require.Contains(t, joined, "create_connection(('mydgd-decode-ray',6379)",
+				"the follower must gate on the leader's Ray head, not its engine: gating on /live "+
+					"deadlocks a full-width launch, because the leader cannot become ready until "+
+					"the followers it is waiting for have already joined")
+			require.NotContains(t, joined, "/live",
+				"the engine health gate belongs to the multinode RoleWorker arm, not the follower")
 			require.Nil(t, container.LivenessProbe, "a `ray start --block` pod cannot satisfy the worker probes")
 		})
 	}

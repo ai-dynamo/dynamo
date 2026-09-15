@@ -308,9 +308,12 @@ func TestPreserveExistingDCDStateKeepsFollowerReplicas(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			c := fake.NewClientBuilder().WithScheme(s).WithObjects(tt.existing).Build()
-			r := &componentWorkloadsReconciler{syncer: newDGDResourceSyncer(c, nil)}
+			// Gate ON: the live replica count is authoritative and generation must not
+			// overwrite it. With the gate off the opposite holds, which the
+			// gate-off subtest below covers.
+			r := &componentWorkloadsReconciler{syncer: newDGDResourceSyncer(c, nil), elasticEPRayPoCEnabled: true}
 
-			t.Log("Generation re-derives the follower and stamps the resting zero")
+			t.Log("Generation re-derives the follower and stamps the declared launch width")
 			desired := &nvidiacomv1beta1.DynamoComponentDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:        tt.existing.Name,
@@ -331,9 +334,39 @@ func TestPreserveExistingDCDStateKeepsFollowerReplicas(t *testing.T) {
 		})
 	}
 
-	t.Run("a follower that does not exist yet is seeded at zero", func(t *testing.T) {
+	// The gate's whole job for a follower. Off, generation owns the count: the deployment
+	// still renders at its declared width, and an external scale is reverted -- "you get
+	// all your pods, you just cannot change how many". On, the scale client owns it.
+	//
+	// Mutation check: dropping `r.elasticEPRayPoCEnabled &&` from preserveExistingDCDState
+	// fails this subtest and nothing else.
+	t.Run("with the gate off a scaled follower is reverted to the declared width", func(t *testing.T) {
+		existing := existingDCD("mydgd-decode-flw", true, 5)
+		c := fake.NewClientBuilder().WithScheme(s).WithObjects(existing).Build()
+		r := &componentWorkloadsReconciler{syncer: newDGDResourceSyncer(c, nil), elasticEPRayPoCEnabled: false}
+
+		desired := &nvidiacomv1beta1.DynamoComponentDeployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        existing.Name,
+				Namespace:   ns,
+				Annotations: existing.Annotations,
+			},
+			Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+					Replicas: ptr.To(int32(3)),
+				},
+			},
+		}
+		require.NoError(t, r.preserveExistingDCDState(context.Background(), desired))
+
+		require.NotNil(t, desired.Spec.Replicas)
+		require.Equal(t, int32(3), *desired.Spec.Replicas,
+			"with the gate off the declared launch width wins, so the externally written 5 is discarded")
+	})
+
+	t.Run("a follower that does not exist yet is seeded at its declared width", func(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(s).Build()
-		r := &componentWorkloadsReconciler{syncer: newDGDResourceSyncer(c, nil)}
+		r := &componentWorkloadsReconciler{syncer: newDGDResourceSyncer(c, nil), elasticEPRayPoCEnabled: true}
 		desired := &nvidiacomv1beta1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "mydgd-decode-flw",

@@ -91,7 +91,6 @@ func (r *componentWorkloadsReconciler) Reconcile(
 		restartState,
 		existingRestartAnnotations,
 		rollingUpdateCtx,
-		r.elasticEPRayPoCEnabled,
 	)
 	if err != nil {
 		logger.Error(err, "failed to generate the DynamoComponentsDeployments")
@@ -286,14 +285,26 @@ func (r *componentWorkloadsReconciler) preserveExistingDCDState(
 
 	desired.Spec.BackendFramework = existing.Spec.BackendFramework
 
-	// A synthesized elastic-EP follower's replica count is owned by whatever drives the
-	// scale, not by generation. Synthesis re-derives the follower from its leader on
-	// every pass and stamps the resting zero (synthesizeElasticEPFollowerDCD), so
-	// without this the sync classifies an external scale-up as a manual change and
-	// writes zero back -- observed on a cluster reverting `replicas: 1` within two
-	// seconds, with "Manual changes detected ... will be overwritten" in the log.
-	// Zero is the value to seed at creation, not to re-assert forever.
-	if existing.GetAnnotations()[consts.KubeAnnotationElasticEPFollower] == consts.KubeLabelValueTrue &&
+	// This is where features.ElasticEPRayPoC actually decides something for a follower.
+	//
+	// Synthesis is ungated and re-derives the follower on every pass, stamping the
+	// declared launch width (`--data-parallel-size` minus the leader's own rank). Whether
+	// that stamp is authoritative is the gate's job:
+	//
+	//   gate off -- generation wins. The follower tracks the declared width, and an
+	//               external scale is classified as a manual change and reverted. The
+	//               deployment renders at full width and its size is fixed, which is
+	//               exactly "you get all your pods, you just cannot change the count".
+	//   gate on  -- the live value wins. Whatever drives the scale owns the count, and
+	//               generation must not re-assert the launch width over it. Without this
+	//               a cluster reverted `replicas: 1` within two seconds, logging
+	//               "Manual changes detected ... will be overwritten".
+	//
+	// Note the deliberate asymmetry with the orphan sweep, which refuses to delete a
+	// follower that still has replicas even when the gate is off. Reverting a count is
+	// recoverable -- the pods come back on the next reconcile; deleting the DCD is not.
+	if r.elasticEPRayPoCEnabled &&
+		existing.GetAnnotations()[consts.KubeAnnotationElasticEPFollower] == consts.KubeLabelValueTrue &&
 		existing.Spec.Replicas != nil {
 		desired.Spec.Replicas = existing.Spec.Replicas
 	}
