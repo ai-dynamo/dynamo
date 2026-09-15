@@ -25,7 +25,8 @@
 #     'rdma/ib' or 'rdma/rdma_shared_device_a'. Replace it to match your device plugin, and
 #     prefer a SHARED flavour: with an exclusive-mode resource, two co-located workers each
 #     claiming HCAs can deadlock NCCL bootstrap in whichever initialises second.
-#   - podAffinity pins decode onto prefill's node so the KV hop stays on one fabric.
+#   - podAffinity packs decode onto prefill's node so the KV hop stays on one fabric.
+#     It is PREFERRED, not required: gang scheduling deadlocks on a required peer affinity.
 ---
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
@@ -150,16 +151,21 @@ spec:
           imagePullSecrets: [{name: acr-token-secret}]
           nodeSelector:
             nvidia.com/gpu.product: NVIDIA-B200
-          # Decode follows prefill onto one node. One-directional on purpose: a mutual
-          # required affinity can deadlock gang scheduling with neither role able to go first.
+          # Pack decode onto prefill's node so the NIXL KV hop stays on one fabric.
+          # PREFERRED, not required: the operator schedules the deployment as a gang, so a
+          # required affinity on a peer that is not placed yet leaves the whole gang Pending
+          # forever -- neither role can go first. Co-location is an optimisation here, not a
+          # correctness requirement: KV moves over IB RDMA, which works cross-node, just slower.
           affinity:
             podAffinity:
-              requiredDuringSchedulingIgnoredDuringExecution:
-                - topologyKey: kubernetes.io/hostname
-                  labelSelector:
-                    matchLabels:
-                      nvidia.com/dynamo-graph-deployment-name: k-exaone-2-disagg
-                      nvidia.com/dynamo-component: PrefillWorker
+              preferredDuringSchedulingIgnoredDuringExecution:
+                - weight: 100
+                  podAffinityTerm:
+                    topologyKey: kubernetes.io/hostname
+                    labelSelector:
+                      matchExpressions:
+                        - {key: nvidia.com/dynamo-graph-deployment-name, operator: In, values: [k-exaone-2-disagg]}
+                        - {key: nvidia.com/dynamo-component, operator: In, values: [PrefillWorker]}
           tolerations:
             - {key: nvidia.com/gpu, operator: Equal, value: "true", effect: NoSchedule}
           containers:
