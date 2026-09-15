@@ -4481,7 +4481,7 @@ mod tests {
         assert!(result.is_err());
         let message = result.unwrap_err().to_string();
         assert!(message.contains("class=Internal"));
-        assert!(message.contains("reason=runtime.internal"));
+        assert!(message.contains("reason=runtime.unclassified"));
         assert!(!message.contains("403 Forbidden"));
     }
 
