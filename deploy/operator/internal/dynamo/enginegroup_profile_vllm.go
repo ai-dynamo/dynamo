@@ -18,12 +18,8 @@
 package dynamo
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -32,25 +28,25 @@ import (
 )
 
 const (
-	vllmEngineGroupBackend          = "vllm"
-	vllmEngineGeometryDigestVersion = "vllm-engine-group-geometry/v1"
-	vllmDynamoModule                = "dynamo.vllm"
-	vllmServeSubcommand             = "serve"
-	vllmTensorParallelSizeAlias     = "-tp"
-	vllmPipelineParallelSizeAlias   = "-pp"
-	vllmPrefillContextSizeFlag      = "--prefill-context-parallel-size"
-	vllmPrefillContextSizeAlias     = "-pcp"
-	vllmDataParallelSizeAlias       = "-dp"
-	vllmDataParallelSizeLocalAlias  = "-dpl"
-	vllmDataParallelExternalLBFlag  = "--data-parallel-external-lb"
-	vllmNodesFlag                   = "--nnodes"
-	vllmNodesAlias                  = "-n"
-	vllmNodeRankFlag                = "--node-rank"
-	vllmNodeRankAlias               = "-r"
-	vllmMasterAddressFlag           = "--master-addr"
-	vllmHeadlessFlag                = "--headless"
-	vllmDeviceIDsFlag               = "--device-ids"
-	vllmDPSizeEnvironment           = "VLLM_DP_SIZE"
+	vllmEngineGroupBackend         = "vllm"
+	vllmDynamoModule               = "dynamo.vllm"
+	vllmServeSubcommand            = "serve"
+	vllmTensorParallelSizeAlias    = "-tp"
+	vllmPipelineParallelSizeAlias  = "-pp"
+	vllmPrefillContextSizeFlag     = "--prefill-context-parallel-size"
+	vllmPrefillContextSizeAlias    = "-pcp"
+	vllmDataParallelSizeAlias      = "-dp"
+	vllmDataParallelSizeLocalAlias = "-dpl"
+	vllmDataParallelExternalLBFlag = "--data-parallel-external-lb"
+	vllmDataParallelHybridLBFlag   = "--data-parallel-hybrid-lb"
+	vllmNodesFlag                  = "--nnodes"
+	vllmNodesAlias                 = "-n"
+	vllmNodeRankFlag               = "--node-rank"
+	vllmNodeRankAlias              = "-r"
+	vllmMasterAddressFlag          = "--master-addr"
+	vllmHeadlessFlag               = "--headless"
+	vllmDeviceIDsFlag              = "--device-ids"
+	vllmDPSizeEnvironment          = "VLLM_DP_SIZE"
 )
 
 // ErrUnsupportedVLLMProfileSource classifies vLLM declarations whose geometry source is not statically inspectable.
@@ -125,13 +121,7 @@ type parsedVLLMProfileGeometry struct {
 	hasDataParallelSizeLocal bool
 	enableElasticEP          bool
 	dataParallelExternalLB   bool
-}
-
-type vllmEngineGeometryProjection struct {
-	Version              string `json:"version"`
-	TensorParallelSize   int64  `json:"tensorParallelSize"`
-	PipelineParallelSize int64  `json:"pipelineParallelSize"`
-	PrefillContextSize   int64  `json:"prefillContextParallelSize"`
+	dataParallelHybridLB     bool
 }
 
 type vllmGeometryOption struct {
@@ -156,6 +146,7 @@ var vllmProfileSensitiveLongOptions = []string{
 	dataParallelSizeLocalFlag,
 	enableElasticEPFlag,
 	vllmDataParallelExternalLBFlag,
+	vllmDataParallelHybridLBFlag,
 	distributedExecutorFlag,
 	dataParallelBackendFlag,
 	vllmNodesFlag,
@@ -166,9 +157,10 @@ var vllmProfileSensitiveLongOptions = []string{
 	vllmDeviceIDsFlag,
 }
 
-// ResolveVLLMProfileGeometry parses strict vLLM argv, validates its creation-time DP assertion,
-// and resolves the provider-neutral Engine Group geometry. A successful result establishes only
-// physical geometry; it does not prove bootstrap, rank placement, or runtime eligibility.
+// ResolveVLLMProfileGeometry parses strict vLLM argv and validates its creation-time DP assertion.
+// Current vLLM Elastic EP owns the complete DP world through one internal client and Ray, which the
+// narrow one-replica-per-pod Engine Group profile cannot represent. The resolver therefore reports
+// valid current declarations as unsupported until vLLM exposes compatible external membership.
 func ResolveVLLMProfileGeometry(source VLLMProfileGeometrySource) (enginegroup.ResolvedProfileGeometry, error) {
 	// Require a valid creation-time target before comparing it with an optional vLLM assertion.
 	if source.InitialReplicas <= 0 {
@@ -185,11 +177,16 @@ func ResolveVLLMProfileGeometry(source VLLMProfileGeometrySource) (enginegroup.R
 		return enginegroup.ResolvedProfileGeometry{}, err
 	}
 
-	// Accept only the external Elastic EP ownership mode in which one process owns its local rank.
-	if !geometry.enableElasticEP || !geometry.dataParallelExternalLB {
+	if !geometry.enableElasticEP {
 		return enginegroup.ResolvedProfileGeometry{}, &UnsupportedVLLMProfileSourceError{
 			Reason: UnsupportedVLLMProfileSourceReasonOwnershipMode,
-			Detail: "--enable-elastic-ep and --data-parallel-external-lb are required",
+			Detail: "--enable-elastic-ep is required",
+		}
+	}
+	if geometry.dataParallelExternalLB || geometry.dataParallelHybridLB {
+		return enginegroup.ResolvedProfileGeometry{}, &UnsupportedVLLMProfileSourceError{
+			Reason: UnsupportedVLLMProfileSourceReasonOwnershipMode,
+			Detail: "vLLM Elastic EP is incompatible with external or hybrid DP load balancing",
 		}
 	}
 
@@ -202,14 +199,7 @@ func ResolveVLLMProfileGeometry(source VLLMProfileGeometrySource) (enginegroup.R
 		)
 	}
 
-	// Require the fixed local layout explicitly because omission can pack global DP into one pod.
-	if !geometry.hasDataParallelSizeLocal {
-		return enginegroup.ResolvedProfileGeometry{}, &UnsupportedVLLMProfileSourceError{
-			Reason: UnsupportedVLLMProfileSourceReasonMissingGeometry,
-			Detail: "vLLM data parallel size local must be explicit for a pod-local profile",
-		}
-	}
-	if geometry.dataParallelSizeLocal > int64(source.InitialReplicas) {
+	if geometry.hasDataParallelSizeLocal && geometry.dataParallelSizeLocal > int64(source.InitialReplicas) {
 		return enginegroup.ResolvedProfileGeometry{}, fmt.Errorf(
 			"vLLM data parallel size local %d exceeds global data parallel size %d",
 			geometry.dataParallelSizeLocal,
@@ -217,62 +207,11 @@ func ResolveVLLMProfileGeometry(source VLLMProfileGeometrySource) (enginegroup.R
 		)
 	}
 
-	// Classify valid local-DP layouts that do not map one logical replica to one capacity pod.
-	if geometry.dataParallelSizeLocal == 0 {
-		return enginegroup.ResolvedProfileGeometry{}, &enginegroup.UnsupportedProfileError{
-			Reason: enginegroup.UnsupportedProfileReasonCapacityLayout,
-			Detail: "a vLLM process with local DP size 0 does not own capacity membership",
-		}
+	return enginegroup.ResolvedProfileGeometry{}, &UnsupportedVLLMProfileSourceError{
+		Reason: UnsupportedVLLMProfileSourceReasonOwnershipMode,
+		Detail: "current vLLM Elastic EP uses one internal client with Ray-managed DP capacity; " +
+			"the narrow one-replica-per-pod Engine Group profile cannot represent that ownership",
 	}
-	if geometry.dataParallelSizeLocal > 1 {
-		return enginegroup.ResolvedProfileGeometry{}, &enginegroup.UnsupportedProfileError{
-			Reason: enginegroup.UnsupportedProfileReasonPackedReplicas,
-			Detail: fmt.Sprintf(
-				"vLLM local DP size %d packs multiple logical replicas into one pod",
-				geometry.dataParallelSizeLocal,
-			),
-		}
-	}
-
-	// Multiply every world-expanding axis without allowing an overflowing physical requirement.
-	if geometry.tensorParallelSize > math.MaxInt64/geometry.pipelineParallelSize {
-		return enginegroup.ResolvedProfileGeometry{}, fmt.Errorf(
-			"vLLM tensor parallel size %d times pipeline parallel size %d overflows int64",
-			geometry.tensorParallelSize,
-			geometry.pipelineParallelSize,
-		)
-	}
-	gpusPerReplica := geometry.tensorParallelSize * geometry.pipelineParallelSize
-	if gpusPerReplica > math.MaxInt64/geometry.prefillContextSize {
-		return enginegroup.ResolvedProfileGeometry{}, fmt.Errorf(
-			"vLLM TP x PP size %d times prefill context parallel size %d overflows int64",
-			gpusPerReplica,
-			geometry.prefillContextSize,
-		)
-	}
-	gpusPerReplica *= geometry.prefillContextSize
-
-	// Canonicalize engine geometry independently from argv aliases and mutable DP targets.
-	engineGeometryDigest, err := digestVLLMEngineGeometry(geometry)
-	if err != nil {
-		return enginegroup.ResolvedProfileGeometry{}, err
-	}
-
-	// Hand provider-neutral facts to the common physical-geometry resolver.
-	return enginegroup.ResolveProfileGeometry(enginegroup.ProfileGeometryInput{
-		Backend:        vllmEngineGroupBackend,
-		GPUsPerReplica: gpusPerReplica,
-		CapacityRoles: []enginegroup.CapacityRoleGeometry{
-			{
-				Name:             enginegroup.MainCapacityRoleName,
-				Class:            enginegroup.CapacityRoleClassRankOwningCapacity,
-				EngineGPUsPerPod: source.MainContainerGPUs,
-				DedicatedGPUs:    source.DedicatedMainGPUAllocation,
-			},
-		},
-		EngineGeometryDigest:   engineGeometryDigest,
-		WorkloadRevisionDigest: source.WorkloadRevisionDigest,
-	})
 }
 
 func parseVLLMProfileGeometry(command, args []string) (parsedVLLMProfileGeometry, error) {
@@ -355,6 +294,7 @@ func parseVLLMProfileGeometry(command, args []string) (parsedVLLMProfileGeometry
 		hasDataParallelSizeLocal: hasDataParallelSizeLocal,
 		enableElasticEP:          hasExactVLLMProfileFlag(inspectableArgv, enableElasticEPFlag),
 		dataParallelExternalLB:   hasExactVLLMProfileFlag(inspectableArgv, vllmDataParallelExternalLBFlag),
+		dataParallelHybridLB:     hasExactVLLMProfileFlag(inspectableArgv, vllmDataParallelHybridLBFlag),
 	}, nil
 }
 
@@ -371,9 +311,22 @@ func applyVLLMProfileEnvironment(
 		}
 	}
 
-	// Apply vLLM's documented environment fallback only when argv omits global DP size.
+	// vLLM falls back to its native DP environment when effective CLI DP is at most one
+	// and local DP is nonzero, even if --data-parallel-size=1 was explicit.
+	effectiveDPSize := int64(1)
+	if geometry.hasDataParallelSize {
+		effectiveDPSize = geometry.dataParallelSize
+	}
+	effectiveLocalDPSize := int64(1)
+	if geometry.hasDataParallelSizeLocal {
+		effectiveLocalDPSize = geometry.dataParallelSizeLocal
+	}
+	if effectiveDPSize > 1 || effectiveLocalDPSize == 0 {
+		return geometry, nil
+	}
+
 	literal, present := environment[vllmDPSizeEnvironment]
-	if !present || geometry.hasDataParallelSize {
+	if !present {
 		return geometry, nil
 	}
 	value, err := parseVLLMGeometryLiteral(vllmDPSizeEnvironment, literal, false)
@@ -553,8 +506,6 @@ func validatePodLocalVLLMPlacement(argv []string) error {
 		name, _, _ := strings.Cut(normalized, "=")
 		switch name {
 		case distributedExecutorFlag,
-			dataParallelBackendFlag,
-			dataParallelBackendShortFlag,
 			vllmNodesFlag,
 			vllmNodesAlias,
 			vllmNodeRankFlag,
@@ -584,22 +535,4 @@ func parseVLLMGeometryLiteral(flag, literal string, allowZero bool) (int64, erro
 	}
 
 	return value, nil
-}
-
-func digestVLLMEngineGeometry(geometry parsedVLLMProfileGeometry) (string, error) {
-	// Exclude global and local DP syntax so aliases and creation-time targets share one geometry identity.
-	projection := vllmEngineGeometryProjection{
-		Version:              vllmEngineGeometryDigestVersion,
-		TensorParallelSize:   geometry.tensorParallelSize,
-		PipelineParallelSize: geometry.pipelineParallelSize,
-		PrefillContextSize:   geometry.prefillContextSize,
-	}
-	encoded, err := json.Marshal(projection)
-	if err != nil {
-		return "", fmt.Errorf("marshal vLLM engine geometry projection: %w", err)
-	}
-
-	// Prefix the digest so its representation remains self-describing.
-	digest := sha256.Sum256(encoded)
-	return "sha256:" + hex.EncodeToString(digest[:]), nil
 }
