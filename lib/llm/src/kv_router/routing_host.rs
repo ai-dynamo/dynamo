@@ -29,7 +29,10 @@ use tracing::Instrument;
 
 use crate::{
     kv_router::{
-        KvRouter, metrics::RouterRequestMetrics, scheduler::DefaultWorkerSelector,
+        KvRouter,
+        cache_history::{self, CacheHistory},
+        metrics::RouterRequestMetrics,
+        scheduler::DefaultWorkerSelector,
         to_worker_selection_session_context,
     },
     local_model::runtime_config::ModelRuntimeConfig,
@@ -59,7 +62,7 @@ use cancellation::{CleanupBudget, DispatchCancellation, StagedKv, await_with_cle
 use kv_selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 use occupancy::HostedOccupancy;
 pub(crate) use request_guard::prompt_private_blocks;
-use request_guard::{KvRequestCleanup, LoraLoadGuard, RequestGuard};
+use request_guard::{CacheHistoryTracking, KvRequestCleanup, LoraLoadGuard, RequestGuard};
 
 const OUTPUT_REPLAY_ID_ANNOTATION_KEY: &str = "output_replay_id";
 const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
@@ -248,6 +251,7 @@ where
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     policy: RoutingPolicy<Sel>,
     request_metrics: Arc<RouterRequestMetrics>,
+    cache_history: Option<Arc<CacheHistory>>,
     affinity: Option<AffinityCoordinator>,
     session_affinity_mode: SessionAffinityMode,
     hosted_occupancy: Option<HostedOccupancy>,
@@ -420,11 +424,17 @@ where
         // and the standalone router create RoutingHost, so this covers both.
         let request_metrics =
             RouterRequestMetrics::from_component(kv_router.client().endpoint.component());
+        let cache_history =
+            cache_history::enabled().then(|| CacheHistory::from_env(kv_router.block_size()));
+        if let Some(history) = &cache_history {
+            request_metrics.set_cache_history_capacity(history.stats());
+        }
 
         RoutingHost {
             inner,
             policy: RoutingPolicy::Kv(kv_router),
             request_metrics,
+            cache_history,
             affinity,
             session_affinity_mode,
             hosted_occupancy: None,
@@ -513,6 +523,7 @@ where
             inner,
             policy,
             request_metrics,
+            cache_history: None,
             affinity,
             session_affinity_mode,
             hosted_occupancy,

@@ -63,6 +63,7 @@ use prometheus::{
 };
 
 use crate::http::service::metrics::generate_log_buckets;
+use crate::kv_router::cache_history::{self, CacheHistoryStats};
 use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
 use dynamo_kv_router::indexer::ApproximateLruStats;
 
@@ -857,6 +858,20 @@ pub struct RouterRequestMetrics {
     pub shared_cache_beyond_blocks: prometheus::Histogram,
     pub non_max_overlap_selections_total: IntCounterVec,
     pub overlap_blocks_lost: HistogramVec,
+    pub(crate) cache_history: Option<CacheHistoryMetrics>,
+}
+
+pub(crate) struct CacheHistoryMetrics {
+    observation_input_tokens_total: IntCounter,
+    f0_tokens_total: IntCounter,
+    f1_tokens_total: IntCounter,
+    complete_observations_total: IntCounter,
+    incomplete_observations_total: IntCounter,
+    retained_entries: IntGauge,
+    represented_tokens: IntGauge,
+    estimated_retained_bytes: IntGauge,
+    capacity_entries: IntGauge,
+    capacity_bytes: IntGauge,
 }
 
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
@@ -978,6 +993,74 @@ impl RouterRequestMetrics {
                     .expect("failed to create router_overlap_blocks_lost");
                 non_max_overlap_selections_total.with_label_values(&[WORKER_TYPE_PREFILL]);
                 overlap_blocks_lost.with_label_values(&[WORKER_TYPE_PREFILL]);
+                let cache_history = cache_history::enabled().then(|| {
+                    let observation_input_tokens_total = metrics
+                        .create_intcounter(
+                            &router_metric("cache_loss_observation_input_tokens_total"),
+                            "Input tokens for cache-reuse observations started by the router",
+                            extra_labels,
+                        )
+                        .expect(
+                            "failed to create router_cache_loss_observation_input_tokens_total",
+                        );
+                    let funnel_tokens_total = metrics
+                        .create_intcountervec(
+                            &router_metric("cache_loss_funnel_tokens_total"),
+                            "Raw token observations at each cache-reuse funnel stage",
+                            &["stage"],
+                            extra_labels,
+                        )
+                        .expect("failed to create router_cache_loss_funnel_tokens_total");
+                    for stage in ["f0", "f1"] {
+                        funnel_tokens_total.with_label_values(&[stage]);
+                    }
+                    let f0_tokens_total = funnel_tokens_total.with_label_values(&["f0"]);
+                    let f1_tokens_total = funnel_tokens_total.with_label_values(&["f1"]);
+                    let observations_total = metrics
+                        .create_intcountervec(
+                            &router_metric("cache_loss_observations_total"),
+                            "Cache-reuse observations by completion status",
+                            &["result"],
+                            extra_labels,
+                        )
+                        .expect("failed to create router_cache_loss_observations_total");
+                    let complete_observations_total =
+                        observations_total.with_label_values(&["complete"]);
+                    let incomplete_observations_total =
+                        observations_total.with_label_values(&["incomplete"]);
+                    let gauge = |suffix, help| {
+                        metrics
+                            .create_intgauge(&router_metric(suffix), help, extra_labels)
+                            .unwrap_or_else(|error| panic!("failed to create {suffix}: {error}"))
+                    };
+                    CacheHistoryMetrics {
+                        observation_input_tokens_total,
+                        f0_tokens_total,
+                        f1_tokens_total,
+                        complete_observations_total,
+                        incomplete_observations_total,
+                        retained_entries: gauge(
+                            "cache_loss_history_unique_hashes",
+                            "Distinct canonical block hashes retained by cache history",
+                        ),
+                        represented_tokens: gauge(
+                            "cache_loss_history_represented_tokens",
+                            "Tokens represented by distinct cache-history entries",
+                        ),
+                        estimated_retained_bytes: gauge(
+                            "cache_loss_history_estimated_bytes",
+                            "Estimated bytes used by retained cache-history entries",
+                        ),
+                        capacity_entries: gauge(
+                            "cache_loss_history_capacity_blocks",
+                            "Configured distinct-block capacity of cache history",
+                        ),
+                        capacity_bytes: gauge(
+                            "cache_loss_history_capacity_bytes",
+                            "Configured byte budget of cache history",
+                        ),
+                    }
+                });
                 Arc::new(Self {
                     requests_started_total,
                     requests_total,
@@ -991,6 +1074,7 @@ impl RouterRequestMetrics {
                     shared_cache_beyond_blocks,
                     non_max_overlap_selections_total,
                     overlap_blocks_lost,
+                    cache_history,
                 })
             })
             .clone()
@@ -1016,6 +1100,55 @@ impl RouterRequestMetrics {
         self.overlap_blocks_lost
             .with_label_values(&[worker_type])
             .observe(overlap_blocks_lost);
+    }
+
+    pub(crate) fn observe_cache_history_input(&self, prompt_tokens: u64) {
+        let Some(metrics) = &self.cache_history else {
+            return;
+        };
+        metrics.observation_input_tokens_total.inc_by(prompt_tokens);
+    }
+
+    pub(crate) fn observe_cache_history_complete(
+        &self,
+        prompt_tokens: u64,
+        previously_seen_tokens: u64,
+    ) {
+        let Some(metrics) = &self.cache_history else {
+            return;
+        };
+        metrics.f0_tokens_total.inc_by(prompt_tokens);
+        metrics.f1_tokens_total.inc_by(previously_seen_tokens);
+        metrics.complete_observations_total.inc();
+    }
+
+    pub(crate) fn observe_cache_history_incomplete(&self) {
+        if let Some(metrics) = &self.cache_history {
+            metrics.incomplete_observations_total.inc();
+        }
+    }
+
+    pub(crate) fn set_cache_history_capacity(&self, stats: CacheHistoryStats) {
+        let Some(metrics) = &self.cache_history else {
+            return;
+        };
+        let gauge = |value: usize| i64::try_from(value).unwrap_or(i64::MAX);
+        metrics.capacity_entries.set(gauge(stats.capacity_entries));
+        metrics.capacity_bytes.set(gauge(stats.capacity_bytes));
+    }
+
+    pub(crate) fn set_cache_history_retained(&self, stats: CacheHistoryStats) {
+        let Some(metrics) = &self.cache_history else {
+            return;
+        };
+        let gauge = |value: usize| i64::try_from(value).unwrap_or(i64::MAX);
+        metrics.retained_entries.set(gauge(stats.retained_entries));
+        metrics
+            .represented_tokens
+            .set(i64::try_from(stats.represented_tokens).unwrap_or(i64::MAX));
+        metrics
+            .estimated_retained_bytes
+            .set(gauge(stats.estimated_retained_bytes));
     }
 }
 

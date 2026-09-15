@@ -55,6 +55,7 @@ pub use dynamo_kv_router::protocols;
 pub use dynamo_kv_router::scheduling;
 pub use dynamo_kv_router::selector;
 
+mod cache_history;
 pub mod encoder_router;
 pub mod indexer;
 pub mod metrics;
