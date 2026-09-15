@@ -469,6 +469,7 @@ func (v *sharedValidation) validateExperimentalSpec(
 			experimental.Checkpoint,
 			fldPath.Child("checkpoint"),
 			experimental.GPUMemoryService,
+			options.componentType,
 		)...)
 	}
 
@@ -612,10 +613,22 @@ func (v *sharedValidation) validateComponentCheckpointConfig(
 	checkpointConfig *nvidiacomv1beta1.ComponentCheckpointConfig,
 	fldPath *field.Path,
 	gms *nvidiacomv1beta1.GPUMemoryServiceSpec,
+	componentType nvidiacomv1beta1.ComponentType,
 ) field.ErrorList {
 	var allErrs field.ErrorList
 	if checkpointConfig.Enabled && !features.MustGateFrom(v.ctx).Enabled(features.Checkpoint) {
 		allErrs = append(allErrs, field.Forbidden(fldPath, "checkpoint functionality is disabled in the operator configuration"))
+	}
+	if checkpointConfig.Enabled && componentType == "" {
+		allErrs = append(allErrs, field.Forbidden(
+			fldPath,
+			"checkpoint functionality requires component type to be explicitly set to worker, prefill, or decode",
+		))
+	} else if checkpointConfig.Enabled && !dynamo.IsWorkerComponent(string(componentType)) {
+		allErrs = append(allErrs, field.Forbidden(
+			fldPath,
+			"checkpoint functionality is supported only for worker, prefill, and decode components",
+		))
 	}
 	if checkpointConfig.Job == nil {
 		return allErrs

@@ -1070,6 +1070,18 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
+			name: "non-worker checkpoint is rejected at admission",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				frontend := dgd.GetComponentByName("frontend")
+				frontend.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
+				}
+			}),
+			wantWebhookErrs: []string{
+				"spec.components[0].experimental.checkpoint: Forbidden: checkpoint functionality is supported only for worker, prefill, and decode components",
+			},
+		},
+		{
 			name:          "checkpoint configuration requires operator feature gate",
 			checkpointOff: true,
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
