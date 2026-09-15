@@ -16,6 +16,7 @@ from dynamo.sglang._compat import resolved_server_args
 _CANCELLATION_POLL_MAX_DELAY_S = 0.05
 _CANCELLATION_ABORT_RETRY_LIMIT = 8
 _CANCELLATION_DRAIN_TIMEOUT_S = 1.0
+_CANCELLATION_REGISTRATION_WAIT_TIMEOUT_S = 30.0
 # Leave most of the drain window available after an ordered abort is submitted.
 _CANCELLATION_DISPATCH_WAIT_TIMEOUT_S = 0.25
 
@@ -190,11 +191,21 @@ class CancellationMixin:
         registry: Mapping[str, Any],
         context_id: str,
     ) -> None:
-        request_id = await self._wait_for_registration(
-            submitted_request_id,
-            request_id_future,
-            registry,
-        )
+        try:
+            request_id = await asyncio.wait_for(
+                self._wait_for_registration(
+                    submitted_request_id,
+                    request_id_future,
+                    registry,
+                ),
+                timeout=_CANCELLATION_REGISTRATION_WAIT_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            logging.warning(
+                "Timed out waiting for SGLang Request ID %s to register",
+                submitted_request_id,
+            )
+            return
         if request_id is None:
             logging.debug(
                 "Abandoning SGLang abort for Context %s; request never registered",
@@ -222,7 +233,7 @@ class CancellationMixin:
         request_id_future: asyncio.Future,
         context: Context,
         submitted_request_id: str | None = None,
-    ) -> None:
+    ) -> asyncio.Task[Any] | None:
         """Wait for cancellation, then order an exact SGLang abort."""
         logging.debug("Cancellation monitor started for Context: %s", context.id())
         ordered_abort_task = None
@@ -281,6 +292,7 @@ class CancellationMixin:
                         except Exception:
                             pass
                     raise EngineShutdown("Engine was shut down during token generation")
+            return ordered_abort_task
         except asyncio.CancelledError:
             logging.debug(
                 "Cancellation monitor task cancelled for SGLang Request ID %s, Context: %s",
@@ -395,22 +407,25 @@ class CancellationMixin:
         try:
             yield cancellation_task
         finally:
-            if not request_id_future.done():
-                request_id_future.cancel()
             request_id = self._resolved_request_id(request_id_future)
-            if not cancellation_task.done():
-                logging.debug(
-                    "Cancelling cancellation monitor task for SGLang Request ID %s, Context: %s",
-                    request_id,
-                    context.id(),
-                )
-                cancellation_task.cancel()
-                try:
-                    await cancellation_task
-                except asyncio.CancelledError:
-                    pass
-            else:
-                cancellation_task.result()
+            ordered_abort_task = None
+            try:
+                if not cancellation_task.done():
+                    logging.debug(
+                        "Cancelling cancellation monitor task for SGLang Request ID %s, Context: %s",
+                        request_id,
+                        context.id(),
+                    )
+                    cancellation_task.cancel()
+                    try:
+                        await cancellation_task
+                    except asyncio.CancelledError:
+                        pass
+                else:
+                    ordered_abort_task = cancellation_task.result()
+            finally:
+                if not request_id_future.done() and ordered_abort_task is None:
+                    request_id_future.cancel()
 
             if self.shutdown_event and self.shutdown_event.is_set():
                 raise EngineShutdown("Engine was shut down during token generation")
