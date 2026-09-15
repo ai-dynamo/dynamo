@@ -23,6 +23,18 @@ from .pool_selection import get_priority_retry_order, load_config
 logger = logging.getLogger(__name__)
 
 
+def _requested_output_tokens(request: Dict[str, Any]) -> int:
+    """Read the preprocessed completion budget without rejecting legacy requests."""
+    stop_conditions = request.get("stop_conditions") or {}
+    if not isinstance(stop_conditions, dict):
+        return 0
+    value = stop_conditions.get("max_tokens")
+    try:
+        return max(0, int(value)) if value is not None else 0
+    except (TypeError, ValueError):
+        return 0
+
+
 class GlobalRouterHandler:
     """
     Handler for the Global Router that routes requests to worker pools.
@@ -218,9 +230,16 @@ class GlobalRouterHandler:
         assert self.config.prefill_pool_selection_strategy is not None
         assert self.config.prefill_pool_dynamo_namespaces is not None
 
-        # Extract ISL (input sequence length)
+        # Keep prefill and decode in a compatible context tier when the pools
+        # have different max-model-len values.
         token_ids = request.get("token_ids", [])
         isl = len(token_ids)
+        output_tokens = _requested_output_tokens(request)
+        routing_length = (
+            isl + output_tokens
+            if self.config.reserve_output_tokens_for_context
+            else isl
+        )
 
         # Extract TTFT target from nvext.router (forwarded by the preprocessor
         # as the `router` field on PreprocessedRequest), fallback to CLI default.
@@ -236,7 +255,7 @@ class GlobalRouterHandler:
 
         # Select prefill pool
         pool_idx = self.config.prefill_pool_selection_strategy.select_pool(
-            isl=isl, ttft_target_ms=ttft_target_ms, priority=priority
+            isl=routing_length, ttft_target_ms=ttft_target_ms, priority=priority
         )
         namespace = self.config.prefill_pool_dynamo_namespaces[pool_idx]
         assert self.config.prefill_pool_priorities is not None
@@ -247,7 +266,8 @@ class GlobalRouterHandler:
         )
 
         logger.info(
-            f"Routing prefill request: ISL={isl}, TTFT_target={ttft_target_ms}ms, "
+            f"Routing prefill request: ISL={isl}, reserved_output={output_tokens}, "
+            f"routing_length={routing_length}, TTFT_target={ttft_target_ms}ms, "
             f"priority={priority} -> pool {pool_idx} ({namespace}); "
             f"retry_order={pool_order}"
         )
@@ -276,10 +296,16 @@ class GlobalRouterHandler:
         assert self.config.decode_pool_selection_strategy is not None
         assert self.config.decode_pool_dynamo_namespaces is not None
 
-        # The strategy field retains the context_length name, but decode routing
-        # currently sees the request token IDs before generation begins.
+        # A decode worker's max-model-len applies to prompt plus completion.
+        # Reserve the requested output budget in heterogeneous pool mode.
         token_ids = request.get("token_ids", [])
-        context_length = len(token_ids)
+        input_tokens = len(token_ids)
+        output_tokens = _requested_output_tokens(request)
+        context_length = (
+            input_tokens + output_tokens
+            if self.config.reserve_output_tokens_for_context
+            else input_tokens
+        )
 
         router_params = request.get("router") or {}
         itl_target_ms = router_params.get("itl_target")
@@ -305,7 +331,8 @@ class GlobalRouterHandler:
         )
 
         logger.info(
-            f"Routing decode request: context_length={context_length}, "
+            f"Routing decode request: input_tokens={input_tokens}, "
+            f"reserved_output={output_tokens}, context_length={context_length}, "
             f"ITL_target={itl_target_ms}ms, priority={priority} -> "
             f"pool {pool_idx} ({namespace}); retry_order={pool_order}"
         )
