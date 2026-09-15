@@ -242,7 +242,8 @@ def get_prefill_ttft(
             request_count=total_concurrency,
             warmup_request_count=AIPERF_WARMUP_REQUEST_PER_DP_RANK * attention_dp_size,
         )
-        assert aiperf_result is not None
+        if aiperf_result is None:
+            return None
         try:
             max_ttft = float(aiperf_result["time_to_first_token"]["max"])
             # subtract the decoding time in-between prefill runs
@@ -266,7 +267,8 @@ def get_prefill_ttft(
         tokenizer,
         base_url=base_url,
     )
-    assert aiperf_result is not None
+    if aiperf_result is None:
+        return None
     try:
         return float(aiperf_result["time_to_first_token"]["avg"])
     except (KeyError, TypeError, ValueError):
