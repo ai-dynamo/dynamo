@@ -5,6 +5,8 @@
 
 use std::collections::HashSet;
 
+use rustc_hash::FxHashSet;
+
 use crate::protocols::{WorkerId, WorkerWithDpRank};
 
 /// Host-owned knowledge of which workers can serve a LoRA adapter.
@@ -46,10 +48,14 @@ pub fn narrow_allowed_worker_ids_by_lora(
         return allowed_worker_ids;
     }
     // A filter may only narrow: ids it returns from outside `base` are dropped.
-    let mut narrowed: HashSet<WorkerId> = filter
+    let preferred: FxHashSet<WorkerId> = filter
         .filter_worker_ids_for_lora(lora_name, &base)
         .into_iter()
-        .filter(|id| base.contains(id))
+        .collect();
+    let mut narrowed: HashSet<WorkerId> = base
+        .iter()
+        .copied()
+        .filter(|id| preferred.contains(id))
         .collect();
     if let Some(pinned) = pinned_worker
         && base.contains(&pinned.worker_id)
@@ -154,6 +160,14 @@ mod tests {
             narrow(&Widening(vec![9]), Some("a"), None, None),
             None,
             "only out-of-universe ids: nothing survives, so the allow-set is unchanged"
+        );
+    }
+
+    #[test]
+    fn all_workers_qualifying_preserves_the_candidate_universe() {
+        assert_eq!(
+            narrow(&Widening(vec![3, 2, 1, 2, 9]), Some("a"), None, None),
+            Some(HashSet::from([1, 2, 3]))
         );
     }
 
