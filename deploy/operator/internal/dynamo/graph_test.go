@@ -10138,13 +10138,22 @@ func TestApplyDGDTemplateDefaultsPreservesAlphaServiceMetadataPrecedence(t *test
 	t.Log("Convert a merged v1alpha1 DGD with conflicting graph, service, and pod metadata")
 	alpha := &v1alpha1.DynamoGraphDeployment{
 		Spec: v1alpha1.DynamoGraphDeploymentSpec{
-			Annotations: map[string]string{"service-wins": "graph", "graph-only": "kept"},
-			Labels:      map[string]string{"service-wins": "graph", "graph-only": "kept"},
+			Annotations: map[string]string{
+				"service-wins": "graph",
+				"graph-only":   "kept",
+				commonconsts.KubeAnnotationDynamoDiscoveryBackend: "etcd",
+			},
+			Labels: map[string]string{"service-wins": "graph", "graph-only": "kept"},
 			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 				"Frontend": {
 					ComponentType: "frontend",
-					Annotations:   map[string]string{"service-wins": "service", "pod-wins": "service", "service-only": "kept"},
-					Labels:        map[string]string{"service-wins": "service", "pod-wins": "service", "service-only": "kept"},
+					Annotations: map[string]string{
+						"service-wins": "service",
+						"pod-wins":     "service",
+						"service-only": "kept",
+						commonconsts.KubeAnnotationDynamoDiscoveryBackend: "kubernetes",
+					},
+					Labels: map[string]string{"service-wins": "service", "pod-wins": "service", "service-only": "kept"},
 					ExtraPodMetadata: &v1alpha1.ExtraPodMetadata{
 						Annotations: map[string]string{"pod-wins": "pod", "pod-only": "kept"},
 						Labels:      map[string]string{"pod-wins": "pod", "pod-only": "kept"},
@@ -10176,6 +10185,29 @@ func TestApplyDGDTemplateDefaultsPreservesAlphaServiceMetadataPrecedence(t *test
 	assert.Equal(t, "kept", labels["graph-only"])
 	assert.Equal(t, "kept", labels["service-only"])
 	assert.Equal(t, "kept", labels["pod-only"])
+
+	t.Log("Verify runtime pod generation consumes the service-level discovery override")
+	podSpec, err := GenerateBasePodSpec(
+		component,
+		BackendFrameworkSGLang,
+		&mockSecretsRetriever{},
+		"test-deployment",
+		"default",
+		RoleMain,
+		1,
+		&configv1alpha1.OperatorConfiguration{
+			Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendEtcd},
+		},
+		commonconsts.MultinodeDeploymentTypeGrove,
+		"Frontend",
+		nil,
+		staticContainerGPUCount(0),
+	)
+	require.NoError(t, err)
+	assert.Contains(t, podSpec.Containers[0].Env, corev1.EnvVar{
+		Name:  commonconsts.DynamoDiscoveryBackendEnvVar,
+		Value: "kubernetes",
+	})
 }
 
 func TestGenerateGrovePodCliqueSet_SpecMetadataPropagation(t *testing.T) {
