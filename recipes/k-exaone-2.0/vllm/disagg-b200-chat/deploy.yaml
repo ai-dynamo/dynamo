@@ -58,8 +58,7 @@ spec:
             - name: main
               # Public released frontend. CPU-only -- it routes traffic and loads no weights,
               # so it takes the released frontend image rather than the model-specific
-              # vLLM runtime. Multi-arch (linux/amd64 + linux/arm64); this tag resolves to
-              # index digest sha256:7a54b0d601b7b2c50d4...
+              # vLLM runtime. Multi-arch: linux/amd64 and linux/arm64.
               image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.1
               command: [/bin/bash, -lc]
               args:
@@ -79,7 +78,7 @@ spec:
       sharedMemorySize: 40Gi
       podTemplate:
         spec:
-          # required only by the dev image above; drop with the public image swap.
+          # needed only by the interim worker image below; drop it when that image is public.
           imagePullSecrets: [{name: acr-token-secret}]
           nodeSelector:
             nvidia.com/gpu.product: NVIDIA-B200
@@ -92,7 +91,6 @@ spec:
               # public nvcr.io tag being cut -- stock vLLM 0.28.0 cannot load this NVFP4
               # checkpoint without it. Swap to nvcr.io/nvidia/ai-dynamo/vllm-runtime:<tag>
               # pinned to the MULTI-ARCH INDEX digest before this recipe ships.
-              # tag at time of validation: 1.4.1-ci-7ba2828b...-vllm-runtime
               image: dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:79a9d1b103d81fbdda1e97dc476a31adcaf6056e2d2f465b09173a5578a574b8
               env:
                 - {name: VLLM_NIXL_SIDE_CHANNEL_PORT, value: "5560"}
@@ -137,7 +135,7 @@ spec:
       sharedMemorySize: 40Gi
       podTemplate:
         spec:
-          # required only by the dev image above; drop with the public image swap.
+          # needed only by the interim worker image below; drop it when that image is public.
           imagePullSecrets: [{name: acr-token-secret}]
           nodeSelector:
             nvidia.com/gpu.product: NVIDIA-B200
@@ -160,7 +158,6 @@ spec:
               # public nvcr.io tag being cut -- stock vLLM 0.28.0 cannot load this NVFP4
               # checkpoint without it. Swap to nvcr.io/nvidia/ai-dynamo/vllm-runtime:<tag>
               # pinned to the MULTI-ARCH INDEX digest before this recipe ships.
-              # tag at time of validation: 1.4.1-ci-7ba2828b...-vllm-runtime
               image: dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:79a9d1b103d81fbdda1e97dc476a31adcaf6056e2d2f465b09173a5578a574b8
               env:
                 - {name: VLLM_NIXL_SIDE_CHANNEL_PORT, value: "5558"}

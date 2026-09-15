@@ -147,6 +147,8 @@ spec:
           value: k-exaone-2-agg-frontend:8000
         - name: TRACE_FILE
           value: /model-cache/traces/8k_1k_70kv_chat_new_noschedule_short_15perc.jsonl
+        # Operating point is per variant: 7 for agg-b200-chat, 14 for disagg-b200-chat.
+        # Set this to match the variant ENDPOINT points at.
         - name: CONCURRENCY
           value: "7"
         # --- The remainder is shared across all variants ---

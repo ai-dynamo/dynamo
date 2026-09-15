@@ -134,8 +134,8 @@ errored, and unfinished requests before reporting aggregate throughput.
 | --- | --- | --- |
 | `ENDPOINT` | `k-exaone-2-agg-frontend:8000` | Change per DGD variant |
 | `TRACE_FILE` | `/model-cache/traces/8k_1k_70kv_chat_new_noschedule_short_15perc.jsonl` | 1,805-request 15% chat trace |
-| `CONCURRENCY` | `7` | the measured SLA-legal operating point on this trace |
-| `TARGET_MODEL` | `zai-org/K-EXAONE 2.0` | Must match `--served-model-name` |
+| `CONCURRENCY` | `7` | per-variant operating point: **7 for `agg-b200-chat`, 14 for `disagg-b200-chat`**. Set it to match the variant `ENDPOINT` points at, or the result will not reproduce the published row. |
+| `TARGET_MODEL` | `LGAI-EXAONE/K-EXAONE-2.0-750B-A37B-NVFP4` | Must match `--served-model-name` |
 
 ## Artifacts
 

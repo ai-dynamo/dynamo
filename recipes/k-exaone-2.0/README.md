@@ -158,15 +158,19 @@ legs**, not peak throughput.
 | Configuration | Concurrency | tok/s/GPU | E2E tok/s/user | TTFT p50 | ITL |
 |---|---|---|---|---|---|
 | Aggregated (4 GPU) | 7 | **87** | 51.4 | 291 ms | 19.15 ms |
-| Disaggregated (8 GPU) | 7 | **55** | 70.6 | 1,018 ms | 13.15 ms |
+| Disaggregated (8 GPU) | **14** | **85** | 54.9 | 2,230 ms | 15.98 ms |
+| Disaggregated (8 GPU) | 7 | 55 | 70.6 | 1,018 ms | 13.15 ms |
 
-The disaggregated figure is **conservative**: at C=7 it clears the gate with wide margin
-(E2E 70.6 against 50, TTFT 1,018 ms against 5,000), so its true operating point is at a higher
-concurrency that has not been swept. It is quoted at C=7 only so it is directly comparable to the
-aggregated row.
+Each row is that configuration's own operating point. The disaggregated C=7 row is kept only
+because it is the concurrency the aggregated row runs at; it is **not** the disaggregated
+recipe's operating point. At C=7 disaggregation clears the gate with so much margin
+(E2E 70.6 against 50, TTFT 1,018 ms against 5,000) that it is simply under-loaded, and reading
+55 against 87 as "disaggregation costs 37%" is an artifact of that.
 
-Disaggregation buys per-token latency, not throughput: ITL 13.15 ms against the aggregated
-recipe's 19.15 ms, for roughly 1.6x the GPUs per unit of throughput.
+Run at its own operating point, **the two topologies are level**: 85 against 87 tok/s/GPU,
+both meeting the same gate. Disaggregation is therefore an SLA and scaling choice for this
+model, not a throughput win or loss -- it buys per-token latency (ITL 15.98 ms against 19.15)
+and independent prefill/decode scaling, for twice the GPUs.
 
 Aggregated on the **full** 12,031-request trace, for reference: **97 tok/s/GPU** at C=8,
 E2E 51.1, TTFT 312 ms.
@@ -175,6 +179,14 @@ Measured KV reuse is **8.8%** on the full trace. That is not a misconfiguration:
 is ~42x oversubscribed against TP=4's KV capacity, so blocks are evicted before they can be hit.
 It is also why KV-aware routing shows no gain here (9.494% hit rate vs 9.458% round-robin) --
 the router cannot route to a block that is already gone.
+
+**38 of the trace's 1,805 requests are rejected, by design, in every run.** The trace is
+multi-turn and its accumulated prompts reach 614,440 tokens, while this checkpoint declares
+`max_position_embeddings` of 262,144, so those requests return HTTP 400 and are excluded from
+the metrics. The count is a fixed property of the trace against this model, identical at every
+concurrency, so the rows above remain comparable to each other -- but the throughput figures are
+computed over the requests that a 262k-context model can actually serve. The C=14 run completed
+1,733 of 1,805: 38 over-length, plus 34 that returned no content under load.
 
 > [!WARNING]
 > Synthetic benchmarks with a shared system prompt report ~3x higher throughput for this model
