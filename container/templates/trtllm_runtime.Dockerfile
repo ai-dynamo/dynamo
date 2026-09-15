@@ -96,37 +96,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     LIBSTDCPP=/usr/lib/${ARCH_ALT}-linux-gnu/libstdc++.so.6 && \
     test -f "$LIBSTDCPP" && ln -sf "$LIBSTDCPP" /opt/dynamo/libstdc++.so.6
 
-# Upstream's Triton is the NGC PyTorch build (3.7.0+git...nv26.5), not the PyPI
-# wheel TensorRT-LLM pulled in through 1.3.0rc24 (`triton==3.6.0`). rc25 pins
-# `triton==3.7.0`, which PEP 440 treats as satisfied by the NGC build's
-# `3.7.0+...` local version, so pip no longer installs the wheel over it. The NGC
-# build ships triton/backends/nvidia/ WITHOUT the include/ (cuda.h) and bin/
-# (ptxas, cuobjdump, nvdisasm) trees the wheel vendors, and relies on image ENV
-# instead: TRITON_CUDACRT_PATH, TRITON_CUDART_PATH, TRITON_PTXAS_PATH, ... all
-# pointing into /usr/local/cuda. Image ENV never reaches the MPI ranks the
-# operator starts over ssh on multinode worker pods -- only mpirun's -x
-# allowlist does -- so Triton's cuda_utils JIT there ran gcc without
-# -I/usr/local/cuda/include, and any multinode TRT-LLM deploy whose worker-pod
-# ranks JIT a Triton kernel died in warmup with "fatal error: cuda.h: No such
-# file or directory" (GH-14864 / NVBug 6772753). Leader-pod ranks and
-# single-node deploys inherit the ENV and were unaffected.
-#
-# Restore the wheel layout so Triton's env-free defaults resolve
-# (backends/nvidia/driver.py: include_dirs = [dirname/include]; knobs.py:
-# env_nvidia_tool default_path = backends/nvidia/bin/<tool>). Per-file symlinks
-# inside real directories, NOT a directory symlink: pip unlinks an existing
-# destination before writing, so a later `pip install triton` (PyPI wheel,
-# which vendors these headers and tools) replaces the links with real files,
-# whereas a directory symlink would make that install write THROUGH into
-# /usr/local/cuda and overwrite the toolkit's own headers. driver.c includes
-# only cuda.h from CUDA; the JIT check below fails the build if that changes.
-# Guarded both ways: a base that already ships the real trees is left
-# untouched, and the build fails if Triton's cuda_utils JIT -- the exact code
-# path that failed -- cannot compile and load with every TRITON_*_PATH
-# variable (and CPATH) unset. There is no GPU at build time, so the check
-# links and loads against the toolkit's libcuda stub and keeps Triton's cache
-# out of $HOME. This lets launchers such as ssh and mpirun use Triton's default
-# paths even when they do not propagate the image ENV.
+# Restore Triton's default CUDA header/tool paths for SSH-launched ranks that
+# lack the image ENV (GH-14864). Use per-file links inside real directories so
+# later wheel installs cannot overwrite the CUDA toolkit through a directory link.
+# Check the JIT with path overrides unset and a fresh cache, using the CUDA
+# driver stub so the build needs no GPU.
 RUN set -eu; \
     tb=$(/usr/bin/python3 -c 'import os, triton.backends.nvidia as b; print(os.path.dirname(b.__file__))'); \
     echo "triton nvidia backend: $tb"; \
