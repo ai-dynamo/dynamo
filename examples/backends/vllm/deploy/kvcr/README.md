@@ -101,8 +101,12 @@ container discovery gives `main` and the real `kvcr-services` sidecar separate
 metadata writers. The explicit sidecar supplies its own downward-API Pod UID;
 the operator injects that identity only into its generated `main` container.
 Kubernetes currently restarts a failed `kvcr-services` container independently.
-Deployments that require vLLM to restart with that sidecar must enforce the
-coordinated restart as Pod-level policy.
+In this MVP, any such restart invalidates the Guard-recovery guarantee and is
+deployment-fatal: a replacement service cannot adopt the original Guard and
+pool while vLLM remains alive. An external deployment controller must replace
+the entire affected worker Pod instead of restarting only the sidecar. If
+worker 0's sidecar restarts, recreate the worker group or DGD because its state
+agent's routing state was also lost.
 
 The state agent carries routing and residency information; it does not move
 KV payloads. KVCR uses NIXL and UCX for the remote payload transfer.

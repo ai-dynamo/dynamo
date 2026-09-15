@@ -10,7 +10,12 @@ from pathlib import Path
 import pytest
 import yaml
 
-pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.pre_merge,
+    pytest.mark.gpu_0,
+    pytest.mark.timeout(90),
+]
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _MANIFEST_DIR = _REPO_ROOT / "examples/backends/vllm/deploy/kvcr"

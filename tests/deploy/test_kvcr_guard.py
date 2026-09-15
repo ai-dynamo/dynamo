@@ -274,6 +274,7 @@ def test_rdma_counter_uses_configured_active_port(monkeypatch) -> None:
 @pytest.mark.pre_merge
 @pytest.mark.unit
 @pytest.mark.gpu_0
+@pytest.mark.timeout(90)
 @pytest.mark.skipif(shutil.which("envsubst") is None, reason="envsubst is unavailable")
 def test_render_manifest_injects_test_only_fault_gate(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("DYNAMO_RDMA_RESOURCE", "rdma/test")
