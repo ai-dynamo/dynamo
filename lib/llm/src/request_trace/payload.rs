@@ -14,6 +14,8 @@ use crate::protocols::openai::chat_completions::{
 /// Context key for the allowlisted headers captured at the HTTP layer.
 pub const HTTP_HEADERS_CONTEXT_KEY: &str = "request_trace.http.request.headers";
 
+const REDACTED_HEADER_VALUE: &str = "<redacted>";
+
 /// True when payload records are being captured and a header allowlist is set.
 pub(crate) fn http_header_capture_active() -> bool {
     if !super::config::capture_enabled() {
@@ -29,28 +31,44 @@ pub fn capture_http_headers(headers: &HeaderMap) -> Option<BTreeMap<String, Stri
     if !http_header_capture_active() {
         return None;
     }
-    capture_http_headers_with_list(headers, &super::policy().http_header_capture_list)
+    let policy = super::policy();
+    capture_http_headers_with_lists(
+        headers,
+        &policy.http_header_capture_list,
+        &policy.http_header_redact_list,
+    )
 }
 
-fn capture_http_headers_with_list(
+fn capture_http_headers_with_lists(
     headers: &HeaderMap,
     capture_list: &[String],
+    redact_list: &[String],
 ) -> Option<BTreeMap<String, String>> {
     if capture_list.is_empty() {
         return None;
     }
     let mut out = BTreeMap::new();
     for name in capture_list {
-        let joined = headers
+        if headers.contains_key(name.as_str())
+            && redact_list
+                .iter()
+                .any(|redact| name.eq_ignore_ascii_case(redact))
+        {
+            out.insert(name.clone(), REDACTED_HEADER_VALUE.to_string());
+            continue;
+        }
+
+        let values = headers
             .get_all(name.as_str())
             .iter()
             .filter_map(|value| value.to_str().ok())
             .filter(|value| !value.is_empty())
-            .collect::<Vec<_>>()
-            .join(", ");
-        if !joined.is_empty() {
-            out.insert(name.clone(), joined);
+            .collect::<Vec<_>>();
+        if values.is_empty() {
+            continue;
         }
+
+        out.insert(name.clone(), values.join(", "));
     }
     (!out.is_empty()).then_some(out)
 }
@@ -150,6 +168,13 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
+    fn default_redact_list() -> Vec<String> {
+        super::super::config::DEFAULT_HTTP_HEADER_REDACT_LIST
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect()
+    }
+
     fn create_test_request(model: &str, store: bool) -> NvCreateChatCompletionRequest {
         let json = serde_json::json!({
             "model": model,
@@ -208,8 +233,9 @@ mod tests {
         headers.insert("NVCF-Function-Id", "fn-9".parse().unwrap());
         headers.insert("authorization", "Bearer secret".parse().unwrap());
 
-        let captured = capture_http_headers_with_list(&headers, &capture_list)
-            .expect("allowlisted headers are captured");
+        let captured =
+            capture_http_headers_with_lists(&headers, &capture_list, &default_redact_list())
+                .expect("allowlisted headers are captured");
         assert_eq!(
             captured.get("x-request-id").map(String::as_str),
             Some("abc-123")
@@ -225,12 +251,96 @@ mod tests {
     }
 
     #[test]
+    fn capture_http_headers_redacts_credential_bearing_names() {
+        let sensitive_names = [
+            "authorization",
+            "proxy-authorization",
+            "cookie",
+            "set-cookie",
+            "x-api-key",
+            "api-key",
+            "x-auth-token",
+            "x-access-token",
+        ];
+        let capture_list = sensitive_names
+            .iter()
+            .map(|name| name.to_string())
+            .collect::<Vec<_>>();
+
+        let mut headers = HeaderMap::new();
+        for name in sensitive_names {
+            headers.insert(name, "credential-value".parse().unwrap());
+        }
+
+        let captured =
+            capture_http_headers_with_lists(&headers, &capture_list, &default_redact_list())
+                .expect("sensitive headers are represented as redacted");
+        for name in sensitive_names {
+            assert_eq!(
+                captured.get(name).map(String::as_str),
+                Some("<redacted>"),
+                "{name} is on the default redact list"
+            );
+        }
+    }
+
+    #[test]
+    fn capture_http_headers_retains_sensitive_name_with_undecodable_value() {
+        let capture_list = vec!["authorization".to_string()];
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            axum::http::HeaderValue::from_bytes(b"\xff").unwrap(),
+        );
+
+        let captured =
+            capture_http_headers_with_lists(&headers, &capture_list, &default_redact_list())
+                .expect("sensitive header is represented as redacted");
+        assert_eq!(
+            captured.get("authorization").map(String::as_str),
+            Some("<redacted>")
+        );
+    }
+
+    #[test]
+    fn capture_http_headers_redact_override_is_name_based_and_keeps_repeats() {
+        let capture_list = vec!["authorization".to_string(), "x-custom".to_string()];
+        let mut headers = HeaderMap::new();
+        headers.append("authorization", "Bearer secret".parse().unwrap());
+        headers.append("authorization", "Basic dXNlcjpwYXNz".parse().unwrap());
+        headers.append("x-custom", "first".parse().unwrap());
+        headers.append("x-custom", "second".parse().unwrap());
+        headers.insert("cookie", "session=secret".parse().unwrap());
+
+        let captured = capture_http_headers_with_lists(
+            &headers,
+            &capture_list,
+            &["X-Custom".to_string(), "cookie".to_string()],
+        )
+        .unwrap();
+        assert_eq!(
+            captured["authorization"],
+            "Bearer secret, Basic dXNlcjpwYXNz"
+        );
+        assert_eq!(captured["x-custom"], "<redacted>");
+        assert!(!captured.contains_key("cookie"));
+
+        let captured = capture_http_headers_with_lists(&headers, &capture_list, &[]).unwrap();
+        assert_eq!(
+            captured["authorization"],
+            "Bearer secret, Basic dXNlcjpwYXNz"
+        );
+        assert_eq!(captured["x-custom"], "first, second");
+    }
+
+    #[test]
     fn capture_http_headers_empty_list_captures_nothing() {
         let mut headers = HeaderMap::new();
         headers.insert("x-request-id", "abc-123".parse().unwrap());
 
         assert!(
-            capture_http_headers_with_list(&headers, &[]).is_none(),
+            capture_http_headers_with_lists(&headers, &[], &default_redact_list()).is_none(),
             "empty allowlist must capture nothing"
         );
     }
@@ -243,8 +353,9 @@ mod tests {
         headers.append("x-tag", "a".parse().unwrap());
         headers.append("x-tag", "b".parse().unwrap());
 
-        let captured = capture_http_headers_with_list(&headers, &capture_list)
-            .expect("repeated header is captured");
+        let captured =
+            capture_http_headers_with_lists(&headers, &capture_list, &default_redact_list())
+                .expect("repeated header is captured");
         assert_eq!(captured.get("x-tag").map(String::as_str), Some("a, b"));
     }
 
@@ -257,7 +368,8 @@ mod tests {
         headers.append("x-tag", "".parse().unwrap());
 
         assert!(
-            capture_http_headers_with_list(&headers, &capture_list).is_none(),
+            capture_http_headers_with_lists(&headers, &capture_list, &default_redact_list())
+                .is_none(),
             "repeated empty values must be omitted, not joined into \", \""
         );
     }
@@ -270,8 +382,9 @@ mod tests {
         headers.append("x-tag", "".parse().unwrap());
         headers.append("x-tag", "tenant-a".parse().unwrap());
 
-        let captured = capture_http_headers_with_list(&headers, &capture_list)
-            .expect("non-empty value is captured");
+        let captured =
+            capture_http_headers_with_lists(&headers, &capture_list, &default_redact_list())
+                .expect("non-empty value is captured");
         assert_eq!(captured.get("x-tag").map(String::as_str), Some("tenant-a"));
     }
 
