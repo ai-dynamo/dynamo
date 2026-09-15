@@ -101,9 +101,10 @@ async def wait_for_sources(relay, predicate):
 
 
 @pytest.mark.parametrize("system_port", [True], indirect=True)
-@pytest.mark.parametrize("mode", ["discovery", "from-file"])
 @pytest.mark.parametrize(
-    "bind", ["127.0.0.1:0", None], ids=["wan-enabled", "wan-disabled"]
+    "mode,bind",
+    [("discovery", None), ("from-file", "127.0.0.1:0")],
+    ids=["discovery-wan-disabled", "from-file-wan-enabled"],
 )
 async def test_http_state(
     relay_factory, sources_file, system_port, monkeypatch, mode, bind

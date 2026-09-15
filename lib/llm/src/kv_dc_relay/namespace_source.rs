@@ -10,7 +10,6 @@ use tokio_util::sync::CancellationToken;
 pub(super) mod discovery;
 pub(super) mod file;
 
-/// Source selection is independent of endpoint discovery and connection configuration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct NamespaceSelection {
     pub namespaces: Vec<String>,
