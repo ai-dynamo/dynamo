@@ -8,6 +8,7 @@ import asyncio
 import copy
 import errno
 import os
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
@@ -186,16 +187,23 @@ class TestResolveModelPath:
         )
         error = PermissionError(errno.EACCES, "Permission denied", str(local_dir))
         original_stat = os.stat
+        original_path_stat = Path.stat
 
         def stat(path, *args, **kwargs):
-            if os.fspath(path) == str(local_dir) or (
-                not config_accessible
-                and os.fspath(path) == str(local_dir / "config.json")
+            if not config_accessible and os.fspath(path) == str(
+                local_dir / "config.json"
             ):
                 raise error
             return original_stat(path, *args, **kwargs)
 
+        def path_stat(path, *args, **kwargs):
+            if path == local_dir:
+                raise error
+            return original_path_stat(path, *args, **kwargs)
+
         monkeypatch.setattr(os, "stat", stat)
+        # Python 3.10/3.11 pathlib caches os.stat, so patch its entry point too.
+        monkeypatch.setattr(Path, "stat", path_stat)
         blueprint = {
             "spec": {
                 "components": [
