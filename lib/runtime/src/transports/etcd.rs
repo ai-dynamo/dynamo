@@ -336,6 +336,25 @@ impl Client {
         Ok(())
     }
 
+    /// Put all entries atomically, using the primary lease when none is supplied.
+    pub async fn kv_put_many(
+        &self,
+        entries: Vec<(String, Vec<u8>)>,
+        lease_id: Option<u64>,
+    ) -> Result<()> {
+        let options = PutOptions::new().with_lease(lease_id.unwrap_or(self.lease_id()) as i64);
+        let operations: Vec<_> = entries
+            .into_iter()
+            .map(|(key, value)| TxnOp::put(key, value, Some(options.clone())))
+            .collect();
+        self.connector
+            .get_client()
+            .kv_client()
+            .txn(Txn::new().and_then(operations))
+            .await?;
+        Ok(())
+    }
+
     pub async fn kv_put_with_options(
         &self,
         key: impl AsRef<str>,
