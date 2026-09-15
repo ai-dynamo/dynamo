@@ -183,6 +183,41 @@ def _native_payload_is_batched(native_payload: Mapping[str, Any]) -> bool:
     )
 
 
+def _public_native_response_id(
+    engine_response_id: Any,
+    response_index: Any,
+    internal_request_id: str | None,
+    response_request_id: str | list[str] | None,
+) -> Any:
+    """Map only response IDs derived from Dynamo's submitted SGLang ID."""
+    if not isinstance(engine_response_id, str) or not isinstance(
+        internal_request_id, str
+    ):
+        return engine_response_id
+    if engine_response_id == internal_request_id:
+        return (
+            response_request_id
+            if isinstance(response_request_id, str)
+            else engine_response_id
+        )
+    if (
+        not isinstance(response_index, int)
+        or isinstance(response_index, bool)
+        or response_index < 0
+        or engine_response_id != f"{internal_request_id}_{response_index}"
+    ):
+        return engine_response_id
+    if isinstance(response_request_id, str):
+        return f"{response_request_id}_{response_index}"
+    if (
+        isinstance(response_request_id, list)
+        and response_index < len(response_request_id)
+        and isinstance(response_request_id[response_index], str)
+    ):
+        return response_request_id[response_index]
+    return engine_response_id
+
+
 def _user_stop_token_ids(request: Dict[str, Any]) -> set[int]:
     stop_conditions = request.get("stop_conditions")
     if isinstance(stop_conditions, dict):
@@ -554,6 +589,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 stream,
                 context,
                 submitted_request_id=submitted_request_id,
+                internal_request_id=sglang_request_id,
                 response_request_id=native_payload.get("rid") or context.id(),
             ):
                 yield output
@@ -737,7 +773,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         stream_source: AsyncIterator[Dict[str, Any]],
         context: Context,
         submitted_request_id: str | None = None,
-        response_request_id: str | None = None,
+        internal_request_id: str | None = None,
+        response_request_id: str | list[str] | None = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Forward opaque SGLang chunks while retaining engine cancellation."""
         request_id_future: asyncio.Future[str] = asyncio.Future()
@@ -762,17 +799,25 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     context.notify_first_token()
                 meta_info = native_response.get("meta_info")
                 if response_request_id is not None and isinstance(meta_info, dict):
-                    public_response = {
-                        **native_response,
-                        "meta_info": {**meta_info, "id": response_request_id},
-                    }
-                    output = {
-                        **chunk,
-                        "engine_data": {
-                            **chunk["engine_data"],
-                            "sglang_response": public_response,
-                        },
-                    }
+                    engine_response_id = meta_info.get("id")
+                    public_response_id = _public_native_response_id(
+                        engine_response_id,
+                        native_response.get("index"),
+                        internal_request_id,
+                        response_request_id,
+                    )
+                    if public_response_id != engine_response_id:
+                        public_response = {
+                            **native_response,
+                            "meta_info": {**meta_info, "id": public_response_id},
+                        }
+                        output = {
+                            **chunk,
+                            "engine_data": {
+                                **chunk["engine_data"],
+                                "sglang_response": public_response,
+                            },
+                        }
                 if not context.is_stopped():
                     yield output
 
