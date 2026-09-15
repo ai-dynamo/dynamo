@@ -23,6 +23,9 @@ from typing import Any, Optional
 import numpy as np
 import yaml
 
+from dynamo._internal.aic import (
+    DEFAULT_BACKEND_VERSIONS as _MOCKER_AIC_BACKEND_VERSIONS,
+)
 from dynamo.common.utils.paths import get_workspace_dir
 from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
 from dynamo.planner.config.backend_components import MockerComponentName
@@ -54,14 +57,8 @@ from dynamo.profiler.utils.profile_common import (
     needs_mocker_aic_perf_model,
     needs_profile_data,
 )
-from dynamo.profiler.utils.replay_optimize.constants import AIC_BACKEND_VERSIONS
 
 logger = logging.getLogger(__name__)
-
-_MOCKER_AIC_BACKEND_VERSIONS = {
-    **AIC_BACKEND_VERSIONS,
-    "trtllm": "1.3.0rc10",
-}
 
 
 def _load_latest_database_version() -> Optional[Callable[..., Optional[str]]]:
