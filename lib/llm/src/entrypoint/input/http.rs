@@ -82,9 +82,18 @@ impl HttpFrontend {
             anyhow::bail!("custom worker-selection policies require a dynamic engine");
         }
 
+        // Callers that reach the frontend without going through `run_input`
+        // still have to drain the trace sinks before the process exits. The
+        // registration is reference counted, so arriving through `run_input`
+        // simply nests inside its guard and drains once, at the outer one. It
+        // is taken before initialization because `spawn_workers` reads the
+        // registration count to decide whether the process-wide sinks follow
+        // this runtime's token.
+        let active_input = crate::request_trace::ActiveInput::register();
+
         super::initialize_input(&distributed_runtime, &engine_config).await;
 
-        match self.worker_selection_policy_factory {
+        let result = match self.worker_selection_policy_factory {
             Some(factory) => {
                 run_with_worker_selector_factory(
                     distributed_runtime,
@@ -110,7 +119,11 @@ impl HttpFrontend {
                 )
                 .await
             }
-        }
+        };
+
+        active_input.release_and_drain().await;
+
+        result
     }
 }
 
@@ -447,7 +460,11 @@ mod tests {
     use crate::model_card::{LoraInfo, ModelDeploymentCard};
     use crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
 
+    // `run` takes a `request_trace::ActiveInput` registration, which is
+    // process-wide, so this shares a serialization group with the request-trace
+    // lifecycle test rather than racing it for the last release.
     #[tokio::test]
+    #[serial_test::serial(request_trace_lifecycle)]
     async fn http_bind_failure_shuts_down_dynamic_and_in_process_runtimes() {
         use crate::local_model::LocalModelBuilder;
         use dynamo_runtime::{Runtime, distributed::DistributedConfig};
