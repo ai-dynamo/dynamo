@@ -124,7 +124,8 @@ async fn connect_until_ready(
                 let log_interval_elapsed = last_logged_at
                     .is_none_or(|last| now.duration_since(last) >= RETRY_LOG_INTERVAL);
                 if error_changed || log_interval_elapsed {
-                    tracing::debug!(
+                    // Keep startup retries visible at the default INFO log level.
+                    tracing::warn!(
                         peer,
                         endpoint = %endpoint_label,
                         pool_slot,
@@ -134,7 +135,7 @@ async fn connect_until_ready(
                         retry_interval = ?transport.retry_interval,
                         suppressed_attempts,
                         error = ?error,
-                        "sidecar gRPC connection attempt failed"
+                        "sidecar gRPC connection attempt failed; retrying"
                     );
                     last_logged_at = Some(now);
                     last_logged_error = Some(detailed_error.clone());

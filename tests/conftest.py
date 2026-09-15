@@ -237,6 +237,11 @@ def pytest_configure(config: pytest.Config) -> None:
     )
     config.addinivalue_line(
         "markers",
+        "sidecar: marks tests that launch a Dynamo dynamo-*-sidecar binary "
+        "against its native-gRPC engine via lib/sidecar/*/launch/*.sh",
+    )
+    config.addinivalue_line(
+        "markers",
         "framework_with_efa: marks deployment tests that require an EFA-capable "
         "cluster and an -efa image",
     )
