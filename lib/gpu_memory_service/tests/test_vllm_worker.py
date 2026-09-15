@@ -142,3 +142,14 @@ def test_explicit_admission_deadline_wins_over_the_shadow_default(monkeypatch):
     )
 
     assert timeout_ms == _RO_CONNECT_TIMEOUT_MS
+
+
+def test_an_explicit_null_deadline_wins_too(monkeypatch):
+    """``--model-loader-extra-config '{"gms_ro_connect_timeout_ms": null}'``
+    is an operator asking for the indefinite wait, which is not the same as
+    leaving the key out."""
+    timeout_ms = _resolve_timeout_for_engine(
+        monkeypatch, "2", {"gms_ro_connect_timeout_ms": None}
+    )
+
+    assert timeout_ms is None

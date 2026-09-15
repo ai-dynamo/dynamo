@@ -1906,15 +1906,16 @@ class TestShadowStandbyEntry:
         runtime.set_health_status.assert_not_called()
         elect_and_wake.assert_not_awaited()
 
-    @pytest.mark.parametrize("raw_timeout", ["nan", "inf", "-inf"])
+    @pytest.mark.parametrize("raw_timeout", ["nan", "inf", "-inf", "-1", "-0.5"])
     @pytest.mark.timeout(30)
     async def test_non_finite_bound_is_refused_instead_of_waiting_forever(
         self, monkeypatch, raw_timeout
     ):
-        """float() takes "nan" and "inf", and both defeat the bound: NaN
-        compares false against 0 and falls to the unbounded branch, and
-        wait_for(inf) never fires. Either one restores the indefinite standby
-        wait this bound exists to remove."""
+        """Only "0" waives the bound. float() also takes "nan", "inf" and a
+        negative, and each of those otherwise reaches an unbounded wait by
+        accident: NaN and a negative compare false against 0 and fall to the
+        unbounded branch, and wait_for(inf) never fires. A typo must not
+        restore the indefinite standby wait this bound exists to remove."""
         monkeypatch.setenv("ENGINE_ID", "2")
         monkeypatch.setenv("DYN_GMS_SHADOW_PAUSE_TIMEOUT_SECONDS", raw_timeout)
         elect_and_wake = AsyncMock()
@@ -1925,6 +1926,26 @@ class TestShadowStandbyEntry:
                 self._handler_that_never_pauses(),
                 Mock(),
                 _make_config(gms_shadow_mode=True),
+            )
+
+        elect_and_wake.assert_not_awaited()
+
+    @pytest.mark.timeout(30)
+    async def test_zero_still_waives_the_bound(self, monkeypatch):
+        """The documented escape hatch: "0" restores the pre-bound wait."""
+        monkeypatch.setenv("ENGINE_ID", "2")
+        monkeypatch.setenv("DYN_GMS_SHADOW_PAUSE_TIMEOUT_SECONDS", "0")
+        elect_and_wake = AsyncMock()
+        monkeypatch.setattr("dynamo.vllm.worker_factory.elect_and_wake", elect_and_wake)
+
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                _make_factory()._maybe_wait_for_failover_lock(
+                    self._handler_that_never_pauses(),
+                    Mock(),
+                    _make_config(gms_shadow_mode=True),
+                ),
+                timeout=0.5,
             )
 
         elect_and_wake.assert_not_awaited()

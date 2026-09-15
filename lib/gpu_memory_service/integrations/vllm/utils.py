@@ -84,7 +84,9 @@ def configure_gms_lock_mode(engine_args) -> None:
                 f"but gms_read_only=False was explicitly set."
             )
         extra["gms_read_only"] = True
-        if extra.get("gms_ro_connect_timeout_ms") is None:
+        # Absent, not None: an explicit null is an operator asking for the
+        # indefinite wait, and it wins like any other explicit value.
+        if "gms_ro_connect_timeout_ms" not in extra:
             extra["gms_ro_connect_timeout_ms"] = SHADOW_RO_CONNECT_TIMEOUT_MS
             logger.info(
                 "[GMS] ENGINE_ID=%s is a shadow; defaulting "

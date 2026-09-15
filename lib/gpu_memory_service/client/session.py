@@ -44,8 +44,6 @@ from gpu_memory_service.common.protocol.messages import (
 
 logger = logging.getLogger(__name__)
 
-# Ceiling on the wait for the server's UDS socket to be listening. Separate
-# from any lock-admission deadline; see _GMSClientSession.__init__.
 _CONNECT_TIMEOUT_MS = 30_000
 
 

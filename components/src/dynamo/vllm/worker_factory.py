@@ -1163,14 +1163,16 @@ class WorkerFactory:
         engine_id = os.environ.get("ENGINE_ID", "0")
         raw_timeout = os.environ.get(ENV_SHADOW_PAUSE_TIMEOUT_SECONDS)
         timeout_s = float(raw_timeout) if raw_timeout else SHADOW_PAUSE_TIMEOUT_SECONDS
-        # float() accepts "nan" and "inf". Both defeat the bound: NaN compares
-        # false against 0 and takes the unbounded branch, and wait_for(inf)
-        # never fires. Reject them rather than silently waiting forever.
-        if not math.isfinite(timeout_s):
+        # Exactly "0" waives the bound; everything else must be a positive
+        # finite number. float() also accepts "nan", "inf", and "-1", and all
+        # three otherwise reach an unbounded wait by accident: NaN and a
+        # negative compare false against 0 and fall to the else branch, and
+        # wait_for(inf) never fires.
+        if not math.isfinite(timeout_s) or timeout_s < 0:
             raise RuntimeError(
                 f"{ENV_SHADOW_PAUSE_TIMEOUT_SECONDS}={raw_timeout!r} is not a "
-                "finite number of seconds; use a positive value to bound the "
-                'pause, or "0" to wait unbounded'
+                "non-negative finite number of seconds; use a positive value "
+                'to bound the pause, or "0" to wait unbounded'
             )
         # %g, not a fixed number of decimals: rounding a sub-second bound down
         # to "0" would print the one value that means "wait forever".
