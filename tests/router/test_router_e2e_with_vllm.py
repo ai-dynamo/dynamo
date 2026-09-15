@@ -16,6 +16,7 @@ from typing import Any, Dict, Optional
 import aiohttp
 import pytest
 
+from tests.router.common import _test_full_block_event_delivery
 from tests.router.e2e_harness import (
     ManagedEngineProcessMixin,
     run_basic_router_test,
@@ -30,7 +31,7 @@ from tests.router.helper import (
     wait_for_indexer_workers_active,
 )
 from tests.utils.constants import DynamoPortRange
-from tests.utils.gpu_args import build_gpu_mem_args
+from tests.utils.gpu_args import build_gpu_mem_args, map_cuda_visible_devices
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import (
     allocate_contiguous_ports,
@@ -225,6 +226,7 @@ class VLLMProcess(ManagedEngineProcessMixin):
         num_gpu_blocks_override = vllm_args.get("num_gpu_blocks_override")
         max_model_len = vllm_args.get("max_model_len")
         enforce_eager = vllm_args.get("enforce_eager", False)
+        tensor_parallel_size = vllm_args.get("tensor_parallel_size", 1)
 
         self.model_name = model
         self.block_size = vllm_args.get("block_size", BLOCK_SIZE)
@@ -251,10 +253,18 @@ class VLLMProcess(ManagedEngineProcessMixin):
                     )
                 )
             else:
-                # No DP; worker sees one GPU
-                gpu_device = str(gpu_start_index + worker_idx)
+                worker_start_gpu = gpu_start_index + worker_idx * tensor_parallel_size
+                gpu_device = map_cuda_visible_devices(
+                    range(worker_start_gpu, worker_start_gpu + tensor_parallel_size),
+                    os.environ.get("CUDA_VISIBLE_DEVICES"),
+                )
 
             command = ["python3", "-m", "dynamo.vllm", "--model", model]
+            for name in ("tensor_parallel_size", "decode_context_parallel_size"):
+                if name in vllm_args:
+                    command.extend(
+                        [f"--{name.replace('_', '-')}", str(vllm_args[name])]
+                    )
 
             if "block_size" in vllm_args:
                 command.extend(["--block-size", str(vllm_args["block_size"])])
@@ -582,6 +592,39 @@ class VLLMProcess(ManagedEngineProcessMixin):
     process_name = "vLLM worker"
     cleanup_name = "vLLM worker resources"
     init_delay_reason = "initialize NIXL before starting next worker"
+
+
+@pytest.mark.gpu_4
+@pytest.mark.h100
+@pytest.mark.nightly
+@pytest.mark.model("Qwen/Qwen2.5-3B-Instruct")
+@pytest.mark.profiled_vram_gib(6.9)
+@pytest.mark.requested_vllm_kv_cache_bytes(268_435_456)
+@pytest.mark.timeout(600)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+def test_vllm_dcp2_event_indexing(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    set_ucx_tls_no_mm,
+    request_plane,
+):
+    model_name = "Qwen/Qwen2.5-3B-Instruct"
+    with VLLMProcess(
+        request,
+        vllm_args={
+            "model": model_name,
+            "block_size": 16,
+            "tensor_parallel_size": 4,
+            "decode_context_parallel_size": 2,
+            "kv_cache_memory_bytes": 268_435_456,
+            "max_model_len": 256,
+            "enforce_eager": True,
+        },
+        num_workers=1,
+        request_plane=request_plane,
+    ) as engine_workers:
+        _test_full_block_event_delivery(engine_workers, model_name, 32, request_plane)
 
 
 @pytest.mark.pre_merge
