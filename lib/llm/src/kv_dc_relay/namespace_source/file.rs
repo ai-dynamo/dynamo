@@ -3,7 +3,7 @@
 
 //! Transport-independent source files, usable with or without an operator.
 
-use super::{NamespaceSelection, NamespaceSource, NamespaceUpdates};
+use super::{NamespaceScope, NamespaceSelection, NamespaceSource, NamespaceUpdates};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -97,11 +97,13 @@ impl KvDcRelaySourcesFile {
 impl From<SourcesDocument> for NamespaceSelection {
     fn from(document: SourcesDocument) -> Self {
         Self {
-            namespaces: document
-                .sources
-                .into_iter()
-                .map(|source| source.namespace)
-                .collect(),
+            scope: NamespaceScope::Namespaces(
+                document
+                    .sources
+                    .into_iter()
+                    .map(|source| source.namespace)
+                    .collect(),
+            ),
             revision: Some(document.revision),
         }
     }

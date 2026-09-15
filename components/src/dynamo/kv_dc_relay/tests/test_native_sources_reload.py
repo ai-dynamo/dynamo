@@ -44,7 +44,6 @@ def sources_file(tmp_path):
 
 @pytest.fixture
 def system_port(request, monkeypatch):
-    # HTTP is enabled only for tests of the HTTP contract.
     port = allocate_port(DynamoPortRange.ROUTER) if request.param else -1
     monkeypatch.setenv("DYN_SYSTEM_PORT", str(port))
     monkeypatch.delenv("POD_UID", raising=False)

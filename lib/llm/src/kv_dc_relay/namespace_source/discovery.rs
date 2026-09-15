@@ -1,14 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{NamespaceSelection, NamespaceSource, NamespaceUpdates};
+use super::{NamespaceScope, NamespaceSelection, NamespaceSource, NamespaceUpdates};
 use crate::kv_dc_relay::discovery::DcDiscoveryFilter;
-use dynamo_runtime::discovery::{Discovery, DiscoveryInstanceId, DiscoveryQuery};
-use futures::StreamExt;
-use std::{collections::HashSet, sync::Arc, time::Duration};
+#[cfg(test)]
+use dynamo_runtime::discovery::DiscoveryQuery;
+use std::collections::HashSet;
 use tokio_util::sync::CancellationToken;
-
-const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Selects which Dynamo endpoints one Relay supervises.
 ///
@@ -103,73 +101,21 @@ impl KvDcRelayDiscoveryConfig {
 }
 
 pub(crate) struct DiscoveryNamespaces {
-    pub discovery: Arc<dyn Discovery>,
     pub config: KvDcRelayDiscoveryConfig,
 }
 
 impl NamespaceSource for DiscoveryNamespaces {
     fn updates(self: Box<Self>, cancel: CancellationToken) -> NamespaceUpdates {
         Box::pin(async_stream::stream! {
-            if !self.config.watch_all {
+            let scope = if self.config.watch_all {
+                NamespaceScope::All
+            } else {
                 let mut namespaces = self.config.namespaces.clone();
                 namespaces.sort();
-                yield Ok(NamespaceSelection { namespaces, revision: None });
-                cancel.cancelled().await;
-                return;
-            }
-            loop {
-                let token = cancel.child_token();
-                let _guard = token.clone().drop_guard();
-                let opened = tokio::select! {
-                    _ = cancel.cancelled() => break,
-                    result = tokio::time::timeout(Duration::from_secs(10), self.discovery.list_and_watch(DiscoveryQuery::AllModels, Some(token))) => result,
-                };
-                if let Ok(Ok(mut events)) = opened {
-                    let mut reconcile = tokio::time::interval(RECONCILE_INTERVAL);
-                    reconcile.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                    reconcile.tick().await;
-                    let mut refresh = tokio::time::interval(Duration::from_millis(50));
-                    refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                    refresh.tick().await;
-                    'snapshots: loop {
-                        let result = tokio::select! {
-                            _ = cancel.cancelled() => return,
-                            result = tokio::time::timeout(Duration::from_secs(10), self.discovery.list(DiscoveryQuery::AllModels)) => result,
-                        };
-                        yield match result {
-                            Ok(Ok(instances)) => {
-                                let mut namespaces = instances.into_iter().filter_map(|instance| {
-                                    match instance.id() {
-                                        DiscoveryInstanceId::Model(id) => Some(id.namespace),
-                                        _ => None,
-                                    }
-                                }).collect::<Vec<_>>();
-                                namespaces.sort();
-                                namespaces.dedup();
-                                Ok(NamespaceSelection { namespaces, revision: None })
-                            }
-                            _ => Err(anyhow::anyhow!("namespace discovery snapshot failed")),
-                        };
-                        let mut dirty = false;
-                        loop {
-                            tokio::select! {
-                                _ = cancel.cancelled() => return,
-                                _ = reconcile.tick() => break,
-                                _ = refresh.tick(), if dirty => break,
-                                event = events.next() => {
-                                    if !matches!(event, Some(Ok(_))) { break 'snapshots; }
-                                    dirty = true;
-                                }
-                            }
-                        }
-                    }
-                }
-                yield Err(anyhow::anyhow!("namespace discovery watch unavailable; retrying"));
-                tokio::select! {
-                    _ = cancel.cancelled() => break,
-                    _ = tokio::time::sleep(Duration::from_secs(1)) => {}
-                }
-            }
+                NamespaceScope::Namespaces(namespaces)
+            };
+            yield Ok(NamespaceSelection { scope, revision: None });
+            cancel.cancelled().await;
         })
     }
 }

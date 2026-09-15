@@ -3,10 +3,19 @@
 
 use super::discovery::{DcDiscoveryFilter, DcMembershipView, MembershipState};
 use super::namespace_source::{KvDcRelaySourcesStatus, discovery::DiscoveryNamespaces};
-use super::namespace_source::{NamespaceSelection, NamespaceSource, NamespaceUpdates};
-use dynamo_runtime::discovery::{Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryQuery};
+use super::namespace_source::{
+    NamespaceScope, NamespaceSelection, NamespaceSource, NamespaceUpdates,
+};
+use dynamo_runtime::discovery::{
+    Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
+};
 use futures::{Stream, StreamExt, future::try_join_all};
-use std::{collections::HashMap, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    pin::Pin,
+    sync::Arc,
+    time::Duration,
+};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -34,13 +43,7 @@ impl DcMembershipWatch {
             super::host::KvDcRelaySources::Discovery(config) => {
                 config.validate()?;
                 let filter = config.filter();
-                (
-                    Box::new(DiscoveryNamespaces {
-                        discovery: discovery.clone(),
-                        config,
-                    }),
-                    filter,
-                )
+                (Box::new(DiscoveryNamespaces { config }), filter)
             }
         };
         Self::start_namespace_source(discovery, source, filter, parent_cancel).await
@@ -87,7 +90,8 @@ async fn list_queries(
 
 const SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 
-type SourceWatchStream = Pin<Box<dyn Stream<Item = (String, u64, Option<DiscoveryEvent>)> + Send>>;
+type SourceWatchStream =
+    Pin<Box<dyn Stream<Item = (DiscoveryQuery, u64, Option<DiscoveryEvent>)> + Send>>;
 
 struct NamespaceWatch {
     epoch: u64,
@@ -98,7 +102,7 @@ struct NamespaceMembership {
     discovery: Arc<dyn Discovery>,
     filter: DcDiscoveryFilter,
     state: MembershipState,
-    watches: HashMap<String, NamespaceWatch>,
+    watches: HashMap<DiscoveryQuery, NamespaceWatch>,
     streams: futures::stream::SelectAll<SourceWatchStream>,
     epoch: u64,
     selection: Option<NamespaceSelection>,
@@ -110,54 +114,59 @@ impl NamespaceMembership {
         &mut self,
         selection: NamespaceSelection,
         cancel: &CancellationToken,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<usize> {
         // Stage additions before publishing a new source set. Dropped guards cancel any
         // partially opened watches if a snapshot or subsequent watch setup fails.
         let mut additions = HashMap::new();
         let mut streams = Vec::<SourceWatchStream>::new();
-        for source in &selection.namespaces {
-            if self.watches.contains_key(source) {
+        let queries = selection.scope.queries();
+        for key in &queries {
+            if self.watches.contains_key(key) {
                 continue;
             }
             let token = cancel.child_token();
             let guard = token.clone().drop_guard();
-            let query = DiscoveryQuery::NamespacedModels {
-                namespace: source.clone(),
-            };
-            let stream = self.discovery.list_and_watch(query, Some(token)).await?;
+            let stream = self
+                .discovery
+                .list_and_watch(key.clone(), Some(token))
+                .await?;
             self.epoch = self
                 .epoch
                 .checked_add(1)
                 .ok_or_else(|| anyhow::anyhow!("sources watch epoch exhausted"))?;
             let epoch = self.epoch;
-            let namespace = source.clone();
+            let query = key.clone();
             // Notifications trigger a fresh snapshot rather than replaying old
             // Added records over a newer list result.
-            let notifications = stream.map(move |event| (namespace.clone(), epoch, event.ok()));
-            let namespace = source.clone();
-            streams.push(Box::pin(notifications.chain(futures::stream::once(
-                async move { (namespace, epoch, None) },
-            ))));
+            let notifications = stream.map(move |event| (query.clone(), epoch, event.ok()));
+            let query = key.clone();
+            streams.push(Box::pin(
+                notifications.chain(futures::stream::once(async move { (query, epoch, None) })),
+            ));
             additions.insert(
-                source.clone(),
+                key.clone(),
                 NamespaceWatch {
                     epoch,
                     _guard: guard,
                 },
             );
         }
-        let queries = selection
-            .namespaces
-            .iter()
-            .map(|s| DiscoveryQuery::NamespacedModels {
-                namespace: s.clone(),
-            })
-            .collect::<Vec<_>>();
         let instances = list_queries(&self.discovery, &queries).await?;
 
+        let count = match &selection.scope {
+            NamespaceScope::Namespaces(namespaces) => namespaces.len(),
+            NamespaceScope::All => instances
+                .iter()
+                .filter_map(|instance| match instance.id() {
+                    DiscoveryInstanceId::Model(id) => Some(id.namespace),
+                    _ => None,
+                })
+                .collect::<HashSet<_>>()
+                .len(),
+        };
+
         // Namespace identity is independent of the lifetime of any DGD or worker.
-        self.watches
-            .retain(|namespace, _| selection.namespaces.contains(namespace));
+        self.watches.retain(|query, _| queries.contains(query));
         self.watches.extend(additions);
         for stream in streams {
             self.streams.push(stream);
@@ -166,14 +175,14 @@ impl NamespaceMembership {
             publish_membership_if_changed(&self.sender, self.state.view(&self.filter));
         }
         self.selection = Some(selection);
-        Ok(())
+        Ok(count)
     }
 
     async fn bounded_apply(
         &mut self,
         selection: NamespaceSelection,
         cancel: &CancellationToken,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<usize> {
         tokio::select! {
             _ = cancel.cancelled() => anyhow::bail!("sources update cancelled"),
             result = tokio::time::timeout(SETUP_TIMEOUT, self.apply(selection, cancel)) => {
@@ -210,7 +219,7 @@ impl NamespaceMembership {
                             source_invalid = false;
                             desired = Some(selection.clone());
                             status.send_modify(|s| s.desired_revision = selection.revision.clone());
-                            if self.selection.as_ref() == Some(&selection) && self.watches.len() == selection.namespaces.len() {
+                            if self.selection.as_ref() == Some(&selection) && self.watches.len() == selection.scope.watch_count() {
                                 if status.borrow().last_error.is_some() { Some(selection) } else { None }
                             } else { Some(selection) }
                         }
@@ -235,7 +244,7 @@ impl NamespaceMembership {
                     desired.clone()
                 },
                 _ = reconcile.tick() => desired.clone(),
-                _ = retry.tick(), if desired != self.selection || desired.as_ref().is_some_and(|selection| self.watches.len() != selection.namespaces.len()) => desired.clone(),
+                _ = retry.tick(), if desired != self.selection || desired.as_ref().is_some_and(|selection| self.watches.len() != selection.scope.watch_count()) => desired.clone(),
                 event = self.streams.next(), if !self.streams.is_empty() => {
                     match event {
                         Some((namespace, epoch, event)) if self.watches.get(&namespace).is_some_and(|w| w.epoch == epoch) => {
@@ -261,9 +270,9 @@ impl NamespaceMembership {
             };
             if let Some(selection) = update {
                 let revision = selection.revision.clone();
-                let count = selection.namespaces.len();
+                let query_count = selection.scope.watch_count();
                 match self.bounded_apply(selection, &cancel).await {
-                    Ok(()) => {
+                    Ok(count) => {
                         last_reconcile_error = None;
                         status.send_modify(|s| {
                             s.applied_revision = revision;
@@ -278,7 +287,7 @@ impl NamespaceMembership {
                         if last_reconcile_error.as_ref() != Some(&detail) {
                             tracing::warn!(
                                 error = %detail,
-                                namespaces = count,
+                                query_count,
                                 "KV DC Relay sources reconciliation failed; retaining last applied sources"
                             );
                             last_reconcile_error = Some(detail);
@@ -314,7 +323,6 @@ impl DcMembershipWatch {
             }
         };
         let revision = selection.revision.clone();
-        let count = selection.namespaces.len();
         let mut state = MembershipState::default();
         let (sender, receiver) = watch::channel(state.view(&filter));
         let mut membership = NamespaceMembership {
@@ -327,7 +335,7 @@ impl DcMembershipWatch {
             selection: None,
             sender,
         };
-        membership.bounded_apply(selection, &cancel).await?;
+        let count = membership.bounded_apply(selection, &cancel).await?;
         let (status, sources_status) = watch::channel(KvDcRelaySourcesStatus {
             desired_revision: revision.clone(),
             applied_revision: revision,
@@ -362,6 +370,7 @@ mod tests {
     struct CountingDiscovery {
         inner: MockDiscovery,
         lists: std::sync::atomic::AtomicUsize,
+        watches: std::sync::atomic::AtomicUsize,
     }
 
     #[async_trait::async_trait]
@@ -392,6 +401,8 @@ mod tests {
             query: DiscoveryQuery,
             cancel: Option<CancellationToken>,
         ) -> anyhow::Result<dynamo_runtime::discovery::DiscoveryStream> {
+            self.watches
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             self.inner.list_and_watch(query, cancel).await
         }
     }
@@ -402,6 +413,7 @@ mod tests {
             let discovery = Arc::new(CountingDiscovery {
                 inner: MockDiscovery::new(Some(1), SharedMockRegistry::new()),
                 lists: Default::default(),
+                watches: Default::default(),
             });
             let namespaces = (0..20).map(|i| format!("ns{i}")).collect::<Vec<_>>();
             for namespace in &namespaces {
@@ -442,8 +454,13 @@ mod tests {
             assert_eq!(relay.subscribe().borrow().endpoints.len(), 200);
             let lists = discovery.lists.load(std::sync::atomic::Ordering::Relaxed);
             assert!(
-                lists <= 63,
+                lists <= if watch_all { 3 } else { 60 },
                 "watch_all={watch_all}: {lists} snapshot reads for one replay"
+            );
+            assert_eq!(relay.sources_status().count, 20);
+            assert_eq!(
+                discovery.watches.load(std::sync::atomic::Ordering::Relaxed),
+                if watch_all { 1 } else { 20 }
             );
             relay.shutdown().await;
         }
@@ -507,12 +524,21 @@ mod tests {
             .unwrap();
         let endpoint = EndpointId::from("a.worker.generate");
         let generation = receiver.borrow().endpoints[&endpoint].generation;
-        let epoch = membership.watches["a"].epoch;
+        let epoch = membership.watches[&DiscoveryQuery::NamespacedModels {
+            namespace: "a".into(),
+        }]
+            .epoch;
         membership
             .bounded_apply(document(&["a", "b"]).into(), &cancel)
             .await
             .unwrap();
-        assert_eq!(membership.watches["a"].epoch, epoch);
+        assert_eq!(
+            membership.watches[&DiscoveryQuery::NamespacedModels {
+                namespace: "a".into()
+            }]
+                .epoch,
+            epoch
+        );
         assert_eq!(
             receiver.borrow().endpoints[&endpoint].generation,
             generation
@@ -523,7 +549,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(receiver.borrow().endpoints.len(), 1);
-        assert!(!membership.watches.contains_key("b"));
+        assert!(
+            !membership
+                .watches
+                .contains_key(&DiscoveryQuery::NamespacedModels {
+                    namespace: "b".into()
+                })
+        );
         membership
             .bounded_apply(document(&[]).into(), &cancel)
             .await
