@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::{
@@ -82,9 +82,18 @@ impl HttpFrontend {
             anyhow::bail!("custom worker-selection policies require a dynamic engine");
         }
 
+        // Callers that reach the frontend without going through `run_input`
+        // still have to drain the trace sinks before the process exits. The
+        // registration is reference counted, so arriving through `run_input`
+        // simply nests inside its guard and drains once, at the outer one. It
+        // is taken before initialization because `spawn_workers` reads the
+        // registration count to decide whether the process-wide sinks follow
+        // this runtime's token.
+        let active_input = crate::request_trace::ActiveInput::register();
+
         super::initialize_input(&distributed_runtime, &engine_config).await;
 
-        match self.worker_selection_policy_factory {
+        let result = match self.worker_selection_policy_factory {
             Some(factory) => {
                 run_with_worker_selector_factory(
                     distributed_runtime,
@@ -110,7 +119,11 @@ impl HttpFrontend {
                 )
                 .await
             }
-        }
+        };
+
+        active_input.release_and_drain().await;
+
+        result
     }
 }
 
@@ -147,22 +160,38 @@ where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     let local_model = engine_config.local_model();
-    let mut http_service_builder = match (local_model.tls_cert_path(), local_model.tls_key_path()) {
-        (Some(tls_cert_path), Some(tls_key_path)) => {
+    let mut http_service_builder = match (
+        local_model.tls_cert_path(),
+        local_model.tls_key_path(),
+        local_model.tls_client_ca_cert_path(),
+    ) {
+        (Some(tls_cert_path), Some(tls_key_path), tls_client_ca_cert_path) => {
             if !tls_cert_path.exists() {
                 anyhow::bail!("TLS certificate not found: {}", tls_cert_path.display());
             }
             if !tls_key_path.exists() {
                 anyhow::bail!("TLS key not found: {}", tls_key_path.display());
             }
+            if let Some(client_ca_cert_path) = tls_client_ca_cert_path
+                && !client_ca_cert_path.exists()
+            {
+                anyhow::bail!(
+                    "TLS client CA certificate not found: {}",
+                    client_ca_cert_path.display()
+                );
+            }
             service_v2::HttpService::builder()
                 .enable_tls(true)
                 .tls_cert_path(Some(tls_cert_path.to_path_buf()))
                 .tls_key_path(Some(tls_key_path.to_path_buf()))
+                .tls_client_ca_cert_path(tls_client_ca_cert_path.map(Path::to_path_buf))
                 .port(local_model.http_port())
         }
-        (None, None) => service_v2::HttpService::builder().port(local_model.http_port()),
-        (_, _) => {
+        (None, None, None) => service_v2::HttpService::builder().port(local_model.http_port()),
+        (None, None, Some(_)) => {
+            anyhow::bail!("--tls-client-ca-cert-path requires --tls-cert-path and --tls-key-path");
+        }
+        (_, _, _) => {
             // CLI should prevent us ever getting here
             anyhow::bail!(
                 "Both --tls-cert-path and --tls-key-path must be provided together to enable TLS"
@@ -447,7 +476,11 @@ mod tests {
     use crate::model_card::{LoraInfo, ModelDeploymentCard};
     use crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
 
+    // `run` takes a `request_trace::ActiveInput` registration, which is
+    // process-wide, so this shares a serialization group with the request-trace
+    // lifecycle test rather than racing it for the last release.
     #[tokio::test]
+    #[serial_test::serial(request_trace_lifecycle)]
     async fn http_bind_failure_shuts_down_dynamic_and_in_process_runtimes() {
         use crate::local_model::LocalModelBuilder;
         use dynamo_runtime::{Runtime, distributed::DistributedConfig};
