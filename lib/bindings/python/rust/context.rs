@@ -312,7 +312,7 @@ impl Context {
     fn async_killed_or_stopped<'a>(&self, py: Python<'a>) -> PyResult<Bound<'a, PyAny>> {
         let inner = self.inner.clone();
 
-        let future = pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             tokio::select! {
                 _ = inner.killed() => {
                     Ok(true)
@@ -321,10 +321,7 @@ impl Context {
                     Ok(true)
                 }
             }
-        })?;
-        // Successful conversion initialized the bridge, even without a Dynamo runtime.
-        let _ = crate::BRIDGE_RUNTIME.set(pyo3_async_runtimes::tokio::get_runtime());
-        Ok(future)
+        })
     }
 
     /// Fire the shared first-token notifier. This releases deferred decode abort and publishes

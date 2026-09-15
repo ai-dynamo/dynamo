@@ -108,7 +108,7 @@ impl VirtualConnectorCoordinator {
     pub fn async_init<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let prefix = root_key(&self.0.namespace);
         let inner = self.0.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let kv_cache = KvCache::new(inner.etcd_client.clone(), prefix, HashMap::new())
                 .await
                 .map_err(to_pyerr)?;
@@ -125,7 +125,7 @@ impl VirtualConnectorCoordinator {
         num_decode: Option<usize>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let inner = self.0.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let current_prefill = load(&inner.num_prefill_workers);
             let has_prefill_changed = num_prefill.is_some_and(|n| n != current_prefill);
 
@@ -247,7 +247,7 @@ impl VirtualConnectorCoordinator {
     #[pyo3(signature = ())]
     pub fn wait_for_scaling_completion<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let inner = self.0.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let Some(kv_cache) = inner.kv_cache.lock().as_ref().cloned() else {
                 return Err(PyErr::new::<PyException, _>(
                     "Call async_init before using this object",
@@ -300,10 +300,7 @@ impl VirtualConnectorCoordinator {
     #[pyo3(signature = ())]
     pub fn is_scaling_ready<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let inner = self.0.clone();
-        pyo3_async_runtimes::tokio::future_into_py(
-            py,
-            async move { Ok(inner.is_scaling_ready().await) },
-        )
+        crate::future_into_py(py, async move { Ok(inner.is_scaling_ready().await) })
     }
 }
 
@@ -418,9 +415,7 @@ impl VirtualConnectorClient {
     #[pyo3(signature = ())]
     pub fn get<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let inner = self.0.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            inner.get().await.map_err(to_pyerr)
-        })
+        crate::future_into_py(py, async move { inner.get().await.map_err(to_pyerr) })
     }
 
     /// Mark this scaling decision complete
@@ -431,9 +426,10 @@ impl VirtualConnectorClient {
         event: PlannerDecision,
     ) -> PyResult<Bound<'p, PyAny>> {
         let inner = self.0.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            inner.complete(event).await.map_err(to_pyerr)
-        })
+        crate::future_into_py(
+            py,
+            async move { inner.complete(event).await.map_err(to_pyerr) },
+        )
     }
 
     /// Wait until a new PlannerDecision appears. Will block until there is one to fetch.
@@ -441,9 +437,7 @@ impl VirtualConnectorClient {
     #[pyo3(signature = ())]
     pub fn wait<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let inner = self.0.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            inner.wait().await.map_err(to_pyerr)
-        })
+        crate::future_into_py(py, async move { inner.wait().await.map_err(to_pyerr) })
     }
 }
 

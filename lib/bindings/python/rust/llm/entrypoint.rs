@@ -778,7 +778,7 @@ pub fn make_engine<'p>(
         .runtime_config(args.runtime_config.clone().inner)
         .namespace(args.namespace.clone())
         .namespace_prefix(args.namespace_prefix.clone());
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    crate::future_into_py(py, async move {
         if let Some(model_path) = args.model_path.clone() {
             let local_path = if model_path.exists() {
                 model_path
@@ -1045,7 +1045,7 @@ pub fn run_input<'p>(
             "linked worker-selection policies require HTTP frontend input",
         ));
     }
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    crate::future_into_py(py, async move {
         if let Some(factory) = worker_selection_policy_factory {
             HttpFrontend::default()
                 .frontend_route_extensions(frontend_route_extensions)

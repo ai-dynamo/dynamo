@@ -198,7 +198,7 @@ impl KvDcRelay {
         let dc_id = self.dc_id.clone();
         let config = self.config.clone();
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             inner
                 .get_or_try_init(|| async move {
                     llm_rs::kv_dc_relay::KvDcRelay::start(
@@ -218,7 +218,7 @@ impl KvDcRelay {
     #[cfg(feature = "ckf-diagnostics")]
     fn stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.started()?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let stats = inner.stats().await.map_err(to_pyerr)?;
             Python::with_gil(|py| {
                 pythonize::pythonize(py, &stats)
@@ -230,7 +230,7 @@ impl KvDcRelay {
 
     fn health<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.started()?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let health = inner.health().await;
             Python::with_gil(|py| {
                 pythonize::pythonize(py, &health)
@@ -242,9 +242,7 @@ impl KvDcRelay {
 
     fn flush<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.started()?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            inner.flush().await.map_err(to_pyerr)
-        })
+        crate::future_into_py(py, async move { inner.flush().await.map_err(to_pyerr) })
     }
 
     #[cfg(feature = "ckf-diagnostics")]
@@ -254,7 +252,7 @@ impl KvDcRelay {
         serving_endpoint: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.started()?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let endpoint = dynamo_runtime::protocols::EndpointId::from(serving_endpoint.as_str());
             let diagnostic = inner
                 .diagnostic_snapshot(&endpoint)
@@ -270,14 +268,12 @@ impl KvDcRelay {
 
     fn shutdown<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.started()?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            inner.shutdown().await.map_err(to_pyerr)
-        })
+        crate::future_into_py(py, async move { inner.shutdown().await.map_err(to_pyerr) })
     }
 
     fn wait_for_shutdown<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.started()?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             inner.wait_for_shutdown().await;
             Ok(())
         })

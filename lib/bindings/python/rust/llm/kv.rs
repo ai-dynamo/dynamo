@@ -673,7 +673,7 @@ impl SelectionService {
             builder = builder.replica_sync(port, replica_sync_peers);
         }
         let inner = py
-            .allow_threads(|| pyo3_async_runtimes::tokio::get_runtime().block_on(builder.build()))
+            .allow_threads(|| crate::bridge_runtime().block_on(builder.build()))
             .map_err(to_pyerr)?;
         Ok(Self {
             inner: Arc::new(inner),
@@ -687,13 +687,13 @@ impl SelectionService {
     /// dropped. Idempotent, and also run automatically on drop.
     fn shutdown(&self, py: Python<'_>) {
         let service = Arc::clone(&self.inner);
-        py.allow_threads(|| pyo3_async_runtimes::tokio::get_runtime().block_on(service.shutdown()));
+        py.allow_threads(|| crate::bridge_runtime().block_on(service.shutdown()));
     }
 
     /// Await service shutdown without blocking the Python event loop.
     fn shutdown_async<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let service = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             service.shutdown().await;
             Ok(())
         })
@@ -704,7 +704,7 @@ impl SelectionService {
         let req: WorkerRequest =
             depythonize(worker.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let core = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let record = core.upsert_worker(req).await.map_err(selection_to_pyerr)?;
             Python::with_gil(|py| pythonize(py, &record).map(|o| o.unbind()).map_err(to_pyerr))
         })
@@ -720,7 +720,7 @@ impl SelectionService {
         let patch: WorkerPatchRequest =
             depythonize(patch.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let service = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let record = service
                 .patch_worker(worker_id, patch)
                 .await
@@ -732,7 +732,7 @@ impl SelectionService {
     /// Remove a worker and tear down its KV-event listener.
     fn delete_worker<'p>(&self, py: Python<'p>, worker_id: u64) -> PyResult<Bound<'p, PyAny>> {
         let core = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let record = core
                 .delete_worker(worker_id)
                 .await
@@ -769,7 +769,7 @@ impl SelectionService {
         let req: OverlapScoresRequest =
             depythonize(request.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let core = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let resp = core.overlap_scores(req).await.map_err(selection_to_pyerr)?;
             Python::with_gil(|py| pythonize(py, &resp).map(|o| o.unbind()).map_err(to_pyerr))
         })
@@ -780,7 +780,7 @@ impl SelectionService {
         let req: SelectRequest =
             depythonize(request.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let core = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let resp = core.select(req).await.map_err(selection_to_pyerr)?;
             Python::with_gil(|py| pythonize(py, &resp).map(|o| o.unbind()).map_err(to_pyerr))
         })
@@ -795,7 +795,7 @@ impl SelectionService {
         let req: SelectAndReserveRequest =
             depythonize(request.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let core = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let resp = core
                 .select_and_reserve(req)
                 .await
@@ -814,7 +814,7 @@ impl SelectionService {
         let req: ReservationRequest =
             depythonize(request.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let core = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let resp = core
                 .create_reservation(req)
                 .await
@@ -830,7 +830,7 @@ impl SelectionService {
         selection_id: String,
     ) -> PyResult<Bound<'p, PyAny>> {
         let core = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             core.prefill_complete(&selection_id)
                 .await
                 .map_err(selection_to_pyerr)?;
@@ -853,7 +853,7 @@ impl SelectionService {
         selection_id: String,
     ) -> PyResult<Bound<'p, PyAny>> {
         let core = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             core.free_reservation(&selection_id)
                 .await
                 .map_err(selection_to_pyerr)?;
@@ -880,7 +880,7 @@ impl SelectionService {
         let req: PotentialLoadsRequest =
             depythonize(request.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let core = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let resp = core
                 .potential_loads(req)
                 .await
@@ -896,7 +896,7 @@ impl SelectionService {
         endpoint: String,
     ) -> PyResult<Bound<'p, PyAny>> {
         let service = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             service
                 .register_replica_peer(endpoint)
                 .await
@@ -911,7 +911,7 @@ impl SelectionService {
         endpoint: String,
     ) -> PyResult<Bound<'p, PyAny>> {
         let service = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             service
                 .deregister_replica_peer(endpoint)
                 .await
@@ -927,7 +927,7 @@ impl SelectionService {
     /// Export the current indexer state in the standalone `/dump` shape.
     fn indexer_snapshot<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let service = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let snapshot = service.indexer_snapshot().await;
             Python::with_gil(|py| {
                 pythonize(py, &snapshot)
@@ -944,7 +944,7 @@ impl SelectionService {
         peers: Vec<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let service = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             service
                 .recover_indexer_from_peers(&peers)
                 .await
@@ -1043,7 +1043,7 @@ impl WorkerMetricsPublisher {
     ) -> PyResult<Bound<'p, PyAny>> {
         let rs_publisher = self.inner.clone();
         let rs_endpoint = endpoint.inner;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             rs_publisher
                 .create_endpoint(rs_endpoint)
                 .await
@@ -1094,7 +1094,7 @@ impl MultimodalEmbeddingCachePublisher {
     ) -> PyResult<Bound<'p, PyAny>> {
         let rs_publisher = self.inner.clone();
         let rs_endpoint = endpoint.inner;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             rs_publisher
                 .create_endpoint(rs_endpoint)
                 .await
@@ -2106,7 +2106,7 @@ impl KvRouter {
         tracker: Option<Arc<RequestTracker>>,
         response_buffer_size: usize,
     ) -> PyResult<Bound<'p, PyAny>> {
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let single_in = SingleIn::new(request);
             let stream = inner.generate(single_in).await.map_err(to_pyerr)?;
             let (tx, rx) =
@@ -2256,7 +2256,7 @@ impl KvRouter {
 
         // The initial-worker wait can be unbounded. Releasing the GIL makes it
         // supervisable from another thread, but not cancellable.
-        let runtime = pyo3_async_runtimes::tokio::get_runtime();
+        let runtime = crate::bridge_runtime();
         py.allow_threads(|| {
             runtime.block_on(async move {
                 let client = endpoint.inner.client().await.map_err(to_pyerr)?;
@@ -2483,7 +2483,7 @@ impl KvRouter {
         let chooser = Arc::clone(self.inner.kv_router());
         let update_states = request_id.is_some();
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let admitted = chooser
                 .find_best_match_details_with_policy_class_admitted(
                     request_id.as_deref(),
@@ -2575,7 +2575,7 @@ impl KvRouter {
     ) -> PyResult<Bound<'p, PyAny>> {
         let chooser = Arc::clone(self.inner.kv_router());
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             chooser
                 .mark_prefill_completed(&request_id)
                 .await
@@ -2588,7 +2588,7 @@ impl KvRouter {
     fn free<'p>(&self, py: Python<'p>, request_id: String) -> PyResult<Bound<'p, PyAny>> {
         let chooser = Arc::clone(self.inner.kv_router());
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             chooser.free(&request_id).await.map_err(to_pyerr)?;
             Ok(())
         })
@@ -2608,7 +2608,7 @@ impl KvRouter {
             .transpose()?;
         let chooser = Arc::clone(self.inner.kv_router());
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let loads = chooser
                 .get_potential_loads(
                     &token_ids,
@@ -2654,7 +2654,7 @@ impl KvRouter {
             .transpose()?;
         let chooser = Arc::clone(self.inner.kv_router());
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let scores = chooser
                 .get_overlap_scores(
                     &token_ids,
@@ -2679,7 +2679,7 @@ impl KvRouter {
     fn dump_events<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let chooser = Arc::clone(self.inner.kv_router());
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let events = chooser.dump_events().await.map_err(to_pyerr)?;
             // Serialize to JSON string
             let json_str = serde_json::to_string(&events).map_err(to_pyerr)?;
