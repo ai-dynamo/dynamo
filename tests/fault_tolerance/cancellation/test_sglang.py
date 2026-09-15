@@ -17,9 +17,11 @@ import pytest
 
 from tests.fault_tolerance.cancellation.utils import (
     DynamoFrontendProcess,
+    poll_for_any_pattern,
     poll_for_pattern,
     read_streaming_responses,
     send_cancellable_request,
+    send_completion_request,
     verify_frontend_cancellation_metrics,
     verify_runtime_cancellation_metrics,
 )
@@ -28,7 +30,18 @@ from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.payloads import check_health_generate, check_models_api
 from tests.utils.port_utils import allocate_port, deallocate_port
 
+# A stranded KV transfer does not fail loudly: the deployment keeps answering,
+# just late, and TRT-LLM only reclaims at kv_transfer_timeout_ms (60s default).
+# Bounding the follow-up below that turns "eventually returned 200" into a
+# failure, which is the symptom a wedge actually produces.
+FOLLOWUP_TIMEOUT_S = 30.0
+
+
 logger = logging.getLogger(__name__)
+
+# Small enough that the request stays inside prefill for the whole test:
+# a long prompt with few output tokens is dominated by the prefill phase.
+PREFILL_CANCELLATION_MAX_TOKENS = 128
 
 pytestmark = [
     pytest.mark.fault_tolerance,
@@ -418,4 +431,146 @@ def test_request_cancellation_sglang_decode_cancel(
                     worker_system_port=prefill_worker.system_port,
                     expected_count=0,
                     component="prefill",
+                )
+
+
+@pytest.mark.timeout(300)  # 3x average
+@pytest.mark.gpu_2
+@pytest.mark.pre_merge
+def test_request_cancellation_sglang_prefill_cancel(
+    request, runtime_services_dynamic_ports, predownload_models
+):
+    """
+    End-to-end test for request cancellation during the prefill phase.
+
+    Both legs must be torn down together. SGLang dispatches decode as soon as
+    prefill hands back bootstrap info, so the decode worker is already parked on
+    the bootstrap room waiting for a KV transfer. Aborting only the prefill leg
+    leaves that receiver waiting on a sender that will never arrive, which
+    wedges the pair: measured directly, a following request did not complete
+    within 240s and the workers stopped accepting connections while still
+    reporting healthy.
+
+    That failure is silent in every signal except latency, so this test asserts
+    the abort reaches *both* workers and that the deployment still serves
+    afterwards. A health check alone would not catch it.
+
+    Note: This test requires 2 GPUs to run decode and prefill workers on
+    separate GPUs.
+    """
+
+    decode_system_port = allocate_port(DynamoPortRange.SERVE.value)
+    request.addfinalizer(lambda port=decode_system_port: deallocate_port(port))
+    prefill_system_port = allocate_port(DynamoPortRange.SERVE.value)
+    request.addfinalizer(lambda port=prefill_system_port: deallocate_port(port))
+
+    with DynamoFrontendProcess(request) as frontend:
+        logger.info("Frontend started successfully")
+
+        with DynamoWorkerProcess(
+            request,
+            system_port=decode_system_port,
+            frontend_port=frontend.frontend_port,
+            mode="decode",
+        ) as decode_worker:
+            logger.info(f"Decode Worker PID: {decode_worker.get_pid()}")
+
+            with DynamoWorkerProcess(
+                request,
+                system_port=prefill_system_port,
+                frontend_port=frontend.frontend_port,
+                mode="prefill",
+            ) as prefill_worker:
+                logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
+
+                # TODO: Why wait after worker ready fixes frontend 404 / 500 flakiness?
+                time.sleep(2)
+
+                logger.info(
+                    "Testing completion request cancellation during prefill phase..."
+                )
+
+                # A long prompt with max_tokens=1 keeps the request inside
+                # prefill long enough for the cancel to land before any token.
+                cancellable_req = send_cancellable_request(
+                    frontend.frontend_port,
+                    "completion",
+                    use_long_prompt=True,
+                    max_tokens=PREFILL_CANCELLATION_MAX_TOKENS,
+                )
+
+                request_id, prefill_log_offset = poll_for_pattern(
+                    process=prefill_worker,
+                    pattern="New Request ID: ",
+                    match_type="contains",
+                    max_wait_ms=10000,
+                    poll_interval_ms=50,
+                    cancellable_request=cancellable_req,
+                )
+
+                cancellable_req.cancel()
+                logger.info(f"Cancelled request ID: {request_id} during prefill")
+
+                # The prefill leg must actually be aborted, not merely detached.
+                poll_for_pattern(
+                    process=prefill_worker,
+                    pattern="Calling SGLang abort_request",
+                    log_offset=prefill_log_offset,
+                    match_type="contains",
+                    max_wait_ms=15000,
+                    poll_interval_ms=50,
+                )
+
+                # And so must the decode leg, whose receiver would otherwise be
+                # left parked on the bootstrap room. This is the assertion that
+                # distinguishes a safe cancellation from the wedge.
+                #
+                # Two outcomes are both correct, and which one happens is a
+                # race: the decode leg is dispatched as soon as prefill returns
+                # bootstrap info, so the cancel either reaches a decode request
+                # already submitted to the engine (abort) or arrives first and
+                # the request is never submitted at all. Requiring the abort
+                # specifically would test the race, not the property.
+                poll_for_any_pattern(
+                    process=decode_worker,
+                    patterns=[
+                        "Calling SGLang abort_request",
+                        "Client gone before submission",
+                    ],
+                    max_wait_ms=15000,
+                    poll_interval_ms=50,
+                )
+
+                logger.info(
+                    "Completion request cancellation during prefill phase "
+                    "detected on both workers"
+                )
+
+                # The wedge showed up as unbounded latency, not as an error, so
+                # check the pair still serves rather than just that it is up.
+                for attempt in range(3):
+                    followup = send_completion_request(
+                        prompt="hello",
+                        max_tokens=4,
+                        frontend_port=frontend.frontend_port,
+                        timeout_s=FOLLOWUP_TIMEOUT_S,
+                    )
+                    followup.wait()
+                    response = followup.get_response()
+                    assert response.status_code == 200, (
+                        f"Request {attempt} after prefill cancellation failed "
+                        f"with HTTP {response.status_code}; the prefill/decode "
+                        "pair appears wedged."
+                    )
+
+                verify_frontend_cancellation_metrics(
+                    frontend_port=frontend.frontend_port,
+                    request_type="completion",
+                    expected_count=1,
+                )
+                verify_runtime_cancellation_metrics(
+                    worker_system_port=prefill_worker.system_port,
+                    expected_count=1,
+                    component="prefill",
+                    max_wait_ms=15000,
                 )

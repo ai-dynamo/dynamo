@@ -190,6 +190,25 @@ pub enum ToolCallArgumentsFormat {
     JsonObject,
 }
 
+/// How long a worker's prefill request may be cancelled after the client goes away.
+///
+/// In disaggregated serving the prefill worker commits KV for a decode worker to
+/// collect. Engines differ in whether aborting after that commitment is safe:
+/// some release the blocks, others hold them until a transfer timeout expires,
+/// which costs far more than letting the prefill finish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PrefillCancelUntil {
+    /// Cancellation is safe at any point the router can observe.
+    Anytime,
+    /// Cancellation is safe only until the worker returns its handoff
+    /// parameters. After that the KV is committed and aborting orphans it.
+    PreHandoff,
+    /// The worker does not support prefill cancellation.
+    #[default]
+    Never,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Validate)]
 #[validate(schema(function = "validate_model_runtime_config"))]
 /// Runtime-resolved metadata published by a worker after its engine starts.
@@ -289,6 +308,15 @@ pub struct ModelRuntimeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv_state_endpoint: Option<EndpointId>,
 
+    /// How long this worker's prefill request may be cancelled once the client
+    /// disconnects.
+    ///
+    /// `None` indicates a legacy worker that does not declare this capability;
+    /// consumers must treat it as [`PrefillCancelUntil::Never`] so that adding
+    /// this field cannot change the behaviour of an existing deployment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_cancel_until: Option<PrefillCancelUntil>,
+
     /// Mapping of engine-specific runtime configs
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub runtime_data: HashMap<String, serde_json::Value>,
@@ -373,6 +401,7 @@ impl Default for ModelRuntimeConfig {
     fn default() -> Self {
         Self {
             context_length: None,
+            prefill_cancel_until: None,
             total_kv_blocks: None,
             max_num_seqs: None,
             max_num_batched_tokens: None,

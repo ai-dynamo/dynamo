@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, Mapping
 from typing import Any
 
 from pydantic import TypeAdapter
@@ -91,7 +91,7 @@ def build_native_generate_request(
 
 async def native_generate_stream(
     engine: Any, request: GenerateReqInput
-) -> AsyncIterator[dict[str, Any]]:
+) -> AsyncGenerator[dict[str, Any], None]:
     """Dispatch exactly as SGLang native ``/generate`` handler does."""
     async for response in engine.tokenizer_manager.generate_request(request, None):
         yield {"token_ids": [], "engine_data": {"sglang_response": response}}
