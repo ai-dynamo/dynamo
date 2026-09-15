@@ -394,11 +394,6 @@ areas:
   - deploy/operator/cmd/crd-apply/
   - deploy/operator/config/
   - deploy/operator/config/crd/
-  - deploy/operator/config/default/
-  - deploy/operator/config/manager/
-  - deploy/operator/config/prometheus/
-  - deploy/operator/config/rbac/
-  - deploy/operator/config/samples/
   - deploy/operator/docs/
   - deploy/operator/hack/
   - deploy/operator/internal/
@@ -418,9 +413,6 @@ areas:
   - deploy/operator/internal/secrets/
   - deploy/operator/internal/webhook/
   - deploy/operator/samples/
-  - deploy/operator/test/
-  - deploy/operator/test/e2e/
-  - deploy/operator/test/utils/
   - deploy/pre-deployment/
   - deploy/utils/
   - deploy/utils/manifests/
@@ -805,10 +797,6 @@ shared:
 - glob: components/src/dynamo/vllm/publisher.py
   owners:
   - backend-vllm
-  - observability
-- glob: deploy/operator/config/prometheus/monitor.yaml
-  owners:
-  - operator
   - observability
 - glob: lib/llm/src/fpm_publisher.rs
   owners:

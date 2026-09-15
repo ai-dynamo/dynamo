@@ -100,7 +100,7 @@ vllm:
     runtime_image: vllm/vllm-openai-cpu
     base_image_tag: 22.04
     runtime_image_tag: v0.28.0
-    # baseline_sbom: not yet captured for cpu — runtime build runs without subtraction
+    # No baseline_sbom: cpu images are unshipped and skip the compliance stages.
   vllm_omni_ref: "v0.28.0rc1"
   # vLLM-Omni 0.28.0rc1 requires transformers>=5.10.1,<5.15, while vLLM's own
   # unbounded transformers>=5.5.3 lets the release images resolve to 5.15.1.

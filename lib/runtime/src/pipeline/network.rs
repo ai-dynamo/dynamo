@@ -42,6 +42,12 @@ use prometheus::{CounterVec, Histogram, IntCounter, IntCounterVec, IntGauge};
 /// Shared default maximum TCP message size across request-plane components.
 pub(crate) const DEFAULT_TCP_MAX_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
 
+/// Prefix a request-plane server writes on the request connection to reject a request it cannot
+/// serve. The client matches on it to classify the reply as a rejection rather than the success
+/// ACK; anything it does not recognise is read as the ACK and it waits for a response stream.
+/// Both ends must use this constant.
+pub(crate) const ACK_UNAVAILABLE_PREFIX: &str = "Server unavailable:";
+
 static REQUEST_PLANE_PAYLOAD_CODEC: OnceLock<RequestPlanePayloadCodec> = OnceLock::new();
 static RESPONSE_PLANE_MODE: OnceLock<ResponsePlaneMode> = OnceLock::new();
 

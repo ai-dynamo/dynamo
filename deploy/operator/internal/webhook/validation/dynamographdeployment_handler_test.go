@@ -83,10 +83,16 @@ func TestDynamoGraphDeploymentHandlerValidateUpdate(t *testing.T) {
 		newDGD := oldDGD.DeepCopy()
 		now := metav1.Now()
 		newDGD.DeletionTimestamp = &now
-		if _, err := handler.ValidateUpdate(ctx, nil, newDGD); err != nil {
+		// Admission always supplies the old object on UPDATE, and the
+		// terminating path now reads it to enforce durable metadata rules.
+		if _, err := handler.ValidateUpdate(ctx, oldDGD, newDGD); err != nil {
 			t.Fatalf("ValidateUpdate() error = %v", err)
 		}
 	})
+
+	// The terminating contract is covered as admission-table rows in
+	// dynamographdeployment_validation_envtest_test.go, against a deletionTimestamp
+	// the API server owns.
 
 	t.Run("stateless validation failure", func(t *testing.T) {
 		invalid := newBetaDGDForValidation()

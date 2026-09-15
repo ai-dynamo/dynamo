@@ -9,6 +9,7 @@ intent: >-
 skills:
   - synthesize-user-workload
   - author-baseline-dgd
+  - find-serving-recipe
 "Required Readings: Docs":
   - agent-docs/references/definitions.md
 "Required Reading: Rules":
@@ -31,7 +32,15 @@ identity. The baseline comes from the baseline-source ladder, and the user's exp
 invariant at every rung:
 
 1. The user provides a DGD (`origin: user`).
-2. No user DGD, but the catalog has an exact or close recipe for the model, hardware, and backend: propose it —
+2. No user DGD, but the catalog has an exact or close recipe for the model, hardware, and backend (perform the
+   scan with the `find-serving-recipe` skill, which defines the catalog as an ordered set of sources with
+   provenance gates and writes an immutable dossier snapshot under `<EXP_ROOT>/analysis/recipe-dossier/`, which
+   this rung's evidence record cites by snapshot path and SHA256). Only a candidate the dossier grades
+   `deployable` may be proposed at this rung; a `hypothesis` or `ceiling-only` candidate is not a baseline. Its
+   DURABLE content (topology, parallelism, precision, sizing) may inform rung 3 as scaffolding, but every
+   condition the dossier recorded as failed travels with it: a mutable, unresolved, or quarantined image is never
+   copied into an authored draft, and a manifest SHA256 proves nothing about the image behind it. Propose the
+   deployable candidate —
    for a close match, with an explicit adaptation diff naming every changed field and its reason — and capture the
    user-confirmed manifest (`origin: recipe-confirmed`). Adaptation covers INFRASTRUCTURE PREREQUISITES, not just
    hardware fields: check the variant's requirements (gateway/service-mesh routing, referenced secrets, CRDs,
@@ -42,9 +51,11 @@ invariant at every rung:
    traffic entry, and when no supported direct route exists that is itself a blocking question. A prerequisite
    only the user can provide is a blocking
    question, not a reason to end the engagement.
-3. Nothing close: invoke `author-baseline-dgd` to draft one from the interview facts and the sizing guides, relay
-   its draft and per-decision evidence table, and capture only what the user explicitly confirms
-   (`origin: agent-authored`).
+3. No `deployable` recipe: invoke `author-baseline-dgd` to draft one from the interview facts and the sizing
+   guides, passing the dossier snapshot path so authoring can reuse durable content and must honor the failed
+   verdict conditions recorded there; relay its draft and per-decision evidence table, and capture only what the
+   user explicitly confirms (`origin: agent-authored`). User confirmation establishes intent, not image
+   provenance: the draft's images must pass the same resolvability gate before confirmation is requested.
 
 Baseline selection and authoring happen ONLY here, at interview time, where a blocking question is legal; the
 optimization loop never selects or substitutes a BASELINE. This constrains only where the baseline comes from — the

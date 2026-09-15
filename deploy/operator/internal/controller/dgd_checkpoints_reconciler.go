@@ -908,6 +908,10 @@ func checkpointWorkerHashForComponent(dgd *nvidiacomv1beta1.DynamoGraphDeploymen
 	if component == nil || !dynamo.IsWorkerComponent(string(component.ComponentType)) {
 		return "", nil
 	}
+	// Pend until a generation is committed; avoids SnapshotJobs for an uncommitted hash.
+	if currentWorkerHashes(dgd).empty() {
+		return "", nil
+	}
 	desired, err := desiredWorkerHashes(dgd)
 	if err != nil {
 		return "", err

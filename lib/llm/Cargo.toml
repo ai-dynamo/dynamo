@@ -115,7 +115,7 @@ tempfile = { workspace = true }
 thiserror = { workspace = true }
 tmq = { workspace = true }
 tokio = { workspace = true }
-tokio-stream = { workspace = true }
+tokio-stream = { workspace = true, features = ["net"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 opentelemetry = { workspace = true }
@@ -174,7 +174,9 @@ utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
 # grpc-service
 # ping version to 0.13.1 so it depends on prost 0.13.5
 # which is used across other libraries
-tonic = { version = "0.13.1" }
+tonic = { version = "0.13.1", features = ["zstd"] }
+tonic-health = { workspace = true }
+tonic-reflection = { version = "0.13.1" }
 # Request prost specifically so tonic-build properly compiles protobuf message
 prost = { version = "0.13.5" }
 

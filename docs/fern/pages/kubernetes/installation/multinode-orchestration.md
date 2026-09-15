@@ -15,12 +15,13 @@ Grove is the default and recommended orchestrator for multinode deployments. It 
 
   The managed installation is recommended for development and testing. It is the simplest path, and allows Dynamo to manage the lifecycle of Grove and KAI Scheduler as bundled subcharts. Run the following command to install Dynamo with Grove and KAI Scheduler:
 
-  ```
+  ```bash
   helm upgrade --install dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
   --namespace $NAMESPACE \
   --create-namespace \
   --set "global.grove.install=true" \
-  --set "global.kai-scheduler.install=true"
+  --set "global.kai-scheduler.install=true" \
+  --set-string "kai-scheduler.scheduler.args.default-staleness-grace-period=-1"
   ```
   </Tab>
   <Tab title="External Installation" value="external">
@@ -30,7 +31,7 @@ Grove is the default and recommended orchestrator for multinode deployments. It 
 
   Then, run the following command to install or configure Dynamo to use the existing Grove and KAI Scheduler:
 
-  ```
+  ```bash
   helm upgrade --install dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
   --namespace $NAMESPACE \
   --create-namespace \
@@ -45,6 +46,7 @@ Grove is the default and recommended orchestrator for multinode deployments. It 
   > |-----------------|---------------|-------|
   > | 1.0.x           | >= v0.13.0    | >= v0.1.0-alpha.6 |
   > | 1.1.x           | >= v0.13.4    | >= v0.1.0-alpha.8 |
+  > | 1.5.x           | >= v0.17.0    | >= v0.1.0-alpha.13 |
 
   </Tab>
 </Tabs>

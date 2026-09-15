@@ -118,7 +118,7 @@ class TestLabelInjectingCollector:
         # Create collector that injects labels
         labels_to_inject = {
             "dynamo_namespace": "prod",
-            "dynamo_component": "vllm-worker",
+            "dynamo_component": "worker",
         }
         collector = LabelInjectingCollector(source_registry, labels_to_inject)
 
@@ -138,18 +138,18 @@ class TestLabelInjectingCollector:
             assert "le" in sample.labels
             # Verify injected labels are present
             assert sample.labels["dynamo_namespace"] == "prod"
-            assert sample.labels["dynamo_component"] == "vllm-worker"
+            assert sample.labels["dynamo_component"] == "worker"
 
         # Verify sum and count samples also have injected labels
         sum_sample = next(s for s in histogram_mf.samples if s.name.endswith("_sum"))
         assert sum_sample.labels["dynamo_namespace"] == "prod"
-        assert sum_sample.labels["dynamo_component"] == "vllm-worker"
+        assert sum_sample.labels["dynamo_component"] == "worker"
 
         count_sample = next(
             s for s in histogram_mf.samples if s.name.endswith("_count")
         )
         assert count_sample.labels["dynamo_namespace"] == "prod"
-        assert count_sample.labels["dynamo_component"] == "vllm-worker"
+        assert count_sample.labels["dynamo_component"] == "worker"
 
     def test_summary_preserves_quantile_label(self):
         """Test that summary 'quantile' label is preserved"""
@@ -212,7 +212,7 @@ class TestLabelInjectingCollector:
         # Create collector with multiple labels to inject
         labels_to_inject = {
             "dynamo_namespace": "prod",
-            "dynamo_component": "vllm-worker",
+            "dynamo_component": "worker",
             "dynamo_endpoint": "generate",
             "model": "llama-3-70b",
             "instance_id": "worker-0",
@@ -227,7 +227,7 @@ class TestLabelInjectingCollector:
         # Verify all labels are present
         sample = metric_families[0].samples[0]
         assert sample.labels["dynamo_namespace"] == "prod"
-        assert sample.labels["dynamo_component"] == "vllm-worker"
+        assert sample.labels["dynamo_component"] == "worker"
         assert sample.labels["dynamo_endpoint"] == "generate"
         assert sample.labels["model"] == "llama-3-70b"
         assert sample.labels["instance_id"] == "worker-0"
@@ -253,7 +253,7 @@ class TestLabelInjectingCollector:
         # Create collector that injects additional labels
         labels_to_inject = {
             "dynamo_namespace": "prod",
-            "dynamo_component": "vllm-worker",
+            "dynamo_component": "worker",
         }
         collector = LabelInjectingCollector(source_registry, labels_to_inject)
 
@@ -275,7 +275,7 @@ class TestLabelInjectingCollector:
         assert sample1.labels["status"] == "success"
         assert sample1.labels["method"] == "GET"
         assert sample1.labels["dynamo_namespace"] == "prod"
-        assert sample1.labels["dynamo_component"] == "vllm-worker"
+        assert sample1.labels["dynamo_component"] == "worker"
         assert sample1.value == 10
 
         # Second sample: status=error, method=POST
@@ -283,7 +283,7 @@ class TestLabelInjectingCollector:
         assert sample2.labels["status"] == "error"
         assert sample2.labels["method"] == "POST"
         assert sample2.labels["dynamo_namespace"] == "prod"
-        assert sample2.labels["dynamo_component"] == "vllm-worker"
+        assert sample2.labels["dynamo_component"] == "worker"
         assert sample2.value == 5
 
     def test_existing_label_not_overwritten(self):
@@ -380,7 +380,7 @@ class TestLabelInjectingCollector:
         # Create collector that injects labels
         labels_to_inject = {
             "dynamo_namespace": "prod",
-            "dynamo_component": "vllm-worker",
+            "dynamo_component": "worker",
         }
         collector = LabelInjectingCollector(source_registry, labels_to_inject)
 
@@ -392,7 +392,7 @@ class TestLabelInjectingCollector:
         for mf in metric_families:
             for sample in mf.samples:
                 assert sample.labels["dynamo_namespace"] == "prod"
-                assert sample.labels["dynamo_component"] == "vllm-worker"
+                assert sample.labels["dynamo_component"] == "worker"
 
     def test_timestamp_preservation(self):
         """Test that timestamps are preserved"""
