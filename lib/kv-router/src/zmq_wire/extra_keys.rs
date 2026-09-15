@@ -6,7 +6,7 @@ use crate::protocols::{BlockExtraInfo, BlockMmObjectInfo};
 use super::types::ExtraKeyItem;
 
 // Must match _DYNAMO_CACHE_SALT_PREFIX in components/src/dynamo/vllm/handlers.py.
-const DYNAMO_CACHE_SALT_PREFIX: &str = "dynamo-cache-salt:";
+pub const DYNAMO_CACHE_SALT_PREFIX: &str = "dynamo-cache-salt:";
 
 /// Encode a frontend-approved routing hash in the marker form carried through
 /// vLLM `extra_keys`.

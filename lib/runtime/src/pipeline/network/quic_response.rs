@@ -44,7 +44,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use xxhash_rust::xxh3::xxh3_64;
 
-use super::{ConnectionInfo, RegisteredStream, StreamReceiver};
+use super::{ConnectionInfo, RegisteredStream, StreamPrologueError, StreamReceiver};
 use crate::{
     config::environment_names::quic_response, discovery::EndpointInstanceId,
     engine::AsyncEngineContext, pipeline::PipelineError,
@@ -540,7 +540,7 @@ impl DeferredResponse {
 
 struct PendingResponse {
     context: Arc<dyn AsyncEngineContext>,
-    connection: oneshot::Sender<Result<StreamReceiver, String>>,
+    connection: oneshot::Sender<Result<StreamReceiver, StreamPrologueError>>,
     bundle_id: Option<Uuid>,
     deferred: DeferredResponse,
     monitor_cancel: CancellationToken,
@@ -902,7 +902,7 @@ fn fail_registration(state: &ServerState, registration_id: Uuid, reason: &str) {
     let mut registration = state.registration(registration_id).lock();
     if let Some(pending) = registration.pending.remove(&registration_id) {
         pending.monitor_cancel.cancel();
-        let _ = pending.connection.send(Err(reason.to_string()));
+        let _ = pending.connection.send(Err(reason.into()));
     }
     if let Some(active) = registration.active.remove(&registration_id) {
         active.monitor_cancel.cancel();
@@ -1209,7 +1209,7 @@ async fn process_server_frame(
                         bundle_id
                     );
                 }
-                let _ = pending.connection.send(Err(error));
+                let _ = pending.connection.send(Err(error.into()));
                 remove_registration(state, frame.registration_id);
             } else {
                 send_control(control_tx, FrameKind::Reset, frame.registration_id)?;
@@ -2748,7 +2748,7 @@ mod tests {
             .await
             .unwrap();
         match provider.await.unwrap() {
-            Err(error) => assert_eq!(error, "generate failed"),
+            Err(error) => assert_eq!(&*error, "generate failed"),
             Ok(_) => panic!("terminal error unexpectedly opened a response stream"),
         }
         shutdown.cancel();
