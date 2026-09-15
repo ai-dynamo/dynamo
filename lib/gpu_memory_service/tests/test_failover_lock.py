@@ -13,6 +13,7 @@ import multiprocessing
 import os
 import signal
 import time
+from multiprocessing import connection
 
 import pytest
 from _deps import HAS_GMS
@@ -100,7 +101,7 @@ async def test_two_engines_contention(lock_path):
 # ── Test 3: process death releases lock ──────────────────────────────
 
 
-def _child_acquire_and_hang(lock_path: str, ready_fd: int):
+def _child_acquire_and_hang(lock_path: str, ready: connection.Connection):
     """Child process: acquire flock, signal parent, then block forever."""
     import fcntl
 
@@ -108,9 +109,11 @@ def _child_acquire_and_hang(lock_path: str, ready_fd: int):
     fcntl.flock(fd, fcntl.LOCK_EX)
     os.write(fd, b"child")
 
-    # Signal parent that we hold the lock
-    os.write(ready_fd, b"1")
-    os.close(ready_fd)
+    # Signal parent that we hold the lock. A Connection is picklable, so it
+    # reaches the child under every start method; a bare fd number only
+    # survives "fork".
+    ready.send(b"1")
+    ready.close()
 
     # Block forever (parent will SIGKILL us)
     time.sleep(3600)
@@ -119,17 +122,17 @@ def _child_acquire_and_hang(lock_path: str, ready_fd: int):
 @pytest.mark.asyncio
 async def test_process_death_releases(lock_path):
     """SIGKILL a child holding the lock. Parent should acquire."""
-    read_fd, write_fd = os.pipe()
+    read_conn, write_conn = multiprocessing.Pipe(duplex=False)
 
     child = multiprocessing.Process(
-        target=_child_acquire_and_hang, args=(lock_path, write_fd)
+        target=_child_acquire_and_hang, args=(lock_path, write_conn)
     )
     child.start()
-    os.close(write_fd)
+    write_conn.close()
 
     # Wait for child to signal it holds the lock
-    os.read(read_fd, 1)
-    os.close(read_fd)
+    read_conn.recv()
+    read_conn.close()
 
     # Child holds the lock — verify we can't acquire immediately
     lock = FlockFailoverLock(lock_path)
