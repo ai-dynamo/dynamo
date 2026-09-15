@@ -538,7 +538,7 @@ async fn anthropic_handler_errors_record_classification_with_response() {
                 (
                     reqwest::StatusCode::BAD_REQUEST,
                     "invalid_request_error",
-                    "bad backend input",
+                    "Invalid request",
                 ),
                 (
                     reqwest::StatusCode::INTERNAL_SERVER_ERROR,
