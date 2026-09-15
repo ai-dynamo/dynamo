@@ -102,6 +102,7 @@ jobs:
             [[ $(jq -r '.pull_request.head.sha' "$GITHUB_EVENT_PATH") == "$head" ]] || exit 0
           fi
           echo "head=$head" >> "$GITHUB_OUTPUT"
+          echo "base=$(jq -r '.base.sha' <<< "$pr")" >> "$GITHUB_OUTPUT"
           echo "author=$(jq -r '.user.login' <<< "$pr")" >> "$GITHUB_OUTPUT"
           echo "current=true" >> "$GITHUB_OUTPUT"
       - name: Validate approved contributor
@@ -210,10 +211,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO_OWNER: ${{ github.repository_owner }}
           REPO_NAME: ${{ github.event.repository.name }}
+          PR_BASE: ${{ steps.request.outputs.base }}
+          PR_SHA: ${{ steps.request.outputs.head }}
         run: |
           commit_shas=$(gh api --paginate \
-            "repos/$REPO_OWNER/$REPO_NAME/pulls/$PR_NUMBER/commits?per_page=100" \
-            --jq '.[].sha')
+            "repos/$REPO_OWNER/$REPO_NAME/compare/$PR_BASE...$PR_SHA?per_page=100" \
+            --jq '.commits[].sha')
 
           if [[ -z "$commit_shas" ]]; then
             echo "Warning: No commits found in PR." >&2
@@ -319,6 +322,7 @@ jobs:
           GH_TOKEN: ${{ secrets.AUTO_VERIFIER_CI_TOKEN }}
           REPO_OWNER: ${{ github.repository_owner }}
           REPO_NAME: ${{ github.event.repository.name }}
+          PR_BASE: ${{ steps.request.outputs.base }}
           PR_SHA: ${{ steps.request.outputs.head }}
         run: |
           if [[ -z "$PR_SHA" ]]; then
@@ -334,7 +338,8 @@ jobs:
             exit 0
           fi
           pr=$(gh api "repos/$REPO_OWNER/$REPO_NAME/pulls/$PR_NUMBER")
-          jq -e --arg sha "$PR_SHA" '.state == "open" and .head.sha == $sha' <<< "$pr" > /dev/null || exit 0
+          jq -e --arg sha "$PR_SHA" --arg base "$PR_BASE" \
+            '.state == "open" and .head.sha == $sha and .base.sha == $base' <<< "$pr" > /dev/null || exit 0
 
           gh pr comment "$PR_NUMBER" \
             --repo "$REPO_OWNER/$REPO_NAME" \
