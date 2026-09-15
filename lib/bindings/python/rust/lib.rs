@@ -173,6 +173,128 @@ fn create_request_context(
     }
 }
 
+/// The runtime the PyO3 bridge settled on, recorded so the exit hook can name it.
+///
+/// There is no way to ask PyO3 for it at exit: `get_runtime()` builds a runtime rather than
+/// report that there is none, and an exiting process has no business starting worker threads.
+static BRIDGE_RUNTIME: std::sync::OnceLock<&'static tokio::runtime::Runtime> =
+    std::sync::OnceLock::new();
+
+/// Offer `primary` to the PyO3 bridge and report the runtime the bridge is using.
+///
+/// Recording that runtime is what lets [`wait_for_bridge_tasks_at_exit`] reach the bridge when
+/// something got to `future_into_py` first and PyO3 built a runtime of its own. Reading it
+/// straight after the offer is what makes the read safe: by then the bridge holds either
+/// `primary` or the runtime it already had, so nothing is constructed here either.
+pub(crate) fn adopt_bridge_runtime(
+    primary: &'static tokio::runtime::Runtime,
+) -> &'static tokio::runtime::Runtime {
+    // `Err(())` only means that the bridge runtime was already selected. It may already be
+    // borrowing `primary`, so identity has to be checked independently by the caller.
+    let _ = pyo3_async_runtimes::tokio::init_with_runtime(primary);
+    bridge_runtime()
+}
+
+/// Record the selected PyO3 runtime whenever bindings access it directly.
+pub(crate) fn bridge_runtime() -> &'static tokio::runtime::Runtime {
+    let bridge = pyo3_async_runtimes::tokio::get_runtime();
+    let _ = BRIDGE_RUNTIME.set(bridge);
+    bridge
+}
+
+/// Convert a future and record its runtime for the bounded interpreter-exit drain.
+pub(crate) fn future_into_py<F, T>(py: Python<'_>, fut: F) -> PyResult<Bound<'_, PyAny>>
+where
+    F: std::future::Future<Output = PyResult<T>> + Send + 'static,
+    T: for<'py> IntoPyObject<'py>,
+{
+    let future = pyo3_async_runtimes::tokio::future_into_py(py, fut)?;
+    // Successful conversion initialized the bridge without requiring a Dynamo runtime.
+    bridge_runtime();
+    Ok(future)
+}
+
+/// Preserve explicit task locals while recording the converted future's runtime.
+fn future_into_py_with_locals<F, T>(
+    py: Python<'_>,
+    locals: pyo3_async_runtimes::TaskLocals,
+    fut: F,
+) -> PyResult<Bound<'_, PyAny>>
+where
+    F: std::future::Future<Output = PyResult<T>> + Send + 'static,
+    T: for<'py> IntoPyObject<'py>,
+{
+    let future = pyo3_async_runtimes::tokio::future_into_py_with_locals(py, locals, fut)?;
+    bridge_runtime();
+    Ok(future)
+}
+
+/// Longest the exit hook will wait for the runtimes it drains to go quiet.
+///
+/// The race it closes is sub-millisecond, so this is still a margin of hundreds. It is also
+/// paid in full, on every exit, by a process whose service tasks never finish: a frontend holds
+/// several, so its alive-task count never reaches zero and the loop always runs to this
+/// deadline. That cost, not the race, is what bounds how large this may be.
+const BRIDGE_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+const BRIDGE_DRAIN_POLL: std::time::Duration = std::time::Duration::from_millis(1);
+
+/// Give Tokio tasks a bounded chance to finish before CPython finalizes the interpreter.
+///
+/// `future_into_py` resolves the Python future from a Tokio worker via `call_soon_threadsafe`,
+/// so the awaiting coroutine resumes while that worker is still inside `Python::with_gil` with
+/// an epilogue left to run — it has yet to drop the argument tuple it passed. The main thread
+/// can leave `asyncio.run` and start finalizing inside that window, and the worker then runs
+/// `PyObject_GC_Del` against a half-torn-down interpreter. The process dies by `SIGSEGV` with
+/// all of its output already correctly written.
+///
+/// Drains both runtimes a bridge task can be on: Dynamo's process runtime, and the runtime the
+/// bridge actually settled on when that is a different one. They differ whenever something
+/// reached `future_into_py` before [`adopt_bridge_runtime`] could offer the process runtime —
+/// the mismatch the bindings already warn about, and the case where every bridge task lives on
+/// the runtime PyO3 built for itself rather than on the process runtime.
+///
+/// Binding future conversions and direct bridge access record the selected runtime;
+/// the exit hook only reads that record and never initializes a runtime.
+#[pyfunction]
+fn wait_for_bridge_tasks_at_exit(py: Python<'_>) {
+    let mut runtimes: Vec<&'static tokio::runtime::Runtime> = Vec::new();
+    if let Some(process) = rs::Worker::existing_process_runtime() {
+        runtimes.push(process);
+    }
+    if let Some(bridge) = BRIDGE_RUNTIME.get().copied()
+        && !runtimes.iter().any(|rt| std::ptr::eq(*rt, bridge))
+    {
+        runtimes.push(bridge);
+    }
+    if runtimes.is_empty() {
+        return;
+    }
+    let alive = || -> usize {
+        runtimes
+            .iter()
+            .map(|rt| rt.metrics().num_alive_tasks())
+            .sum()
+    };
+    // An atexit callback holds the GIL and the tasks being waited on need it, so
+    // waiting without releasing it would deadlock against those same threads.
+    py.allow_threads(|| {
+        let deadline = std::time::Instant::now() + BRIDGE_DRAIN_TIMEOUT;
+        while alive() > 0 {
+            if std::time::Instant::now() >= deadline {
+                // At the default level, and once per process at most: it is the only thing
+                // that accounts for the extra exit delay the operator just waited through.
+                tracing::info!(
+                    alive_tasks = alive(),
+                    runtimes = runtimes.len(),
+                    "tasks still running at interpreter exit; continuing without them"
+                );
+                break;
+            }
+            std::thread::sleep(BRIDGE_DRAIN_POLL);
+        }
+    });
+}
+
 fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // OTLP export no longer requires a pre-existing runtime, so initialize at import.
     if std::env::var_os(SKIP_PYTHON_LOG_INIT_ENV).is_none() {
@@ -197,6 +319,13 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
              has to build its own runtime it will fall back to Tokio's unbounded defaults"
         ),
     }
+
+    // atexit runs before the interpreter is finalized, the last point where a bridge task
+    // still touching Python objects can be waited for.
+    m.py().import("atexit")?.call_method1(
+        "register",
+        (wrap_pyfunction!(wait_for_bridge_tasks_at_exit, m)?,),
+    )?;
 
     m.add_function(wrap_pyfunction!(llm::kv::compute_block_hash_for_seq_py, m)?)?;
     m.add_function(wrap_pyfunction!(lora_name_to_id, m)?)?;
@@ -662,7 +791,7 @@ fn register_model<'p>(
         cfg.validate_config()?;
     }
 
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    crate::future_into_py(py, async move {
         let runtime_config = runtime_config.unwrap_or_default();
 
         // For TensorBased, Images, Videos, and Realtime models, skip
@@ -818,7 +947,7 @@ fn unregister_model<'p>(
 ) -> PyResult<Bound<'p, PyAny>> {
     let lora_name_owned = lora_name.map(|s| s.to_string());
 
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    crate::future_into_py(py, async move {
         // Unified detach method handles both base models and LoRA adapters
         LocalModel::detach_from_endpoint(&endpoint.inner, lora_name_owned.as_deref())
             .await
@@ -835,7 +964,7 @@ fn update_model_taints<'p>(
     endpoint: Endpoint,
     taints: std::collections::HashSet<String>,
 ) -> PyResult<Bound<'p, PyAny>> {
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    crate::future_into_py(py, async move {
         update_model_taints_rs(&endpoint.inner, taints)
             .await
             .map_err(to_pyerr)
@@ -849,10 +978,7 @@ static FETCH_MODEL_RUNTIME_MISMATCH_WARNING: std::sync::Once = std::sync::Once::
 fn ensure_fetch_model_runtime() -> anyhow::Result<&'static tokio::runtime::Runtime> {
     let primary = rs::Worker::ensure_process_runtime()?;
 
-    // `Err(())` only means that the bridge runtime was already selected. It may already be
-    // borrowing `primary`, so identity has to be checked independently.
-    let _ = pyo3_async_runtimes::tokio::init_with_runtime(primary);
-    let bridge = pyo3_async_runtimes::tokio::get_runtime();
+    let bridge = adopt_bridge_runtime(primary);
 
     if !std::ptr::eq(bridge, primary) {
         FETCH_MODEL_RUNTIME_MISMATCH_WARNING.call_once(|| {
@@ -882,7 +1008,7 @@ fn fetch_model<'p>(
     let locals = pyo3_async_runtimes::tokio::get_current_locals(py)?;
     let repo = remote_name.to_string();
     ensure_fetch_model_runtime().map_err(to_pyerr)?;
-    pyo3_async_runtimes::tokio::future_into_py_with_locals(py, locals, async move {
+    crate::future_into_py_with_locals(py, locals, async move {
         LocalModel::fetch(&repo, ignore_weights)
             .await
             .map_err(to_pyerr)
@@ -1232,14 +1358,12 @@ impl DistributedRuntime {
         // frontend in `future_into_py`, which spawns through `get_runtime()`, so this is the
         // call that decides which runtime serves traffic.
         let primary = rs::Worker::ensure_process_runtime().map_err(to_pyerr)?;
-        INIT.get_or_init(|| {
-            // An `Err` means the bridge already holds a runtime, and it never hands one back.
-            // That is a state to accept rather than a failure to report: `backend::Worker` may
-            // have registered this same `RT`, and `dynamo.sglang` reaches `get_runtime()`
-            // before we run. Refusing here broke every sglang test.
-            if pyo3_async_runtimes::tokio::init_with_runtime(primary).is_err()
-                && !std::ptr::eq(pyo3_async_runtimes::tokio::get_runtime(), primary)
-            {
+        // The bridge keeping a runtime of its own is a state to accept rather than a failure to
+        // report: `backend::Worker` may have registered this same `RT`, and `dynamo.sglang`
+        // reaches `get_runtime()` before we run. Refusing here broke every sglang test.
+        let bridge = adopt_bridge_runtime(primary);
+        if !std::ptr::eq(bridge, primary) {
+            INIT.get_or_init(|| {
                 // Both runtimes are sized from DYN_RUNTIME_*, since module init handed the
                 // bridge the same builder. The cost is that there are two of them, so the
                 // process carries twice the threads that configuration describes.
@@ -1248,8 +1372,8 @@ impl DistributedRuntime {
                      DistributedRuntime was created, so the process now has two; both are sized \
                      from DYN_RUNTIME_*, so the thread counts it describes are doubled"
                 );
-            }
-        });
+            });
+        }
 
         // The bridge needed the tokio runtime; this wraps that same one in a dynamo `Runtime`.
         let runtime = rs::Worker::runtime_from_existing().map_err(to_pyerr)?;
@@ -1283,6 +1407,8 @@ impl DistributedRuntime {
 
     #[staticmethod]
     fn detached(py: Python) -> PyResult<Self> {
+        let primary = rs::Worker::ensure_process_runtime().map_err(to_pyerr)?;
+        adopt_bridge_runtime(primary);
         let rt = rs::Worker::runtime_from_existing().map_err(to_pyerr)?;
         let handle = rt.primary();
 
@@ -1466,7 +1592,7 @@ impl Endpoint {
         worker_type: WorkerType,
     ) -> PyResult<Bound<'p, PyAny>> {
         let endpoint = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             Ok(
                 llm_rs::first_token::FirstTokenSource::for_endpoint(&endpoint, worker_type.into())
                     .await
@@ -1588,7 +1714,7 @@ impl Endpoint {
         }
 
         let graceful_shutdown = graceful_shutdown.unwrap_or(true);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             builder
                 .graceful_shutdown(graceful_shutdown)
                 .start()
@@ -1660,7 +1786,7 @@ impl Endpoint {
         // builder = builder.register_local_engine(engine).map_err(to_pyerr)?;
 
         let graceful_shutdown = graceful_shutdown.unwrap_or(true);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             builder
                 .graceful_shutdown(graceful_shutdown)
                 .start()
@@ -1678,7 +1804,7 @@ impl Endpoint {
     ) -> PyResult<Bound<'p, PyAny>> {
         let router_mode = router_mode.unwrap_or(RouterMode::RoundRobin);
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let client = inner.client().await.map_err(to_pyerr)?;
             let push_router =
                 rs::pipeline::PushRouter::<rmpv::Value, RsAnnotated<rmpv::Value>>::from_client(
@@ -1712,7 +1838,7 @@ impl Endpoint {
     /// and should not receive any requests.
     fn unregister_endpoint_instance<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             inner
                 .unregister_endpoint_instance()
                 .await
@@ -1728,7 +1854,7 @@ impl Endpoint {
     /// and should start receiving requests.
     fn register_endpoint_instance<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let inner = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             inner.register_endpoint_instance().await.map_err(to_pyerr)?;
             Ok(())
         })
@@ -1772,7 +1898,7 @@ impl Client {
     /// Replaces wait_for_endpoints.
     fn wait_for_instances<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let inner = self.router.client.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             inner
                 .wait_for_instances()
                 .await
@@ -1792,7 +1918,7 @@ impl Client {
         timeout_s: Option<f64>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let endpoint = self.endpoint.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let last_matches = Arc::new(std::sync::Mutex::new(Vec::<u64>::new()));
             let wait_state = last_matches.clone();
             let error_key = key.clone();
@@ -1882,7 +2008,7 @@ impl Client {
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         let client = self.router.clone();
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let stream = match context {
                 Some(context) => {
                     // Always instrument with appropriate span (none if no trace context)
@@ -1916,7 +2042,7 @@ impl Client {
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         let client = self.router.clone();
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let stream = match context {
                 Some(context) => {
                     // Always instrument with appropriate span (none if no trace context)
@@ -1954,7 +2080,7 @@ impl Client {
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         let client = self.router.clone();
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let stream = match context {
                 Some(context) => {
                     let span = get_span_for_context(&context, "device_aware_weighted");
@@ -1991,7 +2117,7 @@ impl Client {
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         let client = self.router.clone();
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let stream = match context {
                 Some(context) => {
                     // Always instrument with appropriate span (none if no trace context)
@@ -2076,7 +2202,7 @@ impl AsyncResponseStream {
         let rx = self.rx.clone();
         let annotated = self.annotated;
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             loop {
                 let value = rx.lock().await.recv().await;
                 match value {
@@ -2145,7 +2271,7 @@ impl PyAsyncRequestStream {
     #[pyo3(name = "__anext__")]
     fn next<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let rx = self.rx.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             match rx.lock().await.recv().await {
                 Some(pyobj) => Ok(pyobj),
                 None => Err(PyStopAsyncIteration::new_err("Request stream exhausted")),
