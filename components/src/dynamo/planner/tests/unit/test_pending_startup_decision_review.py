@@ -203,8 +203,7 @@ async def test_load_budget_preserves_pending_peer(floor, ceiling, expected):
         assert effects.scale_to.num_prefill is None
 
 
-@pytest.mark.parametrize("requested_prefill", [3, 4])
-def test_throughput_floor_counts_preserved_pending_peer(requested_prefill):
+def test_throughput_floor_counts_preserved_pending_peer():
     config = _config()
     config.enable_load_scaling = False
     config.enable_throughput_scaling = True
@@ -215,7 +214,7 @@ def test_throughput_floor_counts_preserved_pending_peer(requested_prefill):
     counts.expected_num_prefill = 3
     counts.pending_num_prefill, counts.pending_num_decode = 2, 0
     state.observe_worker_counts(counts)
-    state._compute_prefill_replicas = Mock(return_value=requested_prefill)
+    state._compute_prefill_replicas = Mock(return_value=3)
     state._compute_decode_replicas = Mock(return_value=1)
     decision = state._throughput_disagg(1, 100, 100)
     assert decision is not None

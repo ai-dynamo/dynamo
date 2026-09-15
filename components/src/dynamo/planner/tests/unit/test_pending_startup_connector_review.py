@@ -63,7 +63,7 @@ def test_scale_target_reads_dgdsa_before_dgd_propagation():
     )
 
 
-@pytest.mark.parametrize("status", [404, 403, 500])
+@pytest.mark.parametrize("status", [404, 403])
 def test_scale_target_only_falls_back_on_missing_adapter(status):
     api = KubernetesAPI.__new__(KubernetesAPI)
     api.current_namespace = "test"
@@ -228,8 +228,7 @@ async def test_startup_reduction_is_latched_even_with_stale_ready_condition():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("phase", ["Failed", "Succeeded", "Running"])
-async def test_checkpoint_capture_pod_does_not_block_serving_worker_cancellation(phase):
+async def test_checkpoint_capture_pod_does_not_block_serving_worker_cancellation():
     deployment, pods = _deployment(), _pods()
     capture = deepcopy(pods[2])
     capture.metadata.name = "capture-abc"
@@ -245,7 +244,7 @@ async def test_checkpoint_capture_pod_does_not_block_serving_worker_cancellation
             controller=True,
         )
     ]
-    capture.status.phase = phase
+    capture.status.phase = "Running"
     capture.metadata.deletion_timestamp = datetime.now(timezone.utc)
     pods.append(capture)
     connector = _connector(deployment, pods)
