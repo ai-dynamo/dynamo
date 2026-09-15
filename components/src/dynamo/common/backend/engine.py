@@ -44,9 +44,9 @@ class GenerateRequest(TypedDict, total=False):
 
     Multimodal keys (``multi_modal_data``, ``mm_processor_kwargs``,
     ``mm_routing_info``) are populated by the frontend preprocessor when
-    the request carries media. ``encoder_result`` is set by the
-    frontend when forwarding a request from an Encode worker
-    to a downstream Prefill/Aggregated peer; engines read it via
+    the request carries media. ``encoder_result`` may be set by the frontend
+    when forwarding a request from an Encode worker or by an application
+    orchestrator before calling an Aggregated peer; engines read it via
     :func:`dynamo.common.backend.multimodal.require_encoder_result`. All
     four are object-shaped (``dict``) by contract.
 
