@@ -31,9 +31,7 @@ clap = { version = "4", features = ["derive", "env"] }
 futures = { workspace = true }
 opendal = { version = "0.59.1", default-features = false, features = [
     "http-transport-reqwest",
-    "services-azblob",
     "services-fs",
-    "services-gcs",
     "services-s3",
 ] }
 rand = { workspace = true }

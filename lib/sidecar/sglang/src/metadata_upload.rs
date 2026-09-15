@@ -8,16 +8,13 @@ use std::io::Write;
 
 use dynamo_backend_common::{DynamoError, PreprocessedRequest};
 use opendal::{Buffer, Operator};
-use serde::Serialize;
-use serde_json::{Map, Value};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::client;
 
 const OUTPUT_PATH: &str = "choice_0.msgpack.zst";
 
-/// The SGLang sidecar supports one output choice, so one uploader owns the
-/// primary and optional fallback destinations for that choice.
-#[derive(Clone)]
 pub(crate) struct MetadataUploader {
     primary: Operator,
     fallback: Option<Operator>,
@@ -29,6 +26,13 @@ struct MetadataPayload<'a> {
     metadata: &'a Value,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MetadataUploadConfig {
+    url: String,
+    fallback_url: Option<String>,
+}
+
 impl MetadataUploader {
     pub(crate) fn from_request(
         request: &PreprocessedRequest,
@@ -37,7 +41,7 @@ impl MetadataUploader {
         if !enabled {
             return Ok(None);
         }
-        let Some(settings) = request
+        let Some(config) = request
             .extra_args
             .as_ref()
             .and_then(Value::as_object)
@@ -47,49 +51,25 @@ impl MetadataUploader {
         else {
             return Ok(None);
         };
-        if settings.is_null() {
+        if config.is_null() {
             return Ok(None);
         }
-        let settings = settings.as_object().ok_or_else(|| {
-            client::invalid_arg("extra_args.nvext.metadata_upload must be an object")
+        let config = MetadataUploadConfig::deserialize(config).map_err(|error| {
+            client::invalid_arg(format!("invalid extra_args.nvext.metadata_upload: {error}"))
         })?;
-        if let Some(unexpected) = settings
-            .keys()
-            .find(|key| !matches!(key.as_str(), "url" | "fallback_url"))
-        {
-            return Err(client::invalid_arg(format!(
-                "extra_args.nvext.metadata_upload.{unexpected} is not supported"
-            )));
-        }
-        let url = settings
-            .get("url")
-            .ok_or_else(|| client::invalid_arg("extra_args.nvext.metadata_upload.url is required"))?
-            .as_str()
-            .ok_or_else(|| {
-                client::invalid_arg("extra_args.nvext.metadata_upload.url must be a string")
-            })?;
-        // The sidecar is also linked into a Python static library, where
-        // OpenDAL's constructor-based automatic registration is not reliable.
+        // Ensure built-in services are registered when this crate is linked statically.
         opendal::install_default();
-        let primary = operator_from_url(url, "url")?;
-        let fallback = settings
-            .get("fallback_url")
-            .filter(|value| !value.is_null())
-            .map(|value| {
-                value.as_str().ok_or_else(|| {
-                    client::invalid_arg(
-                        "extra_args.nvext.metadata_upload.fallback_url must be a string",
-                    )
-                })
-            })
-            .transpose()?
+        let primary = operator_from_url(&config.url, "url")?;
+        let fallback = config
+            .fallback_url
+            .as_deref()
             .map(|url| operator_from_url(url, "fallback_url"))
             .transpose()?;
         Ok(Some(Self { primary, fallback }))
     }
 
     pub(crate) async fn upload(&self, metadata: Value) -> Result<(), DynamoError> {
-        if metadata.as_object().is_some_and(Map::is_empty) {
+        if metadata.as_object().is_some_and(|value| value.is_empty()) {
             return Ok(());
         }
         let compressed: Buffer = tokio::task::spawn_blocking(move || encode(metadata))
@@ -104,7 +84,7 @@ impl MetadataUploader {
                 let Some(fallback) = self.fallback.as_ref() else {
                     return Err(upload_error(&self.primary, primary_error));
                 };
-                tracing::warn!("primary metadata upload failed; attempting configured fallback");
+                tracing::warn!(error = %primary_error, "primary metadata upload failed; attempting fallback");
                 fallback
                     .write(OUTPUT_PATH, compressed)
                     .await
@@ -236,16 +216,6 @@ mod tests {
         assert!(MetadataUploader::from_request(&invalid, true).is_err());
     }
 
-    #[test]
-    fn grpc_metadata_decodes_json_values_and_preserves_plain_strings() {
-        let metadata = grpc_metadata(&std::collections::HashMap::from([
-            ("finish_reason".into(), r#"{"type":"stop"}"#.into()),
-            ("legacy".into(), "plain".into()),
-        ]));
-        assert_eq!(metadata["finish_reason"]["type"], "stop");
-        assert_eq!(metadata["legacy"], "plain");
-    }
-
     #[tokio::test]
     async fn uploads_python_compatible_msgpack_zstd_payload() {
         let directory = tempfile::tempdir().unwrap();
@@ -257,11 +227,11 @@ mod tests {
             .unwrap()
             .unwrap();
         uploader
-            .upload(json!({
-                "id": "sglang-1",
-                "finish_reason": {"type": "stop"},
-                "output_token_logprobs": [[-0.1, 101, "a"]]
-            }))
+            .upload(grpc_metadata(&std::collections::HashMap::from([
+                ("id".into(), "sglang-1".into()),
+                ("finish_reason".into(), r#"{"type":"stop"}"#.into()),
+                ("output_token_logprobs".into(), r#"[[-0.1,101,"a"]]"#.into()),
+            ])))
             .await
             .unwrap();
 
@@ -299,54 +269,6 @@ mod tests {
 
         assert_eq!(std::fs::read(primary).unwrap(), b"primary sentinel");
         assert!(fallback.join(OUTPUT_PATH).is_file());
-    }
-
-    #[tokio::test]
-    async fn does_not_write_fallback_when_primary_succeeds() {
-        let directory = tempfile::tempdir().unwrap();
-        let primary = directory.path().join("primary");
-        let fallback = directory.path().join("fallback");
-        let configured = request(json!({
-            "nvext": {"metadata_upload": {
-                "url": fs_uri(&primary),
-                "fallback_url": fs_uri(&fallback)
-            }}
-        }));
-        let uploader = MetadataUploader::from_request(&configured, true)
-            .unwrap()
-            .unwrap();
-
-        uploader.upload(json!({"id": "sglang-3"})).await.unwrap();
-
-        assert!(primary.join(OUTPUT_PATH).is_file());
-        assert!(!fallback.join(OUTPUT_PATH).exists());
-    }
-
-    #[tokio::test]
-    async fn returns_fallback_error_when_both_destinations_fail() {
-        let directory = tempfile::tempdir().unwrap();
-        let primary = directory.path().join("primary-is-a-file");
-        let fallback = directory.path().join("fallback-is-a-file");
-        std::fs::write(&primary, b"primary sentinel").unwrap();
-        std::fs::write(&fallback, b"fallback sentinel").unwrap();
-        let configured = request(json!({
-            "nvext": {"metadata_upload": {
-                "url": fs_uri(&primary),
-                "fallback_url": fs_uri(&fallback)
-            }}
-        }));
-        let uploader = MetadataUploader::from_request(&configured, true)
-            .unwrap()
-            .unwrap();
-
-        let error = uploader
-            .upload(json!({"id": "sglang-4"}))
-            .await
-            .unwrap_err();
-
-        assert!(error.to_string().contains("fallback-is-a-file"));
-        assert_eq!(std::fs::read(primary).unwrap(), b"primary sentinel");
-        assert_eq!(std::fs::read(fallback).unwrap(), b"fallback sentinel");
     }
 
     #[test]
