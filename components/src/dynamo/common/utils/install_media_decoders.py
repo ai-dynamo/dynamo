@@ -307,6 +307,11 @@ def install_media_decoders(
     verify_modules = [d.module for d in missing]
 
     if dry_run:
+        if backend == "vllm" and "cv2" in verify_modules:
+            logger.info(
+                "dry run: OpenCV replacement requires "
+                "--force-reinstall --only-binary opencv-python-headless"
+            )
         logger.info(
             "dry run: would install for %s: %s", backend, _redact(" ".join(specs))
         )

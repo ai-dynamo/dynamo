@@ -279,7 +279,10 @@ def _check_image(ships_cv2: bool = False) -> None:
 
 @pytest.mark.vllm
 def test_vllm_image_ships_no_software_video_codecs() -> None:
-    _check_image(ships_cv2=True)
+    import torch
+
+    # Only the CUDA image rebuilds OpenCV; no visible GPU is required here.
+    _check_image(ships_cv2=torch.version.cuda is not None)
 
 
 @pytest.mark.sglang
