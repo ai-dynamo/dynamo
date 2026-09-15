@@ -1,0 +1,132 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: gpu-template
+spec:
+  spec:
+    devices:
+      requests:
+        - name: gpu
+          exactly:
+            deviceClassName: gpu.intel.com
+            count: 1
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: sglang-disagg-xpu-dra
+spec:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - image: docker.io/library/dynamo-sglang-xpu:latest
+          imagePullPolicy: IfNotPresent
+          name: main
+    replicas: 1
+    runtimeVersionOverride: 1.4.0
+    type: frontend
+  - name: decode
+    podTemplate:
+      spec:
+        hostIPC: true
+        containers:
+        - args:
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --served-model-name
+          - Qwen/Qwen3-0.6B
+          - --page-size
+          - "16"
+          - --tp
+          - "1"
+          - --trust-remote-code
+          - --skip-tokenizer-init
+          - --device
+          - xpu
+          - --disable-cuda-graph
+          - --disaggregation-mode
+          - decode
+          - --disaggregation-transfer-backend
+          - nixl
+          - --disaggregation-bootstrap-port
+          - "12345"
+          - --host
+          - 0.0.0.0
+          command:
+          - python3
+          - -m
+          - dynamo.sglang
+          env:
+          - name: UCX_TLS
+            value: "ze_ipc,ze_copy,tcp,cma,sysv,posix,self"
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: docker.io/library/dynamo-sglang-xpu:latest
+          imagePullPolicy: IfNotPresent
+          name: main
+          resources:
+            claims:
+            - name: gpu
+          workingDir: /workspace/examples/backends/sglang
+        resourceClaims:
+        - name: gpu
+          resourceClaimTemplateName: gpu-template
+    replicas: 1
+    runtimeVersionOverride: 1.4.0
+    type: decode
+  - name: prefill
+    podTemplate:
+      spec:
+        hostIPC: true
+        containers:
+        - args:
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --served-model-name
+          - Qwen/Qwen3-0.6B
+          - --page-size
+          - "16"
+          - --tp
+          - "1"
+          - --trust-remote-code
+          - --skip-tokenizer-init
+          - --device
+          - xpu
+          - --disable-cuda-graph
+          - --disaggregation-mode
+          - prefill
+          - --disaggregation-transfer-backend
+          - nixl
+          - --disaggregation-bootstrap-port
+          - "12345"
+          - --host
+          - 0.0.0.0
+          command:
+          - python3
+          - -m
+          - dynamo.sglang
+          env:
+          - name: UCX_TLS
+            value: "ze_ipc,ze_copy,tcp,cma,sysv,posix,self"
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: docker.io/library/dynamo-sglang-xpu:latest
+          imagePullPolicy: IfNotPresent
+          name: main
+          resources:
+            claims:
+            - name: gpu
+          workingDir: /workspace/examples/backends/sglang
+        resourceClaims:
+        - name: gpu
+          resourceClaimTemplateName: gpu-template
+    replicas: 1
+    runtimeVersionOverride: 1.4.0
+    type: prefill
