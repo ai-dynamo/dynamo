@@ -153,70 +153,73 @@ func (a *testTrafficAdapter) Apply(
 
 type testMembershipAdapter struct {
 	topology             MembershipTopology
-	operations           map[string]MembershipOperationObservation
-	requests             map[string]MembershipRequest
-	submitCalls          int
+	transitions          map[string]MembershipTransitionObservation
+	targets              map[string]MembershipTarget
+	applyCalls           int
 	failAfterFirstAccept bool
-	submitRejection      *Failure
+	applyRejection       *Failure
 	events               *[]string
 }
 
-func (a *testMembershipAdapter) ObserveTopology(context.Context, GroupID) (MembershipTopology, error) {
-	return cloneTopology(a.topology), nil
-}
-
-func (a *testMembershipAdapter) ObserveOperation(
+func (a *testMembershipAdapter) Observe(
 	_ context.Context,
 	_ GroupID,
-	operationID string,
-) (MembershipOperationObservation, error) {
-	observation, found := a.operations[operationID]
-	if !found {
-		return MembershipOperationObservation{ID: operationID, Phase: MembershipBackendPhaseAbsent}, nil
+	transitionID string,
+) (MembershipObservation, error) {
+	observation := MembershipObservation{
+		CommittedTopology:     cloneTopology(a.topology),
+		RequestedTransitionID: transitionID,
 	}
-	if observation.CommittedTopology != nil {
-		topology := cloneTopology(*observation.CommittedTopology)
-		observation.CommittedTopology = &topology
+	transition, found := a.transitions[transitionID]
+	if !found || transitionID == "" {
+		return observation, nil
 	}
-	observation.Failure = cloneFailure(observation.Failure)
+	observation.Transition = cloneMembershipTransitionObservation(&transition)
 	return observation, nil
 }
 
-func (a *testMembershipAdapter) Submit(
+func (a *testMembershipAdapter) Apply(
 	_ context.Context,
 	_ GroupID,
-	request MembershipRequest,
-) (ApplyResult, error) {
-	a.submitCalls++
-	*a.events = append(*a.events, "membership:"+request.ID)
-	if a.submitRejection != nil {
-		return ApplyResult{Rejection: cloneFailure(a.submitRejection)}, nil
-	}
-	if existing, found := a.requests[request.ID]; found {
-		if !sameMembershipRequest(existing, request) {
-			return rejected("ConflictingMembershipRequest", "membership operation payload changed"), nil
+	target MembershipTarget,
+) error {
+	a.applyCalls++
+	*a.events = append(*a.events, "membership:"+target.TransitionID)
+	if existing, found := a.targets[target.TransitionID]; found {
+		if !sameMembershipTarget(existing, target) {
+			return errors.New("membership transition payload changed")
 		}
-		return ApplyResult{}, nil
+		return nil
 	}
 
-	a.requests[request.ID] = cloneMembershipRequest(request)
-	a.operations[request.ID] = MembershipOperationObservation{
-		ID:    request.ID,
-		Phase: MembershipBackendPhaseRunning,
+	a.targets[target.TransitionID] = *cloneMembershipTarget(&target)
+	transition := MembershipTransitionObservation{
+		TransitionID:    target.TransitionID,
+		ControlRevision: target.ControlRevision,
+		TargetDigest:    target.TargetDigest,
+		Phase:           MembershipTransitionPhasePending,
 	}
-	if a.failAfterFirstAccept && a.submitCalls == 1 {
-		return ApplyResult{}, errors.New("request timed out after acceptance")
+	if a.applyRejection != nil {
+		transition.Phase = MembershipTransitionPhaseRejected
+		transition.Failure = cloneFailure(a.applyRejection)
 	}
-	return ApplyResult{}, nil
+	a.transitions[target.TransitionID] = transition
+	if a.failAfterFirstAccept && a.applyCalls == 1 {
+		return errors.New("request timed out after acceptance")
+	}
+	return nil
 }
 
-func (a *testMembershipAdapter) commit(operationID string, topology MembershipTopology) {
+func (a *testMembershipAdapter) commit(transitionID string, topology MembershipTopology) {
 	topology = cloneTopology(topology)
 	a.topology = topology
-	a.operations[operationID] = MembershipOperationObservation{
-		ID:                operationID,
-		Phase:             MembershipBackendPhaseCommitted,
-		CommittedTopology: &topology,
+	target := a.targets[transitionID]
+	a.transitions[transitionID] = MembershipTransitionObservation{
+		TransitionID:    transitionID,
+		ControlRevision: target.ControlRevision,
+		TargetDigest:    target.TargetDigest,
+		Phase:           MembershipTransitionPhaseCommitted,
+		ResultTopology:  &topology,
 	}
 }
 
@@ -284,10 +287,10 @@ func newCoordinatorScenario(t *testing.T, topology MembershipTopology) *coordina
 		events:      &scenario.events,
 	}
 	scenario.membership = &testMembershipAdapter{
-		topology:   cloneTopology(topology),
-		operations: make(map[string]MembershipOperationObservation),
-		requests:   make(map[string]MembershipRequest),
-		events:     &scenario.events,
+		topology:    cloneTopology(topology),
+		transitions: make(map[string]MembershipTransitionObservation),
+		targets:     make(map[string]MembershipTarget),
+		events:      &scenario.events,
 	}
 	scenario.verifier = &testServingVerifier{events: &scenario.events}
 	scenario.rebuildCoordinator()
@@ -427,18 +430,13 @@ func rejected(reason string, message string) ApplyResult {
 	}}
 }
 
-func cloneMembershipRequest(request MembershipRequest) MembershipRequest {
-	request.BaseTopology = cloneTopology(request.BaseTopology)
-	request.Plan = cloneResolvedPlan(request.Plan)
-	request.JoiningReplicas = slices.Clone(request.JoiningReplicas)
-	return request
-}
-
-func sameMembershipRequest(left, right MembershipRequest) bool {
-	return left.ID == right.ID &&
+func sameMembershipTarget(left, right MembershipTarget) bool {
+	return left.ControlRevision == right.ControlRevision &&
+		left.TransitionID == right.TransitionID &&
+		left.TargetDigest == right.TargetDigest &&
 		sameTopology(left.BaseTopology, right.BaseTopology) &&
 		sameResolvedPlan(left.Plan, right.Plan) &&
-		sameJoiningReplicas(left.JoiningReplicas, right.JoiningReplicas)
+		sameJoiningReplicas(left.Joining, right.Joining)
 }
 
 func sameJoiningReplicas(left, right []JoiningReplica) bool {

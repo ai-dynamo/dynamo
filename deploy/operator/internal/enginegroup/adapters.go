@@ -74,36 +74,45 @@ type TrafficObservation struct {
 	Drained         []ReplicaMembership
 }
 
-// MembershipBackendPhase is the engine's observable state for one idempotent membership request.
-type MembershipBackendPhase string
+// MembershipTransitionPhase is the adapter's durable state for one exact desired membership transition.
+type MembershipTransitionPhase string
 
 const (
-	// MembershipBackendPhaseAbsent means the engine has not accepted the operation identity.
-	MembershipBackendPhaseAbsent MembershipBackendPhase = "Absent"
-	// MembershipBackendPhaseRunning means the engine accepted the operation and is changing membership.
-	MembershipBackendPhaseRunning MembershipBackendPhase = "Running"
-	// MembershipBackendPhaseCommitted means the request produced the reported topology.
-	MembershipBackendPhaseCommitted MembershipBackendPhase = "Committed"
-	// MembershipBackendPhaseRejected means the request definitively cannot mutate membership.
-	MembershipBackendPhaseRejected MembershipBackendPhase = "Rejected"
-	// MembershipBackendPhaseUnknown means the engine cannot establish whether the request mutated membership.
-	MembershipBackendPhaseUnknown MembershipBackendPhase = "Unknown"
+	// MembershipTransitionPhasePending means the adapter accepted the target and is changing membership.
+	MembershipTransitionPhasePending MembershipTransitionPhase = "Pending"
+	// MembershipTransitionPhaseCommitted means the target produced the reported immutable result topology.
+	MembershipTransitionPhaseCommitted MembershipTransitionPhase = "Committed"
+	// MembershipTransitionPhaseRejected means the target definitively cannot mutate membership.
+	MembershipTransitionPhaseRejected MembershipTransitionPhase = "Rejected"
+	// MembershipTransitionPhaseUnknown means the adapter cannot establish whether the target mutated membership.
+	MembershipTransitionPhaseUnknown MembershipTransitionPhase = "Unknown"
 )
 
-// MembershipRequest is the exact immutable engine request derived from a durable transition.
-type MembershipRequest struct {
-	ID              string
+// MembershipTarget is one exact immutable topology transition desired by the coordinator.
+type MembershipTarget struct {
+	ControlRevision int64
+	TransitionID    string
+	TargetDigest    string
 	BaseTopology    MembershipTopology
 	Plan            ResolvedPlan
-	JoiningReplicas []JoiningReplica
+	Joining         []JoiningReplica
 }
 
-// MembershipOperationObservation is the engine's current result for one request identity.
-type MembershipOperationObservation struct {
-	ID                string
-	Phase             MembershipBackendPhase
-	CommittedTopology *MembershipTopology
-	Failure           *Failure
+// MembershipTransitionObservation is the durable adapter result for one exact target identity.
+type MembershipTransitionObservation struct {
+	TransitionID    string
+	ControlRevision int64
+	TargetDigest    string
+	Phase           MembershipTransitionPhase
+	ResultTopology  *MembershipTopology
+	Failure         *Failure
+}
+
+// MembershipObservation reports current engine topology independently from one correlated transition result.
+type MembershipObservation struct {
+	CommittedTopology     MembershipTopology
+	RequestedTransitionID string
+	Transition            *MembershipTransitionObservation
 }
 
 // ApplyResult reports a definitive, replay-stable rejection of an adapter request.
@@ -131,21 +140,20 @@ type CapacityAdapter interface {
 	Apply(ctx context.Context, groupID GroupID, target CapacityTarget) (ApplyResult, error)
 }
 
-// MembershipAdapter observes committed engine topology and owns the one necessarily transactional external operation.
+// MembershipAdapter converges membership to one desired level while owning the serialized compare-and-apply protocol.
 type MembershipAdapter interface {
-	// ObserveTopology returns the complete authoritative committed topology. Generation advances whenever any serving
-	// process incarnation or logical-to-native membership changes.
-	ObserveTopology(ctx context.Context, groupID GroupID) (MembershipTopology, error)
-	// ObserveOperation returns the current result for the exact request identity.
-	ObserveOperation(
+	// Observe always returns the authoritative committed topology. When transitionID is non-empty, a nil Transition
+	// authoritatively means the adapter has no record of that exact identity. Stale or inconclusive reads return an
+	// error or an Unknown transition instead. Terminal results remain observable until a newer revision is accepted.
+	Observe(
 		ctx context.Context,
 		groupID GroupID,
-		operationID string,
-	) (MembershipOperationObservation, error)
-	// Submit atomically validates the exact base topology and resolved plan before mutation. It is idempotent by request
-	// ID and exact payload. A non-nil error leaves acceptance ambiguous, so callers retry the same identity and payload.
-	// A definitive rejection is returned as ApplyResult.Rejection and remains stable when the request is replayed.
-	Submit(ctx context.Context, groupID GroupID, request MembershipRequest) (ApplyResult, error)
+		transitionID string,
+	) (MembershipObservation, error)
+	// Apply atomically compares BaseTopology and applies target. It is idempotent by transition identity and exact
+	// payload, permits only one non-terminal mutation, and never supersedes Pending or Unknown work. Any returned error
+	// leaves acceptance ambiguous; definitive rejection is reported durably by Observe.
+	Apply(ctx context.Context, groupID GroupID, target MembershipTarget) error
 }
 
 // TrafficAdapter converges runtime discovery and routing to revisioned absolute identity sets.

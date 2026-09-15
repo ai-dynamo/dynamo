@@ -44,6 +44,12 @@ func validateGroupStatus(status GroupStatus) error {
 	if err := validateTrafficTarget(status.ControlRevision, status.Traffic.Desired); err != nil {
 		return err
 	}
+	if err := validateMembershipTarget(status.ControlRevision, status.Membership.Desired); err != nil {
+		return err
+	}
+	if err := validateMembershipObservation(status.Membership.Observed, status.Membership.Desired); err != nil {
+		return fmt.Errorf("validate durable membership observation: %w", err)
+	}
 
 	current, found := status.Topologies.Current()
 	if !found {
@@ -97,32 +103,130 @@ func validateRejection(rejection *Failure) error {
 	return nil
 }
 
-func validateMembershipObservation(observation MembershipOperationObservation) error {
-	switch observation.Phase {
-	case MembershipBackendPhaseAbsent, MembershipBackendPhaseRunning:
-		if observation.CommittedTopology != nil || observation.Failure != nil {
-			return fmt.Errorf("%s membership observation carries a result", observation.Phase)
+func validateMembershipTarget(controlRevision int64, target *MembershipTarget) error {
+	if target == nil {
+		return nil
+	}
+	if target.ControlRevision <= 0 || target.ControlRevision > controlRevision {
+		return fmt.Errorf(
+			"membership target revision %d is invalid for control revision %d",
+			target.ControlRevision,
+			controlRevision,
+		)
+	}
+	if target.TransitionID == "" || target.TargetDigest == "" {
+		return errors.New("membership target lacks a transition ID or canonical digest")
+	}
+	if err := validateTopology(target.BaseTopology); err != nil {
+		return fmt.Errorf("validate membership target base topology: %w", err)
+	}
+	if target.Plan.ID == "" || target.Plan.ProfileFingerprint == "" {
+		return errors.New("membership target has an incomplete resolved plan")
+	}
+	if err := validateResolvedChange(target.Plan.Change); err != nil {
+		return err
+	}
+	wantDigest, err := canonicalMembershipTargetDigest(*target)
+	if err != nil {
+		return err
+	}
+	if target.TargetDigest != wantDigest {
+		return errors.New("membership target digest does not match its canonical payload")
+	}
+	return nil
+}
+
+func validateMembershipObservation(observation MembershipObservation, target *MembershipTarget) error {
+	if err := validateTopology(observation.CommittedTopology); err != nil {
+		return fmt.Errorf("validate authoritative committed topology: %w", err)
+	}
+	if observation.RequestedTransitionID == "" && observation.Transition != nil {
+		return errors.New("topology-only membership observation carries a transition result")
+	}
+	transition := observation.Transition
+	if transition == nil {
+		return nil
+	}
+	if transition.TransitionID != observation.RequestedTransitionID {
+		return errors.New("membership transition result does not match its observation scope")
+	}
+	if target != nil && observation.RequestedTransitionID == target.TransitionID &&
+		(transition.ControlRevision != target.ControlRevision ||
+			transition.TargetDigest != target.TargetDigest) {
+		return errors.New("membership transition observation does not match the desired target")
+	}
+
+	switch transition.Phase {
+	case MembershipTransitionPhasePending:
+		if transition.ResultTopology != nil || transition.Failure != nil {
+			return errors.New("pending membership transition carries a terminal result")
 		}
-	case MembershipBackendPhaseCommitted:
-		if observation.CommittedTopology == nil || observation.Failure != nil {
-			return errors.New("committed membership observation is not a closed topology result")
+	case MembershipTransitionPhaseCommitted:
+		if transition.ResultTopology == nil || transition.Failure != nil {
+			return errors.New("committed membership transition is not a closed topology result")
 		}
-	case MembershipBackendPhaseRejected:
-		if observation.CommittedTopology != nil || observation.Failure == nil {
-			return errors.New("rejected membership observation is not a closed failure result")
+		if err := validateTopology(*transition.ResultTopology); err != nil {
+			return fmt.Errorf("validate membership result topology: %w", err)
 		}
-		if err := validateRejection(observation.Failure); err != nil {
+	case MembershipTransitionPhaseRejected:
+		if transition.ResultTopology != nil || transition.Failure == nil {
+			return errors.New("rejected membership transition is not a closed failure result")
+		}
+		if err := validateRejection(transition.Failure); err != nil {
 			return err
 		}
-	case MembershipBackendPhaseUnknown:
-		if observation.CommittedTopology != nil {
-			return errors.New("unknown membership observation carries a committed topology")
+	case MembershipTransitionPhaseUnknown:
+		if transition.ResultTopology != nil {
+			return errors.New("unknown membership transition carries a result topology")
 		}
-		if observation.Failure != nil {
-			return validateFailure(observation.Failure)
+		if transition.Failure != nil {
+			return validateFailure(transition.Failure)
 		}
 	default:
-		return fmt.Errorf("invalid membership backend phase %q", observation.Phase)
+		return fmt.Errorf("invalid membership transition phase %q", transition.Phase)
+	}
+	return nil
+}
+
+func validateMembershipObservationEvolution(previous, current MembershipObservation) error {
+	if previous.RequestedTransitionID != current.RequestedTransitionID {
+		return nil
+	}
+	before := previous.Transition
+	after := current.Transition
+	if before == nil {
+		return nil
+	}
+	if after == nil {
+		return errors.New("membership adapter forgot a previously observed transition")
+	}
+	if before.TransitionID != after.TransitionID ||
+		before.ControlRevision != after.ControlRevision ||
+		before.TargetDigest != after.TargetDigest {
+		return errors.New("membership adapter changed transition correlation")
+	}
+
+	switch before.Phase {
+	case MembershipTransitionPhasePending:
+		if after.Phase != MembershipTransitionPhasePending &&
+			after.Phase != MembershipTransitionPhaseCommitted &&
+			after.Phase != MembershipTransitionPhaseRejected &&
+			after.Phase != MembershipTransitionPhaseUnknown {
+			return fmt.Errorf("invalid membership transition %s to %s", before.Phase, after.Phase)
+		}
+	case MembershipTransitionPhaseUnknown:
+		if after.Phase != MembershipTransitionPhaseUnknown &&
+			after.Phase != MembershipTransitionPhasePending &&
+			after.Phase != MembershipTransitionPhaseCommitted &&
+			after.Phase != MembershipTransitionPhaseRejected {
+			return fmt.Errorf("invalid membership transition %s to %s", before.Phase, after.Phase)
+		}
+	case MembershipTransitionPhaseCommitted, MembershipTransitionPhaseRejected:
+		if !sameMembershipTransitionObservation(*before, *after) {
+			return errors.New("membership adapter changed an immutable terminal result")
+		}
+	default:
+		return fmt.Errorf("invalid previous membership transition phase %q", before.Phase)
 	}
 	return nil
 }
@@ -262,13 +366,7 @@ func validateTransition(status GroupStatus) error {
 	if err != nil {
 		return err
 	}
-	if transition.Membership.ID != membershipOperationID(
-		transition.Spec.Plan.ID,
-		transition.Spec.BaseTopologyGeneration,
-	) {
-		return errors.New("membership operation ID does not match the transition")
-	}
-	if err := validateMembershipStatus(status, resolution); err != nil {
+	if err := validateTransitionMembership(status, resolution); err != nil {
 		return err
 	}
 	if err := validateVerificationStatus(status); err != nil {
@@ -288,15 +386,14 @@ func validateTransition(status GroupStatus) error {
 			return err
 		}
 		if transition.Outcome == TransitionOutcomeRolledBack &&
-			transition.Membership.Phase != MembershipOperationPhaseRejected &&
-			transition.Membership.Phase != MembershipOperationPhaseNotStarted {
+			!membershipProvablyUncommitted(status) {
 			return errors.New("rolled-back transition lacks a provably uncommitted membership state")
 		}
 	case TransitionOutcomeCompleted:
 		if transition.Failure != nil {
 			return errors.New("completed transition must not carry a failure")
 		}
-		if transition.Membership.Phase != MembershipOperationPhaseCommitted {
+		if !membershipCommitConverged(status) {
 			return errors.New("completed transition has no committed membership")
 		}
 		if transition.Spec.Plan.VerificationRequirement == VerificationRequirementRequired &&
@@ -309,50 +406,53 @@ func validateTransition(status GroupStatus) error {
 	return nil
 }
 
-func validateMembershipStatus(status GroupStatus, resolution planResolution) error {
-	membership := status.Transition.Membership
-	switch membership.Phase {
-	case MembershipOperationPhaseNotStarted:
-		if len(membership.JoiningReplicas) != 0 || membership.CommittedTopologyGeneration != 0 ||
-			membership.Failure != nil {
-			return errors.New("not-started membership contains operation results")
-		}
-	case MembershipOperationPhasePrepared, MembershipOperationPhaseRunning:
-		if membership.CommittedTopologyGeneration != 0 || membership.Failure != nil {
-			return errors.New("uncommitted membership contains a commit or failure result")
-		}
-		if err := validateJoiningReplicas(status.Registry, resolution, membership.JoiningReplicas, true); err != nil {
-			return err
-		}
-	case MembershipOperationPhaseCommitted:
-		if membership.CommittedTopologyGeneration <= 0 || membership.Failure != nil {
-			return errors.New("committed membership lacks a generation or carries failure")
-		}
-		committed, found := status.Topologies.Snapshot(membership.CommittedTopologyGeneration)
-		if !found {
-			return errors.New("committed membership topology is absent")
-		}
-		if err := validateJoiningReplicas(status.Registry, resolution, membership.JoiningReplicas, true); err != nil {
-			return err
-		}
-		base, _ := status.Topologies.Snapshot(status.Transition.Spec.BaseTopologyGeneration)
-		if err := validateCommittedTopology(base, resolution, membership.JoiningReplicas, committed); err != nil {
-			return fmt.Errorf("validate durable committed topology: %w", err)
-		}
-	case MembershipOperationPhaseRejected, MembershipOperationPhaseUnknown:
-		if membership.CommittedTopologyGeneration != 0 || membership.Failure == nil {
-			return errors.New("failed membership status lacks a failure or carries a commit")
-		}
-		if err := validateFailure(membership.Failure); err != nil {
-			return err
-		}
-		if err := validateJoiningReplicas(status.Registry, resolution, membership.JoiningReplicas, false); err != nil {
-			return err
-		}
-	default:
-		return fmt.Errorf("invalid membership operation phase %q", membership.Phase)
+func membershipCommitConverged(status GroupStatus) bool {
+	if !membershipCommittedForTransition(status) || status.Membership.Observed.Transition.ResultTopology == nil {
+		return false
+	}
+	result := *status.Membership.Observed.Transition.ResultTopology
+	return sameTopology(status.Membership.Observed.CommittedTopology, result) &&
+		sameTopologyWithCurrent(status.Topologies, result)
+}
+
+func validateTransitionMembership(status GroupStatus, resolution planResolution) error {
+	target := status.Membership.Desired
+	if target == nil || !membershipTargetMatchesTransition(*target, *status.Transition) {
+		return nil
+	}
+	base, _ := status.Topologies.Snapshot(status.Transition.Spec.BaseTopologyGeneration)
+	if !sameTopology(target.BaseTopology, base) {
+		return errors.New("membership target base topology differs from the transition base")
+	}
+	observed := status.Membership.Observed.Transition
+	requireCurrentRegistry := observed == nil || observed.Phase != MembershipTransitionPhaseRejected
+	if err := validateJoiningReplicas(
+		status.Registry,
+		resolution,
+		target.Joining,
+		requireCurrentRegistry,
+	); err != nil {
+		return err
+	}
+	if observed == nil || observed.Phase != MembershipTransitionPhaseCommitted {
+		return nil
+	}
+	if observed.ResultTopology == nil {
+		return errors.New("committed membership transition lacks its immutable result")
+	}
+	if err := validateCommittedTopology(base, resolution, target.Joining, *observed.ResultTopology); err != nil {
+		return fmt.Errorf("validate durable committed topology: %w", err)
 	}
 	return nil
+}
+
+func membershipProvablyUncommitted(status GroupStatus) bool {
+	if status.Transition == nil || status.Membership.Desired == nil ||
+		!membershipTargetMatchesTransition(*status.Membership.Desired, *status.Transition) {
+		return true
+	}
+	observed := status.Membership.Observed.Transition
+	return observed != nil && observed.Phase == MembershipTransitionPhaseRejected
 }
 
 func validateJoiningReplicas(

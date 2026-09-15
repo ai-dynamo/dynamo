@@ -58,6 +58,12 @@ func cloneTopology(value MembershipTopology) MembershipTopology {
 	return value
 }
 
+func normalizeTopology(value MembershipTopology) MembershipTopology {
+	value = cloneTopology(value)
+	value.Replicas = normalizeMemberships(value.Replicas)
+	return value
+}
+
 func cloneResolvedPlan(value ResolvedPlan) ResolvedPlan {
 	change := value.Change
 	if change.Grow != nil {
@@ -142,6 +148,85 @@ func canonicalPlanDigest(plan ResolvedPlan) (string, error) {
 	}
 	digest := sha256.Sum256(encoded)
 	return hex.EncodeToString(digest[:]), nil
+}
+
+func normalizeJoiningReplicas(values []JoiningReplica) []JoiningReplica {
+	normalized := slices.Clone(values)
+	slices.SortFunc(normalized, func(left, right JoiningReplica) int {
+		return strings.Compare(string(left.ReplicaID), string(right.ReplicaID))
+	})
+	return normalized
+}
+
+func cloneMembershipTarget(value *MembershipTarget) *MembershipTarget {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	cloned.BaseTopology = cloneTopology(value.BaseTopology)
+	cloned.Plan = cloneResolvedPlan(value.Plan)
+	cloned.Joining = slices.Clone(value.Joining)
+	return &cloned
+}
+
+func normalizeMembershipTarget(value MembershipTarget) MembershipTarget {
+	value = *cloneMembershipTarget(&value)
+	value.BaseTopology = normalizeTopology(value.BaseTopology)
+	value.Plan = normalizeResolvedPlan(value.Plan)
+	value.Joining = normalizeJoiningReplicas(value.Joining)
+	return value
+}
+
+func canonicalMembershipTargetDigest(target MembershipTarget) (string, error) {
+	target.TargetDigest = ""
+	encoded, err := json.Marshal(normalizeMembershipTarget(target))
+	if err != nil {
+		return "", fmt.Errorf("marshal canonical membership target: %w", err)
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func cloneMembershipTransitionObservation(
+	value *MembershipTransitionObservation,
+) *MembershipTransitionObservation {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	if value.ResultTopology != nil {
+		topology := cloneTopology(*value.ResultTopology)
+		cloned.ResultTopology = &topology
+	}
+	cloned.Failure = cloneFailure(value.Failure)
+	return &cloned
+}
+
+func cloneMembershipObservation(value MembershipObservation) MembershipObservation {
+	value.CommittedTopology = cloneTopology(value.CommittedTopology)
+	value.Transition = cloneMembershipTransitionObservation(value.Transition)
+	return value
+}
+
+func sameMembershipTransitionObservation(left, right MembershipTransitionObservation) bool {
+	if left.TransitionID != right.TransitionID ||
+		left.ControlRevision != right.ControlRevision ||
+		left.TargetDigest != right.TargetDigest ||
+		left.Phase != right.Phase ||
+		!sameFailure(left.Failure, right.Failure) {
+		return false
+	}
+	if left.ResultTopology == nil || right.ResultTopology == nil {
+		return left.ResultTopology == nil && right.ResultTopology == nil
+	}
+	return sameTopology(*left.ResultTopology, *right.ResultTopology)
+}
+
+func sameFailure(left, right *Failure) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }
 
 func cloneReplicaRecord(value ReplicaRecord) ReplicaRecord {
@@ -248,8 +333,6 @@ func cloneTransition(value *TransitionStatus) *TransitionStatus {
 	}
 	cloned := *value
 	cloned.Spec.Plan = cloneResolvedPlan(value.Spec.Plan)
-	cloned.Membership.JoiningReplicas = slices.Clone(value.Membership.JoiningReplicas)
-	cloned.Membership.Failure = cloneFailure(value.Membership.Failure)
 	cloned.Verification.Proof = cloneServingProof(value.Verification.Proof)
 	cloned.Verification.Failure = cloneFailure(value.Verification.Failure)
 	cloned.Failure = cloneFailure(value.Failure)
@@ -263,6 +346,8 @@ func cloneStatus(value GroupStatus) GroupStatus {
 	value.Capacity.Observed = cloneCapacityObservation(value.Capacity.Observed)
 	value.Traffic.Desired = cloneTrafficTarget(value.Traffic.Desired)
 	value.Traffic.Observed = cloneTrafficObservation(value.Traffic.Observed)
+	value.Membership.Desired = cloneMembershipTarget(value.Membership.Desired)
+	value.Membership.Observed = cloneMembershipObservation(value.Membership.Observed)
 	value.Transition = cloneTransition(value.Transition)
 	return value
 }

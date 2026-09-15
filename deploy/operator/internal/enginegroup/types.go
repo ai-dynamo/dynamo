@@ -241,24 +241,6 @@ type TransitionSpec struct {
 	Plan                   ResolvedPlan
 }
 
-// MembershipOperationPhase is the independent state of the engine membership request.
-type MembershipOperationPhase string
-
-const (
-	// MembershipOperationPhaseNotStarted means capacity and traffic preconditions are still converging.
-	MembershipOperationPhaseNotStarted MembershipOperationPhase = "NotStarted"
-	// MembershipOperationPhasePrepared means the exact request is durable and may be submitted.
-	MembershipOperationPhasePrepared MembershipOperationPhase = "Prepared"
-	// MembershipOperationPhaseRunning means the backend accepted the operation and is changing membership.
-	MembershipOperationPhaseRunning MembershipOperationPhase = "Running"
-	// MembershipOperationPhaseCommitted means the backend committed an exact validated topology.
-	MembershipOperationPhaseCommitted MembershipOperationPhase = "Committed"
-	// MembershipOperationPhaseRejected means the backend definitively rejected the request without mutation.
-	MembershipOperationPhaseRejected MembershipOperationPhase = "Rejected"
-	// MembershipOperationPhaseUnknown means the backend cannot establish the request outcome.
-	MembershipOperationPhaseUnknown MembershipOperationPhase = "Unknown"
-)
-
 // FailureClassification states whether reconciliation may retry the same external intent.
 type FailureClassification string
 
@@ -274,15 +256,6 @@ type Failure struct {
 	Classification FailureClassification
 	Reason         string
 	Message        string
-}
-
-// MembershipOperationStatus records only engine membership progress and outcome.
-type MembershipOperationStatus struct {
-	ID                          string
-	Phase                       MembershipOperationPhase
-	JoiningReplicas             []JoiningReplica
-	CommittedTopologyGeneration int64
-	Failure                     *Failure
 }
 
 // VerificationPhase is the independent state of serving verification.
@@ -327,10 +300,9 @@ const (
 	TransitionOutcomeCompleted TransitionOutcome = "Completed"
 )
 
-// TransitionStatus owns one immutable transition and its independent membership and verification progress.
+// TransitionStatus owns one immutable transition and its independent verification progress.
 type TransitionStatus struct {
 	Spec         TransitionSpec
-	Membership   MembershipOperationStatus
 	Verification VerificationStatus
 	Outcome      TransitionOutcome
 	Failure      *Failure
@@ -350,6 +322,12 @@ type TrafficStatus struct {
 	Observed TrafficObservation
 }
 
+// MembershipStatus records one desired topology transition and the adapter's latest correlated observation.
+type MembershipStatus struct {
+	Desired  *MembershipTarget
+	Observed MembershipObservation
+}
+
 // GroupStatus is the complete durable state owned by one Engine Group reconciler.
 type GroupStatus struct {
 	ControlRevision int64
@@ -357,6 +335,7 @@ type GroupStatus struct {
 	Topologies      TopologyHistory
 	Capacity        CapacityStatus
 	Traffic         TrafficStatus
+	Membership      MembershipStatus
 	Transition      *TransitionStatus
 }
 

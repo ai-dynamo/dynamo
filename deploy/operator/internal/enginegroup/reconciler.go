@@ -52,7 +52,7 @@ func NewCoordinator(
 }
 
 // Reconcile derives each next action from the complete durable status and fresh external observations.
-// A changed absolute target or membership request is returned before its adapter is called, so the caller can persist
+// A changed absolute target or membership target is returned before its adapter is called, so the caller can persist
 // the returned status first. The returned status remains authoritative when a later external call returns an error.
 // A nil desiredPlan means no new transition is requested; an already-running transition still converges.
 func (c *Coordinator) Reconcile(
@@ -102,21 +102,29 @@ func (c *Coordinator) observeGroup(
 	if err := validateTrafficObservation(traffic); err != nil {
 		return MembershipTopology{}, fmt.Errorf("validate traffic observation: %w", err)
 	}
-	topology, err := c.membership.ObserveTopology(ctx, groupID)
-	if err != nil {
-		return MembershipTopology{}, fmt.Errorf("observe membership topology: %w", err)
+	transitionID := ""
+	if status.Membership.Desired != nil {
+		transitionID = status.Membership.Desired.TransitionID
 	}
-	if err := validateTopology(topology); err != nil {
-		return MembershipTopology{}, fmt.Errorf("validate membership topology: %w", err)
+	membership, err := c.membership.Observe(ctx, groupID, transitionID)
+	if err != nil {
+		return MembershipTopology{}, fmt.Errorf("observe membership: %w", err)
+	}
+	if err := validateMembershipObservation(membership, status.Membership.Desired); err != nil {
+		return MembershipTopology{}, fmt.Errorf("validate membership observation: %w", err)
+	}
+	if err := validateMembershipObservationEvolution(status.Membership.Observed, membership); err != nil {
+		return MembershipTopology{}, fmt.Errorf("validate membership observation evolution: %w", err)
 	}
 
 	// Surface fresh physical and traffic truth without making either observation the authority for membership.
 	status.Capacity.Observed = cloneCapacityObservation(capacity)
 	status.Traffic.Observed = cloneTrafficObservation(traffic)
+	status.Membership.Observed = cloneMembershipObservation(membership)
 	if err := validateObservedRevisions(*status); err != nil {
 		return MembershipTopology{}, err
 	}
-	return topology, nil
+	return cloneTopology(membership.CommittedTopology), nil
 }
 
 func (c *Coordinator) reconcileDesiredPlan(
@@ -158,12 +166,44 @@ func (c *Coordinator) reconcileDesiredPlan(
 			desiredPlan.ID,
 		)
 	}
+	if recovered, recoveredStatus := c.recoverMembershipAuthority(status, observedTopology); recovered {
+		return true, ReconcileResult{Status: recoveredStatus, Requeue: true}, nil
+	}
 	if status.Transition.Outcome == TransitionOutcomeBlocked ||
 		status.Transition.Outcome == TransitionOutcomeCompleted ||
 		status.Transition.Outcome == TransitionOutcomeRolledBack {
 		return true, ReconcileResult{Status: status}, nil
 	}
 	return false, ReconcileResult{Status: status}, nil
+}
+
+func (c *Coordinator) recoverMembershipAuthority(
+	status GroupStatus,
+	observedTopology MembershipTopology,
+) (bool, GroupStatus) {
+	if status.Transition.Outcome != TransitionOutcomeBlocked || status.Transition.Failure == nil ||
+		status.Transition.Failure.Reason != "UnknownMembershipOutcome" ||
+		status.Membership.Observed.Transition == nil {
+		return false, status
+	}
+
+	observed := status.Membership.Observed.Transition
+	switch observed.Phase {
+	case MembershipTransitionPhasePending, MembershipTransitionPhaseCommitted:
+		status.Transition.Outcome = TransitionOutcomeProgressing
+		status.Transition.Failure = nil
+		status.Transition.UpdatedAt = c.now()
+		return true, status
+	case MembershipTransitionPhaseRejected:
+		base, found := status.Topologies.Snapshot(status.Transition.Spec.BaseTopologyGeneration)
+		if !found || !sameTopology(base, observedTopology) {
+			return false, status
+		}
+		c.beginRollback(&status, *observed.Failure)
+		return true, status
+	default:
+		return false, status
+	}
 }
 
 func (c *Coordinator) reconcileActiveTransition(
@@ -206,7 +246,11 @@ func (c *Coordinator) reconcileActiveTransition(
 		return ReconcileResult{Status: next, Requeue: err == nil}, err
 	}
 
-	committed, found := next.Topologies.Snapshot(next.Transition.Membership.CommittedTopologyGeneration)
+	membershipTransition := next.Membership.Observed.Transition
+	if membershipTransition == nil || membershipTransition.ResultTopology == nil {
+		return ReconcileResult{Status: next}, errors.New("committed membership result is absent")
+	}
+	committed, found := next.Topologies.Snapshot(membershipTransition.ResultTopology.Generation)
 	if !found {
 		return ReconcileResult{Status: next}, errors.New("committed membership topology is absent from history")
 	}
@@ -278,10 +322,6 @@ func (c *Coordinator) startTransition(
 			BaseTopologyGeneration: base.Generation,
 			Plan:                   cloneResolvedPlan(plan),
 		},
-		Membership: MembershipOperationStatus{
-			ID:    membershipOperationID(plan.ID, base.Generation),
-			Phase: MembershipOperationPhaseNotStarted,
-		},
 		Outcome:   TransitionOutcomeProgressing,
 		StartedAt: now,
 		UpdatedAt: now,
@@ -293,13 +333,23 @@ func transitionID(planID string, baseGeneration int64) string {
 	return fmt.Sprintf("%s@%d", planID, baseGeneration)
 }
 
-func membershipOperationID(planID string, baseGeneration int64) string {
+func membershipTransitionID(planID string, baseGeneration int64) string {
 	return fmt.Sprintf("%s@%d/membership", planID, baseGeneration)
 }
 
 func canReplaceBlockedTransition(status GroupStatus) bool {
-	if status.Transition.Outcome != TransitionOutcomeBlocked ||
-		status.Transition.Membership.Phase == MembershipOperationPhaseUnknown {
+	if status.Transition.Outcome != TransitionOutcomeBlocked {
+		return false
+	}
+	expectedTransitionID := membershipTransitionID(
+		status.Transition.Spec.Plan.ID,
+		status.Transition.Spec.BaseTopologyGeneration,
+	)
+	if status.Membership.Desired != nil &&
+		status.Membership.Desired.TransitionID == expectedTransitionID &&
+		status.Membership.Observed.Transition != nil &&
+		(status.Membership.Observed.Transition.Phase == MembershipTransitionPhasePending ||
+			status.Membership.Observed.Transition.Phase == MembershipTransitionPhaseUnknown) {
 		return false
 	}
 	current, found := status.Topologies.Current()

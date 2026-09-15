@@ -197,7 +197,7 @@ func (c *Coordinator) reconcileJoiningCapacity(
 		return false, false, nil
 	}
 
-	// Freeze the workload manager's concrete joining incarnations in the canonical registry before membership submit.
+	// Freeze the workload manager's concrete joining incarnations in the canonical registry before membership apply.
 	changed, err := bindJoiningIncarnations(&status.Registry, resolution, status.Capacity.Observed)
 	if err != nil {
 		return false, false, err
@@ -216,7 +216,7 @@ func (c *Coordinator) reconcilePreMembershipTraffic(
 	base MembershipTopology,
 	resolution planResolution,
 ) (ready bool, persist bool, err error) {
-	if status.Transition.Membership.Phase == MembershipOperationPhaseCommitted {
+	if membershipCommittedForTransition(*status) {
 		return true, false, nil
 	}
 
@@ -259,138 +259,100 @@ func (c *Coordinator) reconcileMembership(
 	observedTopology MembershipTopology,
 	resolution planResolution,
 ) (ready bool, persist bool, err error) {
-	operation := &status.Transition.Membership
-	if operation.Phase == MembershipOperationPhaseNotStarted {
+	expectedTransitionID := membershipTransitionID(
+		status.Transition.Spec.Plan.ID,
+		status.Transition.Spec.BaseTopologyGeneration,
+	)
+	if status.Membership.Desired == nil || status.Membership.Desired.TransitionID != expectedTransitionID {
+		if status.Membership.Desired != nil && !membershipTargetMayBeReplaced(status.Membership) {
+			return false, false, errors.New("previous membership target has no terminal result")
+		}
 		if !sameTopology(base, observedTopology) {
-			return false, false, errors.New("engine topology changed before membership submission")
+			return false, false, errors.New("engine topology changed before membership target creation")
 		}
 		joining, freezeErr := joiningReplicaIdentities(status.Registry, resolution)
 		if freezeErr != nil {
 			return false, false, freezeErr
 		}
-		operation.JoiningReplicas = joining
-		operation.Phase = MembershipOperationPhasePrepared
+		revision, revisionErr := c.nextControlRevision(status)
+		if revisionErr != nil {
+			return false, false, revisionErr
+		}
+		target := MembershipTarget{
+			ControlRevision: revision,
+			TransitionID:    expectedTransitionID,
+			BaseTopology:    cloneTopology(base),
+			Plan:            cloneResolvedPlan(status.Transition.Spec.Plan),
+			Joining:         joining,
+		}
+		target = normalizeMembershipTarget(target)
+		target.TargetDigest, err = canonicalMembershipTargetDigest(target)
+		if err != nil {
+			return false, false, err
+		}
+		status.Membership.Desired = &target
 		status.Transition.UpdatedAt = c.now()
 		return false, true, nil
 	}
-	if operation.Phase == MembershipOperationPhaseCommitted {
-		committed, found := status.Topologies.Snapshot(operation.CommittedTopologyGeneration)
-		if !found {
-			return false, false, errors.New("membership status references an absent committed topology")
-		}
-		if !sameTopology(committed, observedTopology) {
-			return false, false, errors.New("engine topology diverged after membership commit")
-		}
-		return true, false, nil
+
+	target := *status.Membership.Desired
+	if !membershipTargetMatchesTransition(target, *status.Transition) ||
+		!sameTopology(target.BaseTopology, base) {
+		return false, false, errors.New("durable membership target does not match the active transition")
 	}
-	if operation.Phase == MembershipOperationPhaseRejected ||
-		operation.Phase == MembershipOperationPhaseUnknown {
+	if status.Membership.Observed.RequestedTransitionID != target.TransitionID {
+		return false, false, errors.New("membership observation is not scoped to the desired transition")
+	}
+	observation := status.Membership.Observed.Transition
+	if observation == nil {
+		if !sameTopology(base, observedTopology) {
+			return c.blockUnknownMembership(
+				status,
+				"TopologyChangedWithoutTransition",
+				"engine topology changed while the desired membership transition was absent",
+			)
+		}
+		if applyErr := c.membership.Apply(ctx, groupID, target); applyErr != nil {
+			return false, false, fmt.Errorf("apply membership target: %w", applyErr)
+		}
 		return false, false, nil
 	}
 
-	observation, err := c.membership.ObserveOperation(ctx, groupID, operation.ID)
-	if err != nil {
-		return false, false, fmt.Errorf("observe membership operation: %w", err)
-	}
-	if observation.ID != "" && observation.ID != operation.ID {
-		return false, false, fmt.Errorf(
-			"membership observation ID %q does not match operation %q",
-			observation.ID,
-			operation.ID,
-		)
-	}
-	if observationErr := validateMembershipObservation(observation); observationErr != nil {
-		return c.blockUnknownMembership(status, "InvalidMembershipObservation", observationErr.Error())
-	}
-
-	return c.reconcileMembershipObservation(ctx, groupID, status, base, observedTopology, resolution, observation)
-}
-
-func (c *Coordinator) reconcileMembershipObservation(
-	ctx context.Context,
-	groupID GroupID,
-	status *GroupStatus,
-	base MembershipTopology,
-	observedTopology MembershipTopology,
-	resolution planResolution,
-	observation MembershipOperationObservation,
-) (ready bool, persist bool, err error) {
 	switch observation.Phase {
-	case MembershipBackendPhaseAbsent:
-		return c.submitPreparedMembership(ctx, groupID, status, base, observedTopology)
-	case MembershipBackendPhaseRunning:
-		return c.recordRunningMembership(status, base, observedTopology)
-	case MembershipBackendPhaseCommitted:
-		return c.recordCommittedMembership(status, base, observedTopology, resolution, observation)
-	case MembershipBackendPhaseRejected:
-		return c.recordRejectedMembership(status, observation)
-	case MembershipBackendPhaseUnknown:
-		message := "engine cannot establish the membership operation outcome"
+	case MembershipTransitionPhasePending:
+		if !sameTopology(base, observedTopology) {
+			return c.blockUnknownMembership(
+				status,
+				"TopologyChangedWhilePending",
+				"engine topology changed before the transition reported commit",
+			)
+		}
+		return false, false, nil
+	case MembershipTransitionPhaseCommitted:
+		return c.recordCommittedMembership(status, base, observedTopology, resolution, *observation)
+	case MembershipTransitionPhaseRejected:
+		if !sameTopology(base, observedTopology) {
+			return c.blockUnknownMembership(
+				status,
+				"RejectedAfterTopologyChanged",
+				"membership rejection is unsafe to roll back because committed topology changed",
+			)
+		}
+		c.beginRollback(status, *observation.Failure)
+		return false, true, nil
+	case MembershipTransitionPhaseUnknown:
+		message := "adapter cannot establish the membership transition outcome"
 		if observation.Failure != nil && observation.Failure.Message != "" {
 			message = observation.Failure.Message
 		}
-		return c.blockUnknownMembership(status, "UnknownMembershipOutcome", message)
+		return c.blockUnknownMembership(
+			status,
+			"UnknownMembershipOutcome",
+			message,
+		)
 	default:
-		return false, false, fmt.Errorf("invalid membership backend phase %q", observation.Phase)
+		return false, false, fmt.Errorf("invalid membership transition phase %q", observation.Phase)
 	}
-}
-
-func (c *Coordinator) submitPreparedMembership(
-	ctx context.Context,
-	groupID GroupID,
-	status *GroupStatus,
-	base MembershipTopology,
-	observedTopology MembershipTopology,
-) (ready bool, persist bool, err error) {
-	if !sameTopology(base, observedTopology) {
-		return c.blockUnknownMembership(
-			status,
-			"TopologyChangedWithoutOperation",
-			"engine topology changed while the membership operation was absent",
-		)
-	}
-	request := MembershipRequest{
-		ID:              status.Transition.Membership.ID,
-		BaseTopology:    cloneTopology(base),
-		Plan:            cloneResolvedPlan(status.Transition.Spec.Plan),
-		JoiningReplicas: slices.Clone(status.Transition.Membership.JoiningReplicas),
-	}
-	result, submitErr := c.membership.Submit(ctx, groupID, request)
-	if submitErr != nil {
-		return false, false, fmt.Errorf("submit membership operation: %w", submitErr)
-	}
-	if result.Rejection == nil {
-		return false, false, nil
-	}
-	if err := validateRejection(result.Rejection); err != nil {
-		return false, false, fmt.Errorf("invalid membership rejection: %w", err)
-	}
-
-	status.Transition.Membership.Phase = MembershipOperationPhaseRejected
-	status.Transition.Membership.Failure = cloneFailure(result.Rejection)
-	c.beginRollback(status, *result.Rejection)
-	return false, true, nil
-}
-
-func (c *Coordinator) recordRunningMembership(
-	status *GroupStatus,
-	base MembershipTopology,
-	observedTopology MembershipTopology,
-) (ready bool, persist bool, err error) {
-	if !sameTopology(base, observedTopology) {
-		return c.blockUnknownMembership(
-			status,
-			"TopologyChangedWhileRunning",
-			"engine topology changed before the operation reported commit",
-		)
-	}
-	if status.Transition.Membership.Phase == MembershipOperationPhaseRunning {
-		return false, false, nil
-	}
-
-	status.Transition.Membership.Phase = MembershipOperationPhaseRunning
-	status.Transition.UpdatedAt = c.now()
-	return false, true, nil
 }
 
 func (c *Coordinator) recordCommittedMembership(
@@ -398,44 +360,71 @@ func (c *Coordinator) recordCommittedMembership(
 	base MembershipTopology,
 	observedTopology MembershipTopology,
 	resolution planResolution,
-	observation MembershipOperationObservation,
+	observation MembershipTransitionObservation,
 ) (ready bool, persist bool, err error) {
-	if !sameTopology(observedTopology, base) && !sameTopology(observedTopology, *observation.CommittedTopology) {
+	if sameTopology(observedTopology, base) {
+		return false, false, nil
+	}
+	if !sameTopology(observedTopology, *observation.ResultTopology) {
 		return c.blockUnknownMembership(
 			status,
 			"ConflictingTopologyObservation",
-			"observed topology matches neither the base nor the correlated commit",
+			"authoritative topology matches neither the base nor the correlated transition result",
 		)
 	}
 	if err := validateCommittedTopology(
 		base,
 		resolution,
-		status.Transition.Membership.JoiningReplicas,
-		*observation.CommittedTopology,
+		status.Membership.Desired.Joining,
+		*observation.ResultTopology,
 	); err != nil {
 		return c.blockUnknownMembership(status, "InvalidCommittedTopology", err.Error())
 	}
 
-	history, err := appendTopology(status.Topologies, *observation.CommittedTopology)
+	alreadyCurrent := sameTopologyWithCurrent(status.Topologies, *observation.ResultTopology)
+	history, err := appendTopology(status.Topologies, *observation.ResultTopology)
 	if err != nil {
 		return false, false, err
 	}
+	if alreadyCurrent {
+		return true, false, nil
+	}
 	status.Topologies = history
-	status.Transition.Membership.Phase = MembershipOperationPhaseCommitted
-	status.Transition.Membership.CommittedTopologyGeneration = observation.CommittedTopology.Generation
-	status.Transition.Membership.Failure = nil
 	status.Transition.UpdatedAt = c.now()
 	return false, true, nil
 }
 
-func (c *Coordinator) recordRejectedMembership(
-	status *GroupStatus,
-	observation MembershipOperationObservation,
-) (ready bool, persist bool, err error) {
-	status.Transition.Membership.Phase = MembershipOperationPhaseRejected
-	status.Transition.Membership.Failure = cloneFailure(observation.Failure)
-	c.beginRollback(status, *observation.Failure)
-	return false, true, nil
+func membershipCommittedForTransition(status GroupStatus) bool {
+	if status.Transition == nil || status.Membership.Desired == nil ||
+		status.Membership.Observed.Transition == nil {
+		return false
+	}
+	return membershipTargetMatchesTransition(*status.Membership.Desired, *status.Transition) &&
+		status.Membership.Observed.RequestedTransitionID == status.Membership.Desired.TransitionID &&
+		status.Membership.Observed.Transition.Phase == MembershipTransitionPhaseCommitted
+}
+
+func membershipTargetMatchesTransition(target MembershipTarget, transition TransitionStatus) bool {
+	return target.TransitionID == membershipTransitionID(
+		transition.Spec.Plan.ID,
+		transition.Spec.BaseTopologyGeneration,
+	) && target.BaseTopology.Generation == transition.Spec.BaseTopologyGeneration &&
+		sameResolvedPlan(target.Plan, transition.Spec.Plan)
+}
+
+func membershipTargetMayBeReplaced(status MembershipStatus) bool {
+	if status.Desired == nil {
+		return true
+	}
+	observed := status.Observed.Transition
+	if status.Observed.RequestedTransitionID != status.Desired.TransitionID ||
+		observed == nil || observed.TransitionID != status.Desired.TransitionID ||
+		observed.ControlRevision != status.Desired.ControlRevision ||
+		observed.TargetDigest != status.Desired.TargetDigest {
+		return false
+	}
+	return observed.Phase == MembershipTransitionPhaseCommitted ||
+		observed.Phase == MembershipTransitionPhaseRejected
 }
 
 func (c *Coordinator) blockUnknownMembership(
@@ -448,8 +437,6 @@ func (c *Coordinator) blockUnknownMembership(
 		Reason:         reason,
 		Message:        message,
 	}
-	status.Transition.Membership.Phase = MembershipOperationPhaseUnknown
-	status.Transition.Membership.Failure = cloneFailure(&failure)
 	c.blockTransition(status, failure)
 	return false, true, nil
 }

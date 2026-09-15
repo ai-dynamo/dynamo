@@ -85,6 +85,9 @@ func NewGroupStatus(
 		},
 		Capacity: CapacityStatus{Observed: cloneCapacityObservation(capacity)},
 		Traffic:  TrafficStatus{Observed: cloneTrafficObservation(traffic)},
+		Membership: MembershipStatus{Observed: MembershipObservation{
+			CommittedTopology: cloneTopology(topology),
+		}},
 	}, nil
 }
 

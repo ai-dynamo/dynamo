@@ -36,16 +36,16 @@ func TestCoordinatorGrowthOrdersCapacityCommitVerificationAndAdmission(t *testin
 	}, VerificationRequirementRequired)
 	scenario.desired = &plan
 
-	t.Log("Converge physical capacity and the pre-membership traffic fence before submission")
-	scenario.runUntil("prepare and submit growth", func(s *coordinatorScenario) bool {
-		return s.membership.submitCalls == 1
+	t.Log("Converge physical capacity and the pre-membership traffic fence before application")
+	scenario.runUntil("prepare and apply growth", func(s *coordinatorScenario) bool {
+		return s.membership.applyCalls == 1
 	})
 	if eventIndex(scenario.events, "capacity:") == -1 || eventIndex(scenario.events, "traffic:") == -1 {
 		t.Fatalf("expected capacity and traffic projections before membership, events: %v", scenario.events)
 	}
 	if eventIndex(scenario.events, "capacity:") > eventIndex(scenario.events, "membership:") ||
 		eventIndex(scenario.events, "traffic:") > eventIndex(scenario.events, "membership:") {
-		t.Fatalf("membership was submitted before its prerequisites, events: %v", scenario.events)
+		t.Fatalf("membership was applied before its prerequisites, events: %v", scenario.events)
 	}
 	if eventIndex(scenario.events, "verify:") != -1 {
 		t.Fatalf("serving verification ran before commit, events: %v", scenario.events)
@@ -62,7 +62,7 @@ func TestCoordinatorGrowthOrdersCapacityCommitVerificationAndAdmission(t *testin
 			cloneReplicaMembership(joining),
 		),
 	}
-	scenario.membership.commit(scenario.status.Transition.Membership.ID, committed)
+	scenario.membership.commit(scenario.status.Membership.Desired.TransitionID, committed)
 
 	t.Log("Verify serving before explicitly admitting the committed topology")
 	scenario.runUntil("finish growth", func(s *coordinatorScenario) bool {
@@ -100,16 +100,16 @@ func TestCoordinatorShrinkOrdersDrainCommitReleaseVerificationAndAdmission(t *te
 	)
 	scenario.desired = &plan
 
-	t.Log("Drain the complete quiescing group before submitting selected retirement")
-	scenario.runUntil("prepare and submit retirement", func(s *coordinatorScenario) bool {
-		return s.membership.submitCalls == 1
+	t.Log("Drain the complete quiescing group before applying selected retirement")
+	scenario.runUntil("prepare and apply retirement", func(s *coordinatorScenario) bool {
+		return s.membership.applyCalls == 1
 	})
-	if len(scenario.membership.requests) != 1 {
-		t.Fatalf("expected one immutable membership request, got %d", len(scenario.membership.requests))
+	if len(scenario.membership.targets) != 1 {
+		t.Fatalf("expected one immutable membership target, got %d", len(scenario.membership.targets))
 	}
 	if len(scenario.traffic.observation.Admitted) != 0 ||
 		!sameMemberships(scenario.traffic.observation.Drained, base.Replicas) {
-		t.Fatalf("whole-group drain did not complete before submit: %#v", scenario.traffic.observation)
+		t.Fatalf("whole-group drain did not complete before apply: %#v", scenario.traffic.observation)
 	}
 
 	t.Log("Commit the survivor topology and release only the selected Pod UID")
@@ -117,7 +117,7 @@ func TestCoordinatorShrinkOrdersDrainCommitReleaseVerificationAndAdmission(t *te
 		Generation: 2,
 		Replicas:   cloneReplicaMemberships(base.Replicas[:1]),
 	}
-	scenario.membership.commit(scenario.status.Transition.Membership.ID, committed)
+	scenario.membership.commit(scenario.status.Membership.Desired.TransitionID, committed)
 	scenario.runUntil("finish retirement", func(s *coordinatorScenario) bool {
 		return s.status.Transition.Outcome == TransitionOutcomeCompleted
 	})
@@ -151,7 +151,7 @@ func TestCoordinatorShrinkOrdersDrainCommitReleaseVerificationAndAdmission(t *te
 	}
 }
 
-func TestCoordinatorRestartAfterAmbiguousSubmitDoesNotCompete(t *testing.T) {
+func TestCoordinatorRestartAfterAmbiguousApplyDoesNotCompete(t *testing.T) {
 	scenario := newCoordinatorScenario(t, engineTopology(1, 1))
 	joining := engineReplica(1)
 	joiningIncarnation := replicaIncarnation(1)
@@ -164,27 +164,28 @@ func TestCoordinatorRestartAfterAmbiguousSubmitDoesNotCompete(t *testing.T) {
 	}, VerificationRequirementNone)
 	scenario.desired = &plan
 
-	t.Log("Persist the exact membership request, then simulate a timeout after engine acceptance")
-	var submitErr error
-	for iteration := 1; iteration <= 20 && submitErr == nil; iteration++ {
-		submitErr = scenario.reconcile("advance to ambiguous membership submission")
+	t.Log("Persist the exact membership target, then simulate a timeout after engine acceptance")
+	var applyErr error
+	for iteration := 1; iteration <= 20 && applyErr == nil; iteration++ {
+		applyErr = scenario.reconcile("advance to ambiguous membership application")
 	}
-	if submitErr == nil || !strings.Contains(submitErr.Error(), "timed out after acceptance") {
-		t.Fatalf("expected ambiguous submit error, got %v", submitErr)
+	if applyErr == nil || !strings.Contains(applyErr.Error(), "timed out after acceptance") {
+		t.Fatalf("expected ambiguous apply error, got %v", applyErr)
 	}
-	if scenario.membership.submitCalls != 1 ||
-		scenario.status.Transition.Membership.Phase != MembershipOperationPhasePrepared {
-		t.Fatalf("unexpected state after ambiguous submit: calls=%d status=%#v", scenario.membership.submitCalls, scenario.status.Transition.Membership)
+	if scenario.membership.applyCalls != 1 || scenario.status.Membership.Desired == nil ||
+		scenario.status.Membership.Observed.Transition != nil {
+		t.Fatalf("unexpected state after ambiguous apply: calls=%d status=%#v", scenario.membership.applyCalls, scenario.status.Membership)
 	}
 
 	t.Log("Rebuild the coordinator and recover the running operation by its durable identity")
 	scenario.rebuildCoordinator()
 	scenario.mustReconcile("observe the accepted membership operation after restart")
-	if scenario.membership.submitCalls != 1 {
-		t.Fatalf("restart started a competing membership submission: %d calls", scenario.membership.submitCalls)
+	if scenario.membership.applyCalls != 1 {
+		t.Fatalf("restart started a competing membership application: %d calls", scenario.membership.applyCalls)
 	}
-	if scenario.status.Transition.Membership.Phase != MembershipOperationPhaseRunning {
-		t.Fatalf("running operation was not recovered: %#v", scenario.status.Transition.Membership)
+	if scenario.status.Membership.Observed.Transition == nil ||
+		scenario.status.Membership.Observed.Transition.Phase != MembershipTransitionPhasePending {
+		t.Fatalf("pending transition was not recovered: %#v", scenario.status.Membership)
 	}
 
 	t.Log("Commit the original operation and finish without changing its request identity")
@@ -195,12 +196,12 @@ func TestCoordinatorRestartAfterAmbiguousSubmitDoesNotCompete(t *testing.T) {
 			cloneReplicaMembership(joining),
 		),
 	}
-	scenario.membership.commit(scenario.status.Transition.Membership.ID, committed)
+	scenario.membership.commit(scenario.status.Membership.Desired.TransitionID, committed)
 	scenario.runUntil("finish recovered growth", func(s *coordinatorScenario) bool {
 		return s.status.Transition.Outcome == TransitionOutcomeCompleted
 	})
-	if scenario.membership.submitCalls != 1 {
-		t.Fatalf("committed request was submitted more than once: %d", scenario.membership.submitCalls)
+	if scenario.membership.applyCalls != 1 {
+		t.Fatalf("committed request was applied more than once: %d", scenario.membership.applyCalls)
 	}
 }
 
@@ -215,7 +216,7 @@ func TestCoordinatorRollsBackPreparatoryStateAfterDefinitiveRejection(t *testing
 		Reason:         "UnsupportedTransition",
 		Message:        "engine rejected the exact plan without mutation",
 	}
-	scenario.membership.submitRejection = &rejection
+	scenario.membership.applyRejection = &rejection
 	plan := growPlan("rejected-growth", ReplicaTarget{
 		ReplicaID: joining.ReplicaID,
 		SlotID:    joiningIncarnation.SlotID,
@@ -228,8 +229,9 @@ func TestCoordinatorRollsBackPreparatoryStateAfterDefinitiveRejection(t *testing
 	scenario.runUntil("observe definitive membership rejection", func(s *coordinatorScenario) bool {
 		return s.status.Transition != nil && s.status.Transition.Outcome == TransitionOutcomeReverting
 	})
-	if scenario.status.Transition.Membership.Phase != MembershipOperationPhaseRejected {
-		t.Fatalf("membership rejection was not retained independently: %#v", scenario.status.Transition.Membership)
+	if scenario.status.Membership.Observed.Transition == nil ||
+		scenario.status.Membership.Observed.Transition.Phase != MembershipTransitionPhaseRejected {
+		t.Fatalf("membership rejection was not retained independently: %#v", scenario.status.Membership)
 	}
 	if _, found := allocationByID(scenario.capacity.observation, joining.ReplicaID); !found {
 		t.Fatal("test did not reach allocated preparatory capacity")
@@ -313,18 +315,19 @@ func TestCoordinatorServingFailureDoesNotRewriteMembershipCommit(t *testing.T) {
 	scenario.desired = &plan
 
 	t.Log("Commit a valid reduced membership topology")
-	scenario.runUntil("submit retirement", func(s *coordinatorScenario) bool {
-		return s.membership.submitCalls == 1
+	scenario.runUntil("apply retirement", func(s *coordinatorScenario) bool {
+		return s.membership.applyCalls == 1
 	})
 	committed := MembershipTopology{Generation: 2, Replicas: cloneReplicaMemberships(base.Replicas[:1])}
-	scenario.membership.commit(scenario.status.Transition.Membership.ID, committed)
+	scenario.membership.commit(scenario.status.Membership.Desired.TransitionID, committed)
 
 	t.Log("Record serving failure as workflow health while preserving membership history")
 	scenario.runUntil("observe terminal verification failure", func(s *coordinatorScenario) bool {
 		return s.status.Transition.Outcome == TransitionOutcomeBlocked
 	})
-	if scenario.status.Transition.Membership.Phase != MembershipOperationPhaseCommitted {
-		t.Fatalf("serving failure rewrote membership outcome: %#v", scenario.status.Transition.Membership)
+	if scenario.status.Membership.Observed.Transition == nil ||
+		scenario.status.Membership.Observed.Transition.Phase != MembershipTransitionPhaseCommitted {
+		t.Fatalf("serving failure rewrote membership outcome: %#v", scenario.status.Membership)
 	}
 	if scenario.status.Transition.Verification.Phase != VerificationPhaseFailed {
 		t.Fatalf("verification failure was not recorded independently: %#v", scenario.status.Transition.Verification)
@@ -346,8 +349,8 @@ func TestCoordinatorFailsClosedOnInvalidCommittedMembership(t *testing.T) {
 		Bootstrap: BootstrapModeJoin,
 	}, VerificationRequirementRequired)
 	scenario.desired = &plan
-	scenario.runUntil("submit growth", func(s *coordinatorScenario) bool {
-		return s.membership.submitCalls == 1
+	scenario.runUntil("apply growth", func(s *coordinatorScenario) bool {
+		return s.membership.applyCalls == 1
 	})
 
 	t.Log("Return a correlated commit that illegally remaps a retained native member")
@@ -359,11 +362,12 @@ func TestCoordinatorFailsClosedOnInvalidCommittedMembership(t *testing.T) {
 		),
 	}
 	invalid.Replicas[0].NativeMembers = []NativeMemberID{"unexpected-remap"}
-	scenario.membership.commit(scenario.status.Transition.Membership.ID, invalid)
+	scenario.membership.commit(scenario.status.Membership.Desired.TransitionID, invalid)
 	scenario.runUntil("reject invalid committed topology", func(s *coordinatorScenario) bool {
 		return s.status.Transition != nil && s.status.Transition.Outcome == TransitionOutcomeBlocked
 	})
-	if scenario.status.Transition.Membership.Phase != MembershipOperationPhaseUnknown ||
+	if scenario.status.Membership.Observed.Transition == nil ||
+		scenario.status.Membership.Observed.Transition.Phase != MembershipTransitionPhaseCommitted ||
 		scenario.status.Transition.Failure.Reason != "InvalidCommittedTopology" {
 		t.Fatalf("invalid commit did not become unknown and fail closed: %#v", scenario.status.Transition)
 	}
@@ -384,8 +388,8 @@ func TestCoordinatorRerunsVerificationWhenProofWasNotPersisted(t *testing.T) {
 		Bootstrap: BootstrapModeJoin,
 	}, VerificationRequirementRequired)
 	scenario.desired = &plan
-	scenario.runUntil("submit growth", func(s *coordinatorScenario) bool {
-		return s.membership.submitCalls == 1
+	scenario.runUntil("apply growth", func(s *coordinatorScenario) bool {
+		return s.membership.applyCalls == 1
 	})
 	committed := MembershipTopology{
 		Generation: 2,
@@ -394,7 +398,7 @@ func TestCoordinatorRerunsVerificationWhenProofWasNotPersisted(t *testing.T) {
 			cloneReplicaMembership(joining),
 		),
 	}
-	scenario.membership.commit(scenario.status.Transition.Membership.ID, committed)
+	scenario.membership.commit(scenario.status.Membership.Desired.TransitionID, committed)
 	scenario.runUntil("persist pending verification", func(s *coordinatorScenario) bool {
 		return s.status.Transition.Verification.Phase == VerificationPhasePending
 	})
@@ -440,11 +444,11 @@ func TestCoordinatorRejectsStaleExactReleaseFence(t *testing.T) {
 		VerificationRequirementNone,
 	)
 	scenario.desired = &plan
-	scenario.runUntil("submit retirement", func(s *coordinatorScenario) bool {
-		return s.membership.submitCalls == 1
+	scenario.runUntil("apply retirement", func(s *coordinatorScenario) bool {
+		return s.membership.applyCalls == 1
 	})
 	committed := MembershipTopology{Generation: 2, Replicas: cloneReplicaMemberships(base.Replicas[:1])}
-	scenario.membership.commit(scenario.status.Transition.Membership.ID, committed)
+	scenario.membership.commit(scenario.status.Membership.Desired.TransitionID, committed)
 	scenario.runUntil("persist exact release target", func(s *coordinatorScenario) bool {
 		return s.status.Capacity.Desired != nil &&
 			len(s.status.Capacity.Desired.ReleaseFences) == 1 &&
@@ -500,11 +504,11 @@ func TestCoordinatorReleaseFenceCoversEveryPodInReplicaAllocation(t *testing.T) 
 		VerificationRequirementNone,
 	)
 	scenario.desired = &plan
-	scenario.runUntil("submit multi-Pod retirement", func(s *coordinatorScenario) bool {
-		return s.membership.submitCalls == 1
+	scenario.runUntil("apply multi-Pod retirement", func(s *coordinatorScenario) bool {
+		return s.membership.applyCalls == 1
 	})
 	committed := MembershipTopology{Generation: 2, Replicas: cloneReplicaMemberships(base.Replicas[:1])}
-	scenario.membership.commit(scenario.status.Transition.Membership.ID, committed)
+	scenario.membership.commit(scenario.status.Membership.Desired.TransitionID, committed)
 
 	t.Log("Persist one indivisible release fence containing every Pod UID in the logical replica")
 	scenario.runUntil("derive multi-Pod release fence", func(s *coordinatorScenario) bool {

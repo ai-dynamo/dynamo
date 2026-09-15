@@ -48,15 +48,14 @@ func TestCoordinatorPersistsEveryDirectiveBeforeCallingItsAdapter(t *testing.T) 
 		t.Fatalf("persisted traffic target was not applied exactly once: %d", scenario.traffic.applyCalls)
 	}
 
-	t.Log("Persist the exact membership request before submitting it")
-	scenario.mustReconcile("freeze membership request")
-	if scenario.status.Transition.Membership.Phase != MembershipOperationPhasePrepared ||
-		scenario.membership.submitCalls != 0 {
-		t.Fatalf("membership request was not persisted first: status=%#v calls=%d", scenario.status.Transition.Membership, scenario.membership.submitCalls)
+	t.Log("Persist the exact membership target before applying it")
+	scenario.mustReconcile("freeze membership target")
+	if scenario.status.Membership.Desired == nil || scenario.membership.applyCalls != 0 {
+		t.Fatalf("membership target was not persisted first: status=%#v calls=%d", scenario.status.Membership, scenario.membership.applyCalls)
 	}
-	scenario.mustReconcile("submit persisted membership request")
-	if scenario.membership.submitCalls != 1 {
-		t.Fatalf("persisted membership request was not submitted: %d", scenario.membership.submitCalls)
+	scenario.mustReconcile("apply persisted membership target")
+	if scenario.membership.applyCalls != 1 {
+		t.Fatalf("persisted membership target was not applied: %d", scenario.membership.applyCalls)
 	}
 }
 
@@ -79,18 +78,18 @@ func TestCoordinatorWaitsForCompleteDrainBeforeMembershipMutation(t *testing.T) 
 	for iteration := 1; iteration <= 3; iteration++ {
 		scenario.mustReconcile("wait for drain completion")
 	}
-	if scenario.membership.submitCalls != 0 {
-		t.Fatalf("membership changed before drain completed: %d submissions", scenario.membership.submitCalls)
+	if scenario.membership.applyCalls != 0 {
+		t.Fatalf("membership changed before drain completed: %d applications", scenario.membership.applyCalls)
 	}
 	if !sameMemberships(scenario.traffic.observation.Draining, base.Replicas[1:]) {
 		t.Fatalf("selected replica is not observably draining: %#v", scenario.traffic.observation)
 	}
 
-	t.Log("Publish durable drain completion and allow membership submission")
+	t.Log("Publish durable drain completion and allow membership application")
 	scenario.traffic.observation.Drained = cloneReplicaMemberships(scenario.traffic.observation.Draining)
 	scenario.traffic.observation.Draining = nil
-	scenario.runUntil("submit after drain", func(s *coordinatorScenario) bool {
-		return s.membership.submitCalls == 1
+	scenario.runUntil("apply after drain", func(s *coordinatorScenario) bool {
+		return s.membership.applyCalls == 1
 	})
 }
 
@@ -114,8 +113,8 @@ func TestCoordinatorWaitsForCompleteReplicaAvailability(t *testing.T) {
 	for iteration := 1; iteration <= 3; iteration++ {
 		scenario.mustReconcile("wait for complete replica availability")
 	}
-	if scenario.membership.submitCalls != 0 {
-		t.Fatalf("membership changed before capacity became available: %d submissions", scenario.membership.submitCalls)
+	if scenario.membership.applyCalls != 0 {
+		t.Fatalf("membership changed before capacity became available: %d applications", scenario.membership.applyCalls)
 	}
 	record, found := scenario.status.Registry.Find(joining.ReplicaID)
 	if !found || record.Current != nil {
@@ -128,8 +127,8 @@ func TestCoordinatorWaitsForCompleteReplicaAvailability(t *testing.T) {
 			scenario.capacity.observation.Allocations[index].Available = true
 		}
 	}
-	scenario.runUntil("submit after capacity availability", func(s *coordinatorScenario) bool {
-		return s.membership.submitCalls == 1
+	scenario.runUntil("apply after capacity availability", func(s *coordinatorScenario) bool {
+		return s.membership.applyCalls == 1
 	})
 }
 
@@ -171,9 +170,9 @@ func TestCoordinatorRestoresStableReplicaWithNewPhysicalIncarnation(t *testing.T
 	}
 	scenario.desired = &plan
 
-	t.Log("Provision replacement capacity in the stable slot and submit exact native-member restoration")
-	scenario.runUntil("submit restoration", func(s *coordinatorScenario) bool {
-		return s.membership.submitCalls == 1
+	t.Log("Provision replacement capacity in the stable slot and apply exact native-member restoration")
+	scenario.runUntil("apply restoration", func(s *coordinatorScenario) bool {
+		return s.membership.applyCalls == 1
 	})
 	committedReplica := cloneReplicaMembership(excluded)
 	committedReplica.RuntimeIncarnation = replacement.RuntimeIncarnation
@@ -184,7 +183,7 @@ func TestCoordinatorRestoresStableReplicaWithNewPhysicalIncarnation(t *testing.T
 			committedReplica,
 		),
 	}
-	scenario.membership.commit(scenario.status.Transition.Membership.ID, committed)
+	scenario.membership.commit(scenario.status.Membership.Desired.TransitionID, committed)
 	scenario.runUntil("finish restoration", func(s *coordinatorScenario) bool {
 		return s.status.Transition.Outcome == TransitionOutcomeCompleted
 	})
@@ -219,8 +218,8 @@ func TestCoordinatorReducesToSurvivorsWithoutWaitingForFailedMemberDrain(t *test
 	scenario.desired = &plan
 
 	t.Log("Withdraw the failed identity without requiring an impossible participating drain")
-	scenario.runUntil("submit survivor reduction", func(s *coordinatorScenario) bool {
-		return s.membership.submitCalls == 1
+	scenario.runUntil("apply survivor reduction", func(s *coordinatorScenario) bool {
+		return s.membership.applyCalls == 1
 	})
 	if len(scenario.traffic.observation.Drained) != 0 {
 		t.Fatalf("failed-member reduction unexpectedly required drain participation: %#v", scenario.traffic.observation)
@@ -231,11 +230,12 @@ func TestCoordinatorReducesToSurvivorsWithoutWaitingForFailedMemberDrain(t *test
 
 	t.Log("Commit the exact survivor topology, release failed capacity, and verify survivors")
 	committed := MembershipTopology{Generation: 2, Replicas: cloneReplicaMemberships(base.Replicas[:1])}
-	scenario.membership.commit(scenario.status.Transition.Membership.ID, committed)
+	scenario.membership.commit(scenario.status.Membership.Desired.TransitionID, committed)
 	scenario.runUntil("finish survivor reduction", func(s *coordinatorScenario) bool {
 		return s.status.Transition.Outcome == TransitionOutcomeCompleted
 	})
-	if scenario.status.Transition.Membership.Phase != MembershipOperationPhaseCommitted ||
+	if scenario.status.Membership.Observed.Transition == nil ||
+		scenario.status.Membership.Observed.Transition.Phase != MembershipTransitionPhaseCommitted ||
 		scenario.status.Transition.Verification.Phase != VerificationPhasePassed {
 		t.Fatalf("survivor reduction lost independent outcomes: %#v", scenario.status.Transition)
 	}
@@ -262,14 +262,14 @@ func TestCoordinatorRemapsNativeMembersWithoutChangingPhysicalIdentity(t *testin
 	scenario.desired = &plan
 
 	t.Log("Quiesce the unchanged physical incarnations before native-member remapping")
-	scenario.runUntil("submit remap", func(s *coordinatorScenario) bool {
-		return s.membership.submitCalls == 1
+	scenario.runUntil("apply remap", func(s *coordinatorScenario) bool {
+		return s.membership.applyCalls == 1
 	})
 	committed := cloneTopology(base)
 	committed.Generation = 2
 	committed.Replicas[0].NativeMembers = []NativeMemberID{"remapped-0"}
 	committed.Replicas[1].NativeMembers = []NativeMemberID{"remapped-1"}
-	scenario.membership.commit(scenario.status.Transition.Membership.ID, committed)
+	scenario.membership.commit(scenario.status.Membership.Desired.TransitionID, committed)
 	scenario.runUntil("finish remap", func(s *coordinatorScenario) bool {
 		return s.status.Transition.Outcome == TransitionOutcomeCompleted
 	})
