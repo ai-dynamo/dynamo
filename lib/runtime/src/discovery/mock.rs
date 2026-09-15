@@ -11,21 +11,34 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
-
-/// How long the watch stream waits between two registry reads.
-const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Shared in-memory registry for mock discovery
 #[derive(Clone, Default)]
 pub struct SharedMockRegistry {
-    instances: Arc<Mutex<Vec<DiscoveryInstance>>>,
+    state: Arc<Mutex<RegistryState>>,
 }
 
 impl SharedMockRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+}
+
+#[derive(Default)]
+struct RegistryState {
+    instances: Vec<DiscoveryInstance>,
+    /// Each watch receives the registry after every change, so a change made between two reads
+    /// of its stream still reaches it.
+    watchers: Vec<UnboundedSender<Arc<Vec<DiscoveryInstance>>>>,
+}
+
+impl RegistryState {
+    fn publish(&mut self) {
+        let instances = Arc::new(self.instances.clone());
+        self.watchers
+            .retain(|watcher| watcher.send(instances.clone()).is_ok());
     }
 }
 
@@ -51,15 +64,11 @@ impl MockDiscovery {
     }
 }
 
-/// The instances the registry holds for a query, keyed by instance id.
 fn query_snapshot(
-    registry: &SharedMockRegistry,
+    instances: &[DiscoveryInstance],
     query: &DiscoveryQuery,
 ) -> HashMap<DiscoveryInstanceId, DiscoveryInstance> {
-    registry
-        .instances
-        .lock()
-        .unwrap()
+    instances
         .iter()
         .filter(|instance| matches_query(instance, query))
         .cloned()
@@ -208,14 +217,16 @@ impl Discovery for MockDiscovery {
     async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
         let instance = spec.into_instance(self.instance_id);
         let instance_id = instance.id();
-        let mut instances = self.registry.instances.lock().unwrap();
-        if let Some(existing) = instances
+        let mut state = self.registry.state.lock().unwrap();
+        if let Some(existing) = state
+            .instances
             .iter_mut()
             .find(|existing| existing.id() == instance_id)
         {
             match &instance {
                 DiscoveryInstance::Endpoint(_) => {
                     *existing = instance.clone();
+                    state.publish();
                     return Ok(instance);
                 }
                 DiscoveryInstance::EventSource { .. } => {
@@ -229,7 +240,8 @@ impl Discovery for MockDiscovery {
                 DiscoveryInstance::EventChannel { .. } => {}
             }
         }
-        instances.push(instance.clone());
+        state.instances.push(instance.clone());
+        state.publish();
 
         Ok(instance)
     }
@@ -240,32 +252,33 @@ impl Discovery for MockDiscovery {
         taints: HashSet<String>,
     ) -> Result<()> {
         let target_id = DiscoveryInstanceId::Model(id);
-        let mut instances = self.registry.instances.lock().unwrap();
-        let existing = instances
+        let mut state = self.registry.state.lock().unwrap();
+        let existing = state
+            .instances
             .iter_mut()
             .find(|existing| existing.id() == target_id)
             .ok_or_else(|| {
                 anyhow::anyhow!("model discovery record {target_id:?} is not registered")
             })?;
         *existing = model_with_updated_taints(existing, taints)?;
+        state.publish();
         Ok(())
     }
 
     async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
         let target_id = instance.id();
 
-        self.registry
-            .instances
-            .lock()
-            .unwrap()
-            .retain(|i| i.id() != target_id);
+        let mut state = self.registry.state.lock().unwrap();
+        state.instances.retain(|i| i.id() != target_id);
+        state.publish();
 
         Ok(())
     }
 
     async fn list(&self, query: DiscoveryQuery) -> Result<Vec<DiscoveryInstance>> {
-        let instances = self.registry.instances.lock().unwrap();
-        Ok(instances
+        let state = self.registry.state.lock().unwrap();
+        Ok(state
+            .instances
             .iter()
             .filter(|instance| matches_query(instance, &query))
             .cloned()
@@ -277,24 +290,31 @@ impl Discovery for MockDiscovery {
         query: DiscoveryQuery,
         _cancel_token: Option<CancellationToken>,
     ) -> Result<DiscoveryStream> {
-        let registry = self.registry.clone();
-        // The first snapshot is taken before the return, so a caller that lists afterwards cannot
-        // observe an instance that an unregister removes before the first poll.
-        let mut current = query_snapshot(&registry, &query);
+        let (changes_tx, mut changes) = tokio::sync::mpsc::unbounded_channel();
+        // Every change publishes under this lock, so none falls between the snapshot and the
+        // subscription.
+        let initial = {
+            let mut state = self.registry.state.lock().unwrap();
+            state.watchers.push(changes_tx);
+            query_snapshot(&state.instances, &query)
+        };
 
         let stream = async_stream::stream! {
-            let mut known_instances = HashMap::<DiscoveryInstanceId, DiscoveryInstance>::new();
+            let (events, mut known_instances) =
+                reconcile_discovery_snapshot(&HashMap::new(), initial);
+            for event in events {
+                yield Ok(event);
+            }
 
-            loop {
-                let (events, reconciled) =
-                    reconcile_discovery_snapshot(&known_instances, current);
+            while let Some(instances) = changes.recv().await {
+                let (events, reconciled) = reconcile_discovery_snapshot(
+                    &known_instances,
+                    query_snapshot(&instances, &query),
+                );
                 for event in events {
                     yield Ok(event);
                 }
-
                 known_instances = reconciled;
-                tokio::time::sleep(POLL_INTERVAL).await;
-                current = query_snapshot(&registry, &query);
             }
         };
 
@@ -377,6 +397,44 @@ mod tests {
         let removed = timeout(Duration::from_secs(1), stream.next())
             .await
             .expect("an unregister after establishment must reach the stream")
+            .unwrap()
+            .unwrap();
+        assert_eq!(removed, DiscoveryEvent::Removed(instance.id()));
+    }
+
+    #[tokio::test]
+    async fn watch_reports_the_removal_of_an_instance_listed_after_establishment() {
+        let client = MockDiscovery::new(Some(1), SharedMockRegistry::new());
+        let mut stream = client
+            .list_and_watch(DiscoveryQuery::AllEndpoints, None)
+            .await
+            .unwrap();
+
+        let instance = client
+            .register(DiscoverySpec::Endpoint {
+                namespace: "ns".to_string(),
+                component: "component".to_string(),
+                endpoint: "endpoint".to_string(),
+                transport: TransportType::Tcp("127.0.0.1:8000".to_string()),
+                device_type: None,
+                request_plane_codec: None,
+            })
+            .await
+            .unwrap();
+        let listed = client.list(DiscoveryQuery::AllEndpoints).await.unwrap();
+        assert_eq!(listed, vec![instance.clone()]);
+        client.unregister(instance.clone()).await.unwrap();
+
+        let added = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("a registration after establishment must reach the stream")
+            .unwrap()
+            .unwrap();
+        assert_eq!(added, DiscoveryEvent::Added(instance.clone()));
+
+        let removed = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("a caller that listed the instance must see its removal")
             .unwrap()
             .unwrap();
         assert_eq!(removed, DiscoveryEvent::Removed(instance.id()));
