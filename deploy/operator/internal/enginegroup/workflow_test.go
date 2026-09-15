@@ -154,6 +154,7 @@ func TestCoordinatorWaitsForCompleteDrainBeforeMembershipMutation(t *testing.T) 
 	base := engineTopology(1, 2)
 	scenario := newCoordinatorScenario(t, base)
 	scenario.traffic.autoDrain = false
+	scenario.traffic.confirmInactive = false
 	plan := retirePlan(
 		"wait-for-drain",
 		"replica-1",
@@ -291,9 +292,11 @@ func TestCoordinatorRestoresStableReplicaWithNewPhysicalIncarnation(t *testing.T
 	}
 }
 
-func TestCoordinatorReducesToSurvivorsWithoutWaitingForFailedMemberDrain(t *testing.T) {
+func TestCoordinatorRequiresTerminalTrafficEvidenceForFailedMember(t *testing.T) {
 	base := engineTopology(1, 2)
 	scenario := newCoordinatorScenario(t, base)
+	scenario.traffic.autoDrain = false
+	scenario.traffic.confirmInactive = false
 	plan := ResolvedPlan{
 		ID:                      "remove-failed-member",
 		ProfileFingerprint:      "profile-v1",
@@ -308,16 +311,26 @@ func TestCoordinatorReducesToSurvivorsWithoutWaitingForFailedMemberDrain(t *test
 	}
 	scenario.desired = &plan
 
-	t.Log("Withdraw the failed identity without requiring an impossible participating drain")
-	scenario.runUntil("apply survivor reduction", func(s *coordinatorScenario) bool {
-		return s.membership.applyCalls == 1
+	t.Log("Withdraw the failed identity, but withhold terminal inactivity evidence")
+	scenario.runUntil("apply failed-member withdrawal", func(s *coordinatorScenario) bool {
+		return s.traffic.applyCalls == 1
 	})
-	if len(scenario.traffic.observation.Drained) != 0 {
-		t.Fatalf("failed-member reduction unexpectedly required drain participation: %#v", scenario.traffic.observation)
+	for iteration := 1; iteration <= 3; iteration++ {
+		scenario.mustReconcile("wait for failed-member inactivity confirmation")
+	}
+	if scenario.membership.applyCalls != 0 || len(scenario.traffic.observation.Draining) != 0 ||
+		len(scenario.traffic.observation.Drained) != 0 {
+		t.Fatalf("membership advanced without terminal inactive evidence: %#v", scenario.traffic.observation)
 	}
 	if !sameMemberships(scenario.traffic.observation.Admitted, base.Replicas[:1]) {
 		t.Fatalf("failed identity remained routable: %#v", scenario.traffic.observation.Admitted)
 	}
+
+	t.Log("Publish durable inactivity confirmation and allow survivor reduction")
+	scenario.traffic.observation.Drained = cloneReplicaMemberships(base.Replicas[1:])
+	scenario.runUntil("apply survivor reduction", func(s *coordinatorScenario) bool {
+		return s.membership.applyCalls == 1
+	})
 
 	t.Log("Commit the exact survivor topology, release failed capacity, and verify survivors")
 	committed := MembershipTopology{Generation: 2, Replicas: cloneReplicaMemberships(base.Replicas[:1])}

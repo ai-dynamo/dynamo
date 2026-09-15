@@ -72,7 +72,23 @@ type TrafficTarget struct {
 	TransitionID       string
 	TopologyGeneration int64
 	Admitted           []ReplicaMembership
-	Drain              []ReplicaMembership
+	Drain              []TrafficDrainTarget
+}
+
+// TrafficDrainMode distinguishes participating graceful drain from confirmation that a failed member is inactive.
+type TrafficDrainMode string
+
+const (
+	// TrafficDrainModeGraceful waits for a reachable member's in-flight work to finish.
+	TrafficDrainModeGraceful TrafficDrainMode = "Graceful"
+	// TrafficDrainModeConfirmInactive proves an unreachable member is no longer routable without its participation.
+	TrafficDrainModeConfirmInactive TrafficDrainMode = "ConfirmInactive"
+)
+
+// TrafficDrainTarget requests terminal non-serving evidence for one exact member incarnation.
+type TrafficDrainTarget struct {
+	Membership ReplicaMembership
+	Mode       TrafficDrainMode
 }
 
 // TrafficObservation is the runtime's exact routing and drain state.
@@ -195,7 +211,9 @@ type MembershipAdapter interface {
 type TrafficAdapter interface {
 	// Observe returns exact admitted, draining, and durably drained replica incarnations.
 	Observe(ctx context.Context, groupID GroupID) (TrafficObservation, error)
-	// Apply converges toward the exact admitted set and preserves drain tombstones for the target's Drain set. Revisions
+	// Apply converges toward the exact admitted set and preserves drain tombstones for every target in Drain. Graceful
+	// drain waits for in-flight work; ConfirmInactive proves a failed member non-routable without its participation.
+	// Revisions
 	// are group-global and monotonic. A lower revision or conflicting equal revision is definitively rejected. No engine
 	// membership or discovery event may implicitly admit an incarnation absent from the latest target.
 	Apply(ctx context.Context, groupID GroupID, target TrafficTarget) (ApplyResult, error)

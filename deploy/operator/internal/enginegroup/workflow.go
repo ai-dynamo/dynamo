@@ -872,13 +872,23 @@ func buildPreMembershipTrafficTarget(
 		}
 	}
 
-	drain := make([]ReplicaMembership, 0)
+	drain := make([]TrafficDrainTarget, 0)
 	if status.Transition.Spec.Plan.TrafficRequirement == TrafficRequirementQuiesceGroup {
-		drain = cloneReplicaMemberships(base.Replicas)
-	} else if status.Transition.Spec.Plan.RetirementSafety == RetirementSafetyDrained {
+		for _, membership := range base.Replicas {
+			mode := TrafficDrainModeGraceful
+			if _, retiringMember := retiring[membership.ReplicaID]; retiringMember &&
+				status.Transition.Spec.Plan.RetirementSafety == RetirementSafetyWithdrawn {
+				mode = TrafficDrainModeConfirmInactive
+			}
+			drain = append(drain, TrafficDrainTarget{Membership: cloneReplicaMembership(membership), Mode: mode})
+		}
+	} else {
 		for _, replicaID := range resolution.retiringReplicaIDs {
 			membership, _ := membershipByID(base, replicaID)
-			drain = append(drain, membership)
+			drain = append(drain, TrafficDrainTarget{
+				Membership: membership,
+				Mode:       trafficDrainMode(status.Transition.Spec.Plan.RetirementSafety),
+			})
 		}
 	}
 
@@ -886,7 +896,7 @@ func buildPreMembershipTrafficTarget(
 		TransitionID:       status.Transition.Spec.ID,
 		TopologyGeneration: base.Generation,
 		Admitted:           normalizeMemberships(admitted),
-		Drain:              normalizeMemberships(drain),
+		Drain:              normalizeTrafficDrainTargets(drain),
 	}
 }
 
@@ -896,19 +906,27 @@ func buildCommittedTrafficTarget(
 	committed MembershipTopology,
 	resolution planResolution,
 ) TrafficTarget {
-	drain := make([]ReplicaMembership, 0, len(resolution.retiringReplicaIDs))
-	if status.Transition.Spec.Plan.RetirementSafety == RetirementSafetyDrained {
-		for _, replicaID := range resolution.retiringReplicaIDs {
-			membership, _ := membershipByID(base, replicaID)
-			drain = append(drain, membership)
-		}
+	drain := make([]TrafficDrainTarget, 0, len(resolution.retiringReplicaIDs))
+	for _, replicaID := range resolution.retiringReplicaIDs {
+		membership, _ := membershipByID(base, replicaID)
+		drain = append(drain, TrafficDrainTarget{
+			Membership: membership,
+			Mode:       trafficDrainMode(status.Transition.Spec.Plan.RetirementSafety),
+		})
 	}
 	return TrafficTarget{
 		TransitionID:       status.Transition.Spec.ID,
 		TopologyGeneration: committed.Generation,
 		Admitted:           normalizeMemberships(committed.Replicas),
-		Drain:              normalizeMemberships(drain),
+		Drain:              normalizeTrafficDrainTargets(drain),
 	}
+}
+
+func trafficDrainMode(safety RetirementSafety) TrafficDrainMode {
+	if safety == RetirementSafetyWithdrawn {
+		return TrafficDrainModeConfirmInactive
+	}
+	return TrafficDrainModeGraceful
 }
 
 func cloneReleaseFences(values []ReleaseFence) []ReleaseFence {
@@ -1330,7 +1348,35 @@ func sameTrafficTargetIntent(left, right TrafficTarget) bool {
 	return left.TransitionID == right.TransitionID &&
 		left.TopologyGeneration == right.TopologyGeneration &&
 		sameMemberships(left.Admitted, right.Admitted) &&
-		sameMemberships(left.Drain, right.Drain)
+		sameTrafficDrainTargets(left.Drain, right.Drain)
+}
+
+func normalizeTrafficDrainTargets(values []TrafficDrainTarget) []TrafficDrainTarget {
+	normalized := make([]TrafficDrainTarget, 0, len(values))
+	for _, value := range values {
+		value.Membership = cloneReplicaMembership(value.Membership)
+		value.Membership.NativeMembers = normalizeNativeMembers(value.Membership.NativeMembers)
+		normalized = append(normalized, value)
+	}
+	slices.SortFunc(normalized, func(left, right TrafficDrainTarget) int {
+		return strings.Compare(string(left.Membership.ReplicaID), string(right.Membership.ReplicaID))
+	})
+	return normalized
+}
+
+func sameTrafficDrainTargets(left, right []TrafficDrainTarget) bool {
+	left = normalizeTrafficDrainTargets(left)
+	right = normalizeTrafficDrainTargets(right)
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index].Mode != right[index].Mode ||
+			!sameMembership(left[index].Membership, right[index].Membership) {
+			return false
+		}
+	}
+	return true
 }
 
 func trafficTargetConverged(target TrafficTarget, observation TrafficObservation) bool {
@@ -1339,7 +1385,7 @@ func trafficTargetConverged(target TrafficTarget, observation TrafficObservation
 		return false
 	}
 	for _, required := range target.Drain {
-		if !containsMembership(observation.Drained, required) {
+		if !containsMembership(observation.Drained, required.Membership) {
 			return false
 		}
 	}

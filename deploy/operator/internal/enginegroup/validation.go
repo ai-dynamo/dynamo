@@ -415,17 +415,27 @@ func validateTrafficTarget(controlRevision int64, target *TrafficTarget) error {
 	if err := validateMembershipIdentitySet(target.Admitted); err != nil {
 		return fmt.Errorf("validate desired admitted membership: %w", err)
 	}
-	if err := validateMembershipIdentitySet(target.Drain); err != nil {
-		return fmt.Errorf("validate desired drain membership: %w", err)
-	}
+	draining := make([]ReplicaMembership, 0, len(target.Drain))
+	seenDrains := make(map[ReplicaID]struct{}, len(target.Drain))
 	for _, drained := range target.Drain {
-		if containsMembership(target.Admitted, drained) {
+		if drained.Mode != TrafficDrainModeGraceful && drained.Mode != TrafficDrainModeConfirmInactive {
+			return fmt.Errorf("replica %q has invalid traffic drain mode %q", drained.Membership.ReplicaID, drained.Mode)
+		}
+		if _, duplicate := seenDrains[drained.Membership.ReplicaID]; duplicate {
+			return fmt.Errorf("replica %q appears more than once in desired drain state", drained.Membership.ReplicaID)
+		}
+		seenDrains[drained.Membership.ReplicaID] = struct{}{}
+		draining = append(draining, drained.Membership)
+		if containsMembership(target.Admitted, drained.Membership) {
 			return fmt.Errorf(
 				"traffic target both admits and drains replica %q incarnation %q",
-				drained.ReplicaID,
-				drained.RuntimeIncarnation,
+				drained.Membership.ReplicaID,
+				drained.Membership.RuntimeIncarnation,
 			)
 		}
+	}
+	if err := validateMembershipIdentitySet(draining); err != nil {
+		return fmt.Errorf("validate desired drain membership: %w", err)
 	}
 	return nil
 }

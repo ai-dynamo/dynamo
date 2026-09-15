@@ -324,7 +324,11 @@ func cloneTrafficTarget(value *TrafficTarget) *TrafficTarget {
 	}
 	cloned := *value
 	cloned.Admitted = cloneReplicaMemberships(value.Admitted)
-	cloned.Drain = cloneReplicaMemberships(value.Drain)
+	cloned.Drain = make([]TrafficDrainTarget, 0, len(value.Drain))
+	for _, drain := range value.Drain {
+		drain.Membership = cloneReplicaMembership(drain.Membership)
+		cloned.Drain = append(cloned.Drain, drain)
+	}
 	return &cloned
 }
 

@@ -106,11 +106,12 @@ func (a *testCapacityAdapter) Apply(
 }
 
 type testTrafficAdapter struct {
-	observation TrafficObservation
-	lastTarget  *TrafficTarget
-	applyCalls  int
-	autoDrain   bool
-	events      *[]string
+	observation     TrafficObservation
+	lastTarget      *TrafficTarget
+	applyCalls      int
+	autoDrain       bool
+	confirmInactive bool
+	events          *[]string
 }
 
 func (a *testTrafficAdapter) Observe(context.Context, GroupID) (TrafficObservation, error) {
@@ -137,15 +138,24 @@ func (a *testTrafficAdapter) Apply(
 	// Applying an absolute traffic set withdraws everything else without implicitly admitting engine members.
 	a.observation.AppliedRevision = target.ControlRevision
 	a.observation.Admitted = cloneReplicaMemberships(target.Admitted)
-	if a.autoDrain {
-		a.observation.Draining = nil
-		for _, membership := range target.Drain {
-			if !containsMembership(a.observation.Drained, membership) {
-				a.observation.Drained = append(a.observation.Drained, cloneReplicaMembership(membership))
-			}
+	a.observation.Draining = nil
+	for _, drain := range target.Drain {
+		complete := a.autoDrain
+		if drain.Mode == TrafficDrainModeConfirmInactive {
+			complete = a.confirmInactive
 		}
-	} else {
-		a.observation.Draining = cloneReplicaMemberships(target.Drain)
+		if complete {
+			if !containsMembership(a.observation.Drained, drain.Membership) {
+				a.observation.Drained = append(
+					a.observation.Drained,
+					cloneReplicaMembership(drain.Membership),
+				)
+			}
+			continue
+		}
+		if drain.Mode == TrafficDrainModeGraceful {
+			a.observation.Draining = append(a.observation.Draining, cloneReplicaMembership(drain.Membership))
+		}
 	}
 	a.lastTarget = cloneTrafficTarget(&target)
 	return ApplyResult{}, nil
@@ -321,9 +331,10 @@ func newCoordinatorScenario(t *testing.T, topology MembershipTopology) *coordina
 		events:      &scenario.events,
 	}
 	scenario.traffic = &testTrafficAdapter{
-		observation: trafficObservation,
-		autoDrain:   true,
-		events:      &scenario.events,
+		observation:     trafficObservation,
+		autoDrain:       true,
+		confirmInactive: true,
+		events:          &scenario.events,
 	}
 	scenario.membership = &testMembershipAdapter{
 		topology:    cloneTopology(topology),
