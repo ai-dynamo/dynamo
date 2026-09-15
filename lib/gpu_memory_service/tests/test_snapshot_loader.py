@@ -143,8 +143,8 @@ def test_main_forwards_process_argv_to_v1_helper(monkeypatch):
 
     loader.main()
 
-    # The per-device children are spawned with exactly these arguments, so an
-    # empty list here would make each child fail on a missing --checkpoint-dir.
+    # These base arguments are forwarded to each per-device child, so an empty
+    # list here would make each child fail on a missing --checkpoint-dir.
     assert forwarded == [
         (
             "gpu_memory_service.v1.snapshot.loader",
