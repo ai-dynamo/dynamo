@@ -786,6 +786,9 @@ navigation:
           - page: Gemma-4-31B
             path: pages/recipes/model-recipes/gemma-4-31b.mdx
             slug: gemma-4-31b
+          - page: DeepSeek-V4.1-Flash
+            path: pages/recipes/model-recipes/deepseek-v4-1-flash.mdx
+            slug: deepseek-v4-1-flash
           - page: GLM-5.3-Flash
             path: pages/recipes/model-recipes/glm-5-3-flash.mdx
             slug: glm-5-3-flash

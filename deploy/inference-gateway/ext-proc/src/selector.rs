@@ -41,6 +41,7 @@ pub struct SelectRequest {
     /// Session to pin (`x-dynamo-session-id`); the selector binds it to the
     /// chosen worker when session affinity is enabled.
     pub session_id: Option<String>,
+    pub cache_namespace: Option<String>,
 }
 
 /// Observability overlap summary (matched token counts).
@@ -181,6 +182,7 @@ impl Selector {
             selection_id: Some(reservation_id.clone()),
             prompt: PromptRequest {
                 token_ids: Some(req.token_ids),
+                cache_namespace: req.cache_namespace,
                 ..Default::default()
             },
             router_config_override: None,
@@ -410,6 +412,7 @@ models:
             expected_output_tokens: None,
             policy_class: None,
             session_id: None,
+            cache_namespace: None,
         }
     }
 

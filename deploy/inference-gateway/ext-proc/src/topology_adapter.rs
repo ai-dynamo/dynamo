@@ -92,7 +92,11 @@ impl TopologyAdapter {
             primed: false,
             closed: false,
         };
-        tokio::spawn(selector.catalog_reconciler().run(source, cancel.child_token()));
+        tokio::spawn(
+            selector
+                .catalog_reconciler()
+                .run(source, cancel.child_token()),
+        );
         Self { cancel }
     }
 }

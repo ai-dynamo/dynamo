@@ -767,7 +767,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             let output = LLMEngineOutput {
                 routing_data: Some(RoutingData {
                     worker_id: worker_id_info,
-                    token_ids: Some(request.token_ids.clone()),
+                    token_ids: Some(request.token_ids.as_ref().clone()),
                     ..Default::default()
                 }),
                 ..Default::default()

@@ -145,7 +145,10 @@ impl SelectionServiceBuilder {
         // Explicit session_affinity() call takes precedence over KvRouterConfig.
         let affinity_config: Option<SessionAffinityConfig> =
             if let Some(ttl) = self.session_affinity_ttl {
-                Some(SessionAffinityConfig::new(ttl).with_mode(self.kv_router_config.session_affinity_mode))
+                Some(
+                    SessionAffinityConfig::new(ttl)
+                        .with_mode(self.kv_router_config.session_affinity_mode),
+                )
             } else if let Some(secs) = self.kv_router_config.session_affinity_ttl_secs {
                 let ttl = Duration::try_from_secs_f64(secs)
                     .map_err(|_| anyhow::anyhow!("session affinity TTL {secs} out of range"))?;
