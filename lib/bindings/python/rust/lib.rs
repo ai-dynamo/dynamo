@@ -236,7 +236,6 @@ fn wait_for_bridge_tasks_at_exit(py: Python<'_>) {
             runtimes.push(bridge);
         }
     }
-    // Nothing was ever spawned anywhere this hook can see. Costs an untouched process nothing.
     if runtimes.is_empty() {
         return;
     }
@@ -1380,6 +1379,8 @@ impl DistributedRuntime {
 
     #[staticmethod]
     fn detached(py: Python) -> PyResult<Self> {
+        let primary = rs::Worker::ensure_process_runtime().map_err(to_pyerr)?;
+        adopt_bridge_runtime(primary);
         let rt = rs::Worker::runtime_from_existing().map_err(to_pyerr)?;
         let handle = rt.primary();
 
