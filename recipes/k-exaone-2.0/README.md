@@ -53,7 +53,7 @@ deliberate exception.
 | Reasoning parser | ✅ | `--dyn-reasoning-parser qwen3` |
 | Tool calling | ✅ | `--dyn-tool-call-parser qwen3_coder` |
 | Disaggregated serving | ✅ | NIXL over UCX; requires an RDMA device plugin — see Limitations |
-| KV-aware routing | ➖ | configured, but **inert at the shipped `replicas: 1`** — one worker is one destination. See Limitations before scaling out. |
+| KV-aware routing | ✅ | wired end to end (`--router-kv-events` + worker `--kv-events-config`); inert at the shipped `replicas: 1`, correct when you scale out. See Limitations. |
 | 262,144-token context | ✅ | the checkpoint's native window; served in full, no rope scaling |
 | Expert parallel | ➖ | measured within noise on TP=4; not enabled |
 
@@ -268,12 +268,12 @@ kubectl logs <worker> -n ${NAMESPACE} | grep -o 'Prefix cache hit rate: [0-9.]*%
   Divide `_sum` by `_count`: a ~1 GB KV transfer should take **milliseconds, not seconds**. To see
   the transport UCX actually chose, redeploy with `UCX_PROTO_INFO=y` and look for `rc_mlx5` rather
   than `tcp/eth0` in the worker log.
-- **KV-aware routing does nothing until you scale out, and needs one more flag when you do.**
-  The frontend ships `--router-mode kv`, but with `replicas: 1` there is a single destination, so
-  it is a no-op; the 8.8% figure below is prefix caching, not routing. It also ships
-  `--no-router-kv-events`, and **without the published block index KV routing silently degrades to
-  round-robin** — raising `replicas` alone gives you round-robin under a `kv` label. To actually
-  route on KV, set `replicas: 2+` **and** swap `--no-router-kv-events` for `--router-kv-events`.
+- **KV-aware routing does nothing until you scale out — but scaling out is now all it takes.**
+  The frontend ships `--router-mode kv --router-kv-events` and the worker (prefill, in the
+  disaggregated recipe) ships `--kv-events-config`, so the block index is published and consumed.
+  Both halves are still inert at `replicas: 1`, because one worker is one destination — the 8.8%
+  figure below is prefix caching, not routing. Raising `replicas` is sufficient; you do not need
+  to edit any flag.
   Measured on a 2 x TP4 deployment on this workload, that is not worth doing for throughput: KV
   routing reached a 9.494% prefix hit rate against round-robin's 9.458%, a 0.037 pp difference,
   and aggregate throughput was identical (623 vs 623 tok/s, 847 vs 845). KV routing did show

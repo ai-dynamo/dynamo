@@ -26,6 +26,12 @@
 #     prefer a SHARED flavour: with an exclusive-mode resource, two co-located workers each
 #     claiming HCAs can deadlock NCCL bootstrap in whichever initialises second.
 #   - podAffinity packs decode onto prefill's node so the KV hop stays on one fabric.
+#   - --kv-events-config on the PREFILL worker publishes the prefix-block index that the
+#     frontend's --router-kv-events consumes; decode receives KV and does not publish.
+#     Both halves are inert at replicas: 1 (one destination), but without them raising
+#     replicas silently gives round-robin under a --router-mode kv label. Measured at
+#     parity with round-robin on this workload -- shipped so scaling behaves as labelled,
+#     not as a throughput claim.
 #     It is PREFERRED, not required: gang scheduling deadlocks on a required peer affinity.
 ---
 apiVersion: nvidia.com/v1beta1
@@ -63,7 +69,7 @@ spec:
               image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.1
               command: [/bin/bash, -lc]
               args:
-                - exec python3 -m dynamo.frontend --router-mode kv --no-router-kv-events --kv-cache-block-size 64 --http-host 0.0.0.0 --http-port 8000
+                - exec python3 -m dynamo.frontend --router-mode kv --router-kv-events --kv-cache-block-size 64 --http-host 0.0.0.0 --http-port 8000
               ports: [{containerPort: 8000, name: http, protocol: TCP}]
               volumeMounts:
                 - {mountPath: /model-cache, name: model-cache, readOnly: true}
@@ -111,6 +117,7 @@ spec:
                     --dyn-reasoning-parser qwen3 \
                     --dyn-tool-call-parser qwen3_coder \
                     --kernel-config '{"moe_backend":"FLASHINFER_CUTLASS"}' \
+                    --kv-events-config '{"enable_kv_cache_events":true,"publisher":"zmq"}' \
                     --spec-method exaone_moe_mtp \
                     --spec-tokens 2
               securityContext:
