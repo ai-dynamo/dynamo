@@ -39,6 +39,7 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_temperature",
     "use_kv_events",
     "router_replica_sync",
+    "wait_for_recovery",
     "router_track_active_blocks",
     "router_track_output_blocks",
     "router_assume_kv_reuse",
@@ -200,6 +201,7 @@ class KvRouterConfigBase(ConfigBase):
     router_temperature: float
     use_kv_events: bool
     router_replica_sync: bool
+    wait_for_recovery: bool
     router_track_active_blocks: bool
     router_track_output_blocks: bool
     router_assume_kv_reuse: bool
@@ -421,6 +423,18 @@ class KvRouterArgGroup(ArgGroup):
             help=(
                 "KV Router: Enable best-effort active-sequence synchronization through "
                 "the Runtime event plane."
+            ),
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--wait-for-recovery",
+            env_var="DYN_ROUTER_WAIT_FOR_RECOVERY",
+            default=False,
+            dest="wait_for_recovery",
+            help=(
+                "KV Router: Wait for recovery attempts from 95%% of recoverable worker ranks "
+                "before serving, for up to 600 seconds. "
+                "This is independent of the initial worker-discovery wait."
             ),
         )
         add_negatable_bool_argument(

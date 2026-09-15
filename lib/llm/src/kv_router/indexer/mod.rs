@@ -417,6 +417,34 @@ impl Indexer {
         }
     }
 
+    /// Make previously admitted recovery events visible before router startup completes.
+    pub(crate) async fn flush_recovery_events(&self) -> Result<(), KvRouterError> {
+        match self {
+            Self::KvIndexer {
+                primary,
+                lower_tier,
+                ..
+            } => {
+                primary.flush_and_wait().await?;
+                for indexer in lower_tier.all() {
+                    indexer.flush_and_wait().await?;
+                }
+            }
+            Self::Concurrent {
+                primary,
+                lower_tier,
+                ..
+            } => {
+                primary.flush_and_wait().await?;
+                for indexer in lower_tier.all() {
+                    indexer.flush_and_wait().await?;
+                }
+            }
+            Self::Remote { .. } | Self::None => {}
+        }
+        Ok(())
+    }
+
     /// Cold-reset one logical rank and wait until all local index tiers have completed the removal.
     ///
     /// NOTE: Unlike ordinary event application, rank removal is an infallible lane operation.

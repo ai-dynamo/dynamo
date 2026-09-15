@@ -12,10 +12,11 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
     transports::event_plane::{EventSubscriber, TypedEventSubscriber, uses_direct_zmq},
 };
-use tokio::sync::{Semaphore, oneshot};
+use tokio::sync::{Semaphore, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use super::startup::StartupRecovery;
 use super::{
     IndexerRecoveryTarget, RecoveryTarget, broker_zmq::run_broker_zmq_supervisor,
     direct_zmq::run_direct_zmq_supervisor, source_health, start_state_agent_router,
@@ -414,18 +415,21 @@ pub async fn start_subscriber(
     source_requirement: KvEventSourceRequirement,
     worker_type: &'static str,
     cancellation_token: CancellationToken,
+    wait_for_recovery: bool,
 ) -> Result<KvEventSubscriptionHandle> {
     let runtime = endpoint.component().drt().runtime().secondary();
     let transport_kind = endpoint.component().drt().default_event_transport_kind();
     let direct_zmq = uses_direct_zmq(transport_kind);
     let cancel = cancellation_token.child_token();
     let cancellation_guard = cancel.clone().drop_guard();
+    let startup_recovery = wait_for_recovery.then(StartupRecovery::default);
     let state_router = start_state_agent_router(
         endpoint.component().clone(),
         indexer.clone(),
         membership_watch.clone(),
         block_size,
         cancel.child_token(),
+        startup_recovery.clone(),
     )
     .await;
     let (membership_watch, state_completion) = match state_router {
@@ -446,9 +450,10 @@ pub async fn start_subscriber(
     };
     let client = WorkerQueryClient::spawn(
         endpoint.component().clone(),
-        IndexerRecoveryTarget::new(indexer),
+        IndexerRecoveryTarget::new(indexer.clone()),
         membership_watch.fork_receiver(),
         cancel.child_token(),
+        startup_recovery.clone(),
     )
     .await?;
     let health_completion = source_health::spawn(
@@ -459,6 +464,7 @@ pub async fn start_subscriber(
         endpoint.id(),
         cancel.child_token(),
     );
+    let startup_membership = watch::Receiver::clone(&membership_watch);
     let metric_scope = MismatchMetricScope::Router(source_requirement);
 
     if transport_kind == EventTransportKind::Zmq && !direct_zmq {
@@ -484,6 +490,14 @@ pub async fn start_subscriber(
         startup_rx.await.map_err(|_| {
             anyhow::anyhow!("Brokered-ZMQ ingress supervisor exited before reporting readiness")
         })?;
+        if let Some(gate) = startup_recovery {
+            gate.wait(startup_membership, &cancel).await?;
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => anyhow::bail!("cancelled while applying initial recovery"),
+                result = indexer.flush_recovery_events() => result?,
+            }
+        }
         let cancel = cancellation_guard.disarm();
         return Ok(KvEventSubscriptionHandle {
             cancel,
@@ -520,6 +534,14 @@ pub async fn start_subscriber(
         startup_rx.await.map_err(|_| {
             anyhow::anyhow!("KV event subscription supervisor exited before reporting readiness")
         })?;
+        if let Some(gate) = startup_recovery {
+            gate.wait(startup_membership, &cancel).await?;
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => anyhow::bail!("cancelled while applying initial recovery"),
+                result = indexer.flush_recovery_events() => result?,
+            }
+        }
         let cancel = cancellation_guard.disarm();
         return Ok(KvEventSubscriptionHandle {
             cancel,
@@ -555,6 +577,14 @@ pub async fn start_subscriber(
             anyhow::anyhow!("Direct-ZMQ ingress supervisor exited before reporting readiness")
         })?
         .map_err(anyhow::Error::msg)?;
+    if let Some(gate) = startup_recovery {
+        gate.wait(startup_membership, &cancel).await?;
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => anyhow::bail!("cancelled while applying initial recovery"),
+            result = indexer.flush_recovery_events() => result?,
+        }
+    }
     let cancel = cancellation_guard.disarm();
     Ok(KvEventSubscriptionHandle {
         cancel,
@@ -607,6 +637,7 @@ pub(crate) async fn start_target_subscriber<T: RecoveryTarget>(
         recovery_semaphore,
         recovery_attempt_timeout,
         cancel.child_token(),
+        None,
     )
     .await?;
     let (startup_tx, startup_rx) = oneshot::channel();

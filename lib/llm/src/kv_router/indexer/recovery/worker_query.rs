@@ -20,6 +20,7 @@ use tokio::sync::{Mutex, Semaphore, watch};
 use tokio_util::sync::CancellationToken;
 
 use super::recovery_lane::{RECOVERY_CONCURRENCY_LIMIT, RecoveryLane};
+use super::startup::{Attempt, Source, StartupRecovery};
 use super::target::{IndexerRecoveryTarget, RecoveryResetReason, RecoveryTarget};
 use super::worker_query_state::{LiveEventAction, RankState, RecoveryKey};
 use super::worker_query_transport::{RuntimeWorkerQueryTransport, WorkerQueryTransport};
@@ -45,6 +46,7 @@ struct SourceBinding {
     source: KvEventSource,
     source_id: KvSourceId,
     lifetime: CancellationToken,
+    startup_attempt: Option<Attempt>,
 }
 
 #[derive(Debug, Clone)]
@@ -111,6 +113,7 @@ pub(crate) struct WorkerQueryClient<T = IndexerRecoveryTarget> {
     recovery_lane: RecoveryLane<RecoveryKey>,
     recovery_attempt_timeout: Duration,
     cancellation_token: CancellationToken,
+    startup_recovery: Option<StartupRecovery>,
 }
 
 impl<T: RecoveryTarget> WorkerQueryClient<T> {
@@ -119,6 +122,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
         target: T,
         membership_watch: KvSourceMembershipWatch,
         cancellation_token: CancellationToken,
+        startup_recovery: Option<StartupRecovery>,
     ) -> Result<Arc<Self>> {
         Self::spawn_with_recovery_limit(
             component,
@@ -127,6 +131,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             Arc::new(Semaphore::new(RECOVERY_CONCURRENCY_LIMIT)),
             DEFAULT_RECOVERY_ATTEMPT_TIMEOUT,
             cancellation_token,
+            startup_recovery,
         )
         .await
     }
@@ -138,6 +143,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
         recovery_semaphore: Arc<Semaphore>,
         recovery_attempt_timeout: Duration,
         cancellation_token: CancellationToken,
+        startup_recovery: Option<StartupRecovery>,
     ) -> Result<Arc<Self>> {
         let transport = Arc::new(RuntimeWorkerQueryTransport::new(&component).await?);
         let membership_rx = watch::Receiver::clone(&membership_watch);
@@ -152,6 +158,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             recovery_lane: RecoveryLane::with_semaphore(recovery_semaphore),
             recovery_attempt_timeout,
             cancellation_token,
+            startup_recovery,
         });
 
         Ok(client)
@@ -191,6 +198,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             recovery_lane: RecoveryLane::with_semaphore(recovery_semaphore),
             recovery_attempt_timeout,
             cancellation_token: CancellationToken::new(),
+            startup_recovery: None,
         })
     }
 
@@ -293,7 +301,19 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             return;
         }
         slot.rejected_source = None;
+        let startup_attempt = self.startup_recovery.as_ref().and_then(|gate| {
+            source.recovery_target.as_ref()?;
+            gate.register(
+                source.worker,
+                Source {
+                    publisher_id: source.publisher_id,
+                    attachment_generation: None,
+                    versioned: false,
+                },
+            )
+        });
         let binding = Arc::new(SourceBinding {
+            startup_attempt,
             lifetime: self.cancellation_token.child_token(),
             source,
             source_id,
@@ -756,12 +776,16 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             if task_cancel.is_cancelled() {
                 return;
             }
+            let startup_attempt = binding.startup_attempt.clone();
             let complete_initial = client
                 .clone()
                 .finish_recovery(key, binding, task_cancel, result)
                 .await;
             if initial_recovery && complete_initial {
                 client.target.complete_initial_recovery(key.0, key.1).await;
+            }
+            if initial_recovery && let Some(attempt) = startup_attempt {
+                attempt.finish();
             }
         });
         self.recovery_lane.insert(key, cancel, handle);
@@ -1534,6 +1558,53 @@ mod tests {
 
     fn ready_source(source: &KvEventSource) -> KvSourceId {
         source.source_id()
+    }
+
+    #[tokio::test]
+    async fn startup_wait_releases_after_recovery_and_indexer_visibility() {
+        let endpoint = EndpointId::from("test.router.kv");
+        let source = source(&endpoint, 100);
+        let view = membership_view(
+            &endpoint,
+            &endpoint,
+            [(source.worker, KvSourceStatus::ActiveRecoverable(source))],
+        );
+        let (_tx, rx) = watch::channel(view);
+        let gate = StartupRecovery::default();
+        let release = Arc::new(Notify::new());
+        let transport = Arc::new(MockTransport {
+            responses: Mutex::new(vec![WorkerKvQueryResponse::TreeDump {
+                events: vec![store(90)],
+                last_event_id: 90,
+                reset_scope: ResetScope::All,
+            }]),
+            release: Mutex::new(Some(release.clone())),
+        });
+        let (primary, indexer) = indexer();
+        let mut client = WorkerQueryClient::new_target_for_test(
+            IndexerRecoveryTarget::new(indexer.clone()),
+            rx.clone(),
+            transport,
+        );
+        Arc::get_mut(&mut client).unwrap().startup_recovery = Some(gate.clone());
+        client.sync_membership().await;
+        let cancel = CancellationToken::new();
+        let wait = gate.wait(rx, &cancel);
+        tokio::pin!(wait);
+        assert!(futures::poll!(&mut wait).is_pending());
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), &mut wait)
+            .await
+            .unwrap()
+            .unwrap();
+        indexer.flush_recovery_events().await.unwrap();
+        let events = primary.dump_events().await.unwrap();
+        assert!(contains_rank_block(
+            &events,
+            WorkerWithDpRank::new(42, 4),
+            90
+        ));
+        client.shutdown().await;
     }
 
     #[tokio::test]

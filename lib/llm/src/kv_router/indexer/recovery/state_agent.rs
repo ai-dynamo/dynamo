@@ -54,6 +54,7 @@ use crate::{
     kv_router::Indexer,
 };
 
+use super::startup::{Attempt, Source, StartupRecovery};
 use super::{
     RuntimeWorkerQueryTransport, recovery_lane::RecoveryLane, worker_query_state::RankState,
 };
@@ -85,6 +86,7 @@ struct OwnerRecoveryTail {
 
 #[derive(Clone)]
 struct OwnerRecoveryPlan {
+    startup_attempt: Option<Attempt>,
     owner: CacheOwnerId,
     source: KvStateSourceAdvertisement,
     attachment: Option<KvStateAttachmentAdvertisement>,
@@ -172,6 +174,7 @@ pub(crate) async fn start_state_agent_router(
     membership: KvSourceMembershipWatch,
     expected_block_size: u32,
     cancellation_token: CancellationToken,
+    startup_recovery: Option<StartupRecovery>,
 ) -> Result<KvStateRouterHandle> {
     let endpoint = membership
         .borrow()
@@ -227,6 +230,7 @@ pub(crate) async fn start_state_agent_router(
             projection_commit,
             observation_rx,
             cancellation_token,
+            startup_recovery,
         )
         .await;
         let _ = completion_tx.send(());
@@ -383,6 +387,7 @@ async fn run_state_agent_router(
     projection_commit: Arc<Mutex<()>>,
     mut observation_rx: watch::Receiver<u64>,
     cancel: CancellationToken,
+    startup_recovery: Option<StartupRecovery>,
 ) {
     let mut attachment_stream: Option<dynamo_runtime::discovery::DiscoveryStream> = None;
     let mut event_stream: Option<
@@ -543,7 +548,11 @@ async fn run_state_agent_router(
                 let publisher_id = result.publisher_id();
                 let retry_fence = result.retry_fence();
                 recovery_lane.finish((owner, result.schedule_generation()));
-                if let Err(error) = finish_owner_recovery(
+                let startup_attempt = match result.as_ref() {
+                    OwnerRecoveryResult::Initial { plan, .. }
+                    | OwnerRecoveryResult::PostStatus { plan, .. } => plan.startup_attempt.clone(),
+                };
+                let completion = finish_owner_recovery(
                     *result,
                     &indexer,
                     transport.as_ref(),
@@ -558,8 +567,13 @@ async fn run_state_agent_router(
                     &observation_revision,
                     &projection_commit,
                 )
-                .await
+                .await;
+                if !matches!(&completion, Ok(false))
+                    && let Some(attempt) = startup_attempt
                 {
+                    attempt.finish();
+                }
+                if let Err(error) = completion {
                     fail_owner_recovery(
                         owner,
                         publisher_id,
@@ -644,6 +658,7 @@ async fn run_state_agent_router(
                 &projection_commit,
                 revision,
                 schedule_generation,
+                startup_recovery.as_ref(),
             )
             .await
             {
@@ -808,6 +823,7 @@ async fn schedule_state_sources(
     projection_commit: &Mutex<()>,
     expected_revision: u64,
     schedule_generation: u64,
+    startup_recovery: Option<&StartupRecovery>,
 ) -> Result<()> {
     ensure_observation_revision(observation_revision, expected_revision)?;
     let live_workers: HashSet<_> = membership.sources.keys().copied().collect();
@@ -1090,6 +1106,16 @@ async fn schedule_state_sources(
             recovery_tx,
             transport.clone(),
             OwnerRecoveryPlan {
+                startup_attempt: startup_recovery.and_then(|gate| {
+                    gate.register(
+                        recognized_worker?,
+                        Source {
+                            publisher_id: source.publisher_id,
+                            attachment_generation: expected_generation,
+                            versioned: true,
+                        },
+                    )
+                }),
                 owner,
                 source: source.clone(),
                 attachment: attachment.cloned(),
@@ -1297,19 +1323,19 @@ async fn finish_owner_recovery(
     recovering_publishers: &mut HashMap<u64, CacheOwnerId>,
     observation_revision: &AtomicU64,
     projection_commit: &Mutex<()>,
-) -> Result<()> {
+) -> Result<bool> {
     let plan = match &result {
         OwnerRecoveryResult::Initial { plan, .. }
         | OwnerRecoveryResult::PostStatus { plan, .. } => plan,
     };
     if !owner_recovery_is_current(plan, membership, sources, attachments, observation_revision) {
-        return Ok(());
+        return Ok(false);
     }
     if tails
         .get(&plan.owner)
         .is_none_or(|tail| tail.schedule_generation != plan.schedule_generation)
     {
-        return Ok(());
+        return Ok(false);
     }
     let expected_revision = plan.observation_revision;
 
@@ -1330,7 +1356,7 @@ async fn finish_owner_recovery(
                         recovering_publishers,
                     );
                     tracing::warn!(owner = %plan.owner, %error, "KV state-agent status handshake failed");
-                    return Ok(());
+                    return Ok(true);
                 }
             };
             let recovered_cursor = if let Some(recovery) = recovery {
@@ -1345,7 +1371,7 @@ async fn finish_owner_recovery(
                             recovering_publishers,
                         );
                         tracing::warn!(owner = %plan.owner, %error, "KV state-agent recovery query failed");
-                        return Ok(());
+                        return Ok(true);
                     }
                 };
                 if plan.recovery_required
@@ -1372,7 +1398,7 @@ async fn finish_owner_recovery(
                     anyhow::bail!("state-agent recovery transport disappeared");
                 };
                 launch_post_status(lane, tx, (*transport).clone(), plan, recovered_cursor);
-                return Ok(());
+                return Ok(false);
             } else {
                 apply_recovery_tail(indexer, &plan, plan.previous_cursor, runtime, tails).await?
             };
@@ -1402,7 +1428,7 @@ async fn finish_owner_recovery(
                         recovering_publishers,
                     );
                     tracing::warn!(owner = %plan.owner, %error, "KV state-agent post-recovery status check failed");
-                    return Ok(());
+                    return Ok(true);
                 }
             };
             let recovered_cursor =
@@ -1425,7 +1451,8 @@ async fn finish_owner_recovery(
         projection_commit,
         expected_revision,
     )
-    .await
+    .await?;
+    Ok(true)
 }
 
 fn owner_recovery_is_current(
@@ -1970,6 +1997,7 @@ mod tests {
             protocol_version: source.protocol_version,
         };
         let plan = OwnerRecoveryPlan {
+            startup_attempt: None,
             owner,
             source,
             attachment: Some(attachment),
