@@ -1216,6 +1216,15 @@ where
         );
     }
 
+    fn publish_group_observation(
+        &self,
+        key: &GroupKey,
+        observation: Option<super::worker_inventory::WorkerGroupObservation>,
+    ) {
+        self.manager
+            .publish_worker_group_observation(key.id(), observation);
+    }
+
     fn discard_prepared(&self, prepared: Self::Prepared) {
         drop(prepared);
     }

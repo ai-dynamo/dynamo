@@ -285,6 +285,10 @@ where
 
 pub(crate) trait PrefillRouterLifecycle: Send + Sync {
     fn set_target(&self, target: Option<WorkerSetTarget>);
+    fn available_worker_ids_for(
+        &self,
+        endpoint: &EndpointId,
+    ) -> Option<std::collections::HashSet<u64>>;
 }
 
 impl<Sel> PrefillRouterLifecycle for PrefillRouter<Sel>
@@ -293,6 +297,27 @@ where
 {
     fn set_target(&self, target: Option<WorkerSetTarget>) {
         self.set_target(target);
+    }
+
+    fn available_worker_ids_for(
+        &self,
+        endpoint: &EndpointId,
+    ) -> Option<std::collections::HashSet<u64>> {
+        // Target changes and activation publish binding/lifecycle under this same lock.
+        let _target = self.target.lock();
+        let binding = self.binding.load();
+        let binding = binding
+            .as_ref()
+            .filter(|binding| &binding.endpoint_id == endpoint)?;
+        Some(
+            if self.cancel_token.is_cancelled()
+                || self.lifecycle_state() != PrefillLifecycleState::Active
+            {
+                std::collections::HashSet::new()
+            } else {
+                binding.router.available_worker_ids()
+            },
+        )
     }
 }
 
