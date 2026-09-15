@@ -79,6 +79,8 @@ func (r *DynamoGraphDeploymentReconciler) selectWorkloadProgram(
 	switch provider {
 	case workloadProviderGrove:
 		return r.newGroveProgram(), nil
+	case workloadProviderDisaggregatedSet:
+		return r.newDisaggregatedSetProgram(), nil
 	case workloadProviderComponent:
 		return r.newComponentProgram(), nil
 	default:
