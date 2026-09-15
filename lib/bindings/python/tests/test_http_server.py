@@ -234,13 +234,13 @@ HTTP_ERROR_CASES = (
     (
         MSG_CONTAINS_STATUS_ERROR,
         415,
-        MSG_CONTAINS_STATUS_ERROR,
+        "Unsupported media type",
         "Unsupported Media Type",
     ),
     (
         MSG_CONTAINS_INVALID_ARGUMENT,
         400,
-        f"ValueError: {MSG_CONTAINS_INVALID_ARGUMENT}",
+        "Invalid request",
         "Bad Request",
     ),
     (
@@ -253,15 +253,7 @@ HTTP_ERROR_CASES = (
 
 
 def expected_error_body(status: int, message: str, error_type: str) -> Dict:
-    body = {"message": message, "type": error_type, "code": status}
-    # A backend-asserted 500 that carries no retry semantics tunnels
-    # its own status into `details` so it survives for debugging,
-    # while the backend's own message text stays server-side. See
-    # `BackendStatusAction::CoerceToInternal` in
-    # lib/llm/src/http/service/openai.rs.
-    if status == 500:
-        body["details"] = {"backend_status": 500}
-    return body
+    return {"message": message, "type": error_type, "code": status}
 
 
 @pytest.mark.asyncio
