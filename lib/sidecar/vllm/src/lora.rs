@@ -15,7 +15,7 @@ use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery, DiscoverySpec};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use serde_json::Value;
-use tokio::sync::{Mutex, OwnedMutexGuard};
+use tokio::sync::{Mutex, OwnedRwLockReadGuard, RwLock};
 
 use crate::client;
 use crate::proto as pb;
@@ -28,26 +28,32 @@ pub(crate) fn is_lora_update(update: &str) -> bool {
     matches!(update, LOAD_LORA | UNLOAD_LORA | LIST_LORAS)
 }
 
-pub(crate) type LoraGuard = OwnedMutexGuard<()>;
+pub(crate) type LoraGuard = OwnedRwLockReadGuard<()>;
+
+#[derive(Default)]
+pub(crate) struct LoraUpdateState {
+    pub(crate) is_reconciled: bool,
+    pub(crate) pending_unpublish: BTreeSet<String>,
+}
 
 #[derive(Default)]
 pub(crate) struct LoraLifecycle {
     // Serialize inventory checks through native mutation and discovery publication.
-    pub(crate) updates: Mutex<()>,
-    locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    pub(crate) updates: Mutex<LoraUpdateState>,
+    locks: Mutex<HashMap<String, Arc<RwLock<()>>>>,
     published: Mutex<BTreeSet<String>>,
 }
 
 impl LoraLifecycle {
-    pub(crate) async fn lock(&self, name: &str) -> LoraGuard {
-        let lock = self
-            .locks
-            .lock()
-            .await
-            .entry(name.to_string())
-            .or_default()
-            .clone();
-        lock.lock_owned().await
+    pub(crate) async fn adapter_lock(&self, name: &str) -> Arc<RwLock<()>> {
+        let mut locks = self.locks.lock().await;
+        if let Some(lock) = locks.get(name) {
+            return lock.clone();
+        }
+        locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+        let lock = Arc::new(RwLock::new(()));
+        locks.insert(name.to_string(), lock.clone());
+        lock
     }
 
     pub(crate) async fn mark_published(&self, name: &str) {
@@ -228,13 +234,13 @@ pub(crate) async fn resolve_source_path(
                 downloaded.display()
             ))
         })?;
-    let valid = LoRACache::validate_path(&canonical).map_err(|error| {
+    let is_valid = LoRACache::validate_path(&canonical).map_err(|error| {
         client::protocol_error(format!(
             "failed to validate LoRA directory `{}`: {error}",
             canonical.display()
         ))
     })?;
-    if !valid {
+    if !is_valid {
         return Err(client::invalid_argument(format!(
             "LoRA directory `{}` must contain adapter_config.json and adapter weights",
             canonical.display()
@@ -340,7 +346,10 @@ pub(crate) async fn unpublish_lora_model(
     let endpoint_name = endpoint_id.name.as_str();
     let instance_id = endpoint.drt().connection_id();
 
-    let suffix = derive_lora_suffix(Some(lora_name));
+    let Some(suffix) = derive_lora_suffix(Some(lora_name)).filter(|suffix| !suffix.is_empty())
+    else {
+        return Ok(false);
+    };
     let models = discovery
         .list(DiscoveryQuery::EndpointModels {
             namespace: namespace.to_string(),
@@ -351,31 +360,27 @@ pub(crate) async fn unpublish_lora_model(
         .map_err(|error| {
             client::protocol_error(format!("failed to query LoRA discovery: {error}"))
         })?;
-    let exists = models.iter().any(|instance| {
+    let instance = models.into_iter().find(|instance| {
         matches!(
             instance,
             DiscoveryInstance::Model {
                 instance_id: candidate_id,
                 model_suffix,
                 ..
-            } if *candidate_id == instance_id && *model_suffix == suffix
+            } if *candidate_id == instance_id && model_suffix.as_deref() == Some(suffix.as_str())
         )
     });
-    if !exists {
+    let Some(instance) = instance else {
+        return Ok(false);
+    };
+    let card = instance
+        .deserialize_model::<ModelDeploymentCard>()
+        .map_err(|error| client::protocol_error(format!("invalid LoRA model card: {error}")))?;
+    if card.name() != lora_name || card.lora.as_ref().is_none_or(|lora| lora.name != lora_name) {
         return Ok(false);
     }
-    discovery
-        .unregister(DiscoveryInstance::Model {
-            namespace: namespace.to_string(),
-            component: component.to_string(),
-            endpoint: endpoint_name.to_string(),
-            instance_id,
-            card_json: Value::Null,
-            model_suffix: suffix,
-        })
-        .await
-        .map_err(|error| {
-            client::protocol_error(format!("failed to unpublish LoRA model: {error}"))
-        })?;
+    discovery.unregister(instance).await.map_err(|error| {
+        client::protocol_error(format!("failed to unpublish LoRA model: {error}"))
+    })?;
     Ok(true)
 }

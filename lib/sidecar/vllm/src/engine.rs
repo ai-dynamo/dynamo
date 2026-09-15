@@ -34,9 +34,8 @@ pub struct VllmSidecarEngine {
     client: OnceCell<VllmClient>,
     runtime_endpoint: OnceCell<Endpoint>,
     lora_downloader: OnceCell<LoRADownloader>,
-    lora_reconciled: OnceCell<()>,
-    lora_enabled: bool,
-    hot_swap_requested: bool,
+    is_lora_enabled: bool,
+    is_hot_swap_requested: bool,
     lifecycle: lora::LoraLifecycle,
     cancel: CancellationToken,
 }
@@ -56,8 +55,8 @@ impl VllmSidecarEngine {
         transport: GrpcTransportConfig,
     ) -> Self {
         Self {
-            lora_enabled: lora_serving_enabled() && model.supports_lora(),
-            hot_swap_requested: hot_swap_requested(),
+            is_lora_enabled: lora_serving_enabled() && model.supports_lora(),
+            is_hot_swap_requested: is_hot_swap_requested(),
             endpoint,
             model,
             mode,
@@ -65,7 +64,6 @@ impl VllmSidecarEngine {
             client: OnceCell::new(),
             runtime_endpoint: OnceCell::new(),
             lora_downloader: OnceCell::new(),
-            lora_reconciled: OnceCell::new(),
             lifecycle: lora::LoraLifecycle::default(),
             cancel: CancellationToken::new(),
         }
@@ -174,19 +172,19 @@ impl VllmSidecarEngine {
             .ok_or_else(|| client::engine_shutdown("vLLM sidecar runtime endpoint is not ready"))
     }
 
-    fn lora_enabled(&self) -> bool {
-        self.lora_enabled
+    fn is_lora_enabled(&self) -> bool {
+        self.is_lora_enabled
     }
 
     #[cfg(test)]
     pub(crate) fn with_lora_enabled(mut self, enabled: bool) -> Self {
-        self.lora_enabled = enabled && self.model.supports_lora();
+        self.is_lora_enabled = enabled && self.model.supports_lora();
         self
     }
 
     #[cfg(test)]
     pub(crate) fn with_hot_swap_requested(mut self, requested: bool) -> Self {
-        self.hot_swap_requested = requested;
+        self.is_hot_swap_requested = requested;
         self
     }
 
@@ -219,7 +217,7 @@ impl VllmSidecarEngine {
     }
 
     async fn lora_updates(&self) -> Vec<String> {
-        if !self.lora_enabled() {
+        if !self.is_lora_enabled() {
             return Vec::new();
         }
         if let Err(error) = self.reconcile_loaded_loras().await {
@@ -241,7 +239,7 @@ impl VllmSidecarEngine {
             .get("lora_name")
             .and_then(Value::as_str)
             .map(str::to_string);
-        let result = if !self.lora_enabled() {
+        let result = if !self.is_lora_enabled() {
             Err(client::invalid_argument(
                 "LoRA lifecycle is not available: it requires DYN_LORA_ENABLED and a vLLM \
                  server advertising LoRA support with max_loras > 0",
@@ -270,50 +268,47 @@ impl VllmSidecarEngine {
     }
 
     async fn reconcile_loaded_loras(&self) -> Result<(), DynamoError> {
-        self.lora_reconciled
-            .get_or_try_init(|| async {
-                let _update = self.lifecycle.updates.lock().await;
-                let endpoint = self.ready_endpoint()?;
-                let adapters = self.native_inventory().await?;
-                for adapter in &adapters {
-                    lora::validate_adapter_name(
-                        &adapter.lora_name,
-                        |name| self.model.is_base_model_name(name),
-                        &adapters,
-                    )?;
-                }
-                let mut records = std::collections::BTreeSet::new();
-                for adapter in &adapters {
-                    lora::publish_lora_model(endpoint, adapter, self.model.max_loras())
-                        .await?;
-                    records.insert(adapter.lora_name.clone());
-                    self.lifecycle.mark_published(&adapter.lora_name).await;
-                }
-                let stale = self.lifecycle.replace_published(records).await;
-                for name in stale {
-                    if let Err(error) = lora::unpublish_lora_model(endpoint, &name).await {
-                        tracing::warn!(%error, lora_name = %name, "failed to drop stale LoRA discovery record");
-                    }
-                }
-                if !adapters.is_empty() {
-                    tracing::info!(
-                        count = adapters.len(),
-                        "republished LoRA adapters loaded before sidecar start"
-                    );
-                }
-                Ok::<(), DynamoError>(())
-            })
-            .await
-            .copied()
+        let mut state = self.lifecycle.updates.lock().await;
+        if state.is_reconciled {
+            return Ok(());
+        }
+        let endpoint = self.ready_endpoint()?;
+        self.unpublish_pending_loras(endpoint, &mut state).await?;
+        let adapters = self.native_inventory().await?;
+        for adapter in &adapters {
+            lora::validate_adapter_name(
+                &adapter.lora_name,
+                |name| self.model.is_base_model_name(name),
+                &adapters,
+            )?;
+        }
+        let mut records = std::collections::BTreeSet::new();
+        for adapter in &adapters {
+            self.ensure_published(endpoint, adapter, &mut state).await?;
+            records.insert(adapter.lora_name.clone());
+        }
+        state
+            .pending_unpublish
+            .extend(self.lifecycle.replace_published(records).await);
+        self.unpublish_pending_loras(endpoint, &mut state).await?;
+        state.is_reconciled = true;
+        Ok(())
     }
 
     async fn load_lora(&self, body: &Value) -> Result<Value, DynamoError> {
         let request = parse_load_lora(body)?;
         let client = self.started_client()?;
         let endpoint = self.ready_endpoint()?;
-        let _update = self.lifecycle.updates.lock().await;
-        let _guard = self.lifecycle.lock(&request.name).await;
+        let mut state = self.lifecycle.updates.lock().await;
+        let is_reconciled = std::mem::replace(&mut state.is_reconciled, false);
+        let _guard = self
+            .lifecycle
+            .adapter_lock(&request.name)
+            .await
+            .write_owned()
+            .await;
 
+        self.unpublish_pending_loras(endpoint, &mut state).await?;
         let loaded = self.native_inventory().await?;
         lora::validate_adapter_name(
             &request.name,
@@ -325,14 +320,16 @@ impl VllmSidecarEngine {
             .find(|adapter| adapter.lora_name == request.name);
 
         if let Some(existing) = existing {
-            if self.hot_swap_requested {
+            if self.is_hot_swap_requested {
                 return Err(client::invalid_argument(format!(
                     "LoRA adapter `{}` is already loaded; hot swap is not supported by the \
                      gRPC backend. Load new weights under a different name.",
                     request.name
                 )));
             }
-            self.ensure_published(endpoint, existing).await?;
+            self.ensure_published(endpoint, existing, &mut state)
+                .await?;
+            state.is_reconciled = is_reconciled;
             tracing::info!(
                 lora_name = %existing.lora_name,
                 lora_id = existing.lora_id,
@@ -376,7 +373,9 @@ impl VllmSidecarEngine {
                             request.name
                         ))
                     })?;
-                    self.ensure_published(endpoint, &observed).await?;
+                    self.ensure_published(endpoint, &observed, &mut state)
+                        .await?;
+                    state.is_reconciled = is_reconciled;
                     return Ok(json!({
                         "status": "success",
                         "message": format!("LoRA adapter '{}' already loaded", observed.lora_name),
@@ -407,15 +406,16 @@ impl VllmSidecarEngine {
             }
         };
 
-        if let Err(error) =
-            lora::publish_lora_model(endpoint, &adapter, self.model.max_loras()).await
-        {
+        if let Err(error) = self.ensure_published(endpoint, &adapter, &mut state).await {
             tracing::error!(%error, lora_name = %adapter.lora_name, "failed to publish LoRA discovery record; rolling back the native load");
+            if let Err(cleanup_error) = self.unpublish_pending_loras(endpoint, &mut state).await {
+                tracing::warn!(%cleanup_error, lora_name = %adapter.lora_name, "failed to remove LoRA discovery record during rollback");
+            }
             self.rollback_loaded_adapter(client, &adapter).await;
             self.lifecycle.forget(&adapter.lora_name).await;
             return Err(error);
         }
-        self.lifecycle.mark_published(&adapter.lora_name).await;
+        state.is_reconciled = is_reconciled;
 
         tracing::info!(lora_name = %adapter.lora_name, lora_id = adapter.lora_id, "loaded LoRA adapter");
         Ok(json!({
@@ -431,10 +431,19 @@ impl VllmSidecarEngine {
         let lora_name = parse_lora_name(body)?;
         let client = self.started_client()?;
         let endpoint = self.ready_endpoint()?;
-        let _update = self.lifecycle.updates.lock().await;
-        let _guard = self.lifecycle.lock(&lora_name).await;
+        let mut state = self.lifecycle.updates.lock().await;
+        let is_reconciled = std::mem::replace(&mut state.is_reconciled, false);
+        let _guard = self
+            .lifecycle
+            .adapter_lock(&lora_name)
+            .await
+            .write_owned()
+            .await;
 
-        let loaded = self.native_inventory().await?;
+        let loaded = client
+            .list_loras()
+            .await
+            .map_err(client::LoraRpcError::into_dynamo)?;
         let Some(existing) = loaded
             .iter()
             .find(|adapter| adapter.lora_name == lora_name)
@@ -450,7 +459,10 @@ impl VllmSidecarEngine {
         };
 
         // Stop routing new requests before unloading the adapter.
+        let is_published = self.lifecycle.is_published(&lora_name).await;
+        state.pending_unpublish.insert(lora_name.clone());
         lora::unpublish_lora_model(endpoint, &lora_name).await?;
+        state.pending_unpublish.remove(&lora_name);
         self.lifecycle.forget(&lora_name).await;
 
         let removed = match client.unload_lora(lora_name.clone()).await {
@@ -459,16 +471,24 @@ impl VllmSidecarEngine {
                 existing.clone()
             }
             Err(error) => {
-                let definitive = error.is_definitive();
-                let still_loaded = if definitive {
+                let is_definitive = error.is_definitive();
+                let still_loaded = if is_definitive {
                     Some(existing.clone())
                 } else {
                     tracing::warn!(%error, %lora_name, "UnloadLora outcome is ambiguous; reconciling");
-                    self.find_loaded(&lora_name).await?
+                    client
+                        .list_loras()
+                        .await
+                        .map_err(client::LoraRpcError::into_dynamo)?
+                        .into_iter()
+                        .find(|adapter| adapter.lora_name == lora_name)
                 };
                 match still_loaded {
                     Some(observed) => {
-                        self.restore_unloaded_adapter(endpoint, &observed).await;
+                        if is_published {
+                            self.restore_unloaded_adapter(endpoint, &observed, &mut state)
+                                .await;
+                        }
                         return Err(error.into_dynamo());
                     }
                     None => existing.clone(),
@@ -476,6 +496,7 @@ impl VllmSidecarEngine {
             }
         };
 
+        state.is_reconciled = is_reconciled;
         tracing::info!(%lora_name, lora_id = removed.lora_id, "unloaded LoRA adapter");
         Ok(json!({
             "status": "success",
@@ -506,7 +527,12 @@ impl VllmSidecarEngine {
             )));
         }
         // Hold admission until vLLM resolves the adapter for the request.
-        let guard = self.lifecycle.lock(lora_name).await;
+        let guard = self
+            .lifecycle
+            .adapter_lock(lora_name)
+            .await
+            .read_owned()
+            .await;
         if !self.lifecycle.is_published(lora_name).await {
             return Err(client::invalid_argument(format!(
                 "unknown model or LoRA adapter: '{lora_name}'"
@@ -552,9 +578,25 @@ impl VllmSidecarEngine {
         &self,
         endpoint: &Endpoint,
         adapter: &pb::LoraAdapter,
+        state: &mut lora::LoraUpdateState,
     ) -> Result<(), DynamoError> {
+        state.pending_unpublish.insert(adapter.lora_name.clone());
         lora::publish_lora_model(endpoint, adapter, self.model.max_loras()).await?;
+        state.pending_unpublish.remove(&adapter.lora_name);
         self.lifecycle.mark_published(&adapter.lora_name).await;
+        Ok(())
+    }
+
+    async fn unpublish_pending_loras(
+        &self,
+        endpoint: &Endpoint,
+        state: &mut lora::LoraUpdateState,
+    ) -> Result<(), DynamoError> {
+        while let Some(name) = state.pending_unpublish.first().cloned() {
+            lora::unpublish_lora_model(endpoint, &name).await?;
+            state.pending_unpublish.remove(&name);
+            self.lifecycle.forget(&name).await;
+        }
         Ok(())
     }
 
@@ -572,10 +614,14 @@ impl VllmSidecarEngine {
         }
     }
 
-    async fn restore_unloaded_adapter(&self, endpoint: &Endpoint, adapter: &pb::LoraAdapter) {
-        match lora::publish_lora_model(endpoint, adapter, self.model.max_loras()).await {
+    async fn restore_unloaded_adapter(
+        &self,
+        endpoint: &Endpoint,
+        adapter: &pb::LoraAdapter,
+        state: &mut lora::LoraUpdateState,
+    ) {
+        match self.ensure_published(endpoint, adapter, state).await {
             Ok(()) => {
-                self.lifecycle.mark_published(&adapter.lora_name).await;
                 tracing::info!(
                     lora_name = %adapter.lora_name,
                     "restored the LoRA discovery record after a failed unload"
@@ -590,13 +636,18 @@ impl VllmSidecarEngine {
     }
 
     async fn unpublish_all_loras(&self) {
-        let _update = self.lifecycle.updates.lock().await;
+        let mut state = self.lifecycle.updates.lock().await;
+        state.is_reconciled = false;
         let Ok(endpoint) = self.ready_endpoint() else {
             return;
         };
-        for name in self.lifecycle.published_names().await {
+        state
+            .pending_unpublish
+            .extend(self.lifecycle.published_names().await);
+        for name in state.pending_unpublish.clone() {
             match lora::unpublish_lora_model(endpoint, &name).await {
                 Ok(_) => {
+                    state.pending_unpublish.remove(&name);
                     self.lifecycle.forget(&name).await;
                 }
                 Err(error) => {
@@ -1221,6 +1272,6 @@ fn bootstrap_discover(
     })
 }
 
-fn hot_swap_requested() -> bool {
+fn is_hot_swap_requested() -> bool {
     dynamo_runtime::config::env_is_truthy("DYN_LORA_HOTSWAP_ENABLED")
 }
