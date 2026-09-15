@@ -1169,9 +1169,11 @@ class WorkerFactory:
         raw_timeout = os.environ.get(ENV_SHADOW_PAUSE_TIMEOUT_SECONDS)
         timeout_s = float(raw_timeout) if raw_timeout else SHADOW_PAUSE_TIMEOUT_SECONDS
         # This is the last line a wedged shadow prints, so it has to name both
-        # the engine and the bound a reader should expect it to die by.
+        # the engine and the bound a reader should expect it to die by. %g, not
+        # a fixed number of decimals: rounding a sub-second bound down to "0"
+        # would print the one value that means "wait forever".
         logger.info(
-            "[Shadow] engine-%s pausing before standby (bound %.0fs)",
+            "[Shadow] engine-%s pausing before standby (bound %gs)",
             engine_id,
             timeout_s,
         )
@@ -1190,7 +1192,7 @@ class WorkerFactory:
             # promotion, so it must not report itself Ready.
             raise RuntimeError(
                 f"[Shadow] engine-{engine_id} did not finish pausing for standby "
-                f"within {timeout_s:.0f}s; the engine pause (pause_generation + "
+                f"within {timeout_s:g}s; the engine pause (pause_generation + "
                 "sleep, which waits on GMS weight admission) never completed, so "
                 "this engine cannot enter standby"
             ) from exc
