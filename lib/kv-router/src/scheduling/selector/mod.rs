@@ -22,7 +22,9 @@ use policy::{
 
 use super::config::KvRouterConfig;
 use super::filter::{RoutingEligibility, WorkerEligibilityError};
-use super::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
+use super::types::{
+    KvSchedulerError, SchedulingContext, SchedulingRequest, WorkerSelectionPolicyError,
+};
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 
 /// Low-level selector used by routing hosts.
@@ -270,8 +272,10 @@ impl<'a> MaterializedSelectionInput<'a> {
     }
 }
 
-fn selection_result(
+fn selection_result<C: WorkerConfigLike>(
     request: &SchedulingRequest,
+    workers: &HashMap<WorkerId, C>,
+    eligibility: RoutingEligibility<'_>,
     worker: WorkerWithDpRank,
     block_size: u32,
 ) -> WorkerSelectionResult {
@@ -280,6 +284,8 @@ fn selection_result(
         required_blocks: request.request_blocks(block_size),
         effective_overlap_blocks: request.effective_overlap_blocks_for(worker),
         cached_tokens: request.effective_cached_tokens_for(worker),
+        max_cached_tokens: SchedulingContext::with_eligibility(request, workers, eligibility)
+            .best_cached_tokens(),
         potential_decode_blocks: request
             .potential_decode_blocks_after_admission(worker, block_size),
     }
@@ -445,7 +451,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         }
         return Err(KvSchedulerError::NoEndpoints);
     };
-    let result = selection_result(request, worker, block_size);
+    let result = selection_result(request, workers, eligibility, worker, block_size);
     log_selection(
         workers,
         request,
