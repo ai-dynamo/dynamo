@@ -169,6 +169,7 @@ func TestEnsureWorkloadProvider(t *testing.T) {
 			require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(seed), live))
 			reconciler := &DynamoGraphDeploymentReconciler{
 				Client:        kubeClient,
+				DirectClient:  kubeClient,
 				RuntimeConfig: &commoncontroller.RuntimeConfig{Gate: tt.gate},
 			}
 
@@ -253,6 +254,7 @@ func TestEnsureWorkloadProviderRestoresObjectAfterPatchFailure(t *testing.T) {
 	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(seed), live))
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client:        kubeClient,
+		DirectClient:  kubeClient,
 		RuntimeConfig: &commoncontroller.RuntimeConfig{},
 	}
 
@@ -313,6 +315,7 @@ func TestDynamoGraphDeploymentReconcileReportsUnsupportedWorkloadProvider(t *tes
 			kubeClient := builder.Build()
 			reconciler := &DynamoGraphDeploymentReconciler{
 				Client:        kubeClient,
+				DirectClient:  kubeClient,
 				RuntimeConfig: &commoncontroller.RuntimeConfig{},
 			}
 
