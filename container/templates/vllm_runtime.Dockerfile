@@ -20,6 +20,7 @@ ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
 ARG VLLM_OMNI_REF
 ARG TRANSFORMERS_VERSION
+ARG TOKENIZERS_VERSION
 ARG NIXL_REF
 {% if device == "cuda" %}
 ARG CUDA_MAJOR
@@ -189,12 +190,13 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 # The vLLM 0.28.0 release images resolve the unbounded `transformers>=5.5.3`
 # requirement to 5.15.1, but vLLM-Omni 0.28.0rc1 caps Transformers below 5.15.
 # Omni is layered against the installed Transformers version, so install the
-# compatible release first and its dependency solve sees the final Transformers
-# invariant instead of resolving against 5.15.1.
+# compatible releases first so its dependency solve sees the final Transformers
+# and Tokenizers invariants instead of the base image's incompatible versions.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} --no-deps \
-        "transformers==${TRANSFORMERS_VERSION}"
+        "transformers==${TRANSFORMERS_VERSION}" \
+        "tokenizers==${TOKENIZERS_VERSION}"
 
 {% if device != "cuda" %}
 # NIXL meta package always tries to find a cuda-backend
