@@ -481,8 +481,11 @@ RUN rm -rf /workspace/vllm
 # no H.264 is built. Direct rm makes the removal robust regardless of how the
 # base image's pip is configured; the guards fail the build if any of them survive.
 RUN set -eux; \
-    OPENCV_VERSION="$(python3 -m pip show opencv-python-headless | awk '/^Version:/{print $2}')"; \
-    test -n "${OPENCV_VERSION}"; \
+    OPENCV_VERSION="$(python3 -m pip show opencv-python-headless 2>/dev/null | awk '/^Version:/{print $2}')"; \
+    if [ -z "${OPENCV_VERSION}" ]; then \
+        OPENCV_VERSION="$(python3 -m pip show opencv-python 2>/dev/null | awk '/^Version:/{print $2}')"; \
+    fi; \
+    test -n "${OPENCV_VERSION}" || { echo "ERROR: base image must provide version metadata for opencv-python-headless or opencv-python" >&2; exit 1; }; \
     python3 -m pip uninstall --yes \
         av decord decord2 opencv-python opencv-python-headless torchcodec \
         || true; \
@@ -507,7 +510,7 @@ RUN set -eux; \
     rm -rf /root/.cache/pip; \
     python3 -c "import cv2; cv2.resize"; \
     ! ls -d "${SITE_PACKAGES}"/opencv_python*.libs 2>/dev/null; \
-    python3 -c "import cv2,re,sys; m=re.search(r'^\s*FFMPEG:\s*(\S+)', cv2.getBuildInformation(), re.M); sys.exit('cv2 was built WITH FFmpeg' if m and m.group(1).upper()=='YES' else 0)"
+    python3 -c "import cv2,re,sys; enabled=[name for name,value in re.findall(r'^\s*(FFMPEG|GSTREAMER):\s*(\S+)', cv2.getBuildInformation(), re.M|re.I) if value.upper()=='YES']; sys.exit('ERROR: cv2 was built with video backends: '+', '.join(enabled) if enabled else 0)"
 
 # PyNvVideoCodec is KEPT (removed from the purge above) but UPGRADED to >=2.2.0 by
 # the requirements install: the base image's 2.0.4 bundles a full FFmpeg (incl.
