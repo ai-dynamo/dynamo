@@ -21,7 +21,7 @@ use prometheus::{
 };
 use serde::Serialize;
 use std::{
-    sync::{Arc, LazyLock},
+    sync::{Arc, LazyLock, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -51,9 +51,14 @@ fn new_failure_counter(metrics_prefix: Option<&str>) -> IntCounterVec {
 }
 
 /// Process-wide because protocol error renderers can run without a request-scoped `Metrics`.
+static FAILURE_METRICS_PREFIX: OnceLock<String> = OnceLock::new();
 pub(crate) static DYNAM_FAILURES_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
-    let prefix = std::env::var(env_metrics::DYN_METRICS_PREFIX).ok();
-    new_failure_counter(prefix.as_deref())
+    let prefix = FAILURE_METRICS_PREFIX.get_or_init(|| {
+        let raw = std::env::var(env_metrics::DYN_METRICS_PREFIX)
+            .unwrap_or_else(|_| name_prefix::FRONTEND.to_string());
+        sanitize_frontend_prometheus_prefix(&raw)
+    });
+    new_failure_counter(Some(prefix.as_str()))
 });
 
 fn record_failure_into(counter: &IntCounterVec, error: &DynamoError) {
@@ -859,6 +864,15 @@ impl Metrics {
         // needed — hardcode name_prefix::FRONTEND and drop the sanitize function.
         let raw_prefix = metrics_prefix.unwrap_or_else(|| name_prefix::FRONTEND.to_string());
         let prefix = sanitize_frontend_prometheus_prefix(&raw_prefix);
+        if let Err(configured_prefix) = FAILURE_METRICS_PREFIX.set(prefix.clone())
+            && configured_prefix != prefix
+        {
+            tracing::warn!(
+                configured=%configured_prefix,
+                requested=%prefix,
+                "Semantic failure metrics already use a different process-wide prefix"
+            );
+        }
         if prefix != raw_prefix {
             tracing::warn!(
                 raw=%raw_prefix,
