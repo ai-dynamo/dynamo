@@ -947,6 +947,7 @@ mod tests {
                 None,
                 None,
                 RoutingConstraints::default(),
+                false,
             )
             .await
             .unwrap();
@@ -968,6 +969,7 @@ mod tests {
                         0,
                         None,
                         RoutingConstraints::default(),
+                        false,
                     )
                     .await
                     .unwrap();
