@@ -19,7 +19,6 @@ import pytest
 import pytest_asyncio
 
 from dynamo.common.http import close_http_client
-from dynamo.common.multimodal import codec_errors
 
 # The decode carriers ``codec_errors`` probes. Only these names are answered by
 # the ``carrier_imports`` fixture; every other import runs for real.
@@ -90,6 +89,9 @@ def carrier_imports(monkeypatch):
     carrier that does not import raises. A string produces ``ImportError``;
     an exception instance models a native-loader failure such as ``OSError``.
     """
+    # Import after collection's optional-dependency guard: the multimodal
+    # package imports torch, which CPU-only runtime images may not ship.
+    from dynamo.common.multimodal import codec_errors
 
     def _set(
         present: tuple[str, ...] = (), error: str | BaseException | None = None
