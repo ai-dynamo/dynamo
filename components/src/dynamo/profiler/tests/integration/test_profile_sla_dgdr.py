@@ -358,7 +358,7 @@ def _save_dummy_npz(output_dir: str):
 
 _DECODE_SVC_NAMES = {
     "sglang": "decode",
-    "vllm": "VllmDecodeWorker",
+    "vllm": "decode",
     "trtllm": "decode",
 }
 

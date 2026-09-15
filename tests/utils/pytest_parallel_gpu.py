@@ -474,12 +474,12 @@ def run_parallel(
     # ignores Docker --cpus -- so num_slots can be many times the real CPU budget
     # (e.g. 32 under --cpus=4). Combined with the zero-VRAM filler backfill that
     # would oversubscribe the CPU and slow every concurrent test. Cap at the
-    # container's true CPU budget; raise NUM_CPUS (or --cpus) to allow more.
+    # container's true CPU budget.
     cpu_budget = effective_cpu_budget()
     if num_slots > cpu_budget:
         _print(
             f"Capping concurrency: {num_slots} -> {cpu_budget} slots "
-            f"(CPU budget; raise NUM_CPUS to allow more)"
+            "(detected CPU budget or NUM_CPUS ceiling)"
         )
         num_slots = cpu_budget
     num_slots = max(1, num_slots)

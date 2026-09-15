@@ -115,13 +115,11 @@ CUDA_VISIBLE_DEVICES="$SGLANG_DECODE_GPU" \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
 
-OTEL_SERVICE_NAME=dynamo-worker-prefill \
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT1:-8081}" \
     dynamo-sglang-sidecar \
     --grpc-endpoint "${SGLANG_HOST}:${SGLANG_PREFILL_GRPC_PORT}" \
     --bootstrap-host "$SGLANG_BOOTSTRAP_HOST" &
 
-OTEL_SERVICE_NAME=dynamo-worker-decode \
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT2:-8082}" \
     dynamo-sglang-sidecar \
     --grpc-endpoint "${SGLANG_HOST}:${SGLANG_DECODE_GRPC_PORT}" &

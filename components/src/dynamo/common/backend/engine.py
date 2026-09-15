@@ -131,6 +131,7 @@ class LlmRegistration:
     # them so the frontend's PrefillRouter can take its bootstrap path.
     bootstrap_host: Optional[str] = None
     bootstrap_port: Optional[int] = None
+    enable_eagle: bool = False
 
 
 @dataclass

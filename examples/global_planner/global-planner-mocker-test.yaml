@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Internal test fixture. The public online Mocker CLI is temporarily unavailable.
-#
 # Mocker-based GlobalPlanner test: 2 prefill pools + 2 decode pools.
 # Each pool SLA Planner reads router histogram metrics from cluster Prometheus
 # and delegates scaling decisions to the GlobalPlanner (no-op mode).
@@ -164,7 +162,7 @@ spec:
           command:
           - python3
           - -m
-          - dynamo.mocker._worker
+          - dynamo.mocker
           image: ${DYNAMO_IMAGE}
           name: main
           workingDir: /workspace
@@ -234,7 +232,7 @@ spec:
           command:
           - python3
           - -m
-          - dynamo.mocker._worker
+          - dynamo.mocker
           image: ${DYNAMO_IMAGE}
           name: main
           workingDir: /workspace
@@ -304,7 +302,7 @@ spec:
           command:
           - python3
           - -m
-          - dynamo.mocker._worker
+          - dynamo.mocker
           image: ${DYNAMO_IMAGE}
           name: main
           workingDir: /workspace
@@ -374,7 +372,7 @@ spec:
           command:
           - python3
           - -m
-          - dynamo.mocker._worker
+          - dynamo.mocker
           image: ${DYNAMO_IMAGE}
           name: main
           workingDir: /workspace

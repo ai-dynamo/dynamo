@@ -36,13 +36,30 @@ done
 
 echo "==> Namespace: ${NAMESPACE}"
 
-# Stop any local port-forward for the frontend service
-echo "==> Stopping port-forward (if running)..."
-pkill -f "kubectl port-forward svc/tml-inkling-sglang-agg-frontend" 2>/dev/null || true
+DGDS=(
+  tml-inkling-sglang-agg
+  inkling-vllm-gb300-agg-agentic
+  inkling-vllm-gb300-disagg-agentic
+)
 
-# Delete the DynamoGraphDeployment (cascades to pods and services)
-echo "==> Deleting DynamoGraphDeployment tml-inkling-sglang-agg..."
-kubectl delete dynamographdeployment tml-inkling-sglang-agg \
+# Stop any local port-forward for the frontend services
+echo "==> Stopping port-forwards (if running)..."
+for dgd in "${DGDS[@]}"; do
+  pkill -f "kubectl port-forward svc/${dgd}-frontend" 2>/dev/null || true
+done
+
+# Delete the DynamoGraphDeployments (cascades to pods and services)
+for dgd in "${DGDS[@]}"; do
+  echo "==> Deleting DynamoGraphDeployment ${dgd}..."
+  kubectl delete dynamographdeployment "${dgd}" \
+    -n "${NAMESPACE}" --ignore-not-found=true
+done
+
+# Delete the DRA resources of the disaggregated profile. They outlive the DGD.
+echo "==> Deleting ComputeDomain and ResourceClaimTemplate..."
+kubectl delete computedomain inkling-vllm-gb300-disagg-agentic-compute-domain \
+  -n "${NAMESPACE}" --ignore-not-found=true
+kubectl delete resourceclaimtemplate inkling-vllm-gb300-disagg-agentic-roce \
   -n "${NAMESPACE}" --ignore-not-found=true
 
 # Delete the model-download job

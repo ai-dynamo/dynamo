@@ -24,7 +24,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from dynamo.common.http import HttpStatusError, HttpTimeoutError
+from dynamo.common.http import HttpConnectionError, HttpStatusError, HttpTimeoutError
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.multimodal.image_loader import URL_VARIANT_KEY, ImageLoader
 
@@ -153,7 +153,7 @@ async def test_retry_after_failure(loader: ImageLoader) -> None:
     ok_fetch = _mock_fetch_bytes()
 
     with patch(_FETCH_BYTES_PATH, fail_fetch):
-        with pytest.raises(ValueError, match="Timeout"):
+        with pytest.raises(HttpStatusError, match="Timeout"):
             await loader.load_image("https://example.com/img.png")
 
     # _inflight should be cleared after failure
@@ -195,12 +195,30 @@ async def test_data_url_non_image_rejected(loader: ImageLoader) -> None:
 # --- HTTP error contract ---
 
 
-async def test_http_timeout_raises_valueerror(loader: ImageLoader) -> None:
-    """HTTP timeout should be normalized to ValueError."""
+async def test_http_timeout_raises_408(loader: ImageLoader) -> None:
+    """A timeout on a user-supplied URL is a client error, so the
+    frontend must surface 408 instead of an opaque 500."""
     mock_fetch = _mock_fetch_bytes(side_effect=HttpTimeoutError("timed out"))
     with patch(_FETCH_BYTES_PATH, mock_fetch):
-        with pytest.raises(ValueError, match="Timeout loading image"):
+        with pytest.raises(HttpStatusError) as exc_info:
             await loader.load_image("https://example.com/img.png")
+        assert exc_info.value.status == 408
+        assert "Timeout loading image" in exc_info.value.message
+        assert "https://example.com/img.png" in exc_info.value.url
+
+
+async def test_http_connection_error_raises_400(loader: ImageLoader) -> None:
+    """An unreachable user-supplied URL is a client error, so the
+    frontend must surface 400 instead of an opaque 500."""
+    mock_fetch = _mock_fetch_bytes(
+        side_effect=HttpConnectionError("connection refused")
+    )
+    with patch(_FETCH_BYTES_PATH, mock_fetch):
+        with pytest.raises(HttpStatusError) as exc_info:
+            await loader.load_image("https://example.com/img.png")
+        assert exc_info.value.status == 400
+        assert "Connection error loading image" in exc_info.value.message
+        assert "https://example.com/img.png" in exc_info.value.url
 
 
 async def test_http_status_error_propagated(loader: ImageLoader) -> None:

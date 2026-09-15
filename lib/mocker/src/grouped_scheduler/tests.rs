@@ -9,7 +9,7 @@ use std::sync::Mutex as StdMutex;
 use crate::common::handoff::HandoffId;
 use crate::common::perf_model::{AicCallback, PerfModel};
 use crate::common::protocols::{FpmSink, KvCacheEventSink, WorkerType};
-use crate::scheduler::LiveEngineEvent;
+use crate::live::{LiveEngine, LiveEngineOptions};
 
 use super::*;
 
@@ -124,7 +124,7 @@ async fn noop_cancellation_only_cleans_metadata_when_output_is_discarded() {
         let (metrics_tx, _metrics_rx) = watch::channel(MockerMetrics::new(0, 0, 128));
         let dispatch = RankDispatch {
             external_dp_rank: 0,
-            event_tx: None,
+            output: RankOutputSink::None,
             kv_event_publishers: KvEventPublishers::default(),
             fpm_publisher: FpmPublisher::default(),
             lifecycle_tx,
@@ -326,129 +326,39 @@ async fn cancellation_lane_bypasses_an_ordinary_command_deferred_mid_pass() {
     slow_args.num_gpu_blocks = 2_048;
     slow_args.max_num_batched_tokens = Some(2_048);
     slow_args.speedup_ratio = 0.001;
-    let (event_tx, mut event_rx) = mpsc::channel(8);
-    let cancel = CancellationToken::new();
-    let GroupedSchedulers {
-        schedulers, actor, ..
-    } = create_grouped_scheduler_with_event_senders(
+    let (admission_tx, mut admission_rx) = mpsc::unbounded_channel();
+    let engine = LiveEngine::start_with_options(
         slow_args,
-        vec![GroupedSchedulerRankEventSinks {
-            event_tx: Some(SchedulerEventSender::Ordered {
-                tx: event_tx,
-                forward_admissions: true,
-                cancel: cancel.clone(),
-            }),
-            kv_event_publishers: KvEventPublishers::default(),
-            fpm_publisher: FpmPublisher::default(),
-        }],
-        Some(cancel.clone()),
+        0,
+        LiveEngineOptions {
+            admission_tx: Some(admission_tx),
+            ..LiveEngineOptions::default()
+        },
     )
     .unwrap();
-    let command_tx = schedulers[0].command_sender();
-    let cancellation_tx = schedulers[0].cancellation_sender();
     let first_request_id = Uuid::from_u128(101);
     let first_request = DirectRequest {
         tokens: vec![1; 512],
         uuid: Some(first_request_id),
         ..request(101, 0)
     };
-    let (first_reply, first_response) = oneshot::channel();
-    command_tx
-        .send(SchedulerCommandEnvelope {
-            command: SchedulerCommand::Submit(first_request),
-            reply: first_reply,
-        })
-        .await
-        .unwrap();
-    first_response.await.unwrap().unwrap();
-    assert!(matches!(
-        event_rx.recv().await,
-        Some(LiveEngineEvent::Admissions(_))
-    ));
+    let first = engine.submit(first_request).await.unwrap();
+    admission_rx.recv().await.unwrap();
 
-    let (deferred_reply, mut deferred_response) = oneshot::channel();
-    command_tx
-        .send(SchedulerCommandEnvelope {
-            command: SchedulerCommand::Submit(request(102, 0)),
-            reply: deferred_reply,
-        })
-        .await
-        .unwrap();
+    let pending_engine = engine.clone();
+    let pending = tokio::spawn(async move { pending_engine.submit(request(102, 0)).await });
     tokio::task::yield_now().await;
 
-    let (cancellation_reply, cancellation_response) = oneshot::channel();
-    cancellation_tx
-        .send(SchedulerCancellationEnvelope {
-            request_id: first_request_id,
-            discard_pending_output: true,
-            reply: cancellation_reply,
-        })
-        .await
-        .unwrap();
-    let cancellation = tokio::time::timeout(Duration::from_millis(500), cancellation_response)
+    let cancellation = tokio::time::timeout(Duration::from_millis(500), first.cancel())
         .await
         .expect("cancellation must bypass the deferred ordinary lane")
-        .unwrap()
         .unwrap();
-    assert_eq!(cancellation.result, SchedulerCommandResult::Applied);
-    assert!(matches!(
-        deferred_response.try_recv(),
-        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-    ));
+    assert!(cancellation);
+    assert!(!pending.is_finished());
 
-    cancel.cancel();
-    actor.await.unwrap().unwrap();
-}
-
-#[tokio::test]
-async fn cancellation_while_waiting_for_ordered_output_ack_is_orderly() {
-    let (event_tx, mut event_rx) = mpsc::channel(8);
-    let cancel = CancellationToken::new();
-    let GroupedSchedulers {
-        schedulers, actor, ..
-    } = create_grouped_scheduler_with_event_senders(
-        args(1),
-        vec![GroupedSchedulerRankEventSinks {
-            event_tx: Some(SchedulerEventSender::Ordered {
-                tx: event_tx,
-                forward_admissions: true,
-                cancel: cancel.clone(),
-            }),
-            kv_event_publishers: KvEventPublishers::default(),
-            fpm_publisher: FpmPublisher::default(),
-        }],
-        Some(cancel.clone()),
-    )
-    .unwrap();
-    let (reply, response) = oneshot::channel();
-    schedulers[0]
-        .command_sender()
-        .send(SchedulerCommandEnvelope {
-            command: SchedulerCommand::Submit(request(103, 0)),
-            reply,
-        })
-        .await
-        .unwrap();
-    response.await.unwrap().unwrap();
-
-    let delivered = loop {
-        match tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
-            .await
-            .expect("grouped output publication timed out")
-            .expect("ordered event lane closed before output")
-        {
-            LiveEngineEvent::Admissions(_) => {}
-            LiveEngineEvent::Outputs { delivered, .. } => break delivered,
-        }
-    };
-    cancel.cancel();
-    drop(delivered);
-
-    tokio::time::timeout(Duration::from_secs(1), actor)
-        .await
-        .expect("grouped scheduler should stop after cancellation")
-        .unwrap()
-        .unwrap();
+    pending.abort();
+    let _ = pending.await;
+    engine.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -576,7 +486,7 @@ async fn applied_midpass_cancellation_publishes_empty_occupancy_immediately() {
         watch::channel(MockerMetrics::from_parts(0, 7, 128, 1, 0, 0, 0, 0));
     let dispatch = RankDispatch {
         external_dp_rank: 0,
-        event_tx: None,
+        output: RankOutputSink::None,
         kv_event_publishers: KvEventPublishers::default(),
         fpm_publisher: FpmPublisher::default(),
         lifecycle_tx,
@@ -649,7 +559,7 @@ async fn synthetic_midpass_kv_is_deferred_until_completion_before_fpm() {
     let (metrics_tx, metrics_rx) = watch::channel(initial_metrics);
     let dispatch = RankDispatch {
         external_dp_rank: 0,
-        event_tx: None,
+        output: RankOutputSink::None,
         kv_event_publishers: KvEventPublishers::new(
             Some(Arc::clone(&effects) as Arc<dyn KvCacheEventSink>),
             None,

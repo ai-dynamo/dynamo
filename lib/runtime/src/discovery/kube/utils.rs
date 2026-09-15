@@ -95,8 +95,11 @@ pub fn hash_container_name(pod_name: &str, container_name: &str) -> u64 {
     KubeDiscoveryTarget::Container(pod_name.to_string(), container_name.to_string()).instance_id()
 }
 
-/// Extract (instance_id, pod_name) tuples from an EndpointSlice for ready endpoints.
-pub(super) fn extract_endpoint_info(slice: &EndpointSlice) -> Vec<(u64, String)> {
+/// Extract (instance_id, cr_name, pod_uid) tuples from an EndpointSlice for ready endpoints.
+///
+/// Skips endpoints without a pod UID in `target_ref.uid` — never falls back to name-only
+/// identity, which could match a new Pod incarnation to a previous one's metadata.
+pub(super) fn extract_endpoint_info(slice: &EndpointSlice) -> Vec<(u64, String, String)> {
     let mut result = Vec::new();
 
     for endpoint in &slice.endpoints {
@@ -110,27 +113,49 @@ pub(super) fn extract_endpoint_info(slice: &EndpointSlice) -> Vec<(u64, String)>
             continue;
         }
 
-        let pod_name = match endpoint.target_ref.as_ref() {
-            Some(target_ref) => target_ref.name.as_deref().unwrap_or(""),
+        let target_ref = match endpoint.target_ref.as_ref() {
+            Some(r) => r,
             None => continue,
         };
 
+        let pod_name = target_ref.name.as_deref().unwrap_or("");
         if pod_name.is_empty() {
             continue;
         }
 
+        let pod_uid = match target_ref.uid.as_deref() {
+            Some(uid) if !uid.is_empty() => uid.to_string(),
+            _ => {
+                tracing::debug!(
+                    pod_name,
+                    "EndpointSlice endpoint missing target_ref.uid, skipping"
+                );
+                continue;
+            }
+        };
+
         let target = KubeDiscoveryTarget::Pod(pod_name.to_string());
-        result.push((target.instance_id(), target.cr_name()));
+        result.push((target.instance_id(), target.cr_name(), pod_uid));
     }
 
     result
 }
 
-/// Extract (instance_id, cr_name) tuples from a Pod for each ready container.
-pub(super) fn extract_ready_containers(pod: &Pod) -> Vec<(u64, String)> {
+/// Extract (instance_id, cr_name, pod_uid) tuples from a Pod for each ready container.
+///
+/// Skips pods without `metadata.uid` — never falls back to name-only identity.
+pub(super) fn extract_ready_containers(pod: &Pod) -> Vec<(u64, String, String)> {
     let pod_name = match pod.metadata.name.as_deref() {
         Some(name) => name,
         None => return vec![],
+    };
+
+    let pod_uid = match pod.metadata.uid.as_deref() {
+        Some(uid) if !uid.is_empty() => uid.to_string(),
+        _ => {
+            tracing::debug!(pod_name, "Pod missing metadata.uid, skipping");
+            return vec![];
+        }
     };
 
     let container_statuses = match pod
@@ -147,7 +172,7 @@ pub(super) fn extract_ready_containers(pod: &Pod) -> Vec<(u64, String)> {
         .filter(|cs| cs.ready)
         .map(|cs| {
             let target = KubeDiscoveryTarget::Container(pod_name.to_string(), cs.name.clone());
-            (target.instance_id(), target.cr_name())
+            (target.instance_id(), target.cr_name(), pod_uid.clone())
         })
         .collect()
 }

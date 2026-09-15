@@ -189,18 +189,12 @@ class CancellableRequest:
 
 
 def send_completion_request(
-    prompt: str, max_tokens: int, frontend_port: int
+    prompt: str,
+    max_tokens: int,
+    frontend_port: int,
+    timeout_s: float | None = None,
 ) -> CancellableRequest:
-    """Send a completion request to the frontend
-
-    Args:
-        prompt: The prompt for completion
-        max_tokens: Maximum tokens to generate
-        frontend_port: Port where the frontend is running
-
-    Returns:
-        A CancellableRequest object that can be explicitly cancelled
-    """
+    """Send a cancellable completion request to the frontend."""
     payload = {
         "model": FAULT_TOLERANCE_MODEL_NAME,
         "prompt": prompt,
@@ -219,24 +213,19 @@ def send_completion_request(
         f"http://localhost:{frontend_port}/v1/completions",
         headers=headers,
         json=payload,
+        timeout=timeout_s,
     )
     return cancellable_req
 
 
 def send_chat_completion_request(
-    prompt: str, max_tokens: int, frontend_port: int, stream: bool = False
+    prompt: str,
+    max_tokens: int,
+    frontend_port: int,
+    stream: bool = False,
+    timeout_s: float | None = None,
 ) -> CancellableRequest:
-    """Send a chat completion request to the frontend
-
-    Args:
-        prompt: The prompt for chat completion
-        max_tokens: Maximum tokens to generate
-        frontend_port: Port where the frontend is running
-        stream: Whether to stream the response
-
-    Returns:
-        A CancellableRequest object that can be explicitly cancelled
-    """
+    """Send a cancellable chat request to the frontend."""
     payload = {
         "model": FAULT_TOLERANCE_MODEL_NAME,
         "messages": [{"role": "user", "content": prompt}],
@@ -257,6 +246,7 @@ def send_chat_completion_request(
         headers=headers,
         json=payload,
         stream=stream,
+        timeout=timeout_s,
     )
     return cancellable_req
 
@@ -266,31 +256,22 @@ def send_cancellable_request(
     request_type: str = "completion",
     use_long_prompt: bool = False,
     max_tokens: int = 16384,
+    timeout_s: float | None = None,
 ) -> CancellableRequest:
-    """Send a request that can be manually cancelled.
-
-    Args:
-        frontend_port: Port where the frontend is running
-        request_type: Type of request - "completion", "chat_completion", or "chat_completion_stream"
-        use_long_prompt: Whether to use an extremely long prompt
-        max_tokens: Maximum tokens to generate for the cancellable request
-
-    Returns:
-        A CancellableRequest object that can be explicitly cancelled
-    """
+    """Send a request that can be manually cancelled."""
     prompt = "Tell me a very long and detailed story about the history of artificial intelligence, including all major milestones, researchers, and breakthroughs?"
     if use_long_prompt:
         prompt += " Make sure it is" + " long" * 16000 + "!"
 
     if request_type == "completion":
-        return send_completion_request(prompt, max_tokens, frontend_port)
+        return send_completion_request(prompt, max_tokens, frontend_port, timeout_s)
     elif request_type == "chat_completion":
         return send_chat_completion_request(
-            prompt, max_tokens, frontend_port, stream=False
+            prompt, max_tokens, frontend_port, stream=False, timeout_s=timeout_s
         )
     elif request_type == "chat_completion_stream":
         return send_chat_completion_request(
-            prompt, max_tokens, frontend_port, stream=True
+            prompt, max_tokens, frontend_port, stream=True, timeout_s=timeout_s
         )
     else:
         raise ValueError(f"Unknown request type: {request_type}")
@@ -299,12 +280,18 @@ def send_cancellable_request(
 def read_streaming_responses(
     cancellable_req: CancellableRequest,
     expected_count: int = 5,
+    deadline_s: float | None = None,
 ) -> None:
     """Read a specific number of responses from a streaming request.
 
     Args:
         cancellable_req: The CancellableRequest object with an active stream
         expected_count: Number of responses to read before returning
+        deadline_s: Budget for waiting on the next chunk, checked after each
+            arrival while the goal is unmet. A late chunk that completes
+            expected_count still counts, so this does not cap total read
+            time. The `timeout` passed to requests bounds a single read; this
+            bounds the sequence of them.
 
     Raises:
         pytest.fail if stream ends before expected_count responses
@@ -318,6 +305,7 @@ def read_streaming_responses(
         )
 
     response = cast(requests.Response, response_raw)  # Type narrowing after checks
+    deadline = None if deadline_s is None else time.monotonic() + deadline_s
     response_count = 0
     for line in response.iter_lines():
         response_count += 1
@@ -327,6 +315,14 @@ def read_streaming_responses(
         if response_count >= expected_count:
             logger.info(f"Successfully read {response_count} responses")
             return
+        # Checked only while the goal is unmet. Moving this above the return
+        # would fail runs that received every chunk they needed.
+        if deadline is not None and time.monotonic() > deadline:
+            cancellable_req.cancel()
+            pytest.fail(
+                f"Read only {response_count} of {expected_count} streaming responses "
+                f"within {deadline_s}s"
+            )
 
     # If we get here, stream ended too early
     pytest.fail(

@@ -381,14 +381,17 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         router_id: u64,
         worker_type: &'static str,
     ) -> Self {
-        Self::new_with_replica_worker_policy(
+        Self::new_with_options(
             publisher,
             block_size,
             dp_range,
             replica_sync,
             router_id,
             worker_type,
-            ReplicaWorkerPolicy::LazyRegister,
+            SequenceTrackerOptions {
+                replica_worker_policy: ReplicaWorkerPolicy::LazyRegister,
+                expiry_duration: Some(active_request_expiry_duration()),
+            },
         )
     }
 
@@ -411,38 +414,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             SequenceTrackerOptions {
                 replica_worker_policy: ReplicaWorkerPolicy::LazyRegister,
                 expiry_duration: None,
-            },
-        )
-    }
-
-    /// Create a tracker with an explicit stale active-request cleanup guard.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `expiry_duration` or `block_size` is zero.
-    pub fn new_with_expiry_duration(
-        publisher: P,
-        block_size: usize,
-        dp_range: HashMap<u64, (u32, u32)>,
-        replica_sync: bool,
-        router_id: u64,
-        worker_type: &'static str,
-        expiry_duration: Duration,
-    ) -> Self {
-        assert!(
-            !expiry_duration.is_zero(),
-            "expiry_duration must be greater than zero"
-        );
-        Self::new_with_options(
-            publisher,
-            block_size,
-            dp_range,
-            replica_sync,
-            router_id,
-            worker_type,
-            SequenceTrackerOptions {
-                replica_worker_policy: ReplicaWorkerPolicy::LazyRegister,
-                expiry_duration: Some(expiry_duration),
             },
         )
     }
@@ -483,12 +454,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     ) -> Self {
         assert!(block_size > 0, "block_size must be greater than 0");
         let (remote_state_updates, _) = watch::channel(());
-        let workers = match options.expiry_duration {
-            Some(duration) => {
-                WorkerTable::new_with_expiry_duration(block_size, &dp_range, duration)
-            }
-            None => WorkerTable::new_without_expiry(block_size, &dp_range),
-        };
+        let workers = WorkerTable::new_with_expiry(block_size, &dp_range, options.expiry_duration);
         let initial_workers: Vec<_> = workers.workers().collect();
         let prompt_registry = PromptRegistry::new(initial_workers.iter().copied());
         let publisher = Arc::new(publisher);
@@ -1622,21 +1588,6 @@ mod tests {
                 DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION
             );
         }
-    }
-
-    /// Verifies that zero duration is rejected before worker-table construction.
-    #[test]
-    #[should_panic(expected = "expiry_duration must be greater than zero")]
-    fn custom_expiry_rejects_zero_duration_at_multi_worker_boundary() {
-        let _ = ActiveSequencesMultiWorker::new_with_expiry_duration(
-            NoopSequencePublisher,
-            4,
-            HashMap::new(),
-            false,
-            0,
-            "test",
-            Duration::ZERO,
-        );
     }
 
     fn make_sequences() -> ActiveSequencesMultiWorker<NoopSequencePublisher> {

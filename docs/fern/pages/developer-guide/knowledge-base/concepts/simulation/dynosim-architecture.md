@@ -7,7 +7,9 @@ subtitle: How the replay harness composes simulated engines, routing, and Planne
 
 DynoSim connects a workload driver to one or more Mocker engine cores and records request and token
 timing for analysis. The unified `aisimulate predict` and `aisimulate recommend` commands run this
-simulation offline. The former public online replay and Mocker commands are unavailable.
+simulation offline. The former public Replay online CLI is unavailable, although the Python replay
+SDK retains online mode. The separate `python3 -m dynamo.mocker` command launches live Mocker
+workers without replay orchestration.
 
 For task-oriented instructions, see [Run a DynoSim Simulation](../../../../cli/operations/simulation-with-dynosim/dynosim-replay.mdx),
 [Sweep DynoSim Configurations](../../../../cli/operations/simulation-with-dynosim/dynosim-sweeps.mdx), and
@@ -90,9 +92,9 @@ Offline execution drives Mocker engine cores directly. It uses a logical clock a
 a frontend, worker registration, etcd, NATS, or HTTP traffic. This path is appropriate for fast,
 repeatable configuration comparisons and continuous-integration tests.
 
-The codebase retains an internal worker runtime and compatibility SDK paths, but they are not a
-supported online CLI workflow. Online simulation will return through the unified AISimulate CLI in
-a future release.
+Run `python3 -m dynamo.mocker` for the supported live worker CLI. The Python replay SDK retains
+online mode for programmatic callers, but no public Replay CLI currently exposes online replay
+orchestration.
 
 ## Routing simulation
 

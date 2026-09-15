@@ -2238,7 +2238,8 @@ fn content_texts(chunks: &[Annotated<NvCreateChatCompletionStreamResponse>]) -> 
 }
 
 // Backend sends content chunks then a data-less terminal chunk with finish_reason=length.
-// The latch must fire on the first finish chunk and not re-fire on the terminal one.
+// The terminal delta itself is the recovery signal: it must remain observable even
+// when safely suppressing the incomplete native marker and its arguments.
 #[tokio::test]
 async fn test_glm47_streaming_truncated_data_less_terminal_chunk() {
     let mut chunks = vec![
@@ -2253,25 +2254,24 @@ async fn test_glm47_streaming_truncated_data_less_terminal_chunk() {
     let out = run_glm47_jail(chunks).await;
 
     let texts = content_texts(&out);
-    assert_eq!(texts.len(), 1, "exactly one recovery chunk; got: {texts:?}");
     assert!(
-        texts[0].contains("<tool_call>"),
-        "recovery must contain the truncated markup; got: {:?}",
-        texts[0]
+        texts.iter().all(|text| !text.contains("<tool_call>")),
+        "recovery must not expose native markup; got: {texts:?}"
     );
-    // Latch: a second finish_reason=length chunk must not produce a second copy.
+    let terminal_choices: Vec<_> = out
+        .iter()
+        .filter_map(|response| response.data.as_ref())
+        .flat_map(|data| data.inner.choices.iter())
+        .filter(|choice| choice.finish_reason == Some(FinishReason::Length))
+        .collect();
     assert_eq!(
-        out.iter()
-            .filter(|a| {
-                a.data
-                    .as_ref()
-                    .and_then(|d| d.inner.choices.first())
-                    .and_then(|c| c.finish_reason)
-                    == Some(FinishReason::Length)
-            })
-            .count(),
+        terminal_choices.len(),
         1,
-        "finish_reason=length must appear exactly once in output"
+        "expected one terminal recovery delta"
+    );
+    assert!(
+        terminal_choices[0].delta.content.is_none(),
+        "the recovery delta must be empty-safe rather than leak partial arguments"
     );
     let nvext_chunks: Vec<_> = out
         .iter()
@@ -2288,9 +2288,8 @@ async fn test_glm47_streaming_truncated_data_less_terminal_chunk() {
     );
 }
 
-// Prose follows a complete tool call, then a truncated second call — all in one jailed
-// buffer. The jail releases the prose+tail verbatim; pass 2 must suppress it and emit
-// only the tail via the recovery chunk (tail_already_emitted path).
+// Prose follows a complete tool call, then a truncated second call. The prose remains
+// visible while the terminal recovery delta suppresses only the incomplete call.
 #[tokio::test]
 async fn test_glm47_streaming_prose_plus_truncated_block_tail_already_emitted() {
     let complete =
@@ -2303,20 +2302,45 @@ async fn test_glm47_streaming_prose_plus_truncated_block_tail_already_emitted() 
     let out = run_glm47_jail(chunks).await;
 
     let texts = content_texts(&out);
-    // The jail splits the finish chunk: it emits "tail prose " as a separate
-    // earlier content chunk (unavoidable — already left the jail), then puts
-    // "<tool_call>get_time..." on the finish chunk. Pass 2 suppresses the finish
-    // chunk's content; the recovery chunk carries just the marker-onwards tail.
-    // Net invariant: the truncated block appears exactly once (from recovery),
-    // never duplicated from the finish chunk.
-    let recovery: Vec<_> = texts
-        .iter()
-        .filter(|t| t.contains("<tool_call>get_time"))
-        .collect();
     assert_eq!(
-        recovery.len(),
-        1,
-        "truncated second call must appear exactly once (no duplicate); got: {texts:?}"
+        texts.concat(),
+        "tail prose ",
+        "prose before the true marker must stay visible; got: {texts:?}"
+    );
+    assert!(
+        texts.iter().all(|text| !text.contains("<tool_call>")),
+        "truncated native markup must not leak; got: {texts:?}"
+    );
+    assert!(
+        out.iter()
+            .filter_map(|response| response.data.as_ref())
+            .flat_map(|data| data.inner.choices.iter())
+            .any(|choice| {
+                choice.finish_reason == Some(FinishReason::Length)
+                    && choice.delta.content.is_none()
+                    && choice.delta.tool_calls.is_none()
+            }),
+        "the terminal empty-safe recovery delta must remain observable"
+    );
+}
+
+// A completed native call is consumed by the jail before this prose arrives. A terminal
+// length marker must not replay the prose retained only for native-marker recovery.
+#[tokio::test]
+async fn test_glm47_streaming_post_call_prose_is_not_duplicated_on_length_finish() {
+    let complete =
+        "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Boston</arg_value></tool_call>";
+    let chunks = vec![
+        make_glm47_chunk(Some(complete), None),
+        make_glm47_chunk(Some("tail prose "), None),
+        make_glm47_chunk(None, Some(FinishReason::Length)),
+    ];
+
+    let out = run_glm47_jail(chunks).await;
+    assert_eq!(
+        content_texts(&out).concat(),
+        "tail prose ",
+        "terminal recovery must not repeat prose after a completed call"
     );
 }
 

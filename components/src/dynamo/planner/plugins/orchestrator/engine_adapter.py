@@ -70,6 +70,8 @@ if TYPE_CHECKING:
 
 from dynamo.planner.core.budget import (
     apply_power_budget,
+    bounds_for_total,
+    compute_tolerance,
     proportional_clamp_pair,
     proportional_clamp_single,
 )
@@ -949,6 +951,9 @@ class OrchestratorEngineAdapter:
             worker_counts.expected_num_decode,
             worker_counts.decode_scaling_in_progress,
         )
+        gpu_budget_reconcile = (
+            not deployment_scaling and self._gpu_budget_reconcile_needed(worker_counts)
+        )
         prefill_floor_needed = (
             mode in ("disagg", "prefill")
             and not deployment_scaling
@@ -983,16 +988,22 @@ class OrchestratorEngineAdapter:
                 not prefill_proposed
                 and not prefill_floor_needed
                 and not floor_reconcile
+                and not gpu_budget_reconcile
             ):
                 num_p = None
-            if not decode_proposed and not decode_floor_needed and not floor_reconcile:
+            if (
+                not decode_proposed
+                and not decode_floor_needed
+                and not floor_reconcile
+                and not gpu_budget_reconcile
+            ):
                 num_d = None
             if num_p is None and num_d is None:
                 return None
         else:
             p_unchanged = (num_p is None) or (num_p == current_p)
             d_unchanged = (num_d is None) or (num_d == current_d)
-            if p_unchanged and d_unchanged:
+            if p_unchanged and d_unchanged and not gpu_budget_reconcile:
                 return None
 
         num_p, num_d = self._apply_final_budget(num_p, num_d, worker_counts)
@@ -1035,6 +1046,44 @@ class OrchestratorEngineAdapter:
                 return None
 
         return ScalingDecision(num_prefill=num_p, num_decode=num_d)
+
+    def _gpu_budget_reconcile_needed(self, worker_counts: WorkerCounts) -> bool:
+        min_gpus = self._config.min_gpu_budget
+        max_gpus = self._config.max_gpu_budget
+        if min_gpus < 0 and max_gpus < 0:
+            return False
+
+        mode = self._config.mode
+        if mode == "prefill":
+            components = [
+                (worker_counts.ready_num_prefill, self._capabilities.prefill),
+            ]
+        elif mode in ("decode", "agg"):
+            components = [(worker_counts.ready_num_decode, self._capabilities.decode)]
+        elif mode == "disagg":
+            components = [
+                (worker_counts.ready_num_prefill, self._capabilities.prefill),
+                (worker_counts.ready_num_decode, self._capabilities.decode),
+            ]
+        else:
+            return False
+
+        total_gpus = 0
+        gpu_costs: list[int] = []
+        for replicas, capabilities in components:
+            if replicas is None or capabilities is None:
+                return False
+            gpu_cost = capabilities.resolved_gpu_cost_per_replica
+            if gpu_cost is None or gpu_cost <= 0:
+                return False
+            total_gpus += replicas * gpu_cost
+            gpu_costs.append(gpu_cost)
+
+        tolerance = (
+            compute_tolerance(gpu_costs) if min_gpus >= 0 and max_gpus >= 0 else 0
+        )
+        in_bounds, _ = bounds_for_total(total_gpus, min_gpus, max_gpus, tolerance)
+        return not in_bounds
 
     def _apply_final_budget(
         self,

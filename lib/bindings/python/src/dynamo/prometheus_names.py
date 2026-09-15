@@ -420,9 +420,6 @@ class name_prefix:
     TRANSPORT = "dynamo_transport"
     # Prefix for work-handler transport breakdown metrics (backend side)
     WORK_HANDLER = "dynamo_work_handler"
-    # Prefix for request admission/rejection control metrics (e.g.
-    # `dynamo_rejection_request_total`).
-    REJECTION = "dynamo_rejection"
     # Prefix for tokio runtime metrics (poll times, queue depths, stalls).
     TOKIO = "dynamo_tokio"
     # Prefix for per-phase routing overhead latency (hashing, scheduling).
@@ -533,6 +530,7 @@ class tokio_perf:
     WORKER_LOCAL_QUEUE_DEPTH = "worker_local_queue_depth"
     WORKER_STEAL_COUNT_TOTAL = "worker_steal_count_total"
     WORKER_OVERFLOW_COUNT_TOTAL = "worker_overflow_count_total"
+    QUEUE_OVERLOAD_WARNINGS_TOTAL = "queue_overload_warnings_total"
     BLOCKING_THREADS = "blocking_threads"
     BLOCKING_IDLE_THREADS = "blocking_idle_threads"
     BLOCKING_QUEUE_DEPTH = "blocking_queue_depth"
@@ -608,10 +606,8 @@ class work_handler:
     QUEUE_DEPTH = "queue_depth"
     # Configured capacity of the bounded work queue (gauge, static)
     QUEUE_CAPACITY = "queue_capacity"
-    # Total times enqueuing work failed because the dispatcher channel was closed.
-    # A full queue is shed via try_reserve() and counted under
-    # `dynamo_rejection_request_total`. Saturation shows up as rising `QUEUE_DEPTH`
-    # toward `QUEUE_CAPACITY`.
+    # Requests rejected before TCP worker dispatch because the bounded work queue
+    # was full or the dispatcher channel was closed.
     ENQUEUE_REJECTED_TOTAL = "enqueue_rejected_total"
     # Time spent waiting to acquire a worker-pool permit (histogram)
     PERMIT_WAIT_SECONDS = "permit_wait_seconds"

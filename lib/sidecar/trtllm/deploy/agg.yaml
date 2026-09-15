@@ -42,11 +42,10 @@ spec:
     podTemplate:
       spec:
         # trtllm-engine as a native sidecar (initContainer + restartPolicy: Always):
-        # starts before `main`, stops after. --grpc needs rc21; rc22 crashes on
-        # startup (protobuf version mismatch).
+        # starts before `main`, stops after.
         initContainers:
         - name: trtllm-engine
-          image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc21
+          image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc25
           restartPolicy: Always
           # gRPC HealthCheck via exec (tcpSocket/grpc: dial the pod IP, not the
           # loopback engine). startupProbe gates `main`; readinessProbe drops dead workers.
@@ -77,10 +76,20 @@ spec:
             requests:
               # Increase for larger models.
               ephemeral-storage: 2Gi
+          # `--grpc` needs `smg-grpc-proto`, which TRT-LLM keeps behind the
+          # optional `grpc-smg` extra rather than shipping in the image.
+          # Constraint copied from that extra so we resolve what upstream
+          # resolves. Needs egress to PyPI; bake it into a derived image if the
+          # cluster has none.
           command:
-          - python3
-          - -m
-          - tensorrt_llm.commands.serve
+          - sh
+          - -c
+          - |
+            set -e
+            python3 -c "import smg_grpc_proto" 2>/dev/null \
+              || pip install --no-cache-dir "smg-grpc-proto>=0.4.2"
+            exec python3 -m tensorrt_llm.commands.serve "$@"
+          - trtllm-serve
           args:
           - Qwen/Qwen3-0.6B
           - --grpc

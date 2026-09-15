@@ -29,7 +29,10 @@ catalog_validate = load_catalog_validator("recipe_catalog_validate")
         ),
         (
             "inkling",
-            ("nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0-inkling-dev.1",),
+            (
+                "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0-inkling-dev.1",
+                "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-inkling-dev.1",
+            ),
         ),
         (
             "kimi-k2-6",
@@ -37,7 +40,10 @@ catalog_validate = load_catalog_validator("recipe_catalog_validate")
         ),
         (
             "kimi-k3",
-            ("nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-kimi-k3-dev.1",),
+            (
+                "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0-kimi-k3-dev.1",
+                "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-kimi-k3-dev.1",
+            ),
         ),
         (
             "nemotron-3-5-lightning",
@@ -104,6 +110,11 @@ def test_recipe_specific_images_are_catalog_owned(
                     "release_tag": "v1.4.0-inkling-dev.1",
                     "release_state": "prerelease",
                 },
+                {
+                    "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-inkling-dev.1",
+                    "source_revision": "5e75161371dbca94ad878b7fee2904c0715d308b",
+                    "source_kind": "deploy-asset",
+                },
             ),
         ),
         (
@@ -122,10 +133,17 @@ def test_recipe_specific_images_are_catalog_owned(
             "kimi-k3",
             (
                 {
-                    "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-kimi-k3-dev.1",
-                    "source_revision": "92ec0146e4221c7c9e5013e3bd51db6113f96935",
+                    "image": "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0-kimi-k3-dev.1",
+                    "source_revision": "f7f0c719e57aebffa3d386ff14b387c94fdaedad",
                     "source_kind": "github-release",
-                    "release_tag": "v1.4.0-kimi-k3-dev.1",
+                    "release_tag": "v1.5.0-kimi-k3-dev.1",
+                    "release_state": "prerelease",
+                },
+                {
+                    "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-kimi-k3-dev.1",
+                    "source_revision": "f7f0c719e57aebffa3d386ff14b387c94fdaedad",
+                    "source_kind": "github-release",
+                    "release_tag": "v1.5.0-kimi-k3-dev.1",
                     "release_state": "prerelease",
                 },
             ),

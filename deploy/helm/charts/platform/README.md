@@ -149,9 +149,9 @@ Kubernetes: `>=1.30.0-0`
 | file://components/operator | dynamo-operator | 1.5.0 |
 | https://charts.bitnami.com/bitnami | etcd | 12.0.18 |
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
-| oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.12-rc1 |
-| oci://ghcr.io/ai-dynamo/snapshot | snapshot | 0.1.0-alpha.1 |
-| oci://ghcr.io/kai-scheduler/kai-scheduler | kai-scheduler | v0.13.4 |
+| oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.13 |
+| oci://ghcr.io/ai-dynamo/snapshot | snapshot | 0.1.0 |
+| oci://ghcr.io/kai-scheduler/kai-scheduler | kai-scheduler | v0.17.0 |
 
 ## Values
 
@@ -225,10 +225,9 @@ Kubernetes: `>=1.30.0-0`
 | dynamo-operator.webhook.certManager.certificate.rootCA.duration | string | `"87600h"` | Duration for the root CA certificate (e.g., "87600h" for 10 years). The root CA typically has a much longer lifetime than the leaf certificates it signs. |
 | dynamo-operator.webhook.certManager.certificate.rootCA.renewBefore | string | `"720h"` | Time before root CA expiration to trigger renewal (e.g., "720h" for 30 days). Renewing a CA can be disruptive as all signed certificates must be reissued. |
 | dynamo-operator.checkpoint.enabled | bool | `false` | Whether to enable checkpoint/restore functionality |
-| dynamo-operator.checkpoint.cleanupImage | string | `"busybox:1.36"` | Image used by best-effort artifact cleanup Jobs for automatically-created checkpoints. The image must provide /bin/sh and rm. |
-| dynamo-operator.checkpoint.storage | object | `{}` | Optional PVC storage used when the snapshot-agent is installed outside workload namespaces with snapshot.storage.accessMode=podMount. Set create=true for operator-managed namespace PVCs, or omit/create=false to require an already-present PVC with the configured name. ReadWriteOnce can be used with podMount for sequential checkpoint/restore on suitable storage backends; use ReadWriteMany for concurrent multi-node access. |
 | grove.tolerations | list | `[]` | Node tolerations for Grove pods |
 | grove.affinity | object | `{}` | Affinity for Grove pods |
+| grove.crdInstaller.enabled | bool | `true` | Upgrade Grove CRDs before the bundled operator starts. |
 | grove.config.server.healthProbes.enable | bool | `true` | Enable Grove's webhook-aware liveness and readiness probes. The readiness endpoint stays false until certificates and the webhook server are ready. |
 | kai-scheduler.global.tolerations | list | `[]` | Node tolerations for kai-scheduler pods |
 | kai-scheduler.global.affinity | object | `{}` | Affinity for kai-scheduler pods |
@@ -292,8 +291,11 @@ For **production environments**, Kai Scheduler and Grove should be installed sep
 | 1.1.x           | >= v0.13.4    | >= v0.1.0-alpha.8 |
 | 1.3.x           | >= v0.13.4    | >= v0.1.0-alpha.8, < v0.1.0-alpha.9 |
 | 1.4.x           | >= v0.13.4    | >= v0.1.0-alpha.12-rc1 |
+| 1.5.x           | >= v0.17.0    | >= v0.1.0-alpha.13 |
 
 Grove should be upgraded in lockstep with Dynamo while Grove APIs are not stable. Dynamo 1.3.x expects Grove's earlier `ClusterTopology` API and is incompatible with the newer `ClusterTopologyBinding` API; Dynamo 1.4.x expects `ClusterTopologyBinding`.
+
+Grove `v0.1.0-alpha.13` enables its `kai-scheduler` backend by default. When Grove's `kai-scheduler` profile is active, disable KAI's independent stale PodGroup eviction by setting `scheduler.args.default-staleness-grace-period` to `"-1s"` in the KAI Scheduler chart; Grove owns PodGroup termination timing. Keep KAI's normal cleanup behavior when using KAI without Grove or when an externally managed Grove has that profile disabled. The bundled Grove subchart also enables its CRD installer so new and updated Grove CRDs are applied before its operator starts during upgrades.
 
 After installing them separately, enable Dynamo integration:
 
@@ -325,7 +327,14 @@ global:
     install: true   # Deploys the bundled kai-scheduler subchart (integration auto-enabled)
   grove:
     install: true   # Deploys the bundled Grove subchart (integration auto-enabled)
+
+kai-scheduler:
+  scheduler:
+    args:
+      default-staleness-grace-period: "-1s"  # Grove owns PodGroup cleanup
 ```
+
+The chart requires this KAI override when it installs both bundled subcharts. With externally managed Grove, set the override only when its `kai-scheduler` profile is active. KAI-only installations should omit it.
 
 Note: `global.*.install` controls whether the bundled subcharts are deployed. When set, integration is automatically enabled. `global.*.enabled` can be set independently when using externally-managed installations.
 

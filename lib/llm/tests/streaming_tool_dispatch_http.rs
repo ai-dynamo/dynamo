@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use dynamo_llm::http::service::service_v2::HttpService;
 use dynamo_llm::model_card::ModelDeploymentCard;
+use dynamo_llm::protocols::Annotated;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use dynamo_protocols::types::{
     ChatChoiceStream, ChatCompletionMessageToolCallChunk, ChatCompletionRequestMessage,
@@ -32,7 +33,7 @@ mod ports;
 mod scripted_chat_engine;
 
 use ports::bind_random_port;
-use scripted_chat_engine::{Script, ScriptedChatEngine};
+use scripted_chat_engine::ScriptedChatEngine;
 
 const MODEL: &str = "tool-dispatch-model";
 
@@ -103,7 +104,7 @@ fn chunk(choice: ChatChoiceStream) -> NvCreateChatCompletionStreamResponse {
 ///
 /// Ordinary frames are labelled by what the client can see in them, so a lost or
 /// reordered frame changes the label sequence rather than only its length.
-async fn wire_labels(script: Script) -> Vec<String> {
+async fn wire_labels(script: Vec<NvCreateChatCompletionStreamResponse>) -> Vec<String> {
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
         .port(port)
@@ -119,7 +120,10 @@ async fn wire_labels(script: Script) -> Vec<String> {
         .add_chat_completions_model(
             MODEL,
             card.mdcsum(),
-            Arc::new(ScriptedChatEngine::new([script])),
+            Arc::new(ScriptedChatEngine::new([Ok(script
+                .into_iter()
+                .map(Annotated::from_data)
+                .collect())])),
         )
         .expect("failed to register scripted model");
 

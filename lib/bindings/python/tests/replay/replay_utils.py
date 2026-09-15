@@ -36,17 +36,6 @@ MOONCAKE_TRACE_FIRST20 = """{"timestamp": 0, "input_length": 6755, "output_lengt
 {"timestamp": 3052, "input_length": 2007, "output_length": 354, "hash_ids": [0, 446, 447, 448]}
 """
 
-AIC_PARITY_MODEL = "Qwen/Qwen3-32B"
-AIC_PARITY_SYSTEM = "h200_sxm"
-AIC_PARITY_VERSIONS = {
-    "vllm": "0.14.0",
-    "sglang": "0.5.6.post2",
-}
-AIC_PARITY_BACKENDS = [
-    pytest.param("vllm", id="vllm"),
-    pytest.param("sglang", id="sglang"),
-]
-
 
 def _require_aisimulate_distribution(*, allow_module_level: bool = False) -> None:
     try:
@@ -300,95 +289,6 @@ def _planner_profile_data_npz_path() -> Path:
         Path(__file__).resolve().parents[5]
         / "benchmarks/results/H200_TP1P_TP1D_perf_data.npz"
     )
-
-
-def _aic_replay_args(backend_name: str):
-    payload = {
-        "block_size": 512,
-        "enable_prefix_caching": True,
-        "enable_chunked_prefill": False,
-        "max_num_seqs": 16,
-        "max_num_batched_tokens": 65536,
-        "num_gpu_blocks": 100000,
-        "speedup_ratio": 1.0,
-        "aic_backend": backend_name,
-        "aic_system": AIC_PARITY_SYSTEM,
-        "aic_backend_version": AIC_PARITY_VERSIONS[backend_name],
-        "aic_tp_size": 1,
-        "aic_model_path": AIC_PARITY_MODEL,
-    }
-    if backend_name == "sglang":
-        payload["engine_type"] = "sglang"
-        payload["sglang"] = {
-            "page_size": 512,
-            "max_prefill_tokens": 65536,
-            "chunked_prefill_size": 65536,
-        }
-    return MockEngineArgs.from_json(json.dumps(payload))
-
-
-def _aic_disagg_replay_args(
-    backend_name: str,
-    *,
-    tp_size: int,
-    is_prefill: bool,
-    max_num_seqs: int,
-    max_num_batched_tokens: int,
-):
-    payload = {
-        "block_size": 512,
-        "enable_prefix_caching": False,
-        "enable_chunked_prefill": False,
-        "max_num_seqs": max_num_seqs,
-        "max_num_batched_tokens": max_num_batched_tokens,
-        "num_gpu_blocks": 50000,
-        "speedup_ratio": 1.0,
-        "aic_backend": backend_name,
-        "aic_system": AIC_PARITY_SYSTEM,
-        "aic_backend_version": AIC_PARITY_VERSIONS[backend_name],
-        "aic_tp_size": tp_size,
-        "aic_model_path": AIC_PARITY_MODEL,
-        "is_prefill": is_prefill,
-        "is_decode": not is_prefill,
-    }
-    if backend_name == "sglang":
-        payload["engine_type"] = "sglang"
-        payload["sglang"] = {
-            "page_size": 512,
-            "max_prefill_tokens": 65536,
-            "chunked_prefill_size": 65536,
-        }
-    return MockEngineArgs.from_json(json.dumps(payload))
-
-
-def _run_aic_static_point(backend_name: str, isl: int, osl: int, batch_size: int):
-    aic_core = pytest.importorskip("aiconfigurator_core")
-
-    database = aic_core.sdk.perf_database.get_database(
-        system=AIC_PARITY_SYSTEM,
-        backend=backend_name,
-        version=AIC_PARITY_VERSIONS[backend_name],
-    )
-    backend = aic_core.sdk.backends.factory.get_backend(backend_name)
-    model = aic_core.sdk.models.get_model(
-        model_path=AIC_PARITY_MODEL,
-        model_config=aic_core.sdk.config.ModelConfig(tp_size=1),
-        backend_name=backend_name,
-    )
-    summary = backend.run_static(
-        model=model,
-        database=database,
-        runtime_config=aic_core.sdk.config.RuntimeConfig(
-            batch_size=batch_size,
-            beam_width=1,
-            isl=isl,
-            osl=osl,
-            prefix=0,
-        ),
-        mode="static",
-        stride=32,
-    )
-    return summary.get_summary_df().to_dict(orient="records")[0]
 
 
 def _planner_profile_data_dir_path() -> Path:

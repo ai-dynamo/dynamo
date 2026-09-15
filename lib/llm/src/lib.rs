@@ -9,6 +9,7 @@
 pub mod backend;
 pub mod common;
 mod direct_zmq_fan_in;
+mod direct_zmq_sub_pool;
 pub mod discovery;
 pub mod endpoint_type;
 pub mod engines;
