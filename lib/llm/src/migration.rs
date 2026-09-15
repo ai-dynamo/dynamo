@@ -70,14 +70,15 @@ impl HasTokenIds for LLMEngineOutput {
     }
 }
 
+const MIGRATION_BLOCKING_REASONS: &[&str] = &[
+    "request.cancelled",
+    "backend.cancelled",
+    "capacity.exhausted",
+    "capacity.pool_exhausted",
+];
+
 fn blocks_migration(reason: &ErrorReason) -> bool {
-    matches!(
-        reason.as_str(),
-        "request.cancelled"
-            | "backend.cancelled"
-            | "capacity.exhausted"
-            | "capacity.pool_exhausted"
-    )
+    MIGRATION_BLOCKING_REASONS.contains(&reason.as_str())
 }
 
 fn is_migration_eligible(reason: &ErrorReason) -> bool {
@@ -709,8 +710,8 @@ where
         if let Some(min_tokens) = self.request.stop_conditions.min_tokens {
             self.request.stop_conditions.min_tokens = Some(min_tokens.saturating_sub(output_len));
         }
-        for token_id in token_ids.iter() {
-            self.request.token_ids.push(*token_id);
+        if !token_ids.is_empty() {
+            Arc::make_mut(&mut self.request.token_ids).extend(token_ids.iter().copied());
         }
     }
 
@@ -780,6 +781,100 @@ mod tests {
         assert!(
             is_migratable(&stream_incomplete),
             "StreamIncomplete (truncated stream from departed worker) must be migratable"
+        );
+    }
+
+    // Migration short-circuits on any blocking semantic reason in the chain, so
+    // pre_stream_failure_error must withhold those reasons before attaching a cause.
+    #[test]
+    fn pre_stream_failure_with_migration_sensitive_cause_is_still_migratable() {
+        use dynamo_runtime::pipeline::network::StreamPrologueError;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+
+        for &(error_type, reason) in &[
+            (ErrorType::Cancelled, "request.cancelled"),
+            (
+                ErrorType::Backend(BackendError::Cancelled),
+                "backend.cancelled",
+            ),
+            (ErrorType::ResourceExhausted, "capacity.pool_exhausted"),
+            (ErrorType::CapacityExhausted, "capacity.exhausted"),
+        ] {
+            let worker_error = DynamoError::builder()
+                .error_type(error_type)
+                .reason(ErrorReason::new(reason).unwrap())
+                .message("no capacity on the downstream worker")
+                .build();
+
+            assert!(!is_migratable(&worker_error), "{reason} setup");
+
+            let err = pre_stream_failure_error(StreamPrologueError::new(
+                format!("Generate Error: {worker_error}"),
+                worker_error,
+            ));
+            assert!(
+                is_migratable(&err),
+                "a {reason} worker error must not make a pre-stream failure stop migrating"
+            );
+            assert!(
+                std::error::Error::source(&err).is_none(),
+                "a {reason} cause must be withheld"
+            );
+        }
+
+        let nested = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+            .message("downstream worker rejected the request")
+            .cause(
+                DynamoError::builder()
+                    .error_type(ErrorType::ResourceExhausted)
+                    .message("no capacity on the downstream worker")
+                    .build(),
+            )
+            .build();
+        let err = pre_stream_failure_error(StreamPrologueError::new(
+            "Generate Error: downstream worker rejected the request",
+            nested,
+        ));
+        assert!(is_migratable(&err));
+        assert!(std::error::Error::source(&err).is_none());
+
+        let worker_error = DynamoError::builder()
+            .error_type(ErrorType::WorkerOverloaded)
+            .reason(ErrorReason::new("capacity.worker_overloaded").unwrap())
+            .message("selected worker is full")
+            .build();
+        let err = pre_stream_failure_error(StreamPrologueError::new(
+            "Generate Error: selected worker is full",
+            worker_error,
+        ));
+        assert!(is_migratable(&err));
+        let source = std::error::Error::source(&err)
+            .and_then(|source| source.downcast_ref::<DynamoError>())
+            .expect("worker-scoped cause must remain attached");
+        assert_eq!(source.reason().as_str(), "capacity.worker_overloaded");
+    }
+
+    // dynamo-runtime cannot import this module, so the addressed router keeps a copy.
+    #[test]
+    fn migration_sensitive_reasons_match_the_blocking_set() {
+        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::migration_sensitive_error_reasons;
+
+        let router_reasons = migration_sensitive_error_reasons();
+        let missing_from_router: Vec<_> = MIGRATION_BLOCKING_REASONS
+            .iter()
+            .filter(|reason| !router_reasons.contains(reason))
+            .collect();
+        let missing_from_here: Vec<_> = router_reasons
+            .iter()
+            .filter(|reason| !MIGRATION_BLOCKING_REASONS.contains(reason))
+            .collect();
+
+        assert!(
+            missing_from_router.is_empty() && missing_from_here.is_empty(),
+            "MIGRATION_BLOCKING_REASONS and MIGRATION_SENSITIVE_ERROR_REASONS must match: \
+             missing from addressed_router.rs: {missing_from_router:?}; \
+             missing from migration.rs: {missing_from_here:?}"
         );
     }
 
@@ -2399,6 +2494,7 @@ mod tests {
         }
 
         let request = create_mock_request(3);
+        let original_request = request.clone();
         let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
             Arc::new(LlmEngineMock(context_id.clone()));
 
@@ -2418,15 +2514,27 @@ mod tests {
         .await
         .expect("Failed to build RetryManager");
 
+        // Metadata-only chunks must not copy the shared prompt.
+        retry_manager.track_response(&Annotated::from_data(LLMEngineOutput::default()));
+        assert!(Arc::ptr_eq(
+            &original_request.token_ids,
+            &retry_manager.request.token_ids
+        ));
+
         let mut responses = Vec::new();
         while let Some(r) = retry_manager.next().await {
             responses.push(r);
         }
         assert_eq!(responses.len(), 3);
         assert_eq!(
-            retry_manager.request.token_ids,
-            vec![1, 2, 3, 200, 201, 202]
+            retry_manager.request.token_ids.as_slice(),
+            &[1, 2, 3, 200, 201, 202]
         );
+        assert_eq!(original_request.token_ids.as_slice(), &[1, 2, 3]);
+        assert!(!Arc::ptr_eq(
+            &original_request.token_ids,
+            &retry_manager.request.token_ids
+        ));
     }
 
     /// Regression test for the migration-discards-withheld-text bug: a chunk delivered

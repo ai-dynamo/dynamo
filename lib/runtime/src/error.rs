@@ -658,7 +658,7 @@ impl<'de> Deserialize<'de> for Diagnostic {
 /// let err = DynamoError::msg("outer");
 /// println!("{}", err); // "Internal: outer"
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DynamoError {
     /// Coarse semantic category. This may retain a compatible legacy variant internally; use [`Self::class`] for validated consumer policy.
     pub class: ErrorClass,
