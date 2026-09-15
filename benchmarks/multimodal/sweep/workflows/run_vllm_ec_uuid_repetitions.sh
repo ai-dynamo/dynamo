@@ -14,7 +14,7 @@ if [[ ! "$REPETITIONS" =~ ^[1-9][0-9]*$ ]]; then
 fi
 
 mkdir -p "$OUTPUT_BASE"
-python3 - "$OUTPUT_BASE/run_metadata.json" "$CONFIG" "$OUTPUT_BASE" "$REPETITIONS" <<'PY'
+python - "$OUTPUT_BASE/run_metadata.json" "$CONFIG" "$OUTPUT_BASE" "$REPETITIONS" <<'PY'
 import datetime
 import json
 import os
@@ -80,7 +80,7 @@ PY
 
 for ((iteration = 1; iteration <= REPETITIONS; iteration++)); do
     iteration_config="$OUTPUT_BASE/config-rep-$iteration.yaml"
-    iteration_order="$(python3 - "$iteration_config" <<'PY'
+    iteration_order="$(python - "$iteration_config" <<'PY'
 import sys
 
 import yaml
@@ -90,7 +90,7 @@ print(" -> ".join(item["label"] for item in config["configs"]))
 PY
 )"
     echo "[sweep] ITERATION_ORDER_${iteration}=${iteration_order}"
-    python3 -m benchmarks.multimodal.sweep \
+    python -m benchmarks.multimodal.sweep \
         --config "$iteration_config" \
         --output-dir "$OUTPUT_BASE/rep-$iteration" \
         --skip-plots
@@ -98,7 +98,7 @@ PY
     if [[ "$iteration" == "1" ]]; then
         for arm in vllm-serve vllm-serve-native-ec vllm-serve-dynamo-ec; do
             artifact="$OUTPUT_BASE/rep-1/30u_8t_5w_8000word_base64_uuid_seed42/$arm/concurrency30"
-            python3 -m benchmarks.multimodal.jsonl.validate_uuid_transport \
+            python -m benchmarks.multimodal.jsonl.validate_uuid_transport \
                 "$artifact/inputs.json" \
                 --expect-content 360 \
                 --expect-stripped 840 \
