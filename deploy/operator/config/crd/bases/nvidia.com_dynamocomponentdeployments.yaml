@@ -19947,9 +19947,7 @@ spec:
               description: spec defines the desired state for this Dynamo component deployment.
               properties:
                 backendFramework:
-                  description: |-
-                    backendFramework specifies the GPU backend framework (for example,
-                    "sglang", "vllm", or "trtllm").
+                  description: backendFramework specifies the backend framework.
                   enum:
                     - sglang
                     - vllm
@@ -20194,7 +20192,7 @@ spec:
                           properties:
                             backendFramework:
                               description: |-
-                                backendFramework is the runtime framework (`vllm`, `sglang`, or `trtllm`).
+                                backendFramework is the runtime framework (`vllm`, `sglang`, `trtllm`).
                                 Deprecated: legacy identity only.
                               enum:
                                 - vllm

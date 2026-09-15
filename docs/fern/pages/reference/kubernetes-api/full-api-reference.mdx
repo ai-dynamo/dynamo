@@ -2613,7 +2613,7 @@ model is the model identifier (e.g. "meta-llama/Llama-3-70B"). Deprecated: legac
 </ParamField>
 
 <ParamField path="backendFramework" type="string" required={true}>
-backendFramework is the runtime framework (`vllm`, `sglang`, or `trtllm`). Deprecated: legacy identity only.
+backendFramework is the runtime framework (`vllm`, `sglang`, `trtllm`). Deprecated: legacy identity only.
 **Validation:** Enum: [vllm sglang trtllm]  Required: \&#123;\&#125;
 </ParamField>
 
@@ -2811,7 +2811,7 @@ DynamoComponentDeploymentSpec defines the desired state of a DynamoComponentDepl
 **Appears in:** [DynamoComponentDeployment](#v1beta1-dynamocomponentdeployment)
 
 <ParamField path="backendFramework" type="string">
-backendFramework specifies the GPU backend framework (for example, "sglang", "vllm", or "trtllm").
+backendFramework specifies the backend framework.
 **Validation:** Enum: [sglang vllm trtllm]
 </ParamField>
 

@@ -20912,7 +20912,7 @@ spec:
                                 properties:
                                   backendFramework:
                                     description: |-
-                                      backendFramework is the runtime framework (`vllm`, `sglang`, or `trtllm`).
+                                      backendFramework is the runtime framework (`vllm`, `sglang`, `trtllm`).
                                       Deprecated: legacy identity only.
                                     enum:
                                       - vllm
