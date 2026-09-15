@@ -31,7 +31,7 @@ Dynamo + vLLM deployment profiles for the B200 chat workload:
 | **Max num seqs**         | 32                                           | 32 prefill / **256 decode**                                  |
 | **Max batched tokens**   | 8,192                                        | 8,192                                                        |
 | **GPU memory util**      | 0.93                                         | 0.93                                                         |
-| **Weight loading**       | fastsafetensors, lazy                        | fastsafetensors, lazy                                        |
+| **Weight loading**       | safetensors (engine default)                 | safetensors (engine default)                                 |
 | **Context length**       | 262,144 (model native)                       | 262,144 (model native)                                       |
 | **Prefix caching**       | On (vLLM default)                            | On (vLLM default)                                            |
 | **Routing**              | KV-aware                                     | KV-aware                                                     |
@@ -200,10 +200,14 @@ is communication-bound, not KV-capacity-bound.
 block geometry and produces silent garbage output, not an error. `--max-num-seqs` is the exception
 and is deliberately different — 32 on prefill, 256 on decode.
 
-**Weight loading.** `--load-format fastsafetensors --safetensors-load-strategy lazy` cut first-start
-time on this 53-shard, ~530 GB checkpoint. They affect load only, not steady-state serving, so the
-published throughput figures — which were measured without them on the aggregated variant — are
-unchanged.
+**Weight loading: do not add `--load-format fastsafetensors` without GPUDirect Storage.** It is
+tempting on a 53-shard, ~530 GB checkpoint, but fastsafetensors' fast path is GDS, and where the
+GDS pieces are missing it does not fall back cleanly — it stalls before opening a single shard.
+Observed on a cluster whose `model-cache` PVC is NFS-backed, with no `/dev/nvidia-fs*` device and
+no `libcufile.so` in the image: all four ranks spun at ~0.8 core for 13 minutes with zero file
+descriptors open on the mount and only the CUDA context resident on the GPUs. Removing the flag —
+the only variable changed — restored a normal start. Add it only where the nvidia-fs driver and
+cuFile are both present and the filesystem supports GDS.
 
 **Evaluating this model.** Use temperature 0.6 / top_p 0.95, not greedy — `temperature=0`
 drives this reasoning model into repetition. On `lm-eval`, GPQA needs `--system_instruction` to

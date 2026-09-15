@@ -88,8 +88,6 @@ spec:
                 - |
                   ulimit -l unlimited
                   exec python3 -m dynamo.vllm --model "${MODEL_NAME}" --served-model-name "${MODEL_NAME}" \
-                    --load-format fastsafetensors \
-                    --safetensors-load-strategy lazy \
                     --tensor-parallel-size 4 \
                     --gpu-memory-utilization 0.93 \
                     --max-num-seqs 32 \
