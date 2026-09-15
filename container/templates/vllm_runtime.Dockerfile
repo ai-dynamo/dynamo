@@ -365,7 +365,6 @@ RUN --mount=type=bind,source=./container/deps/vllm/validate_torch_compile_smoke.
 # IMAGEIO_FFMPEG_EXE. This remains ungated by enable_media_ffmpeg so the
 # media-enabled runtime wheel and the omni video-export path always have their
 # required shared libraries and CLI available.
-{% if device == "cuda" or device == "xpu" %}
 RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
     mkdir -p /usr/local/lib/pkgconfig && \
     cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/ && \
@@ -390,7 +389,6 @@ RUN set -eu; \
         echo "ERROR: shipped ffmpeg ($ff) exposes an H.264/H.265/AAC/NVENC encoder" >&2; \
         exit 1; \
     fi
-{% endif %}
 
 # Replace the upstream vllm/vllm-openai image's imageio-ffmpeg (which ships a
 # GPL-encumbered prebuilt ffmpeg binary in <site-packages>/imageio_ffmpeg/binaries/)

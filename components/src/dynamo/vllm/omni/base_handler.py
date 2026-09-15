@@ -132,11 +132,14 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
             trust_remote_code=config.engine_args.trust_remote_code,
             deploy_config_path=config.stage_configs_path,
         )
-        has_diffusion_stage = any(
+        # Older Omni defers single-stage diffusion detection until engine startup.
+        forward_diffusion_options = not stage_configs or any(
             stage.stage_type == "diffusion" for stage in stage_configs
         )
         for field, value in dataclasses.asdict(config.diffusion).items():
-            if value is not None and (has_diffusion_stage or field == "enforce_eager"):
+            if value is not None and (
+                forward_diffusion_options or field == "enforce_eager"
+            ):
                 omni_kwargs[field] = value
 
         # These three fields are shared vLLM engine settings. Keep their CLI

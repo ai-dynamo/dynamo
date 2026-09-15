@@ -67,9 +67,10 @@ def _make_config(**parallel_overrides):
 
 def _build_kwargs(config, stage_type="diffusion"):
     handler = BaseOmniHandler.__new__(BaseOmniHandler)
+    stages = [SimpleNamespace(stage_type=stage_type)] if stage_type else []
     with patch(
         "dynamo.vllm.omni.base_handler.resolve_stage_configs",
-        return_value=(None, [SimpleNamespace(stage_type=stage_type)]),
+        return_value=(None, stages),
     ):
         return handler._build_omni_kwargs(config)
 
@@ -128,6 +129,16 @@ class TestDiffusionParallelConfigCoverage:
             cli_overrides=kwargs,
         )
         assert kwargs["enforce_eager"] is True
+
+    def test_diffusion_kwargs_preserved_when_stage_detection_is_deferred(self):
+        config = _make_config()
+        config.diffusion.enable_cpu_offload = True
+        config.diffusion.vae_use_tiling = True
+
+        kwargs = _build_kwargs(config, stage_type=None)
+
+        assert kwargs["enable_cpu_offload"] is True
+        assert kwargs["vae_use_tiling"] is True
 
     def test_lora_disabled_resolves_no_capacity(self):
         config = _make_config()
