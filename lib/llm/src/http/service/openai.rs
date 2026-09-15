@@ -25,6 +25,7 @@ use base64::Engine as _;
 use bytes::Bytes;
 use dynamo_runtime::config::{env_is_truthy, environment_names::llm as env_llm};
 use dynamo_runtime::{
+    engine::AsyncEngineContext,
     pipeline::{AsyncEngineContextProvider, Context},
     protocols::annotated::AnnotationsProvider,
 };
@@ -47,7 +48,7 @@ use super::{
         process_response_and_observe_metrics,
         process_response_using_event_converter_and_observe_metrics,
     },
-    service_v2,
+    service_v2::{self, BackendErrorCheck},
 };
 use crate::engines::ValidateRequest;
 use crate::preprocessor::{PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, decode_base64_to_floats};
@@ -182,6 +183,19 @@ fn unavailable_error_type() -> String {
         .to_string()
 }
 
+/// `error_type` for a genuine 400 that is not a load-shed rejection. Same
+/// reasoning as `unavailable_error_type`: `map_error_code_to_error_type`
+/// checks `code == overload_status_code()` first, and an operator can
+/// configure `DYN_HTTP_OVERLOAD_STATUS_CODE=400`, which would otherwise
+/// label unsupported content "Overloaded" — telling clients to retry a
+/// request that can never succeed.
+fn bad_request_error_type() -> String {
+    StatusCode::BAD_REQUEST
+        .canonical_reason()
+        .expect("400 is IANA-registered")
+        .to_string()
+}
+
 /// `error_type` for a genuine 500 (unhandled panic, bug, misconfiguration)
 /// that is not a load-shed rejection. Same reasoning as `unavailable_error_type`:
 /// `map_error_code_to_error_type` checks `code == overload_status_code()`
@@ -225,7 +239,7 @@ fn classify_error_for_metrics(code: StatusCode, message: &str) -> ErrorType {
 }
 
 /// Extract ErrorType from ErrorResponse for metrics
-fn extract_error_type_from_response(response: &ErrorResponse) -> ErrorType {
+pub(super) fn extract_error_type_from_response(response: &ErrorResponse) -> ErrorType {
     response
         .1
         .metric_error_type
@@ -241,8 +255,10 @@ fn responses_conversion_error_response(error: anyhow::Error) -> ErrorResponse {
             invalid_argument(format!("{CONTEXT}: {message}")).into(),
             CONTEXT,
         ),
-        Some(ResponsesConversionError::NotImplemented(message)) => {
-            ErrorMessage::not_implemented_error(format!("{VALIDATION_PREFIX}{CONTEXT}: {message}"))
+        Some(ResponsesConversionError::UnsupportedContent(message)) => {
+            ErrorMessage::unsupported_content_error(format!(
+                "{VALIDATION_PREFIX}{CONTEXT}: {message}"
+            ))
         }
         None => ErrorMessage::from_anyhow(error, CONTEXT),
     }
@@ -256,20 +272,20 @@ fn responses_error_code(status_code: StatusCode) -> &'static str {
     }
 }
 
-/// Match `InvalidArgument` at top-level OR under `Backend()`.
-/// `py_err_to_dynamo` wraps Python `ValueError`/`TypeError` as
-/// `Backend(InvalidArgument)`; both variants are 400-worthy.
+fn is_invalid_argument(error: &dynamo_runtime::error::DynamoError) -> bool {
+    matches!(
+        error.reason().as_str(),
+        "backend.invalid_argument" | "request.invalid_argument"
+    )
+}
+
 pub(crate) fn find_invalid_argument_in_chain<'a>(
     err: &'a (dyn std::error::Error + 'static),
 ) -> Option<&'a dynamo_runtime::error::DynamoError> {
-    use dynamo_runtime::error::{BackendError, ErrorType};
     let mut current = Some(err);
     while let Some(e) = current {
         if let Some(dynamo_err) = e.downcast_ref::<dynamo_runtime::error::DynamoError>()
-            && matches!(
-                dynamo_err.error_type(),
-                ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument)
-            )
+            && is_invalid_argument(dynamo_err)
         {
             return Some(dynamo_err);
         }
@@ -365,6 +381,28 @@ impl ErrorMessage {
                 code: code.as_u16(),
                 details: None,
                 metric_error_type: Some(ErrorType::Unavailable),
+            }),
+        )
+    }
+
+    /// Client Closed Request — nginx's 499 convention, which
+    /// [`classify_error_for_metrics`] already maps to [`ErrorType::Cancelled`].
+    ///
+    /// Returned when the client goes away while a handler is still waiting for
+    /// the backend's first event. Nobody reads this response; it exists so the
+    /// handler stops there instead of finishing a stream for a connection that
+    /// is gone. See [`until_client_disconnects`].
+    pub fn client_disconnected() -> ErrorResponse {
+        let code = StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_REQUEST);
+        let reason = map_error_code_to_error_type(code);
+        (
+            code,
+            Json(ErrorMessage {
+                message: reason.clone(),
+                error_type: reason,
+                code: code.as_u16(),
+                details: None,
+                metric_error_type: Some(ErrorType::Cancelled),
             }),
         )
     }
@@ -492,6 +530,25 @@ impl ErrorMessage {
         )
     }
 
+    /// Unsupported multimodal content is a client error: no retry can make the
+    /// request succeed, and infrastructure above the frontend counts 5xx as a
+    /// server-side fault. Answered 400 where `not_implemented_error` answers 501.
+    pub fn unsupported_content_error<T: Display>(msg: T) -> ErrorResponse {
+        tracing::debug!("Unsupported Content error: {msg}");
+        let code = StatusCode::BAD_REQUEST;
+        let error_type = bad_request_error_type();
+        (
+            code,
+            Json(ErrorMessage {
+                message: msg.to_string(),
+                error_type,
+                code: code.as_u16(),
+                details: None,
+                metric_error_type: Some(ErrorType::NotImplemented),
+            }),
+        )
+    }
+
     pub fn request_headers_too_large(msg: &str) -> ErrorResponse {
         let code = StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE;
         let error_type = map_error_code_to_error_type(code);
@@ -544,14 +601,62 @@ impl ErrorMessage {
 
         // InvalidArgument (top-level OR Backend) → 400.
         if let Some(dynamo_err) = find_invalid_argument_in_chain(err.as_ref()) {
+            // The message may be an [`ErrorPayload`] envelope rather than prose,
+            // so unwrap it; otherwise the client is shown the raw JSON. An
+            // explicit client-error status inside the envelope (for example 415)
+            // is honoured, matching what the in-stream path already does. A 5xx
+            // is not, because reaching this arm means the worker classified the
+            // failure as a request problem, and a 5xx body here would bypass the
+            // sanitizing the other arms apply.
+            let (message, explicit_status) =
+                match serde_json::from_str::<ErrorPayload>(dynamo_err.message()) {
+                    Ok(envelope) => {
+                        let explicit_status = envelope
+                            .code
+                            .and_then(|code| StatusCode::from_u16(code).ok())
+                            .filter(StatusCode::is_client_error);
+                        (
+                            envelope
+                                .message
+                                .unwrap_or_else(|| dynamo_err.message().to_string()),
+                            explicit_status,
+                        )
+                    }
+                    Err(_) => (dynamo_err.message().to_string(), None),
+                };
+            let code = explicit_status.unwrap_or(StatusCode::BAD_REQUEST);
+            // An explicit status the worker asserted goes through the shared
+            // policy, so a 499 answers with the same sanitized cancellation
+            // body as every other HTTP path rather than the worker's own text,
+            // which can name a context id or an internal file. A 400 remains a
+            // validation error, even when the configured overload status also
+            // happens to be 400.
+            if let Some(explicit_status) = explicit_status
+                && explicit_status != StatusCode::BAD_REQUEST
+                && let BackendStatusAction::Sanitize(variant) =
+                    BackendStatusAction::triage(explicit_status)
+            {
+                return ErrorMessage::sanitized_with_details(variant, message);
+            }
             return (
-                StatusCode::BAD_REQUEST,
+                code,
                 Json(ErrorMessage {
-                    message: dynamo_err.message().to_string(),
-                    error_type: map_error_code_to_error_type(StatusCode::BAD_REQUEST),
-                    code: StatusCode::BAD_REQUEST.as_u16(),
+                    message,
+                    error_type: if code == StatusCode::BAD_REQUEST {
+                        bad_request_error_type()
+                    } else {
+                        map_error_code_to_error_type(code)
+                    },
+                    code: code.as_u16(),
                     details: None,
-                    metric_error_type: Some(ErrorType::Validation),
+                    // A plain 400 keeps the validation override: a worker's
+                    // refusal text does not carry the `Validation:` prefix
+                    // `classify_error_for_metrics` looks for, so the request
+                    // error would otherwise be counted as `Internal`. A status
+                    // the envelope preserved classifies from that status
+                    // instead, so a backend rate limit counts as `Overload`.
+                    metric_error_type: (code == StatusCode::BAD_REQUEST)
+                        .then_some(ErrorType::Validation),
                 }),
             );
         }
@@ -968,6 +1073,19 @@ async fn completions_single(
     let stream = stream::iter(annotations).chain(stream);
 
     if streaming {
+        // Same pre-commit check as chat_completions: a backend error before
+        // the first item maps to its HTTP status instead of an SSE frame
+        // behind an HTTP 200.
+        let stream = until_client_disconnects(
+            check_for_backend_error(stream, state.streaming_backend_error_check()),
+            &ctx,
+        )
+        .await
+        .inspect_err(|error_response| {
+            log_pre_commit_error(&request_id, error_response);
+            inflight_guard.mark_error(extract_error_type_from_response(error_response));
+        })?;
+
         // For streaming, we'll drop the http_queue_guard on the first token
         let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream
@@ -1005,7 +1123,7 @@ async fn completions_single(
         // Preserve typed backend errors before the completions aggregator turns
         // them into strings. In particular, Python ValueError/TypeError arrives
         // as Backend(InvalidArgument) and must remain an HTTP 400.
-        let stream = check_for_backend_error(stream, None)
+        let stream = check_for_backend_error(stream, BackendErrorCheck::UntilFirstEvent)
             .await
             .map_err(|error_response| {
                 tracing::error!(request_id, "Backend error detected: {:?}", error_response);
@@ -1132,13 +1250,14 @@ fn aggregate_batch_completion_usage(
 type BoxedCompletionResponseStream =
     std::pin::Pin<Box<dyn futures::Stream<Item = Annotated<NvCreateCompletionResponse>> + Send>>;
 
-/// Check each prompt stream before merging a non-streaming completion batch.
+/// Check each prompt stream before merging a completion batch, streaming or not.
 ///
 /// `select_all` cannot safely provide this check after merging because a normal
 /// event from one prompt may arrive before a typed backend error from another.
 /// Poll all streams concurrently so batch startup is not serialized.
 async fn check_completion_batch_streams<S>(
     streams: Vec<S>,
+    check: BackendErrorCheck,
 ) -> Result<Vec<BoxedCompletionResponseStream>, ErrorResponse>
 where
     S: futures::Stream<Item = Annotated<NvCreateCompletionResponse>> + Send + 'static,
@@ -1146,7 +1265,7 @@ where
     futures::future::try_join_all(
         streams
             .into_iter()
-            .map(|stream| check_for_backend_error(stream, None)),
+            .map(|stream| check_for_backend_error(stream, check)),
     )
     .await
 }
@@ -1200,9 +1319,14 @@ async fn completions_batch(
     // prepare to process any annotations
     let annotations = request.annotations();
 
-    // Generate streams for each prompt in the batch
+    // Generate streams for each prompt in the batch.
+    //
+    // Each prompt runs under its own context so it can carry its own request
+    // id, but every one is linked to the request context: `kill` cascades to
+    // linked children, so a client disconnect or a failed preflight stops all
+    // of them rather than only the prompt that happened to be first.
     let mut all_streams = Vec::new();
-    let mut first_ctx = None;
+    let parent_ctx = request.context();
 
     for prompt_idx in 0..batch_size {
         // Extract single prompt at this index
@@ -1233,10 +1357,7 @@ async fn completions_batch(
             err_response
         })?;
 
-        // Capture context from first stream
-        if first_ctx.is_none() {
-            first_ctx = Some(stream.context());
-        }
+        parent_ctx.link_child(stream.context());
 
         // Remap choice indices: choice.index += prompt_idx * n
         let prompt_idx_u32 = prompt_idx as u32;
@@ -1253,28 +1374,34 @@ async fn completions_batch(
         all_streams.push(remapped_stream);
     }
 
-    let all_streams: Vec<BoxedCompletionResponseStream> = if streaming {
-        all_streams
-            .into_iter()
-            .map(|stream| Box::pin(stream) as BoxedCompletionResponseStream)
-            .collect()
+    let check = if streaming {
+        state.streaming_backend_error_check()
     } else {
-        check_completion_batch_streams(all_streams)
-            .await
-            .map_err(|error_response| {
-                tracing::error!(request_id, "Backend error detected: {:?}", error_response);
-                inflight_guard.mark_error(extract_error_type_from_response(&error_response));
-                error_response
-            })?
+        BackendErrorCheck::UntilFirstEvent
     };
+    let all_streams = until_client_disconnects(
+        check_completion_batch_streams(all_streams, check),
+        &parent_ctx,
+    )
+    .await
+    .inspect_err(|error_response| {
+        log_pre_commit_error(&request_id, error_response);
+        inflight_guard.mark_error(extract_error_type_from_response(error_response));
+        // One prompt's error abandons the whole batch, so stop the siblings
+        // still running behind it instead of leaving them to generate for a
+        // response that will never be sent.
+        parent_ctx.kill();
+    })?;
 
-    // Merge all streams after every non-streaming prompt has passed its own
-    // backend-error preflight.
+    // Merge all streams after every prompt has passed its own backend-error
+    // check.
     let merged_stream = stream::select_all(all_streams);
     let merged_stream = aggregate_batch_completion_usage(merged_stream, request_id.clone());
 
-    // capture the context to cancel the stream if the client disconnects
-    let ctx = first_ctx.expect("At least one stream should be generated");
+    // The request context cancels every prompt on client disconnect, through
+    // the child links established above. It is also what the route's connection
+    // monitor kills, so the monitor below observes the same stop signal.
+    let ctx = parent_ctx;
 
     let annotations_vec = annotations.map_or(Vec::new(), |annotations| {
         annotations
@@ -1371,8 +1498,10 @@ async fn completions_batch(
 async fn embeddings(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(mut request): Json<NvCreateEmbeddingRequest>,
+    body: Body,
 ) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let mut request: NvCreateEmbeddingRequest = parse_json_request("embeddings", &body)?;
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.inner.model)?;
@@ -1528,8 +1657,10 @@ async fn embeddings(
 async fn classify(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(mut request): Json<NvCreateClassifyRequest>,
+    body: Body,
 ) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let mut request: NvCreateClassifyRequest = parse_json_request("classify", &body)?;
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.model)?;
@@ -1805,8 +1936,10 @@ fn build_pooling_binary_response(
 async fn pooling(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(mut request): Json<NvCreatePoolingRequest>,
+    body: Body,
 ) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let mut request: NvCreatePoolingRequest = parse_json_request("pooling", &body)?;
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.model)?;
@@ -2240,31 +2373,38 @@ impl BackendErrorInfo {
     }
 }
 
+/// The `{"message": ..., "code": ...}` envelope `py_err_to_dynamo` emits for an
+/// HTTP-like Python exception (see `lib/bindings/python/rust/backend.rs`).
+///
+/// A worker's error message is therefore not always prose, and the raw envelope
+/// must never reach a client. Both the in-stream path
+/// ([`extract_backend_error_if_present`]) and the pre-stream path
+/// ([`ErrorMessage::from_anyhow`]) unwrap it, so the *body* is the same either
+/// way. They deliberately differ on the *status*: the in-stream path honours
+/// any code in the envelope, while the pre-stream path honours only a client
+/// error, because it is reached solely through the `InvalidArgument` arm and a
+/// 5xx there would skip the sanitizing the other arms apply.
+#[derive(serde::Deserialize)]
+struct ErrorPayload {
+    message: Option<String>,
+    code: Option<u16>,
+}
+
 /// Checks if an Annotated event represents a backend error and extracts error information.
 /// Returns Some(info) if it's an error, None otherwise.
 fn extract_backend_error_if_present<T: serde::Serialize>(
     event: &Annotated<T>,
 ) -> Option<BackendErrorInfo> {
-    #[derive(serde::Deserialize)]
-    struct ErrorPayload {
-        message: Option<String>,
-        code: Option<u16>,
-    }
-
     // Check if event type is "error" (from postprocessor when FinishReason::Error is encountered)
     if let Some(event_type) = &event.event
         && event_type == "error"
     {
-        use dynamo_runtime::error::{BackendError, ErrorType};
-
         // Classify only this event's error, not its causes. An inner invalid
         // argument must not override an outer unavailable or internal error.
-        let invalid_argument = event.error.as_ref().filter(|error| {
-            matches!(
-                error.error_type(),
-                ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument)
-            )
-        });
+        let invalid_argument = event
+            .error
+            .as_ref()
+            .filter(|error| is_invalid_argument(error));
 
         // Extract error string: prefer DynamoError field, fallback to legacy comment.
         // Use message() instead of to_string() for DynamoError to avoid prefixing
@@ -2418,17 +2558,20 @@ const MAX_LEADING_ANNOTATIONS: usize = 16;
 
 /// Inspect the first non-annotation event in the stream for a backend error.
 ///
-/// `timeout = None` — await stream events indefinitely (non-streaming preflight).
-/// `timeout = Some(dur)` — race against a single deadline captured at function
-/// entry (streaming pre-commit peek). If the deadline elapses before a
-/// non-annotation event arrives, return the buffered annotations chained with
-/// the remaining stream so downstream sees the original ordering.
+/// `BackendErrorCheck::UntilFirstEvent` awaits stream events indefinitely: the
+/// non-streaming preflight, and the streaming pre-commit when the service is
+/// configured to wait. `BackendErrorCheck::Bounded` races against a
+/// single deadline captured at function entry (streaming pre-commit peek); if
+/// the deadline elapses before a non-annotation event arrives, the buffered
+/// annotations are returned chained with the remaining stream so downstream
+/// sees the original ordering. `BackendErrorCheck::Skip` returns the stream
+/// untouched.
 ///
 /// Returns `Err(ErrorResponse)` if the first non-annotation event is a backend
 /// error, `Ok(stream)` otherwise.
 pub(super) async fn check_for_backend_error<T>(
     stream: impl futures::Stream<Item = Annotated<T>> + Send + 'static,
-    timeout: Option<std::time::Duration>,
+    check: BackendErrorCheck,
 ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = Annotated<T>> + Send>>, ErrorResponse>
 where
     T: serde::Serialize + Send + 'static,
@@ -2438,7 +2581,11 @@ where
     let mut stream = Box::pin(stream);
     // Single deadline captured at entry so the peek window is bounded in total,
     // not per-iteration.
-    let deadline = timeout.map(|t| tokio::time::Instant::now() + t);
+    let deadline = match check {
+        BackendErrorCheck::Skip => return Ok(stream),
+        BackendErrorCheck::Bounded(window) => Some(tokio::time::Instant::now() + window),
+        BackendErrorCheck::UntilFirstEvent => None,
+    };
     let mut buffered: Vec<Annotated<T>> = Vec::new();
 
     loop {
@@ -2471,6 +2618,56 @@ where
         // consumption with original ordering preserved.
         buffered.push(event);
         return Ok(Box::pin(futures::stream::iter(buffered).chain(stream)));
+    }
+}
+
+/// Abandon `check` if the client disconnects before it resolves, and discard a
+/// result that resolved after the disconnect.
+///
+/// Route handlers run in a detached `tokio::spawn`, so a handler outlives the
+/// connection that asked for it. Without this, a disconnect during the
+/// pre-commit wait is recorded twice: once when the armed connection handle
+/// drops, and again when the finished response — built for a client that is
+/// already gone — is dropped unpolled with its stream handle armed. Ending the
+/// wait keeps it inside the lifetime of its connection.
+///
+/// The kill also wins when `check` resolves in the same poll. A backend that
+/// ends or fails its stream once its context is killed resolves the check
+/// right then, and that result is a response for a closed connection: an `Ok`
+/// would arm a stream handle nobody polls, and an `Err` would meter a client
+/// hangup as whatever the backend said on its way out. So a result is
+/// returned only while the connection is still open.
+pub(super) async fn until_client_disconnects<T>(
+    check: impl std::future::Future<Output = Result<T, ErrorResponse>>,
+    ctx: &Arc<dyn AsyncEngineContext>,
+) -> Result<T, ErrorResponse> {
+    let result = tokio::select! {
+        result = check => result,
+        () = ctx.killed() => return Err(ErrorMessage::client_disconnected()),
+    };
+    if ctx.is_killed() {
+        return Err(ErrorMessage::client_disconnected());
+    }
+    result
+}
+
+/// Log a failed pre-commit check.
+///
+/// A client that hung up is an expected outcome rather than a backend fault, so
+/// it must not raise the log level on a busy frontend.
+pub(super) fn log_pre_commit_error(request_id: &str, error_response: &ErrorResponse) {
+    if error_response.1.metric_error_type == Some(ErrorType::Cancelled) {
+        tracing::debug!(
+            request_id,
+            "Client disconnected before the first backend event"
+        );
+    } else {
+        tracing::error!(
+            request_id,
+            status = %error_response.0,
+            error = ?error_response.1.0,
+            "Backend error detected"
+        );
     }
 }
 
@@ -2519,28 +2716,6 @@ fn backend_error_response(backend_error: BackendErrorInfo) -> ErrorResponse {
                 metric_error_type: None,
             }),
         ),
-    }
-}
-
-/// Read the pre-commit peek window from the environment.
-///
-/// `Some(dur)` — poll for that duration before committing SSE.
-/// `None` — the peek is disabled entirely (default; matches pre-fix behavior
-/// where all backend errors surface as SSE frames post-HTTP-200).
-///
-/// Read live per streaming request. Reading `std::env::var` is a hashmap
-/// lookup — sub-microsecond, negligible next to the peek window
-/// itself. Live reads make the value tunable at test time without a
-/// process restart.
-// FIXME: unify env-var initialization with the rest of `env_llm::*` once that
-// module gets a standard reader.
-fn pre_commit_error_peek_timeout() -> Option<std::time::Duration> {
-    match std::env::var(env_llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS)
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-    {
-        Some(0) | None => None,
-        Some(ms) => Some(std::time::Duration::from_millis(ms)),
     }
 }
 
@@ -2908,29 +3083,25 @@ async fn chat_completions(
     // note - we might do this as part of the post processing set to make it more generic
 
     if streaming {
-        // Peek the first non-annotation event for a synchronous backend error
-        // (e.g. `Backend(InvalidArgument)` from a text-only model receiving
-        // image content) before committing HTTP 200, so we can return the
-        // typed 4xx that the non-streaming path returns. The peek window is
-        // short (`DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS`) — if no signal arrives,
-        // fall through to SSE, and `monitor_for_disconnects` owns the long
-        // backend-inactivity timeout from there.
-        let stream = match pre_commit_error_peek_timeout() {
-            Some(dur) => check_for_backend_error(stream, Some(dur))
-                .await
-                .map_err(|err_response| {
-                    tracing::error!(request_id = %request_id, "Backend error detected: {:?}", err_response);
-                    inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-                    err_response
-                })?,
-            // Env var unset → skip peek, commit HTTP 200 immediately (pre-fix
-            // behavior). Backend errors will surface as SSE error frames via
-            // monitor_for_disconnects.
-            None => Box::pin(stream)
-                as std::pin::Pin<
-                    Box<dyn futures::Stream<Item = _> + Send>,
-                >,
-        };
+        // Inspect the first non-annotation event for a synchronous backend
+        // error (e.g. `Backend(InvalidArgument)` from a text-only model
+        // receiving image content) before committing HTTP 200, so we can
+        // return the typed 4xx that the non-streaming path returns. How long
+        // to wait is service configuration; with a bounded window and no
+        // signal, fall through to SSE, and `monitor_for_disconnects` owns the
+        // long backend-inactivity timeout from there. That monitor arms only
+        // once the response is built, so it does not bound this wait:
+        // `UntilFirstEvent` ends on the first event or on the client
+        // disconnecting, and on nothing else.
+        let stream = until_client_disconnects(
+            check_for_backend_error(stream, state.streaming_backend_error_check()),
+            &ctx,
+        )
+        .await
+        .inspect_err(|err_response| {
+            log_pre_commit_error(&request_id, err_response);
+            inflight_guard.mark_error(extract_error_type_from_response(err_response));
+        })?;
 
         let mut http_queue_guard = Some(http_queue_guard);
         let tool_dispatch_enabled = state.streaming_tool_dispatch_enabled();
@@ -3040,14 +3211,13 @@ async fn chat_completions(
         Ok(sse_stream.into_response())
     } else {
         // Check first event for backend errors before aggregating (non-streaming only)
-        let stream_with_check =
-            check_for_backend_error(stream, None)
-                .await
-                .map_err(|error_response| {
-                    tracing::error!(request_id, "Backend error detected: {:?}", error_response);
-                    inflight_guard.mark_error(extract_error_type_from_response(&error_response));
-                    error_response
-                })?;
+        let stream_with_check = check_for_backend_error(stream, BackendErrorCheck::UntilFirstEvent)
+            .await
+            .map_err(|error_response| {
+                tracing::error!(request_id, "Backend error detected: {:?}", error_response);
+                inflight_guard.mark_error(extract_error_type_from_response(&error_response));
+                error_response
+            })?;
 
         let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream_with_check.inspect(move |response| {
@@ -3178,6 +3348,9 @@ pub fn validate_chat_completion_fields_generic(
     request: &NvCreateChatCompletionRequest,
 ) -> Result<(), ErrorResponse> {
     request.validate().map_err(|e| {
+        if find_invalid_argument_in_chain(e.as_ref()).is_some() {
+            return ErrorMessage::from_anyhow(e, "Invalid chat completion request");
+        }
         ErrorMessage::from_http_error(HttpError {
             code: 400,
             message: VALIDATION_PREFIX.to_string() + &e.to_string(),
@@ -3209,6 +3382,9 @@ pub fn validate_completion_fields_generic(
     request: &NvCreateCompletionRequest,
 ) -> Result<(), ErrorResponse> {
     request.validate().map_err(|e| {
+        if find_invalid_argument_in_chain(e.as_ref()).is_some() {
+            return ErrorMessage::from_anyhow(e, "Invalid completion request");
+        }
         ErrorMessage::from_http_error(HttpError {
             code: 400,
             message: VALIDATION_PREFIX.to_string() + &e.to_string(),
@@ -3535,24 +3711,19 @@ async fn responses(
     let ctx = engine_stream.context();
 
     if streaming {
-        // Peek the first non-annotation event for a synchronous backend error
-        // before committing HTTP 200 — same rationale as chat_completions
-        // above. Short peek window; the long backend-inactivity safety net
+        // Inspect the first non-annotation event for a synchronous backend
+        // error before committing HTTP 200 — same rationale as
+        // chat_completions above. The long backend-inactivity safety net
         // lives in `monitor_for_disconnects`.
-        let engine_stream = match pre_commit_error_peek_timeout() {
-            Some(dur) => check_for_backend_error(engine_stream, Some(dur))
-                .await
-                .map_err(|err_response| {
-                    tracing::error!(request_id = %request_id, "Backend error detected: {:?}", err_response);
-                    inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-                    err_response
-                })?,
-            // Env var unset → skip peek, commit HTTP 200 immediately.
-            None => Box::pin(engine_stream)
-                as std::pin::Pin<
-                    Box<dyn futures::Stream<Item = _> + Send>,
-                >,
-        };
+        let engine_stream = until_client_disconnects(
+            check_for_backend_error(engine_stream, state.streaming_backend_error_check()),
+            &ctx,
+        )
+        .await
+        .inspect_err(|err_response| {
+            log_pre_commit_error(&request_id, err_response);
+            inflight_guard.mark_error(extract_error_type_from_response(err_response));
+        })?;
 
         // Streaming path: convert chat completion stream chunks to Responses API SSE events.
         // The engine yields Annotated<NvCreateChatCompletionStreamResponse>. We extract the
@@ -3649,7 +3820,7 @@ async fn responses(
 
         // Check first event for backend errors before aggregating (non-streaming only)
         let stream_with_check =
-            check_for_backend_error(engine_stream, None)
+            check_for_backend_error(engine_stream, BackendErrorCheck::UntilFirstEvent)
                 .await
                 .map_err(|error_response| {
                     tracing::error!(request_id, "Backend error detected: {:?}", error_response);
@@ -4249,13 +4420,24 @@ pub fn responses_router(
 async fn images(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateImageRequest>,
+    body: Body,
+) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let request: NvCreateImageRequest = parse_json_request("images", &body)?;
+    images_with_request(state, headers, request).await
+}
+
+async fn images_with_request(
+    state: Arc<service_v2::State>,
+    headers: HeaderMap,
+    mut request: NvCreateImageRequest,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     // (per-model readiness check is deferred until after we resolve the
     // ImageModel enum into a string; see below)
     check_ready(&state)?;
 
+    request.nest_passthrough();
     let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
@@ -4335,8 +4517,14 @@ async fn images(
     let response = NvImagesResponse::from_annotated_stream(stream)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to fold images stream for {}: {:?}", request_id, e);
-            let err_response = ErrorMessage::internal_server_error("Failed to fold images stream");
+            // Route the stream error through from_anyhow so typed errors keep
+            // their semantics: an InvalidArgument raised by the worker (e.g.
+            // request validation) surfaces as HTTP 400 with its message,
+            // while internal errors remain sanitized 500s (and are logged by
+            // the sanitization path). No pre-classification logging here:
+            // expected 400s would show up at error level.
+            let err_response =
+                ErrorMessage::from_anyhow(anyhow::Error::new(e), "Failed to generate images");
             inflight.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
@@ -4349,8 +4537,10 @@ async fn images(
 async fn images_edits(
     state: State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateImageRequest>,
+    body: Body,
 ) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let request: NvCreateImageRequest = parse_json_request("image edits", &body)?;
     if request.input_reference.is_none() {
         let code = StatusCode::BAD_REQUEST;
         return Err((
@@ -4364,7 +4554,7 @@ async fn images_edits(
             }),
         ));
     }
-    images(state, headers, Json(request)).await
+    images_with_request(state.0, headers, request).await
 }
 
 /// Create an Axum [`Router`] for the OpenAI API Images endpoints.
@@ -4390,12 +4580,15 @@ pub fn images_router(
 async fn videos(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateVideoRequest>,
+    body: Body,
 ) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let mut request: NvCreateVideoRequest = parse_json_request("videos", &body)?;
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.model)?;
 
+    request.nest_passthrough();
     let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
@@ -4512,11 +4705,14 @@ async fn videos(
 async fn video_stream(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateVideoRequest>,
+    body: Body,
 ) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let mut request: NvCreateVideoRequest = parse_json_request("video stream", &body)?;
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.model)?;
 
+    request.nest_passthrough();
     let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
     let model = request.model.clone();
@@ -4707,8 +4903,10 @@ fn decode_audio_chunks(response: &NvAudioSpeechResponse) -> Result<Vec<Bytes>, S
 async fn handler_audio_speech(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(mut request): Json<NvCreateAudioSpeechRequest>,
+    body: Body,
 ) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let mut request: NvCreateAudioSpeechRequest = parse_json_request("audio speech", &body)?;
     // return a 503 if the service is not ready
     // (per-model readiness check is deferred until after we resolve the
     // Option<String> model field; see below)
@@ -4731,7 +4929,8 @@ async fn handler_audio_speech(
             .get_or_insert_default()
             .frontend_accepts_audio_chunks = Some(true);
     }
-    let request = context_from_headers(request, request_id, &headers)?;
+    request.nest_passthrough();
+    let mut request = context_from_headers(request, request_id, &headers)?;
 
     // model is optional in the request; fall back to a model that can actually
     // serve right now (complete worker set), not just any displayable one, so
@@ -4746,15 +4945,23 @@ async fn handler_audio_speech(
             .unwrap_or_default()
     });
     // Per-model serving readiness gate (now that we have a resolved model
-    // name string).
+    // name string). Runs on the requested name so a 503 quotes back what the
+    // caller asked for.
     check_model_serving_ready(&state, &model)?;
+
+    // Audio registrations honor --served-model-name aliases, so resolve one to
+    // its primary before it reaches routing, metrics, or the engine request.
+    // Readiness is published per primary name, and every other alias-bearing
+    // surface keeps the request model consistent with that name.
+    let model = state.manager().resolve_canonical_name(&model);
+    request.model = Some(model.clone());
 
     let context = request.context();
     let (mut connection_handle, stream_handle) = create_connection_monitor(
         context,
         Some(state.metrics_clone()),
         CancellationLabels {
-            model: model.clone(),
+            model: state.manager().metric_model_for(&model).to_string(),
             endpoint: Endpoint::Audios.to_string(),
             request_type: if streams_audio_chunks {
                 "stream"
@@ -4808,13 +5015,15 @@ async fn audio_speech(
         .map_err(|e| ErrorMessage::from_model_error(&e))?;
 
     let mut inflight = state.metrics_clone().create_inflight_guard(
-        &model,
+        &metric_model,
         Endpoint::Audios,
         streams_audio_chunks,
         &request_id,
     );
 
-    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+    let mut response_collector = state
+        .metrics_clone()
+        .create_response_collector(&metric_model);
 
     let ctx = request.context();
     inflight.mark_error(ErrorType::Cancelled);
@@ -4822,14 +5031,14 @@ async fn audio_speech(
         if super::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::Audios);
+                .inc_rejection(&metric_model, super::metrics::Endpoint::Audios);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate audio");
         inflight.mark_error(extract_error_type_from_response(&err_response));
         err_response
     })?;
 
-    let stream = check_for_backend_error(stream, None)
+    let stream = check_for_backend_error(stream, BackendErrorCheck::UntilFirstEvent)
         .await
         .inspect_err(|error_response| {
             let error_type = match error_response.0 {
@@ -5056,8 +5265,8 @@ mod tests {
 
     use super::*;
     use crate::discovery::ModelManagerError;
-    use crate::protocols::common::StopConditionsProvider;
     use crate::protocols::common::extensions::{AgentCompaction, NvExt};
+    use crate::protocols::common::{SamplingOptionsProvider, StopConditionsProvider};
     use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use crate::protocols::openai::common_ext::CommonExt;
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
@@ -5071,6 +5280,36 @@ mod tests {
     };
 
     const BACKUP_ERROR_MESSAGE: &str = "Failed to generate completions";
+
+    #[test]
+    fn wire_normalized_invalid_request_is_found_through_error_context() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+
+        let original = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+            .message("invalid request")
+            .build();
+        let wire = serde_json::to_value(original).unwrap();
+        let normalized: DynamoError = serde_json::from_value(wire).unwrap();
+        assert_eq!(
+            normalized.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+
+        let error = anyhow::Error::new(normalized).context("request validation failed");
+        assert_eq!(
+            find_invalid_argument_in_chain(error.as_ref()).map(DynamoError::message),
+            Some("invalid request")
+        );
+
+        let private_error = anyhow::Error::new(
+            DynamoError::builder()
+                .error_type(ErrorType::InvalidRequest)
+                .message("private diagnostic")
+                .build(),
+        );
+        assert!(find_invalid_argument_in_chain(private_error.as_ref()).is_none());
+    }
 
     fn binary_pooling_response() -> NvCreatePoolingResponse {
         NvCreatePoolingResponse {
@@ -5353,6 +5592,28 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_chat_completion_request_accepts_media_url_with_uuid() {
+        for (part_type, media_url, uuid) in [
+            ("video_url", "https://example.com/video.mp4", "video-42"),
+            ("audio_url", "https://example.com/audio.wav", "audio-42"),
+        ] {
+            let body = format!(
+                r#"{{"model":"test-model","messages":[{{"role":"user","content":[{{"type":"{part_type}","{part_type}":{{"url":"{media_url}"}},"uuid":"{uuid}"}}]}}]}}"#
+            );
+
+            let request: NvCreateChatCompletionRequest =
+                parse_json_request("chat completions", body.as_bytes())
+                    .expect("request should parse");
+            let request = serde_json::to_value(request).expect("request should serialize");
+            assert_eq!(request["messages"][0]["content"][0]["uuid"], uuid);
+            assert_eq!(
+                request["messages"][0]["content"][0][part_type]["url"],
+                media_url
+            );
+        }
+    }
+
+    #[test]
     fn test_parse_chat_completion_request_accepts_empty_uuid_url_after_tolerant_parse() {
         let body = b"{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"raw \xff \x1b data\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"\"},\"uuid\":\"image-42\"}]}]}";
 
@@ -5490,7 +5751,6 @@ mod tests {
                     trigger: Some("automatic".to_string()),
                     ..Default::default()
                 }),
-                kv_hints: None,
                 input_trigger: None,
             },
         );
@@ -5601,6 +5861,29 @@ mod tests {
         let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
         assert_eq!(response.0, StatusCode::BAD_REQUEST);
         assert_eq!(response.1.message, "custom error message");
+    }
+
+    #[test]
+    fn guided_decoding_conflict_maps_to_bounded_bad_request() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "guided_json": {
+                "type": "object",
+                "description": "x".repeat(1_200_000),
+            },
+            "guided_regex": "a+",
+        }))
+        .expect("request should deserialize");
+
+        let error = request.extract_sampling_options().unwrap_err();
+        let response = ErrorMessage::from_anyhow(error, BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.1.message,
+            "Only one guided-decoding constraint can be set; received: json, regex"
+        );
     }
 
     #[test]
@@ -5960,16 +6243,29 @@ mod tests {
     fn unavailable_error_response_from_anyhow() {
         use dynamo_runtime::error::{DynamoError, ErrorType};
 
-        let err: anyhow::Error = DynamoError::builder()
-            .error_type(ErrorType::Unavailable)
-            .message("No workers available for endpoint test/worker/generate")
-            .build()
-            .into();
-        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+        // The pool-scoped and worker-scoped flavors both reach the client as 503
+        // when migration cannot retry them.
+        for (error_type, message) in [
+            (
+                ErrorType::Unavailable,
+                "No workers available for endpoint test/worker/generate",
+            ),
+            (
+                ErrorType::WorkerUnavailable,
+                "Server unavailable: unknown endpoint a/generate",
+            ),
+        ] {
+            let err: anyhow::Error = DynamoError::builder()
+                .error_type(error_type)
+                .message(message)
+                .build()
+                .into();
+            let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
 
-        assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(response.1.code, StatusCode::SERVICE_UNAVAILABLE.as_u16());
-        assert_eq!(response.1.message, "Service temporarily unavailable");
+            assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE, "{error_type}");
+            assert_eq!(response.1.code, StatusCode::SERVICE_UNAVAILABLE.as_u16());
+            assert_eq!(response.1.message, "Service temporarily unavailable");
+        }
     }
 
     #[test]
@@ -6055,6 +6351,193 @@ mod tests {
         assert_eq!(response.0, StatusCode::BAD_REQUEST);
         assert_eq!(response.1.code, StatusCode::BAD_REQUEST.as_u16());
         assert!(response.1.message.contains("does not currently support"));
+    }
+
+    /// A worker that refuses a request before the response stream opens must
+    /// reach the client as 400, not 500.
+    #[test]
+    fn test_pre_stream_refusal_surfaces_as_400() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+        use dynamo_runtime::pipeline::network::StreamPrologueError;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+
+        let prologue_error = StreamPrologueError::new(
+            "Generate Error: multimodal input is not supported by this backend",
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                .message("multimodal input is not supported by this backend")
+                .build(),
+        );
+
+        let err: anyhow::Error = pre_stream_failure_error(prologue_error).into();
+        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.code, StatusCode::BAD_REQUEST.as_u16());
+        assert!(
+            response
+                .1
+                .message
+                .contains("multimodal input is not supported"),
+            "the client should see the worker's reason, got: {}",
+            response.1.message
+        );
+    }
+
+    /// `py_err_to_dynamo` wraps an HTTP-like Python exception's text in a
+    /// `{"message":..,"code":..}` envelope, so a refusal from a Python worker
+    /// carries JSON, not prose. The client must be shown the reason, never the
+    /// envelope -- the in-stream path already unwraps it, and the two must agree.
+    #[test]
+    fn test_pre_stream_refusal_unwraps_the_python_error_envelope() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+        use dynamo_runtime::pipeline::network::StreamPrologueError;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+
+        let refuse = |message: &str| {
+            let prologue = StreamPrologueError::new(
+                format!("Generate Error: {message}"),
+                DynamoError::builder()
+                    .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                    .message(message)
+                    .build(),
+            );
+            ErrorMessage::from_anyhow(
+                pre_stream_failure_error(prologue).into(),
+                BACKUP_ERROR_MESSAGE,
+            )
+        };
+
+        let response = refuse(
+            &serde_json::json!({"message": "multimodal input is not supported", "code": 400})
+                .to_string(),
+        );
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.message, "multimodal input is not supported");
+
+        // An explicit client-error status inside the envelope is honoured.
+        let response = refuse(
+            &serde_json::json!({"message": "unsupported media type", "code": 415}).to_string(),
+        );
+        assert_eq!(response.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(response.1.message, "unsupported media type");
+
+        // A 5xx inside the envelope does not escape through the 4xx arm.
+        let response = refuse(&serde_json::json!({"message": "boom", "code": 500}).to_string());
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+    }
+
+    /// A worker can report a cancellation as an HTTP-like 499, and its own text
+    /// may name a context id or an internal path. The status survives, the text
+    /// does not: this arm owes the client the same sanitized body every other
+    /// HTTP path produces for a cancellation.
+    #[test]
+    fn test_pre_stream_refusal_sanitizes_the_envelope_cancellation() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynErrorType};
+        use dynamo_runtime::pipeline::network::StreamPrologueError;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+
+        let envelope = serde_json::json!({
+            "message": "Context id abc-123 stopped at /opt/dynamo/worker.py:42",
+            "code": 499,
+        })
+        .to_string();
+        let prologue = StreamPrologueError::new(
+            format!("Generate Error: {envelope}"),
+            DynamoError::builder()
+                .error_type(DynErrorType::Backend(BackendError::InvalidArgument))
+                .message(envelope)
+                .build(),
+        );
+
+        let response = ErrorMessage::from_anyhow(
+            pre_stream_failure_error(prologue).into(),
+            BACKUP_ERROR_MESSAGE,
+        );
+
+        assert_eq!(response.0, StatusCode::from_u16(499).unwrap());
+        assert_eq!(response.1.message, SanitizedError::Cancelled.to_string());
+        assert!(
+            !response.1.message.contains("abc-123") && !response.1.message.contains("/opt/dynamo"),
+            "the worker's own cancellation text must not reach the client, got: {}",
+            response.1.message
+        );
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::Cancelled
+        );
+    }
+
+    /// A status the envelope preserved is what the metric is counted from. A
+    /// backend rate limit is an overload, not a validation failure; a plain 400
+    /// keeps the validation override, because a worker's refusal text carries no
+    /// `Validation:` prefix and would otherwise be counted as internal.
+    #[test]
+    fn test_pre_stream_refusal_classifies_metrics_from_the_preserved_status() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynErrorType};
+        use dynamo_runtime::pipeline::network::StreamPrologueError;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+
+        let refuse = |message: String| {
+            let prologue = StreamPrologueError::new(
+                format!("Generate Error: {message}"),
+                DynamoError::builder()
+                    .error_type(DynErrorType::Backend(BackendError::InvalidArgument))
+                    .message(message)
+                    .build(),
+            );
+            ErrorMessage::from_anyhow(
+                pre_stream_failure_error(prologue).into(),
+                BACKUP_ERROR_MESSAGE,
+            )
+        };
+
+        let rate_limited =
+            refuse(serde_json::json!({"message": "too many requests", "code": 429}).to_string());
+        assert_eq!(rate_limited.0, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            extract_error_type_from_response(&rate_limited),
+            ErrorType::Overload
+        );
+
+        let refused = refuse("multimodal input is not supported by this backend".to_string());
+        assert_eq!(refused.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            extract_error_type_from_response(&refused),
+            ErrorType::Validation
+        );
+    }
+
+    /// Negative control for `test_pre_stream_refusal_surfaces_as_400`: a genuine
+    /// pre-stream connect failure must still be 500. Only a request-level
+    /// refusal earns a 4xx.
+    #[test]
+    fn test_pre_stream_connect_failure_still_surfaces_as_500() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+        use dynamo_runtime::pipeline::network::StreamPrologueError;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+
+        // The worker died rather than refused: typed, but not a request problem.
+        let engine_shutdown = StreamPrologueError::new(
+            "Generate Error: engine shut down",
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+                .message("engine shut down")
+                .build(),
+        );
+        let response = ErrorMessage::from_anyhow(
+            pre_stream_failure_error(engine_shutdown).into(),
+            BACKUP_ERROR_MESSAGE,
+        );
+        assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
+
+        // An older worker sends no typed error at all: also still 500.
+        let untyped = StreamPrologueError::from_message("Generate Error: could not reach worker");
+        let response = ErrorMessage::from_anyhow(
+            pre_stream_failure_error(untyped).into(),
+            BACKUP_ERROR_MESSAGE,
+        );
+        assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[test]
@@ -6874,7 +7357,7 @@ mod tests {
         };
 
         let test_stream = stream::iter(vec![error_event]);
-        let result = check_for_backend_error(test_stream, None).await;
+        let result = check_for_backend_error(test_stream, BackendErrorCheck::UntilFirstEvent).await;
 
         // Should return an error
         assert!(result.is_err());
@@ -6897,24 +7380,44 @@ mod tests {
         use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
         use futures::stream;
 
-        for error_type in [
-            ErrorType::InvalidArgument,
-            ErrorType::Backend(BackendError::InvalidArgument),
+        let wire = serde_json::to_value(
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                .message("unsupported JSON schema keyword")
+                .build(),
+        )
+        .unwrap();
+        let normalized: DynamoError = serde_json::from_value(wire).unwrap();
+        assert_eq!(
+            normalized.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+        assert_eq!(normalized.class(), ErrorType::InvalidRequest);
+
+        for error in [
+            DynamoError::builder()
+                .error_type(ErrorType::InvalidArgument)
+                .message("unsupported JSON schema keyword")
+                .build(),
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                .message("unsupported JSON schema keyword")
+                .build(),
+            normalized,
         ] {
             let error_event = Annotated::<NvCreateChatCompletionStreamResponse> {
                 data: None,
                 id: None,
                 event: Some("error".to_string()),
                 comment: None,
-                error: Some(
-                    DynamoError::builder()
-                        .error_type(error_type)
-                        .message("unsupported JSON schema keyword")
-                        .build(),
-                ),
+                error: Some(error),
             };
 
-            let result = check_for_backend_error(stream::iter(vec![error_event]), None).await;
+            let result = check_for_backend_error(
+                stream::iter(vec![error_event]),
+                BackendErrorCheck::UntilFirstEvent,
+            )
+            .await;
 
             let error_response = match result {
                 Err(error_response) => error_response,
@@ -6945,11 +7448,15 @@ mod tests {
             ),
         };
 
-        let error_response =
-            match check_for_backend_error(stream::iter(vec![error_event]), None).await {
-                Ok(_) => panic!("typed completion error must fail"),
-                Err(error_response) => error_response,
-            };
+        let error_response = match check_for_backend_error(
+            stream::iter(vec![error_event]),
+            BackendErrorCheck::UntilFirstEvent,
+        )
+        .await
+        {
+            Ok(_) => panic!("typed completion error must fail"),
+            Err(error_response) => error_response,
+        };
 
         assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
         assert_eq!(error_response.1.code, StatusCode::BAD_REQUEST.as_u16());
@@ -6987,10 +7494,13 @@ mod tests {
             ),
         };
 
-        let result = check_completion_batch_streams(vec![
-            stream::iter(vec![normal_event]),
-            stream::iter(vec![error_event]),
-        ])
+        let result = check_completion_batch_streams(
+            vec![
+                stream::iter(vec![normal_event]),
+                stream::iter(vec![error_event]),
+            ],
+            BackendErrorCheck::UntilFirstEvent,
+        )
         .await;
 
         let error_response = match result {
@@ -7020,7 +7530,7 @@ mod tests {
         };
 
         let test_stream = stream::iter(vec![error_event]);
-        let result = check_for_backend_error(test_stream, None).await;
+        let result = check_for_backend_error(test_stream, BackendErrorCheck::UntilFirstEvent).await;
 
         // Should return an error with correct status code extracted from JSON
         assert!(result.is_err());
@@ -7053,7 +7563,7 @@ mod tests {
         };
 
         let test_stream = stream::iter(vec![error_event]);
-        let result = check_for_backend_error(test_stream, None).await;
+        let result = check_for_backend_error(test_stream, BackendErrorCheck::UntilFirstEvent).await;
 
         assert!(result.is_err());
         if let Err(error_response) = result {
@@ -7082,7 +7592,7 @@ mod tests {
         };
 
         let test_stream = stream::iter(vec![error_event]);
-        let result = check_for_backend_error(test_stream, None).await;
+        let result = check_for_backend_error(test_stream, BackendErrorCheck::UntilFirstEvent).await;
 
         assert!(result.is_err());
         if let Err(error_response) = result {
@@ -7125,7 +7635,11 @@ mod tests {
                 error: None,
             };
 
-            let result = check_for_backend_error(stream::iter(vec![error_event]), None).await;
+            let result = check_for_backend_error(
+                stream::iter(vec![error_event]),
+                BackendErrorCheck::UntilFirstEvent,
+            )
+            .await;
             let Err(response) = result else {
                 panic!("backend status {code} should produce an error response");
             };
@@ -7158,7 +7672,11 @@ mod tests {
             error: None,
         };
 
-        let result = check_for_backend_error(stream::iter(vec![error_event]), None).await;
+        let result = check_for_backend_error(
+            stream::iter(vec![error_event]),
+            BackendErrorCheck::UntilFirstEvent,
+        )
+        .await;
         let Err(response) = result else {
             panic!("an overload status should produce an error response");
         };
@@ -7211,7 +7729,7 @@ mod tests {
         };
 
         let test_stream = stream::iter(vec![error_event]);
-        let result = check_for_backend_error(test_stream, None).await;
+        let result = check_for_backend_error(test_stream, BackendErrorCheck::UntilFirstEvent).await;
 
         assert!(result.is_err());
         if let Err(error_response) = result {
@@ -7248,7 +7766,7 @@ mod tests {
         };
 
         let test_stream = stream::iter(vec![annotation, error_event]);
-        let result = check_for_backend_error(test_stream, None).await;
+        let result = check_for_backend_error(test_stream, BackendErrorCheck::UntilFirstEvent).await;
 
         assert!(
             result.is_err(),
@@ -7296,7 +7814,7 @@ mod tests {
         };
 
         let test_stream = stream::iter(vec![annotation, normal_event]);
-        let result = check_for_backend_error(test_stream, None).await;
+        let result = check_for_backend_error(test_stream, BackendErrorCheck::UntilFirstEvent).await;
 
         assert!(result.is_ok());
         let mut returned: Vec<_> = result.unwrap().collect().await;
@@ -7305,6 +7823,56 @@ mod tests {
         assert_eq!(first.event.as_deref(), Some(ANNOTATION_REQUEST_ID));
         let second = returned.remove(0);
         assert_eq!(second.id, Some("msg-1".to_string()));
+    }
+
+    /// The timeout branch of a `Bounded` check is the one path that hands back
+    /// annotations it has already taken off the stream. Dropping them there
+    /// loses the request-id frame silently, behind an HTTP 200 that still
+    /// looks healthy.
+    #[tokio::test]
+    async fn test_check_for_backend_error_bounded_replays_annotations_after_window() {
+        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use futures::stream::StreamExt;
+
+        let annotation = Annotated::<NvCreateChatCompletionStreamResponse>::from_annotation(
+            ANNOTATION_REQUEST_ID,
+            &"req-123".to_string(),
+        )
+        .expect("annotation construction should succeed");
+        let window = std::time::Duration::from_millis(20);
+        let stream = async_stream::stream! {
+            yield annotation;
+            // Outlast the window, so the check hands the stream over before
+            // the first data event arrives.
+            tokio::time::sleep(window * 10).await;
+            yield Annotated::<NvCreateChatCompletionStreamResponse> {
+                data: None,
+                id: Some("msg-1".to_string()),
+                event: None,
+                comment: None,
+                error: None,
+            };
+        };
+
+        let started = tokio::time::Instant::now();
+        let result = check_for_backend_error(stream, BackendErrorCheck::Bounded(window)).await;
+        let waited = started.elapsed();
+
+        assert!(
+            waited < window * 5,
+            "the check waited {waited:?}, past its {window:?} window"
+        );
+        let returned: Vec<_> = result
+            .expect("an elapsed window is not an error")
+            .collect()
+            .await;
+        assert_eq!(
+            returned.len(),
+            2,
+            "buffered annotation must survive the window"
+        );
+        assert_eq!(returned[0].event.as_deref(), Some(ANNOTATION_REQUEST_ID));
+        assert_eq!(returned[1].id.as_deref(), Some("msg-1"));
     }
 
     #[tokio::test]
@@ -7336,7 +7904,7 @@ mod tests {
         };
 
         let test_stream = stream::iter(vec![normal_event.clone()]);
-        let result = check_for_backend_error(test_stream, None).await;
+        let result = check_for_backend_error(test_stream, BackendErrorCheck::UntilFirstEvent).await;
 
         // Should return Ok with the stream
         assert!(result.is_ok());
@@ -7357,7 +7925,7 @@ mod tests {
         // Create an empty stream
         let test_stream =
             stream::iter::<Vec<Annotated<NvCreateChatCompletionStreamResponse>>>(vec![]);
-        let result = check_for_backend_error(test_stream, None).await;
+        let result = check_for_backend_error(test_stream, BackendErrorCheck::UntilFirstEvent).await;
 
         // Should return Ok with an empty stream
         assert!(result.is_ok());
@@ -7383,7 +7951,7 @@ mod tests {
         };
 
         let test_stream = stream::iter(vec![error_event]);
-        let result = check_for_backend_error(test_stream, None).await;
+        let result = check_for_backend_error(test_stream, BackendErrorCheck::UntilFirstEvent).await;
 
         // Should return an error based on is_backend_error_event logic
         assert!(result.is_err());
@@ -7572,6 +8140,21 @@ mod tests {
     #[test]
     fn test_extract_error_type_from_response_not_implemented() {
         let response = ErrorMessage::not_implemented_error("Feature not available");
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::NotImplemented
+        );
+    }
+
+    #[test]
+    fn unsupported_content_responses_conversion_errors_are_not_implemented() {
+        let response = responses_conversion_error_response(
+            ResponsesConversionError::UnsupportedContent("feature not available".to_string())
+                .into(),
+        );
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.error_type, "Bad Request");
         assert_eq!(
             extract_error_type_from_response(&response),
             ErrorType::NotImplemented

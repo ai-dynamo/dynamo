@@ -6,7 +6,9 @@
 use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest};
 use crate::protocols::openai::GuidedToolConstraint;
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
-use crate::protocols::openai::tools::{get_json_schema_from_tools, validate_openai_tool_choice};
+use crate::protocols::openai::tools::{
+    ToolChoiceGuidance, get_tool_choice_guidance_from_tools, validate_openai_tool_choice,
+};
 
 use dynamo_parsers::tool_calling::{ToolChoice, ToolDefinition};
 use dynamo_protocols::types::{ChatCompletionTool, ChatCompletionToolChoiceOption, ResponseFormat};
@@ -125,21 +127,24 @@ impl OpenAIPreprocessor {
             return Ok(GuidedToolConstraint::None);
         }
 
-        match get_json_schema_from_tools(
+        match get_tool_choice_guidance_from_tools(
             Some(tool_choice),
             Some(tools),
             request.inner.parallel_tool_calls,
         ) {
-            Ok(Some(schema)) => {
+            Ok(Some(guidance)) => {
                 let gd = common_request
                     .sampling_options
                     .guided_decoding
                     .get_or_insert_default();
-                gd.json = Some(schema);
+                match guidance {
+                    ToolChoiceGuidance::Json(schema) => gd.json = Some(schema),
+                    ToolChoiceGuidance::Regex(regex) => gd.regex = Some(regex),
+                }
 
-                // Report the shape that was installed, not the tool_choice that
-                // asked for it. Only these two arms produce a JSON schema, so only
-                // they may be streamed as guided JSON.
+                // Report the parser constraint implied by the installed grammar,
+                // not merely the tool_choice that requested it. Both JSON and
+                // regex guidance still use the guided-JSON tool-output parser.
                 return Ok(installed_json_constraint(tool_choice));
             }
             Ok(None) => {}
@@ -242,7 +247,7 @@ pub(crate) fn guided_tool_constraint(
     // constraint for a `tool_choice` that names a tool absent from `tools` (or an
     // empty `tools` list under `tool_choice: "required"`).
     let tools = request.inner.tools.as_deref().unwrap_or(&[]);
-    match get_json_schema_from_tools(
+    match get_tool_choice_guidance_from_tools(
         Some(tool_choice),
         Some(tools),
         request.inner.parallel_tool_calls,
@@ -262,11 +267,11 @@ fn uses_kimi_k3_parser(tool_call_parser: Option<&str>, reasoning_parser: Option<
     tool_call_parser.is_some_and(is_k3) || reasoning_parser.is_some_and(is_k3)
 }
 
-/// Map a forced `tool_choice` onto the JSON shape its schema constrains output to.
+/// Map a forced `tool_choice` onto the guided-JSON parser constraint for its grammar.
 ///
-/// Only reachable once `get_json_schema_from_tools` actually produced a schema, and
-/// that function returns `None` for `Auto`/`None`, so those arms are unreachable in
-/// practice and report [`GuidedToolConstraint::None`] rather than guessing.
+/// Only reachable once `get_tool_choice_guidance_from_tools` produced either JSON or
+/// regex guidance. It returns `None` for `Auto`/`None`, so those arms are unreachable
+/// in practice and report [`GuidedToolConstraint::None`] rather than guessing.
 fn installed_json_constraint(tool_choice: &ChatCompletionToolChoiceOption) -> GuidedToolConstraint {
     match tool_choice {
         ChatCompletionToolChoiceOption::Named(named) => GuidedToolConstraint::GuidedJsonNamed {
@@ -430,6 +435,34 @@ mod tests {
             installed_json_constraint(&named("get_weather")),
             GuidedToolConstraint::GuidedJsonNamed {
                 tool_name: "get_weather".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn named_closed_zero_arg_tool_keeps_the_named_parser_constraint() {
+        let request = request(json!({
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_server_time",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": false
+                    }
+                }
+            }],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "get_server_time"}
+            }
+        }));
+
+        assert_eq!(
+            guided_tool_constraint(&request, None, None, false).expect("constraint is valid"),
+            GuidedToolConstraint::GuidedJsonNamed {
+                tool_name: "get_server_time".to_string(),
             }
         );
     }

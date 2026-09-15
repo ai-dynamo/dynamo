@@ -13,7 +13,19 @@ the operator propagates the corresponding env vars to all DGD pods it manages.
 
 For the full list of TLS/mTLS environment variables and CLI flags, and for the
 per-component configuration method, see the
-[TLS reference](../../../../reference/components/tls-configuration.mdx).
+[TLS reference](../../reference/components/tls-configuration.mdx).
+
+## Frontend HTTP TLS
+
+Operator-level TLS settings inject `DYN_TCP_TLS_*` and `NATS_TLS_*` for internal
+transports. They do not inject the frontend's `DYN_TLS_*` HTTP settings.
+
+To enable HTTPS or HTTP mTLS, explicitly set `DYN_TLS_CERT_PATH`,
+`DYN_TLS_KEY_PATH`, and, for mTLS, `DYN_TLS_CLIENT_CA_CERT_PATH` in the frontend
+container's `podTemplate` environment. Mount the server certificate, private
+key, and trusted client CA at those paths. See the
+[HTTP TLS reference](../../reference/components/tls-configuration.mdx#http-tls-and-mtls)
+for the configuration requirements.
 
 ## Operator-level TLS configuration
 
@@ -53,7 +65,7 @@ values when both are set.
 > When any `natsTLS*` value is set, `natsAddr` **must** use the
 > `tls://` scheme — the runtime fails closed at startup otherwise. If you are
 > using the bundled NATS subchart, also enable TLS on the server side (see
-> [Enabling TLS on the NATS server](../../../../reference/components/tls-configuration.mdx#enabling-tls-on-the-nats-server)).
+> [Enabling TLS on the NATS server](../../reference/components/tls-configuration.mdx#enabling-tls-on-the-nats-server)).
 
 ## Operator-level mTLS configuration
 
@@ -121,5 +133,5 @@ operator's auto-injection, apply these mounts in each component's
 > For NATS TLS to work, the NATS server itself must also be
 > configured to listen on TLS. The operator injects the **client-side** env
 > vars, but enabling TLS on the NATS server subchart is a separate step — see
-> [Enabling TLS on the NATS server](../../../../reference/components/tls-configuration.mdx#enabling-tls-on-the-nats-server)
+> [Enabling TLS on the NATS server](../../reference/components/tls-configuration.mdx#enabling-tls-on-the-nats-server)
 > in the TLS reference.

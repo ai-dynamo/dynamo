@@ -250,12 +250,6 @@ impl ConcurrentRadixTreeCompressed {
             .child_lookup_plan(cursor.last_ext_hash, first_local);
 
         let shape_version = match plan {
-            ParentChildPlan::Stale => {
-                return Ok(StoreInsertStep::RetryParent {
-                    parent: cursor.parent.clone(),
-                    parent_is_anchor: cursor.parent_is_anchor,
-                });
-            }
             ParentChildPlan::StaleParent { hash } => {
                 let Some(resolved) =
                     self.resolve_lookup(lookup, worker, hash, LookupRepairDirection::TowardTail)
@@ -423,15 +417,6 @@ impl ConcurrentRadixTreeCompressed {
                     ) else {
                         continue;
                     };
-                    if let Some((expected, actual)) = scan.block_hash_mismatch {
-                        duplicate_store = false;
-                        tracing::warn!(
-                            ?expected,
-                            ?actual,
-                            "block_hash mismatch: sequence hashes should be uniform across workers"
-                        );
-                    }
-
                     return ChildInsertStep::Done(Self::finish_with_lookup_update(
                         lookup,
                         worker,
@@ -454,14 +439,6 @@ impl ConcurrentRadixTreeCompressed {
                 ) else {
                     continue;
                 };
-                if let Some((expected, actual)) = scan.block_hash_mismatch {
-                    tracing::warn!(
-                        ?expected,
-                        ?actual,
-                        "block_hash mismatch: sequence hashes should be uniform across workers"
-                    );
-                }
-
                 return ChildInsertStep::Done(self.finish_after_split_lookup(
                     lookup,
                     worker,
@@ -482,14 +459,6 @@ impl ConcurrentRadixTreeCompressed {
             else {
                 continue;
             };
-            if let Some((expected, actual)) = scan.block_hash_mismatch {
-                duplicate_store = false;
-                tracing::warn!(
-                    ?expected,
-                    ?actual,
-                    "block_hash mismatch: sequence hashes should be uniform across workers"
-                );
-            }
             if promoted {
                 duplicate_store = false;
             }

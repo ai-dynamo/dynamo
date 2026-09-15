@@ -16,7 +16,7 @@ import shutil
 import pytest
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, DynamoPortRange
-from tests.utils.managed_process import ManagedProcess
+from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import allocate_port, deallocate_port
 
@@ -141,7 +141,7 @@ class DynamoWorkerProcess(ManagedProcess):
 
         # Configure health check based on worker type
         health_check_urls = [
-            (f"http://localhost:{self.system_port}/health", self.is_ready)
+            (f"http://localhost:{self.system_port}/health", check_health_ready)
         ]
         if mode in ["decode", "agg"]:
             health_check_urls.append(
@@ -180,20 +180,6 @@ class DynamoWorkerProcess(ManagedProcess):
             logging.warning(f"Failed to release TRT-LLM worker port: {e}")
 
         return super().__exit__(exc_type, exc_val, exc_tb)
-
-    def is_ready(self, response) -> bool:
-        """Check the health of the worker process"""
-        try:
-            data = response.json()
-            if data.get("status") == "ready":
-                logger.info(f"{self.worker_id} status is ready")
-                return True
-            logger.warning(
-                f"{self.worker_id} status is not ready: {data.get('status')}"
-            )
-        except ValueError:
-            logger.warning(f"{self.worker_id} health response is not valid JSON")
-        return False
 
 
 @pytest.mark.timeout(290)  # 3x average

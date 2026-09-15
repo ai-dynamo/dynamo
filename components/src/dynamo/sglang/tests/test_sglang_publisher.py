@@ -50,28 +50,30 @@ def test_get_local_dp_rank_range_respects_multinode_dp_attention():
     assert list(get_local_dp_rank_range(server_args)) == [4, 5, 6, 7]
 
 
-def test_set_forward_pass_metrics_worker_id_uses_endpoint_identity():
+def test_set_forward_pass_metrics_worker_id_declares_endpoint_identity(monkeypatch):
     class ReadOnlyServerArgs:
         def __init__(self):
             object.__setattr__(self, "enable_forward_pass_metrics", True)
-            object.__setattr__(self, "override_source", None)
 
         def __setattr__(self, name, value):
             raise AttributeError("server args are read-only")
 
-        def override(self, source, **fields):
-            object.__setattr__(self, "override_source", source)
-            for name, value in fields.items():
-                object.__setattr__(self, name, value)
-
     server_args = ReadOnlyServerArgs()
     endpoint = SimpleNamespace(connection_id=lambda: "endpoint-9")
+    declarations = []
+
+    def declare(args, source, **fields):
+        declarations.append((args, source, fields))
+
+    monkeypatch.setattr(publisher_mod, "override_server_args", declare)
 
     set_forward_pass_metrics_worker_id(server_args, endpoint)
 
-    assert server_args.override_source == "dynamo.forward_pass_metrics"
-    assert server_args.forward_pass_metrics_worker_id == "endpoint-9"
-    assert server_args.forward_pass_metrics_ipc_name.startswith("ipc://")
+    args, source, fields = declarations[0]
+    assert args is server_args
+    assert source == "dynamo.forward_pass_metrics"
+    assert fields["forward_pass_metrics_worker_id"] == "endpoint-9"
+    assert fields["forward_pass_metrics_ipc_name"].startswith("ipc://")
 
 
 def test_set_forward_pass_metrics_worker_id_is_noop_when_disabled():
@@ -494,6 +496,72 @@ def test_init_kv_event_publish_uses_worker_id_override(monkeypatch):
     assert [call["dp_rank"] for call in calls] == [4, 5, 6, 7]
     assert {call["worker_id"] for call in calls} == {1234}
     assert {call["kv_block_size"] for call in calls} == {32}
+
+
+def test_init_kv_event_publish_subscribes_to_every_pure_dp_replica(monkeypatch):
+    calls = []
+
+    class FakeKvEventPublisher:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+        def shutdown(self):
+            pass
+
+    monkeypatch.setattr(publisher_mod, "KvEventPublisher", FakeKvEventPublisher)
+    monkeypatch.setattr(
+        publisher_mod,
+        "get_zmq_socket",
+        lambda *args, **kwargs: SimpleNamespace(close=lambda linger=0: None),
+    )
+    monkeypatch.setattr(publisher_mod, "get_local_ip_auto", lambda: "127.0.0.1")
+    monkeypatch.setattr(
+        publisher_mod,
+        "ZmqEventPublisher",
+        SimpleNamespace(
+            offset_endpoint_port=staticmethod(
+                lambda base_ep, dp_rank: f"tcp://*:{5557 + dp_rank}"
+            )
+        ),
+    )
+
+    server_args = SimpleNamespace(
+        kv_events_config='{"endpoint": "tcp://*:5557"}',
+        page_size=16,
+        dcp_size=1,
+        dp_size=4,
+        enable_dp_attention=False,
+        nnodes=1,
+        node_rank=0,
+    )
+    config = SimpleNamespace(
+        server_args=server_args,
+        dynamo_args=SimpleNamespace(
+            enable_local_indexer=False,
+            kv_state_endpoint=None,
+            use_kv_events=True,
+        ),
+    )
+    publisher = DynamoSglangPublisher(
+        engine=SimpleNamespace(
+            port_args=SimpleNamespace(metrics_ipc_name="ipc://metrics")
+        ),
+        config=config,
+        generate_endpoint=SimpleNamespace(),
+        component_gauges=SimpleNamespace(),
+    )
+
+    publishers = publisher.init_kv_event_publish()
+
+    assert len(publishers) == 4
+    assert [call["dp_rank"] for call in calls] == [0, 1, 2, 3]
+    assert [call["zmq_endpoint"] for call in calls] == [
+        "tcp://127.0.0.1:5557",
+        "tcp://127.0.0.1:5558",
+        "tcp://127.0.0.1:5559",
+        "tcp://127.0.0.1:5560",
+    ]
+    publisher.cleanup()
 
 
 def test_init_kv_event_publish_uses_effective_kv_event_setting():

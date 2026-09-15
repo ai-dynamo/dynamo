@@ -159,3 +159,33 @@ def test_request_exposes_all_token_ids():
         "vllm.v1.request.Request no longer exposes `_all_token_ids` — "
         "InstrumentedScheduler relies on it for NewRequestData.prefill_token_ids."
     )
+
+
+def test_model_config_exposes_get_vocab_size():
+    """``InstrumentedScheduler._bench_init`` bounds synthetic prompt token ids
+    with ``model_config.get_vocab_size()``. The call site degrades gracefully
+    (falls back to all-zero prompts), but that fallback reintroduces the MoE
+    routing-collapse bias the randomization exists to remove -- so a vLLM
+    rename must fail loudly here, not silently flip benchmarks back to
+    zeros."""
+    from vllm.config import ModelConfig
+
+    assert callable(
+        getattr(ModelConfig, "get_vocab_size", None)
+    ), "vLLM ModelConfig.get_vocab_size is gone — synthetic prompt randomization relies on it."
+
+
+def test_vllm_freezes_serving_heap_with_freeze_gc_heap():
+    """``dynamo.vllm.gc_policy.stop_gc_policy`` re-establishes vLLM's serving
+    freeze after a benchmark by mirroring ``freeze_gc_heap`` (collect, then
+    ``gc.freeze()``). If vLLM drops or renames that baseline, the mirrored
+    re-freeze must be revisited rather than silently diverge."""
+    from vllm.utils.gc_utils import freeze_gc_heap
+    from vllm.v1.engine.core import EngineCore
+    from vllm.v1.worker.gpu_worker import Worker
+
+    assert callable(freeze_gc_heap)
+    # The re-freeze only makes sense while vLLM itself installs the baseline
+    # in both processes the benchmark touches.
+    assert "freeze_gc_heap()" in inspect.getsource(EngineCore.__init__)
+    assert "freeze_gc_heap()" in inspect.getsource(Worker)

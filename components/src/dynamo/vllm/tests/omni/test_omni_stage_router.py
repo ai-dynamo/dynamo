@@ -97,9 +97,9 @@ def test_router_loads_stage_configs_from_model_deploy_config():
 
     load_and_resolve_stage_configs.assert_called_once_with(
         config.model,
-        "/deploy/glm_image.yaml",
         kwargs={},
         trust_remote_code=False,
+        deploy_config_path="/deploy/glm_image.yaml",
     )
     output_formatter.assert_called_once()
     assert router.stage_configs == stage_configs

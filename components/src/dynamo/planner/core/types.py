@@ -199,6 +199,7 @@ class EngineCapabilities:
     """Static capabilities for a single engine stage (prefill or decode)."""
 
     num_gpu: Optional[int] = None
+    gpu_cost_per_replica: Optional[int] = None
     max_num_batched_tokens: Optional[int] = None
     max_num_seqs: Optional[int] = None
     context_length: Optional[int] = None
@@ -209,6 +210,14 @@ class EngineCapabilities:
     # cap × the replica-wide GPU total. None when power awareness is off or the
     # cap has not been resolved. The final budget clamp reads this.
     power_watts_per_replica: Optional[int] = None
+
+    @property
+    def resolved_gpu_cost_per_replica(self) -> Optional[int]:
+        """GPU budget cost, falling back to the legacy engine width."""
+
+        if self.gpu_cost_per_replica is not None:
+            return self.gpu_cost_per_replica
+        return self.num_gpu
 
 
 @dataclass

@@ -10,8 +10,11 @@ import re
 import secrets
 import time
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any, List, Literal, Optional
 
+import aiohttp
+import httpx
 import kr8s
 import pytest
 import requests
@@ -20,6 +23,12 @@ from kr8s.objects import Pod, Service
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client import exceptions
 
+from tests.deploy.vcluster_utils import (
+    VCLUSTER_CONNECTION_RETRY_DELAY_SECONDS,
+    retry_vcluster_api,
+    retry_vcluster_api_async,
+)
+from tests.utils.client import send_request
 from tests.utils.test_output import resolve_test_output_path
 
 logger = logging.getLogger(__name__)
@@ -49,6 +58,12 @@ DEFAULT_REQUEST_TIMEOUT = 120
 # Minimum response content length to validate that the model is generating meaningful output.
 # This matches the validation threshold from the original shell-based deployment tests.
 MIN_RESPONSE_CONTENT_LENGTH = 100
+PORT_FORWARD_REQUEST_RETRY_LIMIT = 1
+_KR8S_VCLUSTER_CONNECTION_ERRORS = (httpx.TransportError, kr8s.APITimeoutError)
+_VCLUSTER_CLEANUP_ERRORS = (
+    aiohttp.ClientConnectionError,
+    *_KR8S_VCLUSTER_CONNECTION_ERRORS,
+)
 
 
 def validate_chat_response(
@@ -736,7 +751,7 @@ class DeploymentSpec:
         Add or override a command-line argument for a specific service
 
         Args:
-            service_name: Name of the service (e.g., "VllmDecodeWorker", "TRTLLMWorker")
+            service_name: Name of the service (e.g., "decode", "TRTLLMWorker")
             arg_name: Argument name (e.g., "--max-model-len", "--max-seq-len")
             arg_value: Argument value (e.g., "1024")
         """
@@ -1251,14 +1266,31 @@ class ManagedDeployment:
                         warning += f" lastExitCode={last_exit}"
 
                     prev_log = await self._fetch_previous_container_log(
-                        pod_name, cs.name, tail_lines=prev_log_tail_lines
+                        pod_name, cs.name
                     )
                     if prev_log:
+                        restart_log_dir = os.path.join(self.log_dir, "restarts")
+                        try:
+                            os.makedirs(restart_log_dir, exist_ok=True)
+                            restart_log_path = os.path.join(
+                                restart_log_dir,
+                                f"{pod_name}.{cs.name}.restart-{after}.previous.log",
+                            )
+                            with open(restart_log_path, "w") as f:
+                                f.write(prev_log)
+                        except OSError as e:
+                            self._logger.debug(
+                                "Failed to preserve previous log for %s: %s", key, e
+                            )
+
+                        prev_log_tail = "\n".join(
+                            prev_log.splitlines()[-prev_log_tail_lines:]
+                        )
                         warning += (
                             f"\n      --- last {prev_log_tail_lines} lines of "
                             f"previous {cs.name} log ({pod_name}) ---\n"
                         )
-                        for line in prev_log.splitlines():
+                        for line in prev_log_tail.splitlines():
                             warning += f"      {line}\n"
                         warning += f"      --- end of previous {cs.name} log ---"
                     else:
@@ -1287,15 +1319,12 @@ class ManagedDeployment:
         self,
         pod_name: str,
         container: str,
-        tail_lines: int = 100,
     ) -> Optional[str]:
-        """Fetch the previous (pre-restart) instance log for a container.
+        """Fetch a bounded previous-instance log for a container.
 
-        Returns the tail of the log as a single string, or None if no previous
-        instance exists or the API call fails. This is the artifact that
-        normally lives in ``<pod>.<container>.previous.log`` on disk; we
-        surface it inline so failed CI runs are self-diagnosing without
-        needing an artifact download.
+        Returns the log as a single string, or None if no previous instance
+        exists or the API call fails. The caller preserves it before a later
+        restart rotates it out of Kubernetes' single previous-log slot.
         """
         try:
             assert self._core_api is not None, "Kubernetes API not initialized"
@@ -1304,7 +1333,7 @@ class ManagedDeployment:
                 namespace=self.namespace,
                 container=container,
                 previous=True,
-                tail_lines=tail_lines,
+                tail_lines=50000,
             )
             return log if isinstance(log, str) else str(log)
         except exceptions.ApiException as e:
@@ -1472,28 +1501,33 @@ class ManagedDeployment:
         return Service.get(full_service_name, namespace=self.namespace)
 
     def get_pods(self, service_names: list[str] | None = None) -> dict[str, list[Pod]]:
-        result: dict[str, list[Pod]] = {}
-
         if not service_names:
             service_names = [service.name for service in self.deployment_spec.services]
 
-        for original_name in service_names:
-            # List pods using stable labels that are not affected by worker hash suffixes.
-            label_selector = (
-                f"nvidia.com/dynamo-graph-deployment-name={self._deployment_name},"
-                f"nvidia.com/dynamo-component={original_name}"
-            )
+        def list_pods() -> dict[str, list[Pod]]:
+            result: dict[str, list[Pod]] = {}
+            for original_name in service_names:
+                # List pods using stable labels that are not affected by worker hash suffixes.
+                label_selector = (
+                    f"nvidia.com/dynamo-graph-deployment-name={self._deployment_name},"
+                    f"nvidia.com/dynamo-component={original_name}"
+                )
 
-            pods: list[Pod] = []
+                result[original_name] = list(  # type: ignore[arg-type]
+                    kr8s.get(
+                        "pods",
+                        namespace=self.namespace,
+                        label_selector=label_selector,
+                    )
+                )
+            return result
 
-            for pod in kr8s.get(
-                "pods", namespace=self.namespace, label_selector=label_selector
-            ):
-                pods.append(pod)  # type: ignore[arg-type]
-
-            result[original_name] = pods
-
-        return result
+        return retry_vcluster_api(
+            "listing pods",
+            list_pods,
+            _KR8S_VCLUSTER_CONNECTION_ERRORS,
+            self._logger,
+        )
 
     def get_pod_manifest_logs_metrics(self, service_name: str, pod: Pod, suffix=""):
         directory = os.path.join(self.log_dir, service_name)
@@ -1614,18 +1648,27 @@ class ManagedDeployment:
         """
         Delete the DynamoGraphDeployment CR.
         """
+        if not self._deployment_name or self._custom_api is None:
+            return
+
         try:
-            if self._deployment_name and self._custom_api is not None:
-                await self._custom_api.delete_namespaced_custom_object(
+            await retry_vcluster_api_async(
+                f"deleting deployment {self.namespace}/{self._deployment_name}",
+                partial(
+                    self._custom_api.delete_namespaced_custom_object,
                     group="nvidia.com",
                     version=self.deployment_spec.api_version,
                     namespace=self.namespace,
                     plural="dynamographdeployments",
                     name=self._deployment_name,
-                )
-        except exceptions.ApiException as e:
-            if e.status != 404:  # Ignore if already deleted
-                raise
+                ),
+                (aiohttp.ClientConnectionError,),
+                self._logger,
+            )
+        except exceptions.ApiException as error:
+            if error.status == 404:  # Ignore if already deleted
+                return
+            raise
 
     def port_forward(
         self, pod: Pod, remote_port: int, max_connection_attempts: int = 3
@@ -1657,7 +1700,7 @@ class ManagedDeployment:
                 # Check if port is assigned
                 if port_forward.local_port == 0:
                     self._logger.debug(
-                        f"Port not yet assigned for pod {pod.name} (attempt {attempt+1}/{max_connection_attempts})"
+                        f"Port not yet assigned for pod {pod.name} (attempt {attempt + 1}/{max_connection_attempts})"
                     )
                     continue
 
@@ -1671,40 +1714,8 @@ class ManagedDeployment:
                         return port_forward
                 except (requests.ConnectionError, requests.Timeout) as e:
                     self._logger.warning(
-                        f"Connection test failed for pod {pod.name} (attempt {attempt+1}/{max_connection_attempts}): {e}"
+                        f"Connection test failed for pod {pod.name} (attempt {attempt + 1}/{max_connection_attempts}): {e}"
                     )
-
-                # Restart port-forward for next attempt (except on last attempt)
-                if attempt == max_connection_attempts - 1:
-                    continue
-                try:
-                    port_forward.stop()
-                except Exception as e:
-                    self._logger.debug(
-                        f"Error stopping port forward for pod {pod.name}: {e}"
-                    )
-                # kr8s' sync stop() can return before the background thread has
-                # fully torn down (or even finished starting), so we can't assume
-                # the old forward is dead once stop() returns. Track it so
-                # _cleanup() stops it later regardless of whether stop() raised,
-                # rather than losing the reference when we replace the object.
-                if port_forward not in self._active_port_forwards:
-                    self._active_port_forwards.append(port_forward)
-                # Create a fresh portforward object so local_port=0 picks a new
-                # ephemeral port rather than re-binding the previously assigned
-                # port that may still be in TIME_WAIT.
-                try:
-                    port_forward = pod.portforward(
-                        remote_port=remote_port,
-                        local_port=0,
-                        address="127.0.0.1",
-                    )
-                    port_forward.start()
-                except Exception as e:
-                    self._logger.debug(
-                        f"Error restarting port forward for pod {pod.name}: {e}"
-                    )
-                    break
 
             # All attempts failed
             self._logger.warning(
@@ -1712,8 +1723,8 @@ class ManagedDeployment:
             )
             try:
                 port_forward.stop()
-            except Exception:
-                pass  # Ignore errors during cleanup
+            except Exception as e:
+                self._logger.debug("Error stopping port forward: %s", e)
             return None
 
         except Exception as e:
@@ -1721,6 +1732,59 @@ class ManagedDeployment:
                 f"Failed to create port forward for pod {pod.name}: {e}"
             )
             return None
+
+    def send_request_with_port_forward_retry(
+        self,
+        pod: Pod,
+        remote_port: int,
+        endpoint: str,
+        payload: dict[str, Any],
+        timeout: float,
+        port_forward: Any,
+        request_sender: Any = send_request,
+    ) -> requests.Response:
+        """Retry one request after rebuilding a dropped pod port-forward."""
+        active_port_forward = port_forward
+
+        # Inference POSTs may have reached the backend before their connection
+        # failed, so rebuild the port-forward and replay each request only once.
+        for attempt in range(PORT_FORWARD_REQUEST_RETRY_LIMIT + 1):
+            url = f"http://localhost:{active_port_forward.local_port}{endpoint}"
+            try:
+                return request_sender(url, payload, timeout=timeout, method="POST")
+            except (
+                requests.ConnectionError,
+                requests.Timeout,
+                httpx.TransportError,
+            ) as error:
+                if attempt == PORT_FORWARD_REQUEST_RETRY_LIMIT:
+                    raise
+
+                self._logger.warning(
+                    "Frontend request transport failed; rebuilding the pod "
+                    "port-forward and retrying once: %s",
+                    error,
+                )
+                try:
+                    active_port_forward.stop()
+                except RuntimeError as stop_error:
+                    if "anext()" not in str(
+                        stop_error
+                    ) and "already running" not in str(stop_error):
+                        raise
+                    self._logger.debug(
+                        "Ignoring expected error while stopping failed frontend "
+                        "port-forward: %s",
+                        stop_error,
+                    )
+
+                time.sleep(VCLUSTER_CONNECTION_RETRY_DELAY_SECONDS)
+                replacement = self.port_forward(pod, remote_port)
+                if replacement is None:
+                    raise
+                active_port_forward = replacement
+
+        raise AssertionError("unreachable")
 
     async def _cleanup(self):
         try:
@@ -1732,17 +1796,11 @@ class ManagedDeployment:
             for port_forward in self._active_port_forwards:
                 try:
                     port_forward.stop()
-                except RuntimeError as e:
-                    # Expected error when pod is terminated:
-                    # "anext(): asynchronous generator is already running"
-                    if "anext()" in str(e) or "already running" in str(e):
-                        self._logger.debug(f"Port forward cleanup: {e}")
-                    else:
-                        self._logger.warning(
-                            f"Unexpected error stopping port forward: {e}"
-                        )
                 except Exception as e:
-                    self._logger.debug(f"Error stopping port forward: {e}")
+                    # Port-forward teardown is best-effort. A third-party cleanup
+                    # failure must not mask the deployment test result or prevent
+                    # the remaining forwards from being stopped.
+                    self._logger.debug("Error stopping port forward: %s", e)
             self._active_port_forwards.clear()
         finally:
             await self._delete_deployment()
@@ -1764,13 +1822,30 @@ class ManagedDeployment:
             await self._create_deployment()
             await self._wait_for_ready(timeout=self.readiness_timeout)
 
-        except:
-            await self._cleanup()
+        except BaseException:
+            try:
+                await self._cleanup()
+            except _VCLUSTER_CLEANUP_ERRORS:
+                self._logger.exception(
+                    "vCluster connection failed during cleanup after deployment "
+                    "setup failure; preserving the original error"
+                )
             raise
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        await self._cleanup()
+        if exc_type is None:
+            await self._cleanup()
+            return None
+
+        try:
+            await self._cleanup()
+        except _VCLUSTER_CLEANUP_ERRORS:
+            self._logger.exception(
+                "vCluster connection failed during cleanup after test failure; "
+                "preserving the original error"
+            )
+        return False
 
 
 async def main():

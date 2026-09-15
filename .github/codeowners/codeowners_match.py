@@ -46,7 +46,7 @@ import functools
 import re
 import subprocess
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypedDict
@@ -65,7 +65,7 @@ class Area(TypedDict, total=False):
 
 
 class SharedSpec(TypedDict):
-    """Multi-owner override (``shared:`` entry)."""
+    """Validated owner rule: a ``shared:`` or ``required_owners:`` entry."""
 
     glob: str
     owners: list[str]
@@ -110,6 +110,7 @@ class ResolvedModel:
 
     catch_all: str
     areas: list[ResolvedArea]
+    required_owners: list[SharedSpec]
     shared: list[SharedSpec]
     filetype_shared: list[FiletypeShared]
     meta: dict = field(default_factory=dict)
@@ -151,6 +152,15 @@ class ResolvedModel:
 # ----------------------------------------------------------------------
 
 
+def _star_fragment(pattern: str, index: int) -> tuple[str, int]:
+    """Translate one ``*`` token and return its regex plus the next index."""
+    if pattern.startswith("**/", index):
+        return "(?:.*/)?", index + 3
+    if pattern.startswith("**", index):
+        return ".*", index + 2
+    return "[^/]*", index + 1
+
+
 def _glob_to_re(pattern: str) -> str:
     """Translate a CODEOWNERS glob to a regex: ``*``/``?`` stop at ``/``,
     ``**`` crosses directories. fnmatch is wrong here -- its ``*`` greedily
@@ -160,11 +170,9 @@ def _glob_to_re(pattern: str) -> str:
     while i < len(pattern):
         c = pattern[i]
         if c == "*":
-            if pattern[i : i + 2] == "**":
-                out.append(".*")
-                i += 2
-                continue
-            out.append("[^/]*")
+            fragment, i = _star_fragment(pattern, i)
+            out.append(fragment)
+            continue
         elif c == "?":
             out.append("[^/]")
         elif c == "[":
@@ -287,6 +295,35 @@ def changed_paths(repo: Path, base: str) -> list[str]:
     return [p for p in out.splitlines() if p.strip()]
 
 
+def merge_base_tree(repo: Path, base: str) -> list[str]:
+    """Tracked files at the merge-base of ``base`` and HEAD.
+
+    The diff-aware gate compares staleness against the same reference frame
+    ``changed_paths`` diffs against (three-dot = merge-base), so "this branch
+    deleted the last file a glob matched" is judged on what the branch
+    actually changed, not on unrelated history that landed on ``base`` after
+    it forked. Like ``changed_paths``, this reads the tree and lives only in
+    the coverage tool, never in emission.
+    """
+    try:
+        merge_base = subprocess.check_output(
+            ["git", "-C", str(repo), "merge-base", base, "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        out = subprocess.check_output(
+            ["git", "-C", str(repo), "ls-tree", "-r", "--name-only", merge_base],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except subprocess.CalledProcessError as err:
+        raise SystemExit(
+            f"git merge-base/ls-tree failed in {repo!r} "
+            f"(not a checkout, or base {base!r} unavailable): {err}"
+        ) from err
+    return [p for p in out.splitlines() if p.strip()]
+
+
 # ----------------------------------------------------------------------
 # Resolution pipeline
 # ----------------------------------------------------------------------
@@ -301,6 +338,98 @@ def changed_paths(repo: Path, base: str) -> list[str]:
 # back into the emitted rules.
 
 
+def _valid_owner_token(owner: object, known_labels: set[str]) -> bool:
+    """Whether an owner is an area label, @ principal, or email address."""
+    if not isinstance(owner, str) or not owner or any(char.isspace() for char in owner):
+        return False
+    if owner in known_labels:
+        return True
+    if owner.startswith("@"):
+        return len(owner) > 1
+    local, separator, domain = owner.partition("@")
+    return bool(local and separator and domain)
+
+
+def _owner_rule_values(rule: object, section: str) -> tuple[str, list[object]]:
+    """Extract a structurally valid owner rule from untrusted YAML."""
+    if not isinstance(rule, Mapping):
+        raise SystemExit(f"areas.yaml: {section} entry {rule!r} must be a mapping")
+    if "inherits" in rule:
+        raise SystemExit(
+            f"areas.yaml: {section} entry {rule!r} uses the removed key "
+            "'inherits' -- list every owner (retained and added) under "
+            "'owners'. The strict gate rejects a shared rule that drops an "
+            "owner an enclosing rule grants, so the complete list is checked, "
+            "not trusted."
+        )
+    glob = rule.get("glob")
+    owners = rule.get("owners", []) or []
+    if not isinstance(glob, str) or not glob or any(char.isspace() for char in glob):
+        raise SystemExit(f"areas.yaml: {section} entry {rule!r} has invalid 'glob'")
+    if not isinstance(owners, list):
+        raise SystemExit(
+            f"areas.yaml: {section} entry {rule!r} requires a list 'owners' value"
+        )
+    return glob, list(owners)
+
+
+def _normalize_owner_rules(
+    rules: object, areas: list[ResolvedArea], section: str
+) -> list[SharedSpec]:
+    """Validate principals and normalize additive owner authoring."""
+    if not isinstance(rules, list):
+        raise SystemExit(f"areas.yaml: {section} must be a list")
+    known_labels = {area.label for area in areas}
+    normalized: list[SharedSpec] = []
+    for rule in rules:
+        glob, declared = _owner_rule_values(rule, section)
+        invalid = [o for o in declared if not _valid_owner_token(o, known_labels)]
+        if invalid:
+            raise SystemExit(
+                f"areas.yaml: {section} entry {rule!r} has unknown owner labels "
+                f"or invalid principals: {invalid!r}"
+            )
+        owners = list(dict.fromkeys(declared))
+        if not owners:
+            raise SystemExit(f"areas.yaml: {section} entry {rule!r} has no owners")
+        normalized.append({"glob": glob, "owners": owners})
+    return normalized
+
+
+def _normalize_filetype_rule(rule: object, known_labels: set[str]) -> FiletypeRule:
+    """Validate one file-type rule. Every file-type rule blocks."""
+    if not isinstance(rule, Mapping):
+        raise SystemExit(f"areas.yaml: filetype_rules entry {rule!r} must be a mapping")
+    pattern = rule.get("pattern")
+    coowner = rule.get("coowner")
+    if (
+        not isinstance(pattern, str)
+        or not pattern
+        or any(char.isspace() for char in pattern)
+    ):
+        raise SystemExit(
+            f"areas.yaml: filetype_rules entry {rule!r} has invalid pattern"
+        )
+    if not _valid_owner_token(coowner, known_labels):
+        raise SystemExit(
+            f"areas.yaml: filetype_rules entry {rule!r} has invalid coowner"
+        )
+    return {"pattern": pattern, "coowner": coowner}
+
+
+def _normalize_filetype_rules(
+    rules: object, areas: list[ResolvedArea]
+) -> list[FiletypeShared]:
+    """Validate file-type rules into blocking coowner-only rows."""
+    if not isinstance(rules, list):
+        raise SystemExit("areas.yaml: classify.filetype_rules must be a list")
+    labels = {area.label for area in areas}
+    return [
+        FiletypeShared(glob=rule["pattern"], owners=[rule["coowner"]])
+        for rule in (_normalize_filetype_rule(r, labels) for r in rules)
+    ]
+
+
 def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> ResolvedModel:
     """Resolve an ``areas.yaml`` spec into the model the emitter renders.
 
@@ -312,7 +441,9 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
     Semantics per section:
 
     * ``areas``       -- ``path_globs`` are emitted verbatim (sorted).
-    * ``shared``      -- passed through as declared.
+    * ``required_owners`` -- validated owner-presence contracts; not emitted.
+    * ``shared``      -- one complete owner list per co-owned glob; the
+      strict gate rejects a list that drops an enclosing rule's owner.
     * ``advisory``    -- no longer supported. Every owner in CODEOWNERS blocks,
       so a leftover ``advisory:`` block, an ``advisory`` key on a ``shared``
       entry, or one on a filetype rule, is rejected rather than silently
@@ -382,26 +513,30 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
         for a in raw_areas
     ]
 
-    # Filetype rule -> one stable coowner-only row (bare pattern
-    # matches by basename at any depth per GitHub CODEOWNERS semantics).
-    # The old "enclosing area + coowner" behavior required walking the
-    # tree; if a specific subtree wants that co-ownership, declare it
-    # explicitly in ``shared`` with a path glob.
-    filetype_shared: list[FiletypeShared] = []
-    for rule in filetype_rules:
-        pattern = rule.get("pattern")
-        coowner = rule.get("coowner")
-        if not pattern or not coowner:
-            raise SystemExit(
-                f"areas.yaml: filetype_rules entry {rule!r} missing "
-                "'pattern' or 'coowner'"
-            )
-        filetype_shared.append(FiletypeShared(glob=pattern, owners=[coowner]))
+    # A CODEOWNERS row always replaces earlier rows, so every owner rule
+    # declares its COMPLETE final owner set. Additive intent is machine-
+    # checked, not authored: the strict gate rejects a shared rule that
+    # drops an owner an enclosing rule grants (see
+    # shared_additivity_violations in build_codeowners.py). Discovery stays
+    # pure -- enclosure is judged against the other policy rules, never the
+    # live tree, so emission remains a pure policy function.
+    normalized_shared = _normalize_owner_rules(spec_shared, areas, "shared")
+    required_owners = _normalize_owner_rules(
+        spec.get("required_owners", []), areas, "required_owners"
+    )
+
+    # Filetype rule -> one stable coowner-only row (bare pattern matches by
+    # basename at any depth per GitHub CODEOWNERS semantics). The old
+    # "enclosing area + coowner" behavior required walking the live tree; if a
+    # specific subtree wants that co-ownership, declare it explicitly in
+    # ``shared`` with a path glob.
+    filetype_shared = _normalize_filetype_rules(filetype_rules, areas)
 
     return ResolvedModel(
         catch_all=catch_all,
         areas=areas,
-        shared=list(spec_shared),
+        required_owners=required_owners,
+        shared=normalized_shared,
         filetype_shared=filetype_shared,
         meta=dict(spec.get("meta", {})),
     )

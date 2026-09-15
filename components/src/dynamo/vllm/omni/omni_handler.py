@@ -26,6 +26,7 @@ from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
 from dynamo._core import Context
 from dynamo.common.multimodal import ImageLoader
+from dynamo.common.protocols import sanitize_media_passthrough
 from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
 from dynamo.common.protocols.image_protocol import ImageNvExt, NvCreateImageRequest
 from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
@@ -43,7 +44,7 @@ from dynamo.llm import (
     WorkerType,
     register_model,
 )
-from dynamo.llm.exceptions import EngineShutdown
+from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
 from dynamo.vllm.handlers import get_lora_manager
 from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
 from dynamo.vllm.omni.base_handler import BaseOmniHandler
@@ -57,12 +58,42 @@ from dynamo.vllm.omni.utils import (
     image_generation_negative_prompt_from_request,
     image_generation_sampling_overrides,
     image_generation_size_from_request,
+    image_generation_size_from_str,
     streaming_sampling_params,
 )
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_VIDEO_FPS = 16
+
+
+def _apply_media_passthrough(
+    sp: OmniDiffusionSamplingParams, extra_args: Optional[Dict[str, Any]]
+) -> None:
+    """Hand frontend-forwarded passthrough knobs to the engine.
+
+    The frontend nests a request's unknown top-level fields (an OpenAI
+    client's ``extra_body``) under ``extra_args["media_passthrough"]``.
+    ``sanitize_media_passthrough`` drops the request if any knob names a
+    path/checkpoint or a policy control, then the rest ride ``sp.extra_args``
+    to the engine. Nothing is set on the sampling params by attribute name:
+    a caller-controlled key must not choose which attribute it writes.
+    """
+    knobs = sanitize_media_passthrough(extra_args)
+    if not knobs:
+        return
+    existing = getattr(sp, "extra_args", None)
+    if isinstance(existing, dict):
+        existing.update(knobs)
+    else:
+        try:
+            sp.extra_args = knobs
+        except (AttributeError, TypeError):
+            logger.warning(
+                "Dropping media passthrough knobs %s: sampling params expose "
+                "no extra_args",
+                sorted(knobs),
+            )
 
 
 @dataclass
@@ -350,6 +381,20 @@ class OmniHandler(BaseOmniHandler):
             )
         except (ValueError, NotImplementedError, RuntimeError) as e:
             logger.error(f"Invalid request {request_id}: {e}")
+            if (
+                isinstance(e, ValueError)
+                and request_type == RequestType.IMAGE_GENERATION
+            ):
+                # /v1/images/generations folds worker output into
+                # NvImagesResponse, which has no failure shape, so the
+                # chat.completion.chunk _error_chunk returns is not a rejection
+                # the client can read. Re-raise as InvalidArgument instead: it is
+                # a registered binding exception, so errors.rs takes its message
+                # via .value(py).str() and the client sees the reason alone. A
+                # bare ValueError reaches the same 400 through engine.rs's
+                # fallback, but that path uses PyErr::to_string() and renders as
+                # "ValueError: <reason>", leaking the Python type to the API.
+                raise InvalidArgument(str(e)) from e
             yield self._error_chunk(request_id, str(e), request_type)
             return
 
@@ -657,7 +702,9 @@ class OmniHandler(BaseOmniHandler):
 
     def _engine_inputs_from_image(self, req: NvCreateImageRequest) -> EngineInputs:
         """Build engine inputs from an NvCreateImageRequest."""
-        width, height = parse_size(req.size, default_w=1024, default_h=1024)
+        # req.size is a free-form client string, so it needs the same bound the
+        # chat path applies -- parse_size alone returns whatever it parses.
+        width, height = image_generation_size_from_str(req.size)
         nvext = req.nvext or ImageNvExt()
 
         prompt = build_image_generation_prompt(
@@ -682,6 +729,7 @@ class OmniHandler(BaseOmniHandler):
         sp.seed = (
             nvext.seed if nvext.seed is not None else random.randint(0, 2**32 - 1)
         )
+        _apply_media_passthrough(sp, req.extra_args)
 
         sampling_params_list = self._build_sampling_params_list(sp)
         lora_request = self._resolve_and_apply_lora(req.model, sampling_params_list)
@@ -743,6 +791,7 @@ class OmniHandler(BaseOmniHandler):
         self._update_if_not_none(sp, "boundary_ratio", nvext.boundary_ratio)
         self._update_if_not_none(sp, "guidance_scale_2", nvext.guidance_scale_2)
         self._update_if_not_none(sp, "fps", fps)
+        _apply_media_passthrough(sp, req.extra_args)
 
         sampling_params_list = self._build_sampling_params_list(sp)
         lora_request = self._resolve_and_apply_lora(req.model, sampling_params_list)

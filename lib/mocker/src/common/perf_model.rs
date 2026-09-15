@@ -81,6 +81,8 @@ pub enum PerfModel {
     /// Select the built-in AISimulate polynomial timing model.
     #[default]
     Polynomial,
+    /// Constant per-pass latencies owned by the AISimulate engine.
+    Fixed { prefill_ms: f64, decode_ms: f64 },
     /// Interpolation-based model using profiler data
     /// Decode axes: (scheduled logical KV tokens, mean context length)
     Interpolated {
@@ -96,6 +98,13 @@ impl Clone for PerfModel {
     fn clone(&self) -> Self {
         match self {
             PerfModel::Polynomial => PerfModel::Polynomial,
+            PerfModel::Fixed {
+                prefill_ms,
+                decode_ms,
+            } => PerfModel::Fixed {
+                prefill_ms: *prefill_ms,
+                decode_ms: *decode_ms,
+            },
             PerfModel::Interpolated {
                 prefill_interp,
                 decode_interp,
@@ -114,6 +123,13 @@ impl std::fmt::Debug for PerfModel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PerfModel::Polynomial => write!(f, "PerfModel::Polynomial"),
+            PerfModel::Fixed {
+                prefill_ms,
+                decode_ms,
+            } => write!(
+                f,
+                "PerfModel::Fixed {{ prefill_ms: {prefill_ms}, decode_ms: {decode_ms} }}"
+            ),
             PerfModel::Interpolated { .. } => write!(f, "PerfModel::Interpolated {{ .. }}"),
             PerfModel::Aiconfigurator { .. } => write!(f, "PerfModel::Aiconfigurator"),
         }
@@ -229,8 +245,8 @@ impl PerfModel {
         isl: usize,
         prefix: usize,
     ) -> Result<f64> {
-        if matches!(self, Self::Polynomial) {
-            anyhow::bail!("polynomial timing is implemented by the AISimulate engine");
+        if matches!(self, Self::Polynomial | Self::Fixed { .. }) {
+            anyhow::bail!("built-in timing is implemented by the AISimulate engine");
         }
         let new_tokens_per_req = isl.saturating_sub(prefix);
         if batch_size == 0 || new_tokens_per_req == 0 {
@@ -238,6 +254,7 @@ impl PerfModel {
         }
         let time = match self {
             PerfModel::Polynomial => unreachable!("polynomial handled above"),
+            PerfModel::Fixed { .. } => unreachable!("fixed timing handled above"),
             PerfModel::Interpolated { prefill_interp, .. } => {
                 let tokens = (batch_size * new_tokens_per_req) as f64;
                 prefill_interp.interp(tokens).unwrap_or(0.0)
@@ -264,14 +281,15 @@ impl PerfModel {
         context_length: usize,
         _total_kv_tokens: usize,
     ) -> Result<f64> {
-        if matches!(self, Self::Polynomial) {
-            anyhow::bail!("polynomial timing is implemented by the AISimulate engine");
+        if matches!(self, Self::Polynomial | Self::Fixed { .. }) {
+            anyhow::bail!("built-in timing is implemented by the AISimulate engine");
         }
         if batch_size == 0 {
             return Ok(0.0);
         }
         let time = match self {
             PerfModel::Polynomial => unreachable!("polynomial handled above"),
+            PerfModel::Fixed { .. } => unreachable!("fixed timing handled above"),
             PerfModel::Interpolated { decode_interp, .. } => decode_interp
                 .interp(active_kv_tokens as f64, context_length as f64)
                 .unwrap_or(0.0),

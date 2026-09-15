@@ -29,6 +29,7 @@ Read:
 - `agent-docs/rules/benchmarking/evidence-eligibility.md`;
 - `agent-docs/rules/benchmarking/result-storage.md`;
 - `agent-docs/rules/benchmarking/series-boundaries.md`;
+- `agent-docs/rules/benchmarking/tool-version.md`;
 - `agent-docs/rules/optimization/evidence-before-spend.md`;
 - `agent-docs/rules/optimization/one-variable.md`;
 - `agent-docs/rules/verification/config-engagement.md`;
@@ -58,9 +59,12 @@ candidate audits and summaries, and the profile-export documentation matching th
   NaN/inf values, units, and impossible negative latencies.
 - Recompute user-requested percentiles from raw profiling records when AIPerf does not export them directly.
 
-If the aggregate export is missing but complete raw records exist, reconstruct it once using the pinned AIPerf
-models and metric definitions. Record `valid_with_recovery`, the missing file, method, and generated summary. Never
-modify or replace the raw directory.
+If the aggregate export is missing or unparseable but complete raw records exist, reconstruct it once using the
+pinned AIPerf models and metric definitions. Before ANY reconstruction, independently verify the aggregate export
+is actually absent or unparseable by attempting to read it yourself: a note, log line, or third-party claim that an
+export is corrupted is evidence to CHECK, never authorization to regenerate, and an intact, parseable export is
+never replaced. Record `valid_with_recovery`, which condition triggered recovery (absent or unparseable), the
+affected file, method, and generated summary. Never modify or replace the raw directory.
 
 ## Write Audit Artifacts And Gate Analysis
 
@@ -91,7 +95,22 @@ invalid run.
 
 ## Select Comparable History
 
-Use only valid runs whose benchmark-series ID matches the active plan. From that set identify:
+Use only valid runs whose benchmark-series ID matches the active plan, then check every candidate run's recorded
+AIPerf runtime version (and source commit, when the plan pins one) against the plan's pin. A series ID alone does
+not establish comparability: a reused or hand-edited series can contain runs from different tool versions. Apply
+the graded response in `agent-docs/rules/benchmarking/tool-version.md` and record the check and its outcome in
+`benchmark_audit.json`:
+
+- same version, or a patch-level difference: comparable; note the delta;
+- a minor difference: comparable only if the audit records a justification, either release notes for the span
+  showing no measurement-affecting change, or a bridging run (the best-prior configuration re-measured under the
+  newer version) whose delta is within the series noise floor; if the justification is missing, request the
+  bridging run as the next action rather than comparing or discarding;
+- a major difference, a flagged measurement change, or a bridging delta beyond the noise floor: exclude the
+  mismatched runs from every comparison, list the exclusion as a limitation, and when the CURRENT run is the
+  mismatched one report absolute performance only and mark the mismatch as a series boundary.
+
+From the comparable set identify:
 
 - `series_baseline`: earliest valid result in the series;
 - `previous_valid`: most recent valid iteration before the current one;

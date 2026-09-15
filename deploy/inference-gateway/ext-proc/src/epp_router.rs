@@ -7,8 +7,8 @@
 //! no Dynamo `DistributedRuntime`, no etcd/NATS, and no embedded KV router.
 //! Instead it composes:
 //!
-//! - a [`VllmRenderClient`] tokenization,
-//! - a [`PodDiscovery`] that discovers Ready raw vLLM pods from Kubernetes,
+//! - a [`RenderClient`] that tokenizes prompts via a render sidecar,
+//! - a [`PodDiscovery`] that discovers Ready worker pods from Kubernetes,
 //! - a [`TopologyAdapter`] that registers those pods into the selector, and
 //! - a [`Selector`] (in-process, runtime-free selection service) that picks a
 //!   worker.
@@ -27,21 +27,55 @@ use anyhow::Result;
 use tokio::sync::Semaphore;
 
 use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
+use dynamo_llm::http::service::metadata::extract_metadata_from_header_pairs;
 use dynamo_llm::protocols::common::extensions::{
     AgentHints, HEADER_REQUEST_PRIORITY, HEADER_REQUEST_STRICT_PRIORITY, resolve_request_priority,
 };
 use serde::Deserialize;
 
-use crate::epp_standalone_config::EppStandaloneConfig;
-use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo};
+use crate::epp_standalone_config::{EppStandaloneConfig, RendererProtocol};
+use crate::picker::{
+    CacheSaltForwarding, Endpoint, EndpointPicker, PickError, PickResult, RequestInfo,
+    resolve_cache_namespace,
+};
 use crate::pod_discovery::PodDiscovery;
+use crate::render_http::RenderError;
 use crate::selector::{SelectRequest, Selector};
+use crate::sglang_renderer_client::SglangRendererClient;
 use crate::topology_adapter::{RegistrationDefaults, TopologyAdapter};
-use crate::vllm_render_client::{VllmRenderClient, VllmRenderError};
+use crate::vllm_render_client::VllmRenderClient;
+
+/// Resolve the request's scheduling policy class from the Dynamo metadata
+/// headers. Goes through the frontend's metadata extractor (rather than a
+/// hardcoded header name) so custom `DYN_METADATA_HEADER` prefixes, trimming,
+/// and duplicate handling stay aligned with the integrated router.
+pub(crate) fn requested_policy_class(
+    headers: &[(String, String)],
+) -> Result<Option<String>, PickError> {
+    let metadata =
+        extract_metadata_from_header_pairs(headers.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+            .map_err(PickError::MetadataHeadersTooLarge)?;
+    Ok(metadata.get("policy-class").cloned())
+}
+
+/// Protocol-dispatched render client for the standalone EPP.
+enum RenderClient {
+    Vllm(VllmRenderClient),
+    Sglang(SglangRendererClient),
+}
+
+impl RenderClient {
+    async fn render_chat(&self, body: bytes::Bytes) -> Result<Vec<u32>, RenderError> {
+        match self {
+            Self::Vllm(c) => c.render_chat(body).await,
+            Self::Sglang(c) => c.render_chat(body).await,
+        }
+    }
+}
 
 /// Standalone endpoint picker backed by the standalone selection service.
 pub struct EppRouter {
-    renderer: VllmRenderClient,
+    renderer: RenderClient,
     reflector: Arc<PodDiscovery>,
     selector: Arc<Selector>,
     // Kept alive for the lifetime of the router; the reconcile loop runs on it.
@@ -57,6 +91,15 @@ pub struct EppRouter {
     inflight: Arc<Semaphore>,
 }
 
+/// Routing inputs parsed from a standalone EPP request.
+struct TokenizeResult {
+    token_ids: Vec<u32>,
+    priority_jump: Option<f64>,
+    strict_priority: Option<u32>,
+    cache_namespace: Option<String>,
+    expected_output_tokens: Option<u32>,
+}
+
 impl EppRouter {
     /// Assemble the standalone runtime from the validated selector config.
     pub async fn from_selector(
@@ -64,11 +107,20 @@ impl EppRouter {
         policy_registry: WorkerSelectionPolicyRegistry,
     ) -> Result<Self> {
         let selector = Arc::new(Selector::new(&cfg, policy_registry).await?);
-        let renderer = VllmRenderClient::new(
-            &cfg.tokenizer_service_url,
-            Duration::from_millis(cfg.tokenization_timeout_ms),
-            cfg.tokenizer_max_response_bytes,
-        )?;
+        let timeout = Duration::from_millis(cfg.tokenization_timeout_ms);
+        let max_response_bytes = cfg.tokenizer_max_response_bytes;
+        let renderer = match cfg.renderer_protocol {
+            RendererProtocol::VllmRender => RenderClient::Vllm(VllmRenderClient::new(
+                &cfg.tokenizer_service_url,
+                timeout,
+                max_response_bytes,
+            )?),
+            RendererProtocol::SglangRenderer => RenderClient::Sglang(SglangRendererClient::new(
+                &cfg.tokenizer_service_url,
+                timeout,
+                max_response_bytes,
+            )?),
+        };
         let (reflector, reflector_ready) = PodDiscovery::spawn(&cfg).await?;
         let reflector = Arc::new(reflector);
         let defaults = RegistrationDefaults::from_config(&cfg);
@@ -95,25 +147,37 @@ impl EppRouter {
         self.reflector_ready.load(Ordering::Acquire)
     }
 
-    /// Tokenize a chat body for routing → `(token_ids, priority_jump,
-    /// strict_priority)`. Priority uses header-over-body precedence via
-    /// [`resolve_request_priority`].
+    /// Tokenize a chat body and resolve its routing inputs.
     async fn tokenize(
         &self,
         request_body: bytes::Bytes,
-        priority_header: Option<String>,
-        strict_priority_header: Option<String>,
-    ) -> Result<(Vec<u32>, Option<f64>, Option<u32>), TokenizeError> {
-        // Parse only `nvext.agent_hints` for priority — the worker re-parses the
-        // full body anyway, so we skip allocating the large `messages`/tools
-        // fields. Malformed JSON still fails here (→ 400); a well-formed body that
-        // is not a valid chat request is caught by the renderer below.
+        headers: &[(String, String)],
+    ) -> Result<TokenizeResult, TokenizeError> {
+        // Parse only the routing hot-path fields — the worker re-parses the full
+        // body anyway, so we skip allocating the large `messages`/tools fields.
+        // Malformed JSON still fails here (→ 400); a well-formed body that is not
+        // a valid chat request is caught by the renderer below.
         let hints: RoutingHints =
             serde_json::from_slice(&request_body).map_err(TokenizeError::InvalidBody)?;
+        let priority_header = first_header(headers, HEADER_REQUEST_PRIORITY);
+        let strict_priority_header = first_header(headers, HEADER_REQUEST_STRICT_PRIORITY);
         let resolved = resolve_request_priority(
             hints.nvext.as_ref().and_then(|n| n.agent_hints.as_ref()),
-            priority_header.as_deref(),
-            strict_priority_header.as_deref(),
+            priority_header,
+            strict_priority_header,
+        );
+        let expected_output_tokens = hints
+            .nvext
+            .as_ref()
+            .and_then(|n| n.agent_hints.as_ref())
+            .and_then(|h| h.osl);
+        let cache_namespace = resolve_cache_namespace(
+            headers,
+            hints
+                .nvext
+                .as_ref()
+                .and_then(|nvext| nvext.cache_namespace.as_deref()),
+            hints.cache_namespace.as_deref(),
         );
         // Moves the `Bytes` into reqwest (zero-copy) rather than copying.
         let token_ids = self
@@ -121,7 +185,13 @@ impl EppRouter {
             .render_chat(request_body)
             .await
             .map_err(TokenizeError::Render)?;
-        Ok((token_ids, resolved.priority_jump, resolved.strict_priority))
+        Ok(TokenizeResult {
+            token_ids,
+            priority_jump: resolved.priority_jump,
+            strict_priority: resolved.strict_priority,
+            expected_output_tokens,
+            cache_namespace,
+        })
     }
 
     /// Ready workers inside an Envoy `candidate_subset`, resolved in a single index
@@ -143,7 +213,13 @@ impl EppRouter {
 
 /// True if a scheme-less `ip:port` endpoint is covered by an Envoy subset,
 /// matching either the full `ip:port` or the bare `ip`.
-fn endpoint_in_subset(
+///
+/// Matches the bare-IP case via `IpAddr`, never `endpoint.split(':')`: a
+/// bracketed IPv6 endpoint (`[fd00::2]:8000`) splits into garbage on `:`,
+/// silently never matching a bare `fd00::2` candidate. Shared with
+/// [`crate::epp::Router::subset_to_worker_ids`], the other Envoy
+/// candidate_subset matcher in this crate.
+pub(crate) fn endpoint_in_subset(
     endpoint: &str,
     candidates: &HashSet<&str>,
     candidate_ips: &HashSet<IpAddr>,
@@ -155,18 +231,25 @@ fn endpoint_in_subset(
 }
 
 /// Minimal deserialize target for the routing hot path: only `nvext.agent_hints`
-/// is needed for priority resolution, so the large `messages`/tools fields are
-/// never allocated. Unknown fields are ignored (no `deny_unknown_fields`).
+/// is needed for priority resolution and `cache_namespace`,so the large
+/// `messages`/tools fields are never allocated.
+/// Unknown fields are ignored (no `deny_unknown_fields`).
 #[derive(Deserialize)]
 struct RoutingHints {
     #[serde(default)]
     nvext: Option<RoutingNvExt>,
+    /// Native vLLM top-level `cache_salt`.
+    #[serde(default, rename = "cache_salt")]
+    cache_namespace: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct RoutingNvExt {
     #[serde(default)]
     agent_hints: Option<AgentHints>,
+    /// Dynamo-style `nvext.cache_salt`.
+    #[serde(default, rename = "cache_salt")]
+    cache_namespace: Option<String>,
 }
 
 /// Case-insensitive lookup of the first non-empty, trimmed value for `name`.
@@ -256,16 +339,17 @@ impl EndpointPicker for EppRouter {
             });
         }
 
-        // Header-over-body priority (via the shared resolver), honored here as on
-        // the frontend path.
-        let priority_header =
-            first_header(&req.headers, HEADER_REQUEST_PRIORITY).map(str::to_owned);
-        let strict_priority_header =
-            first_header(&req.headers, HEADER_REQUEST_STRICT_PRIORITY).map(str::to_owned);
-        let (tokens, priority_jump, strict_priority) = self
-            .tokenize(req.body.clone(), priority_header, strict_priority_header)
+        let TokenizeResult {
+            token_ids: tokens,
+            priority_jump,
+            strict_priority,
+            cache_namespace,
+            expected_output_tokens,
+        } = self
+            .tokenize(req.body.clone(), &req.headers)
             .await
             .map_err(|e| e.into_pick_error(&req.request_id))?;
+        let policy_class = requested_policy_class(&req.headers)?;
 
         // EPP-minted booking key (not the reused `x-request-id`): stays
         // EPP-known/releasable and rides back on `PickResult::reservation_id`,
@@ -290,9 +374,13 @@ impl EndpointPicker for EppRouter {
             // Effective header-over-body values; `None` only when unset everywhere.
             priority_jump,
             strict_priority,
+            expected_output_tokens,
+            policy_class,
+            cache_namespace: cache_namespace.clone(),
         };
 
         // On either error return below the guard (still armed) frees the booking.
+
         let resp = match self.selector.select_and_reserve(select_req).await {
             Ok(resp) => resp,
             Err(e) => return Err(PickError::RoutingFailed(e.to_string())),
@@ -320,6 +408,9 @@ impl EndpointPicker for EppRouter {
             endpoint,
             // Worker re-tokenizes the forwarded request (llm-d parity); no inject.
             token_ids: None,
+            cache_namespace,
+            // Native vLLM has no Dynamo handler to tag the salt; the EPP does.
+            cache_salt_forwarding: CacheSaltForwarding::NativeVllm,
             // Booking id for the server's lifecycle callbacks (no shared map).
             reservation_id: Some(reservation_id),
             ..Default::default()
@@ -401,8 +492,8 @@ impl<R: ReservationReleaser> Drop for ReservationGuard<R> {
 enum TokenizeError {
     /// The request body could not be parsed — a genuine client (400) error.
     InvalidBody(serde_json::Error),
-    /// The vLLM render call failed; the specific variant decides the status.
-    Render(VllmRenderError),
+    /// The renderer call failed; the specific variant decides the status.
+    Render(RenderError),
 }
 
 impl TokenizeError {
@@ -413,30 +504,30 @@ impl TokenizeError {
             // The serde message describes the client's own JSON, not our
             // internals, so it is safe to surface as a 400.
             TokenizeError::InvalidBody(e) => {
-                PickError::TokenizationFailed(format!("invalid request body: {e}"))
+                PickError::InvalidRequest(format!("invalid request body: {e}"))
             }
             TokenizeError::Render(e) => {
-                tracing::warn!(request_id, error = %e, "Tokenization Render failed");
-                match e {
-                    VllmRenderError::Unavailable { .. } => PickError::TokenizerUnavailable,
-                    VllmRenderError::Timeout { .. } => PickError::TokenizerTimeout,
-                    // Only the renderer's payload-validation statuses (400/422)
-                    // mean the client's request was bad → surface as a client 400.
-                    // Auth/misconfig (401/403/404), overload (429/503), any other
-                    // 4xx, and 5xx are the renderer's or our own fault — never blame
-                    // the client's payload for those (`is_client_error()` would).
-                    VllmRenderError::UpstreamStatus { status, .. } => match status.as_u16() {
-                        400 | 422 => PickError::TokenizationFailed(
-                            "request rejected by tokenization service".to_string(),
-                        ),
-                        // Renderer overloaded / temporarily unavailable → retryable.
-                        429 | 503 => PickError::TokenizerUnavailable,
-                        _ => PickError::TokenizerUpstreamError,
-                    },
-                    // A too-large or contract-breaking success is the renderer's
-                    // fault (→ 502).
-                    VllmRenderError::InvalidResponse { .. }
-                    | VllmRenderError::ResponseTooLarge { .. } => PickError::TokenizerUpstreamError,
+                tracing::warn!(request_id, error = %e, "Tokenization render failed");
+                match &e {
+                    RenderError::Unavailable { .. } => PickError::TokenizerUnavailable,
+                    RenderError::Timeout { .. } => PickError::TokenizerTimeout,
+                    RenderError::InvalidResponse { .. } | RenderError::ResponseTooLarge { .. } => {
+                        PickError::TokenizerUpstreamError
+                    }
+                    RenderError::UpstreamStatus { status, .. } => {
+                        match status.as_u16() {
+                            // Only payload-validation statuses (400/422) mean the
+                            // client's request was bad → surface as a client 400.
+                            // Auth/misconfig (401/403/404), overload (429/503), any
+                            // other 4xx, and 5xx are the renderer's or our own fault.
+                            400 | 422 => PickError::InvalidRequest(
+                                "request rejected by tokenization service".to_string(),
+                            ),
+                            // Renderer overloaded / temporarily unavailable → retryable.
+                            429 | 503 => PickError::TokenizerUnavailable,
+                            _ => PickError::TokenizerUpstreamError,
+                        }
+                    }
                 }
             }
         }
@@ -448,12 +539,63 @@ mod tests {
     use super::*;
 
     #[test]
+    fn requested_policy_class_uses_frontend_metadata_extraction() {
+        // The class rides a Dynamo metadata header; the extractor strips the
+        // prefix, trims, and honors the first of repeated headers.
+        let headers: Vec<(String, String)> = vec![
+            (
+                "x-dynamo-meta-policy-class".to_string(),
+                " latency ".to_string(),
+            ),
+            (
+                "x-dynamo-meta-policy-class".to_string(),
+                "throughput".to_string(),
+            ),
+            ("x-request-id".to_string(), "irrelevant".to_string()),
+        ];
+        assert_eq!(
+            requested_policy_class(&headers).unwrap().as_deref(),
+            Some("latency")
+        );
+
+        // Mixed-case header names match as well.
+        let headers: Vec<(String, String)> = vec![(
+            "X-Dynamo-Meta-Policy-Class".to_string(),
+            "express".to_string(),
+        )];
+        assert_eq!(
+            requested_policy_class(&headers).unwrap().as_deref(),
+            Some("express")
+        );
+
+        // No metadata header → no policy class.
+        let headers: Vec<(String, String)> = vec![("x-request-id".to_string(), "r1".to_string())];
+        assert_eq!(requested_policy_class(&headers).unwrap(), None);
+    }
+
+    #[test]
+    fn requested_policy_class_preserves_typed_limit_error() {
+        use dynamo_llm::http::service::metadata::MetadataHeaderError;
+
+        let headers: Vec<(String, String)> = (0..65)
+            .map(|i| (format!("x-dynamo-meta-key-{i:02}"), "v".to_string()))
+            .collect();
+        let err = requested_policy_class(&headers).expect_err("65 metadata entries must fail");
+        assert!(
+            matches!(
+                err,
+                PickError::MetadataHeadersTooLarge(MetadataHeaderError::TooManyEntries { .. })
+            ),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn render_upstream_status_maps_to_correct_pick_error() {
-        use crate::vllm_render_client::VllmRenderError;
         use reqwest::StatusCode;
 
         let map = |status: StatusCode| {
-            TokenizeError::Render(VllmRenderError::UpstreamStatus {
+            TokenizeError::Render(RenderError::UpstreamStatus {
                 status,
                 body: String::new(),
             })
@@ -463,11 +605,11 @@ mod tests {
         // Renderer validated the client's payload and rejected it → client 400.
         assert!(matches!(
             map(StatusCode::BAD_REQUEST),
-            PickError::TokenizationFailed(_)
+            PickError::InvalidRequest(_)
         ));
         assert!(matches!(
             map(StatusCode::UNPROCESSABLE_ENTITY),
-            PickError::TokenizationFailed(_)
+            PickError::InvalidRequest(_)
         ));
 
         // Auth / misconfiguration is NOT an invalid client payload → upstream 502,

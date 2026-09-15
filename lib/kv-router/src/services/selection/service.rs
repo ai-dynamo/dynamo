@@ -233,12 +233,15 @@ impl SelectionService {
     ) -> Self {
         let cancel_token = CancellationToken::new();
         Self {
-            core: Arc::new(SelectionCore::new_local(
-                kv_router_config,
-                indexer_threads,
-                cancel_token.clone(),
-                SelectionCacheConfig::default(),
-            )),
+            core: Arc::new(
+                SelectionCore::try_new_local(
+                    kv_router_config,
+                    indexer_threads,
+                    cancel_token.clone(),
+                    SelectionCacheConfig::default(),
+                )
+                .expect("valid test config"),
+            ),
             peer_manager: None,
             replica_runtime: None,
             replica_sync_port: None,

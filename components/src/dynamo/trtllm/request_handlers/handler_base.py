@@ -15,6 +15,7 @@
 
 import asyncio
 import dataclasses
+import inspect
 import logging
 import os
 import re
@@ -39,7 +40,7 @@ from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMo
 from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.health_check import HEALTH_CHECK_KEY
-from dynamo.llm.exceptions import EngineShutdown
+from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
 from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
 from dynamo.nixl_connect import Connector
 from dynamo.runtime import DistributedRuntime
@@ -466,8 +467,9 @@ class HandlerBase(BaseGenerativeHandler):
 
         Raise EngineShutdown if shutdown event is triggered.
         """
+        cancellation_triggers: list[asyncio.Future[Any]] = []
         try:
-            cancellation_triggers: list[asyncio.Future[Any]] = [
+            cancellation_triggers = [
                 context.async_killed_or_stopped(),  # Request cancellation
             ]
             # Shutdown cancellation
@@ -500,6 +502,14 @@ class HandlerBase(BaseGenerativeHandler):
         except asyncio.CancelledError:
             # Task was cancelled, which is expected when generation completes normally
             pass
+        finally:
+            to_drain = []
+            for task in cancellation_triggers:
+                if not task.done():
+                    task.cancel()
+                    to_drain.append(task)
+            if to_drain:
+                await asyncio.gather(*to_drain, return_exceptions=True)
 
     @asynccontextmanager
     async def _cancellation_monitor(
@@ -857,7 +867,15 @@ class HandlerBase(BaseGenerativeHandler):
             return processed_input
 
         if self.multimodal_processor is None and self._request_has_multimodal(request):
-            raise RuntimeError(
+            # InvalidArgument, not RuntimeError: no worker in the pool can
+            # serve this request. RuntimeError maps to Backend(Unknown) and so
+            # to a sanitized 500 that reads as a server fault; this maps to
+            # Backend(InvalidArgument), which the frontend answers 4xx.
+            #
+            # That 4xx reaches a non-streaming client. A streaming client still
+            # sees 200 then an SSE error frame unless the operator sets
+            # DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS, which is unset by default.
+            raise InvalidArgument(
                 "Multimodal input received but worker started without --modality multimodal. "
                 "Restart the worker with --modality multimodal or remove image_url content."
             )
@@ -1240,17 +1258,43 @@ class HandlerBase(BaseGenerativeHandler):
             conv_kwargs = (
                 {"conversation_params": conversation_params} if conv_affinity else {}
             )
-            generation_result = self.engine.llm.generate_async(
-                inputs=processed_input,  # Use the correctly extracted inputs
-                sampling_params=sampling_params,
-                disaggregated_params=disaggregated_params,
-                streaming=streaming,
-                trace_headers=trace_headers,
-                scheduling_params=scheduling_params,
+            generate_kwargs = {
+                "inputs": processed_input,  # Use the correctly extracted inputs
+                "sampling_params": sampling_params,
+                "disaggregated_params": disaggregated_params,
+                "streaming": streaming,
+                "trace_headers": trace_headers,
+                "scheduling_params": scheduling_params,
                 **conv_kwargs,
-                priority=priority,
-                cache_salt=cache_salt,
-            )
+                "priority": priority,
+                "cache_salt": cache_salt,
+            }
+            generate_async = self.engine.llm.generate_async
+            try:
+                generation_result = generate_async(**generate_kwargs)
+            except (ValueError, TypeError, NotImplementedError) as e:
+                # TRT-LLM performs request validation and preprocessing synchronously in
+                # `generate_async()`, before executor submission. A TypeError can also mean
+                # Dynamo called an incompatible TRT-LLM API, so only treat it as request-local
+                # when the call itself matches a meaningful runtime signature. The same
+                # exception types during result iteration can indicate an executor bug and should
+                # continue through the fatal path below.
+                if isinstance(e, TypeError) and not _call_signature_accepts_kwargs(
+                    generate_async, generate_kwargs
+                ):
+                    raise
+                error_msg = str(e)
+                logging.warning(
+                    "Request %s rejected during request validation (%s): %s",
+                    request_id,
+                    type(e).__name__,
+                    error_msg,
+                )
+                yield {
+                    "finish_reason": {"error": error_msg},
+                    "token_ids": [],
+                }
+                return
 
             # Log the Dynamo-to-engine request-ID mapping exactly once per
             # request, immediately after submission. This is the only place the
@@ -1597,3 +1641,24 @@ class HandlerBase(BaseGenerativeHandler):
         # 1. it catches unsupported fields / attributes.
         # 2. it executes the class's `__post_init__`, which may contain helpful validation logic.
         return dataclasses.replace(sampling_params, **overrides)
+
+
+def _call_signature_accepts_kwargs(callable_obj: Any, kwargs: dict[str, Any]) -> bool:
+    """Return whether a meaningfully inspectable callable accepts `kwargs`."""
+    try:
+        signature = inspect.signature(callable_obj)
+    except (TypeError, ValueError):
+        return False
+
+    if all(
+        parameter.kind
+        in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+        for parameter in signature.parameters.values()
+    ):
+        return False
+
+    try:
+        signature.bind(**kwargs)
+    except TypeError:
+        return False
+    return True

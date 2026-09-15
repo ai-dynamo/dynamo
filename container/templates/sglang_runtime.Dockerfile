@@ -14,6 +14,9 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 {% endif %}
 
 ARG MODELEXPRESS_VERSION
+{% if device == "cuda" %}
+ARG CUDA_MAJOR
+{% endif %}
 
 WORKDIR /workspace
 
@@ -27,9 +30,12 @@ ENV PATH=/usr/local/bin/etcd:$PATH
 # Install the TurboJPEG runtime used by frontend JPEG decoding and bring
 # base-image OS packages up to the current patch releases. --only-upgrade skips
 # anything not already installed while keeping both operations in one layer.
+# libjemalloc2 lets Dynamo processes opt into jemalloc via
+# LD_PRELOAD or DYN_FRONTEND_JEMALLOC; it is not preloaded by default.
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        libturbojpeg && \
+        libturbojpeg \
+        libjemalloc2 && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --only-upgrade \
         dirmngr \
         gnupg \
@@ -48,9 +54,12 @@ RUN apt-get update && \
     ldconfig -p | grep -q 'libturbojpeg.so.0'
 {% else %}
 # Install the TurboJPEG runtime used by frontend JPEG decoding.
+# libjemalloc2 lets Dynamo processes opt into jemalloc via
+# LD_PRELOAD or DYN_FRONTEND_JEMALLOC; it is not preloaded by default.
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        libturbojpeg && \
+        libturbojpeg \
+        libjemalloc2 && \
     rm -rf /var/lib/apt/lists/* && \
     ldconfig && \
     ldconfig -p | grep -q 'libturbojpeg.so.0'
@@ -174,11 +183,37 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
 # Install SGLang-specific runtime dependencies without changing the upstream
 # dependency solution. imageio-ffmpeg is installed from source (no bundled
 # binary) for the VP9 video-encode path; see requirements.sglang.txt.
+{% if device == "cuda" %}
 RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tmp/requirements.sglang.txt \
     --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
+    [ "$CUDA_MAJOR" = "13" ] || { echo "ERROR: requirements.sglang.txt hardcodes the mooncake-transfer-engine-cuda13 distribution; got CUDA_MAJOR=$CUDA_MAJOR" >&2; exit 1; } && \
     pip install --break-system-packages --force-reinstall --no-deps \
         --requirement /tmp/requirements.sglang.txt
+{% else %}
+# mooncake and PyNvVideoCodec are CUDA-only. The mooncake floor names the CUDA 13
+# distribution, and PyNvVideoCodec decodes on NVDEC through libnvcuvid, so both
+# are inert on the XPU image and neither is present in its base. The patterns are
+# anchored to the line start so they cannot match inside another requirement, and
+# the checks fail the build if either package arrives by another route -- a filter
+# that silently stopped matching would otherwise look like success. Both checks
+# are positive tests with no `!` and no stderr redirect, so a broken interpreter
+# fails the build instead of passing it vacuously.
+#
+# Whole-RUN branches, rather than a conditional inside one RUN: a `{% raw %}{% if %}{% endraw %}` in the
+# middle of a `\`-continued command emits a blank line that ends the command
+# early. Matches the equivalent branch in vllm_runtime.Dockerfile.
+RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tmp/requirements.sglang.txt \
+    --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    export PIP_CACHE_DIR=/root/.cache/pip && \
+    grep -v -e '^PyNvVideoCodec' -e '^mooncake-transfer-engine-cuda13' \
+        /tmp/requirements.sglang.txt > /tmp/requirements.sglang.nonvidia.txt && \
+    pip install --break-system-packages --force-reinstall --no-deps \
+        --requirement /tmp/requirements.sglang.nonvidia.txt && \
+    rm -f /tmp/requirements.sglang.nonvidia.txt && \
+    python3 -c "import importlib.util,sys; sys.exit(1 if importlib.util.find_spec('PyNvVideoCodec') else 0)" && \
+    python3 -c "import importlib.metadata as m, re, sys; names={re.sub(r'[-_.]+', '-', n).lower() for d in m.distributions() if (n := (d.metadata or {}).get('Name'))}; sys.exit(1 if 'mooncake-transfer-engine-cuda13' in names else 0)"
+{% endif %}
 
 # Remove the codec-bearing video-DECODE components from the upstream SGLang image
 # (PyAV, decord, OpenCV, torchcodec + any base ffmpeg/libav*), then copy the

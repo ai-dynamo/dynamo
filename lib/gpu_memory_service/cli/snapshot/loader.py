@@ -174,15 +174,12 @@ def _list_checkpoint_devices(
 
 
 def main(argv: list[str] | None = None) -> None:
-    selector = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
-    selector.add_argument("--use-v1", action="store_true")
-    options, remaining = selector.parse_known_args(argv)
-    if options.use_v1:
-        run_per_device("gpu_memory_service.v1.snapshot.loader", remaining)
+    if os.environ.get("DYN_GMS_USE_V1") == "true":
+        run_per_device("gpu_memory_service.v1.snapshot.loader", argv)
         return
 
     parser = _build_parser()
-    args = parser.parse_args(remaining)
+    args = parser.parse_args(argv)
     if not args.checkpoint_dir:
         parser.error(
             f"--checkpoint-dir is required for --transfer-backend={args.transfer_backend}"

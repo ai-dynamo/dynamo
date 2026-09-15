@@ -26,7 +26,7 @@ from tests.utils.device import (
     get_default_vllm_block_size,
 )
 from tests.utils.engine_process import FRONTEND_PORT
-from tests.utils.managed_process import ManagedProcess
+from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.payloads import check_health_generate, check_models_api
 from tests.utils.port_utils import allocate_port, deallocate_port
 
@@ -78,12 +78,14 @@ class DynamoWorkerProcess(ManagedProcess):
         # Configure disaggregation mode, KV transfer, and health checks per worker type.
         if mode == WorkerMode.PREFILL:
             command.extend(["--disaggregation-mode", "prefill"])
-            health_check_urls = [(f"http://localhost:{port}/health", self.is_ready)]
+            health_check_urls = [
+                (f"http://localhost:{port}/health", check_health_ready)
+            ]
         else:
             if mode == WorkerMode.DECODE:
                 command.extend(["--disaggregation-mode", "decode"])
             health_check_urls = [
-                (f"http://localhost:{port}/health", self.is_ready),
+                (f"http://localhost:{port}/health", check_health_ready),
                 (f"http://localhost:{FRONTEND_PORT}/v1/models", check_models_api),
                 (f"http://localhost:{FRONTEND_PORT}/health", check_health_generate),
             ]
@@ -172,19 +174,6 @@ class DynamoWorkerProcess(ManagedProcess):
 
         if cleanup_errors:
             raise cleanup_errors[0]
-
-    def is_ready(self, response) -> bool:
-        """Check the health of the worker process"""
-        worker_type = "Prefill worker" if self.mode == WorkerMode.PREFILL else "Worker"
-        try:
-            data = response.json()
-            if data.get("status") == "ready":
-                logger.info(f"{worker_type} status is ready")
-                return True
-            logger.warning(f"{worker_type} status is not ready: {data.get('status')}")
-        except ValueError:
-            logger.warning(f"{worker_type} health response is not valid JSON")
-        return False
 
 
 @pytest.mark.gpu_1

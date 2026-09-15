@@ -12,6 +12,7 @@
 //! provides the full-state rebootstrap point for a lease.
 
 use std::sync::Arc;
+#[cfg(test)]
 use std::time::Duration;
 
 #[cfg(test)]
@@ -27,50 +28,12 @@ use super::publication::{
 };
 use super::{CkfBuildError, CkfConfig, DcCkfState};
 
-pub const DEFAULT_LOCAL_CKF_RECOVERY_ATTEMPTS: usize = 8;
-pub const DEFAULT_LOCAL_CKF_RECOVERY_BACKOFF: Duration = Duration::from_millis(200);
-
-/// Same-generation snapshot-recovery policy.
-///
-/// The adapter exposes the exponential schedule but deliberately does not sleep. A lifecycle
-/// coordinator can apply the returned delays without blocking the actor or an ingestion worker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LocalCkfRecoveryPolicy {
-    pub max_attempts: usize,
-    pub initial_backoff: Duration,
-}
-
-impl Default for LocalCkfRecoveryPolicy {
-    fn default() -> Self {
-        Self {
-            max_attempts: DEFAULT_LOCAL_CKF_RECOVERY_ATTEMPTS,
-            initial_backoff: DEFAULT_LOCAL_CKF_RECOVERY_BACKOFF,
-        }
-    }
-}
-
-impl LocalCkfRecoveryPolicy {
-    pub fn delay_after_failure(self, failed_attempt: usize) -> Option<Duration> {
-        if failed_attempt == 0 || failed_attempt >= self.max_attempts {
-            return None;
-        }
-        let exponent = u32::try_from(failed_attempt - 1).unwrap_or(u32::MAX);
-        Some(
-            self.initial_backoff
-                .checked_mul(2u32.checked_pow(exponent).unwrap_or(u32::MAX))
-                .unwrap_or(Duration::MAX),
-        )
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum LocalCkfAdapterBuildError {
     #[error(transparent)]
     Producer(#[from] CkfBuildError),
     #[error("producer identity format does not match the local CKF state")]
     ProducerFormatMismatch,
-    #[error("local CKF recovery max_attempts must be nonzero")]
-    ZeroRecoveryAttempts,
     #[error("initial lane assignment failed: {0}")]
     Assignment(#[source] GlobalCkfIngestionError),
     #[error("initial actor barrier snapshot failed: {0:?}")]
@@ -105,12 +68,6 @@ pub enum LocalCkfAdapterError {
     SnapshotIngestion(#[source] GlobalCkfIngestionError),
     #[error("snapshot installation returned {0:?}")]
     SnapshotInstallation(GlobalCkfIngestOutcome),
-    #[error("snapshot recovery failed after {attempts} attempts: {last}")]
-    RecoveryExhausted {
-        attempts: usize,
-        #[source]
-        last: Box<LocalCkfAdapterError>,
-    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -136,7 +93,6 @@ pub struct LocalCkfDrainReport {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalCkfRecoveryReport {
-    pub attempts: usize,
     pub lease: LaneLease,
     pub sequence: u64,
 }
@@ -177,7 +133,6 @@ pub struct LocalCkfAdapter {
     state: DcCkfState,
     publisher: DcCkfPublisher<IngestionDeltaSink>,
     ingestion: Arc<GlobalCkfIngestionPool>,
-    recovery: LocalCkfRecoveryPolicy,
     consumer_instance: super::global::ConsumerInstanceId,
     physical_lane: u8,
     next_assignment_epoch: u64,
@@ -194,11 +149,7 @@ impl LocalCkfAdapter {
         identity: ProducerIdentity,
         lease: LaneLease,
         ingestion: Arc<GlobalCkfIngestionPool>,
-        recovery: LocalCkfRecoveryPolicy,
     ) -> Result<Self, LocalCkfAdapterBuildError> {
-        if recovery.max_attempts == 0 {
-            return Err(LocalCkfAdapterBuildError::ZeroRecoveryAttempts);
-        }
         let mut state = DcCkfState::new(config)?;
         if state.format() != identity.format() {
             return Err(LocalCkfAdapterBuildError::ProducerFormatMismatch);
@@ -235,7 +186,6 @@ impl LocalCkfAdapter {
             state,
             publisher,
             ingestion,
-            recovery,
             consumer_instance: lease.consumer_instance(),
             physical_lane: lease.physical_lane(),
             next_assignment_epoch: lease.assignment_epoch(),
@@ -337,36 +287,10 @@ impl LocalCkfAdapter {
     }
 
     /// Replace the current lease and recover the same producer generation from a new barrier
-    /// snapshot. Retry delays are exposed by [`LocalCkfRecoveryPolicy`] and intentionally not
-    /// slept here so this method never blocks a shared runtime worker on backoff.
+    /// snapshot. Failure leaves actor admission closed for an external lifecycle coordinator to
+    /// retry or tear down.
     pub fn recover_snapshot(&mut self) -> Result<LocalCkfRecoveryReport, LocalCkfAdapterError> {
         self.admission_open = false;
-        let mut last = None;
-        for attempt in 1..=self.recovery.max_attempts {
-            match self.recover_snapshot_once() {
-                Ok((lease, sequence)) => {
-                    self.admission_open = true;
-                    return Ok(LocalCkfRecoveryReport {
-                        attempts: attempt,
-                        lease,
-                        sequence,
-                    });
-                }
-                Err(
-                    error @ LocalCkfAdapterError::Snapshot(
-                        PublisherSnapshotError::SequenceExhausted,
-                    ),
-                ) => return Err(error),
-                Err(error) => last = Some(error),
-            }
-        }
-        Err(LocalCkfAdapterError::RecoveryExhausted {
-            attempts: self.recovery.max_attempts,
-            last: Box::new(last.expect("nonzero recovery attempts always record an error")),
-        })
-    }
-
-    fn recover_snapshot_once(&mut self) -> Result<(LaneLease, u64), LocalCkfAdapterError> {
         let assignment_epoch = self
             .next_assignment_epoch
             .checked_add(1)
@@ -390,7 +314,8 @@ impl LocalCkfAdapter {
         if outcome != (GlobalCkfIngestOutcome::SnapshotInstalled { sequence }) {
             return Err(LocalCkfAdapterError::SnapshotInstallation(outcome));
         }
-        Ok((lease, sequence))
+        self.admission_open = true;
+        Ok(LocalCkfRecoveryReport { lease, sequence })
     }
 
     #[cfg(test)]
@@ -456,17 +381,7 @@ mod tests {
             )
             .unwrap(),
         );
-        LocalCkfAdapter::new(
-            config,
-            identity,
-            lease,
-            ingestion,
-            LocalCkfRecoveryPolicy {
-                max_attempts: 8,
-                initial_backoff: Duration::ZERO,
-            },
-        )
-        .unwrap()
+        LocalCkfAdapter::new(config, identity, lease, ingestion).unwrap()
     }
 
     fn stored(event_id: u64, hash: u64) -> RouterEvent {
@@ -532,11 +447,25 @@ mod tests {
         );
 
         let recovery = adapter.recover_snapshot().unwrap();
-        assert_eq!(recovery.attempts, 1);
         assert_eq!(recovery.sequence, 0);
         assert_eq!(recovery.lease.assignment_epoch(), 2);
         assert_ne!(adapter.indexer().ready_lanes(), 0);
         adapter.exact_consumer_drain().unwrap();
+    }
+
+    #[test]
+    fn failed_recovery_returns_the_concrete_error_and_keeps_admission_closed() {
+        let mut adapter = build_adapter(CkfConfig::new(128));
+        adapter.next_assignment_epoch = u64::MAX;
+
+        assert!(matches!(
+            adapter.recover_snapshot(),
+            Err(LocalCkfAdapterError::AssignmentEpochExhausted)
+        ));
+        assert!(matches!(
+            adapter.apply_event(stored(1, 41)),
+            Err(LocalCkfAdapterError::AdmissionClosed)
+        ));
     }
 
     #[test]
@@ -590,19 +519,5 @@ mod tests {
                 .is_none()
         );
         adapter.exact_consumer_drain().unwrap();
-    }
-
-    #[test]
-    fn recovery_policy_exposes_backoff_without_sleeping() {
-        let policy = LocalCkfRecoveryPolicy::default();
-        assert_eq!(
-            policy.delay_after_failure(1),
-            Some(Duration::from_millis(200))
-        );
-        assert_eq!(
-            policy.delay_after_failure(2),
-            Some(Duration::from_millis(400))
-        );
-        assert_eq!(policy.delay_after_failure(8), None);
     }
 }

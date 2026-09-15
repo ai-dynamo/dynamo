@@ -23,7 +23,10 @@ from dynamo.planner.environment.metrics_provider.interface import (
 )
 from dynamo.planner.environment.state import ComponentState, DeploymentState
 from dynamo.planner.errors import DeploymentValidationError
-from dynamo.planner.monitoring.dgd_services import ComponentPowerConfig
+from dynamo.planner.monitoring.dgd_services import (
+    ComponentGPUShape,
+    ComponentPowerConfig,
+)
 from dynamo.planner.monitoring.traffic_metrics import Metrics
 
 logger = logging.getLogger(__name__)
@@ -298,8 +301,8 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
     def _refresh_gpu_counts(self, deployment: Optional[dict] = None) -> None:
         state = self.deployment_state()
         try:
-            prefill_gpus, decode_gpus = self._call_with_optional_deployment(
-                self.controller.get_gpu_counts,
+            prefill_shape, decode_shape = self._call_with_optional_deployment(
+                self.controller.get_gpu_shapes,
                 deployment=deployment,
                 require_prefill=self.require_prefill,
                 require_decode=self.require_decode,
@@ -310,30 +313,50 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
                 "falling back to last observed or configured values",
                 exc,
             )
-            prefill_gpus = state.prefill.num_gpus
-            decode_gpus = state.decode.num_gpus
+            prefill_shape = self._fallback_gpu_shape(
+                state.prefill, self.config.prefill_engine_num_gpu
+            )
+            decode_shape = self._fallback_gpu_shape(
+                state.decode, self.config.decode_engine_num_gpu
+            )
 
-        if prefill_gpus is None:
-            prefill_gpus = state.prefill.num_gpus
-        if prefill_gpus is None:
-            prefill_gpus = self.config.prefill_engine_num_gpu
-        if decode_gpus is None:
-            decode_gpus = state.decode.num_gpus
-        if decode_gpus is None:
-            decode_gpus = self.config.decode_engine_num_gpu
+        if prefill_shape is None:
+            prefill_shape = self._fallback_gpu_shape(
+                state.prefill, self.config.prefill_engine_num_gpu
+            )
+        if decode_shape is None:
+            decode_shape = self._fallback_gpu_shape(
+                state.decode, self.config.decode_engine_num_gpu
+            )
 
         errors = []
-        if self.require_prefill and prefill_gpus is None:
+        if self.require_prefill and prefill_shape is None:
             errors.append("Missing prefill_engine_num_gpu in config")
-        if self.require_decode and decode_gpus is None:
+        if self.require_decode and decode_shape is None:
             errors.append("Missing decode_engine_num_gpu in config")
         if errors:
             raise DeploymentValidationError(errors)
 
         if self.require_prefill:
-            state.prefill.num_gpus = prefill_gpus
+            state.prefill.num_gpus = prefill_shape.gpus_per_engine
+            state.prefill.gpus_per_replica = prefill_shape.gpus_per_replica
         if self.require_decode:
-            state.decode.num_gpus = decode_gpus
+            state.decode.num_gpus = decode_shape.gpus_per_engine
+            state.decode.gpus_per_replica = decode_shape.gpus_per_replica
+
+    @staticmethod
+    def _fallback_gpu_shape(
+        component_state: ComponentState, configured: Optional[int]
+    ) -> Optional[ComponentGPUShape]:
+        engine = component_state.num_gpus
+        if engine is None:
+            engine = configured
+        if engine is None:
+            return None
+        replica = component_state.gpus_per_replica
+        if replica is None:
+            replica = engine
+        return ComponentGPUShape(engine, replica)
 
     def _load_static_power_caps_at_startup(
         self, deployment: Optional[dict] = None

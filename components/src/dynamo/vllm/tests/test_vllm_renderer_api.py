@@ -356,7 +356,8 @@ class TestVllmRendererApi:
 
         Both use msgspec array_like=True, so field ORDER determines wire
         position. vllm_processor.py constructs EngineCoreOutput by keyword
-        and reads fields from EngineCoreRequest positionally.
+        and reads EngineCoreRequest fields by name, but the request still
+        crosses vLLM boundaries using array-like serialization.
         """
         base_request_fields = (
             "request_id",
@@ -380,17 +381,23 @@ class TestVllmRendererApi:
         )
         reasoning_request_fields = (*base_request_fields, "reasoning_parser_kwargs")
         abort_request_fields = (*reasoning_request_fields, "abort_immediately")
-        # vllm-omni monkey-patches EngineCoreRequest with an extra field
-        # (only installed on amd64, not arm64)
-        omni_fields = (*reasoning_request_fields, "additional_information")
-        abort_omni_fields = (*abort_request_fields, "additional_information")
-        valid_request_fields = (
+        core_request_fields = (
             base_request_fields,
             reasoning_request_fields,
             abort_request_fields,
-            (*base_request_fields, "additional_information"),
-            omni_fields,
-            abort_omni_fields,
+        )
+        # vLLM 0.28 adds a trailing optional session_id field. Dynamo does not
+        # expose sessions through its preprocessed-request protocol yet, so the
+        # input processor leaves this field at its backward-compatible default.
+        # It is declared by vLLM itself, so it precedes the vllm-omni extension
+        # below rather than trailing it.
+        core_request_fields = core_request_fields + tuple(
+            (*fields, "session_id") for fields in core_request_fields
+        )
+        # vllm-omni monkey-patches EngineCoreRequest with an extra field, which
+        # lands after every field vLLM declares.
+        valid_request_fields = core_request_fields + tuple(
+            (*fields, "additional_information") for fields in core_request_fields
         )
         # vLLM 0.26 adds a trailing model_intermediate_buffer field. Dynamo
         # reads EngineCoreRequest fields by name, so the append is compatible
@@ -405,6 +412,17 @@ class TestVllmRendererApi:
             f"Actual:          {actual_request_fields}\n"
             "Update request construction in components/src/dynamo/frontend/vllm_processor.py"
         )
+        if "session_id" in actual_request_fields:
+            request_defaults = dict(
+                zip(
+                    actual_request_fields[
+                        -len(EngineCoreRequest.__struct_defaults__) :
+                    ],
+                    EngineCoreRequest.__struct_defaults__,
+                    strict=True,
+                )
+            )
+            assert request_defaults["session_id"] is None
 
         base_output_fields = (
             "request_id",
@@ -447,15 +465,23 @@ class TestVllmRendererApi:
             "is_segment_finished",
             "new_prompt_len_snapshot",
         )
-        omni_output_fields = base_output_fields + omni_output_extra_fields
-        omni_cached_token_output_fields = (
-            cached_token_output_fields + omni_output_extra_fields
-        )
-        valid_output_fields = (
+        core_output_fields = (
             base_output_fields,
             cached_token_output_fields,
-            omni_output_fields,
-            omni_cached_token_output_fields,
+        )
+        # vLLM 0.28 appends optional multimodal cache-miss and sampling-mask
+        # payloads. Dynamo does not enable either feature, so both retain their
+        # None defaults, but their declaration order remains part of vLLM's
+        # array-like wire contract.
+        vllm_028_output_extra_fields = (
+            "mm_cache_miss_hashes",
+            "new_sampling_mask",
+        )
+        core_output_fields = core_output_fields + tuple(
+            fields + vllm_028_output_extra_fields for fields in core_output_fields
+        )
+        valid_output_fields = core_output_fields + tuple(
+            fields + omni_output_extra_fields for fields in core_output_fields
         )
         actual_output_fields = EngineCoreOutput.__struct_fields__
         assert actual_output_fields in valid_output_fields, (
@@ -488,6 +514,10 @@ class TestVllmRendererApi:
         )
         assert output.request_id == "test-123"
         assert output.new_token_ids == [1, 2, 3]
+        if "mm_cache_miss_hashes" in EngineCoreOutput.__struct_fields__:
+            assert output.mm_cache_miss_hashes is None
+        if "new_sampling_mask" in EngineCoreOutput.__struct_fields__:
+            assert output.new_sampling_mask is None
         assert output.finish_reason is FinishReason.STOP
         assert output.stop_reason == "eos"
 
