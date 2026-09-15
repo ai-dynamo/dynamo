@@ -19,7 +19,7 @@ use tokio_util::{
     sync::CancellationToken,
 };
 
-use crate::{client, client::Discovery, protocol};
+use crate::{client, client::Discovery, metadata_upload::MetadataUploader, protocol};
 
 const PAYLOAD_KEY: &str = "sglang_tito";
 const MAX_EVENT_BYTES: usize = 64 * 1024 * 1024;
@@ -242,6 +242,7 @@ impl NativeHttp {
         request: NativeRequest,
         ctx: GenerateContext,
         cancel: CancellationToken,
+        metadata_uploader: Option<MetadataUploader>,
     ) -> BoxStream<'static, Result<LLMEngineOutput, DynamoError>> {
         Box::pin(async_stream::stream! {
             let is_prefill = request.is_prefill;
@@ -319,7 +320,7 @@ impl NativeHttp {
                     ));
                     return;
                 }
-                let response = match serde_json::from_str(data) {
+                let mut response = match serde_json::from_str(data) {
                     Ok(response) => response,
                     Err(error) => {
                         yield Err(client::protocol_error(format!(
@@ -328,8 +329,27 @@ impl NativeHttp {
                         return;
                     }
                 };
+                let terminal = response_is_terminal(&response);
+                if let Some(uploader) = metadata_uploader.as_ref() {
+                    let metadata = response.get("meta_info").cloned();
+                    if terminal && let Some(metadata) = metadata {
+                        if !metadata.is_object() {
+                            yield Err(client::protocol_error(
+                                "SGLang /generate meta_info must be an object",
+                            ));
+                            return;
+                        }
+                        if let Err(error) = uploader.upload(metadata).await {
+                            yield Err(error);
+                            return;
+                        }
+                    }
+                    if let Some(metadata) = response.get_mut("meta_info") {
+                        *metadata = Value::Object(Map::new());
+                    }
+                }
                 let has_output = response_has_output(&response);
-                let (mut output, terminal) = output(response, &mut prefill_handoff);
+                let mut output = output(response, &mut prefill_handoff, terminal);
                 if !first_output_seen && has_output && (!is_prefill || terminal) {
                     ctx.notify_first_token();
                     first_output_seen = true;
@@ -360,12 +380,15 @@ fn response_has_output(response: &Value) -> bool {
         })
 }
 
-fn output(response: Value, prefill_handoff: &mut Option<Value>) -> (LLMEngineOutput, bool) {
-    let error = response.get("error");
-    let finished = error.is_some()
+fn response_is_terminal(response: &Value) -> bool {
+    response.get("error").is_some()
         || response
             .pointer("/meta_info/finish_reason")
-            .is_some_and(|reason| !reason.is_null());
+            .is_some_and(|reason| !reason.is_null())
+}
+
+fn output(response: Value, prefill_handoff: &mut Option<Value>, finished: bool) -> LLMEngineOutput {
+    let error = response.get("error");
     let mut output = match error {
         Some(error) => LLMEngineOutput::error(
             error
@@ -381,7 +404,7 @@ fn output(response: Value, prefill_handoff: &mut Option<Value>) -> (LLMEngineOut
     if finished {
         output.disaggregated_params = prefill_handoff.take();
     }
-    (output, finished)
+    output
 }
 
 fn request_error(error: reqwest::Error) -> DynamoError {
@@ -437,6 +460,7 @@ mod tests {
         response_has_output,
     };
     use crate::client::Discovery;
+    use crate::metadata_upload::MetadataUploader;
 
     fn canonical_request() -> PreprocessedRequest {
         PreprocessedRequest::builder()
@@ -582,11 +606,62 @@ mod tests {
             },
             ctx,
             CancellationToken::new(),
+            None,
         );
 
         assert!(stream.next().await.unwrap().is_ok());
         assert!(*first_token_seen.borrow());
         assert!(stream.next().await.unwrap().is_ok());
+        assert!(stream.next().await.is_none());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn metadata_upload_writes_only_terminal_metadata_and_suppresses_it_inline() {
+        let body = concat!(
+            "data:{\"output_ids\":[101],\"meta_info\":{\"finish_reason\":null,\"step\":1}}\n\n",
+            "data:{\"output_ids\":[102],\"meta_info\":{\"finish_reason\":{\"type\":\"stop\"},\"step\":2}}\n\n"
+        )
+        .to_string();
+        let (port, server) = serve_once(body, "200 OK").await;
+        let directory = tempfile::tempdir().unwrap();
+        let mut configured = canonical_request();
+        configured.extra_args = Some(json!({
+            "nvext": {
+                "metadata_upload": {
+                    "url": url::Url::from_directory_path(directory.path()).unwrap()
+                }
+            }
+        }));
+        let uploader = MetadataUploader::from_request(&configured, true)
+            .unwrap()
+            .unwrap();
+        let ctx = GenerateContext::new(dynamo_backend_common::testing::mock_context(), None);
+        let mut stream = native_http(port).generate(
+            NativeRequest {
+                body: json!({"input_ids": [1], "stream": true}),
+                is_prefill: false,
+                prefill_handoff: None,
+            },
+            ctx,
+            CancellationToken::new(),
+            Some(uploader),
+        );
+
+        let incremental = stream.next().await.unwrap().unwrap();
+        assert_eq!(
+            incremental.engine_data.unwrap()["sglang_response"]["meta_info"],
+            json!({})
+        );
+        assert!(!directory.path().join("choice_0.msgpack.zst").exists());
+
+        let terminal = stream.next().await.unwrap().unwrap();
+        assert!(terminal.finish_reason.is_some());
+        assert_eq!(
+            terminal.engine_data.unwrap()["sglang_response"]["meta_info"],
+            json!({})
+        );
+        assert!(directory.path().join("choice_0.msgpack.zst").exists());
         assert!(stream.next().await.is_none());
         server.await.unwrap();
     }
@@ -604,6 +679,7 @@ mod tests {
             },
             ctx,
             CancellationToken::new(),
+            None,
         );
 
         let error = stream.next().await.unwrap().unwrap_err();
