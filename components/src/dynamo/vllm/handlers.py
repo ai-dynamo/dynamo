@@ -3390,9 +3390,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             completion_token_counts=total_output_tokens_by_index,
                         )
                         if CACHE_REUSE_WORKER_STAGES_ENABLED:
-                            out.setdefault("engine_data", {})["cache_loss"] = (
-                                BaseWorkerHandler._cache_loss_engine_data(res)
-                            )
+                            out.setdefault("engine_data", {})[
+                                "cache_loss"
+                            ] = BaseWorkerHandler._cache_loss_engine_data(res)
                         if prompt_logprobs_payload is not None:
                             _attach_prompt_logprobs_engine_data(
                                 out, prompt_logprobs_payload
