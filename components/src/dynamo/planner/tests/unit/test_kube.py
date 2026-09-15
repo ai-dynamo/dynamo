@@ -17,8 +17,6 @@ from typing import Any, Dict
 from unittest.mock import MagicMock, patch, sentinel
 
 import pytest
-from kubernetes import client
-
 from dynamo.planner.connectors.clients.kubernetes_api import KubernetesAPI
 from dynamo.planner.errors import (
     DuplicateSubComponentError,
@@ -27,6 +25,7 @@ from dynamo.planner.errors import (
     RolloutFailedError,
     SubComponentNotFoundError,
 )
+from kubernetes import client
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -127,6 +126,71 @@ def test_update_service_replicas_uses_dgdsa_scale(k8s_api, mock_custom_api):
     )
     # Should NOT fall back to DGD patch
     mock_custom_api.patch_namespaced_custom_object.assert_not_called()
+
+
+def test_get_service_scaling_adapter_reads_named_dgdsa(k8s_api, mock_custom_api):
+    adapter = {
+        "metadata": {"name": "test-deployment-frontend"},
+        "spec": {"replicas": 0},
+    }
+    mock_custom_api.get_namespaced_custom_object.return_value = adapter
+
+    result = k8s_api.get_service_scaling_adapter("test-deployment", "Frontend")
+
+    assert result is adapter
+    mock_custom_api.get_namespaced_custom_object.assert_called_once_with(
+        group="nvidia.com",
+        version="v1beta1",
+        namespace=k8s_api.current_namespace,
+        plural="dynamographdeploymentscalingadapters",
+        name="test-deployment-frontend",
+    )
+
+
+@pytest.mark.parametrize("replicas", [False, -1, 1.5, "1", None])
+def test_get_scaling_adapter_desired_replicas_rejects_invalid_values(replicas):
+    adapter = {
+        "metadata": {"name": "test-deployment-worker"},
+        "spec": {"replicas": replicas},
+    }
+
+    with pytest.raises(ValueError, match="spec.replicas"):
+        KubernetesAPI.get_scaling_adapter_desired_replicas(adapter)
+
+
+def test_update_scaling_adapter_replicas_is_strict(k8s_api, mock_custom_api):
+    k8s_api.update_scaling_adapter_replicas(
+        "test-deployment", "Frontend", 3, resource_version="101"
+    )
+
+    mock_custom_api.patch_namespaced_custom_object_scale.assert_called_once_with(
+        group="nvidia.com",
+        version="v1beta1",
+        namespace=k8s_api.current_namespace,
+        plural="dynamographdeploymentscalingadapters",
+        name="test-deployment-frontend",
+        body={
+            "spec": {"replicas": 3},
+            "metadata": {"resourceVersion": "101"},
+        },
+    )
+    mock_custom_api.get_namespaced_custom_object.assert_not_called()
+    mock_custom_api.api_client.call_api.assert_not_called()
+
+
+def test_update_scaling_adapter_replicas_never_falls_back_on_404(
+    k8s_api, mock_custom_api
+):
+    mock_custom_api.patch_namespaced_custom_object_scale.side_effect = (
+        client.ApiException(status=404)
+    )
+
+    with pytest.raises(client.ApiException) as exc_info:
+        k8s_api.update_scaling_adapter_replicas("test-deployment", "Frontend", 3)
+
+    assert exc_info.value.status == 404
+    mock_custom_api.get_namespaced_custom_object.assert_not_called()
+    mock_custom_api.api_client.call_api.assert_not_called()
 
 
 def test_update_service_replicas_fallback_to_dgd(k8s_api, mock_custom_api):

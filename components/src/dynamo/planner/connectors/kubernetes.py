@@ -17,11 +17,16 @@ import asyncio
 import json
 import logging
 import os
+from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Optional
 
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import PlannerConnector
 from dynamo.planner.connectors.clients.kubernetes_api import (
+    DYNAMO_API_VERSION,
+    DYNAMO_COMPONENT_LABEL,
+    DYNAMO_DGD_NAME_LABEL,
     DYNAMO_WORKER_METADATA_API_VERSION,
     NVIDIA_API_GROUP,
     KubernetesAPI,
@@ -64,6 +69,16 @@ CURRENT_WORKER_HASH_ANNOTATION = "nvidia.com/current-worker-hash"
 CURRENT_WORKER_HASH_V2_ANNOTATION = "nvidia.com/current-worker-hash-v2"
 WORKER_COMPONENT_TYPES = {"worker", "prefill", "decode"}
 WORKER_SUFFIX_COMPONENT_KINDS = {"Deployment", "LeaderWorkerSet"}
+
+
+@dataclass(frozen=True)
+class _ReplicaUpdatePlan:
+    """One fully resolved replica target from a single DGD snapshot."""
+
+    target: TargetReplica
+    service: Service
+    current_replicas: int
+    scaling_adapter: dict | None
 
 
 class KubernetesConnector(PlannerConnector):
@@ -915,48 +930,272 @@ class KubernetesConnector(PlannerConnector):
             raise EmptyTargetReplicasError()
 
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        deployment_ready = self.kube_api.is_deployment_ready(deployment)
 
-        if not self.kube_api.is_deployment_ready(deployment):
-            if self.raise_not_ready:
-                logger.warning(
-                    "Deployment %s is not ready, rejecting this scaling",
+        if not deployment_ready:
+            rejection = self._unready_recovery_dgd_rejection(deployment)
+            if rejection is not None:
+                return self._reject_not_ready_scaling(rejection)
+
+        # Resolve every component and authoritative desired state before the
+        # first mutation. Besides avoiding partial multi-component writes on a
+        # bad target, this is required for the narrow unready-DGD recovery path.
+        try:
+            plans = self._preflight_replica_updates(deployment, target_replicas)
+        except Exception as exc:
+            if not deployment_ready:
+                return self._reject_not_ready_scaling(
+                    f"replica-target preflight failed: {type(exc).__name__}: {exc}"
+                )
+            raise
+
+        if not deployment_ready:
+            rejection = self._unready_recovery_target_rejection(deployment, plans)
+            if rejection is not None:
+                return self._reject_not_ready_scaling(rejection)
+
+        mutations = [
+            plan
+            for plan in plans
+            if plan.current_replicas != plan.target.desired_replicas
+        ]
+
+        for plan in mutations:
+            target_replica = plan.target
+            service = plan.service
+            logger.info(
+                "Updating %s component %s from %s to desired replica count %s",
+                target_replica.sub_component_type.value,
+                service.name,
+                plan.current_replicas,
+                target_replica.desired_replicas,
+            )
+            if plan.scaling_adapter is not None:
+                # ``scalingAdapter`` key presence makes DGDSA desired state
+                # authoritative, including the v1beta1 marker form ``{}``.
+                # The strict client method never falls back to a DGD write.
+                self.kube_api.update_scaling_adapter_replicas(
                     self.graph_deployment_name,
+                    service.name,
+                    target_replica.desired_replicas,
+                    resource_version=(
+                        plan.scaling_adapter.get("metadata", {}).get("resourceVersion")
+                        if not deployment_ready
+                        else None
+                    ),
                 )
-                raise DynamoGraphDeploymentNotReadyError(
-                    deployment_name=self.graph_deployment_name,
-                    namespace=getattr(self.kube_api, "current_namespace", None),
-                )
-            logger.warning(
-                "Deployment %s is not ready, ignoring this scaling",
-                self.graph_deployment_name,
-            )
-            return
-
-        for target_replica in target_replicas:
-            service = get_component_from_type_or_name(
-                deployment,
-                target_replica.sub_component_type,
-                component_name=target_replica.component_name,
-            )
-            current_replicas = service.number_replicas()
-            if current_replicas != target_replica.desired_replicas:
+            else:
                 logger.info(
-                    f"Updating {target_replica.sub_component_type.value} component {service.name} to desired replica count {target_replica.desired_replicas}"
+                    "Component %s has no declared scaling adapter; using the "
+                    "legacy replica update path",
+                    service.name,
                 )
                 self.kube_api.update_graph_replicas(
                     self.graph_deployment_name,
                     service.name,
                     target_replica.desired_replicas,
                 )
-            else:
+
+        for plan in plans:
+            if plan.current_replicas == plan.target.desired_replicas:
                 logger.info(
-                    f"{target_replica.sub_component_type.value} component {service.name} already at desired replica count {target_replica.desired_replicas}, skipping"
+                    "%s component %s already at desired replica count %s, skipping",
+                    plan.target.sub_component_type.value,
+                    plan.service.name,
+                    plan.target.desired_replicas,
                 )
+
+        # An unready no-op is safe but cannot make the graph become Ready; keep
+        # the historical nonblocking skip behavior instead of waiting forever.
+        if not deployment_ready and not mutations:
+            return
 
         if blocking:
             await self.kube_api.wait_for_graph_deployment_ready(
                 self.graph_deployment_name,
             )
+
+    def _preflight_replica_updates(
+        self, deployment: dict, target_replicas: list[TargetReplica]
+    ) -> list[_ReplicaUpdatePlan]:
+        """Resolve all targets and authoritative desired counts without writes."""
+        plans: list[_ReplicaUpdatePlan] = []
+        seen_components: set[str] = set()
+        for target in target_replicas:
+            service = get_component_from_type_or_name(
+                deployment,
+                target.sub_component_type,
+                component_name=target.component_name,
+            )
+            if service.name in seen_components:
+                raise ValueError(
+                    f"duplicate replica target for component {service.name!r}"
+                )
+            seen_components.add(service.name)
+            scaling_adapter = None
+            if "scalingAdapter" in service.service:
+                scaling_adapter = self.kube_api.get_service_scaling_adapter(
+                    self.graph_deployment_name, service.name
+                )
+                current_replicas = self.kube_api.get_scaling_adapter_desired_replicas(
+                    scaling_adapter
+                )
+            else:
+                current_replicas = service.number_replicas()
+            plans.append(
+                _ReplicaUpdatePlan(
+                    target=target,
+                    service=service,
+                    current_replicas=current_replicas,
+                    scaling_adapter=scaling_adapter,
+                )
+            )
+        return plans
+
+    def _unready_recovery_dgd_rejection(self, deployment: dict) -> str | None:
+        """Reject unsafe parent snapshots before reading any DGDSA target."""
+        metadata = deployment.get("metadata", {}) or {}
+        if not isinstance(metadata, Mapping):
+            return "DGD metadata is malformed"
+        if metadata.get("name") != self.graph_deployment_name:
+            return "DGD metadata.name does not match the connector target"
+        if metadata.get("deletionTimestamp") is not None:
+            return "DGD is being deleted"
+        dgd_uid = metadata.get("uid")
+        if not isinstance(dgd_uid, str) or not dgd_uid:
+            return "DGD metadata.uid is unavailable"
+        if not self.kube_api.is_spec_generation_observed(deployment):
+            return "DGD status has not observed the current spec generation"
+
+        status = deployment.get("status", {}) or {}
+        if not isinstance(status, Mapping):
+            return "DGD status is malformed"
+        state = status.get("state")
+        if isinstance(state, str) and state.lower() == "failed":
+            return "DGD status.state is failed"
+        rolling = status.get("rollingUpdate") or {}
+        if not isinstance(rolling, Mapping):
+            return "DGD rolling-update status is malformed"
+        phase = rolling.get("phase") or ""
+        if phase not in ("", "Completed"):
+            return f"DGD rolling update phase is {phase!r}"
+        return None
+
+    def _unready_recovery_target_rejection(
+        self, deployment: dict, plans: list[_ReplicaUpdatePlan]
+    ) -> str | None:
+        """Allow only owned DGDSA no-ops or strict zero-to-positive recovery."""
+        for plan in plans:
+            if plan.scaling_adapter is None:
+                return f"component {plan.service.name!r} has no declared DGDSA"
+
+            adapter_rejection = self._recovery_adapter_rejection(
+                deployment, plan.service.name, plan.scaling_adapter
+            )
+            if adapter_rejection is not None:
+                return adapter_rejection
+
+            desired = plan.target.desired_replicas
+            current = plan.current_replicas
+            if current == desired:
+                continue
+            if current != 0 or desired <= 0:
+                return (
+                    f"component {plan.service.name!r} is not a zero-to-positive "
+                    f"recovery (current={current}, target={desired})"
+                )
+        return None
+
+    def _recovery_adapter_rejection(
+        self, deployment: dict, component_name: str, adapter: dict
+    ) -> str | None:
+        """Validate DGDSA identity and ownership for an unready-DGD write."""
+        if not isinstance(adapter, Mapping):
+            return f"DGDSA for component {component_name!r} is malformed"
+        dgd_metadata = deployment.get("metadata", {}) or {}
+        if not isinstance(dgd_metadata, Mapping):
+            return "DGD metadata is malformed"
+        dgd_name = dgd_metadata.get("name")
+        dgd_uid = dgd_metadata.get("uid")
+        adapter_metadata = adapter.get("metadata", {}) or {}
+        if not isinstance(adapter_metadata, Mapping):
+            return f"DGDSA metadata for component {component_name!r} is malformed"
+        expected_adapter_name = f"{self.graph_deployment_name}-{component_name.lower()}"
+
+        if adapter_metadata.get("name") != expected_adapter_name:
+            return f"DGDSA metadata.name does not match component {component_name!r}"
+        if adapter_metadata.get("deletionTimestamp") is not None:
+            return f"DGDSA {expected_adapter_name!r} is being deleted"
+        resource_version = adapter_metadata.get("resourceVersion")
+        if not isinstance(resource_version, str) or not resource_version.strip():
+            return f"DGDSA {expected_adapter_name!r} has no resourceVersion"
+
+        expected_api_version = f"{NVIDIA_API_GROUP}/{DYNAMO_API_VERSION}"
+        owner_matches = False
+        owner_references = adapter_metadata.get("ownerReferences", []) or []
+        if not isinstance(owner_references, list):
+            return f"DGDSA {expected_adapter_name!r} ownerReferences are malformed"
+        for owner in owner_references:
+            if not isinstance(owner, Mapping):
+                continue
+            if owner.get("apiVersion") != expected_api_version:
+                continue
+            if (
+                owner.get("controller") is True
+                and owner.get("kind") == "DynamoGraphDeployment"
+                and owner.get("name") == dgd_name
+                and owner.get("uid") == dgd_uid
+            ):
+                owner_matches = True
+                break
+        if not owner_matches:
+            return f"DGDSA {expected_adapter_name!r} is not controller-owned by the DGD"
+
+        adapter_spec = adapter.get("spec", {}) or {}
+        if not isinstance(adapter_spec, Mapping):
+            return f"DGDSA {expected_adapter_name!r} spec is malformed"
+        dgd_ref = adapter_spec.get("dgdRef") or {}
+        if not isinstance(dgd_ref, Mapping):
+            return f"DGDSA {expected_adapter_name!r} dgdRef is malformed"
+        if dgd_ref.get("name") != dgd_name:
+            return f"DGDSA {expected_adapter_name!r} references a different DGD"
+        if dgd_ref.get("componentName") != component_name:
+            return f"DGDSA {expected_adapter_name!r} references a different component"
+
+        # Labels are not the ownership authority, but reject contradictory
+        # labels when an operator supplies them as defense in depth.
+        labels = adapter_metadata.get("labels") or {}
+        if not isinstance(labels, Mapping):
+            return f"DGDSA {expected_adapter_name!r} labels are malformed"
+        if (
+            DYNAMO_DGD_NAME_LABEL in labels
+            and labels[DYNAMO_DGD_NAME_LABEL] != dgd_name
+        ):
+            return f"DGDSA {expected_adapter_name!r} has a mismatched DGD label"
+        if (
+            DYNAMO_COMPONENT_LABEL in labels
+            and labels[DYNAMO_COMPONENT_LABEL] != component_name
+        ):
+            return f"DGDSA {expected_adapter_name!r} has a mismatched component label"
+        return None
+
+    def _reject_not_ready_scaling(self, reason: str) -> None:
+        """Preserve the connector's existing skip-versus-raise contract."""
+        if self.raise_not_ready:
+            logger.warning(
+                "Deployment %s is not ready, rejecting this scaling: %s",
+                self.graph_deployment_name,
+                reason,
+            )
+            raise DynamoGraphDeploymentNotReadyError(
+                deployment_name=self.graph_deployment_name,
+                namespace=getattr(self.kube_api, "current_namespace", None),
+            )
+        logger.warning(
+            "Deployment %s is not ready, ignoring this scaling: %s",
+            self.graph_deployment_name,
+            reason,
+        )
 
 
 if __name__ == "__main__":
