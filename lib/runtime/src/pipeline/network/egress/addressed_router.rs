@@ -19,6 +19,8 @@ use crate::metrics::request_plane::{
     REQUEST_PLANE_INFLIGHT, REQUEST_PLANE_QUEUE_SECONDS, REQUEST_PLANE_ROUNDTRIP_TTFT_SECONDS,
     REQUEST_PLANE_SEND_SECONDS,
 };
+use crate::pipeline::network::ACK_OVERLOADED_PREFIX;
+use crate::pipeline::network::ACK_UNAVAILABLE_PREFIX;
 use crate::pipeline::network::ConnectionInfo;
 use crate::pipeline::network::NetworkStreamWrapper;
 use crate::pipeline::network::PendingConnections;
@@ -952,15 +954,15 @@ impl AddressedPushRouter {
 /// Map a worker rejection ACK to the corresponding typed error. `None` for
 /// normal responses, including the empty "queued" ACK.
 fn detect_worker_rejection_response(res_bytes: &[u8]) -> Option<DynamoError> {
-    const OVERLOAD_PREFIX: &[u8] = b"Server overloaded:";
-    let unavailable_prefix = crate::pipeline::network::ACK_UNAVAILABLE_PREFIX.as_bytes();
+    const OVERLOAD_PREFIX: &[u8] = ACK_OVERLOADED_PREFIX.as_bytes();
+    const UNAVAILABLE_PREFIX: &[u8] = ACK_UNAVAILABLE_PREFIX.as_bytes();
 
     let error_type = if res_bytes.starts_with(OVERLOAD_PREFIX) {
         // This ACK came from the one worker addressed by this dispatch. It says
         // nothing about capacity elsewhere in the eligible pool, so preserve
         // worker scope for migration instead of reporting pool exhaustion.
         ErrorType::WorkerOverloaded
-    } else if res_bytes.starts_with(unavailable_prefix) {
+    } else if res_bytes.starts_with(UNAVAILABLE_PREFIX) {
         // Same scope: the addressed server is up but has no handler for this
         // instance, or is closing its worker pool. Other instances may still
         // serve the endpoint, so this stays migratable.
