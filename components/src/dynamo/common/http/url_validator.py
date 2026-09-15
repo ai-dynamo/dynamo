@@ -95,6 +95,12 @@ def describe_media_source(source: str, limit: int = SOURCE_LABEL_LIMIT) -> str:
     if source.startswith("data:"):
         meta = source[len("data:") :].partition(",")[0]
         media_type = meta.split(";")[0] or "application/octet-stream"
+        # The media-type field is client-supplied and unbounded: a reference of
+        # ``"data:" + "A" * 200_000 + ",AAAA"`` puts all of it here, so eliding
+        # the payload alone still renders a 200 KB label. Bound it like any
+        # other source. Omitting the comma takes the same path.
+        if len(media_type) > limit:
+            media_type = f"{media_type[:limit]}... ({len(media_type)} chars)"
         return f"data:{media_type} ({len(source)} chars, payload elided)"
     if len(source) > limit:
         return f"{source[:limit]}... ({len(source)} chars)"
@@ -254,7 +260,13 @@ def validate_local_path(path: str, policy: UrlValidationPolicy) -> Path:
     except FileNotFoundError as exc:
         raise UrlValidationError(f"File not found: {label}") from exc
     except OSError as exc:
-        raise UrlValidationError(f"Could not resolve path '{label}': {exc}") from exc
+        # ``exc`` renders the offending filename in full -- ENAMETOOLONG on a
+        # 200,000-character name gives a 200,069-character string -- which walks
+        # straight past ``label``'s bound into the error response and the log.
+        # ``strerror`` is the errno text alone ("File name too long"), with no
+        # path in it; the bounded ``str(exc)`` is the fallback when it is None.
+        detail = exc.strerror or describe_error_detail(str(exc))
+        raise UrlValidationError(f"Could not resolve path '{label}': {detail}") from exc
     except ValueError as exc:
         # An embedded NUL makes lstat() raise ValueError, not OSError. Reachable
         # since file:// paths are percent-decoded, so %00 becomes a real NUL.

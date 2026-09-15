@@ -23,6 +23,7 @@ from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
     describe_error_detail,
+    describe_media_source,
     is_blocked_ip,
     validate_local_path,
     validate_media_reference,
@@ -463,6 +464,48 @@ def test_validate_local_path_bounds_the_path_in_its_message(tmp_path) -> None:
 
     assert len(str(excinfo.value)) < 500
     assert "200010 chars" in str(excinfo.value)  # true size stays visible
+
+
+def test_validate_local_path_bounds_the_oserror_diagnostic(tmp_path) -> None:
+    """The errno text repeats the filename, which the label bound does not cover.
+
+    The ``/nope/`` case above stops at the missing parent and never reaches the
+    filesystem. Under an *existing* parent the name is handed to lstat(),
+    ENAMETOOLONG comes back, and ``str(exc)`` carries the whole
+    200,000-character filename into the same error response and log line the
+    label bound was there to protect.
+    """
+    policy = UrlValidationPolicy(allowed_local_path=str(tmp_path))
+    path = str(tmp_path / ("n" * 200_000))
+
+    with pytest.raises(UrlValidationError) as excinfo:
+        validate_local_path(path, policy)
+
+    assert len(str(excinfo.value)) < 500
+    assert "n" * 200 not in str(excinfo.value)
+
+
+def test_describe_media_source_bounds_data_uri_metadata() -> None:
+    """Eliding the payload is not enough: the media-type field is client-supplied.
+
+    Everything before the comma is the metadata, so a reference of
+    ``"data:" + "A" * 200_000 + ",AAAA"`` rendered a 200,036-character label with
+    the payload already elided. Omitting the comma takes the same branch.
+    """
+    for source in ("data:" + "A" * 200_000 + ",AAAA", "data:" + "A" * 200_000):
+        label = describe_media_source(source)
+
+        assert len(label) < 500
+        assert "A" * 200 not in label
+        assert f"({len(source)} chars" in label  # true size stays visible
+
+
+def test_describe_media_source_keeps_an_ordinary_data_uri_intact() -> None:
+    """Control: a real media type is short and must survive the new bound."""
+    label = describe_media_source("data:image/png;base64," + "A" * 50_000)
+
+    assert label.startswith("data:image/png (")
+    assert "payload elided" in label
 
 
 def test_validate_local_path_keeps_an_ordinary_path_intact(tmp_path) -> None:
