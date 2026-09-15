@@ -407,6 +407,14 @@ pub trait LLMEngine: Send + Sync + 'static {
         }))
     }
 
+    /// Wait until this engine must be withdrawn from discovery. This does not
+    /// request cleanup: accepted and late-arriving requests may still complete.
+    /// The worker invokes this once after registration and never re-registers
+    /// a withdrawn engine. Engines without a lifecycle signal remain pending.
+    async fn wait_for_withdrawal(&self) {
+        std::future::pending::<()>().await;
+    }
+
     /// Hand the engine its runtime serving [`Endpoint`](dynamo_runtime::component::Endpoint),
     /// exactly once, after it exists and before serving begins. Default no-op.
     ///

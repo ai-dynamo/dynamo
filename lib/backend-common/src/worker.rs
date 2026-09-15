@@ -291,6 +291,13 @@ impl EngineKind {
         }
     }
 
+    async fn wait_for_withdrawal(&self) {
+        match self {
+            EngineKind::Llm(e) => e.wait_for_withdrawal().await,
+            EngineKind::Raw(_) => std::future::pending::<()>().await,
+        }
+    }
+
     /// See [`LLMEngine::is_quiescent`].
     async fn is_quiescent(&self) -> Result<Option<bool>, DynamoError> {
         match self {
@@ -1196,8 +1203,30 @@ impl Worker {
         let serve_fut = primary_endpoint.wait();
         tokio::pin!(serve_fut);
 
+        // Withdrawal only changes discovery/readiness. Keep polling the serving
+        // endpoint so existing streams and requests from stale routers survive.
+        let engine = self.engine.clone();
+        let withdrawal = async {
+            engine.wait_for_withdrawal().await;
+            let _hold = ReadinessHold::take(endpoint.drt().system_health(), endpoint.name());
+            set_worker_health(&endpoint, HealthStatus::NotReady);
+            self.begin_engine_route_shutdown().await;
+            let mut retry_delay = std::time::Duration::from_millis(50);
+            loop {
+                match endpoint.unregister_endpoint_instance().await {
+                    Ok(()) => break,
+                    Err(error) => tracing::warn!(%error, "Engine withdrawal failed; retrying"),
+                }
+                tokio::time::sleep(retry_delay).await;
+                retry_delay = (retry_delay * 2).min(std::time::Duration::from_secs(5));
+            }
+            tracing::info!("Engine withdrawn from discovery; continuing to serve until shutdown");
+            std::future::pending::<()>().await;
+        };
+
         let serve_result = tokio::select! {
             biased;
+            _ = withdrawal => unreachable!("withdrawal keeps serving until shutdown"),
             result = &mut serve_fut => {
                 match result {
                     // Endpoint exited cleanly (e.g. DRT primary token
@@ -3969,6 +3998,124 @@ mod handoff_and_lifecycle_tests {
 
         worker.begin_engine_route_shutdown().await;
         assert!(control_response_is_error(&resume_request.await.unwrap()));
+    }
+
+    struct WithdrawingEngine {
+        withdrawal: CancellationToken,
+        cleaned: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait]
+    impl LLMEngine for WithdrawingEngine {
+        async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
+            Ok(EngineConfig {
+                model: "withdrawal-mock".into(),
+                ..Default::default()
+            })
+        }
+
+        async fn generate(
+            &self,
+            _request: PreprocessedRequest,
+            _ctx: crate::engine::GenerateContext,
+        ) -> Result<
+            BoxStream<'static, Result<crate::engine::LLMEngineOutput, DynamoError>>,
+            DynamoError,
+        > {
+            Ok(Box::pin(futures::stream::once(async {
+                Ok(crate::engine::LLMEngineOutput::stop())
+            })))
+        }
+
+        async fn wait_for_withdrawal(&self) {
+            self.withdrawal.cancelled().await;
+        }
+
+        async fn cleanup(&self) -> Result<(), DynamoError> {
+            self.cleaned
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    async fn withdrawal_keeps_worker_alive(config: dynamo_runtime::distributed::DistributedConfig) {
+        use std::sync::atomic::Ordering;
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime, config).await.unwrap();
+        let endpoint = drt
+            .namespace("withdrawal_test")
+            .unwrap()
+            .component("worker")
+            .unwrap()
+            .endpoint("generate");
+        let health = drt.system_health();
+        let engine = Arc::new(WithdrawingEngine {
+            withdrawal: CancellationToken::new(),
+            cleaned: std::sync::atomic::AtomicBool::new(false),
+        });
+        let mut worker = Worker::new(engine.clone(), WorkerConfig::default());
+        let engine_config = worker.start_engine(1).await.unwrap();
+        let shutdown = CancellationToken::new();
+        let client = endpoint.client().await.unwrap();
+        let mut available = client.instance_avail_watcher();
+        let serve = tokio::spawn({
+            let shutdown = shutdown.clone();
+            let endpoint = endpoint.clone();
+            async move {
+                worker
+                    .serve_with_orchestrator(&engine_config, endpoint, shutdown)
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(10), client.wait_for_instances())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(health_reaches(&health, true).await);
+        assert!(!available.borrow_and_update().is_empty());
+        engine.withdrawal.cancel();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            available.wait_for(|ids| ids.is_empty()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(!health.lock().get_health_status().0);
+        // Even successful health probes cannot resurrect withdrawal readiness.
+        set_worker_health(&endpoint, HealthStatus::Ready);
+        assert!(!health.lock().get_health_status().0);
+        assert!(!engine.cleaned.load(Ordering::SeqCst));
+        assert!(!serve.is_finished());
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(60), serve)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(engine.cleaned.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn engine_withdrawal_removes_routing_without_cleanup() {
+        withdrawal_keeps_worker_alive(
+            dynamo_runtime::distributed::DistributedConfig::process_local(),
+        )
+        .await;
+    }
+
+    #[cfg(feature = "integration")]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn engine_withdrawal_removes_etcd_routing_without_cleanup() {
+        let config = dynamo_runtime::distributed::DistributedConfig::from_settings_with_overrides(
+            Some("etcd"),
+            Some("tcp"),
+            Some("zmq"),
+        )
+        .unwrap();
+        withdrawal_keeps_worker_alive(config).await;
     }
 
     /// Assemble a worker whose engine supplies no health-check payload — the

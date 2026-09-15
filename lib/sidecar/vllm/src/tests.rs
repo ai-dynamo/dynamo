@@ -804,6 +804,7 @@ struct FakeServer {
     endpoint: String,
     service: FakeVllm,
     shutdown: Option<oneshot::Sender<()>>,
+    health: tonic_health::server::HealthReporter,
 }
 
 impl FakeServer {
@@ -839,6 +840,7 @@ impl FakeServer {
             endpoint: format!("http://{address}"),
             service,
             shutdown: Some(shutdown),
+            health,
         }
     }
 }
@@ -1116,6 +1118,71 @@ fn engine_with_server_info(
         mode,
         transport,
     )
+}
+
+#[tokio::test]
+async fn health_withdrawal_preserves_active_and_late_generation() {
+    let server = FakeServer::start(FakeVllm::default()).await;
+    let endpoint = server.endpoint.clone();
+    let (engine, _) = tokio::task::spawn_blocking(move || {
+        VllmSidecarEngine::from_args(Some(vec![
+            "dynamo-vllm-sidecar".into(),
+            "--grpc-endpoint".into(),
+            endpoint,
+            "--watch-engine-health".into(),
+        ]))
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let engine = Arc::new(engine);
+    engine.start(1).await.unwrap();
+    server
+        .service
+        .hold_before_first_token
+        .store(true, Ordering::SeqCst);
+    let active = tokio::spawn({
+        let engine = engine.clone();
+        async move { collect(&engine, request()).await }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !server.service.first_token_pending.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    server
+        .health
+        .set_service_status(INFERENCE_SERVICE, HealthServingStatus::NotServing)
+        .await;
+    // A new watch observes the current state even if it missed the transition.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        engine.wait_for_withdrawal(),
+    )
+    .await
+    .unwrap();
+    assert!(!active.is_finished());
+    server
+        .service
+        .hold_before_first_token
+        .store(false, Ordering::SeqCst);
+    assert!(
+        collect(&engine, request())
+            .await
+            .last()
+            .unwrap()
+            .finish_reason
+            .is_some()
+    );
+    server.service.release_first_token.notify_one();
+    let outputs = tokio::time::timeout(std::time::Duration::from_secs(2), active)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(outputs.last().unwrap().finish_reason.is_some());
+    engine.cleanup().await.unwrap();
 }
 
 async fn engine_from_args(

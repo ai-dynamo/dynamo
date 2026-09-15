@@ -103,6 +103,38 @@ python -m dynamo.vllm.sidecar \
 Use `DYN_SIDECAR_GRPC_ENDPOINT` instead of `--grpc-endpoint` when the endpoint is
 provided through the environment.
 
+### Experimental health-based withdrawal
+
+For aggregated serving with etcd, opt into ongoing standard gRPC health watches:
+
+```bash
+vllm-rs serve Qwen/Qwen3-0.6B --host 127.0.0.1 --grpc-port 50051 \
+  --grpc-shutdown-grace-period 5 --shutdown-timeout 60
+
+DYN_DISCOVERY_BACKEND=etcd dynamo-vllm-sidecar \
+  --grpc-endpoint 127.0.0.1:50051 --watch-engine-health
+```
+
+The vLLM command requires a build with `--grpc-shutdown-grace-period` support.
+The sidecar flag is also available as `DYN_VLLM_WATCH_ENGINE_HEALTH=true`.
+
+On engine `NOT_SERVING`, the sidecar becomes unready and unregisters its
+generation endpoint from discovery. It keeps forwarding late requests and
+preserving active streams while vLLM's withdrawal grace allows discovery
+updates to propagate. It retries failed deregistration without cancelling
+generation. No Kubernetes operator or EndpointSlice is involved.
+
+Withdrawal does not stop the sidecar process. Stop it after vLLM has finished
+draining; sending SIGTERM to both processes simultaneously does not provide
+this ordering outside Kubernetes native-sidecar lifecycle management.
+
+This option requires `Health.Watch` and currently rejects disaggregated serving
+and RL. Any non-serving status, watch termination, or watch error permanently
+withdraws this sidecar, including transient connection errors. Restart the
+sidecar with the engine to restore discovery; automatic engine recovery and KV
+state reconciliation are not implemented. A fixed grace period cannot ensure
+discovery propagation during outages, and SIGKILL cannot announce withdrawal.
+
 ### RL workflows
 
 Start vLLM with the capabilities required by the workflow, then opt the sidecar into RL discovery:

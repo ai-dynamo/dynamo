@@ -23,4 +23,10 @@ pub(crate) struct Args {
         value_parser = parse_http_endpoint
     )]
     pub vllm_http_endpoint: Option<HttpEndpoint>,
+
+    /// Withdraw from discovery when gRPC health becomes non-serving or disconnects.
+    /// Keeps serving late requests; restart the sidecar to advertise a new engine.
+    /// Experimental: aggregated serving without RL only; requires Health.Watch.
+    #[arg(long, env = "DYN_VLLM_WATCH_ENGINE_HEALTH")]
+    pub watch_engine_health: bool,
 }
