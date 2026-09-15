@@ -252,8 +252,8 @@ impl ImageRoutingProcessor {
             .count_tokens_for_images(dimensions, max_model_len, text_prompt_len)
     }
 
-    /// Whether exact counting needs the rendered prompt with image placeholders
-    /// removed, as opposed to only the independent image dimensions.
+    /// Whether exact counting needs a request-wide context budget, as opposed
+    /// to only the independent image dimensions.
     pub fn uses_request_context_budget(&self) -> bool {
         self.processor.uses_request_context_budget()
     }
@@ -263,8 +263,8 @@ impl ImageRoutingProcessor {
         self.processor.routing_prompt_kind()
     }
 
-    /// Tokenize the model-specific text used to derive a request-wide image
-    /// budget without blocking the async frontend runtime.
+    /// Tokenize the model-specific processor text used to derive a request-wide
+    /// image budget without blocking the async frontend runtime.
     pub(crate) async fn context_budget_text_len(
         &self,
         tokenizer: Arc<dyn RuntimeTokenizer>,

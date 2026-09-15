@@ -167,8 +167,9 @@ For the timing-model design, see [Mocker Engine Architecture](../../developer-gu
 </ParamField>
 
 <ParamField path="--aic-backend-version" type="string" default="auto">
-  AIC backend engine version, for example `0.12.0` for vLLM. When unset, uses the default version for
-  the backend.
+  AIC performance-database version. Use `current`, `previous`, or `next` when the slot is available
+  for the selected system and backend, or specify a version assigned to one of those slots.
+  When unset, uses the release database's `current` slot.
 </ParamField>
 
 <ParamField path="--aic-tp-size" type="integer" default="1">

@@ -8722,8 +8722,8 @@ mod tests {
     }
 
     #[cfg(feature = "mm-routing")]
-    #[test]
-    fn nemotron_exact_routing_uses_request_wide_image_budget() {
+    #[tokio::test]
+    async fn nemotron_exact_routing_uses_vllm_dummy_text_budget() {
         let model_dir = tempfile::tempdir().unwrap();
         std::fs::write(
             model_dir.path().join("config.json"),
@@ -8764,6 +8764,17 @@ mod tests {
             model_dir.path(),
         )
         .unwrap();
+        let image_text_prompt_len = counter
+            .context_budget_text_len(
+                Arc::new(RoutingTestTokenizer {
+                    atomic_controls: true,
+                    fail_plain_text: false,
+                }),
+                Some("before<image>middle<image>after<image>"),
+                3,
+            )
+            .await;
+        assert_eq!(image_text_prompt_len, Some(0));
         let mdc = ModelDeploymentCard::load_from_disk(
             "tests/data/sample-models/mock-llama-3.1-8b-instruct",
             None,
@@ -8795,17 +8806,21 @@ mod tests {
             height: 1080,
         });
         let routing = preprocessor
-            .build_mm_exact_routing_info(&entries, &[7, 18, 8, 18, 9, 18, 10], Some(10))
+            .build_mm_exact_routing_info(
+                &entries,
+                &[7, 18, 8, 18, 9, 18, 10],
+                image_text_prompt_len,
+            )
             .expect("Nemotron routing info should be exact");
 
-        // vLLM 0.28 budgets these three images to 1,344 tokens each. Each
+        // vLLM 0.28 budgets these three images to 1,323 tokens each. Each
         // image also contributes its atomic <img> and </img> delimiters.
-        assert_eq!(routing.expanded_prompt_len, 4 + 3 * (1344 + 2));
-        assert_eq!(routing.routing_token_ids.len(), 4048);
+        assert_eq!(routing.expanded_prompt_len, 4 + 3 * (1323 + 2));
+        assert_eq!(routing.routing_token_ids.len(), 3984);
         assert_eq!(routing.routing_token_ids[0], 7);
         assert_eq!(routing.routing_token_ids[1], 19);
-        assert_eq!(routing.routing_token_ids[1346], 20);
-        assert_eq!(routing.routing_token_ids[1347], 8);
+        assert_eq!(routing.routing_token_ids[1325], 20);
+        assert_eq!(routing.routing_token_ids[1326], 8);
         assert!(routing.block_mm_infos.is_empty());
 
         assert!(

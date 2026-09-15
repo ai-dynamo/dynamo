@@ -14,7 +14,7 @@ license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
     "ai-dynamo-runtime==1.5.0",
-    "aisimulate==0.1.0.dev2; python_version >= '3.11' and python_version < '3.14'",
+    "aisimulate==0.12.0.dev2; python_version >= '3.11' and python_version < '3.14'",
     "aiohttp>=3.14.3,<4.0",
     "transformers>=4.56.0",
     "kubernetes>=32.0.1,<33.0.0",
@@ -240,6 +240,9 @@ xfail_strict = true
 log_cli_level = "INFO"
 filterwarnings = [
     "error",
+    # DGDR still uses AISimulate 0.12's supported legacy sweep API until its
+    # migration to the new Sweeper API is implemented.
+    'ignore:`aiconfigurator\.sdk\.sweep\.sweep_(agg|disagg)\(\)` is deprecated:DeprecationWarning',
     # chardet 6.x is pulled in transitively but requests 2.32.x only supports chardet <6;
     # charset_normalizer is used at runtime so the warning is benign.
     "ignore:.*doesn't match a supported version",

@@ -268,17 +268,23 @@ impl ImageRoutingBackend for NemotronImageTokenCounter {
     }
 
     fn context_budget_prompt(&self, formatted_prompt: &str, image_count: usize) -> Result<String> {
-        prompt_without_images(formatted_prompt, image_count)
+        validate_image_placeholders(formatted_prompt, image_count)?;
+
+        // The vLLM native Generate path receives token IDs, so multimodal
+        // preprocessing runs separately with dummy "<image>" text. Nemotron
+        // removes those placeholders before computing its image budget, making
+        // the effective text length zero regardless of the rendered prompt.
+        Ok(String::new())
     }
 }
 
-fn prompt_without_images(formatted_prompt: &str, image_count: usize) -> Result<String> {
+fn validate_image_placeholders(formatted_prompt: &str, image_count: usize) -> Result<()> {
     let placeholder_count = formatted_prompt.match_indices(IMAGE_CONTEXT).count();
     ensure!(
         placeholder_count == image_count,
         "Nemotron rendered prompt contains {placeholder_count} image placeholders for {image_count} images"
     );
-    Ok(formatted_prompt.replace(IMAGE_CONTEXT, ""))
+    Ok(())
 }
 
 /// Routing-only implementation of vLLM's Nemotron video prompt expansion.
@@ -796,6 +802,12 @@ mod tests {
                 .unwrap(),
             vec![1344, 1344, 1344]
         );
+        assert_eq!(
+            counter
+                .count_tokens_for_images(&[(1920, 1080); 3], 4096, 0)
+                .unwrap(),
+            vec![1323, 1323, 1323]
+        );
     }
 
     #[test]
@@ -810,12 +822,22 @@ mod tests {
     }
 
     #[test]
-    fn budget_prompt_removes_all_image_placeholders() {
+    fn budget_prompt_matches_vllm_token_input_dummy_text() {
+        let counter =
+            NemotronImageTokenCounter::try_from_configs(&processor_config(), &model_config())
+                .unwrap();
+
         assert_eq!(
-            prompt_without_images("before<image>middle<image>after", 2).unwrap(),
-            "beforemiddleafter"
+            counter
+                .context_budget_prompt("before<image>middle<image>after", 2)
+                .unwrap(),
+            ""
         );
-        assert!(prompt_without_images("before<image>after", 2).is_err());
+        assert!(
+            counter
+                .context_budget_prompt("before<image>after", 2)
+                .is_err()
+        );
     }
 
     #[test]
