@@ -53,15 +53,6 @@ spec:
       - name: perf
         image: python:3.12-slim
         imagePullPolicy: IfNotPresent
-        # Not optional on this recipe. aiperf tokenizes the whole trace in a process pool
-        # before the run starts: 1,805 conversations at ~28.8k ISL is ~52M tokens. With no
-        # requests the Job is BestEffort and a pool worker gets reaped under node memory
-        # pressure, surfacing as "BrokenProcessPool ... terminated abruptly" at
-        # profile_configure -- after warmup has already passed, so it reads as a benchmark
-        # bug rather than as OOM.
-        resources:
-          requests: {cpu: "4", memory: 16Gi}
-          limits: {cpu: "16", memory: 64Gi}
         workingDir: /workspace
         command:
         - /bin/bash
