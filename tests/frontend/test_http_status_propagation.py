@@ -133,7 +133,8 @@ def test_python_backend_ssrf_rejection_is_4xx_with_zero_egress(
     )
 
     assert 400 <= response.status_code < 500, response.text
-    assert "is in a blocked range" in response.text, response.text
+    assert response.json()["message"] == "Invalid request", response.text
+    assert "is in a blocked range" not in response.text, response.text
     outbound_canary.assert_no_connection()
 
 

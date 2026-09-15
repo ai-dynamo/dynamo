@@ -37,14 +37,12 @@ use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
 
 use dynamo_runtime::error::{DynamoError, ErrorType as DynamoErrorType};
 
-fn new_failure_counter() -> IntCounterVec {
+fn new_failure_counter(metrics_prefix: Option<&str>) -> IntCounterVec {
+    let prefix =
+        sanitize_frontend_prometheus_prefix(metrics_prefix.unwrap_or(name_prefix::FRONTEND));
     IntCounterVec::new(
         Opts::new(
-            format!(
-                "{}_{}",
-                name_prefix::FRONTEND,
-                frontend_service::FAILURES_TOTAL
-            ),
+            format!("{}_{}", prefix, frontend_service::FAILURES_TOTAL),
             "Total number of terminal semantic request failures",
         ),
         &["class", "reason"],
@@ -53,8 +51,10 @@ fn new_failure_counter() -> IntCounterVec {
 }
 
 /// Process-wide because protocol error renderers can run without a request-scoped `Metrics`.
-pub(crate) static DYNAM_FAILURES_TOTAL: LazyLock<IntCounterVec> =
-    LazyLock::new(new_failure_counter);
+pub(crate) static DYNAM_FAILURES_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    let prefix = std::env::var(env_metrics::DYN_METRICS_PREFIX).ok();
+    new_failure_counter(prefix.as_deref())
+});
 
 fn record_failure_into(counter: &IntCounterVec, error: &DynamoError) {
     counter
@@ -4237,11 +4237,28 @@ mod tests {
     }
 
     #[test]
+    fn semantic_failure_metric_honors_custom_prefix() {
+        let registry = prometheus::Registry::new();
+        let counter = new_failure_counter(Some("nv_llm_http_service"));
+        counter
+            .with_label_values(&["Internal", "runtime.internal"])
+            .inc();
+        registry.register(Box::new(counter)).unwrap();
+
+        assert!(
+            registry
+                .gather()
+                .iter()
+                .any(|family| family.name() == "nv_llm_http_service_failures_total")
+        );
+    }
+
+    #[test]
     fn semantic_failure_metric_has_only_class_and_reason_labels() {
         use dynamo_runtime::error::{DynamoError, ErrorClass, ErrorReason};
 
         let registry = prometheus::Registry::new();
-        let counter = new_failure_counter();
+        let counter = new_failure_counter(None);
         registry.register(Box::new(counter.clone())).unwrap();
         let error = DynamoError::builder()
             .class(ErrorClass::InvalidRequest)

@@ -156,6 +156,10 @@ impl ErrorMessage {
     pub(crate) fn message(&self) -> &str {
         &self.message
     }
+
+    pub(crate) fn is_overload(&self) -> bool {
+        self.metric_error_type == Some(ErrorType::Overload)
+    }
 }
 
 fn map_error_code_to_error_type(code: StatusCode) -> String {
@@ -174,6 +178,17 @@ fn map_error_code_to_error_type(code: StatusCode) -> String {
         // so canonical_reason() returns None. Use the de facto standard name.
         None if code.as_u16() == 499 => "Client Closed Request".to_string(),
         None => "UnknownError".to_string(),
+    }
+}
+
+fn semantic_error_type(class: ErrorClass, status: StatusCode) -> String {
+    if class.normalized() == ErrorClass::CapacityExhausted {
+        "Overloaded".to_string()
+    } else {
+        status
+            .canonical_reason()
+            .unwrap_or("UnknownError")
+            .to_string()
     }
 }
 
@@ -670,7 +685,7 @@ impl ErrorMessage {
             status,
             Json(ErrorMessage {
                 message: error.public_message().unwrap_or(public_message).to_string(),
-                error_type: map_error_code_to_error_type(status),
+                error_type: semantic_error_type(error.class(), status),
                 code: status.as_u16(),
                 details: error
                     .public_details()
@@ -843,6 +858,13 @@ impl From<HttpError> for ErrorMessage {
     }
 }
 
+fn unprocessable_error_message(body: &[u8]) -> (String, bool) {
+    match serde_json::from_slice::<ErrorMessage>(body) {
+        Ok(error) => (error.message, true),
+        Err(_) => (String::from_utf8_lossy(body).into_owned(), false),
+    }
+}
+
 // Problem: Currently we are using JSON from axum as the request validator. Whenever there is an invalid JSON, it will return a 422.
 // But all the downstream apps that relies on openai based APIs, expects to get 400 for all these cases otherwise they fail badly
 // Solution: Intercept the response from handlers and convert ANY 422 status codes to 400 with the actual error message.
@@ -850,17 +872,19 @@ pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> 
     let response = next.run(request).await;
 
     if response.status() == StatusCode::UNPROCESSABLE_ENTITY {
-        record_local_failure(ErrorClass::InvalidRequest);
         let (_parts, body) = response.into_parts();
         let body_bytes = axum::body::to_bytes(body, get_body_limit())
             .await
             .unwrap_or_default();
-        let error_message = String::from_utf8_lossy(&body_bytes).to_string();
+        let (error_message, already_recorded) = unprocessable_error_message(&body_bytes);
+        if !already_recorded {
+            record_local_failure(ErrorClass::InvalidRequest);
+        }
         (
             StatusCode::BAD_REQUEST,
             Json(ErrorMessage {
                 message: error_message,
-                error_type: map_error_code_to_error_type(StatusCode::BAD_REQUEST),
+                error_type: bad_request_error_type(),
                 code: StatusCode::BAD_REQUEST.as_u16(),
                 details: None,
                 metric_error_type: None,
@@ -2685,7 +2709,7 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
             return Some(BackendErrorInfo {
                 message,
                 status: code,
-                semantic: semantic.cloned(),
+                semantic: if overloaded { semantic.cloned() } else { None },
                 sanitized: overloaded.then_some(SanitizedError::Overloaded),
             });
         }
@@ -2940,9 +2964,27 @@ fn backend_error_response(backend_error: BackendErrorInfo, record_failure: bool)
         semantic,
         sanitized,
     } = backend_error;
-    let mut render_record_failure = record_failure;
+    if let Some(variant) = sanitized {
+        let mut render_record_failure = record_failure;
+        if record_failure
+            && let Some(error) = &semantic
+            && error.class().normalized() == sanitized_error_class(variant)
+        {
+            super::metrics::record_failure(error);
+            render_record_failure = false;
+        }
+        return ErrorMessage::sanitized_with_details_recording(
+            variant,
+            message,
+            render_record_failure,
+        );
+    }
+
     if let Some(error) = &semantic {
-        let is_classified = error.reason().as_str() != "runtime.unclassified";
+        let is_classified = !matches!(
+            error.reason().as_str(),
+            "backend.unknown" | "runtime.unclassified"
+        );
         if is_classified
             && let Some(response) =
                 ErrorMessage::from_semantic_error_with_recording(error, record_failure)
@@ -2956,15 +2998,10 @@ fn backend_error_response(backend_error: BackendErrorInfo, record_failure: bool)
                 false,
             );
         }
-        if record_failure && is_classified {
-            super::metrics::record_failure(error);
-            render_record_failure = false;
-        }
     }
-    let action = match sanitized {
-        Some(variant) => BackendStatusAction::Sanitize(variant),
-        None => BackendStatusAction::triage(status),
-    };
+
+    let render_record_failure = record_failure;
+    let action = BackendStatusAction::triage(status);
     match action {
         BackendStatusAction::Sanitize(variant) => {
             ErrorMessage::sanitized_with_details_recording(variant, message, render_record_failure)
@@ -6217,6 +6254,26 @@ mod tests {
     }
 
     #[test]
+    fn semantic_422_body_is_not_reclassified() {
+        let body = serde_json::to_vec(&ErrorMessage {
+            message: "safe semantic message".to_string(),
+            error_type: "Unprocessable Entity".to_string(),
+            code: 422,
+            details: None,
+            metric_error_type: None,
+        })
+        .unwrap();
+
+        let (message, already_recorded) = unprocessable_error_message(&body);
+        assert_eq!(message, "safe semantic message");
+        assert!(already_recorded);
+
+        let (message, already_recorded) = unprocessable_error_message(b"raw validator rejection");
+        assert_eq!(message, "raw validator rejection");
+        assert!(!already_recorded);
+    }
+
+    #[test]
     fn test_check_ready_rejects_draining_service() {
         let service = service_v2::HttpService::builder().build().unwrap();
         let state = service.state_clone();
@@ -6651,6 +6708,46 @@ mod tests {
         let backend_error =
             extract_backend_error_if_present(&event).expect("error event should be extracted");
         assert_eq!(backend_error.status, StatusCode::SERVICE_UNAVAILABLE);
+
+        let response = backend_error_response(backend_error, false);
+        assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.1.message, "Internal server error");
+    }
+
+    #[test]
+    fn legacy_python_worker_client_status_envelopes_are_supported() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+
+        for (code, expected_status, expected_message) in [
+            (
+                415,
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "Unsupported Media Type",
+            ),
+            (429, StatusCode::TOO_MANY_REQUESTS, "Too Many Requests"),
+        ] {
+            let event: Annotated<NvCreateChatCompletionStreamResponse> = Annotated {
+                data: None,
+                id: None,
+                event: Some("error".to_string()),
+                comment: None,
+                error: Some(
+                    DynamoError::builder()
+                        .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                        .message(format!(
+                            r#"{{"message":"private backend detail","code":{code}}}"#
+                        ))
+                        .build(),
+                ),
+            };
+
+            let backend_error =
+                extract_backend_error_if_present(&event).expect("error event should be extracted");
+            let response = backend_error_response(backend_error, false);
+            assert_eq!(response.0, expected_status);
+            assert_eq!(response.1.message, expected_message);
+            assert!(!response.1.message.contains("private backend detail"));
+        }
     }
 
     #[test]

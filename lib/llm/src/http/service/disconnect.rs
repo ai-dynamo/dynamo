@@ -41,7 +41,7 @@ use tokio::sync::mpsc;
 
 use crate::http::service::error::{ClientErrorAction, SanitizedError, http_action_for_error};
 use crate::http::service::metrics::{CancellationLabels, ErrorType, InflightGuard, Metrics};
-use dynamo_runtime::error::DynamoError;
+use dynamo_runtime::error::{DynamoError, ErrorClass};
 
 use dynamo_runtime::config::environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS as BACKEND_STREAM_TIMEOUT_ENV;
 
@@ -126,13 +126,31 @@ impl StreamErrorSignal {
             .and_then(|failure| failure.semantic_error.as_ref())
     }
 
-    fn record_delivered_semantic_failure(&self) {
-        if self.terminal_event_emitted()
-            && let Some(error) = self.semantic_error()
-            && !matches!(error.class(), dynamo_runtime::error::ErrorClass::Cancelled)
-        {
-            crate::http::service::metrics::record_failure(error);
+    fn record_delivered_failure(&self) {
+        if !self.terminal_event_emitted() {
+            return;
         }
+        let Some(failure) = self.0.failure.get() else {
+            return;
+        };
+        if let Some(error) = &failure.semantic_error {
+            if error.class() != ErrorClass::Cancelled {
+                crate::http::service::metrics::record_failure(error);
+            }
+            return;
+        }
+
+        let class = match &failure.error_type {
+            ErrorType::Validation => ErrorClass::InvalidRequest,
+            ErrorType::NotFound => ErrorClass::NotFound,
+            ErrorType::Overload => ErrorClass::CapacityExhausted,
+            ErrorType::Unavailable => ErrorClass::Unavailable,
+            ErrorType::Cancelled => return,
+            ErrorType::ResponseTimeout => ErrorClass::DeadlineExceeded,
+            ErrorType::NotImplemented => ErrorClass::NotImplemented,
+            ErrorType::None | ErrorType::Internal => ErrorClass::Internal,
+        };
+        crate::http::service::metrics::record_failure(&DynamoError::builder().class(class).build());
     }
 }
 
@@ -176,7 +194,7 @@ impl Drop for SignaledInflightGuard {
         if let Some(error_signal) = &self.error_signal
             && error_signal.terminal_event_emitted()
         {
-            error_signal.record_delivered_semantic_failure();
+            error_signal.record_delivered_failure();
             if self.guard.error_type() == &ErrorType::Cancelled
                 && let Some(error_type) = self.signaled_error_type()
             {
@@ -962,6 +980,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(failure_metrics)]
     async fn signaled_error_drop_after_terminal_event_is_not_a_cancellation() {
         let model = "drop-after-response-failed";
         let metrics = Arc::new(Metrics::new());
@@ -992,6 +1011,9 @@ mod tests {
         connection_handle.disarm();
         drop(connection_handle);
         let error_signal = StreamErrorSignal::default();
+        let semantic_counter = crate::http::service::metrics::DYNAM_FAILURES_TOTAL
+            .with_label_values(&["Internal", "runtime.internal"]);
+        let semantic_before = semantic_counter.get();
         let producer_error_signal = error_signal.clone();
         let stream = futures::stream::once(async move {
             producer_error_signal.set(ErrorType::Internal);
@@ -1051,6 +1073,7 @@ mod tests {
         assert_eq!(metrics.get_cancellation_count(&cancellation_labels), 0);
         assert_eq!(metrics.get_client_disconnect_count(), 0);
         assert!(!context.is_killed());
+        assert_eq!(semantic_counter.get() - semantic_before, 1);
     }
 
     #[tokio::test]
