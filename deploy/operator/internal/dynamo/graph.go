@@ -2177,7 +2177,7 @@ func applyDGDTemplateDefaults(
 	}
 
 	propagateDGDAnnotations(dynamoDeployment.GetAnnotations(), component)
-	propagateDGDSpecMetadata(dynamoDeployment.Spec.Annotations, dynamoDeployment.Spec.Labels, component)
+	propagateDGDSpecMetadata(dynamoDeployment, component)
 }
 
 func shouldApplyKvTransferPolicyToWorkerComponent(
@@ -2321,9 +2321,28 @@ func propagateDGDAnnotations(dgdAnnotations map[string]string, component *v1beta
 }
 
 // propagateDGDSpecMetadata merges DGD spec-level annotations and labels into
-// the component as a low-priority base. Service-level values take precedence.
-func propagateDGDSpecMetadata(annotations, labels map[string]string, component *v1beta1.DynamoComponentDeploymentSharedSpec) {
+// the component as a low-priority base. Preserved v1alpha1 service metadata
+// reserves its keys, while explicit pod-template metadata remains unchanged.
+func propagateDGDSpecMetadata(dgd *v1beta1.DynamoGraphDeployment, component *v1beta1.DynamoComponentDeploymentSharedSpec) {
 	podTemplate := ensurePodTemplate(component)
+
+	// Restore the alpha service layer once before filtering inherited defaults.
+	var serviceAnnotations, serviceLabels map[string]string
+	if alphaComponent := getDGDAlphaComponent(dgd, component.ComponentName); alphaComponent != nil {
+		serviceAnnotations = alphaComponent.Annotations
+		serviceLabels = alphaComponent.Labels
+	}
+
+	// Do not promote graph defaults above preserved service-level annotations.
+	annotations := maps.Clone(dgd.Spec.Annotations)
+	for key := range serviceAnnotations {
+		delete(annotations, key)
+	}
+	labels := maps.Clone(dgd.Spec.Labels)
+	for key := range serviceLabels {
+		delete(labels, key)
+	}
+
 	podTemplate.Annotations = mergeLowPriorityMetadata(podTemplate.Annotations, annotations)
 	podTemplate.Labels = mergeLowPriorityMetadata(podTemplate.Labels, labels)
 }

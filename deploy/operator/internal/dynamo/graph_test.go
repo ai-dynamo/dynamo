@@ -10108,7 +10108,13 @@ func TestPropagateDGDSpecMetadata(t *testing.T) {
 				Labels:      tt.serviceLabels,
 			}
 			betaComponent := betaComponent(t, component)
-			propagateDGDSpecMetadata(tt.dgdAnnotations, tt.dgdLabels, betaComponent)
+			dgd := &v1beta1.DynamoGraphDeployment{
+				Spec: v1beta1.DynamoGraphDeploymentSpec{
+					Annotations: tt.dgdAnnotations,
+					Labels:      tt.dgdLabels,
+				},
+			}
+			propagateDGDSpecMetadata(dgd, betaComponent)
 			annotations := GetPodTemplateAnnotations(betaComponent)
 			labels := GetPodTemplateLabels(betaComponent)
 
@@ -10126,6 +10132,50 @@ func TestPropagateDGDSpecMetadata(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestApplyDGDTemplateDefaultsPreservesAlphaServiceMetadataPrecedence(t *testing.T) {
+	t.Log("Convert a merged v1alpha1 DGD with conflicting graph, service, and pod metadata")
+	alpha := &v1alpha1.DynamoGraphDeployment{
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Annotations: map[string]string{"service-wins": "graph", "graph-only": "kept"},
+			Labels:      map[string]string{"service-wins": "graph", "graph-only": "kept"},
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Frontend": {
+					ComponentType: "frontend",
+					Annotations:   map[string]string{"service-wins": "service", "pod-wins": "service", "service-only": "kept"},
+					Labels:        map[string]string{"service-wins": "service", "pod-wins": "service", "service-only": "kept"},
+					ExtraPodMetadata: &v1alpha1.ExtraPodMetadata{
+						Annotations: map[string]string{"pod-wins": "pod", "pod-only": "kept"},
+						Labels:      map[string]string{"pod-wins": "pod", "pod-only": "kept"},
+					},
+				},
+			},
+		},
+	}
+	beta := &v1beta1.DynamoGraphDeployment{}
+	require.NoError(t, alpha.ConvertTo(beta))
+	component := beta.GetComponentByName("Frontend")
+	require.NotNil(t, component)
+
+	t.Log("Apply graph defaults and generate the final resource metadata")
+	applyDGDTemplateDefaults(component, beta, nil)
+	annotations, err := generateAnnotations(component, beta, "Frontend")
+	require.NoError(t, err)
+	labels, err := generateLabels(component, beta, "Frontend", DiscoveryContext{})
+	require.NoError(t, err)
+
+	t.Log("Verify service metadata wins graph conflicts without losing other layers")
+	assert.Equal(t, "service", annotations["service-wins"])
+	assert.Equal(t, "pod", annotations["pod-wins"])
+	assert.Equal(t, "kept", annotations["graph-only"])
+	assert.Equal(t, "kept", annotations["service-only"])
+	assert.Equal(t, "kept", annotations["pod-only"])
+	assert.Equal(t, "service", labels["service-wins"])
+	assert.Equal(t, "pod", labels["pod-wins"])
+	assert.Equal(t, "kept", labels["graph-only"])
+	assert.Equal(t, "kept", labels["service-only"])
+	assert.Equal(t, "kept", labels["pod-only"])
 }
 
 func TestGenerateGrovePodCliqueSet_SpecMetadataPropagation(t *testing.T) {
