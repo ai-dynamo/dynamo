@@ -79,7 +79,7 @@ def _image_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Emit `image_uuids` parallel to `images` in each JSONL row (default: False). "
-        "Pass --uuid to enable for aiperf --mm-cache-mode {uuid-only,uuid-and-strip} runs.",
+        "Pass --uuid to enable AIPerf --uuid-and-strip runs.",
     )
     return p
 
