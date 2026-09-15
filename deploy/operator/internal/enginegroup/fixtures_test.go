@@ -392,7 +392,10 @@ func growPlan(planID string, target ReplicaTarget, verification VerificationRequ
 		ProcessLifecycleOwner:   ProcessLifecycleOwnerOrchestrator,
 		TrafficRequirement:      TrafficRequirementKeepServing,
 		VerificationRequirement: verification,
-		Change:                  &GrowChange{Replicas: []ReplicaTarget{target}},
+		Change: ResolvedChange{
+			Kind: PlanKindGrow,
+			Grow: &GrowChange{Replicas: []ReplicaTarget{target}},
+		},
 	}
 }
 
@@ -409,7 +412,10 @@ func retirePlan(
 		TrafficRequirement:      trafficRequirement,
 		RetirementSafety:        RetirementSafetyDrained,
 		VerificationRequirement: verification,
-		Change:                  &RetireChange{Replicas: []ReplicaID{replicaID}},
+		Change: ResolvedChange{
+			Kind:   PlanKindRetire,
+			Retire: &RetireChange{Replicas: []ReplicaID{replicaID}},
+		},
 	}
 }
 

@@ -157,14 +157,17 @@ func TestCoordinatorRestoresStableReplicaWithNewPhysicalIncarnation(t *testing.T
 		ProcessLifecycleOwner:   ProcessLifecycleOwnerOrchestrator,
 		TrafficRequirement:      TrafficRequirementQuiesceGroup,
 		VerificationRequirement: VerificationRequirementRequired,
-		Change: &RestoreChange{Replicas: []RestorationTarget{{
-			ReplicaTarget: ReplicaTarget{
-				ReplicaID: excluded.ReplicaID,
-				SlotID:    excludedIncarnation.SlotID,
-				Bootstrap: BootstrapModeRestoreFixedSlot,
-			},
-			NativeMembers: cloneNativeMembers(excluded.NativeMembers),
-		}}},
+		Change: ResolvedChange{
+			Kind: PlanKindRestore,
+			Restore: &RestoreChange{Replicas: []RestorationTarget{{
+				ReplicaTarget: ReplicaTarget{
+					ReplicaID: excluded.ReplicaID,
+					SlotID:    excludedIncarnation.SlotID,
+					Bootstrap: BootstrapModeRestoreFixedSlot,
+				},
+				NativeMembers: cloneNativeMembers(excluded.NativeMembers),
+			}}},
+		},
 	}
 	scenario.desired = &plan
 
@@ -208,7 +211,10 @@ func TestCoordinatorReducesToSurvivorsWithoutWaitingForFailedMemberDrain(t *test
 		TrafficRequirement:      TrafficRequirementKeepServing,
 		RetirementSafety:        RetirementSafetyWithdrawn,
 		VerificationRequirement: VerificationRequirementRequired,
-		Change:                  &ReduceToSurvivorsChange{Survivors: []ReplicaID{"replica-0"}},
+		Change: ResolvedChange{
+			Kind:              PlanKindReduceToSurvivors,
+			ReduceToSurvivors: &ReduceToSurvivorsChange{Survivors: []ReplicaID{"replica-0"}},
+		},
 	}
 	scenario.desired = &plan
 
@@ -245,10 +251,13 @@ func TestCoordinatorRemapsNativeMembersWithoutChangingPhysicalIdentity(t *testin
 		ProcessLifecycleOwner:   ProcessLifecycleOwnerEngine,
 		TrafficRequirement:      TrafficRequirementQuiesceGroup,
 		VerificationRequirement: VerificationRequirementRequired,
-		Change: &RemapChange{Membership: []ReplicaNativeMembership{
-			{ReplicaID: "replica-0", SlotID: "slot-0", NativeMembers: []NativeMemberID{"remapped-0"}},
-			{ReplicaID: "replica-1", SlotID: "slot-1", NativeMembers: []NativeMemberID{"remapped-1"}},
-		}},
+		Change: ResolvedChange{
+			Kind: PlanKindRemap,
+			Remap: &RemapChange{Membership: []ReplicaNativeMembership{
+				{ReplicaID: "replica-0", SlotID: "slot-0", NativeMembers: []NativeMemberID{"remapped-0"}},
+				{ReplicaID: "replica-1", SlotID: "slot-1", NativeMembers: []NativeMemberID{"remapped-1"}},
+			}},
+		},
 	}
 	scenario.desired = &plan
 

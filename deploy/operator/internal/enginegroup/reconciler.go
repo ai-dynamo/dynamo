@@ -241,6 +241,7 @@ func (c *Coordinator) startTransition(
 	observedTopology MembershipTopology,
 	plan ResolvedPlan,
 ) (GroupStatus, error) {
+	plan = normalizeResolvedPlan(plan)
 	base, found := status.Topologies.Current()
 	if !found {
 		return status, errors.New("current topology is absent")
@@ -392,6 +393,8 @@ func compactRegistryHistory(registry ReplicaRegistry) ReplicaRegistry {
 }
 
 func sameResolvedPlan(left, right ResolvedPlan) bool {
+	left = normalizeResolvedPlan(left)
+	right = normalizeResolvedPlan(right)
 	if left.ID != right.ID ||
 		left.ProfileFingerprint != right.ProfileFingerprint ||
 		left.ProcessLifecycleOwner != right.ProcessLifecycleOwner ||
@@ -401,22 +404,25 @@ func sameResolvedPlan(left, right ResolvedPlan) bool {
 		return false
 	}
 
-	switch leftChange := left.Change.(type) {
-	case *GrowChange:
-		rightChange, ok := right.Change.(*GrowChange)
-		return ok && slices.Equal(leftChange.Replicas, rightChange.Replicas)
-	case *RetireChange:
-		rightChange, ok := right.Change.(*RetireChange)
-		return ok && sameReplicaIDs(leftChange.Replicas, rightChange.Replicas)
-	case *ReduceToSurvivorsChange:
-		rightChange, ok := right.Change.(*ReduceToSurvivorsChange)
-		return ok && sameReplicaIDs(leftChange.Survivors, rightChange.Survivors)
-	case *RestoreChange:
-		rightChange, ok := right.Change.(*RestoreChange)
-		return ok && sameRestorationTargets(leftChange.Replicas, rightChange.Replicas)
-	case *RemapChange:
-		rightChange, ok := right.Change.(*RemapChange)
-		return ok && sameNativeMemberships(leftChange.Membership, rightChange.Membership)
+	if left.Change.Kind != right.Change.Kind {
+		return false
+	}
+	switch left.Change.Kind {
+	case PlanKindGrow:
+		return left.Change.Grow != nil && right.Change.Grow != nil &&
+			slices.Equal(left.Change.Grow.Replicas, right.Change.Grow.Replicas)
+	case PlanKindRetire:
+		return left.Change.Retire != nil && right.Change.Retire != nil &&
+			slices.Equal(left.Change.Retire.Replicas, right.Change.Retire.Replicas)
+	case PlanKindReduceToSurvivors:
+		return left.Change.ReduceToSurvivors != nil && right.Change.ReduceToSurvivors != nil &&
+			slices.Equal(left.Change.ReduceToSurvivors.Survivors, right.Change.ReduceToSurvivors.Survivors)
+	case PlanKindRestore:
+		return left.Change.Restore != nil && right.Change.Restore != nil &&
+			sameRestorationTargets(left.Change.Restore.Replicas, right.Change.Restore.Replicas)
+	case PlanKindRemap:
+		return left.Change.Remap != nil && right.Change.Remap != nil &&
+			sameNativeMemberships(left.Change.Remap.Membership, right.Change.Remap.Membership)
 	default:
 		return false
 	}

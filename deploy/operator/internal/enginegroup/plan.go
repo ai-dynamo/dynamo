@@ -99,8 +99,8 @@ func validateResolvedPlan(
 	if plan.ProfileFingerprint == "" {
 		return planResolution{}, errors.New("profile fingerprint must not be empty")
 	}
-	if plan.Change == nil {
-		return planResolution{}, errors.New("membership change must not be nil")
+	if err := validateResolvedChange(plan.Change); err != nil {
+		return planResolution{}, err
 	}
 	if plan.ProcessLifecycleOwner != ProcessLifecycleOwnerEngine &&
 		plan.ProcessLifecycleOwner != ProcessLifecycleOwnerOrchestrator {
@@ -123,19 +123,19 @@ func validateResolvedPlan(
 
 	var resolution planResolution
 	var err error
-	switch change := plan.Change.(type) {
-	case *GrowChange:
-		resolution, err = resolveGrowth(base, registry, change)
-	case *RetireChange:
-		resolution, err = resolveRetirement(base, change)
-	case *ReduceToSurvivorsChange:
-		resolution, err = resolveSurvivorReduction(base, change)
-	case *RestoreChange:
-		resolution, err = resolveRestoration(base, registry, change)
-	case *RemapChange:
-		resolution, err = resolveRemap(base, registry, change)
+	switch plan.Change.Kind {
+	case PlanKindGrow:
+		resolution, err = resolveGrowth(base, registry, plan.Change.Grow)
+	case PlanKindRetire:
+		resolution, err = resolveRetirement(base, plan.Change.Retire)
+	case PlanKindReduceToSurvivors:
+		resolution, err = resolveSurvivorReduction(base, plan.Change.ReduceToSurvivors)
+	case PlanKindRestore:
+		resolution, err = resolveRestoration(base, registry, plan.Change.Restore)
+	case PlanKindRemap:
+		resolution, err = resolveRemap(base, registry, plan.Change.Remap)
 	default:
-		return planResolution{}, fmt.Errorf("unsupported membership change type %T", plan.Change)
+		return planResolution{}, fmt.Errorf("unsupported membership change kind %q", plan.Change.Kind)
 	}
 	if err != nil {
 		return planResolution{}, err
@@ -152,6 +152,44 @@ func validateResolvedPlan(
 	}
 
 	return resolution, nil
+}
+
+func validateResolvedChange(change ResolvedChange) error {
+	variants := 0
+	for _, present := range []bool{
+		change.Grow != nil,
+		change.Retire != nil,
+		change.ReduceToSurvivors != nil,
+		change.Restore != nil,
+		change.Remap != nil,
+	} {
+		if present {
+			variants++
+		}
+	}
+	if variants != 1 {
+		return fmt.Errorf("membership change must contain exactly one variant, found %d", variants)
+	}
+
+	var matches bool
+	switch change.Kind {
+	case PlanKindGrow:
+		matches = change.Grow != nil
+	case PlanKindRetire:
+		matches = change.Retire != nil
+	case PlanKindReduceToSurvivors:
+		matches = change.ReduceToSurvivors != nil
+	case PlanKindRestore:
+		matches = change.Restore != nil
+	case PlanKindRemap:
+		matches = change.Remap != nil
+	default:
+		return fmt.Errorf("unsupported membership change kind %q", change.Kind)
+	}
+	if !matches {
+		return fmt.Errorf("membership change kind %q does not match its populated variant", change.Kind)
+	}
+	return nil
 }
 
 func resolveGrowth(

@@ -20,6 +20,7 @@ package enginegroup
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -58,31 +59,89 @@ func cloneTopology(value MembershipTopology) MembershipTopology {
 }
 
 func cloneResolvedPlan(value ResolvedPlan) ResolvedPlan {
-	switch change := value.Change.(type) {
-	case *GrowChange:
-		value.Change = &GrowChange{Replicas: slices.Clone(change.Replicas)}
-	case *RetireChange:
-		value.Change = &RetireChange{Replicas: slices.Clone(change.Replicas)}
-	case *ReduceToSurvivorsChange:
-		value.Change = &ReduceToSurvivorsChange{Survivors: slices.Clone(change.Survivors)}
-	case *RestoreChange:
-		replicas := make([]RestorationTarget, 0, len(change.Replicas))
-		for _, replica := range change.Replicas {
+	change := value.Change
+	if change.Grow != nil {
+		value.Change.Grow = &GrowChange{Replicas: slices.Clone(change.Grow.Replicas)}
+	}
+	if change.Retire != nil {
+		value.Change.Retire = &RetireChange{Replicas: slices.Clone(change.Retire.Replicas)}
+	}
+	if change.ReduceToSurvivors != nil {
+		value.Change.ReduceToSurvivors = &ReduceToSurvivorsChange{
+			Survivors: slices.Clone(change.ReduceToSurvivors.Survivors),
+		}
+	}
+	if change.Restore != nil {
+		replicas := make([]RestorationTarget, 0, len(change.Restore.Replicas))
+		for _, replica := range change.Restore.Replicas {
 			replica.NativeMembers = cloneNativeMembers(replica.NativeMembers)
 			replicas = append(replicas, replica)
 		}
-		value.Change = &RestoreChange{Replicas: replicas}
-	case *RemapChange:
-		membership := make([]ReplicaNativeMembership, 0, len(change.Membership))
-		for _, replica := range change.Membership {
+		value.Change.Restore = &RestoreChange{Replicas: replicas}
+	}
+	if change.Remap != nil {
+		membership := make([]ReplicaNativeMembership, 0, len(change.Remap.Membership))
+		for _, replica := range change.Remap.Membership {
 			replica.NativeMembers = cloneNativeMembers(replica.NativeMembers)
 			membership = append(membership, replica)
 		}
-		value.Change = &RemapChange{Membership: membership}
-	case nil:
-		value.Change = nil
+		value.Change.Remap = &RemapChange{Membership: membership}
 	}
 	return value
+}
+
+func normalizeResolvedPlan(value ResolvedPlan) ResolvedPlan {
+	value = cloneResolvedPlan(value)
+	switch value.Change.Kind {
+	case PlanKindGrow:
+		if value.Change.Grow != nil {
+			slices.SortFunc(value.Change.Grow.Replicas, func(left, right ReplicaTarget) int {
+				return strings.Compare(string(left.ReplicaID), string(right.ReplicaID))
+			})
+		}
+	case PlanKindRetire:
+		if value.Change.Retire != nil {
+			value.Change.Retire.Replicas = normalizeReplicaIDs(value.Change.Retire.Replicas)
+		}
+	case PlanKindReduceToSurvivors:
+		if value.Change.ReduceToSurvivors != nil {
+			value.Change.ReduceToSurvivors.Survivors = normalizeReplicaIDs(
+				value.Change.ReduceToSurvivors.Survivors,
+			)
+		}
+	case PlanKindRestore:
+		if value.Change.Restore != nil {
+			for index := range value.Change.Restore.Replicas {
+				value.Change.Restore.Replicas[index].NativeMembers = normalizeNativeMembers(
+					value.Change.Restore.Replicas[index].NativeMembers,
+				)
+			}
+			slices.SortFunc(value.Change.Restore.Replicas, func(left, right RestorationTarget) int {
+				return strings.Compare(string(left.ReplicaID), string(right.ReplicaID))
+			})
+		}
+	case PlanKindRemap:
+		if value.Change.Remap != nil {
+			for index := range value.Change.Remap.Membership {
+				value.Change.Remap.Membership[index].NativeMembers = normalizeNativeMembers(
+					value.Change.Remap.Membership[index].NativeMembers,
+				)
+			}
+			slices.SortFunc(value.Change.Remap.Membership, func(left, right ReplicaNativeMembership) int {
+				return strings.Compare(string(left.ReplicaID), string(right.ReplicaID))
+			})
+		}
+	}
+	return value
+}
+
+func canonicalPlanDigest(plan ResolvedPlan) (string, error) {
+	encoded, err := json.Marshal(normalizeResolvedPlan(plan))
+	if err != nil {
+		return "", fmt.Errorf("marshal canonical resolved plan: %w", err)
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
 }
 
 func cloneReplicaRecord(value ReplicaRecord) ReplicaRecord {

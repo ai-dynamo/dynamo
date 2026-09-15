@@ -161,62 +161,41 @@ type RestorationTarget struct {
 	NativeMembers []NativeMemberID
 }
 
-// MembershipChange is the closed set of membership changes understood by the coordinator.
-// Concrete changes are deliberately typed so invalid combinations are absent from the model.
-type MembershipChange interface {
-	membershipChange()
-	Kind() PlanKind
-}
-
 // GrowChange adds the named new logical replicas.
 type GrowChange struct {
 	Replicas []ReplicaTarget
 }
-
-func (*GrowChange) membershipChange() {}
-
-// Kind returns the plan kind.
-func (*GrowChange) Kind() PlanKind { return PlanKindGrow }
 
 // RetireChange removes the named healthy logical replicas after drain.
 type RetireChange struct {
 	Replicas []ReplicaID
 }
 
-func (*RetireChange) membershipChange() {}
-
-// Kind returns the plan kind.
-func (*RetireChange) Kind() PlanKind { return PlanKindRetire }
-
 // ReduceToSurvivorsChange requests removal of every base member not present in Survivors.
 type ReduceToSurvivorsChange struct {
 	Survivors []ReplicaID
 }
-
-func (*ReduceToSurvivorsChange) membershipChange() {}
-
-// Kind returns the plan kind.
-func (*ReduceToSurvivorsChange) Kind() PlanKind { return PlanKindReduceToSurvivors }
 
 // RestoreChange restores the named stable logical and native-member identities.
 type RestoreChange struct {
 	Replicas []RestorationTarget
 }
 
-func (*RestoreChange) membershipChange() {}
-
-// Kind returns the plan kind.
-func (*RestoreChange) Kind() PlanKind { return PlanKindRestore }
-
 // RemapChange replaces the complete logical-to-native member mapping at the same cardinality.
 type RemapChange struct {
 	Membership []ReplicaNativeMembership
 }
 
-func (*RemapChange) membershipChange() {}
-
-// Kind returns the plan kind.
-func (*RemapChange) Kind() PlanKind { return PlanKindRemap }
+// ResolvedChange is the serializable tagged union of membership changes understood by the coordinator.
+// Exactly one variant must be present and must match Kind.
+type ResolvedChange struct {
+	Kind              PlanKind                 `json:"kind"`
+	Grow              *GrowChange              `json:"grow,omitempty"`
+	Retire            *RetireChange            `json:"retire,omitempty"`
+	ReduceToSurvivors *ReduceToSurvivorsChange `json:"reduceToSurvivors,omitempty"`
+	Restore           *RestoreChange           `json:"restore,omitempty"`
+	Remap             *RemapChange             `json:"remap,omitempty"`
+}
 
 // ResolvedPlan is an immutable, profile-resolved membership transition.
 type ResolvedPlan struct {
@@ -226,7 +205,7 @@ type ResolvedPlan struct {
 	TrafficRequirement      TrafficRequirement
 	RetirementSafety        RetirementSafety
 	VerificationRequirement VerificationRequirement
-	Change                  MembershipChange
+	Change                  ResolvedChange
 }
 
 // ReplicaHistoryEntry retains one excluded incarnation and its exact engine-native membership.
