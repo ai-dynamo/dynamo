@@ -6,42 +6,85 @@ SPDX-License-Identifier: Apache-2.0
 # TensorRT-LLM sidecar
 
 > [!WARNING]
-> **Experimental.** This sidecar and its deployment example are experimental.
-> The Python launcher ships in the `ai-dynamo` and `ai-dynamo-runtime` wheel
-> pair, but the container image is not yet packaged for distribution. The
-> manifest, flags, and behavior may change without notice.
+> **Experimental.** This sidecar and its deployment example are experimental and
+> not yet packaged for distribution (see [Packaging](#packaging)). The manifest,
+> flags, and behavior may change without notice.
 
-`dynamo-trtllm-sidecar` connects a Dynamo worker to TensorRT-LLM's native
-`trtllm.TrtllmService` gRPC `Generate` service. It is a standalone Rust
-executable composed with `dynamo_backend_common::run` and is also compiled into
-`ai-dynamo-runtime` for the importable `dynamo.trtllm.sidecar` launcher.
+`dynamo-trtllm-sidecar` connects a Dynamo worker to TensorRT-LLM's OpenEngine
+(`openengine.v1`) gRPC server — the `Inference.Generate` streaming RPC. It is a
+standalone Rust executable composed with `dynamo_backend_common::run`, and is
+also compiled into `ai-dynamo-runtime` for the importable
+`dynamo.trtllm.sidecar` launcher:
 TensorRT-LLM runs as its own process while the sidecar owns Dynamo worker
 registration, request conversion, transport, cancellation, and abort.
 
 ## Supported
 
 - Aggregated generation
+- Disaggregated (prefill/decode) serving — see [Disaggregation](#disaggregation)
 - Token requests through Dynamo preprocessing
 - Sampling, stop conditions, structured output (JSON schema / regex / grammar /
   structural tag), and logprobs
 - Streaming delta tokens with a terminal usage/finish summary
-- `Abort` on cancellation
+- Cancellation via `Control.Abort` and by closing the gRPC stream
 
-The initial protocol does **not** support disaggregated (prefill/decode)
-serving, multimodal input, LoRA, KV-aware routing, encode workers, beam search,
-or `n > 1`. Disaggregation is excluded because the `Generate` response contract
-carries no context-phase handoff.
+The integration does **not** support multimodal input, LoRA, encode workers,
+beam search, or `n > 1`.
+
+A routing target selected by the KV router is forwarded to the engine as the
+protocol's `openengine-target-dp-rank` metadata. `KvSessionRef.dp_rank` remains
+authoritative for a session's KV affinity, so a decode request follows the
+handoff rather than the header.
+
+> [!NOTE]
+> `Control.GetModelInfo` supplies the registered context length (and the default
+> `max_tokens` for requests that omit one) unless `--context-length` supplies it
+> instead. `Control.Abort` cancels an in-flight request; closing the `Generate`
+> stream also aborts it, so cancellation is covered either way.
+>
+> `Control`'s LoRA RPCs (`LoadLora`, `UnloadLora`, `ListLoras`) and KV-event
+> RPCs (`GetKvEventSources`, `SubscribeKvEvents`) return `UNIMPLEMENTED`: the
+> LLM API has no runtime adapter load/unload entry point, and KV events are
+> published out of band. The sidecar uses neither.
+
+## Protocol
+
+The gRPC types are vendored, like the vLLM and SGLang sidecars': `proto/`
+carries the `openengine.v1` contract from
+[`ai-dynamo/openengine`](https://github.com/ai-dynamo/openengine) `v0.1.0`,
+compiled by `build.rs` with `tonic-build`. The pinned revision is the git commit
+behind the Buf Schema Registry module commit (`768a93c7b44e`) TensorRT-LLM's
+server is generated from, so the two sides agree; `proto/README.md` records the
+commit and per-file SHA-256.
+
+Building needs only `protoc`, which the workspace already requires for `lib/llm`
+and the other sidecars — there is no registry to configure and no token to
+obtain.
+
+To bump the protocol, re-copy `proto/openengine/v1/*.proto` from a newer upstream
+commit, update the revision, checksums, and `build.rs`'s `PROTOS` list together,
+and re-run the tests.
 
 ## Run
 
-Start TensorRT-LLM with its native gRPC listener. Its protobuf bindings are an
-optional extra, so install them first. Install the package directly rather than
-via `tensorrt_llm[grpc-smg]`: the extra makes pip re-resolve TensorRT-LLM's whole
-dependency closure, which fails on an image whose site-packages is read-only.
+Start TensorRT-LLM with its OpenEngine gRPC server. This requires the OpenEngine
+Python bindings and a TensorRT-LLM build with OpenEngine gRPC support:
 
 ```bash
-pip install "smg-grpc-proto>=0.4.2"
-python -m tensorrt_llm.commands.serve <model> --grpc --host 0.0.0.0 --port 50051
+# Install the two packages directly rather than through the
+# `tensorrt_llm[openengine]` extra: the extra makes pip re-resolve
+# TensorRT-LLM's whole dependency closure, which fails on an image whose
+# site-packages is read-only. Both are pinned to BSR module commit
+# 768a93c7b44e, the revision `proto/` was generated from. The protobuf package
+# is additionally pinned by gencode version -- a gencode newer than the image's
+# protobuf runtime fails at import -- so raise it only with the image's
+# protobuf.
+python -m pip install --extra-index-url https://buf.build/gen/python \
+  "openengine-openengine-grpc-python==1.78.1.1.20260730172104+768a93c7b44e" \
+  "openengine-openengine-protocolbuffers-python==33.5.0.1.20260730172104+768a93c7b44e"
+
+python -m tensorrt_llm.commands.serve <model> \
+  --grpc --grpc-protocol openengine --host 0.0.0.0 --port 50051
 ```
 
 This listener is unauthenticated and plaintext. Keep colocated deployments on
@@ -56,16 +99,59 @@ dynamo-trtllm-sidecar \
   --model-path <model>
 ```
 
-After installing `ai-dynamo`, the Python module runs the same native worker:
+The context length comes from `--context-length` (or `TRTLLM_CONTEXT_LENGTH`)
+when it is supplied, and from `Control.GetModelInfo` otherwise; a disagreement
+between the two is logged at WARN and the configured value wins. Supply it
+whenever the engine was started without `--max_seq_len`, because TensorRT-LLM
+then reports its `max_input_len` default instead of a real context length and
+the sidecar discards that value. With neither source the worker still
+registers, and only requests that omit `max_tokens` are rejected.
 
-```bash
-python -m dynamo.trtllm.sidecar \
-  --grpc-endpoint 127.0.0.1:50051 \
-  --model-path <model>
-```
+Startup waits for the engine: TensorRT-LLM binds its gRPC port before the model
+finishes loading, so the sidecar retries `GetModelInfo` until
+`--grpc-startup-deadline` rather than failing on the first answer.
 
 Use `DYN_SIDECAR_GRPC_ENDPOINT` instead of `--grpc-endpoint` when the endpoint is
 provided through the environment.
+
+## Disaggregation
+
+Prefill and decode run as two workers, each with its own TensorRT-LLM engine and
+its own sidecar, selected with `--disaggregation-mode`:
+
+```bash
+# Prefill (context) worker — registers under the `prefill` component.
+dynamo-trtllm-sidecar --disaggregation-mode prefill \
+  --grpc-endpoint 127.0.0.1:50051 --model-path <model>
+
+# Decode (generation) worker.
+dynamo-trtllm-sidecar --disaggregation-mode decode \
+  --grpc-endpoint 127.0.0.1:50052 --model-path <model>
+```
+
+Both engines must be started with a KV cache transceiver so they can move KV
+cache between themselves (`cache_transceiver_config`); without it the engines
+cannot complete the handoff. Use the default `NIXL` backend — it picks its own
+underlying transport (UCX where there is no RDMA fabric) and is the path Dynamo
+uses elsewhere for disaggregation.
+
+OpenEngine has no request-type field, so the phase is carried on the wire like
+this:
+
+- The prefill worker sets `extra.request_type = "context_only"` and caps
+  generation at one token. The server answers with a terminal `PrefillReady`
+  event holding a `KvSessionRef`; there is no `finished` event for a context
+  request.
+- The sidecar encodes that `KvSessionRef` as the opaque JSON Dynamo carries in
+  `PrefillResult.disaggregated_params`, and emits it on the prefill worker's
+  terminal chunk. The prefill worker streams no tokens to the client.
+- The decode worker decodes that JSON back into `kv.session` on its own
+  `Generate` request, which the server maps to `generation_only`. It streams the
+  full completion and reports the authoritative usage.
+
+The handoff JSON mirrors `KvSessionRef` field-for-field (`session_id`,
+`transfer_backend`, `endpoints`, `dp_rank`, `attributes`) and is never
+interpreted between the two workers. See `src/disagg.rs`.
 
 ## Deploy on Kubernetes (quick start)
 
@@ -86,10 +172,16 @@ as the container command.
 - `kubectl` set to that cluster, and a namespace to deploy into.
 - A Hugging Face token for the model.
 - A container registry you can push to and the cluster can pull from.
+- A TensorRT-LLM engine image with OpenEngine gRPC support (serving
+  `--grpc-protocol openengine`, implementing the `Control` service, and with the
+  OpenEngine Python bindings installed for the health probes). No published
+  release ships this yet, so `deploy/agg.yaml` leaves it as the placeholder
+  `<trtllm-image-with-openengine>` for you to fill in.
 
 ### 1. Build and push the sidecar image
 
-Build and push the image to a registry your cluster can pull from:
+Build a multi-arch image so it runs on any node — `amd64` (x86) or `arm64`
+(GB200/Grace):
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
@@ -97,9 +189,9 @@ docker buildx build --platform linux/amd64,linux/arm64 \
   -t <your-registry>/dynamo-sidecar:1.3.0 --push .
 ```
 
-See [Build the image](../README.md#build-the-image) for a single-architecture
-build. This manifest sets the container `command` to
-`dynamo-trtllm-sidecar`.
+To build faster for one arch, pass just that platform (e.g. `linux/arm64` for
+GB200/Grace). See [Build the image](../README.md#build-the-image) for a
+single-architecture build.
 
 ### 2. Point the manifest at your image
 

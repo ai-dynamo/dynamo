@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Aggregated serving through TensorRT-LLM's native gRPC server (1 GPU).
+# Aggregated serving through TensorRT-LLM's OpenEngine gRPC server (1 GPU).
 
 set -e
 
@@ -69,7 +69,8 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 # TensorRT-LLM reports its `max_input_len` default instead of a context length
 # and the sidecar discards it, so pass the same value to both. When the caller
 # supplies `--max_seq_len`, theirs wins and the sidecar adopts the engine's
-# report rather than overriding it with a default it was never told about.
+# `Control.GetModelInfo` report rather than overriding it with a default it was
+# never told about.
 TRTLLM_MAX_SEQ_LEN_ARGS=()
 TRTLLM_CONTEXT_LENGTH_ARGS=()
 trtllm_max_seq_len_supplied=0
@@ -86,11 +87,24 @@ if [[ -n "$TRTLLM_CONTEXT_LENGTH" ]]; then
     TRTLLM_CONTEXT_LENGTH_ARGS=(--context-length "$TRTLLM_CONTEXT_LENGTH")
 fi
 
-# `--grpc` needs `smg-grpc-proto`, which TRT-LLM keeps behind its optional
-# `grpc-smg` extra. Constraint copied from that extra so we resolve what
-# upstream resolves.
-if ! "$TRTLLM_PYTHON" -c "import smg_grpc_proto" >/dev/null 2>&1; then
-    "$TRTLLM_PYTHON" -m pip install --no-cache-dir "smg-grpc-proto>=0.4.2"
+# `--grpc-protocol openengine` needs the OpenEngine bindings, which resolve only
+# from a custom index. Both packages are pinned to BSR module commit
+# 768a93c7b44e, the same revision the vendored protos in `proto/` were generated
+# from (see `proto/README.md`), so the engine and the sidecar speak the same
+# contract revision.
+#
+# The protobuf package is pinned by *gencode* version as well: buf publishes one
+# build per protoc release, and a gencode newer than the runtime in the
+# TensorRT-LLM image fails at import with "Detected incompatible Protobuf
+# Gencode/Runtime versions". 33.5 matches the protobuf 6.33.x runtime those
+# images ship. Raise it only together with the image's protobuf.
+OPENENGINE_PROTOBUF_VERSION="33.5.0.1.20260730172104+768a93c7b44e"
+OPENENGINE_GRPC_VERSION="1.78.1.1.20260730172104+768a93c7b44e"
+if ! "$TRTLLM_PYTHON" -c "import openengine.v1.openengine_pb2" >/dev/null 2>&1; then
+    "$TRTLLM_PYTHON" -m pip install --no-cache-dir \
+        --extra-index-url https://buf.build/gen/python \
+        "openengine-openengine-grpc-python==${OPENENGINE_GRPC_VERSION}" \
+        "openengine-openengine-protocolbuffers-python==${OPENENGINE_PROTOBUF_VERSION}"
 fi
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
@@ -102,16 +116,17 @@ if [[ -n "$GPU_MEM_ARGS" ]]; then
     TRTLLM_GPU_MEM_ARGS=(--extra_llm_api_options "$TRTLLM_EXTRA_CONFIG")
 fi
 
-print_launch_banner "Launching TensorRT-LLM Native-gRPC Sidecar (1 GPU)" "$MODEL" "$HTTP_PORT" \
+print_launch_banner "Launching TensorRT-LLM OpenEngine-gRPC Sidecar (1 GPU)" "$MODEL" "$HTTP_PORT" \
     "TensorRT-LLM gRPC: 127.0.0.1:${TRTLLM_GRPC_PORT}" \
     "Context length:    ${TRTLLM_CONTEXT_LENGTH:-from engine report}"
 
 python3 -m dynamo.frontend &
 
-# TensorRT-LLM's native gRPC listener is unauthenticated; keep it on loopback.
+# TensorRT-LLM's OpenEngine gRPC listener is unauthenticated; keep it on loopback.
 CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
 "$TRTLLM_PYTHON" -m tensorrt_llm.commands.serve "$MODEL" \
     --grpc \
+    --grpc-protocol openengine \
     --host 127.0.0.1 \
     --port "$TRTLLM_GRPC_PORT" \
     "${TRTLLM_MAX_SEQ_LEN_ARGS[@]}" \

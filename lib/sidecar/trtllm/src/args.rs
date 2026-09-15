@@ -6,7 +6,7 @@ use dynamo_sidecar_common::SidecarArgs;
 #[derive(clap::Parser, Clone, Debug)]
 #[command(
     name = "dynamo-trtllm-sidecar",
-    about = "Run a Dynamo worker against TensorRT-LLM's native gRPC TrtllmService"
+    about = "Run a Dynamo worker against TensorRT-LLM's OpenEngine gRPC server"
 )]
 pub(crate) struct Args {
     #[command(flatten)]
@@ -19,13 +19,12 @@ pub(crate) struct Args {
     /// Model maximum sequence length (input + output). Used to register the
     /// context length and to derive a default `max_tokens` when a request omits
     /// one. A value supplied here takes precedence over the context length
-    /// TensorRT-LLM's `GetModelInfo` gRPC reports; that report is used only when
-    /// this argument is omitted, and a disagreement is logged at WARN. Supply
-    /// this whenever the engine was started without `--max_seq_len`, because
+    /// `Control.GetModelInfo` reports; that report is used only when this
+    /// argument is omitted, and a disagreement is logged at WARN. Supply this
+    /// whenever the engine was started without `--max_seq_len`, because
     /// TensorRT-LLM then reports its `max_input_len` default instead of a real
-    /// context length and `client::model_info` discards it. With neither
-    /// source, requests that omit `max_tokens` are rejected. See the note in
-    /// `convert.rs`.
-    #[arg(long, env = "TRTLLM_CONTEXT_LENGTH")]
+    /// context length. With neither source, requests that omit `max_tokens` are
+    /// rejected. See the note in `convert.rs`.
+    #[arg(long, env = "TRTLLM_CONTEXT_LENGTH", value_parser = clap::value_parser!(u32).range(1..))]
     pub context_length: Option<u32>,
 }

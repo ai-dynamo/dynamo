@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: TensorRT-LLM Sidecar
-subtitle: Run Dynamo beside a stock TensorRT-LLM engine through native gRPC.
+subtitle: Run Dynamo beside a TensorRT-LLM engine through its OpenEngine gRPC API.
 ---
 
 > [!WARNING]
@@ -10,9 +10,10 @@ subtitle: Run Dynamo beside a stock TensorRT-LLM engine through native gRPC.
 > coverage can change without notice.
 
 `dynamo-trtllm-sidecar` is a CPU-only Dynamo worker that connects to
-TensorRT-LLM's native gRPC service. It preserves the upstream engine process
-and argument surface while using Dynamo for request handling and distributed
-serving. See the
+TensorRT-LLM's OpenEngine gRPC API (`openengine.v1`), served by
+`trtllm-serve --grpc --grpc-protocol openengine`. It preserves the upstream
+engine process and argument surface while using Dynamo for request handling and
+distributed serving. See the
 [Sidecar Backends](../../../concepts/system-architecture/sidecar-backends.md) page for the common
 architecture.
 
@@ -20,22 +21,25 @@ architecture.
 
 | Deployment path | Aggregated | Disaggregated |
 |---|---|---|
-| Local launcher | Validated on one GPU | Not supported |
-| Kubernetes example | Validated | Not supported |
+| Local launcher | Validated on one GPU | Validated on one GPU; no launcher script yet |
+| Kubernetes example | Validated | No manifest yet |
 
 This table covers launch topology only. The
 [TensorRT-LLM feature matrix](overview.md#feature-support-matrix) describes the
-in-process backend; sidecar feature parity is still under evaluation. The
-current native gRPC contract does not provide the prefill/decode handoff needed
-for disaggregated serving. See the
+in-process backend; sidecar feature parity is still under evaluation.
+Disaggregated prefill/decode is supported over the OpenEngine contract: a
+prefill worker marks its request `context_only` and returns the `PrefillReady`
+KV handoff that a decode worker replays. Running it needs an engine with a KV
+cache transceiver configured on both legs. See the
 [TensorRT-LLM sidecar README](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/trtllm/README.md)
 for other protocol limitations.
 
 ## Launch Locally
 
 From a Dynamo source checkout, build or install Dynamo so
-`dynamo-trtllm-sidecar` is on `PATH`. Install a TensorRT-LLM release that
-provides `tensorrt_llm.commands.serve --grpc`.
+`dynamo-trtllm-sidecar` is on `PATH`. You need a TensorRT-LLM build that
+serves `--grpc --grpc-protocol openengine`; no published release ships it yet.
+The launcher installs the pinned OpenEngine Python bindings itself.
 
 Start Dynamo's local discovery services, then run the aggregated launcher:
 
@@ -45,7 +49,8 @@ docker compose -f dev/docker-compose.yml up -d
 ```
 
 The launcher starts the Dynamo frontend, TensorRT-LLM engine, and sidecar. It
-binds TensorRT-LLM's native gRPC endpoint to loopback.
+binds TensorRT-LLM's OpenEngine gRPC endpoint to loopback, which is
+unauthenticated and plaintext.
 
 Verify the frontend:
 
@@ -65,6 +70,8 @@ No published sidecar image is available yet. Follow the
 [Kubernetes quick start](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/trtllm/README.md#deploy-on-kubernetes-quick-start)
 to build `dynamo-sidecar`, which contains all three engine-specific sidecar
 executables. The TensorRT-LLM manifest runs `dynamo-trtllm-sidecar` as the
-container command and pairs it with a stock upstream TensorRT-LLM image. The
+container command and pairs it with a TensorRT-LLM image that serves
+OpenEngine gRPC. No published TensorRT-LLM release ships that yet, so the engine
+image has to be built; the manifest's comments list what it must provide. The
 source tree includes an
 [aggregated deployment manifest](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/trtllm/deploy/agg.yaml).
