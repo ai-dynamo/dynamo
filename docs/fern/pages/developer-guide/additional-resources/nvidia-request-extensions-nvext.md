@@ -56,6 +56,15 @@ token IDs, pass integer IDs in the normal `stop` array, for example
 `"stop": [576]`. Strings such as `"token_id:576"` remain literal string stop
 sequences and are not parsed as token IDs.
 
+For `metadata_upload`, the Python SGLang worker uses the installed fsspec
+backends. The SGLang sidecar uses OpenDAL and includes `file://`, `s3://`,
+`gs://`, and `az://` support. Both implementations try `fallback_url` only
+after the primary upload fails. The sidecar supports this field on
+`/v1/chat/completions`, `/v1/completions`, `/v1/responses`, and the native
+SGLang `/generate` frontend API. The native adapter treats the complete
+`nvext` object as Dynamo-owned and does not forward it to SGLang. In
+disaggregated serving, only the decode worker uploads metadata.
+
 ### Header Overrides
 
 Routing fields can also be set via HTTP headers, which take priority over `nvext` values:

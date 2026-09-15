@@ -54,6 +54,7 @@ mod tests {
                 "finish_reason": {"type": "length", "length": 1},
                 "prompt_tokens": 2,
                 "completion_tokens": 1,
+                "routed_experts": "AQIDBA==",
                 "output_token_logprobs": [[-0.1, 101, "native-token-text"]]
             },
             "future_sglang_field": {"opaque": true}

@@ -28,6 +28,60 @@ follow-up.
 
 Use `DYN_SIDECAR_GRPC_ENDPOINT` instead of `--grpc-endpoint` when the endpoint is provided through the environment.
 
+## Upload response metadata
+
+Start the sidecar with `--enable-rl` or `DYN_ENABLE_RL=true` to allow response
+metadata uploads. Uploads remain disabled for requests that omit
+`nvext.metadata_upload`.
+
+Set `nvext.metadata_upload.url` in an OpenAI-compatible generation request:
+
+```json
+{
+  "nvext": {
+    "metadata_upload": {
+      "url": "s3://bucket/root/rollout-1",
+      "fallback_url": "file:///var/tmp/rollout-1"
+    }
+  }
+}
+```
+
+The sidecar writes `choice_0.msgpack.zst` under this URL.
+The artifact uses the same MessagePack and Zstandard schema as the Python SGLang bindings.
+The supported URL schemes are `file://`, `s3://`, `gs://`, and `az://`.
+OpenDAL loads credentials from the standard provider configuration for the selected service.
+The optional `fallback_url` can use a different supported scheme.
+If the primary upload fails, the sidecar writes the same artifact to the fallback URL.
+
+OpenDAL selects the storage service from each URL scheme.
+The packaged sidecar includes the file, S3, Google Cloud Storage, and Azure Blob services.
+A downstream binary can register a custom OpenDAL service before it starts the sidecar.
+The custom service must use the compatible OpenDAL registry and link into that binary.
+The metadata upload code does not need a change for the custom scheme.
+The packaged executable does not load service plug-ins at run time.
+
+The sidecar uploads metadata only for aggregated and decode requests.
+It does not return the uploaded metadata inline.
+If the final upload fails, the sidecar stops the terminal response.
+Thus, the caller cannot accept a rollout without its metadata.
+
+| Frontend API or worker role | Metadata upload support |
+|---|---|
+| `POST /v1/chat/completions` | Supported |
+| `POST /v1/completions` | Supported |
+| `POST /v1/responses` | Supported |
+| Native SGLang `POST` or `PUT /generate` | Supported; `nvext` is Dynamo-owned and is not forwarded to SGLang |
+| Aggregated worker | Uploads final `meta_info` |
+| Disaggregated prefill worker | Does not upload |
+| Disaggregated decode worker | Uploads final `meta_info` |
+
+The sidecar supports one output choice, so each request writes
+`choice_0.msgpack.zst`.
+For native `/generate`, the streamed `meta_info` retains the request ID, finish
+reason, and token counts. Large fields such as routed experts and token
+log-probability arrays appear only in the uploaded artifact.
+
 Native Dynamo `/generate` requests are forwarded opaquely to SGLang's HTTP
 endpoint using the gRPC host and the HTTP port returned by `GetServerInfo`.
 The sidecar advertises this capability only after the HTTP health probe passes

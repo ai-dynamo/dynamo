@@ -35,6 +35,7 @@ use super::openai::{
 };
 use super::{RouteDoc, service_v2};
 use crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
+use crate::protocols::common::extensions::routing_constraints_to_kv;
 use crate::protocols::common::preprocessor::PreprocessedRequest;
 use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 use crate::protocols::sglang::generate::SglangGenerateRequest;
@@ -184,9 +185,23 @@ fn preprocessed_request(
     let min_tokens = request.min_new_tokens().map_err(anyhow::Error::msg)?;
     let ignore_eos = request.ignore_eos().map_err(anyhow::Error::msg)?;
     let routing_priority = request.priority.unwrap_or_default();
-    let (input_ids, worker_envelope) = request.into_worker_envelope(request_id);
+    let (input_ids, worker_envelope, nvext) = request.into_worker_envelope(request_id);
     let mut extra_args = serde_json::Map::new();
     extra_args.insert("sglang_tito".to_string(), worker_envelope);
+    if let Some(nvext) = nvext.as_ref() {
+        extra_args.insert("nvext".to_string(), serde_json::to_value(nvext)?);
+    }
+
+    let nvext_dp_rank = nvext.as_ref().and_then(|nvext| nvext.dp_rank);
+    let routing_constraints = nvext
+        .as_ref()
+        .and_then(|nvext| nvext.routing_constraints.clone())
+        .map(routing_constraints_to_kv);
+    let annotations = nvext
+        .as_ref()
+        .and_then(|nvext| nvext.annotations.clone())
+        .unwrap_or_default();
+    let request_timestamp_ms = nvext.as_ref().and_then(|nvext| nvext.request_timestamp_ms);
 
     PreprocessedRequest::builder()
         .model(model.to_string())
@@ -205,11 +220,22 @@ fn preprocessed_request(
             return_tokens_as_token_ids: Some(true),
             ..Default::default()
         })
+        .annotations(annotations)
+        .request_timestamp_ms(request_timestamp_ms)
         .routing(Some(crate::protocols::common::preprocessor::RoutingHints {
-            dp_rank: data_parallel_rank,
+            backend_instance_id: nvext.as_ref().and_then(|nvext| nvext.backend_instance_id),
+            prefill_worker_id: nvext.as_ref().and_then(|nvext| nvext.prefill_worker_id),
+            decode_worker_id: nvext.as_ref().and_then(|nvext| nvext.decode_worker_id),
+            dp_rank: data_parallel_rank.or(nvext_dp_rank),
+            prefill_dp_rank: nvext.as_ref().and_then(|nvext| nvext.prefill_dp_rank),
             expected_output_tokens: max_tokens,
+            cache_namespace: nvext
+                .as_ref()
+                .and_then(|nvext| nvext.cache_salt.clone())
+                .filter(|salt| !salt.is_empty()),
             priority_jump: Some(routing_priority.max(0) as f64),
             priority: Some(routing_priority),
+            routing_constraints,
             ..Default::default()
         }))
         .extra_args(Some(serde_json::Value::Object(extra_args)))
@@ -517,6 +543,51 @@ mod tests {
         );
 
         assert_eq!(models, vec!["other".to_string(), "primary".to_string()]);
+    }
+
+    #[test]
+    fn nvext_is_owned_by_dynamo_and_not_forwarded_to_sglang() {
+        let request: SglangGenerateRequest = serde_json::from_value(serde_json::json!({
+            "input_ids": [1, 2, 3],
+            "sampling_params": {"max_new_tokens": 7},
+            "stream": true,
+            "future_sglang_field": {"opaque": true},
+            "nvext": {
+                "backend_instance_id": 41,
+                "dp_rank": 3,
+                "cache_salt": "rollout-1",
+                "metadata_upload": {
+                    "url": "s3://bucket/primary",
+                    "fallback_url": "file:///tmp/fallback"
+                }
+            }
+        }))
+        .unwrap();
+
+        let preprocessed = preprocessed_request(request, "model", Some(5), "request-1").unwrap();
+        let extra_args = preprocessed.extra_args.unwrap();
+
+        assert!(extra_args["sglang_tito"].get("nvext").is_none());
+        assert_eq!(
+            extra_args["sglang_tito"]["future_sglang_field"]["opaque"],
+            true
+        );
+        assert_eq!(
+            extra_args["nvext"]["metadata_upload"]["url"],
+            "s3://bucket/primary"
+        );
+        assert_eq!(
+            extra_args["nvext"]["metadata_upload"]["fallback_url"],
+            "file:///tmp/fallback"
+        );
+        let routing = preprocessed.routing.unwrap();
+        assert_eq!(routing.backend_instance_id, Some(41));
+        assert_eq!(
+            routing.dp_rank,
+            Some(5),
+            "the header overrides nvext.dp_rank"
+        );
+        assert_eq!(routing.cache_namespace.as_deref(), Some("rollout-1"));
     }
 
     #[test]
