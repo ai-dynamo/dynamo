@@ -48,6 +48,17 @@ use std::{
 use tokio::time::timeout;
 use tokio_util::codec::FramedRead;
 
+#[test]
+fn model_endpoint_availability_is_public() {
+    let service = HttpService::builder().build().unwrap();
+
+    assert!(!service.model_endpoint_enabled(EndpointType::Chat));
+    service
+        .enable_model_endpoint(EndpointType::Chat, true)
+        .unwrap();
+    assert!(service.model_endpoint_enabled(EndpointType::Chat));
+}
+
 #[path = "common/ports.rs"]
 mod ports;
 use ports::bind_random_port;
