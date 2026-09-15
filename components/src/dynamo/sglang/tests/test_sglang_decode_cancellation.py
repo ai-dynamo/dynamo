@@ -365,6 +365,45 @@ async def test_unsupported_runtime_uses_response_id_cancellation(
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(5)
+async def test_parallel_sampling_does_not_guess_sglang_child_request_ids(
+    decode_cancellation_case,
+):
+    case = decode_cancellation_case
+    case.handler.serving_mode = DisaggregationMode.AGGREGATED
+    case.handler._build_sampling_params = lambda request: {
+        "max_new_tokens": 1,
+        "n": 3,
+    }
+    case.first_response = True
+    case.allow_registration.set()
+
+    async def async_generate(**kwargs):
+        assert kwargs["rid"] == "internal-request-id"
+        return case.handler.engine.tokenizer_manager.generate_request(
+            SimpleNamespace(rid="actual-child-uuid"), case.context
+        )
+
+    case.handler.engine.async_generate = async_generate
+    consumer = asyncio.create_task(
+        _collect(case.handler.generate(case.request, case.context))
+    )
+    try:
+        await asyncio.wait_for(case.first_response_consumed.wait(), timeout=1)
+        assert not case.abort_calls
+
+        case.cancelled.set()
+
+        assert await asyncio.wait_for(consumer, timeout=1) == []
+        assert case.abort_calls == [("actual-child-uuid", False)]
+        assert case.drained.is_set()
+        assert not case.registry
+    finally:
+        consumer.cancel()
+        await asyncio.gather(consumer, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
 async def test_cancelled_stream_drain_is_bounded(
     decode_cancellation_case, monkeypatch, caplog
 ):
