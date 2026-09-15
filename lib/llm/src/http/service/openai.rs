@@ -2819,13 +2819,15 @@ type ToolCallAssemblies = HashMap<(u32, u32), ToolCallAssembly>;
 /// True when `chunk` is a byte-identical replay of what has already been
 /// emitted for its key, rather than a continuation of it.
 fn is_exact_replay(entry: &ToolCallAssembly, chunk: &ChatCompletionMessageToolCallChunk) -> bool {
-    let accumulated_args = entry
-        .accumulated
-        .function
-        .as_ref()
-        .and_then(|f| f.arguments.as_deref());
-    let incoming_args = chunk.function.as_ref().and_then(|f| f.arguments.as_deref());
-    accumulated_args == incoming_args
+    entry.accumulated.index == chunk.index
+        && entry.accumulated.id == chunk.id
+        && entry.accumulated.r#type == chunk.r#type
+        && entry
+            .accumulated
+            .function
+            .as_ref()
+            .map(|f| (&f.name, &f.arguments))
+            == chunk.function.as_ref().map(|f| (&f.name, &f.arguments))
 }
 
 fn emit_tool_call_dispatch(
