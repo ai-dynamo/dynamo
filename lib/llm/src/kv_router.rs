@@ -11,7 +11,8 @@ use std::{
 use anyhow::Result;
 use dynamo_kv_router::{
     DEFAULT_ROUTING_GROUP, KvSchedulerError, PrefillLoadEstimator, RoutingPartitionRef,
-    SharedKvCache, TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope,
+    SessionPrefixIndexer, SharedKvCache, TrackingHashAlgorithm, TrackingHashContext,
+    TrackingHashScope,
     config::{KvRouterConfig, RouterConfigOverride, min_initial_workers_from_env},
     indexer::{
         ApproximateLruIncarnation, ApproximateLruStats, KvRouterError, RoutingDecisionHashes,
@@ -558,6 +559,8 @@ where
     lora_filter: Option<Arc<crate::lora::LoraFilter>>,
     endpoint_registration: Option<dynamo_runtime::discovery::EndpointRegistrationLease>,
     teardown_task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
+    /// Optional session-aware logical prefix index.
+    session_prefix_index: Option<Arc<SessionPrefixIndexer>>,
 }
 
 fn resolve_tracking_model_name(
@@ -702,6 +705,9 @@ where
         let cancellation_token = parent_token.child_token();
         let cancellation_guard = cancellation_token.clone().drop_guard();
         let min_initial_workers = min_initial_workers_from_env()?;
+        let session_prefix_index = kv_router_config
+            .enable_session_prefix_index
+            .then(|| Arc::new(SessionPrefixIndexer::new()));
 
         let indexer = if cache_required {
             Indexer::new(
@@ -710,6 +716,7 @@ where
                 block_size,
                 model_name.as_deref(),
                 cancellation_token.child_token(),
+                session_prefix_index.clone(),
             )
             .await?
         } else {
@@ -873,6 +880,7 @@ where
             lora_filter,
             endpoint_registration: None,
             teardown_task_guard: None,
+            session_prefix_index,
         })
     }
 
@@ -1651,7 +1659,7 @@ where
         let kv_transfer_candidates = retain_kv_transfer_chain
             .then(|| tiered_matches.kv_transfer_candidates().cloned())
             .flatten();
-        drop(tiered_matches);
+
         let find_matches_elapsed = start.elapsed();
 
         // Capture shared cache info for metrics before moving into schedule().
@@ -1669,6 +1677,11 @@ where
             pinned_worker.as_ref(),
         );
 
+        let session_index_context = self
+            .session_prefix_index
+            .as_ref()
+            .and(session_context.as_ref())
+            .map(|session| session.session_id().to_owned());
         let schedule_request = ScheduleRequest {
             mode,
             token_seq: maybe_seq_hashes,
@@ -1727,6 +1740,20 @@ where
                 Err(error) => return Err(map_scheduler_error(error)),
             },
         };
+
+        // Indexing failures never affect routing.
+        if let Some(session_id) = session_index_context.as_ref()
+            && let Some(&matched_hash) = tiered_matches
+                .device
+                .last_matched_hashes
+                .get(&response.best_worker)
+            && let Err(err) =
+                self.indexer
+                    .enqueue_session_match(session_id, response.best_worker, matched_hash)
+        {
+            tracing::warn!(%err, "failed to record session prefix match");
+        }
+
         let kv_hint = if is_admitted_routing {
             self.kv_hint_for_selection(
                 context_id,
@@ -1737,6 +1764,8 @@ where
         } else {
             None
         };
+
+        drop(tiered_matches);
 
         let total_elapsed = start.elapsed();
         let routing_hashes = routing_block_hashes.map(RoutingDecisionHashes::from_local_hashes);
