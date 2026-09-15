@@ -46,12 +46,13 @@ def cache_block_size(server_args: Any) -> int | None:
     return int(value) if value is not None else None
 
 
-def validate_disagg_compatibility(
-    mode: DisaggregationMode, server_args: Any
-) -> None:
+def validate_disagg_compatibility(mode: DisaggregationMode, server_args: Any) -> None:
     if mode == DisaggregationMode.AGGREGATED:
         return
-    if getattr(server_args, "disaggregation_transfer_backend", "mooncake") != "mooncake":
+    if (
+        getattr(server_args, "disaggregation_transfer_backend", "mooncake")
+        != "mooncake"
+    ):
         raise ValueError("Dynamo TokenSpeed disaggregation requires Mooncake")
     if attention_dp_size(server_args) != 1:
         # TokenSpeed assigns P/D requests by bootstrap_room modulo DP size.
@@ -61,7 +62,9 @@ def validate_disagg_compatibility(
             "use independent workers for multiple prefill/decode replicas"
         )
     if (cache_block_size(server_args) or 0) <= 0:
-        raise ValueError("TokenSpeed disaggregation requires a positive --prefix-granularity (--block-size)")
+        raise ValueError(
+            "TokenSpeed disaggregation requires a positive --prefix-granularity (--block-size)"
+        )
 
 
 def runtime_disaggregated_endpoint(server_args: Any) -> tuple[str, int]:
@@ -91,7 +94,9 @@ def bootstrap_kwargs(
             f"TokenSpeed {mode.value} worker requires bootstrap_info from "
             "Dynamo's prefill router"
         )
-    host, port, room = (info.get(f"bootstrap_{key}") for key in ("host", "port", "room"))
+    host, port, room = (
+        info.get(f"bootstrap_{key}") for key in ("host", "port", "room")
+    )
     if (
         not isinstance(host, str)
         or not host

@@ -43,11 +43,15 @@ async def run(args):
                 + (f"The identifying word for this document is {topic}. " * 80)
                 + "\nAnswer with the identifying word only."
             )
-            prompts.append(tokenizer.apply_chat_template(
-                [{"role": "user", "content": content}],
-                tokenize=True, add_generation_prompt=True, return_dict=False,
-                enable_thinking=False,
-            ))
+            prompts.append(
+                tokenizer.apply_chat_template(
+                    [{"role": "user", "content": content}],
+                    tokenize=True,
+                    add_generation_prompt=True,
+                    return_dict=False,
+                    enable_thinking=False,
+                )
+            )
 
         async def scores(tokens):
             return await router.get_overlap_scores(tokens)
@@ -57,32 +61,44 @@ async def run(args):
             expected = len(tokens) // 64
             while True:
                 result = await scores(tokens)
-                hits = {row["worker_id"]: row["device_blocks"] for row in result["workers"]}
+                hits = {
+                    row["worker_id"]: row["device_blocks"] for row in result["workers"]
+                }
                 if hits.get(owner, 0) >= expected:
                     return result
                 if time.monotonic() >= deadline:
-                    raise AssertionError(f"Expected {expected} cached blocks on {owner}: {result}")
+                    raise AssertionError(
+                        f"Expected {expected} cached blocks on {owner}: {result}"
+                    )
                 await asyncio.sleep(0.25)
 
         async with httpx.AsyncClient(timeout=300) as http:
+
             async def request(label, tokens, expected_word, forced_prefill=None):
                 headers = {"x-request-id": f"longcat-{label}-{uuid.uuid4().hex}"}
                 if forced_prefill is not None:
                     headers["x-dynamo-prefill-instance-id"] = str(forced_prefill)
                 payload = {
-                    "model": args.model, "prompt": tokens, "max_tokens": 32,
-                    "temperature": 0, "stream": True,
+                    "model": args.model,
+                    "prompt": tokens,
+                    "max_tokens": 32,
+                    "temperature": 0,
+                    "stream": True,
                     "nvext": {"extra_fields": ["worker_id"]},
                 }
                 text, workers, chunks, finished = "", {}, [], False
                 started = time.monotonic()
                 async with http.stream(
-                    "POST", args.url.rstrip("/") + "/v1/completions",
-                    json=payload, headers=headers,
+                    "POST",
+                    args.url.rstrip("/") + "/v1/completions",
+                    json=payload,
+                    headers=headers,
                 ) as response:
                     if response.status_code != 200:
                         body = (await response.aread()).decode()
-                        raise RuntimeError(f"{label}: HTTP {response.status_code}: {body}")
+                        raise RuntimeError(
+                            f"{label}: HTTP {response.status_code}: {body}"
+                        )
                     async for line in response.aiter_lines():
                         if not line.startswith("data:"):
                             continue
@@ -98,9 +114,13 @@ async def run(args):
                         for choice in chunk.get("choices", []):
                             text += choice.get("text", "")
                 record = {
-                    "label": label, "elapsed_s": time.monotonic() - started,
-                    "worker_ids": workers, "text": text, "chunks": chunks,
-                    "forced_prefill": forced_prefill, "expected_word": expected_word,
+                    "label": label,
+                    "elapsed_s": time.monotonic() - started,
+                    "worker_ids": workers,
+                    "text": text,
+                    "chunks": chunks,
+                    "forced_prefill": forced_prefill,
+                    "expected_word": expected_word,
                     "prompt_tokens": len(tokens),
                 }
                 observations.append(record)
@@ -109,17 +129,29 @@ async def run(args):
                 assert isinstance(workers.get("decode_worker_id"), int), record
                 if forced_prefill is not None:
                     assert workers["prefill_worker_id"] == forced_prefill, record
-                print(json.dumps({k: v for k, v in record.items() if k != "chunks"}), flush=True)
+                print(
+                    json.dumps({k: v for k, v in record.items() if k != "chunks"}),
+                    flush=True,
+                )
                 return record
 
             for i, owner in enumerate(prefill_ids):
-                await request(f"warm-{i}", prompts[i], ("ORANGE", "PURPLE")[i], forced_prefill=owner)
+                await request(
+                    f"warm-{i}",
+                    prompts[i],
+                    ("ORANGE", "PURPLE")[i],
+                    forced_prefill=owner,
+                )
                 report[f"warm_{i}_overlap"] = await wait_for_cache(prompts[i], owner)
             report["cold_overlap"] = await scores(prompts[2])
-            assert all(row["device_blocks"] == 0 for row in report["cold_overlap"]["workers"]), report["cold_overlap"]
+            assert all(
+                row["device_blocks"] == 0 for row in report["cold_overlap"]["workers"]
+            ), report["cold_overlap"]
             for repeat in range(2):
                 for i, owner in enumerate(prefill_ids):
-                    record = await request(f"reuse-{i}-{repeat}", prompts[i], ("ORANGE", "PURPLE")[i])
+                    record = await request(
+                        f"reuse-{i}-{repeat}", prompts[i], ("ORANGE", "PURPLE")[i]
+                    )
                     assert record["worker_ids"]["prefill_worker_id"] == owner, record
             await request("cold-control", prompts[2], "SILVER")
         report["passed"] = True

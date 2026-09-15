@@ -61,7 +61,9 @@ def native_engine(monkeypatch):
     ],
 )
 @pytest.mark.parametrize("explicit_endpoint", [False, True])
-async def test_cli_registers_worker_role(monkeypatch, mode, component, expected, explicit_endpoint):
+async def test_cli_registers_worker_role(
+    monkeypatch, mode, component, expected, explicit_endpoint
+):
     class NativeArgs:
         @staticmethod
         def add_cli_args(parser):
@@ -73,7 +75,14 @@ async def test_cli_registers_worker_role(monkeypatch, mode, component, expected,
             return server_args(**vars(parsed))
 
     monkeypatch.setattr(args, "_server_args_cls", lambda: NativeArgs)
-    cli = ["--model", "test-model", "--disaggregation-mode", mode, "--namespace", "test"]
+    cli = [
+        "--model",
+        "test-model",
+        "--disaggregation-mode",
+        mode,
+        "--namespace",
+        "test",
+    ]
     if explicit_endpoint:
         cli += ["--endpoint", "dyn://custom.worker.generate"]
     _, config = await TokenspeedLLMEngine.from_args(cli)
@@ -85,7 +94,9 @@ async def test_cli_registers_worker_role(monkeypatch, mode, component, expected,
 
 @pytest.mark.parametrize("mode", ["prefill", "decode", "null"])
 @pytest.mark.parametrize("legacy_block_size", [False, True])
-async def test_registration_advertises_prefill_bootstrap_only(monkeypatch, native_engine, mode, legacy_block_size):
+async def test_registration_advertises_prefill_bootstrap_only(
+    monkeypatch, native_engine, mode, legacy_block_size
+):
     monkeypatch.setenv(BOOTSTRAP_HOST_ENV, "prefill.example")
     native_args = server_args(disaggregation_mode=mode)
     if legacy_block_size:
@@ -97,14 +108,18 @@ async def test_registration_advertises_prefill_bootstrap_only(monkeypatch, nativ
         assert registration.llm.context_length == 8192
         assert registration.llm.total_kv_blocks == 128
         assert registration.llm.kv_cache_block_size == 64
-        assert registration.llm.bootstrap_host == ("prefill.example" if mode == "prefill" else None)
+        assert registration.llm.bootstrap_host == (
+            "prefill.example" if mode == "prefill" else None
+        )
         assert registration.llm.bootstrap_port == (9000 if mode == "prefill" else None)
     finally:
         await engine.cleanup()
 
 
 @pytest.mark.parametrize("mode", ["prefill", "decode"])
-async def test_generate_forwards_handoff_and_preserves_decode_budget(native_engine, mode):
+async def test_generate_forwards_handoff_and_preserves_decode_budget(
+    native_engine, mode
+):
     native, _ = native_engine
     inputs = []
 
@@ -116,7 +131,9 @@ async def test_generate_forwards_handoff_and_preserves_decode_budget(native_engi
         }
 
     native.tokenizer_manager.generate_request = generate
-    engine = TokenspeedLLMEngine(server_args(disaggregation_mode=mode, host="prefill.example"))
+    engine = TokenspeedLLMEngine(
+        server_args(disaggregation_mode=mode, host="prefill.example")
+    )
     await engine.start(worker_id=1)
     request = {
         "token_ids": [10, 11],
@@ -177,7 +194,10 @@ async def test_bad_handoff_rejected_before_native_request(native_engine, bootstr
 @pytest.mark.parametrize(
     "overrides,message",
     [
-        ({"mapping": SimpleNamespace(attn=SimpleNamespace(dp_size=2))}, "attention DP=1"),
+        (
+            {"mapping": SimpleNamespace(attn=SimpleNamespace(dp_size=2))},
+            "attention DP=1",
+        ),
         ({"disaggregation_transfer_backend": "fake"}, "Mooncake"),
         ({"prefix_granularity": 0}, "positive --prefix-granularity"),
         ({"prefix_granularity": -1}, "positive --prefix-granularity"),
@@ -194,7 +214,9 @@ async def test_unsupported_disagg_fails_before_start(native_engine, overrides, m
 
 async def test_kv_sources_use_unique_ipc_endpoints_and_cleanup(native_engine):
     engines = [
-        TokenspeedLLMEngine(server_args(kv_events_config='{"enable_kv_cache_events":true}'))
+        TokenspeedLLMEngine(
+            server_args(kv_events_config='{"enable_kv_cache_events":true}')
+        )
         for _ in range(2)
     ]
     paths = []
@@ -223,9 +245,13 @@ async def test_kv_sources_use_unique_ipc_endpoints_and_cleanup(native_engine):
         ({"endpoint": "ipc:///test-events", "publisher": None}, "ipc:///test-events"),
     ],
 )
-async def test_kv_source_matches_native_bind_and_topic(native_engine, native_config, expected):
+async def test_kv_source_matches_native_bind_and_topic(
+    native_engine, native_config, expected
+):
     native_config.update(enable_kv_cache_events=True, topic="kv")
-    engine = TokenspeedLLMEngine(server_args(kv_events_config=json.dumps(native_config)))
+    engine = TokenspeedLLMEngine(
+        server_args(kv_events_config=json.dumps(native_config))
+    )
     try:
         await engine.start(worker_id=1)
         [source] = await engine.kv_event_sources()
@@ -241,7 +267,10 @@ async def test_kv_source_matches_native_bind_and_topic(native_engine, native_con
         {"kv_events_config": None},
         {"kv_events_config": '{"enable_kv_cache_events":false}'},
         {"kv_events_config": '{"enable_kv_cache_events":true,"publisher":"null"}'},
-        {"kv_events_config": '{"enable_kv_cache_events":true}', "enable_prefix_caching": False},
+        {
+            "kv_events_config": '{"enable_kv_cache_events":true}',
+            "enable_prefix_caching": False,
+        },
     ],
 )
 async def test_disabled_kv_events_have_no_source(native_engine, overrides):
@@ -255,9 +284,16 @@ async def test_disabled_kv_events_have_no_source(native_engine, overrides):
 
 async def test_connecting_native_publisher_is_rejected(native_engine):
     _, constructor = native_engine
-    engine = TokenspeedLLMEngine(server_args(kv_events_config=json.dumps({
-        "enable_kv_cache_events": True, "endpoint": "tcp://127.0.0.1:19000",
-    })))
+    engine = TokenspeedLLMEngine(
+        server_args(
+            kv_events_config=json.dumps(
+                {
+                    "enable_kv_cache_events": True,
+                    "endpoint": "tcp://127.0.0.1:19000",
+                }
+            )
+        )
+    )
     with pytest.raises(ValueError, match="binding endpoint"):
         await engine.start(worker_id=1)
     constructor.assert_not_called()
@@ -267,10 +303,16 @@ async def test_connecting_native_publisher_is_rejected(native_engine):
 async def test_failed_start_cleans_up_event_endpoint(native_engine):
     _, constructor = native_engine
     constructor.side_effect = RuntimeError("native startup failed")
-    engine = TokenspeedLLMEngine(server_args(kv_events_config='{"enable_kv_cache_events":true}'))
+    engine = TokenspeedLLMEngine(
+        server_args(kv_events_config='{"enable_kv_cache_events":true}')
+    )
     with pytest.raises(RuntimeError, match="native startup failed"):
         await engine.start(worker_id=1)
-    path = Path(json.loads(engine.server_args.kv_events_config)["endpoint"].removeprefix("ipc://")).parent
+    path = Path(
+        json.loads(engine.server_args.kv_events_config)["endpoint"].removeprefix(
+            "ipc://"
+        )
+    ).parent
     await engine.cleanup()
     assert not path.exists()
     assert await engine.kv_event_sources() == []
@@ -279,9 +321,15 @@ async def test_failed_start_cleans_up_event_endpoint(native_engine):
 @pytest.mark.parametrize("enabled", ["false", "true", None, 1])
 async def test_non_boolean_event_flag_rejected_before_start(native_engine, enabled):
     _, constructor = native_engine
-    engine = TokenspeedLLMEngine(server_args(kv_events_config=json.dumps({
-        "enable_kv_cache_events": enabled,
-    })))
+    engine = TokenspeedLLMEngine(
+        server_args(
+            kv_events_config=json.dumps(
+                {
+                    "enable_kv_cache_events": enabled,
+                }
+            )
+        )
+    )
     with pytest.raises(ValueError, match="JSON boolean"):
         await engine.start(worker_id=1)
     constructor.assert_not_called()
@@ -289,7 +337,9 @@ async def test_non_boolean_event_flag_rejected_before_start(native_engine, enabl
 
 
 @pytest.mark.parametrize("address", ["127.0.1.1", "0.0.0.0"])
-async def test_wildcard_prefill_rejects_local_only_advertisement(monkeypatch, native_engine, address):
+async def test_wildcard_prefill_rejects_local_only_advertisement(
+    monkeypatch, native_engine, address
+):
     monkeypatch.delenv(BOOTSTRAP_HOST_ENV, raising=False)
     monkeypatch.setattr(disagg.socket, "gethostbyname", lambda _: address)
     _, constructor = native_engine
@@ -300,7 +350,9 @@ async def test_wildcard_prefill_rejects_local_only_advertisement(monkeypatch, na
     await engine.cleanup()
 
 
-async def test_explicit_loopback_prefill_allowed_for_single_host(monkeypatch, native_engine):
+async def test_explicit_loopback_prefill_allowed_for_single_host(
+    monkeypatch, native_engine
+):
     monkeypatch.setenv(BOOTSTRAP_HOST_ENV, "127.0.0.1")
     engine = TokenspeedLLMEngine(server_args(disaggregation_mode="prefill"))
     try:

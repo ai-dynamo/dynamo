@@ -13,13 +13,16 @@ import sys
 from typing import Any, Dict, Optional, Sequence
 
 from dynamo.common.config_dump import register_encoder
-from dynamo.common.constants import DisaggregationMode
 from dynamo.common.configuration.groups.runtime_args import (
     DynamoRuntimeArgGroup,
     DynamoRuntimeConfig,
 )
+from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.runtime import parse_endpoint
-from dynamo.tokenspeed.disagg import resolve_disaggregation_mode, validate_disagg_compatibility
+from dynamo.tokenspeed.disagg import (
+    resolve_disaggregation_mode,
+    validate_disagg_compatibility,
+)
 
 DEFAULT_ENDPOINT_COMPONENT = "backend"
 DEFAULT_ENDPOINT_NAME = "generate"

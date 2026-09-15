@@ -24,9 +24,7 @@ def kv_events_enabled(config: dict[str, Any]) -> bool:
     enabled = config.get("enable_kv_cache_events", False)
     if not isinstance(enabled, bool):
         raise ValueError("TokenSpeed enable_kv_cache_events must be a JSON boolean")
-    return enabled and config.get(
-        "publisher", "zmq"
-    ) != "null"
+    return enabled and config.get("publisher", "zmq") != "null"
 
 
 def kv_event_source(config: dict[str, Any]) -> ZmqSource:

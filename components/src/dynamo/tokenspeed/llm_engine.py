@@ -75,7 +75,9 @@ class TokenspeedLLMEngine(LLMEngine):
         validate_disagg_compatibility(self.disaggregation_mode, self.server_args)
         bootstrap_host, bootstrap_port = None, None
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
-            bootstrap_host, bootstrap_port = runtime_disaggregated_endpoint(self.server_args)
+            bootstrap_host, bootstrap_port = runtime_disaggregated_endpoint(
+                self.server_args
+            )
         self._configure_kv_events()
         # The Dynamo response layer expects per-chunk token deltas.
         self.server_args.stream_output = True
@@ -125,7 +127,9 @@ class TokenspeedLLMEngine(LLMEngine):
         )
 
     def _configure_kv_events(self) -> None:
-        config = kv_events_config_dict(getattr(self.server_args, "kv_events_config", None))
+        config = kv_events_config_dict(
+            getattr(self.server_args, "kv_events_config", None)
+        )
         if not kv_events_enabled(config) or not getattr(
             self.server_args, "enable_prefix_caching", True
         ):
@@ -136,9 +140,13 @@ class TokenspeedLLMEngine(LLMEngine):
                 "use independent worker replicas"
             )
         if (cache_block_size(self.server_args) or 0) <= 0:
-            raise ValueError("TokenSpeed KV events require a positive --prefix-granularity (--block-size)")
+            raise ValueError(
+                "TokenSpeed KV events require a positive --prefix-granularity (--block-size)"
+            )
         if not config.get("endpoint"):
-            self._kv_event_dir = tempfile.TemporaryDirectory(prefix="dynamo-tokenspeed-")
+            self._kv_event_dir = tempfile.TemporaryDirectory(
+                prefix="dynamo-tokenspeed-"
+            )
             config["endpoint"] = f"ipc://{self._kv_event_dir.name}/kv-events"
         self._kv_source = kv_event_source(config)
         self.server_args.kv_events_config = json.dumps(config)
