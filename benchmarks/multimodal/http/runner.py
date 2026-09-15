@@ -3,16 +3,15 @@
 
 """Async fetch loop with per-request latency capture.
 
-Sets ``DYN_HTTP_BACKEND`` for the chosen backend, calls
-``close_http_client()`` before+after to defend against stale singletons
-across runs in the same process. Returns raw samples; aggregation is in
-``stats.py``.
+Drives ``dynamo.common.http.fetch_bytes``, which is aiohttp-backed. Calls
+``close_http_client()`` before+after so each run starts from a fresh
+session rather than inheriting a warm pool from the previous one.
+Returns raw samples; aggregation is in ``stats.py``.
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
 import time
 import uuid
 from dataclasses import dataclass
@@ -22,7 +21,6 @@ from dynamo.common.http import close_http_client, fetch_bytes
 
 @dataclass
 class RunResult:
-    backend: str
     n: int
     wall_s: float
     samples: list[tuple[float, str]]
@@ -41,10 +39,7 @@ async def _timed_fetch(url: str, timeout: float) -> tuple[float, str]:
         return (time.perf_counter() - start, type(e).__name__)
 
 
-async def run_one(
-    backend: str, urls: list[str], timeout: float, request_rate: float
-) -> RunResult:
-    os.environ["DYN_HTTP_BACKEND"] = backend
+async def run_one(urls: list[str], timeout: float, request_rate: float) -> RunResult:
     await close_http_client()
     interval = 1.0 / request_rate
     t0 = time.perf_counter()
@@ -57,4 +52,4 @@ async def run_one(
     samples = await asyncio.gather(*tasks)
     wall_s = time.perf_counter() - t0
     await close_http_client()
-    return RunResult(backend=backend, n=len(urls), wall_s=wall_s, samples=samples)
+    return RunResult(n=len(urls), wall_s=wall_s, samples=samples)
