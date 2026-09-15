@@ -27,10 +27,16 @@ class _MockModel:
     """Records the request it builds and replays a fixed response stream."""
 
     def __init__(
-        self, output_metadata: list[dict[str, Any]], responses: list[Any]
+        self,
+        output_metadata: list[dict[str, Any]],
+        responses: list[Any],
+        max_batch_size: int = 0,
+        name: str = "mock-model",
     ) -> None:
         self._output_metadata = output_metadata
         self._responses = responses
+        self._max_batch_size = max_batch_size
+        self.name = name
         self.last_request: types.SimpleNamespace | None = None
 
     def create_request(self) -> types.SimpleNamespace:
@@ -39,6 +45,9 @@ class _MockModel:
 
     def metadata(self) -> dict[str, Any]:
         return {"outputs": self._output_metadata}
+
+    def config(self) -> dict[str, Any]:
+        return {"max_batch_size": self._max_batch_size}
 
     def async_infer(self, _inference_request: Any) -> AsyncIterator[Any]:
         async def _stream() -> AsyncIterator[Any]:
@@ -78,9 +87,10 @@ def run_handler_generate(
     triton_output_metadata: list[dict[str, Any]],
     triton_responses: list[Any],
     dynamo_request: dict[str, Any],
+    max_batch_size: int = 0,
 ) -> tuple[_MockModel, list[dict[str, Any]]]:
     """Build a RequestHandler over a _MockModel and drive generate to completion."""
-    model = _MockModel(triton_output_metadata, triton_responses)
+    model = _MockModel(triton_output_metadata, triton_responses, max_batch_size)
     handler = handlers.RequestHandler(MagicMock(), model)
 
     async def _collect() -> list[dict[str, Any]]:
@@ -292,6 +302,7 @@ def _make_handler(
     model.ready = _readiness(model_ready)
     model.name = model_name
     model.metadata = MagicMock(return_value={"outputs": output_metadata})
+    model.config = MagicMock(return_value={})
     model.async_infer = MagicMock(
         side_effect=AssertionError("async_infer must not be called")
     )
