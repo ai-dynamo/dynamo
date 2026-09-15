@@ -6,6 +6,7 @@
 //! This module provides a trait-based interface for creating and managing Prometheus metrics
 //! with automatic label injection and hierarchical naming support.
 
+pub(crate) mod backend_admission;
 pub mod frontend_perf;
 pub mod otlp_export;
 pub mod prom_typed;
