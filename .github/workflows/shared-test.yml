@@ -355,7 +355,16 @@ jobs:
 
             case "${outcome}" in
               ''|skipped)
-                echo "⏭️  ${stage}: did not run"
+                # An unresolvable id renders empty, which would otherwise read
+                # as "skipped" and exempt a stage that really ran.
+                if [[ -f "${exitcode_file}" ]]; then
+                  echo "❌ ${stage}: wrote a status file but its outcome is"
+                  echo "   '${outcome:-<empty>}'. Its id in STAGE_OUTCOMES does not"
+                  echo "   resolve, so the stage ran unverified."
+                  failed=1
+                else
+                  echo "⏭️  ${stage}: did not run"
+                fi
                 ;;
               success)
                 if [[ ! -f "${exitcode_file}" ]]; then
@@ -388,5 +397,11 @@ jobs:
               failed=1
             fi
           done
+
+          # Without this the checks tab shows only "Process completed with exit
+          # code 1" and the stage name stays buried in this step's log.
+          if [[ "${failed}" -ne 0 ]]; then
+            echo "::error title=Test stage verification failed::A pytest stage did not record a passing result. See this step's log for the stage."
+          fi
 
           exit "${failed}"
