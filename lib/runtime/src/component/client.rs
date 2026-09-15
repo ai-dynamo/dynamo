@@ -909,8 +909,9 @@ impl Client {
             endpoint: endpoint.name.clone(),
         };
 
+        let watcher_cancel = drt.primary_token().child_token();
         let mut discovery_stream = discovery
-            .list_and_watch(discovery_query.clone(), None)
+            .list_and_watch(discovery_query.clone(), Some(watcher_cancel.clone()))
             .await?;
         let (watch_tx, watch_rx) = tokio::sync::watch::channel(vec![]);
         let discovery_source = Arc::new(EndpointDiscoverySource::new(watch_rx));
@@ -924,6 +925,16 @@ impl Client {
 
             loop {
                 let discovery_event = tokio::select! {
+                    biased;
+                    _ = watcher_cancel.cancelled() => {
+                        tracing::debug!(
+                            exit_reason = "runtime_cancelled",
+                            preserved_instances = map.len(),
+                            "endpoint_watcher: runtime cancelled; preserving the last instance snapshot for discovery query: {:?}",
+                            discovery_query,
+                        );
+                        break;
+                    }
                     _ = watch_tx.closed() => {
                         break;
                     }
@@ -933,10 +944,22 @@ impl Client {
                                 event
                             },
                             Some(Err(e)) => {
-                                tracing::error!("endpoint_watcher: discovery stream error: {}; shutting down for discovery query: {:?}", e, discovery_query);
+                                tracing::error!(
+                                    exit_reason = "discovery_stream_error",
+                                    "endpoint_watcher: discovery stream error: {}; clearing the instance snapshot for discovery query: {:?}",
+                                    e,
+                                    discovery_query,
+                                );
+                                let _ = watch_tx.send(vec![]);
                                 break;
                             }
                             None => {
+                                tracing::warn!(
+                                    exit_reason = "discovery_stream_ended",
+                                    "endpoint_watcher: discovery stream ended unexpectedly; clearing the instance snapshot for discovery query: {:?}",
+                                    discovery_query,
+                                );
+                                let _ = watch_tx.send(vec![]);
                                 break;
                             }
                         }
@@ -965,7 +988,8 @@ impl Client {
                     break;
                 }
             }
-            let _ = watch_tx.send(vec![]);
+
+            watcher_cancel.cancel();
         });
 
         sources.insert(endpoint.clone(), Arc::downgrade(&discovery_source));
@@ -1792,6 +1816,49 @@ mod tests {
         );
         state.decrement(worker_id);
         assert_eq!(state.load(worker_id), 0);
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_local_watcher_cancellation_preserves_last_instance_snapshot() {
+        const WATCHER_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_watcher_cancel_preserves".to_string())
+            .unwrap();
+        let component = ns.component("synthetic_component".to_string()).unwrap();
+        let endpoint = component.endpoint("synthetic_endpoint".to_string());
+
+        let client = Client::new(endpoint.clone()).await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let discovered = client.wait_for_instances().await.unwrap();
+        let instance_id = discovered[0].id();
+        let mut instance_source = client.instance_source.as_ref().clone();
+        instance_source.borrow_and_update();
+
+        // End the watch without emitting DiscoveryEvent::Removed.
+        drt.primary_token().cancel();
+
+        tokio::time::timeout(WATCHER_EXIT_TIMEOUT, instance_source.changed())
+            .await
+            .expect("endpoint watcher did not exit after runtime cancellation")
+            .expect_err("endpoint watcher published a snapshot while exiting");
+
+        assert_eq!(
+            instance_source
+                .borrow()
+                .iter()
+                .map(Instance::id)
+                .collect::<Vec<_>>(),
+            vec![instance_id],
+            "cancelling the runtime primary token must not publish an empty instance \
+             list; local watcher teardown is not an authoritative discovery removal"
+        );
 
         rt.shutdown();
     }
