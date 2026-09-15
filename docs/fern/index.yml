@@ -1237,6 +1237,9 @@ navigation:
         contents:
           # Keep this archive in reverse chronological order. Publication dates are
           # rendered in each article header and on the custom landing page.
+          - page: "When to use EPD Disaggregation for Multimodal Serving"
+            path: pages/blog/2026/epd-disaggregation-multimodal.mdx
+            slug: epd-disaggregation-multimodal
           - page: "Dynamo Agent Optimization Skills"
             path: pages/blog/2026/agent-optimization-skills.mdx
             slug: agent-optimization-skills

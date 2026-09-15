@@ -1,0 +1,46 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "When to use EPD Disaggregation for Multimodal Serving"
+subtitle: "[Jesse Gu](https://developer.nvidia.com/blog/author/zcgu/), [Ryan McCormick](https://developer.nvidia.com/blog/author/rmccormick/) and [Akshatha Kamath](https://developer.nvidia.com/blog/author/akshathak/) — September 2026"
+description: "A guide to when disaggregating the vision encoder from prefill and decode yields real performance benefits for multimodal serving, and when it does not."
+keywords: Dynamo, EPD disaggregation, multimodal inference, vision encoder, TTFT, goodput, LLM serving
+last-updated: September 9, 2026
+hide-page-actions: true
+---
+
+import { BlogStyles } from "@/components/BlogStyles";
+import { BlogArticleMeta } from "@/components/BlogArticleMeta";
+
+<BlogStyles />
+
+<BlogArticleMeta
+  authors={[
+    { name: "Jesse Gu", href: "https://developer.nvidia.com/blog/author/zcgu/" },
+    { name: "Ryan McCormick", href: "https://developer.nvidia.com/blog/author/rmccormick/" },
+    { name: "Akshatha Kamath", href: "https://developer.nvidia.com/blog/author/akshathak/" },
+  ]}
+  category="Multimodal"
+  date="September 9, 2026"
+  readTime="2 min read"
+/>
+
+Multimodal serving puts a vision encoder in front of the usual prefill and decode stages. When all three share the same GPUs, image processing stalls token generation. Encode-prefill-decode (EPD) disaggregation moves the encoder onto its own workers so each stage scales independently — but it also adds an embedding transfer, so it is not a free win. Our blog post, [When to Use Encode-Prefill-Decode Disaggregation to Accelerate Multimodal Model Serving](https://developer.nvidia.com/blog/when-to-use-encode-prefill-decode-disaggregation-to-accelerate-multimodal-model-serving/), is a guide to the conditions under which disaggregating the encoder actually pays off.
+
+## When disaggregation helps
+
+EPD yields the most benefit when encoder work is a substantial share of request latency:
+
+- **Heavy media input.** Multiple images, high-resolution images, or video generate more visual tokens and therefore more encoder work — giving disaggregation more to offload. EPD also lets you scale encoder capacity independently to prevent encoding from becoming a bottleneck.
+- **Short to moderate output lengths.** Shorter output sequences keep decode from overshadowing encoder gains, so end-to-end improvements are clearest here.
+- **Smaller, MoE, and quantized models.** These have a higher encoder-to-LLM compute ratio, making the encoder a larger relative bottleneck and EPD a bigger lever.
+- **Mixed text and multimodal traffic.** Disaggregation isolates encoder work so that latency-sensitive text requests are not held up waiting for image encoding to complete.
+
+## When it does not
+
+EPD is less effective when decoder compute dominates:
+
+- **Long output sequences.** As output length grows, decode increasingly determines total latency and the encoder's contribution shrinks to the point where disaggregation overhead can outweigh its gains.
+- **Large dense models.** A bigger LLM means the encoder is a smaller fraction of overall compute, so isolating it moves less of the critical path. In these cases, scaling decoder capacity will have more impact than disaggregating the encoder.
+
+Read the [full post](https://developer.nvidia.com/blog/when-to-use-encode-prefill-decode-disaggregation-to-accelerate-multimodal-model-serving/) for the benchmark methodology and the colocated versus heterogeneous deployment tradeoff.
