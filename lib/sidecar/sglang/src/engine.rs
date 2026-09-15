@@ -13,6 +13,7 @@ use dynamo_backend_common::{
     LLMEngineOutput, LLMEngineOutputExt, LlmRegistration, ModelInput, PreprocessedRequest,
     WorkerConfig, usage,
 };
+use dynamo_sidecar_common::NativeStream;
 use futures::stream::BoxStream;
 use serde_json::Value;
 use tokio::sync::OnceCell;
@@ -34,10 +35,49 @@ pub struct SglangSidecarEngine {
     bootstrap_host: Option<String>,
     bootstrap_port: Option<u16>,
     pool: OnceCell<Pool>,
+    #[cfg(test)]
+    scripted: Option<
+        dynamo_sidecar_common::testing::ScriptedClient<pb::GenerateRequest, pb::GenerateResponse>,
+    >,
     cancel: CancellationToken,
 }
 
+enum GenerationClient {
+    Grpc(Client),
+    #[cfg(test)]
+    Scripted(
+        dynamo_sidecar_common::testing::ScriptedClient<pb::GenerateRequest, pb::GenerateResponse>,
+    ),
+}
+
+impl GenerationClient {
+    async fn generate(
+        &mut self,
+        request: pb::GenerateRequest,
+    ) -> Result<NativeStream<pb::GenerateResponse>, tonic::Status> {
+        match self {
+            Self::Grpc(client) => client
+                .generate(request)
+                .await
+                .map(|response| NativeStream::Grpc(response.into_inner())),
+            #[cfg(test)]
+            Self::Scripted(script) => script.open(request).await,
+        }
+    }
+}
+
 impl SglangSidecarEngine {
+    fn generation_client(&self) -> Result<GenerationClient, DynamoError> {
+        #[cfg(test)]
+        if let Some(script) = &self.scripted {
+            return Ok(GenerationClient::Scripted(script.clone()));
+        }
+        self.pool
+            .get()
+            .map(|pool| GenerationClient::Grpc(pool.stream_client()))
+            .ok_or_else(|| client::engine_shutdown("generate called before start"))
+    }
+
     pub(crate) fn new(
         endpoint: impl Into<String>,
         transport: TransportConfig,
@@ -52,6 +92,8 @@ impl SglangSidecarEngine {
             bootstrap_host,
             bootstrap_port,
             pool: OnceCell::new(),
+            #[cfg(test)]
+            scripted: None,
             cancel: CancellationToken::new(),
         }
     }
@@ -185,11 +227,7 @@ impl LLMEngine for SglangSidecarEngine {
         request: PreprocessedRequest,
         ctx: GenerateContext,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
-        let mut grpc_client = self
-            .pool
-            .get()
-            .map(Pool::stream_client)
-            .ok_or_else(|| client::engine_shutdown("generate called before start"))?;
+        let mut grpc_client = self.generation_client()?;
 
         let prompt_tokens = request.token_ids.len() as u32;
         let return_tokens_as_ids = request
@@ -232,7 +270,7 @@ impl LLMEngine for SglangSidecarEngine {
                 return;
             };
             let mut stream = match opened {
-                Ok(response) => response.into_inner(),
+                Ok(response) => response,
                 Err(status) => {
                     yield Err(client::status_to_dynamo("Generate", status));
                     return;
@@ -710,3 +748,7 @@ mod tests {
         assert_eq!(registration.data_parallel_size, Some(16));
     }
 }
+
+#[cfg(test)]
+#[path = "conformance.rs"]
+mod conformance;

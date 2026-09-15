@@ -6,7 +6,11 @@
 mod args;
 mod endpoint;
 mod error;
+mod stream;
 mod transport;
+
+#[cfg(feature = "testing")]
+pub mod testing;
 
 pub use args::{GrpcTransportArgs, GrpcTransportConfig, SidecarArgs};
 pub use endpoint::GrpcEndpoint;
@@ -14,4 +18,5 @@ pub use error::{
     cannot_connect, connection_timeout, engine_shutdown, invalid_argument, protocol_error,
     status_to_dynamo,
 };
+pub use stream::NativeStream;
 pub use transport::{DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool};

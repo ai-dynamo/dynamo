@@ -237,3 +237,7 @@ impl LLMEngine for VllmSidecarEngine {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "conformance.rs"]
+mod conformance;
