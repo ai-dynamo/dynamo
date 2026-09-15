@@ -178,7 +178,9 @@ pub fn error_class_for_http_status(code: u16) -> ErrorClass {
         503 => ErrorClass::Unavailable,
         504 => ErrorClass::DeadlineExceeded,
         529 => ErrorClass::CapacityExhausted,
-        402 | 405..=407 | 410..=412 | 414 | 416..=428 | 430 | 432..=498 => ErrorClass::InvalidRequest,
+        402 | 405..=407 | 410..=412 | 414 | 416..=428 | 430 | 432..=498 => {
+            ErrorClass::InvalidRequest
+        }
         _ => ErrorClass::Internal,
     }
 }
