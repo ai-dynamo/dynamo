@@ -8,7 +8,7 @@ package lpx
 import (
 	"testing"
 
-	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/thirdparty/lpxscheduler/v1alpha1"
+	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"

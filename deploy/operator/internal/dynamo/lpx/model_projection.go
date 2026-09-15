@@ -11,7 +11,7 @@ import (
 	"slices"
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/thirdparty/lpxscheduler/v1alpha1"
+	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 

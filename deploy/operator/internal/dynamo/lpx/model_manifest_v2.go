@@ -12,7 +12,7 @@ import (
 	"strings"
 
 	"capnproto.org/go/capnp/v3"
-	manifestcapnpv2 "github.com/ai-dynamo/dynamo/deploy/operator/internal/thirdparty/capnp/gbuild_manifest/v2"
+	manifestcapnpv2 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
 )
 
 const (
