@@ -148,9 +148,9 @@ def configure_dynamo_logging(
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
 
-    # map the DYN_LOG variable to a logging level
+    # map the DYN_LOG filter to a logging level for the engine loggers
     dyn_var = os.environ.get("DYN_LOG", "info")
-    dyn_level = log_level_mapping(dyn_var)
+    dyn_level = filter_level_mapping(dyn_var)
 
     # Configure the logger with Dynamo's handler. Rust applies the final
     # target-specific filtering, but Python should cheaply discard levels that
@@ -171,26 +171,54 @@ def configure_dynamo_logging(
         logger.propagate = True
 
 
+# Rust env_filter level names (case-insensitive) and the Python level that
+# keeps the same records available. Python has no TRACE or OFF level: TRACE
+# maps to DEBUG so records stay available for Rust, and OFF maps to CRITICAL,
+# the most restrictive level the engine logging configs can name.
+_LOG_LEVELS = {
+    "trace": logging.DEBUG,
+    "debug": logging.DEBUG,
+    "info": logging.INFO,
+    "warn": logging.WARNING,
+    "warning": logging.WARNING,
+    "error": logging.ERROR,
+    "critical": logging.CRITICAL,
+    "off": logging.CRITICAL,
+}
+
+
 def log_level_mapping(level: str) -> int:
     """
-    The DYN_LOG variable is set using "debug" or "trace" or "info.
-    This function maps those to the appropriate logging level and defaults to INFO
-    if the variable is not set or a bad value.
+    Map a single DYN_LOG level token such as "debug", "trace" or "info" to the
+    appropriate logging level. Matching ignores case and surrounding whitespace,
+    and defaults to INFO if the token is not a recognized level.
     """
-    if level == "debug":
-        return logging.DEBUG
-    elif level == "info":
-        return logging.INFO
-    elif level == "warn" or level == "warning":
-        return logging.WARNING
-    elif level == "error":
-        return logging.ERROR
-    elif level == "critical":
-        return logging.CRITICAL
-    elif level == "trace":
-        return logging.INFO
-    else:
-        return logging.INFO
+    return _LOG_LEVELS.get(level.strip().lower(), logging.INFO)
+
+
+def filter_level_mapping(filters: str) -> int:
+    """
+    Return the lowest logging level enabled by a Rust-style DYN_LOG filter.
+
+    DYN_LOG accepts comma-separated env_filter directives, each either a bare
+    level ("debug"), a target-scoped level ("dynamo_llm=trace") or a bare
+    target ("dynamo_llm"), which env_filter treats as that target at TRACE.
+    The lowest level wins so records stay available for the most verbose
+    target. Defaults to INFO when no directive is present.
+    """
+    levels = []
+    for directive in filters.split(","):
+        directive = directive.strip()
+        if not directive:
+            continue
+        if "=" in directive:
+            levels.append(log_level_mapping(directive.rsplit("=", 1)[-1]))
+        elif directive.lower() in _LOG_LEVELS:
+            levels.append(log_level_mapping(directive))
+        else:
+            # A target-only directive enables TRACE for that target.
+            levels.append(logging.DEBUG)
+    return min(levels, default=logging.INFO)
 
 
 def python_log_level_mapping(filters: str) -> int:
@@ -203,16 +231,7 @@ def python_log_level_mapping(filters: str) -> int:
         # Python does not discard messages enabled only by file configuration.
         return logging.DEBUG
 
-    levels = []
-    for directive in filters.split(","):
-        level = directive.rsplit("=", 1)[-1].strip().lower()
-        if level == "trace":
-            # Python has no TRACE level. Keep DEBUG records available for Rust
-            # when any target explicitly enables trace output.
-            levels.append(logging.DEBUG)
-        else:
-            levels.append(log_level_mapping(level))
-    return min(levels, default=logging.INFO)
+    return filter_level_mapping(filters)
 
 
 def configure_sglang_logging(dyn_level: int) -> None:
