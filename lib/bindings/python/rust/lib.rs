@@ -262,7 +262,6 @@ fn wait_for_bridge_tasks_at_exit(py: Python<'_>) {
         runtimes.push(process);
     }
     if let Some(bridge) = BRIDGE_RUNTIME.get().copied() {
-        // Usually the bridge borrowed the process runtime; then there is one runtime to drain.
         if !runtimes.iter().any(|rt| std::ptr::eq(*rt, bridge)) {
             runtimes.push(bridge);
         }

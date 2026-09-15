@@ -274,27 +274,14 @@ def _parse_jsonl_logs(output: str) -> list[dict[str, Any]]:
     return records
 
 
-@pytest.fixture
-def system_port(request: pytest.FixtureRequest) -> int:
-    """Reserve a shared port only for the scenario that actually binds one.
-
-    The other five run with `DYN_SYSTEM_PORT=-1` and never open a listener, so they
-    have no reason to hold a reservation from the pool every concurrent test shares.
-    Acquiring in a fixture rather than in the test body keeps an exhausted pool a
-    setup error instead of reporting an environment problem as a Dynamo failure.
-    """
-    if request.getfixturevalue("scenario") != "fetch_then_backend_worker":
-        return 0
-    return request.getfixturevalue("dynamo_dynamic_ports").system_ports[0]
-
-
 @pytest.mark.parametrize(("scenario", "expect_mismatch"), SCENARIOS)
 def test_fetch_model_runtime_bridge_orders(
-    tmp_path: Path, scenario: str, expect_mismatch: bool, system_port: int
+    tmp_path: Path, scenario: str, expect_mismatch: bool, dynamo_dynamic_ports
 ) -> None:
     cache = tmp_path / "hf-cache"
     cache.mkdir()
     snapshot = _build_cached_model(cache)
+    system_port = dynamo_dynamic_ports.system_ports[0]
     result = subprocess.run(
         [sys.executable, "-c", CHILD, scenario, str(snapshot), str(system_port)],
         env=_isolated_child_env(cache, scenario, system_port),
