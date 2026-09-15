@@ -4,6 +4,7 @@
 """Utility functions for ArgGroup configuration."""
 
 import argparse
+import logging
 import os
 import re
 from typing import Any, Callable, Optional, TypeVar, Union
@@ -11,12 +12,18 @@ from typing import Any, Callable, Optional, TypeVar, Union
 T = TypeVar("T")
 
 
+logger = logging.getLogger(__name__)
+
+_TRUTHY = frozenset({"1", "true", "on", "yes"})
+_FALSY = frozenset({"", "0", "false", "off", "no"})
+
+
 def parse_bool(value: str) -> bool:
     """Parse Dynamo's truthy and falsy configuration values."""
     normalized = value.strip().lower()
-    if normalized in ("1", "true", "on", "yes"):
+    if normalized in _TRUTHY:
         return True
-    if normalized in ("", "0", "false", "off", "no"):
+    if normalized in _FALSY:
         return False
     raise argparse.ArgumentTypeError("expected one of: true/false, 1/0, on/off, yes/no")
 
@@ -39,6 +46,27 @@ def split_served_model_names(served_model_name: Any) -> list[str]:
     for raw_name in raw_names:
         names.extend(name for name in re.split(r"[\s,]+", raw_name.strip()) if name)
     return names
+
+
+_unrecognized_bool_warned: set[str] = set()
+
+
+def _warn_unrecognized_bool(env_var: str, value: str) -> None:
+    """Warn once per variable that a boolean value was not understood.
+
+    Warn rather than raise: a malformed flag should not stop a worker starting,
+    and falling through to false is indistinguishable from a deliberate opt-out
+    without the warning.
+    """
+    if env_var in _unrecognized_bool_warned:
+        return
+    _unrecognized_bool_warned.add(env_var)
+    logger.warning(
+        "Unrecognised value %r for %s; expected true/false, 1/0, on/off or "
+        "yes/no. Using false.",
+        value,
+        env_var,
+    )
 
 
 def env_or_default(
@@ -73,7 +101,10 @@ def env_or_default(
     target_type = value_type if value_type is not None else type(default)
 
     if target_type is bool:
-        return value.strip().lower() in ("true", "1", "yes", "on")  # type: ignore
+        normalized = value.strip().lower()
+        if normalized not in _TRUTHY and normalized not in _FALSY:
+            _warn_unrecognized_bool(env_var, value)
+        return normalized in _TRUTHY  # type: ignore
     if target_type is int:
         return int(value)  # type: ignore
     if target_type is float:
