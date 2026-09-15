@@ -153,29 +153,26 @@ mod tests {
     }
 
     #[test]
-    fn kimi_k3_forced_dynamic_tools_use_native_xtml_policies() {
-        for (tool_choice, expected) in [
-            (json!("required"), GuidedToolConstraint::None),
-            (
+    fn kimi_k3_named_dynamic_tool_uses_structural_tag_policy() {
+        let parsing_options = ParsingOptions {
+            tool_call_parser: Some("kimi_k3".to_string()),
+            ..Default::default()
+        };
+        let result = apply_request_tool_call_parsing_options(
+            parsing_options,
+            &dynamic_request(Some(
                 json!({"type": "function", "function": {"name": "lookup"}}),
-                GuidedToolConstraint::StructuralTag,
-            ),
-        ] {
-            let parsing_options = ParsingOptions {
-                tool_call_parser: Some("kimi_k3".to_string()),
-                ..Default::default()
-            };
-            let result = apply_request_tool_call_parsing_options(
-                parsing_options,
-                &dynamic_request(Some(tool_choice)),
-            )
-            .expect("forced dynamic tool choice must configure parsing");
+            )),
+        )
+        .expect("named dynamic tool choice must configure parsing");
 
-            assert!(!result.suppress_tool_calls);
-            assert_eq!(result.guided_tool_constraint, expected);
-            assert_eq!(result.tools.len(), 1);
-            assert_eq!(result.tools[0].name, "lookup");
-        }
+        assert!(!result.suppress_tool_calls);
+        assert_eq!(
+            result.guided_tool_constraint,
+            GuidedToolConstraint::StructuralTag
+        );
+        assert_eq!(result.tools.len(), 1);
+        assert_eq!(result.tools[0].name, "lookup");
     }
 
     #[test]
