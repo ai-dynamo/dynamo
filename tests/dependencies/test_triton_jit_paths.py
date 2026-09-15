@@ -24,6 +24,8 @@ import sys
 import pytest
 
 pytestmark = [
+    # Let the 600s subprocess timeout report its failure before pytest interrupts.
+    pytest.mark.timeout(620),
     pytest.mark.trtllm,
     pytest.mark.pre_merge,
     pytest.mark.post_merge,
@@ -62,7 +64,6 @@ def _run(code: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
 
 
 def test_nvidia_backend_paths_resolve_without_env():
-    """cuda.h and the CUDA tools must resolve from Triton's own default paths."""
     code = (
         "import os; from triton import knobs; from triton.backends.nvidia import driver; "
         "hdr = os.path.join(driver.include_dirs[0], 'cuda.h'); "
@@ -79,7 +80,6 @@ def test_nvidia_backend_paths_resolve_without_env():
 
 
 def test_cuda_utils_jit_compiles_without_env(tmp_path: pathlib.Path):
-    """The exact code path that failed in GH-14864: compile + load Triton's cuda_utils."""
     stub = pathlib.Path("/usr/local/cuda/lib64/stubs/libcuda.so")
     if not stub.is_file():
         pytest.skip(

@@ -145,7 +145,7 @@ RUN set -eu; \
     env -u TRITON_CUDACRT_PATH -u TRITON_CUDART_PATH -u TRITON_PTXAS_PATH -u TRITON_CUOBJDUMP_PATH -u TRITON_NVDISASM_PATH \
         -u CPATH -u C_INCLUDE_PATH \
         TRITON_HOME="$chk/home" TRITON_CACHE_DIR="$chk/cache" TRITON_LIBCUDA_PATH="$chk/stubs" \
-        LD_LIBRARY_PATH="$chk/stubs:${LD_LIBRARY_PATH}" \
+        LD_LIBRARY_PATH="$chk/stubs:${LD_LIBRARY_PATH:-}" \
         /usr/bin/python3 -c 'from triton import knobs; from triton.backends.nvidia.driver import CudaUtils; CudaUtils(); print("triton env-free cuda_utils JIT ok; tools:", knobs.nvidia.ptxas.path, knobs.nvidia.cuobjdump.path, knobs.nvidia.nvdisasm.path)'; \
     rm -rf "$chk"
 
@@ -723,9 +723,18 @@ RUN rm -rf /usr/local/cuda-*/NsightSystems-cli-*/target-linux-*/plugins/efa_metr
 # (GH-14864). The env-free JIT check there ran before the overlay; assert here,
 # where the shipped filesystem is assembled, that the links came through and
 # still resolve. Existence checks only -- `test -f`/`-x` follow symlinks.
-RUN tb=$(/usr/bin/python3 -c 'import os, triton.backends.nvidia as b; print(os.path.dirname(b.__file__))') && \
-    test -f "$tb/include/cuda.h" && \
-    test -x "$tb/bin/ptxas" && test -x "$tb/bin/cuobjdump" && test -x "$tb/bin/nvdisasm"
+RUN set -eu; \
+    tb=$(/usr/bin/python3 -c 'import os, triton.backends.nvidia as b; print(os.path.dirname(b.__file__))'); \
+    if [ ! -f "$tb/include/cuda.h" ]; then \
+        echo "ERROR: Triton CUDA header missing after runtime overlay: $tb/include/cuda.h" >&2; \
+        exit 1; \
+    fi; \
+    for tool in ptxas cuobjdump nvdisasm; do \
+        if [ ! -x "$tb/bin/$tool" ]; then \
+            echo "ERROR: Triton CUDA tool missing or not executable after runtime overlay: $tb/bin/$tool" >&2; \
+            exit 1; \
+        fi; \
+    done
 
 # Mirrors runtime_full's ENV — must stay in sync. Re-declaration is required
 # because `FROM ${RUNTIME_IMAGE}` here does not inherit runtime_full's config.
