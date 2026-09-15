@@ -106,10 +106,18 @@ class DynamoWorkerProcess(ManagedProcess):
                 ]
             )
 
-        # KV events config and NIXL side channel port only for prefill worker
+        # Every worker started with --kv-transfer-config opens a NIXL handshake
+        # listener, so each one needs its own port. Left unset, the worker takes
+        # vLLM's host-wide default (5600) and loses the bind race against any
+        # other worker on the host, so the engine core never finishes
+        # initializing and the worker never reports ready.
+        if mode != WorkerMode.AGGREGATED:
+            self.nixl_side_channel_port = allocate_port(DynamoPortRange.NIXL.value)
+            env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(self.nixl_side_channel_port)
+
+        # KV events config only for prefill worker
         if mode == WorkerMode.PREFILL:
             self.kv_event_port = allocate_port(DynamoPortRange.SERVE.value)
-            self.nixl_side_channel_port = allocate_port(DynamoPortRange.NIXL.value)
             command.extend(
                 [
                     "--kv-events-config",
@@ -123,7 +131,6 @@ class DynamoWorkerProcess(ManagedProcess):
                     ),
                 ]
             )
-            env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(self.nixl_side_channel_port)
 
         # Set log directory based on worker type.
         worker_type = "prefill_worker" if mode == WorkerMode.PREFILL else "worker"
