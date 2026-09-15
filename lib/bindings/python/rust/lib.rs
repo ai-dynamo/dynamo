@@ -175,9 +175,11 @@ fn create_request_context(
 
 /// Longest the exit hook will wait for the process runtime to go quiet.
 ///
-/// The race it closes is sub-millisecond, so this is a wide margin. It is also the worst-case
-/// exit delay for a process whose service tasks are still running, which is why it is short.
-const BRIDGE_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+/// The race it closes is sub-millisecond, so this is still a margin of hundreds. It is also
+/// paid in full, on every exit, by a process whose service tasks never finish: a frontend holds
+/// several, so its alive-task count never reaches zero and the loop always runs to this
+/// deadline. That cost, not the race, is what bounds how large this may be.
+const BRIDGE_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 const BRIDGE_DRAIN_POLL: std::time::Duration = std::time::Duration::from_millis(1);
 
 /// Give Tokio tasks a bounded chance to finish before CPython finalizes the interpreter.
@@ -205,7 +207,9 @@ fn wait_for_bridge_tasks_at_exit(py: Python<'_>) {
         let deadline = std::time::Instant::now() + BRIDGE_DRAIN_TIMEOUT;
         while runtime.metrics().num_alive_tasks() > 0 {
             if std::time::Instant::now() >= deadline {
-                tracing::debug!(
+                // At the default level, and once per process at most: it is the only thing
+                // that accounts for the extra exit delay the operator just waited through.
+                tracing::info!(
                     alive_tasks = runtime.metrics().num_alive_tasks(),
                     "tasks still running at interpreter exit; continuing without them"
                 );
