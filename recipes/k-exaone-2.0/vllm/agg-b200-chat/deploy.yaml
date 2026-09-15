@@ -58,7 +58,7 @@ spec:
           volumes:
             - name: model-cache
               persistentVolumeClaim: {claimName: model-cache}
-    - name: VllmWorker
+    - name: Worker
       # digest-pinned image has no semver tag for the operator to parse
       runtimeVersionOverride: "1.4.1"
       minAvailable: 1

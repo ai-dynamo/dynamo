@@ -6,8 +6,8 @@ SPDX-License-Identifier: Apache-2.0
 # K-EXAONE 2.0 Benchmark Recipe
 
 A single [AIPerf](https://github.com/ai-dynamo/aiperf) trace-replay Job —
-[`perf.yaml`](perf.yaml) — covers all four K-EXAONE 2.0 DGDs. Set `ENDPOINT` for the
-target DGD and 
+[`perf.yaml`](perf.yaml) — covers both K-EXAONE 2.0 DGDs. Set `ENDPOINT` and
+`CONCURRENCY` for the target DGD.
 
 The Job waits for the target model on the DGD frontend, runs a short warmup,
 replays the configured trace at one `CONCURRENCY` value, and writes raw
@@ -106,13 +106,13 @@ kubectl delete pod pvc-helper -n ${NAMESPACE}
 
 ## Running a concurrency sweep
 
-`perf.yaml` runs one `CONCURRENCY` value. Clear SGLang KV state and Dynamo
-frontend/router state between independent runs:
+`perf.yaml` runs one `CONCURRENCY` value. Restart the workers to clear engine KV
+state and Dynamo frontend/router state between independent runs:
 
 ```bash
 kubectl delete job k-exaone-2-bench -n ${NAMESPACE} --ignore-not-found
 
-DGD=k-exaone-2-agg-b200-chat # Choose one of the four variant names above.
+DGD=k-exaone-2-agg            # or k-exaone-2-disagg
 kubectl delete pods -n ${NAMESPACE} \
   -l nvidia.com/dynamo-graph-deployment-name=${DGD}
 kubectl wait --for=condition=Ready pod -n ${NAMESPACE} \

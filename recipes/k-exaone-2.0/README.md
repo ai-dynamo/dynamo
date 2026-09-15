@@ -111,7 +111,7 @@ Silence is not a hang — watch the worker log for shard progress.
 ```bash
 # aggregated
 kubectl wait --for=condition=Ready dgd/k-exaone-2-agg -n ${NAMESPACE} --timeout=7200s
-kubectl logs -f -l nvidia.com/dynamo-component=VllmWorker -n ${NAMESPACE}
+kubectl logs -f -l nvidia.com/dynamo-component=Worker -n ${NAMESPACE}
 
 # disaggregated
 kubectl wait --for=condition=Ready dgd/k-exaone-2-disagg -n ${NAMESPACE} --timeout=7200s
