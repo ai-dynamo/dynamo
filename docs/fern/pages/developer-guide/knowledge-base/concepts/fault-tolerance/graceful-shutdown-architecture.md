@@ -44,7 +44,7 @@ The `graceful_shutdown()` function:
 2. Unregisters all endpoints from discovery
 3. Waits for a configurable grace period (`DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS`, default 5s)
 4. Calls `runtime.shutdown()` to invalidate endpoints and stop accepting new requests
-5. Waits for in-flight requests (based on `graceful_shutdown` per endpoint)
+5. Waits for request handlers to finish, including with an error (based on `graceful_shutdown` per endpoint)
 6. Returns to allow cleanup to proceed
 
 The aggregate wait in `runtime.shutdown()` is bounded by
@@ -101,7 +101,7 @@ drain into a restart loop.
 
 Backend workers always use `graceful_shutdown=True`, meaning they wait for in-flight requests to complete until the engine is stopped. Request migration is configured at the **frontend** level via `--migration-limit`:
 
-- When migration is enabled at the frontend, disconnected streams from failed workers are automatically retried on healthy workers
+- When migration is enabled at the frontend, requests interrupted by worker failure or graceful shutdown after grace expires are retried on healthy workers, subject to the retry budget and request limits
 - Workers don't need to know about migration configuration - they simply complete their work or signal incomplete streams
 - See [Request Migration Architecture](request-migration-architecture.md) for details on how migration works
 
@@ -206,7 +206,7 @@ Kubernetes uses health endpoints to determine pod readiness:
 
 - **During shutdown**: Endpoints become unavailable
 - **Readiness probe fails**: Traffic stops routing to the pod
-- **Graceful draining**: Existing requests complete
+- **Graceful draining**: Existing requests have time to complete
 
 ## Related Documentation
 
