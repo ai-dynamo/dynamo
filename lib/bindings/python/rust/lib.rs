@@ -173,6 +173,50 @@ fn create_request_context(
     }
 }
 
+/// Longest the exit hook will wait for the process runtime to go quiet.
+///
+/// The race it closes is sub-millisecond, so this is a wide margin. It is also the worst-case
+/// exit delay for a process whose service tasks are still running, which is why it is short.
+const BRIDGE_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+const BRIDGE_DRAIN_POLL: std::time::Duration = std::time::Duration::from_millis(1);
+
+/// Give Tokio tasks a bounded chance to finish before CPython finalizes the interpreter.
+///
+/// `future_into_py` resolves the Python future from a Tokio worker via `call_soon_threadsafe`,
+/// so the awaiting coroutine resumes while that worker is still inside `Python::with_gil` with
+/// an epilogue left to run — it has yet to drop the argument tuple it passed. The main thread
+/// can leave `asyncio.run` and start finalizing inside that window, and the worker then runs
+/// `PyObject_GC_Del` against a half-torn-down interpreter. The process dies by `SIGSEGV` with
+/// all of its output already correctly written.
+///
+/// Drains the process runtime, which is the runtime the bridge uses whenever
+/// `ensure_fetch_model_runtime` got there first. When the bridge picked up a different runtime
+/// it warns about the mismatch, and this hook cannot reach it: `get_runtime()` would build a
+/// runtime rather than report that there is none.
+#[pyfunction]
+fn wait_for_bridge_tasks_at_exit(py: Python<'_>) {
+    // No runtime was ever built, so nothing was ever spawned. Costs an untouched process nothing.
+    let Some(runtime) = rs::Worker::existing_process_runtime() else {
+        return;
+    };
+    // Releasing the GIL is load-bearing: an atexit callback holds it, and the tasks being
+    // waited on need it to finish. Waiting while holding it would deadlock against exactly
+    // the threads this is waiting for.
+    py.allow_threads(|| {
+        let deadline = std::time::Instant::now() + BRIDGE_DRAIN_TIMEOUT;
+        while runtime.metrics().num_alive_tasks() > 0 {
+            if std::time::Instant::now() >= deadline {
+                tracing::debug!(
+                    alive_tasks = runtime.metrics().num_alive_tasks(),
+                    "tasks still running at interpreter exit; continuing without them"
+                );
+                break;
+            }
+            std::thread::sleep(BRIDGE_DRAIN_POLL);
+        }
+    });
+}
+
 fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // OTLP export no longer requires a pre-existing runtime, so initialize at import.
     if std::env::var_os(SKIP_PYTHON_LOG_INIT_ENV).is_none() {
@@ -197,6 +241,14 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
              has to build its own runtime it will fall back to Tokio's unbounded defaults"
         ),
     }
+
+    // atexit runs before the interpreter is finalized, which is the only point where a bridge
+    // task still touching Python objects can still be waited for. See
+    // `wait_for_bridge_tasks_at_exit`.
+    m.py().import("atexit")?.call_method1(
+        "register",
+        (wrap_pyfunction!(wait_for_bridge_tasks_at_exit, m)?,),
+    )?;
 
     m.add_function(wrap_pyfunction!(llm::kv::compute_block_hash_for_seq_py, m)?)?;
     m.add_function(wrap_pyfunction!(lora_name_to_id, m)?)?;
