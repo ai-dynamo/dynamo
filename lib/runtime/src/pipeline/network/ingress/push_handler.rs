@@ -683,10 +683,8 @@ where
                 // Send the worker's error type with the display text, so a
                 // frontend can tell a request the backend cannot serve from
                 // a transport failure.
-                let prologue_error = StreamPrologueError::new(
-                    error_string,
-                    typed_error_from_pipeline_error(&e),
-                );
+                let prologue_error =
+                    StreamPrologueError::new(error_string, typed_error_from_pipeline_error(&e));
                 let _result = publisher.send_prologue_typed(Some(prologue_error)).await;
                 Err(e)?
             }
