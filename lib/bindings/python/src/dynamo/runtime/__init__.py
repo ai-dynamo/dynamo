@@ -3,6 +3,7 @@
 
 import asyncio
 import os
+import signal
 import warnings
 from functools import wraps
 from typing import Any, AsyncGenerator, Callable, Optional, Type, Union
@@ -18,7 +19,7 @@ from dynamo._core import Endpoint as Endpoint
 from dynamo._core import PyAsyncRequestStream as PyAsyncRequestStream
 
 
-def dynamo_worker(enable_nats: Optional[bool] = None):
+def dynamo_worker(enable_nats: Optional[bool] = None, register_shutdown: bool = False):
     """
     Decorator that creates a DistributedRuntime and passes it to the worker function.
 
@@ -26,6 +27,7 @@ def dynamo_worker(enable_nats: Optional[bool] = None):
         enable_nats: Deprecated. NATS enablement is now determined automatically
             from the event-plane configuration. This parameter is accepted for
             backwards compatibility but will be removed in a future release.
+        register_shutdown: Boolean flag to gracefully shutdown a dynamo worker post SIGTERM, SIGINT.
     """
     if enable_nats is not None:
         warnings.warn(
@@ -43,7 +45,9 @@ def dynamo_worker(enable_nats: Optional[bool] = None):
             request_plane = os.environ.get("DYN_REQUEST_PLANE", "tcp")
             discovery_backend = os.environ.get("DYN_DISCOVERY_BACKEND", "etcd")
             runtime = DistributedRuntime(loop, discovery_backend, request_plane)
-
+            if register_shutdown:
+                for sig in (signal.SIGINT, signal.SIGTERM):
+                    loop.add_signal_handler(sig, runtime.shutdown)
             await func(runtime, *args, **kwargs)
 
         return wrapper
