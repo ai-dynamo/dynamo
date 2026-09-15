@@ -23,6 +23,7 @@ use super::worker_monitor::LoadThresholdConfig;
 use super::{
     GenerateEngineSelection, KvSourceMembershipWatch, Model, RuntimeConfigWatch, WorkerSet,
     kv_source_watch::KvSourceMembershipCoordinator, runtime_config_watch,
+    runtime_configs::filter_runtime_configs,
 };
 
 use dynamo_runtime::{
@@ -2186,6 +2187,13 @@ impl ModelManager {
             None
         };
 
+        // Shared endpoint state includes rejected cohorts; router capacity and metadata
+        // must use the same membership as this client's worker selection.
+        let workers_with_configs = filter_runtime_configs(
+            workers_with_configs,
+            client.instance_avail_watcher(),
+            cancellation_token.clone(),
+        );
         let mut chooser = KvRouter::new_with_worker_role_and_scheduler_load(
             endpoint.clone(),
             client,
