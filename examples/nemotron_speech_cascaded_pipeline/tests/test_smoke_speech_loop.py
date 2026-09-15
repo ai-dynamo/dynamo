@@ -77,20 +77,35 @@ async def test_realtime_llm_streams_complete_transcript_and_collects_text():
     ]
 
 
-async def test_realtime_llm_replays_revised_asr_hypothesis_before_commit():
+@pytest.mark.parametrize(
+    "deltas,final_text",
+    [
+        (["recognize", " wreck"], "recognize speech"),
+        (["hello"], "hello world"),
+        ([], "hello"),
+    ],
+)
+async def test_realtime_llm_sends_final_only_text_without_more_warming(
+    deltas, final_text
+):
     websocket = _WebSocket([])
     text_input = _RealtimeTextInput(websocket)
 
-    await text_input.append("recognize")
-    await text_input.append(" wreck")
-    await text_input.commit("recognize speech")
+    for delta in deltas:
+        await text_input.append(delta)
+    await text_input.commit(final_text)
 
     assert websocket.sent == [
-        {"type": "input_text.append", "text": "recognize"},
-        {"type": "input_text.append", "text": " wreck"},
-        {"type": "input_text.clear"},
-        {"type": "input_text.append", "text": "recognize speech"},
-        {"type": "input_text.commit"},
+        *[{"type": "input_text.append", "text": delta} for delta in deltas],
+        *([{"type": "input_text.clear"}] if deltas else []),
+        {
+            "type": "conversation.item.create",
+            "item": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": final_text}],
+            },
+        },
     ]
 
 

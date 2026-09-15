@@ -51,15 +51,17 @@ class _RealtimeTextInput:
         self.text += text
 
     async def commit(self, final_text: str) -> None:
-        # Interim ASR hypotheses may be revised. Replaying the final transcript
-        # preserves correctness while retaining useful prefill before revision.
-        if final_text != self.text:
+        if final_text == self.text:
             if self.text:
-                await self.websocket.send_json({"type": "input_text.clear"})
-                self.text = ""
-            await self.append(final_text)
+                await self.websocket.send_json({"type": "input_text.commit"})
+            return
+        # Final-only text has no overlap window. Generate from the authoritative
+        # item directly, reusing completed prefix blocks without more warming.
         if self.text:
-            await self.websocket.send_json({"type": "input_text.commit"})
+            await self.websocket.send_json({"type": "input_text.clear"})
+        self.text = final_text
+        if final_text:
+            await _create_user_item(self.websocket, final_text)
 
 
 async def _synthesize(
@@ -236,12 +238,10 @@ async def _generate_realtime(
     return "".join(output), first_token_at - started, completed_at - started
 
 
-async def _complete_realtime(
+async def _create_user_item(
     websocket: ClientWebSocketResponse,
-    args: argparse.Namespace,
     transcript: str,
-) -> tuple[str, float, float]:
-    """Run an atomic realtime request for comparison with incremental prefill."""
+) -> None:
     await websocket.send_json(
         {
             "type": "conversation.item.create",
@@ -252,6 +252,15 @@ async def _complete_realtime(
             },
         }
     )
+
+
+async def _complete_realtime(
+    websocket: ClientWebSocketResponse,
+    args: argparse.Namespace,
+    transcript: str,
+) -> tuple[str, float, float]:
+    """Run an atomic realtime request for comparison with incremental prefill."""
+    await _create_user_item(websocket, transcript)
     return await _generate_realtime(websocket, args)
 
 

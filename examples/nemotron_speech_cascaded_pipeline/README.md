@@ -316,8 +316,10 @@ The smoke client demonstrates the endpoint flow an external orchestrator can
 use: it opens separate ASR and LLM WebSockets through the Dynamo frontend,
 forwards ASR deltas with Dynamo's `input_text.append` extension, commits the
 final transcript, and then requests a response. If ASR revises an interim
-hypothesis, it clears the speculative text and replays the final transcript
-before commit. The pinned Blueprint Pipecat profile continues to use streamed
+hypothesis, it clears the speculative text and sends the authoritative final
+transcript with `conversation.item.create`, without starting more speculative
+warming at turn end. Unchanged text uses `input_text.commit`. The pinned
+Blueprint Pipecat profile continues to use streamed
 chat completions and does not yet implement this experimental handoff.
 
 For an established Realtime connection without overlapping prefill, run
