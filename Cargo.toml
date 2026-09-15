@@ -132,13 +132,6 @@ ipnet = { version = "2" }
 libc = { version = "0.2" }
 oneshot = { version = "0.1.13", features = ["std", "async"] }
 ordered-float = "4"
-opendal = { version = "0.59.1", default-features = false, features = [
-    "http-transport-reqwest",
-    "services-azblob",
-    "services-fs",
-    "services-gcs",
-    "services-s3",
-] }
 parking_lot = "0.12.5"
 prometheus = { version = "0.14"}
 rand = { version = "0.9.2" }
@@ -195,7 +188,6 @@ uuid = { version = "1.18.1", features = ["v4", "serde"] }
 url = { version = "2.5", features = ["serde"] }
 xxhash-rust = { version = "0.8", features = ["xxh3", "const_xxh3"] }
 zeroize = { version = "1" }
-zstd = "0.13"
 
 # ext-proc / Envoy gRPC
 prost = { version = "0.13.5" }
