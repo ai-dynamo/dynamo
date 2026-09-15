@@ -288,6 +288,7 @@ where
     {
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
+        self.validate_explicit_worker(request.content(), phase)?;
         let explicit = explicit_target(request.content(), phase)?;
         let has_affinity_session = self.affinity.is_some() && affinity_id(&request)?.is_some();
         let is_direct = matches!(&self.policy, RoutingPolicy::Direct);
