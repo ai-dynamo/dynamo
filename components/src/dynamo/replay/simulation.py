@@ -375,7 +375,10 @@ class DynamoReplayRunner:
             raise TypeError("trace workload requires a string trace_format")
         agentic_lanes = spec.workload.get("agentic_lanes")
         trace_block_size = spec.workload.get("trace_block_size")
-        if trace_format != "weka" and trace_block_size is None:
+        # Weka and Dynamo traces carry their source block size in the trace
+        # metadata. Leave it unset so AISimulate can validate and use that
+        # embedded value instead of imposing the synthetic-workload default.
+        if trace_format not in {"weka", "dynamo"} and trace_block_size is None:
             trace_block_size = self.trace_block_size
         if deployment.deployment_mode == "agg":
             return run_trace_replay(

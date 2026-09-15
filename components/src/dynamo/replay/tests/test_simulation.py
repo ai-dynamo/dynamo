@@ -155,7 +155,7 @@ def test_trace_runner_preserves_current_replay_arguments(monkeypatch) -> None:
     assert seen["planner_config"] == {"mode": "agg"}
     assert seen["arrival_speedup_ratio"] == 2.0
     assert seen["replay_concurrency"] == 8
-    assert seen["trace_block_size"] == 512
+    assert seen["trace_block_size"] is None
     assert seen["benchmark_granularity"] == 8
     assert seen["capture_per_request"] is False
     assert seen["capture_planner_details"] is False
