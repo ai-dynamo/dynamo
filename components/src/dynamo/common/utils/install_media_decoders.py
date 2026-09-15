@@ -85,8 +85,13 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_S = 600
 _LOCK_PATH = Path(tempfile.gettempdir()) / "dynamo_media_decoders.lock"
-# Mask URL userinfo (user:token@) before pip args reach the logs.
-_CRED_RE = re.compile(r"(\w+://)[^/@\s]+@")
+# Mask URL userinfo (user:token@) before pip args reach the logs. Matching runs
+# to the last "@" before the host, because registry URLs are routinely written
+# with an unencoded email as the username and stopping at the first "@" leaves
+# the password in the line. "?" and "#" bound the match alongside "/" and
+# whitespace, so an "@" in a query or fragment cannot drag the match past the
+# host.
+_CRED_RE = re.compile(r"(\w+://)[^/?#\s]+@")
 
 
 @dataclass(frozen=True)
