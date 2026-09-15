@@ -526,7 +526,7 @@ def test_request_cancellation_trtllm_decode_handoff_cancel(
                 # task cannot masquerade as successful cancellation.
                 _, decode_log_offset = poll_for_pattern(
                     process=decode_worker,
-                    pattern="Deferred abort: engine abort fired",
+                    pattern="Deferred abort: deferred path, engine abort fired",
                     log_offset=decode_log_offset,
                     max_wait_ms=30_000,
                 )
@@ -561,6 +561,7 @@ def test_request_cancellation_trtllm_decode_handoff_cancel(
                     expected_count=1,
                     deadline_s=30,
                     drain=True,
+                    require_content=True,
                 )
 
                 logger.info(

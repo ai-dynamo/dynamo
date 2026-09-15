@@ -134,6 +134,25 @@ def test_cancel_startup_is_owned_by_startup_thread(tmp_path):
     assert _wait_for_pid_death(pid), "Cancelled startup left its child running"
 
 
+def test_cancel_startup_before_enter_prevents_process_launch(tmp_path):
+    """Cancellation between preparation and __enter__ must not be cleared."""
+    mp = ManagedProcess(
+        command=_bash_sleep_cmd(_unique_marker()),
+        timeout=10,
+        display_output=False,
+        terminate_all_matching_process_names=False,
+        log_dir=str(tmp_path),
+    )
+
+    mp.prepare_startup()
+    mp.cancel_startup()
+
+    with pytest.raises(RuntimeError, match="startup was cancelled"):
+        mp.__enter__()
+
+    assert mp.proc is None, "Pre-enter cancellation still launched the process"
+
+
 # ---------------------------------------------------------------------------
 # Scenario 1: Simple process with children — all should die on __exit__
 # ---------------------------------------------------------------------------

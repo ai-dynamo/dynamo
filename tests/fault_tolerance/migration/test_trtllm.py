@@ -142,7 +142,7 @@ KV_TRANSFER_CASES = [
                 "failure; tracked in https://github.com/ai-dynamo/dynamo/pull/14609"
             ),
             raises=OutputContinuityError,
-            strict=False,
+            strict=True,
         ),
         id="worker-failure-completion-stream-tcp",
     ),
@@ -344,7 +344,7 @@ class DynamoWorkerProcess(ManagedProcess):
             env=env,
             health_check_urls=health_check_urls,
             timeout=300,
-            display_output=False,
+            display_output=True,
             terminate_all_matching_process_names=False,
             log_dir=str(log_dir),
             display_name=worker_id,

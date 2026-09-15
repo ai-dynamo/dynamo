@@ -283,6 +283,7 @@ def read_streaming_responses(
     expected_count: int = 5,
     deadline_s: float | None = None,
     drain: bool = False,
+    require_content: bool = False,
 ) -> None:
     """Read a specific number of responses from a streaming request.
 
@@ -292,6 +293,9 @@ def read_streaming_responses(
         deadline_s: Absolute wall-clock budget for reading the required stream.
         drain: Continue reading after expected_count until a successful terminal
             response and ``[DONE]`` marker are received.
+        require_content: Require at least one nonempty generated-text fragment.
+            This is useful for drained health probes that must prove generation,
+            not merely a syntactically complete metadata-only response.
 
     Raises:
         pytest.fail if stream ends before expected_count responses
@@ -308,6 +312,7 @@ def read_streaming_responses(
     response_count = 0
     saw_finish_reason = False
     saw_done = False
+    saw_content = False
     deadline = None if deadline_s is None else time.monotonic() + deadline_s
     deadline_expired = threading.Event()
     deadline_timer = None
@@ -372,12 +377,24 @@ def read_streaming_responses(
                     choice.get("finish_reason") is not None
                     for choice in event.get("choices", [])
                 )
+                saw_content = saw_content or any(
+                    isinstance(fragment, str) and bool(fragment)
+                    for choice in event.get("choices", [])
+                    for fragment in (
+                        (choice.get("delta") or {}).get("content"),
+                        choice.get("text"),
+                    )
+                )
                 logger.info(
                     "Received streaming response %s: %.100s", response_count, event
                 )
-                if response_count >= expected_count and not drain:
+                if (
+                    response_count >= expected_count
+                    and not drain
+                    and (not require_content or saw_content)
+                ):
                     fail_if_deadline_expired()
-                    logger.info(f"Successfully read {response_count} responses")
+                    logger.info("Successfully read %s responses", response_count)
                     return
         except Exception:
             fail_if_deadline_expired()
@@ -388,8 +405,10 @@ def read_streaming_responses(
             pytest.fail("Streaming response ended without a [DONE] marker")
         if drain and not saw_finish_reason:
             pytest.fail("Streaming response ended without a successful finish reason")
+        if require_content and not saw_content:
+            pytest.fail("Streaming response ended without generated content")
         if response_count >= expected_count:
-            logger.info(f"Successfully drained {response_count} responses")
+            logger.info("Successfully drained %s responses", response_count)
             return
 
         pytest.fail(

@@ -55,6 +55,9 @@ def managed_processes_concurrently(
                 logger.exception("Failed to clean up a late-starting process")
         return entered_process
 
+    for process in processes:
+        process.prepare_startup()
+
     executor = ThreadPoolExecutor(max_workers=len(processes))
     futures = [
         executor.submit(enter_process, index, process)
