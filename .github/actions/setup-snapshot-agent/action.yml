@@ -16,7 +16,7 @@ inputs:
   chart_version:
     description: 'github.com/ai-dynamo/snapshot chart version to install (pinned, never latest)'
     required: false
-    default: 0.1.0-rc.1
+    default: 0.1.0
   storage_size:
     description: 'Snapshot-managed checkpoint PVC size'
     required: false
