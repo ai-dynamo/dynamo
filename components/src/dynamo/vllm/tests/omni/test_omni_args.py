@@ -121,6 +121,15 @@ def test_startup_lora_paths_parse_as_diffusion_options():
     ]
 
 
+def test_fastvideo_vsa_topk_parses_as_diffusion_option():
+    parser = argparse.ArgumentParser()
+    OmniArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(["--fastvideo-vsa-topk", "64"])
+
+    assert args.fastvideo_vsa_topk == 64
+
+
 @pytest.mark.parametrize("fps", [0, -1, -100])
 def test_omni_config_invalid_video_fps(fps):
     config = _make_omni_config(default_video_fps=fps)
@@ -154,6 +163,13 @@ def test_omni_config_invalid_boundary_ratio(ratio):
 def test_omni_config_valid_boundary_ratio(ratio):
     config = _make_omni_config(boundary_ratio=ratio)
     config.validate()
+
+
+@pytest.mark.parametrize("topk", [0, -1])
+def test_omni_config_invalid_fastvideo_vsa_topk(topk):
+    config = _make_omni_config(fastvideo_vsa_topk=topk)
+    with pytest.raises(ValueError, match="--fastvideo-vsa-topk must be > 0"):
+        config.validate()
 
 
 def test_negative_stage_id_rejected():

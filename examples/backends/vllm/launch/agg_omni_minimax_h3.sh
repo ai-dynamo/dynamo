@@ -9,7 +9,7 @@ trap 'echo Cleaning up...; kill 0' EXIT
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
-# MiniMax-H3 uses the four visible B200s for diffusion parallelism. The
+# MiniMax-H3 uses the four visible GPUs for diffusion parallelism. The
 # text-generation KV-cache flags from gpu_utils.sh do not apply to this worker.
 
 MODEL="${DYN_H3_MODEL:-MiniMaxAI/MiniMax-H3}"
@@ -22,8 +22,12 @@ TEXT_ENCODER_TP_SIZE="${DYN_H3_TEXT_ENCODER_TP_SIZE:-4}"
 # 448x256) do not leave ranks with empty tile lists. Larger workloads may opt
 # into the full DiT group size explicitly.
 VAE_PATCH_PARALLEL_SIZE="${DYN_H3_VAE_PATCH_PARALLEL_SIZE:-1}"
-ATTENTION_BACKEND="${DYN_H3_ATTENTION_BACKEND:-TRTLLM_ATTN}"
+RING_DEGREE="${DYN_H3_RING_DEGREE:-1}"
+ALLGATHER_DEGREE="${DYN_H3_ALLGATHER_DEGREE:-1}"
+ATTENTION_BACKEND="${DYN_H3_ATTENTION_BACKEND:-}"
 FASTH3_LORA_PATH="${DYN_H3_FASTH3_LORA_PATH:-}"
+FASTH3_VARIANT="${DYN_H3_FASTH3_VARIANT:-}"
+FASTVIDEO_VSA_TOPK="${DYN_H3_FASTVIDEO_VSA_TOPK:-64}"
 EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -61,10 +65,17 @@ done
 
 MODEL_PATH="${MODEL_PATH:-$MODEL}"
 FASTH3_ARGS=()
+if [[ -n "$FASTH3_VARIANT" && -z "$FASTH3_LORA_PATH" ]]; then
+    echo "DYN_H3_FASTH3_VARIANT requires DYN_H3_FASTH3_LORA_PATH" >&2
+    exit 1
+fi
 if [[ -n "$FASTH3_LORA_PATH" ]]; then
     if [[ ! -f "$FASTH3_LORA_PATH" ]]; then
         echo "FastH3 adapter not found: $FASTH3_LORA_PATH" >&2
         exit 1
+    fi
+    if [[ -z "$FASTH3_VARIANT" ]]; then
+        FASTH3_VARIANT="$(basename "$(dirname "$FASTH3_LORA_PATH")")"
     fi
     FASTH3_ARGS=(--lora-path "$FASTH3_LORA_PATH")
     EXAMPLE_INFERENCE_STEPS=4
@@ -72,6 +83,30 @@ if [[ -n "$FASTH3_LORA_PATH" ]]; then
 else
     EXAMPLE_INFERENCE_STEPS=50
     EXAMPLE_SCHEDULER_FIELDS=$',\n    "flow_shift": 12.0,\n    "audio_flow_shift": 3.0'
+fi
+
+if [[ "$FASTH3_VARIANT" == vsa-* ]]; then
+    ATTENTION_BACKEND="${ATTENTION_BACKEND:-FASTVIDEO_VSA}"
+    if [[ "$ATTENTION_BACKEND" != "FASTVIDEO_VSA" ]]; then
+        echo "FastH3 VSA requires DYN_H3_ATTENTION_BACKEND=FASTVIDEO_VSA" >&2
+        exit 1
+    fi
+    if [[ "$RING_DEGREE" != 1 || "$ALLGATHER_DEGREE" != 1 ]]; then
+        echo "FastH3 VSA supports pure Ulysses only; ring and all-gather degrees must be 1" >&2
+        exit 1
+    fi
+    if [[ ! "$FASTVIDEO_VSA_TOPK" =~ ^[1-9][0-9]*$ ]]; then
+        echo "DYN_H3_FASTVIDEO_VSA_TOPK must be a positive integer" >&2
+        exit 1
+    fi
+    python -c 'import fastvideo_kernel'
+    # The published fastvideo-kernel wheel provides the portable Triton VSA
+    # route used by B300/SM103. The native SM100a extension is source-built
+    # and must be opted into explicitly on compatible B200/SM100 systems.
+    export FASTVIDEO_VSA_SM100A="${DYN_H3_FASTVIDEO_VSA_SM100A:-0}"
+    FASTH3_ARGS+=(--fastvideo-vsa-topk "$FASTVIDEO_VSA_TOPK")
+else
+    ATTENTION_BACKEND="${ATTENTION_BACKEND:-TRTLLM_ATTN}"
 fi
 
 SERVED_MODEL_ARGS=()
@@ -127,6 +162,8 @@ DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}" \
     --trust-remote-code \
     --task-type fl2va \
     --ulysses-degree "$ULYSSES_DEGREE" \
+    --ring-degree "$RING_DEGREE" \
+    --allgather-degree "$ALLGATHER_DEGREE" \
     --text-encoder-tp-size "$TEXT_ENCODER_TP_SIZE" \
     --vae-patch-parallel-size "$VAE_PATCH_PARALLEL_SIZE" \
     --vae-use-tiling \

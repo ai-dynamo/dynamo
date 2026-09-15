@@ -59,6 +59,7 @@ class OmniDiffusionKwargs:
     task_type: Optional[str] = None
     lora_path: Optional[list[str]] = None
     diffusion_attention_backend: Optional[str] = None
+    fastvideo_vsa_topk: Optional[int] = None
     enforce_eager: bool = False
 
 
@@ -219,6 +220,17 @@ class OmniArgGroup(ArgGroup):
             env_var="DYN_OMNI_DIFFUSION_ATTENTION_BACKEND",
             default=None,
             help="vLLM-Omni diffusion attention backend.",
+        )
+        add_argument(
+            g,
+            flag_name="--fastvideo-vsa-topk",
+            env_var="DYN_OMNI_FASTVIDEO_VSA_TOPK",
+            default=None,
+            arg_type=int,
+            help=(
+                "Key/value blocks retained per query block by the "
+                "FASTVIDEO_VSA diffusion attention backend."
+            ),
         )
         add_negatable_bool_argument(
             g,
@@ -472,6 +484,11 @@ class OmniConfig(DynamoRuntimeConfig):
             raise ValueError("--text-encoder-tp-size must be > 0")
         if not (0 < self.diffusion.boundary_ratio <= 1):
             raise ValueError("--boundary-ratio must be in (0, 1]")
+        if (
+            self.diffusion.fastvideo_vsa_topk is not None
+            and self.diffusion.fastvideo_vsa_topk <= 0
+        ):
+            raise ValueError("--fastvideo-vsa-topk must be > 0")
         if self.stage_configs_path is None:
             if self.stage_id is not None:
                 raise ValueError("--stage-id requires --stage-configs-path")

@@ -1017,9 +1017,12 @@ overrides:
 
   # --- vLLM-Omni kernel packages surfaced by the nvidia/cuda baseline (UNKNOWN
   #     to syft/pip; resolved from upstream) ---
+  - { ecosystem: python, name: instanttensor,                 license: "Apache-2.0",                   source: "scitix/InstantTensor v0.1.9 LICENSE — https://github.com/scitix/InstantTensor/blob/v0.1.9/LICENSE (wheel metadata omits the license expression)" }
   - { ecosystem: python, name: humming-kernels,               license: "Apache-2.0",                   source: "inclusionAI/humming JIT GEMM kernels — https://github.com/inclusionAI/humming/blob/main/LICENSE (Apache-2.0)" }
   - { ecosystem: python, name: tokenspeed-mla,                license: "MIT",                          source: "LightSeek Foundation tokenspeed — https://github.com/lightseekorg/tokenspeed (MIT, PyPI license field)" }
   - { ecosystem: python, name: nvidia-cutlass-dsl-libs-cu13,  license: "LicenseRef-NVIDIA-Proprietary", source: "NVIDIA CUTLASS Python DSL license — https://docs.nvidia.com/cutlass/latest/media/docs/pythonDSL/license.html (PyPI classifier: Other/Proprietary)" }
+  - { ecosystem: python, name: sigstore-models,                license: "MIT",                          source: "astral-sh/sigstore-models LICENSE — https://github.com/astral-sh/sigstore-models/blob/main/LICENSE (MIT; wheel metadata omits the license expression)" }
+  - { ecosystem: rust, name: tsp-asn1,                         license: "Apache-2.0",                   source: "trailofbits/rfc3161-client workspace LICENSE — https://github.com/trailofbits/rfc3161-client/blob/main/LICENSE (Apache-2.0; member Cargo.toml inherits the workspace license file)" }
 
   # --- libdrm family (X.Org DRM; MIT; syft/DEP-5 leaves the per-GPU subpackages
   #     UNKNOWN — libdrm-intel1 is amd64-only so it missed the arm64-derived pass) ---

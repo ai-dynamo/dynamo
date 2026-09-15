@@ -14,8 +14,9 @@
 # limitations under the License.
 
 # Opt-in development and qualification overlay for vLLM-Omni models that
-# generate joint video and audio. The standard Dynamo image intentionally
-# remains on its royalty-free VP9-only media stack.
+# generate joint video and audio, including FastH3 VSA. The standard Dynamo
+# image intentionally remains on its royalty-free VP9-only media stack and
+# does not acquire FastVideo's optional CUDA kernel.
 ARG BASE_IMAGE=dynamo:latest-vllm-runtime
 FROM ${BASE_IMAGE}
 
@@ -32,9 +33,10 @@ RUN uv pip install \
         --system \
         --no-deps \
         av==18.0.0 \
+        fastvideo-kernel==0.3.5 \
     && ffmpeg -hide_banner -encoders 2>/dev/null | grep -Eq '(^| )libx264( |$)' \
     && python3 -c \
-        'import av; av.codec.Codec("h264", "w"); av.codec.Codec("aac", "w")'
+        'import av, fastvideo_kernel; av.codec.Codec("h264", "w"); av.codec.Codec("aac", "w")'
 
 RUN python3 <<'PY'
 import io

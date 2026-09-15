@@ -9,8 +9,12 @@ API_URL="${DYN_H3_API_URL:-http://127.0.0.1:8000/v1/videos}"
 MODEL="${DYN_H3_MODEL:-MiniMaxAI/MiniMax-H3}"
 MODEL_REVISION="${DYN_H3_MODEL_REVISION:-42ed227ee7df40d41602854ae760620d6eb651fe}"
 FASTH3_LORA_PATH="${DYN_H3_FASTH3_LORA_PATH:-}"
+FASTH3_VARIANT="${DYN_H3_FASTH3_VARIANT:-}"
 FASTH3_REVISION="${DYN_H3_FASTH3_REVISION:-bcf40ca6f457ed66f8badf13514943e390205fca}"
-FASTH3_SHA256="${DYN_H3_FASTH3_SHA256:-4ce198c83132251b7fd0de2503823aa49c53983f068318f66cb19eaefb7fcc12}"
+FASTH3_SHA256="${DYN_H3_FASTH3_SHA256:-}"
+ATTENTION_BACKEND="${DYN_H3_ATTENTION_BACKEND:-}"
+FASTVIDEO_VSA_TOPK="${DYN_H3_FASTVIDEO_VSA_TOPK:-64}"
+FASTVIDEO_VSA_SM100A="${DYN_H3_FASTVIDEO_VSA_SM100A:-0}"
 QUAL_DIR="${DYN_H3_QUAL_DIR:-/tmp/dynamo_minimax_h3_qualification}"
 OUTPUT_DIR="$QUAL_DIR/outputs"
 CASE_NAME="cat-playing-canon-in-d-grand-piano"
@@ -40,10 +44,50 @@ fi
 
 mkdir -p "$OUTPUT_DIR"
 
+if [[ -n "$FASTH3_VARIANT" && -z "$FASTH3_LORA_PATH" ]]; then
+    echo "DYN_H3_FASTH3_VARIANT requires DYN_H3_FASTH3_LORA_PATH" >&2
+    exit 1
+fi
 if [[ -n "$FASTH3_LORA_PATH" ]]; then
     if [[ ! -f "$FASTH3_LORA_PATH" ]]; then
         echo "FastH3 adapter not found: $FASTH3_LORA_PATH" >&2
         exit 1
+    fi
+    if [[ -z "$FASTH3_VARIANT" ]]; then
+        FASTH3_VARIANT="$(basename "$(dirname "$FASTH3_LORA_PATH")")"
+    fi
+    if [[ -z "$FASTH3_SHA256" ]]; then
+        case "$FASTH3_VARIANT" in
+            dense-datafree)
+                FASTH3_SHA256="4ce198c83132251b7fd0de2503823aa49c53983f068318f66cb19eaefb7fcc12"
+                ;;
+            vsa-datafree)
+                FASTH3_SHA256="42dc502a2078f166c396a1fa75f29728d1844363652d345d5ef3e2b444ed6470"
+                ;;
+            vsa-synthetic-step1300)
+                FASTH3_SHA256="de6af1ea8b2f4b31a7ac3752b4836f88671199fdf277a5dd922f9cca3bea7b65"
+                ;;
+            vsa-synthetic-step1900)
+                FASTH3_SHA256="bbac632dffb828d99123ab06c7ff3efc246351bed63d1860b4252e61dafeaed8"
+                ;;
+            *)
+                echo "Set DYN_H3_FASTH3_SHA256 for unrecognized variant: $FASTH3_VARIANT" >&2
+                exit 1
+                ;;
+        esac
+    fi
+    if [[ "$FASTH3_VARIANT" == vsa-* ]]; then
+        ATTENTION_BACKEND="${ATTENTION_BACKEND:-FASTVIDEO_VSA}"
+        if [[ "$ATTENTION_BACKEND" != "FASTVIDEO_VSA" ]]; then
+            echo "FastH3 VSA qualification requires FASTVIDEO_VSA" >&2
+            exit 1
+        fi
+        if [[ ! "$FASTVIDEO_VSA_TOPK" =~ ^[1-9][0-9]*$ ]]; then
+            echo "DYN_H3_FASTVIDEO_VSA_TOPK must be a positive integer" >&2
+            exit 1
+        fi
+    else
+        ATTENTION_BACKEND="${ATTENTION_BACKEND:-TRTLLM_ATTN}"
     fi
     actual_fasth3_sha256="$(sha256sum "$FASTH3_LORA_PATH" | awk '{print $1}')"
     if [[ "$actual_fasth3_sha256" != "$FASTH3_SHA256" ]]; then
@@ -90,8 +134,9 @@ import torch
 devices = [torch.cuda.get_device_name(index) for index in range(torch.cuda.device_count())]
 if len(devices) != 4:
     raise SystemExit(f"Expected exactly 4 visible GPUs, found {len(devices)}: {devices}")
-if any("B200" not in device.upper() for device in devices):
-    raise SystemExit(f"Expected 4 B200 GPUs, found: {devices}")
+supported_products = ("B200", "GB300")
+if not any(all(product in device.upper() for device in devices) for product in supported_products):
+    raise SystemExit(f"Expected 4 identical B200 or GB300 GPUs, found: {devices}")
 
 with open(sys.argv[1], "w", encoding="utf-8") as output:
     json.dump({"visible_gpu_count": len(devices), "devices": devices}, output, indent=2)
@@ -165,7 +210,8 @@ if grep -q 'mean_volume: -inf' "$AUDIO_STATS_FILE"; then
 fi
 
 sha256sum "$VIDEO_FILE" > "$SHA_FILE"
-export DYNAMO_REVISION IMAGE_REF MODEL MODEL_REVISION FASTH3_LORA_PATH FASTH3_REVISION FASTH3_SHA256
+export DYNAMO_REVISION IMAGE_REF MODEL MODEL_REVISION FASTH3_LORA_PATH FASTH3_VARIANT
+export FASTH3_REVISION FASTH3_SHA256 ATTENTION_BACKEND FASTVIDEO_VSA_TOPK FASTVIDEO_VSA_SM100A
 python3 - "$METADATA_FILE" "$HARDWARE_FILE" "$REQUEST_FILE" "$TIMING_FILE" <<'PY'
 import importlib.metadata
 import json
@@ -199,6 +245,7 @@ metadata = {
         "ai-dynamo": version("ai-dynamo"),
         "vllm": version("vllm"),
         "vllm-omni": version("vllm-omni"),
+        "fastvideo-kernel": version("fastvideo-kernel"),
         "av": version("av"),
     },
     "hardware": hardware,
@@ -209,7 +256,16 @@ if os.environ["FASTH3_LORA_PATH"]:
         "adapter_path": os.environ["FASTH3_LORA_PATH"],
         "adapter_revision": os.environ["FASTH3_REVISION"],
         "adapter_sha256": os.environ["FASTH3_SHA256"],
+        "variant": os.environ["FASTH3_VARIANT"],
+        "attention_backend": os.environ["ATTENTION_BACKEND"],
     }
+    if os.environ["FASTH3_VARIANT"].startswith("vsa-"):
+        metadata["fasth3"]["fastvideo_vsa_topk"] = int(
+            os.environ["FASTVIDEO_VSA_TOPK"]
+        )
+        metadata["fasth3"]["fastvideo_vsa_sm100a"] = (
+            os.environ["FASTVIDEO_VSA_SM100A"] == "1"
+        )
 with open(sys.argv[1], "w", encoding="utf-8") as output:
     json.dump(metadata, output, indent=2)
     output.write("\n")

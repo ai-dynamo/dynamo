@@ -77,7 +77,9 @@ vllm:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: vllm/vllm-openai
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.28.0-ubuntu2404
+    # vLLM-Omni 0.29 uses the vLLM 0.29 KV-cache layout API (including
+    # compute_layout_strides), so the runtime base must move in lockstep.
+    runtime_image_tag: v0.29.0-ubuntu2404
     # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.2-base-ubuntu24.04
     # (Docker Hub), NOT a self-baseline of the third-party vllm/vllm-openai image.
     # vllm-openai is built FROM nvidia/cuda, so this attributes everything vLLM
@@ -101,8 +103,8 @@ vllm:
     base_image_tag: 22.04
     runtime_image_tag: v0.28.0
     # No baseline_sbom: cpu images are unshipped and skip the compliance stages.
-  vllm_omni_ref: "v0.28.0"
-  # vLLM-Omni 0.28.0 requires transformers>=5.10.1,<5.15, while vLLM's own
+  vllm_omni_ref: "v0.29.0rc1"
+  # vLLM-Omni 0.29.0rc1 requires transformers>=5.13,<5.15, while vLLM's own
   # unbounded transformers>=5.5.3 lets the release images resolve to 5.15.1.
   # Omni is layered against the installed Transformers version, so without
   # this pin its dependency solve is unsatisfiable. Remove the pin once

@@ -855,9 +855,12 @@ class OmniHandler(BaseOmniHandler):
         model_fps = getattr(output_sp, "fps", None) or getattr(
             output_sp, "frame_rate", None
         )
-        output_fps = int(
-            model_fps or getattr(self.config, "default_video_fps", DEFAULT_VIDEO_FPS)
-        )
+        if model_fps is None:
+            output_fps = int(
+                getattr(self.config, "default_video_fps", DEFAULT_VIDEO_FPS)
+            )
+        else:
+            output_fps = int(model_fps)
 
         logger.info(
             "Video diffusion request: prompt='%s...', size=%sx%s, frames=%s, fps=%s",
