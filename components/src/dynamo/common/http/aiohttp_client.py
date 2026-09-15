@@ -17,7 +17,13 @@ from typing import Optional
 import aiohttp
 from yarl import URL
 
-from .base import HttpClient, HttpConnectionError, HttpStatusError, HttpTimeoutError
+from .base import (
+    HttpBodyTooLargeError,
+    HttpClient,
+    HttpConnectionError,
+    HttpStatusError,
+    HttpTimeoutError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +79,31 @@ class AiohttpClient(HttpClient):
                 )
         return self._session
 
-    async def _fetch_simple(self, url: str, timeout: float) -> bytes:
+    @staticmethod
+    async def _read_response(
+        response: aiohttp.ClientResponse, url: str, max_bytes: Optional[int]
+    ) -> bytes:
+        if max_bytes is None:
+            return await response.read()
+
+        content_length = response.headers.get("Content-Length")
+        if content_length is not None:
+            try:
+                if int(content_length) > max_bytes:
+                    raise HttpBodyTooLargeError(max_bytes, url)
+            except ValueError:
+                pass
+
+        body = bytearray()
+        async for chunk in response.content.iter_chunked(min(64 * 1024, max_bytes + 1)):
+            body.extend(chunk)
+            if len(body) > max_bytes:
+                raise HttpBodyTooLargeError(max_bytes, url)
+        return bytes(body)
+
+    async def _fetch_simple(
+        self, url: str, timeout: float, *, max_bytes: Optional[int] = None
+    ) -> bytes:
         session = await self._get_session()
         client_timeout = self._effective_timeout(timeout)
         try:
@@ -81,7 +111,7 @@ class AiohttpClient(HttpClient):
                 url, timeout=client_timeout, allow_redirects=True
             ) as response:
                 response.raise_for_status()
-                return await response.read()
+                return await self._read_response(response, url, max_bytes)
         except aiohttp.ClientResponseError as e:
             raise HttpStatusError(e.status, e.message or "", url) from e
         except (asyncio.TimeoutError, aiohttp.ServerTimeoutError) as e:
@@ -96,7 +126,7 @@ class AiohttpClient(HttpClient):
             raise HttpConnectionError(f"HTTP error loading {url}: {e}") from e
 
     async def _fetch_body_or_redirect(
-        self, url: str, timeout: float
+        self, url: str, timeout: float, *, max_bytes: Optional[int] = None
     ) -> tuple[bytes | None, str | None]:
         session = await self._get_session()
         client_timeout = self._effective_timeout(timeout)
@@ -109,13 +139,13 @@ class AiohttpClient(HttpClient):
                     if location:
                         next_url = str(response.url.join(URL(location)))
                         return None, next_url
-                    return await response.read(), None
+                    return await self._read_response(response, url, max_bytes), None
 
                 try:
                     response.raise_for_status()
                 except aiohttp.ClientResponseError as e:
                     raise HttpStatusError(e.status, e.message or "", url) from e
-                return await response.read(), None
+                return await self._read_response(response, url, max_bytes), None
         except (asyncio.TimeoutError, aiohttp.ServerTimeoutError) as e:
             raise HttpTimeoutError(f"Timeout loading {url}") from e
         except (

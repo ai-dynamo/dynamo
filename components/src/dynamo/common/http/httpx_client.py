@@ -28,7 +28,13 @@ from typing import Optional
 
 import httpx
 
-from .base import HttpClient, HttpConnectionError, HttpStatusError, HttpTimeoutError
+from .base import (
+    HttpBodyTooLargeError,
+    HttpClient,
+    HttpConnectionError,
+    HttpStatusError,
+    HttpTimeoutError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -95,10 +101,45 @@ class HttpxClient(HttpClient):
                 )
         return self._client
 
-    async def _fetch_simple(self, url: str, timeout: float) -> bytes:
+    @staticmethod
+    async def _read_response(
+        response: httpx.Response, url: str, max_bytes: Optional[int]
+    ) -> bytes:
+        if max_bytes is None:
+            return response.content
+
+        content_length = response.headers.get("Content-Length")
+        if content_length is not None:
+            try:
+                if int(content_length) > max_bytes:
+                    raise HttpBodyTooLargeError(max_bytes, url)
+            except ValueError:
+                pass
+
+        body = bytearray()
+        async for chunk in response.aiter_bytes(
+            chunk_size=min(64 * 1024, max_bytes + 1)
+        ):
+            body.extend(chunk)
+            if len(body) > max_bytes:
+                raise HttpBodyTooLargeError(max_bytes, url)
+        return bytes(body)
+
+    async def _fetch_simple(
+        self, url: str, timeout: float, *, max_bytes: Optional[int] = None
+    ) -> bytes:
         client = await self._get_client()
         async with self._get_semaphore():
             try:
+                if max_bytes is not None:
+                    async with client.stream(
+                        "GET",
+                        url,
+                        timeout=self._per_call_timeout(timeout),
+                        follow_redirects=True,
+                    ) as response:
+                        response.raise_for_status()
+                        return await self._read_response(response, url, max_bytes)
                 response = await client.get(
                     url, timeout=self._per_call_timeout(timeout)
                 )
@@ -114,7 +155,7 @@ class HttpxClient(HttpClient):
                 raise HttpConnectionError(f"HTTP error loading {url}: {e}") from e
 
     async def _fetch_body_or_redirect(
-        self, url: str, timeout: float
+        self, url: str, timeout: float, *, max_bytes: Optional[int] = None
     ) -> tuple[bytes | None, str | None]:
         client = await self._get_client()
         async with self._get_semaphore():
@@ -125,6 +166,7 @@ class HttpxClient(HttpClient):
                 response = await client.send(
                     request,
                     follow_redirects=False,
+                    stream=max_bytes is not None,
                 )
             except httpx.TimeoutException as e:
                 raise HttpTimeoutError(f"Timeout loading {url}") from e
@@ -140,13 +182,13 @@ class HttpxClient(HttpClient):
                         next_url = str(response.url.join(location))
                         return None, next_url
                     # 3xx without Location: treat as terminal, surface the body.
-                    return response.content, None
+                    return await self._read_response(response, url, max_bytes), None
 
                 try:
                     response.raise_for_status()
                 except httpx.HTTPStatusError as e:
                     raise HttpStatusError(e.response.status_code, str(e), url) from e
-                return response.content, None
+                return await self._read_response(response, url, max_bytes), None
             finally:
                 await response.aclose()
 
