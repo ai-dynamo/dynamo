@@ -1299,6 +1299,13 @@ fn engine_config_advertises_vllm_generate_capability() {
             .get("vllm_inference_v1_generate"),
         Some(&json!(true))
     );
+    assert_eq!(
+        model
+            .engine_config()
+            .runtime_data
+            .get(dynamo_llm::lora::LORA_REQUIRES_REGISTRATION),
+        Some(&json!(true))
+    );
 }
 
 #[test]

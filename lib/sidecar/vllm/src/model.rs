@@ -144,16 +144,21 @@ impl DiscoveredModel {
 
     pub(crate) fn engine_config(&self) -> EngineConfig {
         let parallelism = self.server.parallelism.as_ref();
-        let runtime_data = if self.server.supports_native_sampling_params_json {
-            [(
-                VLLM_INFERENCE_V1_GENERATE_CAPABILITY.to_string(),
-                serde_json::Value::Bool(true),
-            )]
-            .into_iter()
-            .collect()
-        } else {
-            Default::default()
-        };
+        let mut runtime_data: std::collections::HashMap<String, serde_json::Value> =
+            if self.server.supports_native_sampling_params_json {
+                [(
+                    VLLM_INFERENCE_V1_GENERATE_CAPABILITY.to_string(),
+                    serde_json::Value::Bool(true),
+                )]
+                .into_iter()
+                .collect()
+            } else {
+                Default::default()
+            };
+        runtime_data.insert(
+            dynamo_llm::lora::LORA_REQUIRES_REGISTRATION.to_string(),
+            serde_json::Value::Bool(true),
+        );
         EngineConfig {
             model: self.source.clone(),
             served_model_name: Some(self.served_name.clone()),

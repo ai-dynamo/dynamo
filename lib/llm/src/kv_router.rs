@@ -1221,16 +1221,7 @@ where
             .await
     }
 
-    /// Narrow the candidate workers to this LoRA's allocated/loaded replicas, staying strictly
-    /// within the existing candidate universe (never widening). Returns the (possibly narrowed)
-    /// `allowed_worker_ids` to pass to the scheduler.
-    ///
-    /// - No filter (LoRA serving disabled) or base-model request (`lora_name` is `None`):
-    ///   returns `allowed_worker_ids` unchanged.
-    /// - Pinned worker: KV-cache correctness wins — it is always retained even if not in the
-    ///   LoRA replica set (the worker lazy-loads the adapter).
-    /// - If narrowing would exclude every candidate, falls back to the original set so the
-    ///   request stays routable (lazy-load path) rather than failing.
+    /// Narrow LoRA candidates, retaining a KV pin only when the worker can serve the adapter.
     fn narrow_allowed_by_lora(
         &self,
         lora_name: Option<&str>,
@@ -1248,24 +1239,16 @@ where
         if base.is_empty() {
             return allowed_worker_ids;
         }
-        let mut narrowed: HashSet<WorkerId> = filter
-            .filter_worker_ids_for_lora(Some(lora_name), &base)
-            .into_iter()
-            .collect();
-        // Retain a pinned worker only if it is already within the candidate universe — never
-        // widen the caller's `allowed_worker_ids` (KV-cache / EPP / migration invariants depend
-        // on that set). If the filter excluded an in-universe pinned worker, re-add it so the
-        // pin still wins for cache correctness; if the pin is outside the universe, honor the
-        // caller's constraint and drop it.
-        if let Some(p) = pinned_worker
-            && base.contains(&p.worker_id)
-        {
-            narrowed.insert(p.worker_id);
-        }
-        if narrowed.is_empty() {
-            return allowed_worker_ids;
-        }
-        Some(narrowed)
+        Some(
+            filter
+                .filter_worker_ids_for_lora_with_pin(
+                    Some(lora_name),
+                    &base,
+                    pinned_worker.map(|worker| worker.worker_id),
+                )
+                .into_iter()
+                .collect(),
+        )
     }
 
     /// Give these tokens, find the worker with the best weighted cache hit.
