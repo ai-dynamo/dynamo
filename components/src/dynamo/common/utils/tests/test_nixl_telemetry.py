@@ -103,40 +103,52 @@ class TestNixlPrometheusBasePort:
         env = {**OPERATOR_ENV, "NIXL_TELEMETRY_ENABLE": enabled_value}
         assert nixl_prometheus_base_port(env) == 19090
 
-    def test_unset_exporter_is_not_prometheus(self):
-        env = dict(OPERATOR_ENV)
-        del env["NIXL_TELEMETRY_EXPORTER"]
+    @pytest.mark.parametrize(
+        "enabled_value", ["n", "0", "no", "off", "false", "disable", "FALSE"]
+    )
+    def test_nixl_false_token_disables_telemetry(self, enabled_value):
+        env = {**OPERATOR_ENV, "NIXL_TELEMETRY_ENABLE": enabled_value}
         assert nixl_prometheus_base_port(env) is None
 
-    def test_unset_port_uses_nixl_default(self):
+    @pytest.mark.parametrize("enabled_value", ["", "maybe", " y", "y "])
+    def test_invalid_enable_value_is_rejected(self, enabled_value):
+        env = {**OPERATOR_ENV, "NIXL_TELEMETRY_ENABLE": enabled_value}
+        with pytest.raises(ValueError, match="NIXL_TELEMETRY_ENABLE"):
+            nixl_prometheus_base_port(env)
+
+    @pytest.mark.parametrize(
+        ("removed_name", "expected"),
+        [
+            ("NIXL_TELEMETRY_EXPORTER", None),
+            ("NIXL_TELEMETRY_PROMETHEUS_PORT", DEFAULT_NIXL_PROMETHEUS_PORT),
+        ],
+    )
+    def test_unset_value(self, removed_name, expected):
         env = dict(OPERATOR_ENV)
-        del env["NIXL_TELEMETRY_PROMETHEUS_PORT"]
-        assert nixl_prometheus_base_port(env) == DEFAULT_NIXL_PROMETHEUS_PORT
+        del env[removed_name]
+        assert nixl_prometheus_base_port(env) == expected
 
     def test_hexadecimal_port_is_recognized(self):
         env = {**OPERATOR_ENV, "NIXL_TELEMETRY_PROMETHEUS_PORT": "0x4A92"}
         assert nixl_prometheus_base_port(env) == 19090
 
     @pytest.mark.parametrize(
-        "port_value", ["abc", "0", "99999", " 9090", "+9090", "9_090"]
+        "port_value", ["abc", "99999", " 9090", "+9090", "9" * 5000]
     )
-    def test_unusable_port_is_not_recognized(self, port_value):
+    def test_invalid_port_is_rejected(self, port_value):
         env = {**OPERATOR_ENV, "NIXL_TELEMETRY_PROMETHEUS_PORT": port_value}
-        assert nixl_prometheus_base_port(env) is None
+        with pytest.raises(ValueError, match="NIXL_TELEMETRY_PROMETHEUS_PORT"):
+            nixl_prometheus_base_port(env)
 
-    def test_oversized_decimal_port_is_not_recognized(self):
-        # This exceeds Python's default integer-string conversion limit.
-        env = {**OPERATOR_ENV, "NIXL_TELEMETRY_PROMETHEUS_PORT": "9" * 5000}
-        assert nixl_prometheus_base_port(env) is None
+    def test_ephemeral_port_is_rejected_by_dynamo(self):
+        env = {**OPERATOR_ENV, "NIXL_TELEMETRY_PROMETHEUS_PORT": "0"}
+        with pytest.raises(ValueError, match="ephemeral"):
+            nixl_prometheus_base_port(env)
 
     @pytest.mark.parametrize(
         "override",
         [
-            {"NIXL_TELEMETRY_ENABLE": "n"},
-            {"NIXL_TELEMETRY_ENABLE": ""},
-            {"NIXL_TELEMETRY_ENABLE": " y"},
-            {"NIXL_TELEMETRY_ENABLE": "y "},
-            {"NIXL_TELEMETRY_EXPORTER": "file"},
+            {"NIXL_TELEMETRY_EXPORTER": "doca"},
             {"NIXL_TELEMETRY_EXPORTER": "PROMETHEUS"},
             {"NIXL_TELEMETRY_EXPORTER": "prometheus "},
         ],

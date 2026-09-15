@@ -103,7 +103,7 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 <ParamField path="NIXL_TELEMETRY_EXPORTER" type="string">
   NIXL telemetry exporter to use, e.g. `prometheus`.
 
-  Required for a Prometheus endpoint, with the exact lowercase value `prometheus`. NIXL has no default exporter: with this variable unset, or set to another value, enabling telemetry collects metrics in-process and opens no Prometheus port.
+  Required for a Prometheus endpoint, with the exact lowercase value `prometheus`. NIXL has no default exporter: when this variable is unset, telemetry is collected in-process without opening a Prometheus port. Other valid exporters, such as `doca`, use their own configuration; an exporter that NIXL cannot load makes agent construction fail.
 
   **Operator preset:** `prometheus` on worker, prefill, and decode pods.
 </ParamField>
@@ -115,7 +115,7 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 
   Within a single worker, treat this as the **base** of a range rather than one port. SGLang runs one scheduler process per node-local GPU and each builds its own NIXL agent, so Dynamo gives node-local rank *i* the port `base + i` and the operator declares the whole range on the pod as `nixl`, `nixl-1`, … so Prometheus scrapes every rank. Leave room for as many consecutive ports as the pod has GPUs (up to 8).
 
-  Optional: with the exporter selected, NIXL binds a listener whether or not this is set. `19090` is Dynamo's convention rather than a NIXL default, and with this variable unset the exporter falls back to its own built-in `9090` — which is the `DYN_SYSTEM_PORT` operator preset, so set it explicitly to keep the two apart. A noninteger value or a value outside `1`-`65535` is not a fallback: NIXL then binds no exporter at all.
+  Optional: with the exporter selected, NIXL binds a listener whether or not this is set. `19090` is Dynamo's convention rather than a NIXL default, and with this variable unset the exporter falls back to its own built-in `9090` — which is the `DYN_SYSTEM_PORT` operator preset, so set it explicitly to keep the two apart. A malformed or out-of-range value is not a fallback: NIXL rejects it and agent construction fails. NIXL accepts `0` as an ephemeral port, but Dynamo rejects it because that port cannot be declared or configured as a scrape target.
 
   **Operator preset:** `19090` on worker, prefill, and decode pods.
 </ParamField>
