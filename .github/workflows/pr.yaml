@@ -436,7 +436,6 @@ jobs:
     timeout-minutes: 10
     container:
       image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}-${{ needs.vllm-cpu-build.outputs.target_tag_plain }}
-      options: --shm-size=1g
       env:
         HOME: /__w/dynamo/dynamo
         USER: dynamo
@@ -444,6 +443,8 @@ jobs:
       OMP_NUM_THREADS: '2'
       VLLM_CPU_KVCACHE_SPACE: '1'
       VLLM_CPU_OMP_THREADS_BIND: nobind
+      # ARC job containers provide only 64 MiB of shared memory.
+      VLLM_ENABLE_V1_MULTIPROCESSING: '0'
       HF_HUB_OFFLINE: '1'
     permissions:
       contents: read
