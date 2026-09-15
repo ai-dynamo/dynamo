@@ -35,7 +35,7 @@ on:
 jobs:
   ensure-vcluster:
     name: Ensure vCluster
-    runs-on: prod-deploy-tester-v1
+    runs-on: prod-deploy-tester-v1-east-canary
     timeout-minutes: 30
     permissions:
       contents: read
@@ -68,7 +68,7 @@ jobs:
   dgdr-deploy-test:
     name: CPU / ${{ matrix.suite }}
     needs: ensure-vcluster
-    runs-on: prod-deploy-tester-v1
+    runs-on: prod-deploy-tester-v1-east-canary
     timeout-minutes: 120
     strategy:
       fail-fast: false
