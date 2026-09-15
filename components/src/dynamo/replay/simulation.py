@@ -337,6 +337,16 @@ class DynamoReplayRunner:
         # Pipeline parallelism is already represented in the public parallel
         # mapping and used for AIC capacity. MockEngineArgs has no PP field.
         lowered.pop("aic_pp_size", None)
+        # AISimulate exposes vLLM's attention-DP prefill cadence, while the
+        # current Dynamo replay engine does not. The public default is neutral,
+        # so remove it at this compatibility boundary; reject non-default
+        # values rather than silently changing replay semantics.
+        prefill_schedule_interval = lowered.pop("prefill_schedule_interval", 1)
+        if prefill_schedule_interval != 1:
+            raise ValueError(
+                "Dynamo replay does not support prefill_schedule_interval values "
+                "other than 1"
+            )
         return MockEngineArgs.from_json(json.dumps(lowered))
 
     def _run_trace(

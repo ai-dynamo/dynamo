@@ -93,11 +93,13 @@ def test_best_available_uses_aic_core_wheel_facade(monkeypatch):
 
     class _FakeAicFacade:
         last_config = None
+        last_worker_type = None
         last_options = None
 
         @classmethod
-        def best_available(cls, config, options):
+        def best_available(cls, config, worker_type, options):
             cls.last_config = config
+            cls.last_worker_type = worker_type
             cls.last_options = options
             return sentinel
 
@@ -122,6 +124,7 @@ def test_best_available_uses_aic_core_wheel_facade(monkeypatch):
     )
 
     assert _FakeAicFacade.last_config is config
+    assert _FakeAicFacade.last_worker_type == "prefill"
     assert _FakeAicFacade.last_options is options
     assert model.diagnostics()["readiness"] == "ready"
 
