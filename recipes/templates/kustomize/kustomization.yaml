@@ -13,11 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - "your-base-recipe.yaml"
 components:
+  # The schema Component must stay first; strategic merge patches depend on it.
+  - components/dynamo-openapi
   - components/cache-binding/agg
   - components/registry-credentials/agg
   - components/scheduling/agg
