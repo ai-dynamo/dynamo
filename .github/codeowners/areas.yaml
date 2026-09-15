@@ -86,6 +86,7 @@ areas:
   - components/src/dynamo/trtllm/request_handlers/
   - components/src/dynamo/trtllm/tests/
   - components/src/dynamo/trtllm/utils/
+  - benchmarks/test_logprobs_stream*.py
   - components/src/dynamo/trtllm/workers/
   - examples/backends/trtllm/
   - lib/sidecar/trtllm/
