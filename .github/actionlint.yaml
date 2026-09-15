@@ -13,4 +13,5 @@ paths:
 
 self-hosted-runner:
   labels:
+    - dynamo-gcp-dev-02-nightly-v1
     - prod-builder-v3
