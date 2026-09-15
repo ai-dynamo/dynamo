@@ -144,14 +144,13 @@ Measured KV reuse on this workload is 8.8%. That is not a misconfiguration — t
 
 <div data-variant="disagg">
 
-Mooncake chat trace replay, 1,805 requests. Concurrency 14 is this target's operating point — the highest concurrency meeting both legs of the gate. The concurrency 7 row is included only because it is where the aggregated target runs, so the two can be read side by side.
+Mooncake chat trace replay, 1,805 requests. Concurrency 14 is this target's operating point — the highest concurrency meeting both legs of the gate.
 
 | Concurrency | tok/s/GPU | E2E tok/s/user | TTFT p50 | ITL |
 | ----------- | --------- | -------------- | -------- | --- |
-| **14**      | **85**    | 54.9           | 2,230 ms | 15.98 ms |
-| 7           | 55        | 70.6           | 1,018 ms | 13.15 ms |
+| 14          | **85**    | 54.9           | 2,230 ms | 15.98 ms |
 
-At its own operating point disaggregation is level with aggregation — 85 against 87 tok/s/GPU under the same gate — so it is an SLA and scaling choice for this model rather than a throughput win or loss. It buys per-token latency (ITL 15.98 ms against the aggregated recipe's 19.15 ms) and independent prefill/decode scaling, for twice the GPUs. At concurrency 7 the deployment is simply under-loaded, which is what the 55 reflects.
+This is level with the aggregated target's 87 tok/s/GPU under the same gate, so disaggregation is an SLA and scaling choice for this model rather than a throughput win or loss. It buys per-token latency (ITL 15.98 ms against the aggregated recipe's 19.15 ms) and lets prefill and decode scale independently, for twice the GPUs. Lowering concurrency trades throughput for interactivity — at C=7 the same deployment gives 55 tok/s/GPU but E2E 70.6 tok/s/user and TTFT p50 1,018 ms.
 
 38 of the trace's 1,805 requests are rejected in every run, at every concurrency: the trace is multi-turn and its accumulated prompts reach 614,440 tokens against this checkpoint's 262,144-token ceiling, so they return HTTP 400 and are excluded from the metrics.
 

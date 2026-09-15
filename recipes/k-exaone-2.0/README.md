@@ -158,19 +158,19 @@ legs**, not peak throughput.
 | Configuration | Concurrency | tok/s/GPU | E2E tok/s/user | TTFT p50 | ITL |
 |---|---|---|---|---|---|
 | Aggregated (4 GPU) | 7 | **87** | 51.4 | 291 ms | 19.15 ms |
-| Disaggregated (8 GPU) | **14** | **85** | 54.9 | 2,230 ms | 15.98 ms |
-| Disaggregated (8 GPU) | 7 | 55 | 70.6 | 1,018 ms | 13.15 ms |
+| Disaggregated (8 GPU) | 14 | **85** | 54.9 | 2,230 ms | 15.98 ms |
 
-Each row is that configuration's own operating point. The disaggregated C=7 row is kept only
-because it is the concurrency the aggregated row runs at; it is **not** the disaggregated
-recipe's operating point. At C=7 disaggregation clears the gate with so much margin
-(E2E 70.6 against 50, TTFT 1,018 ms against 5,000) that it is simply under-loaded, and reading
-55 against 87 as "disaggregation costs 37%" is an artifact of that.
+Each row is that configuration's own operating point, which is why the concurrencies differ;
+tok/s/GPU is what makes them comparable, not a matching concurrency.
 
-Run at its own operating point, **the two topologies are level**: 85 against 87 tok/s/GPU,
-both meeting the same gate. Disaggregation is therefore an SLA and scaling choice for this
-model, not a throughput win or loss -- it buys per-token latency (ITL 15.98 ms against 19.15)
-and independent prefill/decode scaling, for twice the GPUs.
+**The two topologies are level** -- 85 against 87 tok/s/GPU under the same gate. Disaggregation
+is an SLA and scaling choice for this model, not a throughput win or loss: it buys per-token
+latency (ITL 15.98 ms against 19.15) and lets prefill and decode scale independently, for twice
+the GPUs.
+
+Concurrency is the latency/throughput knob within a target. Running the disaggregated recipe at
+C=7 instead trades throughput for interactivity: 55 tok/s/GPU, but E2E 70.6 tok/s/user and
+TTFT p50 1,018 ms.
 
 Aggregated on the **full** 12,031-request trace, for reference: **97 tok/s/GPU** at C=8,
 E2E 51.1, TTFT 312 ms.
