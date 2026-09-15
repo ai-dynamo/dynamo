@@ -848,7 +848,8 @@ sglang_configs = {
         env={
             "DYN_ENCODE_GPU_MEM": "0.1",
             "DYN_WORKER_GPU_MEM": "0.4",
-            "DYN_SGL_EMBEDDING_TRANSFER_MODE": "local",
+            # Use NIXL so the cache test covers the real transfer path.
+            "DYN_SGL_EMBEDDING_TRANSFER_MODE": "nixl-write",
             # The clips come from the image_server over plain http on localhost,
             # which the URL policy rejects by default. This model is gated out of
             # NVDEC (see _NVDEC_UNSAFE_MODEL_TYPES), and that disabled path now
