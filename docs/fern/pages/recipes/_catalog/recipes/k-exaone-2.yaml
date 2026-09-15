@@ -19,7 +19,7 @@ targets:
     count: 4
   runtime:
     framework: vllm
-    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-k-exaone-2.0-dev.1
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:79a9d1b103d81fbdda1e97dc476a31adcaf6056e2d2f465b09173a5578a574b8
   topology: aggregated
   techniques:
   - mtp-spec-dec
@@ -45,7 +45,7 @@ targets:
     count: 8
   runtime:
     framework: vllm
-    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-k-exaone-2.0-dev.1
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:79a9d1b103d81fbdda1e97dc476a31adcaf6056e2d2f465b09173a5578a574b8
   topology: disaggregated
   techniques:
   - disagg-pd
@@ -67,6 +67,10 @@ targets:
     summary: 55 tok/s/GPU at concurrency 7, E2E 70.6 tok/s/user, TTFT p50 1,018 ms, ITL 13.15 ms; quoted at the same
       concurrency as the aggregated target for comparability, and conservative because the gate is met with wide margin
 gaps:
+- The worker image is an interim internal build; external users cannot pull it. A public
+  nvcr.io/nvidia/ai-dynamo/vllm-runtime tag is blocked on ai-dynamo/dynamo#14599, without which
+  stock vLLM 0.28.0 cannot load this NVFP4 checkpoint. The frontend already uses the public
+  nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.1 image.
 - Disaggregated is quoted at concurrency 7 for comparability with the aggregated target; its true operating point is at a higher concurrency that has not been swept.
 - The InfiniBand RDMA extended-resource name in the disaggregated manifest is cluster-specific and must be adjusted per cluster.
 - 1M context is not supported; the checkpoint declares 262,144 positions with unscaled rope.
