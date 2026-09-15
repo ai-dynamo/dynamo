@@ -15,7 +15,8 @@
 //! worker, and never interpreted in between.
 
 use dynamo_backend_common::DynamoError;
-use serde_json::{Map, Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use dynamo_sidecar_common::{json_to_struct, struct_to_json};
 
@@ -28,6 +29,33 @@ pub(crate) const REQUEST_TYPE_KEY: &str = "request_type";
 pub(crate) const CONTEXT_ONLY: &str = "context_only";
 
 const ATTRIBUTES: &str = "prefill handoff attributes";
+
+/// The handoff's JSON shape, mirroring [`pb::KvSessionRef`] field for field.
+///
+/// Both directions go through this one type, so the decode worker requires
+/// exactly what the prefill worker writes: a handoff that lost a field in
+/// transit fails here by name instead of decoding into a plausible-but-wrong
+/// session (a dropped `dp_rank` would otherwise read as rank 0 and pull KV from
+/// the wrong shard).
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Handoff {
+    session_id: String,
+    transfer_backend: String,
+    endpoints: Vec<Endpoint>,
+    dp_rank: u32,
+    /// TensorRT-LLM's own opaque state, absent only if the server sent none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    attributes: Option<Value>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Endpoint {
+    host: String,
+    port: u32,
+    protocol: String,
+}
 
 /// Encodes the prefill worker's `KvSessionRef` as the opaque JSON Dynamo
 /// forwards to the decode worker.
@@ -46,112 +74,59 @@ pub(crate) fn session_to_json(session: pb::KvSessionRef) -> Result<Value, Dynamo
         ));
     }
 
-    let endpoints: Vec<Value> = endpoints
-        .into_iter()
-        .map(|endpoint| {
-            json!({
-                "host": endpoint.host,
-                "port": endpoint.port,
-                "protocol": endpoint.protocol,
+    let handoff = Handoff {
+        session_id,
+        transfer_backend,
+        endpoints: endpoints
+            .into_iter()
+            .map(|endpoint| Endpoint {
+                host: endpoint.host,
+                port: endpoint.port,
+                protocol: endpoint.protocol,
             })
-        })
-        .collect();
-
-    let mut fields = Map::new();
-    fields.insert("session_id".to_string(), Value::String(session_id));
-    fields.insert(
-        "transfer_backend".to_string(),
-        Value::String(transfer_backend),
-    );
-    fields.insert("endpoints".to_string(), Value::Array(endpoints));
-    fields.insert("dp_rank".to_string(), json!(dp_rank));
-    if let Some(attributes) = attributes_struct {
-        fields.insert(
-            "attributes".to_string(),
-            struct_to_json(attributes, "TensorRT-LLM", ATTRIBUTES)?,
-        );
-    }
-    Ok(Value::Object(fields))
+            .collect(),
+        dp_rank,
+        attributes: attributes_struct
+            .map(|attributes| struct_to_json(attributes, "TensorRT-LLM", ATTRIBUTES))
+            .transpose()?,
+    };
+    serde_json::to_value(handoff).map_err(|error| {
+        client::protocol_error(format!("prefill handoff could not be encoded: {error}"))
+    })
 }
 
 /// Decodes the handoff JSON produced by [`session_to_json`] back into the
 /// `KvSessionRef` the decode request replays.
 pub(crate) fn session_from_json(value: &Value) -> Result<pb::KvSessionRef, DynamoError> {
-    let Value::Object(fields) = value else {
-        return Err(client::invalid_argument(
-            "decode request prefill_result.disaggregated_params must be a JSON object",
-        ));
-    };
-
-    let session_id = string_field(fields, "session_id")?.ok_or_else(|| {
-        client::invalid_argument("decode request prefill handoff is missing session_id")
+    let handoff: Handoff = serde_json::from_value(value.clone()).map_err(|error| {
+        client::invalid_argument(format!(
+            "decode request prefill_result.disaggregated_params is not a TensorRT-LLM handoff: \
+             {error}"
+        ))
     })?;
-    let transfer_backend = string_field(fields, "transfer_backend")?.unwrap_or_default();
-    let dp_rank = match fields.get("dp_rank") {
-        None | Some(Value::Null) => 0,
-        Some(value) => u32::try_from(value.as_u64().ok_or_else(|| {
-            client::invalid_argument("decode request prefill handoff dp_rank must be an integer")
-        })?)
-        .map_err(|_| {
-            client::invalid_argument("decode request prefill handoff dp_rank does not fit in u32")
-        })?,
-    };
-
-    let endpoints = match fields.get("endpoints") {
-        None | Some(Value::Null) => Vec::new(),
-        Some(Value::Array(values)) => values
-            .iter()
-            .map(endpoint_from_json)
-            .collect::<Result<_, _>>()?,
-        Some(_) => {
-            return Err(client::invalid_argument(
-                "decode request prefill handoff endpoints must be an array",
-            ));
-        }
-    };
-
-    let attributes_struct = match fields.get("attributes") {
-        None | Some(Value::Null) => None,
-        Some(value) => Some(json_to_struct(value.clone(), ATTRIBUTES)?),
-    };
-
-    Ok(pb::KvSessionRef {
-        session_id,
-        transfer_backend,
-        endpoints,
-        dp_rank,
-        attributes_struct,
-    })
-}
-
-fn endpoint_from_json(value: &Value) -> Result<pb::KvEndpoint, DynamoError> {
-    let Value::Object(fields) = value else {
+    if handoff.session_id.is_empty() {
         return Err(client::invalid_argument(
-            "decode request prefill handoff endpoint must be a JSON object",
+            "decode request prefill handoff has an empty session_id",
         ));
-    };
-    let port = fields
-        .get("port")
-        .and_then(Value::as_u64)
-        .and_then(|port| u32::try_from(port).ok())
-        .ok_or_else(|| {
-            client::invalid_argument("decode request prefill handoff endpoint port is invalid")
-        })?;
-    Ok(pb::KvEndpoint {
-        host: string_field(fields, "host")?.unwrap_or_default(),
-        port,
-        protocol: string_field(fields, "protocol")?.unwrap_or_default(),
-    })
-}
-
-fn string_field(fields: &Map<String, Value>, key: &str) -> Result<Option<String>, DynamoError> {
-    match fields.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(value)) => Ok(Some(value.clone())),
-        Some(_) => Err(client::invalid_argument(format!(
-            "decode request prefill handoff {key} must be a string"
-        ))),
     }
+    Ok(pb::KvSessionRef {
+        session_id: handoff.session_id,
+        transfer_backend: handoff.transfer_backend,
+        endpoints: handoff
+            .endpoints
+            .into_iter()
+            .map(|endpoint| pb::KvEndpoint {
+                host: endpoint.host,
+                port: endpoint.port,
+                protocol: endpoint.protocol,
+            })
+            .collect(),
+        dp_rank: handoff.dp_rank,
+        attributes_struct: handoff
+            .attributes
+            .map(|attributes| json_to_struct(attributes, ATTRIBUTES))
+            .transpose()?,
+    })
 }
 
 /// `extra` payload marking a request as prefill-only.

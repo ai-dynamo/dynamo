@@ -69,7 +69,8 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 # TensorRT-LLM reports its `max_input_len` default instead of a context length
 # and the sidecar discards it, so pass the same value to both. When the caller
 # supplies `--max_seq_len`, theirs wins and the sidecar adopts the engine's
-# report rather than overriding it with a default it was never told about.
+# `Control.GetModelInfo` report rather than overriding it with a default it was
+# never told about.
 TRTLLM_MAX_SEQ_LEN_ARGS=()
 TRTLLM_CONTEXT_LENGTH_ARGS=()
 trtllm_max_seq_len_supplied=0
@@ -87,13 +88,23 @@ if [[ -n "$TRTLLM_CONTEXT_LENGTH" ]]; then
 fi
 
 # `--grpc-protocol openengine` needs the OpenEngine bindings, which resolve only
-# from a custom index and which TRT-LLM keeps behind its optional `openengine`
-# extra. Constraints copied from that extra so we resolve what upstream does.
-if ! "$TRTLLM_PYTHON" -c "import openengine.v1" >/dev/null 2>&1; then
+# from a custom index. Both packages are pinned to BSR module commit
+# 768a93c7b44e, the same revision the vendored protos in `proto/` were generated
+# from (see `proto/README.md`), so the engine and the sidecar speak the same
+# contract revision.
+#
+# The protobuf package is pinned by *gencode* version as well: buf publishes one
+# build per protoc release, and a gencode newer than the runtime in the
+# TensorRT-LLM image fails at import with "Detected incompatible Protobuf
+# Gencode/Runtime versions". 33.5 matches the protobuf 6.33.x runtime those
+# images ship. Raise it only together with the image's protobuf.
+OPENENGINE_PROTOBUF_VERSION="33.5.0.1.20260730172104+768a93c7b44e"
+OPENENGINE_GRPC_VERSION="1.78.1.1.20260730172104+768a93c7b44e"
+if ! "$TRTLLM_PYTHON" -c "import openengine.v1.openengine_pb2" >/dev/null 2>&1; then
     "$TRTLLM_PYTHON" -m pip install --no-cache-dir \
         --extra-index-url https://buf.build/gen/python \
-        "openengine-openengine-grpc-python" \
-        "openengine-openengine-protocolbuffers-python"
+        "openengine-openengine-grpc-python==${OPENENGINE_GRPC_VERSION}" \
+        "openengine-openengine-protocolbuffers-python==${OPENENGINE_PROTOBUF_VERSION}"
 fi
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
