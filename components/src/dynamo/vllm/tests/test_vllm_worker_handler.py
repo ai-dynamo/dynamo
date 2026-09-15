@@ -1942,13 +1942,17 @@ class TestWeightVersionObservation:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("paused", [None, 0, 1, "false", [], {}])
-    async def test_rejects_non_bool_pause_state(self, handler, paused):
+    async def test_non_bool_pause_state_preserves_version(
+        self, handler, paused, caplog
+    ):
         handler.engine_client.is_paused.return_value = paused
 
         assert await handler.get_weight_version({}) == {
-            "status": "error",
-            "message": "engine returned an invalid pause state",
+            "status": "ok",
+            "version": "checkpoint-1",
+            "paused": None,
         }
+        assert "engine returned an invalid pause state" in caplog.text
         assert not handler._pause_lock.locked()
 
     @pytest.mark.asyncio
@@ -1966,13 +1970,15 @@ class TestWeightVersionObservation:
         assert not handler._pause_lock.locked()
 
     @pytest.mark.asyncio
-    async def test_query_error_returns_error(self, handler):
+    async def test_query_error_preserves_version(self, handler, caplog):
         handler.engine_client.is_paused.side_effect = RuntimeError("query failed")
 
         assert await handler.get_weight_version({}) == {
-            "status": "error",
-            "message": "query failed",
+            "status": "ok",
+            "version": "checkpoint-1",
+            "paused": None,
         }
+        assert "query failed" in caplog.text
         handler.runtime.shutdown.assert_not_called()
         assert not handler._pause_lock.locked()
 
