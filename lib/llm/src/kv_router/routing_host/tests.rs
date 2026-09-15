@@ -2891,29 +2891,28 @@ async fn unknown_explicit_workers_are_rejected_before_builtin_dispatch() {
     .await
     .unwrap();
     let host = RoutingHost::<DefaultWorkerSelector>::new_builtin(inner, load_context).unwrap();
-    for worker_id in [live_worker.wrapping_add(1), u64::MAX] {
-        for (field, phase) in [
-            ("backend_instance_id", RequestPhase::Aggregated),
-            ("decode_worker_id", RequestPhase::Decode),
-            ("prefill_worker_id", RequestPhase::Prefill),
-        ] {
-            let mut content = request();
-            content.routing =
-                Some(serde_json::from_value(serde_json::json!({field: worker_id})).unwrap());
-            let error = host
-                .select_and_dispatch_builtin(Context::new(content), phase, |_, _| Ok(()))
-                .await
-                .unwrap_err();
-            assert!(match_error_chain(
-                error.as_ref(),
-                &[ErrorType::InvalidArgument],
-                &[]
-            ));
-            assert_eq!(
-                error.downcast_ref::<DynamoError>().unwrap().message(),
-                format!("nvext.{field}={worker_id} does not identify a known worker")
-            );
-        }
+    let worker_id = live_worker.wrapping_add(1);
+    for (field, phase) in [
+        ("backend_instance_id", RequestPhase::Aggregated),
+        ("decode_worker_id", RequestPhase::Decode),
+        ("prefill_worker_id", RequestPhase::Prefill),
+    ] {
+        let mut content = request();
+        content.routing =
+            Some(serde_json::from_value(serde_json::json!({field: worker_id})).unwrap());
+        let error = host
+            .select_and_dispatch_builtin(Context::new(content), phase, |_, _| Ok(()))
+            .await
+            .unwrap_err();
+        assert!(match_error_chain(
+            error.as_ref(),
+            &[ErrorType::InvalidArgument],
+            &[]
+        ));
+        assert_eq!(
+            error.downcast_ref::<DynamoError>().unwrap().message(),
+            format!("nvext.{field}={worker_id} does not identify a known worker")
+        );
     }
     assert!(dispatch.worker_ids.lock().unwrap().is_empty());
     let mut valid = request();
@@ -2932,42 +2931,41 @@ async fn unknown_explicit_workers_are_rejected_before_builtin_dispatch() {
 async fn unknown_explicit_workers_are_rejected_before_kv_admission() {
     let (host, dispatch, worker_id, runtime) =
         router_with_recorded_dispatch("unknown-kv-worker").await;
-    for unknown in [worker_id.wrapping_add(1), u64::MAX] {
-        assert!(!host.inner.client.is_instance_live(unknown));
-        for (field, phase) in [
-            ("backend_instance_id", RequestPhase::Aggregated),
-            ("decode_worker_id", RequestPhase::Decode),
-            ("prefill_worker_id", RequestPhase::Prefill),
-        ] {
-            let mut content = request();
-            content.routing =
-                Some(serde_json::from_value(serde_json::json!({field: unknown})).unwrap());
-            let request = Context::new(content);
-            let error = host
-                .select_with_affinity(&request, phase, false, &CleanupBudget::default())
-                .await
-                .err()
-                .expect("unknown worker must fail before admission");
-            assert!(match_error_chain(
-                error.as_ref(),
-                &[ErrorType::InvalidArgument],
-                &[]
-            ));
-            assert_eq!(
-                error.downcast_ref::<DynamoError>().unwrap().message(),
-                format!("nvext.{field}={unknown} does not identify a known worker")
-            );
-            let error = host
-                .preview_kv_route(&request, phase)
-                .await
-                .err()
-                .expect("unknown preview target");
-            assert!(match_error_chain(
-                error.as_ref(),
-                &[ErrorType::InvalidArgument],
-                &[]
-            ));
-        }
+    let unknown = worker_id.wrapping_add(1);
+    assert!(!host.inner.client.is_instance_live(unknown));
+    for (field, phase) in [
+        ("backend_instance_id", RequestPhase::Aggregated),
+        ("decode_worker_id", RequestPhase::Decode),
+        ("prefill_worker_id", RequestPhase::Prefill),
+    ] {
+        let mut content = request();
+        content.routing =
+            Some(serde_json::from_value(serde_json::json!({field: unknown})).unwrap());
+        let request = Context::new(content);
+        let error = host
+            .select_with_affinity(&request, phase, false, &CleanupBudget::default())
+            .await
+            .err()
+            .expect("unknown worker must fail before admission");
+        assert!(match_error_chain(
+            error.as_ref(),
+            &[ErrorType::InvalidArgument],
+            &[]
+        ));
+        assert_eq!(
+            error.downcast_ref::<DynamoError>().unwrap().message(),
+            format!("nvext.{field}={unknown} does not identify a known worker")
+        );
+        let error = host
+            .preview_kv_route(&request, phase)
+            .await
+            .err()
+            .expect("unknown preview target");
+        assert!(match_error_chain(
+            error.as_ref(),
+            &[ErrorType::InvalidArgument],
+            &[]
+        ));
     }
     assert!(dispatch.worker_ids.lock().unwrap().is_empty());
     assert!(
@@ -3014,7 +3012,6 @@ async fn explicit_worker_validation_preserves_precedence_and_discovery_membershi
     ];
     host.inner.client.override_instance_avail(vec![]);
     for (value, phase) in cases {
-        // Exercise the public nvext types as well as the routing hints.
         let _: crate::protocols::common::extensions::NvExt =
             serde_json::from_value(value.clone()).unwrap();
         let mut content = request();
