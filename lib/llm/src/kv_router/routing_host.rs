@@ -599,11 +599,12 @@ where
                 .backend_instance_id
                 .map(|id| (id, "backend_instance_id"))
         });
+        // Validate discovery membership, not health: unavailable workers are still known.
         if let Some((worker_id, field)) = target
-            && !self.inner.client.is_instance_live(worker_id)
+            && !self.inner.client.is_instance_discovered(worker_id)
         {
             return Err(invalid_argument(format!(
-                "nvext.{field} does not identify a known worker"
+                "nvext.{field}={worker_id} does not identify a known worker"
             )));
         }
         Ok(())

@@ -288,7 +288,6 @@ where
     {
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
-        self.validate_explicit_worker(request.content(), phase)?;
         let explicit = explicit_target(request.content(), phase)?;
         let has_affinity_session = self.affinity.is_some() && affinity_id(&request)?.is_some();
         let is_direct = matches!(&self.policy, RoutingPolicy::Direct);
@@ -324,6 +323,7 @@ where
                 None,
             )
         } else {
+            self.validate_explicit_worker(request.content(), phase)?;
             self.select_with_session_affinity(&request, phase, is_query_only, &budget, |target| {
                 let pinned_target = explicit.or(match self.session_affinity_mode {
                     SessionAffinityMode::Hard => target,
