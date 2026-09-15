@@ -121,6 +121,16 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     # Initialize Git LFS for the dynamo user (required for requirements with lfs=true)
     git lfs install
 
+# Ubuntu ARM can leave Clang's resource-library path as a dangling symlink
+# when compiler-rt is not installed. BuildKit follows that link while
+# checksumming the later /usr COPY and fails before the dev stage can run.
+# Bindgen needs the headers from libclang-dev, not compiler-rt, so normalize
+# only the missing resource-library path to an empty directory.
+RUN resource_dir="$(clang --print-resource-dir)" && \
+    if [ ! -e "${resource_dir}/lib" ]; then \
+        rm -f "${resource_dir}/lib" && mkdir -p "${resource_dir}/lib"; \
+    fi
+
 # Install awk separately with fault tolerance (~2MB).
 # awk is a virtual package with multiple implementations (gawk, mawk, original-awk).
 # Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
@@ -291,11 +301,17 @@ SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
 # We stash the pre-tools python3 (which may be a real binary or a symlink we created earlier for vLLM/TRTLLM)
 # and restore it after copying toolchains from dynamo_tools.
 RUN if [ -e /usr/bin/python3 ]; then cp -a /usr/bin/python3 /tmp/python3.pretools; fi
-# Pull the developer toolchain from dynamo_tools in as few COPY layers as
-# possible (overlay2 caps a downstream image at ~128 layers). The six /usr/*
-# subtrees collapse into one COPY; --exclude=local skips the multi-GB /usr/local
-# (CUDA, etc.) the dev image already inherits from its own base.
-COPY --from=dynamo_tools --exclude=local /usr/ /usr/
+# Pull the developer toolchain from dynamo_tools in one layer (overlay2 caps a
+# downstream image at ~128 layers). A stage-mounted archival copy preserves
+# dangling package symlinks under /usr; BuildKit's COPY checksum traversal
+# otherwise dereferences them and fails on Ubuntu ARM. Keep /usr/local out
+# because the dev image already inherits that multi-GB framework/CUDA tree.
+RUN --mount=from=dynamo_tools,target=/dynamo_tools \
+    set -eux; \
+    for dir in bin sbin lib libexec include share; do \
+        mkdir -p "/usr/${dir}"; \
+        cp -a --no-clobber "/dynamo_tools/usr/${dir}/." "/usr/${dir}/"; \
+    done
 COPY --from=dynamo_tools /opt/nvidia/ /opt/nvidia/
 COPY --from=dynamo_tools /etc/alternatives/ /etc/alternatives/
 COPY --from=dynamo_tools /etc/bash_completion.d/ /etc/bash_completion.d/
