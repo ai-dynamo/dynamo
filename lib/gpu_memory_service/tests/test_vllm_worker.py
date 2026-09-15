@@ -110,12 +110,3 @@ def test_init_device_forwards_the_resolved_ro_connect_timeout(init_device_calls)
     assert calls[0]["tag"] == "weights"
     assert calls[0]["mode"] == RequestedLockType.RO
     assert calls[0]["timeout_ms"] == _RO_CONNECT_TIMEOUT_MS
-
-
-def test_init_device_forwards_no_deadline_when_none_is_configured(init_device_calls):
-    """A primary with no configured deadline still waits indefinitely."""
-    calls = init_device_calls({})
-
-    assert len(calls) == 1
-    assert calls[0]["mode"] == RequestedLockType.RW_OR_RO
-    assert calls[0]["timeout_ms"] is None

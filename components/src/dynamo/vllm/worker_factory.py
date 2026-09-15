@@ -1192,9 +1192,10 @@ class WorkerFactory:
             # promotion, so it must not report itself Ready.
             raise RuntimeError(
                 f"[Shadow] engine-{engine_id} did not finish pausing for standby "
-                f"within {timeout_s:g}s; the engine pause (pause_generation + "
-                "sleep, which waits on GMS weight admission) never completed, so "
-                "this engine cannot enter standby"
+                f"within {timeout_s:g}s; the engine pause (pause_generation, then "
+                "the engine sleep, which asks GMS to unmap and abort its weights "
+                "and kv_cache mappings) never completed, so this engine cannot "
+                "enter standby"
             ) from exc
         lock = await elect_and_wake(
             handler._pause_controller,
