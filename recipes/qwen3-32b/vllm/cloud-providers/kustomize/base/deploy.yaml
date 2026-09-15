@@ -17,7 +17,7 @@ spec:
           value: /model-cache
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.1
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.5.0
           workingDir: /workspace
           securityContext:
             runAsUser: 0
@@ -73,7 +73,7 @@ spec:
                 --block-size "${BLOCK_SIZE}" \
                 --hf-overrides "${HF_OVERRIDES}" \
                 --max-model-len "${MAX_MODEL_LEN}"
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0
           workingDir: /workspace
           env: &vllmEnvironment
             - name: MODEL_NAME
@@ -143,7 +143,7 @@ spec:
                 --block-size "${BLOCK_SIZE}" \
                 --hf-overrides "${HF_OVERRIDES}" \
                 --max-model-len "${MAX_MODEL_LEN}"
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0
           workingDir: /workspace
           env: *vllmEnvironment
           volumeMounts:
