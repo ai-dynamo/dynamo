@@ -928,10 +928,8 @@ impl Client {
         Ok(discovery_source)
     }
 
-    /// Establishes the endpoint watch and spawns the task that projects it into the returned
-    /// source. Dropping the source stops the task and cancels `cancel_token`, which ends the
-    /// backend watch. Pass a child of the runtime's primary token: that is the token the backends
-    /// fall back to, so shutdown still ends a watch that clients are holding.
+    /// Pass a child of the runtime's primary token as `cancel_token`: the backends fall back to
+    /// that token, so shutdown still ends a watch that clients are holding.
     async fn spawn_dynamic_discovery_source(
         endpoint: &Endpoint,
         discovery: &dyn Discovery,

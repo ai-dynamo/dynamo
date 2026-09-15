@@ -725,8 +725,6 @@ impl Discovery for KVStoreDiscovery {
         // Use the provided cancellation token, or fall back to the default token
         let cancel_token = cancel_token.unwrap_or_else(|| self.cancel_token.clone());
 
-        // kv::Manager::watch establishes the backend watch before it returns, so the stream this
-        // method hands back reports every change that follows.
         let (_, mut rx) = self
             .store
             .clone()
