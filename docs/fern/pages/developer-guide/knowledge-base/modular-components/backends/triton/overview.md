@@ -44,9 +44,10 @@ The Triton and KServe features below are not yet supported end-to-end through th
 
 | Triton release tag                      |  CUDA  | NVIDIA driver |
 | :-------------------------------------- | :----: | :-----------: |
-| `nvcr.io/nvidia/tritonserver:26.07-py3` | `13.2` |  `610.43.02`  | <!-- Update version with each Triton release. -->
+| `nvcr.io/nvidia/tritonserver:26.07-py3` | `13.2` |  `610.43`  |
+| `nvcr.io/nvidia/tritonserver:26.08-py3` | `13.4` |  `615.61`  |
 
-The Triton release is pinned in [`container/context.yaml`](https://github.com/ai-dynamo/dynamo/tree/main/container/context.yaml) under `triton.cuda13.2` (`runtime_image_tag`/`base_image_tag`), the same way the other framework runtimes pin their image.
+The Triton release is pinned in [`container/context.yaml`](https://github.com/ai-dynamo/dynamo/tree/main/container/context.yaml) under `triton.cuda13.2` and `triton.cuda13.4` (`runtime_image_tag`/`base_image_tag`), the same way the other framework runtimes pin their image.
 
 ## Prerequisites
 
@@ -169,21 +170,21 @@ Common flags:
 
 ## Configuring the Triton version
 
-The Triton release is pinned by `triton.cuda13.2.runtime_image_tag` in [`container/context.yaml`](https://github.com/ai-dynamo/dynamo/tree/main/container/context.yaml) (default `26.07-py3`), mirroring how the other framework runtimes pin their image.
+The Triton release is pinned by `triton.cuda13.4.runtime_image_tag` in [`container/context.yaml`](https://github.com/ai-dynamo/dynamo/tree/main/container/context.yaml) (default `26.08-py3`), mirroring how the other framework runtimes pin their image.
 The CUDA family is fixed by the Triton release, so `--cuda-version` is auto-derived; passing it explicitly is rejected.
 
 To build into a different Triton release, override `RUNTIME_IMAGE_TAG` at build time (no `context.yaml` edit needed). Keep `BASE_IMAGE_TAG` on CUDA 13.1 (default `26.02-cuda13.1-devel-ubuntu24.04`):
-the Rust `cudarc` crate rejects CUDA 13.2 at build time, and the wheels load CUDA dynamically so they run on the 13.2 runtime image regardless:
+the Rust `cudarc` crate rejects other CUDA versions at build time, and the wheels load CUDA dynamically so they run on the 13.4 runtime image regardless:
 
 ```bash
 python container/render.py --framework=triton --target=runtime --output-short-filename
 docker buildx build --network=host \
-  --build-arg RUNTIME_IMAGE_TAG=26.07-py3 \
+  --build-arg RUNTIME_IMAGE_TAG=26.08-py3 \
   --build-arg BASE_IMAGE_TAG=26.02-cuda13.1-devel-ubuntu24.04 \
-  -f container/rendered.Dockerfile -t dynamo:triton-26.07 .
+  -f container/rendered.Dockerfile -t dynamo:triton-26.08 .
 ```
 
-To make a release the default, edit `triton.cuda13.2` in `container/context.yaml`.
+To make a release the default, edit `triton.cuda13.4` in `container/context.yaml`.
 
 ## Metrics
 
