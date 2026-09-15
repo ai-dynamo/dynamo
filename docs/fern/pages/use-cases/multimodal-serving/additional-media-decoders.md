@@ -102,12 +102,17 @@ The default pip timeout is 600 seconds (`--timeout-s` overrides it; `0` disables
 
 ```bash
 VERSION=$(pip show opencv-python-headless | awk '/^Version:/{print $2}')
+if [ -n "$VERSION" ]; then
+  SPEC="opencv-python-headless==${VERSION}"
 # Without metadata, match the library version plus its packaging revision.
-[ -n "$VERSION" ] || VERSION="$(python -c 'import cv2; print(cv2.__version__)').*"
-pip install --no-deps --force-reinstall --only-binary opencv-python-headless \
-  "opencv-python-headless==${VERSION}"
+elif VERSION=$(python -c 'import cv2; print(cv2.__version__)') && [ -n "$VERSION" ]; then
+  SPEC="opencv-python-headless==${VERSION}.*"
+else
+  SPEC='opencv-python-headless>=4.13.0.92,<5'
+fi
+pip install --no-deps --force-reinstall --only-binary opencv-python-headless "$SPEC"
 ```
 
-`--force-reinstall --only-binary` replaces the source build even when its version already satisfies pip. Pinning preserves the image's OpenCV version. The wheel restores bundled FFmpeg and codecs, so review it against your distribution policy. The bundled vLLM installer performs this replacement and installs missing PyAV.
+`--force-reinstall --only-binary` replaces the source build even when its version already satisfies pip. Pinning preserves the image's OpenCV version; with neither metadata nor an importable `cv2`, the command falls back to the bounded range, which is what the bundled installer does too. The wheel restores bundled FFmpeg and codecs, so review it against your distribution policy. The bundled vLLM installer performs this replacement and installs missing PyAV.
 
 - The optional Rust frontend decoder (`--frontend-decoding`) links FFmpeg's compiled-in decoders and always decodes VP8/VP9 regardless of installed Python packages; backend decoding is what an install extends. Re-encoding an input to VP9 (`ffmpeg -i input.mp4 -c:v libvpx-vp9 -an output.webm`) is an alternative that needs no additional packages.

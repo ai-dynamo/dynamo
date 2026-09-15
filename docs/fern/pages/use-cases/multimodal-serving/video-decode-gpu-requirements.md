@@ -166,11 +166,19 @@ binary wheel of the same version, not installing a range:
 
 ```bash
 VERSION=$(pip show opencv-python-headless | awk '/^Version:/{print $2}')
+if [ -n "$VERSION" ]; then
+  SPEC="opencv-python-headless==${VERSION}"
 # Without metadata, match the library version plus its packaging revision.
-[ -n "$VERSION" ] || VERSION="$(python -c 'import cv2; print(cv2.__version__)').*"
-pip install --no-deps --force-reinstall --only-binary opencv-python-headless \
-  "opencv-python-headless==${VERSION}"
+elif VERSION=$(python -c 'import cv2; print(cv2.__version__)') && [ -n "$VERSION" ]; then
+  SPEC="opencv-python-headless==${VERSION}.*"
+else
+  SPEC='opencv-python-headless>=4.13.0.92,<5'
+fi
+pip install --no-deps --force-reinstall --only-binary opencv-python-headless "$SPEC"
 ```
+
+With neither pip metadata nor an importable `cv2`, this falls back to the bounded range instead of
+an unresolvable `==.*` pin.
 
 Nothing installs automatically — this is a deliberate operator step. The images also ship
 an installer with the same bounds plus idempotency and air-gap support
