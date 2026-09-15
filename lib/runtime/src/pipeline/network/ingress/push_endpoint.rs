@@ -58,11 +58,6 @@ impl PushEndpoint {
             let req = tokio::select! {
                 biased;
 
-                // await on service request
-                req = endpoint.next() => {
-                    req
-                }
-
                 // process shutdown
                 _ = self.cancellation_token.cancelled() => {
                     tracing::info!("PushEndpoint received cancellation signal, shutting down service");
@@ -70,6 +65,11 @@ impl PushEndpoint {
                         tracing::warn!("Failed to stop NATS service: {:?}", e);
                     }
                     break;
+                }
+
+                // Cancellation wins even when the request queue stays ready.
+                req = endpoint.next() => {
+                    req
                 }
             };
 
