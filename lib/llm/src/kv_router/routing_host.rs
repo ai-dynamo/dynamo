@@ -576,6 +576,39 @@ where
         }
     }
 
+    /// Check request-supplied targets only at initial selection, not after a route preview
+    /// or when dispatching: a worker disappearing later is a service failure.
+    fn validate_explicit_worker(
+        &self,
+        request: &PreprocessedRequest,
+        phase: RequestPhase,
+    ) -> Result<(), Error> {
+        let Some(routing) = request.routing.as_ref() else {
+            return Ok(());
+        };
+        let target = match phase {
+            RequestPhase::Prefill => routing
+                .prefill_worker_id
+                .map(|id| (id, "prefill_worker_id")),
+            RequestPhase::Decode | RequestPhase::Aggregated => {
+                routing.decode_worker_id.map(|id| (id, "decode_worker_id"))
+            }
+        }
+        .or_else(|| {
+            routing
+                .backend_instance_id
+                .map(|id| (id, "backend_instance_id"))
+        });
+        if let Some((worker_id, field)) = target
+            && !self.inner.client.is_instance_live(worker_id)
+        {
+            return Err(invalid_argument(format!(
+                "nvext.{field} does not identify a known worker"
+            )));
+        }
+        Ok(())
+    }
+
     fn affinity_target_is_valid(&self, target: AffinityTarget) -> bool {
         if !self.inner.client.is_instance_discovered(target.worker_id) {
             return false;

@@ -636,12 +636,13 @@ async fn builtin_direct_fallback_stays_disabled_for_affinity() {
 
     let mut standalone = request();
     standalone.routing_mut().backend_instance_id = Some(stale_worker);
-    let mut stream = host.generate(Context::new(standalone)).await.unwrap();
-    while stream.next().await.is_some() {}
-    assert_eq!(
-        dispatch.worker_ids.lock().unwrap().as_slice(),
-        &[real_worker]
-    );
+    let error = host.generate(Context::new(standalone)).await.unwrap_err();
+    assert!(match_error_chain(
+        error.as_ref(),
+        &[ErrorType::InvalidArgument],
+        &[]
+    ));
+    assert!(dispatch.worker_ids.lock().unwrap().is_empty());
 
     let session_id = SessionAffinityId::new("direct-affinity");
     let AffinityAcquire::Initialize(initializer) =
@@ -654,15 +655,16 @@ async fn builtin_direct_fallback_stays_disabled_for_affinity() {
             .commit(AffinityTarget::worker(stale_worker))
             .unwrap(),
     );
-    assert!(
-        host.generate(affinity_request("direct-affinity", Some(stale_worker)))
-            .await
-            .is_err()
-    );
-    assert_eq!(
-        dispatch.worker_ids.lock().unwrap().as_slice(),
-        &[real_worker]
-    );
+    let error = host
+        .generate(affinity_request("direct-affinity", None))
+        .await
+        .unwrap_err();
+    assert!(!match_error_chain(
+        error.as_ref(),
+        &[ErrorType::InvalidArgument],
+        &[]
+    ));
+    assert!(dispatch.worker_ids.lock().unwrap().is_empty());
     assert_eq!(affinity.query_target(&session_id, None).unwrap(), None);
 
     drop(host);
@@ -1166,8 +1168,22 @@ async fn router_with_worker_configs(
         .component("workers".to_string())
         .unwrap();
     let endpoint = component.endpoint("generate");
-    let client = endpoint.client().await.unwrap();
+    let mut client = endpoint.client().await.unwrap();
     let worker_ids = workers.keys().copied().collect::<Vec<_>>();
+    let instances = worker_ids
+        .iter()
+        .map(|&instance_id| Instance {
+            namespace: "affinity-selection-cancellation".into(),
+            component: "workers".into(),
+            endpoint: "generate".into(),
+            instance_id,
+            transport: dynamo_runtime::component::TransportType::Tcp("127.0.0.1:1".into()),
+            device_type: None,
+            request_plane_codec: None,
+        })
+        .collect();
+    let (_instances_tx, instances) = watch::channel(instances);
+    client.instance_source = Arc::new(instances);
     let (_tx, workers) = watch::channel(workers);
     let config = KvRouterConfig {
         skip_initial_worker_wait: true,
@@ -2851,5 +2867,193 @@ async fn kv_stopped_decode_request_without_staged_kv_never_reaches_a_worker() {
     );
 
     drop(router);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+async fn unknown_explicit_workers_are_rejected_before_builtin_dispatch() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let component = distributed
+        .namespace("unknown-explicit-workers")
+        .unwrap()
+        .component("workers")
+        .unwrap();
+    for (index, mode) in [
+        RouterMode::RoundRobin,
+        RouterMode::Random,
+        RouterMode::PowerOfTwoChoices,
+        RouterMode::LeastLoaded,
+        RouterMode::DeviceAwareWeighted,
+        RouterMode::Direct,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let endpoint = component.endpoint(format!("mode-{index}"));
+        let client = endpoint.client().await.unwrap();
+        let load_context = test_load_context(&client).await;
+        let dispatch = Arc::new(CompletedBuiltinDispatch::default());
+        let inner = PushRouter::from_client_with_dispatch(
+            client,
+            mode,
+            Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
+        )
+        .await
+        .unwrap();
+        let host = RoutingHost::<DefaultWorkerSelector>::new_builtin(inner, load_context).unwrap();
+        for worker_id in [42, u64::MAX] {
+            for (field, phase) in [
+                ("backend_instance_id", RequestPhase::Aggregated),
+                ("decode_worker_id", RequestPhase::Decode),
+                ("prefill_worker_id", RequestPhase::Prefill),
+            ] {
+                let mut content = request();
+                content.routing =
+                    Some(serde_json::from_value(serde_json::json!({field: worker_id})).unwrap());
+                let error = host
+                    .select_and_dispatch_builtin(Context::new(content), phase, |_, _| Ok(()))
+                    .await
+                    .unwrap_err();
+                assert!(match_error_chain(
+                    error.as_ref(),
+                    &[ErrorType::InvalidArgument],
+                    &[]
+                ));
+                assert_eq!(
+                    error.downcast_ref::<DynamoError>().unwrap().message(),
+                    format!("nvext.{field} does not identify a known worker")
+                );
+            }
+        }
+        assert!(dispatch.worker_ids.lock().unwrap().is_empty());
+    }
+    runtime.shutdown();
+}
+
+#[tokio::test]
+async fn unknown_explicit_workers_are_rejected_before_kv_admission() {
+    let (host, dispatch, worker_id, runtime) =
+        router_with_recorded_dispatch("unknown-kv-worker").await;
+    for unknown in [worker_id.wrapping_add(1), u64::MAX] {
+        assert!(!host.inner.client.is_instance_live(unknown));
+        for (field, phase) in [
+            ("backend_instance_id", RequestPhase::Aggregated),
+            ("decode_worker_id", RequestPhase::Decode),
+            ("prefill_worker_id", RequestPhase::Prefill),
+        ] {
+            let mut content = request();
+            content.routing =
+                Some(serde_json::from_value(serde_json::json!({field: unknown})).unwrap());
+            let request = Context::new(content);
+            let error = host
+                .select_with_affinity(&request, phase, false, &CleanupBudget::default())
+                .await
+                .err()
+                .expect("unknown worker must fail before admission");
+            assert!(match_error_chain(
+                error.as_ref(),
+                &[ErrorType::InvalidArgument],
+                &[]
+            ));
+            assert_eq!(
+                error.downcast_ref::<DynamoError>().unwrap().message(),
+                format!("nvext.{field} does not identify a known worker")
+            );
+            let error = host
+                .preview_kv_route(&request, phase)
+                .await
+                .err()
+                .expect("unknown preview target");
+            assert!(match_error_chain(
+                error.as_ref(),
+                &[ErrorType::InvalidArgument],
+                &[]
+            ));
+        }
+    }
+    assert!(dispatch.worker_ids.lock().unwrap().is_empty());
+    assert!(
+        host.kv_router()
+            .get_potential_loads(&[], None, None, None, None)
+            .await
+            .unwrap()
+            .iter()
+            .all(|load| load.active_requests == 0)
+    );
+    drop(host);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+async fn explicit_worker_validation_preserves_precedence_and_discovery_membership() {
+    let (host, runtime) = router_with_workers(None, &[u64::MAX]).await;
+    let cases = [
+        (serde_json::json!({}), RequestPhase::Aggregated),
+        (
+            serde_json::json!({"backend_instance_id": null, "decode_worker_id": null,
+            "prefill_worker_id": null, "dp_rank": null}),
+            RequestPhase::Aggregated,
+        ),
+        (
+            serde_json::json!({"backend_instance_id": u64::MAX}),
+            RequestPhase::Prefill,
+        ),
+        (
+            serde_json::json!({"backend_instance_id": u64::MAX, "decode_worker_id": null}),
+            RequestPhase::Decode,
+        ),
+        (
+            serde_json::json!({"backend_instance_id": 42, "decode_worker_id": u64::MAX,
+            "prefill_worker_id": 42}),
+            RequestPhase::Aggregated,
+        ),
+        (
+            serde_json::json!({"backend_instance_id": 42, "decode_worker_id": 42,
+            "prefill_worker_id": u64::MAX}),
+            RequestPhase::Prefill,
+        ),
+    ];
+    for (value, phase) in cases {
+        // Exercise the public nvext types as well as the routing hints.
+        let _: crate::protocols::common::extensions::NvExt =
+            serde_json::from_value(value.clone()).unwrap();
+        let mut content = request();
+        content.routing = Some(serde_json::from_value(value).unwrap());
+        host.validate_explicit_worker(&content, phase).unwrap();
+        host.inner.client.override_instance_avail(vec![]);
+        host.validate_explicit_worker(&content, phase).unwrap();
+    }
+    drop(host);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+async fn explicit_worker_disappearing_after_preview_is_not_revalidated() {
+    let (mut host, runtime) = router(None).await;
+    let mut content = request();
+    content.routing_mut().decode_worker_id = Some(7);
+    let request = Context::new(content);
+    let preview = host
+        .preview_kv_route(&request, RequestPhase::Decode)
+        .await
+        .unwrap();
+    let (_tx, empty) = watch::channel(vec![]);
+    host.inner.client.instance_source = Arc::new(empty);
+    // Selection already succeeded. Planning must retain the admitted target;
+    // subsequent transport failure must keep its service-error classification.
+    let plan = host
+        .plan_kv_route_from_preview(&request, preview)
+        .await
+        .unwrap();
+    let error = host.dispatch_kv_plan(request, plan).await.unwrap_err();
+    assert!(!match_error_chain(
+        error.as_ref(),
+        &[ErrorType::InvalidArgument],
+        &[]
+    ));
+    drop(host);
     runtime.shutdown();
 }

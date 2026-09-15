@@ -6295,6 +6295,69 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn unknown_explicit_worker_response_is_bad_request() {
+        use crate::{
+            kv_router::{RouterLoadSource, RoutingHost, RoutingLoadContext},
+            preprocessor::PreprocessedRequest,
+        };
+        use dynamo_runtime::{
+            DistributedRuntime, Runtime,
+            distributed::DistributedConfig,
+            pipeline::{AsyncEngine, Context, PushRouter, RouterMode},
+        };
+
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let endpoint = distributed
+            .namespace("unknown-worker-http-error")
+            .unwrap()
+            .component("workers")
+            .unwrap()
+            .endpoint("generate");
+        let client = endpoint.client().await.unwrap();
+        let load_context = RoutingLoadContext::start(
+            client.clone(),
+            RouterLoadSource::Aggregated,
+            crate::discovery::LoadThresholdHandle::new(Default::default()),
+            &distributed.child_token(),
+            None,
+        )
+        .await
+        .unwrap();
+        let inner = PushRouter::from_client(client, RouterMode::RoundRobin)
+            .await
+            .unwrap();
+        let host = RoutingHost::<dynamo_kv_router::DefaultWorkerSelector>::new_builtin(
+            inner,
+            load_context,
+        )
+        .unwrap();
+        let mut request = PreprocessedRequest::builder()
+            .model("test".into())
+            .token_ids(vec![1])
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .build()
+            .unwrap();
+        request.routing_mut().decode_worker_id = Some(u64::MAX);
+        let error = host.generate(Context::new(request)).await.unwrap_err();
+        let response = ErrorMessage::from_anyhow(error, BACKUP_ERROR_MESSAGE);
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.code, 400);
+        assert_eq!(response.1.error_type, "Bad Request");
+        assert_eq!(
+            response.1.message,
+            "nvext.decode_worker_id does not identify a known worker"
+        );
+        drop(host);
+        runtime.shutdown();
+    }
+
     #[test]
     fn test_nested_invalid_argument_response_from_anyhow() {
         use dynamo_runtime::error::{DynamoError, ErrorType};
