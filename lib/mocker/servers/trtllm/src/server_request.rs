@@ -272,18 +272,16 @@ impl PreparedRequest {
         generated: usize,
         cached_tokens: Option<usize>,
     ) -> pb::GenerateResponse {
-        pb::GenerateResponse {
-            request_id: self.request_id.clone(),
-            event: Some(pb::generate_response::Event::Finished(
-                pb::GenerationFinished {
-                    output_index: Some(0),
-                    reason: reason as i32,
-                    message: String::new(),
-                    stop_match: None,
-                },
-            )),
-            usage: Some(self.usage(generated, cached_tokens)),
-        }
+        super::response_with_usage(
+            &self.request_id,
+            pb::generate_response::Event::Finished(pb::GenerationFinished {
+                output_index: Some(0),
+                reason: reason as i32,
+                message: String::new(),
+                stop_match: None,
+            }),
+            Some(self.usage(generated, cached_tokens)),
+        )
     }
 
     /// The terminal event a context request ends with instead of `finished`.

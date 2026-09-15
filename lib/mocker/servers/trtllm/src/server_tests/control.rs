@@ -31,17 +31,7 @@ async fn model_info_reports_a_positive_context_length_for_any_model_name() {
 
 #[tokio::test]
 async fn abort_reports_aborted_then_already_finished() {
-    let service = TrtllmMockerService::new(
-        config(),
-        MockEngineArgsBuilder::default()
-            .engine_type(EngineType::Trtllm)
-            .num_gpu_blocks(4_096usize)
-            .block_size(4usize)
-            .speedup_ratio(0.01)
-            .build()
-            .unwrap(),
-    )
-    .unwrap();
+    let service = slow_service();
     let mut stream = service
         .generate(Request::new(request("req-abort", 512)))
         .await
@@ -193,17 +183,7 @@ async fn abort_before_the_terminal_reaches_the_client_cancels_it() {
 /// transition recorded after the cancel would arrive too late.
 #[tokio::test]
 async fn concurrent_abort_and_terminal_event_agree() {
-    let service = TrtllmMockerService::new(
-        config(),
-        MockEngineArgsBuilder::default()
-            .engine_type(EngineType::Trtllm)
-            .num_gpu_blocks(4_096usize)
-            .block_size(4usize)
-            .speedup_ratio(0.01)
-            .build()
-            .unwrap(),
-    )
-    .unwrap();
+    let service = slow_service();
     let mut stream = service
         .generate(Request::new(request("req-concurrent", 512)))
         .await

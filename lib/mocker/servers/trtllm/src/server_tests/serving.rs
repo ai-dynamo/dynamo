@@ -168,16 +168,7 @@ async fn aggregated_stream_ends_with_exactly_one_finished_and_no_prompt_event() 
 
 #[tokio::test]
 async fn duplicate_request_ids_are_rejected() {
-    let service = TrtllmMockerService::new(config(), {
-        MockEngineArgsBuilder::default()
-            .engine_type(EngineType::Trtllm)
-            .num_gpu_blocks(4_096usize)
-            .block_size(4usize)
-            .speedup_ratio(0.01)
-            .build()
-            .unwrap()
-    })
-    .unwrap();
+    let service = slow_service();
     let _first = service
         .generate(Request::new(request("req-dup", 64)))
         .await
@@ -193,13 +184,7 @@ async fn concurrent_request_limit_rejects_an_extra_stream() {
             max_concurrent_requests: 2,
             ..config()
         },
-        MockEngineArgsBuilder::default()
-            .engine_type(EngineType::Trtllm)
-            .num_gpu_blocks(4_096usize)
-            .block_size(4usize)
-            .speedup_ratio(0.01)
-            .build()
-            .unwrap(),
+        slow_args(),
     )
     .unwrap();
     let _first = service
@@ -487,16 +472,7 @@ async fn a_stop_token_below_min_tokens_does_not_fire() {
 /// accounting reads this number.
 #[tokio::test]
 async fn a_cache_hit_never_covers_the_whole_prompt() {
-    let service = TrtllmMockerService::new(
-        config(),
-        MockEngineArgsBuilder::default()
-            .engine_type(EngineType::Trtllm)
-            .num_gpu_blocks(4_096usize)
-            .block_size(4usize)
-            .build()
-            .unwrap(),
-    )
-    .unwrap();
+    let service = TrtllmMockerService::new(config(), admitting_args()).unwrap();
 
     let cached_of = |responses: &[pb::GenerateResponse]| {
         responses

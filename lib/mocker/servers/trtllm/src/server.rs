@@ -435,6 +435,24 @@ enum Exit {
     Aborted,
 }
 
+/// The one place a `GenerateResponse` is built, so no call site can emit an
+/// empty `event` oneof or attach usage to a non-terminal event.
+pub(super) fn response_with_usage(
+    request_id: &str,
+    event: pb::generate_response::Event,
+    usage: Option<pb::Usage>,
+) -> pb::GenerateResponse {
+    pb::GenerateResponse {
+        request_id: request_id.to_string(),
+        event: Some(event),
+        usage,
+    }
+}
+
+fn response(request_id: &str, event: pb::generate_response::Event) -> pb::GenerateResponse {
+    response_with_usage(request_id, event, None)
+}
+
 /// A context request's terminal event. The real server reports the context
 /// phase's usage here -- the decode leg cannot reconstruct its cache-hit count
 /// -- so the mocker must too.
@@ -443,19 +461,11 @@ fn prefill_ready(
     ready: pb::PrefillReady,
     usage: pb::Usage,
 ) -> pb::GenerateResponse {
-    pb::GenerateResponse {
-        request_id: request_id.to_string(),
-        event: Some(pb::generate_response::Event::PrefillReady(ready)),
-        usage: Some(usage),
-    }
-}
-
-fn response(request_id: &str, event: pb::generate_response::Event) -> pb::GenerateResponse {
-    pb::GenerateResponse {
-        request_id: request_id.to_string(),
-        event: Some(event),
-        usage: None,
-    }
+    response_with_usage(
+        request_id,
+        pb::generate_response::Event::PrefillReady(ready),
+        Some(usage),
+    )
 }
 
 fn engine_error(

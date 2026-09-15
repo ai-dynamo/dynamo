@@ -15,14 +15,7 @@ async fn role_validation_rejects_mismatched_disaggregation_payloads() {
         Code::FailedPrecondition
     );
 
-    let prefill = TrtllmMockerService::new(
-        MockerServerConfig {
-            mode: ServerMode::Prefill,
-            ..config()
-        },
-        admitting_args(),
-    )
-    .unwrap();
+    let prefill = prefill_service();
     assert_eq!(
         generate_error(&prefill, request("pf-plain", 4))
             .await
@@ -46,14 +39,7 @@ async fn role_validation_rejects_mismatched_disaggregation_payloads() {
 
 #[tokio::test]
 async fn prefill_stream_ends_with_prefill_ready_and_no_finished() {
-    let prefill = TrtllmMockerService::new(
-        MockerServerConfig {
-            mode: ServerMode::Prefill,
-            ..config()
-        },
-        admitting_args(),
-    )
-    .unwrap();
+    let prefill = prefill_service();
     let mut request = request("pf-1", 1);
     request.extra = Some(context_only_extra());
     let responses = drain(&prefill, request).await.unwrap();
