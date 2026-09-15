@@ -11,6 +11,7 @@ use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use dynamo_backend_common::engine::RoutingHints;
 use dynamo_backend_common::{
@@ -21,6 +22,7 @@ use dynamo_backend_common::{
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
 use futures::{Stream, StreamExt};
 use serde_json::json;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Notify, oneshot};
 use tokio_stream::wrappers::TcpListenerStream;
@@ -41,6 +43,7 @@ struct FakeVllm {
     data_parallel_rank_metadata: Arc<Mutex<Vec<Option<String>>>>,
     peers: Arc<Mutex<Vec<SocketAddr>>>,
     model_info_override: Arc<Mutex<Option<pb::ModelInfo>>>,
+    server_info_override: Arc<Mutex<Option<pb::ServerInfo>>>,
     reject: Arc<AtomicBool>,
     hang: Arc<AtomicBool>,
     hang_before_headers: Arc<AtomicBool>,
@@ -276,7 +279,13 @@ impl pb::control_server::Control for FakeVllm {
         &self,
         _request: Request<pb::GetServerInfoRequest>,
     ) -> Result<Response<pb::ServerInfo>, Status> {
-        Ok(Response::new(server_info()))
+        Ok(Response::new(
+            self.server_info_override
+                .lock()
+                .await
+                .clone()
+                .unwrap_or_else(server_info),
+        ))
     }
 
     async fn get_model_info(
@@ -538,7 +547,7 @@ fn rl_worker_metadata_identifies_zero_parallelism_dimensions() {
             _ => unreachable!(),
         }
         let model = DiscoveredModel::from_proto(model_info(), server).expect("valid discovery");
-        let error = model.rl_worker_metadata(None).unwrap_err();
+        let error = model.rl_worker_metadata(None, None).unwrap_err();
         assert!(error.to_string().contains(expected));
     }
 }
@@ -1121,12 +1130,24 @@ fn engine_with_server_info(
 async fn engine_from_args(
     endpoint: &str,
 ) -> (VllmSidecarEngine, dynamo_backend_common::WorkerConfig) {
+    try_engine_from_args(endpoint, "http://worker:8120")
+        .await
+        .expect("bootstrap discovery")
+}
+
+async fn try_engine_from_args(
+    endpoint: &str,
+    http_endpoint: &str,
+) -> Result<
+    (VllmSidecarEngine, dynamo_backend_common::WorkerConfig),
+    dynamo_backend_common::DynamoError,
+> {
     let argv = vec![
         "dynamo-vllm-sidecar".to_string(),
         "--grpc-endpoint".to_string(),
         endpoint.to_string(),
         "--vllm-http-endpoint".to_string(),
-        "http://worker:8120".to_string(),
+        http_endpoint.to_string(),
         "--enable-rl".to_string(),
         "--grpc-connections".to_string(),
         "2".to_string(),
@@ -1138,7 +1159,29 @@ async fn engine_from_args(
     tokio::task::spawn_blocking(move || VllmSidecarEngine::from_args(Some(argv)))
         .await
         .expect("bootstrap task")
-        .expect("bootstrap discovery")
+}
+
+async fn world_size_server(world_size: u32) -> (String, oneshot::Receiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("address");
+    let (request_tx, request_rx) = oneshot::channel();
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept request");
+        let mut buffer = [0; 2048];
+        let size = stream.read(&mut buffer).await.expect("read request");
+        let request = String::from_utf8_lossy(&buffer[..size]).into_owned();
+        let body = format!(r#"{{"world_size":{world_size}}}"#);
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("write response");
+        let _ = request_tx.send(request);
+    });
+    (format!("http://{address}/admin"), request_rx)
 }
 
 async fn collect(
@@ -1234,6 +1277,65 @@ async fn startup_rejects_model_identity_change_after_bootstrap() {
     *server.service.model_info_override.lock().await = Some(changed);
 
     assert!(engine.start(0).await.is_err());
+}
+
+#[tokio::test]
+async fn rl_startup_falls_back_to_v028_http_world_size() {
+    let service = FakeVllm::default();
+    let mut legacy_server = server_info();
+    legacy_server
+        .parallelism
+        .as_mut()
+        .expect("parallelism metadata")
+        .world_size = 0;
+    *service.server_info_override.lock().await = Some(legacy_server);
+    let grpc = FakeServer::start(service).await;
+    let (http_endpoint, request_rx) = world_size_server(8).await;
+
+    let (_, worker) = try_engine_from_args(&grpc.endpoint, &http_endpoint)
+        .await
+        .expect("vLLM 0.28 RL discovery should use the HTTP world size");
+
+    assert_eq!(
+        worker.rl_metadata,
+        Some(
+            RlWorkerMetadata::new(
+                8,
+                Some(RlAdminBaseUrl::parse(&http_endpoint).expect("admin URL")),
+            )
+            .expect("worker metadata")
+        )
+    );
+    let request = tokio::time::timeout(Duration::from_secs(1), request_rx)
+        .await
+        .expect("world-size request timeout")
+        .expect("world-size request");
+    assert!(request.starts_with("GET /admin/get_world_size?include_dp=true HTTP/1.1"));
+}
+
+#[tokio::test]
+async fn rl_startup_rejects_invalid_v028_http_world_size() {
+    let service = FakeVllm::default();
+    let mut legacy_server = server_info();
+    legacy_server
+        .parallelism
+        .as_mut()
+        .expect("parallelism metadata")
+        .world_size = 0;
+    *service.server_info_override.lock().await = Some(legacy_server);
+    let grpc = FakeServer::start(service).await;
+    let (http_endpoint, request_rx) = world_size_server(0).await;
+
+    let error = match try_engine_from_args(&grpc.endpoint, &http_endpoint).await {
+        Ok(_) => panic!("zero HTTP world size must fail"),
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains("positive u32 `world_size`"));
+    tokio::time::timeout(Duration::from_secs(1), request_rx)
+        .await
+        .expect("world-size request timeout")
+        .expect("world-size request");
 }
 
 #[tokio::test]

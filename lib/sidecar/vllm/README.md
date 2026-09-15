@@ -127,6 +127,8 @@ Replace `rollout-0.rl.svc.cluster.local` with a private address that the RL cont
 
 Native vLLM lifecycle and weight-update operations use the typed gRPC Control service and do not require `--vllm-http-endpoint`. Configure the HTTP base URL only when an RL framework needs a compatibility operation that is not represented by the typed service, such as a custom `worker_extension_cls` method invoked through `/collective_rpc`.
 
+vLLM 0.28 does not report its engine world size over gRPC. When RL is enabled against that release, the sidecar uses `--vllm-http-endpoint` to query `/get_world_size?include_dp=true` during startup. Newer vLLM releases report this value over gRPC and do not use the fallback.
+
 The HTTP value must be a controller-routable `http://` or `https://` base URL. Path prefixes are preserved, so a reverse proxy can advertise a value such as `https://rollout.example.internal/vllm-admin`; downstream clients append the compatibility route beneath that prefix. User information, query strings, and fragments are rejected. Do not place credentials or tokens in the URL.
 
 The update request bodies match vLLM's RL HTTP schemas: `init_weight_transfer_engine` requires `{"init_info": {...}}`, `update_weights` requires `{"update_info": {...}}`, `finish_weight_update` accepts `{"weight_version": "..."}`, and `update_weight_version` requires `{"new_version": "..."}`. Weight tensors remain on the configured NCCL, IPC, or sparse-NCCL transport; only backend metadata crosses gRPC.
