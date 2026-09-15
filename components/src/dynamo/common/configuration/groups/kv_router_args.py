@@ -66,8 +66,6 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "conditional_disagg_prefill_busy_threshold",
     "conditional_disagg_decode_busy_threshold",
     "router_predicted_ttl_secs",
-    "session_affinity_ttl_secs",
-    "session_affinity_mode",
 )
 
 CONDITIONAL_DISAGG_POLICY_CHOICES: tuple[str, ...] = (
@@ -230,8 +228,6 @@ class KvRouterConfigBase(ConfigBase):
     conditional_disagg_prefill_busy_threshold: Optional[float] = None
     conditional_disagg_decode_busy_threshold: Optional[float] = None
     router_predicted_ttl_secs: Optional[float] = None
-    session_affinity_ttl_secs: Optional[int] = None
-    session_affinity_mode: str = "hard"
     load_aware: bool = False
 
     def apply_load_aware_preset(self) -> None:
@@ -699,31 +695,4 @@ class KvRouterArgGroup(ArgGroup):
                 "Independent of --router-ttl-secs, which covers pure approximate mode."
             ),
             arg_type=float,
-        )
-        add_argument(
-            g,
-            flag_name="--router-session-affinity-ttl-secs",
-            env_var="DYN_ROUTER_SESSION_AFFINITY_TTL_SECS",
-            default=None,
-            help=(
-                "Enable session affinity with this router-local idle TTL in seconds. "
-                "Bindings synchronize across router replicas on a best-effort basis. "
-                "Affinity is disabled when this option is omitted. "
-                "This is independent of KV prediction TTL settings."
-            ),
-            arg_type=int,
-            dest="session_affinity_ttl_secs",
-        )
-        add_argument(
-            g,
-            flag_name="--router-session-affinity-mode",
-            env_var="DYN_ROUTER_SESSION_AFFINITY_MODE",
-            default="hard",
-            help=(
-                "How an existing session binding participates in worker selection. "
-                "hard makes the binding an exact constraint; soft exposes it as a "
-                "policy-visible preference."
-            ),
-            choices=("hard", "soft"),
-            dest="session_affinity_mode",
         )

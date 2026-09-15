@@ -998,12 +998,6 @@ impl ExtProcError {
                 status_code: StatusCode::ServiceUnavailable,
                 message: e.to_string(),
             },
-            // Internal EPP invariant violation — always an EPP bug. 500 keeps
-            // it distinct from client errors (400) and transient failures (503).
-            PickError::Internal(msg) => Self {
-                status_code: StatusCode::InternalServerError,
-                message: msg,
-            },
         }
     }
 

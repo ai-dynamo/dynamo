@@ -203,10 +203,6 @@ pub enum PickError {
     /// multiplexing means the connection cap does not bound concurrent requests.
     #[error("endpoint picker overloaded")]
     Overloaded,
-    /// An internal EPP invariant was violated; always an EPP bug, never a client
-    /// error → 500.
-    #[error("internal error: {0}")]
-    Internal(String),
 }
 
 #[cfg(test)]

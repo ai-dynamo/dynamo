@@ -17,17 +17,42 @@ use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dashmap::{DashMap, mapref::entry::Entry};
+use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 use tokio::sync::futures::OwnedNotified;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 pub use crate::protocols::WorkerAffinityTarget as AffinityTarget;
-pub use crate::scheduling::config::SessionAffinityMode;
 
 pub const MAX_SESSION_AFFINITY_TTL_SECS: u64 = 31_536_000;
 pub const MAX_SESSION_AFFINITY_ENTRIES: usize = 65_536;
 pub const MAX_SESSION_AFFINITY_ID_BYTES: usize = 256;
+
+/// How a bound session treats a dispatch that landed elsewhere.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionAffinityMode {
+    /// The binding is exact: dispatching to another worker or rank is an error.
+    #[default]
+    Hard,
+    /// The binding follows the dispatch: the session rebinds to where it ran.
+    Soft,
+}
+
+impl std::str::FromStr for SessionAffinityMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "hard" => Ok(Self::Hard),
+            "soft" => Ok(Self::Soft),
+            _ => Err(format!(
+                "invalid session affinity mode {value:?}; expected 'hard' or 'soft'"
+            )),
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum AffinityError {
