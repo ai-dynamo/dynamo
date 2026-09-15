@@ -13,6 +13,7 @@ from typing import Any, Generator
 import pytest
 import requests
 
+from tests.frontend.test_prepost import OUTPUTS_INTERVAL_20
 from tests.utils.constants import QWEN
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
 from tests.utils.port_utils import ServicePorts
@@ -313,3 +314,48 @@ def test_vllm_chat_processor_forwards_max_thinking_tokens(
     captured = _read_captured_request(capture_path)
 
     assert captured["stop_conditions"]["max_thinking_tokens"] == 16
+
+
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+@pytest.mark.parametrize("event_plane", ["zmq"], indirect=True)
+def test_vllm_chat_processor_local_stop_preserves_stream_terminal(
+    start_services: tuple[int, Path],
+) -> None:
+    """A frontend string stop must retain terminal usage across HTTP requests."""
+    frontend_port, capture_path = start_services
+    payload = {
+        "model": TEST_MODEL,
+        "messages": [{"role": "user", "content": "Name some James Joyce books."}],
+        "stop": ["James Joyce"],
+        "stream": True,
+        "stream_options": {"include_usage": True},
+        "max_tokens": 128,
+    }
+
+    for _ in range(2):
+        with requests.post(
+            f"http://localhost:{frontend_port}/v1/chat/completions",
+            json=payload,
+            timeout=60,
+            stream=True,
+        ) as response:
+            chunks = _collect_stream_chunks(response)
+
+        terminal_choices = [
+            choice
+            for chunk in chunks
+            for choice in chunk.get("choices", [])
+            if choice.get("finish_reason")
+        ]
+        assert len(terminal_choices) == 1
+        assert terminal_choices[0]["finish_reason"] == "stop"
+        assert "James Joyce" not in _collect_reasoning(chunks)
+
+        usages = [chunk["usage"] for chunk in chunks if chunk.get("usage")]
+        assert usages, "Local stop must preserve the terminal usage chunk"
+        captured = _read_captured_request(capture_path)
+        assert usages[-1]["prompt_tokens"] == len(captured["token_ids"])
+        assert usages[-1]["completion_tokens"] == sum(
+            len(output.token_ids) for output in OUTPUTS_INTERVAL_20[:2]
+        )
