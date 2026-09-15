@@ -73,6 +73,21 @@ async def run(args):
                 await asyncio.sleep(0.25)
 
         async with httpx.AsyncClient(timeout=300) as http:
+            deadline = time.monotonic() + 120
+            while True:
+                response = await http.get(args.url.rstrip("/") + "/v1/models")
+                if response.status_code == 200 and any(
+                    row.get("id") == args.model
+                    for row in response.json().get("data", [])
+                ):
+                    break
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        f"Frontend did not expose {args.model!r}; inspect its model "
+                        f"registration logs. Last /v1/models response: "
+                        f"{response.status_code}: {response.text[:1000]}"
+                    )
+                await asyncio.sleep(0.5)
 
             async def request(label, tokens, expected_word, forced_prefill=None):
                 headers = {"x-request-id": f"longcat-{label}-{uuid.uuid4().hex}"}

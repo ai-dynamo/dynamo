@@ -62,6 +62,19 @@ hf download meituan-longcat/LongCat-Flash-Chat-FP8 \
   --local-dir /models/longcat-flash-fp8
 ```
 
+The pinned checkpoint omits `model_type` from `config.json`, although its
+[`LongcatFlashConfig`](https://huggingface.co/meituan-longcat/LongCat-Flash-Chat-FP8/blob/a373e08a1c4897ab12cbac2a540e497502d55118/configuration_longcat_flash.py)
+declares `longcat_flash`. Dynamo's frontend requires this field. Prepare the
+metadata on every host before starting workers:
+
+```bash
+python3 examples/backends/tokenspeed/prepare_longcat.py /models/longcat-flash-fp8
+```
+
+The script saves the original config as `config.json.dynamo-original` and adds the
+missing field. Restart existing workers after preparation so they publish the
+updated model metadata.
+
 ## Launch
 
 Run the commands below inside containers with all eight GPUs exposed, host
