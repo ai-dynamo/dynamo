@@ -537,7 +537,6 @@ async def test_decode_cancellation_drains_buffered_empty_chunk(
     case.cancel_before_response = True
     case.allow_registration.set()
 
-    # The buffered chunk arrives after stop, without yielding to the abort monitor.
     outputs = await asyncio.wait_for(
         _collect(case.handler.generate(case.request, case.context)), timeout=1
     )
