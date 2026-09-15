@@ -213,6 +213,11 @@ class GMSWorker(_BaseWorker):
         if not is_scratch_kv_enabled():
             return super().determine_available_memory()
 
+        if self.cache_config.kv_cache_memory_bytes:
+            # An explicit KV size is a constant, not a measurement: delegating
+            # keeps a GMS writer and a GMS importer on the same layout.
+            return super().determine_available_memory()
+
         import vllm.envs as envs
         from vllm.config import CUDAGraphMode
         from vllm.platforms import current_platform
