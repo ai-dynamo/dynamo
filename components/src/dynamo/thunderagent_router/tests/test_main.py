@@ -13,7 +13,11 @@ from typing import Any, Optional
 
 import pytest
 
-from dynamo.thunderagent_router.__main__ import ThunderAgentRouterHandler
+from dynamo.thunderagent_router.__main__ import (
+    ThunderAgentRouterHandler,
+    _proxy_runtime_config,
+)
+from dynamo.thunderagent_router.args import parse_args
 from dynamo.thunderagent_router.program_state import ReplicaKey
 from dynamo.thunderagent_router.router import PauseDecision
 
@@ -223,3 +227,78 @@ async def test_a_placed_program_does_not_consult_the_first_chunk():
     await drive(handler)
 
     assert scheduler.back_fills == []
+
+
+class _FakeCapacity:
+    def __init__(self, cards: dict[str, str]) -> None:
+        self._cards = cards
+
+    def get_model_cards(self) -> dict[str, str]:
+        return self._cards
+
+
+@pytest.mark.asyncio
+async def test_proxy_runtime_config_overlays_parsers_without_dropping_token_budget(
+    monkeypatch,
+):
+    class OverlayConfig:
+        def __init__(self) -> None:
+            self.tool_call_parser = None
+            self.reasoning_parser = None
+            self.engine_specific: dict[str, str] = {
+                "token_budget": (
+                    '{"combined_limit":131072,"reject_prompt_overflow":true,'
+                    '"reject_total_overflow":true}'
+                )
+            }
+
+        def set_engine_specific(self, key: str, value: str) -> None:
+            self.engine_specific[key] = value
+
+        def get_engine_specific(self, key: str) -> Optional[str]:
+            return self.engine_specific.get(key)
+
+    overlay = OverlayConfig()
+    captured: dict[str, Any] = {}
+
+    async def fake_wait(_get_cards, **_kwargs):
+        return "card-json"
+
+    def fake_from_card(card_json, _cls):
+        captured["card_json"] = card_json
+        return overlay
+
+    monkeypatch.setattr(
+        "dynamo.thunderagent_router.__main__.wait_for_backend_card", fake_wait
+    )
+    monkeypatch.setattr(
+        "dynamo.thunderagent_router.__main__.runtime_config_from_card_json",
+        fake_from_card,
+    )
+    monkeypatch.setattr(
+        "dynamo.thunderagent_router.__main__.kv_cache_block_size_from_card_json",
+        lambda card_json: 64,
+    )
+
+    config = parse_args(
+        [
+            "--endpoint",
+            "dynamo.sglang.generate",
+            "--model-name",
+            "Qwen/Qwen3-0.6B",
+            "--dyn-tool-call-parser",
+            "hermes",
+            "--dyn-reasoning-parser",
+            "qwen",
+        ]
+    )
+    runtime_cfg, block_size = await _proxy_runtime_config(
+        _FakeCapacity({"1": "card-json"}), config
+    )
+
+    assert captured["card_json"] == "card-json"
+    assert runtime_cfg is overlay
+    assert runtime_cfg.tool_call_parser == "hermes"
+    assert runtime_cfg.reasoning_parser == "qwen"
+    assert runtime_cfg.get_engine_specific("token_budget") is not None
+    assert block_size == 64
