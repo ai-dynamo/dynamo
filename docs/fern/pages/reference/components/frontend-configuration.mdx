@@ -533,7 +533,7 @@ export DYN_METRICS_ITL_MAX=80
 export DYN_METRICS_ITL_COUNT=20
 ```
 
-Rounding can move the top edge either way, so pick a `MAX` that is already two significant figures if you need an exact ceiling. `MAX=123` exports `le=120` and sends observations from 120 to 123 into `+Inf`; `MAX=131072` exports `le=130000`. Two of the defaults above are affected: request duration is set to `512` but exports `510`, and input sequence is set to `128000` but exports `130000`.
+Rounding can move the top edge either way, so pick a `MAX` that is already two significant figures if you need an exact ceiling. Prometheus buckets are inclusive, so `MAX=123` exports `le=120` and only observations *greater than* 120 and up to 123 fall into `+Inf` — a value of exactly 120 still lands in the `le=120` bucket. `MAX=131072` exports `le=130000`. Two of the defaults above are affected: request duration is set to `512` but exports `510`, and input sequence is set to `128000` but exports `130000`.
 
 `dynamo_frontend_cached_tokens` shares the input sequence buckets, so `DYN_METRICS_INPUT_SEQUENCE_*` changes both histograms.
 
@@ -541,7 +541,7 @@ A histogram's configuration is validated as a set: `MIN` must be above zero, bel
 
 A value that cannot be parsed at all is handled per variable, not as a set: it warns, that one variable falls back to its default, and the others still apply.
 
-Use `COUNT` of at least 2. `COUNT=1` passes validation but produces the leading `0` edge and nothing else, which ignores `MIN` and `MAX` and puts every observation in `+Inf`. Because rounding to two significant figures can collapse neighboring edges, a high `COUNT` over a narrow range also yields fewer buckets than requested; the frontend warns when that removes more than a tenth of them.
+Use `COUNT` of at least 2. `COUNT=1` passes validation but produces the leading `0` edge and nothing else, which ignores `MIN` and `MAX` and puts every *positive* observation in `+Inf`; only a zero-valued observation is counted, in the `le=0` bucket. Because rounding to two significant figures can collapse neighboring edges, a high `COUNT` over a narrow range also yields fewer buckets than requested; the frontend warns when that removes more than a tenth of them.
 
 Bucket edges appear directly in the `le` label, which is the only reliable way to confirm a setting took effect. These histograms are labeled by `model`, so a series exists only after a request has populated it — on a freshly restarted frontend the command below prints nothing, which means "no data yet", not "the setting was ignored". Send a request first:
 
