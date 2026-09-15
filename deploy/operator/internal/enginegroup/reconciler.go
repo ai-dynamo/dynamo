@@ -77,10 +77,22 @@ func (c *Coordinator) Reconcile(
 
 	// Start, retain, or replace the one durable resolved transition before executing its explicit steps.
 	handled, result, err := c.reconcileDesiredPlan(next, desiredPlan, topology)
-	if err != nil || handled {
+	if err != nil {
 		return result, err
 	}
+	if handled {
+		if hasTerminalSteadyState(result.Status) {
+			return c.reconcileTerminalTargets(ctx, groupID, result.Status)
+		}
+		return result, nil
+	}
 	return c.reconcileActiveTransition(ctx, groupID, result.Status, topology)
+}
+
+func hasTerminalSteadyState(status GroupStatus) bool {
+	return status.Transition != nil &&
+		(status.Transition.Outcome == TransitionOutcomeCompleted ||
+			status.Transition.Outcome == TransitionOutcomeRolledBack)
 }
 
 func (c *Coordinator) observeGroup(
@@ -469,7 +481,6 @@ func sameResolvedPlan(left, right ResolvedPlan) bool {
 		left.ProfileFingerprint != right.ProfileFingerprint ||
 		left.ProcessLifecycleOwner != right.ProcessLifecycleOwner ||
 		left.TrafficRequirement != right.TrafficRequirement ||
-		left.RetirementSafety != right.RetirementSafety ||
 		left.VerificationRequirement != right.VerificationRequirement {
 		return false
 	}

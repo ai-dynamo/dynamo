@@ -124,6 +124,13 @@ type MembershipTarget struct {
 	Joining         []JoiningReplica
 }
 
+// PlanValidationRequest carries the coordinator-owned canonical digest alongside the exact normalized plan.
+type PlanValidationRequest struct {
+	BaseTopology MembershipTopology
+	Plan         ResolvedPlan
+	PlanDigest   string
+}
+
 // ValidationEvidence binds adapter approval to immutable plan, profile, capability, and optional target state.
 type ValidationEvidence struct {
 	PlanDigest           string
@@ -177,8 +184,9 @@ type CapacityAdapter interface {
 	Observe(ctx context.Context, groupID GroupID) (CapacityObservation, error)
 	// Apply converges to target without deleting capacity absent from an exact UID-bound release fence.
 	// Revisions are group-global and monotonic. Repeating an equal revision and payload is idempotent; an equal revision
-	// with another payload or a lower revision is definitively rejected. Deletion uses Pod UID preconditions, and an
-	// applied fence remains observable until a later target explicitly reopens the stable replica slot.
+	// must repair observable drift, while an equal revision with another payload or a lower revision is definitively
+	// rejected. Deletion uses Pod UID preconditions, and an applied fence remains observable until a later target
+	// explicitly reopens the stable replica slot.
 	Apply(ctx context.Context, groupID GroupID, target CapacityTarget) (ApplyResult, error)
 }
 
@@ -189,8 +197,7 @@ type MembershipAdapter interface {
 	ValidatePlan(
 		ctx context.Context,
 		groupID GroupID,
-		base MembershipTopology,
-		plan ResolvedPlan,
+		request PlanValidationRequest,
 	) (PreflightResult, error)
 	// ValidateTarget revalidates the exact target after joining runtime identities are frozen. It is side-effect-free
 	// and either adds the canonical target digest to matching plan evidence or definitively rejects that target.
@@ -215,9 +222,9 @@ type TrafficAdapter interface {
 	Observe(ctx context.Context, groupID GroupID) (TrafficObservation, error)
 	// Apply converges toward the exact admitted set and preserves drain tombstones for every target in Drain. Graceful
 	// drain waits for in-flight work; ConfirmInactive proves a failed member non-routable without its participation.
-	// Revisions
-	// are group-global and monotonic. A lower revision or conflicting equal revision is definitively rejected. No engine
-	// membership or discovery event may implicitly admit an incarnation absent from the latest target.
+	// Revisions are group-global and monotonic. Repeating an equal revision and payload must repair observable drift; a
+	// lower revision or conflicting equal revision is definitively rejected. No engine membership or discovery event may
+	// implicitly admit an incarnation absent from the latest target.
 	Apply(ctx context.Context, groupID GroupID, target TrafficTarget) (ApplyResult, error)
 }
 

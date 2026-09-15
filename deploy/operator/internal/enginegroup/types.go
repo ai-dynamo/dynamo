@@ -112,16 +112,6 @@ const (
 	TrafficRequirementQuiesceGroup TrafficRequirement = "QuiesceGroup"
 )
 
-// RetirementSafety describes what must be observed before a replica may leave engine membership.
-type RetirementSafety string
-
-const (
-	// RetirementSafetyDrained requires planned retirees to finish in-flight work.
-	RetirementSafetyDrained RetirementSafety = "Drained"
-	// RetirementSafetyWithdrawn permits failed members that can no longer drain to be observably non-routable.
-	RetirementSafetyWithdrawn RetirementSafety = "Withdrawn"
-)
-
 // VerificationRequirement describes whether a committed topology must prove serving progress before admission.
 type VerificationRequirement string
 
@@ -203,7 +193,6 @@ type ResolvedPlan struct {
 	ProfileFingerprint      string
 	ProcessLifecycleOwner   ProcessLifecycleOwner
 	TrafficRequirement      TrafficRequirement
-	RetirementSafety        RetirementSafety
 	VerificationRequirement VerificationRequirement
 	Change                  ResolvedChange
 }

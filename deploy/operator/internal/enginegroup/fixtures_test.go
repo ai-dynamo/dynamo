@@ -52,13 +52,13 @@ func (a *testCapacityAdapter) Apply(
 	if target.ControlRevision < a.observation.AppliedRevision {
 		return rejected("StaleCapacityRevision", "capacity revision is stale"), nil
 	}
-	if target.ControlRevision == a.observation.AppliedRevision {
+	sameRevision := target.ControlRevision == a.observation.AppliedRevision
+	if sameRevision {
 		if a.lastTarget == nil || !sameCapacityTargetIntent(*a.lastTarget, target) {
 			return rejected("ConflictingCapacityRevision", "capacity revision payload changed"), nil
 		}
-		return ApplyResult{}, nil
 	}
-	if a.rejectNext != nil {
+	if !sameRevision && a.rejectNext != nil {
 		rejection := cloneFailure(a.rejectNext)
 		a.rejectNext = nil
 		a.observation.Allocations = append(
@@ -97,12 +97,28 @@ func (a *testCapacityAdapter) Apply(
 	}
 	a.observation.AppliedRevision = target.ControlRevision
 	a.observation.Allocations = allocations
-	a.observation.ReleaseFences = append(
-		a.observation.ReleaseFences,
-		cloneReleaseFences(target.ReleaseFences)...,
-	)
+	a.observation.ReleaseFences = convergeReleaseFences(a.observation.ReleaseFences, target)
 	a.lastTarget = cloneCapacityTarget(&target)
 	return ApplyResult{}, nil
+}
+
+func convergeReleaseFences(existing []ReleaseFence, target CapacityTarget) []ReleaseFence {
+	byReplica := make(map[ReplicaID]ReleaseFence, len(existing)+len(target.ReleaseFences))
+	for _, fence := range existing {
+		byReplica[fence.ReplicaID] = fence
+	}
+	for _, replica := range target.Replicas {
+		delete(byReplica, replica.ReplicaID)
+	}
+	for _, fence := range target.ReleaseFences {
+		byReplica[fence.ReplicaID] = fence
+	}
+
+	result := make([]ReleaseFence, 0, len(byReplica))
+	for _, fence := range byReplica {
+		result = append(result, fence)
+	}
+	return normalizeReleaseFences(result)
 }
 
 type testTrafficAdapter struct {
@@ -132,7 +148,6 @@ func (a *testTrafficAdapter) Apply(
 		if a.lastTarget == nil || !sameTrafficTargetIntent(*a.lastTarget, target) {
 			return rejected("ConflictingTrafficRevision", "traffic revision payload changed"), nil
 		}
-		return ApplyResult{}, nil
 	}
 
 	// Applying an absolute traffic set withdraws everything else without implicitly admitting engine members.
@@ -165,6 +180,7 @@ type testMembershipAdapter struct {
 	topology              MembershipTopology
 	transitions           map[string]MembershipTransitionObservation
 	targets               map[string]MembershipTarget
+	lastPlanValidation    *PlanValidationRequest
 	planValidationCalls   int
 	targetValidationCalls int
 	applyCalls            int
@@ -179,20 +195,18 @@ type testMembershipAdapter struct {
 func (a *testMembershipAdapter) ValidatePlan(
 	_ context.Context,
 	_ GroupID,
-	_ MembershipTopology,
-	plan ResolvedPlan,
+	request PlanValidationRequest,
 ) (PreflightResult, error) {
 	a.planValidationCalls++
+	request.BaseTopology = cloneTopology(request.BaseTopology)
+	request.Plan = cloneResolvedPlan(request.Plan)
+	a.lastPlanValidation = &request
 	if a.planRejection != nil {
 		return PreflightResult{Rejection: cloneFailure(a.planRejection)}, nil
 	}
-	digest, err := canonicalPlanDigest(plan)
-	if err != nil {
-		return PreflightResult{}, err
-	}
 	return PreflightResult{Evidence: &ValidationEvidence{
-		PlanDigest:           digest,
-		ProfileFingerprint:   plan.ProfileFingerprint,
+		PlanDigest:           request.PlanDigest,
+		ProfileFingerprint:   request.Plan.ProfileFingerprint,
 		CapabilityGeneration: "capabilities-v1",
 	}}, nil
 }
@@ -476,7 +490,6 @@ func retirePlan(
 		ProfileFingerprint:      "profile-v1",
 		ProcessLifecycleOwner:   ProcessLifecycleOwnerOrchestrator,
 		TrafficRequirement:      trafficRequirement,
-		RetirementSafety:        RetirementSafetyDrained,
 		VerificationRequirement: verification,
 		Change: ResolvedChange{
 			Kind:   PlanKindRetire,

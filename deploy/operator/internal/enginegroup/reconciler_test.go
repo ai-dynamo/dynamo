@@ -164,6 +164,59 @@ func TestCoordinatorShrinkOrdersDrainCommitReleaseVerificationAndAdmission(t *te
 	}
 }
 
+func TestCoordinatorReassertsCompletedTargetsAfterObservedDrift(t *testing.T) {
+	const retiringReplicaID ReplicaID = "replica-1"
+
+	base := engineTopology(1, 2)
+	scenario := newCoordinatorScenario(t, base)
+	plan := retirePlan(
+		"reassert-completed-retirement",
+		retiringReplicaID,
+		TrafficRequirementKeepServing,
+		VerificationRequirementNone,
+	)
+	scenario.desired = &plan
+	scenario.runUntil("apply retirement", func(s *coordinatorScenario) bool {
+		return s.membership.applyCalls == 1
+	})
+	committed := MembershipTopology{Generation: 2, Replicas: cloneReplicaMemberships(base.Replicas[:1])}
+	scenario.membership.commit(scenario.status.Membership.Desired.TransitionID, committed)
+	scenario.runUntil("complete retirement", func(s *coordinatorScenario) bool {
+		return s.status.Transition.Outcome == TransitionOutcomeCompleted
+	})
+
+	t.Log("Remove an unsafe traffic drift by replaying the accepted target at the same revision")
+	trafficCalls := scenario.traffic.applyCalls
+	scenario.traffic.observation.Admitted = cloneReplicaMemberships(base.Replicas)
+	scenario.mustReconcile("reassert completed traffic target")
+	if scenario.traffic.applyCalls != trafficCalls+1 ||
+		!sameMemberships(scenario.traffic.observation.Admitted, committed.Replicas) {
+		t.Fatalf(
+			"completed traffic target was not reasserted: calls=%d observation=%#v",
+			scenario.traffic.applyCalls,
+			scenario.traffic.observation,
+		)
+	}
+
+	t.Log("Remove reappearing retired capacity only through its retained exact release fence")
+	capacityCalls := scenario.capacity.applyCalls
+	scenario.capacity.observation.Allocations = append(
+		scenario.capacity.observation.Allocations,
+		CapacityAllocation{Incarnation: replicaIncarnation(1), Available: true},
+	)
+	scenario.mustReconcile("reassert completed capacity target")
+	if scenario.capacity.applyCalls != capacityCalls+1 {
+		t.Fatalf("completed capacity target was not reasserted: %d applications", scenario.capacity.applyCalls)
+	}
+	if _, found := allocationByID(scenario.capacity.observation, retiringReplicaID); found {
+		t.Fatal("reasserted capacity target retained the exactly fenced retired allocation")
+	}
+	scenario.mustReconcile("observe repaired terminal targets")
+	if scenario.status.Transition.Outcome != TransitionOutcomeCompleted {
+		t.Fatalf("steady-state repair changed the completed outcome: %#v", scenario.status.Transition)
+	}
+}
+
 func TestCoordinatorRestartAfterAmbiguousApplyDoesNotCompete(t *testing.T) {
 	scenario := newCoordinatorScenario(t, engineTopology(1, 1))
 	joining := engineReplica(1)

@@ -43,6 +43,11 @@ func TestCoordinatorPersistsEveryDirectiveBeforeCallingItsAdapter(t *testing.T) 
 	if scenario.status.Transition.PlanPreflight.Evidence == nil || len(scenario.events) != 0 {
 		t.Fatalf("plan validation was not persisted before prework: status=%#v events=%v", scenario.status.Transition.PlanPreflight, scenario.events)
 	}
+	request := scenario.membership.lastPlanValidation
+	if request == nil || request.PlanDigest != scenario.status.Transition.PlanPreflight.SubjectDigest ||
+		!sameTopology(request.BaseTopology, engineTopology(1, 2)) || !sameResolvedPlan(request.Plan, plan) {
+		t.Fatalf("adapter did not receive the coordinator-owned plan digest: %#v", request)
+	}
 
 	t.Log("Persist the absolute traffic target before applying it")
 	scenario.mustReconcile("derive traffic target")
@@ -173,6 +178,13 @@ func TestCoordinatorWaitsForCompleteDrainBeforeMembershipMutation(t *testing.T) 
 	if scenario.membership.applyCalls != 0 {
 		t.Fatalf("membership changed before drain completed: %d applications", scenario.membership.applyCalls)
 	}
+	if scenario.traffic.applyCalls < 2 {
+		t.Fatalf("accepted traffic target was not reasserted while unconverged: %d applications", scenario.traffic.applyCalls)
+	}
+	if len(scenario.status.Traffic.Desired.Drain) != 1 ||
+		scenario.status.Traffic.Desired.Drain[0].Mode != TrafficDrainModeGraceful {
+		t.Fatalf("planned retirement did not require graceful drain: %#v", scenario.status.Traffic.Desired.Drain)
+	}
 	if !sameMemberships(scenario.traffic.observation.Draining, base.Replicas[1:]) {
 		t.Fatalf("selected replica is not observably draining: %#v", scenario.traffic.observation)
 	}
@@ -207,6 +219,9 @@ func TestCoordinatorWaitsForCompleteReplicaAvailability(t *testing.T) {
 	}
 	if scenario.membership.applyCalls != 0 {
 		t.Fatalf("membership changed before capacity became available: %d applications", scenario.membership.applyCalls)
+	}
+	if scenario.capacity.applyCalls < 2 {
+		t.Fatalf("accepted capacity target was not reasserted while unconverged: %d applications", scenario.capacity.applyCalls)
 	}
 	record, found := scenario.status.Registry.Find(joining.ReplicaID)
 	if !found || record.Current != nil {
@@ -302,7 +317,6 @@ func TestCoordinatorRequiresTerminalTrafficEvidenceForFailedMember(t *testing.T)
 		ProfileFingerprint:      "profile-v1",
 		ProcessLifecycleOwner:   ProcessLifecycleOwnerOrchestrator,
 		TrafficRequirement:      TrafficRequirementKeepServing,
-		RetirementSafety:        RetirementSafetyWithdrawn,
 		VerificationRequirement: VerificationRequirementRequired,
 		Change: ResolvedChange{
 			Kind:              PlanKindReduceToSurvivors,
@@ -324,6 +338,10 @@ func TestCoordinatorRequiresTerminalTrafficEvidenceForFailedMember(t *testing.T)
 	}
 	if !sameMemberships(scenario.traffic.observation.Admitted, base.Replicas[:1]) {
 		t.Fatalf("failed identity remained routable: %#v", scenario.traffic.observation.Admitted)
+	}
+	if len(scenario.status.Traffic.Desired.Drain) != 1 ||
+		scenario.status.Traffic.Desired.Drain[0].Mode != TrafficDrainModeConfirmInactive {
+		t.Fatalf("survivor recovery did not require inactive-member evidence: %#v", scenario.status.Traffic.Desired.Drain)
 	}
 
 	t.Log("Publish durable inactivity confirmation and allow survivor reduction")

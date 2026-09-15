@@ -46,8 +46,11 @@ func (c *Coordinator) reconcilePlanPreflight(
 	result, validationErr := c.membership.ValidatePlan(
 		ctx,
 		groupID,
-		base,
-		status.Transition.Spec.Plan,
+		PlanValidationRequest{
+			BaseTopology: cloneTopology(base),
+			Plan:         cloneResolvedPlan(status.Transition.Spec.Plan),
+			PlanDigest:   digest,
+		},
 	)
 	if validationErr != nil {
 		return false, false, fmt.Errorf("validate membership plan: %w", validationErr)
@@ -153,7 +156,7 @@ func (c *Coordinator) reconcileRollbackCapacity(
 	}
 
 	desired := *status.Capacity.Desired
-	if status.Capacity.Observed.AppliedRevision < desired.ControlRevision {
+	if !capacityReleaseConverged(desired, status.Capacity.Observed) {
 		result, applyErr := c.capacity.Apply(ctx, groupID, desired)
 		if applyErr != nil {
 			return false, false, fmt.Errorf("apply rollback capacity target: %w", applyErr)
@@ -165,9 +168,6 @@ func (c *Coordinator) reconcileRollbackCapacity(
 			c.blockTransition(status, *result.Rejection)
 			return false, true, nil
 		}
-		return false, false, nil
-	}
-	if !capacityReleaseConverged(desired, status.Capacity.Observed) {
 		return false, false, nil
 	}
 
@@ -205,7 +205,7 @@ func (c *Coordinator) reconcileRollbackTraffic(
 	}
 
 	desired := *status.Traffic.Desired
-	if status.Traffic.Observed.AppliedRevision < desired.ControlRevision {
+	if !trafficTargetConverged(desired, status.Traffic.Observed) {
 		result, applyErr := c.traffic.Apply(ctx, groupID, desired)
 		if applyErr != nil {
 			return false, false, fmt.Errorf("apply rollback traffic target: %w", applyErr)
@@ -219,7 +219,68 @@ func (c *Coordinator) reconcileRollbackTraffic(
 		}
 		return false, false, nil
 	}
-	return trafficTargetConverged(desired, status.Traffic.Observed), false, nil
+	return true, false, nil
+}
+
+// reconcileTerminalTargets keeps the last accepted physical and traffic levels converged after the transition that
+// produced them has completed or rolled back. Membership incarnation drift remains a separate recovery event and is
+// rejected by the durable registry and topology invariants rather than being silently adopted here.
+func (c *Coordinator) reconcileTerminalTargets(
+	ctx context.Context,
+	groupID GroupID,
+	status GroupStatus,
+) (ReconcileResult, error) {
+	current, found := status.Topologies.Current()
+	if !found || !sameTopology(current, status.Membership.Observed.CommittedTopology) {
+		return ReconcileResult{Status: status}, errors.New("terminal transition does not match authoritative membership")
+	}
+
+	if status.Traffic.Desired != nil &&
+		!trafficTargetConverged(*status.Traffic.Desired, status.Traffic.Observed) {
+		result, err := c.traffic.Apply(ctx, groupID, *status.Traffic.Desired)
+		if err != nil {
+			return ReconcileResult{Status: status, Requeue: true}, fmt.Errorf("reassert terminal traffic target: %w", err)
+		}
+		if result.Rejection != nil {
+			if err := validateRejection(result.Rejection); err != nil {
+				return ReconcileResult{Status: status}, fmt.Errorf("invalid terminal traffic rejection: %w", err)
+			}
+			return ReconcileResult{Status: status}, fmt.Errorf(
+				"terminal traffic target was rejected: %s: %s",
+				result.Rejection.Reason,
+				result.Rejection.Message,
+			)
+		}
+		return ReconcileResult{Status: status, Requeue: true}, nil
+	}
+
+	if status.Capacity.Desired != nil &&
+		!terminalCapacityTargetConverged(*status.Capacity.Desired, status.Capacity.Observed) {
+		result, err := c.capacity.Apply(ctx, groupID, *status.Capacity.Desired)
+		if err != nil {
+			return ReconcileResult{Status: status, Requeue: true}, fmt.Errorf("reassert terminal capacity target: %w", err)
+		}
+		if result.Rejection != nil {
+			if err := validateRejection(result.Rejection); err != nil {
+				return ReconcileResult{Status: status}, fmt.Errorf("invalid terminal capacity rejection: %w", err)
+			}
+			return ReconcileResult{Status: status}, fmt.Errorf(
+				"terminal capacity target was rejected: %s: %s",
+				result.Rejection.Reason,
+				result.Rejection.Message,
+			)
+		}
+		return ReconcileResult{Status: status, Requeue: true}, nil
+	}
+
+	return ReconcileResult{Status: status}, nil
+}
+
+func terminalCapacityTargetConverged(target CapacityTarget, observation CapacityObservation) bool {
+	if len(target.ReleaseFences) > 0 {
+		return capacityReleaseConverged(target, observation)
+	}
+	return capacityAllocationsConverged(target, observation, true)
 }
 
 func (c *Coordinator) reconcileJoiningCapacity(
@@ -249,7 +310,7 @@ func (c *Coordinator) reconcileJoiningCapacity(
 	}
 
 	desired := *status.Capacity.Desired
-	if status.Capacity.Observed.AppliedRevision < desired.ControlRevision {
+	if !capacityAllocationsConverged(desired, status.Capacity.Observed, true) {
 		result, applyErr := c.capacity.Apply(ctx, groupID, desired)
 		if applyErr != nil {
 			return false, false, fmt.Errorf("apply joining capacity target: %w", applyErr)
@@ -261,9 +322,6 @@ func (c *Coordinator) reconcileJoiningCapacity(
 			c.beginRollback(status, *result.Rejection)
 			return false, true, nil
 		}
-		return false, false, nil
-	}
-	if !capacityAllocationsConverged(desired, status.Capacity.Observed, true) {
 		return false, false, nil
 	}
 
@@ -304,7 +362,7 @@ func (c *Coordinator) reconcilePreMembershipTraffic(
 	}
 
 	desired := *status.Traffic.Desired
-	if status.Traffic.Observed.AppliedRevision < desired.ControlRevision {
+	if !trafficTargetConverged(desired, status.Traffic.Observed) {
 		result, applyErr := c.traffic.Apply(ctx, groupID, desired)
 		if applyErr != nil {
 			return false, false, fmt.Errorf("apply pre-membership traffic target: %w", applyErr)
@@ -318,7 +376,7 @@ func (c *Coordinator) reconcilePreMembershipTraffic(
 		}
 		return false, false, nil
 	}
-	return trafficTargetConverged(desired, status.Traffic.Observed), false, nil
+	return true, false, nil
 }
 
 func (c *Coordinator) reconcileMembership(
@@ -612,7 +670,7 @@ func (c *Coordinator) reconcileRetiredCapacity(
 	}
 
 	desired := *status.Capacity.Desired
-	if status.Capacity.Observed.AppliedRevision < desired.ControlRevision {
+	if !capacityReleaseConverged(desired, status.Capacity.Observed) {
 		result, applyErr := c.capacity.Apply(ctx, groupID, desired)
 		if applyErr != nil {
 			return false, false, fmt.Errorf("apply retired capacity target: %w", applyErr)
@@ -624,9 +682,6 @@ func (c *Coordinator) reconcileRetiredCapacity(
 			c.blockTransition(status, *result.Rejection)
 			return false, true, nil
 		}
-		return false, false, nil
-	}
-	if !capacityReleaseConverged(desired, status.Capacity.Observed) {
 		return false, false, nil
 	}
 
@@ -723,7 +778,7 @@ func (c *Coordinator) reconcileCommittedTraffic(
 	}
 
 	desired := *status.Traffic.Desired
-	if status.Traffic.Observed.AppliedRevision < desired.ControlRevision {
+	if !trafficTargetConverged(desired, status.Traffic.Observed) {
 		result, applyErr := c.traffic.Apply(ctx, groupID, desired)
 		if applyErr != nil {
 			return false, false, fmt.Errorf("apply committed traffic target: %w", applyErr)
@@ -737,7 +792,7 @@ func (c *Coordinator) reconcileCommittedTraffic(
 		}
 		return false, false, nil
 	}
-	return trafficTargetConverged(desired, status.Traffic.Observed), false, nil
+	return true, false, nil
 }
 
 func buildCapacityTarget(
@@ -877,7 +932,7 @@ func buildPreMembershipTrafficTarget(
 		for _, membership := range base.Replicas {
 			mode := TrafficDrainModeGraceful
 			if _, retiringMember := retiring[membership.ReplicaID]; retiringMember &&
-				status.Transition.Spec.Plan.RetirementSafety == RetirementSafetyWithdrawn {
+				status.Transition.Spec.Plan.Change.Kind == PlanKindReduceToSurvivors {
 				mode = TrafficDrainModeConfirmInactive
 			}
 			drain = append(drain, TrafficDrainTarget{Membership: cloneReplicaMembership(membership), Mode: mode})
@@ -887,7 +942,7 @@ func buildPreMembershipTrafficTarget(
 			membership, _ := membershipByID(base, replicaID)
 			drain = append(drain, TrafficDrainTarget{
 				Membership: membership,
-				Mode:       trafficDrainMode(status.Transition.Spec.Plan.RetirementSafety),
+				Mode:       trafficDrainMode(status.Transition.Spec.Plan.Change.Kind),
 			})
 		}
 	}
@@ -911,7 +966,7 @@ func buildCommittedTrafficTarget(
 		membership, _ := membershipByID(base, replicaID)
 		drain = append(drain, TrafficDrainTarget{
 			Membership: membership,
-			Mode:       trafficDrainMode(status.Transition.Spec.Plan.RetirementSafety),
+			Mode:       trafficDrainMode(status.Transition.Spec.Plan.Change.Kind),
 		})
 	}
 	return TrafficTarget{
@@ -922,8 +977,8 @@ func buildCommittedTrafficTarget(
 	}
 }
 
-func trafficDrainMode(safety RetirementSafety) TrafficDrainMode {
-	if safety == RetirementSafetyWithdrawn {
+func trafficDrainMode(kind PlanKind) TrafficDrainMode {
+	if kind == PlanKindReduceToSurvivors {
 		return TrafficDrainModeConfirmInactive
 	}
 	return TrafficDrainModeGraceful

@@ -83,7 +83,6 @@ func TestResolvedPlanVariantsProduceExactIdentitySets(t *testing.T) {
 				ProfileFingerprint:      "profile-v1",
 				ProcessLifecycleOwner:   ProcessLifecycleOwnerOrchestrator,
 				TrafficRequirement:      TrafficRequirementKeepServing,
-				RetirementSafety:        RetirementSafetyWithdrawn,
 				VerificationRequirement: VerificationRequirementRequired,
 				Change: ResolvedChange{
 					Kind:              PlanKindReduceToSurvivors,

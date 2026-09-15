@@ -147,16 +147,6 @@ func validateResolvedPlan(
 		return planResolution{}, err
 	}
 
-	// Retirement safety is meaningful and mandatory only when logical replicas leave membership.
-	if len(resolution.retiringReplicaIDs) > 0 {
-		if plan.RetirementSafety != RetirementSafetyDrained &&
-			plan.RetirementSafety != RetirementSafetyWithdrawn {
-			return planResolution{}, fmt.Errorf("invalid retirement safety %q", plan.RetirementSafety)
-		}
-	} else if plan.RetirementSafety != "" {
-		return planResolution{}, errors.New("retirement safety must be empty when no replica retires")
-	}
-
 	return resolution, nil
 }
 
