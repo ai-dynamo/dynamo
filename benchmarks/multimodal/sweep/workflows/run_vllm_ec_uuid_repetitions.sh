@@ -8,8 +8,13 @@ CONFIG="${1:-benchmarks/multimodal/sweep/experiments/embedding_cache/vllm_serve.
 OUTPUT_BASE="${2:-/dynamo-tmp/logs/09-14/qwen35-122b-vllm-ec-uuid}"
 REPETITIONS="${3:-3}"
 
+if [[ ! "$REPETITIONS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "REPETITIONS must be a positive integer, got: $REPETITIONS" >&2
+    exit 2
+fi
+
 mkdir -p "$OUTPUT_BASE"
-python3 - "$OUTPUT_BASE/run_metadata.json" <<'PY'
+python3 - "$OUTPUT_BASE/run_metadata.json" "$CONFIG" "$OUTPUT_BASE" "$REPETITIONS" <<'PY'
 import datetime
 import json
 import os
@@ -20,14 +25,37 @@ from importlib.metadata import version
 
 import dynamo._core
 import vllm
+import yaml
 
 output = pathlib.Path(sys.argv[1])
+config_path = pathlib.Path(sys.argv[2])
+output_base = pathlib.Path(sys.argv[3])
+repetitions = int(sys.argv[4])
+config = yaml.safe_load(config_path.read_text())
+configs = config["configs"]
+if not configs:
+    raise ValueError(f"No configs found in {config_path}")
+
+rotations = [configs[index:] + configs[:index] for index in range(len(configs))]
+balanced_orders = rotations + [list(reversed(order)) for order in rotations]
+arm_orders = []
+for iteration in range(1, repetitions + 1):
+    ordered_configs = balanced_orders[(iteration - 1) % len(balanced_orders)]
+    labels = [item["label"] for item in ordered_configs]
+    arm_orders.append(labels)
+    iteration_config = dict(config)
+    iteration_config["configs"] = ordered_configs
+    (output_base / f"config-rep-{iteration}.yaml").write_text(
+        yaml.safe_dump(iteration_config, sort_keys=False)
+    )
+
 metadata = {
     "profile": "122b",
     "model": "Qwen/Qwen3.5-122B-A10B-FP8",
     "preset": "dl-H100x2",
     "tp": 2,
     "arms": ["vllm-serve", "vllm-serve-native-ec", "vllm-serve-dynamo-ec"],
+    "arm_orders": arm_orders,
     "ec_capacity_gb": 4,
     "nvtx": False,
     "uuid_and_strip": True,
@@ -51,8 +79,19 @@ output.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
 PY
 
 for ((iteration = 1; iteration <= REPETITIONS; iteration++)); do
+    iteration_config="$OUTPUT_BASE/config-rep-$iteration.yaml"
+    iteration_order="$(python3 - "$iteration_config" <<'PY'
+import sys
+
+import yaml
+
+config = yaml.safe_load(open(sys.argv[1]))
+print(" -> ".join(item["label"] for item in config["configs"]))
+PY
+)"
+    echo "[sweep] ITERATION_ORDER_${iteration}=${iteration_order}"
     python3 -m benchmarks.multimodal.sweep \
-        --config "$CONFIG" \
+        --config "$iteration_config" \
         --output-dir "$OUTPUT_BASE/rep-$iteration" \
         --skip-plots
     echo "[sweep] END_ITER_${iteration}"
