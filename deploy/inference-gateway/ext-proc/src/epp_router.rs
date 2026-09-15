@@ -34,7 +34,10 @@ use dynamo_llm::protocols::common::extensions::{
 use serde::Deserialize;
 
 use crate::epp_standalone_config::{EppStandaloneConfig, RendererProtocol};
-use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo};
+use crate::picker::{
+    CacheSaltForwarding, Endpoint, EndpointPicker, PickError, PickResult, RequestInfo,
+    resolve_cache_namespace,
+};
 use crate::pod_discovery::PodDiscovery;
 use crate::render_http::RenderError;
 use crate::selector::{SelectRequest, Selector};
@@ -51,7 +54,7 @@ pub(crate) fn requested_policy_class(
 ) -> Result<Option<String>, PickError> {
     let metadata =
         extract_metadata_from_header_pairs(headers.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-            .map_err(|e| PickError::MetadataHeadersInvalid(e.to_string()))?;
+            .map_err(PickError::MetadataHeadersTooLarge)?;
     Ok(metadata.get("policy-class").cloned())
 }
 
@@ -86,6 +89,16 @@ pub struct EppRouter {
     /// and released (RAII) when it returns or is dropped/cancelled; when none are
     /// available the request is shed with `PickError::Overloaded` (not queued).
     inflight: Arc<Semaphore>,
+}
+
+/// Routing inputs parsed from a standalone EPP request.
+#[derive(Debug)]
+struct TokenizedRequest {
+    token_ids: Vec<u32>,
+    priority_jump: Option<f64>,
+    strict_priority: Option<u32>,
+    cache_namespace: Option<String>,
+    expected_output_tokens: Option<u32>,
 }
 
 impl EppRouter {
@@ -135,53 +148,65 @@ impl EppRouter {
         self.reflector_ready.load(Ordering::Acquire)
     }
 
-    /// Tokenize a chat body for routing and resolve its scheduling metadata.
-    /// Priority uses header-over-body precedence via [`resolve_request_priority`].
-    /// On failure the already-resolved priority is returned alongside the error
-    /// so a degraded pick keeps it.
+    /// Tokenize a chat body and resolve its routing inputs. On failure, already
+    /// resolved inputs are returned alongside the error so a degraded pick keeps
+    /// them.
     async fn tokenize(
         &self,
         request_body: bytes::Bytes,
-        priority_header: Option<String>,
-        strict_priority_header: Option<String>,
+        headers: &[(String, String)],
     ) -> Result<TokenizedRequest, TokenizeFailure> {
-        // Parse only `nvext.agent_hints` for priority — the worker re-parses the
-        // full body anyway, so we skip allocating the large `messages`/tools
-        // fields. Malformed JSON still fails here (→ 400); a well-formed body that
-        // is not a valid chat request is caught by the renderer below.
+        // Parse only the routing hot-path fields — the worker re-parses the full
+        // body anyway, so we skip allocating the large `messages`/tools fields.
+        // Malformed JSON still fails here (→ 400); a well-formed body that is not
+        // a valid chat request is caught by the renderer below.
         let hints: RoutingHints =
             serde_json::from_slice(&request_body).map_err(|error| TokenizeFailure {
                 priority_jump: None,
                 strict_priority: None,
                 expected_output_tokens: None,
+                cache_namespace: None,
                 error: TokenizeError::InvalidBody(error),
             })?;
+        let priority_header = first_header(headers, HEADER_REQUEST_PRIORITY);
+        let strict_priority_header = first_header(headers, HEADER_REQUEST_STRICT_PRIORITY);
         let resolved = resolve_request_priority(
             hints.nvext.as_ref().and_then(|n| n.agent_hints.as_ref()),
-            priority_header.as_deref(),
-            strict_priority_header.as_deref(),
+            priority_header,
+            strict_priority_header,
         );
         let expected_output_tokens = hints
             .nvext
             .as_ref()
             .and_then(|n| n.agent_hints.as_ref())
             .and_then(|h| h.osl);
+        let cache_namespace = resolve_cache_namespace(
+            headers,
+            hints
+                .nvext
+                .as_ref()
+                .and_then(|nvext| nvext.cache_namespace.as_deref()),
+            hints.cache_namespace.as_deref(),
+        );
         // Moves the `Bytes` into reqwest (zero-copy) rather than copying.
-        let token_ids =
-            self.renderer
-                .render_chat(request_body)
-                .await
-                .map_err(|e| TokenizeFailure {
+        let token_ids = match self.renderer.render_chat(request_body).await {
+            Ok(token_ids) => token_ids,
+            Err(error) => {
+                return Err(TokenizeFailure {
                     priority_jump: resolved.priority_jump,
                     strict_priority: resolved.strict_priority,
                     expected_output_tokens,
-                    error: TokenizeError::Render(e),
-                })?;
+                    cache_namespace,
+                    error: TokenizeError::Render(error),
+                });
+            }
+        };
         Ok(TokenizedRequest {
             token_ids,
             priority_jump: resolved.priority_jump,
             strict_priority: resolved.strict_priority,
             expected_output_tokens,
+            cache_namespace,
         })
     }
 
@@ -222,18 +247,25 @@ pub(crate) fn endpoint_in_subset(
 }
 
 /// Minimal deserialize target for the routing hot path: only `nvext.agent_hints`
-/// is needed for priority resolution, so the large `messages`/tools fields are
-/// never allocated. Unknown fields are ignored (no `deny_unknown_fields`).
+/// is needed for priority resolution and `cache_namespace`,so the large
+/// `messages`/tools fields are never allocated.
+/// Unknown fields are ignored (no `deny_unknown_fields`).
 #[derive(Deserialize)]
 struct RoutingHints {
     #[serde(default)]
     nvext: Option<RoutingNvExt>,
+    /// Native vLLM top-level `cache_salt`.
+    #[serde(default, rename = "cache_salt")]
+    cache_namespace: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct RoutingNvExt {
     #[serde(default)]
     agent_hints: Option<AgentHints>,
+    /// Dynamo-style `nvext.cache_salt`.
+    #[serde(default, rename = "cache_salt")]
+    cache_namespace: Option<String>,
 }
 
 /// Case-insensitive lookup of the first non-empty, trimmed value for `name`.
@@ -323,23 +355,16 @@ impl EndpointPicker for EppRouter {
             });
         }
 
-        // Header-over-body priority (via the shared resolver), honored here as on
-        // the frontend path.
-        let priority_header =
-            first_header(&req.headers, HEADER_REQUEST_PRIORITY).map(str::to_owned);
-        let strict_priority_header =
-            first_header(&req.headers, HEADER_REQUEST_STRICT_PRIORITY).map(str::to_owned);
         let TokenizedRequest {
             token_ids: tokens,
             priority_jump,
             strict_priority,
+            cache_namespace,
             expected_output_tokens,
         } = tokenized_or_load_only(
-            self.tokenize(req.body.clone(), priority_header, strict_priority_header)
-                .await,
+            self.tokenize(req.body.clone(), &req.headers).await,
             &req.request_id,
         )?;
-
         let policy_class = requested_policy_class(&req.headers)?;
 
         // EPP-minted booking key (not the reused `x-request-id`): stays
@@ -371,6 +396,7 @@ impl EndpointPicker for EppRouter {
             strict_priority,
             expected_output_tokens,
             policy_class,
+            cache_namespace: cache_namespace.clone(),
         };
 
         // On either error return below the guard (still armed) frees the booking.
@@ -402,6 +428,9 @@ impl EndpointPicker for EppRouter {
             endpoint,
             // Worker re-tokenizes the forwarded request (llm-d parity); no inject.
             token_ids: None,
+            cache_namespace,
+            // Native vLLM has no Dynamo handler to tag the salt; the EPP does.
+            cache_salt_forwarding: CacheSaltForwarding::NativeVllm,
             // Booking id for the server's lifecycle callbacks (no shared map).
             reservation_id: Some(reservation_id),
             ..Default::default()
@@ -549,18 +578,11 @@ impl TokenizeError {
 }
 
 #[derive(Debug)]
-struct TokenizedRequest {
-    token_ids: Vec<u32>,
-    priority_jump: Option<f64>,
-    strict_priority: Option<u32>,
-    expected_output_tokens: Option<u32>,
-}
-
-#[derive(Debug)]
 struct TokenizeFailure {
     priority_jump: Option<f64>,
     strict_priority: Option<u32>,
     expected_output_tokens: Option<u32>,
+    cache_namespace: Option<String>,
     error: TokenizeError,
 }
 
@@ -577,6 +599,7 @@ fn tokenized_or_load_only(
             priority_jump,
             strict_priority,
             expected_output_tokens,
+            cache_namespace,
             error,
         }) if error.should_degrade() => {
             tracing::warn!(
@@ -589,6 +612,7 @@ fn tokenized_or_load_only(
                 priority_jump,
                 strict_priority,
                 expected_output_tokens,
+                cache_namespace,
             })
         }
         Err(TokenizeFailure { error, .. }) => Err(error.into_pick_error(request_id)),
@@ -632,6 +656,23 @@ mod tests {
         // No metadata header → no policy class.
         let headers: Vec<(String, String)> = vec![("x-request-id".to_string(), "r1".to_string())];
         assert_eq!(requested_policy_class(&headers).unwrap(), None);
+    }
+
+    #[test]
+    fn requested_policy_class_preserves_typed_limit_error() {
+        use dynamo_llm::http::service::metadata::MetadataHeaderError;
+
+        let headers: Vec<(String, String)> = (0..65)
+            .map(|i| (format!("x-dynamo-meta-key-{i:02}"), "v".to_string()))
+            .collect();
+        let err = requested_policy_class(&headers).expect_err("65 metadata entries must fail");
+        assert!(
+            matches!(
+                err,
+                PickError::MetadataHeadersTooLarge(MetadataHeaderError::TooManyEntries { .. })
+            ),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -708,6 +749,7 @@ mod tests {
                 priority_jump: Some(3.5),
                 strict_priority: Some(7),
                 expected_output_tokens: Some(128),
+                cache_namespace: Some("tenant-a".to_string()),
                 error: TokenizeError::Render(render_error),
             }),
             "req-1",
@@ -717,6 +759,7 @@ mod tests {
         assert_eq!(degraded.priority_jump, Some(3.5));
         assert_eq!(degraded.strict_priority, Some(7));
         assert_eq!(degraded.expected_output_tokens, Some(128));
+        assert_eq!(degraded.cache_namespace.as_deref(), Some("tenant-a"));
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -742,6 +785,7 @@ mod tests {
                 priority_jump: Some(4.5),
                 strict_priority: Some(8),
                 expected_output_tokens: Some(128),
+                cache_namespace: None,
                 error: TokenizeError::Render(timeout_error),
             }),
             "req-2",
@@ -761,6 +805,7 @@ mod tests {
                 priority_jump: None,
                 strict_priority: None,
                 expected_output_tokens: None,
+                cache_namespace: None,
                 error: TokenizeError::InvalidBody(
                     serde_json::from_str::<()>("not json").unwrap_err(),
                 ),
@@ -775,6 +820,7 @@ mod tests {
                     priority_jump: Some(1.0),
                     strict_priority: Some(2),
                     expected_output_tokens: Some(128),
+                    cache_namespace: None,
                     error: TokenizeError::Render(RenderError::UpstreamStatus {
                         status,
                         body: String::new(),
@@ -793,6 +839,7 @@ mod tests {
                 priority_jump: Some(1.0),
                 strict_priority: Some(2),
                 expected_output_tokens: Some(128),
+                cache_namespace: None,
                 error: TokenizeError::Render(RenderError::InvalidResponse {
                     source: serde_json::from_str::<()>("not json").unwrap_err(),
                 }),
@@ -810,6 +857,7 @@ mod tests {
                 priority_jump: Some(1.0),
                 strict_priority: Some(2),
                 expected_output_tokens: Some(128),
+                cache_namespace: None,
                 error: TokenizeError::Render(RenderError::UpstreamStatus {
                     status,
                     body: String::new(),
@@ -833,6 +881,7 @@ mod tests {
                     priority_jump: Some(1.0),
                     strict_priority: Some(2),
                     expected_output_tokens: Some(128),
+                    cache_namespace: None,
                     error: TokenizeError::Render(RenderError::UpstreamStatus {
                         status,
                         body: String::new(),

@@ -30,7 +30,7 @@ opentelemetry-sdk<=1.38.0
 # Transitive via imageio/matplotlib; floor keeps images on the current patch line.
 pillow>=12.3.0
 prometheus_client==0.23.1
-protobuf>=5.29.5,<7.0.0
+protobuf==6.33.6
 pydantic>=2.11.4,<=2.13.5
 pydantic-settings<2.13.0
 PyYAML==6.0.3
@@ -42,4 +42,4 @@ tensorboardX==2.6.2.2
 # SGLang 0.5.16 pins 5.12.1.
 transformers>=4.56.0
 uvicorn==0.38.0
-zstandard==0.23.0
+zstandard==0.25.0

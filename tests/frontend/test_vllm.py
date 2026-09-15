@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
 from typing import Any, Dict, Generator, Optional, Tuple
 
 import pytest
@@ -73,7 +72,7 @@ SYSTEM_HEALTH_TOOL = {
 }
 
 
-class VllmWorkerProcess(ManagedProcess):
+class WorkerProcess(ManagedProcess):
     """Vllm Worker process for GPT-OSS model."""
 
     def __init__(
@@ -128,11 +127,6 @@ class VllmWorkerProcess(ManagedProcess):
         env["DYN_SYSTEM_PORT"] = str(self.system_port)
 
         log_dir = f"{request.node.name}_{worker_id}"
-
-        try:
-            shutil.rmtree(log_dir)
-        except FileNotFoundError:
-            pass
 
         super().__init__(
             command=command,
@@ -194,7 +188,7 @@ def start_services(
         terminate_all_matching_process_names=False,
     ):
         logger.info("Frontend started for tests")
-        with VllmWorkerProcess(
+        with WorkerProcess(
             request,
             frontend_port=frontend_port,
             system_port=system_port,

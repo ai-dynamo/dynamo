@@ -98,6 +98,11 @@ areas:
   - examples/backends/sglang/
   - lib/mocker/servers/sglang/
   - lib/sidecar/sglang/
+- label: backend-triton
+  github_team: '@ai-dynamo/dynamo-backend-triton-codeowners'
+  path_globs:
+  - components/src/dynamo/triton/**
+  - docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/triton/
 - label: kv-memory
   github_team: '@ai-dynamo/dynamo-kv-memory-codeowners'
   path_globs:
@@ -227,6 +232,7 @@ areas:
   - components/src/dynamo/common/memory/
   - components/src/dynamo/common/tests/
   - components/src/dynamo/common/utils/
+  - components/src/dynamo/experimental/
   - examples/backends/sample/
   - examples/backends/tritonserver/
   - examples/common/
@@ -394,11 +400,6 @@ areas:
   - deploy/operator/cmd/crd-apply/
   - deploy/operator/config/
   - deploy/operator/config/crd/
-  - deploy/operator/config/default/
-  - deploy/operator/config/manager/
-  - deploy/operator/config/prometheus/
-  - deploy/operator/config/rbac/
-  - deploy/operator/config/samples/
   - deploy/operator/docs/
   - deploy/operator/hack/
   - deploy/operator/internal/
@@ -418,9 +419,6 @@ areas:
   - deploy/operator/internal/secrets/
   - deploy/operator/internal/webhook/
   - deploy/operator/samples/
-  - deploy/operator/test/
-  - deploy/operator/test/e2e/
-  - deploy/operator/test/utils/
   - deploy/pre-deployment/
   - deploy/utils/
   - deploy/utils/manifests/
@@ -541,6 +539,19 @@ required_owners:
   owners:
   - operator
 shared:
+- glob: .github/review-prompts/README.md
+  owners:
+  - ops
+  - frontend
+  - runtime
+- glob: .github/review-prompts/frontend.md
+  owners:
+  - ops
+  - frontend
+- glob: .github/review-prompts/runtime.md
+  owners:
+  - ops
+  - runtime
 # CODEOWNERS is a generated artifact, so co-ownership here is about who may
 # approve it, not who reviews its contents. Every area is listed because under
 # "any one approves" any single team satisfies the gate: without this, adding a
@@ -805,10 +816,6 @@ shared:
 - glob: components/src/dynamo/vllm/publisher.py
   owners:
   - backend-vllm
-  - observability
-- glob: deploy/operator/config/prometheus/monitor.yaml
-  owners:
-  - operator
   - observability
 - glob: lib/llm/src/fpm_publisher.rs
   owners:

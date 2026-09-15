@@ -56,6 +56,7 @@ pub struct SelectRequest {
     pub strict_priority: Option<u32>,
     pub expected_output_tokens: Option<u32>,
     pub policy_class: Option<String>,
+    pub cache_namespace: Option<String>,
 }
 
 /// Observability overlap summary (matched token counts).
@@ -286,11 +287,13 @@ impl Selector {
                 block_hashes: Some(Vec::new()),
                 sequence_hashes: Some(Vec::new()),
                 isl_tokens: Some(req.estimated_input_tokens.max(1)),
+                cache_namespace: req.cache_namespace,
                 ..Default::default()
             }
         } else {
             PromptRequest {
                 token_ids: Some(req.token_ids),
+                cache_namespace: req.cache_namespace,
                 ..Default::default()
             }
         };
@@ -524,6 +527,7 @@ models:
             strict_priority: None,
             expected_output_tokens: None,
             policy_class: None,
+            cache_namespace: None,
         }
     }
 

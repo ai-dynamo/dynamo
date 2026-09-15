@@ -141,6 +141,8 @@ impl DiscoveredModel {
             model: self.source.clone(),
             served_model_name: Some(self.served_name.clone()),
             model_aliases: self.identity.aliases.clone(),
+            // The released protocol lacks native sampling JSON and its capability
+            // flag. Advertise native Generate only once upstream supports both.
             runtime_data: Default::default(),
             llm: Some(LlmRegistration {
                 context_length: nonzero(self.server.max_model_len),

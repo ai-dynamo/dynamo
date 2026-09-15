@@ -10,6 +10,14 @@ from dataclasses import dataclass, field
 
 import pytest
 
+# tests.serve.multimodal_profiles.vllm reaches dynamo.common.multimodal, whose
+# package __init__ eagerly imports torch.
+# Skip the whole module in images that do not ship torch (e.g. Triton).
+try:
+    import torch  # noqa: F401
+except ModuleNotFoundError as e:
+    pytest.skip(f"torch not available in this image: {e}", allow_module_level=True)
+
 from tests.serve.common import (
     WORKSPACE_DIR,
     params_with_model_mark,
@@ -34,6 +42,7 @@ from tests.utils.payload_builder import (
     embedding_payload,
     embedding_payload_default,
     kv_events_metrics_payload,
+    lora_chat_payload,
     metric_payload_default,
     pooling_payload,
     router_cached_tokens_chat_payload,
@@ -43,7 +52,6 @@ from tests.utils.payloads import (
     EmbeddingMultiWorkerDispatchPayload,
     EmbeddingPayload,
     ToolCallingChatPayload,
-    lora_chat_payload,
 )
 
 logger = logging.getLogger(__name__)
