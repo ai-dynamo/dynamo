@@ -81,6 +81,9 @@ def _agg_deployment() -> BackendDeploymentSpec:
         backend_version="0.11.0",
         agg_engine_args={"engine_type": "vllm", "max_num_seqs": 256},
         num_workers=3,
+        performance_model_metadata={
+            "aggregated": {"config": {"model_path": "target-model"}}
+        },
     )
 
 
@@ -152,7 +155,7 @@ def test_trace_runner_preserves_current_replay_arguments(monkeypatch) -> None:
     assert seen["planner_config"] == {"mode": "agg"}
     assert seen["arrival_speedup_ratio"] == 2.0
     assert seen["replay_concurrency"] == 8
-    assert seen["trace_block_size"] == 512
+    assert seen["trace_block_size"] is None
     assert seen["benchmark_granularity"] == 8
     assert seen["capture_per_request"] is False
     assert seen["capture_planner_details"] is False
@@ -168,7 +171,14 @@ def test_trace_paths_only_workload_routes_to_trace_replay(monkeypatch) -> None:
 
     def fake_run_trace_replay(**kwargs):
         seen.update(kwargs)
-        return _report({"completed_requests": 2})
+        return _report(
+            {
+                "completed_requests": 2,
+                "agentic_graph": {
+                    "source_models": ["source-a", "source-b"],
+                },
+            }
+        )
 
     monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
     monkeypatch.setattr(simulation, "run_trace_replay", fake_run_trace_replay)
@@ -189,6 +199,110 @@ def test_trace_paths_only_workload_routes_to_trace_replay(monkeypatch) -> None:
     assert seen["arrival_speedup_ratio"] == 2.0
     assert seen["agentic_lanes"] == 4
     assert report.metrics["completed_requests"] == 2.0
+
+
+@pytest.mark.parametrize(
+    "nested_timestamp_basis", [None, "auto", "absolute", "relative"]
+)
+def test_weka_runner_delegates_without_inventing_a_source_block_size(
+    monkeypatch,
+    nested_timestamp_basis,
+) -> None:
+    seen = {}
+
+    def fake_run_trace_replay(**kwargs):
+        seen.update(kwargs)
+        return _report(
+            {
+                "completed_requests": 2,
+                "agentic_graph": {
+                    "source_models": ["source-a", "source-b"],
+                },
+            }
+        )
+
+    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
+    monkeypatch.setattr(simulation, "run_trace_replay", fake_run_trace_replay)
+    spec = ReplaySpec(
+        backend_deployment=_agg_deployment(),
+        workload={
+            "trace_path": "published-weka",
+            "trace_format": "weka",
+            "agentic_lanes": 1,
+            "weka_nested_timestamp_basis": nested_timestamp_basis,
+        },
+        goal={"target": "throughput"},
+    )
+
+    report = simulation.DynamoReplayRunnerFactory().create(0).run(spec)
+
+    assert seen["trace_block_size"] is None
+    assert seen["agentic_lanes"] == 1
+    assert seen["execution_model"] == "target-model"
+    assert seen["weka_nested_timestamp_basis"] == nested_timestamp_basis
+    assert report.metadata == {
+        "agentic_qualification": "functional_only",
+        "agentic_input_format": "weka",
+        "agentic_lanes": 1,
+        "agentic_graph": {
+            "source_models": ["source-a", "source-b"],
+        },
+        "agentic_model_projection": {
+            "policy": "project_to_configured_target",
+            "source_models": ["source-a", "source-b"],
+            "target_model": "target-model",
+        },
+    }
+
+
+def test_weka_runner_requires_a_configured_execution_target_model() -> None:
+    deployment = BackendDeploymentSpec(
+        deployment_mode="agg",
+        backend="vllm",
+        backend_version="0.11.0",
+        agg_engine_args={"engine_type": "vllm", "max_num_seqs": 256},
+        num_workers=3,
+    )
+    spec = ReplaySpec(
+        backend_deployment=deployment,
+        workload={"trace_path": "published-weka", "trace_format": "weka"},
+        goal={"target": "throughput"},
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="agentic execution requires a configured target model",
+    ):
+        simulation.DynamoReplayRunnerFactory().create(0).run(spec)
+
+
+def test_dynamo_runner_defers_target_model_validation_until_trace_load(
+    monkeypatch,
+) -> None:
+    seen = {}
+
+    def fake_run_trace_replay(**kwargs):
+        seen.update(kwargs)
+        return _report({"completed_requests": 1})
+
+    deployment = BackendDeploymentSpec(
+        deployment_mode="agg",
+        backend="vllm",
+        backend_version="0.11.0",
+        agg_engine_args={"engine_type": "vllm", "max_num_seqs": 256},
+        num_workers=1,
+    )
+    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
+    monkeypatch.setattr(simulation, "run_trace_replay", fake_run_trace_replay)
+    spec = ReplaySpec(
+        backend_deployment=deployment,
+        workload={"trace_path": "standard.jsonl", "trace_format": "dynamo"},
+        goal={"target": "throughput"},
+    )
+
+    simulation.DynamoReplayRunnerFactory().create(0).run(spec)
+
+    assert seen["execution_model"] is None
 
 
 def test_trace_replay_rejects_boolean_agentic_lanes() -> None:
@@ -399,6 +513,37 @@ def test_fixed_timing_keeps_aic_identity_out_of_runtime_args(monkeypatch) -> Non
     assert "aic_pp_size" not in lowered
 
 
+def test_engine_args_removes_neutral_prefill_schedule_interval(monkeypatch) -> None:
+    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
+    monkeypatch.setattr(
+        simulation,
+        "resolve_aic_num_gpu_blocks",
+        lambda payload: payload,
+    )
+
+    engine_args = simulation.DynamoReplayRunner._engine_args(
+        {"engine_type": "vllm", "prefill_schedule_interval": 1}
+    )
+
+    assert "prefill_schedule_interval" not in json.loads(engine_args.payload)
+
+
+def test_engine_args_rejects_nondefault_prefill_schedule_interval(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
+    monkeypatch.setattr(
+        simulation,
+        "resolve_aic_num_gpu_blocks",
+        lambda payload: payload,
+    )
+
+    with pytest.raises(ValueError, match="prefill_schedule_interval"):
+        simulation.DynamoReplayRunner._engine_args(
+            {"engine_type": "vllm", "prefill_schedule_interval": 4}
+        )
+
+
 def test_factory_preserves_trtllm_disagg_gate() -> None:
     capabilities = simulation.DynamoReplayRunnerFactory().capabilities()
 
@@ -417,6 +562,7 @@ def test_factory_owns_replay_spec_abi_version(monkeypatch) -> None:
             supported_backend_topologies=(),
             supported_hooks=(),
             supports_disaggregated_attention_dp=False,
+            **_kwargs,
         ):
             seen["version"] = replay_spec_api_version
             seen[

@@ -109,6 +109,7 @@ def test_load_engine_args_materializes_unset_aic_blocks(monkeypatch):
             "fmha_dtype": None,
             "kv_cache_dtype": None,
             "comm_dtype": None,
+            "cuda_graph_reserved_bytes": 0,
             "systems_path": None,
         }
     ]

@@ -17,7 +17,9 @@ use super::{
     ReplayWorkerArtifacts, SlaThresholds, TraceSimulationReport,
 };
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
-use crate::loadgen::{AgenticTrace, Trace, TraceFileFormat, load_weka_trace};
+use crate::loadgen::{
+    AgenticTrace, Trace, TraceFileFormat, WekaImportOptions, load_weka_agentic_graph_with_options,
+};
 use crate::scheduler::RouterEventVisibility;
 
 /// Replay artifact KV-event timestamp visibility override.
@@ -72,13 +74,43 @@ fn load_trace_from_file(
 
 fn load_agentic_trace_from_file(
     trace_path: &Path,
-    _trace_block_size: usize,
+    trace_block_size: usize,
     trace_format: TraceFileFormat,
     arrival_speedup_ratio: f64,
 ) -> Result<AgenticTrace> {
+    load_agentic_trace_from_file_with_options(
+        trace_path,
+        trace_block_size,
+        trace_format,
+        arrival_speedup_ratio,
+        WekaImportOptions::default(),
+    )
+}
+
+/// Load and normalize an agentic trace, preserving explicit Weka import options.
+#[doc(hidden)]
+pub fn load_agentic_trace_from_file_with_options(
+    trace_path: &Path,
+    trace_block_size: usize,
+    trace_format: TraceFileFormat,
+    arrival_speedup_ratio: f64,
+    weka_options: WekaImportOptions,
+) -> Result<AgenticTrace> {
     let trace = match trace_format {
         TraceFileFormat::AgenticMooncake => AgenticTrace::from_agentic_mooncake(trace_path)?,
-        TraceFileFormat::Weka => load_weka_trace(trace_path)?,
+        // AISimulate owns Weka validation and lowering. Dynamo keeps only this
+        // runtime composition seam so existing `trace_format="weka"` callers
+        // continue to receive the canonical validated agentic graph.
+        // A zero value is Dynamo's internal sentinel for an omitted source
+        // block-size assertion; Weka itself rejects zero block sizes.
+        TraceFileFormat::Weka => {
+            load_weka_agentic_graph_with_options(
+                trace_path,
+                (trace_block_size != 0).then_some(trace_block_size),
+                weka_options,
+            )?
+            .0
+        }
         _ => bail!("{} is not an agentic trace format", trace_format.as_str()),
     };
     trace
@@ -2765,5 +2797,103 @@ mod tests {
                 "expected validation error to mention first_arrival_timestamp_ms, got {err}",
             );
         }
+    }
+
+    #[test]
+    fn weka_trace_uses_aisimulate_ingestion_and_preserves_source_evidence() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.json");
+        std::fs::write(
+            &source,
+            serde_json::to_vec(&serde_json::json!({
+                "id": "play",
+                "models": ["model", "other-model"],
+                "block_size": 4,
+                "hash_id_scope": "local",
+                "requests": [
+                    {"t": 1.0, "type": "s", "model": "model", "in": 4, "out": 1, "hash_ids": [1], "api_time": 0.2},
+                    {"t": 1.4, "type": "s", "model": "other-model", "in": 8, "out": 0, "hash_ids": [1, 2]}
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let trace = load_agentic_trace_from_file(&source, 0, TraceFileFormat::Weka, 2.0).unwrap();
+
+        assert_eq!(trace.source().format, "weka");
+        assert_eq!(trace.block_size(), 4);
+        assert_eq!(trace.node_count(), 2);
+        assert_eq!(trace.nodes()[0].source_play_ordinal(), Some(0));
+        assert_eq!(trace.nodes()[0].recorded_api_time_ms(), Some(200.0));
+        assert_eq!(trace.nodes()[1].recorded_api_time_ms(), None);
+        assert_eq!(trace.nodes()[1].max_output_tokens(), 0);
+        assert_eq!(trace.nodes()[0].not_before_ms(), 0.0);
+        assert_eq!(trace.nodes()[1].not_before_ms(), 200.0);
+        assert_eq!(trace.nodes()[1].dependencies()[0].delay_ms, 100.0);
+        assert_eq!(
+            trace.identity().source_models,
+            ["model".to_string(), "other-model".to_string()]
+        );
+
+        let error =
+            load_agentic_trace_from_file(&source, 512, TraceFileFormat::Weka, 1.0).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Weka source block size 4 does not match configured block size 512")
+        );
+    }
+
+    #[test]
+    fn weka_nested_timestamp_override_survives_loading_and_timing_normalization() {
+        use crate::loadgen::WekaNestedTimestampBasis;
+
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("nested.json");
+        std::fs::write(
+            &source,
+            serde_json::to_vec(&serde_json::json!({
+                "id": "play",
+                "models": ["model"],
+                "block_size": 4,
+                "hash_id_scope": "local",
+                "requests": [
+                    {"t": 0.0, "type": "s", "model": "model", "in": 4, "out": 1, "hash_ids": [1]},
+                    {"t": 1.0, "type": "subagent", "agent_id": "worker", "subagent_type": "Explore", "status": "completed", "models": ["model"], "requests": [
+                        {"t": 2.0, "type": "s", "model": "model", "in": 4, "out": 1, "hash_ids": [2]}
+                    ]}
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        // Auto sees no relative witness: the child is later than its marker.
+        // Relative must still add the marker offset, including after a cache hit.
+        for (basis, child_start_ms) in [
+            (WekaNestedTimestampBasis::Auto, 2_000.0),
+            (WekaNestedTimestampBasis::Absolute, 2_000.0),
+            (WekaNestedTimestampBasis::Relative, 3_000.0),
+            (WekaNestedTimestampBasis::Auto, 2_000.0),
+        ] {
+            for speedup in [1.0, 2.0] {
+                let trace = load_agentic_trace_from_file_with_options(
+                    &source,
+                    0,
+                    TraceFileFormat::Weka,
+                    speedup,
+                    WekaImportOptions {
+                        nested_timestamp_basis: basis,
+                    },
+                )
+                .unwrap();
+                assert_eq!(trace.node_count(), 2);
+                assert_eq!(trace.nodes()[0].not_before_ms(), 0.0);
+                assert_eq!(trace.nodes()[1].not_before_ms(), child_start_ms / speedup);
+            }
+        }
+        let default = load_agentic_trace_from_file(&source, 0, TraceFileFormat::Weka, 1.0).unwrap();
+        assert_eq!(default.nodes()[1].not_before_ms(), 2_000.0);
     }
 }

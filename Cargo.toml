@@ -55,8 +55,9 @@ repository = "https://github.com/ai-dynamo/dynamo.git"
 keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
 [workspace.dependencies]
-# Published separately by https://github.com/ai-dynamo/aisimulate.
-aisimulate-core = { version = "=0.12.0-dev.1" }
+# TODO: replace this public review revision with the matching exact crates.io
+# release once it exports the Weka graph-loading API.
+aisimulate-core = { git = "https://github.com/ai-dynamo/aisimulate.git", rev = "d71203e489541bc98c5f4a616dcec3b225b8fb72" }
 
 # Local crates
 dynamo-runtime = { path = "lib/runtime", version = "1.5.0" }

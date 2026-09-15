@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Published AISimulate wheel staged into planner and framework runtime wheelhouses.
-aisimulate==0.12.0.dev1
+# TODO: replace this public review revision with the matching exact PyPI
+# release once it exports the Weka graph-loading API.
+aisimulate @ git+https://github.com/ai-dynamo/aisimulate.git@d71203e489541bc98c5f4a616dcec3b225b8fb72#subdirectory=python/aisimulate

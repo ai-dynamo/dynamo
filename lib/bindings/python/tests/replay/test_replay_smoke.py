@@ -366,6 +366,7 @@ def test_online_trace_replay_supports_agentic_mooncake(tmp_path):
         replay_mode="online",
         router_mode="kv_router",
         trace_format="agentic_mooncake",
+        execution_model="target-model",
     )
 
     _assert_basic_report_counts(
@@ -374,6 +375,11 @@ def test_online_trace_replay_supports_agentic_mooncake(tmp_path):
         input_tokens=64,
         output_tokens=2,
     )
+    assert report["agentic_model_projection"] == {
+        "policy": "project_to_configured_target",
+        "source_models": ["test-model"],
+        "target_model": "target-model",
+    }
 
 
 def test_online_synthetic_replay_supports_goodput_sla():
@@ -431,6 +437,77 @@ def test_run_trace_replay_rejects_applied_compute_agentic_format_without_concurr
         )
 
 
+@pytest.mark.parametrize(
+    ("basis", "child_start_ms"),
+    [(None, 2_000.0), ("auto", 2_000.0), ("absolute", 2_000.0), ("relative", 3_000.0)],
+)
+@pytest.mark.parametrize("arrival_speedup_ratio", [1.0, 2.0])
+def test_weka_nested_timestamp_override_reaches_native_replay(
+    tmp_path, basis, child_start_ms, arrival_speedup_ratio
+):
+    trace_path = tmp_path / "nested.json"
+    trace_path.write_text(
+        json.dumps(
+            {
+                "id": "play",
+                "models": ["model"],
+                "block_size": 64,
+                "hash_id_scope": "local",
+                "requests": [
+                    {
+                        "t": 0.0,
+                        "type": "s",
+                        "model": "model",
+                        "in": 64,
+                        "out": 1,
+                        "hash_ids": [1],
+                    },
+                    {
+                        "t": 1.0,
+                        "type": "subagent",
+                        "agent_id": "worker",
+                        "subagent_type": "Explore",
+                        "status": "completed",
+                        "models": ["model"],
+                        "requests": [
+                            {
+                                "t": 2.0,
+                                "type": "s",
+                                "model": "model",
+                                "in": 64,
+                                "out": 1,
+                                "hash_ids": [2],
+                            }
+                        ],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = run_trace_replay(
+        trace_path,
+        extra_engine_args=_vllm_args(),
+        trace_format="weka",
+        execution_model="target-model",
+        weka_nested_timestamp_basis=basis,
+        arrival_speedup_ratio=arrival_speedup_ratio,
+        capture_per_request=True,
+    )
+
+    assert report.summary["completed_requests"] == 2
+    root, child = sorted(
+        report.per_request, key=lambda record: record["arrival_time_ms"]
+    )
+    assert root["arrival_time_ms"] == 0.0
+    # With no recorded root API duration, the graph's child delay starts when
+    # the replayed root completes. Only that delay is scaled by the speedup.
+    assert child["arrival_time_ms"] == (
+        root["terminal_time_ms"] + child_start_ms / arrival_speedup_ratio
+    )
+
+
 def test_direct_agentic_dynamo_trace_rejects_replay_concurrency():
     trace_path = (
         Path(__file__).resolve().parents[5]
@@ -446,6 +523,7 @@ def test_direct_agentic_dynamo_trace_rejects_replay_concurrency():
             extra_engine_args=_vllm_args(),
             replay_concurrency=2,
             trace_format="dynamo",
+            execution_model="target-model",
         )
 
 
@@ -463,6 +541,7 @@ def test_direct_agentic_dynamo_trace_honors_per_request_capture():
         extra_engine_args=_vllm_args(),
         replay_mode="offline",
         trace_format="dynamo",
+        execution_model="target-model",
         capture_per_request=True,
     )
 
@@ -470,6 +549,7 @@ def test_direct_agentic_dynamo_trace_honors_per_request_capture():
     assert report.coverage["capture_per_request"] is True
     assert report.coverage["per_request_records"] == len(report.per_request)
     assert report.summary["completed_requests"] == len(report.per_request)
+    assert report.summary["agentic_model_projection"]["target_model"] == "target-model"
 
 
 @pytest.mark.planner

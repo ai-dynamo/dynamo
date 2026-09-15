@@ -40,6 +40,78 @@ def test_replay_api_routes_trace_file_lists(monkeypatch):
     assert api_calls[1][1]["trace_format"] == "dynamo"
 
 
+def test_replay_api_requires_target_model_for_weka():
+    with pytest.raises(
+        ValueError,
+        match="agentic execution requires a configured target model",
+    ):
+        replay_api.run_trace_replay("published-weka", trace_format="weka")
+
+
+@pytest.mark.parametrize(
+    "nested_timestamp_basis", [None, "auto", "absolute", "relative"]
+)
+def test_replay_api_reports_agentic_model_projection(
+    monkeypatch, nested_timestamp_basis
+):
+    api_calls = []
+
+    def capture_api(*args, **kwargs):
+        api_calls.append((args, kwargs))
+        return SimpleNamespace(
+            summary={
+                "completed_requests": 2,
+                "agentic_graph": {
+                    "source_models": ["source-a", "source-b"],
+                },
+            },
+            per_request=None,
+            coverage={},
+        )
+
+    monkeypatch.setattr(replay_api, "_run_mocker_trace_replay", capture_api)
+
+    report = replay_api.run_trace_replay(
+        "published-weka",
+        trace_format="weka",
+        execution_model=" target-model ",
+        weka_nested_timestamp_basis=nested_timestamp_basis,
+    )
+
+    assert api_calls[0][1]["execution_model"] == "target-model"
+    assert api_calls[0][1]["weka_nested_timestamp_basis"] == nested_timestamp_basis
+    assert report.summary["agentic_model_projection"] == {
+        "policy": "project_to_configured_target",
+        "source_models": ["source-a", "source-b"],
+        "target_model": "target-model",
+    }
+
+
+@pytest.mark.parametrize("basis", ["auto", "absolute", "relative"])
+def test_replay_api_rejects_weka_timestamp_basis_for_other_formats(basis):
+    with pytest.raises(ValueError, match="requires trace_format='weka'"):
+        replay_api.run_trace_replay("unused.jsonl", weka_nested_timestamp_basis=basis)
+
+
+@pytest.mark.parametrize(
+    ("basis", "error"),
+    [
+        ("unknown", ValueError),
+        ("Relative", ValueError),
+        (True, TypeError),
+        (1, TypeError),
+    ],
+)
+def test_replay_api_rejects_invalid_weka_timestamp_basis(basis, error):
+    with pytest.raises(error, match="weka_nested_timestamp_basis must be"):
+        replay_api.run_trace_replay(
+            "unused.jsonl",
+            trace_format="weka",
+            execution_model="target-model",
+            weka_nested_timestamp_basis=basis,
+        )
+
+
 def test_planner_replay_rejects_empty_dynamo_trace_list():
     with pytest.raises(
         ValueError,

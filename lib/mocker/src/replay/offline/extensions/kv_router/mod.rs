@@ -931,20 +931,16 @@ impl OfflineReplayRouter {
             .slots
             .project_worker_loads(request.token_seq.as_deref(), decay_now);
         let scheduling_request = request.scheduling_request(self.block_size as usize, worker_loads);
+        let best_available_overlap_blocks = u32::try_from(
+            dynamo_kv_router::scheduling::SchedulingContext::new(
+                &scheduling_request,
+                &self.workers_with_configs,
+            )
+            .best_cached_tokens()
+                / self.block_size as usize,
+        )
+        .unwrap_or(u32::MAX);
         let eligibility = scheduling_request.eligibility();
-        let best_available_overlap_blocks = request
-            .overlaps
-            .scores
-            .iter()
-            .filter(|(worker, _)| {
-                self.workers_with_configs
-                    .get(&worker.worker_id)
-                    .is_some_and(|config| eligibility.allows_worker(worker.worker_id, config))
-                    && worker.dp_rank < self.dp_size
-            })
-            .map(|(_, overlap)| *overlap)
-            .max()
-            .unwrap_or(0);
         let selection = self
             .selector
             .select_worker(WorkerSelectionInput::configured(
@@ -1191,6 +1187,7 @@ mod tests {
             uuid: Some(Uuid::from_u128(uuid)),
             dp_rank: 0,
             preferred_dp_rank: None,
+            preferred_prefill_dp_rank: None,
             arrival_timestamp_ms: Some(0.0),
             priority,
             strict_priority,

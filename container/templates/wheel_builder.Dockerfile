@@ -632,32 +632,20 @@ COPY examples/router/custom-policy-example/ /opt/dynamo/examples/router/custom-p
 COPY deploy/inference-gateway/ext-proc/ /opt/dynamo/deploy/inference-gateway/ext-proc/
 COPY deploy/inference-gateway/sidecar/ /opt/dynamo/deploy/inference-gateway/sidecar/
 
-{% if target == "planner" or (target == "runtime" and framework in ("vllm", "sglang", "trtllm")) %}
+{% if target in ("runtime", "planner", "frontend") %}
 COPY container/deps/requirements.aisimulate.txt /opt/dynamo/container/deps/requirements.aisimulate.txt
 
-# AI Simulate is released separately as an abi3 wheel. Stage the exact published
-# wheel consumed by ai-dynamo instead of rebuilding it from vendored source.
-# Download only this distribution; runtime images own dependency installation
-# through their requirements files and local wheels.
-# AISimulate targets glibc 2.34+, which all consuming runtime images support.
-# Select that target explicitly: the manylinux_2_28 builder only stages the
-# wheel and must not filter it using the builder's older glibc version.
+# TODO(AIC-1810): while the Weka importer is pinned to its public review
+# revision, build only that distribution from the immutable VCS requirement.
+# Replace this with the published-wheel download path when matching PyPI and
+# crates.io dev releases are available. Runtime images continue to own
+# dependency installation through their requirements files and local wheels.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv && \
     source ${VIRTUAL_ENV}/bin/activate && \
-    case "${TARGETARCH}" in \
-        amd64) AISIMULATE_WHEEL_ARCH=x86_64 ;; \
-        arm64) AISIMULATE_WHEEL_ARCH=aarch64 ;; \
-        *) echo "Unsupported AISimulate target architecture: ${TARGETARCH}" >&2; exit 1 ;; \
-    esac && \
-    python -m pip download \
-        --platform "manylinux_2_34_${AISIMULATE_WHEEL_ARCH}" \
-        --python-version "${PYTHON_VERSION}" \
-        --implementation cp \
-        --abi abi3 \
-        --only-binary=:all: \
+    python -m pip wheel \
         --no-deps \
-        --dest /opt/dynamo/dist \
+        --wheel-dir /opt/dynamo/dist \
         --requirement /opt/dynamo/container/deps/requirements.aisimulate.txt
 {% endif %}
 
