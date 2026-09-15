@@ -532,7 +532,7 @@ async fn anthropic_handler_errors_record_classification_with_response() {
                 ),
                 (
                     reqwest::StatusCode::from_u16(499).unwrap(),
-                    "request_cancelled",
+                    "invalid_request_error",
                     "Request cancelled",
                 ),
                 (
