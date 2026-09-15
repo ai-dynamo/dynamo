@@ -24,6 +24,12 @@ enum QueuedScript {
     Immediate(Script),
     Failure(Error),
     #[allow(dead_code)]
+    Interrupted {
+        chunks: Script,
+        split_at: usize,
+        kill_after_stop: bool,
+    },
+    #[allow(dead_code)]
     BackendError {
         chunks: Script,
         error: DynamoError,
@@ -52,6 +58,19 @@ pub struct ScriptedChatEngine {
 }
 
 impl ScriptedChatEngine {
+    #[allow(dead_code)]
+    pub fn with_interrupted_tail(chunks: Script, split_at: usize, kill_after_stop: bool) -> Self {
+        assert!(split_at < chunks.len());
+        Self {
+            scripts: Mutex::new(VecDeque::from([QueuedScript::Interrupted {
+                chunks,
+                split_at,
+                kill_after_stop,
+            }])),
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+
     pub fn new(scripts: impl IntoIterator<Item = Result<Script, Error>>) -> Self {
         Self {
             scripts: Mutex::new(
@@ -134,8 +153,27 @@ impl
             script => script,
         };
 
+        let producer_ctx = ctx.clone();
         let output = async_stream::stream! {
             match script {
+                QueuedScript::Interrupted { chunks, split_at, kill_after_stop } => {
+                    let mut chunks = chunks.into_iter();
+                    for chunk in chunks.by_ref().take(split_at) {
+                        yield chunk;
+                    }
+                    producer_ctx.stop_generating();
+                    if kill_after_stop {
+                        producer_ctx.kill();
+                        // A killed backend need not produce another item or EOF.
+                        std::future::pending::<()>().await;
+                    }
+                    // Force Pending after stopping: ready chunks would win the
+                    // adapter's biased select and hide premature cancellation.
+                    tokio::task::yield_now().await;
+                    for chunk in chunks {
+                        yield chunk;
+                    }
+                }
                 QueuedScript::Immediate(chunks) => {
                     for chunk in chunks {
                         yield chunk;

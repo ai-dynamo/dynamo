@@ -716,10 +716,11 @@ async fn anthropic_messages(
             let mut saw_error = false;
             let mut cancelled = false;
 
-            // Keep a single cancellation future alive across chunks — recreating
-            // it per token churns the underlying Notify (see disconnect.rs).
-            let stopped = cancel_ctx.stopped();
-            tokio::pin!(stopped);
+            // Match the outer monitor: graceful stops must drain the backend's
+            // remaining chunks; only kill triggers cancellation and parking below.
+            // Keep one future across chunks to avoid Notify churn (disconnect.rs).
+            let killed = cancel_ctx.killed();
+            tokio::pin!(killed);
 
             loop {
                 tokio::select! {
@@ -749,7 +750,7 @@ async fn anthropic_messages(
                             yield event.map_err(axum::Error::new);
                         }
                     }
-                    _ = &mut stopped => {
+                    _ = &mut killed => {
                         // Client disconnected (or the request was otherwise
                         // cancelled). Best-effort flush the terminal usage +
                         // message_stop below so a still-writable proxy records
@@ -772,7 +773,7 @@ async fn anthropic_messages(
             if cancelled {
                 // Park so the outer `monitor_for_disconnects` (whose select is
                 // biased toward the stream) forwards the finalizer events above,
-                // then observes the stop itself and records the request as
+                // then observes the kill itself and records the request as
                 // cancelled rather than completed.
                 std::future::pending::<()>().await;
             }
