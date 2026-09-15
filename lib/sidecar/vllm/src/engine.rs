@@ -794,9 +794,10 @@ async fn fetch_vllm_world_size(
     let mut url = reqwest::Url::parse(endpoint.as_str()).map_err(|error| {
         client::invalid_argument(format!("invalid vLLM HTTP endpoint: {error}"))
     })?;
-    let base_path = url.path().trim_end_matches('/');
-    let world_size_path = format!("{base_path}/get_world_size");
-    url.set_path(&world_size_path);
+    url.path_segments_mut()
+        .map_err(|_| client::invalid_argument("vLLM HTTP endpoint cannot be used as a base URL"))?
+        .pop_if_empty()
+        .push("get_world_size");
     url.query_pairs_mut().append_pair("include_dp", "true");
     let request = async {
         let client = reqwest::Client::builder()

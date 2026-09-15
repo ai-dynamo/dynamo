@@ -1168,7 +1168,22 @@ async fn world_size_server(world_size: u32) -> (String, oneshot::Receiver<String
     tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.expect("accept request");
         let mut buffer = [0; 2048];
-        let size = stream.read(&mut buffer).await.expect("read request");
+        let mut size = 0;
+        loop {
+            assert!(
+                size < buffer.len(),
+                "request headers exceeded the 2048-byte fixture limit"
+            );
+            let read = stream
+                .read(&mut buffer[size..])
+                .await
+                .expect("read request");
+            assert!(read > 0, "request ended before the complete HTTP headers");
+            size += read;
+            if buffer[..size].windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                break;
+            }
+        }
         let request = String::from_utf8_lossy(&buffer[..size]).into_owned();
         let body = format!(r#"{{"world_size":{world_size}}}"#);
         let response = format!(
@@ -1311,6 +1326,31 @@ async fn rl_startup_falls_back_to_v028_http_world_size() {
         .expect("world-size request timeout")
         .expect("world-size request");
     assert!(request.starts_with("GET /admin/get_world_size?include_dp=true HTTP/1.1"));
+}
+
+#[tokio::test]
+async fn rl_world_size_fallback_preserves_encoded_http_path_prefix() {
+    let service = FakeVllm::default();
+    let mut legacy_server = server_info();
+    legacy_server
+        .parallelism
+        .as_mut()
+        .expect("parallelism metadata")
+        .world_size = 0;
+    *service.server_info_override.lock().await = Some(legacy_server);
+    let grpc = FakeServer::start(service).await;
+    let (http_endpoint, request_rx) = world_size_server(8).await;
+    let http_endpoint = format!("{http_endpoint}%2Fv1");
+
+    try_engine_from_args(&grpc.endpoint, &http_endpoint)
+        .await
+        .expect("encoded HTTP path prefix should be preserved");
+
+    let request = tokio::time::timeout(Duration::from_secs(1), request_rx)
+        .await
+        .expect("world-size request timeout")
+        .expect("world-size request");
+    assert!(request.starts_with("GET /admin%2Fv1/get_world_size?include_dp=true HTTP/1.1"));
 }
 
 #[tokio::test]
