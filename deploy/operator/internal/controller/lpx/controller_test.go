@@ -20,6 +20,7 @@ import (
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/require"
+	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -31,6 +32,61 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
+
+func TestLPXReplicaUpdatesUseScaleSubresource(t *testing.T) {
+	conflict := apierrors.NewConflict(consts.PodCliqueScalingGroupGVR.GroupResource(), "group", errors.New("stale version"))
+	for _, tc := range []struct {
+		name        string
+		replicas    *int32
+		err         error
+		wantUpdates int
+	}{
+		{name: "scale out", replicas: ptr.To(int32(12)), wantUpdates: 1},
+		{name: "scale in", replicas: ptr.To(int32(2)), wantUpdates: 1},
+		{name: "unchanged", replicas: ptr.To(int32(9))},
+		{name: "omitted"},
+		{name: "conflict", replicas: ptr.To(int32(12)), err: conflict, wantUpdates: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Observe a Grove group with nine replicas")
+			child, source, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+			lpx.ServingComponent(source).Replicas = tc.replicas
+			r, selected := newPreparedLPXTestReconciler(t, registry, t.Context(), child, source)
+			objects := lpxMaterializedObjects(t, r, child, source, selected)
+			group := findLPXTestScalingGroup(t, objects, selected.plan.LPXScalingGroup)
+			group.Spec.Replicas = 9
+			createLPXTestObjects(t, t.Context(), r.Client, objects...)
+			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(group), group))
+			updates := 0
+			r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+				SubResourceUpdate: func(ctx context.Context, delegated client.Client, subresource string, object client.Object, opts ...client.SubResourceUpdateOption) error {
+					require.Equal(t, "scale", subresource)
+					require.Equal(t, client.ObjectKeyFromObject(group), client.ObjectKeyFromObject(object))
+					options := (&client.SubResourceUpdateOptions{}).ApplyOptions(opts)
+					scale := options.SubResourceBody.(*autoscalingv1.Scale)
+					require.Equal(t, group.ResourceVersion, scale.ResourceVersion)
+					require.Equal(t, *tc.replicas, scale.Spec.Replicas)
+					updates++
+					if tc.err != nil {
+						return tc.err
+					}
+					return delegated.SubResource(subresource).Update(ctx, object, opts...)
+				},
+			})
+
+			t.Log("Only explicit changes write scale, preserving the observed resource-version precondition")
+			_, _, err := r.reconcileWorkload(t.Context(), child, source, selected)
+			require.ErrorIs(t, err, tc.err)
+			require.Equal(t, tc.wantUpdates, updates)
+			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(group), group))
+			want := int32(9)
+			if tc.replicas != nil && tc.err == nil {
+				want = *tc.replicas
+			}
+			require.Equal(t, want, group.Spec.Replicas)
+		})
+	}
+}
 
 func TestLPXEngineOrderAndUnrelatedEditsPreservePublication(t *testing.T) {
 	t.Log("Publish a speculative engine using its frozen child identity")

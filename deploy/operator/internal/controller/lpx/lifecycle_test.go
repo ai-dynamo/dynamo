@@ -35,6 +35,7 @@ import (
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	groveschedulerv1alpha1 "github.com/ai-dynamo/grove/scheduler/api/core/v1alpha1"
 	"github.com/stretchr/testify/require"
+	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -2397,6 +2398,17 @@ func newLPXTestReconciler(
 		Build()
 	nextLPRUID := 0
 	wrapped := interceptor.NewClient(base, interceptor.Funcs{
+		// The fake client does not implement scale for Grove custom resources.
+		SubResourceUpdate: func(ctx context.Context, delegated client.Client, subresource string, object client.Object, opts ...client.SubResourceUpdateOption) error {
+			if group, ok := object.(*grovev1alpha1.PodCliqueScalingGroup); ok && subresource == "scale" {
+				options := (&client.SubResourceUpdateOptions{}).ApplyOptions(opts)
+				scale := options.SubResourceBody.(*autoscalingv1.Scale)
+				group.ResourceVersion = scale.ResourceVersion
+				group.Spec.Replicas = scale.Spec.Replicas
+				return delegated.Update(ctx, group)
+			}
+			return delegated.SubResource(subresource).Update(ctx, object, opts...)
+		},
 		Create: func(ctx context.Context, delegated client.WithWatch, object client.Object, opts ...client.CreateOption) error {
 			if request, ok := object.(*lpxv1alpha1.LPUPipelineRequest); ok {
 				if request.UID == "" {

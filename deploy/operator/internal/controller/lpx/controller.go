@@ -20,6 +20,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -284,8 +285,11 @@ func (r *graphReconciler) reconcileWorkload(ctx context.Context, deployment *v1a
 		} else if !metav1.IsControlledBy(group, synced) || !group.DeletionTimestamp.IsZero() {
 			return state, ctrl.Result{}, fmt.Errorf("LPX scaling group lacks the current PCS owner")
 		} else if group.Spec.Replicas != *replicas {
-			group.Spec.Replicas = *replicas
-			if err := r.Update(ctx, group); err != nil {
+			scale := &autoscalingv1.Scale{
+				ObjectMeta: metav1.ObjectMeta{ResourceVersion: group.ResourceVersion},
+				Spec:       autoscalingv1.ScaleSpec{Replicas: *replicas},
+			}
+			if err := r.SubResource("scale").Update(ctx, group, client.WithSubResourceBody(scale)); err != nil {
 				return state, ctrl.Result{}, err
 			}
 		}
