@@ -2101,6 +2101,70 @@ async fn departed_session_worker_reinitializes_the_session() {
     assert_eq!(bound_worker(&core, "s"), Some(second.worker_id));
 }
 
+#[rstest::rstest]
+#[case::removed_rank(Some(1))]
+#[case::retained_rank(Some(0))]
+#[case::worker_only(None)]
+#[tokio::test]
+async fn session_dp_rank_shrink_rebinds_only_removed_targets(
+    #[case] dp_rank: Option<u32>,
+    #[values(false, true)] after_hold: bool,
+) {
+    let core = core_with_session_affinity();
+    let key = default_key();
+    core.upsert_worker(WorkerRequest {
+        data_parallel_size: Some(2),
+        ..worker(1)
+    })
+    .await
+    .expect("worker upsert");
+    let entry = core.entry(&key).expect("default partition");
+    let table = entry.affinity.get().expect("affinity table");
+    let target = WorkerAffinityTarget::new(1, dp_rank);
+    drop(
+        table
+            .commit(table.acquire("s", None).await.expect("hold"), target)
+            .expect("bind session"),
+    );
+
+    let mut request = Box::pin(core.select_and_reserve(session_reservation("r1", "s")));
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    if after_hold {
+        // Take the hold, then shrink before the scheduler actor can run.
+        assert!(request.as_mut().poll(&mut context).is_pending());
+        let mut record = core.catalog.get(1).expect("worker");
+        record.data_parallel_size = Some(1);
+        core.catalog.replace(record);
+        core.publish_scheduler_config(&key);
+    } else {
+        core.patch_worker(
+            1,
+            serde_json::from_value(serde_json::json!({"data_parallel_size": 1}))
+                .expect("worker patch"),
+        )
+        .await
+        .expect("shrink worker");
+        assert!(request.as_mut().poll(&mut context).is_pending());
+        assert_eq!(
+            table.query_target("s", None).expect("query"),
+            (dp_rank != Some(1)).then_some(target),
+            "only a removed target must be invalidated before scheduling",
+        );
+    }
+
+    let response = request.await.expect("rank removal is not a client fault");
+    assert_eq!((response.worker_id, response.dp_rank), (1, 0));
+    assert_eq!(
+        table.query_target("s", None).expect("query"),
+        Some(WorkerAffinityTarget::new(1, dp_rank.map(|_| 0))),
+    );
+    core.free_reservation("r1").await.expect("free booking");
+    wait_until("session lease release", || {
+        lease_count(&core, "s") == Some(0)
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn session_worker_departing_after_the_hold_reinitializes_the_session() {
     let (core, first) = bound_session(SessionAffinityMode::Hard).await;

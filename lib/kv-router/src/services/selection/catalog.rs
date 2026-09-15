@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use parking_lot::RwLock;
 
 use crate::identity::RoutingPartitionId;
-use crate::protocols::{WorkerId, WorkerWithDpRank};
+use crate::protocols::{WorkerAffinityTarget, WorkerId, WorkerWithDpRank};
 
 use super::types::{SelectionWorkerConfig, WorkerCatalogRecord, WorkerLifecycle};
 
@@ -114,11 +114,20 @@ impl WorkerCatalog {
             .count()
     }
 
-    pub(super) fn is_schedulable(&self, worker_id: WorkerId, key: &RoutingPartitionId) -> bool {
+    pub(super) fn is_schedulable(
+        &self,
+        target: WorkerAffinityTarget,
+        key: &RoutingPartitionId,
+    ) -> bool {
         self.workers
             .read()
-            .get(&worker_id)
-            .is_some_and(|record| schedulable_in(record, key))
+            .get(&target.worker_id)
+            .is_some_and(|record| {
+                schedulable_in(record, key)
+                    && target
+                        .dp_rank
+                        .is_none_or(|rank| record.dp_ranks().contains(&rank))
+            })
     }
 
     pub(super) fn schedulable_endpoint(

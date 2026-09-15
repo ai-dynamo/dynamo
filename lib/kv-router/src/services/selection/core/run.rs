@@ -565,7 +565,7 @@ impl SelectionCore {
         }))
     }
 
-    /// Hold `session_id` for a booking, re-initializing a binding whose worker
+    /// Hold `session_id` for a booking, re-initializing a binding whose target
     /// this partition can no longer schedule. `None` when the table is full: a
     /// router-side limit, not a client fault, so the request routes unpinned.
     pub(super) async fn hold_session(
@@ -583,7 +583,7 @@ impl SelectionCore {
             };
             match acquired {
                 Ok(Hold::Bound { target, mut lease })
-                    if !self.catalog.is_schedulable(target.worker_id, key) =>
+                    if !self.catalog.is_schedulable(target, key) =>
                 {
                     tracing::debug!(
                         session_id,
@@ -606,7 +606,7 @@ impl SelectionCore {
     }
 
     /// Bind the held session to `dispatched`. A `Hard` rejection whose bound
-    /// worker departed after [`Self::hold_session`] checked it is not a client
+    /// worker or rank departed after [`Self::hold_session`] checked it is not a client
     /// fault: the session is re-initialized on the dispatched worker instead.
     pub(super) fn commit_session(
         &self,
@@ -622,7 +622,7 @@ impl SelectionCore {
             Ok(lease) => Ok(Some(lease)),
             Err(error) => {
                 let departed =
-                    bound.is_some_and(|target| !self.catalog.is_schedulable(target.worker_id, key));
+                    bound.is_some_and(|target| !self.catalog.is_schedulable(target, key));
                 if !departed {
                     return Err(affinity_error(error));
                 }
