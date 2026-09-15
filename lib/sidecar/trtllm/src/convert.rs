@@ -20,19 +20,19 @@ use dynamo_backend_common::{
     PreprocessedRequest, PromptTokensDetails, StopReason, TopLogprob, usage,
 };
 
-use crate::client;
+use crate::client::{self, ModelLimits};
 use crate::disagg;
 use crate::proto as pb;
 
-/// Per-chunk logprobs: the selected-token logprob sequence plus the per-token
-/// top-k alternatives, both aligned with the chunk's delta tokens.
-type MappedLogprobs = (Option<Vec<f64>>, Option<Vec<Vec<TopLogprob>>>);
+/// A chunk's delta token IDs, the selected-token logprob sequence, and the
+/// per-token top-k alternatives, all aligned with each other.
+type MappedTokens = (Vec<u32>, Option<Vec<f64>>, Option<Vec<Vec<TopLogprob>>>);
 
 pub(crate) fn build_generate_request(
     request: &PreprocessedRequest,
     request_id: &str,
     model: &str,
-    context_length: Option<u32>,
+    limits: Option<ModelLimits>,
     mode: DisaggregationMode,
 ) -> Result<pb::GenerateRequest, DynamoError> {
     validate_request(request, mode)?;
@@ -46,7 +46,7 @@ pub(crate) fn build_generate_request(
     let max_tokens = if mode.is_prefill() {
         1
     } else {
-        max_tokens(request, context_length)?
+        max_tokens(request, limits)?
     };
     // The decode worker replays the prefill worker's session; the prefill worker
     // marks its request `context_only` through `extra`.
@@ -150,19 +150,30 @@ pub(crate) fn build_generate_request(
 // not govern.
 fn max_tokens(
     request: &PreprocessedRequest,
-    context_length: Option<u32>,
+    limits: Option<ModelLimits>,
 ) -> Result<u32, DynamoError> {
     if let Some(max_tokens) = request.stop_conditions.max_tokens {
         return Ok(max_tokens);
     }
-    let context_length = context_length.ok_or_else(|| {
-        client::invalid_argument(
-            "TensorRT-LLM requires max_tokens, and the server reported no model context \
-             length to derive a default; specify max_tokens explicitly",
-        )
-    })?;
+    let context_length = limits
+        .and_then(|limits| limits.context_length)
+        .ok_or_else(|| {
+            client::invalid_argument(
+                "TensorRT-LLM requires max_tokens, and no model context length is known to \
+             derive a default from; specify max_tokens explicitly or start the sidecar \
+             with --context-length",
+            )
+        })?;
+    let limits = limits.unwrap_or_default();
     let prompt_len = request.token_ids.len() as u32;
-    Ok(context_length.saturating_sub(prompt_len).max(1))
+    let remaining = context_length.saturating_sub(prompt_len).max(1);
+    // The window is input + output, so on a short prompt the remainder can
+    // exceed what the engine will actually generate and it would reject the
+    // request we derived.
+    Ok(match limits.max_output_tokens {
+        Some(cap) => remaining.min(cap),
+        None => remaining,
+    })
 }
 
 fn normalize_top_k(top_k: Option<i32>) -> Result<Option<i32>, DynamoError> {
@@ -408,16 +419,33 @@ pub(crate) struct ResponseState {
     prompt_tokens: u32,
     completion_tokens: u32,
     output_logprobs: Option<u32>,
-    /// Prefill workers normally terminate on `PrefillReady` instead of
-    /// `finished`, and stream no tokens to the client.
-    is_prefill: bool,
-    /// Held back rather than streamed: on the normal path the decode worker
-    /// replays the context phase's tokens, so forwarding them here would
-    /// duplicate them. They are only surfaced by a context request that ends
-    /// without a handoff, which has no decode leg to replay them.
-    held_prefill_tokens: Vec<u32>,
-    /// Cache hits are measured during the context phase, so on a decode worker
-    /// they arrive with the handoff rather than from the local engine.
+    phase: Phase,
+}
+
+/// What this worker does with the tokens the engine streams back. Each arm owns
+/// the state that only exists in that mode, so a prefill worker cannot reach a
+/// decode worker's cache accounting and vice versa.
+enum Phase {
+    /// Aggregated, or a decode leg: tokens stream straight to the client.
+    Stream {
+        /// The handoff this leg replays, if any. Cache hits are measured during
+        /// the context phase, so on a decode leg the count arrives here rather
+        /// than from the local engine -- which counts the blocks transferred
+        /// into it and reports a different quantity under the same name.
+        handoff: Option<Handoff>,
+    },
+    /// A prefill leg: `PrefillReady` is the terminal event, and context tokens
+    /// are held back because the decode leg replays them. They only reach the
+    /// client through a context request that ends without a handoff, which has
+    /// no decode leg to do the replaying.
+    Prefill { held: Vec<u32> },
+}
+
+/// What a decode leg knows about the context phase that preceded it.
+struct Handoff {
+    /// The context phase's prefix-cache hit count, when it reported one. Absent
+    /// means the context phase reported none -- not that the decode engine's
+    /// own count should stand in for it.
     cached_tokens: Option<u32>,
 }
 
@@ -427,13 +455,18 @@ impl ResponseState {
             prompt_tokens: request.token_ids.len() as u32,
             completion_tokens: 0,
             output_logprobs: request.output_options.logprobs,
-            is_prefill: mode.is_prefill(),
-            held_prefill_tokens: Vec::new(),
-            cached_tokens: request
-                .prefill_result
-                .as_ref()
-                .and_then(|prefill| prefill.prompt_tokens_details.as_ref())
-                .and_then(|details| details.cached_tokens),
+            phase: if mode.is_prefill() {
+                Phase::Prefill { held: Vec::new() }
+            } else {
+                Phase::Stream {
+                    handoff: request.prefill_result.as_ref().map(|prefill| Handoff {
+                        cached_tokens: prefill
+                            .prompt_tokens_details
+                            .as_ref()
+                            .and_then(|details| details.cached_tokens),
+                    }),
+                }
+            },
         }
     }
 
@@ -450,34 +483,23 @@ impl ResponseState {
         response: pb::GenerateResponse,
     ) -> Result<Option<LLMEngineOutput>, DynamoError> {
         let pb::GenerateResponse { event, usage, .. } = response;
+        // A response with no event is protocol drift, not an empty delta.
+        let Some(event) = event else {
+            return Err(client::protocol_error("response carried no event"));
+        };
         match event {
-            Some(pb::generate_response::Event::Token(token)) if self.is_prefill => {
-                self.hold_prefill_token(token)
-            }
-            Some(pb::generate_response::Event::Token(token)) => self.convert_token(token),
-            // A context request that ends without a handoff never transmitted
-            // its KV -- it hit a stop condition during the one-token context
-            // phase, or was cancelled first. There is no decode leg to run, so
-            // the terminal and whatever it produced are the whole answer, and
-            // the frontend's prefill router returns them to the caller.
-            Some(pb::generate_response::Event::Finished(finished)) if self.is_prefill => {
-                let mut terminal = self.convert_finished(finished, usage)?;
-                terminal.token_ids = std::mem::take(&mut self.held_prefill_tokens);
-                Ok(Some(terminal))
-            }
-            Some(pb::generate_response::Event::Finished(finished)) => {
+            pb::generate_response::Event::Token(token) => self.convert_token(token),
+            pb::generate_response::Event::Finished(finished) => {
                 self.convert_finished(finished, usage).map(Some)
             }
-            Some(pb::generate_response::Event::Error(error)) => Err(engine_error(error)),
-            // Prompt logprobs are never requested, so a prompt event is drift.
-            Some(pb::generate_response::Event::Prompt(_)) => Err(client::protocol_error(
-                "received an unexpected prompt event; prompt logprobs are not requested",
-            )),
-            Some(pb::generate_response::Event::PrefillReady(prefill)) => {
+            pb::generate_response::Event::PrefillReady(prefill) => {
                 self.convert_prefill_ready(prefill, usage).map(Some)
             }
-            // A response with no event is protocol drift, not an empty delta.
-            None => Err(client::protocol_error("response carried no event")),
+            pb::generate_response::Event::Error(error) => Err(engine_error(error)),
+            // Prompt logprobs are never requested, so a prompt event is drift.
+            pb::generate_response::Event::Prompt(_) => Err(client::protocol_error(
+                "received an unexpected prompt event; prompt logprobs are not requested",
+            )),
         }
     }
 
@@ -492,11 +514,11 @@ impl ResponseState {
         prefill: pb::PrefillReady,
         reported: Option<pb::Usage>,
     ) -> Result<LLMEngineOutput, DynamoError> {
-        if !self.is_prefill {
+        let Phase::Prefill { .. } = self.phase else {
             return Err(client::protocol_error(
                 "received a prefill_ready event on a worker that is not running in prefill mode",
             ));
-        }
+        };
         let session = prefill
             .kv_session
             .ok_or_else(|| client::protocol_error("prefill_ready event carried no kv_session"))?;
@@ -521,34 +543,17 @@ impl ResponseState {
         })
     }
 
-    /// Counts a context-phase token and keeps its ID, without streaming it.
-    fn hold_prefill_token(
-        &mut self,
-        token: pb::TokenOutput,
-    ) -> Result<Option<LLMEngineOutput>, DynamoError> {
-        let index = token.output_index.unwrap_or(0);
-        if index != 0 {
-            return Err(client::protocol_error(format!(
-                "received unsupported output index {index}"
-            )));
-        }
-        self.held_prefill_tokens
-            .extend(token.tokens.iter().map(|info| info.token_id));
-        self.completion_tokens = self.held_prefill_tokens.len() as u32;
-        Ok(None)
-    }
-
     fn convert_token(
         &mut self,
         token: pb::TokenOutput,
     ) -> Result<Option<LLMEngineOutput>, DynamoError> {
-        let index = token.output_index.unwrap_or(0);
-        if index != 0 {
-            return Err(client::protocol_error(format!(
-                "received unsupported output index {index}"
-            )));
+        check_output_index(token.output_index)?;
+        if let Phase::Prefill { held } = &mut self.phase {
+            held.extend(token.tokens.iter().map(|info| info.token_id));
+            self.completion_tokens = held.len() as u32;
+            return Ok(None);
         }
-        let token_ids: Vec<u32> = token.tokens.iter().map(|info| info.token_id).collect();
+        let (token_ids, log_probs, top_logprobs) = self.map_tokens(token.tokens)?;
         self.completion_tokens = self
             .completion_tokens
             .saturating_add(token_ids.len() as u32);
@@ -558,7 +563,6 @@ impl ResponseState {
             // surface yet.
             return Ok(None);
         }
-        let (log_probs, top_logprobs) = self.map_logprobs(&token.tokens)?;
         Ok(Some(LLMEngineOutput {
             token_ids,
             log_probs,
@@ -573,12 +577,19 @@ impl ResponseState {
         finished: pb::GenerationFinished,
         reported: Option<pb::Usage>,
     ) -> Result<LLMEngineOutput, DynamoError> {
-        let index = finished.output_index.unwrap_or(0);
-        if index != 0 {
-            return Err(client::protocol_error(format!(
-                "received unsupported output index {index}"
-            )));
-        }
+        check_output_index(finished.output_index)?;
+        // A decode engine counts the blocks transferred into it as cache hits,
+        // a different quantity from the context phase's prefix-cache hit that
+        // would read as a ~100% hit rate on every disaggregated request. Once
+        // this leg took a handoff the context phase is the only source, even
+        // when it reported no hits. A leg without one ran its own context
+        // phase, so its engine is the source.
+        let (mut cached_tokens, engine_measured_the_cache) = match &self.phase {
+            Phase::Stream {
+                handoff: Some(handoff),
+            } => (handoff.cached_tokens, false),
+            Phase::Stream { handoff: None } | Phase::Prefill { .. } => (None, true),
+        };
         // The final response carries authoritative usage; prefer it over the
         // counts accumulated while streaming.
         if let Some(reported) = reported {
@@ -588,7 +599,9 @@ impl ResponseState {
             if reported.completion_tokens != 0 {
                 self.completion_tokens = reported.completion_tokens;
             }
-            self.cached_tokens = reported.cached_prompt_tokens.or(self.cached_tokens);
+            if engine_measured_the_cache {
+                cached_tokens = reported.cached_prompt_tokens;
+            }
         }
 
         let finish_reason = match pb::FinishReason::try_from(finished.reason).map_err(|_| {
@@ -606,11 +619,34 @@ impl ResponseState {
             }
         };
 
+        // A context request only reaches a `finished` event when it produced no
+        // handoff: the server suppresses the terminal once it has sent
+        // `PrefillReady`. `Length` there means the context phase burned its
+        // one-token budget without ever transmitting KV -- disaggregation is
+        // not working on this engine -- so returning that single token would
+        // silently truncate the completion. Any other reason is a genuine stop
+        // during the context phase, and with no decode leg to run, it is the
+        // whole answer.
+        let held = match &mut self.phase {
+            Phase::Prefill { held } if finish_reason == FinishReason::Length => {
+                return Err(client::protocol_error(format!(
+                    "context request ended at its token budget without a kv_session handoff \
+                     after {} token(s); the engine ran the context phase but never transmitted \
+                     its KV, which usually means disaggregation is not configured on it (check \
+                     cache_transceiver_config)",
+                    held.len()
+                )));
+            }
+            Phase::Prefill { held } => std::mem::take(held),
+            Phase::Stream { .. } => Vec::new(),
+        };
+
         let mut terminal = LLMEngineOutput {
+            token_ids: held,
             index: Some(0),
             finish_reason: Some(finish_reason),
             completion_usage: Some(CompletionUsage {
-                prompt_tokens_details: cached_prompt_tokens(self.cached_tokens, self.prompt_tokens),
+                prompt_tokens_details: cached_prompt_tokens(cached_tokens, self.prompt_tokens),
                 ..usage(self.prompt_tokens, self.completion_tokens)
             }),
             ..Default::default()
@@ -627,39 +663,40 @@ impl ResponseState {
         Ok(terminal)
     }
 
-    fn map_logprobs(&self, tokens: &[pb::TokenInfo]) -> Result<MappedLogprobs, DynamoError> {
+    /// One pass over the owned deltas. Token IDs, selected-token logprobs, and
+    /// the candidate lists all come from the same `TokenInfo`s, and this runs on
+    /// every token of every request.
+    fn map_tokens(&self, tokens: Vec<pb::TokenInfo>) -> Result<MappedTokens, DynamoError> {
+        let mut token_ids = Vec::with_capacity(tokens.len());
         let Some(count) = self.output_logprobs else {
-            return Ok((None, None));
+            token_ids.extend(tokens.into_iter().map(|info| info.token_id));
+            return Ok((token_ids, None, None));
         };
-        // Logprobs were requested, so every delta token must carry its
-        // selected-token logprob; a missing value is protocol drift.
         let mut log_probs = Vec::with_capacity(tokens.len());
-        for token in tokens {
-            let logprob = token.logprob.ok_or_else(|| {
-                client::protocol_error(format!("token {} is missing its logprob", token.token_id))
+        // `logprobs=0` keeps the selected-token logprob but omits the top
+        // alternatives, matching the vLLM sidecar contract.
+        let wants_candidates = count != 0;
+        let mut top_logprobs = Vec::with_capacity(if wants_candidates { tokens.len() } else { 0 });
+        for info in tokens {
+            let token_id = info.token_id;
+            let rank = info.rank.unwrap_or(0);
+            // Logprobs were requested, so every delta token must carry its
+            // selected-token logprob; a missing value is protocol drift.
+            let logprob = info.logprob.ok_or_else(|| {
+                client::protocol_error(format!("token {token_id} is missing its logprob"))
             })?;
-            log_probs.push(logprob);
-        }
-        if count == 0 {
-            // `logprobs=0` keeps the selected-token logprob but omits the top
-            // alternatives, matching the vLLM sidecar contract.
-            return Ok((Some(log_probs), None));
-        }
-        let top_logprobs = tokens
-            .iter()
-            .map(|token| {
-                if token.candidates.is_empty() {
+            if wants_candidates {
+                top_logprobs.push(if info.candidates.is_empty() {
                     vec![TopLogprob {
-                        rank: token.rank.unwrap_or(0),
-                        token_id: token.token_id,
+                        rank,
+                        token_id,
                         token: None,
-                        logprob: token.logprob.unwrap_or(0.0),
+                        logprob,
                         bytes: None,
                     }]
                 } else {
-                    token
-                        .candidates
-                        .iter()
+                    info.candidates
+                        .into_iter()
                         .map(|candidate| TopLogprob {
                             rank: candidate.rank.unwrap_or(0),
                             token_id: candidate.token_id,
@@ -668,10 +705,30 @@ impl ResponseState {
                             bytes: None,
                         })
                         .collect()
-                }
-            })
-            .collect();
-        Ok((Some(log_probs), Some(top_logprobs)))
+                });
+            }
+            token_ids.push(token_id);
+            log_probs.push(logprob);
+        }
+        Ok((
+            token_ids,
+            Some(log_probs),
+            wants_candidates.then_some(top_logprobs),
+        ))
+    }
+}
+
+/// The OpenEngine contract requires an explicit index even for output zero, and
+/// the sidecar streams a single sequence: anything else is drift.
+fn check_output_index(index: Option<u32>) -> Result<(), DynamoError> {
+    match index {
+        Some(0) => Ok(()),
+        Some(index) => Err(client::protocol_error(format!(
+            "received unsupported output index {index}"
+        ))),
+        None => Err(client::protocol_error(
+            "response carried no output index; the OpenEngine contract requires one",
+        )),
     }
 }
 
