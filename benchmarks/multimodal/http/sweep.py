@@ -1,14 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Sweep aiohttp vs httpx through dynamo.common.http.
+"""Sweep the dynamo.common.http fetch path under fan-out.
 
 Rate-limited emitter. For each (request_rate, server-processing-time-mean-ms)
 pair, brings up a local media server with that processing-time-mean and
-issues `--requests` total requests at the target RPS, twice (once per
-backend), alternating which backend goes first to remove cold-start bias.
-Reports a per-iteration table and a per-(request_rate) cross-iteration
-grid.
+issues `--requests` total requests at the target RPS. Reports a
+per-iteration table and a per-(request_rate) cross-iteration grid.
 
 Usage:
   python -m benchmarks.multimodal.http.sweep \\
@@ -35,7 +33,7 @@ DEFAULT_IMAGE_URL = "http://images.cocodataset.org/val2017/000000039769.jpg"
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Sweep aiohttp vs httpx across server delays and request rates."
+        description="Sweep the HTTP fetch path across server delays and request rates."
     )
     p.add_argument(
         "--server-processing-time-means-ms",
@@ -82,13 +80,6 @@ def _check_ulimit(peak_inflight_estimate: int) -> None:
         )
 
 
-def _by_backend(summaries: list[Summary], backend: str) -> Summary:
-    for s in summaries:
-        if s.backend == backend:
-            return s
-    raise KeyError(f"no summary for backend {backend!r}")
-
-
 def _parse_float_list(raw: str, flag: str) -> list[float]:
     values = [float(x) for x in raw.split(",") if x.strip()]
     if not values:
@@ -111,25 +102,18 @@ async def _run_sweep(args: argparse.Namespace) -> int:
 
     for rate in rates:
         print_batch_header(request_rate=rate, requests=args.requests)
-        grid_rows: list[tuple[float, Summary, Summary]] = []
-        for i, mean_ms in enumerate(means):
+        grid_rows: list[tuple[float, Summary]] = []
+        for mean_ms in means:
             with local_media_server(
                 port=args.port, image_url=args.image_url, mean_ms=mean_ms
             ) as base_url:
                 urls = gen_urls([base_url], args.requests)
-                order = ["httpx", "aiohttp"] if i % 2 else ["aiohttp", "httpx"]
-                print(f"[sweep] mean_ms={mean_ms:g}  order={order}")
-                results = [await run_one(b, urls, args.timeout, rate) for b in order]
+                print(f"[sweep] mean_ms={mean_ms:g}")
+                result = await run_one(urls, args.timeout, rate)
 
-            summaries = [summarize(r) for r in results]
-            print_iteration(mean_ms, summaries)
-            grid_rows.append(
-                (
-                    mean_ms,
-                    _by_backend(summaries, "aiohttp"),
-                    _by_backend(summaries, "httpx"),
-                )
-            )
+            summary = summarize(result)
+            print_iteration(mean_ms, summary)
+            grid_rows.append((mean_ms, summary))
 
         print_grid(grid_rows)
         print()
