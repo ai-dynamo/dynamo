@@ -106,7 +106,7 @@ impl DiscoveredModel {
     pub(crate) fn rl_worker_metadata(
         &self,
         admin_base_url: Option<RlAdminBaseUrl>,
-        fallback_world_size: Option<u32>,
+        configured_world_size: Option<u32>,
     ) -> Result<RlWorkerMetadata, DynamoError> {
         let parallelism = self.server.parallelism.as_ref().ok_or_else(|| {
             client::protocol_error("RL discovery requires vLLM parallelism metadata")
@@ -136,8 +136,10 @@ impl DiscoveredModel {
                     })?
             }
             None if parallelism.world_size == 0 => {
-                let world_size = fallback_world_size.ok_or_else(|| {
-                    client::protocol_error("vLLM reports an invalid engine world size")
+                let world_size = configured_world_size.ok_or_else(|| {
+                    client::invalid_argument(
+                        "--vllm-rl-world-size is required when vLLM omits engine world size from gRPC metadata",
+                    )
                 })?;
                 let expected_total_world_size = expected_minimum_world_size
                     .checked_mul(data_parallel_size)
@@ -145,8 +147,8 @@ impl DiscoveredModel {
                         client::protocol_error("vLLM reports an invalid RL world size")
                     })?;
                 if world_size % expected_total_world_size != 0 {
-                    return Err(client::protocol_error(
-                        "vLLM reports an RL world size that is not divisible by TP * PP * DP",
+                    return Err(client::invalid_argument(
+                        "--vllm-rl-world-size must be divisible by TP * PP * DP",
                     ));
                 }
                 world_size
@@ -159,13 +161,6 @@ impl DiscoveredModel {
         };
         RlWorkerMetadata::new(world_size, admin_base_url)
             .map_err(|error| client::protocol_error(error.to_string()))
-    }
-
-    pub(crate) fn requires_world_size_fallback(&self) -> bool {
-        self.server
-            .parallelism
-            .as_ref()
-            .is_some_and(|parallelism| parallelism.world_size == 0)
     }
 
     pub(crate) fn engine_config(&self) -> EngineConfig {

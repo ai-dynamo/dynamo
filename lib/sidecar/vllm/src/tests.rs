@@ -11,7 +11,6 @@ use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 use dynamo_backend_common::engine::RoutingHints;
 use dynamo_backend_common::{
@@ -22,7 +21,6 @@ use dynamo_backend_common::{
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
 use futures::{Stream, StreamExt};
 use serde_json::json;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Notify, oneshot};
 use tokio_stream::wrappers::TcpListenerStream;
@@ -550,6 +548,21 @@ fn rl_worker_metadata_identifies_zero_parallelism_dimensions() {
         let error = model.rl_worker_metadata(None, None).unwrap_err();
         assert!(error.to_string().contains(expected));
     }
+}
+
+#[test]
+fn discovery_rejects_zero_data_parallelism() {
+    let mut server = server_info();
+    server
+        .parallelism
+        .as_mut()
+        .expect("parallelism metadata")
+        .data_parallel_size = 0;
+
+    let error = DiscoveredModel::from_proto(model_info(), server)
+        .expect_err("zero data parallelism must fail discovery");
+
+    assert!(error.to_string().contains("data-parallel size of zero"));
 }
 
 #[test]
@@ -1142,7 +1155,18 @@ async fn try_engine_from_args(
     (VllmSidecarEngine, dynamo_backend_common::WorkerConfig),
     dynamo_backend_common::DynamoError,
 > {
-    let argv = vec![
+    try_engine_from_args_with_world_size(endpoint, http_endpoint, None).await
+}
+
+async fn try_engine_from_args_with_world_size(
+    endpoint: &str,
+    http_endpoint: &str,
+    world_size: Option<u32>,
+) -> Result<
+    (VllmSidecarEngine, dynamo_backend_common::WorkerConfig),
+    dynamo_backend_common::DynamoError,
+> {
+    let mut argv = vec![
         "dynamo-vllm-sidecar".to_string(),
         "--grpc-endpoint".to_string(),
         endpoint.to_string(),
@@ -1156,47 +1180,12 @@ async fn try_engine_from_args(
         "--grpc-connect-attempt-timeout-secs".to_string(),
         "1".to_string(),
     ];
+    if let Some(world_size) = world_size {
+        argv.extend(["--vllm-rl-world-size".to_string(), world_size.to_string()]);
+    }
     tokio::task::spawn_blocking(move || VllmSidecarEngine::from_args(Some(argv)))
         .await
         .expect("bootstrap task")
-}
-
-async fn world_size_server(world_size: u32) -> (String, oneshot::Receiver<String>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let address = listener.local_addr().expect("address");
-    let (request_tx, request_rx) = oneshot::channel();
-    tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.expect("accept request");
-        let mut buffer = [0; 2048];
-        let mut size = 0;
-        loop {
-            assert!(
-                size < buffer.len(),
-                "request headers exceeded the 2048-byte fixture limit"
-            );
-            let read = stream
-                .read(&mut buffer[size..])
-                .await
-                .expect("read request");
-            assert!(read > 0, "request ended before the complete HTTP headers");
-            size += read;
-            if buffer[..size].windows(4).any(|bytes| bytes == b"\r\n\r\n") {
-                break;
-            }
-        }
-        let request = String::from_utf8_lossy(&buffer[..size]).into_owned();
-        let body = format!(r#"{{"world_size":{world_size}}}"#);
-        let response = format!(
-            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-            body.len()
-        );
-        stream
-            .write_all(response.as_bytes())
-            .await
-            .expect("write response");
-        let _ = request_tx.send(request);
-    });
-    (format!("http://{address}/admin"), request_rx)
 }
 
 async fn collect(
@@ -1295,7 +1284,7 @@ async fn startup_rejects_model_identity_change_after_bootstrap() {
 }
 
 #[tokio::test]
-async fn rl_startup_falls_back_to_v028_http_world_size() {
+async fn rl_startup_uses_configured_v028_world_size() {
     let service = FakeVllm::default();
     let mut legacy_server = server_info();
     legacy_server
@@ -1305,31 +1294,47 @@ async fn rl_startup_falls_back_to_v028_http_world_size() {
         .world_size = 0;
     *service.server_info_override.lock().await = Some(legacy_server);
     let grpc = FakeServer::start(service).await;
-    let (http_endpoint, request_rx) = world_size_server(8).await;
 
-    let (_, worker) = try_engine_from_args(&grpc.endpoint, &http_endpoint)
-        .await
-        .expect("vLLM 0.28 RL discovery should use the HTTP world size");
+    let (_, worker) =
+        try_engine_from_args_with_world_size(&grpc.endpoint, "http://worker:8120", Some(8))
+            .await
+            .expect("configured vLLM 0.28 world size should allow RL discovery");
 
     assert_eq!(
         worker.rl_metadata,
         Some(
             RlWorkerMetadata::new(
                 8,
-                Some(RlAdminBaseUrl::parse(&http_endpoint).expect("admin URL")),
+                Some(RlAdminBaseUrl::parse("http://worker:8120/").expect("admin URL")),
             )
             .expect("worker metadata")
         )
     );
-    let request = tokio::time::timeout(Duration::from_secs(1), request_rx)
-        .await
-        .expect("world-size request timeout")
-        .expect("world-size request");
-    assert!(request.starts_with("GET /admin/get_world_size?include_dp=true HTTP/1.1"));
 }
 
 #[tokio::test]
-async fn rl_world_size_fallback_preserves_encoded_http_path_prefix() {
+async fn rl_startup_prefers_authoritative_grpc_world_size() {
+    let grpc = FakeServer::start(FakeVllm::default()).await;
+
+    let (_, worker) =
+        try_engine_from_args_with_world_size(&grpc.endpoint, "http://worker:8120", Some(8))
+            .await
+            .expect("nonzero gRPC world size should remain authoritative");
+
+    assert_eq!(
+        worker.rl_metadata,
+        Some(
+            RlWorkerMetadata::new(
+                4,
+                Some(RlAdminBaseUrl::parse("http://worker:8120/").expect("admin URL")),
+            )
+            .expect("worker metadata")
+        )
+    );
+}
+
+#[tokio::test]
+async fn rl_startup_requires_configured_v028_world_size() {
     let service = FakeVllm::default();
     let mut legacy_server = server_info();
     legacy_server
@@ -1339,43 +1344,60 @@ async fn rl_world_size_fallback_preserves_encoded_http_path_prefix() {
         .world_size = 0;
     *service.server_info_override.lock().await = Some(legacy_server);
     let grpc = FakeServer::start(service).await;
-    let (http_endpoint, request_rx) = world_size_server(8).await;
-    let http_endpoint = format!("{http_endpoint}%2Fv1");
 
-    try_engine_from_args(&grpc.endpoint, &http_endpoint)
-        .await
-        .expect("encoded HTTP path prefix should be preserved");
-
-    let request = tokio::time::timeout(Duration::from_secs(1), request_rx)
-        .await
-        .expect("world-size request timeout")
-        .expect("world-size request");
-    assert!(request.starts_with("GET /admin%2Fv1/get_world_size?include_dp=true HTTP/1.1"));
-}
-
-#[tokio::test]
-async fn rl_startup_rejects_invalid_v028_http_world_size() {
-    let service = FakeVllm::default();
-    let mut legacy_server = server_info();
-    legacy_server
-        .parallelism
-        .as_mut()
-        .expect("parallelism metadata")
-        .world_size = 0;
-    *service.server_info_override.lock().await = Some(legacy_server);
-    let grpc = FakeServer::start(service).await;
-    let (http_endpoint, request_rx) = world_size_server(0).await;
-
-    let error = match try_engine_from_args(&grpc.endpoint, &http_endpoint).await {
-        Ok(_) => panic!("zero HTTP world size must fail"),
+    let error = match try_engine_from_args(&grpc.endpoint, "http://worker:8120").await {
+        Ok(_) => panic!("missing configured vLLM 0.28 world size must fail"),
         Err(error) => error,
     };
 
-    assert!(error.to_string().contains("positive u32 `world_size`"));
-    tokio::time::timeout(Duration::from_secs(1), request_rx)
-        .await
-        .expect("world-size request timeout")
-        .expect("world-size request");
+    assert!(error.to_string().contains("--vllm-rl-world-size"));
+}
+
+#[tokio::test]
+async fn rl_startup_rejects_incompatible_configured_v028_world_size() {
+    let service = FakeVllm::default();
+    let mut legacy_server = server_info();
+    legacy_server
+        .parallelism
+        .as_mut()
+        .expect("parallelism metadata")
+        .world_size = 0;
+    *service.server_info_override.lock().await = Some(legacy_server);
+    let grpc = FakeServer::start(service).await;
+
+    let error =
+        match try_engine_from_args_with_world_size(&grpc.endpoint, "http://worker:8120", Some(7))
+            .await
+        {
+            Ok(_) => panic!("configured world size must match the discovered topology"),
+            Err(error) => error,
+        };
+
+    assert_eq!(
+        error.error_type(),
+        ErrorType::Backend(BackendError::InvalidArgument)
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("must be divisible by TP * PP * DP")
+    );
+}
+
+#[tokio::test]
+async fn rl_startup_rejects_zero_configured_world_size() {
+    let error = match try_engine_from_args_with_world_size(
+        "http://127.0.0.1:1",
+        "http://worker:8120",
+        Some(0),
+    )
+    .await
+    {
+        Ok(_) => panic!("configured world size must be positive"),
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains("--vllm-rl-world-size"));
 }
 
 #[tokio::test]
