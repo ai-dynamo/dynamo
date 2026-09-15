@@ -13,6 +13,7 @@ from typing import Any, Protocol
 
 from aisimulate.aic import materialize_aic_num_gpu_blocks
 
+from dynamo._internal.aic import resolve_backend_version
 from dynamo.mocker import MockEngineArgs
 from dynamo.mocker.args import (
     resolve_planner_profile_data as _resolve_mocker_planner_profile_data,
@@ -26,6 +27,13 @@ class PlannerProfileDataResult(Protocol):
 def resolve_aic_num_gpu_blocks(raw: dict[str, Any]) -> None:
     """Materialize AIC KV capacity in-place for SDK compatibility."""
 
+    if (
+        raw.get("aic_backend") is not None
+        or raw.get("aic_attention_dp_size") is not None
+    ):
+        raw["aic_backend_version"] = resolve_backend_version(
+            raw.get("aic_backend") or "vllm", raw.get("aic_backend_version")
+        )
     lowered = materialize_aic_num_gpu_blocks(raw)
     raw.clear()
     raw.update(lowered)
