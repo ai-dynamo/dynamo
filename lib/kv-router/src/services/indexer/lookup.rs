@@ -114,9 +114,9 @@ impl Indexer {
             .await
     }
 
-    /// Device match details plus per-tier hits. Router-hint chain retention is
-    /// honored as requested; see [`Indexer::find_tiered_matches_with_options`]
-    /// for the capability-gated variant.
+    /// Device match details plus per-tier hits, with router-hint chain retention
+    /// disabled. Use [`Indexer::find_tiered_matches_with_options`] to request
+    /// retention through the capability-gated variant.
     pub async fn find_matches_by_tier(
         &self,
         sequence: Vec<LocalBlockHash>,
