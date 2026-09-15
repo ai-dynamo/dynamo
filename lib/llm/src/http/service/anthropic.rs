@@ -219,9 +219,11 @@ impl AnthropicHandlerError {
     // guard. Attach metrics only at the /v1/messages handler boundary.
     fn from_request_validation(error: AnthropicRequestValidationError) -> Self {
         let (class, metric_error_type) = match &error {
-            AnthropicRequestValidationError::InvalidArgument(_)
-            | AnthropicRequestValidationError::UnsupportedContent(_) => {
+            AnthropicRequestValidationError::InvalidArgument(_) => {
                 (ErrorClass::InvalidRequest, ErrorType::Validation)
+            }
+            AnthropicRequestValidationError::UnsupportedContent(_) => {
+                (ErrorClass::InvalidRequest, ErrorType::NotImplemented)
             }
             AnthropicRequestValidationError::NotImplemented(_) => {
                 (ErrorClass::NotImplemented, ErrorType::NotImplemented)
@@ -1361,7 +1363,7 @@ fn anthropic_error_type_for_status(status: StatusCode, fallback: &str) -> &str {
         404 => "not_found_error",
         413 => "request_too_large",
         429 => "rate_limit_error",
-        499 => "invalid_request_error",
+        499 => "request_cancelled",
         503 | 529 => "overloaded_error",
         _ if status.is_client_error() => "invalid_request_error",
         _ => fallback,
