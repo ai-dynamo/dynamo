@@ -141,6 +141,7 @@ struct CommittedDiscoveryGroup {
 struct PendingLoraProjection {
     base_capacities: Vec<u32>,
     adapters: HashMap<String, LoraInfo>,
+    requires_registration: bool,
 }
 
 type EndpointLoraProjection = HashMap<EndpointId, HashMap<WorkerWithDpRank, LoraWorkerProjection>>;
@@ -277,6 +278,9 @@ impl ModelManager {
                 if let Some(capacity) = card.runtime_config.max_gpu_lora_count {
                     worker_projection.base_capacities.push(capacity);
                 }
+                worker_projection.requires_registration |= card
+                    .runtime_config
+                    .runtime_flag_enabled(crate::lora::LORA_REQUIRES_REGISTRATION);
 
                 for (adapter_key, adapter_card) in &group.adapters {
                     let Ok(adapter_mcid) = ModelCardInstanceId::from_path(adapter_key) else {
@@ -335,8 +339,13 @@ impl ModelManager {
                             .first()
                             .copied()
                             .or_else(|| adapter_capacities.first().copied())
-                            .or_else(|| (!loras.is_empty()).then_some(4))?;
-                        Some((worker, LoraWorkerProjection { capacity, loras }))
+                            .or_else(|| (!loras.is_empty()).then_some(4))
+                            .or_else(|| projection.requires_registration.then_some(0))?;
+                        Some((worker, LoraWorkerProjection {
+                            capacity,
+                            loras,
+                            requires_registration: projection.requires_registration,
+                        }))
                     })
                     .collect();
                 (endpoint_id, workers)
@@ -357,6 +366,7 @@ impl ModelManager {
                     continue;
                 };
                 existing.capacity = existing.capacity.min(projection.capacity);
+                existing.requires_registration |= projection.requires_registration;
                 let mut loras = existing
                     .loras
                     .iter()
@@ -3589,6 +3599,134 @@ mod tests {
         assert!(manager.get_model_cards().is_empty());
         assert!(manager.get_committed_model("adapter").is_none());
         assert!(tracker.is_empty());
+    }
+
+    #[test]
+    fn sidecar_unload_preserves_routing_to_registered_replicas() {
+        use crate::lora::{LORA_REQUIRES_REGISTRATION, LoraAllocationConfig, LoraController};
+
+        let manager = ModelManager::new();
+        let mut base = ModelDeploymentCard::with_name_only("base");
+        base.runtime_config.max_gpu_lora_count = Some(4);
+        base.runtime_config
+            .runtime_data
+            .insert(LORA_REQUIRES_REGISTRATION.into(), true.into());
+        let mut adapter = ModelDeploymentCard::with_name_only("adapter");
+        adapter.lora = Some(LoraInfo {
+            name: "adapter".into(),
+            max_gpu_lora_count: Some(4),
+        });
+        let members: Vec<_> = [1, 2]
+            .into_iter()
+            .map(|id| {
+                (
+                    ModelCardInstanceId {
+                        namespace: "namespace".into(),
+                        component: "worker".into(),
+                        endpoint: "generate".into(),
+                        instance_id: id,
+                        model_suffix: None,
+                    }
+                    .to_path(),
+                    base.clone(),
+                )
+            })
+            .collect();
+        let adapters: Vec<_> = members
+            .iter()
+            .map(|(key, _)| {
+                let mut mcid = ModelCardInstanceId::from_path(key).unwrap();
+                mcid.model_suffix = Some("adapter".into());
+                (mcid.to_path(), adapter.clone())
+            })
+            .collect();
+        manager
+            .commit_discovery_group(
+                "group",
+                "workers",
+                WorkerSet::new("deployment".into(), base.mdcsum().into(), base),
+                members.clone(),
+                adapters.clone(),
+            )
+            .unwrap();
+        let domain = manager.lora_domain(&EndpointId::from("namespace.worker.generate"));
+        let mut controller = LoraController::new(
+            LoraAllocationConfig::default(),
+            domain.routing_table.clone(),
+            domain.state_tracker.clone(),
+            domain.load_estimator.clone(),
+        );
+        controller.recompute_now();
+        let pin = domain
+            .routing_table
+            .get_config("adapter")
+            .unwrap()
+            .replica_set[0]
+            .worker_id;
+        assert_eq!(
+            domain
+                .filter
+                .filter_worker_ids_for_lora(Some("adapter"), &[1, 2]),
+            [pin]
+        );
+
+        let remaining = if pin == 1 { 2 } else { 1 };
+        let retained = adapters
+            .into_iter()
+            .filter(|(key, _)| {
+                ModelCardInstanceId::from_path(key).unwrap().instance_id == remaining
+            })
+            .collect();
+        manager
+            .replace_discovery_group("group", members.clone(), retained)
+            .unwrap();
+        controller.recompute_now();
+        assert_eq!(domain.state_tracker.total_lora_slots(), 8);
+        assert_eq!(
+            domain
+                .routing_table
+                .get_config("adapter")
+                .unwrap()
+                .replica_set[0]
+                .worker_id,
+            pin
+        );
+        assert_eq!(
+            domain
+                .filter
+                .filter_worker_ids_for_lora(Some("adapter"), &[1, 2]),
+            [remaining]
+        );
+        assert_eq!(
+            domain
+                .filter
+                .filter_worker_ids_for_lora_with_pin(Some("adapter"), &[1, 2], Some(pin)),
+            [remaining]
+        );
+
+        manager
+            .replace_discovery_group("group", members, Vec::new())
+            .unwrap();
+        controller.recompute_now();
+        assert!(
+            domain
+                .filter
+                .filter_worker_ids_for_lora_with_pin(Some("adapter"), &[1, 2], Some(pin))
+                .is_empty()
+        );
+        assert_eq!(
+            domain.filter.filter_worker_ids_for_lora(None, &[1, 2]),
+            [1, 2]
+        );
+        domain
+            .state_tracker
+            .set_worker_capacity(WorkerWithDpRank::new(3, 0), 4);
+        assert_eq!(
+            domain
+                .filter
+                .filter_worker_ids_for_lora_with_pin(Some("adapter"), &[1, 2, 3], Some(3)),
+            [3]
+        );
     }
 
     fn topology_card(role: WorkerType) -> ModelDeploymentCard {

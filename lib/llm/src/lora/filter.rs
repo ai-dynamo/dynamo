@@ -94,11 +94,36 @@ impl LoraFilter {
         lora_name: Option<&str>,
         available: &[u64],
     ) -> Vec<u64> {
+        self.filter_worker_ids_for_lora_with_pin(lora_name, available, None)
+    }
+
+    pub(crate) fn filter_worker_ids_for_lora_with_pin(
+        &self,
+        lora_name: Option<&str>,
+        available: &[u64],
+        pinned_worker: Option<u64>,
+    ) -> Vec<u64> {
         let Some(lora_name) = lora_name else {
             return available.to_vec();
         };
         let observed = self.state_tracker.snapshot();
+        let eligible = observed.eligible_workers(lora_name, available);
+        let mut selected = self.filter_observed(&observed, lora_name, &eligible);
+        if let Some(pin) = pinned_worker
+            && eligible.contains(&pin)
+            && !selected.contains(&pin)
+        {
+            selected.push(pin);
+        }
+        selected
+    }
 
+    fn filter_observed(
+        &self,
+        observed: &LoraObservedSnapshot,
+        lora_name: &str,
+        available: &[u64],
+    ) -> Vec<u64> {
         let Some(config) = self.routing_table.get_config(lora_name) else {
             // No routing-table entry yet (controller disabled, or before the first tick).
             // Prefer workers that actually have this adapter loaded (from the state tracker)
@@ -171,7 +196,7 @@ impl LoraFilter {
                 lora = lora_name,
                 "Replica set workers all unavailable; using bounded fallback (no scatter)"
             );
-            self.bounded_fallback(&observed, lora_name, available)
+            self.bounded_fallback(observed, lora_name, available)
         } else {
             // Inactive: cold-start pin
             if let Some(pin_id) = config.replica_set.first().map(|w| w.worker_id)
@@ -188,7 +213,7 @@ impl LoraFilter {
                 lora = lora_name,
                 "Cold-start pin worker unavailable; using bounded fallback (no scatter)"
             );
-            self.bounded_fallback(&observed, lora_name, available)
+            self.bounded_fallback(observed, lora_name, available)
         }
     }
 
