@@ -631,7 +631,6 @@ jobs:
           fi
 
           .github/scripts/run_with_pypi_fallback.py \
-            "${RUNNER_TEMP}/test-image-build.log" \
             docker buildx build \
             --progress=plain \
             ${PUSH_ARGS} \

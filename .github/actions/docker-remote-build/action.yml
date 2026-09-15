@@ -167,15 +167,15 @@ runs:
         fi
 
         set +e
-        .github/scripts/run_with_pypi_fallback.py "${BUILD_LOG_FILE}" \
+        .github/scripts/run_with_pypi_fallback.py \
           docker buildx build \
           --progress=plain \
           --tag "$IMAGE_TAG" \
           --platform "${PLATFORM_FLAG}" \
           -f "${DOCKERFILE}" \
-          $TARGET_ARG $EXTRA_ARGS $SECRET_ARGS .
+          $TARGET_ARG $EXTRA_ARGS $SECRET_ARGS . 2>&1 | tee "${BUILD_LOG_FILE}"
 
-        BUILD_EXIT_CODE=$?
+        BUILD_EXIT_CODE=${PIPESTATUS[0]}
         set -e
 
         BUILD_END_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)

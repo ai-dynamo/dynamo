@@ -52,7 +52,6 @@ def run_wrapper(
         / ".github/scripts/run_with_pypi_fallback.py"
     )
     state = tmp_path / "calls.json"
-    log = tmp_path / "build.log"
     env = {
         **os.environ,
         "CALL_STATE": str(state),
@@ -64,17 +63,17 @@ def run_wrapper(
         "UV_DEFAULT_INDEX": index_url,
     }
     result = subprocess.run(
-        [sys.executable, str(wrapper), str(log), *command_stub],
+        [sys.executable, str(wrapper), *command_stub],
         capture_output=True,
         text=True,
         timeout=5,
         env=env,
     )
-    return result, json.loads(state.read_text()), log.read_text()
+    return result, json.loads(state.read_text())
 
 
 def test_cloudfront_403_retries_with_public_pypi(tmp_path, command_stub):
-    result, calls, log = run_wrapper(
+    result, calls = run_wrapper(
         tmp_path,
         command_stub,
         output=(
@@ -89,14 +88,12 @@ def test_cloudfront_403_retries_with_public_pypi(tmp_path, command_stub):
     ]
     assert calls[1]["uv_default_index"] == "https://pypi.org/simple/"
     assert "::warning title=PyPI fallback::" in result.stdout
-    assert "fallback attempt" in log
-    assert (
-        "403 Request blocked" in (tmp_path / "build.log.artifactory-failed").read_text()
-    )
+    assert "403 Request blocked" in result.stdout
+    assert "fallback attempt" in result.stdout
 
 
 def test_success_does_not_retry(tmp_path, command_stub):
-    result, calls, _ = run_wrapper(
+    result, calls = run_wrapper(
         tmp_path,
         command_stub,
         output="primary attempt",
@@ -119,7 +116,7 @@ def test_success_does_not_retry(tmp_path, command_stub):
     ],
 )
 def test_non_retryable_failure_preserves_exit_code(tmp_path, command_stub, output):
-    result, calls, _ = run_wrapper(tmp_path, command_stub, output=output)
+    result, calls = run_wrapper(tmp_path, command_stub, output=output)
 
     assert result.returncode == 23
     assert len(calls) == 1
@@ -127,7 +124,7 @@ def test_non_retryable_failure_preserves_exit_code(tmp_path, command_stub, outpu
 
 
 def test_public_pypi_primary_does_not_retry(tmp_path, command_stub):
-    result, calls, _ = run_wrapper(
+    result, calls = run_wrapper(
         tmp_path,
         command_stub,
         output=(
@@ -142,7 +139,7 @@ def test_public_pypi_primary_does_not_retry(tmp_path, command_stub):
 
 
 def test_fallback_failure_is_propagated(tmp_path, command_stub):
-    result, calls, _ = run_wrapper(
+    result, calls = run_wrapper(
         tmp_path,
         command_stub,
         output=(

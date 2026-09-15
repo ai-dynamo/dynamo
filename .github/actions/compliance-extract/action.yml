@@ -175,7 +175,6 @@ runs:
         EPP_IMAGE_ARG=""
         [ -n "${EPP_IMAGE:-}" ] && EPP_IMAGE_ARG="--build-arg EPP_IMAGE=${EPP_IMAGE}"
         .github/scripts/run_with_pypi_fallback.py \
-            "${RUNNER_TEMP}/compliance-artifact-build.log" \
             docker buildx build \
             --builder ${{ inputs.builder_name }} \
             --platform ${{ inputs.platform }} \
@@ -388,7 +387,6 @@ runs:
         EPP_IMAGE_ARG=""
         [ -n "${EPP_IMAGE:-}" ] && EPP_IMAGE_ARG="--build-arg EPP_IMAGE=${EPP_IMAGE}"
         .github/scripts/run_with_pypi_fallback.py \
-            "${RUNNER_TEMP}/sources-archive-build.log" \
             docker buildx build \
             --builder ${{ inputs.builder_name }} \
             --platform ${{ inputs.platform }} \

@@ -4,51 +4,42 @@
 
 import argparse
 import os
-import shutil
 import subprocess
 import sys
-from pathlib import Path
 
 ARTIFACTORY_PREFIX = "https://artifactory.nvidia.com/"
 CLOUDFRONT_HOST = "d1j32scj9xxftt.cloudfront.net"
 PUBLIC_PYPI = "https://pypi.org/simple/"
 
 
-def run_command(command: list[str], log_file: Path, env=None) -> int:
-    """Run a command while streaming its combined output to stdout and a log."""
-    with log_file.open("w") as output:
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            errors="replace",
-            env=env,
-        )
-        assert process.stdout is not None
-        for line in process.stdout:
-            sys.stdout.write(line)
-            sys.stdout.flush()
-            output.write(line)
-            output.flush()
-        return process.wait()
-
-
-def is_retryable_artifactory_failure(log_file: Path) -> bool:
-    if not os.environ.get("PIP_INDEX_URL", "").startswith(ARTIFACTORY_PREFIX):
-        return False
-
-    output = log_file.read_text(errors="replace").lower()
-    return CLOUDFRONT_HOST in output and (
-        "403" in output or "request blocked" in output
+def run_command(command: list[str], env=None) -> tuple[int, bool]:
+    """Stream command output and detect the known Artifactory CDN failure."""
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        errors="replace",
+        env=env,
     )
+    assert process.stdout is not None
+
+    saw_cloudfront_host = False
+    saw_access_denied = False
+    for line in process.stdout:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+        normalized = line.lower()
+        saw_cloudfront_host |= CLOUDFRONT_HOST in normalized
+        saw_access_denied |= "403" in normalized or "request blocked" in normalized
+
+    return process.wait(), saw_cloudfront_host and saw_access_denied
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Retry an Artifactory CDN failure against public PyPI"
     )
-    parser.add_argument("log_file", type=Path)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if not args.command:
@@ -58,13 +49,13 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    primary_exit_code = run_command(args.command, args.log_file)
-    if primary_exit_code == 0 or not is_retryable_artifactory_failure(args.log_file):
+    primary_exit_code, retryable_failure = run_command(args.command)
+    uses_artifactory = os.environ.get("PIP_INDEX_URL", "").startswith(
+        ARTIFACTORY_PREFIX
+    )
+    if primary_exit_code == 0 or not uses_artifactory or not retryable_failure:
         return primary_exit_code
 
-    # Keep the retry log clean for BuildKit metrics parsing.
-    failed_log = args.log_file.with_name(f"{args.log_file.name}.artifactory-failed")
-    shutil.move(args.log_file, failed_log)
     print(
         "::warning title=PyPI fallback::"
         "Artifactory CDN returned 403; retrying with public PyPI",
@@ -74,7 +65,8 @@ def main() -> int:
     fallback_env = os.environ.copy()
     fallback_env["PIP_INDEX_URL"] = PUBLIC_PYPI
     fallback_env["UV_DEFAULT_INDEX"] = PUBLIC_PYPI
-    return run_command(args.command, args.log_file, env=fallback_env)
+    fallback_exit_code, _ = run_command(args.command, env=fallback_env)
+    return fallback_exit_code
 
 
 if __name__ == "__main__":
