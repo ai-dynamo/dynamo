@@ -22,10 +22,6 @@ import logging
 import os
 from typing import Optional
 
-# typing.Self is 3.11+; pyproject declares requires-python>=3.10 so use the
-# typing_extensions back-port (added as an explicit dep in pyproject.toml).
-from typing_extensions import Self
-
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
 from dynamo.common.configuration.utils import add_argument, nullable_float
@@ -46,6 +42,13 @@ _LEGACY_ENV_ALIASES: dict[str, tuple[str, ...]] = {
     "DYN_HTTP_POOL_TIMEOUT": ("DYN_MM_HTTP_POOL_TIMEOUT",),
     "DYN_HTTP_CONCURRENCY": ("DYN_MM_HTTP_CONCURRENCY",),
 }
+
+# Canonical names that are now accepted-but-ignored (they configured the removed
+# httpx backend). Their legacy aliases warn that they're ignored rather than
+# pointing operators at a live knob to migrate to.
+_IGNORED_HTTP_KNOBS = frozenset(
+    {"DYN_HTTP_MAX_KEEPALIVE", "DYN_HTTP_POOL_TIMEOUT", "DYN_HTTP_CONCURRENCY"}
+)
 
 _legacy_warned: set[str] = set()
 
@@ -68,7 +71,16 @@ def _apply_legacy_env_aliases() -> None:
             os.environ[canonical] = value
             if legacy not in _legacy_warned:
                 _legacy_warned.add(legacy)
-                logger.warning("%s is deprecated; use %s instead.", legacy, canonical)
+                if canonical in _IGNORED_HTTP_KNOBS:
+                    logger.warning(
+                        "%s is deprecated and ignored; it configured the removed "
+                        "httpx backend.",
+                        legacy,
+                    )
+                else:
+                    logger.warning(
+                        "%s is deprecated; use %s instead.", legacy, canonical
+                    )
             break
 
 
@@ -103,22 +115,15 @@ class HttpConfigBase(ConfigBase):
     #   aiohttp: ``ClientTimeout.sock_connect``
     connect_timeout: float
 
-    # --- httpx-only -------------------------------------------------------
-
-    # Cap on idle keepalive connections kept warm in the pool. Raising
-    # this to match ``max_connections`` prevents TLS re-handshake churn
-    # under fan-out. Maps to ``Limits.max_keepalive_connections``.
+    # --- Deprecated no-ops (retained for backward compatibility) ----------
+    # These configured the removed httpx backend and have no aiohttp
+    # equivalent that we apply: aiohttp's connector queues natively (no
+    # semaphore/pool-timeout) and idle keepalive is governed by time
+    # (``keepalive_timeout``) rather than a connection count. The flags and
+    # env vars are still accepted so existing configs don't break, but the
+    # values are ignored.
     max_keepalive: int
-
-    # Wait-for-free-slot timeout; ``Timeout.pool``. Decoupled from the
-    # read budget so a saturated pool surfaces quickly.
     pool_timeout: float
-
-    # Process-wide cap on concurrent in-flight HTTP fetches via the
-    # httpx backend. The semaphore acts as backpressure in front of the
-    # pool so a burst of requests can't push ``PoolTimeout`` up the
-    # stack. aiohttp has no equivalent because its connector queues
-    # natively.
     concurrency: int
 
     # --- aiohttp-only -----------------------------------------------------
@@ -126,17 +131,6 @@ class HttpConfigBase(ConfigBase):
     # How long an idle connection stays warm in the pool, in seconds;
     # ``TCPConnector.keepalive_timeout``.
     keepalive_timeout: float
-
-    @classmethod
-    def from_cli_args(cls, args: argparse.Namespace) -> Self:
-        config = super().from_cli_args(args)
-        # ``--http-max-keepalive 0`` is the documented sentinel for
-        # "match max_connections" — resolve here so the httpx backend
-        # always gets a non-zero keepalive cap regardless of which
-        # construction path the operator used.
-        if config.max_keepalive == 0:
-            config.max_keepalive = config.max_connections
-        return config
 
 
 class HttpArgGroup(ArgGroup):
@@ -183,12 +177,13 @@ class HttpArgGroup(ArgGroup):
             g,
             flag_name="--http-max-keepalive",
             env_var="DYN_HTTP_MAX_KEEPALIVE",
-            default=0,  # 0 → match max_connections; resolved in from_env.
+            default=0,
             arg_type=int,
             dest="max_keepalive",
             help=(
-                "[httpx-only] Cap on idle keepalive connections in the pool. "
-                "0 → match --http-max-connections."
+                "[deprecated, no-op] Configured the removed httpx backend; "
+                "aiohttp governs keepalive by time (--http-keepalive-timeout). "
+                "Accepted but ignored."
             ),
         )
         add_argument(
@@ -198,7 +193,10 @@ class HttpArgGroup(ArgGroup):
             default=60.0,
             arg_type=float,
             dest="pool_timeout",
-            help="[httpx-only] Wait-for-free-slot timeout (seconds).",
+            help=(
+                "[deprecated, no-op] Configured the removed httpx backend; "
+                "aiohttp's connector queues natively. Accepted but ignored."
+            ),
         )
         add_argument(
             g,
@@ -208,8 +206,9 @@ class HttpArgGroup(ArgGroup):
             arg_type=int,
             dest="concurrency",
             help=(
-                "[httpx-only] Process-wide cap on concurrent in-flight fetches. "
-                "Acts as backpressure in front of the pool."
+                "[deprecated, no-op] Configured the removed httpx backend; "
+                "aiohttp's connector queues natively, so no front semaphore is "
+                "needed. Accepted but ignored."
             ),
         )
         add_argument(
