@@ -41,6 +41,7 @@ struct FakeVllm {
     data_parallel_rank_metadata: Arc<Mutex<Vec<Option<String>>>>,
     peers: Arc<Mutex<Vec<SocketAddr>>>,
     model_info_override: Arc<Mutex<Option<pb::ModelInfo>>>,
+    server_info_override: Arc<Mutex<Option<pb::ServerInfo>>>,
     reject: Arc<AtomicBool>,
     hang: Arc<AtomicBool>,
     hang_before_headers: Arc<AtomicBool>,
@@ -276,7 +277,13 @@ impl pb::control_server::Control for FakeVllm {
         &self,
         _request: Request<pb::GetServerInfoRequest>,
     ) -> Result<Response<pb::ServerInfo>, Status> {
-        Ok(Response::new(server_info()))
+        Ok(Response::new(
+            self.server_info_override
+                .lock()
+                .await
+                .clone()
+                .unwrap_or_else(server_info),
+        ))
     }
 
     async fn get_model_info(
@@ -538,9 +545,24 @@ fn rl_worker_metadata_identifies_zero_parallelism_dimensions() {
             _ => unreachable!(),
         }
         let model = DiscoveredModel::from_proto(model_info(), server).expect("valid discovery");
-        let error = model.rl_worker_metadata(None).unwrap_err();
+        let error = model.rl_worker_metadata(None, None).unwrap_err();
         assert!(error.to_string().contains(expected));
     }
+}
+
+#[test]
+fn discovery_rejects_zero_data_parallelism() {
+    let mut server = server_info();
+    server
+        .parallelism
+        .as_mut()
+        .expect("parallelism metadata")
+        .data_parallel_size = 0;
+
+    let error = DiscoveredModel::from_proto(model_info(), server)
+        .expect_err("zero data parallelism must fail discovery");
+
+    assert!(error.to_string().contains("data-parallel size of zero"));
 }
 
 #[test]
@@ -1121,12 +1143,35 @@ fn engine_with_server_info(
 async fn engine_from_args(
     endpoint: &str,
 ) -> (VllmSidecarEngine, dynamo_backend_common::WorkerConfig) {
-    let argv = vec![
+    try_engine_from_args(endpoint, "http://worker:8120")
+        .await
+        .expect("bootstrap discovery")
+}
+
+async fn try_engine_from_args(
+    endpoint: &str,
+    http_endpoint: &str,
+) -> Result<
+    (VllmSidecarEngine, dynamo_backend_common::WorkerConfig),
+    dynamo_backend_common::DynamoError,
+> {
+    try_engine_from_args_with_world_size(endpoint, http_endpoint, None).await
+}
+
+async fn try_engine_from_args_with_world_size(
+    endpoint: &str,
+    http_endpoint: &str,
+    world_size: Option<u32>,
+) -> Result<
+    (VllmSidecarEngine, dynamo_backend_common::WorkerConfig),
+    dynamo_backend_common::DynamoError,
+> {
+    let mut argv = vec![
         "dynamo-vllm-sidecar".to_string(),
         "--grpc-endpoint".to_string(),
         endpoint.to_string(),
         "--vllm-http-endpoint".to_string(),
-        "http://worker:8120".to_string(),
+        http_endpoint.to_string(),
         "--enable-rl".to_string(),
         "--grpc-connections".to_string(),
         "2".to_string(),
@@ -1135,10 +1180,12 @@ async fn engine_from_args(
         "--grpc-connect-attempt-timeout-secs".to_string(),
         "1".to_string(),
     ];
+    if let Some(world_size) = world_size {
+        argv.extend(["--vllm-rl-world-size".to_string(), world_size.to_string()]);
+    }
     tokio::task::spawn_blocking(move || VllmSidecarEngine::from_args(Some(argv)))
         .await
         .expect("bootstrap task")
-        .expect("bootstrap discovery")
 }
 
 async fn collect(
@@ -1234,6 +1281,123 @@ async fn startup_rejects_model_identity_change_after_bootstrap() {
     *server.service.model_info_override.lock().await = Some(changed);
 
     assert!(engine.start(0).await.is_err());
+}
+
+#[tokio::test]
+async fn rl_startup_uses_configured_v028_world_size() {
+    let service = FakeVllm::default();
+    let mut legacy_server = server_info();
+    legacy_server
+        .parallelism
+        .as_mut()
+        .expect("parallelism metadata")
+        .world_size = 0;
+    *service.server_info_override.lock().await = Some(legacy_server);
+    let grpc = FakeServer::start(service).await;
+
+    let (_, worker) =
+        try_engine_from_args_with_world_size(&grpc.endpoint, "http://worker:8120", Some(8))
+            .await
+            .expect("configured vLLM 0.28 world size should allow RL discovery");
+
+    assert_eq!(
+        worker.rl_metadata,
+        Some(
+            RlWorkerMetadata::new(
+                8,
+                Some(RlAdminBaseUrl::parse("http://worker:8120/").expect("admin URL")),
+            )
+            .expect("worker metadata")
+        )
+    );
+}
+
+#[tokio::test]
+async fn rl_startup_prefers_authoritative_grpc_world_size() {
+    let grpc = FakeServer::start(FakeVllm::default()).await;
+
+    let (_, worker) =
+        try_engine_from_args_with_world_size(&grpc.endpoint, "http://worker:8120", Some(8))
+            .await
+            .expect("nonzero gRPC world size should remain authoritative");
+
+    assert_eq!(
+        worker.rl_metadata,
+        Some(
+            RlWorkerMetadata::new(
+                4,
+                Some(RlAdminBaseUrl::parse("http://worker:8120/").expect("admin URL")),
+            )
+            .expect("worker metadata")
+        )
+    );
+}
+
+#[tokio::test]
+async fn rl_startup_requires_configured_v028_world_size() {
+    let service = FakeVllm::default();
+    let mut legacy_server = server_info();
+    legacy_server
+        .parallelism
+        .as_mut()
+        .expect("parallelism metadata")
+        .world_size = 0;
+    *service.server_info_override.lock().await = Some(legacy_server);
+    let grpc = FakeServer::start(service).await;
+
+    let error = match try_engine_from_args(&grpc.endpoint, "http://worker:8120").await {
+        Ok(_) => panic!("missing configured vLLM 0.28 world size must fail"),
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains("--vllm-rl-world-size"));
+}
+
+#[tokio::test]
+async fn rl_startup_rejects_incompatible_configured_v028_world_size() {
+    let service = FakeVllm::default();
+    let mut legacy_server = server_info();
+    legacy_server
+        .parallelism
+        .as_mut()
+        .expect("parallelism metadata")
+        .world_size = 0;
+    *service.server_info_override.lock().await = Some(legacy_server);
+    let grpc = FakeServer::start(service).await;
+
+    let error =
+        match try_engine_from_args_with_world_size(&grpc.endpoint, "http://worker:8120", Some(7))
+            .await
+        {
+            Ok(_) => panic!("configured world size must match the discovered topology"),
+            Err(error) => error,
+        };
+
+    assert_eq!(
+        error.error_type(),
+        ErrorType::Backend(BackendError::InvalidArgument)
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("must be divisible by TP * PP * DP")
+    );
+}
+
+#[tokio::test]
+async fn rl_startup_rejects_zero_configured_world_size() {
+    let error = match try_engine_from_args_with_world_size(
+        "http://127.0.0.1:1",
+        "http://worker:8120",
+        Some(0),
+    )
+    .await
+    {
+        Ok(_) => panic!("configured world size must be positive"),
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains("--vllm-rl-world-size"));
 }
 
 #[tokio::test]
