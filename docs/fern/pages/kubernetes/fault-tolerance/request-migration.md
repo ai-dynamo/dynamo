@@ -2,14 +2,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Request Migration
-subtitle: Keep in-flight generations alive across worker failures by retrying them on a healthy worker.
+subtitle: Keep in-flight generations alive when a worker becomes unavailable by retrying them on a healthy worker.
 ---
 
-When a worker fails mid-generation, Dynamo can migrate the in-progress request to a healthy worker and continue from the exact point of failure — no tokens lost or duplicated, and no interruption visible to the client. Migration is configured once on the **Frontend** and applies globally to every model it serves.
+When a worker becomes unavailable mid-generation, through failure or through a graceful shutdown that ends before the request does, Dynamo can migrate the in-progress request to a healthy worker and continue from the exact point where it stopped — no tokens lost or duplicated, and no interruption visible to the client. Migration is configured once on the **Frontend** and applies globally to every model it serves.
 
 Migration is **off by default** (`--migration-limit 0`). The steps below turn it on, optionally bound its memory use, and verify it is working.
 
-> **How it works:** the Migrator's position in the pipeline, token-state accumulation, and the two failure scenarios it handles are documented in [Request Migration Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-migration-architecture.md).
+> **How it works:** the Migrator's position in the pipeline, token-state accumulation, and the trigger scenarios it handles are documented in [Request Migration Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-migration-architecture.md).
 
 <Steps toc={true} tocDepth={2}>
 
@@ -112,6 +112,6 @@ Migration preserves partial generations rather than restarting them, so individu
 
 ## Related Documentation
 
-- [Request Migration Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-migration-architecture.md) - Pipeline position, token-state tracking, and failure scenarios
+- [Request Migration Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-migration-architecture.md) - Pipeline position, token-state tracking, and migration trigger scenarios
 - [Graceful Shutdown](graceful-shutdown.md) - Draining in-flight requests on planned shutdown
 - [Metrics Catalog](../../reference/observability/metrics-catalog.mdx#migration) - Migration metrics

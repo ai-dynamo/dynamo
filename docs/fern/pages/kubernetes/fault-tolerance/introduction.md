@@ -17,7 +17,7 @@ Most production deployments need both. Request fault tolerance keeps individual 
 
 These behaviors operate at the request boundary: an incoming request, an in-flight generation, or a client connection.
 
-- **[Request Migration](request-migration.md)** — Recovers an in-flight generation when a worker fails mid-request by moving the request to another healthy worker. **Off by default** — enable it when you want best-effort continuity for long-running generations.
+- **[Request Migration](request-migration.md)** — Recovers an in-flight generation by moving the request to another healthy worker when a worker becomes unavailable mid-request, through failure or a graceful shutdown. **Off by default** — enable it when you want best-effort continuity for long-running generations.
 - **[Request Rejection](request-rejection.md)** — Rejects new requests with HTTP 529 when every worker is too busy, so clients can retry instead of adding queueing delay for everyone. **Off by default** — enable it when you want explicit overload behavior.
 - **[Request Cancellation](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-cancellation-architecture.md)** — Stops frontend and runtime work when the client disconnects. This is a built-in runtime behavior and does not require workload configuration.
 
@@ -35,7 +35,7 @@ These behaviors operate at the worker and engine lifecycle boundary: planned shu
 Use these Knowledge Base pages when you want the deeper implementation model or validation details:
 
 - [Fault Tolerance Testing](../../developer-guide/knowledge-base/concepts/fault-tolerance/fault-tolerance-testing.md) — the framework for validating these behaviors (cancellation, migration, etcd HA failover, hardware fault injection).
-- [Request Migration Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-migration-architecture.md) — pipeline position, token-state tracking, and worker-failure scenarios.
+- [Request Migration Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-migration-architecture.md) — pipeline position, token-state tracking, and migration trigger scenarios.
 
 ## Configuration Reference
 

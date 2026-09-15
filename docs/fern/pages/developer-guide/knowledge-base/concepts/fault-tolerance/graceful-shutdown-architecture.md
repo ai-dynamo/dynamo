@@ -101,7 +101,7 @@ drain into a restart loop.
 
 Backend workers always use `graceful_shutdown=True`, meaning they wait for in-flight requests to complete until the engine is stopped. Request migration is configured at the **frontend** level via `--migration-limit`:
 
-- When migration is enabled at the frontend, disconnected streams from failed workers are automatically retried on healthy workers
+- When migration is enabled at the frontend, disconnected streams are automatically retried on healthy workers — both streams from failed workers and streams a worker drops because its own graceful shutdown ended before the request did
 - Workers don't need to know about migration configuration - they simply complete their work or signal incomplete streams
 - See [Request Migration Architecture](request-migration-architecture.md) for details on how migration works
 

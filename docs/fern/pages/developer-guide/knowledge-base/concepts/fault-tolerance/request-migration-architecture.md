@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Request Migration Architecture
-subtitle: Preserve token state and reissue in-flight requests on healthy workers after a worker failure.
+subtitle: Preserve token state and reissue in-flight requests on healthy workers when a worker becomes unavailable.
 ---
 
-This document describes the internals of how Dynamo implements request migration to handle worker failures gracefully during LLM text generation. Request migration allows in-progress requests to continue on different workers when the original worker becomes unavailable, providing fault tolerance and improved user experience.
+This document describes the internals of how Dynamo implements request migration to handle a worker becoming unavailable — through failure or through a graceful shutdown — during LLM text generation. Request migration allows in-progress requests to continue on different workers when the original worker becomes unavailable, providing fault tolerance and improved user experience.
 
 This is an architecture reference. For how to enable and tune migration, its benefits, and its known limitations, see the [Request Migration](../../../../kubernetes/fault-tolerance/request-migration.md) use-case guide. For the metrics migration emits, see the [Metrics Catalog](../../../../reference/observability/metrics-catalog.mdx#migration).
 
@@ -43,7 +43,7 @@ When a request is being processed and responses are flowing back from a worker, 
 
 ### Migration Trigger Scenarios
 
-The migration system handles two distinct failure scenarios:
+The migration system handles three distinct scenarios. Two are failures; the third is a planned shutdown.
 
 #### 1. New Request Migration (Initial Connection Failure)
 
@@ -72,6 +72,27 @@ The migration system handles two distinct failure scenarios:
 3. **New Stream Creation**: A fresh stream is created with the accumulated request state, ensuring the new worker has complete context.
 
 4. **Continuation**: The new worker receives the request with the full token context and continues generation from the exact point where the previous worker left off.
+
+#### 3. Worker Shutdown Migration (Graceful Shutdown)
+
+**Scenario**: A worker receives `SIGTERM` — a rolling upgrade, a scale-down, or a node drain — and its grace period ends while the request is still generating. This is not a failure: the worker is shutting down as instructed.
+
+**Error Pattern**: The backend aborts the requests that are still in flight and raises an engine shutdown error. All three backends do this: vLLM, SGLang, and TensorRT-LLM. The frontend classifies the resulting `backend.engine_shutdown` reason as migration-eligible, so the request follows the same recovery path as a mid-stream disconnection.
+
+**Migration Process**: Identical to ongoing request migration above. The accumulated token state is reissued on a healthy worker, and the client sees an uninterrupted stream.
+
+Migration is off by default, so this recovery only happens when the frontend sets `--migration-limit` (or `DYN_MIGRATION_LIMIT`) to a non-zero value. With migration disabled, a request caught by a graceful shutdown ends in an error at the client. Planned pod turnover is the common case for this scenario, which makes the migration limit relevant to deployments that never expect a worker to crash.
+
+#### Terminal-frame drain window
+
+A shutting-down worker emits its terminal frame before its trailing typed error arrives. To avoid ending a request on the frame and losing the error that makes it migratable, the router withholds a terminal frame whose finish reason is `Error` or `Cancelled` for up to 5 seconds while it waits for that error.
+
+- If the typed error arrives, the stream is classified as failed and migration takes over.
+- If nothing arrives within the window, the withheld frame is released and the stream ends normally.
+
+The window is bounded by `DRAIN_TIMEOUT` in `lib/llm/src/kv_router/routing_host.rs`, a fixed 5 seconds with no flag or environment variable to change it.
+
+Two limits on what this costs. It applies only to a stream that is already ending abnormally — a request that finishes with `Stop` or `Length` is never withheld and never delayed. And what is delayed is the final frame of such a request, by up to 5 seconds; tokens already streamed to the client are untouched. The routing host serves the `KV`, `Random`, and `RoundRobin` router modes, so this behavior is not specific to KV routing.
 
 ### Seamless Token Flow and Request State Evolution
 
