@@ -2848,6 +2848,8 @@ class KvDcRelay:
         expected_unique_blocks: int = 1_048_576,
         bind: Optional[str] = None,
         tuning: Optional[Dict[str, int]] = None,
+        sources_file: Optional[str] = None,
+        connection_revision: Optional[str] = None,
     ) -> None:
         ...
 
