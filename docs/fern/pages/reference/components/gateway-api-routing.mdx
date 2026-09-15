@@ -198,16 +198,16 @@ volume and any dropped events are visible once it is on.
 
 ### Booking Ownership on Disconnect and Retry
 
-The Frontend owns a request end to end and frees its booking when the work ends. The EPP only selects.
-The gateway dispatches, so the EPP's booking is tied to the `ext_proc` stream, and the EPP frees it
-when that stream ends rather than when the worker stops generating.
+The Frontend owns a request end to end and frees its booking when the work ends. The EPP only selects,
+so it has no direct view of the worker: it watches the response through `ext_proc` and frees when that
+stream ends.
 
-Those coincide in the normal case, and they also coincide when the stream ends early, because the
-gateway tears the upstream down with it. agentgateway drops fail-open once request headers are sent
-and has no response-side fail-open, so an `ext_proc` failure mid-response ends the exchange, which
-closes the stream to the worker. The worker's Frontend sidecar sees the disconnect and cancels
-generation. Freeing the booking is therefore correct: nothing keeps running that the EPP has stopped
-accounting for.
+In practice the free lands where the Frontend's does. A stream that runs to completion ends when the
+response does. A stream that ends early takes the worker with it, because agentgateway drops fail-open
+once request headers are sent and has no response-side fail-open: an `ext_proc` failure mid-response
+ends the exchange, closing the stream to the worker, and the worker's Frontend sidecar cancels
+generation on the disconnect. Either way nothing keeps running that the EPP has stopped accounting
+for.
 
 Two effects remain:
 
