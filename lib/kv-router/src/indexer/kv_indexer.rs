@@ -28,6 +28,7 @@ fn apply_event_with_counters(
     counters: &PreBoundEventCounters,
 ) -> bool {
     let kind = EventKind::of(&event.event.data);
+    let stored_block_count = EventKind::stored_block_count(&event.event.data);
     let event_id = event.event.event_id;
     let worker_id = event.worker_id;
     let result = trie.apply_event_with_counters(event, Some(counters));
@@ -37,6 +38,9 @@ fn apply_event_with_counters(
         tracing::trace!(
             "Applied KV event to global radix tree: event_type={kind}, event_id={event_id}, worker_id={worker_id}, success={result_is_ok}, global_radix_tree_size={tree_size}"
         );
+    }
+    if let Some(block_count) = stored_block_count {
+        counters.inc_stored_parent_not_found_blocks(block_count, &result);
     }
     counters.inc(kind, result);
     result_is_ok

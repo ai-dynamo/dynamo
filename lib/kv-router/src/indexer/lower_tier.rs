@@ -1033,22 +1033,30 @@ impl SyncIndexer for LowerTierIndexer {
             match task {
                 WorkerTask::Event(event) => {
                     let kind = EventKind::of(&event.event.data);
+                    let stored_block_count = EventKind::stored_block_count(&event.event.data);
                     let result = self.apply_event(&mut worker_blocks, event);
                     if let Err(ref error) = result {
                         tracing::warn!(%error, "Failed to apply lower-tier event");
                     }
                     if let Some(ref c) = counters {
+                        if let Some(block_count) = stored_block_count {
+                            c.inc_stored_parent_not_found_blocks(block_count, &result);
+                        }
                         c.inc(kind, result);
                     }
                 }
                 WorkerTask::EventWithAck { event, resp } => {
                     let kind = EventKind::of(&event.event.data);
+                    let stored_block_count = EventKind::stored_block_count(&event.event.data);
                     let result = self.apply_event(&mut worker_blocks, event);
                     let applied = result.is_ok();
                     if let Err(ref error) = result {
                         tracing::warn!(%error, "Failed to apply lower-tier event");
                     }
                     if let Some(ref c) = counters {
+                        if let Some(block_count) = stored_block_count {
+                            c.inc_stored_parent_not_found_blocks(block_count, &result);
+                        }
                         c.inc(kind, result);
                     }
                     let _ = resp.send(applied);
@@ -1066,12 +1074,16 @@ impl SyncIndexer for LowerTierIndexer {
                     correlation_id,
                 } => {
                     let kind = EventKind::of(&event.event.data);
+                    let stored_block_count = EventKind::stored_block_count(&event.event.data);
                     let result = self.apply_event(&mut worker_blocks, event);
                     observation.record(correlation_id, result.is_ok());
                     if let Err(ref error) = result {
                         tracing::warn!(%error, "Failed to apply lower-tier event");
                     }
                     if let Some(ref c) = counters {
+                        if let Some(block_count) = stored_block_count {
+                            c.inc_stored_parent_not_found_blocks(block_count, &result);
+                        }
                         c.inc(kind, result);
                     }
                 }
