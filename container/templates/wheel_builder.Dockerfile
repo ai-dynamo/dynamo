@@ -639,10 +639,22 @@ COPY container/deps/requirements.aisimulate.txt /opt/dynamo/container/deps/requi
 # wheel consumed by ai-dynamo instead of rebuilding it from vendored source.
 # Download only this distribution; runtime images own dependency installation
 # through their requirements files and local wheels.
+# AISimulate targets glibc 2.34+, which all consuming runtime images support.
+# Select that target explicitly: the manylinux_2_28 builder only stages the
+# wheel and must not filter it using the builder's older glibc version.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv && \
     source ${VIRTUAL_ENV}/bin/activate && \
+    case "${TARGETARCH}" in \
+        amd64) AISIMULATE_WHEEL_ARCH=x86_64 ;; \
+        arm64) AISIMULATE_WHEEL_ARCH=aarch64 ;; \
+        *) echo "Unsupported AISimulate target architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac && \
     python -m pip download \
+        --platform "manylinux_2_34_${AISIMULATE_WHEEL_ARCH}" \
+        --python-version "${PYTHON_VERSION}" \
+        --implementation cp \
+        --abi abi3 \
         --only-binary=:all: \
         --no-deps \
         --dest /opt/dynamo/dist \
