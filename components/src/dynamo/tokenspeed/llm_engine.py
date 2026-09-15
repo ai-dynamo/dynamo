@@ -9,6 +9,7 @@ import importlib
 import json
 import logging
 import re
+import tempfile
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -20,12 +21,27 @@ from dynamo.common.backend.engine import (
     LLMEngine,
     LlmRegistration,
 )
+from dynamo.common.backend.publisher import ZmqSource
 from dynamo.common.backend.worker import WorkerConfig
+from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.llm import ModelInput
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.tokenspeed.args import parse_args
+from dynamo.tokenspeed.disagg import (
+    attention_dp_size,
+    bootstrap_kwargs,
+    cache_block_size,
+    resolve_disaggregation_mode,
+    runtime_disaggregated_endpoint,
+    validate_disagg_compatibility,
+)
+from dynamo.tokenspeed.kv_events import (
+    kv_event_source,
+    kv_events_config_dict,
+    kv_events_enabled,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +49,9 @@ logger = logging.getLogger(__name__)
 class TokenspeedLLMEngine(LLMEngine):
     def __init__(self, server_args: Any):
         self.server_args = server_args
+        self.disaggregation_mode = resolve_disaggregation_mode(server_args)
+        self._kv_source: ZmqSource | None = None
+        self._kv_event_dir: tempfile.TemporaryDirectory | None = None
         self.engine = None
         self._model_max_len: int | None = None
         self._active_rids_by_context: dict[str, list[str]] = {}
@@ -52,7 +71,14 @@ class TokenspeedLLMEngine(LLMEngine):
         return engine, worker_config
 
     async def start(self, worker_id: int) -> EngineConfig:
-        del worker_id  # tokenspeed has no cluster-wide ID needs
+        del worker_id
+        validate_disagg_compatibility(self.disaggregation_mode, self.server_args)
+        bootstrap_host, bootstrap_port = None, None
+        if self.disaggregation_mode == DisaggregationMode.PREFILL:
+            bootstrap_host, bootstrap_port = runtime_disaggregated_endpoint(
+                self.server_args
+            )
+        self._configure_kv_events()
         # The Dynamo response layer expects per-chunk token deltas.
         self.server_args.stream_output = True
         self.engine = _tokenspeed_engine_cls()(server_args=self.server_args)
@@ -66,7 +92,7 @@ class TokenspeedLLMEngine(LLMEngine):
             or getattr(self.server_args, "max_model_len", None)
         )
 
-        block_size = _optional_int(getattr(self.server_args, "block_size", None))
+        block_size = cache_block_size(self.server_args)
         max_total_tokens = _optional_int(
             scheduler_info.get("max_total_num_tokens")
             or getattr(self.server_args, "max_total_tokens", None)
@@ -88,6 +114,8 @@ class TokenspeedLLMEngine(LLMEngine):
             served_model_name=self.server_args.served_model_name,
             llm=LlmRegistration(
                 context_length=self._model_max_len,
+                bootstrap_host=bootstrap_host,
+                bootstrap_port=bootstrap_port,
                 kv_cache_block_size=block_size,
                 total_kv_blocks=total_kv_blocks,
                 max_num_seqs=_optional_int(
@@ -98,18 +126,51 @@ class TokenspeedLLMEngine(LLMEngine):
             ),
         )
 
+    def _configure_kv_events(self) -> None:
+        config = kv_events_config_dict(
+            getattr(self.server_args, "kv_events_config", None)
+        )
+        if not kv_events_enabled(config) or not getattr(
+            self.server_args, "enable_prefix_caching", True
+        ):
+            return
+        if attention_dp_size(self.server_args) != 1:
+            raise ValueError(
+                "TokenSpeed KV-aware routing currently requires attention DP=1; "
+                "use independent worker replicas"
+            )
+        if (cache_block_size(self.server_args) or 0) <= 0:
+            raise ValueError(
+                "TokenSpeed KV events require a positive --prefix-granularity (--block-size)"
+            )
+        if not config.get("endpoint"):
+            self._kv_event_dir = tempfile.TemporaryDirectory(
+                prefix="dynamo-tokenspeed-"
+            )
+            config["endpoint"] = f"ipc://{self._kv_event_dir.name}/kv-events"
+        self._kv_source = kv_event_source(config)
+        self.server_args.kv_events_config = json.dumps(config)
+
+    async def kv_event_sources(self) -> list[ZmqSource]:
+        return [self._kv_source] if self._kv_source is not None else []
+
     async def generate(
         self, request: GenerateRequest, context: Context
     ) -> AsyncGenerator[GenerateChunk, None]:
         assert self.engine is not None, "Engine not initialized"
 
+        bootstrap = bootstrap_kwargs(request, self.disaggregation_mode)
         _validate_single_choice_sampling(request)
         sampling_params = build_sampling_params(request, self._model_max_len)
+        if self.disaggregation_mode == DisaggregationMode.PREFILL:
+            sampling_params["max_new_tokens"] = 1
+            sampling_params.pop("min_new_tokens", None)
         token_ids = request.get("token_ids", [])
         obj = _generate_req_input_cls()(
             input_ids=token_ids,
             sampling_params=sampling_params,
             stream=True,
+            **bootstrap,
         )
 
         request_id = context.id()
@@ -139,9 +200,16 @@ class TokenspeedLLMEngine(LLMEngine):
             logger.debug("Aborted TokenSpeed request %s", rid)
 
     async def cleanup(self) -> None:
-        if self.engine is not None:
-            self.engine.shutdown()
-            logger.info("TokenSpeed engine shutdown")
+        engine, self.engine = self.engine, None
+        try:
+            if engine is not None:
+                engine.shutdown()
+                logger.info("TokenSpeed engine shutdown")
+        finally:
+            self._kv_source = None
+            if self._kv_event_dir is not None:
+                self._kv_event_dir.cleanup()
+                self._kv_event_dir = None
 
 
 def build_sampling_params(
@@ -305,7 +373,11 @@ def _finish_reason_type(finish_reason: Any) -> str:
     if hasattr(finish_reason, "to_json"):
         finish_reason = finish_reason.to_json()
     if isinstance(finish_reason, dict):
-        return str(finish_reason.get("type") or "unknown")
+        reason = str(finish_reason.get("type") or "unknown")
+        if reason == "abort":
+            message = finish_reason.get("message") or "Unknown backend error"
+            raise RuntimeError(f"TokenSpeed generation aborted: {message}")
+        return reason
     return str(finish_reason)
 
 
