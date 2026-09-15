@@ -75,15 +75,16 @@ def _parse_nixl_uint16(env_name: str, raw: str) -> int:
     if _NIXL_UINT16.fullmatch(raw) is None:
         raise ValueError(f"{env_name}={raw!r} is not a valid unsigned 16-bit integer")
 
-    try:
-        value = int(raw, 16 if raw.startswith(("0x", "0X")) else 10)
-    except ValueError as error:
-        raise ValueError(
-            f"{env_name}={raw!r} is not a valid unsigned 16-bit integer"
-        ) from error
-    if value > MAX_PORT:
+    is_hex = raw.startswith(("0x", "0X"))
+    digits = (raw[2:] if is_hex else raw).lstrip("0") or "0"
+    max_digits = format(MAX_PORT, "x") if is_hex else str(MAX_PORT)
+    if len(digits) > len(max_digits) or (
+        len(digits) == len(max_digits) and digits.lower() > max_digits
+    ):
         raise ValueError(f"{env_name}={raw!r} is outside the range 0-{MAX_PORT}")
-    return value
+    # Parse only the significant digits so Python's configurable integer-string
+    # limit cannot misclassify a valid value with many leading zeroes.
+    return int(digits, 16 if is_hex else 10)
 
 
 def _parse_nixl_bool(env_name: str, raw: str) -> bool:

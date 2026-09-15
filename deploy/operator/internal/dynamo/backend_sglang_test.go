@@ -843,12 +843,6 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 			ports:             workerPorts,
 			telemetryEnable:   "y",
 			telemetryExporter: "prometheus ",
-			portValueFrom: &corev1.EnvVarSource{
-				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "telemetry"},
-					Key:                  "nixl-port",
-				},
-			},
 			containerGPUs: -1,
 			expectedPorts: map[string]int32{"nixl": 19090},
 		},
