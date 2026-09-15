@@ -976,6 +976,7 @@ mod output_hash_tests {
 #[cfg(test)]
 mod prefill_start_tests {
     use super::*;
+    use crate::kv_router::metrics::RoutingDecisionCounters;
 
     fn test_request(tracker: Arc<RequestTracker>, annotations: Vec<String>) -> PreprocessedRequest {
         PreprocessedRequest::builder()
@@ -1014,6 +1015,8 @@ mod prefill_start_tests {
             )
             .unwrap(),
             overlap_blocks_lost: hist_vec("overlap_blocks_lost"),
+            decision_counters_prefill: RoutingDecisionCounters::for_test(),
+            decision_counters_decode: RoutingDecisionCounters::for_test(),
         })
     }
 

@@ -217,6 +217,19 @@ pub mod frontend_service {
     /// Effective KV overlap blocks lost by non-max-overlap selections
     pub const OVERLAP_BLOCKS_LOST: &str = "overlap_blocks_lost";
 
+    /// Routing decisions made by the router
+    pub const DECISIONS_TOTAL: &str = "decisions_total";
+
+    /// Routing decisions that selected the best-overlap eligible instance
+    pub const DECISION_KV_OPTIMAL_TOTAL: &str = "decision_kv_optimal_total";
+
+    /// Input tokens observed across routing decisions
+    pub const INPUT_F0_TOTAL: &str = "input_f0_total";
+
+    /// Input tokens cached on the best-overlap eligible instance.
+    /// The numbering skips f1, which the router and indexer cannot evaluate.
+    pub const INPUT_F2_TOTAL: &str = "input_f2_total";
+
     /// Number of cached tokens (prefix cache hits) per request
     pub const CACHED_TOKENS: &str = "cached_tokens";
 
@@ -669,6 +682,19 @@ pub mod router {
 
     /// Effective KV overlap blocks lost by non-max-overlap selections
     pub const OVERLAP_BLOCKS_LOST: &str = "router_overlap_blocks_lost";
+
+    /// Routing decisions made by the router
+    pub const DECISIONS_TOTAL: &str = "router_decisions_total";
+
+    /// Routing decisions that selected the best-overlap eligible instance
+    pub const DECISION_KV_OPTIMAL_TOTAL: &str = "router_decision_kv_optimal_total";
+
+    /// Input tokens observed across routing decisions
+    pub const INPUT_F0_TOTAL: &str = "router_input_f0_total";
+
+    /// Input tokens cached on the best-overlap eligible instance, whether or not it was selected.
+    /// The numbering skips f1, which the router and indexer cannot evaluate.
+    pub const INPUT_F2_TOTAL: &str = "router_input_f2_total";
 
     /// Whether the router currently has a worker/dp_rank registered (1 = registered)
     pub const WORKER_REGISTERED: &str = "router_worker_registered";

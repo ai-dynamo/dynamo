@@ -25,9 +25,10 @@ use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::queue_admission::WorkerPlacement;
 use super::selector::{DefaultWorkerSelector, WorkerSelectionInput, WorkerSelector};
 use super::types::{
-    AdvisorySchedulingResponse, AdvisoryWorkerLoad, AttemptId, KvSchedulerError,
-    NonMaxOverlapSelection, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider,
-    SchedulingContext, SchedulingRequest, SchedulingResponse, WorkerAvailabilityProvider,
+    AdvisorySchedulingResponse, AdvisoryWorkerLoad, AttemptId, BestOverlapCandidate,
+    KvSchedulerError, NonMaxOverlapSelection, NonMaxOverlapSelectionObserver,
+    OverloadedWorkerProvider, SchedulingContext, SchedulingRequest, SchedulingResponse,
+    WorkerAvailabilityProvider,
 };
 use crate::protocols::{
     LocalBlockHash, PrefillLoadHint, WorkerConfigLike, WorkerId, WorkerSelectionResult,
@@ -70,6 +71,63 @@ struct SelectedWorkerForRequest {
     selected_worker_tiers: SelectedWorkerTierSnapshot,
     selected_worker_load: AdvisoryWorkerLoad,
     non_max_overlap_selection: Option<NonMaxOverlapSelection>,
+    best_overlap: Option<BestOverlapCandidate>,
+}
+
+/// Best effective KV overlap reachable for `request` across the eligible workers.
+///
+/// Applies the same eligibility filter and lower-worker-id tie-break as
+/// [`non_max_overlap_selection`], so the two report a consistent notion of "best overlap" and
+/// their metrics stay reconcilable. It differs in reporting the best candidate absolutely
+/// rather than relative to the selection, so a decision that already took the best overlap is
+/// still scoreable.
+///
+/// A worker missing from the overlap map holds no matching blocks, so an empty map yields a
+/// zero candidate that the selection trivially matches.
+///
+/// Returns `None` for a pinned selection, matching [`non_max_overlap_selection`]: the caller
+/// named the worker, so there was no routing decision to score.
+fn best_overlap_candidate<C: WorkerConfigLike>(
+    workers: &HashMap<WorkerId, C>,
+    request: &SchedulingRequest,
+    eligibility: RoutingEligibility<'_>,
+    selected: WorkerWithDpRank,
+) -> Option<BestOverlapCandidate> {
+    if eligibility.pinned_worker().is_some() {
+        return None;
+    }
+
+    let mut best = None;
+    for (&worker, &overlap_blocks) in &request.overlap.effective_overlap_blocks {
+        if eligibility.validate_worker_rank(workers, worker).is_err() {
+            continue;
+        }
+        let is_better = best.is_none_or(
+            |(current_worker, current_overlap): (WorkerWithDpRank, f64)| {
+                overlap_blocks > current_overlap
+                    || (overlap_blocks == current_overlap && worker < current_worker)
+            },
+        );
+        if is_better {
+            best = Some((worker, overlap_blocks));
+        }
+    }
+
+    let Some((best_worker, effective_overlap_blocks)) = best else {
+        return Some(BestOverlapCandidate {
+            effective_overlap_blocks: 0.0,
+            effective_cached_tokens: 0,
+            selected_has_max_overlap: true,
+        });
+    };
+    Some(BestOverlapCandidate {
+        effective_overlap_blocks,
+        effective_cached_tokens: request.effective_cached_tokens_for(best_worker),
+        // Compared here, where both values come from one scope. Re-deriving this downstream
+        // would compare against a copy that callers have already rounded.
+        selected_has_max_overlap: request.effective_overlap_blocks_for(selected)
+            >= effective_overlap_blocks,
+    })
 }
 
 fn non_max_overlap_selection<C: WorkerConfigLike>(
@@ -1340,6 +1398,8 @@ impl<
                     } else {
                         None
                     };
+                    let best_overlap =
+                        best_overlap_candidate(&workers, request, eligibility, selection.worker);
                     let config = workers
                         .get(&selection.worker.worker_id)
                         .expect("selected worker config must exist");
@@ -1363,6 +1423,7 @@ impl<
                         selected_worker_tiers,
                         selected_worker_load,
                         non_max_overlap_selection,
+                        best_overlap,
                     }
                 })
         }
@@ -1387,6 +1448,7 @@ impl<
                 target_cached_prefix_blocks,
                 kv_transfer_candidates: request.kv_transfer_candidates.take(),
                 potential_decode_blocks: selected.selection.potential_decode_blocks,
+                best_overlap: selected.best_overlap,
             },
         })
     }
@@ -1419,6 +1481,7 @@ impl<
             target_cached_prefix_blocks,
             kv_transfer_candidates: request.kv_transfer_candidates.take(),
             potential_decode_blocks: selected.selection.potential_decode_blocks,
+            best_overlap: selected.best_overlap,
         };
         let non_max_overlap_selection = selected.non_max_overlap_selection;
 
@@ -2284,6 +2347,142 @@ mod tests {
             non_max_overlap_selection(&workers, &request, request.eligibility(), worker1, 2.0)
                 .is_none()
         );
+    }
+
+    fn overlap_request(
+        name: &str,
+        entries: &[(WorkerWithDpRank, f64, usize)],
+    ) -> (
+        SchedulingRequest,
+        tokio::sync::oneshot::Receiver<Result<SchedulingResponse, KvSchedulerError>>,
+    ) {
+        let (mut request, rx) = make_request(name, 64);
+        for &(worker, blocks, tokens) in entries {
+            request
+                .overlap
+                .effective_overlap_blocks
+                .insert(worker, blocks);
+            request
+                .overlap
+                .effective_cached_tokens
+                .insert(worker, tokens);
+        }
+        (request, rx)
+    }
+
+    /// The discriminating case: the best-overlap worker is eligible and simply lost on cost.
+    /// A candidate derived from the selected worker alone would score this decision optimal.
+    #[test]
+    fn best_overlap_reports_the_unselected_maximum() {
+        let workers = HashMap::from([
+            (0, SimpleWorkerConfig::default()),
+            (1, SimpleWorkerConfig::default()),
+        ]);
+        let worker0 = WorkerWithDpRank::new(0, 0);
+        let worker1 = WorkerWithDpRank::new(1, 0);
+        let (request, _rx) = overlap_request("best-unselected", &[(worker0, 4.0, 64)]);
+
+        let best = best_overlap_candidate(&workers, &request, request.eligibility(), worker1)
+            .expect("an unpinned selection reports a candidate");
+
+        assert_eq!(best.effective_overlap_blocks, 4.0);
+        assert_eq!(best.effective_cached_tokens, 64);
+        assert!(!best.selected_has_max_overlap);
+    }
+
+    #[test]
+    fn best_overlap_marks_a_max_overlap_selection_optimal() {
+        let workers = HashMap::from([
+            (0, SimpleWorkerConfig::default()),
+            (1, SimpleWorkerConfig::default()),
+        ]);
+        let worker0 = WorkerWithDpRank::new(0, 0);
+        let (request, _rx) = overlap_request("best-selected", &[(worker0, 4.0, 64)]);
+
+        let best = best_overlap_candidate(&workers, &request, request.eligibility(), worker0)
+            .expect("an unpinned selection reports a candidate");
+
+        assert_eq!(best.effective_cached_tokens, 64);
+        assert!(best.selected_has_max_overlap);
+    }
+
+    /// Two workers tied on overlap must resolve to the lower worker id, the same tie-break
+    /// `non_max_overlap_selection` applies. Differing cached tokens make the choice observable,
+    /// so a divergent tie-break here would desync the two metrics rather than fail silently.
+    #[test]
+    fn best_overlap_breaks_an_overlap_tie_on_the_lower_worker_id() {
+        let workers = HashMap::from([
+            (0, SimpleWorkerConfig::default()),
+            (1, SimpleWorkerConfig::default()),
+        ]);
+        let worker0 = WorkerWithDpRank::new(0, 0);
+        let worker1 = WorkerWithDpRank::new(1, 0);
+        let (request, _rx) =
+            overlap_request("best-tie", &[(worker0, 2.0, 32), (worker1, 2.0, 999)]);
+
+        let best = best_overlap_candidate(&workers, &request, request.eligibility(), worker1)
+            .expect("an unpinned selection reports a candidate");
+
+        assert_eq!(best.effective_overlap_blocks, 2.0);
+        assert_eq!(
+            best.effective_cached_tokens, 32,
+            "lower worker id wins the tie"
+        );
+        assert!(
+            best.selected_has_max_overlap,
+            "a tie means no strictly better worker existed"
+        );
+    }
+
+    /// Overlap the router could not have taken is not overlap it gave up.
+    #[test]
+    fn best_overlap_ignores_ineligible_workers() {
+        let workers = HashMap::from([
+            (0, SimpleWorkerConfig::default()),
+            (1, SimpleWorkerConfig::default()),
+        ]);
+        let worker0 = WorkerWithDpRank::new(0, 0);
+        let worker1 = WorkerWithDpRank::new(1, 0);
+        let (mut request, _rx) = overlap_request("best-ineligible", &[(worker0, 4.0, 64)]);
+        request.allowed_worker_ids = Some(HashSet::from([worker1.worker_id]));
+
+        let best = best_overlap_candidate(&workers, &request, request.eligibility(), worker1)
+            .expect("an unpinned selection reports a candidate");
+
+        assert_eq!(best.effective_overlap_blocks, 0.0);
+        assert_eq!(best.effective_cached_tokens, 0);
+        assert!(best.selected_has_max_overlap);
+    }
+
+    #[test]
+    fn best_overlap_is_absent_for_pinned_selections() {
+        let workers = HashMap::from([
+            (0, SimpleWorkerConfig::default()),
+            (1, SimpleWorkerConfig::default()),
+        ]);
+        let worker0 = WorkerWithDpRank::new(0, 0);
+        let worker1 = WorkerWithDpRank::new(1, 0);
+        let (mut request, _rx) = overlap_request("best-pinned", &[(worker1, 4.0, 64)]);
+        request.pinned_worker = Some(worker0);
+
+        assert!(
+            best_overlap_candidate(&workers, &request, request.eligibility(), worker0).is_none(),
+            "the caller chose the worker, so there is no decision to score"
+        );
+    }
+
+    #[test]
+    fn best_overlap_is_zero_when_no_worker_holds_overlap() {
+        let workers = HashMap::from([(0, SimpleWorkerConfig::default())]);
+        let worker0 = WorkerWithDpRank::new(0, 0);
+        let (request, _rx) = make_request("best-empty", 64);
+
+        let best = best_overlap_candidate(&workers, &request, request.eligibility(), worker0)
+            .expect("an unpinned selection reports a candidate");
+
+        assert_eq!(best.effective_overlap_blocks, 0.0);
+        assert_eq!(best.effective_cached_tokens, 0);
+        assert!(best.selected_has_max_overlap);
     }
 
     #[tokio::test]
