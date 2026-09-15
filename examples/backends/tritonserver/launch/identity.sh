@@ -71,8 +71,8 @@ while [[ $# -gt 0 ]]; do
             echo "  DYN_SYSTEM_PORT  Worker metrics port (default: 8081)"
             echo ""
             echo "Ports:"
-            echo "  HTTP:  8000 (configurable via DYN_HTTP_PORT)"
-            echo "  gRPC:  8787 (KServe gRPC for tensor models)"
+            echo "  KServe gRPC (tensor models): 8000 (configurable via DYN_HTTP_PORT / --http-port)"
+            echo "  gRPC-service metrics HTTP:    8788 (configurable via --grpc-metrics-port)"
             echo ""
             echo "Additional arguments will be passed to tritonworker.py"
             exit 0

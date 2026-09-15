@@ -30,7 +30,7 @@ def main() -> None:
     parser.add_argument(
         "--port",
         type=int,
-        default=8787,
+        default=8000,
         help="Port of the gRPC endpoint (default: %(default)s)",
     )
     parser.add_argument(
