@@ -1617,6 +1617,14 @@ pub trait Discovery: Send + Sync {
     async fn list(&self, query: DiscoveryQuery) -> Result<Vec<DiscoveryInstance>>;
 
     /// Returns a stream of discovery events (Added/Removed) for the given discovery query
+    ///
+    /// An implementation establishes the watch before it returns. The stream reports the state at
+    /// that moment, and then every change that follows.
+    ///
+    /// A caller that also needs a [`Discovery::list`] snapshot calls `list_and_watch` first. A
+    /// `list` before the watch can show an instance that an unregister removes before the
+    /// snapshot, and the stream never reports that removal.
+    ///
     /// The optional cancellation token can be used to stop the watch stream
     async fn list_and_watch(
         &self,
