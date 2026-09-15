@@ -69,10 +69,11 @@ permissions:
 
 jobs:
   ok-to-test:
+    # Authenticate glamr-agent by GitHub account ID, independent of login changes.
     if: >-
       (github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.fork) ||
       (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
-       github.event.comment.user.login == 'glamr-agent' &&
+       github.event.comment.user.id == 282374502 &&
        contains(github.event.comment.body, '@dynamo-ops please run full CI for '))
     runs-on: ubuntu-latest
     environment: external_collaborator
