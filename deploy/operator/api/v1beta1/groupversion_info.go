@@ -36,6 +36,9 @@ var (
 	// DynamoGraphDeploymentGVK is the v1beta1 DynamoGraphDeployment kind.
 	DynamoGraphDeploymentGVK = GroupVersion.WithKind("DynamoGraphDeployment")
 
+	// DynamoGraphDeploymentEngineGroupGVK is the v1beta1 DynamoGraphDeploymentEngineGroup kind.
+	DynamoGraphDeploymentEngineGroupGVK = GroupVersion.WithKind("DynamoGraphDeploymentEngineGroup")
+
 	// DynamoGraphDeploymentRequestGVK is the v1beta1 DynamoGraphDeploymentRequest kind.
 	DynamoGraphDeploymentRequestGVK = GroupVersion.WithKind("DynamoGraphDeploymentRequest")
 
@@ -52,6 +55,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&DynamoComponentDeploymentList{},
 		&DynamoGraphDeployment{},
 		&DynamoGraphDeploymentList{},
+		&DynamoGraphDeploymentEngineGroup{},
+		&DynamoGraphDeploymentEngineGroupList{},
 		&DynamoGraphDeploymentRequest{},
 		&DynamoGraphDeploymentRequestList{},
 		&DynamoGraphDeploymentScalingAdapter{},
