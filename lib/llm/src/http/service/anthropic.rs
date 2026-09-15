@@ -1363,7 +1363,7 @@ fn anthropic_error_type_for_status(status: StatusCode, fallback: &str) -> &str {
         404 => "not_found_error",
         413 => "request_too_large",
         429 => "rate_limit_error",
-        499 => "request_cancelled",
+        499 => "invalid_request_error",
         503 | 529 => "overloaded_error",
         _ if status.is_client_error() => "invalid_request_error",
         _ => fallback,
