@@ -318,7 +318,7 @@ mod tests {
     impl StreamingDispatch<PreprocessedRequest, LlmResponse> for RecordingDispatch {
         async fn generate(
             &self,
-            request: SingleIn<AddressedRequest<PreprocessedRequest>>,
+            request: SingleIn<AddressedRequest<&PreprocessedRequest>>,
         ) -> Result<ManyOut<LlmResponse>, Error> {
             let (addressed, _) = request.transfer(());
             let (_, _, instance) = addressed.into_parts();

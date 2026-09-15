@@ -308,7 +308,7 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>
 {
     async fn generate(
         &self,
-        request: SingleIn<AddressedRequest<PreprocessedRequest>>,
+        request: SingleIn<AddressedRequest<&PreprocessedRequest>>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let (addressed, context) = request.transfer(());
         let (_, _, instance) = addressed.into_parts();
@@ -1216,7 +1216,7 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>
 {
     async fn generate(
         &self,
-        request: SingleIn<AddressedRequest<PreprocessedRequest>>,
+        request: SingleIn<AddressedRequest<&PreprocessedRequest>>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         tokio::task::yield_now().await;
         let (addressed, context) = request.transfer(());
@@ -2189,7 +2189,7 @@ struct RejectFirstDispatch {
 impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>> for RejectFirstDispatch {
     async fn generate(
         &self,
-        request: SingleIn<AddressedRequest<PreprocessedRequest>>,
+        request: SingleIn<AddressedRequest<&PreprocessedRequest>>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let (addressed, context) = request.transfer(());
         let (request, _, instance) = addressed.into_parts();
@@ -2439,7 +2439,7 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>
 {
     async fn generate(
         &self,
-        request: SingleIn<AddressedRequest<PreprocessedRequest>>,
+        request: SingleIn<AddressedRequest<&PreprocessedRequest>>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let (addressed, context) = request.transfer(());
         let (request, _, instance) = addressed.into_parts();

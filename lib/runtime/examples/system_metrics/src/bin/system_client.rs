@@ -5,7 +5,8 @@ use futures::StreamExt;
 use system_metrics::{DEFAULT_COMPONENT, DEFAULT_ENDPOINT, DEFAULT_NAMESPACE};
 
 use dynamo_runtime::{
-    DistributedRuntime, Runtime, Worker, logging, pipeline::PushRouter,
+    DistributedRuntime, Runtime, Worker, logging,
+    pipeline::{PushRouter, SingleIn},
     protocols::annotated::Annotated,
 };
 
@@ -27,7 +28,9 @@ async fn app(runtime: Runtime) -> anyhow::Result<()> {
     let router =
         PushRouter::<String, Annotated<String>>::from_client(client, Default::default()).await?;
 
-    let mut stream = router.random("hello world".to_string().into()).await?;
+    let mut stream = router
+        .random(SingleIn::new("hello world".to_string()))
+        .await?;
 
     while let Some(resp) = stream.next().await {
         println!("{:?}", resp);

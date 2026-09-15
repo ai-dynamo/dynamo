@@ -85,7 +85,7 @@ impl RouteTraceContext {
 
 /// Attach route tracing metadata to a request and return the shared handle that
 /// will later contain the selected worker ID.
-pub fn attach_route_trace_context<T: Data>(
+pub fn attach_route_trace_context<T: Send + Sync>(
     request: &mut Context<T>,
     trace_context: RouteTraceContext,
 ) -> Arc<RouteTraceContext> {
@@ -95,7 +95,9 @@ pub fn attach_route_trace_context<T: Data>(
         .expect("route trace context was just inserted")
 }
 
-pub fn get_route_trace_context<T: Data>(request: &Context<T>) -> Option<Arc<RouteTraceContext>> {
+pub fn get_route_trace_context<T: Send + Sync>(
+    request: &Context<T>,
+) -> Option<Arc<RouteTraceContext>> {
     request
         .get_optional::<RouteTraceContext>(ROUTE_TRACE_CONTEXT_KEY)
         .ok()

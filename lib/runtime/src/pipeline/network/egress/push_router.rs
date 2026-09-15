@@ -28,6 +28,7 @@ use async_trait::async_trait;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use std::{
+    borrow::Borrow,
     collections::{HashMap, HashSet},
     marker::PhantomData,
     pin::Pin,
@@ -900,19 +901,23 @@ where
     }
 
     /// Issue a request to the next available instance in a round-robin fashion
-    pub async fn round_robin(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
+    pub async fn round_robin<P>(&self, request: SingleIn<P>) -> anyhow::Result<ManyOut<U>>
+    where
+        P: Borrow<T> + Send + Sync,
+    {
         self.round_robin_prepared(request, |_, _| Ok(()))
             .await
             .map(|(_, stream)| stream)
     }
 
-    async fn round_robin_prepared<M, F>(
+    async fn round_robin_prepared<P, M, F>(
         &self,
-        request: SingleIn<T>,
+        request: SingleIn<P>,
         prepare: F,
     ) -> anyhow::Result<(M, ManyOut<U>)>
     where
-        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+        P: Borrow<T> + Send + Sync,
+        F: FnOnce(&mut P, u64) -> anyhow::Result<M>,
     {
         let (instance_id, candidate_count) =
             self.select_untracked_worker(self.round_robin_picker.as_ref())?;
@@ -928,19 +933,23 @@ where
     }
 
     /// Issue a request to a random endpoint
-    pub async fn random(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
+    pub async fn random<P>(&self, request: SingleIn<P>) -> anyhow::Result<ManyOut<U>>
+    where
+        P: Borrow<T> + Send + Sync,
+    {
         self.random_prepared(request, |_, _| Ok(()))
             .await
             .map(|(_, stream)| stream)
     }
 
-    async fn random_prepared<M, F>(
+    async fn random_prepared<P, M, F>(
         &self,
-        request: SingleIn<T>,
+        request: SingleIn<P>,
         prepare: F,
     ) -> anyhow::Result<(M, ManyOut<U>)>
     where
-        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+        P: Borrow<T> + Send + Sync,
+        F: FnOnce(&mut P, u64) -> anyhow::Result<M>,
     {
         let (instance_id, candidate_count) =
             self.select_untracked_worker(self.random_picker.as_ref())?;
@@ -1000,19 +1009,44 @@ where
             .await
     }
 
-    /// Issue a request to exactly one endpoint without transport fallback.
-    pub async fn direct(
+    /// Dispatch to exactly one endpoint without transport fallback.
+    /// The request can carry an owned payload or a borrow. The response stream
+    /// does not borrow the payload.
+    ///
+    /// ```no_run
+    /// # use dynamo_runtime::pipeline::{ManyOut, PushRouter, SingleIn};
+    /// # use dynamo_runtime::protocols::annotated::Annotated;
+    /// async fn dispatch(router: &PushRouter<Vec<u32>, Annotated<String>>, worker: u64)
+    ///     -> anyhow::Result<ManyOut<Annotated<String>>>
+    /// {
+    ///     let payload = vec![1, 2, 3];
+    ///     let response = router.direct(SingleIn::new(&payload), worker).await?;
+    ///     drop(payload);
+    ///     Ok(response)
+    /// }
+    /// ```
+    pub async fn direct<P>(
         &self,
-        request: SingleIn<T>,
+        request: SingleIn<P>,
         instance_id: u64,
-    ) -> anyhow::Result<ManyOut<U>> {
+    ) -> anyhow::Result<ManyOut<U>>
+    where
+        P: Borrow<T> + Send + Sync,
+    {
         tracing::info!(
             router_mode = "direct",
             worker_id = instance_id,
             "Selected worker"
         );
-        self.generate_with_fault_detection(instance_id, request, TransportFallback::Deny)
-            .await
+        self.generate_with_fault_detection_prepared_inner(
+            instance_id,
+            request,
+            TransportFallback::Deny,
+            OverloadCheck::Required,
+            |_, _| Ok(()),
+        )
+        .await
+        .map(|(_, stream)| stream)
     }
 
     /// Dispatch to a selected endpoint with transport fallback.
@@ -1235,15 +1269,16 @@ where
         }
     }
 
-    async fn dispatch_selected<M, F>(
+    async fn dispatch_selected<P, M, F>(
         &self,
         instance_id: u64,
-        request: SingleIn<T>,
+        request: SingleIn<P>,
         mut permit: Option<OccupancyPermit>,
         prepare: F,
     ) -> anyhow::Result<(M, ManyOut<U>)>
     where
-        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+        P: Borrow<T> + Send + Sync,
+        F: FnOnce(&mut P, u64) -> anyhow::Result<M>,
     {
         let (metadata, stream) = self
             .generate_with_fault_detection_prepared(
@@ -1679,47 +1714,51 @@ where
         fallback: TransportFallback<'_>,
         overload_check: OverloadCheck,
     ) -> anyhow::Result<ManyOut<U>> {
-        self.generate_with_fault_detection_prepared_inner(
+        // Keep owned dispatch state off the stacks of nested routing futures.
+        Box::pin(self.generate_with_fault_detection_prepared_inner(
             instance_id,
             request,
             fallback,
             overload_check,
             |_, _| Ok(()),
-        )
+        ))
         .await
         .map(|(_, stream)| stream)
     }
 
-    async fn generate_with_fault_detection_prepared<M, F>(
+    async fn generate_with_fault_detection_prepared<P, M, F>(
         &self,
         instance_id: u64,
-        request: SingleIn<T>,
+        request: SingleIn<P>,
         fallback: TransportFallback<'_>,
         prepare: F,
     ) -> anyhow::Result<(M, ManyOut<U>)>
     where
-        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+        P: Borrow<T> + Send + Sync,
+        F: FnOnce(&mut P, u64) -> anyhow::Result<M>,
     {
-        self.generate_with_fault_detection_prepared_inner(
+        // Keep owned dispatch state off the stacks of nested routing futures.
+        Box::pin(self.generate_with_fault_detection_prepared_inner(
             instance_id,
             request,
             fallback,
             OverloadCheck::Required,
             prepare,
-        )
+        ))
         .await
     }
 
-    async fn generate_with_fault_detection_prepared_inner<M, F>(
+    async fn generate_with_fault_detection_prepared_inner<P, M, F>(
         &self,
         instance_id: u64,
-        mut request: SingleIn<T>,
+        mut request: SingleIn<P>,
         fallback: TransportFallback<'_>,
         overload_check: OverloadCheck,
         prepare: F,
     ) -> anyhow::Result<(M, ManyOut<U>)>
     where
-        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+        P: Borrow<T> + Send + Sync,
+        F: FnOnce(&mut P, u64) -> anyhow::Result<M>,
     {
         let route_start = Instant::now();
         let request_id = request.id().to_string();
@@ -1771,7 +1810,9 @@ where
                 return Err(error);
             }
         };
-        let request = request.map(|req| AddressedRequest::with_instance(req, address, instance));
+        let (payload, context) = request.into_parts();
+        let request =
+            context.map(|()| AddressedRequest::with_instance(payload.borrow(), address, instance));
 
         STAGE_DURATION_SECONDS
             .with_label_values(&[STAGE_ROUTE])
@@ -3521,14 +3562,14 @@ mod tests {
     impl StreamingDispatch<u64, TestResponse> for RecordingDispatch {
         async fn generate(
             &self,
-            request: SingleIn<AddressedRequest<u64>>,
+            request: SingleIn<AddressedRequest<&u64>>,
         ) -> Result<ManyOut<TestResponse>, Error> {
             let (addressed, _ctx) = request.transfer(());
             let (payload, address, instance) = addressed.into_parts();
             self.unary
                 .lock()
                 .unwrap()
-                .push((payload, address, instance.map(|i| i.id())));
+                .push((*payload, address, instance.map(|i| i.id())));
             Ok(Self::canned_stream())
         }
 
@@ -3549,6 +3590,104 @@ mod tests {
         async fn on_instance_added(&self, id: &EndpointInstanceId) {
             self.added.lock().unwrap().push(id.instance_id);
         }
+    }
+
+    #[tokio::test]
+    async fn routing_retries_borrow_payload_and_preserve_context() {
+        use crate::pipeline::network::egress::unified_client::{Headers, RequestPlaneClient};
+        use crate::pipeline::network::{RequestControlMessage, TwoPartCodec};
+
+        #[derive(Serialize)]
+        struct Payload {
+            tokens: Vec<u64>,
+        }
+
+        #[derive(Default)]
+        struct RejectingClient {
+            requests: std::sync::Mutex<Vec<(RequestControlMessage, Vec<u8>)>>,
+        }
+
+        #[async_trait::async_trait]
+        impl RequestPlaneClient for RejectingClient {
+            async fn send_request(
+                &self,
+                _address: String,
+                payload: bytes::Bytes,
+                _headers: Headers,
+            ) -> anyhow::Result<bytes::Bytes> {
+                let message = TwoPartCodec::default().decode_message(payload)?;
+                self.requests.lock().unwrap().push((
+                    serde_json::from_slice(&message.header)?,
+                    message.data.to_vec(),
+                ));
+                anyhow::bail!("retry this request")
+            }
+
+            fn transport_name(&self) -> &'static str {
+                "test"
+            }
+            fn is_healthy(&self) -> bool {
+                true
+            }
+        }
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("borrow-direct".to_string())
+            .unwrap()
+            .component("worker".to_string())
+            .unwrap()
+            .endpoint("generate".to_string());
+        let client = endpoint.client().await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+        let transport = Arc::new(RejectingClient::default());
+        let dispatch =
+            AddressedPushRouter::new(transport.clone(), drt.tcp_server().await.unwrap()).unwrap();
+        let router = PushRouter::<Payload, TestResponse>::from_client_with_dispatch(
+            client,
+            RouterMode::Direct,
+            dispatch,
+        )
+        .await
+        .unwrap();
+        let payload = Payload {
+            tokens: vec![1, 2, 3],
+        };
+        let expected = serde_json::to_value(&payload).unwrap();
+        for attempt in 0..6 {
+            let mut context = SingleIn::with_id_and_metadata(
+                &payload,
+                format!("attempt-{attempt}"),
+                Default::default(),
+            );
+            context.insert_metadata("attempt", attempt.to_string());
+            let error = match attempt / 2 {
+                0 => router.direct(context, worker_id).await,
+                1 => router.random(context).await,
+                _ => router.round_robin(context).await,
+            }
+            .unwrap_err();
+            assert!(error.to_string().contains("retry this request"));
+        }
+        drop(payload);
+        let requests = transport.requests.lock().unwrap();
+        assert_eq!(requests.len(), 6);
+        for (attempt, (control, data)) in requests.iter().enumerate() {
+            assert_eq!(
+                control
+                    .payload_codec
+                    .decode::<serde_json::Value>(data)
+                    .unwrap(),
+                expected
+            );
+            assert_eq!(control.id, format!("attempt-{attempt}"));
+            assert_eq!(control.metadata["attempt"], attempt.to_string());
+        }
+        rt.shutdown();
     }
 
     /// The transport seam must deliver to a caller-supplied `StreamingDispatch`:
@@ -3590,6 +3729,27 @@ mod tests {
             assert_eq!(*payload, 42);
             assert_eq!(*dispatched, Some(instance_id));
             assert!(!address.is_empty(), "selected transport address expected");
+        }
+
+        for mode in [
+            RouterMode::Direct,
+            RouterMode::Random,
+            RouterMode::RoundRobin,
+        ] {
+            let mut response = {
+                let payload = 43;
+                let request = SingleIn::new(&payload);
+                match mode {
+                    RouterMode::Direct => router.direct(request, instance_id).await,
+                    RouterMode::Random => router.random(request).await,
+                    RouterMode::RoundRobin => router.round_robin(request).await,
+                    _ => unreachable!(),
+                }
+                .unwrap()
+            };
+            assert!(response.next().await.is_some());
+            while response.next().await.is_some() {}
+            assert_eq!(dispatch.unary.lock().unwrap().last().unwrap().0, 43);
         }
 
         // Bidirectional hop reaches the supplied dispatch with the same worker.
