@@ -11,6 +11,7 @@
 //! Envoy ──ext-proc──▶ ExtProcServer<epp::Router> ──EndpointPicker──▶ Dynamo KV Router
 //! ```
 
+pub mod admission;
 pub mod envoy_helpers;
 pub mod epp;
 pub mod epp_router;
@@ -29,6 +30,7 @@ pub mod sglang_renderer_client;
 pub mod topology_adapter;
 pub mod vllm_render_client;
 
+pub use admission::{RouterRejection, classify_router_error};
 pub use epp::Router;
 pub use epp_router::EppRouter;
 pub use epp_standalone_config::{
