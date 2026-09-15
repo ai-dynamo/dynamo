@@ -3,7 +3,11 @@
 
 //! Single-threaded compressed radix tree for KV cache routing.
 
-use std::{cell::RefCell, collections::VecDeque, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::VecDeque,
+    rc::{Rc, Weak},
+};
 
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
@@ -18,6 +22,7 @@ type WorkerLookup = FxHashMap<ExternalSequenceBlockHash, SharedRadixBlock>;
 pub(crate) struct RadixBlock {
     state: NodeState,
     children: FxHashMap<LocalBlockHash, SharedRadixBlock>,
+    parent: Weak<RefCell<RadixBlock>>,
     /// Once a node has children it is never eligible for leaf extension again.
     internal: bool,
 }
@@ -27,21 +32,50 @@ impl RadixBlock {
         Self {
             state: NodeState::empty(),
             children: FxHashMap::default(),
+            parent: Weak::new(),
             internal: true,
         }
     }
 
-    fn for_blocks(blocks: &[KvCacheStoredBlockData], worker: WorkerWithDpRank) -> Self {
+    fn for_blocks(
+        blocks: &[KvCacheStoredBlockData],
+        worker: WorkerWithDpRank,
+        parent: &SharedRadixBlock,
+    ) -> Self {
         Self {
             state: NodeState::for_blocks(blocks, worker),
             children: FxHashMap::default(),
+            parent: Rc::downgrade(parent),
             internal: false,
         }
     }
 
-    fn clear_children_if_unreachable(&mut self) {
-        if self.state.full_edge_workers.is_empty() {
-            self.children.clear();
+    fn prune_unreachable(node: &SharedRadixBlock) {
+        let (parent, key) = {
+            let mut node_ref = node.borrow_mut();
+            debug_assert!(!node_ref.state.edge.is_empty(), "cannot prune the root");
+            if node_ref.state.full_edge_workers.is_empty() {
+                node_ref.children.clear();
+            }
+            if node_ref.state.has_any_workers() {
+                return;
+            }
+            (
+                node_ref.parent.upgrade(),
+                node_ref.state.edge.first().map(|&(key, _)| key),
+            )
+        };
+        if let (Some(parent), Some(key)) = (parent, key) {
+            let mut parent = parent.borrow_mut();
+            // A detached node can outlive its old edge through a worker lookup.
+            // Do not remove a replacement that now uses the same local hash.
+            if parent
+                .children
+                .get(&key)
+                .is_some_and(|child| Rc::ptr_eq(child, node))
+            {
+                parent.children.remove(&key);
+            }
         }
     }
 }
@@ -339,7 +373,9 @@ impl RadixTree {
                     break;
                 }
 
-                let child = Rc::new(RefCell::new(RadixBlock::for_blocks(remaining, worker)));
+                let child = Rc::new(RefCell::new(RadixBlock::for_blocks(
+                    remaining, worker, &parent,
+                )));
                 {
                     let mut parent_ref = parent.borrow_mut();
                     parent_ref.internal = true;
@@ -379,7 +415,7 @@ impl RadixTree {
                 self.update_lookup_for_blocks(worker, &remaining[..match_len], &child);
 
                 let tail = &remaining[match_len..];
-                let tail_node = Rc::new(RefCell::new(RadixBlock::for_blocks(tail, worker)));
+                let tail_node = Rc::new(RefCell::new(RadixBlock::for_blocks(tail, worker, &child)));
                 {
                     let mut child_ref = child.borrow_mut();
                     child_ref.internal = true;
@@ -493,8 +529,12 @@ impl RadixTree {
                     full_edge_workers: suffix_full,
                 },
                 children: std::mem::take(&mut node_ref.children),
+                parent: Rc::downgrade(node),
                 internal: node_ref.internal,
             }));
+            for child in suffix.borrow().children.values() {
+                child.borrow_mut().parent = Rc::downgrade(&suffix);
+            }
             node_ref.children.insert(suffix_first_local, suffix.clone());
             node_ref.internal = true;
             suffix
@@ -514,6 +554,8 @@ impl RadixTree {
                 lookup.insert(hash, suffix.clone());
             }
         }
+        drop(suffix_ref);
+        RadixBlock::prune_unreachable(&suffix);
     }
 
     fn update_lookup_for_blocks(
@@ -620,12 +662,11 @@ impl RadixTree {
                 // worker. Otherwise stale descendants can be reused as store parents,
                 // reactivated by restoring only the removed block, or emitted by dumps
                 // without a valid worker-specific parent.
-                let outcome = node_ref
+                node_ref
                     .state
-                    .remove_worker_at_pos(worker, min_pos, min_hash);
-                node_ref.clear_children_if_unreachable();
-                outcome
+                    .remove_worker_at_pos(worker, min_pos, min_hash)
             };
+            RadixBlock::prune_unreachable(&node);
             for stale_hash in outcome.stale_hashes {
                 lookup.remove(&stale_hash);
                 eagerly_removed.insert(stale_hash);
@@ -652,9 +693,8 @@ impl RadixTree {
                 if !seen.insert(Rc::as_ptr(&node)) {
                     continue;
                 }
-                let mut node_ref = node.borrow_mut();
-                node_ref.state.drop_worker(worker);
-                node_ref.clear_children_if_unreachable();
+                node.borrow_mut().state.drop_worker(worker);
+                RadixBlock::prune_unreachable(&node);
             }
             if keep_worker {
                 self.lookup.insert(worker_key, FxHashMap::default());
@@ -676,9 +716,8 @@ impl RadixTree {
             if !seen.insert(Rc::as_ptr(&node)) {
                 continue;
             }
-            let mut node_ref = node.borrow_mut();
-            node_ref.state.drop_worker(worker);
-            node_ref.clear_children_if_unreachable();
+            node.borrow_mut().state.drop_worker(worker);
+            RadixBlock::prune_unreachable(&node);
         }
     }
 
@@ -814,6 +853,113 @@ mod tests {
     use crate::test_utils::{
         create_remove_event, create_store_event, make_store_event, snapshot_events,
     };
+
+    #[test]
+    fn cache_churn_releases_evicted_branches() {
+        let mut tree = RadixTree::new();
+        tree.apply_event(create_store_event(1, 0, vec![1, 2, 3], None))
+            .unwrap();
+        for hash in [4, 5, 6, 7, 8] {
+            for worker in [1, 2] {
+                tree.apply_event(create_store_event(worker, hash, vec![1, 2, hash], None))
+                    .unwrap();
+            }
+            let branch = Rc::downgrade(
+                &tree.lookup[&WorkerWithDpRank::new(1, 0)][&ExternalSequenceBlockHash(hash * 100)],
+            );
+            if hash == 4 {
+                // Splitting the parent moves its existing children to the suffix.
+                tree.apply_event(create_store_event(1, hash, vec![1, 99], None))
+                    .unwrap();
+            }
+            tree.apply_event(create_remove_event(1, hash + 1, vec![hash]))
+                .unwrap();
+            assert!(
+                branch.upgrade().is_some(),
+                "another worker still owns the branch"
+            );
+            match hash % 4 {
+                0 => tree
+                    .apply_event(create_remove_event(2, hash + 1, vec![hash]))
+                    .unwrap(),
+                1 => tree.remove_worker(2),
+                2 => tree.remove_worker_dp_rank(2, 0),
+                _ => tree.clear_all_blocks(2),
+            }
+            assert!(
+                branch.upgrade().is_none(),
+                "evicted branch is still retained"
+            );
+            assert_eq!(tree.edge_lengths_for_test(), vec![1, 1, 1, 1]);
+            assert_eq!(tree.current_size(), if hash % 4 == 0 { 6 } else { 4 });
+        }
+    }
+
+    #[test]
+    fn removing_detached_node_preserves_replacement() {
+        let mut tree = RadixTree::new();
+        for blocks in [vec![1, 2, 3, 4], vec![1, 2, 3, 9]] {
+            tree.apply_event(create_store_event(2, 0, blocks, None))
+                .unwrap();
+        }
+        tree.apply_event(create_store_event(1, 0, vec![1, 2, 3], None))
+            .unwrap();
+        let old_branch = Rc::downgrade(
+            &tree.lookup[&WorkerWithDpRank::new(2, 0)][&ExternalSequenceBlockHash(400)],
+        );
+        for worker in [1, 2] {
+            tree.apply_event(create_remove_event(worker, 1, vec![3]))
+                .unwrap();
+        }
+        // The existing descendant-invalidation gap leaves worker 2's old node
+        // in its lookup after the parent has disconnected it.
+        assert!(old_branch.upgrade().is_some());
+        tree.apply_event(create_store_event(
+            1,
+            2,
+            vec![3],
+            Some(ExternalSequenceBlockHash(200)),
+        ))
+        .unwrap();
+        tree.apply_event(create_store_event(
+            1,
+            3,
+            vec![4],
+            Some(ExternalSequenceBlockHash(300)),
+        ))
+        .unwrap();
+        tree.apply_event(create_remove_event(2, 3, vec![4]))
+            .unwrap();
+
+        assert!(old_branch.upgrade().is_none());
+        let scores = tree.find_matches((1..=4).map(LocalBlockHash).collect(), false);
+        assert_eq!(scores.scores.get(&WorkerWithDpRank::new(1, 0)), Some(&4));
+    }
+
+    #[test]
+    fn split_releases_unowned_suffix() {
+        let mut tree = RadixTree::new();
+        for worker in [1, 2] {
+            tree.apply_event(create_store_event(worker, 0, vec![1, 2, 3], None))
+                .unwrap();
+        }
+        tree.apply_event(create_remove_event(1, 1, vec![2]))
+            .unwrap();
+        tree.apply_event(create_remove_event(2, 1, vec![1]))
+            .unwrap();
+        assert_eq!(tree.edge_lengths_for_test(), vec![3]);
+
+        tree.apply_event(create_store_event(
+            1,
+            2,
+            vec![9],
+            Some(ExternalSequenceBlockHash(100)),
+        ))
+        .unwrap();
+
+        assert_eq!(tree.edge_lengths_for_test(), vec![1, 1]);
+        assert_eq!(tree.current_size(), 2);
+    }
 
     #[test]
     fn rejects_self_referencing_store() {
