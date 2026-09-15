@@ -12,7 +12,7 @@ import pytest
 
 from dynamo.common.constants import DisaggregationMode
 from dynamo.llm.exceptions import InvalidArgument
-from dynamo.tokenspeed import args, llm_engine
+from dynamo.tokenspeed import args, disagg, llm_engine
 from dynamo.tokenspeed.disagg import BOOTSTRAP_HOST_ENV
 from dynamo.tokenspeed.llm_engine import TokenspeedLLMEngine
 
@@ -286,3 +286,25 @@ async def test_non_boolean_event_flag_rejected_before_start(native_engine, enabl
         await engine.start(worker_id=1)
     constructor.assert_not_called()
     await engine.cleanup()
+
+
+@pytest.mark.parametrize("address", ["127.0.1.1", "0.0.0.0"])
+async def test_wildcard_prefill_rejects_local_only_advertisement(monkeypatch, native_engine, address):
+    monkeypatch.delenv(BOOTSTRAP_HOST_ENV, raising=False)
+    monkeypatch.setattr(disagg.socket, "gethostbyname", lambda _: address)
+    _, constructor = native_engine
+    engine = TokenspeedLLMEngine(server_args(disaggregation_mode="prefill"))
+    with pytest.raises(ValueError, match=BOOTSTRAP_HOST_ENV):
+        await engine.start(worker_id=1)
+    constructor.assert_not_called()
+    await engine.cleanup()
+
+
+async def test_explicit_loopback_prefill_allowed_for_single_host(monkeypatch, native_engine):
+    monkeypatch.setenv(BOOTSTRAP_HOST_ENV, "127.0.0.1")
+    engine = TokenspeedLLMEngine(server_args(disaggregation_mode="prefill"))
+    try:
+        config = await engine.start(worker_id=1)
+        assert config.llm.bootstrap_host == "127.0.0.1"
+    finally:
+        await engine.cleanup()

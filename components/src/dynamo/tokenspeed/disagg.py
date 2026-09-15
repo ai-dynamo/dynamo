@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import socket
 from typing import Any
@@ -70,6 +71,12 @@ def runtime_disaggregated_endpoint(server_args: Any) -> tuple[str, int]:
     host = os.environ.get(BOOTSTRAP_HOST_ENV) or getattr(server_args, "host", None)
     if not host or host in ("0.0.0.0", "::", "[::]"):
         host = socket.gethostbyname(socket.gethostname())
+        address = ipaddress.ip_address(host)
+        if address.is_loopback or address.is_unspecified:
+            raise ValueError(
+                "TokenSpeed wildcard host resolves to a local-only address; "
+                f"set {BOOTSTRAP_HOST_ENV} to an address reachable by decode workers"
+            )
     return str(host), int(port)
 
 
