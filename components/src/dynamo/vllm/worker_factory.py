@@ -886,6 +886,7 @@ class WorkerFactory:
             config.engine_args,
             config.embedding_transfer_mode,  # type: ignore[arg-type]
             enable_frontend_decoding=config.frontend_decoding,
+            embedding_cache_capacity_gb=config.multimodal_embedding_cache_capacity_gb,
         )
         await handler.async_init(runtime)
 

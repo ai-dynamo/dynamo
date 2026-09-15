@@ -97,9 +97,10 @@ def test_embedding_contract_rejects_wire_base64_and_nonfinite_vectors():
             validate_embedding(body, 1, 2)
 
 
+@pytest.mark.parametrize("inject_sender", [False, True])
 @pytest.mark.parametrize("endpoint", [None, "/custom/chat/completions"])
 def test_api_cases_use_shared_client_and_preserve_invalid_response(
-    monkeypatch, tmp_path, endpoint
+    monkeypatch, tmp_path, endpoint, inject_sender
 ):
     calls = []
 
@@ -118,9 +119,15 @@ def test_api_cases_use_shared_client_and_preserve_invalid_response(
             tokens=30,
         )
 
-    monkeypatch.setattr(api_checks, "send_request", send)
+    options = {"request_sender": send} if inject_sender else {}
+    if inject_sender:
+        monkeypatch.setattr(
+            api_checks, "send_request", Mock(side_effect=AssertionError)
+        )
+    else:
+        monkeypatch.setattr(api_checks, "send_request", send)
     api_checks.check_deployment_api(
-        "http://test", "model", "chat", tmp_path, endpoint=endpoint
+        "http://test", "model", "chat", tmp_path, endpoint=endpoint, **options
     )
     assert len(calls) == 4
     assert all(

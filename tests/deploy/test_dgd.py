@@ -14,6 +14,7 @@ import logging
 import os
 import subprocess
 import time
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +36,7 @@ from tests.deploy.dgd_utils import (
     _get_workspace_dir,
     validate_chat_response,
 )
-from tests.utils.client import wait_for_model_availability
+from tests.utils.client import send_request, wait_for_model_availability
 from tests.utils.test_output import resolve_test_output_path
 
 logger = logging.getLogger(__name__)
@@ -219,6 +220,18 @@ async def test_deployment(
             if validate_agg_logging
             else 0
         )
+
+        def send_with_retry(url, payload, *, timeout, method, stream):
+            return deployment.send_request_with_port_forward_retry(
+                pod=frontend_pod,
+                remote_port=port,
+                endpoint=endpoint,
+                payload=payload,
+                timeout=timeout,
+                port_forward=port_forward,
+                request_sender=partial(send_request, stream=stream),
+            )
+
         await asyncio.to_thread(
             check_deployment_api,
             base_url,
@@ -226,6 +239,7 @@ async def test_deployment(
             scenario,
             Path(resolve_test_output_path(request.node.name)) / "responses",
             endpoint=endpoint,
+            request_sender=send_with_retry,
         )
 
         if validate_agg_logging:

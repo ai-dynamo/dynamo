@@ -6,6 +6,7 @@
 import json
 import logging
 import re
+from functools import partial
 from pathlib import Path
 
 from tests.deploy.dgd_utils import (
@@ -32,6 +33,7 @@ def check_deployment_api(
     output: Path,
     *,
     endpoint: str | None = None,
+    request_sender=None,
 ) -> None:
     """Run shared API cases and retain raw responses even if a contract fails."""
     output.mkdir(parents=True, exist_ok=True)
@@ -39,6 +41,7 @@ def check_deployment_api(
         endpoint = (
             "/v1/embeddings" if scenario == "embedding" else "/v1/chat/completions"
         )
+    request = partial(_request, request_sender=request_sender)
     url = base_url + endpoint
     if scenario == "embedding":
         for name, inputs, encoding in (
@@ -49,7 +52,7 @@ def check_deployment_api(
             payload = {"model": model, "input": inputs}
             if encoding:
                 payload["encoding_format"] = encoding
-            data = _request(url, payload, output / f"{name}.json")
+            data = request(url, payload, output / f"{name}.json")
             assert data["model"] == model, data
             # The example uses Qwen3-Embedding-0.6B's native 1024 dimensions.
             validate_embedding(data, 2 if name == "batch" else 1, 1024)
@@ -64,14 +67,14 @@ def check_deployment_api(
         "stream": False,
         "chat_template_kwargs": {"enable_thinking": False},
     }
-    unary = _request(
+    unary = request(
         url,
         payload,
         output / "unary.json",
         min_content_length=MIN_RESPONSE_CONTENT_LENGTH,
     )
-    _request(url, {**payload, "stream": True}, output / "stream.json")
-    _request(url, {**payload, "max_tokens": 1}, output / "limited.json")
+    request(url, {**payload, "stream": True}, output / "stream.json")
+    request(url, {**payload, "max_tokens": 1}, output / "limited.json")
     content = unary["choices"][0]["message"]["content"]
     # Use a later word, avoiding a whitespace boundary at the start of output.
     match = next(
@@ -85,15 +88,23 @@ def check_deployment_api(
     )
     assert match is not None, "Cannot derive an interior stop sequence"
     stop = match.group()
-    stopped = _request(url, {**payload, "stop": stop}, output / "stop.json")
+    stopped = request(url, {**payload, "stop": stop}, output / "stop.json")
     validate_stop_response(stopped, unary, stop)
 
 
-def _request(url: str, payload: dict, artifact: Path, min_content_length: int = 0):
+def _request(
+    url: str,
+    payload: dict,
+    artifact: Path,
+    min_content_length: int = 0,
+    *,
+    request_sender=None,
+):
     record = {"request": payload}
     logger.info("Checking deployment API case %s", artifact.stem)
     try:
-        with send_request(
+        sender = send_request if request_sender is None else request_sender
+        with sender(
             url,
             payload,
             timeout=float(DEFAULT_REQUEST_TIMEOUT),
