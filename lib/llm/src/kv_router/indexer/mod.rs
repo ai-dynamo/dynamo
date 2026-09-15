@@ -14,8 +14,8 @@ use dynamo_kv_router::{
         record_unsupported_residency_event,
     },
     protocols::{
-        DpRank, KvCacheEventData, ResidencyProjection, ResidencyRoutingSnapshot, RouterEvent,
-        WorkerId,
+        DpRank, ExternalSequenceBlockHash, KvCacheEventData, ResidencyProjection,
+        ResidencyRoutingSnapshot, RouterEvent, WorkerId, WorkerWithDpRank,
     },
 };
 
@@ -450,6 +450,30 @@ impl Indexer {
         Ok(())
     }
 
+    pub(crate) fn enqueue_session_match(
+        &self,
+        session_id: &str,
+        worker: WorkerWithDpRank,
+        matched_hash: ExternalSequenceBlockHash,
+    ) -> Result<(), KvRouterError> {
+        match self {
+            Self::KvIndexer {
+                session_updates, ..
+            }
+            | Self::Concurrent {
+                session_updates, ..
+            } => match session_updates {
+                Some(sender) => sender.enqueue(SessionMutation::Matched {
+                    worker,
+                    session_id: session_id.to_owned(),
+                    matched_hash,
+                }),
+                None => Ok(()),
+            },
+            Self::Remote { .. } | Self::None => Ok(()),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) async fn apply_event(&self, event: RouterEvent) {
         if let Err(error) = self.try_apply_event(event).await {
@@ -882,6 +906,43 @@ mod tests {
                 .unwrap(),
             vec![vec![block_hashes[0]]]
         );
+    }
+
+    #[tokio::test]
+    async fn route_match_is_ordered_after_pending_remove_and_store() {
+        let (indexer, session_prefix_index) = make_session_test_indexer();
+        let worker = WorkerWithDpRank::new(7, 0);
+        let initial_store =
+            store_event(7, 0, 1, &[], &[41], StorageTier::Device).with_session_id("session-old");
+        let block_hash = match &initial_store.event.data {
+            KvCacheEventData::Stored(stored) => stored.blocks[0].block_hash,
+            _ => unreachable!(),
+        };
+
+        indexer.apply_event(initial_store).await;
+        indexer.flush_session_updates().await.unwrap();
+
+        indexer
+            .apply_event(remove_event(7, 0, 2, vec![block_hash]))
+            .await;
+        indexer
+            .apply_event(
+                store_event(7, 0, 3, &[], &[41], StorageTier::Device).with_session_id("session-a"),
+            )
+            .await;
+        indexer
+            .enqueue_session_match("session-b", worker, block_hash)
+            .unwrap();
+        indexer.flush_session_updates().await.unwrap();
+
+        for session in ["session-a", "session-b"] {
+            assert_eq!(
+                session_prefix_index
+                    .get_session_block_lineage(session, worker, None)
+                    .unwrap(),
+                vec![vec![block_hash]]
+            );
+        }
     }
 
     async fn flush_indexer(indexer: &Indexer) {

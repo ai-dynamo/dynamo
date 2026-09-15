@@ -1681,7 +1681,7 @@ where
             .session_prefix_index
             .as_ref()
             .and(session_context.as_ref())
-            .map(|session| (session.session_id().to_owned(), session.session_final()));
+            .map(|session| session.session_id().to_owned());
         let schedule_request = ScheduleRequest {
             mode,
             token_seq: maybe_seq_hashes,
@@ -1742,23 +1742,16 @@ where
         };
 
         // Indexing failures never affect routing.
-        if let Some(index) = self.session_prefix_index.as_ref()
-            && let Some((session_id, session_final)) = session_index_context.as_ref()
-        {
-            if let Some(&matched_hash) = tiered_matches
+        if let Some(session_id) = session_index_context.as_ref()
+            && let Some(&matched_hash) = tiered_matches
                 .device
                 .last_matched_hashes
                 .get(&response.best_worker)
-                && let Err(err) =
-                    index.update_session_from_match(session_id, response.best_worker, matched_hash)
-            {
-                tracing::warn!(%err, "failed to record session prefix match");
-            }
-
-            // Reclaim after recording the final match.
-            if *session_final == Some(true) {
-                index.remove_session(session_id);
-            }
+            && let Err(err) =
+                self.indexer
+                    .enqueue_session_match(session_id, response.best_worker, matched_hash)
+        {
+            tracing::warn!(%err, "failed to record session prefix match");
         }
 
         let kv_hint = if is_admitted_routing {

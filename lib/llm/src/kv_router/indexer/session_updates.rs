@@ -24,6 +24,11 @@ enum SessionUpdateMessage {
 }
 
 pub(super) enum SessionMutation {
+    Matched {
+        worker: WorkerWithDpRank,
+        session_id: String,
+        matched_hash: ExternalSequenceBlockHash,
+    },
     Stored {
         worker: WorkerWithDpRank,
         session_id: String,
@@ -59,7 +64,8 @@ impl SessionMutation {
 
     fn worker(&self) -> WorkerWithDpRank {
         match self {
-            Self::Stored { worker, .. }
+            Self::Matched { worker, .. }
+            | Self::Stored { worker, .. }
             | Self::Removed { worker, .. }
             | Self::Cleared { worker } => *worker,
         }
@@ -67,6 +73,17 @@ impl SessionMutation {
 
     fn apply(self, index: &SessionPrefixIndexer) {
         match self {
+            Self::Matched {
+                worker,
+                session_id,
+                matched_hash,
+            } => {
+                if let Err(error) =
+                    index.update_session_from_match(&session_id, worker, matched_hash)
+                {
+                    tracing::warn!(%error, %session_id, ?worker, "failed to record session prefix match");
+                }
+            }
             Self::Stored {
                 worker,
                 session_id,

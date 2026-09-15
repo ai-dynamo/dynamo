@@ -492,31 +492,33 @@ impl IndexState {
             return 0;
         }
 
-        let affected: Vec<(SessionId, NodeId)> = removed_nodes
-            .iter()
-            .filter_map(|node| {
-                self.worker_frontier_to_sessions
-                    .get(&worker)
-                    .and_then(|frontiers| frontiers.get(node))
-                    .map(|sessions| {
-                        sessions
-                            .iter()
-                            .cloned()
-                            .map(|session_id| (session_id, *node))
-                            .collect::<Vec<_>>()
+        // Examine each frontier path; recede past the removed block and its descendants.
+        let affected: Vec<(SessionId, NodeId, Option<NodeId>)> = self
+            .worker_frontier_to_sessions
+            .get(&worker)
+            .map(|frontiers| {
+                frontiers
+                    .iter()
+                    .filter_map(|(&frontier, sessions)| {
+                        let path = self.path_to_root(frontier);
+                        let shallowest_removed =
+                            path.into_iter().find(|node| removed_nodes.contains(node))?;
+                        let replacement = self.nodes[shallowest_removed].parent;
+                        Some(
+                            sessions
+                                .iter()
+                                .cloned()
+                                .map(move |session_id| (session_id, frontier, replacement)),
+                        )
                     })
+                    .flatten()
+                    .collect()
             })
-            .flatten()
-            .collect();
+            .unwrap_or_default();
 
-        for (session_id, old_frontier) in &affected {
-            let mut replacement = self.nodes[*old_frontier].parent;
-            while replacement.is_some_and(|node| removed_nodes.contains(&node)) {
-                replacement = replacement.and_then(|node| self.nodes[node].parent);
-            }
-
+        for (session_id, old_frontier, replacement) in &affected {
             self.remove_frontier_binding(session_id, worker, *old_frontier);
-            if let Some(replacement) = replacement {
+            if let Some(replacement) = *replacement {
                 self.advance_frontier(session_id, worker, replacement);
             }
         }
@@ -873,6 +875,29 @@ mod tests {
             0,
             "replaying the same removal must not recede the frontier again"
         );
+    }
+
+    #[test]
+    fn interior_removal_recedes_before_later_frontier_removal() {
+        let chain = hashes(vec![1, 2, 3]);
+        let indexer = SessionPrefixIndexer::new();
+
+        indexer
+            .update_session_from_stored_blocks("s1", worker(1), None, &chain)
+            .unwrap();
+
+        assert_eq!(
+            indexer.update_session_from_removed_blocks(worker(1), &[chain[1]]),
+            1
+        );
+        assert_eq!(lineage_of(&indexer, "s1"), vec![vec![chain[0]]]);
+
+        assert_eq!(
+            indexer.update_session_from_removed_blocks(worker(1), &[chain[2]]),
+            0,
+            "removing the old tail must not restore its already-removed parent"
+        );
+        assert_eq!(lineage_of(&indexer, "s1"), vec![vec![chain[0]]]);
     }
 
     #[test]
