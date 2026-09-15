@@ -218,6 +218,183 @@ func TestCoordinatorRestartAfterAmbiguousApplyDoesNotCompete(t *testing.T) {
 	}
 }
 
+func TestCoordinatorReplaysIdenticalTargetAfterAuthoritativeAbsence(t *testing.T) {
+	scenario := newCoordinatorScenario(t, engineTopology(1, 1))
+	joining := engineReplica(1)
+	joiningIncarnation := replicaIncarnation(1)
+	scenario.capacity.planned[joining.ReplicaID] = joiningIncarnation
+	scenario.membership.failBeforeFirstAccept = true
+	plan := growPlan("replay-absent-growth", ReplicaTarget{
+		ReplicaID: joining.ReplicaID,
+		SlotID:    joiningIncarnation.SlotID,
+		Bootstrap: BootstrapModeJoin,
+	}, VerificationRequirementNone)
+	scenario.desired = &plan
+
+	t.Log("Persist the target, then lose the first invocation before adapter acceptance")
+	var applyErr error
+	for iteration := 1; iteration <= 30 && applyErr == nil; iteration++ {
+		applyErr = scenario.reconcile("advance to pre-acceptance timeout")
+	}
+	if applyErr == nil || !strings.Contains(applyErr.Error(), "timed out before acceptance") {
+		t.Fatalf("expected pre-acceptance timeout, got %v", applyErr)
+	}
+	digest := scenario.status.Membership.Desired.TargetDigest
+	if scenario.membership.applyCalls != 1 || len(scenario.membership.targets) != 0 {
+		t.Fatalf("adapter unexpectedly retained the failed invocation: %#v", scenario.membership)
+	}
+
+	t.Log("Restart, observe exact-ID absence, and safely replay the unchanged desired level")
+	scenario.rebuildCoordinator()
+	scenario.mustReconcile("observe absence and replay exact target")
+	if scenario.membership.applyCalls != 2 || len(scenario.membership.targets) != 1 ||
+		scenario.status.Membership.Desired.TargetDigest != digest {
+		t.Fatalf("absence did not replay one identical target: %#v", scenario.membership)
+	}
+	scenario.mustReconcile("observe replayed target pending")
+	if scenario.status.Membership.Observed.Transition == nil ||
+		scenario.status.Membership.Observed.Transition.Phase != MembershipTransitionPhasePending {
+		t.Fatalf("replayed target was not recovered: %#v", scenario.status.Membership)
+	}
+}
+
+func TestCoordinatorWaitsForAuthoritativeTopologyAfterCorrelatedCommit(t *testing.T) {
+	base := engineTopology(1, 1)
+	scenario := newCoordinatorScenario(t, base)
+	joining := engineReplica(1)
+	joiningIncarnation := replicaIncarnation(1)
+	scenario.capacity.planned[joining.ReplicaID] = joiningIncarnation
+	plan := growPlan("delayed-topology-growth", ReplicaTarget{
+		ReplicaID: joining.ReplicaID,
+		SlotID:    joiningIncarnation.SlotID,
+		Bootstrap: BootstrapModeJoin,
+	}, VerificationRequirementNone)
+	scenario.desired = &plan
+	scenario.runUntil("apply growth target", func(s *coordinatorScenario) bool {
+		return s.membership.applyCalls == 1
+	})
+	committed := MembershipTopology{
+		Generation: 2,
+		Replicas: append(
+			cloneReplicaMemberships(base.Replicas),
+			cloneReplicaMembership(joining),
+		),
+	}
+
+	t.Log("Report the immutable transition result while the general topology observer remains on the base")
+	scenario.membership.reportCommit(scenario.status.Membership.Desired.TransitionID, committed)
+	for iteration := 1; iteration <= 3; iteration++ {
+		scenario.mustReconcile("wait for authoritative topology to catch up")
+	}
+	if scenario.status.Transition.Outcome != TransitionOutcomeProgressing ||
+		!sameTopologyWithCurrent(scenario.status.Topologies, base) {
+		t.Fatalf("correlated result committed before authoritative topology agreed: %#v", scenario.status)
+	}
+
+	t.Log("Publish the same topology through the general observer and complete convergence")
+	scenario.membership.topology = cloneTopology(committed)
+	scenario.runUntil("complete delayed topology growth", func(s *coordinatorScenario) bool {
+		return s.status.Transition.Outcome == TransitionOutcomeCompleted
+	})
+}
+
+func TestCoordinatorFailsClosedWhenCommitAndAuthoritativeTopologyConflict(t *testing.T) {
+	base := engineTopology(1, 1)
+	scenario := newCoordinatorScenario(t, base)
+	joining := engineReplica(1)
+	joiningIncarnation := replicaIncarnation(1)
+	scenario.capacity.planned[joining.ReplicaID] = joiningIncarnation
+	plan := growPlan("conflicting-topology-growth", ReplicaTarget{
+		ReplicaID: joining.ReplicaID,
+		SlotID:    joiningIncarnation.SlotID,
+		Bootstrap: BootstrapModeJoin,
+	}, VerificationRequirementNone)
+	scenario.desired = &plan
+	scenario.runUntil("apply growth target", func(s *coordinatorScenario) bool {
+		return s.membership.applyCalls == 1
+	})
+	result := MembershipTopology{
+		Generation: 2,
+		Replicas: append(
+			cloneReplicaMemberships(base.Replicas),
+			cloneReplicaMembership(joining),
+		),
+	}
+	scenario.membership.reportCommit(scenario.status.Membership.Desired.TransitionID, result)
+	scenario.membership.topology = MembershipTopology{Generation: 3, Replicas: cloneReplicaMemberships(base.Replicas)}
+
+	t.Log("Refuse admission when the transition result and authoritative engine topology describe different worlds")
+	scenario.runUntil("block conflicting topology", func(s *coordinatorScenario) bool {
+		return s.status.Transition.Outcome == TransitionOutcomeBlocked
+	})
+	if scenario.status.Transition.Failure.Reason != "ConflictingTopologyObservation" ||
+		scenario.verifier.calls != 0 {
+		t.Fatalf("conflicting topology did not fail closed: status=%#v events=%v", scenario.status, scenario.events)
+	}
+}
+
+func TestCoordinatorResumesWhenUnknownMembershipAuthorityRecovers(t *testing.T) {
+	base := engineTopology(1, 1)
+	scenario := newCoordinatorScenario(t, base)
+	joining := engineReplica(1)
+	joiningIncarnation := replicaIncarnation(1)
+	scenario.capacity.planned[joining.ReplicaID] = joiningIncarnation
+	plan := growPlan("recover-authority", ReplicaTarget{
+		ReplicaID: joining.ReplicaID,
+		SlotID:    joiningIncarnation.SlotID,
+		Bootstrap: BootstrapModeJoin,
+	}, VerificationRequirementNone)
+	scenario.desired = &plan
+	scenario.runUntil("apply growth target", func(s *coordinatorScenario) bool {
+		return s.membership.applyCalls == 1
+	})
+	target := *scenario.status.Membership.Desired
+	scenario.membership.transitions[target.TransitionID] = MembershipTransitionObservation{
+		TransitionID:    target.TransitionID,
+		ControlRevision: target.ControlRevision,
+		TargetDigest:    target.TargetDigest,
+		Phase:           MembershipTransitionPhaseUnknown,
+		Failure: &Failure{
+			Classification: FailureClassificationRetryable,
+			Reason:         "AuthorityUnavailable",
+			Message:        "adapter temporarily lost authoritative state",
+		},
+	}
+
+	t.Log("Fail closed while the accepted collective has an unknown outcome")
+	scenario.runUntil("block unknown transition", func(s *coordinatorScenario) bool {
+		return s.status.Transition.Outcome == TransitionOutcomeBlocked
+	})
+	if scenario.membership.applyCalls != 1 {
+		t.Fatalf("unknown transition was replayed: %d applies", scenario.membership.applyCalls)
+	}
+
+	t.Log("Recover authority for the same transition and resume without superseding it")
+	scenario.membership.transitions[target.TransitionID] = MembershipTransitionObservation{
+		TransitionID:    target.TransitionID,
+		ControlRevision: target.ControlRevision,
+		TargetDigest:    target.TargetDigest,
+		Phase:           MembershipTransitionPhasePending,
+	}
+	scenario.mustReconcile("resume recovered pending transition")
+	if scenario.status.Transition.Outcome != TransitionOutcomeProgressing ||
+		scenario.membership.applyCalls != 1 {
+		t.Fatalf("recovered authority did not resume safely: %#v", scenario.status.Transition)
+	}
+
+	committed := MembershipTopology{
+		Generation: 2,
+		Replicas: append(
+			cloneReplicaMemberships(base.Replicas),
+			cloneReplicaMembership(joining),
+		),
+	}
+	scenario.membership.commit(target.TransitionID, committed)
+	scenario.runUntil("complete recovered transition", func(s *coordinatorScenario) bool {
+		return s.status.Transition.Outcome == TransitionOutcomeCompleted
+	})
+}
+
 func TestCoordinatorRollsBackPreparatoryStateAfterDefinitiveRejection(t *testing.T) {
 	base := engineTopology(1, 1)
 	scenario := newCoordinatorScenario(t, base)
@@ -265,6 +442,43 @@ func TestCoordinatorRollsBackPreparatoryStateAfterDefinitiveRejection(t *testing
 	}
 	if !sameMemberships(scenario.traffic.observation.Admitted, base.Replicas) {
 		t.Fatalf("rollback did not restore base traffic: %#v", scenario.traffic.observation)
+	}
+}
+
+func TestCoordinatorDoesNotRollBackRejectedTargetAfterTopologyChanged(t *testing.T) {
+	base := engineTopology(1, 1)
+	scenario := newCoordinatorScenario(t, base)
+	joining := engineReplica(1)
+	joiningIncarnation := replicaIncarnation(1)
+	scenario.capacity.planned[joining.ReplicaID] = joiningIncarnation
+	scenario.membership.applyRejection = &Failure{
+		Classification: FailureClassificationTerminal,
+		Reason:         "Rejected",
+		Message:        "target was rejected without mutation",
+	}
+	plan := growPlan("rejected-after-change", ReplicaTarget{
+		ReplicaID: joining.ReplicaID,
+		SlotID:    joiningIncarnation.SlotID,
+		Bootstrap: BootstrapModeJoin,
+	}, VerificationRequirementNone)
+	scenario.desired = &plan
+	scenario.runUntil("apply rejected growth target", func(s *coordinatorScenario) bool {
+		return s.membership.applyCalls == 1
+	})
+
+	t.Log("Advance authoritative topology independently before observing the correlated rejection")
+	scenario.membership.topology = MembershipTopology{
+		Generation: 2,
+		Replicas:   cloneReplicaMemberships(base.Replicas),
+	}
+	scenario.runUntil("block unsafe rejection rollback", func(s *coordinatorScenario) bool {
+		return s.status.Transition.Outcome == TransitionOutcomeBlocked
+	})
+	if scenario.status.Transition.Failure.Reason != "RejectedAfterTopologyChanged" {
+		t.Fatalf("changed topology was treated as safely rejected: %#v", scenario.status.Transition)
+	}
+	if _, found := allocationByID(scenario.capacity.observation, joining.ReplicaID); !found {
+		t.Fatal("unsafe rollback released joining capacity")
 	}
 }
 
@@ -542,5 +756,87 @@ func TestCoordinatorFailsClosedOnUncorrelatedTopologyChange(t *testing.T) {
 	err := scenario.reconcile("reconcile unexpected topology")
 	if err == nil || !strings.Contains(err.Error(), "without a resolved transition") {
 		t.Fatalf("expected fail-closed topology error, got %v", err)
+	}
+}
+
+func TestCoordinatorRejectsMutationOfTerminalMembershipResult(t *testing.T) {
+	base := engineTopology(1, 1)
+	scenario := newCoordinatorScenario(t, base)
+	joining := engineReplica(1)
+	joiningIncarnation := replicaIncarnation(1)
+	scenario.capacity.planned[joining.ReplicaID] = joiningIncarnation
+	plan := growPlan("immutable-terminal-result", ReplicaTarget{
+		ReplicaID: joining.ReplicaID,
+		SlotID:    joiningIncarnation.SlotID,
+		Bootstrap: BootstrapModeJoin,
+	}, VerificationRequirementNone)
+	scenario.desired = &plan
+	scenario.runUntil("apply growth target", func(s *coordinatorScenario) bool {
+		return s.membership.applyCalls == 1
+	})
+	committed := MembershipTopology{
+		Generation: 2,
+		Replicas: append(
+			cloneReplicaMemberships(base.Replicas),
+			cloneReplicaMembership(joining),
+		),
+	}
+	transitionID := scenario.status.Membership.Desired.TransitionID
+	scenario.membership.commit(transitionID, committed)
+	scenario.runUntil("complete growth", func(s *coordinatorScenario) bool {
+		return s.status.Transition.Outcome == TransitionOutcomeCompleted
+	})
+	target := *scenario.status.Membership.Desired
+	scenario.membership.transitions[transitionID] = MembershipTransitionObservation{
+		TransitionID:    transitionID,
+		ControlRevision: target.ControlRevision,
+		TargetDigest:    target.TargetDigest,
+		Phase:           MembershipTransitionPhaseRejected,
+		Failure: &Failure{
+			Classification: FailureClassificationTerminal,
+			Reason:         "RewrittenHistory",
+		},
+	}
+
+	t.Log("Reject an adapter that rewrites an already committed terminal result")
+	err := scenario.reconcile("observe mutated terminal result")
+	if err == nil || !strings.Contains(err.Error(), "changed an immutable terminal result") {
+		t.Fatalf("expected immutable-terminal error, got %v", err)
+	}
+}
+
+func TestCoordinatorRejectsForgottenTerminalMembershipResult(t *testing.T) {
+	base := engineTopology(1, 1)
+	scenario := newCoordinatorScenario(t, base)
+	joining := engineReplica(1)
+	joiningIncarnation := replicaIncarnation(1)
+	scenario.capacity.planned[joining.ReplicaID] = joiningIncarnation
+	plan := growPlan("retained-terminal-result", ReplicaTarget{
+		ReplicaID: joining.ReplicaID,
+		SlotID:    joiningIncarnation.SlotID,
+		Bootstrap: BootstrapModeJoin,
+	}, VerificationRequirementNone)
+	scenario.desired = &plan
+	scenario.runUntil("apply growth target", func(s *coordinatorScenario) bool {
+		return s.membership.applyCalls == 1
+	})
+	committed := MembershipTopology{
+		Generation: 2,
+		Replicas: append(
+			cloneReplicaMemberships(base.Replicas),
+			cloneReplicaMembership(joining),
+		),
+	}
+	transitionID := scenario.status.Membership.Desired.TransitionID
+	scenario.membership.commit(transitionID, committed)
+	scenario.runUntil("complete growth", func(s *coordinatorScenario) bool {
+		return s.status.Transition.Outcome == TransitionOutcomeCompleted
+	})
+	delete(scenario.membership.transitions, transitionID)
+
+	t.Log("Reject time-based expiry that recreates ambiguity after a long controller outage")
+	err := scenario.reconcile("observe forgotten terminal result")
+	if err == nil || !strings.Contains(err.Error(), "forgot a previously observed transition") {
+		t.Fatalf("expected terminal-retention error, got %v", err)
 	}
 }

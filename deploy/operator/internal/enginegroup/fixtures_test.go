@@ -168,6 +168,7 @@ type testMembershipAdapter struct {
 	planValidationCalls   int
 	targetValidationCalls int
 	applyCalls            int
+	failBeforeFirstAccept bool
 	failAfterFirstAccept  bool
 	planRejection         *Failure
 	targetRejection       *Failure
@@ -234,6 +235,9 @@ func (a *testMembershipAdapter) Apply(
 ) error {
 	a.applyCalls++
 	*a.events = append(*a.events, "membership:"+target.TransitionID)
+	if a.failBeforeFirstAccept && a.applyCalls == 1 {
+		return errors.New("request timed out before acceptance")
+	}
 	if existing, found := a.targets[target.TransitionID]; found {
 		if !sameMembershipTarget(existing, target) {
 			return errors.New("membership transition payload changed")
@@ -262,6 +266,11 @@ func (a *testMembershipAdapter) Apply(
 func (a *testMembershipAdapter) commit(transitionID string, topology MembershipTopology) {
 	topology = cloneTopology(topology)
 	a.topology = topology
+	a.reportCommit(transitionID, topology)
+}
+
+func (a *testMembershipAdapter) reportCommit(transitionID string, topology MembershipTopology) {
+	topology = cloneTopology(topology)
 	target := a.targets[transitionID]
 	a.transitions[transitionID] = MembershipTransitionObservation{
 		TransitionID:    transitionID,
