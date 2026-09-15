@@ -24,8 +24,8 @@ import sys
 import pytest
 
 pytestmark = [
-    # Let the 600s subprocess timeout report its failure before pytest interrupts.
-    pytest.mark.timeout(620),
+    # Let the 30s subprocess timeout report its failure before pytest interrupts.
+    pytest.mark.timeout(60),
     pytest.mark.trtllm,
     pytest.mark.pre_merge,
     pytest.mark.post_merge,
@@ -59,7 +59,7 @@ def _run(code: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
         env=env,
         capture_output=True,
         text=True,
-        timeout=600,
+        timeout=30,
     )
 
 
