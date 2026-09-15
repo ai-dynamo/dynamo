@@ -264,6 +264,11 @@ def test_estimate_num_gpu_blocks_propagates_transitive_import_error(monkeypatch)
     assert exc_info.value is missing_dependency
 
 
+@pytest.mark.parametrize("backend", ["vllm", "sglang", "trtllm"])
+def test_default_version_uses_queryable_slot(backend):
+    assert resolve_backend_version(backend, None) == "current"
+
+
 def test_trtllm_version_resolution():
     assert resolve_backend_version("trtllm", "0.20.0") == "0.20.0"
 
