@@ -10,7 +10,7 @@ import pytest
 
 from dynamo.common.metadata_upload import MetadataUploader
 from dynamo.llm import HttpError
-from dynamo.llm.exceptions import EngineShutdown
+from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
 from dynamo.sglang.engine_generate import (
     build_native_generate_request,
     native_generate_stream,
