@@ -17,7 +17,7 @@
 #     -t <your-registry>/dynamo-tokenspeed:dev \
 #     .
 #
-#   # 2. Slim runtime image (no compilers / no Rust toolchain):
+#   # 2. Runtime image (keeps CUDA JIT tooling, omits the Rust toolchain):
 #   docker build \
 #     -f recipes/kimi-k2.5/tokenspeed/agg/nvidia/Dockerfile \
 #     --target runtime \
@@ -120,6 +120,9 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     maturin build --release -o /tmp/dynamo-dist
 
 FROM tokenspeed_base AS runtime
+# FlashInfer's grouped FP8 GEMM JIT invokes nvcc through PATH.
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH="${CUDA_HOME}/bin:${PATH}"
 # Copy the source context, excluding the builder's Cargo target artifacts.
 COPY . /workspace/dynamo
 COPY --from=wheel_builder /tmp/dynamo-dist/*.whl /tmp/
@@ -132,6 +135,8 @@ RUN set -eux; \
 WORKDIR /workspace/dynamo
 
 FROM build_tools AS dev
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH="${CUDA_HOME}/bin:${PATH}"
 COPY . /workspace/dynamo
 COPY --from=wheel_builder /tmp/dynamo-dist/*.whl /tmp/
 RUN set -eux; \
