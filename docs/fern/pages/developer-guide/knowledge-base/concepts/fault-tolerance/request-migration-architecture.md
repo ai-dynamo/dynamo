@@ -83,16 +83,18 @@ The migration system handles three distinct scenarios. Two are failures; the thi
 
 Migration is off by default, so this recovery only happens when the frontend sets `--migration-limit` (or `DYN_MIGRATION_LIMIT`) to a non-zero value. With migration disabled, a request caught by a graceful shutdown ends in an error at the client. Planned pod turnover is the common case for this scenario, which makes the migration limit relevant to deployments that never expect a worker to crash.
 
-#### Terminal-frame drain window
+### Terminal-Frame Drain Window
 
 A shutting-down worker emits its terminal frame before its trailing typed error arrives. To avoid ending a request on the frame and losing the error that makes it migratable, the router withholds a terminal frame whose finish reason is `Error` or `Cancelled` for up to 5 seconds while it waits for that error.
 
 - If the typed error arrives, the stream is classified as failed and migration takes over.
-- If nothing arrives within the window, the withheld frame is released and the stream ends normally.
+- If nothing arrives within the window, the request is **not** migrated. The router records the attempt as a migration failure, releases the withheld frame, and the client's stream ends on the `Error` or `Cancelled` finish reason the worker sent. This is the path where the request is lost.
 
 The window is bounded by `DRAIN_TIMEOUT` in `lib/llm/src/kv_router/routing_host.rs`, a fixed 5 seconds with no flag or environment variable to change it.
 
-Two limits on what this costs. It applies only to a stream that is already ending abnormally — a request that finishes with `Stop` or `Length` is never withheld and never delayed. And what is delayed is the final frame of such a request, by up to 5 seconds; tokens already streamed to the client are untouched. The routing host serves the `KV`, `Random`, and `RoundRobin` router modes, so this behavior is not specific to KV routing.
+Two limits on what this costs. It applies only to a stream that is already ending abnormally — a request that finishes with `Stop` or `Length` is never withheld and never delayed. And what is delayed is the final frame of such a request, by up to 5 seconds; tokens already streamed to the client are untouched.
+
+Every router mode builds a routing host — `KV` builds the KV-routed one, every other mode builds the built-in one — and both monitor the response stream the same way, so the drain window applies to all of them and is not specific to KV routing.
 
 ### Seamless Token Flow and Request State Evolution
 
