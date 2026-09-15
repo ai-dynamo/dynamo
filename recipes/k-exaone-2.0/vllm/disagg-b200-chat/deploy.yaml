@@ -108,6 +108,8 @@ spec:
                 - |
                   ulimit -l unlimited
                   exec python3 -m dynamo.vllm --model "${MODEL_NAME}" --served-model-name "${MODEL_NAME}" \
+                    --load-format fastsafetensors \
+                    --safetensors-load-strategy lazy \
                     --disaggregation-mode=prefill \
                     --tensor-parallel-size 4 \
                     --gpu-memory-utilization 0.93 \
@@ -175,6 +177,8 @@ spec:
                 - |
                   ulimit -l unlimited
                   exec python3 -m dynamo.vllm --model "${MODEL_NAME}" --served-model-name "${MODEL_NAME}" \
+                    --load-format fastsafetensors \
+                    --safetensors-load-strategy lazy \
                     --disaggregation-mode=decode \
                     --tensor-parallel-size 4 \
                     --gpu-memory-utilization 0.93 \

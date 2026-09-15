@@ -31,6 +31,7 @@ Dynamo + vLLM deployment profiles for the B200 chat workload:
 | **Max num seqs**         | 32                                           | 32 prefill / **256 decode**                                  |
 | **Max batched tokens**   | 8,192                                        | 8,192                                                        |
 | **GPU memory util**      | 0.93                                         | 0.93                                                         |
+| **Weight loading**       | fastsafetensors, lazy                        | fastsafetensors, lazy                                        |
 | **Context length**       | 262,144 (model native)                       | 262,144 (model native)                                       |
 | **Prefix caching**       | On (vLLM default)                            | On (vLLM default)                                            |
 | **Routing**              | KV-aware                                     | KV-aware                                                     |
@@ -198,6 +199,11 @@ is communication-bound, not KV-capacity-bound.
 **Disaggregated: prefill and decode must agree** on spec-dec and block size. A mismatch changes KV
 block geometry and produces silent garbage output, not an error. `--max-num-seqs` is the exception
 and is deliberately different — 32 on prefill, 256 on decode.
+
+**Weight loading.** `--load-format fastsafetensors --safetensors-load-strategy lazy` cut first-start
+time on this 53-shard, ~530 GB checkpoint. They affect load only, not steady-state serving, so the
+published throughput figures — which were measured without them on the aggregated variant — are
+unchanged.
 
 **Evaluating this model.** Use temperature 0.6 / top_p 0.95, not greedy — `temperature=0`
 drives this reasoning model into repetition. On `lm-eval`, GPQA needs `--system_instruction` to
