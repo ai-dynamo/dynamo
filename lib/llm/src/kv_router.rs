@@ -23,9 +23,9 @@ use dynamo_kv_router::{
     },
     protocols::KV_EVENT_SUBJECT,
     protocols::{
-        BlockExtraInfo, BlockHashOptions, LocalBlockHash, PrefillLoadHint, RouterEvent,
-        RouterRequest, RouterResponse, RoutingConstraints, TokensWithHashes, WorkerConfigLike,
-        WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
+        BlockExtraInfo, BlockHashOptions, ExternalSequenceBlockHash, LocalBlockHash,
+        PrefillLoadHint, RouterEvent, RouterRequest, RouterResponse, RoutingConstraints,
+        TokensWithHashes, WorkerConfigLike, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     },
     scheduling::{
         AdmissionAttempt, AttemptId, CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider,
@@ -505,6 +505,30 @@ fn log_routing_input_hashes(
         local_hashes = ?local_hash_ids,
         "[ROUTING_INPUT] request local hashes"
     );
+}
+
+fn deepest_matched_hash_for_worker(
+    tiered_matches: &indexer::TieredMatchDetails,
+    worker: WorkerWithDpRank,
+) -> Option<ExternalSequenceBlockHash> {
+    tiered_matches
+        .lower_tier
+        .values()
+        .filter_map(|details| details.next_continuations.get(&worker))
+        .filter_map(|continuation| {
+            continuation
+                .last_matched_hash
+                .map(|hash| (continuation.start_pos, hash))
+        })
+        .max_by_key(|(position, _)| *position)
+        .map(|(_, hash)| hash)
+        .or_else(|| {
+            tiered_matches
+                .device
+                .last_matched_hashes
+                .get(&worker)
+                .copied()
+        })
 }
 
 // for router discovery registration
@@ -1608,6 +1632,15 @@ where
         let seq_hash_elapsed = start.elapsed();
 
         let is_admitted_routing = matches!(admission, FindBestMatchAdmission::WithAdmission { .. });
+        let session_index_context = if is_admitted_routing {
+            self.session_prefix_index
+                .as_ref()
+                .and(session_context.as_ref())
+                .map(|session| session.session_id().to_owned())
+        } else {
+            None
+        };
+        let session_block_hashes = session_index_context.as_ref().map(|_| block_hashes.clone());
         let supports_overlap_refresh = self.scheduler.supports_overlap_refresh();
         let retain_block_hashes = supports_overlap_refresh || return_routing_hashes;
         let has_transfer_capable_workers = self.has_transfer_capable_workers();
@@ -1659,6 +1692,7 @@ where
         let kv_transfer_candidates = retain_kv_transfer_chain
             .then(|| tiered_matches.kv_transfer_candidates().cloned())
             .flatten();
+        drop(tiered_matches);
 
         let find_matches_elapsed = start.elapsed();
 
@@ -1677,11 +1711,6 @@ where
             pinned_worker.as_ref(),
         );
 
-        let session_index_context = self
-            .session_prefix_index
-            .as_ref()
-            .and(session_context.as_ref())
-            .map(|session| session.session_id().to_owned());
         let schedule_request = ScheduleRequest {
             mode,
             token_seq: maybe_seq_hashes,
@@ -1742,16 +1771,27 @@ where
         };
 
         // Indexing failures never affect routing.
-        if let Some(session_id) = session_index_context.as_ref()
-            && let Some(&matched_hash) = tiered_matches
-                .device
-                .last_matched_hashes
-                .get(&response.best_worker)
-            && let Err(err) =
-                self.indexer
-                    .enqueue_session_match(session_id, response.best_worker, matched_hash)
-        {
-            tracing::warn!(%err, "failed to record session prefix match");
+        if let (Some(session_id), Some(block_hashes)) = (
+            session_index_context.as_ref(),
+            session_block_hashes.as_deref(),
+        ) {
+            match self.indexer.find_matches_by_tier_ref(block_hashes).await {
+                Ok(tiered_matches) => {
+                    if let Some(matched_hash) =
+                        deepest_matched_hash_for_worker(&tiered_matches, response.best_worker)
+                        && let Err(err) = self.indexer.enqueue_session_match(
+                            session_id,
+                            response.best_worker,
+                            matched_hash,
+                        )
+                    {
+                        tracing::warn!(%err, "failed to record session prefix match");
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(%err, "failed to refresh session prefix match");
+                }
+            }
         }
 
         let kv_hint = if is_admitted_routing {
@@ -1764,8 +1804,6 @@ where
         } else {
             None
         };
-
-        drop(tiered_matches);
 
         let total_elapsed = start.elapsed();
         let routing_hashes = routing_block_hashes.map(RoutingDecisionHashes::from_local_hashes);
