@@ -62,6 +62,7 @@ struct FakeVllm {
     load_commit_error: Arc<AtomicBool>,
     unload_commit_error: Arc<AtomicBool>,
     lora_disabled: Arc<AtomicBool>,
+    is_lora_unavailable: Arc<AtomicBool>,
     hold_load: Arc<AtomicBool>,
     load_pending: Arc<AtomicBool>,
     release_load: Arc<Notify>,
@@ -75,6 +76,9 @@ struct FakeVllm {
 impl FakeVllm {
     #[allow(clippy::result_large_err)]
     fn ensure_lora_enabled(&self) -> Result<(), Status> {
+        if self.is_lora_unavailable.load(Ordering::SeqCst) {
+            return Err(Status::unavailable("injected LoRA outage"));
+        }
         if self.lora_disabled.load(Ordering::SeqCst) {
             return Err(Status::failed_precondition(
                 "engine was not started with LoRA enabled",
@@ -368,6 +372,7 @@ impl pb::control_server::Control for FakeVllm {
         if self.hold_unload.load(Ordering::SeqCst) {
             self.unload_pending.store(true, Ordering::SeqCst);
             self.release_unload.notified().await;
+            self.ensure_lora_enabled()?;
             return Err(Status::failed_precondition("injected unload rejection"));
         }
         let mut loras = self.loras.lock().await;
@@ -2432,6 +2437,11 @@ async fn lora_lifecycle_preserves_identity_and_routing_metadata() {
     assert_eq!(first["status"], "success");
     let assigned = server.service.loras.lock().await[0].lora_id;
     assert_eq!(first["lora_id"], assigned);
+    assert!(
+        !crate::lora::unpublish_lora_model(&endpoint, "Math-R8")
+            .await
+            .unwrap()
+    );
     let cards = endpoint
         .drt()
         .discovery()
@@ -2652,10 +2662,31 @@ async fn publication_failure_rolls_back_a_committed_native_load() {
     let dir = adapter_dir();
     let mut loading = Box::pin(load(&engine, "math-r8", &dir));
     wait_pending(&server.service.load_pending, &mut loading).await;
+    // Simulate a record written before publication returns an error.
+    crate::lora::publish_lora_model(
+        &endpoint,
+        &pb::LoraAdapter {
+            lora_id: 1,
+            lora_name: "math-r8".into(),
+            source_path: dir.path().to_string_lossy().into_owned(),
+        },
+        4,
+    )
+    .await
+    .unwrap();
     let discovery = endpoint.drt().discovery();
     for card in discovery.list(DiscoveryQuery::AllModels).await.unwrap() {
-        discovery.unregister(card).await.unwrap();
+        if matches!(
+            &card,
+            DiscoveryInstance::Model {
+                model_suffix: None,
+                ..
+            }
+        ) {
+            discovery.unregister(card).await.unwrap();
+        }
     }
+    assert_eq!(lora_siblings(&endpoint).await.len(), 1);
     server.service.hold_load.store(false, Ordering::SeqCst);
     server.service.release_load.notify_one();
     assert_eq!(loading.await["status"], "error");
@@ -2671,25 +2702,47 @@ async fn publication_failure_rolls_back_a_committed_native_load() {
     assert_eq!(calls, ["load_lora", "unload_lora"]);
     assert_eq!(server.service.next_lora_id.load(Ordering::SeqCst), 1);
     assert!(server.service.loras.lock().await.is_empty());
+    assert!(lora_siblings(&endpoint).await.is_empty());
 }
 
 #[tokio::test]
 async fn failed_unload_restores_the_removed_discovery_record() {
-    let (server, engine, endpoint) = started_lora_engine(FakeVllm::default(), "lora_restore").await;
-    let dir = adapter_dir();
-    assert_eq!(load(&engine, "math-r8", &dir).await["status"], "success");
-    server.service.hold_unload.store(true, Ordering::SeqCst);
-    let mut unloading = Box::pin(unload(&engine, "math-r8"));
-    wait_pending(&server.service.unload_pending, &mut unloading).await;
-    assert!(lora_siblings(&endpoint).await.is_empty());
-    assert_eq!(server.service.loras.lock().await.len(), 1);
-    server.service.release_unload.notify_one();
-    assert_eq!(unloading.await["status"], "error");
-    assert_eq!(lora_siblings(&endpoint).await.len(), 1);
-    assert_eq!(
-        collect(&engine, request_selecting("math-r8")).await.len(),
-        1
-    );
+    for is_unavailable in [false, true] {
+        let (server, engine, endpoint) =
+            started_lora_engine(FakeVllm::default(), "lora_restore").await;
+        let dir = adapter_dir();
+        assert_eq!(load(&engine, "math-r8", &dir).await["status"], "success");
+        server.service.hold_unload.store(true, Ordering::SeqCst);
+        let mut unloading = Box::pin(unload(&engine, "math-r8"));
+        wait_pending(&server.service.unload_pending, &mut unloading).await;
+        assert!(lora_siblings(&endpoint).await.is_empty());
+        assert_eq!(server.service.loras.lock().await.len(), 1);
+        server
+            .service
+            .is_lora_unavailable
+            .store(is_unavailable, Ordering::SeqCst);
+        server.service.release_unload.notify_one();
+        assert_eq!(unloading.await["status"], "error");
+        if is_unavailable {
+            assert!(lora_siblings(&endpoint).await.is_empty());
+            server
+                .service
+                .is_lora_unavailable
+                .store(false, Ordering::SeqCst);
+            assert_eq!(
+                engine
+                    .engine_update("list_loras".into(), json!({}))
+                    .await
+                    .unwrap()["status"],
+                "success"
+            );
+        }
+        assert_eq!(lora_siblings(&endpoint).await.len(), 1);
+        assert_eq!(
+            collect(&engine, request_selecting("math-r8")).await.len(),
+            1
+        );
+    }
 }
 
 #[tokio::test]
@@ -2741,7 +2794,8 @@ async fn invalid_restart_inventory_keeps_base_serving() {
         );
         assert!(lora_siblings(&endpoint).await.is_empty());
         assert_eq!(collect(&engine, request()).await.len(), 1);
-        server.service.loras.lock().await.pop();
+        assert_eq!(unload(&engine, conflicting_name).await["status"], "success");
+        assert_eq!(server.service.loras.lock().await.len(), 1);
         assert_eq!(
             engine
                 .engine_update("list_loras".into(), json!({}))
@@ -2820,6 +2874,37 @@ async fn generate_error(
 }
 
 #[tokio::test]
+async fn lora_lock_registry_reclaims_idle_entries_without_losing_waiters() {
+    let lifecycle = crate::lora::LoraLifecycle::default();
+    let lock = lifecycle.adapter_lock("active").await;
+    let active = Arc::downgrade(&lock);
+    let held = lock.clone().write_owned().await;
+    let mut waiting = Box::pin(lock.read_owned());
+    assert!(
+        futures::future::poll_immediate(&mut waiting)
+            .await
+            .is_none()
+    );
+
+    let mut idle = std::sync::Weak::new();
+    for name in ["idle-a", "idle-b", "idle-c"] {
+        let lock = lifecycle.adapter_lock(name).await;
+        assert!(idle.upgrade().is_none());
+        idle = Arc::downgrade(&lock);
+    }
+    drop(held);
+    drop(lifecycle.adapter_lock("after-release").await);
+    let lock = lifecycle.adapter_lock("active").await;
+    assert!(Arc::ptr_eq(&lock, &active.upgrade().unwrap()));
+    let guard = waiting.await;
+    assert!(lock.try_write().is_err());
+    drop(guard);
+    drop(lock);
+    drop(lifecycle.adapter_lock("after-waiter").await);
+    assert!(active.upgrade().is_none());
+}
+
+#[tokio::test]
 async fn request_admission_and_unload_cannot_race() {
     let (server, engine, endpoint) =
         started_lora_engine(FakeVllm::default(), "lora_admission").await;
@@ -2832,6 +2917,19 @@ async fn request_admission_and_unload_cannot_race() {
     let mut generating =
         Box::pin(engine.generate(request_selecting("math-r8"), generate_context()));
     wait_pending(&server.service.headers_pending, &mut generating).await;
+    server
+        .service
+        .headers_pending
+        .store(false, Ordering::SeqCst);
+    let mut second = Box::pin(engine.generate(request_selecting("math-r8"), generate_context()));
+    wait_pending(&server.service.headers_pending, &mut second).await;
+    assert_eq!(server.service.requests.lock().await.len(), 2);
+    let mut unloading = Box::pin(unload(&engine, "math-r8"));
+    assert!(
+        futures::future::poll_immediate(&mut unloading)
+            .await
+            .is_none()
+    );
     let context = dynamo_backend_common::testing::mock_context();
     let mut waiting = Box::pin(engine.generate(
         request_selecting("math-r8"),
@@ -2851,13 +2949,7 @@ async fn request_admission_and_unload_cannot_race() {
         cancelled.next().await.unwrap().unwrap().finish_reason,
         Some(FinishReason::Cancelled)
     );
-    assert_eq!(server.service.requests.lock().await.len(), 1);
-    let mut unloading = Box::pin(unload(&engine, "math-r8"));
-    assert!(
-        futures::future::poll_immediate(&mut unloading)
-            .await
-            .is_none()
-    );
+    assert_eq!(server.service.requests.lock().await.len(), 2);
     assert!(
         !server
             .service
@@ -2872,8 +2964,14 @@ async fn request_admission_and_unload_cannot_race() {
         .service
         .hang_before_headers
         .store(false, Ordering::SeqCst);
-    server.service.release_headers.notify_one();
+    server.service.release_headers.notify_waiters();
     let _stream = generating.await.unwrap();
+    assert!(
+        futures::future::poll_immediate(&mut unloading)
+            .await
+            .is_none()
+    );
+    let _second_stream = second.await.unwrap();
     assert_eq!(unloading.await["status"], "success");
 }
 
