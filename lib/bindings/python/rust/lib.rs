@@ -261,10 +261,10 @@ fn wait_for_bridge_tasks_at_exit(py: Python<'_>) {
     if let Some(process) = rs::Worker::existing_process_runtime() {
         runtimes.push(process);
     }
-    if let Some(bridge) = BRIDGE_RUNTIME.get().copied() {
-        if !runtimes.iter().any(|rt| std::ptr::eq(*rt, bridge)) {
-            runtimes.push(bridge);
-        }
+    if let Some(bridge) = BRIDGE_RUNTIME.get().copied()
+        && !runtimes.iter().any(|rt| std::ptr::eq(*rt, bridge))
+    {
+        runtimes.push(bridge);
     }
     if runtimes.is_empty() {
         return;
