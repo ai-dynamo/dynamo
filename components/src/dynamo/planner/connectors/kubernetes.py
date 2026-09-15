@@ -843,9 +843,9 @@ class KubernetesConnector(PlannerConnector):
                 except ApiException as exc:
                     if exc.status != 403:
                         raise
-                    # Old roles allow Scale PATCH but not GET. Retain this
-                    # request until its DGD target arrives; do not guess that
-                    # an unobserved write was superseded or drop the latch.
+                    # GET may be revoked after admission. Retain this request
+                    # until its DGD target arrives; do not guess that an
+                    # unobserved write was superseded or drop the latch.
                     with self._startup_scale_down_lock:
                         warn = "scale" not in self._startup_read_warnings
                         self._startup_read_warnings.add("scale")
@@ -1125,6 +1125,38 @@ class KubernetesConnector(PlannerConnector):
                         )
                         any_reduction = True
                 startup_reduction &= any_reduction
+
+        if startup_reduction:
+            # Reconciliation needs Scale GET to recognize superseding writers.
+            # Check every changed component before the first PATCH, so partial
+            # RBAC cannot admit a cancellation we cannot subsequently track.
+            try:
+                for target in target_replicas:
+                    service = get_component_from_type_or_name(
+                        deployment,
+                        target.sub_component_type,
+                        component_name=target.component_name,
+                    )
+                    if service.number_replicas() != target.desired_replicas:
+                        self.kube_api.get_service_replica_target(
+                            self.graph_deployment_name, service.name
+                        )
+            except ApiException as exc:
+                if exc.status != 403:
+                    raise
+                startup_reduction = False
+                with self._startup_scale_down_lock:
+                    warn = "scale" not in self._startup_read_warnings
+                    self._startup_read_warnings.add("scale")
+                if warn:
+                    logger.warning(
+                        "Scale get forbidden for %s; startup cancellation is "
+                        "disabled until Scale get is granted",
+                        self.graph_deployment_name,
+                    )
+            else:
+                with self._startup_scale_down_lock:
+                    self._startup_read_warnings.discard("scale")
 
         if not ready and not startup_reduction:
             if self.raise_not_ready:

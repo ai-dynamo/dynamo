@@ -3,7 +3,8 @@
 
 """Older service accounts keep ordinary scaling without granting startup reads."""
 
-from unittest.mock import AsyncMock, Mock
+from copy import deepcopy
+from unittest.mock import AsyncMock, Mock, call
 
 import pytest
 from kubernetes.client import ApiException
@@ -167,10 +168,108 @@ async def test_forbidden_dgd_read_is_not_treated_as_optional_pod_access():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("raise_not_ready", [False, True])
+@pytest.mark.parametrize("ready_target", [2, 4])
+async def test_scale_get_denial_preserves_scaling_after_external_update(
+    raise_not_ready, ready_target
+):
+    deployment, pods = _deployment(), _pods()
+    connector = _connector(deployment, pods)
+    connector.raise_not_ready = raise_not_ready
+    connector.kube_api.get_service_replica_target.side_effect = ApiException(status=403)
+    environment = _env(connector, power=True)
+    await environment._refresh_replica_counts()
+    assert environment.deployment_state().decode.replicas.pending_startup == 1
+
+    if raise_not_ready:
+        with pytest.raises(DynamoGraphDeploymentNotReadyError):
+            await connector.set_component_replicas(_target(1), blocking=False)
+    else:
+        await connector.set_component_replicas(_target(1), blocking=False)
+    connector.kube_api.update_graph_replicas.assert_not_called()
+    assert connector._startup_scale_down_targets == {}
+
+    # An external writer scales to three workers while Scale GET stays forbidden.
+    _settle(deployment)
+    deployment["metadata"]["generation"] = 3
+    deployment["status"]["observedGeneration"] = 3
+    pods[-1].status.phase = "Running"
+    pods.append(deepcopy(pods[-1]))
+    pods[-1].metadata.name = "d2"
+    await environment._refresh_replica_counts()
+    replicas = environment.deployment_state().decode.replicas
+    assert (replicas.active, replicas.scaling, replicas.pending_startup) == (
+        3,
+        False,
+        0,
+    )
+    await connector.set_component_replicas(_target(ready_target), blocking=False)
+    connector.kube_api.update_graph_replicas.assert_called_once_with(
+        "qwen", "d", ready_target
+    )
+    assert connector._startup_scale_down_targets == {}
+    connector.kube_api.get_service_replica_target.assert_called_once_with("qwen", "d")
+
+
+@pytest.mark.asyncio
+async def test_all_startup_targets_are_checked_before_writes_and_retried():
+    deployment, pods = _deployment(), _pods()
+    deployment["spec"]["components"][0]["replicas"] = 2
+    deployment["status"]["components"]["p"] = {
+        "replicas": 2,
+        "updatedReplicas": 2,
+        "readyReplicas": 2,
+    }
+    pods.append(deepcopy(pods[0]))
+    pods[-1].metadata.name = "p1"
+    connector = _connector(deployment, pods)
+    read_target = connector.kube_api.get_service_replica_target.side_effect
+    connector.kube_api.get_service_replica_target.side_effect = [
+        2,
+        ApiException(status=403),
+    ]
+    targets = [
+        TargetReplica(sub_component_type=SubComponentType.PREFILL, desired_replicas=1),
+        *_target(1),
+    ]
+    await connector.set_component_replicas(targets, blocking=False)
+    connector.kube_api.update_graph_replicas.assert_not_called()
+    assert connector._startup_scale_down_targets == {}
+    assert connector.kube_api.get_service_replica_target.call_args_list == [
+        call("qwen", "p"),
+        call("qwen", "d"),
+    ]
+
+    # Granting GET takes effect on the next attempt, without restarting Planner.
+    connector.kube_api.get_service_replica_target.side_effect = read_target
+    await connector.set_component_replicas(targets, blocking=False)
+    assert connector.kube_api.update_graph_replicas.call_args_list == [
+        call("qwen", "p", 1),
+        call("qwen", "d", 1),
+    ]
+    assert connector._startup_scale_down_targets == {"p": 1, "d": 1}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [401, 500])
+async def test_startup_scale_get_non_permission_errors_propagate_before_writes(status):
+    connector = _connector(_deployment(), _pods())
+    connector.kube_api.get_service_replica_target.side_effect = ApiException(
+        status=status
+    )
+    with pytest.raises(ApiException) as error:
+        await connector.set_component_replicas(_target(1), blocking=False)
+    assert error.value.status == status
+    connector.kube_api.update_graph_replicas.assert_not_called()
+    assert connector._startup_scale_down_targets == {}
+
+
+@pytest.mark.asyncio
 async def test_scale_get_denial_holds_until_the_accepted_target_is_observed():
     deployment = _deployment()
     connector = _connector(deployment, _pods())
     await connector.set_component_replicas(_target(1), blocking=False)
+    # Permission can still be revoked after admission; keep guarding that write.
     connector.kube_api.get_service_replica_target = Mock(
         side_effect=ApiException(status=403)
     )

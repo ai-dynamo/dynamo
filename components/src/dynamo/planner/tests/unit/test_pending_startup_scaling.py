@@ -221,9 +221,16 @@ def _connector(deployment, pods):
     api = KubernetesAPI.__new__(KubernetesAPI)
     api.get_graph_deployment = Mock(side_effect=lambda _: deepcopy(deployment))
     api.list_pods_for_graph = Mock(return_value=pods)
-    api.update_graph_replicas = Mock()
+    # DGDSA writes precede DGD reconciliation; neither depends on Planner's latch.
+    scale_targets = {
+        component["name"]: component.get("replicas", 1)
+        for component in deployment["spec"]["components"]
+    }
+    api.update_graph_replicas = Mock(
+        side_effect=lambda _, name, target: scale_targets.__setitem__(name, target)
+    )
     api.get_service_replica_target = Mock(
-        side_effect=lambda _, name: connector._startup_scale_down_targets[name]
+        side_effect=lambda _, name: scale_targets[name]
     )
     connector = KubernetesConnector.__new__(KubernetesConnector)
     connector.graph_deployment_name = "qwen"
