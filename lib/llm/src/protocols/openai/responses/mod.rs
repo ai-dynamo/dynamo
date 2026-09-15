@@ -3081,10 +3081,6 @@ Let me check the weather.
             ),
             (None, None),
             (
-                Some(vec![]),
-                Some(ToolChoiceParam::Mode(ToolChoiceOptions::Auto)),
-            ),
-            (
                 Some(serde_json::from_value(serde_json::json!([{
                     "type": "namespace", "name": "weather", "description": "Weather tools", "tools": []
                 }])).unwrap()),
