@@ -34,7 +34,10 @@ use dynamo_llm::protocols::common::extensions::{
 use serde::Deserialize;
 
 use crate::epp_standalone_config::{EppStandaloneConfig, RendererProtocol};
-use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo};
+use crate::picker::{
+    CacheSaltForwarding, Endpoint, EndpointPicker, PickError, PickResult, RequestInfo,
+    resolve_cache_namespace,
+};
 use crate::pod_discovery::PodDiscovery;
 use crate::render_http::RenderError;
 use crate::selector::{SelectRequest, Selector};
@@ -88,6 +91,15 @@ pub struct EppRouter {
     inflight: Arc<Semaphore>,
 }
 
+/// Routing inputs parsed from a standalone EPP request.
+struct TokenizeResult {
+    token_ids: Vec<u32>,
+    priority_jump: Option<f64>,
+    strict_priority: Option<u32>,
+    cache_namespace: Option<String>,
+    expected_output_tokens: Option<u32>,
+}
+
 impl EppRouter {
     /// Assemble the standalone runtime from the validated selector config.
     pub async fn from_selector(
@@ -135,43 +147,51 @@ impl EppRouter {
         self.reflector_ready.load(Ordering::Acquire)
     }
 
-    /// Tokenize a chat body for routing → `(token_ids, priority_jump,
-    /// strict_priority, expected_output_tokens)`. Priority uses header-over-body
-    /// precedence via [`resolve_request_priority`]
+    /// Tokenize a chat body and resolve its routing inputs.
     async fn tokenize(
         &self,
         request_body: bytes::Bytes,
-        priority_header: Option<String>,
-        strict_priority_header: Option<String>,
-    ) -> Result<(Vec<u32>, Option<f64>, Option<u32>, Option<u32>), TokenizeError> {
-        // Parse only `nvext.agent_hints` for priority — the worker re-parses the
-        // full body anyway, so we skip allocating the large `messages`/tools
-        // fields. Malformed JSON still fails here (→ 400); a well-formed body that
-        // is not a valid chat request is caught by the renderer below.
+        headers: &[(String, String)],
+    ) -> Result<TokenizeResult, TokenizeError> {
+        // Parse only the routing hot-path fields — the worker re-parses the full
+        // body anyway, so we skip allocating the large `messages`/tools fields.
+        // Malformed JSON still fails here (→ 400); a well-formed body that is not
+        // a valid chat request is caught by the renderer below.
         let hints: RoutingHints =
             serde_json::from_slice(&request_body).map_err(TokenizeError::InvalidBody)?;
+        let priority_header = first_header(headers, HEADER_REQUEST_PRIORITY);
+        let strict_priority_header = first_header(headers, HEADER_REQUEST_STRICT_PRIORITY);
         let resolved = resolve_request_priority(
             hints.nvext.as_ref().and_then(|n| n.agent_hints.as_ref()),
-            priority_header.as_deref(),
-            strict_priority_header.as_deref(),
+            priority_header,
+            strict_priority_header,
         );
         let expected_output_tokens = hints
             .nvext
             .as_ref()
             .and_then(|n| n.agent_hints.as_ref())
             .and_then(|h| h.osl);
+        let cache_namespace = resolve_cache_namespace(
+            headers,
+            hints
+                .nvext
+                .as_ref()
+                .and_then(|nvext| nvext.cache_namespace.as_deref()),
+            hints.cache_namespace.as_deref(),
+        );
         // Moves the `Bytes` into reqwest (zero-copy) rather than copying.
         let token_ids = self
             .renderer
             .render_chat(request_body)
             .await
             .map_err(TokenizeError::Render)?;
-        Ok((
+        Ok(TokenizeResult {
             token_ids,
-            resolved.priority_jump,
-            resolved.strict_priority,
+            priority_jump: resolved.priority_jump,
+            strict_priority: resolved.strict_priority,
             expected_output_tokens,
-        ))
+            cache_namespace,
+        })
     }
 
     /// Ready workers inside an Envoy `candidate_subset`, resolved in a single index
@@ -211,18 +231,25 @@ pub(crate) fn endpoint_in_subset(
 }
 
 /// Minimal deserialize target for the routing hot path: only `nvext.agent_hints`
-/// is needed for priority resolution, so the large `messages`/tools fields are
-/// never allocated. Unknown fields are ignored (no `deny_unknown_fields`).
+/// is needed for priority resolution and `cache_namespace`,so the large
+/// `messages`/tools fields are never allocated.
+/// Unknown fields are ignored (no `deny_unknown_fields`).
 #[derive(Deserialize)]
 struct RoutingHints {
     #[serde(default)]
     nvext: Option<RoutingNvExt>,
+    /// Native vLLM top-level `cache_salt`.
+    #[serde(default, rename = "cache_salt")]
+    cache_namespace: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct RoutingNvExt {
     #[serde(default)]
     agent_hints: Option<AgentHints>,
+    /// Dynamo-style `nvext.cache_salt`.
+    #[serde(default, rename = "cache_salt")]
+    cache_namespace: Option<String>,
 }
 
 /// Case-insensitive lookup of the first non-empty, trimmed value for `name`.
@@ -312,14 +339,14 @@ impl EndpointPicker for EppRouter {
             });
         }
 
-        // Header-over-body priority (via the shared resolver), honored here as on
-        // the frontend path.
-        let priority_header =
-            first_header(&req.headers, HEADER_REQUEST_PRIORITY).map(str::to_owned);
-        let strict_priority_header =
-            first_header(&req.headers, HEADER_REQUEST_STRICT_PRIORITY).map(str::to_owned);
-        let (tokens, priority_jump, strict_priority, expected_output_tokens) = self
-            .tokenize(req.body.clone(), priority_header, strict_priority_header)
+        let TokenizeResult {
+            token_ids: tokens,
+            priority_jump,
+            strict_priority,
+            cache_namespace,
+            expected_output_tokens,
+        } = self
+            .tokenize(req.body.clone(), &req.headers)
             .await
             .map_err(|e| e.into_pick_error(&req.request_id))?;
         let policy_class = requested_policy_class(&req.headers)?;
@@ -349,6 +376,7 @@ impl EndpointPicker for EppRouter {
             strict_priority,
             expected_output_tokens,
             policy_class,
+            cache_namespace: cache_namespace.clone(),
         };
 
         // On either error return below the guard (still armed) frees the booking.
@@ -380,6 +408,9 @@ impl EndpointPicker for EppRouter {
             endpoint,
             // Worker re-tokenizes the forwarded request (llm-d parity); no inject.
             token_ids: None,
+            cache_namespace,
+            // Native vLLM has no Dynamo handler to tag the salt; the EPP does.
+            cache_salt_forwarding: CacheSaltForwarding::NativeVllm,
             // Booking id for the server's lifecycle callbacks (no shared map).
             reservation_id: Some(reservation_id),
             ..Default::default()
