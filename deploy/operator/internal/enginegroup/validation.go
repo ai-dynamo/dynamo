@@ -41,7 +41,16 @@ func validateGroupStatus(status GroupStatus) error {
 	if err := validateCapacityTarget(status.ControlRevision, status.Capacity.Desired); err != nil {
 		return err
 	}
+	if err := validateCapacityTarget(status.ControlRevision, status.Capacity.Accepted); err != nil {
+		return fmt.Errorf("validate accepted capacity target: %w", err)
+	}
 	if err := validateTrafficTarget(status.ControlRevision, status.Traffic.Desired); err != nil {
+		return err
+	}
+	if err := validateTrafficTarget(status.ControlRevision, status.Traffic.Accepted); err != nil {
+		return fmt.Errorf("validate accepted traffic target: %w", err)
+	}
+	if err := validateAcceptedTargets(status); err != nil {
 		return err
 	}
 	if err := validateMembershipTarget(status.ControlRevision, status.Membership.Desired); err != nil {
@@ -74,6 +83,43 @@ func validateGroupStatus(status GroupStatus) error {
 	if status.Transition != nil {
 		if err := validateTransition(status); err != nil {
 			return fmt.Errorf("validate transition: %w", err)
+		}
+	}
+	return nil
+}
+
+func validateAcceptedTargets(status GroupStatus) error {
+	// Accepted capacity must be an acknowledged version of the current desired-target lineage.
+	if status.Capacity.Accepted != nil {
+		if status.Capacity.Desired == nil {
+			return errors.New("accepted capacity target has no desired target")
+		}
+		if status.Capacity.Accepted.ControlRevision > status.Capacity.Desired.ControlRevision {
+			return errors.New("accepted capacity target is newer than the desired target")
+		}
+		if status.Capacity.Accepted.ControlRevision > status.Capacity.Observed.AppliedRevision {
+			return errors.New("accepted capacity target has not been acknowledged by the adapter")
+		}
+		if status.Capacity.Accepted.ControlRevision == status.Capacity.Desired.ControlRevision &&
+			!sameCapacityTargetIntent(*status.Capacity.Accepted, *status.Capacity.Desired) {
+			return errors.New("accepted and desired capacity payloads conflict at the same revision")
+		}
+	}
+
+	// Accepted traffic follows the same revision and payload invariants independently from capacity.
+	if status.Traffic.Accepted != nil {
+		if status.Traffic.Desired == nil {
+			return errors.New("accepted traffic target has no desired target")
+		}
+		if status.Traffic.Accepted.ControlRevision > status.Traffic.Desired.ControlRevision {
+			return errors.New("accepted traffic target is newer than the desired target")
+		}
+		if status.Traffic.Accepted.ControlRevision > status.Traffic.Observed.AppliedRevision {
+			return errors.New("accepted traffic target has not been acknowledged by the adapter")
+		}
+		if status.Traffic.Accepted.ControlRevision == status.Traffic.Desired.ControlRevision &&
+			!sameTrafficTargetIntent(*status.Traffic.Accepted, *status.Traffic.Desired) {
+			return errors.New("accepted and desired traffic payloads conflict at the same revision")
 		}
 	}
 	return nil
@@ -485,6 +531,11 @@ func validateTransition(status GroupStatus) error {
 			!membershipProvablyUncommitted(status) {
 			return errors.New("rolled-back transition lacks a provably uncommitted membership state")
 		}
+		if transition.Outcome == TransitionOutcomeRolledBack {
+			if err := validateTerminalTargetsAccepted(status); err != nil {
+				return err
+			}
+		}
 	case TransitionOutcomeCompleted:
 		if transition.Failure != nil {
 			return errors.New("completed transition must not carry a failure")
@@ -496,8 +547,27 @@ func validateTransition(status GroupStatus) error {
 			transition.Verification.Phase != VerificationPhasePassed {
 			return errors.New("completed transition has no required serving proof")
 		}
+		if err := validateTerminalTargetsAccepted(status); err != nil {
+			return err
+		}
 	default:
 		return fmt.Errorf("invalid transition outcome %q", transition.Outcome)
+	}
+	return nil
+}
+
+func validateTerminalTargetsAccepted(status GroupStatus) error {
+	if status.Capacity.Desired != nil &&
+		(status.Capacity.Accepted == nil ||
+			status.Capacity.Accepted.ControlRevision != status.Capacity.Desired.ControlRevision ||
+			!sameCapacityTargetIntent(*status.Capacity.Accepted, *status.Capacity.Desired)) {
+		return errors.New("terminal transition has an unaccepted capacity target")
+	}
+	if status.Traffic.Desired != nil &&
+		(status.Traffic.Accepted == nil ||
+			status.Traffic.Accepted.ControlRevision != status.Traffic.Desired.ControlRevision ||
+			!sameTrafficTargetIntent(*status.Traffic.Accepted, *status.Traffic.Desired)) {
+		return errors.New("terminal transition has an unaccepted traffic target")
 	}
 	return nil
 }
@@ -660,7 +730,9 @@ func validateTransitionMembership(status GroupStatus, resolution planResolution)
 		return errors.New("membership target base topology differs from the transition base")
 	}
 	observed := status.Membership.Observed.Transition
-	requireCurrentRegistry := observed == nil || observed.Phase != MembershipTransitionPhaseRejected
+	observationMatchesTarget := status.Membership.Observed.RequestedTransitionID == target.TransitionID
+	requireCurrentRegistry := !observationMatchesTarget ||
+		observed == nil || observed.Phase != MembershipTransitionPhaseRejected
 	if err := validateJoiningReplicas(
 		status.Registry,
 		resolution,
@@ -668,6 +740,9 @@ func validateTransitionMembership(status GroupStatus, resolution planResolution)
 		requireCurrentRegistry,
 	); err != nil {
 		return err
+	}
+	if !observationMatchesTarget {
+		return nil
 	}
 	if observed == nil || observed.Phase != MembershipTransitionPhaseCommitted {
 		return nil

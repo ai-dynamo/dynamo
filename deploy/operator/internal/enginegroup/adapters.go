@@ -62,6 +62,7 @@ type CapacityAllocation struct {
 
 // CapacityObservation is the workload manager's current allocation state.
 type CapacityObservation struct {
+	// AppliedRevision is the last target revision durably accepted by the adapter, whether or not it has converged.
 	AppliedRevision int64
 	Allocations     []CapacityAllocation
 	ReleaseFences   []ReleaseFence
@@ -94,6 +95,7 @@ type TrafficDrainTarget struct {
 
 // TrafficObservation is the runtime's exact routing and drain state.
 type TrafficObservation struct {
+	// AppliedRevision is the last target revision durably accepted by the adapter, whether or not it has converged.
 	AppliedRevision int64
 	Admitted        []ReplicaMembership
 	Draining        []ReplicaMembership

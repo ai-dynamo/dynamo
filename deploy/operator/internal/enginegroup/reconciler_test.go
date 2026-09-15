@@ -72,6 +72,10 @@ func TestCoordinatorGrowthOrdersCapacityCommitVerificationAndAdmission(t *testin
 		capacityTarget.ControlRevision <= bootstrapTarget.ControlRevision {
 		t.Fatalf("joining capacity was not pinned before membership: %#v", pinnedCapacity)
 	}
+	if scenario.status.Capacity.Accepted == nil ||
+		scenario.status.Capacity.Accepted.ControlRevision != capacityTarget.ControlRevision {
+		t.Fatalf("exact joining capacity was not durably accepted before membership: %#v", scenario.status.Capacity)
+	}
 
 	t.Log("Commit the exact topology produced by the engine")
 	committed := MembershipTopology{
@@ -192,6 +196,15 @@ func TestCoordinatorReassertsCompletedTargetsAfterObservedDrift(t *testing.T) {
 	scenario.runUntil("complete retirement", func(s *coordinatorScenario) bool {
 		return s.status.Transition.Outcome == TransitionOutcomeCompleted
 	})
+
+	t.Log("Recover accepted payloads from their durable applied revisions after restart")
+	scenario.status.Capacity.Accepted = nil
+	scenario.status.Traffic.Accepted = nil
+	scenario.rebuildCoordinator()
+	scenario.mustReconcile("recover accepted targets")
+	if scenario.status.Capacity.Accepted == nil || scenario.status.Traffic.Accepted == nil {
+		t.Fatalf("durable adapter acknowledgments did not recover accepted targets: %#v", scenario.status)
+	}
 
 	t.Log("Remove an unsafe traffic drift by replaying the accepted target at the same revision")
 	trafficCalls := scenario.traffic.applyCalls
@@ -784,7 +797,7 @@ func TestCoordinatorServingFailureDoesNotRewriteMembershipCommit(t *testing.T) {
 	}
 }
 
-func TestCoordinatorDoesNotReplayRejectedTrafficTargetWhileBlocked(t *testing.T) {
+func TestCoordinatorMaintainsAcceptedTrafficAfterNewerTargetIsRejected(t *testing.T) {
 	base := engineTopology(1, 1)
 	scenario := newCoordinatorScenario(t, base)
 	joining := engineReplica(1)
@@ -818,8 +831,11 @@ func TestCoordinatorDoesNotReplayRejectedTrafficTargetWhileBlocked(t *testing.T)
 		return s.status.Transition.Outcome == TransitionOutcomeBlocked
 	})
 	trafficCalls := scenario.traffic.applyCalls
-	if scenario.status.Traffic.Desired.ControlRevision <= scenario.traffic.observation.AppliedRevision {
-		t.Fatalf("rejected traffic revision appears accepted: %#v", scenario.status.Traffic)
+	accepted := scenario.status.Traffic.Accepted
+	if accepted == nil ||
+		scenario.status.Traffic.Desired.ControlRevision <= accepted.ControlRevision ||
+		accepted.ControlRevision != scenario.traffic.observation.AppliedRevision {
+		t.Fatalf("rejected traffic target replaced the accepted target: %#v", scenario.status.Traffic)
 	}
 
 	t.Log("Keep the rejected target durable for diagnosis without replaying it")
@@ -828,6 +844,96 @@ func TestCoordinatorDoesNotReplayRejectedTrafficTargetWhileBlocked(t *testing.T)
 	}
 	if scenario.traffic.applyCalls != trafficCalls {
 		t.Fatalf("definitively rejected traffic target was replayed: %d applications", scenario.traffic.applyCalls)
+	}
+
+	t.Log("Restart and repair routing drift by replaying the older accepted fail-closed target")
+	scenario.rebuildCoordinator()
+	scenario.traffic.observation.Admitted = cloneReplicaMemberships(committed.Replicas)
+	scenario.mustReconcile("reassert accepted traffic after restart")
+	if scenario.traffic.applyCalls != trafficCalls+1 ||
+		!sameMemberships(scenario.traffic.observation.Admitted, base.Replicas) ||
+		scenario.traffic.lastTarget.ControlRevision != accepted.ControlRevision {
+		t.Fatalf(
+			"accepted traffic target did not repair drift: calls=%d observation=%#v target=%#v",
+			scenario.traffic.applyCalls,
+			scenario.traffic.observation,
+			scenario.traffic.lastTarget,
+		)
+	}
+}
+
+func TestCoordinatorMaintainsAcceptedCapacityAfterNewerTargetIsRejected(t *testing.T) {
+	base := engineTopology(1, 1)
+	scenario := newCoordinatorScenario(t, base)
+	joining := engineReplica(1)
+	joiningIncarnation := replicaIncarnation(1)
+	scenario.capacity.planned[joining.ReplicaID] = joiningIncarnation
+	growth := growPlan("establish-capacity", ReplicaTarget{
+		ReplicaID: joining.ReplicaID,
+		SlotID:    joiningIncarnation.SlotID,
+		Bootstrap: BootstrapModeJoin,
+	}, VerificationRequirementNone)
+	scenario.desired = &growth
+	scenario.runUntil("apply growth", func(s *coordinatorScenario) bool {
+		return s.membership.applyCalls == 1
+	})
+	expanded := MembershipTopology{
+		Generation: 2,
+		Replicas: append(
+			cloneReplicaMemberships(base.Replicas),
+			cloneReplicaMembership(joining),
+		),
+	}
+	scenario.membership.commit(scenario.status.Membership.Desired.TransitionID, expanded)
+	scenario.runUntil("complete growth", func(s *coordinatorScenario) bool {
+		return s.status.Transition.Outcome == TransitionOutcomeCompleted
+	})
+
+	t.Log("Commit retirement, then reject its newer exact-release capacity target")
+	retirement := retirePlan(
+		"reject-capacity-release",
+		joining.ReplicaID,
+		TrafficRequirementKeepServing,
+		VerificationRequirementNone,
+	)
+	scenario.desired = &retirement
+	scenario.runUntil("apply retirement", func(s *coordinatorScenario) bool {
+		return s.membership.applyCalls == 2
+	})
+	scenario.capacity.rejectNext = &Failure{
+		Classification: FailureClassificationTerminal,
+		Reason:         "ReleaseRejected",
+		Message:        "workload manager rejected the release target",
+	}
+	contracted := MembershipTopology{Generation: 3, Replicas: cloneReplicaMemberships(base.Replicas)}
+	scenario.membership.commit(scenario.status.Membership.Desired.TransitionID, contracted)
+	scenario.runUntil("reject capacity release", func(s *coordinatorScenario) bool {
+		return s.status.Transition.Outcome == TransitionOutcomeBlocked
+	})
+	accepted := scenario.status.Capacity.Accepted
+	if accepted == nil ||
+		scenario.status.Capacity.Desired.ControlRevision <= accepted.ControlRevision ||
+		accepted.ControlRevision != scenario.capacity.observation.AppliedRevision {
+		t.Fatalf("rejected capacity target replaced the accepted target: %#v", scenario.status.Capacity)
+	}
+
+	t.Log("Repair retained-capacity drift with the older accepted target")
+	for index := range scenario.capacity.observation.Allocations {
+		if scenario.capacity.observation.Allocations[index].Incarnation.ReplicaID == base.Replicas[0].ReplicaID {
+			scenario.capacity.observation.Allocations[index].Available = false
+		}
+	}
+	capacityCalls := scenario.capacity.applyCalls
+	scenario.mustReconcile("reassert accepted capacity")
+	allocation, found := allocationByID(scenario.capacity.observation, base.Replicas[0].ReplicaID)
+	if !found || !allocation.Available || scenario.capacity.applyCalls != capacityCalls+1 ||
+		scenario.capacity.lastTarget.ControlRevision != accepted.ControlRevision {
+		t.Fatalf(
+			"accepted capacity target did not repair drift: calls=%d observation=%#v target=%#v",
+			scenario.capacity.applyCalls,
+			scenario.capacity.observation,
+			scenario.capacity.lastTarget,
+		)
 	}
 }
 

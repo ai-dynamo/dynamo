@@ -310,15 +310,21 @@ type TransitionStatus struct {
 	UpdatedAt       time.Time
 }
 
-// CapacityStatus records the latest durable absolute capacity projection and its observation.
+// CapacityStatus records the latest requested and durably accepted absolute capacity projections.
 type CapacityStatus struct {
-	Desired  *CapacityTarget
+	// Desired is the newest persisted target, including a target that may later be definitively rejected.
+	Desired *CapacityTarget
+	// Accepted is the last Desired payload whose exact revision the adapter durably acknowledged.
+	Accepted *CapacityTarget
 	Observed CapacityObservation
 }
 
-// TrafficStatus records the latest durable absolute traffic projection and its observation.
+// TrafficStatus records the latest requested and durably accepted absolute traffic projections.
 type TrafficStatus struct {
-	Desired  *TrafficTarget
+	// Desired is the newest persisted target, including a target that may later be definitively rejected.
+	Desired *TrafficTarget
+	// Accepted is the last Desired payload whose exact revision the adapter durably acknowledged.
+	Accepted *TrafficTarget
 	Observed TrafficObservation
 }
 

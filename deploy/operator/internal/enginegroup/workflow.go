@@ -225,8 +225,8 @@ func (c *Coordinator) reconcileRollbackTraffic(
 	return true, false, nil
 }
 
-// reconcileMaintainedTargets keeps accepted physical and traffic levels converged after progress stops. A blocked
-// transition reasserts only targets whose observed revision proves acceptance, never a definitively rejected target.
+// reconcileMaintainedTargets keeps the last adapter-acknowledged physical and traffic levels converged after progress
+// stops. A newer definitively rejected target remains durable for diagnosis but is never replayed here.
 func (c *Coordinator) reconcileMaintainedTargets(
 	ctx context.Context,
 	groupID GroupID,
@@ -241,14 +241,9 @@ func (c *Coordinator) reconcileMaintainedTargets(
 		}
 	}
 
-	if status.Traffic.Desired != nil &&
-		acceptedTargetMayBeReasserted(
-			status.Transition.Outcome,
-			status.Traffic.Desired.ControlRevision,
-			status.Traffic.Observed.AppliedRevision,
-		) &&
-		!trafficTargetConverged(*status.Traffic.Desired, status.Traffic.Observed) {
-		result, err := c.traffic.Apply(ctx, groupID, *status.Traffic.Desired)
+	acceptedTraffic := status.Traffic.Accepted
+	if acceptedTraffic != nil && !trafficTargetConverged(*acceptedTraffic, status.Traffic.Observed) {
+		result, err := c.traffic.Apply(ctx, groupID, *acceptedTraffic)
 		if err != nil {
 			return ReconcileResult{Status: status, Requeue: true}, fmt.Errorf(
 				"reassert maintained traffic target: %w",
@@ -268,21 +263,20 @@ func (c *Coordinator) reconcileMaintainedTargets(
 		return ReconcileResult{Status: status, Requeue: true}, nil
 	}
 
-	if status.Capacity.Desired != nil &&
-		acceptedTargetMayBeReasserted(
-			status.Transition.Outcome,
-			status.Capacity.Desired.ControlRevision,
-			status.Capacity.Observed.AppliedRevision,
-		) &&
-		!terminalCapacityTargetConverged(*status.Capacity.Desired, status.Capacity.Observed) {
+	acceptedCapacity := status.Capacity.Accepted
+	if acceptedCapacity != nil && !terminalCapacityTargetConverged(*acceptedCapacity, status.Capacity.Observed) {
 		// A committed topology must enter explicit recovery instead of recreating or adopting a new incarnation.
 		if membershipCommittedForTransition(status) {
-			if err := validatePinnedCapacity(*status.Capacity.Desired, status.Capacity.Observed); err != nil {
+			if err := validatePinnedCapacity(
+				*acceptedCapacity,
+				status.Capacity.Observed,
+				status.Membership.Observed.CommittedTopology,
+			); err != nil {
 				return ReconcileResult{Status: status}, err
 			}
 		}
 
-		result, err := c.capacity.Apply(ctx, groupID, *status.Capacity.Desired)
+		result, err := c.capacity.Apply(ctx, groupID, *acceptedCapacity)
 		if err != nil {
 			return ReconcileResult{Status: status, Requeue: true}, fmt.Errorf(
 				"reassert maintained capacity target: %w",
@@ -305,16 +299,25 @@ func (c *Coordinator) reconcileMaintainedTargets(
 	return ReconcileResult{Status: status}, nil
 }
 
-func acceptedTargetMayBeReasserted(
-	outcome TransitionOutcome,
-	desiredRevision int64,
-	appliedRevision int64,
-) bool {
-	return outcome != TransitionOutcomeBlocked || appliedRevision >= desiredRevision
-}
-
-func validatePinnedCapacity(target CapacityTarget, observation CapacityObservation) error {
+func validatePinnedCapacity(
+	target CapacityTarget,
+	observation CapacityObservation,
+	committed MembershipTopology,
+) error {
+	replicasByID := make(map[ReplicaID]CapacityReplicaTarget, len(target.Replicas))
 	for _, replica := range target.Replicas {
+		replicasByID[replica.ReplicaID] = replica
+	}
+
+	for _, membership := range committed.Replicas {
+		replica, found := replicasByID[membership.ReplicaID]
+		if !found {
+			return fmt.Errorf(
+				"%w: committed replica %q is absent from the accepted capacity target",
+				ErrRecoveryRequired,
+				membership.ReplicaID,
+			)
+		}
 		if replica.Incarnation == nil {
 			return fmt.Errorf(
 				"%w: committed replica %q retains bootstrap-only capacity intent",

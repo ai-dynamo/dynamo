@@ -58,11 +58,18 @@ func TestCoordinatorPersistsEveryDirectiveBeforeCallingItsAdapter(t *testing.T) 
 	if scenario.traffic.applyCalls != 1 {
 		t.Fatalf("persisted traffic target was not applied exactly once: %d", scenario.traffic.applyCalls)
 	}
+	if scenario.status.Traffic.Accepted != nil {
+		t.Fatal("traffic target was promoted before its applied revision was observed")
+	}
 
 	t.Log("Persist the exact membership target before applying it")
 	scenario.mustReconcile("freeze membership target")
 	if scenario.status.Membership.Desired == nil || scenario.membership.applyCalls != 0 {
 		t.Fatalf("membership target was not persisted first: status=%#v calls=%d", scenario.status.Membership, scenario.membership.applyCalls)
+	}
+	if scenario.status.Traffic.Accepted == nil ||
+		scenario.status.Traffic.Accepted.ControlRevision != scenario.status.Traffic.Desired.ControlRevision {
+		t.Fatalf("observed traffic target was not promoted to accepted: %#v", scenario.status.Traffic)
 	}
 	scenario.mustReconcile("apply persisted membership target")
 	if scenario.membership.applyCalls != 1 {

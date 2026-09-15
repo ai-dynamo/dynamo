@@ -65,6 +65,9 @@ func (c *Coordinator) Reconcile(
 	if groupID == "" {
 		return ReconcileResult{Status: next}, errors.New("group ID must not be empty")
 	}
+
+	// Recover an acknowledgment already present in durable observations before validating terminal state after restart.
+	promoteAcceptedTargets(&next)
 	if err := validateGroupStatus(next); err != nil {
 		return ReconcileResult{Status: next}, fmt.Errorf("validate durable status: %w", err)
 	}
@@ -137,7 +140,24 @@ func (c *Coordinator) observeGroup(
 	if err := validateObservedRevisions(*status); err != nil {
 		return MembershipTopology{}, err
 	}
+
+	// Retain the payload behind each adapter-acknowledged revision before a newer desired target can replace it.
+	promoteAcceptedTargets(status)
+	if err := validateAcceptedTargets(*status); err != nil {
+		return MembershipTopology{}, err
+	}
 	return cloneTopology(membership.CommittedTopology), nil
+}
+
+func promoteAcceptedTargets(status *GroupStatus) {
+	if status.Capacity.Desired != nil &&
+		status.Capacity.Observed.AppliedRevision == status.Capacity.Desired.ControlRevision {
+		status.Capacity.Accepted = cloneCapacityTarget(status.Capacity.Desired)
+	}
+	if status.Traffic.Desired != nil &&
+		status.Traffic.Observed.AppliedRevision == status.Traffic.Desired.ControlRevision {
+		status.Traffic.Accepted = cloneTrafficTarget(status.Traffic.Desired)
+	}
 }
 
 func (c *Coordinator) reconcileDesiredPlan(
