@@ -976,7 +976,7 @@ mod tests {
         let err =
             ValidateRequest::validate(&request).expect_err("over-max stops must fail validation");
         let expected = format!(
-            "InvalidArgument: Maximum of {} stop sequences allowed, got {}",
+            "InvalidRequest: Maximum of {} stop sequences allowed, got {}",
             MAX_STOP_SEQUENCES,
             MAX_STOP_SEQUENCES + 1
         );
@@ -988,7 +988,7 @@ mod tests {
 
         let over_max_token_ids: Vec<u32> = (0..=MAX_STOP_SEQUENCES as u32).collect();
         let expected_token_ids = format!(
-            "InvalidArgument: Maximum of {} stop token IDs allowed, got {}",
+            "InvalidRequest: Maximum of {} stop token IDs allowed, got {}",
             MAX_STOP_SEQUENCES,
             MAX_STOP_SEQUENCES + 1
         );
