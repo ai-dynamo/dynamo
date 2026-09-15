@@ -32,6 +32,7 @@ if not HAS_GMS:
 if HAS_PYNVML:
     import pynvml
 
+import gpu_memory_service.client.session as _session_module
 import gpu_memory_service.common.vmm as _vmm_module
 from _fake_vmm import FakeVMM
 from gpu_memory_service.client.memory_manager import (
@@ -72,6 +73,9 @@ _ALLOCATION_BLOCK_ASSERTION_SECONDS = 5.0
 _GPU_MEMORY_RECOVERY_TIMEOUT_SECONDS = 30.0
 _FAST_POLL_INTERVAL_SECONDS = 0.01
 _SLOW_POLL_INTERVAL_SECONDS = 0.1
+# Room for retry jitter above the 150 ms ceiling the connect test installs,
+# while staying far below any lock-admission deadline a caller might pass.
+_CONNECT_CEILING_ASSERTION_SECONDS = 5.0
 
 
 def _gpu_memory_free_bytes(device: int = 0) -> int:
@@ -492,6 +496,22 @@ def test_waiting_writer_blocks_new_readers_until_last_reader_disconnects(
         assert waiting_writer.lock_type == GrantedLockType.RW
     finally:
         waiting_writer.close()
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_a_long_lock_deadline_does_not_stretch_the_connect_wait(tmp_path, monkeypatch):
+    """A caller's lock-admission deadline is a workload-shaped wait; the wait
+    for the server socket to exist is not. A missing or misconfigured socket
+    must still fail against the availability ceiling."""
+    monkeypatch.setattr(_session_module, "_CONNECT_TIMEOUT_MS", 150)
+    missing_socket = str(tmp_path / "absent.sock")
+
+    started = time.monotonic()
+    with pytest.raises(ConnectionError, match="GMS server not running"):
+        _GMSClientSession(missing_socket, RequestedLockType.RO, 600_000)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < _CONNECT_CEILING_ASSERTION_SECONDS
 
 
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)

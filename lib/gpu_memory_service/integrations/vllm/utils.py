@@ -44,6 +44,11 @@ def configure_gms_worker_logging() -> None:
     gms_root.propagate = False
 
 
+# Default weight-admission deadline for a shadow engine, in ms. Generous: it
+# sits behind a real writer's load, and must stay under the 2h startup probe.
+SHADOW_RO_CONNECT_TIMEOUT_MS = 900_000
+
+
 def configure_gms_lock_mode(engine_args) -> None:
     """Set gms_read_only in model_loader_extra_config based on ENGINE_ID.
 
@@ -51,6 +56,13 @@ def configure_gms_lock_mode(engine_args) -> None:
     disk (RW_OR_RO). All other engines import from GMS (RO). This avoids
     deadlock: if multiple engines tried to acquire RW locks across TP ranks
     simultaneously, they could block each other indefinitely.
+
+    A non-primary engine also gets a default gms_ro_connect_timeout_ms when the
+    operator has not chosen one. GMS prefers writers, so with two or more
+    shadows a reader can be refused admission behind a queued writer; an
+    untimed refusal parks the worker silently. A single-engine deployment is
+    left alone and keeps waiting indefinitely, and an explicit value always
+    wins.
 
     Raises if user-specified gms_read_only conflicts with ENGINE_ID.
     """
@@ -72,6 +84,16 @@ def configure_gms_lock_mode(engine_args) -> None:
                 f"but gms_read_only=False was explicitly set."
             )
         extra["gms_read_only"] = True
+        # Absent, not None: an explicit null is an operator asking for the
+        # indefinite wait, and it wins like any other explicit value.
+        if "gms_ro_connect_timeout_ms" not in extra:
+            extra["gms_ro_connect_timeout_ms"] = SHADOW_RO_CONNECT_TIMEOUT_MS
+            logger.info(
+                "[GMS] ENGINE_ID=%s is a shadow; defaulting "
+                "gms_ro_connect_timeout_ms to %d ms",
+                engine_id,
+                SHADOW_RO_CONNECT_TIMEOUT_MS,
+            )
 
     engine_args.model_loader_extra_config = extra
 

@@ -610,4 +610,9 @@ To bound how long a restored engine waits for the published weights layout befor
 --model-loader-extra-config '{"gms_ro_connect_timeout_ms": 300000}'
 ```
 
-The default is `null`, which waits indefinitely. Set an integer value to fail after that many milliseconds.
+The value bounds both weight admissions an engine performs: the first one, during device init, and the remap after a shadow is promoted. An expiry during the remap is fatal and exits the worker.
+
+An explicit value always wins. When the key is absent, the default depends on the engine:
+
+- a primary engine (`ENGINE_ID=0`) and any engine outside shadow mode default to `null`, which waits indefinitely;
+- a failover shadow (`ENGINE_ID` other than `0`, under `--gms-shadow-mode`) defaults to `900000` ms. GMS prefers writers, so with two or more shadows a reader can be refused admission behind a queued writer, and an untimed refusal parks the worker with no log and no traceback.

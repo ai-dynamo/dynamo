@@ -67,6 +67,11 @@ BENCHMARK_SOFT_TIMEOUT_GRACE_SECONDS = 90
 # serving nor error propagation may hang on it.
 WORKER_GC_STOP_TIMEOUT_SECONDS = 30.0
 
+# Bound for a shadow engine's pause before standby; generous because it spans a
+# real engine sleep. Override with the env var below; "0" waits unbounded.
+SHADOW_PAUSE_TIMEOUT_SECONDS = 900.0
+ENV_SHADOW_PAUSE_TIMEOUT_SECONDS = "DYN_GMS_SHADOW_PAUSE_TIMEOUT_SECONDS"
+
 # (engine_client, vllm_config, default_sampling_params, cleanup_resource, component_gauges)
 # component_gauges is None on the embedding-worker path: pooling engines
 # have no KV cache / scheduler gauges, so setup_vllm_engine() skips the
@@ -1155,7 +1160,44 @@ class WorkerFactory:
         if config.gms_shadow_mode is not True:
             return False
 
-        await handler._pause_controller.pause(1)
+        engine_id = os.environ.get("ENGINE_ID", "0")
+        raw_timeout = os.environ.get(ENV_SHADOW_PAUSE_TIMEOUT_SECONDS)
+        timeout_s = float(raw_timeout) if raw_timeout else SHADOW_PAUSE_TIMEOUT_SECONDS
+        # Exactly "0" waives the bound; everything else must be a positive
+        # finite number. float() also accepts "nan", "inf", and "-1", and all
+        # three otherwise reach an unbounded wait by accident: NaN and a
+        # negative compare false against 0 and fall to the else branch, and
+        # wait_for(inf) never fires.
+        if not math.isfinite(timeout_s) or timeout_s < 0:
+            raise RuntimeError(
+                f"{ENV_SHADOW_PAUSE_TIMEOUT_SECONDS}={raw_timeout!r} is not a "
+                "non-negative finite number of seconds; use a positive value "
+                'to bound the pause, or "0" to wait unbounded'
+            )
+        # %g, not a fixed number of decimals: rounding a sub-second bound down
+        # to "0" would print the one value that means "wait forever".
+        logger.info(
+            "[Shadow] engine-%s pausing before standby (bound %gs)",
+            engine_id,
+            timeout_s,
+        )
+        try:
+            if timeout_s > 0:
+                await asyncio.wait_for(
+                    handler._pause_controller.pause(1), timeout=timeout_s
+                )
+            else:
+                await handler._pause_controller.pause(1)
+        except asyncio.TimeoutError as exc:
+            # Health is deliberately not published here: a shadow that never
+            # paused holds no lock and cannot take a promotion.
+            raise RuntimeError(
+                f"[Shadow] engine-{engine_id} did not finish pausing for standby "
+                f"within {timeout_s:g}s; the engine pause (pause_generation, then "
+                "the engine sleep, which asks GMS to unmap and abort its weights "
+                "and kv_cache mappings) never completed, so this engine cannot "
+                "enter standby"
+            ) from exc
         lock = await elect_and_wake(
             handler._pause_controller,
             runtime,
