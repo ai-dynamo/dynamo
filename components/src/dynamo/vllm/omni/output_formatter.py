@@ -28,13 +28,10 @@ from dynamo.common.protocols.video_protocol import NvVideosResponse, VideoData
 from dynamo.common.storage import upload_to_fs
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.output_modalities import RequestType
-from dynamo.common.utils.video_utils import (
-    encode_to_video_bytes,
-    frames_to_numpy,
-    normalize_video_frames,
-)
+from dynamo.common.utils.video_utils import encode_video
 from dynamo.vllm.handlers import build_prompt_tokens_details
 from dynamo.vllm.omni.utils import is_empty_payload
+from dynamo.vllm.omni.video_convert import to_canonical
 
 logger = logging.getLogger(__name__)
 
@@ -166,16 +163,14 @@ class DiffusionFormatter:
             )
         try:
             start_time = time.time()
-            # Encode with the in-tree VP9 (libvpx-vp9) encoder rather
-            # than diffusers.export_to_video, whose imageio backend defaults to the
-            # H.264 codec that the codec-compliant image no longer ships (it would
-            # fail with "No valid H.264 encoder was found"). encode_to_video_bytes
-            # is the same shared helper the TRT-LLM video handler uses; VP9-in-mp4
-            # is valid and decodes with our VP8/VP9 allowlist.
-            frames_np = frames_to_numpy(normalize_video_frames(images))
-            video_bytes = await asyncio.to_thread(
-                encode_to_video_bytes, frames_np, fps=fps, output_format=output_format
-            )
+            # Route through the shared encoder rather than
+            # diffusers.export_to_video, whose imageio backend defaults to the
+            # H.264 codec the codec-compliant image no longer ships (it would
+            # fail with "No valid H.264 encoder was found"). encode_video is the
+            # single entry point all three backends use; the in-tree ffmpeg is
+            # VP9-only, and VP9-in-mp4 decodes with our VP8/VP9 allowlist.
+            canonical = to_canonical(images)
+            video_bytes = await asyncio.to_thread(encode_video, canonical, fps)
 
             if response_format == "b64_json":
                 video_data = VideoData(
