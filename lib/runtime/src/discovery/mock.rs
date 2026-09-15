@@ -617,8 +617,6 @@ mod tests {
             ("alias-b", Some("org/base"), None, false),
             ("alias-b", None, Some("org/base"), false),
             ("alias-b", Some(""), Some(""), false),
-            ("alias-b", Some("org/base"), Some(""), false),
-            ("alias-b", Some(""), Some("org/base"), false),
         ] {
             let registry = SharedMockRegistry::new();
             let discovery1 = MockDiscovery::new(Some(1), registry.clone());
@@ -816,6 +814,58 @@ mod tests {
             ))
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn register_base_and_lora_require_distinct_served_names() {
+        for (adapter_name, compatible) in [("base", false), ("alias", false), ("adapter", true)] {
+            for adapter_first in [false, true] {
+                let registry = SharedMockRegistry::new();
+                let first = MockDiscovery::new(Some(1), registry.clone());
+                let second = MockDiscovery::new(Some(2), registry);
+                let base = DiscoverySpec::Model {
+                    namespace: "ns".into(),
+                    component: "comp".into(),
+                    endpoint: "generate".into(),
+                    card_json: serde_json::json!({
+                        "display_name": "base",
+                        "aliases": ["alias"],
+                        "source_path": "org/base",
+                    }),
+                    model_suffix: None,
+                };
+                let adapter = lora_model_spec(
+                    "ns",
+                    "comp",
+                    "generate",
+                    adapter_name,
+                    "org/base",
+                    adapter_name,
+                );
+                let (incumbent, newcomer) = if adapter_first {
+                    (adapter, base)
+                } else {
+                    (base, adapter)
+                };
+                let incumbent = first.register(incumbent).await.unwrap();
+                let result = second.register(newcomer).await;
+                assert_eq!(
+                    result.is_ok(),
+                    compatible,
+                    "{adapter_name}, adapter_first={adapter_first}: {result:?}"
+                );
+                let instances = first
+                    .list(DiscoveryQuery::EndpointModels {
+                        namespace: "ns".into(),
+                        component: "comp".into(),
+                        endpoint: "generate".into(),
+                    })
+                    .await
+                    .unwrap();
+                assert!(instances.contains(&incumbent));
+                assert_eq!(instances.len(), if compatible { 2 } else { 1 });
+            }
+        }
     }
 
     #[tokio::test]

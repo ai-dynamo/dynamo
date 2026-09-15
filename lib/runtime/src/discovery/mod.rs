@@ -1219,7 +1219,16 @@ impl ModelRegistrationIdentity {
     }
 
     fn is_compatible_with(&self, other: &Self) -> bool {
-        if self.is_lora || other.is_lora {
+        if self.is_lora != other.is_lora {
+            let (adapter, base) = if self.is_lora {
+                (self, other)
+            } else {
+                (other, self)
+            };
+            adapter.base_identity() == base.base_identity()
+                && adapter.display_name != base.display_name
+                && !base.aliases.contains(&adapter.display_name)
+        } else if self.is_lora {
             self.base_identity() == other.base_identity()
         } else {
             // Preserve existing same-name registration compatibility across local model paths.
