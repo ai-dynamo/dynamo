@@ -843,8 +843,8 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 			ports:             workerPorts,
 			telemetryEnable:   "y",
 			telemetryExporter: "prometheus ",
-			containerGPUs: -1,
-			expectedPorts: map[string]int32{"nixl": 19090},
+			containerGPUs:     -1,
+			expectedPorts:     map[string]int32{"nixl": 19090},
 		},
 		{
 			name:            "no exporter selection reserves no additional ports",
