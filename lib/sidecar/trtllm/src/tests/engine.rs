@@ -304,15 +304,7 @@ async fn start_retries_until_the_deadline_when_the_server_reports_no_context_len
     let service = FakeTrtllm::default();
     service.empty_model_info.store(true, Ordering::SeqCst);
     let server = FakeServer::start(service).await;
-    let engine = TrtllmSidecarEngine::new(
-        GrpcEndpoint::parse(&server.endpoint, "--grpc-endpoint").expect("valid test endpoint"),
-        impatient_transport(),
-        ConfiguredModel {
-            source: "model-source".to_string(),
-            context_length: None,
-        },
-        AGG,
-    );
+    let engine = engine_with(&server.endpoint, impatient_transport(), None, AGG);
 
     let config = engine.start(0).await.expect("start is not blocked");
     assert_eq!(config.llm.expect("llm registration").context_length, None);
@@ -334,15 +326,7 @@ async fn start_waits_for_a_server_that_is_still_loading_its_model() {
         tokio::time::sleep(Duration::from_millis(40)).await;
         ready.store(false, Ordering::SeqCst);
     });
-    let engine = TrtllmSidecarEngine::new(
-        GrpcEndpoint::parse(&server.endpoint, "--grpc-endpoint").expect("valid test endpoint"),
-        impatient_transport(),
-        ConfiguredModel {
-            source: "model-source".to_string(),
-            context_length: None,
-        },
-        AGG,
-    );
+    let engine = engine_with(&server.endpoint, impatient_transport(), None, AGG);
 
     let config = engine.start(0).await.expect("start once the model loads");
     assert_eq!(
@@ -358,15 +342,7 @@ async fn start_waits_for_a_server_that_is_still_loading_its_model() {
 #[tokio::test]
 async fn a_configured_context_length_outranks_the_servers() {
     let server = FakeServer::start(FakeTrtllm::default()).await;
-    let engine = TrtllmSidecarEngine::new(
-        GrpcEndpoint::parse(&server.endpoint, "--grpc-endpoint").expect("valid test endpoint"),
-        transport(1),
-        ConfiguredModel {
-            source: "model-source".to_string(),
-            context_length: Some(8192),
-        },
-        AGG,
-    );
+    let engine = engine_with(&server.endpoint, transport(1), Some(8192), AGG);
 
     let config = engine
         .start(0)
@@ -391,15 +367,7 @@ async fn a_configured_context_length_survives_a_server_without_control() {
     let service = FakeTrtllm::default();
     service.no_control.store(true, Ordering::SeqCst);
     let server = FakeServer::start(service).await;
-    let engine = TrtllmSidecarEngine::new(
-        GrpcEndpoint::parse(&server.endpoint, "--grpc-endpoint").expect("valid test endpoint"),
-        transport(1),
-        ConfiguredModel {
-            source: "model-source".to_string(),
-            context_length: Some(8192),
-        },
-        AGG,
-    );
+    let engine = engine_with(&server.endpoint, transport(1), Some(8192), AGG);
 
     let config = engine
         .start(0)

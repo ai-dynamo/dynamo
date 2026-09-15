@@ -455,12 +455,24 @@ fn engine_in_mode(
     connections: usize,
     mode: DisaggregationMode,
 ) -> TrtllmSidecarEngine {
+    engine_with(endpoint, transport(connections), None, mode)
+}
+
+/// The one place a test engine is built. Everything a test varies -- the
+/// transport, whether `--context-length` was supplied, the disaggregation role
+/// -- is a parameter here.
+fn engine_with(
+    endpoint: &str,
+    transport: GrpcTransportConfig,
+    context_length: Option<u32>,
+    mode: DisaggregationMode,
+) -> TrtllmSidecarEngine {
     TrtllmSidecarEngine::new(
         GrpcEndpoint::parse(endpoint, "--grpc-endpoint").expect("valid test endpoint"),
-        transport(connections),
+        transport,
         ConfiguredModel {
             source: "model-source".to_string(),
-            context_length: None,
+            context_length,
         },
         mode,
     )
