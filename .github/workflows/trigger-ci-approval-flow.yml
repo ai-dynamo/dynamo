@@ -82,6 +82,9 @@ jobs:
       cancel-in-progress: false
       queue: max
     env:
+      REPO_OWNER: ${{ github.repository_owner }}
+      REPO_NAME: ${{ github.event.repository.name }}
+      UNSIGNED_COMMENT_MARKER: "<!-- dynamo-ext-contributor: unsigned -->"
       PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
     steps:
       - name: Resolve current PR and requested commit
@@ -209,8 +212,6 @@ jobs:
         if: steps.approval_check.outputs.is_approved == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          REPO_OWNER: ${{ github.repository_owner }}
-          REPO_NAME: ${{ github.event.repository.name }}
           PR_BASE: ${{ steps.request.outputs.base }}
           PR_SHA: ${{ steps.request.outputs.head }}
         run: |
@@ -258,13 +259,11 @@ jobs:
         if: steps.approval_check.outputs.is_approved == 'true'
         env:
           GH_TOKEN: ${{ secrets.AUTO_VERIFIER_CI_TOKEN }}
-          REPO_OWNER: ${{ github.repository_owner }}
-          REPO_NAME: ${{ github.event.repository.name }}
         run: |
           bot_login=$(gh api user --jq '.login')
           gh api "repos/$REPO_OWNER/$REPO_NAME/issues/$PR_NUMBER/comments" \
-          | jq -r --arg login "$bot_login" \
-            '.[] | select(.user.login == $login and (.body | contains("<!-- dynamo-ext-contributor: unsigned -->"))) | .id' \
+          | jq -r --arg login "$bot_login" --arg marker "$UNSIGNED_COMMENT_MARKER" \
+            '.[] | select(.user.login == $login and (.body | contains($marker))) | .id' \
           | while read -r comment_id; do
               echo "Deleting stale unsigned-commits comment $comment_id"
               gh api --method DELETE "repos/$REPO_OWNER/$REPO_NAME/issues/comments/$comment_id"
@@ -273,12 +272,10 @@ jobs:
         if: steps.approval_check.outputs.is_approved == 'true' && steps.author_permission_check.outputs.is_maintainer == 'true' && steps.signature_check.outputs.all_signed == 'false'
         env:
           GH_TOKEN: ${{ secrets.AUTO_VERIFIER_CI_TOKEN }}
-          REPO_OWNER: ${{ github.repository_owner }}
-          REPO_NAME: ${{ github.event.repository.name }}
           UNSIGNED_COMMITS: ${{ steps.signature_check.outputs.unsigned_commits }}
         run: |
           table=$(echo "$UNSIGNED_COMMITS" | jq -r '.[] | "| `\(.sha)` | \(.reason) |"')
-          body="<!-- dynamo-ext-contributor: unsigned -->
+          body="$UNSIGNED_COMMENT_MARKER
           ## Unsigned Commits Detected
 
           The following commits are not GPG-signed and must be signed before CI can run:
@@ -296,13 +293,11 @@ jobs:
         if: steps.author_check.outputs.is_approved == 'true' && steps.author_permission_check.outputs.is_maintainer != 'true' && steps.signature_check.outputs.all_signed == 'false'
         env:
           GH_TOKEN: ${{ secrets.AUTO_VERIFIER_CI_TOKEN }}
-          REPO_OWNER: ${{ github.repository_owner }}
-          REPO_NAME: ${{ github.event.repository.name }}
           PR_SHA: ${{ steps.request.outputs.head }}
           UNSIGNED_COMMITS: ${{ steps.signature_check.outputs.unsigned_commits }}
         run: |
           table=$(echo "$UNSIGNED_COMMITS" | jq -r '.[] | "| `\(.sha)` | \(.reason) |"')
-          body="<!-- dynamo-ext-contributor: unsigned -->
+          body="$UNSIGNED_COMMENT_MARKER
           ## Automatic CI Approval Skipped
 
           Automatic approval requires every commit to have a signature that GitHub reports as verified. The following commits do not meet that requirement:
@@ -320,8 +315,6 @@ jobs:
         if: steps.approval_check.outputs.is_approved == 'true' && steps.signature_check.outputs.all_signed == 'true'
         env:
           GH_TOKEN: ${{ secrets.AUTO_VERIFIER_CI_TOKEN }}
-          REPO_OWNER: ${{ github.repository_owner }}
-          REPO_NAME: ${{ github.event.repository.name }}
           PR_BASE: ${{ steps.request.outputs.base }}
           PR_SHA: ${{ steps.request.outputs.head }}
         run: |
