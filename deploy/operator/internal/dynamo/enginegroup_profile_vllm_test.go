@@ -82,13 +82,17 @@ func TestResolveVLLMProfileGeometryCurrentOwnershipUnsupported(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Log("build an inspectable declaration for the selected vLLM ownership mode")
 			source := newTestVLLMProfileGeometrySource(test.command, test.args)
 			if test.removeFlag != "" {
 				source.Args = removeTestVLLMFlag(source.Args, test.removeFlag)
 			}
 
+			t.Log("resolve the declaration against the current engine-supported boundary")
 			_, err := ResolveVLLMProfileGeometry(source)
 			require.Error(t, err)
+
+			t.Log("verify unsupported ownership is explicit and machine-readable")
 			assert.ErrorIs(t, err, ErrUnsupportedVLLMProfileSource)
 			assert.ErrorIs(t, err, enginegroup.ErrUnsupportedProfile)
 			assert.ErrorContains(t, err, test.wantDetail)
@@ -129,13 +133,17 @@ func TestResolveVLLMProfileGeometryDPAssertions(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Log("build a vLLM declaration with inconsistent DP cardinality")
 			source := newTestVLLMProfileGeometrySource(
 				[]string{"python3", "-m", "dynamo.vllm"},
 				test.args,
 			)
 			source.InitialReplicas = test.initialReplicas
 
+			t.Log("resolve the creation-time DP assertion")
 			_, err := ResolveVLLMProfileGeometry(source)
+
+			t.Log("verify invalid cardinality is a configuration error, not an unsupported profile")
 			require.ErrorContains(t, err, test.wantError)
 			assert.False(t, errors.Is(err, ErrUnsupportedVLLMProfileSource))
 		})
@@ -198,6 +206,7 @@ func TestResolveVLLMProfileGeometryNativeEnvironment(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Log("build a vLLM declaration with a native DP environment source")
 			source := newTestVLLMProfileGeometrySource(
 				[]string{"python3", "-m", "dynamo.vllm"},
 				test.args,
@@ -206,8 +215,11 @@ func TestResolveVLLMProfileGeometryNativeEnvironment(t *testing.T) {
 			source.Environment = test.environment
 			source.HasUnresolvedDPEnvironment = test.hasUnresolvedDPEnvironment
 
+			t.Log("apply the same CLI-versus-environment precedence as vLLM")
 			_, err := ResolveVLLMProfileGeometry(source)
 			require.Error(t, err)
+
+			t.Log("verify the effective DP value or the expected unsupported classification")
 			if test.wantError != "" {
 				assert.ErrorContains(t, err, test.wantError)
 				return
@@ -297,10 +309,14 @@ func TestResolveVLLMProfileGeometryUnsupportedSources(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Log("build a vLLM source whose effective declaration is not statically inspectable")
 			source := newTestVLLMProfileGeometrySource(test.command, test.args)
 
+			t.Log("attempt strict profile resolution")
 			_, err := ResolveVLLMProfileGeometry(source)
 			require.Error(t, err)
+
+			t.Log("verify the stable unsupported-source reason")
 			assert.ErrorIs(t, err, ErrUnsupportedVLLMProfileSource)
 			assert.ErrorIs(t, err, enginegroup.ErrUnsupportedProfile)
 
@@ -346,12 +362,16 @@ func TestResolveVLLMProfileGeometryMalformedArguments(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Log("build a literal but malformed vLLM declaration")
 			source := newTestVLLMProfileGeometrySource(
 				[]string{"python3", "-m", "dynamo.vllm"},
 				test.args,
 			)
 
+			t.Log("parse the malformed geometry")
 			_, err := ResolveVLLMProfileGeometry(source)
+
+			t.Log("verify malformed input remains a configuration error")
 			require.ErrorContains(t, err, test.wantError)
 			assert.False(t, errors.Is(err, ErrUnsupportedVLLMProfileSource))
 			assert.False(t, errors.Is(err, enginegroup.ErrUnsupportedProfile))
@@ -360,6 +380,7 @@ func TestResolveVLLMProfileGeometryMalformedArguments(t *testing.T) {
 }
 
 func TestResolveVLLMProfileGeometryIgnoresUnrelatedLiteralArguments(t *testing.T) {
+	t.Log("build a source with fixed-value expansion and literal syntax outside geometry")
 	source := newTestVLLMProfileGeometrySource(
 		[]string{"python3"},
 		[]string{
@@ -373,7 +394,10 @@ func TestResolveVLLMProfileGeometryIgnoresUnrelatedLiteralArguments(t *testing.T
 		},
 	)
 
+	t.Log("resolve only options that can affect profile geometry or ownership")
 	_, err := ResolveVLLMProfileGeometry(source)
+
+	t.Log("verify unrelated literals do not obscure the ownership boundary")
 	require.Error(t, err)
 	var sourceError *UnsupportedVLLMProfileSourceError
 	require.ErrorAs(t, err, &sourceError)
@@ -381,6 +405,7 @@ func TestResolveVLLMProfileGeometryIgnoresUnrelatedLiteralArguments(t *testing.T
 }
 
 func TestResolveVLLMProfileGeometryDoesNotMutateSource(t *testing.T) {
+	t.Log("capture an independently owned copy of the provider source")
 	source := newTestVLLMProfileGeometrySource(
 		[]string{"python3", "-m", "dynamo.vllm"},
 		[]string{"-tp", "4", "-pp", "1", "-dp", "8", "-dpl", "1"},
@@ -388,8 +413,11 @@ func TestResolveVLLMProfileGeometryDoesNotMutateSource(t *testing.T) {
 	source.Environment = map[string]string{vllmDPSizeEnvironment: "4"}
 	before := cloneTestVLLMProfileGeometrySource(source)
 
+	t.Log("resolve the source through parsing and native-environment precedence")
 	_, err := ResolveVLLMProfileGeometry(source)
 	require.Error(t, err)
+
+	t.Log("verify resolution does not mutate caller-owned command, arguments, or environment")
 	assert.Equal(t, before, source)
 }
 
