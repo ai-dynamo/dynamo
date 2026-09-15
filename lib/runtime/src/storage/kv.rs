@@ -333,9 +333,7 @@ impl Manager {
         }
     }
 
-    /// Returns a receiver that will receive all the existing keys, and
-    /// then block and receive new keys as they are created.
-    /// Starts a task that runs forever, watches the store.
+    /// Returns existing keys, then updates, until the receiver, token, or backend closes.
     pub fn watch(
         self: Arc<Self>,
         bucket_name: &str,
@@ -349,19 +347,26 @@ impl Manager {
         // Backpressure is intentional: discovery state events must never be dropped.
         let (tx, rx) = tokio::sync::mpsc::channel(16384);
         let watch_task = tokio::spawn(async move {
-            // Start listening for changes but don't poll this yet
-            let bucket = self
-                .0
-                .get_or_create_bucket(&bucket_name, bucket_ttl)
-                .await?;
-            // Bucket::watch atomically establishes its initial snapshot and incremental
-            // stream. A separate entries() read here could replay an older buffered update
-            // after a newer snapshot.
-            let mut stream = bucket.watch().await?;
+            let receiver_closed = tx.closed();
+            tokio::pin!(receiver_closed);
+            let cancelled = cancel_token.cancelled();
+            tokio::pin!(cancelled);
+
+            let bucket = tokio::select! {
+                _ = &mut receiver_closed => return Ok(()),
+                _ = &mut cancelled => return Ok(()),
+                result = self.0.get_or_create_bucket(&bucket_name, bucket_ttl) => result?,
+            };
+            let mut stream = tokio::select! {
+                _ = &mut receiver_closed => return Ok(()),
+                _ = &mut cancelled => return Ok(()),
+                result = bucket.watch() => result?,
+            };
 
             loop {
                 let event = tokio::select! {
-                    _ = cancel_token.cancelled() => break,
+                    _ = &mut cancelled => break,
+                    _ = &mut receiver_closed => break,
                     result = stream.next() => match result {
                         Some(event) => event,
                         None => break,
@@ -591,6 +596,40 @@ mod tests {
 
         cancel_token.cancel();
         watch_task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn manager_watch_stops_when_receiver_is_dropped() {
+        let manager = Arc::new(Manager::memory());
+        let bucket = manager
+            .get_or_create_bucket(BUCKET_NAME, None)
+            .await
+            .unwrap();
+        let key = Key::new("ns/worker/generate/1".to_string());
+        bucket.insert(&key, "value".into(), 1).await.unwrap();
+
+        let cancel_token = CancellationToken::new();
+        let (watch_task, mut rx) = manager
+            .clone()
+            .watch(BUCKET_NAME, None, cancel_token.clone());
+
+        let initial = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(initial, WatchEvent::Put(_)));
+
+        drop(rx);
+
+        tokio::time::timeout(Duration::from_secs(5), watch_task)
+            .await
+            .expect("watch task must stop when its receiver is dropped")
+            .unwrap()
+            .unwrap();
+        assert!(
+            !cancel_token.is_cancelled(),
+            "termination must not depend on the cancellation token"
+        );
     }
 
     #[tokio::test]
