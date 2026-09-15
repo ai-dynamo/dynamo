@@ -209,12 +209,13 @@ impl SanitizedError {
     /// generic `api_error`.
     pub fn anthropic_type(self) -> &'static str {
         match self {
-            SanitizedError::Cancelled => "request_cancelled",
+            SanitizedError::Cancelled => "api_error",
             SanitizedError::Overloaded => "overloaded_error",
             SanitizedError::Unavailable => "overloaded_error",
             SanitizedError::Internal => "api_error",
             SanitizedError::PreserveServerError(status) => match status.as_u16() {
                 503 | 529 => "overloaded_error",
+                504 => "timeout_error",
                 _ => "api_error",
             },
         }
@@ -367,6 +368,13 @@ mod tests {
         let err = SanitizedError::PreserveServerError(StatusCode::from_u16(529).unwrap());
         assert_eq!(err.anthropic_type(), "overloaded_error");
         assert_eq!(err.openai_type_slug(), "service_unavailable");
+    }
+
+    #[test]
+    fn preserve_server_error_504_maps_to_timeout_type() {
+        let err = SanitizedError::PreserveServerError(StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(err.anthropic_type(), "timeout_error");
+        assert_eq!(err.openai_type_slug(), "internal_server_error");
     }
 
     #[test]

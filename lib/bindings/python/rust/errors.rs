@@ -138,11 +138,10 @@ define_dynamo_exceptions!(
 /// status. Accepts `.code` (matches [`HttpError`] in `http.rs`) or `.status`
 /// (matches `dynamo.common.http.HttpStatusError`) plus `.message`.
 ///
-/// SECURITY: `.message` is forwarded verbatim to clients on 4xx responses
-/// (HTTP protocol contract). Python callers must ensure it contains no
-/// internal state, file paths, traceback strings, or backend identifiers.
-/// Non-4xx codes (including 5xx) are sanitized downstream — the original
-/// message survives in server logs only.
+/// SECURITY: `.message` is diagnostic-only. HTTP-like exceptions can wrap remote
+/// fetch failures whose text includes URLs or internal connection details. The
+/// semantic status is preserved, but client renderers use the class catalog
+/// unless the producer raised an explicitly public Dynamo exception.
 pub fn extract_http_like_error(py: Python<'_>, err: &PyErr) -> Option<(u16, String)> {
     let value = err.value(py);
     let code = value
