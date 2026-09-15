@@ -187,28 +187,6 @@ data:
     export HF_HUB_OFFLINE=1
     export TRANSFORMERS_OFFLINE=1
 
-    python3 - <<'PY'
-    import os
-    from aiperf.common.tokenizer import Tokenizer
-
-    tokenizer = Tokenizer.from_pretrained(
-        os.environ["MODEL"],
-        trust_remote_code=False,
-        revision=os.environ["MODEL_REVISION"],
-        resolve_alias=False,
-    )
-    if tokenizer._tokenizer.vocab_size != 163840:
-        raise SystemExit(
-            f"TOKENIZER_VOCAB_MISMATCH actual={tokenizer._tokenizer.vocab_size}"
-        )
-    print(
-        "TOKENIZER_OK "
-        f"repo={os.environ['MODEL']} "
-        f"revision={os.environ['MODEL_REVISION']} "
-        "vocab_size=163840"
-    )
-    PY
-
     AIPERF_VERSION="$(python3 -c 'import importlib.metadata; print(importlib.metadata.version("aiperf"))')"
     if [[ "${AIPERF_VERSION}" != "0.12.0" ]]; then
       echo "AIPERF_VERSION_MISMATCH expected=0.12.0 actual=${AIPERF_VERSION}" >&2

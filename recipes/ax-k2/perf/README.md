@@ -109,9 +109,8 @@ DGD manifest, pod logs, AIPerf expanded configs, raw reports, and frontend
 The AIPerf-side Transformers build does not recognize the custom `axk2` model
 configuration. The runner therefore downloads only four tokenizer assets from
 the same pinned model revision. It places them in an isolated, tokenizer-only
-Hugging Face snapshot under `/tmp/axk2-tokenizer-hf`, verifies the 163,840-token
-vocabulary, and points AIPerf at the revision-pinned repo ID through that
-offline snapshot.
+Hugging Face snapshot under `/tmp/axk2-tokenizer-hf` and points AIPerf at the
+revision-pinned repo ID through that offline snapshot.
 
 The synthetic snapshot layout is necessary for AIPerf 0.12.0 Mooncake traces:
 parallel prompt synthesis forces offline mode and resolves tokenizers through
