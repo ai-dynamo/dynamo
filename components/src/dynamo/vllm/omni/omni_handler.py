@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import copy
 import functools
 import logging
 import os
@@ -700,6 +701,83 @@ class OmniHandler(BaseOmniHandler):
                 )
         return result if result else [diffusion_sp]
 
+    def _build_video_sampling_params_list(
+        self, req: NvCreateVideoRequest, nvext: VideoNvExt
+    ) -> tuple[list, OmniDiffusionSamplingParams]:
+        """Clone per-stage model defaults and apply explicit video overrides."""
+        defaults = list(self.engine_client.default_sampling_params_list or [])
+        if not defaults:
+            defaults = [OmniDiffusionSamplingParams()]
+            stage_types = ["diffusion"]
+        else:
+            stage_types = [
+                getattr(
+                    self.engine_client.engine.get_stage_metadata(i),
+                    "stage_type",
+                    "llm",
+                )
+                for i in range(len(defaults))
+            ]
+
+        result = []
+        output_sp = None
+        for default, stage_type in zip(defaults, stage_types, strict=True):
+            if stage_type != "diffusion":
+                result.append(
+                    default.clone() if hasattr(default, "clone") else SamplingParams()
+                )
+                continue
+
+            sp = (
+                copy.deepcopy(default)
+                if isinstance(default, OmniDiffusionSamplingParams)
+                else OmniDiffusionSamplingParams()
+            )
+            self._apply_video_sampling_overrides(sp, req, nvext)
+            result.append(sp)
+            output_sp = sp
+
+        if output_sp is None:
+            raise ValueError("Video generation requires a diffusion stage")
+        return result, output_sp
+
+    def _apply_video_sampling_overrides(
+        self,
+        sp: OmniDiffusionSamplingParams,
+        req: NvCreateVideoRequest,
+        nvext: VideoNvExt,
+    ) -> None:
+        """Overlay only fields explicitly supplied by a video request."""
+        if req.size is not None:
+            width, height = parse_size(req.size)
+            sp.width = width
+            sp.height = height
+
+        if nvext.num_frames is not None:
+            sp.num_frames = nvext.num_frames
+        elif req.seconds is not None:
+            model_fps = getattr(sp, "fps", None) or getattr(sp, "frame_rate", None)
+            sp.num_frames = compute_num_frames(
+                num_frames=None,
+                seconds=req.seconds,
+                fps=nvext.fps or model_fps,
+                default_fps=int(
+                    getattr(self.config, "default_video_fps", DEFAULT_VIDEO_FPS)
+                ),
+            )
+
+        if nvext.fps is not None:
+            sp.fps = nvext.fps
+            if hasattr(sp, "frame_rate"):
+                sp.frame_rate = float(nvext.fps)
+
+        self._update_if_not_none(sp, "num_inference_steps", nvext.num_inference_steps)
+        self._update_if_not_none(sp, "guidance_scale", nvext.guidance_scale)
+        self._update_if_not_none(sp, "seed", nvext.seed)
+        self._update_if_not_none(sp, "boundary_ratio", nvext.boundary_ratio)
+        self._update_if_not_none(sp, "guidance_scale_2", nvext.guidance_scale_2)
+        _apply_media_passthrough(sp, req.extra_args)
+
     def _engine_inputs_from_image(self, req: NvCreateImageRequest) -> EngineInputs:
         """Build engine inputs from an NvCreateImageRequest."""
         # req.size is a free-form client string, so it needs the same bound the
@@ -755,16 +833,7 @@ class OmniHandler(BaseOmniHandler):
                 attached to the prompt via ``multi_modal_data`` so vllm-omni's
                 I2V pipeline pre-process can use it.
         """
-        width, height = parse_size(req.size)
         nvext = req.nvext or VideoNvExt()
-
-        num_frames = compute_num_frames(
-            num_frames=nvext.num_frames,
-            seconds=req.seconds,
-            fps=nvext.fps,
-            default_fps=DEFAULT_VIDEO_FPS,
-        )
-        fps = nvext.fps if nvext.fps is not None else DEFAULT_VIDEO_FPS
 
         prompt = OmniTextPrompt(prompt=req.prompt)
         if nvext.negative_prompt is not None:
@@ -778,38 +847,32 @@ class OmniHandler(BaseOmniHandler):
                 image.size[1],
             )
 
-        sp = OmniDiffusionSamplingParams(
-            height=height,
-            width=width,
-            num_frames=num_frames,
+        sampling_params_list, output_sp = self._build_video_sampling_params_list(
+            req, nvext
         )
-        self._update_if_not_none(sp, "num_inference_steps", nvext.num_inference_steps)
-        self._update_if_not_none(sp, "guidance_scale", nvext.guidance_scale)
-        sp.seed = (
-            nvext.seed if nvext.seed is not None else random.randint(0, 2**32 - 1)
-        )
-        self._update_if_not_none(sp, "boundary_ratio", nvext.boundary_ratio)
-        self._update_if_not_none(sp, "guidance_scale_2", nvext.guidance_scale_2)
-        self._update_if_not_none(sp, "fps", fps)
-        _apply_media_passthrough(sp, req.extra_args)
-
-        sampling_params_list = self._build_sampling_params_list(sp)
         lora_request = self._resolve_and_apply_lora(req.model, sampling_params_list)
+
+        model_fps = getattr(output_sp, "fps", None) or getattr(
+            output_sp, "frame_rate", None
+        )
+        output_fps = int(
+            model_fps or getattr(self.config, "default_video_fps", DEFAULT_VIDEO_FPS)
+        )
 
         logger.info(
             "Video diffusion request: prompt='%s...', size=%sx%s, frames=%s, fps=%s",
             req.prompt[:50],
-            width,
-            height,
-            num_frames,
-            fps,
+            getattr(output_sp, "width", None),
+            getattr(output_sp, "height", None),
+            getattr(output_sp, "num_frames", None),
+            model_fps,
         )
 
         return EngineInputs(
             prompt=prompt,
             sampling_params_list=sampling_params_list,
             request_type=RequestType.VIDEO_GENERATION,
-            fps=fps,
+            fps=output_fps,
             response_format=req.response_format,
             output_format=req.output_format,
             lora_request=lora_request,
