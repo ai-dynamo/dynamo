@@ -49,6 +49,18 @@ def is_local_media_url(url: str) -> bool:
 # Generous enough to keep an ordinary URL intact and identifiable.
 SOURCE_LABEL_LIMIT: Final = 120
 
+_DATA_SCHEME: Final = "data:"
+
+
+def _is_data_uri(source: str) -> bool:
+    """True when ``source`` carries the ``data:`` scheme, in any case.
+
+    URI schemes are case-insensitive (RFC 3986), and ``urlparse`` lowercases
+    them, so the rest of this module already accepts ``DATA:``. Slicing keeps
+    this cheap on a multi-megabyte payload.
+    """
+    return source[: len(_DATA_SCHEME)].lower() == _DATA_SCHEME
+
 
 def describe_media_source(source: str, limit: int = SOURCE_LABEL_LIMIT) -> str:
     """Render ``source`` as a bounded label safe to put in an error or log.
@@ -61,8 +73,8 @@ def describe_media_source(source: str, limit: int = SOURCE_LABEL_LIMIT) -> str:
     """
     if not isinstance(source, str):
         return "<non-string media source>"
-    if source.startswith("data:"):
-        meta = source[len("data:") :].partition(",")[0]
+    if _is_data_uri(source):
+        meta = source[len(_DATA_SCHEME) :].partition(",")[0]
         media_type = meta.split(";")[0] or "application/octet-stream"
         return f"data:{media_type} ({len(source)} chars, payload elided)"
     if len(source) > limit:
@@ -81,7 +93,8 @@ def decode_data_uri(url: str) -> bytes:
     meta, sep, payload = remainder.partition(",")
     if not sep:
         raise UrlValidationError("Malformed data URI: missing ',' separator")
-    if "base64" not in meta.split(";"):
+    # RFC 2045 makes the encoding token case-insensitive.
+    if "base64" not in [token.lower() for token in meta.split(";")]:
         raise UrlValidationError("Unsupported data URI: expected base64 payload")
     try:
         return base64.b64decode(unquote(payload), validate=True)

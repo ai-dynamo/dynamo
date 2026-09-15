@@ -18,6 +18,7 @@ import pytest
 
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.multimodal.media_source import (
+    _decode_data_uri,
     describe_media_source,
     is_local_media_url,
     read_local_media_bytes,
@@ -123,6 +124,33 @@ def test_describe_media_source_elides_a_data_uri_payload() -> None:
     assert "data:video/mp4" in label
     assert "payload elided" in label
     assert len(label) < 100
+
+
+@pytest.mark.parametrize("scheme", ["DATA:"])
+def test_describe_media_source_elides_a_data_uri_in_any_scheme_case(
+    scheme: str,
+) -> None:
+    """URI schemes are case-insensitive, and the rest of this module accepts
+    ``DATA:`` because ``urlparse`` lowercases it. A case-sensitive check here
+    reproduced the payload it exists to withhold, in full when the URI was
+    shorter than the truncation limit."""
+    payload = base64.b64encode(b"secret-media-bytes").decode()
+    url = f"{scheme}image/png;base64,{payload}"
+    assert len(url) < 120, "fixture must sit under the truncation limit"
+
+    label = describe_media_source(url)
+
+    assert payload not in label
+    assert "payload elided" in label
+
+
+@pytest.mark.parametrize("token", ["BASE64"])
+def test_base64_data_uri_accepted_in_any_token_case(token: str) -> None:
+    """RFC 2045 makes the encoding token case-insensitive, so a spec-valid
+    ``;BASE64`` URI must not be refused."""
+    payload = base64.b64encode(b"hello").decode()
+
+    assert _decode_data_uri(f"data:image/png;{token},{payload}") == b"hello"
 
 
 def test_describe_media_source_keeps_an_ordinary_url_intact() -> None:
