@@ -485,6 +485,81 @@ impl rustls::client::ResolvesClientCert for ReloadingCertifiedKey {
     }
 }
 
+#[cfg(test)]
+pub(crate) mod test_certs {
+    use std::io::Write;
+
+    use rcgen::{
+        BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair,
+    };
+    use tempfile::NamedTempFile;
+
+    pub(crate) type IdentityFiles = (NamedTempFile, NamedTempFile);
+    pub(crate) type MtlsChainFiles = (
+        NamedTempFile,
+        NamedTempFile,
+        NamedTempFile,
+        NamedTempFile,
+        NamedTempFile,
+    );
+
+    fn write_pem(contents: &str) -> NamedTempFile {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(contents.as_bytes()).unwrap();
+        file
+    }
+
+    pub(crate) fn self_signed_pem() -> (String, String) {
+        let key_pair = KeyPair::generate().unwrap();
+        let cert = CertificateParams::new(vec!["localhost".to_string()])
+            .unwrap()
+            .self_signed(&key_pair)
+            .unwrap();
+        (cert.pem(), key_pair.serialize_pem())
+    }
+
+    pub(crate) fn self_signed_pair() -> IdentityFiles {
+        let (cert, key) = self_signed_pem();
+        (write_pem(&cert), write_pem(&key))
+    }
+
+    pub(crate) fn mtls_chain() -> MtlsChainFiles {
+        let ca_key = KeyPair::generate().unwrap();
+        let mut ca_params = CertificateParams::new(Vec::new()).unwrap();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params
+            .distinguished_name
+            .push(DnType::CommonName, "Dynamo Test CA");
+        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+
+        let server_key = KeyPair::generate().unwrap();
+        let mut server_params = CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+        server_params
+            .extended_key_usages
+            .push(ExtendedKeyUsagePurpose::ServerAuth);
+        let server_cert = server_params
+            .signed_by(&server_key, &ca_cert, &ca_key)
+            .unwrap();
+
+        let client_key = KeyPair::generate().unwrap();
+        let mut client_params = CertificateParams::new(vec!["dynamo-client".to_string()]).unwrap();
+        client_params
+            .extended_key_usages
+            .push(ExtendedKeyUsagePurpose::ClientAuth);
+        let client_cert = client_params
+            .signed_by(&client_key, &ca_cert, &ca_key)
+            .unwrap();
+
+        (
+            write_pem(&ca_cert.pem()),
+            write_pem(&server_cert.pem()),
+            write_pem(&server_key.serialize_pem()),
+            write_pem(&client_cert.pem()),
+            write_pem(&client_key.serialize_pem()),
+        )
+    }
+}
+
 /// Certificate verifier that accepts any certificate.
 /// **Only for development/testing. Never use in production.**
 #[derive(Debug)]
@@ -530,40 +605,24 @@ impl rustls::client::danger::ServerCertVerifier for NoVerifier {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
     use tempfile::NamedTempFile;
-
-    fn make_cert_files() -> (NamedTempFile, NamedTempFile) {
-        let key_pair = rcgen::KeyPair::generate().unwrap();
-        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
-            .unwrap()
-            .self_signed(&key_pair)
-            .unwrap();
-        let mut cert_file = NamedTempFile::new().unwrap();
-        cert_file.write_all(cert.pem().as_bytes()).unwrap();
-        let mut key_file = NamedTempFile::new().unwrap();
-        key_file
-            .write_all(key_pair.serialize_pem().as_bytes())
-            .unwrap();
-        (cert_file, key_file)
-    }
 
     #[test]
     fn server_config_roundtrip() {
-        let (cert, key) = make_cert_files();
+        let (cert, key) = test_certs::self_signed_pair();
         server_tls_config(cert.path(), key.path(), None).unwrap();
     }
 
     #[test]
     fn server_config_with_mtls() {
         // A client CA turns on client-certificate verification (mTLS).
-        let (cert, key) = make_cert_files();
+        let (cert, key) = test_certs::self_signed_pair();
         server_tls_config(cert.path(), key.path(), Some(cert.path())).unwrap();
     }
 
     #[test]
     fn server_config_mtls_empty_client_ca_errors() {
-        let (cert, key) = make_cert_files();
+        let (cert, key) = test_certs::self_signed_pair();
         let empty = NamedTempFile::new().unwrap();
         assert!(
             server_tls_config(cert.path(), key.path(), Some(empty.path()))
@@ -582,7 +641,7 @@ mod tests {
                 .to_string()
                 .contains("reading cert")
         );
-        let (cert, _) = make_cert_files();
+        let (cert, _) = test_certs::self_signed_pair();
         assert!(
             server_tls_config(cert.path(), missing, None)
                 .unwrap_err()
@@ -591,18 +650,9 @@ mod tests {
         );
     }
 
-    fn make_cert_pem() -> (String, String) {
-        let key_pair = rcgen::KeyPair::generate().unwrap();
-        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
-            .unwrap()
-            .self_signed(&key_pair)
-            .unwrap();
-        (cert.pem(), key_pair.serialize_pem())
-    }
-
     #[test]
     fn certified_key_reloads_rotated_files() {
-        let (cert1, key1) = make_cert_pem();
+        let (cert1, key1) = test_certs::self_signed_pem();
         let cert_file = NamedTempFile::new().unwrap();
         let key_file = NamedTempFile::new().unwrap();
         std::fs::write(cert_file.path(), &cert1).unwrap();
@@ -612,7 +662,7 @@ mod tests {
         let before = resolver.resolve_key().cert[0].clone();
 
         // Rotate the file contents in place and force a re-check.
-        let (cert2, key2) = make_cert_pem();
+        let (cert2, key2) = test_certs::self_signed_pem();
         std::fs::write(cert_file.path(), &cert2).unwrap();
         std::fs::write(key_file.path(), &key2).unwrap();
         resolver.reload_now().unwrap();
@@ -632,7 +682,7 @@ mod tests {
         // into a per-generation directory, rotated by an atomic rename over the
         // link.
         let dir = tempfile::tempdir().unwrap();
-        let (c1, k1) = make_cert_pem();
+        let (c1, k1) = test_certs::self_signed_pem();
         let gen1 = dir.path().join("gen1");
         std::fs::create_dir(&gen1).unwrap();
         std::fs::write(gen1.join("tls.crt"), &c1).unwrap();
@@ -646,7 +696,7 @@ mod tests {
         let resolver = ReloadingCertifiedKey::new(&cert_link, &key_link).unwrap();
         let before = resolver.resolve_key().cert[0].clone();
 
-        let (c2, k2) = make_cert_pem();
+        let (c2, k2) = test_certs::self_signed_pem();
         let gen2 = dir.path().join("gen2");
         std::fs::create_dir(&gen2).unwrap();
         std::fs::write(gen2.join("tls.crt"), &c2).unwrap();
@@ -669,7 +719,7 @@ mod tests {
 
     #[test]
     fn certified_key_keeps_previous_on_corrupt_reload() {
-        let (c1, k1) = make_cert_pem();
+        let (c1, k1) = test_certs::self_signed_pem();
         let cert_file = NamedTempFile::new().unwrap();
         let key_file = NamedTempFile::new().unwrap();
         std::fs::write(cert_file.path(), &c1).unwrap();
@@ -699,14 +749,14 @@ mod tests {
 
     #[test]
     fn client_config_with_ca() {
-        let (cert, _) = make_cert_files();
+        let (cert, _) = test_certs::self_signed_pair();
         client_tls_config(Some(cert.path()), false, None, None).unwrap();
     }
 
     #[test]
     fn client_config_with_mtls() {
         // A client cert/key pair is presented as the client identity (mTLS).
-        let (cert, key) = make_cert_files();
+        let (cert, key) = test_certs::self_signed_pair();
         client_tls_config(
             Some(cert.path()),
             false,
@@ -719,14 +769,14 @@ mod tests {
     #[test]
     fn client_config_mtls_insecure() {
         // Client identity is also honored in insecure (no server verification) mode.
-        let (cert, key) = make_cert_files();
+        let (cert, key) = test_certs::self_signed_pair();
         client_tls_config(None, true, Some(cert.path()), Some(key.path())).unwrap();
     }
 
     #[test]
     fn client_config_partial_mtls_errors() {
         // Cert without key (or vice versa) is rejected.
-        let (cert, _) = make_cert_files();
+        let (cert, _) = test_certs::self_signed_pair();
         assert!(client_tls_config(Some(cert.path()), false, Some(cert.path()), None).is_err());
     }
 

@@ -8,6 +8,7 @@ use crate::{
         KvRouter,
         indexer::ApproximateRequestLease,
         metrics::RouterRequestMetrics,
+        prefill_router::BYPASS_REMOTE_PREFILL_ANNOTATION,
         request_lease::RequestAttemptLease,
         scheduler::{DefaultWorkerSelector, SchedulerBookingDescriptor},
     },
@@ -280,10 +281,24 @@ impl RequestObservability {
         self.dispatch_guard = Some(StageGuard::new(STAGE_DISPATCH, phase_label));
     }
 
-    fn record_prefill_start(&self) {
-        if let Some(tracker) = &self.tracker {
-            tracker.record_prefill_start();
+    /// Record prefill start for dispatches that actually run prefill.
+    ///
+    /// Decode normally skips this timestamp. Conditional disaggregation is the
+    /// exception: it labels the request Decode while the selected decode worker
+    /// runs local prefill and decode from the full prompt.
+    fn record_prefill_start(&self, request: &PreprocessedRequest) {
+        let Some(tracker) = &self.tracker else {
+            return;
+        };
+        let includes_prefill = tracker.phase() != RequestPhase::Decode
+            || request
+                .annotations
+                .iter()
+                .any(|annotation| annotation == BYPASS_REMOTE_PREFILL_ANNOTATION);
+        if !includes_prefill {
+            return;
         }
+        tracker.record_prefill_start();
     }
 
     fn mark_dispatched(&mut self) {
@@ -677,8 +692,8 @@ where
         self.observability.start_dispatch(phase_label);
     }
 
-    pub(super) fn record_prefill_start(&self) {
-        self.observability.record_prefill_start();
+    pub(super) fn record_prefill_start(&self, request: &PreprocessedRequest) {
+        self.observability.record_prefill_start(request);
     }
 
     pub(super) fn mark_dispatched(&mut self) {
@@ -955,5 +970,110 @@ mod output_hash_tests {
                 .collect::<Vec<_>>(),
             expected
         );
+    }
+}
+
+#[cfg(test)]
+mod prefill_start_tests {
+    use super::*;
+
+    fn test_request(tracker: Arc<RequestTracker>, annotations: Vec<String>) -> PreprocessedRequest {
+        PreprocessedRequest::builder()
+            .model("test".to_string())
+            .token_ids(vec![1])
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .annotations(annotations)
+            .tracker(Some(tracker))
+            .build()
+            .unwrap()
+    }
+
+    fn test_metrics() -> Arc<RouterRequestMetrics> {
+        fn hist(name: &str) -> prometheus::Histogram {
+            prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(name, name)).unwrap()
+        }
+        fn hist_vec(name: &str) -> prometheus::HistogramVec {
+            prometheus::HistogramVec::new(prometheus::HistogramOpts::new(name, name), &["reason"])
+                .unwrap()
+        }
+        Arc::new(RouterRequestMetrics {
+            requests_total: prometheus::IntCounter::new("requests_total", "test").unwrap(),
+            time_to_first_token_seconds: hist("ttft_seconds"),
+            inter_token_latency_seconds: hist("itl_seconds"),
+            input_sequence_tokens: hist("isl_tokens"),
+            output_sequence_tokens: hist("osl_tokens"),
+            kv_hit_rate: hist("kv_hit_rate"),
+            kv_transfer_estimated_latency_seconds: hist("kv_transfer_seconds"),
+            shared_cache_hit_rate: hist("shared_cache_hit_rate"),
+            shared_cache_beyond_blocks: hist("shared_cache_beyond_blocks"),
+            non_max_overlap_selections_total: prometheus::IntCounterVec::new(
+                prometheus::Opts::new("non_max_overlap_selections_total", "test"),
+                &["reason"],
+            )
+            .unwrap(),
+            overlap_blocks_lost: hist_vec("overlap_blocks_lost"),
+        })
+    }
+
+    async fn dispatch_once(phase: RequestPhase, annotations: Vec<String>) -> Arc<RequestTracker> {
+        let tracker = Arc::new(RequestTracker::new());
+        let _permit = tracker.set_phase(phase).await;
+        let request = test_request(tracker.clone(), annotations);
+        RequestObservability::new(request.tracker.clone(), test_metrics())
+            .record_prefill_start(&request);
+        tracker
+    }
+
+    #[tokio::test]
+    async fn prefill_dispatch_records_prefill_start() {
+        let tracker = dispatch_once(RequestPhase::Prefill, Vec::new()).await;
+        assert!(tracker.prefill_wait_time_ms().is_some());
+    }
+
+    #[tokio::test]
+    async fn aggregated_dispatch_records_prefill_start() {
+        let tracker = dispatch_once(RequestPhase::Aggregated, Vec::new()).await;
+        assert!(tracker.prefill_wait_time_ms().is_some());
+    }
+
+    #[tokio::test]
+    async fn decode_only_dispatch_does_not_record_prefill_start() {
+        let tracker = dispatch_once(RequestPhase::Decode, Vec::new()).await;
+        assert!(tracker.prefill_wait_time_ms().is_none());
+    }
+
+    #[tokio::test]
+    async fn conditional_disagg_decode_records_local_prefill_start() {
+        let tracker = dispatch_once(
+            RequestPhase::Decode,
+            vec![BYPASS_REMOTE_PREFILL_ANNOTATION.to_string()],
+        )
+        .await;
+        assert!(tracker.prefill_wait_time_ms().is_some());
+    }
+
+    /// Pins `RequestTracker`'s first-write-wins contract, which this fix relies on:
+    /// the decode leg still reaches dispatch and must neither clear nor overwrite the
+    /// timestamp prefill already recorded. Unlike the decode-only case, this passes
+    /// against the previous implementation too — it guards the `OnceLock` semantics
+    /// rather than the phase check.
+    #[tokio::test]
+    async fn decode_after_prefill_retains_the_prefill_timestamp() {
+        let tracker = Arc::new(RequestTracker::new());
+        let metrics = test_metrics();
+        let request = test_request(tracker.clone(), Vec::new());
+
+        let prefill_permit = tracker.set_phase(RequestPhase::Prefill).await;
+        RequestObservability::new(Some(tracker.clone()), metrics.clone())
+            .record_prefill_start(&request);
+        let recorded_by_prefill = tracker.prefill_wait_time_ms();
+        assert!(recorded_by_prefill.is_some());
+        drop(prefill_permit);
+
+        let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
+        RequestObservability::new(Some(tracker.clone()), metrics).record_prefill_start(&request);
+        assert_eq!(tracker.prefill_wait_time_ms(), recorded_by_prefill);
     }
 }

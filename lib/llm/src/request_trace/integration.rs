@@ -375,7 +375,6 @@ mod tests {
                 phase: Some("standalone_turn".to_string()),
                 strategy: Some("memento".to_string()),
             }),
-            kv_hints: None,
             input_trigger: Some(InputTrigger::ToolResult),
         });
         let mut context = Context::new(());
@@ -451,7 +450,6 @@ mod tests {
             parent_session_id: None,
             session_final: None,
             compaction: None,
-            kv_hints: None,
             input_trigger: None,
         });
         let tracker = Some(Arc::new(RequestTracker::new()));

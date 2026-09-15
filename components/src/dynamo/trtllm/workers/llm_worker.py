@@ -12,7 +12,7 @@ import json
 import logging
 import os
 import sys
-from typing import Optional
+from typing import Any, Optional
 
 from huggingface_hub import try_to_load_from_cache
 from huggingface_hub.utils import HFValidationError
@@ -65,7 +65,11 @@ from dynamo.trtllm.constants import DisaggregationMode, Modality
 from dynamo.trtllm.engine import Backend, TensorRTLLMEngine, get_llm_engine
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
-from dynamo.trtllm.publisher import DYNAMO_COMPONENT_REGISTRY, get_publisher
+from dynamo.trtllm.publisher import (
+    DYNAMO_COMPONENT_REGISTRY,
+    KvEventPublicationMode,
+    get_publisher,
+)
 from dynamo.trtllm.request_handlers.handlers import (
     RequestHandlerConfig,
     RequestHandlerFactory,
@@ -85,10 +89,69 @@ except ImportError:
 # Default buffer size for kv cache events.
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 100_000
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
+_TLLM_KV_CACHE_MANAGER_V2_BACKEND_ENV = "TLLM_KV_CACHE_MANAGER_V2_BACKEND"
 
 # TRT-LLM 1.3.0rc21 keeps in-vocab image markers for these validated families.
 # Leave other families unresolved until their KV-event convention is verified.
 _MM_ROUTING_MODEL_TYPES = frozenset({"qwen2_vl", "qwen2_5_vl", "qwen3_vl", "kimi_k25"})
+
+
+def _resolve_streaming_kv_events_config(
+    engine_args: dict[str, Any],
+) -> Optional[dict[str, Any]]:
+    """Resolve TensorRT-LLM's streaming ZMQ event-manager configuration."""
+    raw_kv_cache_config = engine_args.get("kv_cache_config")
+    if raw_kv_cache_config is None:
+        return None
+    if hasattr(raw_kv_cache_config, "model_dump"):
+        raw_kv_cache_config = raw_kv_cache_config.model_dump()
+    if not isinstance(raw_kv_cache_config, dict):
+        raise TypeError(
+            "kv_cache_config must be a dict or KvCacheConfig, "
+            f"got {type(raw_kv_cache_config).__name__}"
+        )
+
+    raw_config = raw_kv_cache_config.get("kv_events_config")
+    if raw_config is None:
+        return None
+    if hasattr(raw_config, "model_dump"):
+        raw_config = raw_config.model_dump()
+    if not isinstance(raw_config, dict):
+        raise TypeError(
+            "kv_events_config must be a dict or KVEventsConfig, "
+            f"got {type(raw_config).__name__}"
+        )
+
+    config = dict(raw_config)
+    enabled = bool(config.get("enable_kv_cache_events", False))
+    publisher = config.get("publisher")
+    if publisher is None:
+        publisher = "zmq" if enabled else "null"
+    config["publisher"] = publisher
+    if not enabled or publisher == "null":
+        return None
+    if publisher != "zmq":
+        raise ValueError(f"Unsupported streaming KV event publisher: {publisher!r}")
+    endpoint = config.get("endpoint", "tcp://*:5557")
+    if not isinstance(endpoint, str) or not endpoint:
+        raise ValueError("Streaming KV event endpoint must be a non-empty string")
+    config["endpoint"] = endpoint
+    config.setdefault("topic", "")
+    return config
+
+
+def _validate_streaming_kv_events_backend() -> None:
+    """Require TensorRT-LLM's Python V2 cache manager for streaming events."""
+    backend = os.environ.get(_TLLM_KV_CACHE_MANAGER_V2_BACKEND_ENV)
+    if backend == "python":
+        return
+    configured = backend if backend is not None else "unset (defaults to cpp)"
+    raise ValueError(
+        "TensorRT-LLM streaming KV events require "
+        f"{_TLLM_KV_CACHE_MANAGER_V2_BACKEND_ENV}=python; current value is "
+        f"{configured!r}. The C++ V2 cache manager cannot host the streaming "
+        "event manager."
+    )
 
 
 def _resolve_model_dir(config: Config) -> str:
@@ -402,11 +465,26 @@ async def init_llm_worker(
             logging.error(f"Failed to parse override_engine_args as JSON: {e}")
             sys.exit(1)
 
+    streaming_kv_events_config = _resolve_streaming_kv_events_config(arg_map)
+    if config.publish_kv_events:
+        if streaming_kv_events_config is not None:
+            _validate_streaming_kv_events_backend()
+            kv_event_publication_mode = KvEventPublicationMode.STREAMING
+        else:
+            kv_event_publication_mode = KvEventPublicationMode.POLLING
+    else:
+        kv_event_publication_mode = KvEventPublicationMode.DISABLED
+        if streaming_kv_events_config is not None:
+            logging.warning(
+                "TRT-LLM kv_events_config is set but publish_kv_events is disabled; "
+                "Dynamo KV event handling is off"
+            )
+
     _sync_config_from_engine_args(config, arg_map)
     _strip_postprocess_workers(arg_map)
 
     event_buffer_max_size = 0
-    if config.publish_kv_events:
+    if kv_event_publication_mode is KvEventPublicationMode.POLLING:
         # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.
         # Add it to kv_cache_config while preserving all settings from YAML
         current_kv_config = arg_map["kv_cache_config"]
@@ -470,7 +548,10 @@ async def init_llm_worker(
             should_enable_consolidator,
         )
 
-        if should_enable_consolidator(arg_map):
+        if (
+            kv_event_publication_mode is KvEventPublicationMode.POLLING
+            and should_enable_consolidator(arg_map)
+        ):
             # get_consolidator_endpoints returns (trtllm_bind_endpoint, output_bind_endpoint, output_connect_endpoint)
             consolidator_endpoints = get_consolidator_endpoints()
             trtllm_zmq_bind_endpoint = consolidator_endpoints[0]  # TRTLLM bind endpoint
@@ -714,7 +795,9 @@ async def init_llm_worker(
             config.enable_local_indexer
             and config.disaggregation_mode != DisaggregationMode.DECODE
         )
-        runtime_config.kv_event_publishing_enabled = config.publish_kv_events
+        runtime_config.kv_event_publishing_enabled = (
+            kv_event_publication_mode is not KvEventPublicationMode.DISABLED
+        )
         # Set data_parallel_size for attention DP mode
         # This enables the router's scheduler to correctly iterate over all dp_ranks
         # Need to name ADP as `data_parallel_size` for parity with other frameworks
@@ -903,7 +986,10 @@ async def init_llm_worker(
             disaggregation_mode=config.disaggregation_mode,
         ).to_dict()
 
-        if config.publish_kv_events or config.publish_metrics:
+        if (
+            kv_event_publication_mode is not KvEventPublicationMode.DISABLED
+            or config.publish_metrics
+        ):
             # Initialize the independently gated KV-event and metrics publishers.
             # Use model as fallback if served_model_name is not provided
             model_name_for_metrics = config.served_model_name or config.model
@@ -921,7 +1007,10 @@ async def init_llm_worker(
             # Create worker-side publisher for consolidated events if consolidator is enabled
             # This subscribes to consolidator's ZMQ output and publishes to NATS with worker_id
             consolidator_publisher = None
-            if consolidator_output_endpoint and config.publish_kv_events:
+            if (
+                kv_event_publication_mode is KvEventPublicationMode.POLLING
+                and consolidator_output_endpoint
+            ):
                 # Use the connect endpoint directly (already provided by get_consolidator_endpoints)
                 consolidator_publisher = KvEventPublisher(
                     endpoint=endpoint,
@@ -951,8 +1040,10 @@ async def init_llm_worker(
                 metrics_collector=metrics_collector,
                 kv_state_endpoint=config.kv_state_endpoint,
                 image_token_id=image_token_id,
-                publish_kv_events=config.publish_kv_events,
                 publish_metrics=config.publish_metrics,
+                kv_event_publication_mode=kv_event_publication_mode,
+                streaming_kv_events_config=streaming_kv_events_config,
+                streaming_kv_events_gpus_per_node=gpus_per_node,
             ) as publisher:
                 handler_config.publisher = publisher
                 handler = RequestHandlerFactory().get_request_handler(handler_config)

@@ -17,7 +17,6 @@ from enum import Enum
 from numbers import Real
 from typing import Any
 
-from aisimulate.aic import materialize_aic_num_gpu_blocks
 from aisimulate.sweeper.provider import JSONValue, RuntimeHookSpec
 from aisimulate.sweeper.replay import (
     HookCapability,
@@ -30,6 +29,7 @@ from aisimulate.sweeper.replay import (
 from dynamo.llm import AicPerfConfig, KvRouterConfig
 from dynamo.mocker import MockEngineArgs
 from dynamo.replay.api import run_synthetic_trace_replay, run_trace_replay
+from dynamo.replay.config import resolve_aic_num_gpu_blocks
 
 _PLANNER_HOOK = HookCapability(
     provider="dynamo.planner",
@@ -260,7 +260,7 @@ class DynamoReplayRunner:
                 "aic_model_path",
             ):
                 lowered.pop(name, None)
-        lowered = materialize_aic_num_gpu_blocks(lowered)
+        resolve_aic_num_gpu_blocks(lowered)
         # Pipeline parallelism is already represented in the public parallel
         # mapping and used for AIC capacity. MockEngineArgs has no PP field.
         lowered.pop("aic_pp_size", None)
@@ -284,6 +284,7 @@ class DynamoReplayRunner:
         trace_format = spec.workload.get("trace_format", "mooncake")
         if not isinstance(trace_format, str):
             raise TypeError("trace workload requires a string trace_format")
+        agentic_lanes = spec.workload.get("agentic_lanes")
         if deployment.deployment_mode == "agg":
             return run_trace_replay(
                 trace_files=trace_files,
@@ -292,6 +293,7 @@ class DynamoReplayRunner:
                     "trace_block_size", self.trace_block_size
                 ),
                 max_sim_time_ms=spec.workload.get("max_sim_time_ms"),
+                agentic_lanes=agentic_lanes,
                 extra_engine_args=self._engine_args(deployment.agg_engine_args),
                 num_workers=deployment.num_workers,
                 **common,
@@ -303,6 +305,7 @@ class DynamoReplayRunner:
                 "trace_block_size", self.trace_block_size
             ),
             max_sim_time_ms=spec.workload.get("max_sim_time_ms"),
+            agentic_lanes=agentic_lanes,
             prefill_engine_args=self._engine_args(deployment.prefill_engine_args),
             decode_engine_args=self._engine_args(deployment.decode_engine_args),
             num_prefill_workers=deployment.num_prefill_workers,

@@ -144,13 +144,13 @@ class TestWorkerInfoFromMdc:
         # From VllmComponentName
         assert info.component_name == "backend"
         assert info.endpoint == "generate"
-        assert info.k8s_name == "VllmDecodeWorker"
+        assert info.k8s_name == "decode"
 
     def test_prefill_defaults(self):
         entry = MdcEntry(card_json=_card(worker_type="prefill"))
         info = worker_info_from_mdc(entry, SubComponentType.PREFILL, backend="vllm")
         assert info.component_name == "prefill"
-        assert info.k8s_name == "VllmPrefillWorker"
+        assert info.k8s_name == "prefill"
 
     def test_model_name_fallback_invoked_when_card_missing(self):
         card = _card()

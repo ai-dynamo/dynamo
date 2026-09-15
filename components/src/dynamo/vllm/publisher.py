@@ -24,26 +24,37 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
 
     def __init__(
         self,
-        endpoint: Endpoint,
+        endpoint: Optional[Endpoint],
         dp_rank: int = 0,
         component_gauges: Optional[LLMBackendMetrics] = None,
     ) -> None:
         self.inner = WorkerMetricsPublisher()
         self._endpoint = endpoint
+        self._endpoint_task: Optional[asyncio.Task[None]] = None
         self.dp_rank = dp_rank
         self.component_gauges = component_gauges or LLMBackendMetrics()
         self.num_gpu_block = 1
-        # Schedule async endpoint creation
-        self._endpoint_task = asyncio.create_task(self._create_endpoint())
+        if endpoint is not None:
+            self.bind_endpoint(endpoint)
 
-    async def _create_endpoint(self) -> None:
+    async def _create_endpoint(self, endpoint: Endpoint) -> None:
         """Create the NATS endpoint asynchronously."""
         try:
-            await self.inner.create_endpoint(self._endpoint)
+            await self.inner.create_endpoint(endpoint)
             logging.debug("vLLM metrics publisher endpoint created")
         except Exception:
             logging.exception("Failed to create vLLM metrics publisher endpoint")
             raise
+
+    def bind_endpoint(self, endpoint: Endpoint) -> None:
+        if self._endpoint_task is not None:
+            raise RuntimeError("vLLM metrics publisher endpoint is already bound")
+        if self._endpoint is None:
+            # Drop pre-restore samples so init_publish emits into the newly bound
+            # publisher instead of being deduplicated against snapshot state.
+            self.inner = WorkerMetricsPublisher()
+        self._endpoint = endpoint
+        self._endpoint_task = asyncio.create_task(self._create_endpoint(endpoint))
 
     # TODO: Remove this and pass as metadata through shared storage
     def set_num_gpu_block(self, num_blocks: int) -> None:
@@ -134,14 +145,14 @@ class StatLoggerFactory:
 
     def __init__(
         self,
-        endpoint: Endpoint,
+        endpoint: Optional[Endpoint],
         component_gauges: Optional[LLMBackendMetrics] = None,
         embedding_worker: bool = False,
     ) -> None:
         self.endpoint = endpoint
         self.component_gauges = component_gauges
         self.embedding_worker = embedding_worker
-        self.created_logger: Optional[DynamoStatLoggerPublisher] = None
+        self.created_loggers: dict[int, DynamoStatLoggerPublisher] = {}
 
     def create_stat_logger(self, dp_rank: int) -> StatLoggerBase:
         # Embedding workers have no KV cache and no scheduler stats worth
@@ -159,18 +170,25 @@ class StatLoggerFactory:
             dp_rank=dp_rank,
             component_gauges=self.component_gauges,
         )
-        self.created_logger = logger
+        self.created_loggers[dp_rank] = logger
 
         return logger
 
     def __call__(self, vllm_config: VllmConfig, dp_rank: int) -> StatLoggerBase:
         return self.create_stat_logger(dp_rank=dp_rank)
 
+    def bind_endpoint(self, endpoint: Endpoint) -> None:
+        if self.endpoint is not None:
+            raise RuntimeError("vLLM stat logger endpoint is already bound")
+        self.endpoint = endpoint
+        for logger in self.created_loggers.values():
+            logger.bind_endpoint(endpoint)
+
     # TODO Remove once we publish metadata to shared storage
     def set_num_gpu_blocks_all(self, num_blocks: int) -> None:
-        if self.created_logger:
-            self.created_logger.set_num_gpu_block(num_blocks)
+        for logger in self.created_loggers.values():
+            logger.set_num_gpu_block(num_blocks)
 
     def init_publish(self) -> None:
-        if self.created_logger:
-            self.created_logger.init_publish()
+        for logger in self.created_loggers.values():
+            logger.init_publish()

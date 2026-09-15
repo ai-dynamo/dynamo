@@ -14,7 +14,6 @@ Keep this table current whenever a resource validator is migrated.
 | `DynamoComponentDeployment` | Structural | `dynamocomponentdeployment.go`, `dynamocomponentdeployment_v1alpha1.go` |
 | `DynamoGraphDeploymentRequest` | Structural | `dynamographdeploymentrequest.go` |
 | `DynamoModel` | Structural | `dynamomodel.go` |
-| `DynamoCheckpoint` | Structural | `dynamocheckpoint.go` |
 
 ## Contract
 

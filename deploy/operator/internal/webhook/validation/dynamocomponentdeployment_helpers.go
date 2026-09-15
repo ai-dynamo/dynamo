@@ -23,8 +23,6 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
@@ -69,32 +67,4 @@ func hasDynamoComponentDeploymentV1alpha1CompatibilityFields(
 		spec.EPPConfig != nil ||
 		spec.FrontendSidecar != nil ||
 		spec.Failover != nil
-}
-
-// castToDynamoComponentDeployment converts the v1alpha1 spoke to the v1beta1
-// hub used by the DCD validator, or returns a v1beta1 object unchanged.
-func castToDynamoComponentDeployment(obj runtime.Object) (*nvidiacomv1beta1.DynamoComponentDeployment, error) {
-	switch deployment := obj.(type) {
-	case *nvidiacomv1beta1.DynamoComponentDeployment:
-		return deployment, nil
-	case *nvidiacomv1alpha1.DynamoComponentDeployment:
-		converted := &nvidiacomv1beta1.DynamoComponentDeployment{}
-		if err := deployment.ConvertTo(converted); err != nil {
-			return nil, fmt.Errorf("convert v1alpha1 DynamoComponentDeployment to v1beta1: %w", err)
-		}
-		return converted, nil
-	default:
-		return nil, fmt.Errorf("expected v1alpha1 or v1beta1 DynamoComponentDeployment but got %T", obj)
-	}
-}
-
-func dynamoComponentDeploymentMetadata(obj runtime.Object) (metav1.Object, error) {
-	switch deployment := obj.(type) {
-	case *nvidiacomv1beta1.DynamoComponentDeployment:
-		return deployment, nil
-	case *nvidiacomv1alpha1.DynamoComponentDeployment:
-		return deployment, nil
-	default:
-		return nil, fmt.Errorf("expected DynamoComponentDeployment but got %T", obj)
-	}
 }

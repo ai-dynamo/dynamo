@@ -578,14 +578,62 @@ impl ErrorMessage {
 
         // InvalidArgument (top-level OR Backend) → 400.
         if let Some(dynamo_err) = find_invalid_argument_in_chain(err.as_ref()) {
+            // The message may be an [`ErrorPayload`] envelope rather than prose,
+            // so unwrap it; otherwise the client is shown the raw JSON. An
+            // explicit client-error status inside the envelope (for example 415)
+            // is honoured, matching what the in-stream path already does. A 5xx
+            // is not, because reaching this arm means the worker classified the
+            // failure as a request problem, and a 5xx body here would bypass the
+            // sanitizing the other arms apply.
+            let (message, explicit_status) =
+                match serde_json::from_str::<ErrorPayload>(dynamo_err.message()) {
+                    Ok(envelope) => {
+                        let explicit_status = envelope
+                            .code
+                            .and_then(|code| StatusCode::from_u16(code).ok())
+                            .filter(StatusCode::is_client_error);
+                        (
+                            envelope
+                                .message
+                                .unwrap_or_else(|| dynamo_err.message().to_string()),
+                            explicit_status,
+                        )
+                    }
+                    Err(_) => (dynamo_err.message().to_string(), None),
+                };
+            let code = explicit_status.unwrap_or(StatusCode::BAD_REQUEST);
+            // An explicit status the worker asserted goes through the shared
+            // policy, so a 499 answers with the same sanitized cancellation
+            // body as every other HTTP path rather than the worker's own text,
+            // which can name a context id or an internal file. A 400 remains a
+            // validation error, even when the configured overload status also
+            // happens to be 400.
+            if let Some(explicit_status) = explicit_status
+                && explicit_status != StatusCode::BAD_REQUEST
+                && let BackendStatusAction::Sanitize(variant) =
+                    BackendStatusAction::triage(explicit_status)
+            {
+                return ErrorMessage::sanitized_with_details(variant, message);
+            }
             return (
-                StatusCode::BAD_REQUEST,
+                code,
                 Json(ErrorMessage {
-                    message: dynamo_err.message().to_string(),
-                    error_type: map_error_code_to_error_type(StatusCode::BAD_REQUEST),
-                    code: StatusCode::BAD_REQUEST.as_u16(),
+                    message,
+                    error_type: if code == StatusCode::BAD_REQUEST {
+                        bad_request_error_type()
+                    } else {
+                        map_error_code_to_error_type(code)
+                    },
+                    code: code.as_u16(),
                     details: None,
-                    metric_error_type: Some(ErrorType::Validation),
+                    // A plain 400 keeps the validation override: a worker's
+                    // refusal text does not carry the `Validation:` prefix
+                    // `classify_error_for_metrics` looks for, so the request
+                    // error would otherwise be counted as `Internal`. A status
+                    // the envelope preserved classifies from that status
+                    // instead, so a backend rate limit counts as `Overload`.
+                    metric_error_type: (code == StatusCode::BAD_REQUEST)
+                        .then_some(ErrorType::Validation),
                 }),
             );
         }
@@ -1405,8 +1453,10 @@ async fn completions_batch(
 async fn embeddings(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(mut request): Json<NvCreateEmbeddingRequest>,
+    body: Body,
 ) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let mut request: NvCreateEmbeddingRequest = parse_json_request("embeddings", &body)?;
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.inner.model)?;
@@ -1562,8 +1612,10 @@ async fn embeddings(
 async fn classify(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(mut request): Json<NvCreateClassifyRequest>,
+    body: Body,
 ) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let mut request: NvCreateClassifyRequest = parse_json_request("classify", &body)?;
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.model)?;
@@ -1839,8 +1891,10 @@ fn build_pooling_binary_response(
 async fn pooling(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(mut request): Json<NvCreatePoolingRequest>,
+    body: Body,
 ) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let mut request: NvCreatePoolingRequest = parse_json_request("pooling", &body)?;
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.model)?;
@@ -2274,17 +2328,28 @@ impl BackendErrorInfo {
     }
 }
 
+/// The `{"message": ..., "code": ...}` envelope `py_err_to_dynamo` emits for an
+/// HTTP-like Python exception (see `lib/bindings/python/rust/backend.rs`).
+///
+/// A worker's error message is therefore not always prose, and the raw envelope
+/// must never reach a client. Both the in-stream path
+/// ([`extract_backend_error_if_present`]) and the pre-stream path
+/// ([`ErrorMessage::from_anyhow`]) unwrap it, so the *body* is the same either
+/// way. They deliberately differ on the *status*: the in-stream path honours
+/// any code in the envelope, while the pre-stream path honours only a client
+/// error, because it is reached solely through the `InvalidArgument` arm and a
+/// 5xx there would skip the sanitizing the other arms apply.
+#[derive(serde::Deserialize)]
+struct ErrorPayload {
+    message: Option<String>,
+    code: Option<u16>,
+}
+
 /// Checks if an Annotated event represents a backend error and extracts error information.
 /// Returns Some(info) if it's an error, None otherwise.
 fn extract_backend_error_if_present<T: serde::Serialize>(
     event: &Annotated<T>,
 ) -> Option<BackendErrorInfo> {
-    #[derive(serde::Deserialize)]
-    struct ErrorPayload {
-        message: Option<String>,
-        code: Option<u16>,
-    }
-
     // Check if event type is "error" (from postprocessor when FinishReason::Error is encountered)
     if let Some(event_type) = &event.event
         && event_type == "error"
@@ -3212,6 +3277,9 @@ pub fn validate_chat_completion_fields_generic(
     request: &NvCreateChatCompletionRequest,
 ) -> Result<(), ErrorResponse> {
     request.validate().map_err(|e| {
+        if find_invalid_argument_in_chain(e.as_ref()).is_some() {
+            return ErrorMessage::from_anyhow(e, "Invalid chat completion request");
+        }
         ErrorMessage::from_http_error(HttpError {
             code: 400,
             message: VALIDATION_PREFIX.to_string() + &e.to_string(),
@@ -3243,6 +3311,9 @@ pub fn validate_completion_fields_generic(
     request: &NvCreateCompletionRequest,
 ) -> Result<(), ErrorResponse> {
     request.validate().map_err(|e| {
+        if find_invalid_argument_in_chain(e.as_ref()).is_some() {
+            return ErrorMessage::from_anyhow(e, "Invalid completion request");
+        }
         ErrorMessage::from_http_error(HttpError {
             code: 400,
             message: VALIDATION_PREFIX.to_string() + &e.to_string(),
@@ -4283,7 +4354,17 @@ pub fn responses_router(
 async fn images(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(mut request): Json<NvCreateImageRequest>,
+    body: Body,
+) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let request: NvCreateImageRequest = parse_json_request("images", &body)?;
+    images_with_request(state, headers, request).await
+}
+
+async fn images_with_request(
+    state: Arc<service_v2::State>,
+    headers: HeaderMap,
+    mut request: NvCreateImageRequest,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     // (per-model readiness check is deferred until after we resolve the
@@ -4370,8 +4451,14 @@ async fn images(
     let response = NvImagesResponse::from_annotated_stream(stream)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to fold images stream for {}: {:?}", request_id, e);
-            let err_response = ErrorMessage::internal_server_error("Failed to fold images stream");
+            // Route the stream error through from_anyhow so typed errors keep
+            // their semantics: an InvalidArgument raised by the worker (e.g.
+            // request validation) surfaces as HTTP 400 with its message,
+            // while internal errors remain sanitized 500s (and are logged by
+            // the sanitization path). No pre-classification logging here:
+            // expected 400s would show up at error level.
+            let err_response =
+                ErrorMessage::from_anyhow(anyhow::Error::new(e), "Failed to generate images");
             inflight.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
@@ -4384,8 +4471,10 @@ async fn images(
 async fn images_edits(
     state: State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateImageRequest>,
+    body: Body,
 ) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let request: NvCreateImageRequest = parse_json_request("image edits", &body)?;
     if request.input_reference.is_none() {
         let code = StatusCode::BAD_REQUEST;
         return Err((
@@ -4399,7 +4488,7 @@ async fn images_edits(
             }),
         ));
     }
-    images(state, headers, Json(request)).await
+    images_with_request(state.0, headers, request).await
 }
 
 /// Create an Axum [`Router`] for the OpenAI API Images endpoints.
@@ -4425,8 +4514,10 @@ pub fn images_router(
 async fn videos(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(mut request): Json<NvCreateVideoRequest>,
+    body: Body,
 ) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let mut request: NvCreateVideoRequest = parse_json_request("videos", &body)?;
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.model)?;
@@ -4548,8 +4639,10 @@ async fn videos(
 async fn video_stream(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(mut request): Json<NvCreateVideoRequest>,
+    body: Body,
 ) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let mut request: NvCreateVideoRequest = parse_json_request("video stream", &body)?;
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.model)?;
 
@@ -4744,8 +4837,10 @@ fn decode_audio_chunks(response: &NvAudioSpeechResponse) -> Result<Vec<Bytes>, S
 async fn handler_audio_speech(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(mut request): Json<NvCreateAudioSpeechRequest>,
+    body: Body,
 ) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let mut request: NvCreateAudioSpeechRequest = parse_json_request("audio speech", &body)?;
     // return a 503 if the service is not ready
     // (per-model readiness check is deferred until after we resolve the
     // Option<String> model field; see below)
@@ -5094,8 +5189,8 @@ mod tests {
 
     use super::*;
     use crate::discovery::ModelManagerError;
-    use crate::protocols::common::StopConditionsProvider;
     use crate::protocols::common::extensions::{AgentCompaction, NvExt};
+    use crate::protocols::common::{SamplingOptionsProvider, StopConditionsProvider};
     use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use crate::protocols::openai::common_ext::CommonExt;
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
@@ -5391,6 +5486,28 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_chat_completion_request_accepts_media_url_with_uuid() {
+        for (part_type, media_url, uuid) in [
+            ("video_url", "https://example.com/video.mp4", "video-42"),
+            ("audio_url", "https://example.com/audio.wav", "audio-42"),
+        ] {
+            let body = format!(
+                r#"{{"model":"test-model","messages":[{{"role":"user","content":[{{"type":"{part_type}","{part_type}":{{"url":"{media_url}"}},"uuid":"{uuid}"}}]}}]}}"#
+            );
+
+            let request: NvCreateChatCompletionRequest =
+                parse_json_request("chat completions", body.as_bytes())
+                    .expect("request should parse");
+            let request = serde_json::to_value(request).expect("request should serialize");
+            assert_eq!(request["messages"][0]["content"][0]["uuid"], uuid);
+            assert_eq!(
+                request["messages"][0]["content"][0][part_type]["url"],
+                media_url
+            );
+        }
+    }
+
+    #[test]
     fn test_parse_chat_completion_request_accepts_empty_uuid_url_after_tolerant_parse() {
         let body = b"{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"raw \xff \x1b data\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"\"},\"uuid\":\"image-42\"}]}]}";
 
@@ -5528,7 +5645,6 @@ mod tests {
                     trigger: Some("automatic".to_string()),
                     ..Default::default()
                 }),
-                kv_hints: None,
                 input_trigger: None,
             },
         );
@@ -5639,6 +5755,29 @@ mod tests {
         let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
         assert_eq!(response.0, StatusCode::BAD_REQUEST);
         assert_eq!(response.1.message, "custom error message");
+    }
+
+    #[test]
+    fn guided_decoding_conflict_maps_to_bounded_bad_request() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "guided_json": {
+                "type": "object",
+                "description": "x".repeat(1_200_000),
+            },
+            "guided_regex": "a+",
+        }))
+        .expect("request should deserialize");
+
+        let error = request.extract_sampling_options().unwrap_err();
+        let response = ErrorMessage::from_anyhow(error, BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.1.message,
+            "Only one guided-decoding constraint can be set; received: json, regex"
+        );
     }
 
     #[test]
@@ -5998,16 +6137,29 @@ mod tests {
     fn unavailable_error_response_from_anyhow() {
         use dynamo_runtime::error::{DynamoError, ErrorType};
 
-        let err: anyhow::Error = DynamoError::builder()
-            .error_type(ErrorType::Unavailable)
-            .message("No workers available for endpoint test/worker/generate")
-            .build()
-            .into();
-        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+        // The pool-scoped and worker-scoped flavors both reach the client as 503
+        // when migration cannot retry them.
+        for (error_type, message) in [
+            (
+                ErrorType::Unavailable,
+                "No workers available for endpoint test/worker/generate",
+            ),
+            (
+                ErrorType::WorkerUnavailable,
+                "Server unavailable: unknown endpoint a/generate",
+            ),
+        ] {
+            let err: anyhow::Error = DynamoError::builder()
+                .error_type(error_type)
+                .message(message)
+                .build()
+                .into();
+            let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
 
-        assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(response.1.code, StatusCode::SERVICE_UNAVAILABLE.as_u16());
-        assert_eq!(response.1.message, "Service temporarily unavailable");
+            assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE, "{error_type}");
+            assert_eq!(response.1.code, StatusCode::SERVICE_UNAVAILABLE.as_u16());
+            assert_eq!(response.1.message, "Service temporarily unavailable");
+        }
     }
 
     #[test]
@@ -6093,6 +6245,193 @@ mod tests {
         assert_eq!(response.0, StatusCode::BAD_REQUEST);
         assert_eq!(response.1.code, StatusCode::BAD_REQUEST.as_u16());
         assert!(response.1.message.contains("does not currently support"));
+    }
+
+    /// A worker that refuses a request before the response stream opens must
+    /// reach the client as 400, not 500.
+    #[test]
+    fn test_pre_stream_refusal_surfaces_as_400() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+        use dynamo_runtime::pipeline::network::StreamPrologueError;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+
+        let prologue_error = StreamPrologueError::new(
+            "Generate Error: multimodal input is not supported by this backend",
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                .message("multimodal input is not supported by this backend")
+                .build(),
+        );
+
+        let err: anyhow::Error = pre_stream_failure_error(prologue_error).into();
+        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.code, StatusCode::BAD_REQUEST.as_u16());
+        assert!(
+            response
+                .1
+                .message
+                .contains("multimodal input is not supported"),
+            "the client should see the worker's reason, got: {}",
+            response.1.message
+        );
+    }
+
+    /// `py_err_to_dynamo` wraps an HTTP-like Python exception's text in a
+    /// `{"message":..,"code":..}` envelope, so a refusal from a Python worker
+    /// carries JSON, not prose. The client must be shown the reason, never the
+    /// envelope -- the in-stream path already unwraps it, and the two must agree.
+    #[test]
+    fn test_pre_stream_refusal_unwraps_the_python_error_envelope() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+        use dynamo_runtime::pipeline::network::StreamPrologueError;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+
+        let refuse = |message: &str| {
+            let prologue = StreamPrologueError::new(
+                format!("Generate Error: {message}"),
+                DynamoError::builder()
+                    .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                    .message(message)
+                    .build(),
+            );
+            ErrorMessage::from_anyhow(
+                pre_stream_failure_error(prologue).into(),
+                BACKUP_ERROR_MESSAGE,
+            )
+        };
+
+        let response = refuse(
+            &serde_json::json!({"message": "multimodal input is not supported", "code": 400})
+                .to_string(),
+        );
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.message, "multimodal input is not supported");
+
+        // An explicit client-error status inside the envelope is honoured.
+        let response = refuse(
+            &serde_json::json!({"message": "unsupported media type", "code": 415}).to_string(),
+        );
+        assert_eq!(response.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(response.1.message, "unsupported media type");
+
+        // A 5xx inside the envelope does not escape through the 4xx arm.
+        let response = refuse(&serde_json::json!({"message": "boom", "code": 500}).to_string());
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+    }
+
+    /// A worker can report a cancellation as an HTTP-like 499, and its own text
+    /// may name a context id or an internal path. The status survives, the text
+    /// does not: this arm owes the client the same sanitized body every other
+    /// HTTP path produces for a cancellation.
+    #[test]
+    fn test_pre_stream_refusal_sanitizes_the_envelope_cancellation() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynErrorType};
+        use dynamo_runtime::pipeline::network::StreamPrologueError;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+
+        let envelope = serde_json::json!({
+            "message": "Context id abc-123 stopped at /opt/dynamo/worker.py:42",
+            "code": 499,
+        })
+        .to_string();
+        let prologue = StreamPrologueError::new(
+            format!("Generate Error: {envelope}"),
+            DynamoError::builder()
+                .error_type(DynErrorType::Backend(BackendError::InvalidArgument))
+                .message(envelope)
+                .build(),
+        );
+
+        let response = ErrorMessage::from_anyhow(
+            pre_stream_failure_error(prologue).into(),
+            BACKUP_ERROR_MESSAGE,
+        );
+
+        assert_eq!(response.0, StatusCode::from_u16(499).unwrap());
+        assert_eq!(response.1.message, SanitizedError::Cancelled.to_string());
+        assert!(
+            !response.1.message.contains("abc-123") && !response.1.message.contains("/opt/dynamo"),
+            "the worker's own cancellation text must not reach the client, got: {}",
+            response.1.message
+        );
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::Cancelled
+        );
+    }
+
+    /// A status the envelope preserved is what the metric is counted from. A
+    /// backend rate limit is an overload, not a validation failure; a plain 400
+    /// keeps the validation override, because a worker's refusal text carries no
+    /// `Validation:` prefix and would otherwise be counted as internal.
+    #[test]
+    fn test_pre_stream_refusal_classifies_metrics_from_the_preserved_status() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynErrorType};
+        use dynamo_runtime::pipeline::network::StreamPrologueError;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+
+        let refuse = |message: String| {
+            let prologue = StreamPrologueError::new(
+                format!("Generate Error: {message}"),
+                DynamoError::builder()
+                    .error_type(DynErrorType::Backend(BackendError::InvalidArgument))
+                    .message(message)
+                    .build(),
+            );
+            ErrorMessage::from_anyhow(
+                pre_stream_failure_error(prologue).into(),
+                BACKUP_ERROR_MESSAGE,
+            )
+        };
+
+        let rate_limited =
+            refuse(serde_json::json!({"message": "too many requests", "code": 429}).to_string());
+        assert_eq!(rate_limited.0, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            extract_error_type_from_response(&rate_limited),
+            ErrorType::Overload
+        );
+
+        let refused = refuse("multimodal input is not supported by this backend".to_string());
+        assert_eq!(refused.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            extract_error_type_from_response(&refused),
+            ErrorType::Validation
+        );
+    }
+
+    /// Negative control for `test_pre_stream_refusal_surfaces_as_400`: a genuine
+    /// pre-stream connect failure must still be 500. Only a request-level
+    /// refusal earns a 4xx.
+    #[test]
+    fn test_pre_stream_connect_failure_still_surfaces_as_500() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+        use dynamo_runtime::pipeline::network::StreamPrologueError;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+
+        // The worker died rather than refused: typed, but not a request problem.
+        let engine_shutdown = StreamPrologueError::new(
+            "Generate Error: engine shut down",
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+                .message("engine shut down")
+                .build(),
+        );
+        let response = ErrorMessage::from_anyhow(
+            pre_stream_failure_error(engine_shutdown).into(),
+            BACKUP_ERROR_MESSAGE,
+        );
+        assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
+
+        // An older worker sends no typed error at all: also still 500.
+        let untyped = StreamPrologueError::from_message("Generate Error: could not reach worker");
+        let response = ErrorMessage::from_anyhow(
+            pre_stream_failure_error(untyped).into(),
+            BACKUP_ERROR_MESSAGE,
+        );
+        assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[test]

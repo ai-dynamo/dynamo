@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: removed operator checkpoint values validation
+templates:
+  - charts/dynamo-operator/templates/validate-values.yaml
+tests:
+  - it: rejects the legacy cleanup image
+    set:
+      dynamo-operator.checkpoint.cleanupImage: busybox:1.36
+    asserts:
+      - failedTemplate:
+          errorPattern: "'dynamo-operator.checkpoint.cleanupImage' has been removed"
+
+  - it: rejects legacy operator-managed storage
+    set:
+      dynamo-operator.checkpoint.storage.type: pvc
+    asserts:
+      - failedTemplate:
+          errorPattern: "'dynamo-operator.checkpoint.storage' has been removed"
+
+  - it: accepts the native checkpoint configuration
+    set:
+      dynamo-operator.checkpoint.enabled: true
+    asserts:
+      - notFailedTemplate: {}

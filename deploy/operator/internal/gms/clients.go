@@ -31,6 +31,47 @@ func OverlayClients(checkpointGMS **nvidiacomv1alpha1.GPUMemoryServiceSpec, chec
 	return nil
 }
 
+// OverlayCompatibleSnapshotClients validates the immutable snapshot topology,
+// then applies the current workload's client-only GMS configuration.
+// checkpointGMS must be non-nil; a nil serviceGMS means GMS is disabled.
+func OverlayCompatibleSnapshotClients(
+	checkpointGMS **nvidiacomv1alpha1.GPUMemoryServiceSpec,
+	checkpointName string,
+	serviceGMS *nvidiacomv1beta1.GPUMemoryServiceSpec,
+) error {
+	snapshotEnabled := *checkpointGMS != nil && (*checkpointGMS).Enabled
+	converted := ToAlphaSpec(serviceGMS)
+	serviceEnabled := converted != nil && converted.Enabled
+	if snapshotEnabled != serviceEnabled {
+		return fmt.Errorf(
+			"gpuMemoryService topology for PodSnapshot %q does not match workload: snapshot enabled=%t, workload enabled=%t",
+			checkpointName,
+			snapshotEnabled,
+			serviceEnabled,
+		)
+	}
+	if !snapshotEnabled {
+		return nil
+	}
+	if (*checkpointGMS).Mode != converted.Mode {
+		return fmt.Errorf(
+			"gpuMemoryService mode for PodSnapshot %q does not match workload: snapshot=%q, workload=%q",
+			checkpointName,
+			(*checkpointGMS).Mode,
+			converted.Mode,
+		)
+	}
+
+	// Preserve the validated artifact topology while refreshing fields that
+	// describe clients in the destination workload.
+	overlaid := (*checkpointGMS).DeepCopy()
+	overlaid.DeviceClassName = converted.DeviceClassName
+	overlaid.ExtraClientContainers = converted.ExtraClientContainers
+	overlaid.ExtraClientPods = converted.ExtraClientPods
+	*checkpointGMS = overlaid
+	return nil
+}
+
 // ToAlphaSpec converts the v1beta1 GMS config into the v1alpha1 compatibility shape.
 func ToAlphaSpec(src *nvidiacomv1beta1.GPUMemoryServiceSpec) *nvidiacomv1alpha1.GPUMemoryServiceSpec {
 	if src == nil {

@@ -891,7 +891,7 @@ impl MockEngineArgs {
 }
 
 #[pyfunction]
-#[pyo3(signature = (trace_files, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=None, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None))]
+#[pyo3(signature = (trace_files, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=None, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None, agentic_lanes=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_trace_replay(
     py: Python<'_>,
@@ -921,6 +921,7 @@ pub fn run_mocker_trace_replay(
     capture_per_request: bool,
     capture_planner_details: bool,
     scaling_policy: Option<Py<PyAny>>,
+    agentic_lanes: Option<isize>,
 ) -> PyResult<PyObject> {
     if capture_per_request && replay_mode != "offline" {
         return Err(PyValueError::new_err(
@@ -983,6 +984,22 @@ pub fn run_mocker_trace_replay(
     };
     let run = move |mut scaling_policy: Option<Box<dyn ReplayScalingPolicy>>| {
         let replay_concurrency = parse_replay_concurrency(replay_concurrency)?;
+        let agentic_lanes = parse_agentic_lanes(agentic_lanes)?;
+        if agentic_lanes.is_some() && replay_concurrency.is_some() {
+            anyhow::bail!("agentic_lanes cannot be combined with replay_concurrency");
+        }
+        if agentic_lanes.is_some()
+            && !matches!(
+                trace_format,
+                dynamo_mocker::loadgen::TraceFileFormat::AgenticMooncake
+                    | dynamo_mocker::loadgen::TraceFileFormat::Weka
+                    | dynamo_mocker::loadgen::TraceFileFormat::Dynamo
+            )
+        {
+            anyhow::bail!(
+                "agentic_lanes requires trace_format='agentic_mooncake', 'weka', or 'dynamo'"
+            );
+        }
         if trace_format == dynamo_mocker::loadgen::TraceFileFormat::Dynamo {
             let trace =
                 DynamoRequestTrace::from_request_trace_files(&trace_files, trace_block_size)?;
@@ -993,6 +1010,7 @@ pub fn run_mocker_trace_replay(
                 prefill_load_estimator,
                 num_workers,
                 replay_concurrency,
+                agentic_lanes,
                 &replay_mode,
                 arrival_speedup_ratio,
                 router_mode,
@@ -1048,6 +1066,7 @@ pub fn run_mocker_trace_replay(
                     trace_num_prefix_groups,
                     record_per_request,
                     max_sim_time_ms,
+                    agentic_lanes,
                     sla,
                     scaling_policy.take(),
                 )
@@ -1083,6 +1102,7 @@ pub fn run_mocker_trace_replay(
                     trace_shared_prefix_ratio,
                     trace_num_prefix_groups,
                     record_per_request,
+                    agentic_lanes,
                     sla,
                 )
             }
@@ -1118,6 +1138,7 @@ pub fn run_mocker_trace_replay(
                     trace_num_prefix_groups,
                     record_per_request,
                     max_sim_time_ms,
+                    agentic_lanes,
                     sla,
                     scaling_policy.take(),
                 )
@@ -1166,6 +1187,7 @@ fn run_loaded_dynamo_request_trace(
     prefill_load_estimator: Option<dynamo_mocker::replay::ReplayPrefillLoadEstimator>,
     num_workers: usize,
     replay_concurrency: Option<usize>,
+    agentic_lanes: Option<usize>,
     replay_mode: &str,
     arrival_speedup_ratio: f64,
     router_mode: dynamo_mocker::replay::ReplayRouterMode,
@@ -1176,6 +1198,10 @@ fn run_loaded_dynamo_request_trace(
 ) -> anyhow::Result<dynamo_mocker::replay::TraceSimulationReport> {
     match trace {
         DynamoRequestTrace::Standard(trace) => {
+            anyhow::ensure!(
+                agentic_lanes.is_none(),
+                "agentic_lanes requires an agentic Dynamo request trace"
+            );
             match select_replay_dispatch(args_selection, replay_mode, replay_concurrency)? {
                 ReplayDispatch::AggregatedOfflineConcurrency(args, max_in_flight) => {
                     dynamo_mocker::replay::simulate_concurrency_workload_with_router_mode_and_options_and_scaling_policy(
@@ -1273,16 +1299,11 @@ fn run_loaded_dynamo_request_trace(
                     "agentic Dynamo request traces are not supported with replay_concurrency"
                 );
             }
-            let ReplayArgsSelection::Aggregated(args) = args_selection else {
-                anyhow::bail!(
-                    "agentic Dynamo request traces are not supported for disaggregated replay"
-                );
-            };
             let trace = trace
                 .normalize_starts()
                 .speed_up_timing(arrival_speedup_ratio)?;
-            match replay_mode {
-                "offline" => dynamo_mocker::replay::simulate_agentic_trace_workload_with_router_mode(
+            match (args_selection, replay_mode) {
+                (ReplayArgsSelection::Aggregated(args), "offline") => dynamo_mocker::replay::simulate_agentic_trace_workload_with_router_mode(
                     *args,
                     router_config,
                     prefill_load_estimator,
@@ -1290,9 +1311,11 @@ fn run_loaded_dynamo_request_trace(
                     num_workers,
                     router_mode,
                     record_per_request,
+                    max_sim_time_ms,
+                    agentic_lanes,
                     sla,
                 ),
-                "online" => dynamo_mocker::replay::simulate_agentic_trace_live_workload_with_router_mode_and_options(
+                (ReplayArgsSelection::Aggregated(args), "online") => dynamo_mocker::replay::simulate_agentic_trace_live_workload_with_router_mode_and_options(
                     *args,
                     router_config,
                     prefill_load_estimator,
@@ -1300,9 +1323,24 @@ fn run_loaded_dynamo_request_trace(
                     num_workers,
                     router_mode,
                     record_per_request,
+                    agentic_lanes,
                     sla,
                 ),
-                other => anyhow::bail!(
+                (ReplayArgsSelection::Disagg(config), "offline") => dynamo_mocker::replay::simulate_agentic_trace_workload_disagg_with_router_mode(
+                    *config,
+                    router_config,
+                    prefill_load_estimator,
+                    trace,
+                    router_mode,
+                    record_per_request,
+                    max_sim_time_ms,
+                    agentic_lanes,
+                    sla,
+                ),
+                (ReplayArgsSelection::Disagg(_), "online") => anyhow::bail!(
+                    "online P/D agentic replay is not supported"
+                ),
+                (_, other) => anyhow::bail!(
                     "replay_mode must be either 'offline' or 'online', got '{}'",
                     other
                 ),
@@ -2135,12 +2173,13 @@ fn parse_trace_file_format(
         "agentic_mooncake" | "agentic-mooncake" => {
             Ok(dynamo_mocker::loadgen::TraceFileFormat::AgenticMooncake)
         }
+        "weka" => Ok(dynamo_mocker::loadgen::TraceFileFormat::Weka),
         "applied_compute_agentic" => {
             Ok(dynamo_mocker::loadgen::TraceFileFormat::AppliedComputeAgentic)
         }
         "dynamo" => Ok(dynamo_mocker::loadgen::TraceFileFormat::Dynamo),
         other => Err(PyException::new_err(format!(
-            "trace_format must be 'mooncake', 'mooncake-delta', 'agentic_mooncake'/'agentic-mooncake', 'applied_compute_agentic', or 'dynamo', got '{}'",
+            "trace_format must be 'mooncake', 'mooncake-delta', 'agentic_mooncake'/'agentic-mooncake', 'weka', 'applied_compute_agentic', or 'dynamo', got '{}'",
             other
         ))),
     }
@@ -2149,6 +2188,14 @@ fn parse_trace_file_format(
 fn parse_replay_concurrency(replay_concurrency: Option<isize>) -> anyhow::Result<Option<usize>> {
     match replay_concurrency {
         Some(value) if value < 1 => anyhow::bail!("replay_concurrency must be at least 1"),
+        Some(value) => Ok(Some(value as usize)),
+        None => Ok(None),
+    }
+}
+
+fn parse_agentic_lanes(agentic_lanes: Option<isize>) -> anyhow::Result<Option<usize>> {
+    match agentic_lanes {
+        Some(value) if value < 1 => anyhow::bail!("agentic_lanes must be at least 1"),
         Some(value) => Ok(Some(value as usize)),
         None => Ok(None),
     }

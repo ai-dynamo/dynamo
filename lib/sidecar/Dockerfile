@@ -23,9 +23,8 @@ ARG TARGETARCH
 # Superset of the build dependencies required by all sidecar crates:
 # aws-lc-sys/ring need cmake and a C toolchain (plus perl); bindgen needs
 # libclang; tonic-build (build.rs) needs protoc, and libprotobuf-dev supplies
-# the well-known protos the engine .proto files import (vllm_grpc.proto pulls
-# in google/protobuf/struct.proto); utoipa-swagger-ui downloads its pinned web
-# asset through the system curl binary.
+# the well-known protos the engine .proto files import. utoipa-swagger-ui
+# downloads its pinned web asset through the system curl binary.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         ca-certificates \
@@ -73,6 +72,7 @@ COPY .cargo/ .cargo/
 COPY lib/ lib/
 COPY examples/router/custom-policy-example/ examples/router/custom-policy-example/
 COPY deploy/inference-gateway/ext-proc/ deploy/inference-gateway/ext-proc/
+COPY deploy/inference-gateway/sidecar/ deploy/inference-gateway/sidecar/
 
 # ---- vLLM builder -----------------------------------------------------------
 FROM builder-base AS vllm-builder

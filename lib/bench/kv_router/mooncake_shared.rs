@@ -161,7 +161,7 @@ impl MooncakeIndexerConfig {
                         )
                     })
                     .collect();
-                Arc::new(BranchShardedIndexer::new_with_options(
+                Arc::new(BranchShardedIndexer::new(
                     shards,
                     self.prefix_depth,
                     block_size,
