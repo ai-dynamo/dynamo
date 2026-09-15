@@ -3311,6 +3311,11 @@ class RouterQueueLimitExceeded(DynamoException):
     current: int
     limit: int
 
+class ResourceExhausted(DynamoException):
+    """The selected worker cannot admit more work; callers should retry."""
+
+    ...
+
 class Unknown(DynamoException):
     """Uncategorized or unknown error."""
 
