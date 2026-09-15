@@ -9,12 +9,13 @@
 //! role, parallelism, KV block sizing, and context length are discovered from
 //! the engine's gRPC metadata RPCs.
 //!
-//! The crate never depends on `sglang` or any engine crate — only
-//! `dynamo-backend-common`, `tonic`/`prost`, `clap`, and tokio.
+//! The crate never depends on `sglang` or another engine crate.
+//! It uses the generated protocol contract and OpenDAL storage services.
 
 pub mod args;
 pub mod client;
 pub mod engine;
+mod metadata_upload;
 mod native_http;
 
 /// Generated SGLang gRPC types, temporarily exposed for the Mocker server

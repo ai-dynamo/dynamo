@@ -72,7 +72,7 @@ Before admitting a sample to training, verify:
 | Generated token IDs | Named `nvext.completion_token_ids`, or the native SGLang stream | Use the engine-returned sequence; exact placement depends on the selected interface. |
 | Selected and prompt log probabilities | Standard completion log probabilities, named `nvext.prompt_logprobs`, or native SGLang metadata | Check support and alignment on the exact backend and response path. |
 | Routed experts and raw engine data | Opt-in `nvext.routed_experts` or `nvext.engine_data` | Backend-specific. Prefer named fields over the raw engine payload. |
-| Large SGLang `meta_info` | `nvext.metadata_upload.url` on the OpenAI-compatible path | Uploaded out of band by an RL-enabled SGLang worker; the destination is trusted control input. |
+| Large SGLang `meta_info` | `nvext.metadata_upload` on `/v1/chat/completions`, `/v1/completions`, or `/v1/responses` | Uploaded out of band by an RL-enabled SGLang worker. Set required `url` and optional `fallback_url`; the destination is trusted control input. The native `/generate` frontend API does not support this extension. |
 | Masks, rewards, advantages, tool or environment state, and trajectory objects | Not a generic Dynamo response contract | The framework derives, stores, validates, and accepts these values. |
 
 See [NVIDIA Request Extensions](../../developer-guide/additional-resources/nvidia-request-extensions-nvext.md) for the complete `nvext` request and response shapes.
