@@ -10,7 +10,7 @@ import sglang as sgl
 
 from dynamo._core import Context
 from dynamo.health_check import HEALTH_CHECK_KEY
-from dynamo.sglang._compat import require_reasoning_kwargs
+from dynamo.sglang._compat import cache_salt_kwargs, require_reasoning_kwargs
 from dynamo.sglang._disagg import validate_disagg_parallel_sampling
 from dynamo.sglang.agent_session import agent_session_kwargs
 from dynamo.sglang.args import Config
@@ -26,6 +26,7 @@ from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     build_disagg_mm_kwargs,
     raise_if_unextracted_multimodal,
 )
+from dynamo.sglang.request_utils import request_cache_salt
 
 # Sentinel value matching u32::MAX from the C/Go prefill-routing ABI.
 # This remains as a compatibility fallback for older callers that still encode
@@ -185,12 +186,14 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 external_trace_header=trace_header,
                 routed_dp_rank=dp_rank,
                 lora_path=lora_path,
+                cache_salt=request_cache_salt(inner_request),
             )
             results = native_generate_stream(self.engine, native_request)
         else:
             results = await self.engine.async_generate(
                 **input_param,
                 **mm_kwargs,
+                **cache_salt_kwargs(self.engine, request_cache_salt(inner_request)),
                 sampling_params=sampling_params,
                 stream=True,
                 **require_reasoning_kwargs(self.engine, inner_request),
