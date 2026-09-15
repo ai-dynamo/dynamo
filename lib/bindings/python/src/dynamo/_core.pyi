@@ -3286,7 +3286,10 @@ class VirtualConnectorClient:
         ...
 
     async def wait(self) -> None:
-        """Blocks until there is a new decision to fetch using 'get'"""
+        """Wait for an unacknowledged decision, including one already published.
+
+        Use get() to fetch the decision.
+        """
         ...
 
 

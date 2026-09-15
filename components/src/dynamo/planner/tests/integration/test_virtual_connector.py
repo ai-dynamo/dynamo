@@ -7,10 +7,17 @@
 
 import asyncio
 import logging
+import os
+import subprocess
+import sys
 
 import pytest
 
-from dynamo._core import DistributedRuntime, VirtualConnectorClient
+from dynamo._core import (
+    DistributedRuntime,
+    VirtualConnectorClient,
+    VirtualConnectorCoordinator,
+)
 from dynamo.planner import SubComponentType, TargetReplica, VirtualConnector
 from dynamo.planner.monitoring.worker_info import build_worker_info_from_defaults
 
@@ -118,3 +125,66 @@ async def async_internal(distributed_runtime):
     assert event.num_prefill_workers == 0
     assert event.num_decode_workers == 0
     await client.complete(event)
+
+
+@pytest.mark.timeout(15)
+def test_wait_for_unacknowledged_decision(request):
+    from tests.conftest import EtcdServer
+
+    # Keep runtime shutdown from affecting other tests in pytest's process.
+    with EtcdServer(request, port=0) as etcd:
+        subprocess.run(
+            [sys.executable, __file__],
+            check=True,
+            env={**os.environ, "ETCD_ENDPOINTS": f"http://localhost:{etcd.port}"},
+            timeout=30,
+        )
+
+
+async def _wait_for_unacknowledged_decision():
+    runtime = DistributedRuntime(
+        asyncio.get_running_loop(), "etcd", "tcp", event_plane="zmq"
+    )
+    try:
+        coord = VirtualConnectorCoordinator(runtime, NAMESPACE, 1, 30, 5)
+        await coord.async_init()
+        await coord.update_scaling_decision(1, 2)
+
+        # A late consumer must find the decision even though its watch starts afterward.
+        client = VirtualConnectorClient(runtime, NAMESPACE)
+        await asyncio.wait_for(client.wait(), timeout=5)
+        first = await client.get()
+        assert (
+            first.num_prefill_workers,
+            first.num_decode_workers,
+            first.decision_id,
+        ) == (1, 2, 0)
+        await client.complete(first)
+        await coord.wait_for_scaling_completion()
+
+        waiter = asyncio.ensure_future(client.wait())
+        try:
+            done, _ = await asyncio.wait([waiter], timeout=0.2)
+            assert not done, "An acknowledged decision must not wake the next wait"
+            await client.complete(first)
+            done, _ = await asyncio.wait([waiter], timeout=0.2)
+            assert not done, "An acknowledgement update is not a new decision"
+
+            await coord.update_scaling_decision(0, 3)
+            await asyncio.wait_for(waiter, timeout=5)
+            second = await client.get()
+            assert (
+                second.num_prefill_workers,
+                second.num_decode_workers,
+                second.decision_id,
+            ) == (0, 3, 1)
+            await client.complete(second)
+        finally:
+            waiter.cancel()
+            await asyncio.gather(waiter, return_exceptions=True)
+    finally:
+        runtime.shutdown()
+
+
+if __name__ == "__main__":
+    asyncio.run(_wait_for_unacknowledged_decision())
