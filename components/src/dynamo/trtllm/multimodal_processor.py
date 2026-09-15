@@ -179,6 +179,37 @@ class MultimodalRequestProcessor:
             return False
         return bool(parsed.scheme and parsed.netloc)
 
+    @staticmethod
+    def _assert_public_url(url: str) -> None:
+        """Reject a URL that resolves to a non-public address (SSRF guard).
+
+        The embedding path is a request-supplied input, so a client must not be
+        able to steer the fetch to an internal or cloud-metadata address.
+        """
+        import ipaddress
+        import socket
+
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            raise RuntimeError("Invalid embedding URL")
+        default_port = 443 if parsed.scheme == "https" else 80
+        for info in socket.getaddrinfo(
+            parsed.hostname, parsed.port or default_port, type=socket.SOCK_STREAM
+        ):
+            ip_str = str(info[4][0]).split("%", 1)[0]
+            addr = ipaddress.ip_address(ip_str)
+            if (
+                addr.is_private
+                or addr.is_loopback
+                or addr.is_link_local
+                or addr.is_reserved
+                or addr.is_multicast
+                or addr.is_unspecified
+            ):
+                raise RuntimeError(
+                    f"Embedding URL resolves to blocked address: {addr}"
+                )
+
     def _unwrap_safetensors(
         self, data: Dict[str, torch.Tensor]
     ) -> "torch.Tensor | Dict[str, torch.Tensor]":
@@ -214,9 +245,17 @@ class MultimodalRequestProcessor:
         if self.is_url(path):
             if parsed.scheme not in ("http", "https"):
                 raise RuntimeError(f"Unsupported URL scheme: {parsed.scheme}")
+            self._assert_public_url(path)
             try:
-                with httpx.Client(timeout=300.0) as client:
+                # Do not follow redirects automatically: a public URL could
+                # otherwise redirect the fetch into an internal/metadata address
+                # (the initial-URL check would not see it).
+                with httpx.Client(timeout=300.0, follow_redirects=False) as client:
                     with client.stream("GET", path) as resp:
+                        if resp.is_redirect:
+                            raise RuntimeError(
+                                "Redirects are not allowed when fetching embeddings"
+                            )
                         resp.raise_for_status()
                         content_length = resp.headers.get("content-length")
                         if (
