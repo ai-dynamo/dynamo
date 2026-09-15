@@ -9,7 +9,9 @@
 //! The CRD schema is defined at:
 //! `deploy/operator/config/crd/bases/nvidia.com_dynamoworkermetadatas.yaml`
 
-use anyhow::Result;
+use std::time::Duration;
+
+use anyhow::{Context, Result};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use kube::{
     Api, Client as KubeClient, CustomResource,
@@ -21,6 +23,11 @@ use crate::discovery::{DiscoveryMetadata, EventScope};
 
 /// Field manager name for server-side apply - identifies this client as the owner of fields it sets
 const FIELD_MANAGER: &str = "dynamo-worker";
+
+// Metadata writers hold the shared write lock while applying the CR. Use a bounded
+// operation deadline rather than waiting for the client's long I/O timeouts so a
+// stalled API request cannot block all subsequent discovery registrations.
+const APPLY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Spec for DynamoWorkerMetadata custom resource
 /// The `data` field stores the serialized `DiscoveryMetadata` as a JSON blob.
@@ -182,9 +189,20 @@ pub async fn apply_cr(
     // in practice the CR will only have one writer (the pod owner)
     let params = PatchParams::apply(FIELD_MANAGER).force();
 
-    api.patch(cr_name, &params, &Patch::Apply(cr))
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to apply DynamoWorkerMetadata CR: {}", e))?;
+    tokio::time::timeout(
+        APPLY_TIMEOUT,
+        api.patch(cr_name, &params, &Patch::Apply(cr)),
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "Timed out after {}s applying DynamoWorkerMetadata {namespace}/{cr_name}",
+            APPLY_TIMEOUT.as_secs()
+        )
+    })?
+    .map_err(|e| {
+        anyhow::anyhow!("Failed to apply DynamoWorkerMetadata {namespace}/{cr_name}: {e}")
+    })?;
 
     tracing::debug!(
         "Applied DynamoWorkerMetadata CR: name={}, namespace={}",
