@@ -8,7 +8,6 @@ use std::collections::HashSet;
 
 use super::reservations::{ReservationIndexObserver, spawn_reservation_index_sweep};
 use super::*;
-use crate::services::selection::ingress::remove_worker_from_index;
 
 impl SelectionCore {
     pub async fn upsert_worker(
@@ -308,14 +307,8 @@ impl SelectionCore {
                     );
                 }
 
-                let indexer = match &self.host.cache.index {
-                    KvIndexSource::Owned(ingress) => {
-                        ingress.open(&self.indexer_registry, &key, block_size)
-                    }
-                    KvIndexSource::Remote(_) => self
-                        .indexer_registry
-                        .get_or_create_indexer(key.clone(), block_size),
-                };
+                let KvIndexSource::Owned(ingress) = &self.host.cache.index;
+                let indexer = ingress.open(&self.indexer_registry, &key, block_size);
                 let overlap_refresh = indexer.supports_overlap_refresh().then(|| {
                     Arc::new(TieredOverlapRefresher::new(
                         indexer.clone(),
@@ -382,18 +375,13 @@ impl SelectionCore {
 
     /// The ingress feeding core-owned indexes, when this core listens for KV events.
     fn ingress(&self) -> Option<&dyn KvEventIngress> {
-        match &self.host.cache.index {
-            KvIndexSource::Owned(ingress) if self.listens_for_kv_events => Some(ingress.as_ref()),
-            _ => None,
-        }
+        let KvIndexSource::Owned(ingress) = &self.host.cache.index;
+        self.listens_for_kv_events.then_some(ingress.as_ref())
     }
 
     async fn cleanup_indexer_registration(&self, record: &WorkerCatalogRecord) {
-        if let KvIndexSource::Owned(ingress) = &self.host.cache.index {
-            ingress.detach(&self.indexer_registry, record).await;
-            return;
-        }
-        remove_worker_from_index(&self.indexer_registry, record).await;
+        let KvIndexSource::Owned(ingress) = &self.host.cache.index;
+        ingress.detach(&self.indexer_registry, record).await;
     }
 
     pub(super) fn publish_scheduler_config(&self, key: &RoutingPartitionId) {

@@ -30,10 +30,10 @@ use dynamo_kv_router::protocols::*;
 use dynamo_kv_router::services::indexer::{self, IndexerConfig};
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::services::selection::{
-    self, KvIndexSource, OverlapScoresRequest, PotentialLoadsRequest, ReservationRequest,
-    SelectAndReserveRequest, SelectRequest, SelectionCacheConfig as RsSelectionCacheConfig,
-    SelectionError, SelectionService as RustSelectionService, SelectionServiceBuilder,
-    SelectionServiceConfig, WorkerPatchRequest, WorkerRequest, WorkerSelectionPolicyRegistry,
+    self, OverlapScoresRequest, PotentialLoadsRequest, ReservationRequest, SelectAndReserveRequest,
+    SelectRequest, SelectionCacheConfig as RsSelectionCacheConfig, SelectionError,
+    SelectionService as RustSelectionService, SelectionServiceBuilder, SelectionServiceConfig,
+    WorkerPatchRequest, WorkerRequest, WorkerSelectionPolicyRegistry,
     warn_for_unserved_worker_selection_policies,
 };
 #[cfg(feature = "slot-tracker")]
@@ -358,11 +358,6 @@ struct SelectServiceCli {
     #[arg(long, value_delimiter = ',')]
     indexer_peers: Vec<String>,
 
-    /// Base URL of a standalone indexer that serves the primary KV index; this
-    /// selector then does not subscribe to worker KV events itself
-    #[arg(long)]
-    remote_indexer_url: Option<String>,
-
     /// Local ZMQ PUB port for active-load replica events
     #[arg(long, value_parser = parse_nonzero_port)]
     replica_sync_port: Option<u16>,
@@ -556,7 +551,6 @@ where
         port: cli.port,
         threads: cli.threads,
         indexer_peers: cli.indexer_peers,
-        remote_indexer_url: cli.remote_indexer_url,
         replica_sync_port: cli.replica_sync_port,
         replica_sync_peers: cli.replica_sync_peers,
         session_affinity_ttl: cli
@@ -668,7 +662,7 @@ pub(crate) struct SelectionService {
 impl SelectionService {
     /// Create a selection service. `indexer_threads` sizes the KV indexer pool.
     #[new]
-    #[pyo3(signature = (*, indexer_threads = 4, indexer_peers = None, replica_sync_port = None, replica_sync_peers = None, selection_cache = None, remote_indexer_url = None, session_affinity_ttl_secs = None))]
+    #[pyo3(signature = (*, indexer_threads = 4, indexer_peers = None, replica_sync_port = None, replica_sync_peers = None, selection_cache = None, session_affinity_ttl_secs = None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -677,7 +671,6 @@ impl SelectionService {
         replica_sync_port: Option<u16>,
         replica_sync_peers: Option<Vec<String>>,
         selection_cache: Option<SelectionCacheConfig>,
-        remote_indexer_url: Option<String>,
         session_affinity_ttl_secs: Option<f64>,
     ) -> PyResult<Self> {
         let replica_sync_peers = replica_sync_peers.unwrap_or_default();
@@ -700,9 +693,6 @@ impl SelectionService {
         .selection_cache(selection_cache.unwrap_or_default().inner);
         if let Some(port) = replica_sync_port {
             builder = builder.replica_sync(port, replica_sync_peers);
-        }
-        if let Some(url) = remote_indexer_url {
-            builder = builder.kv_index(KvIndexSource::Remote(url));
         }
         if let Some(ttl) = session_affinity_ttl_secs {
             builder = builder.session_affinity(

@@ -19,11 +19,7 @@ and active-sequence accounting. Keep these implementation invariants explicit:
   from `longest_matched`.
 - Discovery-driven worker membership goes through `WorkerCatalogSource` and
   `CatalogReconciler` (`membership.rs`), not `upsert_worker`/`delete_worker`.
-- A partition's KV index comes from `HostCache.index: KvIndexSource`: `Owned`
-  (a `KvEventIngress` builds and feeds it: `ZmqDirectIngress` here, the
-  runtime event plane in the frontend) or `Remote` (a standalone indexer
-  serves it). The `Indexer` type itself is shared with the frontend
-  (`services::indexer::backend`).
+- A partition's KV index comes from `HostCache.index: KvIndexSource::Owned`. Its `KvEventIngress` builds and feeds it: `ZmqDirectIngress` here, `RuntimeIngress` in the frontend. The frontend ingress also supports Dynamo-native remote indexing. The `Indexer` type itself is shared with the frontend (`services::indexer::backend`).
 - Each partition owns its `SessionAffinity` table, including versioned
   bindings, idle TTL, and lease lifecycle. A reservation owns its affinity
   lease, so every reservation removal releases both. Frontend routing hosts

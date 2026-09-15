@@ -148,18 +148,8 @@ impl SelectionServiceBuilder {
                 .resolve_for_worker_type(&self.kv_router_config, self.worker_type)?,
         };
         let tracking_hash = Arc::new(TrackingHashContext::from_config(&self.kv_router_config)?);
-        let mut indexer_policy = IndexerPolicy::from_router_config(&self.kv_router_config)?;
-        if let KvIndexSource::Remote(base_url) = &self.host.cache.index {
-            indexer_policy = indexer_policy.with_remote_indexer(base_url.clone())?;
-            if !self.indexer_peers.is_empty() {
-                tracing::warn!(
-                    remote_indexer_url = %base_url,
-                    "indexer_peers are ignored when the primary indexer is remote"
-                );
-            }
-            tracing::info!(remote_indexer_url = %base_url, "Using remote KV indexer");
-        }
-        let recover_from_peers = !self.indexer_peers.is_empty() && !indexer_policy.is_remote();
+        let indexer_policy = IndexerPolicy::from_router_config(&self.kv_router_config)?;
+        let recover_from_peers = !self.indexer_peers.is_empty();
         let cancel_token = CancellationToken::new();
         let mut startup_guard = StartupGuard::new(cancel_token.clone());
         let replica_runtime = setup_replica_sync(
@@ -258,9 +248,6 @@ impl SelectionServiceConfig {
         }
         if let Some(ttl) = self.session_affinity_ttl {
             builder = builder.session_affinity(ttl);
-        }
-        if let Some(url) = &self.remote_indexer_url {
-            builder = builder.kv_index(KvIndexSource::Remote(url.clone()));
         }
         builder
     }

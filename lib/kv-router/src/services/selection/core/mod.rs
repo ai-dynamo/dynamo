@@ -199,9 +199,6 @@ pub enum KvIndexSource {
     /// events; it also decides what metadata a worker needs to be schedulable
     /// and what happens to the index when a worker leaves.
     Owned(Arc<dyn KvEventIngress>),
-    /// A standalone indexer at this base URL serves the primary index; this
-    /// core does not subscribe to worker KV events.
-    Remote(String),
 }
 
 impl Default for KvIndexSource {
@@ -240,8 +237,6 @@ pub struct SelectionServiceConfig {
     pub port: u16,
     pub threads: usize,
     pub indexer_peers: Vec<String>,
-    /// Base URL of a standalone indexer that serves the primary KV index.
-    pub remote_indexer_url: Option<String>,
     pub replica_sync_port: Option<u16>,
     pub replica_sync_peers: Vec<String>,
     pub kv_router_config: crate::config::KvRouterConfig,
@@ -363,7 +358,7 @@ impl SelectionCore {
             WorkerRegistry::new_with_cancel_token(indexer_threads, cancel_token.clone())
                 .with_retained_indexers(),
         );
-        let listens_for_kv_events = kv_router_config.use_kv_events && !indexer_policy.is_remote();
+        let listens_for_kv_events = kv_router_config.use_kv_events;
         indexer_registry.set_indexer_policy(indexer_policy);
         if signal_indexer_ready {
             indexer_registry.signal_ready();

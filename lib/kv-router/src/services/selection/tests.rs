@@ -1773,7 +1773,6 @@ async fn selector_replica_sync_propagates_request_lifecycle() {
         port: 8092,
         threads: 1,
         indexer_peers: Vec::new(),
-        remote_indexer_url: None,
         session_affinity_ttl: None,
         replica_sync_port: Some(port_a),
         replica_sync_peers: Vec::new(),

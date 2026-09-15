@@ -65,8 +65,7 @@ APIs. Those bindings should wrap `SelectionService` rather than construct
 |------|---------|-------------|
 | `--port` | `8092` | HTTP server port. |
 | `--threads` | `4` | KV indexer worker threads. |
-| `--indexer-peers` | none | Comma-separated HTTP URLs used for startup KV recovery through `/dump`. Ignored with `--remote-indexer-url`. |
-| `--remote-indexer-url` | none | Base URL of a [standalone indexer](standalone-indexer.md) that serves the primary KV index. The selector then does not subscribe to worker KV events; workers publish to the indexer instead. Requires `use_kv_events=true`. |
+| `--indexer-peers` | none | Comma-separated HTTP URLs used for startup KV recovery through `/dump`. |
 | `--replica-sync-port` | none | Local ZMQ PUB port for active-load lifecycle events. The selector binds `tcp://*:<port>` internally. |
 | `--replica-sync-peers` | none | Comma-separated ZMQ PUB endpoints for selector peers. Requires `--replica-sync-port`. |
 | `--session-affinity-ttl-secs` | none | Pin each request `session_id` to the worker that served it for this long after its last request (1 to 31,536,000 seconds). When `--replica-sync-port` is configured, bindings replicate to peers over the replica mesh (`dynamo.session-affinity.v1` topic). |
@@ -91,12 +90,6 @@ frontend uses, so the two index the same way:
 | `use_kv_events=true` (default) | Event-driven from worker ZMQ events | Not recorded |
 | `use_kv_events=true`, `DYN_ROUTER_PREDICTED_TTL_SECS` set | Event-driven | Recorded into a short-TTL side indexer merged into device scores by per-worker max |
 | `use_kv_events=false` | Approximate: no events, entries expire after `router_ttl_secs` | Recorded into the primary |
-| `--remote-indexer-url` (or `SelectionServiceBuilder::kv_index(KvIndexSource::Remote(..))`) | Served by a standalone indexer, queried through `POST /query_tiered_by_hash` | Recorded into the side indexer when `DYN_ROUTER_PREDICTED_TTL_SECS` is set, else not recorded |
-
-With a remote primary, worker records do not need `kv_events_endpoint(s)` to
-become schedulable, no ZMQ listener is started in the selector, and `/dump`
-returns no primary events (peers recover from the indexer instead). A remote
-lookup failure is reported as an offline indexer for that selection.
 
 A routing decision is recorded when a reservation is booked (`select_and_reserve`,
 or `select` followed by `POST /reservations`), never for a query-only `select`.

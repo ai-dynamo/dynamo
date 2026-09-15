@@ -408,6 +408,35 @@ mod tests {
     };
     use crate::test_utils::{router_event, stored_blocks_with_sequence_hashes};
 
+    #[test]
+    fn tiered_matches_json_round_trip_preserves_device_and_lower_tier_scores() {
+        let worker = WorkerWithDpRank::new(7, 1);
+        let mut original = TieredMatchDetails::default();
+        original.device.overlap_scores.scores.insert(worker, 2);
+        original.device.overlap_scores.frequencies = vec![1, 1];
+        let mut lower = LowerTierMatchDetails::default();
+        lower.hits.insert(worker, 1);
+        original.lower_tier.insert(StorageTier::HostPinned, lower);
+
+        let json = serde_json::to_vec(&WireTieredMatchDetails::from(&original)).unwrap();
+        let wire: WireTieredMatchDetails = serde_json::from_slice(&json).unwrap();
+        let restored = TieredMatchDetails::from(wire);
+
+        assert_eq!(
+            restored.device.overlap_scores.scores,
+            original.device.overlap_scores.scores
+        );
+        assert_eq!(
+            restored.device.overlap_scores.frequencies,
+            original.device.overlap_scores.frequencies
+        );
+        assert_eq!(restored.lower_tier.len(), 1);
+        assert_eq!(
+            restored.lower_tier[&StorageTier::HostPinned].hits,
+            original.lower_tier[&StorageTier::HostPinned].hits
+        );
+    }
+
     fn local_hashes(values: &[u64]) -> Vec<LocalBlockHash> {
         values.iter().copied().map(LocalBlockHash).collect()
     }

@@ -43,25 +43,18 @@ fn local_core_with(
     .expect("valid test config")
 }
 
-/// `new_inner` with the test defaults; `remote_indexer` swaps the primary for
-/// the standalone indexer at that URL.
+/// `new_inner` with the test defaults.
 fn core_with(
     config: crate::config::KvRouterConfig,
     host: SelectionHost,
     policy_factory: Option<WorkerSelectionPolicyFactory>,
     worker_type: WorkerType,
-    remote_indexer: Option<String>,
     affinity: Option<SessionAffinityConfig>,
 ) -> SelectionCore {
     let tracking_hash = Arc::new(
         TrackingHashContext::from_config(&config).expect("valid tracking hash configuration"),
     );
-    let mut indexer_policy = IndexerPolicy::from_router_config(&config).expect("indexer policy");
-    if let Some(base_url) = remote_indexer {
-        indexer_policy = indexer_policy
-            .with_remote_indexer(base_url)
-            .expect("remote policy");
-    }
+    let indexer_policy = IndexerPolicy::from_router_config(&config).expect("indexer policy");
     SelectionCore::new_inner(
         config,
         1,
@@ -91,7 +84,6 @@ fn core_with_host_and_policy(
         host,
         policy_factory,
         WorkerType::Aggregated,
-        None,
         None,
     )
 }
@@ -287,7 +279,6 @@ async fn selection_setup_uses_worker_type_label() {
             None,
             worker_type,
             None,
-            None,
         );
 
         core.upsert_worker(worker(1)).await.expect("worker upsert");
@@ -388,79 +379,68 @@ async fn bookings_populate_the_approximate_primary_without_kv_events() {
 
 #[tokio::test]
 async fn unreachable_remote_indexer_is_reported_not_ready() {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-    let base_url = format!("http://{}", listener.local_addr().expect("addr"));
-    drop(listener);
+    use crate::indexer::{KvRouterError, TieredMatchDetails};
+    use crate::services::indexer::backend::RemotePrimary;
+
+    struct OfflineRemote;
+    #[async_trait::async_trait]
+    impl RemotePrimary for OfflineRemote {
+        async fn find_matches_by_tier(
+            &self,
+            _: Vec<LocalBlockHash>,
+            _: bool,
+        ) -> anyhow::Result<TieredMatchDetails> {
+            Err(KvRouterError::IndexerOffline.into())
+        }
+
+        async fn record_routing_decision(
+            &self,
+            _: WorkerWithDpRank,
+            _: RoutingDecisionHashes,
+        ) -> anyhow::Result<()> {
+            anyhow::bail!("event-driven remote primary must not receive routing decisions")
+        }
+
+        fn use_kv_events(&self) -> bool {
+            true
+        }
+    }
+
+    struct OfflineIngress;
+    #[async_trait::async_trait]
+    impl KvEventIngress for OfflineIngress {
+        fn open(&self, _: &WorkerRegistry, _: &RoutingPartitionId, _: u32) -> Indexer {
+            Indexer::Remote {
+                primary: Arc::new(OfflineRemote),
+                approx: None,
+                primary_records_routing_decisions: false,
+            }
+        }
+    }
+
     let core = core_with(
         test_config(true),
-        SelectionHost::default(),
+        SelectionHost {
+            cache: HostCache {
+                index: KvIndexSource::Owned(Arc::new(OfflineIngress)),
+                shared: None,
+            },
+            ..SelectionHost::default()
+        },
         None,
         WorkerType::Aggregated,
-        Some(base_url),
         None,
     );
     core.upsert_worker(worker(1)).await.expect("worker upsert");
-    assert!(matches!(
-        core.select(select_request()).await,
-        Err(SelectionError::Indexer(
-            crate::indexer::KvRouterError::IndexerOffline
-        ))
-    ));
-}
-
-#[tokio::test]
-async fn remote_indexer_serves_selection_without_local_kv_listeners() {
-    use crate::indexer::KvIndexerInterface;
-    use crate::protocols::{BlockHashOptions, StorageTier, compute_block_hash_for_seq};
-    use crate::services::indexer::registry::WorkerRegistry;
-    use crate::services::indexer::server::spawn_test_indexer_server;
-
-    // The standalone indexer holds worker 2's cache for the test prompt.
-    let key = default_key();
-    let served = Arc::new(WorkerRegistry::new(1));
-    let served_indexer = served.get_or_create_indexer(key.clone(), 4);
-    let hashes: Vec<u64> =
-        compute_block_hash_for_seq(&[1, 2, 3, 4], 4, BlockHashOptions::default())
-            .into_iter()
-            .map(|hash| hash.0)
-            .collect();
-    served_indexer
-        .apply_event_routed(store_event(2, 0, 1, &[], &hashes, StorageTier::Device))
+    let error = core
+        .select(select_request())
         .await
-        .unwrap();
-    if let Indexer::Single { primary, .. } = &served_indexer {
-        let _ = primary.flush().await;
-    }
-    let (base_url, server) = spawn_test_indexer_server(served).await;
-
-    // use_kv_events=true, but the primary is remote: workers need no
-    // kv_events endpoints and no ZMQ listener is started here.
-    let core = core_with(
-        test_config(true),
-        SelectionHost::default(),
-        None,
-        WorkerType::Aggregated,
-        Some(base_url),
-        None,
-    );
-    assert!(!core.listens_for_kv_events);
-    for worker_id in [1, 2] {
-        let record = core
-            .upsert_worker(worker(worker_id))
-            .await
-            .expect("worker upsert");
-        assert_eq!(record.lifecycle, WorkerLifecycle::Schedulable, "{record:?}");
-    }
-
-    let response = core.select(select_request()).await.expect("select");
-    assert_eq!(
-        response.worker_id, 2,
-        "remote cache credit steers selection"
-    );
-    assert_eq!(response.overlap.longest_matched, 4);
-
-    core.delete_worker(2).await.expect("delete worker");
-    server.abort();
+        .expect_err("offline indexer");
+    assert!(matches!(
+        error,
+        SelectionError::Indexer(KvRouterError::IndexerOffline)
+    ));
+    assert_eq!(error.status_code(), 503);
 }
 
 /// Two event-driven workers; worker 1 holds every block of an 8-token
@@ -1444,7 +1424,6 @@ async fn dropped_book_selection_during_routing_record_frees_booking_and_claim() 
         },
         None,
         WorkerType::Aggregated,
-        None,
         Some(
             SessionAffinityConfig::new(Duration::from_secs(10))
                 .with_mode(SessionAffinityMode::Hard),
@@ -2055,7 +2034,6 @@ fn core_with_session_affinity_mode(mode: SessionAffinityMode) -> SelectionCore {
         SelectionHost::default(),
         None,
         WorkerType::Aggregated,
-        None,
         Some(SessionAffinityConfig::new(Duration::from_secs(10)).with_mode(mode)),
     )
 }
