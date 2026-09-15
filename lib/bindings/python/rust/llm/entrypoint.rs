@@ -507,11 +507,7 @@ impl RouterConfig {
                 );
             });
         }
-        if session_affinity_ttl_secs.is_some_and(|ttl| !(1..=31_536_000).contains(&ttl)) {
-            return Err(PyValueError::new_err(
-                "session_affinity_ttl_secs must be between 1 and 31536000",
-            ));
-        }
+        super::kv::check_session_affinity_ttl_secs(session_affinity_ttl_secs)?;
         RsLoadThresholdConfig {
             active_decode_blocks_threshold,
             active_prefill_tokens_threshold,

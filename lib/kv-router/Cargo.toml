@@ -21,6 +21,8 @@ profile = []
 standalone-indexer = ["dep:axum", "dep:reqwest", "dep:zmq", "dep:chrono", "dep:tracing-appender"]
 standalone-slot-tracker = ["dep:axum", "dep:zmq"]
 standalone-selection = ["standalone-indexer", "dep:once_cell"]
+# Test-only hooks consumed by dependent crates' tests; never enable in release.
+testing = []
 
 [dependencies]
 # repo
@@ -73,7 +75,7 @@ axum = { version = "=0.8.4", default-features = false, features = [
   "tracing",
 ], optional = true }
 chrono = { workspace = true, optional = true }
-reqwest = { version = "0.12.24", default-features = false, features = ["json"], optional = true }
+reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"], optional = true }
 tracing-appender = { version = "0.2", optional = true }
 
 [dev-dependencies]
@@ -96,3 +98,8 @@ harness = false
 [[bench]]
 name = "worker_selection"
 harness = false
+
+[[bench]]
+name = "selection_core"
+harness = false
+required-features = ["standalone-selection"]
