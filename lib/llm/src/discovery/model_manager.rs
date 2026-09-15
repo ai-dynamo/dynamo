@@ -23,6 +23,7 @@ use super::worker_monitor::LoadThresholdConfig;
 use super::{
     GenerateEngineSelection, KvSourceMembershipWatch, Model, RuntimeConfigWatch, WorkerSet,
     kv_source_watch::KvSourceMembershipCoordinator, runtime_config_watch,
+    runtime_configs::filter_runtime_configs,
 };
 
 use dynamo_runtime::{
@@ -2186,6 +2187,13 @@ impl ModelManager {
             None
         };
 
+        // Shared endpoint state includes rejected cohorts; router capacity and metadata
+        // must use the same membership as this client's worker selection.
+        let workers_with_configs = filter_runtime_configs(
+            workers_with_configs,
+            client.instance_avail_watcher(),
+            cancellation_token.clone(),
+        );
         let mut chooser = KvRouter::new_with_worker_role_and_scheduler_load(
             endpoint.clone(),
             client,
@@ -2378,7 +2386,7 @@ impl ModelManager {
         let prefill_providers = worker_sets
             .iter()
             .filter(|worker_set| worker_set.card().worker_type == Some(WorkerType::Prefill))
-            .filter_map(|worker_set| worker_set.topology_endpoint().cloned())
+            .filter_map(|worker_set| worker_set.topology_target().cloned())
             .collect::<Vec<_>>();
         let decode_consumers = worker_sets
             .iter()
@@ -2388,7 +2396,11 @@ impl ModelManager {
             .then(|| prefill_providers[0].clone());
         for worker_set in &decode_consumers {
             if let Some(router) = &worker_set.prefill_router {
-                router.set_target(prefill_target.clone());
+                router.set_target(
+                    prefill_target
+                        .clone()
+                        .map(super::WorkerSetTarget::Committed),
+                );
             }
         }
 
@@ -2398,7 +2410,7 @@ impl ModelManager {
                 worker_set.card().worker_type == Some(WorkerType::Encode)
                     && worker_set.card().model_type.is_empty()
             })
-            .filter_map(|worker_set| worker_set.topology_endpoint().cloned())
+            .filter_map(|worker_set| worker_set.topology_target().cloned())
             .collect::<Vec<_>>();
         let unique_encode = (encode_providers.len() == 1).then(|| encode_providers[0].clone());
         let capable_prefill = (prefill_providers.len() == 1)
@@ -2418,7 +2430,12 @@ impl ModelManager {
                     Self::supports_encoder_result_handoff(worker_set.card())
                 }
             };
-            router.set_target(routing_enabled.then(|| unique_encode.clone()).flatten());
+            router.set_target(
+                routing_enabled
+                    .then(|| unique_encode.clone())
+                    .flatten()
+                    .map(super::WorkerSetTarget::Committed),
+            );
         }
     }
 
@@ -3614,9 +3631,18 @@ mod tests {
         Option<Arc<crate::kv_router::EncoderRouter>>,
     ) {
         let card = topology_card(role);
-        let mut worker_set =
-            WorkerSet::new(endpoint.id().namespace, card.mdcsum().to_string(), card);
-        worker_set.set_topology_endpoint(endpoint);
+        let mut worker_set = WorkerSet::new(
+            endpoint.id().namespace,
+            card.mdcsum().to_string(),
+            card.clone(),
+        );
+        worker_set.set_topology_target(crate::discovery::CommittedWorkerSetTarget {
+            group: endpoint.id().to_string(),
+            endpoint,
+            generation: 1,
+            card: Arc::new(card),
+            admitted_ids: tokio::sync::watch::channel(Vec::new()).1,
+        });
         if role != WorkerType::Decode {
             return (worker_set, None, None);
         }
