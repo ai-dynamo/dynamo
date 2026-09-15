@@ -14,7 +14,10 @@
 #      name-keyed router (lib/llm/src/discovery/model_manager.rs) should
 #      send each request only to the worker registered for that model.
 #
-# GPUs: 2
+# GPUs: 2 -- the first two devices of the inherited
+#           CUDA_VISIBLE_DEVICES, so a caller that assigns a
+#           specific pair (the VRAM-aware test scheduler does) is
+#           honoured rather than overridden.
 #
 # Usage:
 #   agg_embed_multiworker.sh MODEL1 MODEL2 [EXTRA_DYNAMO_VLLM_ARGS...]
@@ -60,6 +63,32 @@ HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 SYSTEM_PORT1="${DYN_SYSTEM_PORT1:-${DYN_SYSTEM_PORT:-8081}}"
 SYSTEM_PORT2="${DYN_SYSTEM_PORT2:-8082}"
 
+# Pin each worker to one device of the set we were GIVEN, not to a hardcoded
+# 0 and 1.
+#
+# CUDA_VISIBLE_DEVICES is absolute: a child that sets it to "0" gets physical
+# GPU 0, whatever the parent's value was -- the parent's restriction is
+# replaced, not compounded. So hardcoding 0/1 here is only correct while the
+# caller happens to have handed us exactly those two devices. The VRAM-aware
+# test scheduler (tests/utils/pytest_parallel_gpu.py) allocates a gpu_2 test a
+# gang of any two devices on the node and exports them in
+# CUDA_VISIBLE_DEVICES, so on a node with more than two GPUs it can hand us
+# "2,3" -- and hardcoded 0/1 would then run both workers on devices the
+# scheduler has reserved for other tests, silently double-booking their VRAM.
+#
+# Unset means "no restriction" (a manual run on an unrestricted host), which
+# keeps the historical 0,1 behaviour. An explicitly EMPTY value is different --
+# in CUDA it means "no devices at all" -- so it must fail the check below rather
+# than fall back to two GPUs; hence ``-`` and not ``:-``.
+IFS=',' read -r -a _VISIBLE_GPUS <<< "${CUDA_VISIBLE_DEVICES-0,1}"
+if [ -z "${CUDA_VISIBLE_DEVICES-0,1}" ] || [ "${#_VISIBLE_GPUS[@]}" -lt 2 ]; then
+    echo "ERROR: this script needs 2 GPUs;" \
+         "CUDA_VISIBLE_DEVICES='${CUDA_VISIBLE_DEVICES-<unset>}' exposes ${#_VISIBLE_GPUS[@]}." >&2
+    exit 1
+fi
+WORKER1_GPU="${_VISIBLE_GPUS[0]}"
+WORKER2_GPU="${_VISIBLE_GPUS[1]}"
+
 print_launch_banner --no-curl "Launching Multi-Worker Embeddings (2 GPUs)" "${MODEL1} + ${MODEL2}" "$HTTP_PORT"
 
 print_curl_footer <<CURL
@@ -68,8 +97,8 @@ print_curl_footer <<CURL
     -d '{"model": "${MODEL1}", "input": "Hello, world!"}'
 
   # Per-worker metrics:
-  curl http://localhost:${SYSTEM_PORT1}/metrics  # worker on GPU 0 (${MODEL1})
-  curl http://localhost:${SYSTEM_PORT2}/metrics  # worker on GPU 1 (${MODEL2})
+  curl http://localhost:${SYSTEM_PORT1}/metrics  # worker on the 1st visible GPU (${MODEL1})
+  curl http://localhost:${SYSTEM_PORT2}/metrics  # worker on the 2nd visible GPU (${MODEL2})
 CURL
 
 # Frontend — same routing layer as the single-worker case; the name-keyed
@@ -112,7 +141,7 @@ common_worker_args=(
 #
 # Endpoint format is ``namespace.component.endpoint`` (dots, not slashes).
 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=${SYSTEM_PORT1} \
-CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
+CUDA_VISIBLE_DEVICES="${WORKER1_GPU}" python3 -m dynamo.vllm \
     --model "$MODEL1" \
     --endpoint embed-worker-1.vllm.generate \
     "${common_worker_args[@]}" \
@@ -120,7 +149,7 @@ CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
     "${EXTRA_ARGS[@]}" &
 
 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=${SYSTEM_PORT2} \
-CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
+CUDA_VISIBLE_DEVICES="${WORKER2_GPU}" python3 -m dynamo.vllm \
     --model "$MODEL2" \
     --endpoint embed-worker-2.vllm.generate \
     "${common_worker_args[@]}" \
