@@ -2867,6 +2867,7 @@ async fn kv_stopped_decode_request_without_staged_kv_never_reaches_a_worker() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn unknown_explicit_workers_are_rejected_before_builtin_dispatch() {
     let runtime = Runtime::from_current().unwrap();
     let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
