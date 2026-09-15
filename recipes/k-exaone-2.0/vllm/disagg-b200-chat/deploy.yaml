@@ -111,6 +111,7 @@ spec:
                     --load-format fastsafetensors \
                     --safetensors-load-strategy lazy \
                     --disaggregation-mode=prefill \
+                    --kv-transfer-config "${KV_TRANSFER_CONFIG}" \
                     --tensor-parallel-size 4 \
                     --gpu-memory-utilization 0.93 \
                     --max-num-seqs 32 \
@@ -180,6 +181,7 @@ spec:
                     --load-format fastsafetensors \
                     --safetensors-load-strategy lazy \
                     --disaggregation-mode=decode \
+                    --kv-transfer-config "${KV_TRANSFER_CONFIG}" \
                     --tensor-parallel-size 4 \
                     --gpu-memory-utilization 0.93 \
                     --max-num-seqs 256 \
