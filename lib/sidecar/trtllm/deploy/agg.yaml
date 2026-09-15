@@ -49,7 +49,8 @@ spec:
           # gRPC yet. The image must serve `--grpc-protocol openengine`, expose
           # the Control service (the sidecar needs GetModelInfo to start, and
           # the probes below call Health), and have the OpenEngine Python
-          # bindings installed ("tensorrt_llm[openengine]") for those probes.
+          # bindings installed for those probes -- see the README's Run section
+          # for the pinned package versions, which the image must match.
           image: <trtllm-image-with-openengine>
           restartPolicy: Always
           # Readiness via the OpenEngine Control.Health RPC, which reports the

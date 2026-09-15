@@ -118,9 +118,6 @@ fn status_to_dynamo_parts(rpc: &str, message: &str, code: tonic::Code) -> Dynamo
         | tonic::Code::FailedPrecondition
         | tonic::Code::AlreadyExists => BackendError::InvalidArgument,
         tonic::Code::Unavailable => BackendError::CannotConnect,
-        tonic::Code::ResourceExhausted => {
-            return worker_overloaded(format!("{rpc}: {message} (ResourceExhausted)"));
-        }
         tonic::Code::Cancelled => BackendError::Cancelled,
         tonic::Code::DeadlineExceeded => BackendError::ConnectionTimeout,
         _ => BackendError::Unknown,
@@ -145,6 +142,12 @@ mod tests {
                 BackendError::ConnectionTimeout,
             ),
             (tonic::Code::Internal, BackendError::Unknown),
+            // Not WorkerOverloaded: that type is migratable, and a shared
+            // helper cannot tell an overloaded engine from a per-request
+            // rejection such as an oversized message, which every worker would
+            // reject identically. A backend that knows its server means
+            // backpressure maps this itself.
+            (tonic::Code::ResourceExhausted, BackendError::Unknown),
         ] {
             let error = status_to_dynamo("Test", tonic::Status::new(code, "failure"));
             assert_eq!(error.error_type(), ErrorType::Backend(expected));

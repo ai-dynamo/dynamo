@@ -10,13 +10,15 @@ use dynamo_backend_common::{
     AsyncEngineContext, DisaggregationMode, DynamoError, EngineConfig, GenerateContext, LLMEngine,
     LLMEngineOutput, LLMEngineOutputExt, PreprocessedRequest, WorkerConfig, usage,
 };
-use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig, SidecarStartupError};
+use dynamo_sidecar_common::{
+    GrpcEndpoint, GrpcTransportConfig, SidecarStartupError, startup_deadline,
+};
 use futures::stream::BoxStream;
 use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
-use crate::client::{self, TrtllmClient};
+use crate::client::{self, ModelLimits, TrtllmClient};
 use crate::convert::{ResponseState, build_generate_request};
 use crate::model::ConfiguredModel;
 
@@ -36,10 +38,10 @@ pub struct TrtllmSidecarEngine {
     /// `kv.session` divergence in `convert`.
     mode: DisaggregationMode,
     client: OnceCell<TrtllmClient>,
-    /// Model context length reported by `Control.GetModelInfo`, cached at
-    /// `start` so `generate` can derive a default `max_tokens` for requests
-    /// that omit one.
-    context_length: OnceCell<u32>,
+    /// Engine limits resolved at `start` from `--context-length` and
+    /// `Control.GetModelInfo`, so `generate` can derive a default `max_tokens`
+    /// for requests that omit one.
+    limits: OnceCell<ModelLimits>,
     cancel: CancellationToken,
 }
 
@@ -56,7 +58,7 @@ impl TrtllmSidecarEngine {
             model,
             mode,
             client: OnceCell::new(),
-            context_length: OnceCell::new(),
+            limits: OnceCell::new(),
             cancel: CancellationToken::new(),
         }
     }
@@ -148,42 +150,71 @@ impl LLMEngine for TrtllmSidecarEngine {
         let client = TrtllmClient::connect(&self.endpoint, self.transport).await?;
         let connection_count = client.connection_count();
 
-        // `Control.GetModelInfo` reports the engine's `--max_seq_len`, which is
-        // unset by default; `client::model_info` discards the value
-        // TensorRT-LLM substitutes for it. A configured `--context-length` wins
-        // over what survives that check.
+        // `--context-length` wins over what the engine reports, and is the
+        // only source when the engine reports nothing usable. The resolved
+        // value backs both the registered window and the default-`max_tokens`
+        // path in `convert::max_tokens`.
         let mut model = self.model.clone();
-        let reported = match client.model_info(&self.model.source).await {
-            Ok(reported) => reported,
-            Err(error) => {
-                match model.context_length {
-                    Some(configured) => tracing::warn!(
-                        %error,
+        let limits = match model.context_length {
+            // Configured: the engine is consulted once, to cross-check the
+            // value and to learn its output cap. It may not answer at all --
+            // an older server has no Control service -- and that must not stop
+            // a worker whose window the operator already supplied.
+            Some(configured) => {
+                let reported = match client.model_limits(&model.source).await {
+                    Ok(reported) => reported,
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            configured_context_length = configured,
+                            "Control.GetModelInfo failed; using the configured --context-length"
+                        );
+                        ModelLimits::default()
+                    }
+                };
+                if let Some(engine_context_length) = reported.context_length
+                    && engine_context_length != configured
+                {
+                    tracing::warn!(
                         configured_context_length = configured,
-                        "Control.GetModelInfo failed; using the configured --context-length"
-                    ),
-                    None => tracing::warn!(
-                        %error,
-                        "Control.GetModelInfo failed and no --context-length was \
-                         configured; no context length is available"
-                    ),
+                        engine_context_length,
+                        "--context-length disagrees with the context length TensorRT-LLM \
+                         reported; using the configured --context-length"
+                    );
                 }
-                None
+                ModelLimits {
+                    context_length: Some(configured),
+                    ..reported
+                }
+            }
+            // Nothing configured: the engine is the only source, and it binds
+            // its port before the model finishes loading, so wait for it.
+            None => {
+                match client
+                    .wait_for_model_limits(
+                        &model.source,
+                        startup_deadline(self.transport.startup_deadline)?,
+                        self.transport.retry_interval,
+                    )
+                    .await
+                {
+                    Ok(limits) => limits,
+                    // Registering without a window is still useful: requests
+                    // that carry their own `max_tokens` are served, and only
+                    // the ones that omit it are rejected.
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            "no context length is available; requests that omit max_tokens \
+                             will be rejected. Supply --context-length."
+                        );
+                        ModelLimits::default()
+                    }
+                }
             }
         };
-        match (model.context_length, reported) {
-            (Some(configured), Some(reported)) if configured != reported => tracing::warn!(
-                configured_context_length = configured,
-                engine_context_length = reported,
-                "--context-length disagrees with the context length TensorRT-LLM reported; \
-                 using the configured --context-length"
-            ),
-            (None, Some(reported)) => model.context_length = Some(reported),
-            _ => {}
-        }
-        if let Some(context_length) = model.context_length {
-            let _ = self.context_length.set(context_length);
-        }
+        model.context_length = limits.context_length;
+        let _ = self.limits.set(limits);
 
         self.client
             .set(client)
@@ -192,7 +223,8 @@ impl LLMEngine for TrtllmSidecarEngine {
             endpoint = %self.endpoint,
             connections = connection_count,
             model = %model.source,
-            context_length = ?model.context_length,
+            context_length = ?limits.context_length,
+            max_output_tokens = ?limits.max_output_tokens,
             "TensorRT-LLM gRPC is ready"
         );
         Ok(model.engine_config())
@@ -212,7 +244,7 @@ impl LLMEngine for TrtllmSidecarEngine {
             &request,
             &request_id,
             &self.model.source,
-            self.context_length.get().copied(),
+            self.limits.get().copied(),
             self.mode,
         )?;
         // Routing targets travel as protocol metadata, not in the request body.
@@ -242,9 +274,12 @@ impl LLMEngine for TrtllmSidecarEngine {
         let shutdown = cancel.clone();
         let mut shutdown_cancellation = Box::pin(async move { shutdown.cancelled().await });
 
+        // No deferral here: nothing has been dispatched yet, so there is no
+        // transferred KV to strand -- the deferral below only applies once the
+        // engine has the request.
         let stream = tokio::select! {
             biased;
-            _ = &mut request_cancellation, if !defer_request_cancellation => None,
+            _ = &mut request_cancellation => None,
             _ = &mut shutdown_cancellation => None,
             result = client.generate(proto_request, target_dp_rank) => Some(result?),
         };

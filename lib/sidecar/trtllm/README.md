@@ -37,12 +37,10 @@ authoritative for a session's KV affinity, so a decode request follows the
 handoff rather than the header.
 
 > [!NOTE]
-> The sidecar requires a server implementing the OpenEngine `Control` service.
-> `GetModelInfo` supplies the registered context length (and the default
-> `max_tokens` for requests that omit one), so the sidecar refuses to start if
-> `Control` is missing rather than serving with an unknown context window.
-> `Control.Abort` cancels an in-flight request; closing the `Generate` stream
-> also aborts it, so cancellation is covered either way.
+> `Control.GetModelInfo` supplies the registered context length (and the default
+> `max_tokens` for requests that omit one) unless `--context-length` supplies it
+> instead. `Control.Abort` cancels an in-flight request; closing the `Generate`
+> stream also aborts it, so cancellation is covered either way.
 >
 > `Control`'s LoRA RPCs (`LoadLora`, `UnloadLora`, `ListLoras`) and KV-event
 > RPCs (`GetKvEventSources`, `SubscribeKvEvents`) return `UNIMPLEMENTED`: the
@@ -73,8 +71,17 @@ Start TensorRT-LLM with its OpenEngine gRPC server. This requires the OpenEngine
 Python bindings and a TensorRT-LLM build with OpenEngine gRPC support:
 
 ```bash
+# Install the two packages directly rather than through the
+# `tensorrt_llm[openengine]` extra: the extra makes pip re-resolve
+# TensorRT-LLM's whole dependency closure, which fails on an image whose
+# site-packages is read-only. Both are pinned to BSR module commit
+# 768a93c7b44e, the revision `proto/` was generated from. The protobuf package
+# is additionally pinned by gencode version -- a gencode newer than the image's
+# protobuf runtime fails at import -- so raise it only with the image's
+# protobuf.
 python -m pip install --extra-index-url https://buf.build/gen/python \
-  "tensorrt_llm[openengine]"
+  "openengine-openengine-grpc-python==1.78.1.1.20260730172104+768a93c7b44e" \
+  "openengine-openengine-protocolbuffers-python==33.5.0.1.20260730172104+768a93c7b44e"
 
 python -m tensorrt_llm.commands.serve <model> \
   --grpc --grpc-protocol openengine --host 0.0.0.0 --port 50051
@@ -92,8 +99,17 @@ dynamo-trtllm-sidecar \
   --model-path <model>
 ```
 
-The context length is read from the server at startup (`Control.GetModelInfo`),
-so there is no flag to keep in sync with the engine's `max_seq_len`.
+The context length comes from `--context-length` (or `TRTLLM_CONTEXT_LENGTH`)
+when it is supplied, and from `Control.GetModelInfo` otherwise; a disagreement
+between the two is logged at WARN and the configured value wins. Supply it
+whenever the engine was started without `--max_seq_len`, because TensorRT-LLM
+then reports its `max_input_len` default instead of a real context length and
+the sidecar discards that value. With neither source the worker still
+registers, and only requests that omit `max_tokens` are rejected.
+
+Startup waits for the engine: TensorRT-LLM binds its gRPC port before the model
+finishes loading, so the sidecar retries `GetModelInfo` until
+`--grpc-startup-deadline` rather than failing on the first answer.
 
 Use `DYN_SIDECAR_GRPC_ENDPOINT` instead of `--grpc-endpoint` when the endpoint is
 provided through the environment.
