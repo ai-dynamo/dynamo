@@ -79,6 +79,22 @@ def check(path: Path) -> list[str]:
     return problems
 
 
+def check_enum_usage(root: Path = ROOT) -> list[str]:
+    problems = []
+    for page in (root / "pages" / "reference").rglob("*.mdx"):
+        text = page.read_text()
+        if 'className="enum-values"' not in text:
+            continue
+        if not re.search(
+            r'import\s+\{\s*EnumStyles\s*\}\s+from\s+[\'"]@/components/EnumStyles[\'"]',
+            text,
+        ) or not re.search(r"<EnumStyles\s*/>", text):
+            problems.append(
+                f"{page}: enum badges require an EnumStyles import and render"
+            )
+    return problems
+
+
 def main() -> int:
     args = [Path(a) for a in sys.argv[1:]]
     # The *Styles.tsx convention plus the two components that hold CSS under
@@ -92,12 +108,12 @@ def main() -> int:
     )
     targets = [t for t in targets if t.suffix == ".tsx" and t.exists()]
 
-    problems: list[str] = []
+    problems = check_enum_usage()
     for target in targets:
         problems.extend(check(target))
 
     if problems:
-        print("template literal defects found:\n", file=sys.stderr)
+        print("style component validation problems found:\n", file=sys.stderr)
         for problem in problems:
             print(f"  - {problem}", file=sys.stderr)
         return 1
