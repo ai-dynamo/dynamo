@@ -387,7 +387,11 @@ impl BookingHandle {
     #[must_use]
     pub fn commit(mut self) -> SchedulerBookingDescriptor {
         self.armed = false;
-        self.booking.clone()
+        SchedulerBookingDescriptor {
+            request_id: std::mem::take(&mut self.booking.request_id),
+            worker: self.booking.worker,
+            attempt_id: self.booking.attempt_id,
+        }
     }
 
     /// Free the booking now and wait for the scheduler to acknowledge it.
@@ -1818,8 +1822,11 @@ mod tests {
         wait_freed(&slots, &armed).await;
 
         let committed = book_directly(&slots, "committed");
-        let descriptor = queue.booking_handle(committed.clone()).commit();
+        let handle = queue.booking_handle(committed.clone());
+        let request_id_ptr = handle.booking.request_id.as_ptr();
+        let descriptor = handle.commit();
         assert_eq!(descriptor, committed);
+        assert_eq!(descriptor.request_id.as_ptr(), request_id_ptr);
 
         // The cleanup queue drains in order, so an acknowledged release
         // enqueued after the commit proves the commit enqueued nothing.
