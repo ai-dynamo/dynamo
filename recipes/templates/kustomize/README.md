@@ -442,6 +442,16 @@ python3 scripts/validate-recipe-kustomization.py \
   --kustomize-bin /explicit/path/to/kustomize
 ```
 
+The scaffold's regression tests live in `docs/tests/`. They are excluded from
+the repository's default pytest collection because they are recipe tooling
+tests, not Dynamo runtime tests, and they need Kustomize v5.8.1; the pre-merge
+Recipe Check job runs them by explicit file path. Run them the same way locally,
+with Kustomize on `PATH` or `KUSTOMIZE_BIN` set:
+
+```bash
+python3 -m pytest --noconftest docs/tests/test_*.py
+```
+
 The validator checks that the build targets exactly one beta DGD, verifies the
 canonical component positions, rejects base-owned cluster fields and duplicate
 environment names, lowers each strategic merge patch into guarded JSON 6902
