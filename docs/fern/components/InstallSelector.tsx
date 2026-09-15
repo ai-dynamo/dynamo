@@ -170,7 +170,7 @@ export function InstallSelector({ hardware = "all" }: { hardware?: "all" | "nvid
         : "Pinned nightly wheel build"
       : "Intel XPU local runtime";
   const hardwareLabel = activeHardware === "nvidia" ? "NVIDIA GPU" : "Intel XPU";
-  const versionRowLabel = channel === "nightly" ? "Dynamo nightly" : `${INSTALL_DATA[backend].label} version`;
+  const versionRowLabel = `${INSTALL_DATA[backend].label} version`;
 
   return (
     <>
@@ -215,14 +215,16 @@ export function InstallSelector({ hardware = "all" }: { hardware?: "all" | "nvid
               {entries.map((version, index) => {
                 const hasContainer = Boolean(version.commands.container);
                 const hasWheel = Boolean(version.commands.wheel);
-                const displayVersion = channel === "nightly" && version.dynamo ? version.dynamo : version.backend_version;
+                // Engine version leads on every channel, Dynamo version beneath
+                // it, so a nightly chip reads the same way as a stable one.
+                const displayVersion = version.backend_version;
                 const displayMeta = version.source
                   ? "from main"
-                  : channel === "nightly"
-                    ? version.latest
+                  : version.dynamo
+                    ? `Dynamo ${version.dynamo}`
+                    : version.latest
                       ? "latest nightly"
-                      : version.date ?? "nightly wheel"
-                    : `Dynamo ${version.dynamo}`;
+                      : version.date ?? "nightly wheel";
                 return (
                   <button
                     key={`${version.backend_version}-${version.dynamo ?? index}`}
