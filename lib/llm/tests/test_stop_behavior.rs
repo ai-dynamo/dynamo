@@ -344,3 +344,25 @@ fn hidden_stop_sequence_survives_self_similar_prefix_run() {
         "one token report per input token id"
     );
 }
+
+#[test]
+fn earliest_stop_sequence_wins_over_list_order() {
+    for include_stop_str in [false, true] {
+        let mut decoder = make_decoder(None, None, None, Some(vec!["re", "he"]), include_stop_str);
+        let result = decoder.process_token_ids(&[THERE]).unwrap();
+
+        assert_eq!(
+            result.text.as_deref(),
+            Some(if include_stop_str { "the" } else { "t" }),
+        );
+        match result.stop_trigger {
+            Some(StopTrigger::VisibleStopSequenceDetected(stop)) if include_stop_str => {
+                assert_eq!(stop, "he");
+            }
+            Some(StopTrigger::HiddenStopSequenceDetected(stop)) if !include_stop_str => {
+                assert_eq!(stop, "he");
+            }
+            trigger => panic!("unexpected stop trigger: {trigger:?}"),
+        }
+    }
+}
