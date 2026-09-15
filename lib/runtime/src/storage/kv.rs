@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, percent_encode};
 use serde::{Deserialize, Serialize};
+use tokio_util::task::AbortOnDropHandle;
 
 mod mem;
 pub use mem::MemoryStore;
@@ -364,7 +365,9 @@ impl Manager {
         // Backpressure is intentional: discovery state events must never be dropped.
         let (tx, rx) = tokio::sync::mpsc::channel(16384);
         let (established_tx, established_rx) = tokio::sync::oneshot::channel();
-        let watch_task = tokio::spawn({
+        // Until the watch is established, a caller that stops waiting aborts the task rather than
+        // detaching it: nobody reads the bucket it would create or the backend watch it would hold.
+        let watch_task = AbortOnDropHandle::new(tokio::spawn({
             let bucket_name = bucket_name.clone();
             let cancel_token = cancel_token.clone();
             async move {
@@ -394,6 +397,8 @@ impl Manager {
                 loop {
                     let event = tokio::select! {
                         () = cancel_token.cancelled() => break,
+                        // A quiet bucket would otherwise park the task until its next change.
+                        () = tx.closed() => break,
                         result = stream.next() => match result {
                             Some(event) => event,
                             None => break,
@@ -404,12 +409,11 @@ impl Manager {
                     }
                 }
             }
-        });
+        }));
 
         let established = tokio::select! {
             biased;
-            // Abort rather than detach: the task is still free to create the bucket and open a
-            // backend watch that nobody reads before its establishment hand-off fails.
+            // Await the abort, so the task cannot create the bucket after this returns.
             () = cancel_token.cancelled() => {
                 watch_task.abort();
                 let _ = watch_task.await;
@@ -423,7 +427,7 @@ impl Manager {
             ))
         })??;
 
-        Ok((watch_task, rx))
+        Ok((watch_task.detach(), rx))
     }
 
     pub async fn publish<T: Serialize + Versioned + Send + Sync>(
@@ -568,7 +572,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use futures::{StreamExt, pin_mut};
+    use futures::{FutureExt, StreamExt, pin_mut};
 
     const BUCKET_NAME: &str = "v1/mdc";
 
@@ -731,6 +735,41 @@ mod tests {
             manager.get_bucket(BUCKET_NAME).await.unwrap().is_none(),
             "a cancelled watch created the bucket it gave up on"
         );
+    }
+
+    #[tokio::test]
+    async fn manager_watch_abandoned_before_establishment_creates_no_bucket() {
+        let manager = Arc::new(Manager::memory());
+
+        let watch = manager
+            .clone()
+            .watch(BUCKET_NAME, None, CancellationToken::new());
+        assert!(
+            watch.now_or_never().is_none(),
+            "the watch completed on its first poll, before its setup task could run"
+        );
+
+        tokio::task::yield_now().await;
+        assert!(
+            manager.get_bucket(BUCKET_NAME).await.unwrap().is_none(),
+            "an abandoned watch created the bucket nobody waits for"
+        );
+    }
+
+    #[tokio::test]
+    async fn manager_watch_task_ends_when_its_receiver_drops() {
+        let manager = Arc::new(Manager::memory());
+        let (watch_task, rx) = manager
+            .watch(BUCKET_NAME, None, CancellationToken::new())
+            .await
+            .unwrap();
+
+        drop(rx);
+
+        tokio::time::timeout(Duration::from_secs(1), watch_task)
+            .await
+            .expect("the watch task outlived its receiver on a quiet bucket")
+            .unwrap();
     }
 
     #[tokio::test]
