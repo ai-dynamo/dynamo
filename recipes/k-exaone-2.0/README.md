@@ -54,7 +54,7 @@ deliberate exception.
 | Tool calling | ✅ | `--dyn-tool-call-parser qwen3_coder` |
 | Disaggregated serving | ✅ | NIXL over UCX; requires an RDMA device plugin — see Limitations |
 | KV-aware routing | ⚠️ | enabled, but no measurable gain on this workload — see Performance results |
-| 1M context | ❌ | the checkpoint is 262,144 with unscaled rope |
+| 262,144-token context | ✅ | the checkpoint's native window; served in full, no rope scaling |
 | Expert parallel | ➖ | measured within noise on TP=4; not enabled |
 
 ## Prerequisites
@@ -254,9 +254,6 @@ kubectl logs <worker> -n ${NAMESPACE} | grep -o 'Prefix cache hit rate: [0-9.]*%
   Divide `_sum` by `_count`: a ~1 GB KV transfer should take **milliseconds, not seconds**. To see
   the transport UCX actually chose, redeploy with `UCX_PROTO_INFO=y` and look for `rc_mlx5` rather
   than `tcp/eth0` in the worker log.
-- **1M context is not supported.** The checkpoint declares `max_position_embeddings = 262144`
-  with `rope_type: "default"` (unscaled), and LG's model card states the same. Reaching 1M would
-  need a rope-scaling override with unvalidated long-context accuracy.
 - **No cache-clearing endpoint.** `VLLM_SERVER_DEV_MODE` is a development flag and is not shipped,
   so `POST /reset_prefix_cache` returns 404. To reproduce the benchmark numbers, restart the
   deployment between measurement points rather than clearing the cache in place.

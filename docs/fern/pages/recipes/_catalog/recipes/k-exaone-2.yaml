@@ -74,4 +74,3 @@ gaps:
   nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.1 image.
 - 38 of the trace's 1,805 requests exceed the checkpoint's 262,144-token context ceiling and are rejected with HTTP 400 in every run, at every concurrency; throughput is computed over the remainder.
 - The InfiniBand RDMA extended-resource name in the disaggregated manifest is cluster-specific and must be adjusted per cluster.
-- 1M context is not supported; the checkpoint declares 262,144 positions with unscaled rope.
