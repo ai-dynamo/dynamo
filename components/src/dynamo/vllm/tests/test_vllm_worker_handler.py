@@ -1941,6 +1941,25 @@ class TestWeightVersionObservation:
         handler.engine_client.is_paused.assert_awaited_once_with()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("has_version", [False, True])
+    @pytest.mark.parametrize("paused", [False, True, None])
+    async def test_preserves_initial_version(self, handler, has_version, paused):
+        if has_version:
+            handler._weight_version = "initial"
+        else:
+            del handler._weight_version
+        if paused is None:
+            handler.engine_client.is_paused.side_effect = RuntimeError("query failed")
+        else:
+            handler.engine_client.is_paused.return_value = paused
+
+        assert await handler.get_weight_version({}) == {
+            "status": "ok",
+            "version": "initial",
+            "paused": paused,
+        }
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("paused", [None, 0, 1, "false", [], {}])
     async def test_non_bool_pause_state_preserves_version(
         self, handler, paused, caplog

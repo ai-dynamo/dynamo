@@ -2038,7 +2038,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 paused = None
             return {
                 "status": "ok",
-                "version": self._weight_version,
+                "version": getattr(self, "_weight_version", "initial"),
                 "paused": paused,
             }
 
