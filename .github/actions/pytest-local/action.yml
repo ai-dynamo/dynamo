@@ -34,6 +34,12 @@ inputs:
     default: 'true'
   hf_token:
     required: false
+  triton_artifactory_user:
+    description: 'Artifactory username, for the Triton suites that download QA models from it'
+    required: false
+  triton_artifactory_token:
+    description: 'Artifactory token, for the Triton suites that download QA models from it'
+    required: false
   enable_coverage:
     description: 'Enable coverage collection (true/false)'
     required: false
@@ -62,39 +68,75 @@ inputs:
     description: 'Is this a GPU test job?'
     required: false
     default: 'false'
+  verify_gpu:
+    description: 'Check the GPU through torch before running GPU tests. Set false for images without torch (Triton), leaving the suite to check the GPU it needs.'
+    required: false
+    default: 'true'
+  dd_flaky_retry_enabled:
+    description: 'Override Datadog automatic test retries for this pytest invocation; empty inherits the job environment'
+    required: false
+    default: ''
 
 runs:
   using: "composite"
   steps:
     - name: Initialize test type env var
       shell: bash
+      # Inputs are passed through env rather than interpolated into the script
+      # body (see zizmor "template-injection").
+      env:
+        PYTEST_MARKS: ${{ inputs.pytest_marks }}
+        CONTAINER_WORKSPACE: ${{ inputs.container_workspace }}
+        TEST_SUITE_NAME: ${{ inputs.test_suite_name }}
+        TEST_TYPE: ${{ inputs.test_type }}
+        PLATFORM_ARCH: ${{ inputs.platform_arch }}
+        DRY_RUN: ${{ inputs.dry_run }}
+        ENABLE_COVERAGE: ${{ inputs.enable_coverage }}
+        PARALLEL_MODE: ${{ inputs.parallel_mode }}
+        MAX_VRAM_GIB: ${{ inputs.max_vram_gib }}
+        NVME_DIR: ${{ inputs.nvme_dir }}
+        REQUESTED_HF_HOME: ${{ inputs.hf_home }}
+        GPU_TESTS: ${{ inputs.gpu_tests }}
+        RUN_ID: ${{ github.run_id }}
+        # Required by the ddtrace GitHub provider to link test sessions to the job.
+        JOB_CHECK_RUN_ID: ${{ job.check_run_id }}
+        CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}
+        PYTEST_XML_FILE: pytest_test_report.xml
+        HF_TOKEN: ${{ inputs.hf_token }}
+        DYNAMO_TEST_PLATFORM: ${{ inputs.platform_arch }}
+        DYNAMO_TEST_TYPE: ${{ inputs.test_type }}
+        DYNAMO_TEST_WORKFLOW: ${{ github.workflow }}
+        DYNAMO_TEST_FRAMEWORK: ${{ inputs.framework }}
+        HF_XET_HIGH_PERFORMANCE: 1
+        PYTEST_DD_FLAKY_RETRY_ENABLED: ${{ inputs.dd_flaky_retry_enabled }}
+        TRITON_ARTIFACTORY_USER: ${{ inputs.triton_artifactory_user }}
+        TRITON_ARTIFACTORY_TOKEN: ${{ inputs.triton_artifactory_token }}
+        VERIFY_GPU: ${{ inputs.verify_gpu }}
       run: |
-        STR_TEST_TYPE=$(echo '${{ inputs.test_type }}' | tr ', ' '_')
-        echo "STR_TEST_TYPE=${STR_TEST_TYPE}" >> $GITHUB_ENV
-    - name: verify minio
-      if: inputs.gpu_tests == 'true' # only gpu tests require minio
-      shell: bash
-      run: |
-        # Wait for MinIO to be ready
-        echo "⏳ Waiting for MinIO to be ready..."
-        MAX_ATTEMPTS=30
-        ATTEMPT=0
-        while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-          if curl -sf http://localhost:9000/minio/health/live > /dev/null 2>&1; then
-            echo "✅ MinIO is ready (attempt $((ATTEMPT + 1)))"
-            break
-          fi
-          ATTEMPT=$((ATTEMPT + 1))
-          if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
-            echo "❌ MinIO failed to start within ${MAX_ATTEMPTS}s"
-            exit 1
-          fi
-          sleep 1
-        done
-    - name: Verify GPU visibility
-      if: inputs.gpu_tests == 'true'
-      shell: python
-      run: |
+        # Sanitize test_type for the JUnit and coverage filenames this step
+        # writes: remove commas and spaces.
+        STR_TEST_TYPE=$(echo "${TEST_TYPE}" | tr ', ' '_')
+
+        if [[ "${GPU_TESTS}" == "true" && "${VERIFY_GPU}" != "false" && "${PYTEST_MARKS}" != *"triton_qa"* ]]; then
+          # Only GPU tests require MinIO (LoRA tests). Wait for the job service.
+          echo "⏳ Waiting for MinIO to be ready..."
+          MAX_ATTEMPTS=30
+          ATTEMPT=0
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            if curl -sf http://localhost:9000/minio/health/live > /dev/null 2>&1; then
+              echo "✅ MinIO is ready (attempt $((ATTEMPT + 1)))"
+              break
+            fi
+            ATTEMPT=$((ATTEMPT + 1))
+            if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+              echo "❌ MinIO failed to start within ${MAX_ATTEMPTS}s"
+              exit 1
+            fi
+            sleep 1
+          done
+
+          # Verify GPU visibility before spending time on collection.
+          python - <<'PY'
         import sys
         import torch
         available = torch.cuda.is_available()
