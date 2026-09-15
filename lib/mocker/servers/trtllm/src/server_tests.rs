@@ -37,8 +37,26 @@ fn config() -> MockerServerConfig {
     }
 }
 
+/// An engine slow enough that a request is still streaming while a test does
+/// something else to it -- aborting it, racing a second request, filling the
+/// concurrency limit.
+fn slow_args() -> MockEngineArgs {
+    MockEngineArgsBuilder::default()
+        .engine_type(EngineType::Trtllm)
+        .num_gpu_blocks(4_096usize)
+        .block_size(4usize)
+        .speedup_ratio(0.01)
+        .build()
+        .unwrap()
+}
+
 fn service() -> TrtllmMockerService {
     TrtllmMockerService::new(config(), admitting_args()).unwrap()
+}
+
+/// A service whose engine streams slowly enough to be interrupted.
+fn slow_service() -> TrtllmMockerService {
+    TrtllmMockerService::new(config(), slow_args()).unwrap()
 }
 
 /// Neither the service nor the response stream implements `Debug`, so
