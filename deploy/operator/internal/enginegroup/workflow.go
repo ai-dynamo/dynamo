@@ -585,7 +585,13 @@ func (c *Coordinator) reconcileRetiredCapacity(
 		return true, false, nil
 	}
 
-	releaseFences, err := releaseFencesFor(base, status.Registry, resolution.retiringReplicaIDs)
+	releaseFences, err := releaseFencesFor(
+		status.Transition.Spec.ID,
+		committed.Generation,
+		base,
+		status.Registry,
+		resolution.retiringReplicaIDs,
+	)
 	if err != nil {
 		return false, false, err
 	}
@@ -752,7 +758,13 @@ func buildCapacityTarget(
 		}
 		target := CapacityReplicaTarget{ReplicaID: replicaID, SlotID: record.SlotID}
 		if joining, found := joiningByID[replicaID]; found {
-			target.Bootstrap = joining.Bootstrap
+			if status.Transition.Spec.Plan.ProcessLifecycleOwner == ProcessLifecycleOwnerOrchestrator {
+				target.Bootstrap = &CapacityBootstrap{
+					Mode:                   joining.Bootstrap,
+					BaseTopologyGeneration: status.Transition.Spec.BaseTopologyGeneration,
+					NativeMembers:          joiningNativeMembers(resolution, joining),
+				}
+			}
 		} else if record.Current != nil {
 			incarnation := cloneReplicaIncarnation(*record.Current)
 			target.Incarnation = &incarnation
@@ -825,9 +837,11 @@ func buildRollbackCapacityTarget(
 			incarnation = &observed
 		}
 		releaseFences = append(releaseFences, ReleaseFence{
-			ReplicaID:    record.ReplicaID,
-			SlotID:       record.SlotID,
-			CapacityRefs: cloneCapacityRefs(incarnation.CapacityRefs),
+			TransitionID:                  status.Transition.Spec.ID,
+			AuthorizingTopologyGeneration: base.Generation,
+			ReplicaID:                     record.ReplicaID,
+			SlotID:                        record.SlotID,
+			CapacityRefs:                  cloneCapacityRefs(incarnation.CapacityRefs),
 		})
 	}
 	slices.SortFunc(replicas, func(left, right CapacityReplicaTarget) int {
@@ -932,6 +946,11 @@ func normalizeCapacityReplicaTargets(values []CapacityReplicaTarget) []CapacityR
 			incarnation := normalizeIncarnation(*value.Incarnation)
 			value.Incarnation = &incarnation
 		}
+		if value.Bootstrap != nil {
+			bootstrap := *value.Bootstrap
+			bootstrap.NativeMembers = normalizeNativeMembers(value.Bootstrap.NativeMembers)
+			value.Bootstrap = &bootstrap
+		}
 		normalized = append(normalized, value)
 	}
 	slices.SortFunc(normalized, func(left, right CapacityReplicaTarget) int {
@@ -941,13 +960,23 @@ func normalizeCapacityReplicaTargets(values []CapacityReplicaTarget) []CapacityR
 }
 
 func sameCapacityReplicaTarget(left, right CapacityReplicaTarget) bool {
-	if left.ReplicaID != right.ReplicaID || left.SlotID != right.SlotID || left.Bootstrap != right.Bootstrap {
+	if left.ReplicaID != right.ReplicaID || left.SlotID != right.SlotID ||
+		!sameCapacityBootstrap(left.Bootstrap, right.Bootstrap) {
 		return false
 	}
 	if left.Incarnation == nil || right.Incarnation == nil {
 		return left.Incarnation == nil && right.Incarnation == nil
 	}
 	return sameIncarnation(*left.Incarnation, *right.Incarnation)
+}
+
+func sameCapacityBootstrap(left, right *CapacityBootstrap) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left.Mode == right.Mode &&
+		left.BaseTopologyGeneration == right.BaseTopologyGeneration &&
+		slices.Equal(normalizeNativeMembers(left.NativeMembers), normalizeNativeMembers(right.NativeMembers))
 }
 
 func normalizeReleaseFences(values []ReleaseFence) []ReleaseFence {
@@ -970,6 +999,8 @@ func sameReleaseFences(left, right []ReleaseFence) bool {
 	for index := range left {
 		if left[index].ReplicaID != right[index].ReplicaID ||
 			left[index].SlotID != right[index].SlotID ||
+			left[index].TransitionID != right[index].TransitionID ||
+			left[index].AuthorizingTopologyGeneration != right[index].AuthorizingTopologyGeneration ||
 			!sameCapacityRefs(left[index].CapacityRefs, right[index].CapacityRefs) {
 			return false
 		}
@@ -1088,6 +1119,8 @@ func joiningReplicaIdentities(
 }
 
 func releaseFencesFor(
+	transitionID string,
+	authorizingTopologyGeneration int64,
 	base MembershipTopology,
 	registry ReplicaRegistry,
 	retiringReplicaIDs []ReplicaID,
@@ -1115,12 +1148,26 @@ func releaseFencesFor(
 			capacityRefs = cloneCapacityRefs(record.History[len(record.History)-1].Incarnation.CapacityRefs)
 		}
 		fences = append(fences, ReleaseFence{
-			ReplicaID:    replicaID,
-			SlotID:       record.SlotID,
-			CapacityRefs: capacityRefs,
+			TransitionID:                  transitionID,
+			AuthorizingTopologyGeneration: authorizingTopologyGeneration,
+			ReplicaID:                     replicaID,
+			SlotID:                        record.SlotID,
+			CapacityRefs:                  capacityRefs,
 		})
 	}
 	return normalizeReleaseFences(fences), nil
+}
+
+func joiningNativeMembers(resolution planResolution, target ReplicaTarget) []NativeMemberID {
+	if len(target.NativeMembers) > 0 {
+		return normalizeNativeMembers(target.NativeMembers)
+	}
+	for _, membership := range resolution.restoredMembership {
+		if membership.ReplicaID == target.ReplicaID {
+			return normalizeNativeMembers(membership.NativeMembers)
+		}
+	}
+	return nil
 }
 
 func archiveRetiredReplicas(
@@ -1226,7 +1273,10 @@ func validateCommittedTopology(
 	for _, replica := range joining {
 		joiningByID[replica.ReplicaID] = replica
 	}
-	restoredByID := nativeMembershipByID(resolution.restoredMembership)
+	plannedJoining := make(map[ReplicaID][]NativeMemberID, len(resolution.joiningTargets))
+	for _, target := range resolution.joiningTargets {
+		plannedJoining[target.ReplicaID] = joiningNativeMembers(resolution, target)
+	}
 	remappedByID := nativeMembershipByID(resolution.remappedMembership)
 	for _, membership := range committed.Replicas {
 		replicaID := membership.ReplicaID
@@ -1234,12 +1284,9 @@ func validateCommittedTopology(
 			if membership.RuntimeIncarnation != joiningReplica.RuntimeIncarnation {
 				return fmt.Errorf("joining replica %q committed another runtime incarnation", replicaID)
 			}
-			if restored, restore := restoredByID[replicaID]; restore &&
-				!slices.Equal(
-					normalizeNativeMembers(restored.NativeMembers),
-					normalizeNativeMembers(membership.NativeMembers),
-				) {
-				return fmt.Errorf("restored replica %q committed another native membership", replicaID)
+			if planned := plannedJoining[replicaID]; len(planned) > 0 &&
+				!slices.Equal(normalizeNativeMembers(planned), normalizeNativeMembers(membership.NativeMembers)) {
+				return fmt.Errorf("joining replica %q committed another native membership", replicaID)
 			}
 			continue
 		}

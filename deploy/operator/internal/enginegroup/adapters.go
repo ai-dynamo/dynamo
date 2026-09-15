@@ -24,14 +24,23 @@ type CapacityReplicaTarget struct {
 	ReplicaID   ReplicaID
 	SlotID      CapacitySlotID
 	Incarnation *ReplicaIncarnation
-	Bootstrap   BootstrapMode
+	Bootstrap   *CapacityBootstrap
+}
+
+// CapacityBootstrap is the profile-resolved process intent for one new orchestrator-owned allocation.
+type CapacityBootstrap struct {
+	Mode                   BootstrapMode
+	BaseTopologyGeneration int64
+	NativeMembers          []NativeMemberID
 }
 
 // ReleaseFence authorizes removal of only the named concrete Pod incarnations from one stable slot.
 type ReleaseFence struct {
-	ReplicaID    ReplicaID
-	SlotID       CapacitySlotID
-	CapacityRefs []CapacityRef
+	TransitionID                  string
+	AuthorizingTopologyGeneration int64
+	ReplicaID                     ReplicaID
+	SlotID                        CapacitySlotID
+	CapacityRefs                  []CapacityRef
 }
 
 // CapacityTarget is one durable, group-ordered absolute physical-capacity projection.

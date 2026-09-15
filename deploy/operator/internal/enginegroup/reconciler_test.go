@@ -53,6 +53,17 @@ func TestCoordinatorGrowthOrdersCapacityCommitVerificationAndAdmission(t *testin
 	if !sameMemberships(scenario.traffic.observation.Admitted, engineTopology(1, 2).Replicas) {
 		t.Fatalf("joining replica became routable before commit: %#v", scenario.traffic.observation.Admitted)
 	}
+	capacityTarget := scenario.capacity.lastTarget
+	if capacityTarget == nil {
+		t.Fatal("joining capacity target was not retained")
+	}
+	joiningCapacity := capacityTarget.Replicas[len(capacityTarget.Replicas)-1]
+	if joiningCapacity.Bootstrap == nil ||
+		joiningCapacity.Bootstrap.Mode != BootstrapModeJoin ||
+		joiningCapacity.Bootstrap.BaseTopologyGeneration != 1 ||
+		!slices.Equal(joiningCapacity.Bootstrap.NativeMembers, joining.NativeMembers) {
+		t.Fatalf("joining bootstrap lacks resolved topology and native identity: %#v", joiningCapacity.Bootstrap)
+	}
 
 	t.Log("Commit the exact topology produced by the engine")
 	committed := MembershipTopology{
@@ -125,7 +136,9 @@ func TestCoordinatorShrinkOrdersDrainCommitReleaseVerificationAndAdmission(t *te
 		t.Fatalf("expected one release fence, got %#v", scenario.capacity.observation.ReleaseFences)
 	}
 	fence := scenario.capacity.observation.ReleaseFences[0]
-	if fence.ReplicaID != retiringReplicaID || fence.CapacityRefs[0].UID != "pod-uid-1-v1" {
+	if fence.TransitionID != scenario.status.Transition.Spec.ID ||
+		fence.AuthorizingTopologyGeneration != committed.Generation ||
+		fence.ReplicaID != retiringReplicaID || fence.CapacityRefs[0].UID != "pod-uid-1-v1" {
 		t.Fatalf("release did not retain the exact victim identity: %#v", fence)
 	}
 	if _, found := allocationByID(scenario.capacity.observation, retiringReplicaID); found {
@@ -292,6 +305,7 @@ func TestCoordinatorRollsBackPartiallyAllocatedCapacityAfterDefinitiveRejection(
 		t.Fatal("rollback retained partially allocated capacity")
 	}
 	if len(scenario.capacity.observation.ReleaseFences) != 1 ||
+		scenario.capacity.observation.ReleaseFences[0].AuthorizingTopologyGeneration != base.Generation ||
 		scenario.capacity.observation.ReleaseFences[0].CapacityRefs[0].UID != joiningIncarnation.CapacityRefs[0].UID {
 		t.Fatalf("rollback did not fence the exact partial allocation: %#v", scenario.capacity.observation.ReleaseFences)
 	}

@@ -106,11 +106,11 @@ func TestResolvedPlanVariantsProduceExactIdentitySets(t *testing.T) {
 					Kind: PlanKindRestore,
 					Restore: &RestoreChange{Replicas: []RestorationTarget{{
 						ReplicaTarget: ReplicaTarget{
-							ReplicaID: excludedIncarnation.ReplicaID,
-							SlotID:    excludedIncarnation.SlotID,
-							Bootstrap: BootstrapModeRestoreFixedSlot,
+							ReplicaID:     excludedIncarnation.ReplicaID,
+							SlotID:        excludedIncarnation.SlotID,
+							Bootstrap:     BootstrapModeRestoreFixedSlot,
+							NativeMembers: cloneNativeMembers(excluded.NativeMembers),
 						},
-						NativeMembers: cloneNativeMembers(excluded.NativeMembers),
 					}}},
 				},
 			},
@@ -185,6 +185,25 @@ func TestResolvedPlanRejectsInvalidIdentitySemantics(t *testing.T) {
 			wantError: "already exists",
 		},
 		{
+			name: "orchestrator growth requires native membership",
+			plan: ResolvedPlan{
+				ID:                      "missing-native-membership",
+				ProfileFingerprint:      "profile-v1",
+				ProcessLifecycleOwner:   ProcessLifecycleOwnerOrchestrator,
+				TrafficRequirement:      TrafficRequirementKeepServing,
+				VerificationRequirement: VerificationRequirementNone,
+				Change: ResolvedChange{
+					Kind: PlanKindGrow,
+					Grow: &GrowChange{Replicas: []ReplicaTarget{{
+						ReplicaID: "replica-2",
+						SlotID:    "slot-2",
+						Bootstrap: BootstrapModeJoin,
+					}}},
+				},
+			},
+			wantError: "no resolved native membership",
+		},
+		{
 			name: "retirement requires exact base identity",
 			plan: retirePlan(
 				"missing",
@@ -246,11 +265,11 @@ func TestResolvedPlanSurvivesJSONRoundTrip(t *testing.T) {
 			Kind: PlanKindRestore,
 			Restore: &RestoreChange{Replicas: []RestorationTarget{{
 				ReplicaTarget: ReplicaTarget{
-					ReplicaID: "replica-2",
-					SlotID:    "slot-2",
-					Bootstrap: BootstrapModeRestoreFixedSlot,
+					ReplicaID:     "replica-2",
+					SlotID:        "slot-2",
+					Bootstrap:     BootstrapModeRestoreFixedSlot,
+					NativeMembers: []NativeMemberID{"dp-3", "dp-2"},
 				},
-				NativeMembers: []NativeMemberID{"dp-3", "dp-2"},
 			}}},
 		},
 	}

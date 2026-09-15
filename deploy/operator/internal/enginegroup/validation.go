@@ -343,11 +343,15 @@ func validateCapacityTarget(controlRevision int64, target *CapacityTarget) error
 			return fmt.Errorf("capacity target repeats slot %q", replica.SlotID)
 		}
 		if replica.Incarnation == nil {
-			if replica.Bootstrap != BootstrapModeJoin && replica.Bootstrap != BootstrapModeRestoreFixedSlot {
-				return fmt.Errorf("capacity target replica %q has no valid bootstrap mode", replica.ReplicaID)
+			if target.ProcessLifecycleOwner == ProcessLifecycleOwnerOrchestrator {
+				if err := validateCapacityBootstrap(replica.ReplicaID, replica.Bootstrap); err != nil {
+					return err
+				}
+			} else if replica.Bootstrap != nil {
+				return fmt.Errorf("engine-owned capacity target replica %q carries process bootstrap", replica.ReplicaID)
 			}
 		} else {
-			if replica.Bootstrap != "" {
+			if replica.Bootstrap != nil {
 				return fmt.Errorf("capacity target replica %q has both incarnation and bootstrap mode", replica.ReplicaID)
 			}
 			if err := validateIncarnation(*replica.Incarnation); err != nil {
@@ -365,9 +369,31 @@ func validateCapacityTarget(controlRevision int64, target *CapacityTarget) error
 		return err
 	}
 	for _, fence := range target.ReleaseFences {
+		if fence.TransitionID != target.TransitionID {
+			return fmt.Errorf("release fence for replica %q belongs to another transition", fence.ReplicaID)
+		}
 		if _, retained := replicaIDs[fence.ReplicaID]; retained {
 			return fmt.Errorf("capacity target both retains and releases replica %q", fence.ReplicaID)
 		}
+	}
+	return nil
+}
+
+func validateCapacityBootstrap(replicaID ReplicaID, bootstrap *CapacityBootstrap) error {
+	if bootstrap == nil ||
+		(bootstrap.Mode != BootstrapModeJoin && bootstrap.Mode != BootstrapModeRestoreFixedSlot) ||
+		bootstrap.BaseTopologyGeneration <= 0 || len(bootstrap.NativeMembers) == 0 {
+		return fmt.Errorf("capacity target replica %q has incomplete process bootstrap", replicaID)
+	}
+	seen := make(map[NativeMemberID]struct{}, len(bootstrap.NativeMembers))
+	for _, nativeMember := range bootstrap.NativeMembers {
+		if nativeMember == "" {
+			return fmt.Errorf("capacity target replica %q has an empty bootstrap native member", replicaID)
+		}
+		if _, duplicate := seen[nativeMember]; duplicate {
+			return fmt.Errorf("capacity target replica %q repeats bootstrap native member %q", replicaID, nativeMember)
+		}
+		seen[nativeMember] = struct{}{}
 	}
 	return nil
 }
@@ -423,6 +449,9 @@ func validateTransition(status GroupStatus) error {
 	if err := validateTransitionPreflights(status); err != nil {
 		return err
 	}
+	if err := validateTransitionCapacityEvidence(status); err != nil {
+		return err
+	}
 	if err := validateTransitionMembership(status, resolution); err != nil {
 		return err
 	}
@@ -459,6 +488,29 @@ func validateTransition(status GroupStatus) error {
 		}
 	default:
 		return fmt.Errorf("invalid transition outcome %q", transition.Outcome)
+	}
+	return nil
+}
+
+func validateTransitionCapacityEvidence(status GroupStatus) error {
+	target := status.Capacity.Desired
+	transition := status.Transition
+	if target == nil || target.TransitionID != transition.Spec.ID {
+		return nil
+	}
+	for _, replica := range target.Replicas {
+		if replica.Bootstrap != nil &&
+			replica.Bootstrap.BaseTopologyGeneration != transition.Spec.BaseTopologyGeneration {
+			return fmt.Errorf("capacity bootstrap for replica %q refers to another base topology", replica.ReplicaID)
+		}
+	}
+	for _, fence := range target.ReleaseFences {
+		if _, found := status.Topologies.Snapshot(fence.AuthorizingTopologyGeneration); !found {
+			return fmt.Errorf(
+				"release fence for replica %q refers to an unknown authorizing topology",
+				fence.ReplicaID,
+			)
+		}
 	}
 	return nil
 }

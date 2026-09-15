@@ -150,15 +150,15 @@ const (
 
 // ReplicaTarget is the resolved physical identity and bootstrap intent for one joining replica.
 type ReplicaTarget struct {
-	ReplicaID ReplicaID
-	SlotID    CapacitySlotID
-	Bootstrap BootstrapMode
+	ReplicaID     ReplicaID
+	SlotID        CapacitySlotID
+	Bootstrap     BootstrapMode
+	NativeMembers []NativeMemberID
 }
 
 // RestorationTarget describes one stable logical identity and native membership to restore.
 type RestorationTarget struct {
 	ReplicaTarget
-	NativeMembers []NativeMemberID
 }
 
 // GrowChange adds the named new logical replicas.

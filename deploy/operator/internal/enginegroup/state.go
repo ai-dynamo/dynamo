@@ -67,7 +67,12 @@ func normalizeTopology(value MembershipTopology) MembershipTopology {
 func cloneResolvedPlan(value ResolvedPlan) ResolvedPlan {
 	change := value.Change
 	if change.Grow != nil {
-		value.Change.Grow = &GrowChange{Replicas: slices.Clone(change.Grow.Replicas)}
+		replicas := make([]ReplicaTarget, 0, len(change.Grow.Replicas))
+		for _, replica := range change.Grow.Replicas {
+			replica.NativeMembers = cloneNativeMembers(replica.NativeMembers)
+			replicas = append(replicas, replica)
+		}
+		value.Change.Grow = &GrowChange{Replicas: replicas}
 	}
 	if change.Retire != nil {
 		value.Change.Retire = &RetireChange{Replicas: slices.Clone(change.Retire.Replicas)}
@@ -80,7 +85,7 @@ func cloneResolvedPlan(value ResolvedPlan) ResolvedPlan {
 	if change.Restore != nil {
 		replicas := make([]RestorationTarget, 0, len(change.Restore.Replicas))
 		for _, replica := range change.Restore.Replicas {
-			replica.NativeMembers = cloneNativeMembers(replica.NativeMembers)
+			replica.ReplicaTarget.NativeMembers = cloneNativeMembers(replica.ReplicaTarget.NativeMembers)
 			replicas = append(replicas, replica)
 		}
 		value.Change.Restore = &RestoreChange{Replicas: replicas}
@@ -101,6 +106,11 @@ func normalizeResolvedPlan(value ResolvedPlan) ResolvedPlan {
 	switch value.Change.Kind {
 	case PlanKindGrow:
 		if value.Change.Grow != nil {
+			for index := range value.Change.Grow.Replicas {
+				value.Change.Grow.Replicas[index].NativeMembers = normalizeNativeMembers(
+					value.Change.Grow.Replicas[index].NativeMembers,
+				)
+			}
 			slices.SortFunc(value.Change.Grow.Replicas, func(left, right ReplicaTarget) int {
 				return strings.Compare(string(left.ReplicaID), string(right.ReplicaID))
 			})
@@ -118,8 +128,8 @@ func normalizeResolvedPlan(value ResolvedPlan) ResolvedPlan {
 	case PlanKindRestore:
 		if value.Change.Restore != nil {
 			for index := range value.Change.Restore.Replicas {
-				value.Change.Restore.Replicas[index].NativeMembers = normalizeNativeMembers(
-					value.Change.Restore.Replicas[index].NativeMembers,
+				value.Change.Restore.Replicas[index].ReplicaTarget.NativeMembers = normalizeNativeMembers(
+					value.Change.Restore.Replicas[index].ReplicaTarget.NativeMembers,
 				)
 			}
 			slices.SortFunc(value.Change.Restore.Replicas, func(left, right RestorationTarget) int {
@@ -281,6 +291,11 @@ func cloneCapacityTarget(value *CapacityTarget) *CapacityTarget {
 		if replica.Incarnation != nil {
 			incarnation := cloneReplicaIncarnation(*replica.Incarnation)
 			replica.Incarnation = &incarnation
+		}
+		if replica.Bootstrap != nil {
+			bootstrap := *replica.Bootstrap
+			bootstrap.NativeMembers = cloneNativeMembers(replica.Bootstrap.NativeMembers)
+			replica.Bootstrap = &bootstrap
 		}
 		cloned.Replicas = append(cloned.Replicas, replica)
 	}

@@ -143,6 +143,9 @@ func validateResolvedPlan(
 	if err != nil {
 		return planResolution{}, err
 	}
+	if err := validateJoiningLifecycle(base, plan.ProcessLifecycleOwner, resolution); err != nil {
+		return planResolution{}, err
+	}
 
 	// Retirement safety is meaningful and mandatory only when logical replicas leave membership.
 	if len(resolution.retiringReplicaIDs) > 0 {
@@ -441,6 +444,61 @@ func validateReplicaTarget(target ReplicaTarget, expectedBootstrap BootstrapMode
 			expectedBootstrap,
 		)
 	}
+	seen := make(map[NativeMemberID]struct{}, len(target.NativeMembers))
+	for _, nativeMember := range target.NativeMembers {
+		if nativeMember == "" {
+			return fmt.Errorf("replica %q has an empty planned native member", target.ReplicaID)
+		}
+		if _, duplicate := seen[nativeMember]; duplicate {
+			return fmt.Errorf("replica %q repeats planned native member %q", target.ReplicaID, nativeMember)
+		}
+		seen[nativeMember] = struct{}{}
+	}
+	return nil
+}
+
+func validateJoiningLifecycle(
+	base MembershipTopology,
+	owner ProcessLifecycleOwner,
+	resolution planResolution,
+) error {
+	if len(resolution.joiningTargets) == 0 {
+		return nil
+	}
+	planned := nativeMembershipByID(resolution.restoredMembership)
+	for _, target := range resolution.joiningTargets {
+		if len(target.NativeMembers) > 0 {
+			planned[target.ReplicaID] = ReplicaNativeMembership{
+				ReplicaID: target.ReplicaID, SlotID: target.SlotID, NativeMembers: target.NativeMembers,
+			}
+		}
+		if owner == ProcessLifecycleOwnerOrchestrator && len(planned[target.ReplicaID].NativeMembers) == 0 {
+			return fmt.Errorf(
+				"orchestrator-owned joining replica %q has no resolved native membership",
+				target.ReplicaID,
+			)
+		}
+	}
+
+	seen := make(map[NativeMemberID]ReplicaID)
+	for _, membership := range base.Replicas {
+		for _, nativeMember := range membership.NativeMembers {
+			seen[nativeMember] = membership.ReplicaID
+		}
+	}
+	for _, membership := range planned {
+		for _, nativeMember := range membership.NativeMembers {
+			if replicaID, duplicate := seen[nativeMember]; duplicate {
+				return fmt.Errorf(
+					"planned native member %q belongs to both replica %q and joining replica %q",
+					nativeMember,
+					replicaID,
+					membership.ReplicaID,
+				)
+			}
+			seen[nativeMember] = membership.ReplicaID
+		}
+	}
 	return nil
 }
 
@@ -695,8 +753,9 @@ func validateMembershipIdentitySet(memberships []ReplicaMembership) error {
 func validateReleaseFences(fences []ReleaseFence) error {
 	seen := make(map[ReplicaID]struct{}, len(fences))
 	for _, fence := range fences {
-		if fence.ReplicaID == "" || fence.SlotID == "" || len(fence.CapacityRefs) == 0 {
-			return errors.New("release fence contains an incomplete replica, slot, or Pod identity")
+		if fence.TransitionID == "" || fence.AuthorizingTopologyGeneration <= 0 ||
+			fence.ReplicaID == "" || fence.SlotID == "" || len(fence.CapacityRefs) == 0 {
+			return errors.New("release fence contains incomplete transition, topology, replica, slot, or Pod identity")
 		}
 		if _, duplicate := seen[fence.ReplicaID]; duplicate {
 			return fmt.Errorf("release fence for replica %q appears more than once", fence.ReplicaID)

@@ -476,7 +476,7 @@ func sameResolvedPlan(left, right ResolvedPlan) bool {
 	switch left.Change.Kind {
 	case PlanKindGrow:
 		return left.Change.Grow != nil && right.Change.Grow != nil &&
-			slices.Equal(left.Change.Grow.Replicas, right.Change.Grow.Replicas)
+			sameReplicaTargets(left.Change.Grow.Replicas, right.Change.Grow.Replicas)
 	case PlanKindRetire:
 		return left.Change.Retire != nil && right.Change.Retire != nil &&
 			slices.Equal(left.Change.Retire.Replicas, right.Change.Retire.Replicas)
@@ -494,6 +494,24 @@ func sameResolvedPlan(left, right ResolvedPlan) bool {
 	}
 }
 
+func sameReplicaTargets(left, right []ReplicaTarget) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index].ReplicaID != right[index].ReplicaID ||
+			left[index].SlotID != right[index].SlotID ||
+			left[index].Bootstrap != right[index].Bootstrap ||
+			!slices.Equal(
+				normalizeNativeMembers(left[index].NativeMembers),
+				normalizeNativeMembers(right[index].NativeMembers),
+			) {
+			return false
+		}
+	}
+	return true
+}
+
 func sameRestorationTargets(left, right []RestorationTarget) bool {
 	if len(left) != len(right) {
 		return false
@@ -504,7 +522,10 @@ func sameRestorationTargets(left, right []RestorationTarget) bool {
 	}
 	for _, target := range right {
 		other, found := leftByID[target.ReplicaID]
-		if !found || other.ReplicaTarget != target.ReplicaTarget ||
+		if !found || !sameReplicaTargets(
+			[]ReplicaTarget{other.ReplicaTarget},
+			[]ReplicaTarget{target.ReplicaTarget},
+		) ||
 			!slices.Equal(normalizeNativeMembers(other.NativeMembers), normalizeNativeMembers(target.NativeMembers)) {
 			return false
 		}

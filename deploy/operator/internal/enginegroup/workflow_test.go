@@ -251,11 +251,11 @@ func TestCoordinatorRestoresStableReplicaWithNewPhysicalIncarnation(t *testing.T
 			Kind: PlanKindRestore,
 			Restore: &RestoreChange{Replicas: []RestorationTarget{{
 				ReplicaTarget: ReplicaTarget{
-					ReplicaID: excluded.ReplicaID,
-					SlotID:    excludedIncarnation.SlotID,
-					Bootstrap: BootstrapModeRestoreFixedSlot,
+					ReplicaID:     excluded.ReplicaID,
+					SlotID:        excludedIncarnation.SlotID,
+					Bootstrap:     BootstrapModeRestoreFixedSlot,
+					NativeMembers: cloneNativeMembers(excluded.NativeMembers),
 				},
-				NativeMembers: cloneNativeMembers(excluded.NativeMembers),
 			}}},
 		},
 	}

@@ -428,6 +428,10 @@ func physicalIncarnationForMembership(membership ReplicaMembership) ReplicaIncar
 }
 
 func growPlan(planID string, target ReplicaTarget, verification VerificationRequirement) ResolvedPlan {
+	if len(target.NativeMembers) == 0 {
+		suffix := strings.TrimPrefix(string(target.ReplicaID), "replica-")
+		target.NativeMembers = []NativeMemberID{NativeMemberID("dp-" + suffix)}
+	}
 	return ResolvedPlan{
 		ID:                      planID,
 		ProfileFingerprint:      "profile-v1",
