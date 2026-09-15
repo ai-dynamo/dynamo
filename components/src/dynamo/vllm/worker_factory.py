@@ -20,6 +20,7 @@ from vllm.config import VllmConfig
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo import prometheus_names
+from dynamo.common.lora.manager import lora_runtime_enabled
 from dynamo.common.model_taints import register_model_taint_route
 from dynamo.common.rl import first_endpoint_response, register_rl_routes
 from dynamo.common.snapshot.lifecycle import elect_and_wake
@@ -994,6 +995,7 @@ class WorkerFactory:
             engine=engine_client,
             config=config,
             shutdown_event=shutdown_event,
+            generate_endpoint=generate_endpoint,
         )
 
         embedding_health_check_payload = VllmEmbeddingHealthCheckPayload(
@@ -1003,7 +1005,7 @@ class WorkerFactory:
         register_model_taint_route(runtime, generate_endpoint)
         logger.info("Starting to serve the embedding worker endpoint...")
         try:
-            await asyncio.gather(
+            serve_tasks = [
                 generate_endpoint.serve_endpoint(
                     handler.generate,
                     metrics_labels=[("model", config.model)],
@@ -1026,7 +1028,13 @@ class WorkerFactory:
                     worker_type=WorkerType.Aggregated,
                     needs=[],
                 ),
+            ]
+            serve_tasks.extend(
+                self._pooling_lora_serve_tasks(
+                    runtime, config, handler, shutdown_endpoints
+                )
             )
+            await asyncio.gather(*serve_tasks)
         except Exception as e:
             logger.error(f"Failed to serve embedding worker endpoint: {e}")
             raise
@@ -1082,6 +1090,7 @@ class WorkerFactory:
             config=config,
             model_config=getattr(vllm_config, "model_config", None),
             shutdown_event=shutdown_event,
+            generate_endpoint=generate_endpoint,
         )
 
         classify_health_check_payload = VllmEmbeddingHealthCheckPayload(
@@ -1090,7 +1099,7 @@ class WorkerFactory:
 
         logger.info("Starting to serve the classify worker endpoint...")
         try:
-            await asyncio.gather(
+            serve_tasks = [
                 generate_endpoint.serve_endpoint(
                     handler.generate,
                     metrics_labels=[("model", config.model)],
@@ -1106,12 +1115,67 @@ class WorkerFactory:
                     worker_type=WorkerType.Aggregated,
                     needs=[],
                 ),
+            ]
+            serve_tasks.extend(
+                self._pooling_lora_serve_tasks(
+                    runtime, config, handler, shutdown_endpoints
+                )
             )
+            await asyncio.gather(*serve_tasks)
         except Exception as e:
             logger.error(f"Failed to serve classify worker endpoint: {e}")
             raise
         finally:
             handler.cleanup()
+
+    def _pooling_lora_serve_tasks(
+        self,
+        runtime: DistributedRuntime,
+        config: Config,
+        handler,
+        shutdown_endpoints: list,  # mutated in place
+    ) -> list:
+        """Serve the adapter lifecycle endpoints for a pooling-family worker.
+
+        Without these the worker has no way to take delivery of an adapter, so
+        an adapter-targeted request could only ever resolve to the base model.
+        Returns an empty list when LoRA is off, so the endpoints stay absent
+        rather than registered-and-failing. Also extends ``shutdown_endpoints``
+        so the lifecycle endpoints are unregistered on graceful shutdown,
+        matching the decode/prefill worker pattern.
+        """
+        engine_lora_enabled = bool(getattr(config.engine_args, "enable_lora", False))
+        if not lora_runtime_enabled(engine_lora_enabled):
+            if engine_lora_enabled:
+                logger.warning(
+                    "LoRA is enabled in engine args but the LoRA manager is "
+                    "unavailable, so the adapter lifecycle endpoints are not "
+                    "being registered. Set DYN_LORA_ENABLED=true. Registering "
+                    "them anyway would advertise adapter capacity this worker "
+                    "cannot honour, and adapter-named requests would be "
+                    "answered from the base weights."
+                )
+            return []
+
+        metrics_labels = [("model", config.model)]
+        prefix = f"{config.namespace}.{config.component}"
+        load_lora_endpoint = runtime.endpoint(f"{prefix}.load_lora")
+        unload_lora_endpoint = runtime.endpoint(f"{prefix}.unload_lora")
+        list_loras_endpoint = runtime.endpoint(f"{prefix}.list_loras")
+        shutdown_endpoints.extend(
+            [load_lora_endpoint, unload_lora_endpoint, list_loras_endpoint]
+        )
+        return [
+            load_lora_endpoint.serve_endpoint(
+                handler.load_lora, metrics_labels=metrics_labels
+            ),
+            unload_lora_endpoint.serve_endpoint(
+                handler.unload_lora, metrics_labels=metrics_labels
+            ),
+            list_loras_endpoint.serve_endpoint(
+                handler.list_loras, metrics_labels=metrics_labels
+            ),
+        ]
 
     def _maybe_create_failover_metrics(self, config: Config, generate_endpoint):
         """Create + register per-engine failover metrics (shadow mode only).
