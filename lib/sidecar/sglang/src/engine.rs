@@ -412,9 +412,23 @@ impl LLMEngine for SglangSidecarEngine {
                                 }
                             };
                             let engine_data = if let Some(uploader) = metadata_uploader.as_ref() {
-                                if let Err(error) = uploader.upload(grpc_metadata(&response.meta_info)).await {
-                                    yield Err(error);
-                                    break;
+                                let uploaded = tokio::select! {
+                                    biased;
+                                    _ = ctx.stopped() => None,
+                                    _ = cancel.cancelled() => None,
+                                    result = uploader.upload(grpc_metadata(&response.meta_info)) => Some(result),
+                                };
+                                match uploaded {
+                                    Some(Ok(())) => {}
+                                    Some(Err(error)) => {
+                                        yield Err(error);
+                                        break;
+                                    }
+                                    None => {
+                                        yield Ok(LLMEngineOutput::cancelled()
+                                            .with_usage(usage(observed_prompt_tokens, generated)));
+                                        break;
+                                    }
                                 }
                                 None
                             } else {

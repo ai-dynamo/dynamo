@@ -9,8 +9,8 @@
 //! role, parallelism, KV block sizing, and context length are discovered from
 //! the engine's gRPC metadata RPCs.
 //!
-//! The crate never depends on `sglang` or another engine crate.
-//! It uses the generated protocol contract and OpenDAL storage services.
+//! The crate never depends on `sglang` or any engine crate — only
+//! `dynamo-backend-common`, `tonic`/`prost`, `clap`, and tokio.
 
 pub mod args;
 pub mod client;

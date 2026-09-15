@@ -339,9 +339,25 @@ impl NativeHttp {
                             ));
                             return;
                         }
-                        if let Err(error) = uploader.upload(metadata).await {
-                            yield Err(error);
-                            return;
+                        let uploaded = tokio::select! {
+                            biased;
+                            _ = ctx.stopped() => None,
+                            _ = cancel.cancelled() => None,
+                            result = uploader.upload(metadata) => Some(result),
+                        };
+                        match uploaded {
+                            Some(Ok(())) => {}
+                            Some(Err(error)) => {
+                                yield Err(error);
+                                return;
+                            }
+                            None => {
+                                yield Err(client::cancelled(format!(
+                                    "SGLang native request {} was cancelled",
+                                    ctx.id()
+                                )));
+                                return;
+                            }
                         }
                     }
                     if let Some(metadata) = response.get_mut("meta_info") {
@@ -629,7 +645,7 @@ mod tests {
         configured.extra_args = Some(json!({
             "nvext": {
                 "metadata_upload": {
-                    "url": url::Url::from_directory_path(directory.path()).unwrap()
+                    "url": format!("fs://{}", directory.path().display())
                 }
             }
         }));

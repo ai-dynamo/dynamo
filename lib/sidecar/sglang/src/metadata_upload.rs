@@ -122,11 +122,10 @@ fn operator_from_url(raw: &str, field: &str) -> Result<Operator, DynamoError> {
             "extra_args.nvext.metadata_upload.{field} must not be empty"
         )));
     }
-    let uri = normalize_fsspec_uri(raw, field)?;
-    Operator::from_uri(uri.as_str()).map_err(|error| {
+    Operator::from_uri(raw).map_err(|error| {
         client::invalid_arg(format!(
             "could not configure `{}` metadata upload destination: {error}",
-            uri.split_once(':')
+            raw.split_once(':')
                 .map(|(scheme, _)| scheme)
                 .unwrap_or("unknown")
         ))
@@ -177,23 +176,6 @@ fn encode(metadata: Value) -> Result<Vec<u8>, DynamoError> {
     })
 }
 
-/// OpenDAL uses canonical service names in URIs. Preserve the fsspec spellings
-/// accepted by the Python implementation at the public request boundary.
-fn normalize_fsspec_uri(raw: &str, field: &str) -> Result<String, DynamoError> {
-    let uri = url::Url::parse(raw).map_err(|error| {
-        client::invalid_arg(format!(
-            "extra_args.nvext.metadata_upload.{field} is not a valid URL: {error}"
-        ))
-    })?;
-    let canonical_scheme = match uri.scheme() {
-        "file" => "fs",
-        "gs" => "gcs",
-        "az" => "azblob",
-        scheme => scheme,
-    };
-    Ok(format!("{canonical_scheme}{}", &raw[uri.scheme().len()..]))
-}
-
 pub(crate) fn grpc_metadata(meta: &HashMap<String, String>) -> Value {
     Value::Object(
         meta.iter()
@@ -209,11 +191,16 @@ pub(crate) fn grpc_metadata(meta: &HashMap<String, String>) -> Value {
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
+    use std::path::Path;
 
     use dynamo_backend_common::{OutputOptions, SamplingOptions, StopConditions};
     use serde_json::{Value, json};
 
-    use super::{MetadataUploader, OUTPUT_PATH, grpc_metadata, normalize_fsspec_uri};
+    use super::{MetadataUploader, OUTPUT_PATH, grpc_metadata};
+
+    fn fs_uri(path: &Path) -> String {
+        format!("fs://{}", path.display())
+    }
 
     fn request(extra_args: Value) -> dynamo_backend_common::PreprocessedRequest {
         dynamo_backend_common::PreprocessedRequest::builder()
@@ -228,31 +215,9 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_fsspec_scheme_aliases() {
-        assert_eq!(
-            normalize_fsspec_uri("file:///tmp/metadata", "url")
-                .unwrap()
-                .as_str(),
-            "fs:///tmp/metadata"
-        );
-        assert_eq!(
-            normalize_fsspec_uri("gs://bucket/metadata", "url")
-                .unwrap()
-                .as_str(),
-            "gcs://bucket/metadata"
-        );
-        assert_eq!(
-            normalize_fsspec_uri("az://container/metadata", "url")
-                .unwrap()
-                .as_str(),
-            "azblob://container/metadata"
-        );
-    }
-
-    #[test]
     fn metadata_upload_is_rl_gated_and_strict() {
         let configured = request(json!({
-            "nvext": {"metadata_upload": {"url": "file:///tmp/metadata"}}
+            "nvext": {"metadata_upload": {"url": "fs:///tmp/metadata"}}
         }));
         assert!(
             MetadataUploader::from_request(&configured, false)
@@ -266,7 +231,7 @@ mod tests {
         );
 
         let invalid = request(json!({
-            "nvext": {"metadata_upload": {"url": "file:///tmp", "format": "json"}}
+            "nvext": {"metadata_upload": {"url": "fs:///tmp", "format": "json"}}
         }));
         assert!(MetadataUploader::from_request(&invalid, true).is_err());
     }
@@ -284,9 +249,7 @@ mod tests {
     #[tokio::test]
     async fn uploads_python_compatible_msgpack_zstd_payload() {
         let directory = tempfile::tempdir().unwrap();
-        let url = url::Url::from_directory_path(directory.path())
-            .unwrap()
-            .to_string();
+        let url = fs_uri(directory.path());
         let configured = request(json!({
             "nvext": {"metadata_upload": {"url": url}}
         }));
@@ -324,8 +287,8 @@ mod tests {
         let fallback = directory.path().join("fallback");
         let configured = request(json!({
             "nvext": {"metadata_upload": {
-                "url": url::Url::from_file_path(&primary).unwrap(),
-                "fallback_url": url::Url::from_directory_path(&fallback).unwrap()
+                "url": fs_uri(&primary),
+                "fallback_url": fs_uri(&fallback)
             }}
         }));
         let uploader = MetadataUploader::from_request(&configured, true)
@@ -345,8 +308,8 @@ mod tests {
         let fallback = directory.path().join("fallback");
         let configured = request(json!({
             "nvext": {"metadata_upload": {
-                "url": url::Url::from_directory_path(&primary).unwrap(),
-                "fallback_url": url::Url::from_directory_path(&fallback).unwrap()
+                "url": fs_uri(&primary),
+                "fallback_url": fs_uri(&fallback)
             }}
         }));
         let uploader = MetadataUploader::from_request(&configured, true)
@@ -368,8 +331,8 @@ mod tests {
         std::fs::write(&fallback, b"fallback sentinel").unwrap();
         let configured = request(json!({
             "nvext": {"metadata_upload": {
-                "url": url::Url::from_file_path(&primary).unwrap(),
-                "fallback_url": url::Url::from_file_path(&fallback).unwrap()
+                "url": fs_uri(&primary),
+                "fallback_url": fs_uri(&fallback)
             }}
         }));
         let uploader = MetadataUploader::from_request(&configured, true)

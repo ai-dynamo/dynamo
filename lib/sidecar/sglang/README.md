@@ -41,7 +41,7 @@ Set `nvext.metadata_upload.url` in an OpenAI-compatible generation request:
   "nvext": {
     "metadata_upload": {
       "url": "s3://bucket/root/rollout-1",
-      "fallback_url": "file:///var/tmp/rollout-1"
+      "fallback_url": "fs:///var/tmp/rollout-1"
     }
   }
 }
@@ -49,7 +49,7 @@ Set `nvext.metadata_upload.url` in an OpenAI-compatible generation request:
 
 The sidecar writes `choice_0.msgpack.zst` under this URL.
 The artifact uses the same MessagePack and Zstandard schema as the Python SGLang bindings.
-The supported URL schemes are `file://`, `s3://`, `gs://`, and `az://`.
+The supported OpenDAL URI schemes are `fs://`, `s3://`, `gcs://`, and `azblob://`.
 OpenDAL loads credentials from the standard provider configuration for the selected service.
 The optional `fallback_url` can use a different supported scheme.
 If the primary upload fails, the sidecar writes the same artifact to the fallback URL.
