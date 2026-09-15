@@ -11,7 +11,7 @@
 //! corresponding entry to the macro invocation below to keep Python exceptions
 //! in sync.
 
-use dynamo_runtime::error::BackendError;
+use dynamo_runtime::error::{BackendError, ErrorClass};
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
@@ -157,4 +157,28 @@ pub fn extract_http_like_error(py: Python<'_>, err: &PyErr) -> Option<(u16, Stri
         })?;
     let message = value.getattr("message").ok()?.extract::<String>().ok()?;
     Some((code, message))
+}
+
+/// Map an explicit Python HTTP exception status to Dynamo's semantic class.
+pub fn error_class_for_http_status(code: u16) -> ErrorClass {
+    match code {
+        400 => ErrorClass::InvalidRequest,
+        401 => ErrorClass::Unauthenticated,
+        403 => ErrorClass::PermissionDenied,
+        404 => ErrorClass::NotFound,
+        408 => ErrorClass::DeadlineExceeded,
+        409 => ErrorClass::Conflict,
+        413 => ErrorClass::PayloadTooLarge,
+        415 => ErrorClass::UnsupportedMedia,
+        431 => ErrorClass::PayloadTooLarge,
+        429 => ErrorClass::RateLimited,
+        499 => ErrorClass::Cancelled,
+        501 => ErrorClass::NotImplemented,
+        502 => ErrorClass::BackendProtocol,
+        503 => ErrorClass::Unavailable,
+        504 => ErrorClass::DeadlineExceeded,
+        529 => ErrorClass::CapacityExhausted,
+        402 | 405..=407 | 410..=412 | 414 | 416..=428 | 430 | 432..=498 => ErrorClass::InvalidRequest,
+        _ => ErrorClass::Internal,
+    }
 }
