@@ -20,6 +20,8 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.integration,
     pytest.mark.asyncio,
+    # Keep the process-global native runtime out of the parent of later forked tests.
+    pytest.mark.forked,
     pytest.mark.timeout(30),
 ]
 

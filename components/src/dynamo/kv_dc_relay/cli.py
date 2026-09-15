@@ -203,7 +203,7 @@ def parse_args(
             "--namespace-filter, --namespaces, and --watch-all are mutually exclusive"
         )
     if sources_file is not None:
-        namespaces = ()
+        namespaces: tuple[str, ...] = ()
         watch_all = False
     elif parsed.namespaces is not None:
         namespaces = _csv_values(parsed.namespaces, "--namespaces", parser)
