@@ -437,6 +437,72 @@ def test_run_trace_replay_rejects_applied_compute_agentic_format_without_concurr
         )
 
 
+@pytest.mark.parametrize(
+    ("basis", "child_start_ms"),
+    [(None, 2_000.0), ("auto", 2_000.0), ("absolute", 2_000.0), ("relative", 3_000.0)],
+)
+@pytest.mark.parametrize("arrival_speedup_ratio", [1.0, 2.0])
+def test_weka_nested_timestamp_override_reaches_native_replay(
+    tmp_path, basis, child_start_ms, arrival_speedup_ratio
+):
+    trace_path = tmp_path / "nested.json"
+    trace_path.write_text(
+        json.dumps(
+            {
+                "id": "play",
+                "models": ["model"],
+                "block_size": 64,
+                "hash_id_scope": "local",
+                "requests": [
+                    {
+                        "t": 0.0,
+                        "type": "s",
+                        "model": "model",
+                        "in": 64,
+                        "out": 1,
+                        "hash_ids": [1],
+                    },
+                    {
+                        "t": 1.0,
+                        "type": "subagent",
+                        "agent_id": "worker",
+                        "subagent_type": "Explore",
+                        "status": "completed",
+                        "models": ["model"],
+                        "requests": [
+                            {
+                                "t": 2.0,
+                                "type": "s",
+                                "model": "model",
+                                "in": 64,
+                                "out": 1,
+                                "hash_ids": [2],
+                            }
+                        ],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = run_trace_replay(
+        trace_path,
+        extra_engine_args=_vllm_args(),
+        trace_format="weka",
+        execution_model="target-model",
+        weka_nested_timestamp_basis=basis,
+        arrival_speedup_ratio=arrival_speedup_ratio,
+        capture_per_request=True,
+    )
+
+    assert report.summary["completed_requests"] == 2
+    assert sorted(record["arrival_time_ms"] for record in report.per_request) == [
+        0.0,
+        child_start_ms / arrival_speedup_ratio,
+    ]
+
+
 def test_direct_agentic_dynamo_trace_rejects_replay_concurrency():
     trace_path = (
         Path(__file__).resolve().parents[5]

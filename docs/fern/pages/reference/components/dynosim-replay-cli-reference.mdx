@@ -150,6 +150,12 @@ source. An explicitly configured Weka block size is only an assertion against th
 metadata. Dynamo format accepts multiple trace shards. Weka accepts one file or directory; other
 formats accept exactly one file.
 
+For Weka traces, `traffic.source.nested_timestamp_basis` controls how nested timestamps
+are interpreted: `auto` uses AISimulate's heuristic, `absolute` uses timestamps directly,
+and `relative` adds the parent marker's timestamp. Explicit overrides take precedence over
+the heuristic. For example, a marker at 1 second with a child timestamp of 2 seconds places
+the child at 3 seconds with `relative`, and at 2 seconds with `absolute`.
+
 `mooncake-delta`, `agentic_mooncake`, and `weka` require aggregated engine mode.
 The two agentic formats also require `trace_timestamps` and reject the virtual-time cutoff.
 `applied_compute_agentic` requires concurrency load.
@@ -163,6 +169,9 @@ AISimulate owns public Weka ingestion, validation, and lowering into the canonic
 `dynamo.replay.run_trace_replay(...)` API keeps `trace_format="weka"` as a compatibility adapter,
 but delegates graph construction directly to `aisimulate-core` before Dynamo composes its Router
 and Mocker runtime behavior.
+
+Use `weka_nested_timestamp_basis="absolute"` or `"relative"` to override nested timestamp
+interpretation in `run_trace_replay(...)`. Omitting it preserves the `auto` heuristic.
 
 Set `agentic_lanes` to a positive integer to replay a fixed number of trajectories concurrently.
 Plays are stable-sorted and stride-assigned to lanes. A lane starts its next play only after its

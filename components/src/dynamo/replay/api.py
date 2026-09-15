@@ -58,6 +58,7 @@ class _CommonReplayOptions(TypedDict, total=False):
 class _TraceReplayOptions(_CommonReplayOptions, total=False):
     agentic_lanes: int | None
     execution_model: str | None
+    weka_nested_timestamp_basis: Literal["auto", "absolute", "relative"] | None
     trace_block_size: int | None
     trace_format: str
     trace_shared_prefix_ratio: float
@@ -207,16 +208,28 @@ def run_trace_replay(
     capture_per_request=False,
     capture_planner_details=True,
     execution_model=None,
+    weka_nested_timestamp_basis=None,
 ) -> ReplayReport | dict[str, Any]:
     """Run trace replay.
 
     ``wall_time_ms`` and derived throughput measure Rust runtime construction
     and execution. Planner creation and bootstrap happen before that boundary.
+    ``weka_nested_timestamp_basis`` overrides Weka nested timestamp interpretation;
+    omitting it retains AISimulate's automatic selection.
     """
     if isinstance(agentic_lanes, bool) or (
         agentic_lanes is not None and not isinstance(agentic_lanes, int)
     ):
         raise TypeError("agentic_lanes must be an integer or None")
+    if weka_nested_timestamp_basis is not None:
+        if not isinstance(weka_nested_timestamp_basis, str):
+            raise TypeError("weka_nested_timestamp_basis must be a string or None")
+        if weka_nested_timestamp_basis not in {"auto", "absolute", "relative"}:
+            raise ValueError(
+                "weka_nested_timestamp_basis must be 'auto', 'absolute', or 'relative'"
+            )
+        if trace_format != "weka":
+            raise ValueError("weka_nested_timestamp_basis requires trace_format='weka'")
     execution_model = _normalize_execution_model(trace_format, execution_model)
     trace_files = _normalize_trace_files(trace_files)
     replay_kwargs = {
@@ -241,6 +254,7 @@ def run_trace_replay(
         "max_sim_time_ms": max_sim_time_ms,
         "model_name": model_name,
         "execution_model": execution_model,
+        "weka_nested_timestamp_basis": weka_nested_timestamp_basis,
         "sla_ttft_ms": sla_ttft_ms,
         "sla_itl_ms": sla_itl_ms,
         "sla_e2e_ms": sla_e2e_ms,

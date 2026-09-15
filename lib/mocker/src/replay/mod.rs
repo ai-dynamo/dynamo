@@ -69,6 +69,7 @@ pub use aisimulate_core::replay::{
 pub use entrypoints::{
     ReplayKvEventVisibility, generate_trace_worker_artifacts_offline,
     generate_trace_worker_artifacts_offline_with_kv_event_visibility,
+    load_agentic_trace_from_file_with_options,
     simulate_agentic_trace_live_workload_with_router_mode_and_options,
     simulate_agentic_trace_workload_disagg_with_router_mode,
     simulate_agentic_trace_workload_with_router_mode, simulate_concurrency_file,

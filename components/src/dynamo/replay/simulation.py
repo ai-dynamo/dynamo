@@ -388,6 +388,9 @@ class DynamoReplayRunner:
             return run_trace_replay(
                 trace_files=trace_files,
                 trace_format=trace_format,
+                weka_nested_timestamp_basis=spec.workload.get(
+                    "weka_nested_timestamp_basis"
+                ),
                 trace_block_size=trace_block_size,
                 max_sim_time_ms=spec.workload.get("max_sim_time_ms"),
                 agentic_lanes=agentic_lanes,
@@ -399,6 +402,9 @@ class DynamoReplayRunner:
         return run_trace_replay(
             trace_files=trace_files,
             trace_format=trace_format,
+            weka_nested_timestamp_basis=spec.workload.get(
+                "weka_nested_timestamp_basis"
+            ),
             trace_block_size=trace_block_size,
             max_sim_time_ms=spec.workload.get("max_sim_time_ms"),
             agentic_lanes=agentic_lanes,

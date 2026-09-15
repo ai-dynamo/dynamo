@@ -14,8 +14,9 @@ license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
     "ai-dynamo-runtime==1.5.0",
-    # The review source below already identifies itself as 0.12.0. Keep wheel
-    # metadata installable from the staged artifact and eventual PyPI release.
+    # Temporary: the pinned source identifies itself as 0.12.0, which is not
+    # published on PyPI. Before merge, align all pins with a release containing
+    # the Weka API; the uv source override below does not apply to wheel installs.
     "aisimulate==0.12.0; python_version >= '3.11' and python_version < '3.14'",
     "aiohttp>=3.14.3,<4.0",
     "transformers>=4.56.0",

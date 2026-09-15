@@ -201,8 +201,12 @@ def test_trace_paths_only_workload_routes_to_trace_replay(monkeypatch) -> None:
     assert report.metrics["completed_requests"] == 2.0
 
 
+@pytest.mark.parametrize(
+    "nested_timestamp_basis", [None, "auto", "absolute", "relative"]
+)
 def test_weka_runner_delegates_without_inventing_a_source_block_size(
     monkeypatch,
+    nested_timestamp_basis,
 ) -> None:
     seen = {}
 
@@ -225,6 +229,7 @@ def test_weka_runner_delegates_without_inventing_a_source_block_size(
             "trace_path": "published-weka",
             "trace_format": "weka",
             "agentic_lanes": 1,
+            "weka_nested_timestamp_basis": nested_timestamp_basis,
         },
         goal={"target": "throughput"},
     )
@@ -234,6 +239,7 @@ def test_weka_runner_delegates_without_inventing_a_source_block_size(
     assert seen["trace_block_size"] is None
     assert seen["agentic_lanes"] == 1
     assert seen["execution_model"] == "target-model"
+    assert seen["weka_nested_timestamp_basis"] == nested_timestamp_basis
     assert report.metadata == {
         "agentic_qualification": "functional_only",
         "agentic_input_format": "weka",
