@@ -50,6 +50,65 @@ async def test_cancellation_monitor_rechecks_shutdown_after_cleanup():
             await asyncio.sleep(0)
 
 
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_cancellation_monitor_keeps_pending_ordered_abort_alive(
+    decode_cancellation_case,
+):
+    case = decode_cancellation_case
+    request_id_future = asyncio.get_running_loop().create_future()
+
+    async with case.handler._cancellation_monitor(
+        request_id_future,
+        case.context,
+        submitted_request_id="internal-request-id",
+    ) as cancellation_task:
+        case.cancelled.set()
+        await asyncio.wait_for(cancellation_task, timeout=1)
+
+    assert not request_id_future.cancelled()
+    case.registry["internal-request-id"] = SimpleNamespace(
+        time_stats=SimpleNamespace(api_server_dispatch_finish_time=1.0)
+    )
+    case.dispatched.set()
+    await asyncio.wait_for(case.aborted.wait(), timeout=1)
+    await asyncio.gather(*tuple(case.handler._abort_tasks))
+
+    assert case.abort_calls == [("internal-request-id", False)]
+    case.registry.clear()
+    request_id_future.cancel()
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_pending_ordered_abort_has_bounded_registration_wait(
+    decode_cancellation_case, monkeypatch, caplog
+):
+    caplog.set_level(logging.WARNING)
+    monkeypatch.setattr(
+        "dynamo.sglang.request_handlers.cancellation._CANCELLATION_REGISTRATION_WAIT_TIMEOUT_S",
+        0,
+    )
+    case = decode_cancellation_case
+    request_id_future = asyncio.get_running_loop().create_future()
+
+    async with case.handler._cancellation_monitor(
+        request_id_future,
+        case.context,
+        submitted_request_id="internal-request-id",
+    ) as cancellation_task:
+        case.cancelled.set()
+        await asyncio.wait_for(cancellation_task, timeout=1)
+
+    await asyncio.gather(*tuple(case.handler._abort_tasks))
+    assert not case.abort_calls
+    assert (
+        "Timed out waiting for SGLang Request ID internal-request-id to register"
+        in caplog.messages
+    )
+    request_id_future.cancel()
+
+
 @pytest.fixture
 def decode_cancellation_case(monkeypatch):
     handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
