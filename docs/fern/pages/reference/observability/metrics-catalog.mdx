@@ -151,7 +151,7 @@ Counters for requests that end early: [cancellations](../../developer-guide/know
 
 `dynamo_frontend_worker_*` gauges appear once workers register and begin serving. They live on the frontend's local registry (not component-scoped) and do **not** carry `dynamo_namespace` or `dynamo_component` labels. Frontend-only — not available on the standalone router. Labeled by `worker_id`, `dp_rank`, and `worker_type`.
 
-At each HTTP scrape, these five gauges include only workers in the current committed router membership that pass hard availability checks, and only their current data-parallel (DP) ranks. The timing gauges also allow `dp_rank="none"` when the rank is unknown, provided the worker remains available. Removed or excluded workers disappear from the output; late request completions or load updates cannot restore their exposed series.
+At each HTTP scrape, these five gauges include only workers in the current committed router membership that pass hard availability checks, and only their current data-parallel (DP) ranks. The timing gauges also allow `dp_rank="none"` when the rank is unknown, provided the worker remains available. Their `worker_type` label describes timing attribution: an Encode worker serving Chat/Completions reports these timing samples as `decode`, while the inventory metrics below retain its `encode` topology role. Removed or excluded workers disappear from the output; late request completions or load updates cannot restore their exposed series.
 
 <ParamField path="dynamo_frontend_worker_active_decode_blocks" type="gauge">
   Active KV cache decode blocks per worker.

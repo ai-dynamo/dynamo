@@ -469,6 +469,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             Some(WorkerGroupObservation {
                 model: key.model_name.clone(),
                 endpoint: representative.endpoint_id.clone(),
+                model_type: card.model_type,
                 worker_type: crate::kv_router::RouterLoadSource::from_worker_type(
                     ModelDeploymentCard::resolve_worker_type(card.worker_type, card.model_type),
                 )
@@ -1867,5 +1868,28 @@ mod tests {
         assert_eq!(observation.state, WorkerGroupState::MaterializationFailed);
         assert!(observation.committed.is_empty());
         assert_eq!(observation.checksum_mismatches, HashSet::from([2]));
+    }
+
+    #[tokio::test]
+    async fn inventory_preserves_encode_topology_and_generation_timing_attribution() {
+        use crate::{model_type::ModelType, worker_type::WorkerType};
+
+        for (capabilities, timing_type) in [
+            (ModelType::Chat, "decode"),
+            (ModelType::Completions, "decode"),
+            (ModelType::empty(), "encode"),
+        ] {
+            let (host, _) = FakeHost::new();
+            let mut controller = ModelDiscoveryController::new(host.clone());
+            let mut worker = instance(1, "encode");
+            worker.card.worker_type = Some(WorkerType::Encode);
+            worker.card.model_type = capabilities;
+            worker.mdc_checksum = worker.card.mdcsum().to_string();
+            controller.apply_added(worker);
+            let observation = host.inventory.snapshot().pop().unwrap().1;
+            assert_eq!(observation.worker_type, "encode");
+            assert_eq!(observation.model_type, capabilities);
+            assert_eq!(observation.timing_worker_type(), timing_type);
+        }
     }
 }

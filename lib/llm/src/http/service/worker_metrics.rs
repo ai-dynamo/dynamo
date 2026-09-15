@@ -187,6 +187,7 @@ impl Collector for WorkerMetricsCollector {
     fn collect(&self) -> Vec<MetricFamily> {
         let mut pools: BTreeMap<[String; 5], PoolSnapshot> = BTreeMap::new();
         let mut allowed = AllowedRanks::new();
+        let mut timing_allowed = AllowedRanks::new();
         for (group, available) in (self.inventory)() {
             let labels = [
                 group.model.clone(),
@@ -207,14 +208,17 @@ impl Collector for WorkerMetricsCollector {
                     })
                     .or_insert(state);
                 if state.state == "available" {
+                    let ranks = group.workers[&id]
+                        .data_parallel_rank_range()
+                        .expect("validated worker rank range");
                     allowed
                         .entry((id, group.worker_type.to_string()))
                         .or_default()
-                        .extend(
-                            group.workers[&id]
-                                .data_parallel_rank_range()
-                                .expect("validated worker rank range"),
-                        );
+                        .extend(ranks.clone());
+                    timing_allowed
+                        .entry((id, group.timing_worker_type().to_string()))
+                        .or_default()
+                        .extend(ranks);
                 }
             }
         }
@@ -252,10 +256,15 @@ impl Collector for WorkerMetricsCollector {
                 let allow_unset_rank = worker_last_metric_names
                     .iter()
                     .any(|name| name == family.name());
+                let family_allowed = if allow_unset_rank {
+                    &timing_allowed
+                } else {
+                    &allowed
+                };
                 let retained: Vec<_> = family
                     .take_metric()
                     .into_iter()
-                    .filter(|metric| Self::allowed_sample(metric, &allowed, allow_unset_rank))
+                    .filter(|metric| Self::allowed_sample(metric, family_allowed, allow_unset_rank))
                     .collect();
                 if !retained.is_empty() {
                     family.set_metric(retained);
@@ -380,6 +389,7 @@ mod tests {
                         name: "generate".into(),
                     },
                     worker_type: "decode",
+                    model_type: crate::model_type::ModelType::Chat,
                     workers: ids
                         .iter()
                         .map(|&id| {
@@ -566,5 +576,88 @@ mod tests {
         );
         f.available.lock().insert(1);
         assert_eq!(f.count("available"), Some(1.0));
+    }
+
+    #[test]
+    fn encode_chat_timing_remains_visible_until_exclusion_or_removal() {
+        let f = Fixture::new();
+        f.observe(&[1, 2], &[1, 2], WorkerGroupState::Ready);
+        let mut group = f.inventory.snapshot().pop().unwrap().1;
+        group.worker_type = "encode";
+        group.model_type =
+            crate::model_type::ModelType::Chat | crate::model_type::ModelType::Completions;
+        f.inventory.publish("group".into(), Some(group.clone()));
+        *f.available.lock() = HashSet::from([1, 2]);
+        for gauge in &f.values[2..] {
+            for id in ["1", "2"] {
+                for rank in ["0", "none", "99"] {
+                    gauge.with_label_values(&[id, rank, "decode"]).set(7);
+                }
+            }
+            let name = &gauge.desc()[0].fq_name;
+            assert_eq!(
+                f.sample(name, &[("worker_id", "1"), ("dp_rank", "0")]),
+                Some(7.0)
+            );
+            assert_eq!(
+                f.sample(name, &[("worker_id", "1"), ("dp_rank", "none")]),
+                Some(7.0)
+            );
+            assert_eq!(f.sample(name, &[("dp_rank", "99")]), None);
+        }
+        assert_eq!(
+            f.sample(
+                "dynamo_frontend_router_worker_state",
+                &[
+                    ("router_worker_id", "1"),
+                    ("worker_type", "encode"),
+                    ("state", "available")
+                ]
+            ),
+            Some(1.0)
+        );
+        assert_eq!(
+            f.sample(
+                "dynamo_frontend_router_workers",
+                &[("worker_type", "encode"), ("state", "available")]
+            ),
+            Some(2.0)
+        );
+
+        // A still-discovered but rejected worker must lose its timing samples.
+        group.committed.remove(&1);
+        group.checksum_mismatches.insert(1);
+        f.inventory.publish("group".into(), Some(group.clone()));
+        for gauge in &f.values[2..] {
+            let name = &gauge.desc()[0].fq_name;
+            assert_eq!(f.sample(name, &[("worker_id", "1")]), None);
+            assert_eq!(
+                f.sample(name, &[("worker_id", "2"), ("dp_rank", "0")]),
+                Some(7.0)
+            );
+        }
+        group.committed.insert(1);
+        group.checksum_mismatches.clear();
+        f.inventory.publish("group".into(), Some(group.clone()));
+        f.available.lock().remove(&1);
+        for gauge in &f.values[2..] {
+            assert_eq!(
+                f.sample(&gauge.desc()[0].fq_name, &[("worker_id", "1")]),
+                None
+            );
+        }
+        f.available.lock().insert(1);
+        group.workers.remove(&1);
+        group.committed.remove(&1);
+        f.inventory.publish("group".into(), Some(group));
+        for gauge in &f.values[2..] {
+            gauge.with_label_values(&["1", "none", "decode"]).set(99);
+            let name = &gauge.desc()[0].fq_name;
+            assert_eq!(f.sample(name, &[("worker_id", "1")]), None);
+            assert_eq!(
+                f.sample(name, &[("worker_id", "2"), ("dp_rank", "0")]),
+                Some(7.0)
+            );
+        }
     }
 }
