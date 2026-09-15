@@ -26,6 +26,7 @@ from dynamo.sglang.protocol import (
 from dynamo.sglang.request_handlers.llm.decode_handler import (
     DecodeWorkerHandler,
     _extract_sglang_stop_reason,
+    _native_payload_is_batched,
     _nvext_extra_field_requested,
     _openai_stop_sampling_params,
     _ordered_cancellation_request_id,
@@ -725,6 +726,32 @@ def test_ordered_cancellation_requires_stable_sglang_request_id(
             "request-id", sampling_params, supported=supported
         )
         == expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("native_payload", "expected"),
+    [
+        ({}, False),
+        ({"prompt": "hello"}, False),
+        ({"prompt": ["hello", "world"]}, True),
+        ({"text": ["hello", "world"]}, True),
+        ({"input_ids": [1, 2]}, False),
+        ({"input_ids": [[1], [2]]}, True),
+        ({"input_embeds": [[0.1], [0.2]]}, False),
+        ({"input_embeds": [[[0.1]], [[0.2]]]}, True),
+    ],
+)
+def test_native_payload_batch_detection(native_payload, expected):
+    assert _native_payload_is_batched(native_payload) is expected
+
+
+def test_ordered_cancellation_rejects_native_batch():
+    assert (
+        _ordered_cancellation_request_id(
+            "request-id", {"n": 1}, supported=True, batched=True
+        )
+        is None
     )
 
 
