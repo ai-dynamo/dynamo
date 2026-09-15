@@ -381,6 +381,8 @@ impl Default for ModelRuntimeConfig {
             tool_call_arguments_format: ToolCallArgumentsFormat::JsonString,
             tokenizer_backend: None,
             tokenizer_fallback_enabled: None,
+            // Missing fields from older workers remain conservative. Current
+            // deployment configuration explicitly publishes On/Always.
             structural_tag_mode: StructuralTagMode::Off,
             structural_tag_scope: StructuralTagScope::Auto,
             structural_tag_schema: StructuralTagSchemaMode::Auto,

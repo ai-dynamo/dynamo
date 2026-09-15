@@ -35,8 +35,14 @@ from vllm.utils.async_utils import make_async
 from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.llm.exceptions import InvalidArgument
 
+from .structural_tag_policy import effective_tool_strict, should_attempt_structural_tag
 from .thinking import apply_default_thinking_mode_to_template_kwargs
 from .utils import legacy_guided_decoding
+
+try:
+    from vllm.tool_parsers.structural_tag_registry import get_model_structural_tag
+except ImportError:  # Older supported vLLM releases do not expose this registry.
+    get_model_structural_tag = None
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -182,21 +188,32 @@ def _should_build_tool_call_guidance(
     # enforced guarantee. sglang_prepost.py has the same gap.
     if tool_choice == "none":
         return False
-    if _is_forced_tool_choice(tool_choice):
-        return True
-    if structural_tag_mode != "on":
-        return False
-    if tool_choice != "auto":
-        return False
-    if structural_tag_scope == "always":
-        return True
     # An explicit single-call request is enough to attempt structural-tag
     # guidance. Forced-choice JSON guidance also bounds its array schema below.
     explicit_single_call = (
         "parallel_tool_calls" in request.model_fields_set
         and request.parallel_tool_calls is False
     )
-    return explicit_single_call or any(_tool_is_strict(tool) for tool in request.tools)
+    tool_choice_kind = (
+        "required"
+        if tool_choice == "required"
+        else "named"
+        if _is_named_tool_choice(tool_choice)
+        else "auto"
+        if tool_choice == "auto"
+        else "other"
+    )
+    attempt_structural_tag = should_attempt_structural_tag(
+        mode=structural_tag_mode,
+        scope=structural_tag_scope,
+        tool_choice_kind=tool_choice_kind,
+        has_tools=True,
+        any_explicit_strict=any(_tool_is_strict(tool) for tool in request.tools),
+        parallel_tool_calls_explicitly_false=explicit_single_call,
+    )
+    # Forced choices retain the generic JSON fallback when structural tags are
+    # disabled or unavailable.
+    return attempt_structural_tag or _is_forced_tool_choice(tool_choice)
 
 
 def _request_for_vllm_structural_tag(
@@ -204,13 +221,14 @@ def _request_for_vllm_structural_tag(
     *,
     structural_tag_schema: str,
 ) -> ChatCompletionRequest:
-    strict_schema = structural_tag_schema == "strict"
     tools = [
         tool.model_copy(
             update={
                 "function": tool.function.model_copy(
                     update={
-                        "strict": True if strict_schema else tool.function.strict,
+                        "strict": effective_tool_strict(
+                            tool.function.strict, structural_tag_schema
+                        ),
                     }
                 )
             }
@@ -242,7 +260,31 @@ def build_tool_call_guided_decoding(
             request,
             structural_tag_schema=structural_tag_schema,
         )
-        structural_tag = tool_parser.get_structural_tag(request_for_tag)
+        try:
+            structural_tag_model = getattr(tool_parser, "structural_tag_model", None)
+            structural_tag = (
+                get_model_structural_tag(
+                    model=structural_tag_model,
+                    tools=request_for_tag.tools,
+                    tool_choice=request_for_tag.tool_choice,
+                    reasoning=False,
+                )
+                if structural_tag_model is not None
+                and get_model_structural_tag is not None
+                else tool_parser.get_structural_tag(request_for_tag)
+            )
+        except (
+            AttributeError,
+            KeyError,
+            NotImplementedError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ):
+            # Parser implementations are third-party capability providers. A
+            # failed structural-tag build must preserve the pre-existing JSON
+            # or unconstrained compatibility path for the request.
+            structural_tag = None
         if structural_tag is not None:
             tag_value = (
                 structural_tag.model_dump()

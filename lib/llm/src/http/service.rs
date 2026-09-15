@@ -124,6 +124,7 @@ mod tests {
     fn kimi_k2_required_resolves_to_the_real_structural_tag_decision() {
         let parsing_options = ParsingOptions {
             tool_call_parser: Some("kimi_k2".to_string()),
+            structural_tag_mode: crate::local_model::runtime_config::StructuralTagMode::On,
             ..Default::default()
         };
         let result =
@@ -132,7 +133,7 @@ mod tests {
         assert_eq!(
             result.guided_tool_constraint,
             GuidedToolConstraint::StructuralTag,
-            "kimi_k2 + required must use the intrinsic structural tag, not a reconstructed JSON schema"
+            "kimi_k2 + required must use the enabled structural tag, not a reconstructed JSON schema"
         );
     }
 
@@ -140,6 +141,7 @@ mod tests {
     fn kimi_k2_named_resolves_to_the_real_structural_tag_decision() {
         let parsing_options = ParsingOptions {
             tool_call_parser: Some("kimi_k2".to_string()),
+            structural_tag_mode: crate::local_model::runtime_config::StructuralTagMode::On,
             ..Default::default()
         };
         let named = json!({"type": "function", "function": {"name": "get_weather"}});
@@ -148,7 +150,7 @@ mod tests {
         assert_eq!(
             result.guided_tool_constraint,
             GuidedToolConstraint::StructuralTag,
-            "kimi_k2 + a named tool choice must use the intrinsic structural tag, not a reconstructed JSON schema"
+            "kimi_k2 + a named tool choice must use the enabled structural tag, not a reconstructed JSON schema"
         );
     }
 
@@ -194,11 +196,12 @@ mod tests {
         );
     }
 
-    // With the operator default (`structural_tag_mode = Off`), the same non-Kimi
-    // parser must NOT get a structural tag — confirms the mode gate above is real,
-    // not a permanently-on regression.
+    // With the low-level ParsingOptions default (`structural_tag_mode = Off`),
+    // the same non-Kimi parser must NOT get a structural tag. Regular workers
+    // explicitly publish the deployment's default-on policy into the model card;
+    // native sidecars that do not do so retain this conservative default.
     #[test]
-    fn operator_default_mode_off_does_not_resolve_structural_tag_for_a_non_kimi_parser() {
+    fn parsing_options_default_mode_off_does_not_resolve_structural_tag() {
         let parsing_options = ParsingOptions {
             tool_call_parser: Some("qwen3_coder".to_string()),
             ..Default::default()
