@@ -630,7 +630,9 @@ jobs:
             PYPI_SECRET_ARGS+=(--secret "id=pypi-netrc,src=${NETRC}")
           fi
 
-          docker buildx build \
+          .github/scripts/run_with_pypi_fallback.sh \
+            "${RUNNER_TEMP}/test-image-build.log" \
+            docker buildx build \
             --progress=plain \
             ${PUSH_ARGS} \
             ${NO_CACHE_ARG} \

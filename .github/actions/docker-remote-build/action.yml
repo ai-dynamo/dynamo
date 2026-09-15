@@ -166,14 +166,17 @@ runs:
           TARGET_ARG="--target ${{ inputs.build_target }}"
         fi
 
-        docker buildx build \
+        set +e
+        .github/scripts/run_with_pypi_fallback.sh "${BUILD_LOG_FILE}" \
+          docker buildx build \
           --progress=plain \
           --tag "$IMAGE_TAG" \
           --platform "${PLATFORM_FLAG}" \
           -f "${DOCKERFILE}" \
-          $TARGET_ARG $EXTRA_ARGS $SECRET_ARGS . 2>&1 | tee "${BUILD_LOG_FILE}"
+          $TARGET_ARG $EXTRA_ARGS $SECRET_ARGS .
 
-        BUILD_EXIT_CODE=${PIPESTATUS[0]}
+        BUILD_EXIT_CODE=$?
+        set -e
 
         BUILD_END_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
         echo "BUILD_END_TIME=${BUILD_END_TIME}" >> $GITHUB_ENV
