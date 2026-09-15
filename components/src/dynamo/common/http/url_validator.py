@@ -72,13 +72,50 @@ _BLOCKED_HOSTS: frozenset[str] = frozenset(
 )
 
 
+# Well-known NAT64 prefix (RFC 6052). Addresses inside it carry the IPv4
+# destination in the low 32 bits, so an IPv6-only cluster reaches IPv4 hosts
+# through it. A network-specific prefix may use a different length and is not
+# detectable from the address alone.
+_NAT64_WELL_KNOWN = ipaddress.ip_network("64:ff9b::/96")
+
+
+def _embedded_ipv4(ip: ipaddress.IPv6Address) -> tuple[ipaddress.IPv4Address, ...]:
+    """Return the IPv4 addresses an IPv6 transition address actually reaches.
+
+    6to4 and Teredo are decoded by the stdlib. Without this, a blocked IPv4
+    wrapped in one of these formats passes the range check, because the range
+    check only sees the IPv6 form.
+    """
+    if ip.sixtofour is not None:
+        return (ip.sixtofour,)
+    if ip.teredo is not None:
+        # (server, client): traffic involves both.
+        return ip.teredo
+    if ip in _NAT64_WELL_KNOWN:
+        return (ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF),)
+    return ()
+
+
 def is_blocked_ip(ip_text: str) -> bool:
-    """Return True if ``ip_text`` parses as an IP inside one of the blocked ranges."""
+    """Return True if ``ip_text`` parses as an IP inside one of the blocked ranges.
+
+    IPv6 transition addresses are resolved to the IPv4 address they reach and
+    that address is checked too, so a blocked IPv4 cannot be smuggled through
+    in 6to4, Teredo or NAT64 form.
+    """
     try:
         ip = ipaddress.ip_address(ip_text)
     except ValueError:
         return False
-    return any(ip in net for net in _BLOCKED_IP_NETWORKS)
+    if any(ip in net for net in _BLOCKED_IP_NETWORKS):
+        return True
+    if isinstance(ip, ipaddress.IPv6Address):
+        return any(
+            embedded in net
+            for embedded in _embedded_ipv4(ip)
+            for net in _BLOCKED_IP_NETWORKS
+        )
+    return False
 
 
 @dataclass(frozen=True)
