@@ -4,6 +4,7 @@
 import json
 import logging
 from pathlib import Path
+from stat import S_ISDIR
 from typing import Optional, Union
 
 from huggingface_hub import hf_hub_download, model_info
@@ -144,8 +145,9 @@ def model_has_auto_map(
 
     Works for both local directories and Hub model IDs. Reads ``config.json``
     directly (no ``AutoConfig`` load) so it works even for architectures
-    that ``transformers`` doesn't know about. Returns False on any read
-    error so callers can treat detection as best-effort.
+    that ``transformers`` doesn't know about. Returns False for missing or
+    malformed configs. Unexpected read errors return True so callers apply
+    their trust policy; this does not itself authorize custom code execution.
     """
     path = Path(model_name_or_path)
     try:
@@ -184,11 +186,12 @@ def model_has_auto_map(
         return False
     except Exception as e:
         # Unexpected failure (network, auth, I/O). We cannot determine whether
-        # the model needs trust_remote_code, so conservatively return True to
-        # avoid workers crashing at load time.
+        # the model needs trust_remote_code, so return True and let the caller
+        # decide whether custom code execution is allowed.
         logger.warning(
             "model_has_auto_map: unexpected error reading config.json for %s: %s "
-            "— defaulting to True (injecting --trust-remote-code).",
+            "— auto_map detection is inconclusive; returning True for the "
+            "caller's trust policy check.",
             model_name_or_path,
             e,
         )
@@ -205,9 +208,23 @@ def model_ref_allows_implicit_trust_remote_code(
     remote HF model IDs are treated as mutable and must opt in explicitly.
     Only local directories (including PVC-resolved snapshots) qualify for
     implicit ``--trust-remote-code`` injection.
+
+    Raises RuntimeError when the path cannot be inspected, rather than
+    treating an inaccessible local path as a remote model ID.
     """
     path = Path(model_name_or_path)
-    return path.exists() and path.is_dir()
+    try:
+        return S_ISDIR(path.stat().st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError as e:
+        raise RuntimeError(
+            f"Cannot inspect model path {str(path)!r} to determine whether "
+            f"--trust-remote-code may be enabled automatically: {e}. "
+            "Check directory permissions and symlink ownership for the profiler "
+            "user. For PVC models, set modelCache.pvcModelPath to the actual "
+            "snapshot directory or create the symlink with the profiler's UID."
+        ) from e
 
 
 class ModelInfo(BaseModel):
