@@ -116,6 +116,37 @@ class DistributedRuntime:
         """
         ...
 
+    def begin_health_check_maintenance(self, max_seconds: float) -> int:
+        """
+        Suppress health check canaries for at most max_seconds and return the
+        lease owning the window.
+
+        Use around an operation that deliberately blocks the engine, such as an
+        RL weight transfer waiting on a peer to join the rendezvous. While the
+        window is open the canary does not probe and cannot mark an endpoint
+        NotReady, so /live keeps reporting the last known state. The window
+        expires on its own, so a transaction that never ends cannot leave the
+        worker unprobed.
+
+        Windows nest: probes stay suppressed until every lease is released or
+        expired, so one operation finishing cannot uncover another still running.
+
+        Raises:
+            ValueError: If max_seconds is not a finite positive number, or is
+                greater than 86400 (one day). A window is a backstop rather than
+                a schedule, so longer ones are rejected instead of suppressing
+                probes for an unbounded stretch.
+        """
+        ...
+
+    def end_health_check_maintenance(self, lease: int) -> None:
+        """
+        Release a lease returned by begin_health_check_maintenance. Windows held
+        by other leases stay open, and the canary resumes once none remain.
+        Releasing an already released lease is a no-op.
+        """
+        ...
+
     def register_engine_route(
         self,
         route_name: str,

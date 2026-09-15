@@ -1441,6 +1441,41 @@ impl DistributedRuntime {
         Ok(())
     }
 
+    /// Suppress health check canaries for at most `max_seconds`, and return the
+    /// lease that owns the window.
+    ///
+    /// For an operation that deliberately blocks the engine, such as an RL
+    /// weight transfer waiting on a peer. The window expires on its own, so a
+    /// transaction that never ends cannot leave the worker unprobed.
+    fn begin_health_check_maintenance(&self, max_seconds: f64) -> PyResult<u64> {
+        // A window is a backstop, not a schedule, so a day is already generous.
+        // Bounding it here keeps `Duration::from_secs_f64` and the `Instant`
+        // addition behind it away from the values that make them panic — a PyO3
+        // panic surfaces as PanicException, which `except Exception` misses.
+        const MAX_MAINTENANCE_SECONDS: f64 = 86_400.0;
+        if !max_seconds.is_finite() || max_seconds <= 0.0 || max_seconds > MAX_MAINTENANCE_SECONDS {
+            return Err(PyValueError::new_err(format!(
+                "max_seconds must be a finite positive number no greater than \
+                 {MAX_MAINTENANCE_SECONDS}, got {max_seconds}"
+            )));
+        }
+        Ok(self
+            .inner
+            .system_health()
+            .lock()
+            .begin_canary_maintenance(std::time::Duration::from_secs_f64(max_seconds)))
+    }
+
+    /// Release a lease returned by `begin_health_check_maintenance`. Windows held
+    /// by other leases stay open. Releasing a released lease is a no-op.
+    fn end_health_check_maintenance(&self, lease: u64) -> PyResult<()> {
+        self.inner
+            .system_health()
+            .lock()
+            .end_canary_maintenance(lease);
+        Ok(())
+    }
+
     // This is used to pass the DistributedRuntime from the dynamo-runtime bindings
     // to the KVBM bindings, since KVBM cannot directly use the struct from this cdylib.
     // TODO: Create a separate crate "dynamo-python" so that all binding crates can import

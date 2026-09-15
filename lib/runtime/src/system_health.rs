@@ -18,7 +18,7 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, OnceLock},
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tokio::sync::mpsc;
 
@@ -96,7 +96,18 @@ pub struct SystemHealth {
     live_path: String,
     start_time: Instant,
     uptime_gauge: OnceLock<prometheus::Gauge>,
+    /// Open canary maintenance windows, keyed by the lease that owns each one.
+    /// The value is a deadline rather than a flag: a window nobody closes expires
+    /// instead of silencing canaries forever.
+    canary_maintenance: HashMap<CanaryMaintenanceLease, Instant>,
+    /// Source of lease identifiers, monotonic so a released lease is never reused.
+    next_canary_lease: CanaryMaintenanceLease,
 }
+
+/// Identifies one open canary maintenance window. Returned by
+/// [`SystemHealth::begin_canary_maintenance`] and surrendered to
+/// [`SystemHealth::end_canary_maintenance`].
+pub type CanaryMaintenanceLease = u64;
 
 impl SystemHealth {
     pub fn new(
@@ -134,6 +145,8 @@ impl SystemHealth {
             live_path,
             start_time: Instant::now(),
             uptime_gauge: OnceLock::new(),
+            canary_maintenance: HashMap::new(),
+            next_canary_lease: 0,
         }
     }
 
@@ -196,6 +209,55 @@ impl SystemHealth {
     pub fn set_endpoint_health_status(&self, endpoint: &str, status: HealthStatus) {
         let mut endpoint_health = self.endpoint_health.write().unwrap();
         endpoint_health.insert(endpoint.to_string(), status);
+    }
+
+    /// Open a canary maintenance window lasting at most `max_duration`, and return
+    /// the lease that owns it.
+    ///
+    /// Used around an operation that blocks the engine, such as an RL weight
+    /// transfer waiting on a peer to join a collective. Windows nest: probes stay
+    /// suppressed until every lease has been released or has expired, so one
+    /// operation finishing cannot uncover another that is still running.
+    pub fn begin_canary_maintenance(&mut self, max_duration: Duration) -> CanaryMaintenanceLease {
+        let now = Instant::now();
+        self.prune_expired_canary_maintenance(now);
+        let lease = self.next_canary_lease;
+        self.next_canary_lease += 1;
+        self.canary_maintenance.insert(lease, now + max_duration);
+        lease
+    }
+
+    /// Release `lease`, leaving every other lease's window open. Releasing a lease
+    /// twice, or one that has already expired, is a no-op.
+    pub fn end_canary_maintenance(&mut self, lease: CanaryMaintenanceLease) {
+        self.canary_maintenance.remove(&lease);
+    }
+
+    fn prune_expired_canary_maintenance(&mut self, now: Instant) {
+        self.canary_maintenance
+            .retain(|_, deadline| now < *deadline);
+    }
+
+    /// Whether canary probes are currently suppressed.
+    pub fn canary_suppressed(&mut self) -> bool {
+        let now = Instant::now();
+        self.prune_expired_canary_maintenance(now);
+        self.canary_maintenance
+            .values()
+            .any(|deadline| now < *deadline)
+    }
+
+    /// Apply a canary-derived health status, dropping a `NotReady` write while a
+    /// maintenance window is open. `Ready` always applies.
+    pub fn set_canary_health_status(&mut self, endpoint: &str, status: HealthStatus) {
+        if status == HealthStatus::NotReady && self.canary_suppressed() {
+            tracing::debug!(
+                "Canary maintenance window open; ignoring NotReady for endpoint '{}'",
+                endpoint
+            );
+            return;
+        }
+        self.set_endpoint_health_status(endpoint, status);
     }
 
     /// Returns the overall health status and endpoint health statuses
@@ -576,6 +638,125 @@ mod tests {
         assert!(
             health.get_health_status().0,
             "after the canary marks it ready the worker is healthy"
+        );
+    }
+
+    fn verified_health() -> SystemHealth {
+        let health = system_health(true);
+        health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        health.set_endpoint_registered(ENDPOINT);
+        health.set_endpoint_health_status(ENDPOINT, HealthStatus::Ready);
+        health
+    }
+
+    /// The reported failure: a canary timeout during a weight transfer marks the
+    /// endpoint NotReady, `/live` answers 503 and kubelet restarts the worker.
+    #[test]
+    fn maintenance_window_drops_a_canary_notready() {
+        let mut health = verified_health();
+        health.begin_canary_maintenance(Duration::from_secs(600));
+
+        health.set_canary_health_status(ENDPOINT, HealthStatus::NotReady);
+
+        let (healthy, endpoints) = health.get_health_status();
+        assert!(
+            healthy,
+            "a canary timeout must not unseat a worker under maintenance"
+        );
+        assert_eq!(endpoints.get(ENDPOINT).map(String::as_str), Some("ready"));
+    }
+
+    #[test]
+    fn ending_maintenance_restores_canary_authority() {
+        let mut health = verified_health();
+        let lease = health.begin_canary_maintenance(Duration::from_secs(600));
+        health.end_canary_maintenance(lease);
+
+        health.set_canary_health_status(ENDPOINT, HealthStatus::NotReady);
+
+        assert!(
+            !health.get_health_status().0,
+            "once the transaction ends the canary decides again"
+        );
+    }
+
+    /// Two weight-transfer lifecycles can overlap. Each spans several admin calls,
+    /// so a second one can start before the first one's terminator arrives, and
+    /// the terminators carry no identity beyond the lease their opener was given.
+    /// Releasing one lease must not uncover a transfer still holding another.
+    #[test]
+    fn ending_one_window_leaves_an_overlapping_window_open() {
+        let mut health = verified_health();
+        let first = health.begin_canary_maintenance(Duration::from_secs(600));
+        let second = health.begin_canary_maintenance(Duration::from_secs(600));
+
+        health.end_canary_maintenance(first);
+        health.set_canary_health_status(ENDPOINT, HealthStatus::NotReady);
+        assert!(
+            health.get_health_status().0,
+            "the second transfer still holds a window open"
+        );
+
+        health.end_canary_maintenance(second);
+        health.set_canary_health_status(ENDPOINT, HealthStatus::NotReady);
+        assert!(
+            !health.get_health_status().0,
+            "with every lease released the canary decides again"
+        );
+    }
+
+    /// Releasing the same lease twice must not cancel a window somebody else
+    /// opened. A lifecycle can reach both of its terminators — `finish_weight_update`
+    /// and then `destroy_weights_update_group` — and the second release arrives
+    /// with a lease that is already gone.
+    #[test]
+    fn releasing_a_lease_twice_leaves_other_windows_alone() {
+        let mut health = verified_health();
+        let first = health.begin_canary_maintenance(Duration::from_secs(600));
+        let second = health.begin_canary_maintenance(Duration::from_secs(600));
+
+        health.end_canary_maintenance(first);
+        health.end_canary_maintenance(first);
+
+        health.set_canary_health_status(ENDPOINT, HealthStatus::NotReady);
+        assert!(
+            health.get_health_status().0,
+            "the repeat release is a no-op, not a release of the other lease"
+        );
+        assert!(health.canary_suppressed());
+        health.end_canary_maintenance(second);
+        assert!(!health.canary_suppressed());
+    }
+
+    /// A transaction that is never closed cannot leave a worker unprobed: the
+    /// window is a deadline and expires on its own.
+    #[test]
+    fn maintenance_window_expires_on_its_own() {
+        let mut health = verified_health();
+        health.begin_canary_maintenance(Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(20));
+
+        health.set_canary_health_status(ENDPOINT, HealthStatus::NotReady);
+
+        assert!(
+            !health.get_health_status().0,
+            "an expired window must not keep suppressing the canary"
+        );
+    }
+
+    /// Suppression is one-directional: real traffic and successful probes still
+    /// mark the endpoint ready inside the window.
+    #[test]
+    fn maintenance_window_still_lets_ready_through() {
+        let mut health = verified_health();
+        health.set_endpoint_health_status(ENDPOINT, HealthStatus::NotReady);
+        health.begin_canary_maintenance(Duration::from_secs(600));
+
+        health.set_canary_health_status(ENDPOINT, HealthStatus::Ready);
+
+        assert!(
+            health.get_health_status().0,
+            "a Ready write must apply even under maintenance"
         );
     }
 }

@@ -145,6 +145,9 @@ def _discard_orphan_result(fut: "asyncio.Future[dict]") -> None:
 
 _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY: Final = "kv_transfer_params"
 _KV_HINT_EXTRA_ARGS_KEY: Final = "kv_hint"
+# Ceiling on the canary suppression an RL weight transfer may hold. It only has
+# to outlast a rendezvous; on expiry the worker returns to ordinary probing.
+_RL_MAINTENANCE_WINDOW_S: Final = 600.0
 _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
     {
         "allow_unpaused",
@@ -1201,6 +1204,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self._lora_capacity_guard = asyncio.Lock()
         self._paused: bool = False
         self._weight_version: str = "initial"
+        # Canary maintenance lease for the transfer this worker is running, if
+        # any. A worker has one weight-update group, so one lease is enough and
+        # holding it in a single slot is what makes the terminators idempotent —
+        # see _begin_rl_maintenance and _end_rl_maintenance.
+        self._rl_maintenance_lease: int | None = None
 
         embedding_loader = self.init_embedding_loader(config, encode_worker_client)
 
@@ -2103,8 +2111,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     "Set 'reset_prefix_cache' to false or pause generation first."
                 ),
             }
+        rpc = body.get("engine_rpc", "update_weights_from_path")
         async with self._pause_lock:
             if not self._paused and not allow_unpaused:
+                if rpc == "finish_weight_update":
+                    # A rejected finish still terminates its transfer. Do not
+                    # leave the canary suppressed until the lease expires.
+                    self._end_rl_maintenance()
                 return {
                     "status": "error",
                     "message": (
@@ -2114,7 +2127,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     ),
                 }
             version = body.get("weight_version", "unknown")
-            rpc = body.get("engine_rpc", "update_weights_from_path")
             rpc_kwargs = {
                 k: v
                 for k, v in body.items()
@@ -2137,6 +2149,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             except Exception as e:
                 logger.error(f"[RL] update_weights_from_distributed failed: {e}")
                 return {"status": "error", "message": str(e)}
+            finally:
+                if rpc == "finish_weight_update":
+                    # The other terminator of a weight-transfer transaction: a
+                    # controller may end here and never call destroy. A finish
+                    # that failed still ends it — a worker the failure left
+                    # unhealthy needs probing more than a healthy one, not less.
+                    self._end_rl_maintenance()
 
     async def update_weights_from_tensor(self, body: dict) -> dict:
         """Not implemented: in-process tensor transfer is not yet supported."""
@@ -2152,6 +2171,31 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             "message": "update_weights_from_tensor is not implemented",
         }
 
+    def _begin_rl_maintenance(self) -> None:
+        """Take the lease for a new transfer, superseding any lease still held.
+
+        A worker has one weight-update group, so an init means the previous
+        transfer is over however it ended. Releasing its lease here keeps a
+        transfer that never reached a terminator from holding a window until
+        its deadline.
+        """
+        self._end_rl_maintenance()
+        self._rl_maintenance_lease = self.runtime.begin_health_check_maintenance(
+            _RL_MAINTENANCE_WINDOW_S
+        )
+
+    def _end_rl_maintenance(self) -> None:
+        """Release this worker's lease, once.
+
+        Clearing the slot before releasing makes the terminators idempotent: a
+        transfer that reaches both `finish_weight_update` and
+        `destroy_weights_update_group` releases its lease on the first and does
+        nothing on the second, rather than releasing a lease it does not own.
+        """
+        lease, self._rl_maintenance_lease = self._rl_maintenance_lease, None
+        if lease is not None:
+            self.runtime.end_health_check_maintenance(lease)
+
     async def init_weights_update_group(self, body: dict) -> dict:
         """Initialize the distributed weight-update communication group."""
         if body is None:
@@ -2166,6 +2210,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         async with self._pause_lock:
             try:
                 timeout_s = _rl_init_weights_timeout_s()
+                # The rendezvous blocks EngineCore well past the canary timeout, so
+                # without this window the liveness probe restarts the worker.
+                self._begin_rl_maintenance()
                 rpc_task = asyncio.create_task(
                     self.engine_client.collective_rpc(rpc, kwargs=kwargs)
                 )
@@ -2174,10 +2221,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 except asyncio.CancelledError:
                     rpc_task.cancel()
                     await asyncio.gather(rpc_task, return_exceptions=True)
+                    self._end_rl_maintenance()
                     raise
                 if rpc_task not in done:
                     rpc_task.cancel()
                     await asyncio.gather(rpc_task, return_exceptions=True)
+                    self._end_rl_maintenance()
                     logger.error(
                         f"[RL] init_weights_update_group timed out after "
                         f"{timeout_s:.1f} seconds (rpc={rpc}); terminating the "
@@ -2186,11 +2235,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     self._shutdown_worker()
 
                 await rpc_task
+                # The window deliberately stays open: the transaction continues
+                # until destroy_weights_update_group or finish_weight_update.
                 logger.info(f"[RL] Weight update group initialized (rpc={rpc})")
                 return {"status": "ok", "message": "Weight update group initialized"}
             except EngineDeadError as e:
                 self._shutdown_on_engine_dead(e)
             except Exception as e:
+                self._end_rl_maintenance()
                 logger.error(f"[RL] init_weights_update_group failed: {e}")
                 return {"status": "error", "message": str(e)}
 
@@ -2215,6 +2267,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             except Exception as e:
                 logger.error(f"[RL] destroy_weights_update_group failed: {e}")
                 return {"status": "error", "message": str(e)}
+            finally:
+                # A worker whose teardown failed should be probed again, not hidden.
+                self._end_rl_maintenance()
 
     @abstractmethod
     def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:
