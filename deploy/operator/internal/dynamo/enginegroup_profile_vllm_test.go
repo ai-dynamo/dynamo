@@ -294,6 +294,99 @@ func TestResolveVLLMProfileGeometryDPAssertions(t *testing.T) {
 	}
 }
 
+func TestResolveVLLMProfileGeometryNativeEnvironment(t *testing.T) {
+	tests := []struct {
+		name                       string
+		initialReplicas            int32
+		environment                map[string]string
+		hasUnresolvedDPEnvironment bool
+		wantError                  string
+		unsupportedReason          UnsupportedVLLMProfileSourceReason
+	}{
+		{
+			name:            "native DP size supplies omitted global assertion",
+			initialReplicas: 8,
+			environment:     map[string]string{vllmDPSizeEnvironment: "8"},
+		},
+		{
+			name:            "native DP size conflicts with creation target",
+			initialReplicas: 1,
+			environment:     map[string]string{vllmDPSizeEnvironment: "8"},
+			wantError:       "initial replicas 1 conflict with vLLM data parallel size 8",
+		},
+		{
+			name:            "malformed native DP size",
+			initialReplicas: 8,
+			environment:     map[string]string{vllmDPSizeEnvironment: "many"},
+			wantError:       "VLLM_DP_SIZE must be an integer literal",
+		},
+		{
+			name:                       "opaque environment source",
+			initialReplicas:            8,
+			hasUnresolvedDPEnvironment: true,
+			unsupportedReason:          UnsupportedVLLMProfileSourceReasonEnvironment,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("build a source whose global DP assertion comes from vLLM's native environment")
+			source := newTestVLLMProfileGeometrySource(
+				[]string{"python3", "-m", "dynamo.vllm"},
+				[]string{"-tp", "4", "-pp", "1", "-dpl", "1"},
+			)
+			source.InitialReplicas = test.initialReplicas
+			source.Environment = test.environment
+			source.HasUnresolvedDPEnvironment = test.hasUnresolvedDPEnvironment
+
+			t.Log("resolve fixed native values and reject conflicting or opaque declarations")
+			_, err := ResolveVLLMProfileGeometry(source)
+			if test.wantError == "" && test.unsupportedReason == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			if test.wantError != "" {
+				assert.ErrorContains(t, err, test.wantError)
+				return
+			}
+
+			var sourceError *UnsupportedVLLMProfileSourceError
+			require.ErrorAs(t, err, &sourceError)
+			assert.Equal(t, test.unsupportedReason, sourceError.Reason)
+		})
+	}
+}
+
+func TestResolveVLLMProfileGeometryRequiresExternalElasticOwnership(t *testing.T) {
+	tests := []struct {
+		name       string
+		removeFlag string
+	}{
+		{name: "Elastic EP disabled", removeFlag: enableElasticEPFlag},
+		{name: "external DP lifecycle disabled", removeFlag: vllmDataParallelExternalLBFlag},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("remove one flag that proves externally managed local-rank ownership")
+			source := newTestVLLMProfileGeometrySource(
+				[]string{"python3", "-m", "dynamo.vllm"},
+				[]string{"-tp", "4", "-pp", "1", "-dp", "8", "-dpl", "1"},
+			)
+			source.Args = removeTestVLLMFlag(source.Args, test.removeFlag)
+
+			t.Log("reject internal or legacy lifecycle ownership")
+			_, err := ResolveVLLMProfileGeometry(source)
+			require.Error(t, err)
+
+			var sourceError *UnsupportedVLLMProfileSourceError
+			require.ErrorAs(t, err, &sourceError)
+			assert.Equal(t, UnsupportedVLLMProfileSourceReasonOwnershipMode, sourceError.Reason)
+		})
+	}
+}
+
 func TestResolveVLLMProfileGeometryUnsupportedSources(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -680,7 +773,7 @@ func TestResolveVLLMProfileGeometryDoesNotMutateSource(t *testing.T) {
 func newTestVLLMProfileGeometrySource(command, args []string) VLLMProfileGeometrySource {
 	return VLLMProfileGeometrySource{
 		Command:                    append([]string(nil), command...),
-		Args:                       append([]string(nil), args...),
+		Args:                       append(append([]string(nil), args...), enableElasticEPFlag, vllmDataParallelExternalLBFlag),
 		InitialReplicas:            8,
 		MainContainerGPUs:          4,
 		DedicatedMainGPUAllocation: true,
@@ -692,5 +785,22 @@ func cloneTestVLLMProfileGeometrySource(source VLLMProfileGeometrySource) VLLMPr
 	cloned := source
 	cloned.Command = append([]string(nil), source.Command...)
 	cloned.Args = append([]string(nil), source.Args...)
+	if source.Environment != nil {
+		cloned.Environment = make(map[string]string, len(source.Environment))
+		for name, value := range source.Environment {
+			cloned.Environment[name] = value
+		}
+	}
 	return cloned
+}
+
+func removeTestVLLMFlag(args []string, flag string) []string {
+	updated := make([]string, 0, len(args))
+	for _, argument := range args {
+		if argument != flag {
+			updated = append(updated, argument)
+		}
+	}
+
+	return updated
 }
