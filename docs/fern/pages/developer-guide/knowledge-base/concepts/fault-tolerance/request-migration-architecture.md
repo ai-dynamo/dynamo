@@ -79,7 +79,7 @@ The migration system handles three distinct scenarios. Two are failures; the thi
 
 **Error Pattern**: The backend aborts the requests that are still in flight and raises an engine shutdown error. All three backends do this: vLLM, SGLang, and TensorRT-LLM. The frontend classifies the resulting `backend.engine_shutdown` reason as migration-eligible, so the request follows the same recovery path as a mid-stream disconnection.
 
-**Migration Process**: Identical to ongoing request migration above. The accumulated token state is reissued on a healthy worker, and the client sees an uninterrupted stream.
+**Migration Process**: Identical to ongoing request migration above. The accumulated token state is reissued on a healthy worker. A successful migration keeps the terminal failure off the client's stream, but it is not instantaneous: the handover pauses token flow while the router waits for the worker's trailing error, bounded by the drain window described below.
 
 Migration is off by default, so this recovery only happens when the frontend sets `--migration-limit` (or `DYN_MIGRATION_LIMIT`) to a non-zero value. With migration disabled, a request caught by a graceful shutdown ends in an error at the client. Planned pod turnover is the common case for this scenario, which makes the migration limit relevant to deployments that never expect a worker to crash.
 

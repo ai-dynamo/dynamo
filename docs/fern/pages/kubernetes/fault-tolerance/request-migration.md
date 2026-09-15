@@ -5,7 +5,7 @@ title: Request Migration
 subtitle: Keep in-flight generations alive when a worker becomes unavailable by retrying them on a healthy worker.
 ---
 
-When a worker becomes unavailable mid-generation, through failure or through a graceful shutdown that ends before the request does, Dynamo can migrate the in-progress request to a healthy worker and continue from the exact point where it stopped — no tokens lost or duplicated, and no interruption visible to the client. Migration is configured once on the **Frontend** and applies globally to every model it serves.
+When a worker becomes unavailable mid-generation, through failure or through a graceful shutdown that ends before the request does, Dynamo can migrate the in-progress request to a healthy worker and continue from the exact point where it stopped — no tokens lost or duplicated, and no terminal failure surfaced to the client. The handover is not free: token flow pauses while the Frontend confirms the stream is migratable, so the client can see a gap of up to a few seconds. Migration is configured once on the **Frontend** and applies globally to every model it serves.
 
 Migration is **off by default** (`--migration-limit 0`). The steps below turn it on, optionally bound its memory use, and verify it is working.
 

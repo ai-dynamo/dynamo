@@ -5,7 +5,7 @@ title: Graceful Shutdown
 subtitle: Let workers finish in-flight requests and release resources cleanly when a pod is terminated.
 ---
 
-When Kubernetes terminates a pod (rollout, scale-down, node drain), Dynamo workers stop accepting new requests, keep serving in-flight ones through a grace period, then release engine and connection resources before exiting. This is **on by default** — every component handles `SIGTERM`/`SIGINT` and drains automatically. A request that is still generating when the grace period ends is aborted with an engine shutdown error: if the Frontend sets `--migration-limit` (or `DYN_MIGRATION_LIMIT`), that request is retried on a healthy worker, continuing from the tokens already generated; recovery is best effort, and if migration is off the client receives an error. The steps below tune *how long* it waits and make sure interrupted requests are recovered.
+When Kubernetes terminates a pod (rollout, scale-down, node drain), Dynamo workers stop accepting new requests, keep serving in-flight ones through a grace period, then release engine and connection resources before exiting. This is **on by default** — every component handles `SIGTERM`/`SIGINT` and drains automatically. A request that is still generating when the grace period ends is aborted with an engine shutdown error: if the Frontend sets `--migration-limit` (or `DYN_MIGRATION_LIMIT`), that request is retried on a healthy worker, continuing from the tokens already generated; recovery is best effort, and if migration is off the client receives an error. The steps below tune *how long* it waits and enable best-effort recovery of interrupted requests.
 
 The knobs are three timeouts plus enabling migration. The default flow: endpoints unregister from discovery immediately, workers serve for a short grace period, then endpoints drain (bounded by a timeout) before resources are cleaned up.
 
@@ -54,7 +54,7 @@ The defaults are sound for most deployments. Raise the relevant timeout only for
 
 <Step title="Enable migration so drained requests retry">
 
-Draining lets *current* requests finish, but an interrupted request still needs somewhere to go — whether the worker was lost unexpectedly or a graceful shutdown outlasted the drain window and the worker aborted what was left in flight. Rolling upgrades and scale-downs take this same path, so they need migration enabled too. Enable [request migration](request-migration.md) on the Frontend so disconnected streams are retried on healthy workers. Set `DYN_MIGRATION_LIMIT` in the Frontend `env:` (or `--migration-limit` in its `args:`):
+Draining lets *current* requests finish, but an interrupted request still needs somewhere to go — whether the worker was lost unexpectedly or a graceful shutdown outlasted the drain window and the worker aborted what was left in flight. Rolling upgrades and scale-downs take this same path, so they need migration enabled too. Enable [request migration](request-migration.md) on the Frontend so disconnected streams are retried on healthy workers. Recovery is best effort: the stream must end on a reason the Frontend treats as migratable, and a shutdown qualifies only if the worker's trailing error reaches the Frontend before the router's 5-second terminal-frame drain window closes. Set `DYN_MIGRATION_LIMIT` in the Frontend `env:` (or `--migration-limit` in its `args:`):
 
 ```yaml
   - name: Frontend
