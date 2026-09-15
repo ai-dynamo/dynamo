@@ -213,9 +213,7 @@ while [ -e /run/kvcr/hold-engine-start ]; do
 done
 
 """
-    main["args"][0] = main["args"][0].replace(
-        config_start, hold_gate + config_start
-    )
+    main["args"][0] = main["args"][0].replace(config_start, hold_gate + config_start)
     pod_spec["volumes"].append(
         {
             "name": "rdma-counters",
