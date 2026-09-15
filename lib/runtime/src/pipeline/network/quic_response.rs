@@ -932,8 +932,9 @@ async fn run_server_connection(
                     )
                     .await;
                     if let Err(error) = result {
-                        tracing::warn!(connection_id, %error, "QUIC response lane failed; closing connection");
+                        tracing::warn!(connection_id, error = format!("{error:#}"), close_reason = ?lane_connection.close_reason(), "QUIC response lane failed; closing connection");
                         fail_server_connection(&lane_state, connection_id);
+                        // Close explicitly if the lane failed before bundle registration.
                         lane_connection
                             .close(CLOSE_CODE_INVARIANT, b"response lane invariant failure");
                     }
@@ -1848,14 +1849,23 @@ fn spawn_client_lane(
                 &writer_connections,
                 &writer_contexts,
                 &writer_healthy,
-                &error.to_string(),
+                bundle_id,
+                "writer",
+                &format!("{error:#}"),
             );
         }
     });
 
     tokio::spawn(async move {
         if let Err(error) = run_client_control_reader(recv, contexts.clone()).await {
-            fail_client_connection_bundle(&connections, &contexts, &healthy, &error.to_string());
+            fail_client_connection_bundle(
+                &connections,
+                &contexts,
+                &healthy,
+                bundle_id,
+                "control_reader",
+                &format!("{error:#}"),
+            );
         }
     });
 }
@@ -1946,13 +1956,22 @@ fn fail_client_connection_bundle(
     connections: &[quinn::Connection],
     contexts: &Mutex<HashMap<Uuid, Arc<ClientResponseContext>>>,
     healthy: &AtomicBool,
+    bundle_id: Uuid,
+    failure_path: &'static str,
     reason: &str,
 ) {
     if !healthy.swap(false, Ordering::AcqRel) {
         return;
     }
     crate::metrics::quic_response::record_bundle_failure("worker");
-    tracing::warn!(%reason, "QUIC response connection bundle invariant failed");
+    let remote = connections.first().map(quinn::Connection::remote_address);
+    tracing::warn!(
+        %bundle_id,
+        failure_path,
+        ?remote,
+        %reason,
+        "QUIC response connection bundle invariant failed"
+    );
     for (_, entry) in contexts.lock().drain() {
         entry.fail_registration(reason);
         entry.record_cancellation();
