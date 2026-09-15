@@ -156,7 +156,7 @@ An empty `DYN_NAMESPACE_PREFIX` or `DYN_NAMESPACE_WORKER_SUFFIX` counts as absen
 
 This ordering matters because a worker that is given `DYN_NAMESPACE_WORKER_SUFFIX` registers under `{DYN_NAMESPACE}-{suffix}`, not under `{DYN_NAMESPACE}`. A listener configured for the bare namespace would find none of those workers.
 
-On Kubernetes the operator sets `DYN_NAMESPACE_PREFIX` on the frontend container for you, so the listener matches every worker generation at once — including the two generations that coexist during a rolling update. Set `DYN_NAMESPACE_WORKER_SUFFIX` on the listener yourself only outside Kubernetes, when the listener and the workers share one environment.
+When the Dynamo Kubernetes Operator manages the deployment, it sets `DYN_NAMESPACE_PREFIX` on the frontend container, so the listener matches every worker generation at once, including the two generations that coexist during a rolling update. For a listener that the operator does not manage, including an unmanaged Kubernetes deployment or a deployment outside Kubernetes, configure the listener's namespace scope explicitly with `DYN_NAMESPACE_PREFIX`, `DYN_NAMESPACE_WORKER_SUFFIX`, or `DYN_NAMESPACE`.
 
 ## Coordinate Policy Refresh
 
