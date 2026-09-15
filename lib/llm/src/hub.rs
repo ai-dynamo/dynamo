@@ -136,6 +136,29 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
     let name = name.as_ref();
     let model_name = name.display().to_string();
 
+    // If the name is an absolute filesystem path, treat it as a local model
+    // directory and return it without attempting any HuggingFace download.
+    // This supports models loaded from local storage (e.g., FSx Lustre, NFS,
+    // or other shared filesystems). Surface IO errors from `try_exists()`
+    // (such as permission-denied on a parent directory of a shared
+    // filesystem) instead of swallowing them, and require the path to be a
+    // directory because downstream `update_dir()` assumes a directory.
+    if name.is_absolute() {
+        match name.try_exists() {
+            Ok(true) if name.is_dir() => {
+                tracing::info!("Using local model path: {model_name}");
+                return Ok(name.to_path_buf());
+            }
+            Ok(true) => {
+                anyhow::bail!("Local model path must be a directory: {model_name}");
+            }
+            Ok(false) => {}
+            Err(e) => {
+                anyhow::bail!("Cannot access local model path '{model_name}': {e}");
+            }
+        }
+    }
+
     // Cache-first in all modes: if the snapshot is already on disk with the files we
     // need, return it without touching the network.
     if let Some(cached_path) = get_cached_model_path(&model_name, ignore_weights) {
