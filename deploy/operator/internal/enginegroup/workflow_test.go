@@ -38,6 +38,12 @@ func TestCoordinatorPersistsEveryDirectiveBeforeCallingItsAdapter(t *testing.T) 
 		t.Fatalf("transition was not isolated from external effects: status=%#v events=%v", scenario.status, scenario.events)
 	}
 
+	t.Log("Persist authoritative plan validation before capacity or traffic prework")
+	scenario.mustReconcile("validate resolved membership plan")
+	if scenario.status.Transition.PlanPreflight.Evidence == nil || len(scenario.events) != 0 {
+		t.Fatalf("plan validation was not persisted before prework: status=%#v events=%v", scenario.status.Transition.PlanPreflight, scenario.events)
+	}
+
 	t.Log("Persist the absolute traffic target before applying it")
 	scenario.mustReconcile("derive traffic target")
 	if scenario.status.Traffic.Desired == nil || scenario.traffic.applyCalls != 0 {
@@ -56,6 +62,91 @@ func TestCoordinatorPersistsEveryDirectiveBeforeCallingItsAdapter(t *testing.T) 
 	scenario.mustReconcile("apply persisted membership target")
 	if scenario.membership.applyCalls != 1 {
 		t.Fatalf("persisted membership target was not applied: %d", scenario.membership.applyCalls)
+	}
+}
+
+func TestCoordinatorRejectsUnsupportedPlanBeforePrework(t *testing.T) {
+	base := engineTopology(1, 1)
+	scenario := newCoordinatorScenario(t, base)
+	joining := engineReplica(1)
+	scenario.capacity.planned[joining.ReplicaID] = replicaIncarnation(1)
+	rejection := Failure{
+		Classification: FailureClassificationTerminal,
+		Reason:         "UnsupportedPlan",
+		Message:        "adapter cannot execute the resolved operation shape",
+	}
+	scenario.membership.planRejection = &rejection
+	plan := growPlan("unsupported-growth", ReplicaTarget{
+		ReplicaID: joining.ReplicaID,
+		SlotID:    "slot-1",
+		Bootstrap: BootstrapModeJoin,
+	}, VerificationRequirementNone)
+	scenario.desired = &plan
+
+	t.Log("Persist a correlated authoritative rejection without reserving or allocating capacity")
+	scenario.runUntil("reject unsupported plan", func(s *coordinatorScenario) bool {
+		return s.status.Transition != nil && s.status.Transition.Outcome == TransitionOutcomeBlocked
+	})
+	if scenario.membership.planValidationCalls != 1 ||
+		scenario.membership.targetValidationCalls != 0 ||
+		scenario.membership.applyCalls != 0 ||
+		scenario.capacity.applyCalls != 0 ||
+		scenario.traffic.applyCalls != 0 {
+		t.Fatalf("unsupported plan caused prework: events=%v", scenario.events)
+	}
+	if _, found := scenario.status.Registry.Find(joining.ReplicaID); found {
+		t.Fatal("unsupported plan reserved a logical replica")
+	}
+	preflight := scenario.status.Transition.PlanPreflight
+	if preflight.TransitionID != scenario.status.Transition.Spec.ID ||
+		preflight.SubjectDigest == "" || preflight.Rejection == nil {
+		t.Fatalf("plan rejection lacks durable correlation: %#v", preflight)
+	}
+}
+
+func TestCoordinatorValidatesExactTargetBeforeMembershipApply(t *testing.T) {
+	base := engineTopology(1, 1)
+	scenario := newCoordinatorScenario(t, base)
+	joining := engineReplica(1)
+	joiningIncarnation := replicaIncarnation(1)
+	scenario.capacity.planned[joining.ReplicaID] = joiningIncarnation
+	rejection := Failure{
+		Classification: FailureClassificationTerminal,
+		Reason:         "UnsupportedRuntimeIdentity",
+		Message:        "adapter rejected the frozen joining process",
+	}
+	scenario.membership.targetRejection = &rejection
+	plan := growPlan("rejected-target", ReplicaTarget{
+		ReplicaID: joining.ReplicaID,
+		SlotID:    joiningIncarnation.SlotID,
+		Bootstrap: BootstrapModeJoin,
+	}, VerificationRequirementNone)
+	scenario.desired = &plan
+
+	t.Log("Converge joining capacity, then reject the exact runtime-bound target before applying membership")
+	scenario.runUntil("reject exact membership target", func(s *coordinatorScenario) bool {
+		return s.status.Transition != nil && s.status.Transition.Outcome == TransitionOutcomeReverting
+	})
+	if scenario.membership.planValidationCalls != 1 ||
+		scenario.membership.targetValidationCalls != 1 ||
+		scenario.membership.applyCalls != 0 {
+		t.Fatalf("target validation boundary was not respected: events=%v", scenario.events)
+	}
+	preflight := scenario.status.Transition.TargetPreflight
+	if preflight.TransitionID == "" || preflight.ControlRevision <= 0 ||
+		preflight.SubjectDigest == "" || preflight.Rejection == nil {
+		t.Fatalf("target rejection lacks durable correlation: %#v", preflight)
+	}
+	if scenario.status.Membership.Desired != nil {
+		t.Fatal("rejected target became desired membership")
+	}
+
+	t.Log("Roll back only the preparatory allocation after definitive target rejection")
+	scenario.runUntil("complete target-preflight rollback", func(s *coordinatorScenario) bool {
+		return s.status.Transition.Outcome == TransitionOutcomeRolledBack
+	})
+	if _, found := allocationByID(scenario.capacity.observation, joining.ReplicaID); found {
+		t.Fatal("target-preflight rollback retained joining capacity")
 	}
 }
 

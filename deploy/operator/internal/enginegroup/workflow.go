@@ -25,6 +25,76 @@ import (
 	"strings"
 )
 
+func (c *Coordinator) reconcilePlanPreflight(
+	ctx context.Context,
+	groupID GroupID,
+	status *GroupStatus,
+	base MembershipTopology,
+) (ready bool, persist bool, err error) {
+	digest, err := canonicalPlanDigest(status.Transition.Spec.Plan)
+	if err != nil {
+		return false, false, err
+	}
+	preflight := &status.Transition.PlanPreflight
+	if preflight.SubjectDigest != "" {
+		if preflight.SubjectDigest != digest {
+			return false, false, errors.New("durable plan preflight refers to another plan")
+		}
+		return preflight.Evidence != nil, false, nil
+	}
+
+	result, validationErr := c.membership.ValidatePlan(
+		ctx,
+		groupID,
+		base,
+		status.Transition.Spec.Plan,
+	)
+	if validationErr != nil {
+		return false, false, fmt.Errorf("validate membership plan: %w", validationErr)
+	}
+	if err := validatePreflightResult(result); err != nil {
+		return false, false, fmt.Errorf("invalid plan preflight result: %w", err)
+	}
+	preflight.TransitionID = status.Transition.Spec.ID
+	preflight.SubjectDigest = digest
+	if result.Rejection != nil {
+		preflight.Rejection = cloneFailure(result.Rejection)
+		c.blockTransition(status, *result.Rejection)
+		return false, true, nil
+	}
+	if err := validatePlanEvidence(*result.Evidence, digest, status.Transition.Spec.Plan); err != nil {
+		return false, false, fmt.Errorf("invalid plan validation evidence: %w", err)
+	}
+	preflight.Evidence = cloneValidationEvidence(result.Evidence)
+	status.Transition.UpdatedAt = c.now()
+	return false, true, nil
+}
+
+func (c *Coordinator) reconcileReplicaReservations(
+	status *GroupStatus,
+	resolution planResolution,
+) (ready bool, persist bool, err error) {
+	changed := false
+	for _, target := range resolution.joiningTargets {
+		if _, found := status.Registry.Find(target.ReplicaID); found {
+			continue
+		}
+		status.Registry.Replicas = append(status.Registry.Replicas, ReplicaRecord{
+			ReplicaID: target.ReplicaID,
+			SlotID:    target.SlotID,
+		})
+		changed = true
+	}
+	if err := validateRegistry(status.Registry); err != nil {
+		return false, false, fmt.Errorf("reserve replica identities: %w", err)
+	}
+	if changed {
+		status.Transition.UpdatedAt = c.now()
+		return false, true, nil
+	}
+	return true, false, nil
+}
+
 func (c *Coordinator) reconcileRollback(
 	ctx context.Context,
 	groupID GroupID,
@@ -264,41 +334,103 @@ func (c *Coordinator) reconcileMembership(
 		status.Transition.Spec.BaseTopologyGeneration,
 	)
 	if status.Membership.Desired == nil || status.Membership.Desired.TransitionID != expectedTransitionID {
-		if status.Membership.Desired != nil && !membershipTargetMayBeReplaced(status.Membership) {
-			return false, false, errors.New("previous membership target has no terminal result")
-		}
-		if !sameTopology(base, observedTopology) {
-			return false, false, errors.New("engine topology changed before membership target creation")
-		}
-		joining, freezeErr := joiningReplicaIdentities(status.Registry, resolution)
-		if freezeErr != nil {
-			return false, false, freezeErr
-		}
-		revision, revisionErr := c.nextControlRevision(status)
-		if revisionErr != nil {
-			return false, false, revisionErr
-		}
-		target := MembershipTarget{
-			ControlRevision: revision,
-			TransitionID:    expectedTransitionID,
-			BaseTopology:    cloneTopology(base),
-			Plan:            cloneResolvedPlan(status.Transition.Spec.Plan),
-			Joining:         joining,
-		}
-		target = normalizeMembershipTarget(target)
-		target.TargetDigest, err = canonicalMembershipTargetDigest(target)
-		if err != nil {
-			return false, false, err
-		}
-		status.Membership.Desired = &target
-		status.Transition.UpdatedAt = c.now()
+		return c.prepareMembershipTarget(
+			ctx,
+			groupID,
+			status,
+			base,
+			observedTopology,
+			resolution,
+			expectedTransitionID,
+		)
+	}
+	return c.reconcileDesiredMembership(ctx, status, groupID, base, observedTopology, resolution)
+}
+
+func (c *Coordinator) prepareMembershipTarget(
+	ctx context.Context,
+	groupID GroupID,
+	status *GroupStatus,
+	base MembershipTopology,
+	observedTopology MembershipTopology,
+	resolution planResolution,
+	expectedTransitionID string,
+) (ready bool, persist bool, err error) {
+	if status.Membership.Desired != nil && !membershipTargetMayBeReplaced(status.Membership) {
+		return false, false, errors.New("previous membership target has no terminal result")
+	}
+	if !sameTopology(base, observedTopology) {
+		return false, false, errors.New("engine topology changed before membership target creation")
+	}
+	joining, err := joiningReplicaIdentities(status.Registry, resolution)
+	if err != nil {
+		return false, false, err
+	}
+	planEvidence := status.Transition.PlanPreflight.Evidence
+	if planEvidence == nil {
+		return false, false, errors.New("membership target lacks durable plan validation")
+	}
+	revision, err := nextControlRevisionValue(*status)
+	if err != nil {
+		return false, false, err
+	}
+	target := normalizeMembershipTarget(MembershipTarget{
+		ControlRevision: revision,
+		TransitionID:    expectedTransitionID,
+		Validation:      *cloneValidationEvidence(planEvidence),
+		BaseTopology:    cloneTopology(base),
+		Plan:            cloneResolvedPlan(status.Transition.Spec.Plan),
+		Joining:         joining,
+	})
+	target.TargetDigest, err = canonicalMembershipTargetDigest(target)
+	if err != nil {
+		return false, false, err
+	}
+	result, err := c.membership.ValidateTarget(ctx, groupID, target)
+	if err != nil {
+		return false, false, fmt.Errorf("validate exact membership target: %w", err)
+	}
+	if err := validatePreflightResult(result); err != nil {
+		return false, false, fmt.Errorf("invalid target preflight result: %w", err)
+	}
+	status.Transition.TargetPreflight = PreflightStatus{
+		TransitionID:    target.TransitionID,
+		ControlRevision: target.ControlRevision,
+		SubjectDigest:   target.TargetDigest,
+	}
+	if result.Rejection != nil {
+		status.Transition.TargetPreflight.Rejection = cloneFailure(result.Rejection)
+		c.beginRollback(status, *result.Rejection)
 		return false, true, nil
 	}
+	if err := validateTargetEvidence(*result.Evidence, target, *planEvidence); err != nil {
+		return false, false, fmt.Errorf("invalid target validation evidence: %w", err)
+	}
+	target.Validation = *cloneValidationEvidence(result.Evidence)
+	status.ControlRevision = revision
+	status.Transition.TargetPreflight.Evidence = cloneValidationEvidence(result.Evidence)
+	status.Membership.Desired = &target
+	status.Transition.UpdatedAt = c.now()
+	return false, true, nil
+}
 
+func (c *Coordinator) reconcileDesiredMembership(
+	ctx context.Context,
+	status *GroupStatus,
+	groupID GroupID,
+	base MembershipTopology,
+	observedTopology MembershipTopology,
+	resolution planResolution,
+) (ready bool, persist bool, err error) {
 	target := *status.Membership.Desired
 	if !membershipTargetMatchesTransition(target, *status.Transition) ||
 		!sameTopology(target.BaseTopology, base) {
 		return false, false, errors.New("durable membership target does not match the active transition")
+	}
+	if status.Transition.TargetPreflight.Evidence == nil ||
+		status.Transition.TargetPreflight.SubjectDigest != target.TargetDigest ||
+		*status.Transition.TargetPreflight.Evidence != target.Validation {
+		return false, false, errors.New("durable membership target lacks matching target validation")
 	}
 	if status.Membership.Observed.RequestedTransitionID != target.TransitionID {
 		return false, false, errors.New("membership observation is not scoped to the desired transition")

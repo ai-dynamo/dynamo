@@ -152,13 +152,52 @@ func (a *testTrafficAdapter) Apply(
 }
 
 type testMembershipAdapter struct {
-	topology             MembershipTopology
-	transitions          map[string]MembershipTransitionObservation
-	targets              map[string]MembershipTarget
-	applyCalls           int
-	failAfterFirstAccept bool
-	applyRejection       *Failure
-	events               *[]string
+	topology              MembershipTopology
+	transitions           map[string]MembershipTransitionObservation
+	targets               map[string]MembershipTarget
+	planValidationCalls   int
+	targetValidationCalls int
+	applyCalls            int
+	failAfterFirstAccept  bool
+	planRejection         *Failure
+	targetRejection       *Failure
+	applyRejection        *Failure
+	events                *[]string
+}
+
+func (a *testMembershipAdapter) ValidatePlan(
+	_ context.Context,
+	_ GroupID,
+	_ MembershipTopology,
+	plan ResolvedPlan,
+) (PreflightResult, error) {
+	a.planValidationCalls++
+	if a.planRejection != nil {
+		return PreflightResult{Rejection: cloneFailure(a.planRejection)}, nil
+	}
+	digest, err := canonicalPlanDigest(plan)
+	if err != nil {
+		return PreflightResult{}, err
+	}
+	return PreflightResult{Evidence: &ValidationEvidence{
+		PlanDigest:           digest,
+		ProfileFingerprint:   plan.ProfileFingerprint,
+		CapabilityGeneration: "capabilities-v1",
+	}}, nil
+}
+
+func (a *testMembershipAdapter) ValidateTarget(
+	_ context.Context,
+	_ GroupID,
+	target MembershipTarget,
+) (PreflightResult, error) {
+	a.targetValidationCalls++
+	if a.targetRejection != nil {
+		return PreflightResult{Rejection: cloneFailure(a.targetRejection)}, nil
+	}
+	evidence := target.Validation
+	evidence.TargetDigest = target.TargetDigest
+	return PreflightResult{Evidence: &evidence}, nil
 }
 
 func (a *testMembershipAdapter) Observe(
@@ -434,6 +473,7 @@ func sameMembershipTarget(left, right MembershipTarget) bool {
 	return left.ControlRevision == right.ControlRevision &&
 		left.TransitionID == right.TransitionID &&
 		left.TargetDigest == right.TargetDigest &&
+		left.Validation == right.Validation &&
 		sameTopology(left.BaseTopology, right.BaseTopology) &&
 		sameResolvedPlan(left.Plan, right.Plan) &&
 		sameJoiningReplicas(left.Joining, right.Joining)

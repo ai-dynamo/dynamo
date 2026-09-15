@@ -179,6 +179,7 @@ func normalizeMembershipTarget(value MembershipTarget) MembershipTarget {
 
 func canonicalMembershipTargetDigest(target MembershipTarget) (string, error) {
 	target.TargetDigest = ""
+	target.Validation.TargetDigest = ""
 	encoded, err := json.Marshal(normalizeMembershipTarget(target))
 	if err != nil {
 		return "", fmt.Errorf("marshal canonical membership target: %w", err)
@@ -333,9 +334,21 @@ func cloneTransition(value *TransitionStatus) *TransitionStatus {
 	}
 	cloned := *value
 	cloned.Spec.Plan = cloneResolvedPlan(value.Spec.Plan)
+	cloned.PlanPreflight.Evidence = cloneValidationEvidence(value.PlanPreflight.Evidence)
+	cloned.PlanPreflight.Rejection = cloneFailure(value.PlanPreflight.Rejection)
+	cloned.TargetPreflight.Evidence = cloneValidationEvidence(value.TargetPreflight.Evidence)
+	cloned.TargetPreflight.Rejection = cloneFailure(value.TargetPreflight.Rejection)
 	cloned.Verification.Proof = cloneServingProof(value.Verification.Proof)
 	cloned.Verification.Failure = cloneFailure(value.Verification.Failure)
 	cloned.Failure = cloneFailure(value.Failure)
+	return &cloned
+}
+
+func cloneValidationEvidence(value *ValidationEvidence) *ValidationEvidence {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
 	return &cloned
 }
 

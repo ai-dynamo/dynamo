@@ -284,6 +284,15 @@ type VerificationStatus struct {
 	Failure *Failure
 }
 
+// PreflightStatus durably records the exact digest and authoritative outcome of one side-effect-free validation.
+type PreflightStatus struct {
+	TransitionID    string
+	ControlRevision int64
+	SubjectDigest   string
+	Evidence        *ValidationEvidence
+	Rejection       *Failure
+}
+
 // TransitionOutcome summarizes the complete cross-subsystem transition.
 type TransitionOutcome string
 
@@ -302,12 +311,14 @@ const (
 
 // TransitionStatus owns one immutable transition and its independent verification progress.
 type TransitionStatus struct {
-	Spec         TransitionSpec
-	Verification VerificationStatus
-	Outcome      TransitionOutcome
-	Failure      *Failure
-	StartedAt    time.Time
-	UpdatedAt    time.Time
+	Spec            TransitionSpec
+	PlanPreflight   PreflightStatus
+	TargetPreflight PreflightStatus
+	Verification    VerificationStatus
+	Outcome         TransitionOutcome
+	Failure         *Failure
+	StartedAt       time.Time
+	UpdatedAt       time.Time
 }
 
 // CapacityStatus records the latest durable absolute capacity projection and its observation.

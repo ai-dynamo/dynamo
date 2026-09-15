@@ -103,6 +103,48 @@ func validateRejection(rejection *Failure) error {
 	return nil
 }
 
+func validatePreflightResult(result PreflightResult) error {
+	if (result.Evidence == nil) == (result.Rejection == nil) {
+		return errors.New("preflight must return exactly one of evidence or rejection")
+	}
+	if result.Rejection != nil {
+		return validateRejection(result.Rejection)
+	}
+	return nil
+}
+
+func validatePlanEvidence(evidence ValidationEvidence, digest string, plan ResolvedPlan) error {
+	if evidence.PlanDigest != digest {
+		return errors.New("validation evidence carries another plan digest")
+	}
+	if evidence.TargetDigest != "" {
+		return errors.New("plan validation evidence must not carry a target digest")
+	}
+	if evidence.ProfileFingerprint != plan.ProfileFingerprint {
+		return errors.New("validation evidence carries another profile fingerprint")
+	}
+	if evidence.CapabilityGeneration == "" {
+		return errors.New("validation evidence lacks a capability generation")
+	}
+	return nil
+}
+
+func validateTargetEvidence(
+	evidence ValidationEvidence,
+	target MembershipTarget,
+	planEvidence ValidationEvidence,
+) error {
+	if evidence.PlanDigest != planEvidence.PlanDigest ||
+		evidence.ProfileFingerprint != planEvidence.ProfileFingerprint ||
+		evidence.CapabilityGeneration != planEvidence.CapabilityGeneration {
+		return errors.New("target validation changed its plan, profile, or capability generation")
+	}
+	if evidence.TargetDigest != target.TargetDigest {
+		return errors.New("target validation evidence carries another target digest")
+	}
+	return nil
+}
+
 func validateMembershipTarget(controlRevision int64, target *MembershipTarget) error {
 	if target == nil {
 		return nil
@@ -126,12 +168,24 @@ func validateMembershipTarget(controlRevision int64, target *MembershipTarget) e
 	if err := validateResolvedChange(target.Plan.Change); err != nil {
 		return err
 	}
+	planDigest, err := canonicalPlanDigest(target.Plan)
+	if err != nil {
+		return err
+	}
+	planEvidence := target.Validation
+	planEvidence.TargetDigest = ""
+	if err := validatePlanEvidence(planEvidence, planDigest, target.Plan); err != nil {
+		return err
+	}
 	wantDigest, err := canonicalMembershipTargetDigest(*target)
 	if err != nil {
 		return err
 	}
 	if target.TargetDigest != wantDigest {
 		return errors.New("membership target digest does not match its canonical payload")
+	}
+	if target.Validation.TargetDigest != target.TargetDigest {
+		return errors.New("membership target validation does not bind its canonical digest")
 	}
 	return nil
 }
@@ -366,6 +420,9 @@ func validateTransition(status GroupStatus) error {
 	if err != nil {
 		return err
 	}
+	if err := validateTransitionPreflights(status); err != nil {
+		return err
+	}
 	if err := validateTransitionMembership(status, resolution); err != nil {
 		return err
 	}
@@ -402,6 +459,114 @@ func validateTransition(status GroupStatus) error {
 		}
 	default:
 		return fmt.Errorf("invalid transition outcome %q", transition.Outcome)
+	}
+	return nil
+}
+
+func validateTransitionPreflights(status GroupStatus) error {
+	transition := status.Transition
+	planDigest, err := canonicalPlanDigest(transition.Spec.Plan)
+	if err != nil {
+		return err
+	}
+	if err := validatePlanPreflight(*transition, planDigest); err != nil {
+		return err
+	}
+	return validateTargetPreflight(status)
+}
+
+func validatePlanPreflight(transition TransitionStatus, planDigest string) error {
+	plan := transition.PlanPreflight
+	if plan.SubjectDigest == "" {
+		if plan.TransitionID != "" || plan.ControlRevision != 0 ||
+			plan.Evidence != nil || plan.Rejection != nil {
+			return errors.New("empty plan preflight carries an outcome")
+		}
+		if transition.TargetPreflight.SubjectDigest != "" {
+			return errors.New("target preflight exists before plan validation")
+		}
+		return nil
+	}
+	if plan.SubjectDigest != planDigest {
+		return errors.New("plan preflight digest does not match the durable plan")
+	}
+	if plan.TransitionID != transition.Spec.ID || plan.ControlRevision != 0 {
+		return errors.New("plan preflight correlation does not match the transition")
+	}
+	if err := validatePreflightResult(PreflightResult{
+		Evidence: plan.Evidence, Rejection: plan.Rejection,
+	}); err != nil {
+		return fmt.Errorf("validate durable plan preflight: %w", err)
+	}
+	if plan.Evidence != nil {
+		if err := validatePlanEvidence(*plan.Evidence, planDigest, transition.Spec.Plan); err != nil {
+			return err
+		}
+	} else {
+		if transition.Outcome != TransitionOutcomeBlocked {
+			return errors.New("rejected plan preflight did not block the transition")
+		}
+		if !sameFailure(transition.Failure, plan.Rejection) {
+			return errors.New("transition failure differs from its plan rejection")
+		}
+	}
+	return nil
+}
+
+func validateTargetPreflight(status GroupStatus) error {
+	transition := status.Transition
+	target := transition.TargetPreflight
+	if target.SubjectDigest == "" {
+		if target.TransitionID != "" || target.ControlRevision != 0 ||
+			target.Evidence != nil || target.Rejection != nil {
+			return errors.New("empty target preflight carries an outcome")
+		}
+		return nil
+	}
+	if err := validatePreflightResult(PreflightResult{
+		Evidence: target.Evidence, Rejection: target.Rejection,
+	}); err != nil {
+		return fmt.Errorf("validate durable target preflight: %w", err)
+	}
+	if target.TransitionID != membershipTransitionID(
+		transition.Spec.Plan.ID,
+		transition.Spec.BaseTopologyGeneration,
+	) || target.ControlRevision <= 0 {
+		return errors.New("target preflight correlation does not match the transition")
+	}
+	if target.Evidence == nil {
+		if transition.Outcome != TransitionOutcomeReverting &&
+			transition.Outcome != TransitionOutcomeRolledBack &&
+			transition.Outcome != TransitionOutcomeBlocked {
+			return errors.New("rejected target preflight did not stop membership progress")
+		}
+		if !sameFailure(transition.Failure, target.Rejection) {
+			return errors.New("transition failure differs from its target rejection")
+		}
+		return nil
+	}
+	if status.Membership.Desired == nil ||
+		status.Membership.Desired.TransitionID != membershipTransitionID(
+			transition.Spec.Plan.ID,
+			transition.Spec.BaseTopologyGeneration,
+		) {
+		return errors.New("successful target preflight has no matching desired membership")
+	}
+	if target.SubjectDigest != status.Membership.Desired.TargetDigest {
+		return errors.New("target preflight digest differs from desired membership")
+	}
+	if target.ControlRevision != status.Membership.Desired.ControlRevision {
+		return errors.New("target preflight revision differs from desired membership")
+	}
+	if transition.PlanPreflight.Evidence == nil {
+		return errors.New("target preflight lacks successful plan validation")
+	}
+	if err := validateTargetEvidence(
+		*target.Evidence,
+		*status.Membership.Desired,
+		*transition.PlanPreflight.Evidence,
+	); err != nil {
+		return err
 	}
 	return nil
 }

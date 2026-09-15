@@ -93,9 +93,24 @@ type MembershipTarget struct {
 	ControlRevision int64
 	TransitionID    string
 	TargetDigest    string
+	Validation      ValidationEvidence
 	BaseTopology    MembershipTopology
 	Plan            ResolvedPlan
 	Joining         []JoiningReplica
+}
+
+// ValidationEvidence binds adapter approval to immutable plan, profile, capability, and optional target state.
+type ValidationEvidence struct {
+	PlanDigest           string
+	TargetDigest         string
+	ProfileFingerprint   string
+	CapabilityGeneration string
+}
+
+// PreflightResult is either durable validation evidence or a definitive rejection of the validated subject.
+type PreflightResult struct {
+	Evidence  *ValidationEvidence
+	Rejection *Failure
 }
 
 // MembershipTransitionObservation is the durable adapter result for one exact target identity.
@@ -142,6 +157,17 @@ type CapacityAdapter interface {
 
 // MembershipAdapter converges membership to one desired level while owning the serialized compare-and-apply protocol.
 type MembershipAdapter interface {
+	// ValidatePlan authoritatively checks complete resolved semantics before capacity or traffic prework. It is
+	// side-effect-free and returns evidence bound to the normalized plan and current adapter capabilities.
+	ValidatePlan(
+		ctx context.Context,
+		groupID GroupID,
+		base MembershipTopology,
+		plan ResolvedPlan,
+	) (PreflightResult, error)
+	// ValidateTarget revalidates the exact target after joining runtime identities are frozen. It is side-effect-free
+	// and either adds the canonical target digest to matching plan evidence or definitively rejects that target.
+	ValidateTarget(ctx context.Context, groupID GroupID, target MembershipTarget) (PreflightResult, error)
 	// Observe always returns the authoritative committed topology. When transitionID is non-empty, a nil Transition
 	// authoritatively means the adapter has no record of that exact identity. Stale or inconclusive reads return an
 	// error or an Unknown transition instead. Terminal results remain observable until a newer revision is accepted.

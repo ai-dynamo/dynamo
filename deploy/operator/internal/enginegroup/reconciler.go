@@ -228,6 +228,28 @@ func (c *Coordinator) reconcileActiveTransition(
 		return c.reconcileRollback(ctx, groupID, next, base, topology, resolution)
 	}
 
+	// Obtain durable adapter approval for the complete resolved semantics before any external prework.
+	ready, persist, err := c.reconcilePlanPreflight(ctx, groupID, &next, base)
+	if err != nil || persist || !ready {
+		return ReconcileResult{Status: next, Requeue: err == nil}, err
+	}
+
+	// Reserve stable logical slots only after authoritative plan validation succeeds.
+	ready, persist, err = c.reconcileReplicaReservations(&next, resolution)
+	if err != nil || persist || !ready {
+		return ReconcileResult{Status: next, Requeue: err == nil}, err
+	}
+	return c.reconcilePreparedTransition(ctx, groupID, next, base, topology, resolution)
+}
+
+func (c *Coordinator) reconcilePreparedTransition(
+	ctx context.Context,
+	groupID GroupID,
+	next GroupStatus,
+	base MembershipTopology,
+	topology MembershipTopology,
+	resolution planResolution,
+) (ReconcileResult, error) {
 	// Growth and restoration first converge exact named capacity, then persist the observed incarnations in the registry.
 	ready, persist, err := c.reconcileJoiningCapacity(ctx, groupID, &next, resolution)
 	if err != nil || persist || !ready {
@@ -301,20 +323,6 @@ func (c *Coordinator) startTransition(
 		return status, err
 	}
 
-	// Reserve fresh or restored stable slots in the canonical registry before asking for physical capacity.
-	for _, target := range resolution.joiningTargets {
-		if _, found := status.Registry.Find(target.ReplicaID); found {
-			continue
-		}
-		status.Registry.Replicas = append(status.Registry.Replicas, ReplicaRecord{
-			ReplicaID: target.ReplicaID,
-			SlotID:    target.SlotID,
-		})
-	}
-	if err := validateRegistry(status.Registry); err != nil {
-		return status, fmt.Errorf("reserve replica identities: %w", err)
-	}
-
 	now := c.now()
 	status.Transition = &TransitionStatus{
 		Spec: TransitionSpec{
@@ -378,11 +386,19 @@ func canReplaceBlockedTransition(status GroupStatus) bool {
 }
 
 func (c *Coordinator) nextControlRevision(status *GroupStatus) (int64, error) {
+	next, err := nextControlRevisionValue(*status)
+	if err != nil {
+		return 0, err
+	}
+	status.ControlRevision = next
+	return next, nil
+}
+
+func nextControlRevisionValue(status GroupStatus) (int64, error) {
 	if status.ControlRevision == math.MaxInt64 {
 		return 0, errors.New("Engine Group control revision exhausted")
 	}
-	status.ControlRevision++
-	return status.ControlRevision, nil
+	return status.ControlRevision + 1, nil
 }
 
 func (c *Coordinator) blockTransition(status *GroupStatus, failure Failure) {
