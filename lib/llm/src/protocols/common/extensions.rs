@@ -891,6 +891,7 @@ mod tests {
         HEADER_CLAUDE_CODE_SESSION_ID, HEADER_CODEX_PARENT_THREAD_ID, HEADER_CODEX_THREAD_ID,
         HEADER_CODEX_TURN_METADATA, HEADER_DYNAMO_PARENT_SESSION_ID, HEADER_DYNAMO_SESSION_FINAL,
         HEADER_DYNAMO_SESSION_ID, HEADER_OPENCODE_PARENT_SESSION_ID, HEADER_OPENCODE_SESSION_ID,
+        HEADER_SESSION_AFFINITY,
     };
 
     #[derive(Default)]
@@ -1432,7 +1433,7 @@ mod tests {
     }
 
     #[test]
-    fn session_affinity_prefers_dynamo_header_over_agent_mappings() {
+    fn session_affinity_header_precedence() {
         let mut headers = HeaderMap::new();
         headers.insert(
             HEADER_CLAUDE_CODE_SESSION_ID,
@@ -1450,18 +1451,34 @@ mod tests {
             "claude-session"
         );
 
-        // The explicit Dynamo session header always wins over agent mappings.
+        // x-session-affinity wins over agent-specific header mappings.
+        headers.insert(HEADER_SESSION_AFFINITY, "affinity".parse().unwrap());
+        assert_eq!(
+            session_affinity_from_headers(&headers).unwrap().as_str(),
+            "affinity"
+        );
+        assert_eq!(
+            agent_context_from_headers(&headers).unwrap().session_id,
+            "claude-session"
+        );
+
+        // The explicit Dynamo session header wins over every fallback.
         headers.insert(HEADER_DYNAMO_SESSION_ID, "canonical".parse().unwrap());
         assert_eq!(
             session_affinity_from_headers(&headers).unwrap().as_str(),
             "canonical"
         );
+        assert_eq!(
+            agent_context_from_headers(&headers).unwrap().session_id,
+            "canonical"
+        );
 
-        // A blank Dynamo header is ignored and affinity falls back to the mapping.
+        // A blank Dynamo header is ignored and affinity falls back to
+        // x-session-affinity.
         headers.insert(HEADER_DYNAMO_SESSION_ID, "   ".parse().unwrap());
         assert_eq!(
             session_affinity_from_headers(&headers).unwrap().as_str(),
-            "claude-session"
+            "affinity"
         );
     }
 
@@ -1504,6 +1521,21 @@ mod tests {
         // A blank canonical header with no agent headers yields no affinity.
         headers.insert(HEADER_DYNAMO_SESSION_ID, "   ".parse().unwrap());
         assert!(session_affinity_from_headers(&headers).is_none());
+
+        headers.insert(HEADER_SESSION_AFFINITY, "   ".parse().unwrap());
+        assert!(session_affinity_from_headers(&headers).is_none());
+    }
+
+    #[test]
+    fn session_affinity_header_does_not_create_agent_context() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_SESSION_AFFINITY, "affinity".parse().unwrap());
+
+        assert_eq!(
+            session_affinity_from_headers(&headers).unwrap().as_str(),
+            "affinity"
+        );
+        assert!(agent_context_from_headers(&headers).is_none());
     }
 
     #[test]
@@ -1597,6 +1629,7 @@ mod tests {
             HEADER_DYNAMO_SESSION_ID,
             HEADER_DYNAMO_PARENT_SESSION_ID,
             HEADER_DYNAMO_SESSION_FINAL,
+            HEADER_SESSION_AFFINITY,
         ] {
             let mut headers = HeaderMap::new();
             headers.insert(

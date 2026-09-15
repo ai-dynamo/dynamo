@@ -245,6 +245,7 @@ async def _fetch_from_encode_workers(
     request_id: str,
     receiver: AbstractEmbeddingReceiver,
     context=None,
+    cache_scope: str | None = None,
 ) -> tuple[List[MultiModalGroup], _PendingRelease | None]:
     """Fan out image items (URL or frontend-decoded) to encode workers, load
     embeddings, and return ready groups.
@@ -268,6 +269,7 @@ async def _fetch_from_encode_workers(
         sampling_params=VllmSamplingParams(),
         request_id=request_id,
         multimodal_inputs=[],
+        image_cache_scope=cache_scope,
     )
 
     with time_and_log_code_section(f"[PREFILL] request: {request_id} dispatch encode"):
@@ -349,6 +351,7 @@ async def _fetch_embeddings(
     receiver: AbstractEmbeddingReceiver,
     cache: MultimodalEmbeddingCacheManager | None = None,
     context=None,
+    cache_scope: str | None = None,
 ) -> tuple[list[MultiModalGroup], _PendingRelease | None]:
     """Fetch multimodal embeddings with transparent cache-through.
 
@@ -391,6 +394,7 @@ async def _fetch_embeddings(
             request_id,
             receiver,
             context=context,
+            cache_scope=cache_scope,
         )
 
         # ── 3. Update cache (no-op when cache is None) ──────────────
@@ -433,6 +437,7 @@ class MultiModalEmbeddingLoader:
         *,
         model: str,
         context=None,
+        cache_scope: str | None = None,
     ) -> Dict[str, Any]:
         """Fetch embeddings and build engine-ready ``multi_modal_data``.
 
@@ -454,6 +459,7 @@ class MultiModalEmbeddingLoader:
             self._receiver,
             cache=self._embedding_cache_manager,
             context=context,
+            cache_scope=cache_scope,
         )
 
         multi_modal_data: Dict[str, Any] = {}

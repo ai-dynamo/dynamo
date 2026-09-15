@@ -414,6 +414,17 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_context: Option<AgentContext>,
 
+    /// Opaque frontend-derived scope for partitioning backend `ImageLoader`
+    /// URL caches. This does not namespace engine KV or embedding caches.
+    ///
+    /// This is kept separate from `agent_context`: routing affinity is not
+    /// necessarily an agent identity and must not overwrite agent lineage.
+    /// The optional field is safe across rolling upgrades: older readers
+    /// ignore it and newer readers default it when an older frontend omits it.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_cache_scope: Option<String>,
+
     /// Multimodal processor kwargs forwarded to the backend engine
     /// (e.g. `{"use_audio_in_video": true}` for omni models).
     #[builder(default)]

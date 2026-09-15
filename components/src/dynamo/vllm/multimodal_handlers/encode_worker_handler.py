@@ -385,7 +385,9 @@ class EncodeWorkerHandler:
                         wire_items.append(
                             {DECODED_VARIANT_KEY: group_mm_input.image_decoded}
                         )
-                loaded_images = await self.image_loader.load_image_batch(wire_items)
+                loaded_images = await self.image_loader.load_image_batch(
+                    wire_items, cache_scope=request.image_cache_scope
+                )
 
             if loaded_images:
                 with _nvtx.annotate(

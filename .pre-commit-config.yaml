@@ -177,6 +177,7 @@ repos:
         - pytest-asyncio
         - tomli
         - pydantic
+        - redis>=5.0.0,<8.0.0
         - filelock
         - pyyaml
         - prometheus_client>=0.23.1
