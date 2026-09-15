@@ -194,7 +194,7 @@ pub(crate) fn parse_load_lora(body: &Value) -> Result<LoadLoraUpdate, DynamoErro
         ));
     }
     Ok(LoadLoraUpdate {
-        name,
+        name: name.trim().to_string(),
         uri: uri.to_string(),
     })
 }
@@ -202,8 +202,7 @@ pub(crate) fn parse_load_lora(body: &Value) -> Result<LoadLoraUpdate, DynamoErro
 pub(crate) fn parse_lora_name(body: &Value) -> Result<String, DynamoError> {
     body.get("lora_name")
         .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
+        .filter(|name| !name.trim().is_empty())
         .map(str::to_string)
         .ok_or_else(|| client::invalid_argument("lora_name must be a non-empty string"))
 }
