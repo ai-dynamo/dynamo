@@ -143,6 +143,25 @@ def _sampling_option_params(values: Dict[str, Any]) -> Dict[str, Any]:
     return params
 
 
+def _ordered_cancellation_request_id(
+    request_id: str, sampling_params: Any, *, supported: bool
+) -> str | None:
+    """Use pre-output cancellation only when SGLang preserves the submitted ID."""
+    if not supported:
+        return None
+    if isinstance(sampling_params, list):
+        sampling_params = sampling_params[0] if sampling_params else {}
+    if isinstance(sampling_params, Mapping):
+        sample_count = sampling_params.get("n") or 1
+        beam_width = sampling_params.get("beam_width") or 1
+        # SGLang parallel sampling replaces normalized ``rid_<index>`` values
+        # with unrelated UUIDs before scheduler dispatch. Until SGLang exposes
+        # a group abort API, the submitted ID cannot order a safe exact abort.
+        if sample_count > 1 and beam_width <= 1:
+            return None
+    return request_id
+
+
 def _user_stop_token_ids(request: Dict[str, Any]) -> set[int]:
     stop_conditions = request.get("stop_conditions")
     if isinstance(stop_conditions, dict):
@@ -487,11 +506,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             self._first_token_source.bind(context, routing.get("dp_rank"))
         _raise_if_conditional_disagg_bypass(request)
         sglang_request_id = new_sglang_request_id()
-        submitted_request_id = (
-            sglang_request_id
-            if getattr(self, "_supports_ordered_cancellation", False)
-            else None
-        )
         logging.debug(
             "Submitted SGLang Request ID: %s, Context: %s",
             sglang_request_id,
@@ -501,6 +515,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         priority = (request.get("routing") or {}).get("priority")
         native_payload = native_generate_payload(request)
         if native_payload is not None:
+            submitted_request_id = _ordered_cancellation_request_id(
+                sglang_request_id,
+                native_payload.get("sampling_params"),
+                supported=getattr(self, "_supports_ordered_cancellation", False),
+            )
             stream = self._native_generate_stream(
                 request,
                 native_payload,
@@ -520,6 +539,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         priority_kwargs = self._priority_kwargs(priority)
         sampling_params = self._build_sampling_params(request)
+        submitted_request_id = _ordered_cancellation_request_id(
+            sglang_request_id,
+            sampling_params,
+            supported=getattr(self, "_supports_ordered_cancellation", False),
+        )
         logprob_kwargs = self._build_logprob_kwargs(request)
         metadata_uploader = self._metadata_uploader_from_request(request)
 

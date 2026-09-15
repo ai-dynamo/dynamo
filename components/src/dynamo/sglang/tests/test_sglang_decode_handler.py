@@ -28,6 +28,7 @@ from dynamo.sglang.request_handlers.llm.decode_handler import (
     _extract_sglang_stop_reason,
     _nvext_extra_field_requested,
     _openai_stop_sampling_params,
+    _ordered_cancellation_request_id,
     _user_stop_token_ids,
 )
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
@@ -710,6 +711,29 @@ def test_build_sampling_params_passes_n_for_token_requests():
     assert sampling_params["n"] == 3
     assert sampling_params["temperature"] == 0.2
     assert sampling_params["max_new_tokens"] == 8
+
+
+@pytest.mark.parametrize(
+    ("sampling_params", "supported", "expected"),
+    [
+        ({}, True, "request-id"),
+        ({"n": 1}, True, "request-id"),
+        ([{"n": 1}], True, "request-id"),
+        ({"n": 3}, True, None),
+        ([{"n": 3}], True, None),
+        ({"n": 3, "beam_width": 2}, True, "request-id"),
+        ({"n": 1}, False, None),
+    ],
+)
+def test_ordered_cancellation_requires_stable_sglang_request_id(
+    sampling_params, supported, expected
+):
+    assert (
+        _ordered_cancellation_request_id(
+            "request-id", sampling_params, supported=supported
+        )
+        == expected
+    )
 
 
 def test_build_sampling_params_forwards_repetition_controls_for_token_requests():
