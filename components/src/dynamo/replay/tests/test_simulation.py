@@ -270,6 +270,35 @@ def test_weka_runner_requires_a_configured_execution_target_model() -> None:
         simulation.DynamoReplayRunnerFactory().create(0).run(spec)
 
 
+def test_dynamo_runner_defers_target_model_validation_until_trace_load(
+    monkeypatch,
+) -> None:
+    seen = {}
+
+    def fake_run_trace_replay(**kwargs):
+        seen.update(kwargs)
+        return _report({"completed_requests": 1})
+
+    deployment = BackendDeploymentSpec(
+        deployment_mode="agg",
+        backend="vllm",
+        backend_version="0.11.0",
+        agg_engine_args={"engine_type": "vllm", "max_num_seqs": 256},
+        num_workers=1,
+    )
+    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
+    monkeypatch.setattr(simulation, "run_trace_replay", fake_run_trace_replay)
+    spec = ReplaySpec(
+        backend_deployment=deployment,
+        workload={"trace_path": "standard.jsonl", "trace_format": "dynamo"},
+        goal={"target": "throughput"},
+    )
+
+    simulation.DynamoReplayRunnerFactory().create(0).run(spec)
+
+    assert seen["execution_model"] is None
+
+
 def test_trace_replay_rejects_boolean_agentic_lanes() -> None:
     with pytest.raises(TypeError, match="agentic_lanes must be an integer"):
         run_trace_replay("unused.jsonl", agentic_lanes=True)

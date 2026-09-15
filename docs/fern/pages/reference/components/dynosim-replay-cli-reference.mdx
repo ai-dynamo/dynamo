@@ -144,10 +144,11 @@ evaluation:
 - `stop.max_virtual_time_seconds` is a soft virtual-time cutoff. Requests admitted before the
   cutoff may finish afterward.
 
-For Dynamo request traces and Weka corpora, omit `traffic.source.block_size`; AISimulate derives it
-from the source and rejects mixed block sizes. An explicitly configured Weka block size is only an
-assertion against the published source metadata. Dynamo format accepts multiple trace shards. Weka
-accepts one file or directory; other formats accept exactly one file.
+For Dynamo request traces, omit `traffic.source.block_size`; Dynamo derives it from the source and
+rejects mixed block sizes across shards. For Weka corpora, AISimulate derives the block size from the
+source. An explicitly configured Weka block size is only an assertion against the published source
+metadata. Dynamo format accepts multiple trace shards. Weka accepts one file or directory; other
+formats accept exactly one file.
 
 `mooncake-delta`, `agentic_mooncake`, and `weka` require aggregated engine mode.
 The two agentic formats also require `trace_timestamps` and reject the virtual-time cutoff.

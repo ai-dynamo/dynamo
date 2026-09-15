@@ -80,8 +80,8 @@ class DynamoReplayRunnerFactory:
                 "weka",
             ),
             supports_agentic_lanes=True,
-            # AIC-1815 remains the first full AgentX runtime checkpoint. Keep
-            # the public runner honest about the narrower integration here.
+            # Full AgentX runtime conformance remains a separate checkpoint.
+            # Keep the public runner honest about the narrower integration here.
             supported_agentic_topologies=("agg",),
             agentic_qualification="functional_only",
         )
@@ -311,6 +311,10 @@ class DynamoReplayRunner:
             model = raw_engine_args.get("aic_model_path")
             if isinstance(model, str) and model.strip():
                 return model.strip()
+        if trace_format == "dynamo":
+            # The native loader distinguishes standard from agentic Dynamo
+            # traces and enforces a target model only for the latter.
+            return None
         raise ValueError("agentic execution requires a configured target model")
 
     @staticmethod
