@@ -1557,9 +1557,8 @@ class WorkerFactory:
 
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
         fpm_worker_id = str(generate_endpoint.connection_id())
-        snapshot_factory: Optional[StatLoggerFactory] = None
         if snapshot_engine is not None:
-            engine_setup, snapshot_factory = snapshot_engine
+            engine_setup, factory = snapshot_engine
             (
                 engine_client,
                 vllm_config,
@@ -1567,30 +1566,30 @@ class WorkerFactory:
                 prometheus_temp_dir,
                 _component_gauges,
             ) = engine_setup
-            snapshot_factory.bind_endpoint(generate_endpoint)
+            factory.bind_endpoint(generate_endpoint)
             # TODO: The scheduler in the child process still has worker_id=""
             # because the engine was forked before the runtime existed.
             # Propagating the new ID to the child requires shared memory or
             # a restart of the EngineCore process.
             os.environ[ENV_FPM_WORKER_ID] = fpm_worker_id
         else:
+            factory = StatLoggerFactory(endpoint=generate_endpoint)
             (
                 engine_client,
                 vllm_config,
                 default_sampling_params,
                 prometheus_temp_dir,
                 _component_gauges,
-            ) = self.setup_vllm_engine(config, fpm_worker_id=fpm_worker_id)
+            ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
         await configure_kv_event_block_size(engine_client, vllm_config)
 
-        if snapshot_factory is not None:
-            _, dp_size = get_dp_range_for_worker(vllm_config)
-            per_rank_num_gpu_blocks = per_rank_kv_blocks(
-                vllm_config.cache_config.num_gpu_blocks,
-                dp_size,
-            )
-            snapshot_factory.set_num_gpu_blocks_all(per_rank_num_gpu_blocks or 0)
-            snapshot_factory.init_publish()
+        _, dp_size = get_dp_range_for_worker(vllm_config)
+        per_rank_num_gpu_blocks = per_rank_kv_blocks(
+            vllm_config.cache_config.num_gpu_blocks,
+            dp_size,
+        )
+        factory.set_num_gpu_blocks_all(per_rank_num_gpu_blocks or 0)
+        factory.init_publish()
 
         encode_worker_client = await self._maybe_get_encode_worker_client(
             runtime, config
