@@ -86,6 +86,9 @@ def test_broken_carrier_is_not_treated_as_the_source_build(carrier_imports):
     assert "built without a video backend" not in msg
     assert VALIDATED_SPECS["opencv-python-headless"] in msg
     assert "--force-reinstall" in msg
+    # Without this, pip may rebuild the codec-free sdist the operator is
+    # trying to replace.
+    assert "--only-binary opencv-python-headless" in msg
     # The carrier's own words are what identify the real fault.
     assert "libGL.so.1" in msg
 
