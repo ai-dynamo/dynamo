@@ -165,7 +165,7 @@ def validate_args(args):
             "target": [
                 "runtime",
             ],
-            "cuda_version": ["13.2"],
+            "cuda_version": ["13.2", "13.4"],
         },
         "dynamo": {
             "device": ["cuda"],
@@ -193,7 +193,7 @@ def validate_args(args):
                 "--cuda-version cannot be specified for triton: its CUDA family is "
                 "fixed by the Triton release image."
             )
-        args.cuda_version = valid_inputs["triton"]["cuda_version"][0]
+        args.cuda_version = valid_inputs["triton"]["cuda_version"][-1]
 
     if args.framework in valid_inputs:
         cuda_version_valid = (
