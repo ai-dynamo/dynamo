@@ -186,6 +186,7 @@ fn make_stream_delta(
             usage: None,
         },
         nvext,
+        prompt_logprobs: None,
         llm_metrics: None,
     })
 }
@@ -953,6 +954,7 @@ fn make_stream_delta_with_reasoning(
             usage: None,
         },
         nvext: None,
+        prompt_logprobs: None,
         llm_metrics: None,
     })
 }
