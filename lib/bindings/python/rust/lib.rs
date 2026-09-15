@@ -1327,16 +1327,16 @@ impl DistributedRuntime {
 
         // Give the bridge our runtime before anything spawns on it. `run_input` wraps the whole
         // frontend in `future_into_py`, which spawns through `get_runtime()`, so this is the
-        // call that decides which runtime serves traffic.
+        // call that decides which runtime serves traffic. A frontend builds its
+        // `DistributedRuntime` directly and passes no other offer site, so this is also the only
+        // place that can record the bridge runtime for [`wait_for_bridge_tasks_at_exit`].
         let primary = rs::Worker::ensure_process_runtime().map_err(to_pyerr)?;
-        INIT.get_or_init(|| {
-            // An `Err` means the bridge already holds a runtime, and it never hands one back.
-            // That is a state to accept rather than a failure to report: `backend::Worker` may
-            // have registered this same `RT`, and `dynamo.sglang` reaches `get_runtime()`
-            // before we run. Refusing here broke every sglang test.
-            if pyo3_async_runtimes::tokio::init_with_runtime(primary).is_err()
-                && !std::ptr::eq(pyo3_async_runtimes::tokio::get_runtime(), primary)
-            {
+        // The bridge keeping a runtime of its own is a state to accept rather than a failure to
+        // report: `backend::Worker` may have registered this same `RT`, and `dynamo.sglang`
+        // reaches `get_runtime()` before we run. Refusing here broke every sglang test.
+        let bridge = adopt_bridge_runtime(primary);
+        if !std::ptr::eq(bridge, primary) {
+            INIT.get_or_init(|| {
                 // Both runtimes are sized from DYN_RUNTIME_*, since module init handed the
                 // bridge the same builder. The cost is that there are two of them, so the
                 // process carries twice the threads that configuration describes.
@@ -1345,8 +1345,8 @@ impl DistributedRuntime {
                      DistributedRuntime was created, so the process now has two; both are sized \
                      from DYN_RUNTIME_*, so the thread counts it describes are doubled"
                 );
-            }
-        });
+            });
+        }
 
         // The bridge needed the tokio runtime; this wraps that same one in a dynamo `Runtime`.
         let runtime = rs::Worker::runtime_from_existing().map_err(to_pyerr)?;
