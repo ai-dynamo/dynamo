@@ -3076,6 +3076,7 @@ dependencies = [
  "dynamo-backend-common",
  "futures",
  "prost-types 0.13.5",
+ "prost-types 0.14.3",
  "serde_json",
  "tokio",
  "tonic 0.13.1",

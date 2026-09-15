@@ -26,4 +26,6 @@ pub use error::{
     invalid_argument, protocol_error, status_to_dynamo, worker_overloaded,
 };
 pub use json::{json_to_struct, struct_to_json};
+#[cfg(feature = "tonic-v14")]
+pub use json::{json_to_struct_v14, struct_to_json_v14};
 pub use transport::{DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, startup_deadline};
