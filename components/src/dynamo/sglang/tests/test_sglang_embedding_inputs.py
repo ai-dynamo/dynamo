@@ -13,6 +13,7 @@ pytest.importorskip(
 
 from sglang.srt.managers.io_struct import EmbeddingReqInput  # noqa: E402
 
+from dynamo.sglang.health_check import SglangEmbeddingHealthCheckPayload  # noqa: E402
 from dynamo.sglang.request_handlers.embedding import (  # noqa: E402
     embedding_handler as eh,
 )
@@ -24,6 +25,7 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.pre_merge,
+    pytest.mark.timeout(30),
 ]
 
 
@@ -59,6 +61,29 @@ def _handler(*, enable_trace: bool = True) -> eh.EmbeddingWorkerHandler:
     handler.engine = _Engine()
     handler.enable_trace = enable_trace
     return handler
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_text_input", [True, False])
+async def test_health_check_runs_embedding_inference(monkeypatch, use_text_input):
+    monkeypatch.delenv("DYN_HEALTH_CHECK_PAYLOAD", raising=False)
+    handler = _handler()
+    payload = SglangEmbeddingHealthCheckPayload(
+        "embedding-model", use_text_input=use_text_input
+    ).to_dict()
+
+    outputs = [output async for output in handler.generate(payload, _Context())]
+
+    assert len(outputs) == 1
+    assert outputs[0]["model"] == "embedding-model"
+    assert len(outputs[0]["data"]) == 1
+    if use_text_input:
+        assert handler.engine.async_encode_calls[0]["prompt"] == "Test"
+        assert handler.engine.tokenizer_manager.requests == []
+    else:
+        [(request, _)] = handler.engine.tokenizer_manager.requests
+        assert request.input_ids == [1]
+        assert handler.engine.async_encode_calls == []
 
 
 @pytest.mark.asyncio
