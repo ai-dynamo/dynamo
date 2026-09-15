@@ -22,84 +22,56 @@ import "time"
 // GroupID identifies one independently resizable engine world.
 type GroupID string
 
-// ReplicaID identifies one logical replica throughout capacity replacement.
+// ReplicaID identifies one logical replica throughout physical replacement.
 type ReplicaID string
 
 // CapacitySlotID identifies one stable workload-manager position backing a replica.
 type CapacitySlotID string
 
-// NativeMemberID identifies one engine-native member or rank.
+// NativeMemberID identifies one engine-native member, such as a DP rank.
 type NativeMemberID string
 
-// PodUID identifies one concrete Kubernetes Pod instance.
+// PodUID identifies one concrete Kubernetes Pod incarnation.
 type PodUID string
 
-// RuntimeIncarnationID identifies one complete logical-replica runtime incarnation. It changes when any constituent
-// engine process restarts, including a restart inside the same Pod, and is unique within an Engine Group.
+// RuntimeIncarnationID identifies one engine process incarnation.
 type RuntimeIncarnationID string
 
-// ReplicaSlotBinding associates one stable logical replica with its workload-manager slot.
-type ReplicaSlotBinding struct {
-	ReplicaID ReplicaID
-	SlotID    CapacitySlotID
-}
-
-// ReplicaAvailability is the profile-derived availability of one complete replica allocation.
-type ReplicaAvailability string
-
-const (
-	// ReplicaAvailabilityAvailable means every capacity Pod and required runtime check is ready.
-	ReplicaAvailabilityAvailable ReplicaAvailability = "Available"
-	// ReplicaAvailabilityUnavailable means at least one required capacity or runtime check has failed.
-	ReplicaAvailabilityUnavailable ReplicaAvailability = "Unavailable"
-	// ReplicaAvailabilityUnknown means complete allocation availability cannot be established.
-	ReplicaAvailabilityUnknown ReplicaAvailability = "Unknown"
-)
-
-// CapacityRef identifies one concrete capacity Pod without coupling the contract to a Kubernetes API type.
+// CapacityRef identifies one concrete Pod allocated to a logical replica.
 type CapacityRef struct {
-	Namespace string
-	Name      string
-	UID       PodUID
+	Name string
+	UID  PodUID
 }
 
-// ReplicaIncarnation identifies the exact physical and runtime instance behind one stable logical replica.
-// SlotID remains stable across replacement; CapacityRefs changes with a Pod and RuntimeID with an engine process.
+// ReplicaIncarnation binds one logical replica and stable slot to concrete physical and runtime capacity.
 type ReplicaIncarnation struct {
-	ReplicaID    ReplicaID
-	SlotID       CapacitySlotID
-	CapacityRefs []CapacityRef
-	RuntimeID    RuntimeIncarnationID
+	ReplicaID          ReplicaID
+	SlotID             CapacitySlotID
+	RuntimeIncarnation RuntimeIncarnationID
+	CapacityRefs       []CapacityRef
 }
 
-// ReplicaAllocation is one physically disjoint allocation backing a logical replica.
-type ReplicaAllocation struct {
-	Incarnation  ReplicaIncarnation
-	Availability ReplicaAvailability
-}
-
-// CapacitySnapshot is the workload manager's observed allocation state for an Engine Group.
-type CapacitySnapshot struct {
-	Allocations        []ReplicaAllocation
-	FencedReplicaSlots []ReplicaSlotBinding
-}
-
-// ReplicaMembership correlates one exact physical incarnation with its engine-native members.
-// The complete mapping is authoritative for its topology generation and remains durable after capacity loss.
+// ReplicaMembership is the engine-owned logical, runtime, and native-member identity of one active replica.
 type ReplicaMembership struct {
-	Incarnation   ReplicaIncarnation
-	NativeMembers []NativeMemberID
+	ReplicaID          ReplicaID
+	RuntimeIncarnation RuntimeIncarnationID
+	NativeMembers      []NativeMemberID
 }
 
-// ReplicaNativeMembership binds one stable logical replica and capacity slot to the native members a recovery must
-// restore. A replacement may use new physical and runtime incarnations, but it must return to this exact slot.
+// JoiningReplica identifies one concrete engine process that may join membership.
+type JoiningReplica struct {
+	ReplicaID          ReplicaID
+	RuntimeIncarnation RuntimeIncarnationID
+}
+
+// ReplicaNativeMembership describes an exact stable logical-to-native membership mapping.
 type ReplicaNativeMembership struct {
 	ReplicaID     ReplicaID
 	SlotID        CapacitySlotID
 	NativeMembers []NativeMemberID
 }
 
-// MembershipTopology is the inference engine's authoritative committed membership.
+// MembershipTopology is one immutable engine-authoritative committed topology snapshot.
 type MembershipTopology struct {
 	Generation int64
 	Replicas   []ReplicaMembership
@@ -110,208 +82,307 @@ func (t MembershipTopology) ReplicaCount() int32 {
 	return int32(len(t.Replicas))
 }
 
-// OperationIntent identifies why engine membership is changing.
-type OperationIntent string
+// ProcessLifecycleOwner identifies the system responsible for starting and stopping engine processes.
+type ProcessLifecycleOwner string
 
 const (
-	// OperationIntentGrow adds replicas to a running engine world.
-	OperationIntentGrow OperationIntent = "Grow"
-	// OperationIntentShrink removes replicas from a running engine world.
-	OperationIntentShrink OperationIntent = "Shrink"
-	// OperationIntentRecover restores or remaps membership after unexpected loss.
-	OperationIntentRecover OperationIntent = "Recover"
-	// OperationIntentRetire removes all membership before deleting an engine world.
-	OperationIntentRetire OperationIntent = "Retire"
+	// ProcessLifecycleOwnerEngine means the engine starts and stops its own members.
+	ProcessLifecycleOwnerEngine ProcessLifecycleOwner = "Engine"
+	// ProcessLifecycleOwnerOrchestrator means the orchestrator starts and stops engine members.
+	ProcessLifecycleOwnerOrchestrator ProcessLifecycleOwner = "Orchestrator"
 )
 
-// OperationPhase is the durable controller-facing phase of one membership operation.
-type OperationPhase string
+// BootstrapMode describes how one new physical incarnation joins the engine world.
+type BootstrapMode string
 
 const (
-	// OperationPhasePending means the operation is durable but no membership call may have occurred.
-	// Capacity allocation or traffic withdrawal may already be converging for this immutable operation.
-	OperationPhasePending OperationPhase = "Pending"
-	// OperationPhaseSubmitting means the call may have occurred but acknowledgement is unknown.
-	OperationPhaseSubmitting OperationPhase = "Submitting"
-	// OperationPhaseAccepted means the backend acknowledged the operation identity and target.
-	OperationPhaseAccepted OperationPhase = "Accepted"
-	// OperationPhaseCommitting means the backend is changing membership.
-	OperationPhaseCommitting OperationPhase = "Committing"
-	// OperationPhaseCommitted means the expected committed topology was authoritatively observed.
-	OperationPhaseCommitted OperationPhase = "Committed"
-	// OperationPhaseFailed means the backend definitively failed the membership request or a required post-commit
-	// serving step failed terminally.
-	OperationPhaseFailed OperationPhase = "Failed"
-	// OperationPhaseUnknown means the operation cannot be correlated with authoritative backend state.
-	OperationPhaseUnknown OperationPhase = "Unknown"
-	// OperationPhaseAborting means a provably uncommitted operation is durably restoring current serving state.
-	OperationPhaseAborting OperationPhase = "Aborting"
-	// OperationPhaseAborted means current authoritative members were restored after an operation could not commit.
-	OperationPhaseAborted OperationPhase = "Aborted"
+	// BootstrapModeJoin creates a previously unknown logical member.
+	BootstrapModeJoin BootstrapMode = "Join"
+	// BootstrapModeRestoreFixedSlot restores a known logical and native-member identity.
+	BootstrapModeRestoreFixedSlot BootstrapMode = "RestoreFixedSlot"
 )
 
-// FailureClassification states whether the same operation may be retried.
+// TrafficRequirement describes the traffic boundary required around membership mutation.
+type TrafficRequirement string
+
+const (
+	// TrafficRequirementKeepServing permits retained replicas to serve throughout the mutation.
+	TrafficRequirementKeepServing TrafficRequirement = "KeepServing"
+	// TrafficRequirementQuiesceGroup requires the complete base topology to drain before mutation.
+	TrafficRequirementQuiesceGroup TrafficRequirement = "QuiesceGroup"
+)
+
+// RetirementSafety describes what must be observed before a replica may leave engine membership.
+type RetirementSafety string
+
+const (
+	// RetirementSafetyDrained requires planned retirees to finish in-flight work.
+	RetirementSafetyDrained RetirementSafety = "Drained"
+	// RetirementSafetyWithdrawn permits failed members that can no longer drain to be observably non-routable.
+	RetirementSafetyWithdrawn RetirementSafety = "Withdrawn"
+)
+
+// VerificationRequirement describes whether a committed topology must prove serving progress before admission.
+type VerificationRequirement string
+
+const (
+	// VerificationRequirementNone permits admission immediately after a valid membership commit.
+	VerificationRequirementNone VerificationRequirement = "None"
+	// VerificationRequirementRequired requires a matching serving proof before admission.
+	VerificationRequirementRequired VerificationRequirement = "Required"
+)
+
+// PlanKind identifies the concrete membership-change semantics of a resolved plan.
+type PlanKind string
+
+const (
+	// PlanKindGrow adds previously unknown logical replicas.
+	PlanKindGrow PlanKind = "Grow"
+	// PlanKindRetire removes explicitly selected healthy replicas.
+	PlanKindRetire PlanKind = "Retire"
+	// PlanKindReduceToSurvivors requests an exact survivor set after failure.
+	PlanKindReduceToSurvivors PlanKind = "ReduceToSurvivors"
+	// PlanKindRestore restores excluded stable replicas in their original slots.
+	PlanKindRestore PlanKind = "Restore"
+	// PlanKindRemap changes native membership without changing logical cardinality.
+	PlanKindRemap PlanKind = "Remap"
+)
+
+// ReplicaTarget is the resolved physical identity and bootstrap intent for one joining replica.
+type ReplicaTarget struct {
+	ReplicaID ReplicaID
+	SlotID    CapacitySlotID
+	Bootstrap BootstrapMode
+}
+
+// RestorationTarget describes one stable logical identity and native membership to restore.
+type RestorationTarget struct {
+	ReplicaTarget
+	NativeMembers []NativeMemberID
+}
+
+// MembershipChange is the closed set of membership changes understood by the coordinator.
+// Concrete changes are deliberately typed so invalid combinations are absent from the model.
+type MembershipChange interface {
+	membershipChange()
+	Kind() PlanKind
+}
+
+// GrowChange adds the named new logical replicas.
+type GrowChange struct {
+	Replicas []ReplicaTarget
+}
+
+func (*GrowChange) membershipChange() {}
+
+// Kind returns the plan kind.
+func (*GrowChange) Kind() PlanKind { return PlanKindGrow }
+
+// RetireChange removes the named healthy logical replicas after drain.
+type RetireChange struct {
+	Replicas []ReplicaID
+}
+
+func (*RetireChange) membershipChange() {}
+
+// Kind returns the plan kind.
+func (*RetireChange) Kind() PlanKind { return PlanKindRetire }
+
+// ReduceToSurvivorsChange requests removal of every base member not present in Survivors.
+type ReduceToSurvivorsChange struct {
+	Survivors []ReplicaID
+}
+
+func (*ReduceToSurvivorsChange) membershipChange() {}
+
+// Kind returns the plan kind.
+func (*ReduceToSurvivorsChange) Kind() PlanKind { return PlanKindReduceToSurvivors }
+
+// RestoreChange restores the named stable logical and native-member identities.
+type RestoreChange struct {
+	Replicas []RestorationTarget
+}
+
+func (*RestoreChange) membershipChange() {}
+
+// Kind returns the plan kind.
+func (*RestoreChange) Kind() PlanKind { return PlanKindRestore }
+
+// RemapChange replaces the complete logical-to-native member mapping at the same cardinality.
+type RemapChange struct {
+	Membership []ReplicaNativeMembership
+}
+
+func (*RemapChange) membershipChange() {}
+
+// Kind returns the plan kind.
+func (*RemapChange) Kind() PlanKind { return PlanKindRemap }
+
+// ResolvedPlan is an immutable, profile-resolved membership transition.
+type ResolvedPlan struct {
+	ID                      string
+	ProfileFingerprint      string
+	ProcessLifecycleOwner   ProcessLifecycleOwner
+	TrafficRequirement      TrafficRequirement
+	RetirementSafety        RetirementSafety
+	VerificationRequirement VerificationRequirement
+	Change                  MembershipChange
+}
+
+// ReplicaHistoryEntry retains one excluded incarnation and its exact engine-native membership.
+type ReplicaHistoryEntry struct {
+	TopologyGeneration int64
+	Incarnation        ReplicaIncarnation
+	NativeMembers      []NativeMemberID
+}
+
+// ReplicaRecord is the canonical durable record for one logical replica and stable slot.
+type ReplicaRecord struct {
+	ReplicaID ReplicaID
+	SlotID    CapacitySlotID
+	Current   *ReplicaIncarnation
+	History   []ReplicaHistoryEntry
+}
+
+// ReplicaRegistry is the single authoritative home for logical-replica-to-slot bindings.
+type ReplicaRegistry struct {
+	Replicas []ReplicaRecord
+}
+
+// TopologyHistory retains immutable snapshots referenced by the current transition and serving proofs.
+type TopologyHistory struct {
+	CurrentGeneration int64
+	Snapshots         []MembershipTopology
+}
+
+// TransitionSpec is the immutable durable input to one membership transition.
+type TransitionSpec struct {
+	ID                     string
+	BaseTopologyGeneration int64
+	Plan                   ResolvedPlan
+}
+
+// MembershipOperationPhase is the independent state of the engine membership request.
+type MembershipOperationPhase string
+
+const (
+	// MembershipOperationPhaseNotStarted means capacity and traffic preconditions are still converging.
+	MembershipOperationPhaseNotStarted MembershipOperationPhase = "NotStarted"
+	// MembershipOperationPhasePrepared means the exact request is durable and may be submitted.
+	MembershipOperationPhasePrepared MembershipOperationPhase = "Prepared"
+	// MembershipOperationPhaseRunning means the backend accepted the operation and is changing membership.
+	MembershipOperationPhaseRunning MembershipOperationPhase = "Running"
+	// MembershipOperationPhaseCommitted means the backend committed an exact validated topology.
+	MembershipOperationPhaseCommitted MembershipOperationPhase = "Committed"
+	// MembershipOperationPhaseRejected means the backend definitively rejected the request without mutation.
+	MembershipOperationPhaseRejected MembershipOperationPhase = "Rejected"
+	// MembershipOperationPhaseUnknown means the backend cannot establish the request outcome.
+	MembershipOperationPhaseUnknown MembershipOperationPhase = "Unknown"
+)
+
+// FailureClassification states whether reconciliation may retry the same external intent.
 type FailureClassification string
 
 const (
-	// FailureClassificationRetryable permits retrying the same operation identity and target.
+	// FailureClassificationRetryable means the same intent may be tried again.
 	FailureClassificationRetryable FailureClassification = "Retryable"
-	// FailureClassificationTerminal forbids retrying the failed operation unchanged.
+	// FailureClassificationTerminal means the same intent cannot safely make progress.
 	FailureClassificationTerminal FailureClassification = "Terminal"
 )
 
-// OperationFailure is a structured membership or serving-workflow failure.
-type OperationFailure struct {
+// Failure is one structured subsystem or transition failure.
+type Failure struct {
 	Classification FailureClassification
 	Reason         string
 	Message        string
 }
 
-// OperationPlan describes a caller-owned durable, absolute, identity-aware membership request.
-// Reusing its ID with a different payload is invalid.
-type OperationPlan struct {
-	ID                string
-	Intent            OperationIntent
-	TargetReplicas    int32
-	NominatedReplicas []ReplicaID
-	// RestoredMembership names the absent logical identities, stable slots, and exact native members restored by
-	// recovery expansion.
-	RestoredMembership []ReplicaNativeMembership
-	// TargetMembership is the exact desired engine-native mapping for a cardinally stable remap.
-	TargetMembership []ReplicaMembership
+// MembershipOperationStatus records only engine membership progress and outcome.
+type MembershipOperationStatus struct {
+	ID                          string
+	Phase                       MembershipOperationPhase
+	JoiningReplicas             []JoiningReplica
+	CommittedTopologyGeneration int64
+	Failure                     *Failure
 }
 
-// OperationShape identifies the exact membership transition an engine adapter can safely perform.
-type OperationShape string
+// VerificationPhase is the independent state of serving verification.
+type VerificationPhase string
 
 const (
-	// OperationShapeFreshGrowth adds new logical replicas to a healthy topology.
-	OperationShapeFreshGrowth OperationShape = "FreshGrowth"
-	// OperationShapePlannedHighRankSuffixShrink removes a high-rank suffix of healthy logical replicas.
-	OperationShapePlannedHighRankSuffixShrink OperationShape = "PlannedHighRankSuffixShrink"
-	// OperationShapePlannedSelectedRetirement removes an arbitrary caller-selected set of healthy logical replicas.
-	OperationShapePlannedSelectedRetirement OperationShape = "PlannedSelectedRetirement"
-	// OperationShapeSurvivorReduction adopts or commits a smaller topology after unexpected member loss.
-	OperationShapeSurvivorReduction OperationShape = "SurvivorReduction"
-	// OperationShapeReplacementRestoration restores missing logical replicas to a survivor topology.
-	OperationShapeReplacementRestoration OperationShape = "ReplacementRestoration"
-	// OperationShapeFixedSlotReplacement replaces physical or runtime incarnations while preserving logical and native IDs.
-	OperationShapeFixedSlotReplacement OperationShape = "FixedSlotReplacement"
-	// OperationShapeNativeMemberRemapping changes engine-native membership without changing logical cardinality.
-	OperationShapeNativeMemberRemapping OperationShape = "NativeMemberRemapping"
-	// OperationShapeFullRetirement removes all membership before deleting an engine world.
-	OperationShapeFullRetirement OperationShape = "FullRetirement"
+	// VerificationPhasePending means a proof is required for the committed topology.
+	VerificationPhasePending VerificationPhase = "Pending"
+	// VerificationPhasePassed means the exact topology produced serving progress.
+	VerificationPhasePassed VerificationPhase = "Passed"
+	// VerificationPhaseFailed means a conclusive check failed.
+	VerificationPhaseFailed VerificationPhase = "Failed"
 )
 
-// ReconfigurationTrafficRequirement states how serving traffic must be handled while an operation commits.
-type ReconfigurationTrafficRequirement string
+// ServingProof binds successful serving verification to one immutable topology snapshot.
+type ServingProof struct {
+	TopologyGeneration int64
+	RuntimeDigest      string
+	ObservedAt         time.Time
+}
+
+// VerificationStatus records serving health without rewriting membership history.
+type VerificationStatus struct {
+	Phase   VerificationPhase
+	Proof   *ServingProof
+	Failure *Failure
+}
+
+// TransitionOutcome summarizes the complete cross-subsystem transition.
+type TransitionOutcome string
 
 const (
-	// ReconfigurationTrafficKeepServing means existing members may safely keep serving during the transition.
-	ReconfigurationTrafficKeepServing ReconfigurationTrafficRequirement = "KeepServing"
-	// ReconfigurationTrafficQuiesceGroup means the complete group must be withdrawn and drained before commit.
-	ReconfigurationTrafficQuiesceGroup ReconfigurationTrafficRequirement = "QuiesceGroup"
+	// TransitionOutcomeProgressing means reconciliation still has safe work to perform.
+	TransitionOutcomeProgressing TransitionOutcome = "Progressing"
+	// TransitionOutcomeReverting means a provably uncommitted transition is restoring its canonical base state.
+	TransitionOutcomeReverting TransitionOutcome = "Reverting"
+	// TransitionOutcomeRolledBack means preparatory traffic and capacity were restored after definitive rejection.
+	TransitionOutcomeRolledBack TransitionOutcome = "RolledBack"
+	// TransitionOutcomeBlocked means membership or a post-commit serving step cannot proceed automatically.
+	TransitionOutcomeBlocked TransitionOutcome = "Blocked"
+	// TransitionOutcomeCompleted means capacity, membership, traffic, and verification reached the resolved plan.
+	TransitionOutcomeCompleted TransitionOutcome = "Completed"
 )
 
-// ServingVerificationRequirement states whether a committed topology needs a separate serving proof before admission.
-type ServingVerificationRequirement string
-
-const (
-	// ServingVerificationNotRequired means the resolved profile does not require an additional post-commit check.
-	ServingVerificationNotRequired ServingVerificationRequirement = "NotRequired"
-	// ServingVerificationRequired means the exact committed topology must pass serving verification before admission.
-	ServingVerificationRequired ServingVerificationRequirement = "Required"
-)
-
-// CapacityRecoveryPhase is the durable state of re-establishing serving after physical availability regresses
-// without an engine topology change.
-type CapacityRecoveryPhase string
-
-const (
-	// CapacityRecoveryPhaseNone means no same-topology capacity recovery is in progress.
-	CapacityRecoveryPhaseNone CapacityRecoveryPhase = ""
-	// CapacityRecoveryPhaseRepairing means traffic is fenced and exact physical capacity is being restored.
-	CapacityRecoveryPhaseRepairing CapacityRecoveryPhase = "Repairing"
-	// CapacityRecoveryPhaseVerifying means capacity is available and a post-repair serving check is required.
-	CapacityRecoveryPhaseVerifying CapacityRecoveryPhase = "Verifying"
-)
-
-// ResolvedOperationCapability is the engine safety contract for one concrete durable membership operation.
-type ResolvedOperationCapability struct {
-	Shape                   OperationShape
-	TrafficRequirement      ReconfigurationTrafficRequirement
-	VerificationRequirement ServingVerificationRequirement
+// TransitionStatus owns one immutable transition and its independent membership and verification progress.
+type TransitionStatus struct {
+	Spec         TransitionSpec
+	Membership   MembershipOperationStatus
+	Verification VerificationStatus
+	Outcome      TransitionOutcome
+	Failure      *Failure
+	StartedAt    time.Time
+	UpdatedAt    time.Time
 }
 
-// MembershipCapabilities lists the exact operation shapes an engine adapter can safely perform.
-// Process launch and teardown ownership is a separate profile and cross-adapter concern.
-type MembershipCapabilities struct {
-	OperationShapes []OperationShape
+// CapacityStatus records the latest durable absolute capacity projection and its observation.
+type CapacityStatus struct {
+	Desired  *CapacityTarget
+	Observed CapacityObservation
 }
 
-// Operation is the durable record of one membership transaction.
-type Operation struct {
-	ID                         string
-	Attempt                    int32
-	PlanID                     string
-	Intent                     OperationIntent
-	Capability                 ResolvedOperationCapability
-	SpecGeneration             int64
-	BaseTopology               MembershipTopology
-	TargetReplicas             int32
-	RestoredMembership         []ReplicaNativeMembership
-	JoiningReplicas            []ReplicaIncarnation
-	NominatedReplicas          []ReplicaID
-	TargetMembership           []ReplicaMembership
-	CleanupReplicaSlots        []ReplicaSlotBinding
-	CapacityTargetReplicas     int32
-	CapacityTopologyGeneration int64
-	CapacityTargetApplied      bool
-	QueuedTargetReplicas       *int32
-	Phase                      OperationPhase
-	BackendOperationID         string
-	CommittedTopology          *MembershipTopology
-	// CompensationTopology is the exact authoritative topology restored after a provably uncommitted operation.
-	CompensationTopology       *MembershipTopology
-	ServingVerificationAttempt int32
-	ServingVerificationTarget  *MembershipTopology
-	ServingVerificationProof   *ServingVerificationProof
-	// TerminalAdmissionFailure preserves a non-retryable traffic-admission outcome after later traffic commands
-	// supersede it in the adapter's single latest-command register.
-	TerminalAdmissionFailure *TrafficAdmissionFailure
-	// CapacityRecoveryPhase prevents a restart or repeated reconcile from reusing serving evidence that predates an
-	// availability regression in an otherwise unchanged topology.
-	CapacityRecoveryPhase CapacityRecoveryPhase
-	PostCommitComplete    bool
-	Adopted               bool
-	StartedAt             time.Time
-	LastTransitionTime    time.Time
-	Failure               *OperationFailure
+// TrafficStatus records the latest durable absolute traffic projection and its observation.
+type TrafficStatus struct {
+	Desired  *TrafficTarget
+	Observed TrafficObservation
 }
 
-// TrafficAdmissionFailure binds one terminal admission failure to its exact refused or partially applied command.
-type TrafficAdmissionFailure struct {
-	Command TrafficCommand
-	Failure OperationFailure
+// GroupStatus is the complete durable state owned by one Engine Group reconciler.
+type GroupStatus struct {
+	ControlRevision int64
+	Registry        ReplicaRegistry
+	Topologies      TopologyHistory
+	Capacity        CapacityStatus
+	Traffic         TrafficStatus
+	Transition      *TransitionStatus
 }
 
-// OperationInput is the desired and durable state consumed by one coordinator step.
-type OperationInput struct {
-	GroupID         GroupID
-	SpecGeneration  int64
-	DesiredReplicas int32
-	// Plan carries identity-aware semantics that cannot be derived from desired and active counts.
-	// Its owner must retain the same non-empty ID until the resulting operation records that PlanID.
-	// A nil Plan permits automatic cardinal growth; reductions require exact nominated identities.
-	Plan      *OperationPlan
-	Operation *Operation
-}
-
-// OperationResult is the complete operation state and topology observed by one coordinator step.
-type OperationResult struct {
-	Operation        *Operation
-	Topology         MembershipTopology
-	TopologyObserved bool
-	OperationChanged bool
-	SubmissionNeeded bool
+// ReconcileResult contains the complete desired status and whether prompt requeueing is useful.
+type ReconcileResult struct {
+	Status  GroupStatus
+	Requeue bool
 }

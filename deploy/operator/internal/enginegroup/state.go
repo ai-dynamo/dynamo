@@ -18,769 +18,365 @@
 package enginegroup
 
 import (
-	"cmp"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 )
 
-func validateCapacitySnapshot(snapshot CapacitySnapshot) error {
-	replicaIDs := make(map[ReplicaID]struct{}, len(snapshot.Allocations))
-	slotIDs := make(map[CapacitySlotID]ReplicaID, len(snapshot.Allocations))
-	runtimeIDs := make(map[RuntimeIncarnationID]struct{}, len(snapshot.Allocations))
-	podUIDs := make(map[PodUID]struct{})
-	podNames := make(map[string]struct{})
-
-	// Validate every complete allocation and reject identity overlap across replicas.
-	for _, allocation := range snapshot.Allocations {
-		if err := validateReplicaIncarnation(
-			allocation.Incarnation,
-			allocation.Availability == ReplicaAvailabilityAvailable,
-		); err != nil {
-			return fmt.Errorf("validate capacity allocation: %w", err)
-		}
-		if _, exists := replicaIDs[allocation.Incarnation.ReplicaID]; exists {
-			return fmt.Errorf("duplicate capacity allocation replica ID %q", allocation.Incarnation.ReplicaID)
-		}
-		replicaIDs[allocation.Incarnation.ReplicaID] = struct{}{}
-		if _, exists := slotIDs[allocation.Incarnation.SlotID]; exists {
-			return fmt.Errorf("duplicate capacity slot ID %q", allocation.Incarnation.SlotID)
-		}
-		slotIDs[allocation.Incarnation.SlotID] = allocation.Incarnation.ReplicaID
-		if allocation.Incarnation.RuntimeID != "" {
-			if _, exists := runtimeIDs[allocation.Incarnation.RuntimeID]; exists {
-				return fmt.Errorf("duplicate capacity runtime incarnation ID %q", allocation.Incarnation.RuntimeID)
-			}
-			runtimeIDs[allocation.Incarnation.RuntimeID] = struct{}{}
-		}
-
-		if !validReplicaAvailability(allocation.Availability) {
-			return fmt.Errorf(
-				"capacity allocation %q has invalid availability %q",
-				allocation.Incarnation.ReplicaID,
-				allocation.Availability,
-			)
-		}
-
-		for _, capacityRef := range allocation.Incarnation.CapacityRefs {
-			podName := capacityRef.Namespace + "/" + capacityRef.Name
-			if _, exists := podNames[podName]; exists {
-				return fmt.Errorf("capacity Pod name %q belongs to multiple allocations", podName)
-			}
-			podNames[podName] = struct{}{}
-			if _, exists := podUIDs[capacityRef.UID]; exists {
-				return fmt.Errorf("capacity Pod UID %q belongs to multiple allocations", capacityRef.UID)
-			}
-			podUIDs[capacityRef.UID] = struct{}{}
-		}
-	}
-
-	// Fences are durable logical-slot state and remain observable after their concrete Pods disappear.
-	fencedReplicas := make(map[ReplicaID]CapacitySlotID, len(snapshot.FencedReplicaSlots))
-	fencedSlots := make(map[CapacitySlotID]ReplicaID, len(snapshot.FencedReplicaSlots))
-	allocations := replicaAllocationByID(snapshot)
-	for _, binding := range snapshot.FencedReplicaSlots {
-		if binding.ReplicaID == "" {
-			return errors.New("fenced capacity replica ID must not be empty")
-		}
-		if binding.SlotID == "" {
-			return fmt.Errorf("fenced capacity replica %q has an empty slot ID", binding.ReplicaID)
-		}
-		if _, exists := fencedReplicas[binding.ReplicaID]; exists {
-			return fmt.Errorf("duplicate fenced capacity replica ID %q", binding.ReplicaID)
-		}
-		if previous, exists := fencedSlots[binding.SlotID]; exists {
-			return fmt.Errorf(
-				"fenced capacity slot %q belongs to replicas %q and %q",
-				binding.SlotID,
-				previous,
-				binding.ReplicaID,
-			)
-		}
-		if allocation, exists := allocations[binding.ReplicaID]; exists &&
-			allocation.Incarnation.SlotID != binding.SlotID {
-			return fmt.Errorf(
-				"fenced capacity replica %q changed slot from %q to %q",
-				binding.ReplicaID,
-				binding.SlotID,
-				allocation.Incarnation.SlotID,
-			)
-		}
-		if allocatedReplica, exists := slotIDs[binding.SlotID]; exists && allocatedReplica != binding.ReplicaID {
-			return fmt.Errorf(
-				"fenced capacity slot %q for replica %q is allocated to replica %q",
-				binding.SlotID,
-				binding.ReplicaID,
-				allocatedReplica,
-			)
-		}
-		fencedReplicas[binding.ReplicaID] = binding.SlotID
-		fencedSlots[binding.SlotID] = binding.ReplicaID
-	}
-	return nil
+func cloneCapacityRefs(values []CapacityRef) []CapacityRef {
+	return slices.Clone(values)
 }
 
-func validateReplicaSlotBindings(label string, bindings []ReplicaSlotBinding) error {
-	replicaSlots := make(map[ReplicaID]CapacitySlotID, len(bindings))
-	slotReplicas := make(map[CapacitySlotID]ReplicaID, len(bindings))
-	for _, binding := range bindings {
-		if binding.ReplicaID == "" {
-			return fmt.Errorf("%s replica ID must not be empty", label)
-		}
-		if binding.SlotID == "" {
-			return fmt.Errorf("%s replica %q has an empty capacity slot ID", label, binding.ReplicaID)
-		}
-		if _, exists := replicaSlots[binding.ReplicaID]; exists {
-			return fmt.Errorf("duplicate %s replica ID %q", label, binding.ReplicaID)
-		}
-		if previous, exists := slotReplicas[binding.SlotID]; exists {
-			return fmt.Errorf(
-				"%s capacity slot %q belongs to replicas %q and %q",
-				label,
-				binding.SlotID,
-				previous,
-				binding.ReplicaID,
-			)
-		}
-		replicaSlots[binding.ReplicaID] = binding.SlotID
-		slotReplicas[binding.SlotID] = binding.ReplicaID
-	}
-	return nil
+func cloneNativeMembers(values []NativeMemberID) []NativeMemberID {
+	return slices.Clone(values)
 }
 
-func normalizeReplicaSlotBindings(bindings []ReplicaSlotBinding) ([]ReplicaSlotBinding, error) {
-	replicaSlots := make(map[ReplicaID]CapacitySlotID, len(bindings))
-	slotReplicas := make(map[CapacitySlotID]ReplicaID, len(bindings))
-	for _, binding := range bindings {
-		if binding.ReplicaID == "" || binding.SlotID == "" {
-			return nil, errors.New("replica-slot binding requires non-empty replica and slot IDs")
-		}
-		if slotID, exists := replicaSlots[binding.ReplicaID]; exists {
-			if slotID != binding.SlotID {
-				return nil, fmt.Errorf(
-					"replica %q has conflicting capacity slots %q and %q",
-					binding.ReplicaID,
-					slotID,
-					binding.SlotID,
-				)
-			}
-			continue
-		}
-		if replicaID, exists := slotReplicas[binding.SlotID]; exists && replicaID != binding.ReplicaID {
-			return nil, fmt.Errorf(
-				"capacity slot %q belongs to replicas %q and %q",
-				binding.SlotID,
-				replicaID,
-				binding.ReplicaID,
-			)
-		}
-		replicaSlots[binding.ReplicaID] = binding.SlotID
-		slotReplicas[binding.SlotID] = binding.ReplicaID
-	}
-
-	normalized := make([]ReplicaSlotBinding, 0, len(replicaSlots))
-	for replicaID, slotID := range replicaSlots {
-		normalized = append(normalized, ReplicaSlotBinding{ReplicaID: replicaID, SlotID: slotID})
-	}
-	slices.SortFunc(normalized, func(left, right ReplicaSlotBinding) int {
-		if byReplica := cmp.Compare(left.ReplicaID, right.ReplicaID); byReplica != 0 {
-			return byReplica
-		}
-		return cmp.Compare(left.SlotID, right.SlotID)
-	})
-	return normalized, nil
+func cloneReplicaIncarnation(value ReplicaIncarnation) ReplicaIncarnation {
+	value.CapacityRefs = cloneCapacityRefs(value.CapacityRefs)
+	return value
 }
 
-func replicaIDsForSlotBindings(bindings []ReplicaSlotBinding) []ReplicaID {
-	replicaIDs := make([]ReplicaID, len(bindings))
-	for i, binding := range bindings {
-		replicaIDs[i] = binding.ReplicaID
-	}
-	return normalizeReplicaIDs(replicaIDs)
+func cloneReplicaMembership(value ReplicaMembership) ReplicaMembership {
+	value.NativeMembers = cloneNativeMembers(value.NativeMembers)
+	return value
 }
 
-func sameReplicaSlotBindings(left, right []ReplicaSlotBinding) bool {
-	normalizedLeft, leftErr := normalizeReplicaSlotBindings(left)
-	normalizedRight, rightErr := normalizeReplicaSlotBindings(right)
-	return leftErr == nil && rightErr == nil && slices.Equal(normalizedLeft, normalizedRight)
-}
-
-func validateCapacityRef(capacityRef CapacityRef) error {
-	if capacityRef.Namespace == "" {
-		return errors.New("capacity Pod namespace must not be empty")
-	}
-	if capacityRef.Name == "" {
-		return errors.New("capacity Pod name must not be empty")
-	}
-	if capacityRef.UID == "" {
-		return errors.New("capacity Pod UID must not be empty")
-	}
-	return nil
-}
-
-func validateReplicaIncarnation(incarnation ReplicaIncarnation, requireRuntime bool) error {
-	if incarnation.ReplicaID == "" {
-		return errors.New("replica incarnation ID must not be empty")
-	}
-	if incarnation.SlotID == "" {
-		return fmt.Errorf("replica incarnation %q has an empty capacity slot ID", incarnation.ReplicaID)
-	}
-	if len(incarnation.CapacityRefs) == 0 {
-		return fmt.Errorf("replica incarnation %q has no concrete capacity references", incarnation.ReplicaID)
-	}
-	if requireRuntime && incarnation.RuntimeID == "" {
-		return fmt.Errorf("available replica incarnation %q has an empty runtime ID", incarnation.ReplicaID)
-	}
-
-	// One incarnation is an exact set of concrete Pods; duplicate names or UIDs make correlation ambiguous.
-	podNames := make(map[string]struct{}, len(incarnation.CapacityRefs))
-	podUIDs := make(map[PodUID]struct{}, len(incarnation.CapacityRefs))
-	for _, capacityRef := range incarnation.CapacityRefs {
-		if err := validateCapacityRef(capacityRef); err != nil {
-			return fmt.Errorf("replica incarnation %q: %w", incarnation.ReplicaID, err)
-		}
-		podName := capacityRef.Namespace + "/" + capacityRef.Name
-		if _, exists := podNames[podName]; exists {
-			return fmt.Errorf("replica incarnation %q repeats capacity Pod name %q", incarnation.ReplicaID, podName)
-		}
-		podNames[podName] = struct{}{}
-		if _, exists := podUIDs[capacityRef.UID]; exists {
-			return fmt.Errorf(
-				"replica incarnation %q repeats capacity Pod UID %q",
-				incarnation.ReplicaID,
-				capacityRef.UID,
-			)
-		}
-		podUIDs[capacityRef.UID] = struct{}{}
-	}
-	return nil
-}
-
-func validateTrafficSnapshot(snapshot TrafficSnapshot) error {
-	if snapshot.LatestCommand != nil {
-		if err := validateTrafficCommandObservation(*snapshot.LatestCommand); err != nil {
-			return fmt.Errorf("validate latest traffic command: %w", err)
-		}
-	}
-	if err := validateReplicaIncarnations("traffic-admitted", snapshot.Admitted, true); err != nil {
-		return err
-	}
-	if err := validateHistoricalReplicaIncarnations("traffic-drained", snapshot.Drained); err != nil {
-		return err
-	}
-	if overlap := intersectReplicaIncarnations(snapshot.Admitted, snapshot.Drained); len(overlap) != 0 {
-		return fmt.Errorf("traffic incarnations cannot be both admitted and drained: %v", overlap)
-	}
-	if err := validateTrafficRuntimeIdentities(snapshot); err != nil {
-		return err
-	}
-	if len(snapshot.Drained) != 0 && snapshot.LatestCommand == nil {
-		return errors.New("drained traffic state must carry its latest traffic command")
-	}
-	return nil
-}
-
-func validateTrafficCommandObservation(observation TrafficCommandObservation) error {
-	if err := validateTrafficCommand(observation.Command); err != nil {
-		return err
-	}
-	switch observation.Phase {
-	case TrafficCommandPhaseAccepted:
-		if observation.Failure != nil {
-			return errors.New("accepted traffic command must not carry a failure")
-		}
-	case TrafficCommandPhaseRefused:
-		if err := validateFailure(observation.Failure); err != nil {
-			return fmt.Errorf("validate refused traffic command: %w", err)
-		}
-		if observation.Failure.Classification != FailureClassificationTerminal {
-			return errors.New("refused traffic command requires a terminal failure")
-		}
-	case TrafficCommandPhaseFailed:
-		if err := validateFailure(observation.Failure); err != nil {
-			return fmt.Errorf("validate failed traffic command: %w", err)
-		}
-	default:
-		return fmt.Errorf("invalid traffic command phase %q", observation.Phase)
-	}
-	return nil
-}
-
-func validateTrafficCommand(command TrafficCommand) error {
-	if command.Action != TrafficActionAdmit && command.Action != TrafficActionWithdraw {
-		return fmt.Errorf("invalid traffic command action %q", command.Action)
-	}
-	if command.Request.Revision <= 0 {
-		return fmt.Errorf("traffic command revision must be positive: %d", command.Request.Revision)
-	}
-	if command.Request.OperationID == "" {
-		return errors.New("traffic command operation ID must not be empty")
-	}
-	if command.Request.TopologyGeneration <= 0 {
-		return fmt.Errorf(
-			"traffic command topology generation must be positive: %d",
-			command.Request.TopologyGeneration,
-		)
-	}
-	switch command.Action {
-	case TrafficActionAdmit:
-		if err := validateReplicaIncarnations("traffic-command", command.Request.Replicas, true); err != nil {
-			return err
-		}
-	case TrafficActionWithdraw:
-		if err := validateHistoricalReplicaIncarnations("traffic-command", command.Request.Replicas); err != nil {
-			return err
-		}
-		if err := validateReplicaRuntimeIdentities("traffic-command", command.Request.Replicas); err != nil {
-			return err
-		}
-	}
-	if len(command.Request.Replicas) == 0 {
-		return errors.New("traffic command must name at least one exact replica incarnation")
-	}
-	return nil
-}
-
-func validateHistoricalReplicaIncarnations(label string, incarnations []ReplicaIncarnation) error {
-	// Historical drains may share stable or physical identities, but each complete incarnation appears only once.
-	seen := make([]ReplicaIncarnation, 0, len(incarnations))
-	for _, incarnation := range incarnations {
-		if err := validateReplicaIncarnation(incarnation, true); err != nil {
-			return fmt.Errorf("validate %s replica: %w", label, err)
-		}
-		if slices.ContainsFunc(seen, func(candidate ReplicaIncarnation) bool {
-			return sameReplicaIncarnation(candidate, incarnation)
-		}) {
-			return fmt.Errorf("duplicate %s exact incarnation for logical replica %q", label, incarnation.ReplicaID)
-		}
-		seen = append(seen, incarnation)
-	}
-	return nil
-}
-
-func validateTrafficRuntimeIdentities(snapshot TrafficSnapshot) error {
-	incarnations := append(cloneReplicaIncarnations(snapshot.Admitted), snapshot.Drained...)
-	return validateReplicaRuntimeIdentities("traffic", incarnations)
-}
-
-func validateReplicaRuntimeIdentities(label string, incarnations []ReplicaIncarnation) error {
-	// A runtime identity remains globally exact even when old and new logical incarnations coexist.
-	runtimeIncarnations := make(map[RuntimeIncarnationID]ReplicaIncarnation)
-	for _, incarnation := range incarnations {
-		previous, exists := runtimeIncarnations[incarnation.RuntimeID]
-		if exists && !sameReplicaIncarnation(previous, incarnation) {
-			return fmt.Errorf(
-				"%s runtime incarnation ID %q identifies multiple exact incarnations",
-				label,
-				incarnation.RuntimeID,
-			)
-		}
-		runtimeIncarnations[incarnation.RuntimeID] = incarnation
-	}
-	return nil
-}
-
-func validateReleaseAuthorization(authorization ReleaseAuthorization) error {
-	if authorization.ID == "" {
-		return errors.New("release authorization ID must not be empty")
-	}
-	if authorization.OperationID == "" {
-		return errors.New("release authorization operation ID must not be empty")
-	}
-	if authorization.TopologyGeneration < 0 {
-		return fmt.Errorf(
-			"release authorization topology generation must not be negative: %d",
-			authorization.TopologyGeneration,
-		)
-	}
-	if authorization.TargetReplicas < 0 {
-		return fmt.Errorf(
-			"release authorization target replicas must not be negative: %d",
-			authorization.TargetReplicas,
-		)
-	}
-	replicaIDs := make(map[ReplicaID]struct{}, len(authorization.Replicas))
-	slotIDs := make(map[CapacitySlotID]struct{}, len(authorization.Replicas))
-	podNames := make(map[string]struct{})
-	podUIDs := make(map[PodUID]struct{})
-
-	// Require complete, physically disjoint authorization for every named replica.
-	for _, replica := range authorization.Replicas {
-		if replica.ReplicaID == "" {
-			return errors.New("authorized replica ID must not be empty")
-		}
-		if _, exists := replicaIDs[replica.ReplicaID]; exists {
-			return fmt.Errorf("duplicate authorized replica ID %q", replica.ReplicaID)
-		}
-		replicaIDs[replica.ReplicaID] = struct{}{}
-		if replica.SlotID == "" {
-			return fmt.Errorf("authorized replica %q has an empty capacity slot", replica.ReplicaID)
-		}
-		if _, exists := slotIDs[replica.SlotID]; exists {
-			return fmt.Errorf("duplicate authorized capacity slot ID %q", replica.SlotID)
-		}
-		slotIDs[replica.SlotID] = struct{}{}
-		if len(replica.CapacityRefs) == 0 {
-			continue
-		}
-
-		for _, capacityRef := range replica.CapacityRefs {
-			if err := validateCapacityRef(capacityRef); err != nil {
-				return fmt.Errorf("authorized replica %q: %w", replica.ReplicaID, err)
-			}
-			podName := capacityRef.Namespace + "/" + capacityRef.Name
-			if _, exists := podNames[podName]; exists {
-				return fmt.Errorf("authorized capacity Pod name %q appears more than once", podName)
-			}
-			podNames[podName] = struct{}{}
-			if _, exists := podUIDs[capacityRef.UID]; exists {
-				return fmt.Errorf("authorized capacity Pod UID %q appears more than once", capacityRef.UID)
-			}
-			podUIDs[capacityRef.UID] = struct{}{}
-		}
-	}
-	return nil
-}
-
-func validateCapacityReleaseObservation(observation CapacityReleaseObservation, releaseID string) error {
-	switch observation.Phase {
-	case CapacityReleasePhaseAbsent:
-		if observation.ReleaseID != "" && observation.ReleaseID != releaseID {
-			return fmt.Errorf("release observation ID %q does not match %q", observation.ReleaseID, releaseID)
-		}
-		if observation.Failure != nil {
-			return errors.New("absent release observation must not carry a failure")
-		}
-	case CapacityReleasePhaseApplying, CapacityReleasePhaseApplied:
-		if observation.ReleaseID != releaseID {
-			return fmt.Errorf("release observation ID %q does not match %q", observation.ReleaseID, releaseID)
-		}
-		if observation.Failure != nil {
-			return fmt.Errorf("release phase %q must not carry a failure", observation.Phase)
-		}
-	case CapacityReleasePhaseRefused:
-		if observation.ReleaseID != releaseID {
-			return fmt.Errorf("release observation ID %q does not match %q", observation.ReleaseID, releaseID)
-		}
-		if err := validateFailure(observation.Failure); err != nil {
-			return fmt.Errorf("validate refused release: %w", err)
-		}
-	case CapacityReleasePhaseFailed:
-		if observation.ReleaseID != releaseID {
-			return fmt.Errorf("release observation ID %q does not match %q", observation.ReleaseID, releaseID)
-		}
-		if err := validateFailure(observation.Failure); err != nil {
-			return fmt.Errorf("validate failed release: %w", err)
-		}
-	default:
-		return fmt.Errorf("invalid capacity release phase %q", observation.Phase)
-	}
-	return nil
-}
-
-func validReplicaAvailability(availability ReplicaAvailability) bool {
-	return availability == ReplicaAvailabilityAvailable ||
-		availability == ReplicaAvailabilityUnavailable ||
-		availability == ReplicaAvailabilityUnknown
-}
-
-func cloneCapacitySnapshot(snapshot CapacitySnapshot) CapacitySnapshot {
-	cloned := CapacitySnapshot{
-		Allocations:        make([]ReplicaAllocation, len(snapshot.Allocations)),
-		FencedReplicaSlots: slices.Clone(snapshot.FencedReplicaSlots),
-	}
-	for i, allocation := range snapshot.Allocations {
-		cloned.Allocations[i] = allocation
-		cloned.Allocations[i].Incarnation = cloneReplicaIncarnation(allocation.Incarnation)
+func cloneReplicaMemberships(values []ReplicaMembership) []ReplicaMembership {
+	cloned := make([]ReplicaMembership, 0, len(values))
+	for _, value := range values {
+		cloned = append(cloned, cloneReplicaMembership(value))
 	}
 	return cloned
 }
 
-func requiredReplicaAllocations(incarnations []ReplicaIncarnation) []RequiredReplicaAllocation {
-	required := make([]RequiredReplicaAllocation, len(incarnations))
-	for i, incarnation := range incarnations {
-		required[i] = RequiredReplicaAllocation{
-			ReplicaID: incarnation.ReplicaID,
-			SlotID:    incarnation.SlotID,
-		}
-	}
-	return normalizeRequiredReplicaAllocations(required)
+func cloneTopology(value MembershipTopology) MembershipTopology {
+	value.Replicas = cloneReplicaMemberships(value.Replicas)
+	return value
 }
 
-func restoredReplicaAllocations(memberships []ReplicaNativeMembership) []RequiredReplicaAllocation {
-	required := make([]RequiredReplicaAllocation, len(memberships))
-	for i, membership := range memberships {
-		required[i] = RequiredReplicaAllocation{
-			ReplicaID: membership.ReplicaID,
-			SlotID:    membership.SlotID,
+func cloneResolvedPlan(value ResolvedPlan) ResolvedPlan {
+	switch change := value.Change.(type) {
+	case *GrowChange:
+		value.Change = &GrowChange{Replicas: slices.Clone(change.Replicas)}
+	case *RetireChange:
+		value.Change = &RetireChange{Replicas: slices.Clone(change.Replicas)}
+	case *ReduceToSurvivorsChange:
+		value.Change = &ReduceToSurvivorsChange{Survivors: slices.Clone(change.Survivors)}
+	case *RestoreChange:
+		replicas := make([]RestorationTarget, 0, len(change.Replicas))
+		for _, replica := range change.Replicas {
+			replica.NativeMembers = cloneNativeMembers(replica.NativeMembers)
+			replicas = append(replicas, replica)
 		}
+		value.Change = &RestoreChange{Replicas: replicas}
+	case *RemapChange:
+		membership := make([]ReplicaNativeMembership, 0, len(change.Membership))
+		for _, replica := range change.Membership {
+			replica.NativeMembers = cloneNativeMembers(replica.NativeMembers)
+			membership = append(membership, replica)
+		}
+		value.Change = &RemapChange{Membership: membership}
+	case nil:
+		value.Change = nil
 	}
-	return normalizeRequiredReplicaAllocations(required)
+	return value
 }
 
-func normalizeRequiredReplicaAllocations(required []RequiredReplicaAllocation) []RequiredReplicaAllocation {
-	normalized := slices.Clone(required)
-	slices.SortFunc(normalized, func(left, right RequiredReplicaAllocation) int {
-		if comparison := cmp.Compare(left.ReplicaID, right.ReplicaID); comparison != 0 {
-			return comparison
+func cloneReplicaRecord(value ReplicaRecord) ReplicaRecord {
+	if value.Current != nil {
+		current := cloneReplicaIncarnation(*value.Current)
+		value.Current = &current
+	}
+	history := value.History
+	value.History = make([]ReplicaHistoryEntry, 0, len(history))
+	for _, entry := range history {
+		entry.Incarnation = cloneReplicaIncarnation(entry.Incarnation)
+		entry.NativeMembers = cloneNativeMembers(entry.NativeMembers)
+		value.History = append(value.History, entry)
+	}
+	return value
+}
+
+func cloneRegistry(value ReplicaRegistry) ReplicaRegistry {
+	replicas := value.Replicas
+	value.Replicas = make([]ReplicaRecord, 0, len(replicas))
+	for _, replica := range replicas {
+		value.Replicas = append(value.Replicas, cloneReplicaRecord(replica))
+	}
+	return value
+}
+
+func cloneTopologyHistory(value TopologyHistory) TopologyHistory {
+	snapshots := value.Snapshots
+	value.Snapshots = make([]MembershipTopology, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		value.Snapshots = append(value.Snapshots, cloneTopology(snapshot))
+	}
+	return value
+}
+
+func cloneFailure(value *Failure) *Failure {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+func cloneCapacityTarget(value *CapacityTarget) *CapacityTarget {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	cloned.Replicas = make([]CapacityReplicaTarget, 0, len(value.Replicas))
+	for _, replica := range value.Replicas {
+		if replica.Incarnation != nil {
+			incarnation := cloneReplicaIncarnation(*replica.Incarnation)
+			replica.Incarnation = &incarnation
 		}
-		return cmp.Compare(left.SlotID, right.SlotID)
+		cloned.Replicas = append(cloned.Replicas, replica)
+	}
+	cloned.ReleaseFences = make([]ReleaseFence, 0, len(value.ReleaseFences))
+	for _, fence := range value.ReleaseFences {
+		fence.CapacityRefs = cloneCapacityRefs(fence.CapacityRefs)
+		cloned.ReleaseFences = append(cloned.ReleaseFences, fence)
+	}
+	return &cloned
+}
+
+func cloneCapacityObservation(value CapacityObservation) CapacityObservation {
+	allocations := value.Allocations
+	value.Allocations = make([]CapacityAllocation, 0, len(allocations))
+	for _, allocation := range allocations {
+		allocation.Incarnation = cloneReplicaIncarnation(allocation.Incarnation)
+		value.Allocations = append(value.Allocations, allocation)
+	}
+	value.ReleaseFences = cloneReleaseFences(value.ReleaseFences)
+	return value
+}
+
+func cloneTrafficTarget(value *TrafficTarget) *TrafficTarget {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	cloned.Admitted = cloneReplicaMemberships(value.Admitted)
+	cloned.Drain = cloneReplicaMemberships(value.Drain)
+	return &cloned
+}
+
+func cloneTrafficObservation(value TrafficObservation) TrafficObservation {
+	value.Admitted = cloneReplicaMemberships(value.Admitted)
+	value.Draining = cloneReplicaMemberships(value.Draining)
+	value.Drained = cloneReplicaMemberships(value.Drained)
+	return value
+}
+
+func cloneServingProof(value *ServingProof) *ServingProof {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+func cloneTransition(value *TransitionStatus) *TransitionStatus {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	cloned.Spec.Plan = cloneResolvedPlan(value.Spec.Plan)
+	cloned.Membership.JoiningReplicas = slices.Clone(value.Membership.JoiningReplicas)
+	cloned.Membership.Failure = cloneFailure(value.Membership.Failure)
+	cloned.Verification.Proof = cloneServingProof(value.Verification.Proof)
+	cloned.Verification.Failure = cloneFailure(value.Verification.Failure)
+	cloned.Failure = cloneFailure(value.Failure)
+	return &cloned
+}
+
+func cloneStatus(value GroupStatus) GroupStatus {
+	value.Registry = cloneRegistry(value.Registry)
+	value.Topologies = cloneTopologyHistory(value.Topologies)
+	value.Capacity.Desired = cloneCapacityTarget(value.Capacity.Desired)
+	value.Capacity.Observed = cloneCapacityObservation(value.Capacity.Observed)
+	value.Traffic.Desired = cloneTrafficTarget(value.Traffic.Desired)
+	value.Traffic.Observed = cloneTrafficObservation(value.Traffic.Observed)
+	value.Transition = cloneTransition(value.Transition)
+	return value
+}
+
+// Find returns a copy of the canonical replica record with the given identity.
+func (r ReplicaRegistry) Find(replicaID ReplicaID) (ReplicaRecord, bool) {
+	for _, replica := range r.Replicas {
+		if replica.ReplicaID == replicaID {
+			return cloneReplicaRecord(replica), true
+		}
+	}
+	return ReplicaRecord{}, false
+}
+
+// Snapshot returns a copy of the immutable topology with the given generation.
+func (h TopologyHistory) Snapshot(generation int64) (MembershipTopology, bool) {
+	for _, snapshot := range h.Snapshots {
+		if snapshot.Generation == generation {
+			return cloneTopology(snapshot), true
+		}
+	}
+	return MembershipTopology{}, false
+}
+
+// Current returns the current immutable topology snapshot.
+func (h TopologyHistory) Current() (MembershipTopology, bool) {
+	return h.Snapshot(h.CurrentGeneration)
+}
+
+func normalizeCapacityRefs(values []CapacityRef) []CapacityRef {
+	normalized := cloneCapacityRefs(values)
+	slices.SortFunc(normalized, func(left, right CapacityRef) int {
+		if left.Name != right.Name {
+			return strings.Compare(left.Name, right.Name)
+		}
+		return strings.Compare(string(left.UID), string(right.UID))
 	})
 	return normalized
 }
 
-func validateCapacityRequest(request CapacityRequest) error {
-	if request.OperationID == "" {
-		return errors.New("capacity request operation ID must not be empty")
+func normalizeNativeMembers(values []NativeMemberID) []NativeMemberID {
+	normalized := cloneNativeMembers(values)
+	slices.SortFunc(normalized, func(left, right NativeMemberID) int {
+		return strings.Compare(string(left), string(right))
+	})
+	return normalized
+}
+
+func normalizeIncarnation(value ReplicaIncarnation) ReplicaIncarnation {
+	value.CapacityRefs = normalizeCapacityRefs(value.CapacityRefs)
+	return value
+}
+
+func normalizeMemberships(values []ReplicaMembership) []ReplicaMembership {
+	normalized := cloneReplicaMemberships(values)
+	for index := range normalized {
+		normalized[index].NativeMembers = normalizeNativeMembers(normalized[index].NativeMembers)
 	}
-	if request.TopologyGeneration <= 0 {
-		return fmt.Errorf(
-			"capacity request topology generation must be positive: %d",
-			request.TopologyGeneration,
+	slices.SortFunc(normalized, func(left, right ReplicaMembership) int {
+		return strings.Compare(string(left.ReplicaID), string(right.ReplicaID))
+	})
+	return normalized
+}
+
+func normalizeReplicaIDs(values []ReplicaID) []ReplicaID {
+	normalized := slices.Clone(values)
+	slices.SortFunc(normalized, func(left, right ReplicaID) int {
+		return strings.Compare(string(left), string(right))
+	})
+	return normalized
+}
+
+func sameCapacityRefs(left, right []CapacityRef) bool {
+	return slices.Equal(normalizeCapacityRefs(left), normalizeCapacityRefs(right))
+}
+
+func sameIncarnation(left, right ReplicaIncarnation) bool {
+	return left.ReplicaID == right.ReplicaID &&
+		left.SlotID == right.SlotID &&
+		left.RuntimeIncarnation == right.RuntimeIncarnation &&
+		sameCapacityRefs(left.CapacityRefs, right.CapacityRefs)
+}
+
+func membershipMatchesIncarnation(membership ReplicaMembership, incarnation ReplicaIncarnation) bool {
+	return membership.ReplicaID == incarnation.ReplicaID &&
+		membership.RuntimeIncarnation == incarnation.RuntimeIncarnation
+}
+
+func sameMembership(left, right ReplicaMembership) bool {
+	return left.ReplicaID == right.ReplicaID &&
+		left.RuntimeIncarnation == right.RuntimeIncarnation &&
+		slices.Equal(normalizeNativeMembers(left.NativeMembers), normalizeNativeMembers(right.NativeMembers))
+}
+
+func sameMemberships(left, right []ReplicaMembership) bool {
+	left = normalizeMemberships(left)
+	right = normalizeMemberships(right)
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if !sameMembership(left[index], right[index]) {
+			return false
+		}
+	}
+	return true
+}
+
+func sameTopology(left, right MembershipTopology) bool {
+	return left.Generation == right.Generation && sameMemberships(left.Replicas, right.Replicas)
+}
+
+func membershipByID(topology MembershipTopology, replicaID ReplicaID) (ReplicaMembership, bool) {
+	for _, membership := range topology.Replicas {
+		if membership.ReplicaID == replicaID {
+			return cloneReplicaMembership(membership), true
+		}
+	}
+	return ReplicaMembership{}, false
+}
+
+func allocationByID(observation CapacityObservation, replicaID ReplicaID) (CapacityAllocation, bool) {
+	for _, allocation := range observation.Allocations {
+		if allocation.Incarnation.ReplicaID == replicaID {
+			allocation.Incarnation = cloneReplicaIncarnation(allocation.Incarnation)
+			return allocation, true
+		}
+	}
+	return CapacityAllocation{}, false
+}
+
+func appendTopology(history TopologyHistory, topology MembershipTopology) (TopologyHistory, error) {
+	if topology.Generation <= 0 {
+		return history, errors.New("topology generation must be positive")
+	}
+
+	// An equal generation is an immutable replay, while a lower unseen generation is stale.
+	if existing, found := history.Snapshot(topology.Generation); found {
+		if !sameTopology(existing, topology) {
+			return history, fmt.Errorf("topology generation %d changed payload", topology.Generation)
+		}
+		history.CurrentGeneration = topology.Generation
+		return history, nil
+	}
+	if history.CurrentGeneration >= topology.Generation {
+		return history, fmt.Errorf(
+			"topology generation %d does not advance current generation %d",
+			topology.Generation,
+			history.CurrentGeneration,
 		)
 	}
-	if request.TargetReplicas < 0 {
-		return fmt.Errorf("capacity request target replicas must not be negative: %d", request.TargetReplicas)
-	}
-	if int32(len(request.RequiredReplicas)) > request.TargetReplicas {
-		return fmt.Errorf(
-			"capacity request requires %d exact replicas above target %d",
-			len(request.RequiredReplicas),
-			request.TargetReplicas,
+
+	history.Snapshots = append(history.Snapshots, cloneTopology(topology))
+	history.CurrentGeneration = topology.Generation
+	return history, nil
+}
+
+func topologyRuntimeDigest(topology MembershipTopology) string {
+	memberships := normalizeMemberships(topology.Replicas)
+	var input strings.Builder
+	_, _ = fmt.Fprintf(&input, "generation=%d;", topology.Generation)
+	for _, membership := range memberships {
+		_, _ = fmt.Fprintf(
+			&input,
+			"replica=%s;runtime=%s;",
+			membership.ReplicaID,
+			membership.RuntimeIncarnation,
 		)
-	}
-
-	replicaIDs := make(map[ReplicaID]struct{}, len(request.RequiredReplicas))
-	slotIDs := make(map[CapacitySlotID]struct{}, len(request.RequiredReplicas))
-	for _, required := range request.RequiredReplicas {
-		if required.ReplicaID == "" {
-			return errors.New("capacity request required replica ID must not be empty")
-		}
-		if required.SlotID == "" {
-			return fmt.Errorf("capacity request required replica %q has an empty slot ID", required.ReplicaID)
-		}
-		if _, exists := replicaIDs[required.ReplicaID]; exists {
-			return fmt.Errorf("capacity request repeats required replica %q", required.ReplicaID)
-		}
-		if _, exists := slotIDs[required.SlotID]; exists {
-			return fmt.Errorf("capacity request repeats required slot %q", required.SlotID)
-		}
-		replicaIDs[required.ReplicaID] = struct{}{}
-		slotIDs[required.SlotID] = struct{}{}
-	}
-	return nil
-}
-
-func cloneTrafficSnapshot(snapshot TrafficSnapshot) TrafficSnapshot {
-	return TrafficSnapshot{
-		LatestCommand: cloneTrafficCommandObservation(snapshot.LatestCommand),
-		Admitted:      cloneReplicaIncarnations(snapshot.Admitted),
-		Drained:       cloneReplicaIncarnations(snapshot.Drained),
-	}
-}
-
-func cloneTrafficCommandObservation(observation *TrafficCommandObservation) *TrafficCommandObservation {
-	if observation == nil {
-		return nil
-	}
-	cloned := *observation
-	cloned.Command = *cloneTrafficCommand(&observation.Command)
-	cloned.Failure = cloneFailure(observation.Failure)
-	return &cloned
-}
-
-func cloneTrafficCommand(command *TrafficCommand) *TrafficCommand {
-	if command == nil {
-		return nil
-	}
-	cloned := *command
-	cloned.Request.Replicas = cloneReplicaIncarnations(command.Request.Replicas)
-	return &cloned
-}
-
-func sameTrafficCommand(left, right TrafficCommand) bool {
-	return left.Action == right.Action &&
-		left.Request.Revision == right.Request.Revision &&
-		left.Request.OperationID == right.Request.OperationID &&
-		left.Request.TopologyGeneration == right.Request.TopologyGeneration &&
-		sameReplicaIncarnations(left.Request.Replicas, right.Request.Replicas)
-}
-
-func sameTrafficCommandPayload(left, right TrafficCommand) bool {
-	left.Request.Revision = 1
-	right.Request.Revision = 1
-	return sameTrafficCommand(left, right)
-}
-
-func cloneReleaseAuthorization(authorization *ReleaseAuthorization) *ReleaseAuthorization {
-	if authorization == nil {
-		return nil
-	}
-
-	cloned := *authorization
-	cloned.Replicas = make([]AuthorizedReplica, len(authorization.Replicas))
-	for i, replica := range authorization.Replicas {
-		cloned.Replicas[i] = AuthorizedReplica{
-			ReplicaID:    replica.ReplicaID,
-			SlotID:       replica.SlotID,
-			CapacityRefs: slices.Clone(replica.CapacityRefs),
+		for _, nativeMember := range normalizeNativeMembers(membership.NativeMembers) {
+			_, _ = fmt.Fprintf(&input, "native=%s;", nativeMember)
 		}
 	}
-	return &cloned
-}
 
-func replicaAllocationByID(snapshot CapacitySnapshot) map[ReplicaID]ReplicaAllocation {
-	allocations := make(map[ReplicaID]ReplicaAllocation, len(snapshot.Allocations))
-	for _, allocation := range snapshot.Allocations {
-		allocations[allocation.Incarnation.ReplicaID] = allocation
-	}
-	return allocations
-}
-
-func validateReplicaIncarnations(
-	label string,
-	incarnations []ReplicaIncarnation,
-	requireRuntime bool,
-) error {
-	replicaIDs := make(map[ReplicaID]struct{}, len(incarnations))
-	slotIDs := make(map[CapacitySlotID]struct{}, len(incarnations))
-	runtimeIDs := make(map[RuntimeIncarnationID]struct{}, len(incarnations))
-	podNames := make(map[string]struct{})
-	podUIDs := make(map[PodUID]struct{})
-	for _, incarnation := range incarnations {
-		if err := validateReplicaIncarnation(incarnation, requireRuntime); err != nil {
-			return fmt.Errorf("validate %s replica: %w", label, err)
-		}
-		if _, exists := replicaIDs[incarnation.ReplicaID]; exists {
-			return fmt.Errorf("duplicate %s logical replica ID %q", label, incarnation.ReplicaID)
-		}
-		replicaIDs[incarnation.ReplicaID] = struct{}{}
-		if _, exists := slotIDs[incarnation.SlotID]; exists {
-			return fmt.Errorf("duplicate %s capacity slot ID %q", label, incarnation.SlotID)
-		}
-		slotIDs[incarnation.SlotID] = struct{}{}
-		if incarnation.RuntimeID != "" {
-			if _, exists := runtimeIDs[incarnation.RuntimeID]; exists {
-				return fmt.Errorf("duplicate %s runtime incarnation ID %q", label, incarnation.RuntimeID)
-			}
-			runtimeIDs[incarnation.RuntimeID] = struct{}{}
-		}
-		for _, capacityRef := range incarnation.CapacityRefs {
-			podName := capacityRef.Namespace + "/" + capacityRef.Name
-			if _, exists := podNames[podName]; exists {
-				return fmt.Errorf("duplicate %s capacity Pod name %q", label, podName)
-			}
-			podNames[podName] = struct{}{}
-			if _, exists := podUIDs[capacityRef.UID]; exists {
-				return fmt.Errorf("duplicate %s capacity Pod UID %q", label, capacityRef.UID)
-			}
-			podUIDs[capacityRef.UID] = struct{}{}
-		}
-	}
-	return nil
-}
-
-func cloneReplicaIncarnation(incarnation ReplicaIncarnation) ReplicaIncarnation {
-	cloned := incarnation
-	cloned.CapacityRefs = slices.Clone(incarnation.CapacityRefs)
-	return cloned
-}
-
-func cloneReplicaIncarnations(incarnations []ReplicaIncarnation) []ReplicaIncarnation {
-	if incarnations == nil {
-		return nil
-	}
-	cloned := make([]ReplicaIncarnation, len(incarnations))
-	for i, incarnation := range incarnations {
-		cloned[i] = cloneReplicaIncarnation(incarnation)
-	}
-	return cloned
-}
-
-func normalizeReplicaIncarnations(incarnations []ReplicaIncarnation) []ReplicaIncarnation {
-	normalized := cloneReplicaIncarnations(incarnations)
-	for i := range normalized {
-		slices.SortFunc(normalized[i].CapacityRefs, compareCapacityRefs)
-	}
-	slices.SortFunc(normalized, compareReplicaIncarnations)
-	return slices.CompactFunc(normalized, sameReplicaIncarnation)
-}
-
-func intersectReplicaIncarnations(left, right []ReplicaIncarnation) []ReplicaIncarnation {
-	intersection := make([]ReplicaIncarnation, 0)
-	for _, candidate := range normalizeReplicaIncarnations(left) {
-		if slices.ContainsFunc(right, func(other ReplicaIncarnation) bool {
-			return sameReplicaIncarnation(candidate, other)
-		}) {
-			intersection = append(intersection, candidate)
-		}
-	}
-	return intersection
-}
-
-func missingReplicaIncarnations(required, observed []ReplicaIncarnation) []ReplicaIncarnation {
-	missing := make([]ReplicaIncarnation, 0)
-	for _, candidate := range normalizeReplicaIncarnations(required) {
-		if !slices.ContainsFunc(observed, func(other ReplicaIncarnation) bool {
-			return sameReplicaIncarnation(candidate, other)
-		}) {
-			missing = append(missing, candidate)
-		}
-	}
-	return missing
-}
-
-func containsAllReplicaIncarnations(haystack, needles []ReplicaIncarnation) bool {
-	return len(intersectReplicaIncarnations(haystack, needles)) == len(normalizeReplicaIncarnations(needles))
-}
-
-func sameReplicaIncarnations(left, right []ReplicaIncarnation) bool {
-	return slices.EqualFunc(
-		normalizeReplicaIncarnations(left),
-		normalizeReplicaIncarnations(right),
-		sameReplicaIncarnation,
-	)
-}
-
-func replicaIncarnationIDs(incarnations []ReplicaIncarnation) []ReplicaID {
-	replicaIDs := make([]ReplicaID, len(incarnations))
-	for i, incarnation := range incarnations {
-		replicaIDs[i] = incarnation.ReplicaID
-	}
-	return normalizeReplicaIDs(replicaIDs)
-}
-
-func sameReplicaIncarnation(left, right ReplicaIncarnation) bool {
-	return compareReplicaIncarnations(left, right) == 0
-}
-
-func compareReplicaIncarnations(left, right ReplicaIncarnation) int {
-	if comparison := cmp.Compare(left.ReplicaID, right.ReplicaID); comparison != 0 {
-		return comparison
-	}
-	if comparison := cmp.Compare(left.SlotID, right.SlotID); comparison != 0 {
-		return comparison
-	}
-	if comparison := cmp.Compare(left.RuntimeID, right.RuntimeID); comparison != 0 {
-		return comparison
-	}
-	leftRefs := slices.Clone(left.CapacityRefs)
-	rightRefs := slices.Clone(right.CapacityRefs)
-	slices.SortFunc(leftRefs, compareCapacityRefs)
-	slices.SortFunc(rightRefs, compareCapacityRefs)
-	return slices.CompareFunc(leftRefs, rightRefs, compareCapacityRefs)
-}
-
-func compareCapacityRefs(left, right CapacityRef) int {
-	if comparison := cmp.Compare(left.Namespace, right.Namespace); comparison != 0 {
-		return comparison
-	}
-	if comparison := cmp.Compare(left.Name, right.Name); comparison != 0 {
-		return comparison
-	}
-	return cmp.Compare(left.UID, right.UID)
-}
-
-func containsAllReplicaIDs(haystack []ReplicaID, needles []ReplicaID) bool {
-	return len(intersectReplicaIDs(haystack, needles)) == len(needles)
+	digest := sha256.Sum256([]byte(input.String()))
+	return hex.EncodeToString(digest[:])
 }
