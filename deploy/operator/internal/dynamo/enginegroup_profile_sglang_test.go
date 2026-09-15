@@ -152,8 +152,8 @@ func TestResolveSGLangProfileGeometryCanonicalIdentity(t *testing.T) {
 	assert.Equal(t, canonical, aliases)
 }
 
-func TestResolveSGLangProfileGeometryFingerprintTargetBoundary(t *testing.T) {
-	t.Log("resolve two creation-time sizes under the same immutable maximum")
+func TestResolveSGLangProfileGeometryFingerprintIncludesStorageEPSize(t *testing.T) {
+	t.Log("resolve two immutable expert-storage layouts under the same maximum")
 	initialFour := newTestSGLangProfileGeometrySource()
 	initialFour.Args = setTestSGLangOption(initialFour.Args, sglangMaximumEPSizeOption, "16")
 	geometryFour, err := ResolveSGLangProfileGeometry(initialFour)
@@ -168,8 +168,8 @@ func TestResolveSGLangProfileGeometryFingerprintTargetBoundary(t *testing.T) {
 	geometryEight, err := ResolveSGLangProfileGeometry(initialEight)
 	require.NoError(t, err)
 
-	t.Log("verify creation-time capacity does not change the fixed profile identity")
-	assert.Equal(t, geometryFour.Fingerprint, geometryEight.Fingerprint)
+	t.Log("verify the initial EP width changes the fixed expert-storage identity")
+	assert.NotEqual(t, geometryFour.Fingerprint, geometryEight.Fingerprint)
 
 	t.Log("resolve a different immutable reserved maximum")
 	maximumTwelve := newTestSGLangProfileGeometrySource()
