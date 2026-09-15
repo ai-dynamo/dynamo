@@ -135,6 +135,8 @@ jobs:
       - power-agent
       - sidecar-build
       - vllm-build
+      - vllm-cpu-build
+      - vllm-cpu-test
       - vllm-local-dev-build
       - sglang-local-dev-build
       - trtllm-local-dev-build
@@ -406,6 +408,56 @@ jobs:
       contents: read
       actions: read
     secrets: inherit
+
+  vllm-cpu-build:
+    name: vllm-cpu-runtime
+    needs: [changed-files]
+    if: |
+      needs.changed-files.outputs.core == 'true' ||
+      needs.changed-files.outputs.vllm == 'true'
+    uses: $/.github/workflows/shared-build-image.yml
+    with:
+      framework: vllm
+      target: runtime
+      device: cpu
+      build_test_image: false
+      cuda_version: '[""]'
+      platform: 'linux/amd64'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+    permissions:
+      contents: read
+      actions: read
+    secrets: inherit
+
+  vllm-cpu-test:
+    name: vllm CPU image smoke test
+    needs: [vllm-cpu-build]
+    runs-on: prod-tester-amd-v2
+    timeout-minutes: 10
+    container:
+      image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}-${{ needs.vllm-cpu-build.outputs.target_tag_plain }}
+      env:
+        HOME: /__w/dynamo/dynamo
+        USER: dynamo
+    env:
+      OMP_NUM_THREADS: '2'
+      VLLM_CPU_KVCACHE_SPACE: '1'
+      VLLM_CPU_OMP_THREADS_BIND: nobind
+      # ARC job containers provide only 64 MiB of shared memory.
+      VLLM_ENABLE_V1_MULTIPROCESSING: '0'
+      HF_HUB_OFFLINE: '1'
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Validate CPU runtime and generation
+        working-directory: /workspace
+        env:
+          XDG_CACHE_HOME: ${{ runner.temp }}/vllm-cpu-cache
+        run: python "$GITHUB_WORKSPACE/.github/scripts/validate_vllm_cpu.py"
 
   vllm-dev-build:
     name: vllm-dev
