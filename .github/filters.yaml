@@ -359,7 +359,6 @@ sidecar:
   - '!**/*.rst'
 
 vllm:
-  - '.github/scripts/validate_vllm_cpu.py'
   - 'container/deps/requirements.vllm.txt'
   - 'container/deps/vllm/**'
   - 'examples/backends/vllm/**'

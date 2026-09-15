@@ -15,11 +15,6 @@ on:
         required: false
         type: string
         default: 'runtime'
-      device:
-        description: 'Target device for Docker rendering (cuda, cpu, xpu)'
-        required: false
-        type: string
-        default: 'cuda'
       cuda_version:
         description: 'CUDA versions to build as a JSON array'
         required: true
@@ -82,11 +77,6 @@ on:
         required: false
         type: boolean
         default: false
-      build_test_image:
-        description: 'Build the test-dependency image after the runtime image'
-        required: false
-        type: boolean
-        default: true
       extra_build_args:
         description: 'Extra build args to pass to docker build (newline-separated)'
         required: false
@@ -252,9 +242,6 @@ jobs:
           if [ "${{ inputs.make_efa }}" == "true" ]; then
             TAG_BUILDER+="-efa"
           fi
-          if [ "${{ inputs.device }}" != "cuda" ]; then
-            TAG_BUILDER+="-${{ inputs.device }}"
-          fi
           TARGET_TAG_PLAIN=${TAG_BUILDER}
           if [ "${{ matrix.cuda_version }}" != "" ]; then
             CUDA_VERSION="${{ matrix.cuda_version }}"
@@ -308,7 +295,7 @@ jobs:
         id: calculate-builder-flavor
         shell: bash
         run: |
-          if [[ "${{ inputs.device }}" == "cpu" || ${{ inputs.framework }} != @(vllm|sglang|trtllm) ]]; then
+          if [[ ${{ inputs.framework }} != @(vllm|sglang|trtllm) ]]; then
             echo "builder_flavor=general" >> $GITHUB_OUTPUT
           else
             echo "builder_flavor=${{ inputs.framework }}" >> $GITHUB_OUTPUT
@@ -457,7 +444,6 @@ jobs:
           python ./container/render.py \
               --target=${{ inputs.target }} \
               --framework=${{ inputs.framework }} \
-              --device=${{ inputs.device }} \
               --platform=${{ inputs.platform }} \
               ${CUDA_FLAG} \
               ${MAKE_EFA_FLAG} \
@@ -606,7 +592,7 @@ jobs:
           # RC promotions inherit the source archive.
           archive_sources: ${{ inputs.archive_sources }}
       - name: Refresh BuildKit builder
-        if: ${{ inputs.build_test_image && inputs.target != 'dev' && inputs.target != 'local-dev' && inputs.target != 'frontend' }}
+        if: ${{ inputs.target != 'dev' && inputs.target != 'local-dev' && inputs.target != 'frontend' }}
         uses: $/.github/actions/builder-refresher
         with:
           builder_name: ${{ inputs.builder_name }}
@@ -615,7 +601,7 @@ jobs:
           cuda_version: ${{ matrix.cuda_version }}
           namespace: ${{ vars.BUILDKIT_NAMESPACE }}
       - name: Build and Push Test Image
-        if: ${{ inputs.build_test_image && !inputs.compliance_only && inputs.target != 'dev' && inputs.target != 'local-dev' && inputs.target != 'frontend' }}
+        if: ${{ !inputs.compliance_only && inputs.target != 'dev' && inputs.target != 'local-dev' && inputs.target != 'frontend' }}
         shell: bash
         run: |
           PUSH_ARGS=""
