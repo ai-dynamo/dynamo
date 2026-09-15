@@ -1069,7 +1069,7 @@ mod tests {
         assert_eq!(
             err.to_string(),
             format!(
-                "InvalidArgument: Maximum of {} stop sequences allowed, got {}",
+                "InvalidRequest: Maximum of {} stop sequences allowed, got {}",
                 MAX_STOP_SEQUENCES,
                 MAX_STOP_SEQUENCES + 1
             )
@@ -1082,7 +1082,7 @@ mod tests {
         assert_eq!(
             err.to_string(),
             format!(
-                "InvalidArgument: Maximum of {} stop token IDs allowed, got {}",
+                "InvalidRequest: Maximum of {} stop token IDs allowed, got {}",
                 MAX_STOP_SEQUENCES,
                 MAX_STOP_SEQUENCES + 1
             )
@@ -1098,7 +1098,7 @@ mod tests {
         assert_eq!(
             err.to_string(),
             format!(
-                "InvalidArgument: Maximum of {} stop token IDs allowed, got {}",
+                "InvalidRequest: Maximum of {} stop token IDs allowed, got {}",
                 MAX_STOP_SEQUENCES,
                 MAX_STOP_SEQUENCES + 1
             )
