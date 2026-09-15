@@ -117,7 +117,7 @@ on:
         type: boolean
         default: true
       source_ref:
-        description: 'Git ref/SHA to checkout and to resolve image tags against. Empty = caller SHA (github.sha).'
+        description: 'Git ref/SHA for image tags and checkout. Sidecar jobs always check out the caller SHA. Empty = caller SHA (github.sha).'
         required: false
         type: string
         default: ''
@@ -223,7 +223,7 @@ jobs:
         id: checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
+          ref: ${{ inputs.sidecar_backend != '' && github.sha || inputs.source_ref || github.sha }}
       - name: Download sidecar binary
         if: ${{ inputs.sidecar_backend != '' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
@@ -238,33 +238,24 @@ jobs:
           CONTAINER_WORKSPACE: ${{ inputs.container_workspace }}
         run: |
           set -euo pipefail
-          # No CI-only derived image: install straight into a workspace-local
-          # dir on PATH (writable regardless of the container's uid/gid, unlike
-          # /usr/local/bin) rather than baking a dynamo-*-sidecar binary into a
-          # separate pushed image per backend.
+          # Use a workspace-local directory writable by the container user.
           bin_dir="${GITHUB_WORKSPACE}/.sidecar-bin"
           mkdir -p "${bin_dir}"
           install -m755 "sidecar-artifact/dynamo-${SIDECAR_BACKEND}-sidecar" \
             "${bin_dir}/dynamo-${SIDECAR_BACKEND}-sidecar"
-          if [ "${SIDECAR_BACKEND}" = "vllm" ]; then
-            # vllm-rs ships inside the vllm wheel, not on PATH; agg.sh expects it
-            # on PATH the same way lib/sidecar/vllm/deploy/agg.yaml resolves it.
-            ln -sf "$(python3 -c 'import os,vllm; print(os.path.join(os.path.dirname(vllm.__file__), "vllm-rs"))')" \
-              "${bin_dir}/vllm-rs"
-          fi
           echo "${bin_dir}" >> "${GITHUB_PATH}"
-          # pytest runs from CONTAINER_WORKSPACE, the image's baked-in tree, not
-          # this checkout. When source_ref fell back to a floating tag (a
-          # lib/sidecar/**-only PR that didn't rebuild the backend image), that
-          # baked-in lib/sidecar reflects the last main merge, not this PR. Use
-          # rm+cp (not a plain COPY-style merge) so files this PR deleted don't
-          # linger from the base image.
           if [ -z "${CONTAINER_WORKSPACE}" ]; then
-            echo "::error::container_workspace is empty; refusing to rm -rf lib/sidecar under it"
+            echo "::error::container_workspace is empty; refusing to replace test files"
             exit 1
           fi
-          rm -rf "${CONTAINER_WORKSPACE}/lib/sidecar"
-          cp -r "${GITHUB_WORKSPACE}/lib/sidecar" "${CONTAINER_WORKSPACE}/lib/sidecar"
+          if [ ! "${GITHUB_WORKSPACE}" -ef "${CONTAINER_WORKSPACE}" ]; then
+            # Replace the test inputs so files deleted by the PR cannot linger.
+            for path in lib/sidecar tests examples/common conftest.py pyproject.toml Cargo.toml; do
+              rm -rf "${CONTAINER_WORKSPACE}/${path}"
+              mkdir -p "$(dirname "${CONTAINER_WORKSPACE}/${path}")"
+              cp -r "${GITHUB_WORKSPACE}/${path}" "${CONTAINER_WORKSPACE}/${path}"
+            done
+          fi
       - name: Export KVBM MLA backend
         if: ${{ inputs.kvbm_mla_backend != '' }}
         shell: bash

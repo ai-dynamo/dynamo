@@ -369,18 +369,7 @@ jobs:
       diff_base_branch: ${{ needs.changed-files.outputs.base_ref }}
       diff_merge_base_sha: ${{ needs.changed-files.outputs.merge_base_sha }}
 
-  # --------------------------------------------------------------------------
-  # Sidecar E2E: lib/sidecar/*/launch/agg.sh, run against the backend's own
-  # unmodified -test image (no CI-only derived image/extra push). shared-test.yml
-  # downloads the dynamo-*-sidecar binary sidecar-build already published as a
-  # workflow artifact and installs it via PATH before pytest runs. When the
-  # backend itself wasn't rebuilt (a lib/sidecar/**-only PR), source_ref falls
-  # back to the floating `main` tag for that backend's -test image. sidecar-build
-  # is gated identically to these jobs, so `needs.sidecar-build.result` is a
-  # genuine success/failure signal here, not a masked skip. gpu_1 fan-out is a
-  # deliberate exception to the narrow-scope TODO on the `sidecar` filter in
-  # .github/filters.yaml; revisit if CI cost becomes an issue.
-  # --------------------------------------------------------------------------
+  # Reuse the backend test image and install the sidecar artifact before pytest.
 
   sidecar-vllm-test:
     name: sidecar-runtime # This name overlaps with other sidecar jobs to group them in the UI

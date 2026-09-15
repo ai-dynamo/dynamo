@@ -124,14 +124,7 @@ async fn connect_until_ready(
                 let log_interval_elapsed = last_logged_at
                     .is_none_or(|last| now.duration_since(last) >= RETRY_LOG_INTERVAL);
                 if error_changed || log_interval_elapsed {
-                    // WARN, not debug: matches the existing etcd/nats startup-retry
-                    // convention (dynamo_runtime::transports::etcd logs its own
-                    // "not reachable yet; retrying" loop at warn). At the default
-                    // INFO log level, a debug-level retry loop here is completely
-                    // silent — a sidecar stuck retrying its connection to the
-                    // engine for its full 300s startup_deadline produces zero
-                    // visible output anywhere, which is indistinguishable from a
-                    // true hang.
+                    // Keep startup retries visible at the default INFO log level.
                     tracing::warn!(
                         peer,
                         endpoint = %endpoint_label,

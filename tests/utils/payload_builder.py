@@ -638,12 +638,7 @@ def make_chat_health_check(port: int, model: str):
             stream=False,
         ).with_model(model)
         payload.port = port
-        # No try/except here: ManagedProcess._check_func already catches
-        # exceptions from this callable and logs `failure_reason` every
-        # log_interval seconds. Swallowing the exception here and returning
-        # bare False collapses that into an uninformative "returned False",
-        # hiding what actually failed (connection refused, malformed
-        # response, HTTP error, ...) for the entire retry window.
+        # Let ManagedProcess log the actual health-check failure.
         resp = send_request(
             payload.url(),
             payload.body,
@@ -651,10 +646,7 @@ def make_chat_health_check(port: int, model: str):
             method=payload.method,
             log_level=10,
         )
-        # response.raise_for_status() (called inside response_handler) only
-        # puts the status line in the exception, not the body -- and the
-        # body is where the frontend actually says *why* (no instances
-        # registered, model not found, ...). Surface it here before that.
+        # raise_for_status() omits the response body.
         if not resp.ok:
             raise RuntimeError(
                 f"chat health check got HTTP {resp.status_code} from {resp.url}: "

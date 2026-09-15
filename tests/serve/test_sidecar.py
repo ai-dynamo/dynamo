@@ -13,8 +13,10 @@ from tests.serve.common import (
     params_with_model_mark,
     run_serve_deployment,
 )
+from tests.utils.constants import DynamoPortRange
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import chat_payload_default
+from tests.utils.port_utils import reserved_ports
 
 vllm_sidecar_dir = os.environ.get("VLLM_SIDECAR_DIR") or os.path.join(
     WORKSPACE_DIR, "lib/sidecar/vllm"
@@ -39,21 +41,12 @@ sidecar_configs = {
         marks=[
             pytest.mark.vllm,
             pytest.mark.gpu_1,
-            # EngineConfig.timeout defaults to 600s for the internal
-            # health-check loop (tests/utils/engine_process.py); that loop's
-            # own timeout path logs a clean, detailed failure (attempt count,
-            # last failure reason, log tail). A pytest.mark.timeout with too
-            # little margin over 600s + setup overhead (etcd/nats/process
-            # launch, observed ~70s here) lets pytest-timeout's blunt global
-            # signal fire first mid-loop, discarding that diagnostic path —
-            # exactly what happened at 610s in run 34552442779/103122249777.
+            # Let the 600s health check report failure before pytest times out.
             pytest.mark.timeout(780),
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
-        # Piped (non-tty) stdout is block-buffered by default, so without this
-        # a hung/slow launch shows literally nothing in CI logs until the
-        # process is killed.
+        # Flush Python output promptly into CI logs.
         env={"PYTHONUNBUFFERED": "1"},
         request_payloads=[
             chat_payload_default(),
@@ -66,10 +59,6 @@ sidecar_configs = {
         marks=[
             pytest.mark.sglang,
             pytest.mark.gpu_1,
-            # See vllm_aggregated above: needs margin over EngineConfig's
-            # 600s internal health-check timeout, not just over historically
-            # observed run time, so a real timeout logs its own diagnostics
-            # instead of being cut off by pytest-timeout first.
             pytest.mark.timeout(780),
             pytest.mark.pre_merge,
         ],
@@ -86,8 +75,6 @@ sidecar_configs = {
         marks=[
             pytest.mark.trtllm,
             pytest.mark.gpu_1,
-            # See vllm_aggregated above re: margin over EngineConfig's 600s
-            # internal timeout. Observed ~173s in CI in practice.
             pytest.mark.timeout(780),
             pytest.mark.pre_merge,
         ],
@@ -111,6 +98,7 @@ def sidecar_config_test(request):
     return sidecar_configs[request.param]
 
 
+@pytest.mark.core
 @pytest.mark.sidecar
 @pytest.mark.e2e
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
@@ -133,4 +121,16 @@ def test_serve_deployment(
     config = dataclasses.replace(
         sidecar_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
     )
-    run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
+    if config.name == "vllm_aggregated":
+        with reserved_ports(2, start_port=DynamoPortRange.SERVE.value) as engine_ports:
+            run_serve_deployment(
+                config,
+                request,
+                ports=dynamo_dynamic_ports,
+                extra_env={
+                    "VLLM_RS_HTTP_PORT": str(engine_ports[0]),
+                    "VLLM_GRPC_PORT": str(engine_ports[1]),
+                },
+            )
+    else:
+        run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
