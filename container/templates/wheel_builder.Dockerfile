@@ -242,7 +242,9 @@ ENV VIRTUAL_ENV=/workspace/.venv
 # imports yaml at module scope); the system python3 doesn't ship it.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
-    uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION --seed && \
+    uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION --seed{% if device == "xpu" %} && \
+    echo "/opt/venv/lib/python${PYTHON_VERSION}/site-packages" > \
+        "${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/vllm-xpu-base.pth"{% endif %} && \
     uv pip install --upgrade auditwheel meson pybind11 patchelf maturin[patchelf] tomlkit pyyaml
 
 ARG NIXL_UCX_REF
