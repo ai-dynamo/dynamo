@@ -80,7 +80,6 @@ dynamo-parsers = { version = "8.1.0" }
 dynamo-parsers-v2 = { version = "0.3.2" }
 dynamo-backend-common = { path = "lib/backend-common", version = "1.5.0" }
 dynamo-sidecar-common = { path = "lib/sidecar/common", version = "1.5.0" }
-fastokens = { version = "0.2.0" }
 
 
 # kvbm
