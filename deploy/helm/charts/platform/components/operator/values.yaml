@@ -41,6 +41,14 @@ namespaceRestriction:
 gpuDiscovery:
   # -- DEVELOPMENT AND TESTING ONLY: Enable GPU discovery in namespace-restricted mode.
   enabled: true
+elasticEPRayPoC:
+  # -- Enable the operator-managed Ray elastic expert-parallelism path (proof of concept).
+  # Off by default: the path rewrites launch commands and synthesizes workloads, which is an
+  # administrator's grant to give rather than something to infer from a user's engine flags.
+  # Enabling it starts a Ray head on a single-pod elastic-EP leader, synthesizes the on-demand
+  # follower, emits the leader's headless Ray Service, and applies the Ray-specific admission
+  # rules. Turning it back off removes the followers it synthesized.
+  enabled: false
 controllerManager:
   tolerations: []
   affinity: {}

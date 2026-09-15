@@ -8,11 +8,13 @@ import (
 	"strings"
 	"testing"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/onsi/gomega"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/utils/ptr"
 )
 
 // TestShellQuotePOSIX_ArgvRoundTrip re-parses the quoted tokens through a real
@@ -66,6 +68,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 		expectProbesRemoved bool // If true, probes should be nil
 		expectProbesKept    bool // If true, probes should survive untouched
 		expectDPMasterIPEnv bool // If true, VLLM_DP_MASTER_IP should be bound to the pod IP
+		expectPodIPEnv      bool // If true, POD_IP alone should be bound (follower: not the DP master)
 	}{
 		{
 			name:              "single node does not modify args",
@@ -386,6 +389,32 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			containerGPUs:     2,
 			expectNotModified: true,
 		},
+		// The follower runs `ray start --block`, so nothing listens on DynamoSystemPort.
+		// Keeping the worker probes (liveness FailureThreshold 1) would have the kubelet
+		// kill it on the first probe and restart it forever.
+		{
+			name:          "elastic EP follower drops the probes it can never satisfy",
+			numberOfNodes: 1,
+			role:          RoleFollower,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				// Synthesis stamps the leader's Service name here; the follower launch
+				// reads it rather than rebuilding the address from its own identity.
+				Annotations: map[string]string{
+					commonconsts.KubeAnnotationElasticEPLeaderService: "mydgd-decode-ray",
+				},
+			},
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialContainer: &corev1.Container{
+				Command:        []string{"python3", "-m", "dynamo.vllm"},
+				Args:           []string{"--model", "test", "--data-parallel-backend", "ray", enableElasticEPFlag},
+				LivenessProbe:  &corev1.Probe{},
+				ReadinessProbe: &corev1.Probe{},
+				StartupProbe:   &corev1.Probe{},
+			},
+			containerGPUs:       4,
+			expectProbesRemoved: true,
+			expectPodIPEnv:      true,
+		},
 		{
 			name:          "multinode leader uses GPU count resolved from DRA",
 			numberOfNodes: 2,
@@ -444,8 +473,28 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 
 			initialContainerArgs := append([]string{}, tt.initialContainer.Args...)
 
+			// In production the rendered container IS the component's main container:
+			// generatePodTemplateSpec builds one from the other. The leader arm reads the
+			// component, so a case that puts its flags only in initialContainer would look
+			// like a component with no flags at all. Mirror the case's container into the
+			// spec, and give it the supported single-pod worker shape, so the fixture
+			// matches what the operator actually renders.
+			specForCase := tt.component.DeepCopy()
+			if specForCase.ExtraPodSpec == nil {
+				specForCase.ExtraPodSpec = &v1alpha1.ExtraPodSpec{}
+			}
+			if specForCase.ExtraPodSpec.MainContainer == nil {
+				specForCase.ExtraPodSpec.MainContainer = tt.initialContainer.DeepCopy()
+			}
+			if specForCase.ComponentType == "" {
+				specForCase.ComponentType = string(commonconsts.ComponentTypeWorker)
+			}
+			if specForCase.Replicas == nil {
+				specForCase.Replicas = ptr.To(int32(1))
+			}
+
 			// Call UpdateContainer
-			require.NoError(t, backend.UpdateContainer(tt.initialContainer, tt.numberOfNodes, tt.role, betaComponent(t, tt.component), "test-service", tt.multinodeDeployer, staticContainerGPUCount(tt.containerGPUs)))
+			require.NoError(t, backend.UpdateContainer(tt.initialContainer, tt.numberOfNodes, tt.role, betaComponent(t, specForCase), "test-service", tt.multinodeDeployer, staticContainerGPUCount(tt.containerGPUs)))
 
 			if tt.expectNotModified {
 				// Args should not have changed
@@ -480,6 +529,11 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 				// The launch command interpolates POD_IP into --node-ip-address, so
 				// an unset value would start the Ray head with an empty address.
 				t.Log("the Ray head registers under this address; vLLM searches for it")
+				g.Expect(podIP).ToNot(gomega.BeNil())
+				g.Expect(podIP.ValueFrom.FieldRef.FieldPath).To(gomega.Equal("status.podIP"))
+			} else if tt.expectPodIPEnv {
+				t.Log("the follower pins --node-ip-address to POD_IP but is not the DP master")
+				g.Expect(dpMasterIP).To(gomega.BeNil())
 				g.Expect(podIP).ToNot(gomega.BeNil())
 				g.Expect(podIP.ValueFrom.FieldRef.FieldPath).To(gomega.Equal("status.podIP"))
 			} else {
@@ -1361,5 +1415,196 @@ func TestVLLMBackend_UpdateContainer_NoInterPodGMS(t *testing.T) {
 		if e.Name == "DYN_VLLM_GMS_SHADOW_MODE" {
 			t.Errorf("DYN_VLLM_GMS_SHADOW_MODE must not be injected when inter-pod GMS is disabled")
 		}
+	}
+}
+
+// TestVLLMBackend_ElasticEPRayPoCGateOffLeavesContainerUntouched covers the half of the
+// upgrade-safety property that generation-level tests cannot reach.
+//
+// TestElasticEPRayPoCGateIsUpgradeSafe proves the gate derives no follower and leaves the
+// leader's DCD spec alone, but the Ray-head wrapper is applied later, when a DCD is
+// rendered into a pod. That rewrite replaces Command with /bin/sh -c and rebuilds Args,
+// which changes the pod template and therefore rolls a serving deployment -- the exact
+// thing an operator upgrade must not do on its own.
+//
+// Verified by mutation: dropping the gate from VLLMBackend.elasticEPRayLaunch fails this
+// on the command assertion. If you change what this asserts, re-run that check -- a guard
+// that no longer fails when the gate is removed is decoration, not coverage.
+// TestVLLMBackend_ElasticEPRayPoCGateDoesNotChangeLeaderRender is the upgrade-safety
+// test for the PoC gate, and it varies the axis that matters.
+//
+// The leader's Ray head shipped in #12943, before any gate existed. If the render
+// consulted features.ElasticEPRayPoC, then merely upgrading an operator -- which
+// introduces the gate defaulted off -- would strip the Ray head and both injected
+// addresses from every running elastic-EP leader, changing the pod template and rolling
+// a serving deployment that nobody edited.
+//
+// So the property is not "gate off leaves the container alone". It is "the gate does not
+// reach this render at all": for the same input, gate-off and gate-on must produce
+// byte-identical Command, Args and Env. Mutation check: restoring
+// IsSinglePodElasticEPLeader on the RoleMain arm fails every subtest below.
+func TestVLLMBackend_ElasticEPRayPoCGateDoesNotChangeLeaderRender(t *testing.T) {
+	elasticEPArgs := []string{"--model", "test", "--enable-elastic-ep", "--data-parallel-backend", "ray"}
+
+	tests := []struct {
+		name        string
+		mutate      func(*v1alpha1.DynamoComponentDeploymentSharedSpec)
+		wantRayHead bool
+	}{
+		{
+			name:        "single-pod worker leader",
+			mutate:      func(*v1alpha1.DynamoComponentDeploymentSharedSpec) {},
+			wantRayHead: true,
+		},
+		{
+			// Base wrapped every replica. The PoC declines to derive a follower or a
+			// Service for this shape, but un-wrapping it is a behaviour change against
+			// what already shipped, so the render must still match base.
+			name: "replicas > 1 still renders as base did",
+			mutate: func(s *v1alpha1.DynamoComponentDeploymentSharedSpec) {
+				s.Replicas = ptr.To(int32(2))
+			},
+			wantRayHead: true,
+		},
+		{
+			name: "flags on a non-worker still render as base did",
+			mutate: func(s *v1alpha1.DynamoComponentDeploymentSharedSpec) {
+				s.ComponentType = string(commonconsts.ComponentTypeFrontend)
+			},
+			wantRayHead: true,
+		},
+		{
+			// The launch flags are what selects this render, so a container without them
+			// must be untouched at either gate position.
+			name: "no elastic-EP flags is never wrapped",
+			mutate: func(s *v1alpha1.DynamoComponentDeploymentSharedSpec) {
+				s.ExtraPodSpec.MainContainer.Args = []string{"--model", "test"}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			render := func(gate bool) *corev1.Container {
+				alpha := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: string(commonconsts.ComponentTypeWorker),
+					Replicas:      ptr.To(int32(1)),
+					ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+						MainContainer: &corev1.Container{
+							Name:    "main",
+							Command: []string{"python3", "-m", "dynamo.vllm"},
+							Args:    append([]string(nil), elasticEPArgs...),
+						},
+					},
+				}
+				tt.mutate(alpha)
+				container := alpha.ExtraPodSpec.MainContainer.DeepCopy()
+				// Built through BackendFactory rather than a literal, because the factory
+				// is the one place the operator's gate setting could reach this backend.
+				// Constructing VLLMBackend directly would make this assertion vacuous.
+				backend := BackendFactory(
+					BackendFrameworkVLLM,
+					&configv1alpha1.OperatorConfiguration{
+						ElasticEPRayPoC: configv1alpha1.ElasticEPRayPoCConfiguration{Enabled: gate},
+					},
+					"test-dgd",
+				)
+				require.NoError(t, backend.UpdateContainer(
+					container, 1, RoleMain, betaComponent(t, alpha), "test-service",
+					&GroveMultinodeDeployer{}, staticContainerGPUCount(1),
+				))
+				return container
+			}
+
+			t.Log("Render the same component with the gate off and with the gate on")
+			off, on := render(false), render(true)
+
+			require.Equal(t, on.Command, off.Command,
+				"the gate reached the leader command; an operator upgrade would roll every running elastic-EP leader")
+			require.Equal(t, on.Args, off.Args, "the gate reached the leader args")
+			require.Equal(t, on.Env, off.Env,
+				"the gate reached the injected environment; POD_IP is what `ray start --node-ip-address` "+
+					"interpolates, so losing it leaves the head bound to the wrong address")
+
+			if tt.wantRayHead {
+				require.Equal(t, []string{"/bin/sh", "-c"}, off.Command,
+					"this shape carries the launch flags, so it must get a Ray head at either gate position")
+				names := make([]string, 0, len(off.Env))
+				for _, e := range off.Env {
+					names = append(names, e.Name)
+				}
+				require.Contains(t, names, commonconsts.PodIPEnvVar)
+				return
+			}
+
+			require.Equal(t, []string{"python3", "-m", "dynamo.vllm"}, off.Command,
+				"a container without the launch flags must not be wrapped")
+			require.Empty(t, off.Env, "a container without the launch flags must get no injected environment")
+		})
+	}
+}
+
+// TestVLLMBackend_FollowerRayJoinIsNotGated pins the follower arm to the follower
+// annotation rather than to the PoC gate.
+//
+// RoleFollower is assigned from the operator-set follower annotation with no gate term,
+// and only gated synthesis ever writes that annotation. If the launch rewrite re-checked
+// the gate, a follower DCD that outlived a gate flip would render without its Ray join
+// and run the leader's full serve command instead -- it carries that command verbatim
+// from the deep copy that created it.
+//
+// Mutation check: restoring `b.ElasticEPRayPoCEnabled &&` in elasticEPRayLaunch fails
+// the gate-off subtest.
+func TestVLLMBackend_FollowerRayJoinIsNotGated(t *testing.T) {
+	for _, gate := range []bool{false, true} {
+		t.Run(fmt.Sprintf("gate=%t", gate), func(t *testing.T) {
+			component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: string(commonconsts.ComponentTypeWorker),
+				Replicas:      ptr.To(int32(0)),
+				Annotations: map[string]string{
+					commonconsts.KubeAnnotationElasticEPLeaderService: "mydgd-decode-ray",
+				},
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{
+						Name:    "main",
+						Command: []string{"python3", "-m", "dynamo.vllm"},
+						Args:    []string{"--model", "test", "--enable-elastic-ep", "--data-parallel-backend", "ray"},
+					},
+				},
+			})
+			container := &corev1.Container{
+				Name:           "main",
+				Command:        []string{"python3", "-m", "dynamo.vllm"},
+				Args:           []string{"--model", "test", "--enable-elastic-ep", "--data-parallel-backend", "ray"},
+				LivenessProbe:  &corev1.Probe{},
+				ReadinessProbe: &corev1.Probe{},
+				StartupProbe:   &corev1.Probe{},
+			}
+			backend := BackendFactory(
+				BackendFrameworkVLLM,
+				&configv1alpha1.OperatorConfiguration{
+					ElasticEPRayPoC: configv1alpha1.ElasticEPRayPoCConfiguration{Enabled: gate},
+				},
+				"test-dgd",
+			)
+			require.NoError(t, backend.UpdateContainer(
+				container, 1, RoleFollower, component, "test-service",
+				&GroveMultinodeDeployer{}, staticContainerGPUCount(1),
+			))
+
+			require.Equal(t, []string{"/bin/sh", "-c"}, container.Command,
+				"the follower must get its Ray join at either gate position; without it the pod "+
+					"runs the leader's serve command, which it inherited by deep copy")
+			joined := strings.Join(container.Args, " ")
+			require.Contains(t, joined, "mydgd-decode-ray",
+				"the follower must join the leader Service carried on its annotation")
+			require.Contains(t, joined, "create_connection(('mydgd-decode-ray',6379)",
+				"the follower must gate on the leader's Ray head, not its engine: gating on /live "+
+					"deadlocks a full-width launch, because the leader cannot become ready until "+
+					"the followers it is waiting for have already joined")
+			require.NotContains(t, joined, "/live",
+				"the engine health gate belongs to the multinode RoleWorker arm, not the follower")
+			require.Nil(t, container.LivenessProbe, "a `ray start --block` pod cannot satisfy the worker probes")
+		})
 	}
 }

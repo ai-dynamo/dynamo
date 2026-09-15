@@ -142,7 +142,7 @@ func createTestReconcilerWithStatus(
 func newTestComponentWorkloadsReconciler(
 	rollout *dgdWorkerRolloutReconciler,
 ) *componentWorkloadsReconciler {
-	return newComponentWorkloadsReconciler(rollout.Client, rollout.GetRecorder(), rollout)
+	return newComponentWorkloadsReconciler(rollout.Client, rollout.GetRecorder(), rollout, true)
 }
 
 func (r *dgdWorkerRolloutReconciler) deleteOldWorkerDCDs(
