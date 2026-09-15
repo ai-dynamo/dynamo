@@ -53,11 +53,11 @@ use crate::{
 };
 
 pub const TRANSPORT_NAME: &str = "quic-response";
-// Version 3 Error frames: UTF-8 message (legacy) or JSON ResponseStreamPrologue
-// with optional typed_error. Receivers accept both so a mixed-version pair
-// during a rolling upgrade still completes the handshake. The version is
-// unchanged because a bump would force a lockstep upgrade for a payload the
-// old decoder already accepts as UTF-8.
+// Version 3 Error frames: UTF-8 message (legacy) or tagged JSON
+// ResponseStreamPrologue (`kind` = dynamo.quic.typed_error). Receivers accept
+// both so a mixed-version pair during a rolling upgrade still completes the
+// handshake. The version is unchanged because a bump would force a lockstep
+// upgrade for a payload the old decoder already accepts as UTF-8.
 const PROTOCOL_VERSION: u8 = 3;
 const ALPN: &[u8] = b"dynamo-response-v2";
 const BULK_CONNECTIONS: usize = 8;
@@ -183,7 +183,7 @@ impl TryFrom<ConnectionInfo> for QuicResponseConnectionInfo {
 enum FrameKind {
     Prologue = 1,
     Data = 2,
-    /// Terminal pre-stream failure. Payload is raw UTF-8, or JSON
+    /// Terminal pre-stream failure. Payload is raw UTF-8, or tagged JSON
     /// [`ResponseStreamPrologue`] when the worker has a typed error to keep.
     Error = 3,
     End = 4,
@@ -244,46 +244,65 @@ impl Frame {
     }
 }
 
+/// Wire tag required on typed QUIC Error-frame payloads. Without it, a legacy
+/// UTF-8 JSON message such as `{"error":"failed","code":500}` would deserialize
+/// as [`ResponseStreamPrologue`] and drop the original bytes.
+const QUIC_TYPED_ERROR_KIND: &str = "dynamo.quic.typed_error";
+
+/// Tagged envelope around [`ResponseStreamPrologue`] for `FrameKind::Error`.
+/// `kind` is required; untagged JSON is left as the raw UTF-8 message.
+#[derive(Serialize, Deserialize)]
+struct QuicTypedErrorWire {
+    kind: String,
+    #[serde(flatten)]
+    prologue: ResponseStreamPrologue,
+}
+
 /// Encode a pre-stream error for `FrameKind::Error`.
 ///
 /// Untyped errors stay raw UTF-8 so a mixed-version frontend still sees the
-/// worker's text. Typed errors are JSON [`ResponseStreamPrologue`]: a current
-/// frontend recovers the type; an older one `from_utf8`s the payload (JSON is
-/// valid UTF-8) and treats the object as the message.
+/// worker's text. Typed errors are tagged JSON [`ResponseStreamPrologue`]: a
+/// current frontend recovers the type; an older one `from_utf8`s the payload
+/// (JSON is valid UTF-8) and treats the object as the message.
 fn encode_error_payload(error: StreamPrologueError) -> Bytes {
     let Some(typed_error) = error.typed_error else {
         return Bytes::from(error.message);
     };
-    let prologue = ResponseStreamPrologue {
-        error: Some(error.message),
-        typed_error: Some(typed_error),
+    let message = error.message;
+    let wire = QuicTypedErrorWire {
+        kind: QUIC_TYPED_ERROR_KIND.to_string(),
+        prologue: ResponseStreamPrologue {
+            error: Some(message.clone()),
+            typed_error: Some(typed_error),
+        },
     };
-    match serde_json::to_vec(&prologue) {
+    match serde_json::to_vec(&wire) {
         Ok(bytes) => Bytes::from(bytes),
         Err(err) => {
             tracing::error!(
                 error = %err,
                 "QUIC error prologue did not serialize; sending untyped text"
             );
-            Bytes::from(prologue.error.unwrap_or_default())
+            Bytes::from(message)
         }
     }
 }
 
 /// Decode a `FrameKind::Error` payload.
 ///
-/// JSON that looks like [`ResponseStreamPrologue`] with a present `error`
-/// field is the typed encoding. Anything else is the legacy UTF-8 message,
-/// including a Python `{"message","code"}` envelope which must not be
-/// mistaken for a prologue.
+/// Only JSON with the explicit [`QUIC_TYPED_ERROR_KIND`] discriminant is parsed
+/// as [`ResponseStreamPrologue`]. Anything else, including a Python
+/// `{"message","code"}` envelope or a decoy `{"error","code"}` object, stays
+/// the untyped UTF-8 message.
 fn decode_error_payload(payload: &[u8]) -> Result<StreamPrologueError> {
     if payload.first() == Some(&b'{')
-        && let Ok(prologue) = serde_json::from_slice::<ResponseStreamPrologue>(payload)
-        && let Some(message) = prologue.error
+        && let Ok(wire) = serde_json::from_slice::<QuicTypedErrorWire>(payload)
+        && wire.kind == QUIC_TYPED_ERROR_KIND
+        && let Some(message) = wire.prologue.error
     {
         return Ok(StreamPrologueError {
             message,
-            typed_error: prologue.typed_error,
+            typed_error: wire.prologue.typed_error,
         });
     }
     let message = String::from_utf8(payload.to_vec())
@@ -2839,6 +2858,11 @@ mod tests {
         );
         let payload = encode_error_payload(original.clone());
         assert_eq!(payload.first(), Some(&b'{'));
+        let encoded = std::str::from_utf8(&payload).expect("typed payload is JSON UTF-8");
+        assert!(
+            encoded.contains(QUIC_TYPED_ERROR_KIND),
+            "typed payload must carry the wire discriminant; got {encoded}"
+        );
 
         let decoded = decode_error_payload(&payload).unwrap();
         assert_eq!(decoded, original);
@@ -2856,6 +2880,21 @@ mod tests {
         assert!(
             decoded.typed_error.is_none(),
             "a Python HTTP envelope must stay the untyped message, not a prologue"
+        );
+    }
+
+    #[test]
+    fn error_payload_legacy_json_with_decoy_error_field_is_preserved() {
+        let envelope = br#"{"error":"failed","code":500}"#;
+        let decoded = decode_error_payload(envelope).unwrap();
+        assert_eq!(
+            decoded.message.as_bytes(),
+            envelope,
+            "untagged legacy JSON must be preserved byte-for-byte"
+        );
+        assert!(
+            decoded.typed_error.is_none(),
+            "a decoy error field must not be classified as a typed prologue"
         );
     }
 
