@@ -119,6 +119,14 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
 
         // Convert tool_choice
         let tool_choice = req.tool_choice.as_ref().map(convert_anthropic_tool_choice);
+        let parallel_tool_calls = req
+            .tool_choice
+            .as_ref()
+            .and_then(|choice| match choice {
+                AnthropicToolChoice::Simple(simple) => simple.disable_parallel_tool_use,
+                AnthropicToolChoice::Named(named) => named.disable_parallel_tool_use,
+            })
+            .map(|disabled| !disabled);
 
         // Convert stop_sequences -> stop
         let stop = req
@@ -136,6 +144,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 stop,
                 tools,
                 tool_choice,
+                parallel_tool_calls,
                 stream: Some(true), // Always stream internally
                 // Request cumulative usage on every chunk (not just the final
                 // one) so the Anthropic stream converter can stamp an
