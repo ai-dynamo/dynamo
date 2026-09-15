@@ -42,6 +42,7 @@ const (
 	vllmPrefillContextSizeAlias     = "-pcp"
 	vllmDataParallelSizeAlias       = "-dp"
 	vllmDataParallelSizeLocalAlias  = "-dpl"
+	vllmDataParallelExternalLBFlag  = "--data-parallel-external-lb"
 	vllmNodesFlag                   = "--nnodes"
 	vllmNodesAlias                  = "-n"
 	vllmNodeRankFlag                = "--node-rank"
@@ -49,6 +50,7 @@ const (
 	vllmMasterAddressFlag           = "--master-addr"
 	vllmHeadlessFlag                = "--headless"
 	vllmDeviceIDsFlag               = "--device-ids"
+	vllmDPSizeEnvironment           = "VLLM_DP_SIZE"
 )
 
 // ErrUnsupportedVLLMProfileSource classifies vLLM declarations whose geometry source is not statically inspectable.
@@ -72,6 +74,8 @@ const (
 	UnsupportedVLLMProfileSourceReasonMissingGeometry UnsupportedVLLMProfileSourceReason = "missing-geometry"
 	// UnsupportedVLLMProfileSourceReasonDistributedPlacement means process placement is not proven pod-local.
 	UnsupportedVLLMProfileSourceReasonDistributedPlacement UnsupportedVLLMProfileSourceReason = "distributed-placement"
+	// UnsupportedVLLMProfileSourceReasonOwnershipMode means vLLM does not expose one externally managed rank per pod.
+	UnsupportedVLLMProfileSourceReasonOwnershipMode UnsupportedVLLMProfileSourceReason = "ownership-mode"
 )
 
 // UnsupportedVLLMProfileSourceError describes why a vLLM declaration cannot produce typed geometry.
@@ -96,11 +100,15 @@ func (e *UnsupportedVLLMProfileSourceError) Unwrap() []error {
 
 // VLLMProfileGeometrySource contains the concrete declarative inputs needed to resolve vLLM geometry.
 // Command and Args must be provider-resolved Kubernetes exec-form argv after fixed launch
-// rewriting; only the managed global-DP target may still be omitted. WorkloadRevisionDigest
-// must exclude creation-time and live replica targets. Resolution does not mutate the slices.
+// rewriting; only the managed global-DP target may still be omitted. Environment contains
+// resolved literal vLLM values, while HasUnresolvedDPEnvironment reports an envFrom source or
+// an unresolved VLLM_DP_SIZE valueFrom. WorkloadRevisionDigest must exclude creation-time and
+// live replica targets. Resolution does not mutate the slices or map.
 type VLLMProfileGeometrySource struct {
 	Command                    []string
 	Args                       []string
+	Environment                map[string]string
+	HasUnresolvedDPEnvironment bool
 	InitialReplicas            int32
 	MainContainerGPUs          int64
 	DedicatedMainGPUAllocation bool
@@ -115,6 +123,8 @@ type parsedVLLMProfileGeometry struct {
 	hasDataParallelSize      bool
 	dataParallelSizeLocal    int64
 	hasDataParallelSizeLocal bool
+	enableElasticEP          bool
+	dataParallelExternalLB   bool
 }
 
 type vllmEngineGeometryProjection struct {
@@ -144,6 +154,8 @@ var vllmProfileSensitiveLongOptions = []string{
 	vllmPrefillContextSizeFlag,
 	dataParallelSizeFlag,
 	dataParallelSizeLocalFlag,
+	enableElasticEPFlag,
+	vllmDataParallelExternalLBFlag,
 	distributedExecutorFlag,
 	dataParallelBackendFlag,
 	vllmNodesFlag,
@@ -167,6 +179,18 @@ func ResolveVLLMProfileGeometry(source VLLMProfileGeometrySource) (enginegroup.R
 	geometry, err := parseVLLMProfileGeometry(source.Command, source.Args)
 	if err != nil {
 		return enginegroup.ResolvedProfileGeometry{}, err
+	}
+	geometry, err = applyVLLMProfileEnvironment(geometry, source.Environment, source.HasUnresolvedDPEnvironment)
+	if err != nil {
+		return enginegroup.ResolvedProfileGeometry{}, err
+	}
+
+	// Accept only the external Elastic EP ownership mode in which one process owns its local rank.
+	if !geometry.enableElasticEP || !geometry.dataParallelExternalLB {
+		return enginegroup.ResolvedProfileGeometry{}, &UnsupportedVLLMProfileSourceError{
+			Reason: UnsupportedVLLMProfileSourceReasonOwnershipMode,
+			Detail: "--enable-elastic-ep and --data-parallel-external-lb are required",
+		}
 	}
 
 	// Treat global DP as a creation-time assertion, never as the durable profile target.
@@ -329,7 +353,48 @@ func parseVLLMProfileGeometry(command, args []string) (parsedVLLMProfileGeometry
 		hasDataParallelSize:      hasDataParallelSize,
 		dataParallelSizeLocal:    values[dataParallelSizeLocalFlag],
 		hasDataParallelSizeLocal: hasDataParallelSizeLocal,
+		enableElasticEP:          hasExactVLLMProfileFlag(inspectableArgv, enableElasticEPFlag),
+		dataParallelExternalLB:   hasExactVLLMProfileFlag(inspectableArgv, vllmDataParallelExternalLBFlag),
 	}, nil
+}
+
+func applyVLLMProfileEnvironment(
+	geometry parsedVLLMProfileGeometry,
+	environment map[string]string,
+	hasUnresolvedEnvironment bool,
+) (parsedVLLMProfileGeometry, error) {
+	// Reject opaque Kubernetes sources because they may supply vLLM's native DP cardinality.
+	if hasUnresolvedEnvironment {
+		return parsedVLLMProfileGeometry{}, &UnsupportedVLLMProfileSourceError{
+			Reason: UnsupportedVLLMProfileSourceReasonEnvironment,
+			Detail: "envFrom or valueFrom may supply VLLM_DP_SIZE",
+		}
+	}
+
+	// Apply vLLM's documented environment fallback only when argv omits global DP size.
+	literal, present := environment[vllmDPSizeEnvironment]
+	if !present || geometry.hasDataParallelSize {
+		return geometry, nil
+	}
+	value, err := parseVLLMGeometryLiteral(vllmDPSizeEnvironment, literal, false)
+	if err != nil {
+		return parsedVLLMProfileGeometry{}, err
+	}
+	geometry.dataParallelSize = value
+	geometry.hasDataParallelSize = true
+
+	return geometry, nil
+}
+
+func hasExactVLLMProfileFlag(argv []string, flag string) bool {
+	// BooleanOptionalAction flags are present only as exact, value-free option tokens.
+	for _, token := range argv {
+		if normalizeVLLMOptionToken(token) == flag {
+			return true
+		}
+	}
+
+	return false
 }
 
 func resolveVLLMProfileArguments(command, args []string) ([]string, error) {
@@ -344,7 +409,7 @@ func resolveVLLMProfileArguments(command, args []string) ([]string, error) {
 	// Reject shells and environment wrappers before recognizing a direct vLLM invocation.
 	executable := filepath.Base(command[0])
 	executableFields := strings.Fields(executable)
-	if len(executableFields) > 0 && isVLLMProfileShellOrWrapper(executableFields[0]) {
+	if len(executableFields) > 0 && isProfileShellOrWrapper(executableFields[0]) {
 		return nil, &UnsupportedVLLMProfileSourceError{
 			Reason: UnsupportedVLLMProfileSourceReasonShell,
 			Detail: fmt.Sprintf("command executable %q owns the effective argv", command[0]),
@@ -355,7 +420,7 @@ func resolveVLLMProfileArguments(command, args []string) ([]string, error) {
 	effectiveArgv := make([]string, 0, len(command)+len(args))
 	effectiveArgv = append(effectiveArgv, command...)
 	effectiveArgv = append(effectiveArgv, args...)
-	if isSupportedPythonExecutable(executable) &&
+	if isSupportedProfilePythonExecutable(executable) &&
 		len(effectiveArgv) >= 3 &&
 		effectiveArgv[1] == "-m" &&
 		effectiveArgv[2] == vllmDynamoModule {
@@ -408,24 +473,6 @@ func validateInspectableVLLMProfileArguments(argv []string) error {
 
 	// Reject launch controls that prevent proving one complete replica stays in this capacity pod.
 	return validatePodLocalVLLMPlacement(argv)
-}
-
-func hasKubernetesArgumentExpansion(value string) bool {
-	// Match kubelet's dollar escaping so $$(NAME) remains a literal while $(NAME) is dynamic.
-	for index := 0; index+1 < len(value); index++ {
-		if value[index] != '$' {
-			continue
-		}
-		if value[index+1] == '$' {
-			index++
-			continue
-		}
-		if value[index+1] == '(' && strings.Contains(value[index+2:], ")") {
-			return true
-		}
-	}
-
-	return false
 }
 
 func validateNoAbbreviatedVLLMProfileOptions(argv []string) error {
@@ -555,24 +602,4 @@ func digestVLLMEngineGeometry(geometry parsedVLLMProfileGeometry) (string, error
 	// Prefix the digest so its representation remains self-describing.
 	digest := sha256.Sum256(encoded)
 	return "sha256:" + hex.EncodeToString(digest[:]), nil
-}
-
-func isSupportedPythonExecutable(executable string) bool {
-	// Keep the initial invocation contract to interpreters used by Dynamo's shipped workloads.
-	switch executable {
-	case "python", "python3":
-		return true
-	default:
-		return false
-	}
-}
-
-func isVLLMProfileShellOrWrapper(executable string) bool {
-	// These executables can evaluate or replace argv after Kubernetes creates the container.
-	switch executable {
-	case "sh", "bash", "dash", "ash", "zsh", "ksh", "fish", "env":
-		return true
-	default:
-		return false
-	}
 }
