@@ -18,7 +18,7 @@ Dynamo + vLLM deployment profiles for the B200 chat workload:
 
 |                          | B200 aggregated chat                         | B200 disaggregated chat                                      |
 | ------------------------ | -------------------------------------------- | ------------------------------------------------------------ |
-| **Recipe**               | [`vllm/agg-b200-chat`](vllm/agg-b200-chat/deploy.yaml) | [`vllm/disagg-b200-chat`](vllm/disagg-b200-chat/deploy.yaml) |
+| **Recipe**               | [`vllm/agg-b200-chat`](vllm/agg-b200-chat/deploy-generic.yaml) | [`vllm/disagg-b200-chat`](vllm/disagg-b200-chat/deploy-generic.yaml) |
 | **GPU**                  | 4x B200                                      | 4x B200 prefill + 4x B200 decode                             |
 | **Mode**                 | Aggregated                                   | Prefill/decode disaggregated, 1P1D                           |
 | **Framework**            | vLLM 0.28.0                                  | vLLM 0.28.0                                                  |
@@ -99,14 +99,28 @@ kubectl wait --for=condition=complete job/model-download -n ${NAMESPACE} --timeo
 
 ```bash
 # 4-GPU aggregated
-kubectl apply -f vllm/agg-b200-chat/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f vllm/agg-b200-chat/deploy-generic.yaml -n ${NAMESPACE}
 
 # 8-GPU disaggregated (1P1D) -- edit the rdma/ resource name first, see Limitations
-kubectl apply -f vllm/disagg-b200-chat/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f vllm/disagg-b200-chat/deploy-generic.yaml -n ${NAMESPACE}
 ```
 
 First start takes **40–120 minutes**: 53 shards load, then autotune, then CUDA-graph capture.
 Silence is not a hang — watch the worker log for shard progress.
+
+`deploy-generic.yaml` is a **generated** file: it is the render of
+`kustomize/base` through the variant matrix in `.kustomize-matrix.yaml`. Apply it directly, or
+edit a copy. Contributors edit `kustomize/base/deploy.yaml` and regenerate from the repo root:
+
+```bash
+scripts/kustomize-matrix.py unfold recipes/k-exaone-2.0/vllm/<variant>/.kustomize-matrix.yaml
+scripts/kustomize-matrix.py render recipes/k-exaone-2.0/vllm/<variant>/.kustomize-matrix.yaml
+```
+
+To bind either variant to a specific cluster — a different model-cache claim, node labels and
+taints, a scheduler name, or the physical RDMA resource below — copy the cluster scaffold in
+[`recipes/templates/kustomize`](../templates/kustomize) rather than editing the recipe. That
+layer is where non-portable values belong, and it keeps this base applicable elsewhere.
 
 ```bash
 # aggregated

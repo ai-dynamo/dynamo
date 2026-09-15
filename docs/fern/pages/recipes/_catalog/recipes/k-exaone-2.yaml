@@ -30,7 +30,7 @@ targets:
     type: trace-replay
     traffic: Mooncake chat trace, 8K ISL / 1K OSL, ~70% prefix reuse, 1,805 requests, concurrency 7
   deploy:
-    asset: recipes/k-exaone-2.0/vllm/agg-b200-chat/deploy.yaml
+    asset: recipes/k-exaone-2.0/vllm/agg-b200-chat/deploy-generic.yaml
   benchmark:
     tool: aiperf
     asset: recipes/k-exaone-2.0/perf/perf.yaml
@@ -58,7 +58,7 @@ targets:
     type: trace-replay
     traffic: Mooncake chat trace, 8K ISL / 1K OSL, ~70% prefix reuse, 1,805 requests, concurrency 14
   deploy:
-    asset: recipes/k-exaone-2.0/vllm/disagg-b200-chat/deploy.yaml
+    asset: recipes/k-exaone-2.0/vllm/disagg-b200-chat/deploy-generic.yaml
   benchmark:
     tool: aiperf
     asset: recipes/k-exaone-2.0/perf/perf.yaml

@@ -75,7 +75,7 @@ kubectl wait --for=condition=complete job/model-download -n ${NAMESPACE} --timeo
 <div data-variant="agg">
 
 ```bash
-kubectl apply -f recipes/k-exaone-2.0/vllm/agg-b200-chat/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/k-exaone-2.0/vllm/agg-b200-chat/deploy-generic.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Ready dgd/k-exaone-2-agg -n ${NAMESPACE} --timeout=7200s
 ```
 
@@ -84,7 +84,7 @@ kubectl wait --for=condition=Ready dgd/k-exaone-2-agg -n ${NAMESPACE} --timeout=
 <div data-variant="disagg">
 
 ```bash
-kubectl apply -f recipes/k-exaone-2.0/vllm/disagg-b200-chat/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/k-exaone-2.0/vllm/disagg-b200-chat/deploy-generic.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Ready dgd/k-exaone-2-disagg -n ${NAMESPACE} --timeout=7200s
 ```
 
@@ -182,6 +182,6 @@ This is level with the aggregated target's 87 tok/s/GPU under the same gate, so 
 ## Source
 
 - [Recipe directory](https://github.com/ai-dynamo/dynamo/tree/main/recipes/k-exaone-2.0)
-- [Aggregated manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/k-exaone-2.0/vllm/agg-b200-chat/deploy.yaml)
-- [Disaggregated manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/k-exaone-2.0/vllm/disagg-b200-chat/deploy.yaml)
+- [Aggregated manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/k-exaone-2.0/vllm/agg-b200-chat/deploy-generic.yaml)
+- [Disaggregated manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/k-exaone-2.0/vllm/disagg-b200-chat/deploy-generic.yaml)
 - [Model card](https://huggingface.co/LGAI-EXAONE/K-EXAONE-2.0-750B-A37B-NVFP4)
