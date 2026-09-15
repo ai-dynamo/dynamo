@@ -71,9 +71,16 @@ jobs:
             echo "::error::Unsupported trigger ref: $GITHUB_REF"
             exit 1
           fi
+          # Linear matches an existing release by the exact version string, and
+          # every Dynamo release in the pipeline is v-prefixed. Branch and tag
+          # refs carry the bare form, so put the v back before handing it over.
+          # Without this the action does not find the release and creates a
+          # duplicate beside it: that is where the stray "Dynamo v1.5.0"
+          # carrying version "1.5.0" and zero issues came from, on the day
+          # the 1.5 branch was cut.
           {
             echo "command=${COMMAND}"
-            echo "version=${VERSION}"
+            echo "version=v${VERSION}"
             echo "name=Dynamo v${VERSION}"
           } >> "$GITHUB_OUTPUT"
 
