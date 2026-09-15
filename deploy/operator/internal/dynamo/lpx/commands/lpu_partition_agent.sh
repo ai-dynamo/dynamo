@@ -57,9 +57,9 @@ setup_ssh() {
 	chmod 644 "${HOME}/.ssh/id_rsa.pub"
 	printf "Host *\nIdentityFile %s/.ssh/id_rsa\nStrictHostKeyChecking no\nPort %s\n" "${HOME}" "${MPI_SSH_PORT}" > "${HOME}/.ssh/config"
 
-	ssh-keygen -t rsa -f "${HOME}/.ssh/host_keys/ssh_host_rsa_key" -N "" -q
-	ssh-keygen -t ecdsa -f "${HOME}/.ssh/host_keys/ssh_host_ecdsa_key" -N "" -q
-	ssh-keygen -t ed25519 -f "${HOME}/.ssh/host_keys/ssh_host_ed25519_key" -N "" -q
+	test -f "${HOME}/.ssh/host_keys/ssh_host_rsa_key" || ssh-keygen -t rsa -f "${HOME}/.ssh/host_keys/ssh_host_rsa_key" -N "" -q
+	test -f "${HOME}/.ssh/host_keys/ssh_host_ecdsa_key" || ssh-keygen -t ecdsa -f "${HOME}/.ssh/host_keys/ssh_host_ecdsa_key" -N "" -q
+	test -f "${HOME}/.ssh/host_keys/ssh_host_ed25519_key" || ssh-keygen -t ed25519 -f "${HOME}/.ssh/host_keys/ssh_host_ed25519_key" -N "" -q
 }
 
 run_sshd() {

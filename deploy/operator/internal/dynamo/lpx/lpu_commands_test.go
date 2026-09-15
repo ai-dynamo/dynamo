@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -98,6 +99,49 @@ printf '%s,%s,%s,%s,%s,%s,%s' "${CONFIG_PARTITION_INDEX}" "${LOGICAL_PARTITION_I
 	}
 }
 
+func TestLPXSSHSetupReusesHostKeys(t *testing.T) {
+	t.Parallel()
+
+	t.Log("Extract the direct-hybrid SSH setup alongside the embedded worker setup")
+	_, partitionSetup, found := strings.Cut(lpuPartitionRunCommandSource, "setup_ssh() {\n")
+	require.True(t, found)
+	partitionSetup, _, found = strings.Cut(partitionSetup, "\n}")
+	require.True(t, found)
+	for name, setup := range map[string]string{"worker": sshSetupCommands, "direct hybrid": partitionSetup} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			t.Log("Isolate the SSH Secret and writable home without changing the process home")
+			dir := t.TempDir()
+			for _, name := range []string{"private.key", "private.key.pub"} {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte("secret"), 0o600))
+			}
+			setup = strings.NewReplacer("${HOME}", dir, "$HOME", dir, "/ssh-pk", dir).Replace(setup)
+			command := `ssh-keygen() {
+	while [ "$1" != -f ]; do shift; done
+	[ ! -e "$2" ] || return 1
+	printf 'host key' > "$2"
+}
+` + setup
+
+			t.Log("Generate fresh keys, reuse them on restart, and fill a missing key")
+			for attempt := 0; attempt < 3; attempt++ {
+				if attempt == 2 {
+					require.NoError(t, os.Remove(filepath.Join(dir, ".ssh/host_keys/ssh_host_ecdsa_key")))
+				}
+				cmd := exec.Command("bash", "-ec", command)
+				out, err := cmd.CombinedOutput()
+				require.NoError(t, err, "attempt %d: %s", attempt, out)
+				for _, keyType := range []string{"rsa", "ecdsa", "ed25519"} {
+					key, err := os.ReadFile(filepath.Join(dir, ".ssh/host_keys/ssh_host_"+keyType+"_key"))
+					require.NoError(t, err)
+					require.Equal(t, "host key", string(key))
+				}
+			}
+		})
+	}
+}
+
 func TestLPUCommandDigests(t *testing.T) {
 	t.Parallel()
 
@@ -107,9 +151,9 @@ func TestLPUCommandDigests(t *testing.T) {
 		command string
 		want    string
 	}{
-		{name: "partition", command: lpuPartitionRunCommand, want: "d6f8a2ce0f1031bcf8e08d0aff75e8aed33cbd07aae1fd3e09d813a03b879911"},
-		{name: "worker", command: lpuWorkerRunCommand, want: "a6c8c03474d3feb459a329719ee961e2488a5e4886581adc10deec0691b103aa"},
-		{name: "partition worker", command: lpuPartitionWorkerRunCommand, want: "65b022e0e8785f0ce2f5ff49d798db40cf8e538d310f3044473088e78d655886"},
+		{name: "partition", command: lpuPartitionRunCommand, want: "e9af66afa3dbcdd589582d3576100cbdb72ae131d647919ef6bd11269d1462dd"},
+		{name: "worker", command: lpuWorkerRunCommand, want: "ac7e7dfcf47c1a81bb1e80b7f91f323cc00ceb11bb85e0833fc248334e2b5dd0"},
+		{name: "partition worker", command: lpuPartitionWorkerRunCommand, want: "f280af0e42b7c229317251cded7aa9d71ef53dd661e631c520b457e0d04cb3a8"},
 		{name: "probe", command: lpuV2ProbeCommand, want: "96ac74ae5e413a21fe98077f4d3d5b1dba7a741064e2734ae822ad77ab30e854"},
 	}
 

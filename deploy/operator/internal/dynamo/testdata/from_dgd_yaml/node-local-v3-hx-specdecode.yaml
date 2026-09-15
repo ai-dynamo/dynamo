@@ -403,9 +403,11 @@ spec:
               $HOME/.ssh/id_rsa.pub\ncp /ssh-pk/private.key.pub $HOME/.ssh/authorized_keys\nchmod
               600 $HOME/.ssh/id_rsa $HOME/.ssh/authorized_keys\nchmod 644 $HOME/.ssh/id_rsa.pub\nprintf
               'Host *\\nIdentityFile '$HOME'/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort
-              2222\\n' > $HOME/.ssh/config\n\nssh-keygen -t rsa -f $HOME/.ssh/host_keys/ssh_host_rsa_key
-              -N ''\nssh-keygen -t ecdsa -f $HOME/.ssh/host_keys/ssh_host_ecdsa_key
-              -N ''\nssh-keygen -t ed25519 -f $HOME/.ssh/host_keys/ssh_host_ed25519_key
+              2222\\n' > $HOME/.ssh/config\n\ntest -f \"$HOME/.ssh/host_keys/ssh_host_rsa_key\"
+              || ssh-keygen -t rsa -f $HOME/.ssh/host_keys/ssh_host_rsa_key -N ''\ntest
+              -f \"$HOME/.ssh/host_keys/ssh_host_ecdsa_key\" || ssh-keygen -t ecdsa
+              -f $HOME/.ssh/host_keys/ssh_host_ecdsa_key -N ''\ntest -f \"$HOME/.ssh/host_keys/ssh_host_ed25519_key\"
+              || ssh-keygen -t ed25519 -f $HOME/.ssh/host_keys/ssh_host_ed25519_key
               -N ''\n\n\nif command -v setcap >/dev/null 2>&1; then\n\tfor binary
               in /bin-unwrapped/agent_v2.unwrapped /bin-unwrapped/agent_v2_perfetto_trace.unwrapped
               /bin/agent_v2 /bin/agent_v2_perfetto_trace; do\n\t\tif [[ -e \"$binary\"
@@ -632,9 +634,11 @@ spec:
               $HOME/.ssh/id_rsa.pub\ncp /ssh-pk/private.key.pub $HOME/.ssh/authorized_keys\nchmod
               600 $HOME/.ssh/id_rsa $HOME/.ssh/authorized_keys\nchmod 644 $HOME/.ssh/id_rsa.pub\nprintf
               'Host *\\nIdentityFile '$HOME'/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort
-              2222\\n' > $HOME/.ssh/config\n\nssh-keygen -t rsa -f $HOME/.ssh/host_keys/ssh_host_rsa_key
-              -N ''\nssh-keygen -t ecdsa -f $HOME/.ssh/host_keys/ssh_host_ecdsa_key
-              -N ''\nssh-keygen -t ed25519 -f $HOME/.ssh/host_keys/ssh_host_ed25519_key
+              2222\\n' > $HOME/.ssh/config\n\ntest -f \"$HOME/.ssh/host_keys/ssh_host_rsa_key\"
+              || ssh-keygen -t rsa -f $HOME/.ssh/host_keys/ssh_host_rsa_key -N ''\ntest
+              -f \"$HOME/.ssh/host_keys/ssh_host_ecdsa_key\" || ssh-keygen -t ecdsa
+              -f $HOME/.ssh/host_keys/ssh_host_ecdsa_key -N ''\ntest -f \"$HOME/.ssh/host_keys/ssh_host_ed25519_key\"
+              || ssh-keygen -t ed25519 -f $HOME/.ssh/host_keys/ssh_host_ed25519_key
               -N ''\n\n\nif command -v setcap >/dev/null 2>&1; then\n\tfor binary
               in /bin-unwrapped/agent_v2.unwrapped /bin-unwrapped/agent_v2_perfetto_trace.unwrapped
               /bin/agent_v2 /bin/agent_v2_perfetto_trace; do\n\t\tif [[ -e \"$binary\"
@@ -861,9 +865,11 @@ spec:
               $HOME/.ssh/id_rsa.pub\ncp /ssh-pk/private.key.pub $HOME/.ssh/authorized_keys\nchmod
               600 $HOME/.ssh/id_rsa $HOME/.ssh/authorized_keys\nchmod 644 $HOME/.ssh/id_rsa.pub\nprintf
               'Host *\\nIdentityFile '$HOME'/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort
-              2222\\n' > $HOME/.ssh/config\n\nssh-keygen -t rsa -f $HOME/.ssh/host_keys/ssh_host_rsa_key
-              -N ''\nssh-keygen -t ecdsa -f $HOME/.ssh/host_keys/ssh_host_ecdsa_key
-              -N ''\nssh-keygen -t ed25519 -f $HOME/.ssh/host_keys/ssh_host_ed25519_key
+              2222\\n' > $HOME/.ssh/config\n\ntest -f \"$HOME/.ssh/host_keys/ssh_host_rsa_key\"
+              || ssh-keygen -t rsa -f $HOME/.ssh/host_keys/ssh_host_rsa_key -N ''\ntest
+              -f \"$HOME/.ssh/host_keys/ssh_host_ecdsa_key\" || ssh-keygen -t ecdsa
+              -f $HOME/.ssh/host_keys/ssh_host_ecdsa_key -N ''\ntest -f \"$HOME/.ssh/host_keys/ssh_host_ed25519_key\"
+              || ssh-keygen -t ed25519 -f $HOME/.ssh/host_keys/ssh_host_ed25519_key
               -N ''\n\n\nif command -v setcap >/dev/null 2>&1; then\n\tfor binary
               in /bin-unwrapped/agent_v2.unwrapped /bin-unwrapped/agent_v2_perfetto_trace.unwrapped
               /bin/agent_v2 /bin/agent_v2_perfetto_trace; do\n\t\tif [[ -e \"$binary\"

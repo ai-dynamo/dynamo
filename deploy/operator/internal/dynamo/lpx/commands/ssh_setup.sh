@@ -10,6 +10,6 @@ chmod 600 $HOME/.ssh/id_rsa $HOME/.ssh/authorized_keys
 chmod 644 $HOME/.ssh/id_rsa.pub
 printf 'Host *\nIdentityFile '$HOME'/.ssh/id_rsa\nStrictHostKeyChecking no\nPort @@LPX_SSH_PORT@@\n' > $HOME/.ssh/config
 
-ssh-keygen -t rsa -f $HOME/.ssh/host_keys/ssh_host_rsa_key -N ''
-ssh-keygen -t ecdsa -f $HOME/.ssh/host_keys/ssh_host_ecdsa_key -N ''
-ssh-keygen -t ed25519 -f $HOME/.ssh/host_keys/ssh_host_ed25519_key -N ''
+test -f "$HOME/.ssh/host_keys/ssh_host_rsa_key" || ssh-keygen -t rsa -f $HOME/.ssh/host_keys/ssh_host_rsa_key -N ''
+test -f "$HOME/.ssh/host_keys/ssh_host_ecdsa_key" || ssh-keygen -t ecdsa -f $HOME/.ssh/host_keys/ssh_host_ecdsa_key -N ''
+test -f "$HOME/.ssh/host_keys/ssh_host_ed25519_key" || ssh-keygen -t ed25519 -f $HOME/.ssh/host_keys/ssh_host_ed25519_key -N ''

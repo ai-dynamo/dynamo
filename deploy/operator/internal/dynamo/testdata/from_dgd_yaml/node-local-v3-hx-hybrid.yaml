@@ -304,13 +304,16 @@ spec:
               /ssh-pk/private.key.pub \"${HOME}/.ssh/authorized_keys\"\n\tchmod 600
               \"${HOME}/.ssh/id_rsa\" \"${HOME}/.ssh/authorized_keys\"\n\tchmod 644
               \"${HOME}/.ssh/id_rsa.pub\"\n\tprintf \"Host *\\nIdentityFile %s/.ssh/id_rsa\\nStrictHostKeyChecking
-              no\\nPort %s\\n\" \"${HOME}\" \"${MPI_SSH_PORT}\" > \"${HOME}/.ssh/config\"\n\n\tssh-keygen
-              -t rsa -f \"${HOME}/.ssh/host_keys/ssh_host_rsa_key\" -N \"\" -q\n\tssh-keygen
-              -t ecdsa -f \"${HOME}/.ssh/host_keys/ssh_host_ecdsa_key\" -N \"\" -q\n\tssh-keygen
-              -t ed25519 -f \"${HOME}/.ssh/host_keys/ssh_host_ed25519_key\" -N \"\"
-              -q\n}\n\nrun_sshd() {\n\tsetup_ssh\n\techo \"Starting sshd on port ${MPI_SSH_PORT}
-              for partition ${LOGICAL_PARTITION_INDEX} rank ${PARTITION_RANK}\"\n\texec
-              /bin/sshd -D -e \\\n\t\t-o \"PidFile none\" \\\n\t\t-o \"Port ${MPI_SSH_PORT}\"
+              no\\nPort %s\\n\" \"${HOME}\" \"${MPI_SSH_PORT}\" > \"${HOME}/.ssh/config\"\n\n\ttest
+              -f \"${HOME}/.ssh/host_keys/ssh_host_rsa_key\" || ssh-keygen -t rsa
+              -f \"${HOME}/.ssh/host_keys/ssh_host_rsa_key\" -N \"\" -q\n\ttest -f
+              \"${HOME}/.ssh/host_keys/ssh_host_ecdsa_key\" || ssh-keygen -t ecdsa
+              -f \"${HOME}/.ssh/host_keys/ssh_host_ecdsa_key\" -N \"\" -q\n\ttest
+              -f \"${HOME}/.ssh/host_keys/ssh_host_ed25519_key\" || ssh-keygen -t
+              ed25519 -f \"${HOME}/.ssh/host_keys/ssh_host_ed25519_key\" -N \"\" -q\n}\n\nrun_sshd()
+              {\n\tsetup_ssh\n\techo \"Starting sshd on port ${MPI_SSH_PORT} for partition
+              ${LOGICAL_PARTITION_INDEX} rank ${PARTITION_RANK}\"\n\texec /bin/sshd
+              -D -e \\\n\t\t-o \"PidFile none\" \\\n\t\t-o \"Port ${MPI_SSH_PORT}\"
               \\\n\t\t-o \"AuthorizedKeysFile ${HOME}/.ssh/authorized_keys\" \\\n\t\t-o
               \"StrictModes no\" \\\n\t\t-o \"PermitRootLogin yes\" \\\n\t\t-o \"PubkeyAuthentication
               yes\" \\\n\t\t-o \"SetEnv PARTITION_ID=\\\"${PARTITION_ID}\\\" RANK_IN_PARTITION=\\\"${RANK_IN_PARTITION}\\\"\"
