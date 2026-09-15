@@ -38,6 +38,7 @@ use dynamo_runtime::error::{DynamoError, ErrorType};
 use either::Either;
 use futures::Stream;
 use futures::stream::{self, StreamExt};
+#[cfg(any(feature = "media-nixl", test))]
 use std::borrow::Cow;
 use std::time::Instant;
 
@@ -61,9 +62,11 @@ use crate::local_model::runtime_config::{TOKEN_BUDGET_RUNTIME_KEY, TokenBudget};
 #[cfg(feature = "mm-routing")]
 use crate::model_card::ModelInfoType;
 use crate::model_card::{ModelDeploymentCard, ModelInfo, PromptFormatterArtifact};
+#[cfg(feature = "media-nixl")]
+use crate::preprocessor::media::MediaDecoder;
 #[cfg(feature = "mm-routing")]
 use crate::preprocessor::media::MediaFetcher;
-use crate::preprocessor::media::{MediaDecoder, MediaLoader};
+use crate::preprocessor::media::MediaLoader;
 use crate::protocols::common::preprocessor::{
     MultimodalData, MultimodalDataMap, MultimodalUuidMap, PreprocessedRequestBuilder, RoutingHints,
 };
@@ -198,6 +201,7 @@ impl ToolProcessingRoute {
     }
 }
 
+#[cfg(any(feature = "media-nixl", test))]
 fn tool_content_part_as_user(
     part: &ChatCompletionRequestToolMessageContentPart,
 ) -> Cow<'_, ChatCompletionRequestUserMessageContentPart> {
@@ -223,6 +227,7 @@ enum MultimodalContentPart<'a> {
 }
 
 impl<'a> MultimodalContentPart<'a> {
+    #[cfg(any(feature = "media-nixl", test))]
     fn as_user(&self) -> Cow<'a, ChatCompletionRequestUserMessageContentPart> {
         match self {
             Self::User(part) => Cow::Borrowed(part),
@@ -292,7 +297,7 @@ fn multimodal_content_parts(
     }
 }
 
-#[cfg(feature = "mm-routing")]
+#[cfg(all(feature = "media-nixl", feature = "mm-routing"))]
 fn image_content_part_url(
     content_part: &ChatCompletionRequestUserMessageContentPart,
 ) -> Option<&str> {
@@ -1174,6 +1179,7 @@ fn try_expand_mm_routing_tokens(
     }
 }
 
+#[cfg(feature = "media-nixl")]
 struct MediaFetchTask<'a> {
     modality: &'static str,
     slot_idx: usize,
@@ -2343,9 +2349,19 @@ impl OpenAIPreprocessor {
                 )
             });
 
+        #[cfg(feature = "media-nixl")]
         let media_loader = match mdc.media_decoder {
             Some(media_decoder) => Some(MediaLoader::new(media_decoder, mdc.media_fetcher)?),
             None => None,
+        };
+        #[cfg(not(feature = "media-nixl"))]
+        let media_loader = {
+            if mdc.media_decoder.is_some() {
+                anyhow::bail!(
+                    "frontend media decoding was requested by the model deployment card, but dynamo-llm was built without the 'media-nixl' feature"
+                );
+            }
+            None
         };
 
         #[cfg(feature = "mm-routing")]
@@ -3140,6 +3156,7 @@ impl OpenAIPreprocessor {
         }
     }
 
+    #[cfg(any(feature = "media-nixl", test))]
     fn replace_reserved_media_slot(
         media_map: &mut MultimodalDataMap,
         modality: &str,
@@ -3212,6 +3229,7 @@ impl OpenAIPreprocessor {
         let mut has_user_uuid = false;
         // Decoded results are written back into these reserved modality slots so
         // URL-backed and UUID-only inputs retain request order.
+        #[cfg(feature = "media-nixl")]
         let mut fetch_tasks: Vec<MediaFetchTask<'_>> = Vec::new();
         #[cfg(feature = "mm-routing")]
         let mut mm_routing_entries: Vec<MmRoutingEntry> = Vec::new();
@@ -3281,6 +3299,7 @@ impl OpenAIPreprocessor {
                 }
 
                 let slots = media_map.entry(type_str.to_string()).or_default();
+                #[cfg(feature = "media-nixl")]
                 let slot_idx = slots.len();
                 has_user_uuid |= uuid.is_some();
                 uuid_map
@@ -3291,6 +3310,7 @@ impl OpenAIPreprocessor {
                 match (url, uuid) {
                     (Some(url), _) => {
                         if has_media_loader {
+                            #[cfg(feature = "media-nixl")]
                             fetch_tasks.push(MediaFetchTask {
                                 modality: type_str,
                                 slot_idx,
@@ -3324,17 +3344,25 @@ impl OpenAIPreprocessor {
 
         #[cfg(feature = "mm-routing")]
         let has_processor_override = has_mm_processor_override(request.mm_processor_kwargs());
-        #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
+        #[cfg(all(
+            feature = "media-nixl",
+            feature = "mm-routing",
+            feature = "media-ffmpeg"
+        ))]
         let hash_decoded_video = should_hash_decoded_video(
             exact_mm_routing_eligible,
             has_user_uuid,
             has_processor_override,
             self.video_routing_processor.is_some(),
         );
-        #[cfg(not(all(feature = "mm-routing", feature = "media-ffmpeg")))]
+        #[cfg(all(
+            feature = "media-nixl",
+            not(all(feature = "mm-routing", feature = "media-ffmpeg"))
+        ))]
         let hash_decoded_video = false;
 
         // Execute all fetch tasks
+        #[cfg(feature = "media-nixl")]
         if !fetch_tasks.is_empty() {
             let loader = self.media_loader.as_ref().unwrap();
             // The frontend owns decoding here, so the opaque request kwargs are parsed

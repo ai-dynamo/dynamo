@@ -1,48 +1,34 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-#[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
-use anyhow::Context;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::io::Write;
+use std::sync::Arc;
+
 use anyhow::Result;
 use base64::{Engine as _, engine::general_purpose};
 use dynamo_memory::SystemStorage;
 use dynamo_memory::nixl::{self, NixlAgent, NixlDescriptor, RegisteredView};
+use dynamo_protocols::types::{
+    ChatCompletionRequestMessageContentPartImage, ChatCompletionRequestUserMessageContentPart,
+};
 use flate2::{Compression, write::ZlibEncoder};
-use ndarray::{ArrayBase, Dimension, OwnedRepr};
+use lru::LruCache;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::io::Write;
-use std::sync::Arc;
 
+use super::common::EncodedMediaData;
+use super::decoded::{DataType, DecodedMediaData, MediaTensorInfo};
+#[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
 use super::decoders::DecodedMediaMetadata;
+use super::decoders::{Decoder, MediaDecoder};
+use super::loader::MediaFetcher;
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize)]
-pub enum DataType {
-    UINT8,
-}
-
-// Common tensor metadata shared between decoded and RDMA descriptors
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct MediaTensorInfo {
-    pub(crate) shape: Vec<usize>,
-    pub(crate) dtype: DataType,
-    pub(crate) metadata: Option<DecodedMediaMetadata>,
-}
-
-// Decoded media data (image RGB, video frames pixels, ...)
-#[derive(Debug)]
-pub struct DecodedMediaData {
-    pub(crate) data: SystemStorage,
-    pub(crate) tensor_info: MediaTensorInfo,
-    pub(crate) content_hash: Option<u64>,
-}
-
-// Decoded media data NIXL descriptor (sent to the next step in the pipeline / NATS)
-
+/// NIXL descriptor for decoded media sent to the next pipeline stage.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct RdmaMediaDataDescriptor {
-    // b64 agent metadata
     pub(crate) nixl_metadata: String,
-    // tensor descriptor
     pub(crate) nixl_descriptor: NixlDescriptor,
 
     #[serde(flatten)]
@@ -54,23 +40,13 @@ pub struct RdmaMediaDataDescriptor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) content_hash: Option<String>,
 
-    // reference to the actual data, kept alive while the rdma descriptor is alive
+    /// Keep the registered bytes alive while the descriptor is in use.
     #[serde(skip, default)]
     #[allow(dead_code)]
     pub(crate) source_storage: Option<Arc<nixl::NixlRegistered<SystemStorage>>>,
 }
 
 impl RdmaMediaDataDescriptor {
-    #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
-    fn local_payload(&self) -> Option<&[u8]> {
-        use dynamo_memory::actions::Slice;
-        let registered = self.source_storage.as_ref()?;
-        let storage = registered.storage();
-        // SAFETY: the descriptor keeps the registered SystemStorage alive and
-        // request construction does not mutate it while this borrow exists.
-        unsafe { storage.as_slice().ok() }
-    }
-
     /// Canonical cache/routing key serialized on the descriptor.
     pub(crate) fn content_hash_key(&self) -> Option<&str> {
         self.content_hash.as_deref()
@@ -83,17 +59,28 @@ impl RdmaMediaDataDescriptor {
             .and_then(|key| u64::from_str_radix(key, 16).ok())
     }
 
-    /// Canonical identity for one frontend-decoded video:
-    /// `(modality, shape, dtype, decoded metadata, sampled RGB bytes)`.
-    /// Metadata is serialized from the typed object sent to the worker, so new
-    /// model-visible fields automatically participate in the identity.
+    #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
+    fn local_payload(&self) -> Option<&[u8]> {
+        use dynamo_memory::actions::Slice;
+
+        let registered = self.source_storage.as_ref()?;
+        let storage = registered.storage();
+        // SAFETY: the descriptor keeps the registered SystemStorage alive and
+        // request construction does not mutate it while this borrow exists.
+        unsafe { storage.as_slice().ok() }
+    }
+
+    /// Return the canonical identity for one frontend-decoded video.
     #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
     pub(crate) fn video_content_hash(&self) -> Result<u64> {
+        use anyhow::Context;
+
         self.video_metadata()?;
         self.content_hash()
             .context("decoded video content hash is missing")
     }
 
+    /// Return the decoded video metadata.
     #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
     pub(crate) fn video_metadata(&self) -> Result<&super::decoders::VideoMetadata> {
         match self.tensor_info.metadata.as_ref() {
@@ -103,8 +90,7 @@ impl RdmaMediaDataDescriptor {
         }
     }
 
-    /// Validate the contiguous `[T, H, W, 3]` payload and return its video
-    /// dimensions without copying or preprocessing pixels.
+    /// Validate the contiguous `[T, H, W, 3]` payload and return its dimensions.
     #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
     pub(crate) fn video_dimensions(&self) -> Result<(usize, u32, u32)> {
         let bytes = self
@@ -114,41 +100,310 @@ impl RdmaMediaDataDescriptor {
     }
 }
 
-#[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
-fn hash_video_content(tensor_info: &MediaTensorInfo, bytes: &[u8]) -> Result<u64> {
-    use xxhash_rust::xxh3::Xxh3;
+impl DecodedMediaData {
+    /// Register decoded bytes with NIXL and produce their transport descriptor.
+    pub fn into_rdma_descriptor(self, nixl_agent: &NixlAgent) -> Result<RdmaMediaDataDescriptor> {
+        let mut source_storage = SystemStorage::new(self.data.len())?;
+        // SAFETY: both buffers are valid for `self.data.len()` bytes, do not
+        // overlap, and `source_storage` owns the destination allocation.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                self.data.as_ptr(),
+                source_storage.as_mut_ptr(),
+                self.data.len(),
+            );
+        }
+        let content_hash = self.content_hash.map(|hash| format!("{hash:016x}"));
+        let registered = nixl::register_with_nixl(source_storage, nixl_agent, None)
+            .map_err(|_| anyhow::anyhow!("Failed to register storage with NIXL"))?;
 
-    anyhow::ensure!(!bytes.is_empty(), "decoded video payload is empty");
-    let metadata = tensor_info
-        .metadata
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("decoded video metadata is missing"))?;
-    let DecodedMediaMetadata::Video(metadata) = metadata else {
-        anyhow::bail!("decoded media metadata is not video metadata");
-    };
-    let metadata_bytes = serde_json::to_vec(metadata)
-        .map_err(|error| anyhow::anyhow!("failed to serialize video metadata: {error}"))?;
+        let nixl_descriptor = registered.descriptor();
+        let nixl_metadata = get_nixl_metadata(nixl_agent, registered.storage())?;
 
-    let mut hasher = Xxh3::new();
-    update_len_prefixed(&mut hasher, b"video");
-    hasher.update(&(tensor_info.shape.len() as u64).to_le_bytes());
-    for &dim in &tensor_info.shape {
-        hasher.update(&(dim as u64).to_le_bytes());
+        Ok(RdmaMediaDataDescriptor {
+            nixl_metadata,
+            nixl_descriptor,
+            tensor_info: self.tensor_info,
+            content_hash,
+            source_storage: Some(Arc::new(registered)),
+        })
     }
-    let dtype_byte = match tensor_info.dtype {
-        DataType::UINT8 => 0,
+}
+
+/// Return compressed, base64-encoded metadata for a NIXL agent.
+pub fn get_nixl_metadata(agent: &NixlAgent, _storage: &SystemStorage) -> Result<String> {
+    let nixl_md = agent.raw_agent().get_local_md()?;
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(6));
+    encoder.write_all(&nixl_md)?;
+    let compressed = encoder.finish()?;
+    let b64_encoded = general_purpose::STANDARD.encode(&compressed);
+    Ok(format!("b64:{b64_encoded}"))
+}
+
+/// Create the process-local NIXL agent used for frontend media registration.
+pub fn get_nixl_agent() -> Result<NixlAgent> {
+    let name = format!("media-loader-{}", uuid::Uuid::new_v4());
+    NixlAgent::with_backends(&name, &["UCX"])
+}
+
+/// Frontend media decoder backed by NIXL-registered storage.
+pub struct MediaLoader {
+    media_decoder: MediaDecoder,
+    http_client: reqwest::Client,
+    media_fetcher: MediaFetcher,
+    nixl_agent: NixlAgent,
+    cache: Option<Arc<Mutex<LoaderCache>>>,
+}
+
+impl MediaLoader {
+    /// Convert a cache budget expressed in GiB into bytes.
+    pub(super) fn cache_budget_bytes(value: Option<&str>) -> u64 {
+        let gb = value
+            .and_then(|s| s.parse::<f64>().ok())
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .unwrap_or(0.0);
+        (gb * (1024.0 * 1024.0 * 1024.0)) as u64
+    }
+
+    /// Read the decoded-media cache budget from the process environment.
+    fn cache_budget_bytes_from_env() -> u64 {
+        let value = std::env::var("DYN_MULTIMODAL_LOADER_CACHE_GB").ok();
+        Self::cache_budget_bytes(value.as_deref())
+    }
+
+    /// Hash a media URL into the cache key used by this process.
+    pub(super) fn cache_key(url: &str) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        url.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Create a frontend media loader using the supplied decoder policy.
+    pub fn new(media_decoder: MediaDecoder, media_fetcher: Option<MediaFetcher>) -> Result<Self> {
+        media_decoder.warn_if_unavailable_backends();
+        let media_fetcher = media_fetcher.unwrap_or_else(MediaFetcher::from_env);
+        let http_client = media_fetcher.build_http_client()?;
+        let nixl_agent = get_nixl_agent()?;
+        let cache = match Self::cache_budget_bytes_from_env() {
+            0 => {
+                tracing::debug!(
+                    "[mm-cache] frontend media cache disabled (DYN_MULTIMODAL_LOADER_CACHE_GB=0)"
+                );
+                None
+            }
+            budget => {
+                tracing::info!(
+                    budget_bytes = budget,
+                    "[mm-cache] frontend media cache enabled (DYN_MULTIMODAL_LOADER_CACHE_GB)"
+                );
+                Some(Arc::new(Mutex::new(LoaderCache::new(budget))))
+            }
+        };
+
+        Ok(Self {
+            media_decoder,
+            http_client,
+            media_fetcher,
+            nixl_agent,
+            cache,
+        })
+    }
+
+    /// Build a loader with an explicit cache budget for tests.
+    #[cfg(test)]
+    pub fn with_cache_budget_bytes(
+        media_decoder: MediaDecoder,
+        media_fetcher: Option<MediaFetcher>,
+        budget_bytes: u64,
+    ) -> Result<Self> {
+        let mut loader = Self::new(media_decoder, media_fetcher)?;
+        loader.cache =
+            (budget_bytes > 0).then(|| Arc::new(Mutex::new(LoaderCache::new(budget_bytes))));
+        Ok(loader)
+    }
+
+    /// Return the current number of decoded entries in the media cache.
+    pub fn cache_len(&self) -> usize {
+        self.cache.as_ref().map(|c| c.lock().len()).unwrap_or(0)
+    }
+
+    /// Fetch, decode, and register one media request part.
+    pub async fn fetch_and_decode_media_part(
+        &self,
+        oai_content_part: &ChatCompletionRequestUserMessageContentPart,
+        media_io_kwargs: Option<&MediaDecoder>,
+    ) -> Result<RdmaMediaDataDescriptor> {
+        self.fetch_and_decode_media_part_with_video_hash(oai_content_part, media_io_kwargs, false)
+            .await
+    }
+
+    /// Fetch and decode one media part, optionally hashing decoded video bytes.
+    pub(crate) async fn fetch_and_decode_media_part_with_video_hash(
+        &self,
+        oai_content_part: &ChatCompletionRequestUserMessageContentPart,
+        media_io_kwargs: Option<&MediaDecoder>,
+        _hash_video: bool,
+    ) -> Result<RdmaMediaDataDescriptor> {
+        if let (Some(cache), ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part)) =
+            (self.cache.as_ref(), oai_content_part)
+            && media_io_kwargs.is_none()
+            && let Some(url) = image_part.image_url.as_ref().map(|media| &media.url)
+        {
+            let key = Self::cache_key(url.as_str());
+            if let Some(hit) = cache.lock().get(&key) {
+                tracing::debug!(url_hash = key, "[mm-cache] hit");
+                return Ok(hit);
+            }
+        }
+
+        let decoded = match oai_content_part {
+            ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part) => {
+                let mdc_decoder = self
+                    .media_decoder
+                    .image
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Model does not support image inputs"))?;
+                let url = require_image_url(image_part)?;
+                self.media_fetcher
+                    .check_if_url_allowed_with_dns(url)
+                    .await?;
+                let data = EncodedMediaData::from_url(url, &self.http_client)
+                    .await
+                    .map_err(MediaFetcher::map_fetch_error)?;
+                let decoder =
+                    mdc_decoder.with_runtime(media_io_kwargs.and_then(|k| k.image.as_ref()));
+                decoder.decode_async(data).await?
+            }
+            #[allow(unused_variables)]
+            ChatCompletionRequestUserMessageContentPart::VideoUrl(video_part) => {
+                #[cfg(not(feature = "media-ffmpeg"))]
+                anyhow::bail!("Video decoding requires the 'media-ffmpeg' feature to be enabled");
+
+                #[cfg(feature = "media-ffmpeg")]
+                {
+                    let mdc_decoder =
+                        self.media_decoder.video.as_ref().ok_or_else(|| {
+                            anyhow::anyhow!("Model does not support video inputs")
+                        })?;
+                    let url = video_part
+                        .video_url
+                        .as_ref()
+                        .map(|media| &media.url)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("Cannot decode a video content part without a URL")
+                        })?;
+                    self.media_fetcher
+                        .check_if_url_allowed_with_dns(url)
+                        .await?;
+                    let data = EncodedMediaData::from_url(url, &self.http_client)
+                        .await
+                        .map_err(MediaFetcher::map_fetch_error)?;
+                    let decoder =
+                        mdc_decoder.with_runtime(media_io_kwargs.and_then(|k| k.video.as_ref()));
+                    decoder
+                        .decode_async_with_video_hash(data, _hash_video)
+                        .await?
+                }
+            }
+            ChatCompletionRequestUserMessageContentPart::AudioUrl(_) => {
+                anyhow::bail!("Audio decoding is not supported yet");
+            }
+            _ => anyhow::bail!("Unsupported media type"),
+        };
+
+        let descriptor = decoded.into_rdma_descriptor(&self.nixl_agent)?;
+        if let (Some(cache), ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part)) =
+            (self.cache.as_ref(), oai_content_part)
+            && media_io_kwargs.is_none()
+            && let Some(url) = image_part.image_url.as_ref().map(|media| &media.url)
+        {
+            let key = Self::cache_key(url.as_str());
+            let bytes = descriptor_bytes(&descriptor);
+            cache.lock().put(key, descriptor.clone());
+            tracing::debug!(url_hash = key, bytes, "[mm-cache] insert");
+        }
+
+        Ok(descriptor)
+    }
+}
+
+struct LoaderCache {
+    lru: LruCache<u64, RdmaMediaDataDescriptor>,
+    bytes_used: u64,
+    budget_bytes: u64,
+}
+
+impl LoaderCache {
+    /// Create an empty cache with a decoded-byte budget.
+    fn new(budget_bytes: u64) -> Self {
+        Self {
+            lru: LruCache::unbounded(),
+            bytes_used: 0,
+            budget_bytes,
+        }
+    }
+
+    /// Return and promote an entry when it is present.
+    fn get(&mut self, key: &u64) -> Option<RdmaMediaDataDescriptor> {
+        self.lru.get(key).cloned()
+    }
+
+    /// Insert an entry and evict least-recently-used entries over budget.
+    fn put(&mut self, key: u64, value: RdmaMediaDataDescriptor) {
+        let value_bytes = descriptor_bytes(&value);
+        if let Some(old) = self.lru.pop(&key) {
+            self.bytes_used = self.bytes_used.saturating_sub(descriptor_bytes(&old));
+        }
+        self.lru.put(key, value);
+        self.bytes_used = self.bytes_used.saturating_add(value_bytes);
+        while self.bytes_used > self.budget_bytes && !self.lru.is_empty() {
+            if let Some((_, old)) = self.lru.pop_lru() {
+                self.bytes_used = self.bytes_used.saturating_sub(descriptor_bytes(&old));
+            }
+        }
+    }
+
+    /// Return the number of cached descriptors.
+    fn len(&self) -> usize {
+        self.lru.len()
+    }
+}
+
+/// Calculate the decoded payload size represented by a descriptor.
+fn descriptor_bytes(descriptor: &RdmaMediaDataDescriptor) -> u64 {
+    let element_bytes = match descriptor.tensor_info.dtype {
+        DataType::UINT8 => 1_u64,
     };
-    hasher.update(&[dtype_byte]);
-    update_len_prefixed(&mut hasher, &metadata_bytes);
-    update_len_prefixed(&mut hasher, bytes);
-    Ok(hasher.digest())
+    descriptor
+        .tensor_info
+        .shape
+        .iter()
+        .try_fold(1_u64, |size, &dimension| size.checked_mul(dimension as u64))
+        .unwrap_or(u64::MAX)
+        .saturating_mul(element_bytes)
+}
+
+/// Return the URL from an image part or reject a UUID-only part.
+fn require_image_url(part: &ChatCompletionRequestMessageContentPartImage) -> Result<&url::Url> {
+    use anyhow::Context;
+
+    Ok(&part
+        .image_url
+        .as_ref()
+        .context(
+            "Cannot decode an image content part without a URL; UUID-only parts must be resolved by the backend cache",
+        )?
+        .url)
 }
 
 #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
+/// Validate decoded video storage and return frame count, width, and height.
 fn video_dimensions_from_parts(
     tensor_info: &MediaTensorInfo,
     bytes: &[u8],
 ) -> Result<(usize, u32, u32)> {
+    use anyhow::Context;
+
     let [frames, height, width, channels] = tensor_info.shape.as_slice() else {
         anyhow::bail!(
             "decoded video shape must be [T, H, W, C], got {:?}",
@@ -185,241 +440,28 @@ fn video_dimensions_from_parts(
     Ok((*frames, width, height))
 }
 
-#[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
-fn update_len_prefixed(hasher: &mut xxhash_rust::xxh3::Xxh3, bytes: &[u8]) {
-    hasher.update(&(bytes.len() as u64).to_le_bytes());
-    hasher.update(bytes);
-}
-
-fn canonical_content_hash(shape: &[usize], dtype: DataType, bytes: &[u8]) -> u64 {
-    use xxhash_rust::xxh3::Xxh3;
-
-    let mut hasher = Xxh3::new();
-    // Rank and dimensions are fixed-width so distinct shapes cannot alias
-    // after concatenation.
-    hasher.update(&(shape.len() as u64).to_le_bytes());
-    for &dim in shape {
-        hasher.update(&(dim as u64).to_le_bytes());
-    }
-    // Widen this discriminant if DataType gains another variant.
-    let dtype_byte: u8 = match dtype {
-        DataType::UINT8 => 0,
-    };
-    hasher.update(&[dtype_byte]);
-    hasher.update(bytes);
-    hasher.digest()
-}
-
-fn content_hash_for_storage(
-    tensor_info: &MediaTensorInfo,
-    storage: &SystemStorage,
-    _hash_video: bool,
-) -> Option<u64> {
-    use dynamo_memory::{MemoryDescriptor, actions::Slice};
-
-    if storage.size() == 0 {
-        return None;
-    }
-
-    // SAFETY: storage owns this stable buffer and is only read while the
-    // descriptor is being built, before NIXL can access it concurrently.
-    let bytes = unsafe { storage.as_slice().ok()? };
-    match tensor_info.metadata.as_ref() {
-        Some(DecodedMediaMetadata::Image(_)) => Some(canonical_content_hash(
-            &tensor_info.shape,
-            tensor_info.dtype,
-            bytes,
-        )),
-        #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
-        Some(DecodedMediaMetadata::Video(_)) if _hash_video => {
-            match hash_video_content(tensor_info, bytes) {
-                Ok(hash) => Some(hash),
-                Err(error) => {
-                    tracing::debug!(%error, "Skipping exact routing hash for decoded video");
-                    None
-                }
-            }
-        }
-        #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
-        Some(DecodedMediaMetadata::Video(_)) => None,
-        #[cfg(all(not(feature = "mm-routing"), feature = "media-ffmpeg"))]
-        Some(DecodedMediaMetadata::Video(_)) => None,
-        None => None,
-    }
-}
-
-impl DecodedMediaData {
-    /// Precompute the canonical media hash while still running on the decode
-    /// thread. Images are always hashed; videos are hashed only when the
-    /// request is eligible for exact MM routing.
-    pub(crate) fn compute_content_hash(&mut self, hash_video: bool) {
-        self.content_hash = content_hash_for_storage(&self.tensor_info, &self.data, hash_video);
-    }
-
-    pub fn into_rdma_descriptor(self, nixl_agent: &NixlAgent) -> Result<RdmaMediaDataDescriptor> {
-        let source_storage = self.data;
-        let content_hash = self.content_hash.map(|hash| format!("{hash:016x}"));
-        let registered = nixl::register_with_nixl(source_storage, nixl_agent, None)
-            .map_err(|_| anyhow::anyhow!("Failed to register storage with NIXL"))?;
-
-        let nixl_descriptor = registered.descriptor();
-        let nixl_metadata = get_nixl_metadata(nixl_agent, registered.storage())?;
-
-        Ok(RdmaMediaDataDescriptor {
-            nixl_metadata,
-            nixl_descriptor,
-            tensor_info: self.tensor_info,
-            content_hash,
-            // Keep registered storage alive
-            source_storage: Some(Arc::new(registered)),
-        })
-    }
-}
-
-// convert Array{N}<u8> to DecodedMediaData
-// TODO: Array1<f32> for audio
-
-impl<D: Dimension> TryFrom<ArrayBase<OwnedRepr<u8>, D>> for DecodedMediaData {
-    type Error = anyhow::Error;
-
-    fn try_from(array: ArrayBase<OwnedRepr<u8>, D>) -> Result<Self, Self::Error> {
-        let shape = array.shape().to_vec();
-
-        let (data_vec, _) = array.into_raw_vec_and_offset();
-        let mut storage = SystemStorage::new(data_vec.len())?;
-        unsafe {
-            std::ptr::copy_nonoverlapping(data_vec.as_ptr(), storage.as_mut_ptr(), data_vec.len());
-        }
-
-        Ok(Self {
-            data: storage,
-            tensor_info: MediaTensorInfo {
-                shape,
-                dtype: DataType::UINT8,
-                metadata: None,
-            },
-            content_hash: None,
-        })
-    }
-}
-
-// Get NIXL metadata for a descriptor
-// Returns zlib-compressed, base64-encoded metadata in format: "b64:<compressed_base64>"
-// This format matches what Python nixl_connect expects for RdmaMetadata.nixl_metadata
-// TODO: pre-allocate a fixed NIXL-registered RAM pool so metadata can be cached on the target?
-pub fn get_nixl_metadata(agent: &NixlAgent, _storage: &SystemStorage) -> Result<String> {
-    // WAR: Until https://github.com/ai-dynamo/nixl/pull/970 is merged, can't use get_local_partial_md
-    let nixl_md = agent.raw_agent().get_local_md()?;
-    // let mut reg_desc_list = RegDescList::new(MemType::Dram)?;
-    // reg_desc_list.add_storage_desc(storage)?;
-    // let nixl_partial_md = agent.raw_agent().get_local_partial_md(&reg_desc_list, None)?;
-
-    // Compress with zlib (level 6, matching Python's default)
-    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(6));
-    encoder.write_all(&nixl_md)?;
-    let compressed = encoder.finish()?;
-
-    let b64_encoded = general_purpose::STANDARD.encode(&compressed);
-    Ok(format!("b64:{}", b64_encoded))
-}
-
-pub fn get_nixl_agent() -> Result<NixlAgent> {
-    let name = format!("media-loader-{}", uuid::Uuid::new_v4());
-    let nixl_agent = NixlAgent::with_backends(&name, &["UCX"])?;
-    Ok(nixl_agent)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{DataType, canonical_content_hash};
-
-    #[test]
-    fn canonical_content_hash_payload_is_stable() {
-        let bytes = [0_u8, 1, 2, 3, 4, 5];
-        let hash = canonical_content_hash(&[1, 2, 3], DataType::UINT8, &bytes);
-
-        assert_eq!(hash, 0x7a9b_bcb1_1a89_8630);
-        assert_eq!(format!("{hash:016x}"), "7a9bbcb11a898630");
-    }
-}
 #[cfg(all(test, feature = "mm-routing", feature = "media-ffmpeg"))]
-mod video_tests {
+mod tests {
     use super::*;
     use crate::preprocessor::media::decoders::VideoMetadata;
 
-    fn video_info(sampled_timestamps: Vec<f64>) -> MediaTensorInfo {
-        MediaTensorInfo {
+    #[test]
+    fn video_dimensions_validate_rgb_payload_layout() {
+        let bytes = [0_u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+        let info = MediaTensorInfo {
             shape: vec![2, 1, 2, 3],
             dtype: DataType::UINT8,
             metadata: Some(DecodedMediaMetadata::Video(VideoMetadata {
                 source_fps: 24.0,
                 source_duration: 10.0,
-                sampled_timestamps,
+                sampled_timestamps: vec![0.0, 5.0],
             })),
-        }
-    }
-
-    #[test]
-    fn video_hash_covers_metadata_shape_and_rgb_bytes() {
-        let bytes = [0_u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
-        let info = video_info(vec![0.0, 5.0]);
-        let expected = hash_video_content(&info, &bytes).unwrap();
-
-        assert_eq!(hash_video_content(&info, &bytes).unwrap(), expected);
-
-        let changed_metadata = video_info(vec![0.0, 5.1]);
-        assert_ne!(
-            hash_video_content(&changed_metadata, &bytes).unwrap(),
-            expected
-        );
-
-        let mut changed_shape = info.clone();
-        changed_shape.shape = vec![1, 2, 2, 3];
-        assert_ne!(
-            hash_video_content(&changed_shape, &bytes).unwrap(),
-            expected
-        );
-
-        let mut changed_bytes = bytes;
-        changed_bytes[0] = 42;
-        assert_ne!(hash_video_content(&info, &changed_bytes).unwrap(), expected);
-    }
-
-    #[test]
-    fn video_hash_is_precomputed_from_decoded_storage() {
-        let bytes = [0_u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
-        let info = video_info(vec![0.0, 5.0]);
-        let mut storage = SystemStorage::new(bytes.len()).unwrap();
-        unsafe {
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), storage.as_mut_ptr(), bytes.len());
-        }
+        };
 
         assert_eq!(
-            content_hash_for_storage(&info, &storage, true),
-            Some(hash_video_content(&info, &bytes).unwrap())
+            video_dimensions_from_parts(&info, &bytes).unwrap(),
+            (2, 2, 1)
         );
-    }
-
-    #[test]
-    fn video_hash_is_skipped_when_exact_routing_is_ineligible() {
-        let bytes = [0_u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
-        let info = video_info(vec![0.0, 5.0]);
-        let mut storage = SystemStorage::new(bytes.len()).unwrap();
-        unsafe {
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), storage.as_mut_ptr(), bytes.len());
-        }
-
-        assert_eq!(content_hash_for_storage(&info, &storage, false), None);
-    }
-
-    #[test]
-    fn video_dimensions_validate_rgb_payload_layout() {
-        let bytes = [0_u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
-        let info = video_info(vec![0.0, 5.0]);
-        let dimensions = video_dimensions_from_parts(&info, &bytes).unwrap();
-
-        assert_eq!(dimensions, (2, 2, 1));
-
         let mut rgba = info.clone();
         rgba.shape[3] = 4;
         assert!(video_dimensions_from_parts(&rgba, &bytes).is_err());

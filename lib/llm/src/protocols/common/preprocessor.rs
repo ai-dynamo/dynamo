@@ -20,6 +20,7 @@ use uuid::Uuid;
 use super::extensions::{AgentContext, RouterParams};
 use super::timing::RequestTracker;
 use super::{OutputOptions, SamplingOptions, StopConditions};
+#[cfg(feature = "media-nixl")]
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
 
@@ -227,6 +228,7 @@ pub enum MultimodalData {
     Url(url::Url),
     #[serde(rename(serialize = "Url"))]
     RawUrl(String),
+    #[cfg(feature = "media-nixl")]
     Decoded(RdmaMediaDataDescriptor),
     /// Payload-free media slot resolved by a backend processor cache.
     UuidOnly(String),
