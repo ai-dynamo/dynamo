@@ -1987,6 +1987,62 @@ def test_explicit_infeasible_point_reports_source_index():
         InstrumentedScheduler._bench_build_grid(stub)
 
 
+@pytest.mark.core
+@pytest.mark.parametrize("kv_read_tokens", [0, 12288])
+def test_prefill_feasibility_uses_native_split_with_local_prefix(kv_read_tokens):
+    stub = _explicit_grid_stub("prefill")
+    stub.need_mamba_block_aligned_split = True
+    stub._mamba_block_aligned_split = MagicMock(return_value=128)
+
+    scheduled = stub._bench_prefill_scheduled_tokens_per_req(
+        kv_read_tokens + 192, kv_read_tokens
+    )
+
+    assert scheduled == 128
+    (request, new_tokens), kwargs = stub._mamba_block_aligned_split.call_args
+    assert new_tokens == 192
+    assert request.num_computed_tokens == 0
+    assert request.num_prompt_tokens == request.num_tokens == kv_read_tokens + 192
+    assert request.shared_prefix_boundary == 0
+    assert kwargs == {"num_new_local_computed_tokens": kv_read_tokens}
+
+
+@pytest.mark.core
+@pytest.mark.parametrize("generated", [False, True])
+def test_prefill_grid_rejects_native_split_before_measurement(generated):
+    # GB300 regression: 4 x 192 was considered one 768-token forward, but the
+    # engine's KDA tail checkpoint schedules 4 x 128 first. Plenty of capacity
+    # isolates the split from the unrelated shared-pool feasibility check.
+    stub = _explicit_grid_stub("prefill")
+    stub.cache_config.num_gpu_blocks = 1024
+    stub.cache_config.block_size = 1536
+    stub.need_mamba_block_aligned_split = True
+    stub._mamba_block_aligned_split = MagicMock(return_value=128)
+    candidate = PrefillPointCandidate(
+        total_prefill_tokens=768, total_kv_read_tokens=0, batch_size=4
+    )
+
+    if generated:
+        assert (
+            stub._bench_materialize_prefill_candidate(
+                candidate, "prefill[273]", generated=True
+            )
+            is None
+        )
+    else:
+        with pytest.raises(ValueError, match=r"prefill\[273\].*infeasible"):
+            stub._bench_materialize_prefill_candidate(candidate, "prefill[273]")
+
+    # The feasible neighboring coordinate remains a measured point.
+    supported = candidate.model_copy(update={"total_prefill_tokens": 512})
+    point = stub._bench_materialize_prefill_candidate(
+        supported, "prefill[272]", generated=generated
+    )
+    assert point is not None
+    assert point.total_prefill_tokens == 512
+    assert point.batch_size == 4
+
+
 def test_explicit_decode_respects_scheduled_token_limit():
     stub = _explicit_grid_stub(
         "decode",
