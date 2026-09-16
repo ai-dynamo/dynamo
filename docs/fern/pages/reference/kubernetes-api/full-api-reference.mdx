@@ -3657,7 +3657,7 @@ OverridesSpec allows customizing the profiling job and the generated DynamoGraph
 **Appears in:** [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
 
 <ParamField path="profilingJob" type="JobSpec">
-ProfilingJob allows overriding the profiling Job specification. Fields set here are merged into the controller-generated Job spec.
+ProfilingJob allows overriding the profiling Job specification. Fields set here are merged into the controller-generated Job spec. Security: creating a DGDR is workload-creation authority in its namespace — these overrides carry the same blast radius as creating a Job or Pod directly there, by design. The Pod's security context is enforced centrally by Kubernetes Pod Security Admission on the resulting Pods once the namespace is labeled (see pod-security.kubernetes.io/enforce), not by this API. ServiceAccount identity is a separate layer: these overrides can set serviceAccountName and automountServiceAccountToken, which are bounded by RBAC and namespace membership rather than PSA — the same authority any Pod author in the namespace already holds. Grant create/update on DGDRs only to principals trusted to create Pods in the namespace. The profiling Job always runs in the DGDR's own namespace and overrides cannot change that, so a DGDR cannot escape its namespace.
 See [JobSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#jobspec-v1-batch).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>

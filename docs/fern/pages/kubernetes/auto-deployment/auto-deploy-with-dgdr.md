@@ -467,12 +467,18 @@ workload-creation API:
 > creating a `Job` or `Pod` there — including through `overrides.profilingJob`. This is by design
 > and matches how Kubernetes treats every Pod-spawning resource.
 >
-> Enforce Pod-level security **centrally on the resulting Pods** with
+> Enforce the Pod's **security context centrally on the resulting Pods** with
 > [Pod Security Admission](https://kubernetes.io/docs/concepts/security/pod-security-admission/)
-> (and any admission webhooks) on the namespace, exactly as you would for any workload. The
-> operator does not re-implement those checks. Grant `create`/`update` on DGDRs — and on workload
-> resources generally — only to principals you would trust to create Pods in that namespace, and use
-> namespaces as the tenancy boundary — see
+> (and any admission webhooks). PSA applies no policy until you label the namespace — set
+> `pod-security.kubernetes.io/enforce: <level>` (`baseline` or `restricted`, plus the matching
+> `audit`/`warn` labels) on every namespace where Dynamo runs, exactly as you would for any
+> workload. The operator does not re-implement those checks.
+>
+> PSA governs a Pod's security *context*, not its *identity*: `overrides.profilingJob` can set the
+> Job's `serviceAccountName` and `automountServiceAccountToken`, and those are bounded by RBAC and
+> namespace membership, not by PSA — the same authority any Pod author in the namespace already has.
+> So grant `create`/`update` on DGDRs — and on workload resources generally — only to principals you
+> would trust to create Pods in that namespace, and use namespaces as the tenancy boundary — see
 > [Kubernetes RBAC good practices](https://kubernetes.io/docs/concepts/security/rbac-good-practices/#workload-creation).
 
 The profiling Job always runs in the DGDR's own namespace; overrides cannot relocate it, so a DGDR
