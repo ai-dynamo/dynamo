@@ -209,8 +209,10 @@ fn cached_prompt_tokens_reach_the_client_on_both_paths() {
     );
 }
 
-/// The router sheds and migrates on an overload. Flattening it to a generic
-/// engine error turns a retryable condition into an opaque 500.
+/// `Cancelled` must survive as itself; `Overloaded` must not become
+/// `WorkerOverloaded`. The only server site that emits `Overloaded` is the
+/// consumer-stall watchdog, so migrating on it would re-dispatch to a second
+/// worker that stalls the same way.
 #[test]
 fn engine_error_codes_the_router_acts_on_are_preserved() {
     let overloaded = engine_error(pb::EngineError {
@@ -218,7 +220,7 @@ fn engine_error_codes_the_router_acts_on_are_preserved() {
         message: "at capacity".to_string(),
         retryable: true,
     });
-    assert!(matches!(
+    assert!(!matches!(
         overloaded.error_type(),
         ErrorType::WorkerOverloaded
     ));
