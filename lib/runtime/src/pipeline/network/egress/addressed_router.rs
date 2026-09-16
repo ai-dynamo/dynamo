@@ -12,7 +12,7 @@ use crate::component::Instance;
 use crate::discovery::EndpointInstanceId;
 use crate::dynamo_nvtx_range;
 use crate::engine::{AsyncEngine, AsyncEngineContextProvider, Data, EngineContextGuard};
-use crate::error::{DynamoError, ErrorType, match_error_chain};
+use crate::error::{DynamoError, ErrorType};
 use crate::logging::inject_trace_headers_into_map;
 use crate::metrics::frontend_perf::STAGE_DURATION_SECONDS;
 use crate::metrics::request_plane::{
@@ -51,25 +51,29 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_stream::{StreamExt, StreamNotifyClose, wrappers::ReceiverStream};
 use tracing::Instrument;
 
-/// Error types that must never be attached as the cause of a pre-stream
+/// Error reasons that must never be attached as the cause of a pre-stream
 /// failure, because migration classification walks the whole cause chain.
 ///
-/// Must hold the same set as `NON_MIGRATABLE` in `lib/llm/src/migration.rs`,
-/// which cannot be reused directly because `dynamo-llm` depends on
-/// `dynamo-runtime` and not the reverse.
-/// `migration_sensitive_types_match_the_exclusion_set` there fails if the two
-/// lists ever disagree.
-pub(crate) const MIGRATION_SENSITIVE_ERROR_TYPES: &[ErrorType] =
-    &[ErrorType::Cancelled, ErrorType::ResourceExhausted];
+/// This must match `MIGRATION_BLOCKING_REASONS` in `lib/llm/src/migration.rs`.
+pub(crate) const MIGRATION_SENSITIVE_ERROR_REASONS: &[&str] = &[
+    "request.cancelled",
+    "backend.cancelled",
+    "capacity.exhausted",
+    "capacity.pool_exhausted",
+];
 
-/// Whether any link of `err`'s chain carries a migration-sensitive type.
-///
-/// An empty exclude set reduces [`crate::error::match_error_chain`] to "does
-/// any link match", and that is deliberately the same walk migration
-/// classification runs: an excluded type nested one link down short-circuits it
-/// just as an outer one does.
+/// Whether any link of `err`'s chain carries a migration-sensitive reason.
 fn is_migration_sensitive(err: &DynamoError) -> bool {
-    match_error_chain(err, MIGRATION_SENSITIVE_ERROR_TYPES, &[])
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(source) = current {
+        if let Some(error) = source.downcast_ref::<DynamoError>()
+            && MIGRATION_SENSITIVE_ERROR_REASONS.contains(&error.reason().as_str())
+        {
+            return true;
+        }
+        current = source.source();
+    }
+    false
 }
 
 /// Build the error returned when the worker fails before any response bytes.
@@ -77,10 +81,10 @@ fn is_migration_sensitive(err: &DynamoError) -> bool {
 /// The outer type stays [`ErrorType::CannotConnect`], so retry classification
 /// of the outer error is unchanged. A typed error from the worker's prologue is
 /// attached as the cause, which consumers reach with
-/// [`crate::error::match_error_chain`].
+/// the semantic migration classifier.
 ///
 /// Because that walk covers the whole chain, an attached cause is as visible as
-/// the outer type, so causes typed one of [`MIGRATION_SENSITIVE_ERROR_TYPES`]
+/// the outer type, so causes typed one of [`MIGRATION_SENSITIVE_ERROR_REASONS`]
 /// are withheld rather than attached. The worker's text stays in the message
 /// either way; only the machine-readable type is withheld.
 pub(crate) fn pre_stream_failure_error(error: StreamPrologueError) -> DynamoError {
@@ -101,12 +105,11 @@ pub(crate) fn pre_stream_failure_error(error: StreamPrologueError) -> DynamoErro
 #[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
 pub mod testing {
-    use super::{DynamoError, ErrorType, StreamPrologueError};
+    use super::{DynamoError, StreamPrologueError};
 
-    /// The set `migration_sensitive_types_match_the_exclusion_set` in
-    /// `lib/llm/src/migration.rs` pins against its `NON_MIGRATABLE`.
-    pub fn migration_sensitive_error_types() -> &'static [ErrorType] {
-        super::MIGRATION_SENSITIVE_ERROR_TYPES
+    /// The semantic reason set is pinned by a cross-crate test in `lib/llm/src/migration.rs`.
+    pub fn migration_sensitive_error_reasons() -> &'static [&'static str] {
+        super::MIGRATION_SENSITIVE_ERROR_REASONS
     }
 
     pub fn pre_stream_failure_error(error: StreamPrologueError) -> DynamoError {

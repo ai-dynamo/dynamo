@@ -320,6 +320,7 @@ impl RoutingHost {
                 None,
             )
         } else {
+            self.validate_explicit_worker(request.content(), phase)?;
             self.select_with_session_affinity(&request, phase, is_query_only, &budget, |target| {
                 let pinned_target = explicit.or(match self.session_affinity_mode {
                     SessionAffinityMode::Hard => target,

@@ -609,40 +609,131 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn register_rejects_distinct_base_cards_with_same_source_path_on_same_endpoint() {
-        let registry = SharedMockRegistry::new();
-        let discovery1 = MockDiscovery::new(Some(1), registry.clone());
-        let discovery2 = MockDiscovery::new(Some(2), registry);
-        let spec = |display_name: &str| DiscoverySpec::Model {
-            namespace: "ns".to_string(),
-            component: "comp".to_string(),
-            endpoint: "generate".to_string(),
-            card_json: serde_json::json!({
-                "display_name": display_name,
-                "source_path": "org/base-model",
-            }),
-            model_suffix: None,
-        };
-
-        discovery1.register(spec("public-name-a")).await.unwrap();
-        let err = discovery2
-            .register(spec("public-name-b"))
-            .await
-            .unwrap_err();
-
-        assert!(err.to_string().contains(
-            "Cannot register model 'public-name-b' on endpoint 'ns/comp/generate': a different model 'public-name-a' is already registered there"
-        ));
-
-        let instances = discovery1
-            .list(DiscoveryQuery::EndpointModels {
+    async fn register_non_lora_alias_compatibility() {
+        for (name, source_a, source_b, compatible) in [
+            ("alias-b", Some("org/base"), Some("org/base"), true),
+            ("alias-a", Some("/mount/a"), Some("/mount/b"), true),
+            ("alias-b", Some("org/base"), Some("org/other"), false),
+            ("alias-b", Some("org/base"), None, false),
+            ("alias-b", None, Some("org/base"), false),
+            ("alias-b", Some(""), Some(""), false),
+        ] {
+            let registry = SharedMockRegistry::new();
+            let discovery1 = MockDiscovery::new(Some(1), registry.clone());
+            let discovery2 = MockDiscovery::new(Some(2), registry);
+            let spec = |display_name: &str, source_path: Option<&str>| DiscoverySpec::Model {
                 namespace: "ns".to_string(),
                 component: "comp".to_string(),
                 endpoint: "generate".to_string(),
-            })
-            .await
-            .unwrap();
-        assert_eq!(instances.len(), 1);
+                card_json: serde_json::json!({
+                    "display_name": display_name,
+                    "source_path": source_path,
+                }),
+                model_suffix: None,
+            };
+            discovery1
+                .register(spec("alias-a", source_a))
+                .await
+                .unwrap();
+            let result = discovery2.register(spec(name, source_b)).await;
+            assert_eq!(
+                result.is_ok(),
+                compatible,
+                "{name}: {source_a:?}, {source_b:?}: {result:?}"
+            );
+            if let Err(err) = result {
+                assert!(
+                    err.to_string()
+                        .contains("a different model 'alias-a' is already registered there")
+                );
+            }
+            let instances = discovery1
+                .list(DiscoveryQuery::EndpointModels {
+                    namespace: "ns".to_string(),
+                    component: "comp".to_string(),
+                    endpoint: "generate".to_string(),
+                })
+                .await
+                .unwrap();
+            assert_eq!(instances.len(), if compatible { 2 } else { 1 });
+        }
+    }
+
+    #[tokio::test]
+    async fn register_shared_source_requires_disjoint_served_names() {
+        for (name_b, aliases_a, aliases_b, compatible) in [
+            ("b", vec!["b"], vec![], false),
+            ("b", vec![], vec!["a"], false),
+            ("b", vec!["shared"], vec!["shared"], false),
+            ("b", vec!["a", "extra-a"], vec!["b", "extra-b"], true),
+            ("a", vec!["shared"], vec!["shared"], true),
+        ] {
+            let registry = SharedMockRegistry::new();
+            let first = MockDiscovery::new(Some(1), registry.clone());
+            let second = MockDiscovery::new(Some(2), registry);
+            let spec = |name: &str, aliases: Vec<&str>| DiscoverySpec::Model {
+                namespace: "ns".into(),
+                component: "comp".into(),
+                endpoint: "generate".into(),
+                card_json: serde_json::json!({
+                    "display_name": name,
+                    "aliases": aliases,
+                    "source_path": "org/base",
+                }),
+                model_suffix: None,
+            };
+            let incumbent = first.register(spec("a", aliases_a)).await.unwrap();
+            let result = second.register(spec(name_b, aliases_b)).await;
+            assert_eq!(result.is_ok(), compatible, "{result:?}");
+            let instances = first
+                .list(DiscoveryQuery::EndpointModels {
+                    namespace: "ns".into(),
+                    component: "comp".into(),
+                    endpoint: "generate".into(),
+                })
+                .await
+                .unwrap();
+            assert!(instances.contains(&incumbent));
+            assert_eq!(instances.len(), if compatible { 2 } else { 1 });
+        }
+    }
+
+    #[tokio::test]
+    async fn register_checks_every_existing_model() {
+        // B is compatible with A by name and C by source, but A and C conflict.
+        for order in [[0, 1, 2], [2, 1, 0]] {
+            let registry = SharedMockRegistry::new();
+            let cards = [("a", "/mount/a"), ("a", "/mount/b"), ("b", "/mount/b")];
+            let mut accepted = Vec::new();
+            for (position, index) in order.into_iter().enumerate() {
+                let discovery = MockDiscovery::new(Some(index as u64 + 1), registry.clone());
+                let (name, source) = cards[index];
+                let result = discovery
+                    .register(DiscoverySpec::Model {
+                        namespace: "ns".into(),
+                        component: "comp".into(),
+                        endpoint: "generate".into(),
+                        card_json: serde_json::json!({"display_name": name, "source_path": source}),
+                        model_suffix: None,
+                    })
+                    .await;
+                if position < 2 {
+                    accepted.push(result.unwrap());
+                } else {
+                    assert!(result.is_err());
+                    let instances = discovery
+                        .list(DiscoveryQuery::EndpointModels {
+                            namespace: "ns".into(),
+                            component: "comp".into(),
+                            endpoint: "generate".into(),
+                        })
+                        .await
+                        .unwrap();
+                    assert_eq!(instances.len(), accepted.len());
+                    assert!(accepted.iter().all(|instance| instances.contains(instance)));
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -723,6 +814,58 @@ mod tests {
             ))
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn register_base_and_lora_require_distinct_served_names() {
+        for (adapter_name, compatible) in [("base", false), ("alias", false), ("adapter", true)] {
+            for adapter_first in [false, true] {
+                let registry = SharedMockRegistry::new();
+                let first = MockDiscovery::new(Some(1), registry.clone());
+                let second = MockDiscovery::new(Some(2), registry);
+                let base = DiscoverySpec::Model {
+                    namespace: "ns".into(),
+                    component: "comp".into(),
+                    endpoint: "generate".into(),
+                    card_json: serde_json::json!({
+                        "display_name": "base",
+                        "aliases": ["alias"],
+                        "source_path": "org/base",
+                    }),
+                    model_suffix: None,
+                };
+                let adapter = lora_model_spec(
+                    "ns",
+                    "comp",
+                    "generate",
+                    adapter_name,
+                    "org/base",
+                    adapter_name,
+                );
+                let (incumbent, newcomer) = if adapter_first {
+                    (adapter, base)
+                } else {
+                    (base, adapter)
+                };
+                let incumbent = first.register(incumbent).await.unwrap();
+                let result = second.register(newcomer).await;
+                assert_eq!(
+                    result.is_ok(),
+                    compatible,
+                    "{adapter_name}, adapter_first={adapter_first}: {result:?}"
+                );
+                let instances = first
+                    .list(DiscoveryQuery::EndpointModels {
+                        namespace: "ns".into(),
+                        component: "comp".into(),
+                        endpoint: "generate".into(),
+                    })
+                    .await
+                    .unwrap();
+                assert!(instances.contains(&incumbent));
+                assert_eq!(instances.len(), if compatible { 2 } else { 1 });
+            }
+        }
     }
 
     #[tokio::test]

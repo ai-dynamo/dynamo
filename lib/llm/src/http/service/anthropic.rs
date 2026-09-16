@@ -37,7 +37,7 @@ use super::{
         CancellationLabels, Endpoint, ErrorType, InflightGuard,
         process_chat_response_and_observe_metrics as process_response_and_observe_metrics,
     },
-    service_v2,
+    service_v2::{self, BackendErrorCheck},
 };
 use crate::engines::ValidateRequest;
 use crate::protocols::anthropic::stream_converter::AnthropicStreamConverter;
@@ -690,6 +690,32 @@ async fn anthropic_messages(
     > = Box::pin(engine_stream);
 
     if streaming {
+        // Same pre-commit check as the OpenAI streaming handlers, so one
+        // service-wide policy covers every streaming route: a backend error
+        // before the first event maps to its HTTP status instead of arriving
+        // as an SSE error frame behind an HTTP 200.
+        let engine_stream = super::openai::until_client_disconnects(
+            super::openai::check_for_backend_error(
+                engine_stream,
+                state.streaming_backend_error_check(),
+            ),
+            &ctx,
+        )
+        .await
+        .map_err(|error_response| {
+            // Classify before the body is rewritten: only the status survives
+            // into Anthropic's error format, and the status alone cannot tell a
+            // capacity rejection from a validation failure, or a client hangup
+            // from a backend fault. Mark the guard from the typed error the
+            // response carries rather than letting `into_marked_response`
+            // re-derive it from the status.
+            super::openai::log_pre_commit_error(&request_id, &error_response);
+            inflight_guard.mark_error(super::openai::extract_error_type_from_response(
+                &error_response,
+            ));
+            anthropic_backend_error(error_response.0).into_response()
+        })?;
+
         stream_handle.arm();
 
         let mut converter = match anthropic_ctx {
@@ -797,38 +823,11 @@ async fn anthropic_messages(
         // Non-streaming path: aggregate stream into single response
 
         // Check first event for backend errors using the openai helper
-        let stream_with_check = super::openai::check_for_backend_error(engine_stream, None)
+        let check = BackendErrorCheck::UntilFirstEvent;
+        let stream_with_check = super::openai::check_for_backend_error(engine_stream, check)
             .await
             .map_err(|(status, _json_err)| {
-                // check_for_backend_error has already sanitized the body and
-                // logged the backend detail; preserve its status when
-                // re-wrapping in Anthropic format. Status classification is
-                // classified from the preserved status so OpenAI and Anthropic
-                // backend-error metrics stay aligned.
-                let details = format!("backend error event (status {})", status.as_u16());
-                let metric_error_type = classify_backend_status_for_metrics(status);
-                match SanitizedError::for_backend_status(status) {
-                    Some(variant) => {
-                        AnthropicHandlerError::sanitized(variant, details, metric_error_type)
-                            .into_marked_response(&mut inflight_guard)
-                    }
-                    // 4xx (non-499): preserve the client-error status; the
-                    // message is the canonical reason so we don't smuggle
-                    // backend text through. The "invalid_request_error"
-                    // argument is a fallback — anthropic_error remaps
-                    // 401/403/404/429 to their spec-correct types from the
-                    // status code itself.
-                    None => {
-                        tracing::error!(%status, "Anthropic backend error event");
-                        AnthropicHandlerError::new(
-                            status,
-                            "invalid_request_error",
-                            status.canonical_reason().unwrap_or("Client error"),
-                            metric_error_type,
-                        )
-                        .into_marked_response(&mut inflight_guard)
-                    }
-                }
+                anthropic_backend_error(status).into_marked_response(&mut inflight_guard)
             })?;
 
         let mut http_queue_guard = Some(http_queue_guard);
@@ -1173,6 +1172,36 @@ fn apply_anthropic_nvext_policy(
     };
 }
 
+/// Re-wrap a backend-error status from
+/// [`super::openai::check_for_backend_error`] in Anthropic's error format.
+///
+/// The helper has already sanitized the body and logged the backend detail, so
+/// only the status carries over. Classification is delegated to
+/// [`SanitizedError::for_backend_status`] so the OpenAI and Anthropic surfaces
+/// answer the same backend failure the same way, whether the request streams or
+/// not.
+fn anthropic_backend_error(status: StatusCode) -> AnthropicHandlerError {
+    let details = format!("backend error event (status {})", status.as_u16());
+    let metric_error_type = classify_backend_status_for_metrics(status);
+    match SanitizedError::for_backend_status(status) {
+        Some(variant) => AnthropicHandlerError::sanitized(variant, details, metric_error_type),
+        // 4xx (non-499): preserve the client-error status; the message is the
+        // canonical reason so we don't smuggle backend text through. The
+        // "invalid_request_error" argument is a fallback — anthropic_error
+        // remaps 401/403/404/429 to their spec-correct types from the status
+        // code itself.
+        None => {
+            tracing::error!(%status, "Anthropic backend error event");
+            AnthropicHandlerError::new(
+                status,
+                "invalid_request_error",
+                status.canonical_reason().unwrap_or("Client error"),
+                metric_error_type,
+            )
+        }
+    }
+}
+
 /// Build an Anthropic-formatted error response from a canonical
 /// [`SanitizedError`] variant. The status, public message, and Anthropic
 /// `error_type` all come from the variant; `details` are logged
@@ -1200,22 +1229,16 @@ fn anthropic_sanitized_error_with_details(
         .into_response()
 }
 
-/// Match `InvalidArgument` at top-level OR under `Backend()` anywhere in the
-/// error chain. Request validation surfaces `InvalidArgument`, while backends
-/// that reject bad input (e.g. Python `ValueError`/`TypeError` wrapped by
-/// `py_err_to_dynamo`) surface `Backend(InvalidArgument)`; both are client
-/// input errors and warrant an HTTP 400 rather than a generic 500.
+/// Find a request or backend invalid-argument error anywhere in the chain.
 fn find_invalid_argument_in_chain<'a>(
     err: &'a (dyn std::error::Error + 'static),
 ) -> Option<&'a dynamo_runtime::error::DynamoError> {
-    use dynamo_runtime::error::{BackendError, ErrorType};
-
     let mut current = Some(err);
     while let Some(error) = current {
         if let Some(dynamo_error) = error.downcast_ref::<dynamo_runtime::error::DynamoError>()
             && matches!(
-                dynamo_error.error_type(),
-                ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument)
+                dynamo_error.reason().as_str(),
+                "backend.invalid_argument" | "request.invalid_argument"
             )
         {
             return Some(dynamo_error);
@@ -1408,19 +1431,32 @@ mod tests {
 
     #[test]
     fn anthropic_invalid_argument_is_found_through_error_context() {
-        use dynamo_runtime::error::{DynamoError, ErrorType};
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
 
-        let error = anyhow::Error::new(
-            DynamoError::builder()
-                .error_type(ErrorType::InvalidArgument)
-                .message("invalid request")
-                .build(),
-        )
-        .context("request validation failed");
-
+        let original = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+            .message("invalid request")
+            .build();
+        let wire = serde_json::to_value(original).unwrap();
+        let normalized: DynamoError = serde_json::from_value(wire).unwrap();
         assert_eq!(
-            find_invalid_argument_in_chain(error.as_ref()).map(|error| error.message()),
+            normalized.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+        assert_eq!(normalized.class(), ErrorType::InvalidRequest);
+
+        let error = anyhow::Error::new(normalized).context("request validation failed");
+        assert_eq!(
+            find_invalid_argument_in_chain(error.as_ref()).map(DynamoError::message),
             Some("invalid request")
         );
+
+        let private_error = anyhow::Error::new(
+            DynamoError::builder()
+                .error_type(ErrorType::InvalidRequest)
+                .message("private diagnostic")
+                .build(),
+        );
+        assert!(find_invalid_argument_in_chain(private_error.as_ref()).is_none());
     }
 }

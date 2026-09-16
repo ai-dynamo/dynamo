@@ -468,13 +468,19 @@ RUN rm -rf /workspace/vllm
 # Remove the codec-bearing video-DECODE wheels inherited from the vllm-openai
 # base. Each bundles its own full ffmpeg carrying software H.264/H.265/AAC;
 # PyAV and decord additionally ship GPL libx264/libx265. Dynamo's vLLM component
-# imports none of the removed wheels, so they are unused decode-side dead weight.
+# keeps OpenCV for mistral_common's cv2.resize, rebuilt at the base image's
+# version with video backends disabled. Other codec-bearing wheels are removed.
 # (PyNvVideoCodec is KEPT for NVDEC hardware decode -- see the note below.) The in-tree
 # LGPL ffmpeg + imageio-ffmpeg installed above are intentionally KEPT for the
 # omni video-encode path, which uses the royalty-free VP9 (libvpx_vp9) encoder —
 # no H.264 is built. Direct rm makes the removal robust regardless of how the
 # base image's pip is configured; the guards fail the build if any of them survive.
 RUN set -eux; \
+    OPENCV_VERSION="$(python3 -m pip show opencv-python-headless 2>/dev/null | awk '/^Version:/{print $2}')"; \
+    if [ -z "${OPENCV_VERSION}" ]; then \
+        OPENCV_VERSION="$(python3 -m pip show opencv-python 2>/dev/null | awk '/^Version:/{print $2}')"; \
+    fi; \
+    test -n "${OPENCV_VERSION}" || { echo "ERROR: base image must provide version metadata for opencv-python-headless or opencv-python" >&2; exit 1; }; \
     python3 -m pip uninstall --yes \
         av decord decord2 opencv-python opencv-python-headless torchcodec \
         || true; \
@@ -492,7 +498,14 @@ RUN set -eux; \
     ! python3 -c "import cv2" 2>/dev/null; \
     ! python3 -c "import av" 2>/dev/null; \
     ! python3 -c "import decord" 2>/dev/null; \
-    ! python3 -c "import torchcodec" 2>/dev/null
+    ! python3 -c "import torchcodec" 2>/dev/null; \
+    ENABLE_HEADLESS=1 ENABLE_CONTRIB=0 MAKEFLAGS="-j$(nproc)" \
+    CMAKE_ARGS="-DWITH_FFMPEG=OFF -DWITH_GSTREAMER=OFF -DVIDEOIO_ENABLE_PLUGINS=OFF -DWITH_1394=OFF -DWITH_V4L=OFF -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF -DENABLE_CCACHE=OFF" \
+    python3 -m pip install --no-binary opencv-python-headless "opencv-python-headless==${OPENCV_VERSION}"; \
+    rm -rf /root/.cache/pip; \
+    python3 -c "import cv2; cv2.resize"; \
+    ! ls -d "${SITE_PACKAGES}"/opencv_python*.libs 2>/dev/null; \
+    python3 -c "import cv2,re,sys; enabled=[name for name,value in re.findall(r'^\s*(FFMPEG|GSTREAMER):\s*(\S+)', cv2.getBuildInformation(), re.M|re.I) if value.upper()=='YES']; sys.exit('ERROR: cv2 was built with video backends: '+', '.join(enabled) if enabled else 0)"
 
 # PyNvVideoCodec is KEPT (removed from the purge above) but UPGRADED to >=2.2.0 by
 # the requirements install: the base image's 2.0.4 bundles a full FFmpeg (incl.

@@ -14,7 +14,7 @@ license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
     "ai-dynamo-runtime==1.5.0",
-    "aisimulate==0.12.0.dev1; python_version >= '3.11' and python_version < '3.14'",
+    "aisimulate==0.12.0.dev2; python_version >= '3.11' and python_version < '3.14'",
     "aiohttp>=3.14.3,<4.0",
     "transformers>=4.56.0",
     "kubernetes>=32.0.1,<33.0.0",
@@ -456,6 +456,12 @@ ignore_missing_imports = true
 # Absent from the CPU lint env and ships no type stubs, so mypy would raise
 # import-not-found on the guarded `import PyNvVideoCodec`.
 module = ["PyNvVideoCodec", "PyNvVideoCodec.*"]
+follow_imports = "skip"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# OpenCV is optional and absent from the lint environment.
+module = ["cv2", "cv2.*"]
 follow_imports = "skip"
 ignore_missing_imports = true
 
