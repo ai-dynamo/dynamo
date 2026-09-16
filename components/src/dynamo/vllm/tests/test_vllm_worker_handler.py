@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Unit tests for WorkerHandler in combination with multimodal handling."""
+
 # [gluo FIXME] This suite of tests is added for MultimodalPDWorkerHandler,
 # which is now removed. Yet the concept of this tests is still valid that
 # we need to have unit tests for the worker handlers.
@@ -282,6 +283,47 @@ class TestReasoningParserForwarding:
                 "chat_template_kwargs": {"reasoning_effort": "high"}
             },
         }
+
+    @pytest.mark.asyncio
+    async def test_generate_tokens_forwards_request_metadata(self):
+        from vllm.sampling_params import SamplingParams
+
+        handler = _make_handler()
+        calls = {}
+
+        async def fake_generate(
+            prompt,
+            sampling_params,
+            request_id,
+            *,
+            lora_request=None,
+            data_parallel_rank=None,
+            trace_headers=None,
+            priority=0,
+            session_id=None,
+            kv_hints=None,
+        ):
+            calls["session_id"] = session_id
+            calls["kv_hints"] = kv_hints
+            if False:
+                yield None
+
+        handler.engine_client = MagicMock()
+        handler.engine_client.generate = fake_generate
+        kv_hints = SimpleNamespace(protocol_version="0.1", actions=[])
+
+        chunks = []
+        async for chunk in handler.generate_tokens(
+            PatchedTokensPrompt(prompt_token_ids=[1]),
+            SamplingParams(max_tokens=1),
+            "req-1",
+            session_id="session-1",
+            kv_hints=kv_hints,
+        ):
+            chunks.append(chunk)
+
+        assert chunks == []
+        assert calls == {"session_id": "session-1", "kv_hints": kv_hints}
 
     @pytest.mark.asyncio
     async def test_generate_tokens_drops_reasoning_metadata_for_old_vllm(self):

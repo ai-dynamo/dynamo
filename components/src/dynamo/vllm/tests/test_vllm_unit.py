@@ -1226,107 +1226,50 @@ class TestBenchmarkGrid:
             assert ctx_len <= total_kv
 
 
-def test_build_sampling_params_attaches_kv_hint_message():
-    from dynamo.vllm.handlers import build_sampling_params
+def test_build_vllm_kv_hints_constructs_envelope():
+    from dynamo.vllm.handlers import _build_vllm_kv_hints
 
-    source_locations_payload = {
-        "source_control_endpoint": "tcp://127.0.0.1:23280",
-        "block_hashes": [11, 22],
-    }
     kv_hint = {
         "protocol_version": "0.1",
         "message_id": "msg-123",
-        "actions": [
-            {
-                "action_id": "a1",
-                "action_type": "kv.fetch",
-                "action_version": "1.0",
-                "payload": source_locations_payload,
-            },
-        ],
+        "actions": [],
     }
+    action_type = Mock(side_effect=lambda **kwargs: SimpleNamespace(**kwargs))
+    envelope_type = Mock(side_effect=lambda **kwargs: SimpleNamespace(**kwargs))
+
+    with patch(
+        "dynamo.vllm.handlers._vllm_kv_hints_types",
+        return_value=(action_type, envelope_type),
+    ):
+        envelope = _build_vllm_kv_hints({"kv_hint": kv_hint})
+
+    assert envelope.protocol_version == "0.1"
+    assert envelope.message_id == "msg-123"
+    assert envelope.actions == []
+    action_type.assert_not_called()
+
+
+def test_build_vllm_kv_hints_requires_supported_vllm():
+    from dynamo.vllm.handlers import _build_vllm_kv_hints
+
     request = {
-        "token_ids": [1, 2, 3],
-        "sampling_options": {},
-        "stop_conditions": {},
-        "output_options": {},
-        "kv_hint": kv_hint,
-    }
-
-    default_sampling_params = {
-        "extra_args": {
-            "kv_transfer_params": {"internal": "kept"},
-            "other_internal": "kept",
+        "kv_hint": {
+            "protocol_version": "0.1",
+            "message_id": "msg-123",
+            "actions": [],
         }
     }
 
-    sp = build_sampling_params(request, default_sampling_params=default_sampling_params)
-
-    assert default_sampling_params == {
-        "extra_args": {
-            "kv_transfer_params": {"internal": "kept"},
-            "other_internal": "kept",
-        }
-    }
-    assert sp.extra_args == {
-        "kv_transfer_params": {
-            "internal": "kept",
-            "kv_hint": kv_hint,
-        },
-        "other_internal": "kept",
-    }
+    with patch("dynamo.vllm.handlers._vllm_kv_hints_types", return_value=None):
+        with pytest.raises(RuntimeError, match="does not support first-class KV hint"):
+            _build_vllm_kv_hints(request)
 
 
-@pytest.mark.parametrize(
-    "kv_transfer_params",
-    [
-        {"do_remote_decode": False, "transfer_id": "prefill-1"},
-        {"do_remote_decode": True, "remote_engine_id": "prefill-a"},
-    ],
-)
-def test_update_kv_transfer_params_preserves_kv_hint_only(kv_transfer_params):
+def test_update_kv_transfer_params_replaces_connector_params():
     from dynamo.vllm.handlers import _update_kv_transfer_params
 
-    request_kv_hint = {
-        "protocol_version": "0.1",
-        "message_id": "msg-request",
-        "actions": [],
-    }
-    stale_kv_hint = {
-        "protocol_version": "0.1",
-        "message_id": "msg-stale",
-        "actions": [],
-    }
     sampling_params = SimpleNamespace(
-        extra_args={
-            "kv_transfer_params": {
-                "kv_hint": request_kv_hint,
-                "untrusted_connector_param": "dropped",
-            }
-        }
-    )
-    kv_transfer_params = {**kv_transfer_params, "kv_hint": stale_kv_hint}
-
-    _update_kv_transfer_params(
-        sampling_params, kv_transfer_params, preserve_kv_hint=True
-    )
-
-    assert sampling_params.extra_args["kv_transfer_params"] == {
-        **{key: value for key, value in kv_transfer_params.items() if key != "kv_hint"},
-        "kv_hint": request_kv_hint,
-    }
-
-
-def test_update_kv_transfer_params_drops_existing_kv_hint_by_default():
-    from dynamo.vllm.handlers import _update_kv_transfer_params
-
-    kv_hint = {
-        "protocol_version": "0.1",
-        "message_id": "msg-request",
-        "actions": [],
-    }
-    sampling_params = SimpleNamespace(
-        extra_args={"kv_transfer_params": {"kv_hint": kv_hint}}
+        extra_args={"kv_transfer_params": {"stale": "value"}}
     )
 
     _update_kv_transfer_params(sampling_params, {"transfer_id": "prefill-1"})
@@ -1336,63 +1279,24 @@ def test_update_kv_transfer_params_drops_existing_kv_hint_by_default():
     }
 
 
-def test_update_kv_transfer_params_drops_replacement_kv_hint():
-    from dynamo.vllm.handlers import _update_kv_transfer_params
-
-    stale_kv_hint = {
-        "protocol_version": "0.1",
-        "message_id": "msg-stale",
-        "actions": [],
-    }
-    sampling_params = SimpleNamespace(extra_args={})
-
-    _update_kv_transfer_params(
-        sampling_params,
-        {
-            "transfer_id": "prefill-1",
-            "kv_hint": stale_kv_hint,
-        },
-    )
-
-    assert sampling_params.extra_args["kv_transfer_params"] == {
-        "transfer_id": "prefill-1"
-    }
-
-
 def test_update_kv_transfer_params_copies_extra_args_before_mutating():
     from dynamo.vllm.handlers import _update_kv_transfer_params
 
-    kv_hint = {
-        "protocol_version": "0.1",
-        "message_id": "msg-request",
-        "actions": [],
-    }
     shared_extra_args = {
-        "kv_transfer_params": {
-            "kv_hint": kv_hint,
-            "internal": "kept-in-default",
-        },
+        "kv_transfer_params": {"internal": "kept-in-default"},
         "other_internal": "kept",
     }
     sampling_params = SimpleNamespace(extra_args=shared_extra_args)
 
-    _update_kv_transfer_params(
-        sampling_params, {"transfer_id": "prefill-1"}, preserve_kv_hint=True
-    )
+    _update_kv_transfer_params(sampling_params, {"transfer_id": "prefill-1"})
 
     assert shared_extra_args == {
-        "kv_transfer_params": {
-            "kv_hint": kv_hint,
-            "internal": "kept-in-default",
-        },
+        "kv_transfer_params": {"internal": "kept-in-default"},
         "other_internal": "kept",
     }
     assert sampling_params.extra_args is not shared_extra_args
     assert sampling_params.extra_args == {
-        "kv_transfer_params": {
-            "transfer_id": "prefill-1",
-            "kv_hint": kv_hint,
-        },
+        "kv_transfer_params": {"transfer_id": "prefill-1"},
         "other_internal": "kept",
     }
 
