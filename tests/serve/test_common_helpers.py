@@ -133,7 +133,9 @@ def test_pip_failure_carries_pip_output_to_the_caller(monkeypatch, tmp_path):
     caller saw only a CalledProcessError naming the argv -- so an index outage
     and a bad version pin were indistinguishable from the failure alone.
     """
-    monkeypatch.setattr(common.tempfile, "mkdtemp", lambda **_kw: str(tmp_path / "pkgs"))
+    monkeypatch.setattr(
+        common.tempfile, "mkdtemp", lambda **_kw: str(tmp_path / "pkgs")
+    )
     monkeypatch.setattr(
         common.subprocess,
         "run",
@@ -151,7 +153,9 @@ def test_pip_failure_carries_pip_output_to_the_caller(monkeypatch, tmp_path):
 
 def test_pip_failure_redacts_index_credentials(monkeypatch, tmp_path):
     """CI supplies PIP_INDEX_URL from a secret, so the captured output is a sink."""
-    monkeypatch.setattr(common.tempfile, "mkdtemp", lambda **_kw: str(tmp_path / "pkgs"))
+    monkeypatch.setattr(
+        common.tempfile, "mkdtemp", lambda **_kw: str(tmp_path / "pkgs")
+    )
     monkeypatch.setattr(
         common.subprocess,
         "run",
@@ -171,7 +175,9 @@ def test_pip_failure_redacts_index_credentials(monkeypatch, tmp_path):
 
 def test_pip_failure_output_is_bounded(monkeypatch, tmp_path):
     """A backtracking resolve can print megabytes; the exception must not."""
-    monkeypatch.setattr(common.tempfile, "mkdtemp", lambda **_kw: str(tmp_path / "pkgs"))
+    monkeypatch.setattr(
+        common.tempfile, "mkdtemp", lambda **_kw: str(tmp_path / "pkgs")
+    )
     monkeypatch.setattr(
         common.subprocess,
         "run",
