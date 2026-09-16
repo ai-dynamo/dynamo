@@ -155,7 +155,6 @@ impl Drop for ConcurrentRadixTree {
 }
 
 impl ConcurrentRadixTree {
-    /// Construct an empty backend with a fixed ownership delegate.
     pub fn new_with_delegate(delegate: Arc<dyn super::KvIndexerDelegate>) -> Self {
         let mut backend = Self::new();
         backend.lifecycle = super::HashLifecycle::new(delegate);

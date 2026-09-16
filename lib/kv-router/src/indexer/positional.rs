@@ -168,7 +168,6 @@ pub struct PositionalIndexer {
 }
 
 impl PositionalIndexer {
-    /// Construct an empty backend with a fixed ownership delegate.
     pub fn new_with_delegate(
         jump_size: usize,
         search_mode: SearchMode,

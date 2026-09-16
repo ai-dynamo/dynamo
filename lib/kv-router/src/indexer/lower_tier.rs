@@ -503,7 +503,6 @@ pub struct LowerTierIndexer {
 }
 
 impl LowerTierIndexer {
-    /// Construct an empty tier indexer with a fixed ownership delegate.
     pub fn new_with_delegate(delegate: Arc<dyn super::KvIndexerDelegate>) -> Self {
         let mut backend = Self::new();
         backend.lifecycle = super::HashLifecycle::new(delegate);
