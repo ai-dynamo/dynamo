@@ -43,9 +43,7 @@ use pythonize::{depythonize, pythonize};
 
 use crate::ModelInput;
 use crate::context::Context as PyContext;
-use crate::errors::{
-    error_class_for_http_status, extract_http_like_error, py_exception_to_backend_error,
-};
+use crate::errors::{http_like_error_to_dynamo, py_exception_to_backend_error};
 use crate::llm::kv::KvEventPublisher as PyKvEventPublisher;
 use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
 use crate::to_pyerr;
@@ -1690,11 +1688,8 @@ fn py_err_to_dynamo(err: PyErr) -> DynamoError {
             return builder.build();
         }
 
-        if let Some((code, message)) = extract_http_like_error(py, &err) {
-            return DynamoError::builder()
-                .class(error_class_for_http_status(code))
-                .diagnostic(format!("Python HTTP {code}: {message}"))
-                .build();
+        if let Some(error) = http_like_error_to_dynamo(py, &err) {
+            return error;
         }
 
         if err.is_instance_of::<pyo3::exceptions::PyGeneratorExit>(py) {
