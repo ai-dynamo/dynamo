@@ -17,7 +17,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 aisimulate-core = { workspace = true }
-aisimulate-placement-abi = { path = "../placement-abi", version = "0.12.0-dynamo-bench" }
+aisimulate-placement-abi = { path = "../placement-abi", version = "0.12.0" }
 dynamo-mocker = { workspace = true, features = ["replay-bench"] }
 dynamo-kv-router = { workspace = true }
 serde_json = { workspace = true }

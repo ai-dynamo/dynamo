@@ -23,16 +23,16 @@ resolver = "3"
 # AIPerf's source-level Rust provider contract is not published as independent
 # crates. Pin every AIPerf package to the same immutable repository revision so
 # a clean checkout resolves one coordinated composition surface.
-aiperf-runtime = { path = "../../../../dynamic-simulation-abi/crates/runtime" }
-aiperf-simulate = { path = "../../../../dynamic-simulation-abi/crates/simulate", features = ["dynamic-steppable-abi"] }
-aiperf-protocol = { path = "../../../../dynamic-simulation-abi/crates/protocol" }
-aisimulate-core = { path = "../../../aisimulate-dynamic-abi/crates/core" }
+aiperf-runtime = { git = "https://github.com/NVIDIA-dev/aiperf-rs.git", rev = "61e34f3f41d5687e01a6dbda813c54bc93aa3baf" }
+aiperf-simulate = { git = "https://github.com/NVIDIA-dev/aiperf-rs.git", rev = "61e34f3f41d5687e01a6dbda813c54bc93aa3baf" }
+aiperf-protocol = { git = "https://github.com/NVIDIA-dev/aiperf-rs.git", rev = "61e34f3f41d5687e01a6dbda813c54bc93aa3baf" }
+aisimulate-core = { git = "https://github.com/ai-dynamo/aisimulate.git", rev = "4fd8aaabb68008e15ada1bb1750183968d56b0eb" }
 anyhow = "1"
 dynamo-kv-router = { path = "../kv-router", features = ["bench"] }
 dynamo-mocker = { path = "../mocker", features = ["replay-bench"] }
 
 [dev-dependencies]
-aiperf-runtime = { path = "../../../../dynamic-simulation-abi/crates/runtime", features = ["test-support"] }
+aiperf-runtime = { git = "https://github.com/NVIDIA-dev/aiperf-rs.git", rev = "61e34f3f41d5687e01a6dbda813c54bc93aa3baf", features = ["test-support"] }
 aiperf-steppable-abi = { path = "../steppable-abi", version = "0.13.0" }
 dynamo-steppable-provider = { path = "../steppable-provider" }
 serde_json = "1"
