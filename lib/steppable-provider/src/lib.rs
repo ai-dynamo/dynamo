@@ -372,8 +372,19 @@ unsafe fn replay_context(
         .then(|| unsafe { utf8(context.session_id) })
         .transpose()?;
     let metadata = if context.flags & REPLAY_CONTEXT_FLAG_METADATA != 0 {
-        serde_json::from_slice(unsafe { borrowed_bytes(context.metadata) }?)
-            .map_err(|_| StatusV1::INVALID_ARGUMENT)?
+        // `ReplayContextV1::metadata` is opaque application-owned bytes, not
+        // JSON. AISimulate retains context metadata as `serde_json::Value`, so
+        // lower each byte to its exact unsigned value rather than interpreting
+        // or rejecting caller data. An array cannot collide with the core's
+        // object-only routing controls and round-trips every byte, including
+        // invalid UTF-8.
+        serde_json::Value::Array(
+            unsafe { borrowed_bytes(context.metadata) }?
+                .iter()
+                .copied()
+                .map(serde_json::Value::from)
+                .collect(),
+        )
     } else {
         serde_json::Value::Null
     };
@@ -1373,7 +1384,59 @@ mod tests {
         assert_eq!(context.authored_id, "trace-17");
         assert_eq!(context.session_id.as_deref(), Some("session-2"));
         assert_eq!(context.turn_index, Some(6));
-        assert_eq!(context.metadata, serde_json::json!({"source":"abi"}));
+        assert_eq!(
+            context.metadata,
+            serde_json::Value::Array(
+                metadata
+                    .iter()
+                    .copied()
+                    .map(serde_json::Value::from)
+                    .collect()
+            )
+        );
+    }
+
+    #[test]
+    fn replay_context_accepts_and_preserves_non_json_metadata_bytes() {
+        let authored = b"opaque-metadata";
+        let metadata = [0xff_u8];
+        let request = DirectRequestV1 {
+            struct_size: std::mem::size_of::<DirectRequestV1>() as u32,
+            flags: REQUEST_FLAG_REPLAY_CONTEXT,
+            tokens: U32SliceV1::EMPTY,
+            output_token_ids: U32SliceV1::EMPTY,
+            max_output_tokens: 1,
+            uuid: [0; 16],
+            dp_rank: 0,
+            preferred_dp_rank: 0,
+            preferred_prefill_dp_rank: 0,
+            arrival_timestamp_ms: 0.0,
+            priority: 0,
+            strict_priority: 0,
+            policy_class: ByteSliceV1::EMPTY,
+            replay_context: aiperf_steppable_abi::ReplayContextV1 {
+                struct_size: std::mem::size_of::<aiperf_steppable_abi::ReplayContextV1>() as u32,
+                flags: REPLAY_CONTEXT_FLAG_METADATA,
+                authored_id: ByteSliceV1 {
+                    data: authored.as_ptr(),
+                    len: authored.len() as u64,
+                },
+                session_id: ByteSliceV1::EMPTY,
+                metadata: ByteSliceV1 {
+                    data: metadata.as_ptr(),
+                    len: metadata.len() as u64,
+                },
+                turn_index: 0,
+                prompt_token_source: 0,
+                reserved: 0,
+            },
+        };
+
+        let context = unsafe { direct_request(request) }
+            .expect("opaque metadata must not be JSON-validated")
+            .replay_context
+            .expect("context");
+        assert_eq!(context.metadata, serde_json::json!([255]));
     }
 
     #[test]

@@ -3088,10 +3088,8 @@ version = "1.5.0"
 dependencies = [
  "aiperf-steppable-abi",
  "aisimulate-core",
- "aisimulate-placement-abi",
  "anyhow",
  "dynamo-mocker",
- "dynamo-placement-plugin",
  "serde",
  "serde_json",
  "uuid",

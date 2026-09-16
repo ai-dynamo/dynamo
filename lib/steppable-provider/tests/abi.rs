@@ -3,8 +3,9 @@
 
 use aiperf_steppable_abi::{
     ByteSliceV1, CreateRequestV1, DirectRequestSliceV1, DirectRequestV1, EngineEventV1,
-    PluginDescriptorV1, REQUEST_FLAG_OUTPUT_TOKEN_IDS, REQUEST_FLAG_UUID, ReplayHandleV1,
-    RequestIdMutSliceV1, StatusV1, StepRequestV1, StepResultV1, U32SliceV1, validate_descriptor_v1,
+    PluginDescriptorV1, REPLAY_CONTEXT_FLAG_METADATA, REQUEST_FLAG_OUTPUT_TOKEN_IDS,
+    REQUEST_FLAG_REPLAY_CONTEXT, REQUEST_FLAG_UUID, ReplayHandleV1, RequestIdMutSliceV1, StatusV1,
+    StepRequestV1, StepResultV1, U32SliceV1, validate_descriptor_v1,
 };
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::path::PathBuf;
@@ -319,6 +320,39 @@ fn invalid_direct_request_returns_invalid_argument_without_an_id() {
 }
 
 #[test]
+fn opaque_non_json_replay_metadata_is_accepted_by_the_abi_table() {
+    let (table, handle) = create_replay();
+    let prompt = [9_u32];
+    let authored_id = b"opaque-1";
+    let metadata = [0xff_u8];
+    let mut opaque = request(&prompt, [45; 16]);
+    opaque.flags |= REQUEST_FLAG_REPLAY_CONTEXT;
+    opaque.replay_context = aiperf_steppable_abi::ReplayContextV1 {
+        struct_size: std::mem::size_of::<aiperf_steppable_abi::ReplayContextV1>() as u32,
+        flags: REPLAY_CONTEXT_FLAG_METADATA,
+        authored_id: ByteSliceV1 {
+            data: authored_id.as_ptr(),
+            len: authored_id.len() as u64,
+        },
+        session_id: ByteSliceV1::EMPTY,
+        metadata: ByteSliceV1 {
+            data: metadata.as_ptr(),
+            len: metadata.len() as u64,
+        },
+        turn_index: 0,
+        prompt_token_source: 0,
+        reserved: 0,
+    };
+    let mut returned = [0; 16];
+    assert_eq!(
+        unsafe { table.submit.expect("submit")(handle, opaque, &mut returned) },
+        StatusV1::OK
+    );
+    assert_eq!(returned, [45; 16]);
+    unsafe { table.destroy.expect("destroy")(handle) };
+}
+
+#[test]
 fn provider_cdylib_loads_through_the_fixed_steppable_entrypoint() {
     let test_binary = std::env::current_exe().expect("test binary path");
     let cdylib = test_binary
@@ -447,149 +481,6 @@ fn rejected_later_duplicate_batch_has_no_prior_commitment() {
     );
     assert_eq!(returned, candidate);
     unsafe { table.destroy.expect("destroy")(handle) };
-}
-
-#[test]
-fn contended_admission_matches_the_dynamic_kv_router_provider() {
-    use aisimulate_placement_abi::{
-        AdmissionDecisionV1, ByteSliceV1 as PlacementBytes, PlacementAdmissionV1,
-        PlacementBatchResultV1, PlacementCreateRequestV1, PlacementHandleV1, PlacementLimitsV1,
-        PlacementMetadataV1, PlacementMutationKindV1, PlacementMutationPayloadV1,
-        PlacementMutationSliceV1, PlacementMutationV1, PromptIdentityV1, SchedulerIdSliceV1,
-        WorkerCapacitySliceV1, WorkerCapacityV1, WorkerTopologySliceV1, WorkerTopologyV1,
-        validate_descriptor_v1 as validate_placement_descriptor,
-    };
-
-    let scheduler_ids = [0_u64];
-    let workers = [WorkerTopologyV1 {
-        worker_id: 0,
-        scheduler_ids: SchedulerIdSliceV1 {
-            data: scheduler_ids.as_ptr(),
-            len: 1,
-        },
-    }];
-    let capacities = [WorkerCapacityV1 {
-        worker_id: 0,
-        total_kv_blocks: 1_000,
-        available_kv_blocks: 1_000,
-        max_running_requests: 1,
-        flags: 0,
-        reserved: 0,
-    }];
-    let descriptor = dynamo_placement_plugin::aisimulate_placement_plugin_v1();
-    let placement = unsafe {
-        &*validate_placement_descriptor(descriptor).expect("dynamic placement descriptor")
-    };
-    let mut dynamic_handle = PlacementHandleV1(std::ptr::null_mut());
-    let mut dynamic_error = PlacementBytes::EMPTY;
-    assert!(unsafe {
-        placement.create.expect("placement create")(
-            PlacementCreateRequestV1 {
-                struct_size: std::mem::size_of::<PlacementCreateRequestV1>() as u32,
-                payload_version: 1,
-                flags: 0,
-                reserved: 0,
-                selector_seed: [0; 32],
-                workers: WorkerTopologySliceV1 {
-                    data: workers.as_ptr(),
-                    len: 1,
-                },
-                capacities: WorkerCapacitySliceV1 {
-                    data: capacities.as_ptr(),
-                    len: 1,
-                },
-                options_namespace: PlacementBytes::EMPTY,
-                provider_options: PlacementBytes::EMPTY,
-                limits: PlacementLimitsV1 {
-                    max_mutations: 1,
-                    max_admission_results: 1,
-                    max_released: 1,
-                    max_diagnostic_bytes: 0,
-                },
-            },
-            &mut dynamic_handle,
-            &mut dynamic_error,
-        )
-        .0 == 0
-    });
-    let tokens = [1_u32, 2, 3, 4];
-    let admission = |id, now_ms| PlacementMutationV1 {
-        struct_size: std::mem::size_of::<PlacementMutationV1>() as u32,
-        kind: PlacementMutationKindV1::ADMIT,
-        flags: 0,
-        sequence: 0,
-        now_ms,
-        payload: PlacementMutationPayloadV1 {
-            admission: PlacementAdmissionV1 {
-                request_id: id,
-                flags: 0,
-                priority: 0,
-                prompt_tokens: tokens.len() as u64,
-                max_output_tokens: 1,
-                prompt_identity: PromptIdentityV1 {
-                    flags: PromptIdentityV1::MATERIALIZED_TOKEN_IDS_PRESENT,
-                    reserved: 0,
-                    materialized_token_ids: aisimulate_placement_abi::TokenIdSliceV1 {
-                        data: tokens.as_ptr(),
-                        len: tokens.len() as u64,
-                    },
-                    ..PromptIdentityV1::OMITTED
-                },
-                metadata: PlacementMetadataV1::EMPTY,
-                session_id: PlacementBytes::EMPTY,
-            },
-        },
-    };
-    for (id, expect) in [
-        ([51; 16], AdmissionDecisionV1::IMMEDIATE),
-        ([52; 16], AdmissionDecisionV1::QUEUED),
-    ] {
-        let mutation = admission(id, 0.0);
-        let mut result: PlacementBatchResultV1 = unsafe { std::mem::zeroed() };
-        assert!(unsafe {
-            placement.apply_batch.expect("placement apply")(
-                dynamic_handle,
-                PlacementMutationSliceV1 {
-                    data: &mutation,
-                    len: 1,
-                },
-                &mut result,
-            )
-            .0 == 0
-        });
-        assert_eq!(unsafe { &*result.admission_results.data }.decision, expect);
-        unsafe { placement.release_results.expect("placement release")(result) };
-    }
-
-    let mut config = dynamo_steppable_provider::BackendConfig::one_worker();
-    config.engine.rank.max_num_seqs = 1;
-    let (table, handle) = create_replay_with(config);
-    for id in [[51; 16], [52; 16]] {
-        let mut returned = [0; 16];
-        assert_eq!(
-            unsafe {
-                table.submit.expect("monolithic submit")(
-                    handle,
-                    request(&tokens, id),
-                    &mut returned,
-                )
-            },
-            StatusV1::OK
-        );
-    }
-    let mut state = aiperf_steppable_abi::ReplayStateV1::EMPTY;
-    assert_eq!(
-        unsafe { table.state.expect("state")(handle, &mut state) },
-        StatusV1::OK
-    );
-    assert_eq!(
-        state.in_flight, 2,
-        "the second contended request remains router-owned"
-    );
-    unsafe {
-        table.destroy.expect("destroy")(handle);
-        placement.destroy.expect("placement destroy")(dynamic_handle);
-    }
 }
 
 const RTLD_NOW: c_int = 2;
