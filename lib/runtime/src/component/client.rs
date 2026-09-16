@@ -988,7 +988,17 @@ impl Client {
                     }
                     DiscoveryEvent::Added(_) => {}
                     DiscoveryEvent::ModelTaintsUpdated(_) => {}
-                    DiscoveryEvent::Resync(_) => {}
+                    DiscoveryEvent::Resync(instances) => {
+                        map = instances
+                            .into_iter()
+                            .filter_map(|instance| {
+                                let DiscoveryInstance::Endpoint(instance) = instance else {
+                                    return None;
+                                };
+                                Some((instance.instance_id, instance))
+                            })
+                            .collect();
+                    }
                     DiscoveryEvent::Removed(id) => {
                         if let DiscoveryInstanceId::Endpoint(endpoint_id) = id {
                             map.remove(&endpoint_id.instance_id);
@@ -1011,6 +1021,7 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::component::TransportType;
     use crate::discovery::{
         DiscoveryQuery, DiscoverySpec, DiscoveryStream, MockDiscovery, SharedMockRegistry,
     };
@@ -1018,10 +1029,11 @@ mod tests {
     use futures::future::try_join_all;
 
     /// A backend whose watch producer, like the Kubernetes watcher, parks on its own feed and ends
-    /// only when the token it was given cancels.
+    /// only when the token it was given cancels. A test sends events to a watch through `feeds`.
     struct ParkedProducerDiscovery {
         inner: MockDiscovery,
         producers: StdMutex<Vec<tokio::task::JoinHandle<()>>>,
+        feeds: StdMutex<Vec<tokio::sync::mpsc::UnboundedSender<Result<DiscoveryEvent>>>>,
     }
 
     #[async_trait::async_trait]
@@ -1049,6 +1061,7 @@ mod tests {
         ) -> Result<DiscoveryStream> {
             let (feed_tx, mut feed) =
                 tokio::sync::mpsc::unbounded_channel::<Result<DiscoveryEvent>>();
+            self.feeds.lock().unwrap().push(feed_tx.clone());
             let producer = tokio::spawn(async move {
                 let _feed_tx = feed_tx;
                 match cancel_token {
@@ -1165,6 +1178,7 @@ mod tests {
         let discovery = ParkedProducerDiscovery {
             inner: MockDiscovery::new(Some(1), SharedMockRegistry::new()),
             producers: StdMutex::default(),
+            feeds: StdMutex::default(),
         };
 
         let source = Client::spawn_dynamic_discovery_source(
@@ -1191,6 +1205,72 @@ mod tests {
             .await
             .expect("the backend watch outlives the source that established it")
             .unwrap();
+    }
+
+    fn endpoint_instance(endpoint: &Endpoint, instance_id: u64) -> Instance {
+        Instance {
+            namespace: endpoint.component.namespace.name.clone(),
+            component: endpoint.component.name.clone(),
+            endpoint: endpoint.name.clone(),
+            instance_id,
+            transport: TransportType::Tcp(format!("127.0.0.1:{}", 8000 + instance_id)),
+            device_type: None,
+            request_plane_codec: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_resync_replaces_the_instances_of_a_discovery_source() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt, DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_discovery_source_resync".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("decode".to_string());
+        let discovery = ParkedProducerDiscovery {
+            inner: MockDiscovery::new(Some(1), SharedMockRegistry::new()),
+            producers: StdMutex::default(),
+            feeds: StdMutex::default(),
+        };
+
+        let source = Client::spawn_dynamic_discovery_source(
+            &endpoint,
+            &discovery,
+            drt.primary_token().child_token(),
+        )
+        .await
+        .unwrap();
+        let feed = discovery
+            .feeds
+            .lock()
+            .unwrap()
+            .pop()
+            .expect("the source established no backend watch");
+        let mut instances = source.instance_receiver();
+
+        let first = endpoint_instance(&endpoint, 1);
+        feed.send(Ok(DiscoveryEvent::Added(DiscoveryInstance::Endpoint(
+            first.clone(),
+        ))))
+        .unwrap();
+        wait_for_watch_state(&mut instances, |instances| {
+            instances == std::slice::from_ref(&first)
+        })
+        .await;
+
+        let second = endpoint_instance(&endpoint, 2);
+        feed.send(Ok(DiscoveryEvent::Resync(vec![
+            DiscoveryInstance::Endpoint(second.clone()),
+        ])))
+        .unwrap();
+        wait_for_watch_state(&mut instances, |instances| {
+            instances == std::slice::from_ref(&second)
+        })
+        .await;
     }
 
     #[tokio::test]
