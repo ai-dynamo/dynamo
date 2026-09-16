@@ -94,8 +94,6 @@ PREFILL_MIGRATION_SKIP = pytest.mark.skip(
     )
 )
 
-# Retain one contract for each migration-limit outcome without restoring the
-# old Cartesian matrix. Profile VRAM before removing the skip.
 PREFILL_MIGRATION_CASES = [
     pytest.param(
         3,
@@ -475,7 +473,7 @@ def test_request_migration_trtllm_aggregated(
             )
 
 
-@pytest.mark.timeout(350)  # Preserve the historical bound for this topology.
+@pytest.mark.timeout(350)
 @pytest.mark.nightly
 @pytest.mark.requested_trtllm_kv_tokens(8192)
 @PREFILL_MIGRATION_PARAMETERS
