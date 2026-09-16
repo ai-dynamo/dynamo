@@ -392,11 +392,11 @@ fn validate_request(
         // The same server branch that rejects `openengine-priority` also rejects
         // `openengine-target-dp-rank` (`grpc/openengine/request_mapping.py`,
         // `_trace_headers`), and the servicer turns that into UNIMPLEMENTED --
-        // measured against 1.3.0rc26, including rank 0. Sending it anyway failed
-        // the whole request with a non-migratable 5xx; rejecting here names the
-        // unsupported feature in a 4xx instead. `nvext.dp_rank` and the
-        // `x-dynamo-dp-rank` header both reach this field, so it is reachable
-        // without a KV router.
+        // measured against TensorRT-LLM main at 8bbaf66bd5, rank 0 included.
+        // Sending it anyway failed the whole request with a non-migratable
+        // 5xx; rejecting here names the unsupported feature in a 4xx instead.
+        // `nvext.dp_rank` and the `x-dynamo-dp-rank` header both reach this
+        // field, so it is reachable without a KV router.
         return Err(client::invalid_argument(
             "data-parallel rank targeting is not supported by the TensorRT-LLM sidecar",
         ));
