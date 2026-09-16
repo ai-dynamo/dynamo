@@ -171,9 +171,11 @@ jobs:
             python - <<'PY'
           import torch
           from gpu_memory_service.common.vmm import _sycl_vmm
+          from gpu_memory_service.common.vmm.xpu_utils import XpuVMM
 
           assert torch.xpu.is_available(), "torch.xpu.is_available() is false"
           assert _sycl_vmm.device_count() > 0, "_sycl_vmm found no XPU devices"
+          XpuVMM().ensure_initialized()
           print(f"XPU: {torch.xpu.get_device_name(0)}")
           print(f"SYCL VMM devices: {_sycl_vmm.device_count()}")
           PY

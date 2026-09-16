@@ -57,7 +57,6 @@ pytestmark = [
     pytest.mark.integration,
     pytest.mark.none,
     pytest.mark.gpu_1,
-    pytest.mark.xpu_1,
 ]
 
 _SOCKET_TEST_TIMEOUT_SECONDS = 60
