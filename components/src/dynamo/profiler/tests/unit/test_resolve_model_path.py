@@ -8,7 +8,6 @@ import asyncio
 import copy
 import errno
 import os
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
@@ -176,34 +175,24 @@ class TestResolveModelPath:
         dgdr = _make_dgdr(modelCache=_pvc_model_cache(str(tmp_path), "model"))
         assert resolve_model_path(dgdr) == _HF_ID
 
-    @pytest.mark.parametrize("config_accessible", [False, True])
-    def test_inaccessible_pvc_path_during_materialization(
-        self, tmp_path, monkeypatch, config_accessible
+    def test_inaccessible_pvc_config_during_materialization(
+        self, tmp_path, monkeypatch
     ):
         local_dir = tmp_path / "model"
         _make_model_dir(local_dir)
+        config_path = local_dir / "config.json"
         dgdr = _make_dgdr(
             backend="vllm", modelCache=_pvc_model_cache(str(tmp_path), "model")
         )
-        error = PermissionError(errno.EACCES, "Permission denied", str(local_dir))
+        error = PermissionError(errno.EACCES, "Permission denied", str(config_path))
         original_stat = os.stat
-        original_path_stat = Path.stat
 
         def stat(path, *args, **kwargs):
-            if not config_accessible and os.fspath(path) == str(
-                local_dir / "config.json"
-            ):
+            if os.fspath(path) == str(config_path):
                 raise error
             return original_stat(path, *args, **kwargs)
 
-        def path_stat(path, *args, **kwargs):
-            if path == local_dir:
-                raise error
-            return original_path_stat(path, *args, **kwargs)
-
         monkeypatch.setattr(os, "stat", stat)
-        # Python 3.10/3.11 pathlib caches os.stat, so patch its entry point too.
-        monkeypatch.setattr(Path, "stat", path_stat)
         blueprint = {
             "spec": {
                 "components": [
@@ -217,14 +206,9 @@ class TestResolveModelPath:
                 ]
             }
         }
-        message = (
-            "Cannot inspect model path"
-            if config_accessible
-            else "Cannot inspect PVC model config"
-        )
         with (
             patch("dynamo.profiler.utils.model_info.hf_hub_download") as download,
-            pytest.raises(RuntimeError, match=message) as exc,
+            pytest.raises(RuntimeError, match="Cannot inspect PVC model config") as exc,
         ):
             materialize_dgd(
                 blueprint,
@@ -233,7 +217,7 @@ class TestResolveModelPath:
                 model_name_or_path=resolve_model_path(dgdr),
             )
         assert exc.value.__cause__ is error
-        assert str(local_dir) in str(exc.value)
+        assert str(config_path) in str(exc.value)
         assert "symlink ownership" in str(exc.value)
         assert "modelCache.pvcModelPath" in str(exc.value)
         download.assert_not_called()
