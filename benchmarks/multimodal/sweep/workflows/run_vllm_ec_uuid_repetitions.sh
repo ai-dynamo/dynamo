@@ -6,10 +6,14 @@ set -euo pipefail
 
 CONFIG="${1:-benchmarks/multimodal/sweep/experiments/embedding_cache/vllm_serve.yaml}"
 OUTPUT_BASE="${2:-/dynamo-tmp/logs/09-15/qwen35-122b-vllm-ec-h2d-overlap}"
-REPETITIONS="${3:-4}"
+REPETITIONS="${3:-5}"
 PYTHON_BIN="${DYN_PYTHON:-python}"
+ORDER_SEED="${DYN_BENCHMARK_ORDER_SEED:-42}"
 
 : "${VLLM_SOURCE_REVISION:?VLLM_SOURCE_REVISION must identify the tested vLLM commit}"
+: "${VLLM_BASELINE_SOURCE_REVISION:?VLLM_BASELINE_SOURCE_REVISION must identify the baseline vLLM commit}"
+: "${VLLM_BASELINE_PYTHONPATH:?VLLM_BASELINE_PYTHONPATH must select the baseline vLLM tree}"
+: "${VLLM_PATCHED_PYTHONPATH:?VLLM_PATCHED_PYTHONPATH must select the patched vLLM tree}"
 : "${CONTAINER_IMAGE:?CONTAINER_IMAGE must identify the tested runtime image}"
 : "${CONTAINER_IMAGE_DIGEST:?CONTAINER_IMAGE_DIGEST must identify the tested image digest}"
 : "${CONTAINER_IMAGE_FILE:?CONTAINER_IMAGE_FILE must identify the imported image file}"
@@ -19,9 +23,15 @@ if [[ ! "$REPETITIONS" =~ ^[1-9][0-9]*$ ]]; then
     echo "REPETITIONS must be a positive integer, got: $REPETITIONS" >&2
     exit 2
 fi
+if [[ ! "$ORDER_SEED" =~ ^[0-9]+$ ]]; then
+    echo "DYN_BENCHMARK_ORDER_SEED must be a non-negative integer, got: $ORDER_SEED" >&2
+    exit 2
+fi
+
+export VLLM_PATCHED_SOURCE_REVISION="${VLLM_PATCHED_SOURCE_REVISION:-$VLLM_SOURCE_REVISION}"
 
 mkdir -p "$OUTPUT_BASE"
-"$PYTHON_BIN" - "$OUTPUT_BASE/run_metadata.json" "$CONFIG" "$OUTPUT_BASE" "$REPETITIONS" <<'PY'
+"$PYTHON_BIN" - "$OUTPUT_BASE/run_metadata.json" "$CONFIG" "$OUTPUT_BASE" "$REPETITIONS" "$ORDER_SEED" <<'PY'
 import datetime
 import json
 import os
@@ -35,12 +45,13 @@ import dynamo._core
 import vllm
 import yaml
 
-from benchmarks.multimodal.sweep.repetition_plan import balanced_config_orders
+from benchmarks.multimodal.sweep.repetition_plan import randomized_config_orders
 
 output = pathlib.Path(sys.argv[1])
 config_path = pathlib.Path(sys.argv[2])
 output_base = pathlib.Path(sys.argv[3])
 repetitions = int(sys.argv[4])
+order_seed = int(sys.argv[5])
 config = yaml.safe_load(config_path.read_text())
 configs = config["configs"]
 if not configs:
@@ -51,7 +62,7 @@ sweep_values = concurrencies or config.get("request_rates") or [4, 8, 16, 32, 64
 
 arm_orders = []
 for iteration, ordered_configs in enumerate(
-    balanced_config_orders(configs, repetitions), start=1
+    randomized_config_orders(configs, repetitions, order_seed), start=1
 ):
     labels = [item["label"] for item in ordered_configs]
     arm_orders.append(labels)
@@ -65,6 +76,7 @@ metadata = {
     "model": config["model"],
     "arms": [item["label"] for item in configs],
     "arm_orders": arm_orders,
+    "arm_order_seed": order_seed,
     "tensor_parallel_sizes": {},
     "ec_cpu_capacity_bytes": {},
     "nvtx": config.get("env", {}).get(
@@ -79,6 +91,8 @@ metadata = {
     "vllm_version": vllm.__version__,
     "vllm_executable": shutil.which("vllm"),
     "vllm_source_revision": os.environ["VLLM_SOURCE_REVISION"],
+    "vllm_source_revisions": {},
+    "vllm_pythonpaths": {},
     "python_executable": sys.executable,
     "dynamo_core_file": dynamo._core.__file__,
     "dynamo_version": version("ai-dynamo"),
@@ -95,6 +109,16 @@ metadata = {
 for arm in configs:
     args = arm.get("extra_args", [])
     label = arm["label"]
+    arm_env = {
+        key: os.path.expandvars(str(value))
+        for key, value in arm.get("env", {}).items()
+    }
+    if "DYN_VLLM_SOURCE_REVISION" in arm_env:
+        metadata["vllm_source_revisions"][label] = arm_env[
+            "DYN_VLLM_SOURCE_REVISION"
+        ]
+    if "PYTHONPATH" in arm_env:
+        metadata["vllm_pythonpaths"][label] = arm_env["PYTHONPATH"]
     if "--tensor-parallel-size" in args:
         index = args.index("--tensor-parallel-size")
         metadata["tensor_parallel_sizes"][label] = int(args[index + 1])

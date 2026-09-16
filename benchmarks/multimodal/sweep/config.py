@@ -18,6 +18,7 @@ class BenchmarkConfig:
     label: str
     workflow: str
     extra_args: List[str] = field(default_factory=list)
+    env: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -96,6 +97,7 @@ def _parse_benchmark_config(raw: Dict[str, Any]) -> BenchmarkConfig:
         label=raw["label"],
         workflow=raw["workflow"],
         extra_args=[str(a) for a in raw.get("extra_args", [])],
+        env={str(k): str(v) for k, v in raw.get("env", {}).items()},
     )
 
 

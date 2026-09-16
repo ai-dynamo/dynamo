@@ -27,9 +27,12 @@ def test_embedding_cache_sweep_selects_only_requested_arms() -> None:
 
     assert [item["label"] for item in config["configs"]] == [
         "vllm-serve",
-        "vllm-serve-native-ec",
+        "vllm-serve-native-ec-baseline",
+        "vllm-serve-native-ec-overlap",
     ]
     assert config["env"]["DYN_DISABLE_NSYS"] == "1"
+    assert config["configs"][0]["env"]["PYTHONPATH"] == ("${VLLM_BASELINE_PYTHONPATH}")
+    assert config["configs"][2]["env"]["PYTHONPATH"] == ("${VLLM_PATCHED_PYTHONPATH}")
 
 
 def _run_workflow(tmp_path: Path, *args: str, enable_nsys: bool = False):

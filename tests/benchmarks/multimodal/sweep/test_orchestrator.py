@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from benchmarks.multimodal.sweep.config import BenchmarkConfig, SweepConfig
-from benchmarks.multimodal.sweep.orchestrator import run_sweep
+from benchmarks.multimodal.sweep.orchestrator import _expand_arm_env, run_sweep
 
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
 
@@ -217,3 +217,19 @@ def test_uuid_and_strip_propagates_to_aiperf(
         ]
         == "cfg-0"
     )
+
+
+def test_per_arm_env_expands_and_overrides_top_level(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VLLM_TREE", "/workspace/vllm-baseline")
+
+    assert _expand_arm_env({"PYTHONPATH": "${VLLM_TREE}", "DYN_SOURCE": "base"}) == {
+        "PYTHONPATH": "/workspace/vllm-baseline",
+        "DYN_SOURCE": "base",
+    }
+
+
+def test_per_arm_env_rejects_unresolved_variables() -> None:
+    with pytest.raises(ValueError, match="PYTHONPATH"):
+        _expand_arm_env({"PYTHONPATH": "${MISSING_VLLM_TREE}"})
