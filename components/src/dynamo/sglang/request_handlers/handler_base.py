@@ -1007,7 +1007,7 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             "control/update_weights_from_ipc": self.update_weights_from_ipc,
             "control/update_weight_version": self.update_weight_version,
         }
-        enable_rl = bool(getattr(self.config.dynamo_args, "enable_rl", False))
+        enable_rl = bool(self.config.dynamo_args.enable_rl)
         # Register elastic-EP scaling only on workers whose engine can serve it
         # (see _supports_elastic_ep); the rest simply don't expose the route.
         if self._supports_elastic_ep():
