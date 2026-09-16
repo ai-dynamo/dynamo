@@ -1396,7 +1396,7 @@ unsafe extern "C" fn create(
         unsafe { *error = ByteSliceV1::EMPTY };
     }
     match catch_unwind(AssertUnwindSafe(|| unsafe {
-        create_impl(request, handle, error)
+        create_impl(request, None, handle, error)
     })) {
         Ok(status) => status,
         Err(_) => StatusV1::INTERNAL,
