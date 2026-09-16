@@ -68,6 +68,8 @@ type dynamoComponentDeploymentSharedSpecValidationOptions struct {
 
 // validateDynamoComponentDeploymentSharedSpec validates spec. spec and fldPath must not be nil.
 // Options are supplied by the owning resource.
+//
+//nolint:gocyclo // Cross-field rules stay at their shared API-type owner.
 func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
