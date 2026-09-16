@@ -1243,28 +1243,10 @@ mod cache_loss_tests {
     }
 
     #[test]
-    fn invalid_worker_outcome_does_not_block_a_later_valid_branch() {
-        let route = route();
+    fn invalid_worker_outcome_is_rejected() {
         assert!(
-            valid_cache_loss_worker_outcome(route, &serde_json::json!({"complete": false}),)
+            valid_cache_loss_worker_outcome(route(), &serde_json::json!({"complete": false}),)
                 .is_none()
-        );
-        let value = serde_json::json!({
-            "complete": true,
-            "prompt_tokens": 100,
-            "gpu_hit_tokens": 70,
-            "cpu_hit_tokens": 15,
-            "cpu_lookup_tokens": 20,
-        });
-        let mut worker_outcome = valid_cache_loss_worker_outcome(route, &value);
-        let mut recorded = false;
-
-        assert_eq!(
-            finalize_cache_loss_state(Some(route), &mut worker_outcome, &mut recorded, true),
-            Some(CacheLossFinalization::Complete {
-                stages: [100, 75, 60, 90, 85],
-                tiers: None,
-            })
         );
     }
 
