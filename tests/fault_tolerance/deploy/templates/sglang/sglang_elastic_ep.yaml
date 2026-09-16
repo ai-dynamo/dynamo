@@ -29,6 +29,9 @@
 #     4 idle warm-standby GPUs for the joining group (scale 4 -> 8).
 #   * RDMA / InfiniBand for the mooncake weight-transfer backend. Set
 #     --mooncake-ib-device to the node's IB device list before applying.
+#   * A mooncake-transfer-engine build whose torch ProcessGroup extension matches
+#     the image's exact torch. The worker checks this at startup and names the
+#     mismatch, rather than failing from inside engine code after model load.
 #   * DYN_SYSTEM_ENABLED=true so the leader exposes the :9090 system server that
 #     serves /engine/control/*.
 #
