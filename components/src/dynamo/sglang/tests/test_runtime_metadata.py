@@ -300,3 +300,78 @@ async def test_hicache_publish_failure_preserves_core_capacity(monkeypatch, capl
     assert (
         "Failed to attach native offloading capacity from SGLang HiCache" in caplog.text
     )
+
+
+@pytest.mark.parametrize(
+    "extra_config, served_model_name, model_path, expected",
+    [
+        (
+            {},
+            "meta-llama/Llama-3.1-8B",
+            "meta-llama/Llama-3.1-8B",
+            "meta-llama-Llama-3.1-8B",
+        ),
+        (
+            {"extra_backend_tag": "t6-rev1p4"},
+            "meta-llama/Llama-3.1-8B",
+            "meta-llama/Llama-3.1-8B",
+            "t6-rev1p4_meta-llama-Llama-3.1-8B",
+        ),
+        # Unset served name falls back to model_path, as args.py does.
+        (
+            {"extra_backend_tag": "t6-rev1p4"},
+            None,
+            "/models/local/llama",
+            "t6-rev1p4_-models-local-llama",
+        ),
+        # An empty tag is present, so it contributes a leading separator.
+        (
+            {"extra_backend_tag": ""},
+            "Qwen/Qwen3-32B",
+            "Qwen/Qwen3-32B",
+            "_Qwen-Qwen3-32B",
+        ),
+        # A non-string tag is stringified.
+        (
+            {"extra_backend_tag": 123},
+            "Qwen/Qwen3-32B",
+            "Qwen/Qwen3-32B",
+            "123_Qwen-Qwen3-32B",
+        ),
+        # An explicit null tag contributes nothing.
+        ({"extra_backend_tag": None}, "a/b/c", "a/b/c", "a-b-c"),
+    ],
+)
+def test_mooncake_config_prefix_matches_sglang(
+    extra_config, served_model_name, model_path, expected
+):
+    from dynamo.sglang.register import _mooncake_config_prefix
+
+    server_args = SimpleNamespace(
+        served_model_name=served_model_name, model_path=model_path
+    )
+
+    assert _mooncake_config_prefix(server_args, extra_config) == expected
+
+
+def test_mooncake_runtime_data_publishes_full_key_prefix():
+    from dynamo.sglang.register import _get_mooncake_runtime_data
+
+    server_args = SimpleNamespace(
+        hicache_storage_backend="mooncake",
+        hicache_storage_backend_extra_config=json.dumps(
+            {"extra_backend_tag": "t6-rev1p4"}
+        ),
+        hicache_mem_layout="layer_first",
+        served_model_name="meta-llama/Llama-3.1-8B",
+        model_path="meta-llama/Llama-3.1-8B",
+        page_size=64,
+        tp_size=1,
+        pp_size=1,
+        speculative_algorithm="NONE",
+    )
+
+    runtime_data = _get_mooncake_runtime_data(server_args)
+
+    assert runtime_data is not None
+    assert runtime_data["extra_backend_tag"] == "t6-rev1p4_meta-llama-Llama-3.1-8B"

@@ -280,6 +280,38 @@ def _parse_hicache_storage_extra_config(
     return {}
 
 
+def _mooncake_config_prefix(
+    server_args: ServerArgs, extra_config: dict[str, Any]
+) -> Optional[str]:
+    """Derive the ``config_prefix`` SGLang tags Mooncake object keys and group ids with.
+
+    Mirrors ``MooncakeStore.__init__`` (``mooncake_store.py``): the
+    ``extra_backend_tag`` from the HiCache extra config, then the served model
+    name with ``/`` replaced by ``-``, joined by ``_``. The router prepends the
+    result verbatim when it re-derives keys (``shared_cache.rs``
+    ``maybe_prefix_key`` / ``sglang_group_id``), so it must match SGLang's
+    exactly.
+    """
+    parts: list[str] = []
+
+    # SGLang tests ``is not None`` and applies ``str()``, so empty and
+    # non-string tags contribute a part too.
+    tag = extra_config.get("extra_backend_tag")
+    if tag is not None:
+        parts.append(str(tag))
+
+    # SGLang passes the resolved served model name as
+    # ``HiCacheStorageConfig.model_name`` (``hiradix_cache.py``); ``args.py``
+    # resolves it to a single name, falling back to ``model_path``.
+    model_name = (
+        getattr(server_args, "served_model_name", None) or server_args.model_path
+    )
+    if model_name:
+        parts.append("-".join(model_name.split("/")))
+
+    return "_".join(parts) if parts else None
+
+
 def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, Any]]:
     if getattr(server_args, "hicache_storage_backend", None) != "mooncake":
         return None
@@ -321,10 +353,6 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
         and tp_lcm_size % tp_size == 0
     )
 
-    extra_backend_tag = extra_config.get("extra_backend_tag")
-    if not isinstance(extra_backend_tag, str) or not extra_backend_tag:
-        extra_backend_tag = None
-
     return {
         "backend": "mooncake",
         "page_size": int(getattr(server_args, "page_size", 1) or 1),
@@ -334,7 +362,8 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
         "is_eagle": is_eagle,
         "tp_lcm_size": tp_lcm_size,
         "should_split_heads": should_split_heads,
-        "extra_backend_tag": extra_backend_tag,
+        # Holds the full ``config_prefix``, which the router prepends verbatim.
+        "extra_backend_tag": _mooncake_config_prefix(server_args, extra_config),
         "kv_events_endpoint": os.getenv("DYN_MOONCAKE_KV_EVENTS_ENDPOINT") or None,
     }
 
