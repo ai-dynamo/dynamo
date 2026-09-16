@@ -146,33 +146,3 @@ func (r *disaggregatedSetWorkloadRenderer) renderRole(
 	}
 	return map[string]any{"spec": lwsSpecUnstructured}, nil
 }
-
-func (r *disaggregatedSetWorkloadsReconciler) generateDisaggregatedSet(
-	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	dcds map[string]*nvidiacomv1beta1.DynamoComponentDeployment,
-	selection disaggregatedSetSelection,
-) (*unstructured.Unstructured, error) {
-	components := make(map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec, len(dcds))
-	for name, dcd := range dcds {
-		if dcd != nil {
-			components[name] = &dcd.Spec.DynamoComponentDeploymentSharedSpec
-		}
-	}
-	return r.generateDisaggregatedSetFromNormalized(ctx, dgd, components, selection, dynamo.RollingUpdateContext{})
-}
-
-func (r *disaggregatedSetWorkloadsReconciler) generateDisaggregatedSetFromNormalized(
-	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	components map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
-	selection disaggregatedSetSelection,
-	rollingUpdateCtx dynamo.RollingUpdateContext,
-	checkpointInfos ...map[string]*checkpoint.CheckpointInfo,
-) (*unstructured.Unstructured, error) {
-	var resolvedCheckpoints map[string]*checkpoint.CheckpointInfo
-	if len(checkpointInfos) > 0 {
-		resolvedCheckpoints = checkpointInfos[0]
-	}
-	return r.renderer.Render(ctx, dgd, components, selection, rollingUpdateCtx, resolvedCheckpoints)
-}

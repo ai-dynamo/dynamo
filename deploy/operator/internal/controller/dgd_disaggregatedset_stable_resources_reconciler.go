@@ -42,6 +42,13 @@ type disaggregatedSetStableResourcesReconciler struct {
 	renderer *dcdWorkloadRenderer
 }
 
+const managedServiceMetadataAnnotation = "nvidia.com/dynamo-managed-service-metadata"
+
+type managedServiceMetadata struct {
+	Labels      []string `json:"labels,omitempty"`
+	Annotations []string `json:"annotations,omitempty"`
+}
+
 func newDisaggregatedSetStableResourcesReconciler(
 	k8sClient client.Client,
 	renderer *dcdWorkloadRenderer,

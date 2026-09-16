@@ -650,39 +650,37 @@ func TestCheckDisaggregatedSetReadinessTracksEverySlice(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, leaderworkersetv1.AddToScheme(scheme))
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(children...).Build()
-	workloads := &disaggregatedSetWorkloadsReconciler{
-		readiness: newDisaggregatedSetReadinessResolver(k8sClient),
-	}
+	resolver := newDisaggregatedSetReadinessResolver(k8sClient)
 	selection := disaggregatedSetSelection{
 		componentToRole: map[string]string{"prefill": "prefill", "decode": "decode"},
 		desiredReplicas: map[string]int32{"prefill": 1, "decode": 1},
 	}
 
-	ready, reason, statuses, err := workloads.checkDisaggregatedSetReadiness(t.Context(), ds, selection)
+	readiness, err := resolver.Resolve(t.Context(), ds, selection)
 	require.NoError(t, err)
-	require.True(t, ready, reason)
-	require.Equal(t, int32(2), statuses["prefill"].Replicas)
-	require.Equal(t, int32(2), statuses["prefill"].UpdatedReplicas)
-	require.Equal(t, int32(2), ptr.Deref(statuses["prefill"].ReadyReplicas, 0))
+	require.True(t, readiness.Ready, readiness.Reason)
+	require.Equal(t, int32(2), readiness.ComponentStatuses["prefill"].Replicas)
+	require.Equal(t, int32(2), readiness.ComponentStatuses["prefill"].UpdatedReplicas)
+	require.Equal(t, int32(2), ptr.Deref(readiness.ComponentStatuses["prefill"].ReadyReplicas, 0))
 
 	t.Log("a child whose labels claim a target identity but whose name does not match is stale")
 	duplicate := readyChild(0, "prefill")
 	duplicate.Name += "-duplicate"
 	require.NoError(t, k8sClient.Create(t.Context(), duplicate))
-	ready, reason, _, err = workloads.checkDisaggregatedSetReadiness(t.Context(), ds, selection)
+	readiness, err = resolver.Resolve(t.Context(), ds, selection)
 	require.NoError(t, err)
-	require.False(t, ready)
-	require.Contains(t, reason, "stale role \"prefill\" child LeaderWorkerSet")
-	require.Contains(t, reason, duplicate.Name)
+	require.False(t, readiness.Ready)
+	require.Contains(t, readiness.Reason, "stale role \"prefill\" child LeaderWorkerSet")
+	require.Contains(t, readiness.Reason, duplicate.Name)
 	require.NoError(t, k8sClient.Delete(t.Context(), duplicate))
 
 	t.Log("one missing slice role cannot be hidden by aggregate replica counts")
 	missing := children[3].(*leaderworkersetv1.LeaderWorkerSet)
 	require.NoError(t, k8sClient.Delete(t.Context(), missing))
-	ready, reason, _, err = workloads.checkDisaggregatedSetReadiness(t.Context(), ds, selection)
+	readiness, err = resolver.Resolve(t.Context(), ds, selection)
 	require.NoError(t, err)
-	require.False(t, ready)
-	require.Contains(t, reason, "slice 1")
+	require.False(t, readiness.Ready)
+	require.Contains(t, readiness.Reason, "slice 1")
 }
 
 func TestDisaggregatedSetPathwayObservesWorkerHash(t *testing.T) {
@@ -801,21 +799,19 @@ func TestDisaggregatedSetReadinessDiscoversOwnedChildrenByOwnerReference(t *test
 		foreignLabeled,
 		foreignUnlabeled,
 	}
-	workloads := &disaggregatedSetWorkloadsReconciler{
-		readiness: newDisaggregatedSetReadinessResolver(fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()),
-	}
+	resolver := newDisaggregatedSetReadinessResolver(fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build())
 	selection := disaggregatedSetSelection{
 		componentToRole: map[string]string{"prefill": "prefill", "decode": "decode"},
 		desiredReplicas: map[string]int32{"prefill": 1, "decode": 1},
 	}
 
-	ready, reason, _, err := workloads.checkDisaggregatedSetReadiness(t.Context(), ds, selection)
+	readiness, err := resolver.Resolve(t.Context(), ds, selection)
 	require.NoError(t, err)
-	require.False(t, ready)
-	require.Contains(t, reason, ownedMissingLabel.Name)
-	require.Contains(t, reason, ownedStaleLabel.Name)
-	require.NotContains(t, reason, foreignLabeled.Name)
-	require.NotContains(t, reason, foreignUnlabeled.Name)
+	require.False(t, readiness.Ready)
+	require.Contains(t, readiness.Reason, ownedMissingLabel.Name)
+	require.Contains(t, readiness.Reason, ownedStaleLabel.Name)
+	require.NotContains(t, readiness.Reason, foreignLabeled.Name)
+	require.NotContains(t, readiness.Reason, foreignUnlabeled.Name)
 }
 
 func TestDisaggregatedSetReadinessDoesNotTrustChildIdentityLabels(t *testing.T) {
@@ -867,22 +863,20 @@ func TestDisaggregatedSetReadinessDoesNotTrustChildIdentityLabels(t *testing.T) 
 
 	scheme := runtime.NewScheme()
 	require.NoError(t, leaderworkersetv1.AddToScheme(scheme))
-	workloads := &disaggregatedSetWorkloadsReconciler{
-		readiness: newDisaggregatedSetReadinessResolver(fake.NewClientBuilder().WithScheme(scheme).WithObjects(
-			decode,
-			forgedPrefill,
-		).Build()),
-	}
+	resolver := newDisaggregatedSetReadinessResolver(fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		decode,
+		forgedPrefill,
+	).Build())
 	selection := disaggregatedSetSelection{
 		componentToRole: map[string]string{"prefill": "prefill", "decode": "decode"},
 		desiredReplicas: map[string]int32{"prefill": 1, "decode": 1},
 	}
 
-	ready, reason, _, err := workloads.checkDisaggregatedSetReadiness(t.Context(), ds, selection)
+	readiness, err := resolver.Resolve(t.Context(), ds, selection)
 	require.NoError(t, err)
-	require.False(t, ready)
-	require.Contains(t, reason, "prefill role \"prefill\" slice 0 has 0 target LeaderWorkerSets")
-	require.Contains(t, reason, forgedPrefill.Name)
+	require.False(t, readiness.Ready)
+	require.Contains(t, readiness.Reason, "prefill role \"prefill\" slice 0 has 0 target LeaderWorkerSets")
+	require.Contains(t, readiness.Reason, forgedPrefill.Name)
 }
 
 func TestDisaggregatedSetWatchMapperMapsNonzeroSlice(t *testing.T) {
@@ -960,18 +954,16 @@ func TestDisaggregatedSetStatusReadinessWaitsForRemovedRoleChildren(t *testing.T
 	}
 	scheme := runtime.NewScheme()
 	require.NoError(t, leaderworkersetv1.AddToScheme(scheme))
-	workloads := &disaggregatedSetWorkloadsReconciler{
-		readiness: newDisaggregatedSetReadinessResolver(fake.NewClientBuilder().WithScheme(scheme).WithObjects(removed).Build()),
-	}
+	resolver := newDisaggregatedSetReadinessResolver(fake.NewClientBuilder().WithScheme(scheme).WithObjects(removed).Build())
 	selection := disaggregatedSetSelection{
 		componentToRole: map[string]string{"prefill": "prefill", "decode": "decode"},
 		desiredReplicas: map[string]int32{"prefill": 1, "decode": 1},
 	}
 
-	ready, reason, _, err := workloads.checkDisaggregatedSetReadiness(t.Context(), ds, selection)
+	readiness, err := resolver.Resolve(t.Context(), ds, selection)
 	require.NoError(t, err)
-	require.False(t, ready)
-	require.Contains(t, reason, removed.Name)
+	require.False(t, readiness.Ready)
+	require.Contains(t, readiness.Reason, removed.Name)
 }
 
 func TestDisaggregatedSetPredicatesObserveRoutingMetadata(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -60,7 +61,13 @@ func TestDisaggregatedSetRealLWSCRDValidationAndConvergence(t *testing.T) {
 	workloads := reconciler.newDisaggregatedSetWorkloadsReconciler(
 		newDGDWorkerRolloutReconciler(reconciler.Client, reconciler.Recorder),
 	)
-	desired, err := workloads.generateDisaggregatedSet(t.Context(), dgd, dcds, selection)
+	components := make(map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec, len(dcds))
+	for name, dcd := range dcds {
+		if dcd != nil {
+			components[name] = &dcd.Spec.DynamoComponentDeploymentSharedSpec
+		}
+	}
+	desired, err := workloads.renderer.Render(t.Context(), dgd, components, selection, dynamo.RollingUpdateContext{}, nil)
 	require.NoError(t, err)
 	_, found, err := unstructured.NestedFieldNoCopy(desired.Object, "spec", "slices")
 	require.NoError(t, err)
@@ -74,7 +81,7 @@ func TestDisaggregatedSetRealLWSCRDValidationAndConvergence(t *testing.T) {
 	require.Equal(t, int64(1), slices, "the LWS v0.10 CRD defaults the transitional pathway to one slice")
 
 	t.Log("Reconcile identical desired state after API defaulting")
-	desired, err = workloads.generateDisaggregatedSet(t.Context(), dgd, dcds, selection)
+	desired, err = workloads.renderer.Render(t.Context(), dgd, components, selection, dynamo.RollingUpdateContext{}, nil)
 	require.NoError(t, err)
 	_, modified, err = workloads.resources.Reconcile(t.Context(), dgd, desired)
 	require.NoError(t, err)

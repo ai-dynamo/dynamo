@@ -50,14 +50,7 @@ const (
 	disaggregatedSetNameHashLength      = 8
 	dynamoGraphDeploymentKind           = "DynamoGraphDeployment"
 	dynamoComponentDeploymentKind       = "DynamoComponentDeployment"
-	resourceNotFoundReason              = "resource not found"
-	managedServiceMetadataAnnotation    = "nvidia.com/dynamo-managed-service-metadata"
 )
-
-type managedServiceMetadata struct {
-	Labels      []string `json:"labels,omitempty"`
-	Annotations []string `json:"annotations,omitempty"`
-}
 
 type disaggregatedSetSelection struct {
 	componentToRole map[string]string

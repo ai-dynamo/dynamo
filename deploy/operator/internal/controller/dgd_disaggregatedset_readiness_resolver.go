@@ -24,13 +24,10 @@ import (
 	"strings"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 	disaggregatedsetv1 "sigs.k8s.io/lws/api/disaggregatedset/v1"
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 	disaggregatedsetutils "sigs.k8s.io/lws/pkg/utils/disaggregatedset"
@@ -41,6 +38,8 @@ type disaggregatedSetReadiness struct {
 	Reason            string
 	ComponentStatuses map[string]nvidiacomv1beta1.ComponentReplicaStatus
 }
+
+const disaggregatedSetResourceNotFoundReason = "resource not found"
 
 type disaggregatedSetReadinessResolver struct {
 	reader client.Reader
@@ -109,78 +108,6 @@ func (r *disaggregatedSetReadinessResolver) Resolve(
 		Reason:            reason,
 		ComponentStatuses: statuses,
 	}, nil
-}
-
-func (r *disaggregatedSetReadinessResolver) updatedInProgressForDisaggregatedSet(
-	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	inProgress []string,
-	componentRestartProgress *componentRestartProgressResolver,
-) []string {
-	logger := log.FromContext(ctx)
-	selection, reason := selectDisaggregatedSetComponents(dgd)
-	if reason != "" {
-		logger.V(1).Info("failed to select DisaggregatedSet components for restart progress", "reason", reason)
-		return inProgress
-	}
-
-	ds := newDisaggregatedSetObject()
-	dsErr := r.reader.Get(ctx, types.NamespacedName{Name: disaggregatedSetName(dgd), Namespace: dgd.Namespace}, ds)
-	if dsErr != nil && !apierrors.IsNotFound(dsErr) {
-		logger.V(1).Info("failed to get DisaggregatedSet for restart progress", "error", dsErr)
-	}
-
-	dsReady := false
-	dsReason := resourceNotFoundReason
-	if dsErr == nil {
-		readiness, err := r.Resolve(ctx, ds, selection)
-		if err != nil {
-			dsReason = err.Error()
-		} else {
-			dsReady = readiness.Ready
-			dsReason = readiness.Reason
-		}
-	}
-
-	updatedInProgress := make([]string, 0, len(inProgress))
-	for _, componentName := range inProgress {
-		if _, selected := selection.componentToRole[componentName]; !selected {
-			isFullyUpdated, reason := componentRestartProgress.checkComponentFullyUpdated(ctx, dgd, componentName)
-			if !isFullyUpdated {
-				logger.V(1).Info("component not fully updated", "componentName", componentName, "reason", reason)
-				updatedInProgress = append(updatedInProgress, componentName)
-			}
-			continue
-		}
-
-		if dsErr != nil {
-			reason := resourceNotFoundReason
-			if !apierrors.IsNotFound(dsErr) {
-				reason = dsErr.Error()
-			}
-			logger.V(1).Info("DisaggregatedSet component not fully updated", "componentName", componentName, "reason", reason)
-			updatedInProgress = append(updatedInProgress, componentName)
-			continue
-		}
-
-		if !dsReady {
-			logger.V(1).Info("DisaggregatedSet component not fully updated", "componentName", componentName, "reason", dsReason)
-			updatedInProgress = append(updatedInProgress, componentName)
-		}
-	}
-	return updatedInProgress
-}
-
-func (r *disaggregatedSetWorkloadsReconciler) checkDisaggregatedSetReadiness(
-	ctx context.Context,
-	ds *unstructured.Unstructured,
-	selection disaggregatedSetSelection,
-) (bool, string, map[string]nvidiacomv1beta1.ComponentReplicaStatus, error) {
-	readiness, err := r.readiness.Resolve(ctx, ds, selection)
-	if err != nil {
-		return false, "", nil, err
-	}
-	return readiness.Ready, readiness.Reason, readiness.ComponentStatuses, nil
 }
 
 func checkDisaggregatedSetReadiness(
