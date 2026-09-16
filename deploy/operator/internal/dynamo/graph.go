@@ -1751,7 +1751,6 @@ func GenerateBasePodSpec(
 	shouldDisableImagePullSecret := annotations[commonconsts.KubeAnnotationDisableImagePullSecretDiscovery] == commonconsts.KubeLabelValueTrue
 	if !shouldDisableImagePullSecret && secretsRetriever != nil {
 		imagePullSecrets := []corev1.LocalObjectReference{}
-		// Init containers need registry credentials before ordinary containers can start.
 		for _, ctr := range slices.Concat(podSpec.Containers, podSpec.InitContainers) {
 			if ctr.Image != "" {
 				imagePullSecrets = controller_common.AppendUniqueImagePullSecrets(imagePullSecrets, resolveImagePullSecrets(secretsRetriever, namespace, ctr.Image))
