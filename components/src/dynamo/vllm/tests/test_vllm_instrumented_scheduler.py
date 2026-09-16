@@ -5177,6 +5177,49 @@ def test_kvwarm_prepare_reserves_shadow_tail_blocks(monkeypatch):
     assert not InstrumentedScheduler._kvwarm_plan_covers(stub, point)
 
 
+@pytest.mark.core
+@pytest.mark.parametrize("ctx", [2, 1000])
+def test_kvwarm_does_not_build_a_stage_over_budget_at_the_depth_floor(ctx, monkeypatch):
+    # Four one-block chains fit, but their two private tail blocks per
+    # request raise the warmup bound to twelve. Reaching depth 8 (or starting
+    # below it) must not mark the short point as covered by real KV.
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
+    stub = _kvwarm_planner_stub(usable_blocks=11)
+    short = BenchmarkPoint(point_type="decode", batch_size=4, total_kv_read_tokens=8)
+    deepest = replace(short, total_kv_read_tokens=4 * ctx)
+    stub._bench_grid = deque([deepest, short] if ctx > 2 else [short])
+    original_points = list(stub._bench_grid)
+
+    stub._kvwarm_prepare("decode")
+
+    assert stub._kvwarm_plan[4] == 0
+    assert not stub._kvwarm_plan_covers(short)
+    assert list(stub._bench_grid) == original_points
+    assert stub._kvwarm_meta_init()["capacity_fallbacks"] == [
+        {
+            "batch": 4,
+            "depth": min(ctx + 4, 8),
+            "required_blocks": 12,
+            "usable_blocks": 11,
+        }
+    ]
+    stub._bench_active_req_ids = set()
+    stub._bench_current_point = None
+    stub._kvwarm_stage_reported = None
+    stub._bench_soft_timeout_elapsed = lambda: False
+    stub._bench_frees_pending = lambda: False
+    stub._kvwarm_start_stage = MagicMock()
+    assert stub._kvwarm_step_busy() is False
+    stub._kvwarm_start_stage.assert_not_called()
+
+    # The exact-fit neighbor still warms the short-context point.
+    fitted = _kvwarm_planner_stub(usable_blocks=12)
+    fitted._bench_grid = deque([short])
+    fitted._kvwarm_prepare("decode")
+    assert fitted._kvwarm_plan_covers(short)
+    assert "capacity_fallbacks" not in fitted._kvwarm_meta_init()
+
+
 def test_kvwarm_plan_trims_depth_by_the_negotiated_pool(monkeypatch):
     """Every rank must derive the same plan, so the pool that trims a rung's
     depth is the group's negotiated figure, not this rank's own."""

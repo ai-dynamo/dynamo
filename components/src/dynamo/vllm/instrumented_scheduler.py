@@ -5162,6 +5162,29 @@ class InstrumentedScheduler(AsyncScheduler):
                 > usable
             ):
                 depth -= 1
+            required = (self._bench_blocks_per_req(depth) + shadow_tail_blocks) * batch
+            if required > usable:
+                # Reaching the depth floor does not prove the fleet fits.
+                # This also covers an initially short chain below the floor.
+                # Preserve the points with explicit fake-KV provenance, but
+                # do not build a stage that violates the warmup pool budget.
+                meta.setdefault("capacity_fallbacks", []).append(
+                    {
+                        "batch": batch,
+                        "depth": depth,
+                        "required_blocks": required,
+                        "usable_blocks": usable,
+                    }
+                )
+                logger.warning(
+                    "KVWARM: batch=%d depth=%d needs %d blocks including "
+                    "shadow reserves, pool has %d; using fake-KV fallback",
+                    batch,
+                    depth,
+                    required,
+                    usable,
+                )
+                depth = 0
             plan[batch] = depth
         self._kvwarm_plan = plan
         # Second reordering: all warmed points first, fake fallbacks last --
