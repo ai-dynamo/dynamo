@@ -159,29 +159,6 @@ rather than being silently ignored. It selects the least-loaded worker once the 
 largest count is more than 1.1 times the smallest; otherwise it prefers the worker holding the
 largest device-KV overlap when that overlap covers more than 50% of the request's blocks.
 
-**Experimental.** Available since v1.5. To co-locate the subagents of one parent session, run
-`--router-session-affinity-binding parent-group`. A request that
-carries a parent session id then binds under an internal key derived from that parent id instead of
-its own session, so the subagents of one parent share a binding while the parent keeps its own.
-Dynamo's affinity coordinator owns that binding: it commits only after a successful dispatch, is
-version-checked against concurrent updates, expires on `--router-session-affinity-ttl-secs`, and
-counts against the same global entry limit as any session binding. A request that carries an
-explicit worker target stays on its own session, so it is neither rejected against the group nor
-able to move it.
-
-Two behaviors are known and unresolved. A worker-selection policy sees only the workers eligible for
-the request in front of it, so it cannot tell a request-local exclusion from a worker that has left
-the pool; if one subagent's constraints exclude the group's worker, the fallback it selects becomes
-the group's worker for every sibling. And because siblings share one binding, a concurrent fan-out
-waits for the first sibling's dispatch to commit before the others are placed.
-
-Dynamo resolves the parent session id from the agent headers it already recognizes
-(`X-Dynamo-Parent-Session-ID`, `x-claude-code-parent-agent-id`, `x-codex-parent-thread-id`,
-`x-parent-session-id`). On a backend that routes again internally the group can still split across
-ranks: with TensorRT-LLM's `attention_dp_config.kv_cache_routing_conversation_affinity` enabled,
-set `--conversation-affinity-dp-rank-source dynamo` so the attention-DP rank Dynamo selects is the
-one the engine records.
-
 #### Override the Selection
 
 `DYN_ROUTER_WORKER_SELECTION_POLICY` overrides every stage. `--router-prefill-policy` and
@@ -292,9 +269,26 @@ The first successfully dispatched request binds the session ID to its selected w
 | `hard` | Default. Exact-dispatch to the stored target. If the worker or rank is no longer valid, invalidate the binding and retry normal selection once |
 | `soft` | Pass the stored target through the normal selection pipeline as an advisory target. The built-in selector retains it while eligible; a custom policy can choose another worker |
 
-`--router-session-affinity-binding` (or `DYN_ROUTER_SESSION_AFFINITY_BINDING`) chooses which id a
-binding is keyed on: `session` (default) keys every request on its own session id; `parent-group`
-binds a subagent under its parent's group. It is frontend-only and never appears on a model card.
+**Experimental.** Available since v1.5. When session affinity is enabled (`--router-session-affinity-ttl-secs`),
+a request that carries a parent session id binds under an internal key derived from that parent id
+instead of its own session, so the subagents of one parent share a binding while the parent keeps
+its own. Dynamo's affinity coordinator owns that binding: it commits only after a successful
+dispatch, is version-checked against concurrent updates, expires on the same TTL, and counts
+against the same global entry limit as any session binding. A request that carries an explicit
+worker target stays on its own session, so it is neither rejected against the group nor able to
+move it. Under the default `hard` mode the group is pinned to its first worker and does not
+migrate because of load; the binding resets only when the target becomes unusable or dispatch
+fails.
+
+One behavior is known and unresolved: because siblings share one binding, a concurrent fan-out
+waits for the first sibling's dispatch to commit before the others are placed.
+
+Dynamo resolves the parent session id from the agent headers it already recognizes
+(`X-Dynamo-Parent-Session-ID`, `x-claude-code-parent-agent-id`, `x-codex-parent-thread-id`,
+`x-parent-session-id`). On a backend that routes again internally the group can still split across
+ranks: with TensorRT-LLM's `attention_dp_config.kv_cache_routing_conversation_affinity` enabled,
+set `--conversation-affinity-dp-rank-source dynamo` so the attention-DP rank Dynamo selects is the
+one the engine records.
 
 For soft affinity, Dynamo commits a changed binding after dispatch returns a response stream. Selection, setup, or dispatch failure before that point leaves the old binding intact. A later stream error or cancellation does not roll back the rebind. Explicit request targets remain exact in both modes.
 

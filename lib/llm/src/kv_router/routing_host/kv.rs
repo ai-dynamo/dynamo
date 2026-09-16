@@ -36,15 +36,13 @@ where
                 phase,
                 is_query_only,
                 SelectionOptions {
-                    pinned_target: if self.session_affinity_mode.is_soft() {
-                        None
-                    } else {
-                        affinity_target
+                    pinned_target: match self.session_affinity_mode {
+                        SessionAffinityMode::Hard => affinity_target,
+                        SessionAffinityMode::Soft => None,
                     },
-                    affinity_target: if self.session_affinity_mode.is_soft() {
-                        affinity_target
-                    } else {
-                        None
+                    affinity_target: match self.session_affinity_mode {
+                        SessionAffinityMode::Hard => None,
+                        SessionAffinityMode::Soft => affinity_target,
                     },
                     planned_worker,
                     policy_class,

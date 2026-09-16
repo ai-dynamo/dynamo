@@ -42,9 +42,8 @@ use crate::{
         timing::{RequestPhase, RoutingData, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL},
     },
     session_affinity::{
-        AffinityAcquire, AffinityCoordinator, AffinityTarget, SessionAffinityBinding,
-        SessionAffinityMode, affinity_id, explicit_target, invalid_argument,
-        subagent_group_affinity_id,
+        AffinityAcquire, AffinityCoordinator, AffinityTarget, SessionAffinityMode, affinity_id,
+        explicit_target, invalid_argument, subagent_group_affinity_id,
     },
 };
 
@@ -251,7 +250,6 @@ where
     request_metrics: Arc<RouterRequestMetrics>,
     affinity: Option<AffinityCoordinator>,
     session_affinity_mode: SessionAffinityMode,
-    session_affinity_binding: SessionAffinityBinding,
     hosted_occupancy: Option<HostedOccupancy>,
     lora: Option<LoraRouting>,
     /// Retains the shared client, overload state, and cancellation subtree for this host.
@@ -429,19 +427,10 @@ where
             request_metrics,
             affinity,
             session_affinity_mode,
-            session_affinity_binding: SessionAffinityBinding::default(),
             hosted_occupancy: None,
             lora: None,
             routing_context: load_context,
         }
-    }
-
-    pub fn with_session_affinity_binding(
-        mut self,
-        session_affinity_binding: SessionAffinityBinding,
-    ) -> Self {
-        self.session_affinity_binding = session_affinity_binding;
-        self
     }
 
     #[cfg(test)]
@@ -526,7 +515,6 @@ where
             request_metrics,
             affinity,
             session_affinity_mode,
-            session_affinity_binding: SessionAffinityBinding::default(),
             hosted_occupancy,
             lora: lora
                 .zip(lora_selector)
@@ -596,8 +584,7 @@ where
         request: &SingleIn<PreprocessedRequest>,
         explicit: Option<AffinityTarget>,
     ) -> Result<Option<Arc<SessionAffinityId>>, Error> {
-        if self.session_affinity_binding == SessionAffinityBinding::ParentGroup
-            && explicit.is_none()
+        if explicit.is_none()
             && let Some(parent_session_id) = request
                 .content()
                 .agent_context

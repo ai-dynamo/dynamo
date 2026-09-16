@@ -324,12 +324,14 @@ where
             )
         } else {
             self.select_with_session_affinity(&request, phase, is_query_only, &budget, |target| {
-                let soft = self.session_affinity_mode.is_soft();
-                let pinned_target = explicit.or(if !soft || is_direct { target } else { None });
-                let affinity_target = if explicit.is_none() && soft {
-                    target
-                } else {
-                    None
+                let pinned_target = explicit.or(match self.session_affinity_mode {
+                    SessionAffinityMode::Hard => target,
+                    SessionAffinityMode::Soft if is_direct => target,
+                    SessionAffinityMode::Soft => None,
+                });
+                let affinity_target = match (explicit, self.session_affinity_mode) {
+                    (None, SessionAffinityMode::Soft) => target,
+                    _ => None,
                 };
                 ready(self.select_hosted_worker(&request, pinned_target, affinity_target))
             })
@@ -343,7 +345,7 @@ where
             selected_occupancy,
             device_aware_telemetry,
         } = selection;
-        let soft_affinity_target = if self.session_affinity_mode.is_soft() {
+        let soft_affinity_target = if self.session_affinity_mode == SessionAffinityMode::Soft {
             operation.as_ref().and_then(AffinityAcquire::target)
         } else {
             None

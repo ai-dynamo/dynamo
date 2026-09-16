@@ -2896,10 +2896,7 @@ fn subagent_request(
     request
 }
 
-async fn affinity_mode_host(
-    namespace: &str,
-    binding: crate::session_affinity::SessionAffinityBinding,
-) -> (Runtime, RoutingHost<DefaultWorkerSelector>) {
+async fn affinity_mode_host(namespace: &str) -> (Runtime, RoutingHost<DefaultWorkerSelector>) {
     let runtime = Runtime::from_current().unwrap();
     let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
         .await
@@ -2924,19 +2921,14 @@ async fn affinity_mode_host(
         Some(coordinator),
         crate::session_affinity::SessionAffinityMode::Soft,
     )
-    .unwrap()
-    .with_session_affinity_binding(binding);
+    .unwrap();
     (runtime, host)
 }
 
 #[tokio::test]
 #[serial_test::serial]
 async fn parent_group_binding_resolves_siblings_to_one_key() {
-    let (runtime, host) = affinity_mode_host(
-        "subagent-group-binding",
-        crate::session_affinity::SessionAffinityBinding::ParentGroup,
-    )
-    .await;
+    let (runtime, host) = affinity_mode_host("subagent-group-binding").await;
 
     let key = |request: &SingleIn<PreprocessedRequest>| {
         host.affinity_binding_id(request, None)
@@ -2961,35 +2953,6 @@ async fn parent_group_binding_resolves_siblings_to_one_key() {
 
 #[tokio::test]
 #[serial_test::serial]
-async fn session_binding_resolves_each_subagent_to_its_own_key() {
-    let (runtime, host) = affinity_mode_host(
-        "subagent-group-off",
-        crate::session_affinity::SessionAffinityBinding::Session,
-    )
-    .await;
-
-    let key = |request: &SingleIn<PreprocessedRequest>| {
-        host.affinity_binding_id(request, None)
-            .unwrap()
-            .unwrap()
-            .as_str()
-            .to_string()
-    };
-
-    assert_eq!(
-        key(&subagent_request("child-1", Some("parent-1"))),
-        "child-1"
-    );
-    assert_eq!(
-        key(&subagent_request("child-2", Some("parent-1"))),
-        "child-2"
-    );
-
-    runtime.shutdown();
-}
-
-#[tokio::test]
-#[serial_test::serial]
 async fn parent_group_binding_offers_siblings_the_committed_worker() {
     let workers = [7u64, 9]
         .into_iter()
@@ -3001,9 +2964,6 @@ async fn parent_group_binding_offers_siblings_the_committed_worker() {
         crate::session_affinity::SessionAffinityMode::Soft,
     )
     .await;
-    let router = router.with_session_affinity_binding(
-        crate::session_affinity::SessionAffinityBinding::ParentGroup,
-    );
 
     let offered = async |request: &SingleIn<PreprocessedRequest>| {
         router
@@ -3064,9 +3024,6 @@ async fn hard_parent_group_recovers_when_the_bound_worker_leaves() {
         crate::session_affinity::SessionAffinityMode::Hard,
     )
     .await;
-    let router = router.with_session_affinity_binding(
-        crate::session_affinity::SessionAffinityBinding::ParentGroup,
-    );
     let affinity = router.affinity.as_ref().unwrap();
     let group = SessionAffinityId::new(crate::session_affinity::subagent_group_affinity_id(
         "parent-1",

@@ -32,7 +32,6 @@ use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
 use dynamo_llm::mocker::make_mocker_engine;
 use dynamo_llm::model_card::ModelDeploymentCard as RsModelDeploymentCard;
 use dynamo_llm::reasoning_field::ReasoningField;
-use dynamo_llm::session_affinity::SessionAffinityBinding as RsSessionAffinityBinding;
 use dynamo_llm::session_affinity::SessionAffinityMode as RsSessionAffinityMode;
 use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
 use dynamo_mocker::common::perf_model::PerfModel;
@@ -483,14 +482,13 @@ pub struct RouterConfig {
     active_prefill_tokens_threshold_frac: Option<f64>,
     session_affinity_ttl_secs: Option<u64>,
     session_affinity_mode: RsSessionAffinityMode,
-    session_affinity_binding: RsSessionAffinityBinding,
 }
 
 #[pymethods]
 impl RouterConfig {
     #[new]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false, session_affinity_ttl_secs=None, session_affinity_mode="hard", session_affinity_binding="session"))]
+    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false, session_affinity_ttl_secs=None, session_affinity_mode="hard"))]
     pub fn new(
         mode: RouterMode,
         config: Option<KvRouterConfig>,
@@ -500,7 +498,6 @@ impl RouterConfig {
         enforce_disagg: bool,
         session_affinity_ttl_secs: Option<u64>,
         session_affinity_mode: &str,
-        session_affinity_binding: &str,
     ) -> PyResult<Self> {
         if enforce_disagg {
             static WARN_ONCE: std::sync::Once = std::sync::Once::new();
@@ -525,9 +522,6 @@ impl RouterConfig {
         let session_affinity_mode = session_affinity_mode
             .parse()
             .map_err(PyValueError::new_err)?;
-        let session_affinity_binding = session_affinity_binding
-            .parse()
-            .map_err(PyValueError::new_err)?;
         Ok(Self {
             router_mode: mode,
             kv_router_config: config.unwrap_or_default(),
@@ -536,7 +530,6 @@ impl RouterConfig {
             active_prefill_tokens_threshold_frac,
             session_affinity_ttl_secs,
             session_affinity_mode,
-            session_affinity_binding,
         })
     }
 }
@@ -554,7 +547,6 @@ impl From<RouterConfig> for RsRouterConfig {
             enforce_disagg: false,
             session_affinity_ttl_secs: rc.session_affinity_ttl_secs,
             session_affinity_mode: rc.session_affinity_mode,
-            session_affinity_binding: rc.session_affinity_binding,
         }
     }
 }

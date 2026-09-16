@@ -648,7 +648,7 @@ impl AffinityAcquire {
                 Ok(lease.into_stream(stream))
             }
             Self::Bound { target, mut lease } => {
-                if mode.is_soft() {
+                if mode == SessionAffinityMode::Soft {
                     let rebound_target = match target.dp_rank {
                         None => AffinityTarget::worker(dispatched_target.worker_id),
                         Some(_) => dispatched_target.dp_rank.map_or(target, |dp_rank| {

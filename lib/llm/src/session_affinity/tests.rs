@@ -13,8 +13,8 @@ use futures::{StreamExt, stream};
 
 use super::SessionAffinityMode::{Hard, Soft};
 use super::{
-    AffinityAcquire, AffinityCoordinator, AffinityTarget, LlmResponse, SessionAffinityBinding,
-    affinity_id, coordinator::ReplicaApplyOutcome, explicit_target, subagent_group_affinity_id,
+    AffinityAcquire, AffinityCoordinator, AffinityTarget, LlmResponse, affinity_id,
+    coordinator::ReplicaApplyOutcome, explicit_target, subagent_group_affinity_id,
 };
 use crate::{
     preprocessor::PreprocessedRequest,
@@ -871,25 +871,6 @@ async fn session_affinity_completion_restores_expired_remote_binding() {
         replica.query_target(&session_id(), None).unwrap(),
         Some(replicated_target)
     );
-}
-
-#[test]
-fn parses_the_session_affinity_binding() {
-    use std::str::FromStr;
-
-    assert_eq!(
-        SessionAffinityBinding::from_str("parent-group").unwrap(),
-        SessionAffinityBinding::ParentGroup
-    );
-    assert_eq!(
-        SessionAffinityBinding::from_str("session").unwrap(),
-        SessionAffinityBinding::Session
-    );
-    assert_eq!(
-        SessionAffinityBinding::default(),
-        SessionAffinityBinding::Session
-    );
-    assert!(SessionAffinityBinding::from_str("subagent").is_err());
 }
 
 #[test]
