@@ -83,6 +83,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>
             worker_trace_link: None,
             engine_data: None,
             routing_data: None,
+            jailed_text: None,
         };
 
         Ok(ResponseStream::new(

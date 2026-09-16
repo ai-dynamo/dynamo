@@ -95,7 +95,6 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(
 	// Create validator with manager for API group detection and perform validation.
 	validator := NewDynamoGraphDeploymentValidator(h.mgr)
 	runtimeVersionSource := runtimeVersionValidationSourceForRequest(ctx, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
-
 	// Get user info from admission request context for identity-based validation
 	var terminatingUserInfo *authenticationv1.UserInfo
 	if req, reqErr := admission.RequestFromContext(ctx); reqErr == nil {
@@ -112,7 +111,7 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(
 		return validator.ValidateTerminatingUpdate(ctx, oldObj, newObj, terminatingUserInfo, h.operatorPrincipal)
 	}
 
-	warnings, err := validator.validate(ctx, newObj, runtimeVersionSource, true)
+	warnings, err := validator.validate(ctx, newObj, oldObj, runtimeVersionSource, true)
 	if err != nil {
 		return warnings, err
 	}
