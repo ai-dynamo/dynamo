@@ -22,11 +22,12 @@ use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
 use crate::client::{self, Client, Discovery, Pool};
+use crate::metadata_upload::{MetadataDelivery, MetadataUploadService};
 use crate::native_http::{self, NativeHttp};
 use crate::proto as pb;
 use crate::protocol::{
-    build_generate_request, disaggregated_params_to_json, engine_data_from_meta, extract_logprobs,
-    meta_u32, output_ids_to_u32, terminal_from_meta,
+    build_generate_request, disaggregated_params_to_json, meta_u32, output_ids_to_u32,
+    terminal_from_meta,
 };
 
 pub struct SglangSidecarEngine {
@@ -35,6 +36,7 @@ pub struct SglangSidecarEngine {
     disaggregation_mode: DisaggregationMode,
     bootstrap_host: Option<String>,
     bootstrap_port: Option<u16>,
+    metadata_upload: Option<MetadataUploadService>,
     state: OnceCell<StartedState>,
     cancel: CancellationToken,
 }
@@ -75,7 +77,6 @@ impl SglangSidecarEngine {
                 "route-to-encoder is not supported by the SGLang sidecar",
             ));
         }
-
         let endpoint = args.sidecar.grpc_endpoint;
         let transport = args.sidecar.grpc.config();
         let discovery = bootstrap_discover(&endpoint, &transport)?;
@@ -102,6 +103,11 @@ impl SglangSidecarEngine {
         );
 
         let common = args.sidecar.common;
+        let metadata_upload = if common.enable_rl && !disaggregation_mode.is_prefill() {
+            Some(MetadataUploadService::new(args.metadata_upload)?)
+        } else {
+            None
+        };
         let config = WorkerConfig {
             namespace: common.namespace,
             component: if disaggregation_mode == DisaggregationMode::Aggregated {
@@ -135,6 +141,7 @@ impl SglangSidecarEngine {
                 disaggregation_mode,
                 bootstrap_host,
                 bootstrap_port,
+                metadata_upload,
                 state: OnceCell::new(),
                 cancel: CancellationToken::new(),
             },
@@ -277,6 +284,10 @@ impl LLMEngine for SglangSidecarEngine {
             self.bootstrap_host.as_deref(),
             self.bootstrap_port,
         )?;
+        let metadata_delivery = match &self.metadata_upload {
+            Some(service) => service.delivery_for(&request).await?,
+            None => MetadataDelivery::Inline,
+        };
         let prefill_handoff = if self.disaggregation_mode.is_prefill() {
             grpc_request
                 .disaggregated_params
@@ -353,15 +364,6 @@ impl LLMEngine for SglangSidecarEngine {
                                 break;
                             }
                         };
-                        let (log_probs, top_logprobs) =
-                            match extract_logprobs(&response.meta_info, return_tokens_as_ids) {
-                                Ok(values) => values,
-                                Err(err) => {
-                                    yield Err(err);
-                                    break;
-                                }
-                            };
-
                         if is_prefill {
                             if response.finished {
                                 let mut terminal = match terminal_from_meta(
@@ -395,10 +397,24 @@ impl LLMEngine for SglangSidecarEngine {
                                     break;
                                 }
                             };
-                            let engine_data = match engine_data_from_meta(&response.meta_info, true) {
-                                Ok(engine_data) => engine_data,
-                                Err(error) => {
+                            let fields = tokio::select! {
+                                biased;
+                                _ = ctx.stopped() => None,
+                                _ = cancel.cancelled() => None,
+                                result = metadata_delivery.finish(
+                                    &response.meta_info,
+                                    return_tokens_as_ids,
+                                ) => Some(result),
+                            };
+                            let ((log_probs, top_logprobs), engine_data) = match fields {
+                                Some(Ok(fields)) => fields,
+                                Some(Err(error)) => {
                                     yield Err(error);
+                                    break;
+                                }
+                                None => {
+                                    yield Ok(LLMEngineOutput::cancelled()
+                                        .with_usage(usage(observed_prompt_tokens, generated)));
                                     break;
                                 }
                             };
@@ -411,8 +427,10 @@ impl LLMEngine for SglangSidecarEngine {
                         }
 
                         if !token_ids.is_empty() {
-                            let engine_data = match engine_data_from_meta(&response.meta_info, false) {
-                                Ok(engine_data) => engine_data,
+                            let ((log_probs, top_logprobs), engine_data) = match metadata_delivery
+                                .chunk_fields(&response.meta_info, return_tokens_as_ids)
+                            {
+                                Ok(fields) => fields,
                                 Err(error) => {
                                     yield Err(error);
                                     break;

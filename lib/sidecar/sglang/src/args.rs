@@ -5,6 +5,8 @@
 
 use dynamo_sidecar_common::SidecarArgs;
 
+use crate::metadata_upload::MetadataUploadArgs;
+
 /// Parsed sidecar arguments.
 #[derive(clap::Parser, Debug, Clone)]
 #[command(
@@ -22,4 +24,7 @@ pub struct Args {
     /// wildcard addresses.
     #[arg(long, env = "SGLANG_DISAGGREGATION_BOOTSTRAP_HOST")]
     pub bootstrap_host: Option<String>,
+
+    #[command(flatten)]
+    pub metadata_upload: MetadataUploadArgs,
 }
