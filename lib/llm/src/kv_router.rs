@@ -880,7 +880,7 @@ impl KvRouter {
                 policy_factory,
             },
             workers_with_configs.clone(),
-            Some(Arc::new(request_leases.clone())),
+            Some(request_leases.replica_observer()),
             cancellation_token.child_token(),
         )
         .await?;
@@ -2592,7 +2592,7 @@ mod tests {
 
     /// Three default-config workers under the registry policy, with
     /// `router_track_active_blocks` on so bookings send tracking hashes.
-    async fn tracked_router(name: &str) -> KvRouter {
+    pub(super) async fn tracked_router(name: &str) -> KvRouter {
         // Prefill load decays with wall time and would let near-ties flip
         // between two runs microseconds apart.
         let config = KvRouterConfig {
