@@ -28,7 +28,7 @@ targets:
   - kv-aware-routing
   workload:
     type: trace-replay
-    traffic: Mooncake chat trace, 8K ISL / 1K OSL, ~70% prefix reuse, 1,805 requests, concurrency 7
+    traffic: Mooncake chat trace, 8K ISL / 1K OSL, 1,805 requests, concurrency 7; the trace is designed for ~70% prefix reuse but achieves ~8.8% on this topology (working set oversubscribed against KV capacity)
   deploy:
     asset: recipes/k-exaone-2.0/vllm/agg-b200-chat/deploy-generic.yaml
   benchmark:
@@ -56,7 +56,7 @@ targets:
   - nixl-ucx
   workload:
     type: trace-replay
-    traffic: Mooncake chat trace, 8K ISL / 1K OSL, ~70% prefix reuse, 1,805 requests, concurrency 14
+    traffic: Mooncake chat trace, 8K ISL / 1K OSL, 1,805 requests, concurrency 14; the trace is designed for ~70% prefix reuse but achieves ~8.8% on this topology (working set oversubscribed against KV capacity)
   deploy:
     asset: recipes/k-exaone-2.0/vllm/disagg-b200-chat/deploy-generic.yaml
   benchmark:

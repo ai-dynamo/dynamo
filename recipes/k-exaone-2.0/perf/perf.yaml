@@ -59,7 +59,9 @@ spec:
         - -c
         - |
           set -euo pipefail
-          ulimit -n 600000
+          # Best-effort: raising the fd limit needs privileges the Job may not have, and
+          # under `set -e` a refusal would abort before the sweep ever starts.
+          ulimit -n 600000 || echo "note: could not raise fd limit; continuing"
           apt-get update && apt-get install -y curl jq procps git build-essential && apt-get clean
           # transformers>=5 is REQUIRED for this model, not a preference: K-EXAONE 2.0's
           # tokenizer_config.json declares tokenizer_class "TokenizersBackend", which does

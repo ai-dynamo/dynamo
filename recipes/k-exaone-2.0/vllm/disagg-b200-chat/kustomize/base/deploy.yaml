@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # K-EXAONE 2.0 750B-A37B NVFP4 on vLLM via Dynamo, disaggregated 1P1D, B200
-# (TP=4 per worker, 8 GPUs total), chat workload (8K ISL / 1K OSL, 70% prefix reuse).
+# (TP=4 per worker, 8 GPUs total), chat workload (8K ISL / 1K OSL). The trace is
+# DESIGNED for 70% prefix reuse; achieved reuse on this topology is ~8.8% -- the working
+# set is ~42x oversubscribed against KV capacity, so blocks are evicted before reuse.
 #
 # See ../agg-b200-chat/deploy.yaml for the model-level requirements (FLASHINFER_CUTLASS,
 # MTP, the --dyn-* parsers). Everything below is disaggregation-specific.

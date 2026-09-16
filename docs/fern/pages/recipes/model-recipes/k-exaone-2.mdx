@@ -26,7 +26,7 @@ This recipe serves `LGAI-EXAONE/K-EXAONE-2.0-750B-A37B-NVFP4` — a 764.5B-param
 <span><b>GPUs</b> 4x B200</span>
 <span><b>Parallelism</b> TP4</span>
 <span><b>Spec decoding</b> MTP, draft length 2</span>
-<span><b>Workload</b> 8K ISL / 1K OSL chat trace, ~70% prefix reuse</span>
+<span><b>Workload</b> 8K ISL / 1K OSL chat trace, designed for ~70% prefix reuse (~8.8% achieved here)</span>
 </div>
 <div className="dynamo-target-picker-summary" data-variant="disagg">
 <span><b>Checkpoint</b> LGAI-EXAONE/K-EXAONE-2.0-750B-A37B-NVFP4</span>
@@ -52,7 +52,7 @@ This recipe serves `LGAI-EXAONE/K-EXAONE-2.0-750B-A37B-NVFP4` — a 764.5B-param
 
 <div data-variant="disagg">
 
-- **8x B200** on a single node. Prefill and decode are co-located by a required pod affinity so the KV hop stays on one fabric.
+- **8x B200**, ideally on a single node. Prefill and decode are co-located by a *preferred* pod affinity so the KV hop stays on one fabric where capacity allows; a required affinity deadlocks the operator's gang scheduling. KV moves over IB RDMA, so a split placement still works, just slower.
 - An **RDMA device plugin** exposing InfiniBand HCAs as a Kubernetes extended resource. The manifest requests `rdma/shared_ib`; the name is cluster-specific — see [Notes](#notes).
 
 </div>

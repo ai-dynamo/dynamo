@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # K-EXAONE 2.0 750B-A37B NVFP4 on vLLM via Dynamo, aggregated, B200 (TP=4, 4 GPUs),
-# chat workload (8K ISL / 1K OSL, 70% prefix reuse).
+# chat workload (8K ISL / 1K OSL). The trace is DESIGNED for 70% prefix reuse; the
+# rate actually achieved on this topology is ~8.8%, because the working set is ~42x
+# oversubscribed against TP4 KV capacity and blocks are evicted before reuse.
 #
 # Model: 764.5 B total params, ~37 B active per token. 78 layers, 256 experts top-8.
 # Hybrid attention: 20 full_attention + 58 sliding_attention layers. Native context 262,144.

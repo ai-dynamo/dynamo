@@ -46,6 +46,12 @@ traces/8k_1k_70kv_chat_new_noschedule_short_15perc.jsonl
 The default 15% trace contains 1,805 requests. Its SHA-256 is
 `b1221bca72b69f842897f339624306a84857f1b55ea0d866525f94d9ceb9b871`.
 
+> [!IMPORTANT]
+> `CONCURRENCY` is **per variant**: `7` for `agg-b200-chat`, `14` for `disagg-b200-chat`.
+> The shipped default is 7. Running the disaggregated target at 7 under-loads it and
+> reproduces 55 tok/s/GPU rather than the published 85 -- set it to match the variant
+> that `ENDPOINT` points at.
+
 ## Workflow
 
 ```bash
