@@ -511,8 +511,7 @@ struct ChoiceReasoningState {
     // not idempotent across the trait — individual parsers may be, but the
     // contract does not require it — so calling it twice could re-emit text a
     // parser had already handed over. Draining again is fine; finalizing again
-    // is not. This matters more now that both the terminal-chunk drain and the
-    // end-of-stream fallback finalize every parser, not just the deferring one.
+    // is not.
     parser_finished: bool,
 }
 
@@ -6401,7 +6400,11 @@ impl OpenAIPreprocessor {
                 // the normal path — `is_error()` keys on the annotation event,
                 // not on `data`, so short-circuiting here would change how a
                 // data-carrying error chunk is processed.
-                if response.is_error() {
+                // Captured before `map_data` below, which consumes `response`:
+                // the terminal-choice drain needs it too, not just the
+                // end-of-stream branch.
+                let is_terminal_error = response.is_error();
+                if is_terminal_error {
                     state.saw_terminal_error = true;
                 }
                 // Split disjoint field borrows so the per-choice map and the
@@ -6559,16 +6562,19 @@ impl OpenAIPreprocessor {
                             // A guided-JSON choice that bypassed the parser never
                             // fed it anything, so finishing that parser could only
                             // contribute text the choice never generated.
-                            // Every reasoning parser is finalized here, not just
-                            // the deferring one. A parser that buffers nothing
-                            // flushes nothing and this costs one virtual call per
-                            // finished choice; a parser that IS holding text — a
-                            // partial delimiter, or a harmony final message
-                            // stranded behind a malformed header — would
-                            // otherwise have that text dropped when its state is
-                            // discarded, which is what surfaced to clients as
-                            // `content: null` with `finish_reason: "stop"`.
-                            if choice.finish_reason.is_some()
+                            // Every parsed choice is finalized here, not just a
+                            // deferring one: a parser still holding text would
+                            // otherwise lose it when its state is dropped. One
+                            // holding nothing flushes nothing.
+                            //
+                            // An error chunk may still carry `data` with a
+                            // `finish_reason` (`is_error()` keys on the
+                            // annotation event, not on `data`). Draining onto it
+                            // would put recovered text on the wire for a
+                            // generation that failed — the same reason
+                            // `saw_terminal_error` silences the EOF branch.
+                            if !is_terminal_error
+                                && choice.finish_reason.is_some()
                                 && !terminal_carries_parts
                                 && bypass_decision == Some(false)
                             {
@@ -8017,6 +8023,36 @@ mod tests {
         assert!(
             output.iter().any(|response| response.is_error()),
             "the error itself must still reach the client"
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_eof_flush_is_silent_on_a_data_carrying_error_chunk() {
+        // `is_error()` keys on the annotation event, not on `data`, so an error
+        // chunk can still carry a delta AND a `finish_reason`. The terminal
+        // drain must skip it for the same reason `saw_terminal_error` silences
+        // the end-of-stream branch: the generation failed, so there is no answer
+        // to complete and nothing recovered belongs on the wire.
+        let mut terminal = reasoning_flush_chunk(None, true);
+        terminal.event = Some("error".to_string());
+        terminal.error = Some(dynamo_runtime::error::DynamoError::msg("backend exploded"));
+
+        let output = run_reasoning_flush(
+            vec![
+                reasoning_flush_chunk(Some("<think>thought</think>Answer"), false),
+                reasoning_flush_chunk(Some("<thi"), false),
+                terminal,
+            ],
+            "deepseek_r1",
+            false,
+        )
+        .await;
+
+        let (content, reasoning) = collect_reasoning_flush(&output);
+        assert!(
+            !content.contains("<thi") && !reasoning.contains("<thi"),
+            "a failed generation must not emit recovered text: \
+             content={content:?} reasoning={reasoning:?}"
         );
     }
 
