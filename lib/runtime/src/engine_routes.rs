@@ -64,10 +64,10 @@ impl EngineRoutePolicy {
         .collect();
         if set.len() > 1 {
             tracing::warn!(
-                "Multiple engine-route policy variables set ({}); applying {} (precedence: \
-                 DYN_DISABLE_ENGINE_ROUTES > DYN_ENGINE_ROUTES_ALLOW > DYN_ENGINE_ROUTES_DENY)",
-                set.join(", "),
-                set[0]
+                vars_set = %set.join(", "),
+                applying = set[0],
+                "multiple engine-route policy variables set; applying by precedence \
+                 (DYN_DISABLE_ENGINE_ROUTES > DYN_ENGINE_ROUTES_ALLOW > DYN_ENGINE_ROUTES_DENY)"
             );
         }
 
@@ -222,8 +222,9 @@ impl EngineRouteRegistry {
             Some(allowed) => {
                 if default.is_sensitive() && allowed != default.served_by_default() {
                     tracing::warn!(
-                        "engine-route policy overrides the default for restricted route \
-                         /engine/{route} (serving={allowed})"
+                        route,
+                        serving = allowed,
+                        "engine-route policy overrides a restricted route's default"
                     );
                 }
                 allowed
@@ -231,16 +232,17 @@ impl EngineRouteRegistry {
             None => default.served_by_default(),
         };
         if !permitted {
-            tracing::info!(
-                "Engine route /engine/{route} not registered (disabled by policy/default)"
+            tracing::debug!(
+                route,
+                "engine route not registered (disabled by policy/default)"
             );
             return;
         }
         let mut routes = self.routes.write().unwrap();
         if routes.insert(route.to_string(), callback).is_some() {
-            tracing::warn!("Overwriting already-registered engine route: /engine/{route}");
+            tracing::warn!(route, "overwriting already-registered engine route");
         } else {
-            tracing::debug!("Registered engine route: /engine/{route}");
+            tracing::debug!(route, "registered engine route");
         }
     }
 
