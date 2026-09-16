@@ -8716,11 +8716,15 @@ mod tests {
                 ),
             };
 
-            let response =
-                match check_for_backend_error(stream::iter(vec![error_event]), None).await {
-                    Err(response) => response,
-                    Ok(_) => panic!("typed timeout must fail preflight: {error_type:?}"),
-                };
+            let response = match check_for_backend_error(
+                stream::iter(vec![error_event]),
+                BackendErrorCheck::UntilFirstEvent,
+            )
+            .await
+            {
+                Err(response) => response,
+                Ok(_) => panic!("typed timeout must fail preflight: {error_type:?}"),
+            };
             assert_eq!(
                 extract_error_type_from_response(&response),
                 ErrorType::ResponseTimeout,
