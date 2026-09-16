@@ -12,25 +12,25 @@ homepage = "https://github.com/ai-dynamo/dynamo"
 repository = "https://github.com/ai-dynamo/dynamo.git"
 publish = false
 
-# This source-integration fixture is deliberately not a member of Dynamo's
-# production workspace. AIPerf's provider API is not published independently,
-# so local development supplies its sibling checkout explicitly without making
-# ordinary Dynamo resolution depend on that checkout.
+# This source-integration crate is deliberately not a member of Dynamo's
+# production workspace. It pins the unpublished AIPerf provider API to one
+# immutable source revision without making ordinary Dynamo resolution depend
+# on the integration graph.
 [workspace]
 resolver = "3"
 
 [dependencies]
-# Development-only sibling-worktree composition: AIPerf's source-level Rust
-# provider contract is not published independently. A distributable bundle
-# must replace these paths with one coordinated, reproducible source release.
-aiperf-runtime = { path = "../../../../dynamic-simulation-abi/crates/runtime" }
-aiperf-simulate = { path = "../../../../dynamic-simulation-abi/crates/simulate" }
-aiperf-protocol = { path = "../../../../dynamic-simulation-abi/crates/protocol" }
+# AIPerf's source-level Rust provider contract is not published as independent
+# crates. Pin every AIPerf package to the same immutable repository revision so
+# a clean checkout resolves one coordinated composition surface.
+aiperf-runtime = { git = "https://github.com/NVIDIA-dev/aiperf-rs.git", rev = "e48c0a9d60109d4257926073a6083df1cf26f21d" }
+aiperf-simulate = { git = "https://github.com/NVIDIA-dev/aiperf-rs.git", rev = "e48c0a9d60109d4257926073a6083df1cf26f21d" }
+aiperf-protocol = { git = "https://github.com/NVIDIA-dev/aiperf-rs.git", rev = "e48c0a9d60109d4257926073a6083df1cf26f21d" }
 aisimulate-core = { git = "https://github.com/ai-dynamo/aisimulate.git", rev = "4fd8aaabb68008e15ada1bb1750183968d56b0eb" }
 anyhow = "1"
 dynamo-kv-router = { path = "../kv-router", features = ["bench"] }
 dynamo-mocker = { path = "../mocker", features = ["replay-bench"] }
 
 [dev-dependencies]
-aiperf-runtime = { path = "../../../../dynamic-simulation-abi/crates/runtime", features = ["test-support"] }
+aiperf-runtime = { git = "https://github.com/NVIDIA-dev/aiperf-rs.git", rev = "e48c0a9d60109d4257926073a6083df1cf26f21d", features = ["test-support"] }
 serde_json = "1"
