@@ -50,7 +50,8 @@ impl LoraLifecycle {
         if let Some(lock) = locks.get(name) {
             return lock.clone();
         }
-        locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+        let published = self.published.lock().await;
+        locks.retain(|name, lock| published.contains(name) || Arc::strong_count(lock) > 1);
         let lock = Arc::new(RwLock::new(()));
         locks.insert(name.to_string(), lock.clone());
         lock

@@ -2943,6 +2943,11 @@ async fn generate_error(
 #[tokio::test]
 async fn lora_lock_registry_reclaims_idle_entries_without_losing_waiters() {
     let lifecycle = crate::lora::LoraLifecycle::default();
+    let mut published = Vec::new();
+    for name in ["loaded-a", "loaded-b"] {
+        lifecycle.mark_published(name).await;
+        published.push((name, Arc::downgrade(&lifecycle.adapter_lock(name).await)));
+    }
     let lock = lifecycle.adapter_lock("active").await;
     let active = Arc::downgrade(&lock);
     let held = lock.clone().write_owned().await;
@@ -2969,6 +2974,16 @@ async fn lora_lock_registry_reclaims_idle_entries_without_losing_waiters() {
     drop(lock);
     drop(lifecycle.adapter_lock("after-waiter").await);
     assert!(active.upgrade().is_none());
+
+    for (name, lock) in &published {
+        assert!(Arc::ptr_eq(
+            &lifecycle.adapter_lock(name).await,
+            &lock.upgrade().expect("published lock must survive churn")
+        ));
+        lifecycle.forget(name).await;
+    }
+    drop(lifecycle.adapter_lock("after-unload").await);
+    assert!(published.iter().all(|(_, lock)| lock.upgrade().is_none()));
 }
 
 #[tokio::test]

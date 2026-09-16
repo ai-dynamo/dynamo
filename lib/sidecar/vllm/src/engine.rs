@@ -363,7 +363,7 @@ impl VllmSidecarEngine {
         let source_path_arg = source_path.to_string_lossy().to_string();
 
         let adapter = match client
-            .load_lora(request.name.clone(), source_path_arg.clone())
+            .load_lora(request.name.clone(), source_path_arg)
             .await
         {
             Ok(response) => self.expect_adapter(response.adapter, &request.name)?,
@@ -401,7 +401,9 @@ impl VllmSidecarEngine {
                         return Err(client::protocol_error(format!(
                             "LoRA adapter `{}` is loaded from `{}` but this load requested `{}`; \
                              vLLM and Dynamo disagree about adapter state",
-                            request.name, observed.source_path, source_path_arg
+                            request.name,
+                            observed.source_path,
+                            source_path.display()
                         )));
                     }
                     None => return Err(error.into_dynamo()),
