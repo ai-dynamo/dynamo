@@ -21,6 +21,7 @@ use rs::pipeline::network::Ingress;
 use std::ffi::CString;
 use std::fs;
 use std::path::PathBuf;
+use std::thread::sleep;
 use std::{
     fmt::Display,
     sync::{Arc, Weak},
@@ -196,10 +197,10 @@ pub(crate) fn adopt_bridge_runtime(
 }
 
 /// Record the selected PyO3 runtime whenever bindings access it directly.
+///
+/// The bridge selects its runtime once, so the recorded value never goes stale.
 pub(crate) fn bridge_runtime() -> &'static tokio::runtime::Runtime {
-    let bridge = pyo3_async_runtimes::tokio::get_runtime();
-    let _ = BRIDGE_RUNTIME.set(bridge);
-    bridge
+    BRIDGE_RUNTIME.get_or_init(pyo3_async_runtimes::tokio::get_runtime)
 }
 
 /// Convert a future and record its runtime for the bounded interpreter-exit drain.
@@ -231,47 +232,38 @@ where
 
 /// Longest the exit hook will wait for the runtimes it drains to go quiet.
 ///
-/// The race it closes is sub-millisecond, so this is still a margin of hundreds. It is also
-/// paid in full, on every exit, by a process whose service tasks never finish: a frontend holds
-/// several, so its alive-task count never reaches zero and the loop always runs to this
-/// deadline. That cost, not the race, is what bounds how large this may be.
+/// A process whose service tasks never finish pays this in full on every exit: a frontend's
+/// alive-task count never reaches zero. That cost bounds how large this may be.
 const BRIDGE_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 const BRIDGE_DRAIN_POLL: std::time::Duration = std::time::Duration::from_millis(1);
 
 /// Give Tokio tasks a bounded chance to finish before CPython finalizes the interpreter.
 ///
-/// `future_into_py` resolves the Python future from a Tokio worker via `call_soon_threadsafe`,
-/// so the awaiting coroutine resumes while that worker is still inside `Python::with_gil` with
-/// an epilogue left to run — it has yet to drop the argument tuple it passed. The main thread
-/// can leave `asyncio.run` and start finalizing inside that window, and the worker then runs
-/// `PyObject_GC_Del` against a half-torn-down interpreter. The process dies by `SIGSEGV` with
-/// all of its output already correctly written.
+/// A Tokio worker resolving a `future_into_py` future is still inside `Python::with_gil` when
+/// the awaiting coroutine resumes, so the main thread can start finalizing while that worker
+/// still has Python objects to drop, and the process dies by `SIGSEGV`. The bounded wait only
+/// narrows that window: at the timeout, finalization continues regardless.
 ///
-/// Drains both runtimes a bridge task can be on: Dynamo's process runtime, and the runtime the
-/// bridge actually settled on when that is a different one. They differ whenever something
-/// reached `future_into_py` before [`adopt_bridge_runtime`] could offer the process runtime —
-/// the mismatch the bindings already warn about, and the case where every bridge task lives on
-/// the runtime PyO3 built for itself rather than on the process runtime.
-///
-/// Binding future conversions and direct bridge access record the selected runtime;
-/// the exit hook only reads that record and never initializes a runtime.
+/// Drains both runtimes a bridge task can be on: Dynamo's process runtime, and the runtime PyO3
+/// built for itself when something reached `future_into_py` before [`adopt_bridge_runtime`]
+/// could offer the process runtime. The hook only reads the recorded runtime and never
+/// initializes one.
 #[pyfunction]
 fn wait_for_bridge_tasks_at_exit(py: Python<'_>) {
-    let mut runtimes: Vec<&'static tokio::runtime::Runtime> = Vec::new();
-    if let Some(process) = rs::Worker::existing_process_runtime() {
-        runtimes.push(process);
-    }
-    if let Some(bridge) = BRIDGE_RUNTIME.get().copied()
-        && !runtimes.iter().any(|rt| std::ptr::eq(*rt, bridge))
-    {
-        runtimes.push(bridge);
-    }
-    if runtimes.is_empty() {
+    // At most two, so there is nothing here worth allocating for.
+    let process = rs::Worker::existing_process_runtime();
+    let bridge = BRIDGE_RUNTIME
+        .get()
+        .copied()
+        .filter(|bridge| !matches!(process, Some(rt) if std::ptr::eq(rt, *bridge)));
+    let runtimes: [Option<&'static tokio::runtime::Runtime>; 2] = [process, bridge];
+    if runtimes.iter().all(Option::is_none) {
         return;
     }
     let alive = || -> usize {
         runtimes
             .iter()
+            .flatten()
             .map(|rt| rt.metrics().num_alive_tasks())
             .sum()
     };
@@ -285,12 +277,12 @@ fn wait_for_bridge_tasks_at_exit(py: Python<'_>) {
                 // that accounts for the extra exit delay the operator just waited through.
                 tracing::info!(
                     alive_tasks = alive(),
-                    runtimes = runtimes.len(),
+                    runtimes = runtimes.iter().flatten().count(),
                     "tasks still running at interpreter exit; continuing without them"
                 );
                 break;
             }
-            std::thread::sleep(BRIDGE_DRAIN_POLL);
+            sleep(BRIDGE_DRAIN_POLL);
         }
     });
 }
