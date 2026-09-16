@@ -744,6 +744,10 @@ mod tests {
     fn http_statuses_map_to_semantic_classes() {
         assert_eq!(error_class_for_http_status(400), ErrorClass::InvalidRequest);
         assert_eq!(
+            error_class_for_http_status(403),
+            ErrorClass::PermissionDenied
+        );
+        assert_eq!(
             error_class_for_http_status(415),
             ErrorClass::UnsupportedMedia
         );
