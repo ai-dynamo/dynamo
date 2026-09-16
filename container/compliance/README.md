@@ -49,7 +49,8 @@ stages expose `/sboms` and `/legal` for CI extraction; the final runtime stage d
 `BASELINE_SBOM_FILE` is rendered from `container/context.yaml`'s per-(framework, device)
 `baseline_sbom` key (see `render.py:_resolve_compliance_inputs`). When set, the generators
 subtract the baseline's components so NOTICES attribute only what Dynamo adds on top of the
-upstream base. When empty, NOTICES cover the full image (correct but unfiltered).
+upstream base. When empty, nothing is subtracted and the policy gate fails on any denied
+license the base image carries, so an image is either baselined or skips these stages.
 
 ## Base SBOM corpus & drift
 

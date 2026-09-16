@@ -435,6 +435,11 @@ jobs:
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
       run: cargo test --locked --all-targets
+    - name: Run standalone slot-tracker feature tests
+      if: matrix.dir == '.'
+      working-directory: ${{ matrix.dir }}
+      # No workspace member requests standalone-slot-tracker, so it needs an explicit run here.
+      run: cargo test --locked -p dynamo-kv-router --features standalone-slot-tracker --lib 'services::'
     - name: Run canonical replay feature tests
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
@@ -524,10 +529,14 @@ jobs:
       if: matrix.dir == 'lib/bindings/python'
       working-directory: ${{ matrix.dir }}
       run: cargo clippy --locked --no-deps --features aic-forward-pass --all-targets -- -D warnings
-    - name: Lint Python bindings custom worker-selection policy support
+    - name: Lint Python bindings worker-selection policy builds
       if: matrix.dir == 'lib/bindings/python'
       working-directory: ${{ matrix.dir }}
-      run: cargo clippy --locked --no-deps --features custom-policy,select-service --all-targets -- -D warnings
+      run: |
+        # custom-policy is on by default; also lint it alongside the standalone selection
+        # service, and the build that links no worker-selection policies at all.
+        cargo clippy --locked --no-deps --features custom-policy,select-service --all-targets -- -D warnings
+        cargo clippy --locked --no-deps --no-default-features --all-targets -- -D warnings
     - name: Lint feature-gated benchmark entrypoints
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
