@@ -393,37 +393,44 @@ fn apply_kv_events_impl(
     }
     // Safety: `validate_kv_event_batch_v1` established a readable bounded slice.
     let events = unsafe { std::slice::from_raw_parts(events.data, event_count) };
-    let router_events = match decode_kv_events(placement, events) {
-        Ok(events) => events,
-        Err(error) => {
+    let mut released_records = Vec::new();
+    for (index, event) in events.iter().enumerate() {
+        let router_event = match decode_kv_event(placement, event) {
+            Ok(event) => event,
+            Err(error) => {
+                placement.last_error =
+                    bounded_message(&error.message, placement.max_diagnostic_bytes);
+                report_kv_event_progress(placement, index, out_result);
+                return error.status;
+            }
+        };
+        let released = match placement
+            .placement
+            .observe_router_events(vec![router_event])
+        {
+            Ok(released) => released,
+            Err(error) => {
+                placement.last_error = bounded_message(
+                    &format!("Dynamo placement KV observation failed: {error}"),
+                    placement.max_diagnostic_bytes,
+                );
+                report_kv_event_progress(placement, index, out_result);
+                return StatusV1::REJECTED;
+            }
+        };
+        if let Err(error) = append_placements(placement, released, &mut released_records) {
             placement.last_error = bounded_message(&error.message, placement.max_diagnostic_bytes);
+            report_kv_event_progress(placement, index + 1, out_result);
             return error.status;
         }
-    };
-    let released = match placement.placement.observe_router_events(router_events) {
-        Ok(released) => released,
-        Err(error) => {
-            placement.last_error = bounded_message(
-                &format!("Dynamo placement KV observation failed: {error}"),
-                placement.max_diagnostic_bytes,
-            );
+        if released_records.len() > placement.max_released {
+            placement.last_error =
+                "Dynamo placement policy exceeded negotiated released-result bounds".to_owned();
+            report_kv_event_progress(placement, index + 1, out_result);
             return StatusV1::REJECTED;
         }
-    };
-    let mut released_records = Vec::new();
-    if let Err(error) = append_placements(placement, released, &mut released_records) {
-        placement.last_error = bounded_message(&error.message, placement.max_diagnostic_bytes);
-        return error.status;
+        placement.last_now_ms = now_ms;
     }
-    if released_records.len() > placement.max_released {
-        placement.last_error =
-            "Dynamo placement policy exceeded negotiated released-result bounds".to_owned();
-        out_result.applied_mutations = event_count as u64;
-        out_result.pending_count =
-            PlacementPolicy::<DirectRequest>::pending_count(&placement.placement) as u64;
-        return StatusV1::REJECTED;
-    }
-    placement.last_now_ms = now_ms;
     placement.last_error.clear();
     *out_result = PlacementBatchResultV1 {
         struct_size: std::mem::size_of::<PlacementBatchResultV1>() as u32,
@@ -443,20 +450,25 @@ fn apply_kv_events_impl(
     StatusV1::OK
 }
 
-fn decode_kv_events(
-    configured: &ConfiguredPlacement,
-    events: &[KvEventV1],
-) -> Result<Vec<RouterEvent>, ApplyError> {
-    events
-        .iter()
-        .map(|event| decode_kv_event(configured, event))
-        .collect()
+fn report_kv_event_progress(
+    placement: &ConfiguredPlacement,
+    applied_mutations: usize,
+    out_result: &mut PlacementBatchResultV1,
+) {
+    out_result.applied_mutations = applied_mutations as u64;
+    out_result.pending_count =
+        PlacementPolicy::<DirectRequest>::pending_count(&placement.placement) as u64;
 }
 
 fn decode_kv_event(
     configured: &ConfiguredPlacement,
     event: &KvEventV1,
 ) -> Result<RouterEvent, ApplyError> {
+    if event.dp_rank != 0 {
+        return Err(ApplyError::rejected(
+            "Dynamo placement supports only dp_rank 0 KV events",
+        ));
+    }
     let route = configured
         .topology
         .iter()
@@ -510,7 +522,8 @@ fn decode_kv_event(
         }
     };
     Ok(RouterEvent::with_storage_tier(
-        route.router_worker_id as u64,
+        u64::try_from(route.router_worker_id)
+            .map_err(|_| ApplyError::rejected("Dynamo placement worker index exceeds u64"))?,
         KvCacheEvent {
             event_id: event.event_id,
             data,

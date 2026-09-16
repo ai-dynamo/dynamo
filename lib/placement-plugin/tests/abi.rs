@@ -216,6 +216,52 @@ fn provider_applies_one_lossless_kv_event_to_the_router() {
 }
 
 #[test]
+fn provider_reports_kv_event_prefix_when_later_event_has_unsupported_dp_rank() {
+    let (table, handle) = create_provider_with_limits(PlacementLimitsV1 {
+        max_mutations: 2,
+        max_admission_results: 2,
+        max_released: 2,
+        max_diagnostic_bytes: 256,
+    });
+    let blocks = [KvStoredBlockV1 {
+        sequence_hash: 101,
+        token_hash: 202,
+    }];
+    let events = [
+        KvEventV1::stored(7, 0, KvStorageTierV1::DEVICE, 1, None, None, &blocks),
+        KvEventV1::stored(7, 1, KvStorageTierV1::DEVICE, 2, None, None, &blocks),
+    ];
+    let mut result = empty_result();
+
+    let status = unsafe {
+        table.apply_kv_events.expect("lossless KV callback")(
+            handle,
+            KvEventSliceV1 {
+                data: events.as_ptr(),
+                len: events.len() as u64,
+            },
+            0.0,
+            &mut result,
+        )
+    };
+
+    assert_eq!(status, StatusV1::REJECTED);
+    assert_eq!(result.applied_mutations, 1);
+    assert_eq!(result.pending_count, 0);
+
+    let local_hashes = [202_u64];
+    let sequence_hashes = [101_u64];
+    let admission = admission_with_replay_hashes([29; 16], 1.0, &local_hashes, &sequence_hashes);
+    let admission_result = apply_one(&table, handle, &admission);
+    let placement = unsafe { &*admission_result.admission_results.data }.placement;
+    assert_eq!(placement.cache_sample.overlap_blocks, 1);
+    unsafe {
+        table.release_results.expect("release results")(admission_result);
+        table.destroy.expect("destroy")(handle);
+    }
+}
+
+#[test]
 fn provider_admits_a_materialized_prompt_and_returns_host_topology_ids() {
     let (table, handle) = create_provider();
     let tokens = [11_u32, 12, 13, 14];
@@ -892,6 +938,46 @@ fn admission_mutation(request_id: [u8; 16], now_ms: f64) -> PlacementMutationV1 
                         len: TOKENS.len() as u64,
                     },
                     ..PromptIdentityV1::OMITTED
+                },
+                metadata: PlacementMetadataV1::EMPTY,
+                session_id: ByteSliceV1::EMPTY,
+            },
+        },
+    }
+}
+
+fn admission_with_replay_hashes(
+    request_id: [u8; 16],
+    now_ms: f64,
+    local_hashes: &[u64],
+    sequence_hashes: &[u64],
+) -> PlacementMutationV1 {
+    PlacementMutationV1 {
+        struct_size: std::mem::size_of::<PlacementMutationV1>() as u32,
+        kind: PlacementMutationKindV1::ADMIT,
+        flags: 0,
+        sequence: 1,
+        now_ms,
+        payload: PlacementMutationPayloadV1 {
+            admission: PlacementAdmissionV1 {
+                request_id,
+                flags: 0,
+                priority: 0,
+                prompt_tokens: 16,
+                max_output_tokens: 1,
+                prompt_identity: PromptIdentityV1 {
+                    flags: PromptIdentityV1::LOCAL_BLOCK_HASHES_PRESENT
+                        | PromptIdentityV1::SEQUENCE_BLOCK_HASHES_PRESENT,
+                    reserved: 0,
+                    materialized_token_ids: Default::default(),
+                    local_block_hashes: BlockHashSliceV1 {
+                        data: local_hashes.as_ptr(),
+                        len: local_hashes.len() as u64,
+                    },
+                    sequence_block_hashes: BlockHashSliceV1 {
+                        data: sequence_hashes.as_ptr(),
+                        len: sequence_hashes.len() as u64,
+                    },
                 },
                 metadata: PlacementMetadataV1::EMPTY,
                 session_id: ByteSliceV1::EMPTY,
