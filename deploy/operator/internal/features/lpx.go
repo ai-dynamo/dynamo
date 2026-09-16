@@ -40,7 +40,7 @@ func resolveLPX(ctx context.Context, config *rest.Config) (bool, error) {
 		return false, err
 	}
 
-	// LPX also watches scheduler-scoped PodGangs, which external Grove installs may omit.
+	// Discover the PodGang resource before starting its watch.
 	resource = groveschedulerv1alpha1.SchemeGroupVersion.WithResource("podgangs")
 	available, err = detectAPIAvailability(ctx, config, resource.Group, resource.Version, resource.Resource)
 	if err != nil {

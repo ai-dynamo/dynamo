@@ -8,15 +8,6 @@ templates:
   - charts/dynamo-operator/templates/manager-rbac.yaml
   - charts/dynamo-operator/templates/validate-values.yaml
 tests:
-  - it: preserves the bundled Grove compatibility error
-    template: templates/validate-values.yaml
-    set:
-      global.grove.install: true
-      dynamo-operator.lpx.enabled: true
-    asserts:
-      - failedTemplate:
-          errorPattern: "bundled Grove chart does not support"
-
   - it: rejects LPX without Grove integration
     template: charts/dynamo-operator/templates/validate-values.yaml
     set:

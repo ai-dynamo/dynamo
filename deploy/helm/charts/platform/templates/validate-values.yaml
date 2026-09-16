@@ -146,26 +146,6 @@ kai-scheduler:
   {{- end }}
 {{- end }}
 
-{{- if and
-  .Values.global.grove.install
-  (index .Values "dynamo-operator").lpx.enabled
-}}
-  {{- fail `
-CONFIGURATION ERROR: The bundled Grove chart does not support
-the scheduler-scoped PodGangs required by LPX workloads.
-
-Install the scheduler-scoped Grove build separately, then configure:
-
-  global:
-    grove:
-      install: false
-      enabled: true
-  dynamo-operator:
-    lpx:
-      enabled: true
-` }}
-{{- end }}
-
 {{/*
   NOTE: dynamo-operator subchart values (e.g. dynamo-operator.nats.enabled,
   dynamo-operator.webhook.enabled) are validated in the operator subchart's
