@@ -156,7 +156,13 @@ Set all three explicitly anywhere else.
 
 A worker that runs several ranks in one container builds one NIXL agent per rank, so the configured
 port is the base of a range: SGLang gives node-local rank *i* the port `base + i` and the operator
-declares each one as a separate container port (`nixl`, `nixl-1`, …).
+declares each one as a separate container port (`nixl`, `nixl-1`, …) when
+`NIXL_TELEMETRY_ENABLE=y` (case-insensitive).
+
+For upgrade compatibility, literal enable values `1`, `yes`, `on`, `true`, and `enable`
+retain their existing container port declarations. To expose the additional SGLang rank ports,
+change the value to `y` in the custom resource. This explicit change updates the pod template
+and rolls the workload; an operator-only upgrade leaves these declarations unchanged.
 
 <Note>
 Enabling telemetry does not on its own make the port scrapeable from Prometheus. The

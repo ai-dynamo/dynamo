@@ -72,7 +72,8 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 
 // reserveNixlExporterPorts declares one NIXL exporter port per node-local rank.
 // Skips containers without a nixl port, with NIXL_TELEMETRY_ENABLE set off, or
-// with an exporter other than Prometheus selected.
+// with an exporter other than Prometheus selected. Literal enable values other
+// than y retain their existing port declarations for upgrade compatibility.
 func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount ContainerGPUCount) error {
 	basePort := findContainerPort(container, commonconsts.DynamoNixlPortName)
 	if basePort == nil {
@@ -93,9 +94,14 @@ func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount Con
 	if !prometheusOn {
 		sourced = append(sourced, "NIXL_TELEMETRY_ENABLE")
 	}
+
+	// Preserve the existing pod template for non-y truthy values. Users opt in
+	// to rank port declarations by changing the CR's enable value to y.
 	if prometheusOn {
 		switch strings.ToLower(enabled.Value) {
-		case "y", "1", "yes", "on", "true", "enable":
+		case "y":
+		case "1", "yes", "on", "true", "enable":
+			return nil
 		case "n", "0", "no", "off", "false", "disable":
 			return nil
 		default:

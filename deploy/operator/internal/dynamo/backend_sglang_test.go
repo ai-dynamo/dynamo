@@ -697,11 +697,11 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 			expectedPorts:   allEightPorts,
 		},
 		{
-			name:            "a non-y truthy enable value reserves rank ports",
+			name:            "a non-y truthy enable value preserves the existing port declarations",
 			ports:           workerPorts,
 			telemetryEnable: "true",
 			containerGPUs:   4,
-			expectedPorts:   firstFourPorts,
+			expectedPorts:   map[string]int32{"nixl": 19090},
 		},
 		{
 			name:            "a leading-space enable value is rejected",

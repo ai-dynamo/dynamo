@@ -97,6 +97,8 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 
   NIXL compares the value case-insensitively, so `Y` and `TRUE` are also accepted. Any other value is an error.
 
+  For SGLang operator port declarations, use `y` (case-insensitive). Other literal truthy values retain their existing port declarations to avoid rolling unchanged workloads on operator upgrade. Changing the custom resource value to `y` opts in to the additional rank ports and rolls the workload. Runtime telemetry still accepts all the truthy values listed above.
+
   **Operator preset:** `n` on worker, prefill, and decode pods.
 </ParamField>
 
