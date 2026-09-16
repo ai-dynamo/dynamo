@@ -119,6 +119,8 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 
   Optional: with the exporter selected, NIXL binds a listener whether or not this is set. `19090` is Dynamo's convention rather than a NIXL default, and with this variable unset the exporter falls back to its own built-in `9090` — which is the `DYN_SYSTEM_PORT` operator preset, so set it explicitly to keep the two apart. A malformed or out-of-range value is not a fallback: NIXL rejects it and agent construction fails. NIXL accepts `0` as an ephemeral port, but Dynamo rejects it because that port cannot be declared or configured as a scrape target.
 
+  Set a literal port between 1 and 65535, in decimal or hexadecimal (for example, `0x4a92` for `19090`). When reserving SGLang Prometheus rank ports, the operator rejects a value taken from `valueFrom`: it cannot resolve that value to declare the range as container ports.
+
   **Operator preset:** `19090` on worker, prefill, and decode pods.
 </ParamField>
 

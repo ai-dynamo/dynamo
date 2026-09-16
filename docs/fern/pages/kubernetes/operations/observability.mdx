@@ -167,7 +167,7 @@ and rolls the workload; an operator-only upgrade leaves these declarations uncha
 <Note>
 Enabling telemetry does not on its own make the port scrapeable from Prometheus. The
 `dynamo-worker` PodMonitor endpoint for the `nixl` port is off by default
-(`dynamo.metrics.podMonitors.nixlTelemetry`), because every worker pod declares the `nixl`
+(`dynamo-operator.dynamo.metrics.podMonitors.nixlTelemetry` in the platform chart), because every worker pod declares the `nixl`
 container port whether or not telemetry is enabled. Turn the endpoint on once the port is
 confirmed to be serving.
 </Note>
