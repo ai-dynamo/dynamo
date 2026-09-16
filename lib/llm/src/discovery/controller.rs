@@ -333,7 +333,16 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 tracing::error!("Unexpected non-model removal in model discovery stream");
                 false
             }
-            DiscoveryEvent::Resync(_) => false,
+            DiscoveryEvent::Resync(instances) => {
+                self.apply_reconciliation(
+                    ReconciliationResult {
+                        revision: self.revision,
+                        instances: Ok(instances),
+                    },
+                    namespace_filter,
+                );
+                false
+            }
         };
     }
 
@@ -1607,6 +1616,30 @@ mod tests {
             assert!(!admissions.has_changed().unwrap());
             assert!(host.adapters(&group_key()).is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn a_resync_replaces_the_desired_instances() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        let first = instance(1, "spec");
+        let second = instance(2, "spec");
+
+        controller.apply_added(first.clone());
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([first.key.clone()])
+        );
+
+        controller.apply_event(
+            DiscoveryEvent::Resync(vec![discovery_instance(&second)]),
+            &NamespaceFilter::Global,
+        );
+        assert_eq!(host.members(&group_key()), BTreeSet::from([second.key]));
     }
 
     #[tokio::test]
