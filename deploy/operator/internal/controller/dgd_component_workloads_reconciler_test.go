@@ -240,14 +240,15 @@ func TestDeleteOrphanedElasticEPFollowersRefusesANonEmptyFollower(t *testing.T) 
 // reconcile, so nothing could ever scale it.
 //
 // synthesizeElasticEPFollowerDCD re-derives the follower from its leader each pass and
-// stamps Replicas=0, and SyncResource classifies an externally written replica count as
-// a manual change and copies the desired spec over it. Observed on a cluster: replicas 1
-// reverted to 0 within two seconds, with "Manual changes detected on
-// DynamoComponentDeployment, will be overwritten" in the operator log. Zero is the value
-// to seed at creation, not to re-assert forever -- the scale client owns it after that.
+// stamps the declared launch width, and SyncResource classifies an externally written
+// replica count as a manual change and copies the desired spec over it. Observed on a
+// cluster: replicas 1 reverted to 0 within two seconds, with "Manual changes detected on
+// DynamoComponentDeployment, will be overwritten" in the operator log. The declared width
+// is the value to seed at creation, not to re-assert forever -- the scale client owns it
+// after that.
 //
-// This is also what makes "gate on -> off stops scaling" mean stop rather than tear
-// down: the operator simply stops writing the field.
+// This is also what makes "turning the gate off stops scaling" mean stop rather than
+// snap back: the operator simply stops writing the field.
 //
 // Mutation check: deleting the follower branch in preserveExistingDCDState fails every
 // scaled subtest below.
@@ -308,10 +309,9 @@ func TestPreserveExistingDCDStateKeepsFollowerReplicas(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			c := fake.NewClientBuilder().WithScheme(s).WithObjects(tt.existing).Build()
-			// Gate ON: the live replica count is authoritative and generation must not
-			// overwrite it. With the gate off the opposite holds, which the
-			// gate-off subtest below covers.
-			r := &componentWorkloadsReconciler{syncer: newDGDResourceSyncer(c, nil), elasticEPRayPoCEnabled: true}
+			// The live replica count is authoritative and generation must not overwrite
+			// it. This holds at either gate position; see the freeze subtests below.
+			r := &componentWorkloadsReconciler{syncer: newDGDResourceSyncer(c, nil)}
 
 			t.Log("Generation re-derives the follower and stamps the declared launch width")
 			desired := &nvidiacomv1beta1.DynamoComponentDeployment{
@@ -334,23 +334,25 @@ func TestPreserveExistingDCDStateKeepsFollowerReplicas(t *testing.T) {
 		})
 	}
 
-	// The gate's whole job for a follower. Off, generation owns the count: the deployment
-	// still renders at its declared width, and an external scale is reverted -- "you get
-	// all your pods, you just cannot change how many". On, the scale client owns it.
+	// A running follower freezes wherever it is, in BOTH directions, whatever the declared
+	// width says: scaled up 3 -> 5 stays 5, scaled down 3 -> 1 stays 1.
 	//
-	// Mutation check: dropping `r.elasticEPRayPoCEnabled &&` from preserveExistingDCDState
-	// fails this subtest and nothing else.
-	// With the gate off the operator owns the count, but ownership is asymmetric:
-	// growing back to the declared width adds ranks, which is safe; shrinking to it
-	// deletes pods that may hold live engine ranks, which is not. Nothing in the
-	// operator calls scale_elastic_ep first, so a shrink would leave the engine
-	// committed to a data-parallel size whose members are gone (DYN-3838, DYN-2660) --
-	// the same reason deleteOrphanedElasticEPFollowers refuses a non-empty follower.
-	gateOff := func(t *testing.T, running, declared int32) int32 {
+	// This is what "turning the gate off stops scaling" literally means -- the count stops
+	// changing, rather than the operator dragging it back to the declared width. Dragging
+	// it back is the worse failure either way. Downward it deletes pods that may hold live
+	// engine ranks, with nothing having called scale_elastic_ep to drain them (DYN-3838,
+	// DYN-2660). Upward it re-adds capacity an operator deliberately removed.
+	//
+	// The reconciler therefore does not read the gate at all, and these cases assert the
+	// behaviour directly rather than per gate position.
+	//
+	// Mutation check: restoring a `desired`-wins branch for either direction fails the
+	// matching subtest below.
+	frozenAt := func(t *testing.T, running, declared int32) int32 {
 		t.Helper()
 		existing := existingDCD("mydgd-decode-flw", true, running)
 		c := fake.NewClientBuilder().WithScheme(s).WithObjects(existing).Build()
-		r := &componentWorkloadsReconciler{syncer: newDGDResourceSyncer(c, nil), elasticEPRayPoCEnabled: false}
+		r := &componentWorkloadsReconciler{syncer: newDGDResourceSyncer(c, nil)}
 		desired := &nvidiacomv1beta1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:        existing.Name,
@@ -368,21 +370,21 @@ func TestPreserveExistingDCDStateKeepsFollowerReplicas(t *testing.T) {
 		return *desired.Spec.Replicas
 	}
 
-	// Mutation check: deleting the shrink guard in preserveExistingDCDState fails this.
-	t.Run("with the gate off a follower above the declared width is NOT shrunk", func(t *testing.T) {
-		require.Equal(t, int32(5), gateOff(t, 5, 3),
-			"turning the gate off means scaling stops, not that two running ranks are "+
-				"torn out from under a serving engine without being drained first")
+	t.Run("a follower scaled above the declared width stays where it is", func(t *testing.T) {
+		require.Equal(t, int32(5), frozenAt(t, 5, 3),
+			"shrinking to the declared width would delete two pods that may hold live "+
+				"engine ranks, undrained")
 	})
 
-	t.Run("with the gate off a follower below the declared width is grown back", func(t *testing.T) {
-		require.Equal(t, int32(3), gateOff(t, 1, 3),
-			"the deployment must still converge on the width it declared; adding a rank is safe")
+	t.Run("a follower scaled below the declared width stays where it is", func(t *testing.T) {
+		require.Equal(t, int32(1), frozenAt(t, 1, 3),
+			"the count freezes in BOTH directions; growing back to the declared width "+
+				"would re-add capacity an operator deliberately removed")
 	})
 
 	t.Run("a follower that does not exist yet is seeded at its declared width", func(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(s).Build()
-		r := &componentWorkloadsReconciler{syncer: newDGDResourceSyncer(c, nil), elasticEPRayPoCEnabled: true}
+		r := &componentWorkloadsReconciler{syncer: newDGDResourceSyncer(c, nil)}
 		desired := &nvidiacomv1beta1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "mydgd-decode-flw",

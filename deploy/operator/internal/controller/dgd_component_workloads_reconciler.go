@@ -39,25 +39,25 @@ import (
 
 // componentWorkloadsReconciler owns the component pathway's complete DCD graph
 // reconciliation without depending on the top-level DGD reconciler.
+// This reconciler deliberately does not carry features.ElasticEPRayPoC. Nothing on this
+// pathway branches on it: follower synthesis is ungated (it is the deployment's declared
+// width, not capacity the PoC invents), and a follower's replica count freezes at whatever
+// is live regardless of the gate. The gate's remaining job is the admission rule in
+// internal/webhook/validation. Holding a copy here that nothing reads is how a gate field
+// silently stops meaning anything.
 type componentWorkloadsReconciler struct {
 	syncer  dgdResourceSyncer
 	rollout *dgdWorkerRolloutReconciler
-	// elasticEPRayPoCEnabled carries features.ElasticEPRayPoC. Gated off, generation
-	// derives no follower, so no follower DCD, Deployment, or Service is created
-	// and an existing deployment reconciles exactly as it did before.
-	elasticEPRayPoCEnabled bool
 }
 
 func newComponentWorkloadsReconciler(
 	kubeClient client.Client,
 	recorder events.EventRecorder,
 	rollout *dgdWorkerRolloutReconciler,
-	elasticEPRayPoCEnabled bool,
 ) *componentWorkloadsReconciler {
 	return &componentWorkloadsReconciler{
-		syncer:                 newDGDResourceSyncer(kubeClient, recorder),
-		rollout:                rollout,
-		elasticEPRayPoCEnabled: elasticEPRayPoCEnabled,
+		syncer:  newDGDResourceSyncer(kubeClient, recorder),
+		rollout: rollout,
 	}
 }
 
@@ -285,59 +285,31 @@ func (r *componentWorkloadsReconciler) preserveExistingDCDState(
 
 	desired.Spec.BackendFramework = existing.Spec.BackendFramework
 
-	// This is where features.ElasticEPRayPoC actually decides something for a follower.
+	// A synthesized follower's replica count is seeded once, at creation, and never
+	// re-asserted afterwards.
 	//
 	// Synthesis is ungated and re-derives the follower on every pass, stamping the
-	// declared launch width (`--data-parallel-size` minus the leader's own rank). Whether
-	// that stamp is authoritative is the gate's job:
+	// declared launch width (`--data-parallel-size` minus the leader's own rank). That
+	// stamp is what a follower is CREATED with; it is not a target the operator drives
+	// the count back to. Once the object exists, the live value wins in both directions:
 	//
-	//   gate off -- generation wins. The follower tracks the declared width, and an
-	//               external scale is classified as a manual change and reverted. The
-	//               deployment renders at full width and its size is fixed, which is
-	//               exactly "you get all your pods, you just cannot change the count".
-	//   gate on  -- the live value wins. Whatever drives the scale owns the count, and
-	//               generation must not re-assert the launch width over it. Without this
-	//               a cluster reverted `replicas: 1` within two seconds, logging
-	//               "Manual changes detected ... will be overwritten".
+	//   scaled up   3 -> 5   stays 5
+	//   scaled down 3 -> 1   stays 1
 	//
-	// Note the deliberate asymmetry with the orphan sweep, which refuses to delete a
-	// follower that still has replicas even when the gate is off. Reverting a count is
-	// recoverable -- the pods come back on the next reconcile; deleting the DCD is not.
+	// This holds at either gate position, which makes the gate deliberately absent from
+	// this decision. "Gate off" means the count stops changing -- it freezes wherever it
+	// is -- not that the operator drags it back to the declared width. Dragging it back
+	// would be the worse of the two failures in both directions: downward it deletes pods
+	// that may hold live engine ranks (nothing calls scale_elastic_ep to drain them
+	// first, and DYN-3838 / DYN-2660 record what that leaves behind), and upward it
+	// re-adds capacity an operator deliberately removed.
+	//
+	// Without the preservation at all, generation classifies any external scale as a
+	// manual change: a cluster reverted `replicas: 1` within two seconds, logging
+	// "Manual changes detected ... will be overwritten".
 	if existing.GetAnnotations()[consts.KubeAnnotationElasticEPFollower] == consts.KubeLabelValueTrue &&
 		existing.Spec.Replicas != nil {
-		switch {
-		case r.elasticEPRayPoCEnabled:
-			// Gate on: whatever drives the scale owns the count, and generation must not
-			// re-assert the launch width over it. Without this a cluster reverted
-			// `replicas: 1` within two seconds, logging "Manual changes detected ... will
-			// be overwritten".
-			desired.Spec.Replicas = existing.Spec.Replicas
-
-		case *existing.Spec.Replicas > ptr.Deref(desired.Spec.Replicas, 0):
-			// Gate off, and generation wants FEWER followers than are running. Writing
-			// that number deletes the difference, and those pods hold live engine ranks:
-			// nothing in the operator calls scale_elastic_ep first, so the engine would be
-			// left committed to a data-parallel size whose members are gone. DYN-3838
-			// records the leader surviving at restart=0 with inference stopped, and
-			// DYN-2660 records the orphaned placement group blocking every later scale-up.
-			//
-			// So refuse to shrink, exactly as deleteOrphanedElasticEPFollowers refuses to
-			// release a follower that still has replicas. Turning the gate off means
-			// scaling stops, not that running capacity is torn out from under a serving
-			// engine. Growing back toward the declared width is still allowed below --
-			// adding a rank is safe, removing one is not.
-			log.FromContext(ctx).Info(
-				"Refusing to shrink an elastic-EP follower with the feature gate off; "+
-					"these pods may hold live engine ranks and nothing has drained them",
-				"name", existing.Name,
-				"running", *existing.Spec.Replicas,
-				"declaredWidth", ptr.Deref(desired.Spec.Replicas, 0),
-			)
-			desired.Spec.Replicas = existing.Spec.Replicas
-
-		default:
-			// Gate off and at or below the declared width: let generation grow it back.
-		}
+		desired.Spec.Replicas = existing.Spec.Replicas
 	}
 	return nil
 }

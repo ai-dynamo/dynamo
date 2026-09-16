@@ -54,7 +54,7 @@ func (r *DynamoGraphDeploymentReconciler) newComponentProgram() *componentProgra
 		rollout:         rollout,
 		restart:         newDGDRestartReconciler(),
 		restartProgress: newComponentRestartProgressResolver(r.Client),
-		workloads:       newComponentWorkloadsReconciler(r.Client, r.Recorder, rollout, r.RuntimeConfig.Gate.Enabled(features.ElasticEPRayPoC)),
+		workloads:       newComponentWorkloadsReconciler(r.Client, r.Recorder, rollout),
 		scalingAdapters: newDGDScalingAdaptersReconciler(r.Client, r.Recorder),
 		lwsEnabled:      r.RuntimeConfig.Gate.Enabled(features.LWS),
 	}

@@ -1002,7 +1002,7 @@ func TestComponentWorkloadsReconciler_FirstGenMultinodeStampsWorkerHash(t *testi
 	t.Log("Wire the component workloads reconciler backed by a fake client seeded with only the DGD")
 	r := createTestDGDReconcilerWithStatus(dgd)
 	rollout := newDGDWorkerRolloutReconciler(r.Client, r.Recorder)
-	workloads := newComponentWorkloadsReconciler(r.Client, r.Recorder, rollout, false)
+	workloads := newComponentWorkloadsReconciler(r.Client, r.Recorder, rollout)
 
 	t.Log("Reconcile: every generated worker DCD must carry the computed hash in its label and name")
 	_, err := workloads.Reconcile(context.Background(), dgd, nil, nil)
@@ -1082,7 +1082,7 @@ func TestComponentWorkloadsReconciler_RemovedWorkerComponentDrainedToZero(t *tes
 
 	r := createTestDGDReconcilerWithStatus(reducedDGD, withObjects(prefillOldDCD, decodeOldDCD))
 	rollout := newDGDWorkerRolloutReconciler(r.Client, r.Recorder)
-	workloads := newComponentWorkloadsReconciler(r.Client, r.Recorder, rollout, false)
+	workloads := newComponentWorkloadsReconciler(r.Client, r.Recorder, rollout)
 
 	t.Log("Reconcile: the removed decode component must be targeted at zero replicas")
 	_, err := workloads.Reconcile(context.Background(), reducedDGD, nil, nil)
