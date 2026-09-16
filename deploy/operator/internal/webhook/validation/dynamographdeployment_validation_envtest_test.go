@@ -47,6 +47,9 @@ const (
 const sglangBackendFramework = "sglang"
 
 func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
+	const updatedSidecarImage = "runtime:1.6.0"
+	const customSidecarImage = "runtime:custom"
+
 	longDGDName := "test-graph-" + strings.Repeat("x", 50)
 	boundaryComponentName := "w" + strings.Repeat("x", 36)
 	tooLongComponentName := boundaryComponentName + "x"
@@ -126,32 +129,32 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		}), wantWebhookErrs: []string{`spec.components[1].podTemplate.spec.containers: Required value: main engine container is required for component "worker" with dynamoSidecar`}},
 		{name: "native sidecar beta custom runtime image create needs override",
 			deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
-				c.PodTemplate.Spec.InitContainers[0].Image = "runtime:custom"
+				c.PodTemplate.Spec.InitContainers[0].Image = customSidecarImage
 			}),
 			wantWebhookErrs: []string{`spec.components[1].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag`},
 		},
 		{name: "native sidecar beta custom runtime image update needs override", oldDeployment: nativeDGDForAdmission(t, false, nil),
 			deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
-				c.PodTemplate.Spec.InitContainers[0].Image = "runtime:custom"
+				c.PodTemplate.Spec.InitContainers[0].Image = customSidecarImage
 			}),
 			wantWebhookErrs: []string{`spec.components[1].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag`},
 		},
 		{name: "native sidecar alpha custom runtime image create needs override",
 			deployment: nativeDGDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
-				c.PodTemplate.Spec.InitContainers[0].Image = "runtime:custom"
+				c.PodTemplate.Spec.InitContainers[0].Image = customSidecarImage
 			}),
 			wantWebhookErrs: []string{`spec.services[worker].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag`},
 		},
 		{name: "native sidecar alpha custom runtime image update needs override", oldDeployment: nativeDGDForAdmission(t, true, nil),
 			deployment: nativeDGDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
-				c.PodTemplate.Spec.InitContainers[0].Image = "runtime:custom"
+				c.PodTemplate.Spec.InitContainers[0].Image = customSidecarImage
 			}),
 			wantWebhookErrs: []string{`spec.services[worker].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag`},
 		},
 		// Native-sidecar admission, including alpha conversion and unchanged update invariants.
 		{name: "native sidecar beta create", deployment: nativeDGDForAdmission(t, false, nil)},
 		{name: "native sidecar beta update", oldDeployment: nativeDGDForAdmission(t, false, nil), deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
-			c.PodTemplate.Spec.InitContainers[0].Image = "runtime:1.6.0"
+			c.PodTemplate.Spec.InitContainers[0].Image = updatedSidecarImage
 		})},
 		{name: "native sidecar beta disabled checkpoint", deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: false}}
@@ -182,7 +185,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		},
 		{name: "native sidecar alpha create", deployment: nativeDGDForAdmission(t, true, nil)},
 		{name: "native sidecar alpha update", oldDeployment: nativeDGDForAdmission(t, true, nil), deployment: nativeDGDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
-			c.PodTemplate.Spec.InitContainers[0].Image = "runtime:1.6.0"
+			c.PodTemplate.Spec.InitContainers[0].Image = updatedSidecarImage
 		})},
 		{name: "native sidecar alpha disabled checkpoint", deployment: nativeDGDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: false}}
