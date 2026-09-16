@@ -141,16 +141,14 @@ def _resolve_streaming_kv_events_config(
 
 
 def _validate_streaming_kv_events_backend() -> None:
-    """Require TensorRT-LLM's Python V2 cache manager for streaming events."""
-    backend = os.environ.get(_TLLM_KV_CACHE_MANAGER_V2_BACKEND_ENV)
-    if backend == "python":
+    """Require a V2 cache-manager backend with streaming-event support."""
+    backend = os.environ.get(_TLLM_KV_CACHE_MANAGER_V2_BACKEND_ENV, "cpp").lower()
+    if backend in ("cpp", "python"):
         return
-    configured = backend if backend is not None else "unset (defaults to cpp)"
     raise ValueError(
-        "TensorRT-LLM streaming KV events require "
-        f"{_TLLM_KV_CACHE_MANAGER_V2_BACKEND_ENV}=python; current value is "
-        f"{configured!r}. The C++ V2 cache manager cannot host the streaming "
-        "event manager."
+        "TensorRT-LLM streaming KV events require a supported V2 cache manager "
+        f"backend (cpp or python); {_TLLM_KV_CACHE_MANAGER_V2_BACKEND_ENV} is "
+        f"set to {backend!r}."
     )
 
 

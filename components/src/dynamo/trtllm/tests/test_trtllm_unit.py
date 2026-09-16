@@ -499,17 +499,29 @@ def test_resolve_streaming_kv_events_config_uses_nested_kv_cache_config():
     }
 
 
-def test_streaming_kv_events_require_python_v2_cache_manager(monkeypatch):
+def test_streaming_kv_events_accept_default_cpp_v2_cache_manager(monkeypatch):
     monkeypatch.delenv("TLLM_KV_CACHE_MANAGER_V2_BACKEND", raising=False)
 
-    with pytest.raises(ValueError, match="TLLM_KV_CACHE_MANAGER_V2_BACKEND=python"):
-        _validate_streaming_kv_events_backend()
+    _validate_streaming_kv_events_backend()
+
+
+def test_streaming_kv_events_accept_explicit_cpp_v2_cache_manager(monkeypatch):
+    monkeypatch.setenv("TLLM_KV_CACHE_MANAGER_V2_BACKEND", "cpp")
+
+    _validate_streaming_kv_events_backend()
 
 
 def test_streaming_kv_events_accept_python_v2_cache_manager(monkeypatch):
     monkeypatch.setenv("TLLM_KV_CACHE_MANAGER_V2_BACKEND", "python")
 
     _validate_streaming_kv_events_backend()
+
+
+def test_streaming_kv_events_reject_unknown_v2_cache_manager(monkeypatch):
+    monkeypatch.setenv("TLLM_KV_CACHE_MANAGER_V2_BACKEND", "invalid")
+
+    with pytest.raises(ValueError, match="supported V2 cache manager backend"):
+        _validate_streaming_kv_events_backend()
 
 
 @pytest.mark.parametrize(
