@@ -54,6 +54,7 @@ def _make_config(
 
     config = MagicMock()
     config.model = model
+    config.decode_max_remote_prefill_inflight = 0
     if disaggregation_mode is not None:
         config.disaggregation_mode = getattr(DisaggregationMode, disaggregation_mode)
     else:
