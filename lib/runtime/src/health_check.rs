@@ -101,13 +101,6 @@ impl HealthCheckManager {
                         // Timeout - send health check for this specific endpoint
                         debug!("Canary timer expired for {}, sending health check", endpoint_subject);
 
-                        // A maintenance window means the engine is deliberately busy, so a
-                        // probe would only queue behind whatever is blocking it.
-                        if manager.drt.system_health().lock().canary_suppressed() {
-                            debug!("Canary suppressed for {}, skipping health check", endpoint_subject);
-                            continue;
-                        }
-
                         // Get the health check payload for this endpoint
                         let target = manager.drt.system_health().lock().get_health_check_target(&endpoint_subject);
 
@@ -233,7 +226,8 @@ impl HealthCheckManager {
 
         // Spawn task to send health check and wait for response
         tokio::spawn(async move {
-            let result = tokio::time::timeout(timeout, async {
+            let default_deadline = std::time::Instant::now() + timeout;
+            let probe = async {
                 let request = SingleIn::new(payload);
                 match engine.generate(request).await {
                     Ok(mut response_stream) => {
@@ -264,7 +258,7 @@ impl HealthCheckManager {
                         });
 
                         // Update health status based on response
-                        system_health.lock().set_canary_health_status(
+                        system_health.lock().set_endpoint_health_status(
                             &endpoint_subject_owned,
                             if is_healthy {
                                 HealthStatus::Ready
@@ -278,21 +272,38 @@ impl HealthCheckManager {
                             "Health check request failed for {}: {}",
                             endpoint_subject_owned, e
                         );
-                        system_health.lock().set_canary_health_status(
+                        system_health.lock().set_endpoint_health_status(
                             &endpoint_subject_owned,
                             HealthStatus::NotReady,
                         );
                     }
                 }
-            })
-            .await;
+            };
+            tokio::pin!(probe);
 
-            // Handle timeout
-            if result.is_err() {
-                warn!("Health check timeout for {}", endpoint_subject_owned);
-                system_health
+            loop {
+                let deadline = system_health
                     .lock()
-                    .set_canary_health_status(&endpoint_subject_owned, HealthStatus::NotReady);
+                    .canary_request_deadline(&endpoint_subject_owned, default_deadline);
+                if tokio::time::timeout_at(deadline.into(), &mut probe)
+                    .await
+                    .is_ok()
+                {
+                    break;
+                }
+
+                // An RL operation may start while this probe is already waiting.
+                // Recheck its lease before publishing a timeout, keeping the same
+                // request in flight rather than cancelling and resending it.
+                let mut health = system_health.lock();
+                if health.canary_request_deadline(&endpoint_subject_owned, default_deadline)
+                    > std::time::Instant::now()
+                {
+                    continue;
+                }
+                warn!(endpoint = %endpoint_subject_owned, "Health check timeout");
+                health.set_endpoint_health_status(&endpoint_subject_owned, HealthStatus::NotReady);
+                break;
             }
 
             debug!("Health check completed for {}", endpoint_subject_owned);

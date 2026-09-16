@@ -116,34 +116,33 @@ class DistributedRuntime:
         """
         ...
 
-    def begin_health_check_maintenance(self, max_seconds: float) -> int:
+    def begin_health_check_maintenance(self, max_seconds: float, endpoint: str) -> int:
         """
-        Suppress health check canaries for at most max_seconds and return the
-        lease owning the window.
+        Extend canary timeouts for the named local endpoint and return a lease.
 
-        Use around an operation that deliberately blocks the engine, such as an
-        RL weight transfer waiting on a peer to join the rendezvous. While the
-        window is open the canary does not probe and cannot mark an endpoint
-        NotReady, so /live keeps reporting the last known state. The window
-        expires on its own, so a transaction that never ends cannot leave the
-        worker unprobed.
+        Use the known bound of an operation that blocks the engine, such as an
+        RL weight transfer. Probes continue and publish both Ready and NotReady.
+        The extension expires max_seconds from this call, so later probes do
+        not receive a fresh operation timeout. The normal request timeout is
+        never shortened. Overlapping leases use the latest expiry for the same
+        endpoint; unrelated endpoints retain their normal timeout.
 
-        Windows nest: probes stay suppressed until every lease is released or
-        expired, so one operation finishing cannot uncover another still running.
+        Args:
+            max_seconds: Operation timeout and lease lifetime, in seconds.
+            endpoint: Local endpoint name, e.g. "generate".
 
         Raises:
-            ValueError: If max_seconds is not a finite positive number, or is
-                greater than 86400 (one day). A window is a backstop rather than
-                a schedule, so longer ones are rejected instead of suppressing
-                probes for an unbounded stretch.
+            ValueError: If max_seconds is not finite and positive, or exceeds
+                86400 (one day).
         """
         ...
 
     def end_health_check_maintenance(self, lease: int) -> None:
         """
-        Release a lease returned by begin_health_check_maintenance. Windows held
-        by other leases stay open, and the canary resumes once none remain.
-        Releasing an already released lease is a no-op.
+        Release a timeout extension without affecting other leases.
+        New probes use the remaining extensions or the normal timeout.
+        An in-flight probe may retain its previously granted deadline.
+        Releasing an expired or already released lease is a no-op.
         """
         ...
 

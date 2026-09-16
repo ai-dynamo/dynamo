@@ -145,9 +145,6 @@ def _discard_orphan_result(fut: "asyncio.Future[dict]") -> None:
 
 _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY: Final = "kv_transfer_params"
 _KV_HINT_EXTRA_ARGS_KEY: Final = "kv_hint"
-# Ceiling on the canary suppression an RL weight transfer may hold. It only has
-# to outlast a rendezvous; on expiry the worker returns to ordinary probing.
-_RL_MAINTENANCE_WINDOW_S: Final = 600.0
 _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
     {
         "allow_unpaused",
@@ -2116,7 +2113,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             if not self._paused and not allow_unpaused:
                 if rpc == "finish_weight_update":
                     # A rejected finish still terminates its transfer. Do not
-                    # leave the canary suppressed until the lease expires.
+                    # leave the canary timeout extended until the lease expires.
                     self._end_rl_maintenance()
                 return {
                     "status": "error",
@@ -2153,8 +2150,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 if rpc == "finish_weight_update":
                     # The other terminator of a weight-transfer transaction: a
                     # controller may end here and never call destroy. A finish
-                    # that failed still ends it — a worker the failure left
-                    # unhealthy needs probing more than a healthy one, not less.
+                    # that failed still ends it and restores the normal timeout.
                     self._end_rl_maintenance()
 
     async def update_weights_from_tensor(self, body: dict) -> dict:
@@ -2171,7 +2167,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             "message": "update_weights_from_tensor is not implemented",
         }
 
-    def _begin_rl_maintenance(self) -> None:
+    def _begin_rl_maintenance(self, timeout_s: float) -> None:
         """Take the lease for a new transfer, superseding any lease still held.
 
         A worker has one weight-update group, so an init means the previous
@@ -2181,7 +2177,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         """
         self._end_rl_maintenance()
         self._rl_maintenance_lease = self.runtime.begin_health_check_maintenance(
-            _RL_MAINTENANCE_WINDOW_S
+            timeout_s, self.config.endpoint
         )
 
     def _end_rl_maintenance(self) -> None:
@@ -2210,9 +2206,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         async with self._pause_lock:
             try:
                 timeout_s = _rl_init_weights_timeout_s()
-                # The rendezvous blocks EngineCore well past the canary timeout, so
-                # without this window the liveness probe restarts the worker.
-                self._begin_rl_maintenance()
+                # Give the canary the same bound as the rendezvous watchdog.
+                self._begin_rl_maintenance(timeout_s)
                 rpc_task = asyncio.create_task(
                     self.engine_client.collective_rpc(rpc, kwargs=kwargs)
                 )
@@ -2268,7 +2263,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 logger.error(f"[RL] destroy_weights_update_group failed: {e}")
                 return {"status": "error", "message": str(e)}
             finally:
-                # A worker whose teardown failed should be probed again, not hidden.
+                # Restore the normal timeout even when teardown fails.
                 self._end_rl_maintenance()
 
     @abstractmethod

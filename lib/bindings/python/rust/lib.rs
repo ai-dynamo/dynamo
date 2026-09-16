@@ -1441,13 +1441,9 @@ impl DistributedRuntime {
         Ok(())
     }
 
-    /// Suppress health check canaries for at most `max_seconds`, and return the
-    /// lease that owns the window.
-    ///
-    /// For an operation that deliberately blocks the engine, such as an RL
-    /// weight transfer waiting on a peer. The window expires on its own, so a
-    /// transaction that never ends cannot leave the worker unprobed.
-    fn begin_health_check_maintenance(&self, max_seconds: f64) -> PyResult<u64> {
+    /// Extend canary timeouts for `endpoint` until at most `max_seconds` from now.
+    /// Probes and their status updates remain active. Returns an ownership lease.
+    fn begin_health_check_maintenance(&self, max_seconds: f64, endpoint: &str) -> PyResult<u64> {
         // A window is a backstop, not a schedule, so a day is already generous.
         // Bounding it here keeps `Duration::from_secs_f64` and the `Instant`
         // addition behind it away from the values that make them panic — a PyO3
@@ -1463,11 +1459,11 @@ impl DistributedRuntime {
             .inner
             .system_health()
             .lock()
-            .begin_canary_maintenance(std::time::Duration::from_secs_f64(max_seconds)))
+            .begin_canary_maintenance(endpoint, std::time::Duration::from_secs_f64(max_seconds)))
     }
 
-    /// Release a lease returned by `begin_health_check_maintenance`. Windows held
-    /// by other leases stay open. Releasing a released lease is a no-op.
+    /// Release a timeout extension without affecting other leases.
+    /// Releasing an already released lease is a no-op.
     fn end_health_check_maintenance(&self, lease: u64) -> PyResult<()> {
         self.inner
             .system_health()

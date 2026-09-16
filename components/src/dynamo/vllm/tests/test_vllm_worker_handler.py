@@ -95,6 +95,7 @@ def _make_handler(
             encode_worker_client=encode_worker_client,
         )
     handler.runtime = runtime
+    handler.config = config
     handler._rl_maintenance_lease = None
     handler.model_config = model_config
     handler._multimodal_request_processor = VllmMultimodalRequestProcessor(
@@ -2004,7 +2005,8 @@ class TestRLAdminRouteHardening:
         handler.engine_client.reset_prefix_cache.assert_awaited_once_with()
 
     @pytest.mark.asyncio
-    async def test_init_weights_update_group_succeeds_within_timeout(self):
+    async def test_init_weights_update_group_succeeds_within_timeout(self, monkeypatch):
+        monkeypatch.setenv("DYN_RL_INIT_WEIGHTS_TIMEOUT_S", "45")
         handler = _make_handler()
         handler._pause_lock = asyncio.Lock()
         handler.engine_client = MagicMock()
@@ -2031,7 +2033,7 @@ class TestRLAdminRouteHardening:
             },
         )
         handler.runtime.begin_health_check_maintenance.assert_called_once_with(
-            mod._RL_MAINTENANCE_WINDOW_S
+            45.0, handler.config.endpoint
         )
         handler.runtime.end_health_check_maintenance.assert_not_called()
         assert handler._rl_maintenance_lease == 1
@@ -2214,8 +2216,7 @@ class TestRLAdminRouteHardening:
 
     @pytest.mark.asyncio
     async def test_failed_finish_weight_update_releases_the_lease(self):
-        """A finish that failed still terminates the transfer. Holding the window
-        would hide a worker the failure left unhealthy until the deadline."""
+        """A failed finish must restore the normal canary timeout."""
         handler = _make_handler()
         handler._pause_lock = asyncio.Lock()
         handler._paused = True
