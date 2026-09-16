@@ -4,6 +4,8 @@
 """Unit tests for profiler config_modifiers/protocol helpers."""
 
 import copy
+import errno
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -32,9 +34,16 @@ try:
         EngineType,
         SearchStrategy,
     )
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
+    )
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
         DynamoGraphDeploymentRequestSpec,
         OverridesSpec,
+    )
+    from dynamo.profiler.utils.model_info import (
+        model_ref_allows_implicit_trust_remote_code,
     )
     from dynamo.profiler.utils.profile_common import ProfilerOperationalConfig
 except ImportError:
@@ -1739,6 +1748,82 @@ def test_materialize_dgd_shell_form_preserves_syntax() -> None:
     assert len(result_args) == 1
     # The original shell syntax (&&, export) must be preserved verbatim.
     assert result_args[0] == original_cmd + " --trust-remote-code"
+
+
+@pytest.mark.parametrize(
+    ("path_kind", "expected"),
+    [
+        ("directory", True),
+        ("symlink", True),
+        ("file", False),
+        ("missing", False),
+        ("child_of_file", False),
+    ],
+)
+def test_implicit_trust_requires_local_directory(tmp_path, path_kind, expected):
+    model_path = tmp_path / "model"
+    if path_kind == "directory":
+        model_path.mkdir()
+    elif path_kind == "symlink":
+        target = tmp_path / "snapshot"
+        target.mkdir()
+        model_path.symlink_to(target, target_is_directory=True)
+    elif path_kind in ("file", "child_of_file"):
+        model_path.touch()
+        if path_kind == "child_of_file":
+            model_path /= "child"
+
+    assert model_ref_allows_implicit_trust_remote_code(model_path) is expected
+
+
+@pytest.mark.parametrize("explicit_trust", [False, True])
+def test_materialize_dgd_inaccessible_model_path(
+    tmp_path, monkeypatch, caplog, explicit_trust
+):
+    model_path = tmp_path / "model"
+    model_path.mkdir()
+    (model_path / "config.json").write_text("{}")
+    error = PermissionError(errno.EACCES, "Cannot inspect model", str(model_path))
+    original_stat = Path.stat
+
+    def stat(self, *args, **kwargs):
+        if self == model_path:
+            raise error
+        return original_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    config = _make_dgd_with_workers("decode")
+    if explicit_trust:
+        _main_container(_components_by_name(config)["decode"])["args"].append(
+            "--trust-remote-code"
+        )
+    original_config = copy.deepcopy(config)
+
+    if explicit_trust:
+        result = materialize_dgd(
+            config,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="vllm",
+            model_name_or_path=str(model_path),
+        )
+        assert result == original_config
+    else:
+        with pytest.raises(RuntimeError, match="Cannot inspect model path") as exc:
+            materialize_dgd(
+                config,
+                purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+                runtime_backend="vllm",
+                model_name_or_path=str(model_path),
+            )
+        assert exc.value.__cause__ is error
+        assert str(model_path) in str(exc.value)
+        assert "symlink ownership" in str(exc.value)
+        assert "modelCache.pvcModelPath" in str(exc.value)
+        assert "mutable remote" not in str(exc.value)
+
+    assert config == original_config
+    assert "auto_map detection is inconclusive" in caplog.text
+    assert "injecting --trust-remote-code" not in caplog.text
 
 
 def test_model_has_auto_map_returns_true_on_unexpected_error() -> None:

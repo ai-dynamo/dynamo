@@ -1133,6 +1133,7 @@ pub type DiscoveryStream = Pin<Box<dyn Stream<Item = Result<DiscoveryEvent>> + S
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ModelRegistrationIdentity {
     display_name: String,
+    aliases: Vec<String>,
     source_path: Option<String>,
     is_lora: bool,
 }
@@ -1143,10 +1144,30 @@ impl ModelRegistrationIdentity {
     }
 
     fn is_compatible_with(&self, other: &Self) -> bool {
-        if self.is_lora || other.is_lora {
+        if self.is_lora != other.is_lora {
+            let (adapter, base) = if self.is_lora {
+                (self, other)
+            } else {
+                (other, self)
+            };
+            adapter.base_identity() == base.base_identity()
+                && adapter.display_name != base.display_name
+                && !base.aliases.contains(&adapter.display_name)
+        } else if self.is_lora {
             self.base_identity() == other.base_identity()
         } else {
+            // Preserve existing same-name registration compatibility across local model paths.
             self.display_name == other.display_name
+                || self.source_path.as_deref().is_some_and(|source| {
+                    !source.is_empty()
+                        && other.source_path.as_deref() == Some(source)
+                        && !self.aliases.contains(&other.display_name)
+                        && !other.aliases.contains(&self.display_name)
+                        && !self
+                            .aliases
+                            .iter()
+                            .any(|alias| other.aliases.contains(alias))
+                })
         }
     }
 }
@@ -1166,11 +1187,20 @@ fn extract_model_registration_identity(
         .get("source_path")
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned);
+    let aliases = card_json
+        .get("aliases")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .collect();
     let is_lora =
         model_suffix.is_some() || card_json.get("lora").is_some_and(|value| !value.is_null());
 
     Ok(ModelRegistrationIdentity {
         display_name,
+        aliases,
         source_path,
         is_lora,
     })
