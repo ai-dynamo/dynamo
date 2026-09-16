@@ -6,7 +6,9 @@
 package lpx
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"testing"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -32,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
@@ -73,6 +76,21 @@ func TestLPXSourceWatchMapsControllerOwnedMaterializations(t *testing.T) {
 	reconciler := &graphReconciler{Client: kube}
 
 	require.Equal(t, []ctrl.Request{{NamespacedName: client.ObjectKeyFromObject(owned)}}, reconciler.mapLPXSourceToRequests(t.Context(), source))
+
+	t.Log("Report failed owner lookups with the exact source identity, without inventing a child name")
+	lookupErr := errors.New("owner index unavailable")
+	reconciler.Client = interceptor.NewClient(kube, interceptor.Funcs{
+		List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+			return lookupErr
+		},
+	})
+	var logs bytes.Buffer
+	ctx := ctrl.LoggerInto(t.Context(), zap.New(zap.WriteTo(&logs)))
+	require.Empty(t, reconciler.mapLPXSourceToRequests(ctx, source))
+	require.Contains(t, logs.String(), lookupErr.Error())
+	require.Contains(t, logs.String(), `"name":"source"`)
+	require.Contains(t, logs.String(), `"namespace":"workloads"`)
+	require.Contains(t, logs.String(), `"sourceUID":"source-uid"`)
 }
 
 func TestLPXTopologyBindingWatchMapsMatchingPoliciesWithinScope(t *testing.T) {

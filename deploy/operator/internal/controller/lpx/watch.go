@@ -97,6 +97,7 @@ func (r *graphReconciler) mapLPXSourceToRequests(ctx context.Context, obj client
 	deployments := &nvidiacomv1alpha1.LPXGraphDeploymentList{}
 	ownerKey := obj.GetName() + "/" + string(obj.GetUID())
 	if err := r.List(ctx, deployments, client.InNamespace(obj.GetNamespace()), client.MatchingFields{lpxSourceOwnerIndex: ownerKey}); err != nil {
+		ctrl.LoggerFrom(ctx).Error(err, "Unable to list LPX deployments for source", "source", client.ObjectKeyFromObject(obj), "sourceUID", obj.GetUID())
 		return nil
 	}
 	requests := make([]ctrl.Request, 0, len(deployments.Items))
