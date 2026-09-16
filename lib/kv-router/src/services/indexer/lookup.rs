@@ -135,14 +135,6 @@ impl Indexer {
             .await
     }
 
-    pub async fn find_matches_by_tier_ref(
-        &self,
-        sequence: &[LocalBlockHash],
-    ) -> Result<TieredMatchDetails, KvRouterError> {
-        self.find_matches_by_tier_ref_with_options(sequence, LowerTierQueryOptions::default())
-            .await
-    }
-
     pub async fn find_matches_by_tier_ref_with_options(
         &self,
         sequence: &[LocalBlockHash],
@@ -197,7 +189,7 @@ impl<'a> LookupPipeline<'a> {
                 // Seed lower-tier continuations from confirmed primary matches
                 // only. Predict-on-route side scores are unconfirmed; using
                 // them as lower-tier anchors would over-credit host/disk cache
-                // hits and break the score/hash lockstep `query_lower_tiers`
+                // hits and break the score/hash lockstep `query_lower_tiers_with_options`
                 // expects.
                 let primary_device = self
                     .primary
@@ -366,7 +358,7 @@ impl<'a> PrimaryLookup<'a> {
 /// `overlap_scores.scores` <-> `last_matched_hashes` lockstep. Side-only
 /// workers gain a score with no paired hash by design. The result is safe
 /// for scheduling / cache-hit signal but MUST NOT be used to seed
-/// `query_lower_tiers`, which assumes the lockstep invariant. The local
+/// `query_lower_tiers_with_options`, which assumes the lockstep invariant. The local
 /// arm of `find_matches_by_tier` enforces this by running the lower-tier
 /// query against primary-only `MatchDetails` before merging side scores.
 fn merge_overlap_scores(mut primary: MatchDetails, side: OverlapScores) -> MatchDetails {
@@ -424,7 +416,7 @@ mod tests {
 
     use tokio_util::sync::CancellationToken;
 
-    use crate::indexer::LowerTierIndexers;
+    use crate::indexer::{LowerTierIndexers, LowerTierQueryOptions};
     use crate::services::indexer::backend::Indexer;
     use crate::services::indexer::backend::test_util::store_event;
     use crate::{
@@ -1066,7 +1058,10 @@ mod tests {
         side_for_flush.flush().await;
 
         let query = vec![LocalBlockHash(11), LocalBlockHash(12), LocalBlockHash(13)];
-        let borrowed = indexer.find_matches_by_tier_ref(&query).await.unwrap();
+        let borrowed = indexer
+            .find_matches_by_tier_ref_with_options(&query, LowerTierQueryOptions::default())
+            .await
+            .unwrap();
         let owned = indexer.find_matches_by_tier(query).await.unwrap();
 
         assert_eq!(
@@ -1168,7 +1163,7 @@ mod tests {
     /// Regression test: when a worker has blocks in both device and lower-tier
     /// storage (e.g. same prefix stored on GPU and offloaded to host), the
     /// Concurrent indexer doesn't return last_matched_hashes. Without the fix,
-    /// query_lower_tiers would re-query that worker from root in the lower tier,
+    /// query_lower_tiers_with_options would re-query that worker from root in the lower tier,
     /// double-counting overlap blocks and producing cached_tokens > ISL.
     #[tokio::test]
     async fn concurrent_tiered_query_does_not_double_count_device_and_lower_tier_overlap() {

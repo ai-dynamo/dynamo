@@ -207,23 +207,6 @@ pub struct LowerTierQueryOptions {
     pub retain_kv_transfer_chain: bool,
 }
 
-/// Walk every allocated lower tier in [`lower_tier_query_order`] and build a
-/// per-tier match map seeded from `device_matches`. Per-worker continuations
-/// flow forward: a worker that matched N device blocks starts the host walk
-/// at block N (anchored on its last device hash), and so on.
-pub fn query_lower_tiers(
-    indexers: &LowerTierIndexers,
-    sequence: &[LocalBlockHash],
-    device_matches: &MatchDetails,
-) -> HashMap<StorageTier, LowerTierMatchDetails> {
-    query_lower_tiers_with_options(
-        indexers,
-        sequence,
-        device_matches,
-        LowerTierQueryOptions::default(),
-    )
-}
-
 fn merge_kv_transfer_tier_candidates(
     device_candidates: Option<&KvTransferCandidates>,
     tier_matches: &LowerTierMatchDetails,
@@ -286,6 +269,10 @@ fn merge_kv_transfer_tier_candidates(
     })
 }
 
+/// Walk every allocated lower tier in [`lower_tier_query_order`] and build a
+/// per-tier match map seeded from `device_matches`. Per-worker continuations
+/// flow forward: a worker that matched N device blocks starts the host walk
+/// at block N (anchored on its last device hash), and so on.
 pub fn query_lower_tiers_with_options(
     indexers: &LowerTierIndexers,
     sequence: &[LocalBlockHash],
@@ -302,24 +289,6 @@ pub fn query_lower_tiers_with_options(
         device_matches,
         options,
         snapshot,
-    )
-}
-
-pub fn query_lower_tiers_with_options_and_projection(
-    indexers: &LowerTierIndexers,
-    sequence: &[LocalBlockHash],
-    device_matches: &MatchDetails,
-    options: LowerTierQueryOptions,
-    projection: &ResidencyProjection,
-) -> HashMap<StorageTier, LowerTierMatchDetails> {
-    query_lower_tiers_with_options_and_snapshot(
-        indexers,
-        sequence,
-        device_matches,
-        options,
-        Arc::new(ResidencyRoutingSnapshot::from_projection(
-            projection.clone(),
-        )),
     )
 }
 
@@ -563,7 +532,12 @@ mod tests {
         };
 
         let sequence = vec![LocalBlockHash(1), LocalBlockHash(2)];
-        let result = query_lower_tiers(&indexers, &sequence, &device_matches);
+        let result = query_lower_tiers_with_options(
+            &indexers,
+            &sequence,
+            &device_matches,
+            LowerTierQueryOptions::default(),
+        );
         assert!(result.is_empty());
     }
 

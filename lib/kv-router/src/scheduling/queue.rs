@@ -3307,7 +3307,7 @@ policy_classes:
             "expected NoEndpoints before worker updates, got {resp:?}"
         );
 
-        // Lazily register two workers in the slot tracker (EPP supplies pod list)
+        // Add two workers to the slot tracker, then publish their configs.
         slots.upsert_worker(WorkerDpRange::new(100, 0, 1)).unwrap();
         slots.upsert_worker(WorkerDpRange::new(200, 0, 1)).unwrap();
 
