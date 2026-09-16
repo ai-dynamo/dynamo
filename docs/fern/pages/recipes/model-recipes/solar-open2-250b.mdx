@@ -18,9 +18,6 @@ subtitle: "Serve Solar-Open2-250B-NVFP4 with Dynamo on B200, aggregated or disag
 - A `ReadWriteMany` storage class. `model-cache.yaml` requests 1200Gi, which holds
   the checkpoint alongside benchmark traces and artifacts; the checkpoint itself is
   about 153 GB.
-- Registry credentials for the runtime image, as a pull secret of your choosing.
-  The recipe does not name one; add it to the deployment as described under
-  Runtime image below.
 - A Hugging Face token, as a secret named `hf-token-secret`, used by the download
   Job to fetch the checkpoint:
 
@@ -148,11 +145,6 @@ and a Dynamo frontend compatibility patch. The changes are Python-only.
 The stock Dynamo 1.4.1 vLLM runtime does not serve this model — it has no Solar
 Open2 model definition — so the pinned image is required rather than optional.
 Pin by digest, not by tag.
-
-Until the supporting container changes land upstream this image is served from a
-staging registry and needs registry credentials to pull. The recipe deliberately
-carries no pull secret or other cluster-specific settings, so supply an
-`imagePullSecrets` entry for your environment.
 
 ## Configuration notes
 

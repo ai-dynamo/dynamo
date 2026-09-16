@@ -53,7 +53,7 @@ spec:
       spec:
         containers:
         - name: main
-          image: nvcr.io/nvstaging/nim/snarravula:1.4.1-solar-open2-toolfix-preview1@sha256:deea685b67f14e7fb8be7a7c07d634337bf0dfa39adb0aca40731587a5c6bfff
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-solar-open2-250b-post.1@sha256:42fd3ed0607aa19b7d4c1b0a8f8aaaefefc8ec6292294ea2b5e6757353891f49
           imagePullPolicy: IfNotPresent
           command:
           - python3
@@ -91,7 +91,7 @@ spec:
       spec:
         containers:
         - name: main
-          image: nvcr.io/nvstaging/nim/snarravula:1.4.1-solar-open2-toolfix-preview1@sha256:deea685b67f14e7fb8be7a7c07d634337bf0dfa39adb0aca40731587a5c6bfff
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-solar-open2-250b-post.1@sha256:42fd3ed0607aa19b7d4c1b0a8f8aaaefefc8ec6292294ea2b5e6757353891f49
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 0
@@ -161,7 +161,7 @@ spec:
       spec:
         containers:
         - name: main
-          image: nvcr.io/nvstaging/nim/snarravula:1.4.1-solar-open2-toolfix-preview1@sha256:deea685b67f14e7fb8be7a7c07d634337bf0dfa39adb0aca40731587a5c6bfff
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-solar-open2-250b-post.1@sha256:42fd3ed0607aa19b7d4c1b0a8f8aaaefefc8ec6292294ea2b5e6757353891f49
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 0
