@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::ffi::c_void;
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
 
 use aisimulate_placement_abi::{
     AdmissionDecisionV1, BlockHashSliceV1, ByteSliceV1, EngineObservationV1, PlacementAdmissionV1,
@@ -14,7 +14,7 @@ use aisimulate_placement_abi::{
 
 #[test]
 fn exported_descriptor_is_a_complete_v1_plugin() {
-    let descriptor = dynamo_placement_plugin::dynamo_placement_plugin_entry_v1();
+    let descriptor = dynamo_placement_plugin::aisimulate_placement_plugin_v1();
 
     assert!(!descriptor.is_null());
     assert!(unsafe { validate_descriptor_v1(descriptor) }.is_ok());
@@ -23,6 +23,60 @@ fn exported_descriptor_is_a_complete_v1_plugin() {
     let descriptor = unsafe { &*descriptor };
     assert_eq!(descriptor.abi_major, PluginDescriptorV1::ABI_MAJOR);
     assert!(!descriptor.provider_id.cast::<c_void>().is_null());
+}
+
+#[test]
+fn provider_cdylib_loads_through_the_fixed_aisimulate_entrypoint() {
+    let test_binary = std::env::current_exe().expect("test binary path");
+    let cdylib = test_binary
+        .parent()
+        .expect("test binary directory")
+        .join(format!(
+            "{}dynamo_placement_plugin{}",
+            std::env::consts::DLL_PREFIX,
+            std::env::consts::DLL_SUFFIX
+        ));
+
+    let cdylib = CString::new(cdylib.to_string_lossy().as_bytes()).expect("cdylib path");
+    // Safety: the test owns the loaded handle and uses the fixed C ABI symbol
+    // resolved by `DynamicPlacementPlugin` on this Unix target.
+    unsafe {
+        let library = dlopen(cdylib.as_ptr(), RTLD_NOW);
+        assert!(
+            !library.is_null(),
+            "Dynamo cdylib must load: {}",
+            dlerror_message()
+        );
+        let entry = dlsym(library, c"aisimulate_placement_plugin_v1".as_ptr());
+        assert!(
+            !entry.is_null(),
+            "Dynamo cdylib must export AISimulate's fixed placement entrypoint"
+        );
+        let entry: unsafe extern "C" fn() -> *const PluginDescriptorV1 = std::mem::transmute(entry);
+        assert!(validate_descriptor_v1(entry()).is_ok());
+        assert_eq!(dlclose(library), 0);
+    }
+}
+
+const RTLD_NOW: c_int = 2;
+
+unsafe extern "C" {
+    fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
+    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    fn dlclose(handle: *mut c_void) -> c_int;
+    fn dlerror() -> *const c_char;
+}
+
+fn dlerror_message() -> String {
+    // Safety: `dlerror` returns a process-lifetime message pointer or null.
+    unsafe {
+        let error = dlerror();
+        if error.is_null() {
+            "unknown dynamic-loader error".to_owned()
+        } else {
+            CStr::from_ptr(error).to_string_lossy().into_owned()
+        }
+    }
 }
 
 #[test]
@@ -66,7 +120,7 @@ fn provider_creates_and_destroys_a_narrow_validated_kv_router_instance() {
             max_diagnostic_bytes: 256,
         },
     };
-    let descriptor = dynamo_placement_plugin::dynamo_placement_plugin_entry_v1();
+    let descriptor = dynamo_placement_plugin::aisimulate_placement_plugin_v1();
     // Safety: the immutable provider descriptor has a validated V1 operation table.
     let table = unsafe { &*validate_descriptor_v1(descriptor).expect("valid descriptor") };
     let mut handle = PlacementHandleV1(std::ptr::null_mut());
@@ -385,24 +439,262 @@ fn provider_reports_the_committed_prefix_before_an_unsupported_observation() {
     unsafe { table.destroy.expect("required destroy operation")(handle) };
 }
 
+#[test]
+fn provider_reports_admission_overflow_as_a_committed_batch() {
+    let (table, handle) = create_provider_with_limits(PlacementLimitsV1 {
+        max_mutations: 2,
+        max_admission_results: 1,
+        max_released: 2,
+        max_diagnostic_bytes: 256,
+    });
+    let mutations = [
+        admission_mutation([12; 16], 0.0),
+        admission_mutation([13; 16], 1.0),
+    ];
+    let mut result = empty_result();
+
+    let status = unsafe {
+        table.apply_batch.expect("required apply operation")(
+            handle,
+            PlacementMutationSliceV1 {
+                data: mutations.as_ptr(),
+                len: mutations.len() as u64,
+            },
+            &mut result,
+        )
+    };
+
+    assert_eq!(status, StatusV1::REJECTED);
+    assert_eq!(result.applied_mutations, 2);
+    assert_eq!(result.pending_count, 1);
+    unsafe { table.destroy.expect("required destroy operation")(handle) };
+}
+
+#[test]
+fn provider_reports_release_overflow_as_a_committed_batch() {
+    let (table, handle) = create_provider_with_capacity_and_limits(
+        2,
+        PlacementLimitsV1 {
+            max_mutations: 4,
+            max_admission_results: 4,
+            max_released: 1,
+            max_diagnostic_bytes: 256,
+        },
+    );
+    let admissions = [
+        admission_mutation([14; 16], 0.0),
+        admission_mutation([15; 16], 1.0),
+        admission_mutation([16; 16], 2.0),
+        admission_mutation([17; 16], 3.0),
+    ];
+    let mut admission_result = empty_result();
+    assert_eq!(
+        unsafe {
+            table.apply_batch.expect("required apply operation")(
+                handle,
+                PlacementMutationSliceV1 {
+                    data: admissions.as_ptr(),
+                    len: admissions.len() as u64,
+                },
+                &mut admission_result,
+            )
+        },
+        StatusV1::OK
+    );
+    unsafe { table.release_results.expect("required release operation")(admission_result) };
+
+    let terminals = [
+        lifecycle_mutation(PlacementMutationKindV1::REQUEST_TERMINAL, [14; 16], 4.0),
+        lifecycle_mutation(PlacementMutationKindV1::REQUEST_TERMINAL, [15; 16], 5.0),
+    ];
+    let mut result = empty_result();
+    let status = unsafe {
+        table.apply_batch.expect("required apply operation")(
+            handle,
+            PlacementMutationSliceV1 {
+                data: terminals.as_ptr(),
+                len: terminals.len() as u64,
+            },
+            &mut result,
+        )
+    };
+
+    assert_eq!(status, StatusV1::REJECTED);
+    assert_eq!(result.applied_mutations, 2);
+    assert_eq!(result.pending_count, 1);
+    unsafe { table.destroy.expect("required destroy operation")(handle) };
+}
+
+#[test]
+fn provider_rejects_heterogeneous_or_partially_available_capacity() {
+    let scheduler_ids = [19_u64, 29];
+    let workers = [
+        worker_topology(7, &scheduler_ids[..1]),
+        worker_topology(8, &scheduler_ids[1..]),
+    ];
+    let heterogeneous = [
+        worker_capacity(7, 100, 100, 1),
+        worker_capacity(8, 200, 200, 1),
+    ];
+    let partially_available = [worker_capacity(7, 100, 75, 1)];
+    let one_worker = [worker_topology(7, &scheduler_ids[..1])];
+
+    assert_create_rejected(&workers, &heterogeneous);
+    assert_create_rejected(&one_worker, &partially_available);
+}
+
+#[test]
+fn provider_rejects_multiple_scheduler_ids_per_worker() {
+    let scheduler_ids = [19_u64, 20];
+    let workers = [worker_topology(7, &scheduler_ids)];
+    let capacities = [worker_capacity(7, 100, 100, 1)];
+
+    assert_create_rejected(&workers, &capacities);
+}
+
+#[test]
+fn provider_rejects_one_sided_replay_hash_flags_even_with_tokens() {
+    let (table, handle) = create_provider();
+    let tokens = [11_u32, 12, 13, 14];
+    let hashes = [101_u64];
+
+    for flags in [
+        PromptIdentityV1::LOCAL_BLOCK_HASHES_PRESENT,
+        PromptIdentityV1::SEQUENCE_BLOCK_HASHES_PRESENT,
+    ] {
+        let mutation = PlacementMutationV1 {
+            struct_size: std::mem::size_of::<PlacementMutationV1>() as u32,
+            kind: PlacementMutationKindV1::ADMIT,
+            flags: 0,
+            sequence: 1,
+            now_ms: 0.0,
+            payload: PlacementMutationPayloadV1 {
+                admission: PlacementAdmissionV1 {
+                    request_id: [18; 16],
+                    flags: 0,
+                    priority: 0,
+                    prompt_tokens: tokens.len() as u64,
+                    max_output_tokens: 1,
+                    prompt_identity: PromptIdentityV1 {
+                        flags: PromptIdentityV1::MATERIALIZED_TOKEN_IDS_PRESENT | flags,
+                        reserved: 0,
+                        materialized_token_ids: aisimulate_placement_abi::TokenIdSliceV1 {
+                            data: tokens.as_ptr(),
+                            len: tokens.len() as u64,
+                        },
+                        local_block_hashes: BlockHashSliceV1 {
+                            data: hashes.as_ptr(),
+                            len: hashes.len() as u64,
+                        },
+                        sequence_block_hashes: BlockHashSliceV1 {
+                            data: hashes.as_ptr(),
+                            len: hashes.len() as u64,
+                        },
+                    },
+                    metadata: PlacementMetadataV1::EMPTY,
+                    session_id: ByteSliceV1::EMPTY,
+                },
+            },
+        };
+        let mut result = empty_result();
+
+        let status = unsafe {
+            table.apply_batch.expect("required apply operation")(
+                handle,
+                PlacementMutationSliceV1 {
+                    data: &mutation,
+                    len: 1,
+                },
+                &mut result,
+            )
+        };
+
+        assert_eq!(status, StatusV1::INVALID_ARGUMENT);
+        assert_eq!(result.applied_mutations, 0);
+    }
+
+    unsafe { table.destroy.expect("required destroy operation")(handle) };
+}
+
 fn create_provider() -> (aisimulate_placement_abi::PluginVTableV1, PlacementHandleV1) {
     let scheduler_ids = [19_u64];
-    let workers = [WorkerTopologyV1 {
-        worker_id: 7,
-        scheduler_ids: SchedulerIdSliceV1 {
-            data: scheduler_ids.as_ptr(),
-            len: scheduler_ids.len() as u64,
+    let workers = [worker_topology(7, &scheduler_ids)];
+    let capacities = [worker_capacity(7, 100, 100, 1)];
+    create_provider_with_config(
+        &workers,
+        &capacities,
+        PlacementLimitsV1 {
+            max_mutations: 8,
+            max_admission_results: 8,
+            max_released: 8,
+            max_diagnostic_bytes: 256,
         },
-    }];
-    let capacities = [WorkerCapacityV1 {
-        worker_id: 7,
-        total_kv_blocks: 100,
-        available_kv_blocks: 100,
-        max_running_requests: 1,
-        flags: 0,
-        reserved: 0,
-    }];
-    let request = PlacementCreateRequestV1 {
+    )
+}
+
+fn create_provider_with_limits(
+    limits: PlacementLimitsV1,
+) -> (aisimulate_placement_abi::PluginVTableV1, PlacementHandleV1) {
+    create_provider_with_capacity_and_limits(1, limits)
+}
+
+fn create_provider_with_capacity_and_limits(
+    max_running_requests: u64,
+    limits: PlacementLimitsV1,
+) -> (aisimulate_placement_abi::PluginVTableV1, PlacementHandleV1) {
+    let scheduler_ids = [19_u64];
+    let workers = [worker_topology(7, &scheduler_ids)];
+    let capacities = [worker_capacity(7, 100, 100, max_running_requests)];
+    create_provider_with_config(&workers, &capacities, limits)
+}
+
+fn assert_create_rejected(workers: &[WorkerTopologyV1], capacities: &[WorkerCapacityV1]) {
+    let descriptor = dynamo_placement_plugin::aisimulate_placement_plugin_v1();
+    let table = unsafe { *validate_descriptor_v1(descriptor).expect("valid descriptor") };
+    let mut handle = PlacementHandleV1(std::ptr::null_mut());
+    let mut error = ByteSliceV1::EMPTY;
+    let request = create_request(workers, capacities, default_limits());
+
+    let status = unsafe {
+        table.create.expect("required create operation")(request, &mut handle, &mut error)
+    };
+
+    assert_eq!(status, StatusV1::REJECTED);
+    assert!(handle.0.is_null());
+    assert!(error.len > 0);
+    unsafe {
+        table
+            .release_bytes
+            .expect("required byte release operation")(error)
+    };
+}
+
+fn create_provider_with_config(
+    workers: &[WorkerTopologyV1],
+    capacities: &[WorkerCapacityV1],
+    limits: PlacementLimitsV1,
+) -> (aisimulate_placement_abi::PluginVTableV1, PlacementHandleV1) {
+    let descriptor = dynamo_placement_plugin::aisimulate_placement_plugin_v1();
+    let table = unsafe { *validate_descriptor_v1(descriptor).expect("valid descriptor") };
+    let mut handle = PlacementHandleV1(std::ptr::null_mut());
+    let mut error = ByteSliceV1::EMPTY;
+    let request = create_request(workers, capacities, limits);
+
+    let status = unsafe {
+        table.create.expect("required create operation")(request, &mut handle, &mut error)
+    };
+    assert_eq!(status, StatusV1::OK);
+    assert!(!handle.0.is_null());
+    assert!(error.data.is_null());
+    (table, handle)
+}
+
+fn create_request(
+    workers: &[WorkerTopologyV1],
+    capacities: &[WorkerCapacityV1],
+    limits: PlacementLimitsV1,
+) -> PlacementCreateRequestV1 {
+    PlacementCreateRequestV1 {
         struct_size: std::mem::size_of::<PlacementCreateRequestV1>() as u32,
         payload_version: 1,
         flags: 0,
@@ -418,25 +710,43 @@ fn create_provider() -> (aisimulate_placement_abi::PluginVTableV1, PlacementHand
         },
         options_namespace: ByteSliceV1::EMPTY,
         provider_options: ByteSliceV1::EMPTY,
-        limits: PlacementLimitsV1 {
-            max_mutations: 8,
-            max_admission_results: 8,
-            max_released: 8,
-            max_diagnostic_bytes: 256,
-        },
-    };
-    let descriptor = dynamo_placement_plugin::dynamo_placement_plugin_entry_v1();
-    let table = unsafe { *validate_descriptor_v1(descriptor).expect("valid descriptor") };
-    let mut handle = PlacementHandleV1(std::ptr::null_mut());
-    let mut error = ByteSliceV1::EMPTY;
+        limits,
+    }
+}
 
-    let status = unsafe {
-        table.create.expect("required create operation")(request, &mut handle, &mut error)
-    };
-    assert_eq!(status, StatusV1::OK);
-    assert!(!handle.0.is_null());
-    assert!(error.data.is_null());
-    (table, handle)
+fn default_limits() -> PlacementLimitsV1 {
+    PlacementLimitsV1 {
+        max_mutations: 8,
+        max_admission_results: 8,
+        max_released: 8,
+        max_diagnostic_bytes: 256,
+    }
+}
+
+fn worker_topology(worker_id: u64, scheduler_ids: &[u64]) -> WorkerTopologyV1 {
+    WorkerTopologyV1 {
+        worker_id,
+        scheduler_ids: SchedulerIdSliceV1 {
+            data: scheduler_ids.as_ptr(),
+            len: scheduler_ids.len() as u64,
+        },
+    }
+}
+
+fn worker_capacity(
+    worker_id: u64,
+    total_kv_blocks: u64,
+    available_kv_blocks: u64,
+    max_running_requests: u64,
+) -> WorkerCapacityV1 {
+    WorkerCapacityV1 {
+        worker_id,
+        total_kv_blocks,
+        available_kv_blocks,
+        max_running_requests,
+        flags: 0,
+        reserved: 0,
+    }
 }
 
 fn empty_result() -> PlacementBatchResultV1 {

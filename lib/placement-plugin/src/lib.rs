@@ -18,12 +18,12 @@ use aisimulate_core::replay::{
     ReplayAdmissionMetadata, ReplayRequestContext, WorkerTopology,
 };
 use aisimulate_placement_abi::{
-    AdmissionDecisionV1, ByteSliceV1, MAX_CREATE_WORKERS_V1, PlacementAdmissionV1,
-    PlacementBatchResultV1, PlacementCacheSampleV1, PlacementCreateRequestV1,
-    PlacementDiagnosticSliceV1, PlacementHandleV1, PlacementMetadataV1, PlacementMutationKindV1,
-    PlacementMutationSliceV1, PlacementResultSliceV1, PlacementResultV1, PlacementSliceV1,
-    PlacementV1, PluginDescriptorV1, PluginVTableV1, PromptIdentityV1, StatusV1, WorkerTopologyV1,
-    validate_create_request_v1, validate_mutation_batch_v1,
+    AdmissionDecisionV1, ByteSliceV1, PlacementAdmissionV1, PlacementBatchResultV1,
+    PlacementCacheSampleV1, PlacementCreateRequestV1, PlacementDiagnosticSliceV1,
+    PlacementHandleV1, PlacementMetadataV1, PlacementMutationKindV1, PlacementMutationSliceV1,
+    PlacementResultSliceV1, PlacementResultV1, PlacementSliceV1, PlacementV1, PluginDescriptorV1,
+    PluginVTableV1, PromptIdentityV1, StatusV1, WorkerTopologyV1, validate_create_request_v1,
+    validate_mutation_batch_v1,
 };
 use dynamo_mocker::placement::{
     KvReplayMetadata, KvRouterConfig, KvRouterPlacement, MockEngineArgs,
@@ -82,7 +82,7 @@ static DESCRIPTOR: PluginDescriptorV1 = PluginDescriptorV1 {
 /// loader. The Rust-callable form is intentionally the same ABI so the
 /// integration test exercises the exact descriptor a loader receives.
 #[unsafe(no_mangle)]
-pub extern "C" fn dynamo_placement_plugin_entry_v1() -> *const PluginDescriptorV1 {
+pub extern "C" fn aisimulate_placement_plugin_v1() -> *const PluginDescriptorV1 {
     &raw const DESCRIPTOR
 }
 
@@ -128,6 +128,7 @@ fn create_impl(request: PlacementCreateRequestV1) -> Result<ConfiguredPlacement,
     validate_create_request_v1(&request)
         .map_err(|error| format!("invalid Dynamo placement create request: {error:?}"))?;
     validate_empty_options(request.options_namespace, request.provider_options)?;
+    let (max_running_requests, total_kv_blocks) = decode_capacity_profile(&request.capacities)?;
     let topology = decode_topology(request.workers, request.capacities)?;
     if topology.is_empty() {
         return Err("Dynamo placement requires at least one worker".to_owned());
@@ -138,8 +139,6 @@ fn create_impl(request: PlacementCreateRequestV1) -> Result<ConfiguredPlacement,
             .try_into()
             .expect("fixed-size seed"),
     );
-    let max_running_requests = capacities_max_running(&request.capacities)?;
-    let total_kv_blocks = capacities_total_blocks(&request.capacities)?;
     let engine_args = MockEngineArgs {
         max_num_seqs: Some(max_running_requests),
         num_gpu_blocks: total_kv_blocks,
@@ -229,11 +228,11 @@ fn decode_worker(
     worker: &WorkerTopologyV1,
     router_worker_id: usize,
 ) -> Result<WorkerRoute, String> {
-    if worker.scheduler_ids.len == 0 || worker.scheduler_ids.data.is_null() {
-        return Err("Dynamo placement requires at least one scheduler per worker".to_owned());
-    }
-    if worker.scheduler_ids.len > MAX_CREATE_WORKERS_V1 {
-        return Err("Dynamo placement scheduler count exceeds the V1 bound".to_owned());
+    if worker.scheduler_ids.len != 1 || worker.scheduler_ids.data.is_null() {
+        return Err(
+            "Dynamo placement requires exactly one scheduler per worker until DP mapping is implemented"
+                .to_owned(),
+        );
     }
     let scheduler_count = usize::try_from(worker.scheduler_ids.len)
         .map_err(|_| "Dynamo placement scheduler count exceeds platform bounds".to_owned())?;
@@ -251,46 +250,42 @@ fn decode_worker(
     })
 }
 
-fn capacities_max_running(
+fn decode_capacity_profile(
     capacities: &aisimulate_placement_abi::WorkerCapacitySliceV1,
-) -> Result<usize, String> {
+) -> Result<(usize, usize), String> {
     // Safety: create-request validation established a bounded, readable slice.
     let capacities =
         unsafe { std::slice::from_raw_parts(capacities.data, capacities.len as usize) };
-    capacities
-        .iter()
-        .map(|capacity| usize::try_from(capacity.max_running_requests))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| "Dynamo placement running-request capacity exceeds platform bounds".to_owned())
-        .and_then(|values| {
-            values
-                .into_iter()
-                .max()
-                .filter(|value| *value > 0)
-                .ok_or_else(|| {
-                    "Dynamo placement requires a positive running-request capacity".to_owned()
-                })
-        })
-}
-
-fn capacities_total_blocks(
-    capacities: &aisimulate_placement_abi::WorkerCapacitySliceV1,
-) -> Result<usize, String> {
-    // Safety: create-request validation established a bounded, readable slice.
-    let capacities =
-        unsafe { std::slice::from_raw_parts(capacities.data, capacities.len as usize) };
-    capacities
-        .iter()
-        .map(|capacity| usize::try_from(capacity.total_kv_blocks))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| "Dynamo placement KV-block capacity exceeds platform bounds".to_owned())
-        .and_then(|values| {
-            values
-                .into_iter()
-                .max()
-                .filter(|value| *value > 0)
-                .ok_or_else(|| "Dynamo placement requires a positive KV-block capacity".to_owned())
-        })
+    let Some(first) = capacities.first() else {
+        return Err("Dynamo placement requires at least one capacity record".to_owned());
+    };
+    if first.available_kv_blocks != first.total_kv_blocks {
+        return Err(
+            "Dynamo placement does not support partially available KV-block capacity".to_owned(),
+        );
+    }
+    let max_running_requests = usize::try_from(first.max_running_requests).map_err(|_| {
+        "Dynamo placement running-request capacity exceeds platform bounds".to_owned()
+    })?;
+    let total_kv_blocks = usize::try_from(first.total_kv_blocks)
+        .map_err(|_| "Dynamo placement KV-block capacity exceeds platform bounds".to_owned())?;
+    if max_running_requests == 0 {
+        return Err("Dynamo placement requires a positive running-request capacity".to_owned());
+    }
+    if total_kv_blocks == 0 {
+        return Err("Dynamo placement requires a positive KV-block capacity".to_owned());
+    }
+    if capacities.iter().skip(1).any(|capacity| {
+        capacity.max_running_requests != first.max_running_requests
+            || capacity.total_kv_blocks != first.total_kv_blocks
+            || capacity.available_kv_blocks != first.available_kv_blocks
+    }) {
+        return Err(
+            "Dynamo placement requires homogeneous worker capacities until per-worker capacity mapping is implemented"
+                .to_owned(),
+        );
+    }
+    Ok((max_running_requests, total_kv_blocks))
 }
 
 unsafe extern "C" fn apply_batch(
@@ -382,6 +377,11 @@ fn apply_batch_impl(
     {
         placement.last_error =
             "Dynamo placement policy exceeded negotiated result bounds".to_owned();
+        // The router has already applied every mutation. Preserve that fact
+        // for a host that will not receive owned result slices on failure.
+        out_result.applied_mutations = batch_len as u64;
+        out_result.pending_count =
+            PlacementPolicy::<DirectRequest>::pending_count(&placement.placement) as u64;
         return StatusV1::REJECTED;
     }
     placement.last_error.clear();
@@ -577,7 +577,12 @@ fn decode_admission(
     let has_tokens = identity.flags & PromptIdentityV1::MATERIALIZED_TOKEN_IDS_PRESENT != 0;
     let has_local_hashes = identity.flags & PromptIdentityV1::LOCAL_BLOCK_HASHES_PRESENT != 0;
     let has_sequence_hashes = identity.flags & PromptIdentityV1::SEQUENCE_BLOCK_HASHES_PRESENT != 0;
-    if !has_tokens && !(has_local_hashes && has_sequence_hashes) {
+    if has_local_hashes != has_sequence_hashes {
+        return Err(ApplyError::rejected(
+            "Dynamo KV placement requires local and sequence replay hashes together",
+        ));
+    }
+    if !has_tokens && !has_local_hashes {
         return Err(ApplyError::rejected(
             "Dynamo KV placement requires materialized prompt tokens or paired replay hashes",
         ));
