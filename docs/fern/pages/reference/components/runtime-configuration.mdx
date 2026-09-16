@@ -143,27 +143,43 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   See [Frontend Configuration](frontend-configuration.mdx) for `DYN_HTTP_BODY_LIMIT_MB`.
 </ParamField>
 
-<ParamField path="DYN_TCP_RPC_HOST" type="string" default="auto-detected">
+<ParamField path="DYN_TCP_RPC_HOST" type="string" default="auto-detected local address">
   Host for the TCP request-plane server. Accepts IPv4 and IPv6 literals, bracketed IPv6 literals,
-  wildcards, and interface names such as `eth0:1`. If unset, Dynamo selects the first usable
-  non-loopback IPv4 address, then IPv6, then IPv4 loopback, then IPv6 loopback.
+  wildcards, and interface names, including aliases such as `eth0:1`. If unset or empty, Dynamo
+  selects the first usable non-loopback IPv4 address, then IPv6, then IPv4 loopback, then IPv6
+  loopback. Dynamo does not trim whitespace; a value containing only whitespace fails server startup.
 
-  A wildcard advertises a reachable address in its requested family. If only the other family has a
-  usable non-loopback address, Dynamo switches the bind wildcard to that family. IPv4 link-local
+  For a named interface, Dynamo uses the same address selection order, restricted to that interface.
+  It selects the first usable address in each category in operating-system enumeration order. An
+  interface with only loopback addresses uses IPv4 loopback, then IPv6 loopback.
+
+  A wildcard selects a usable non-loopback address in its requested family for advertisement. If
+  only the other family has one, Dynamo switches the bind wildcard to that family. If neither family
+  has one, Dynamo prefers loopback in the requested family before trying the other family. If no
+  loopback address is found, it uses the requested family's standard loopback address. The bind
+  wildcard uses the selected address family. Wildcards are never advertised. IPv4 link-local
   addresses are accepted. Multicast, broadcast, and IPv6 link-local addresses are rejected.
-  Wildcards are accepted as bind addresses and are never advertised.
+
+  The server resolves the address once at startup. A loopback fallback persists until restart, and
+  an interface-enumeration error fails server startup.
 </ParamField>
 
-<ParamField path="DYN_TCP_RESPONSE_STREAM_HOST" type="string" default="auto-detected">
-  Host for the TCP response-stream server. It accepts the same values and uses the same address
-  selection and wildcard-family rules as `DYN_TCP_RPC_HOST`. The QUIC response listener uses the
-  selected concrete address.
+<ParamField path="DYN_TCP_RPC_PORT" type="integer" default="0">
+  Port used by the TCP request-plane server. Accepted values are integers from `0` to `65535`.
+  When the value is unset, empty, or `0`, the operating system assigns a free port. Dynamo does not
+  trim whitespace. An invalid value, including a value with surrounding whitespace, silently falls
+  back to an operating-system-assigned port.
 </ParamField>
 
-Automatic selection for advertised URLs caches only successful non-loopback results and resolves
-again after interface-enumeration errors and loopback fallbacks. The TCP request-plane and
-response-stream servers resolve once at startup. A loopback fallback persists until restart, and an
-interface-enumeration error fails server startup.
+<ParamField path="DYN_TCP_RESPONSE_STREAM_HOST" type="string" default="auto-detected local address">
+  Host for the TCP response-stream server. It accepts the same address syntax and uses the same
+  address selection and wildcard-family rules as `DYN_TCP_RPC_HOST`. Dynamo trims whitespace and
+  treats an empty value as unset. With a wildcard host, the TCP listener binds the selected wildcard,
+  while the QUIC response listener binds only the selected concrete address.
+
+  The server resolves the address once at startup. A loopback fallback persists until restart, and
+  an interface-enumeration error fails server startup.
+</ParamField>
 
 <ParamField path="DYN_TCP_RESPONSE_STREAM_PORT" type="integer" default="0">
   Port used by the TCP response stream server. Dynamo trims surrounding whitespace. When the value
@@ -184,11 +200,14 @@ interface-enumeration error fails server startup.
   IPv4 or IPv6 address, or exact network interface name, advertised by direct ZMQ event publishers.
   For an interface name, Dynamo selects the first usable IPv4 address, then IPv6. Dynamo trims
   whitespace and treats an empty value as unset. Unspecified addresses such as `0.0.0.0` and `::` are
-  invalid. When unset, automatic advertisement stays in the IPv4 bind family.
+  invalid. When unset, automatic advertisement stays in the IPv4 bind family. If the host has no
+  usable non-loopback IPv4 address, automatic selection advertises IPv4 loopback (`127.0.0.1` when
+  no IPv4 loopback address is found), and remote subscribers cannot reach the publisher.
 
   This variable changes the discovery address, not the listener address. Direct ZMQ continues to bind
-  an IPv4 wildcard, so an IPv6 value does not enable IPv6 listening. This variable does not affect
-  NATS or ZMQ broker mode.
+  an IPv4 wildcard. For remote subscribers, an explicit override must identify a reachable IPv4
+  address served by that listener. An IPv6 value does not enable IPv6 listening. This variable does
+  not affect NATS or ZMQ broker mode.
 </ParamField>
 
 <ParamField path="DYN_ZMQ_IO_THREADS" type="integer" default="4">
