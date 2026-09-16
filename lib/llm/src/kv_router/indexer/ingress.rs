@@ -13,7 +13,7 @@ use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::identity::RoutingPartitionId;
 use dynamo_kv_router::services::indexer::registry::WorkerRegistry;
 use dynamo_kv_router::services::selection::KvEventIngress;
-use dynamo_kv_router::{SessionPrefixIndexer, WorkerInputs, WorkerType};
+use dynamo_kv_router::{SessionPrefixIndexer, SharedKvCache, WorkerInputs, WorkerType};
 use dynamo_runtime::component::Endpoint;
 use tokio_util::sync::CancellationToken;
 
@@ -37,6 +37,7 @@ pub(crate) struct RuntimeIngressArgs<'a> {
     pub kv_source_membership: Option<KvSourceMembershipWatch>,
     pub cancellation_token: CancellationToken,
     pub session_prefix_index: Option<Arc<SessionPrefixIndexer>>,
+    pub shared_cache: Option<Arc<dyn SharedKvCache>>,
 }
 
 pub(crate) struct RuntimeIngress {
@@ -59,10 +60,11 @@ impl RuntimeIngress {
             kv_source_membership,
             cancellation_token,
             session_prefix_index,
+            shared_cache,
         } = args;
         let component = endpoint.component();
         let cache_required = worker_inputs.contains(WorkerInputs::CACHE);
-        let indexer = if cache_required {
+        let mut indexer = if cache_required {
             super::build(
                 component,
                 kv_router_config,
@@ -75,6 +77,7 @@ impl RuntimeIngress {
         } else {
             Indexer::None
         };
+        indexer.set_shared_cache(shared_cache);
 
         let subscription = if cache_required && kv_event_source_requirement.should_subscribe() {
             let membership_watch = kv_source_membership.ok_or_else(|| {
@@ -133,6 +136,13 @@ impl RuntimeIngress {
 
     pub(crate) fn indexer(&self) -> &Indexer {
         &self.indexer
+    }
+
+    pub(crate) async fn shutdown(&self) {
+        let subscription = self.subscription.lock().take();
+        if let Some(subscription) = subscription {
+            subscription.shutdown().await;
+        }
     }
 
     #[cfg(test)]

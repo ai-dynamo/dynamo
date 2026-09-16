@@ -107,6 +107,10 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     _VALID_TOKENIZER_BACKENDS = {"default", "fastokens", "basetenkenizer"}
 
     def validate(self) -> None:
+        if self.shared_cache_type == "mooncake-store" and self.router_mode != "kv":
+            raise ValueError(
+                "--shared-cache-type=mooncake-store requires --router-mode=kv"
+            )
         if self.load_aware:
             self.router_mode = "kv"
         self.apply_load_aware_preset()

@@ -2913,6 +2913,11 @@ impl OpenAIPreprocessor {
     ) -> Result<PreprocessedRequestBuilder> {
         let mut builder = PreprocessedRequest::builder();
         builder.model(request.model());
+        builder.shared_cache_eligible(request.unsupported_fields().is_none_or(|fields| {
+            fields.keys().all(|key| {
+                crate::protocols::openai::validate::PASSTHROUGH_EXTRA_FIELDS.contains(&key.as_str())
+            })
+        }));
 
         let mut stop_conditions = request.extract_stop_conditions()?;
         let eos_token_ids = self.model_info.eos_token_ids();
@@ -10676,6 +10681,36 @@ mod tests {
             _request: SingleIn<PreprocessedRequest>,
         ) -> Result<ManyOut<Annotated<BackendOutput>>, Error> {
             panic!("request must be rejected before backend dispatch")
+        }
+    }
+
+    #[test]
+    fn shared_cache_eligibility_is_captured_before_openai_extra_fields_are_dropped() {
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        for (extra, expected) in [
+            (serde_json::json!({}), true),
+            (serde_json::json!({"cache_salt": "tenant-a"}), true),
+            (serde_json::json!({"extra_keys": ["opaque"]}), false),
+            (serde_json::json!({"future_input": true}), false),
+        ] {
+            let mut raw = serde_json::json!({"model": "test-model", "prompt": [1, 2, 3]});
+            raw.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let request: NvCreateCompletionRequest = serde_json::from_value(raw).unwrap();
+            let preprocessed = preprocessor
+                .builder_with_lora(&request, Some("adapter".into()))
+                .unwrap()
+                .token_ids(vec![1, 2, 3])
+                .build()
+                .unwrap();
+            assert_eq!(preprocessed.shared_cache_text_eligible(), expected);
+            assert_eq!(preprocessed.token_ids.as_slice(), &[1, 2, 3]);
         }
     }
 

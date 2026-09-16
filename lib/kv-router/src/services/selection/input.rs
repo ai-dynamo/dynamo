@@ -56,13 +56,14 @@ impl PromptRequest {
             lora_name: self.lora_name.as_deref(),
             cache_namespace: self.cache_namespace.as_deref(),
             is_eagle: self.is_eagle,
+            shared_cache_eligible: false,
         }
     }
 }
 
-/// A prompt borrowed for one selection: the same fields as [`PromptRequest`]
+/// A prompt borrowed for one selection: the inputs from [`PromptRequest`]
 /// with the same precedence (multimodal routing tokens, then raw tokens, then
-/// the hash-only trio).
+/// the hash-only trio), plus host-local shared-cache provenance.
 #[derive(Debug, Clone, Copy)]
 pub struct PromptView<'a> {
     pub token_ids: Option<&'a [u32]>,
@@ -74,6 +75,8 @@ pub struct PromptView<'a> {
     pub lora_name: Option<&'a str>,
     pub cache_namespace: Option<&'a str>,
     pub is_eagle: Option<bool>,
+    /// Positive provenance supplied by the embedding host, never by a wire request.
+    pub shared_cache_eligible: bool,
 }
 
 impl PromptView<'_> {

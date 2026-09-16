@@ -13,8 +13,8 @@ use anyhow::Result;
 use dynamo_kv_router::WorkerSelectionPolicy;
 use dynamo_kv_router::{
     DEFAULT_ROUTING_GROUP, KvSchedulerError, PrefillLoadEstimator, RoutingPartitionRef,
-    SessionPrefixIndexer, SharedKvCache, TrackingHashAlgorithm, TrackingHashContext,
-    TrackingHashScope, WorkerSelectionPolicyFactory,
+    SessionPrefixIndexer, SharedCacheQuery, SharedKvCache, TrackingHashAlgorithm,
+    TrackingHashContext, TrackingHashScope, WorkerSelectionPolicyFactory,
     config::{KvRouterConfig, RouterConfigOverride, min_initial_workers_from_env},
     indexer::{
         ApproximateLruIncarnation, ApproximateLruStats, KvRouterError, RoutingDecisionHashes,
@@ -608,6 +608,7 @@ pub struct KvRouter {
     /// Optional external shared KV cache pool. When present, `find_best_match`
     /// queries it in parallel with the indexer and factors shared hits into scoring.
     shared_cache: Option<Arc<dyn SharedKvCache>>,
+    shared_cache_tasks: Option<[tokio::task::JoinHandle<()>; 2]>,
     endpoint_registration: Option<dynamo_runtime::discovery::EndpointRegistrationLease>,
     teardown_task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
     /// Optional session-aware logical prefix index.
@@ -772,6 +773,7 @@ impl KvRouter {
             kv_source_membership,
             cancellation_token: cancellation_token.clone(),
             session_prefix_index: session_prefix_index.clone(),
+            shared_cache: shared_cache.clone(),
         })
         .await?;
         let indexer = ingress.indexer().clone();
@@ -907,10 +909,19 @@ impl KvRouter {
             approximate_lru_ranks,
             request_leases,
             shared_cache,
+            shared_cache_tasks: None,
             endpoint_registration: None,
             teardown_task_guard: None,
             session_prefix_index,
         })
+    }
+
+    pub(crate) fn set_shared_cache_tasks(&mut self, tasks: [tokio::task::JoinHandle<()>; 2]) {
+        self.shared_cache_tasks = Some(tasks);
+    }
+
+    pub(crate) fn cancellation_token(&self) -> CancellationToken {
+        self.cancellation_token.clone()
     }
 
     pub(crate) fn set_endpoint_registration(
@@ -993,6 +1004,19 @@ impl KvRouter {
 
     pub fn required_worker_inputs(&self) -> dynamo_kv_router::selector::WorkerInputs {
         self.required_worker_inputs
+    }
+
+    /// Cancel background work and wait for KV event ingestion to stop.
+    pub async fn shutdown(mut self) {
+        self.cancellation_token.cancel();
+        self.ingress.shutdown().await;
+        if let Some(tasks) = self.shared_cache_tasks.take() {
+            for task in tasks {
+                if let Err(error) = task.await {
+                    tracing::warn!(%error, "Mooncake Store task failed during shutdown");
+                }
+            }
+        }
     }
 
     pub fn is_eagle(&self) -> bool {
@@ -1277,6 +1301,7 @@ impl KvRouter {
             context_id,
             tokens,
             block_mm_infos,
+            !self.is_eagle && block_mm_infos.is_none(),
             router_config_override,
             update_states,
             return_routing_hashes,
@@ -1302,6 +1327,7 @@ impl KvRouter {
         context_id: Option<&str>,
         tokens: &[u32],
         block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        shared_cache_eligible: bool,
         router_config_override: Option<&RouterConfigOverride>,
         update_states: bool,
         return_routing_hashes: bool,
@@ -1359,6 +1385,9 @@ impl KvRouter {
                     lora_name: lora_name.as_deref(),
                     cache_namespace: cache_namespace.as_deref(),
                     is_eagle: Some(self.is_eagle),
+                    shared_cache_eligible: shared_cache_eligible
+                        && !self.is_eagle
+                        && block_mm_infos.is_none(),
                 },
                 router_config_override: router_config_override.cloned(),
                 expected_output_tokens,
@@ -1809,12 +1838,21 @@ impl KvRouter {
         let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, hash_options);
         let num_blocks = block_hashes.len();
 
-        let tiered_matches = self.indexer.find_matches_by_tier(block_hashes).await?;
+        let tiered_matches = self
+            .indexer
+            .find_matches_by_tier_ref_with_options(&block_hashes, Default::default())
+            .await?;
 
         let (shared_hits, shared_error) = if include_shared {
             if let Some(shared_cache) = self.shared_cache.as_ref() {
                 match shared_cache
-                    .check_blocks(tokens, self.block_size, cache_namespace)
+                    .check_blocks(SharedCacheQuery {
+                        block_hashes: &block_hashes,
+                        tokens,
+                        block_size: self.block_size,
+                        cache_namespace,
+                        shared_cache_eligible: !self.is_eagle && block_mm_infos.is_none(),
+                    })
                     .await
                 {
                     Ok(hits) => (Some(hits), None),
@@ -1990,10 +2028,16 @@ impl Drop for KvRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{HashMap, HashSet};
+    use std::{
+        collections::{HashMap, HashSet},
+        time::Duration,
+    };
 
     use async_trait::async_trait;
-    use dynamo_kv_router::{WorkerSelectionPolicyError, protocols::compute_seq_hash_for_block};
+    use dynamo_kv_router::{
+        WorkerSelectionPolicyError,
+        protocols::{StorageTier, compute_seq_hash_for_block},
+    };
     use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
     use tokio::sync::watch;
 
@@ -2140,9 +2184,7 @@ mod tests {
     impl SharedKvCache for FakeSharedCache {
         async fn check_blocks(
             &self,
-            _tokens: &[u32],
-            _block_size: u32,
-            _cache_namespace: Option<&str>,
+            _query: SharedCacheQuery<'_>,
         ) -> Result<dynamo_kv_router::protocols::SharedCacheHits, KvRouterError> {
             if self.should_error {
                 Err(KvRouterError::IndexerOffline)
@@ -2712,6 +2754,7 @@ mod tests {
                     Some(session),
                     &tokens,
                     None,
+                    false,
                     None,
                     update_states,
                     return_hashes,
@@ -2902,6 +2945,7 @@ mod tests {
                     Some(&context_id),
                     tokens,
                     None,
+                    false,
                     None,
                     true,
                     true,
@@ -3050,6 +3094,7 @@ mod tests {
                 Some("cancelled"),
                 &prompt,
                 None,
+                false,
                 None,
                 true,
                 false,
@@ -3278,6 +3323,324 @@ mod tests {
                 router.free(id).await.unwrap();
             }
         }
+    }
+
+    pub(super) async fn make_local_shared_cache_router(
+        threads: u32,
+        shared_cache: Option<Arc<dyn SharedKvCache>>,
+    ) -> KvRouter {
+        let component = make_test_component("local-shared-cache-router").await;
+        let endpoint = component.endpoint("backend");
+        let client = endpoint.client().await.unwrap();
+        let (_tx, workers) = watch::channel(HashMap::from([
+            (0, ModelRuntimeConfig::default()),
+            (1, ModelRuntimeConfig::default()),
+        ]));
+        // The builtin policy declares CACHE for aggregated workers, and a
+        // CACHE-declaring event-fed router needs a source membership watch.
+        let membership = crate::discovery::KvSourceMembershipCoordinator::start(
+            endpoint.id(),
+            workers.clone(),
+            component.drt().discovery(),
+        )
+        .subscribe();
+        let role = WorkerType::Aggregated;
+        let config = KvRouterConfig {
+            overlap_score_credit: 0.25,
+            router_temperature: 0.0,
+            router_track_active_blocks: false,
+            router_track_prefill_tokens: true,
+            shared_cache_multiplier: 0.5,
+            router_event_threads: threads,
+            skip_initial_worker_wait: true,
+            ..Default::default()
+        };
+        let router = KvRouter::new_with_worker_role(
+            endpoint,
+            client,
+            workers,
+            Some(membership),
+            2,
+            SelectionPolicySource::Registry,
+            Some(config),
+            None,
+            Some(role),
+            role.default_selector_label(),
+            None,
+            false,
+            shared_cache,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            router.indexer,
+            Indexer::Single { .. } | Indexer::Concurrent { .. }
+        ));
+        assert!(router.indexer.supports_kv_transfer_chain_retention());
+        assert!(router.ingress.has_subscription());
+        router
+    }
+
+    async fn seed_router_device_prefix(router: &KvRouter, tokens: &[u32]) {
+        let hashes =
+            compute_block_hash_for_seq(tokens, router.block_size, BlockHashOptions::default());
+        let prefix: Vec<_> = hashes[..2].iter().map(|hash| hash.0).collect();
+        router
+            .indexer
+            .try_apply_event(indexer::test_util::store_event(
+                0,
+                0,
+                1,
+                &[],
+                &prefix,
+                StorageTier::Device,
+            ))
+            .await
+            .unwrap();
+        indexer::test_util::flush_indexer(&router.indexer).await;
+    }
+
+    #[tokio::test]
+    async fn local_shared_cache_scoring_subtracts_device_depth_before_weighting() {
+        let tokens = [11, 12, 21, 22, 31, 32, 41];
+        for threads in [1, 2] {
+            let router = make_local_shared_cache_router(
+                threads,
+                Some(Arc::new(FakeSharedCache {
+                    hits: Some(dynamo_kv_router::protocols::SharedCacheHits::from_hits(
+                        &[true; 3],
+                    )),
+                    should_error: false,
+                })),
+            )
+            .await;
+            seed_router_device_prefix(&router, &tokens).await;
+            let scores = router
+                .get_overlap_scores(&tokens, None, None, None, None, true)
+                .await
+                .unwrap();
+            assert_eq!(scores.shared_cache.total_hit_blocks, 3);
+            assert_eq!(scores.shared_cache.ranges, vec![(0, 3)]);
+            assert_eq!(scores.workers.len(), 2);
+            let hot = &scores.workers[0];
+            assert_eq!((hot.worker_id, hot.device_blocks), (0, 2));
+            assert_eq!(hot.shared_beyond_device_blocks, Some(1));
+            assert_eq!(hot.router_credit_blocks, 1.0);
+            let cold = &scores.workers[1];
+            assert_eq!((cold.worker_id, cold.device_blocks), (1, 0));
+            assert_eq!(cold.shared_beyond_device_blocks, Some(3));
+            assert_eq!(cold.router_credit_blocks, 1.5);
+
+            for return_routing_hashes in [false, true] {
+                let outcome = router
+                    .find_best_match_details_with_policy_class(
+                        None,
+                        &tokens,
+                        None,
+                        None,
+                        false,
+                        return_routing_hashes,
+                        None,
+                        None,
+                        0.0,
+                        0,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        RoutingConstraints::default(),
+                    )
+                    .await
+                    .unwrap();
+                let FindBestMatchOutcome::Routed {
+                    worker,
+                    overlap_blocks,
+                    cached_tokens,
+                    routing_hashes,
+                    ..
+                } = outcome
+                else {
+                    panic!("expected routed outcome");
+                };
+                assert_eq!(worker, WorkerWithDpRank::new(1, 0));
+                assert_eq!(overlap_blocks, 0);
+                assert_eq!(cached_tokens, 0);
+                assert_eq!(routing_hashes.is_some(), return_routing_hashes);
+                if let Some(hashes) = routing_hashes {
+                    assert_eq!(
+                        hashes.local_hashes,
+                        compute_block_hash_for_seq(&tokens, 2, BlockHashOptions::default())
+                    );
+                }
+            }
+            router.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn local_shared_cache_errors_and_exclusion_preserve_device_overlap() {
+        let tokens = [11, 12, 21, 22, 31, 32, 41];
+        for threads in [1, 2] {
+            let router = make_local_shared_cache_router(
+                threads,
+                Some(Arc::new(FakeSharedCache {
+                    hits: None,
+                    should_error: true,
+                })),
+            )
+            .await;
+            seed_router_device_prefix(&router, &tokens).await;
+            for include_shared in [false, true] {
+                let scores = router
+                    .get_overlap_scores(&tokens, None, None, None, None, include_shared)
+                    .await
+                    .unwrap();
+                assert_eq!(scores.shared_cache.enabled, include_shared);
+                assert_eq!(scores.shared_cache.error.is_some(), include_shared);
+                assert_eq!(scores.shared_cache.total_hit_blocks, 0);
+                assert_eq!(scores.workers[0].device_blocks, 2);
+                assert_eq!(scores.workers[0].shared_beyond_device_blocks, None);
+                assert_eq!(scores.workers[0].router_credit_blocks, 0.5);
+            }
+            let FindBestMatchOutcome::Routed {
+                worker,
+                overlap_blocks,
+                ..
+            } = find_best_match(&router, &tokens, false).await.unwrap()
+            else {
+                panic!("expected routed outcome");
+            };
+            assert_eq!(worker, WorkerWithDpRank::new(0, 0));
+            assert_eq!(overlap_blocks, 2);
+            router.shutdown().await;
+        }
+    }
+
+    #[derive(Default)]
+    struct EligibilityCache {
+        queries: std::sync::Mutex<Vec<(bool, Option<String>)>>,
+    }
+
+    #[async_trait]
+    impl SharedKvCache for EligibilityCache {
+        async fn check_blocks(
+            &self,
+            query: SharedCacheQuery<'_>,
+        ) -> Result<dynamo_kv_router::protocols::SharedCacheHits, KvRouterError> {
+            self.queries.lock().unwrap().push((
+                query.shared_cache_eligible,
+                query.cache_namespace.map(str::to_owned),
+            ));
+            Ok(Default::default())
+        }
+    }
+
+    #[tokio::test]
+    async fn local_shared_cache_queries_reject_eagle_and_multimodal_eligibility() {
+        let cache = Arc::new(EligibilityCache::default());
+        let mut router = make_local_shared_cache_router(1, Some(cache.clone())).await;
+        let tokens = [11, 12, 21, 22, 31, 32, 41];
+        let mm_infos = [None, None, None];
+        for is_eagle in [false, true] {
+            router.is_eagle = is_eagle;
+            for block_mm_infos in [None, Some(mm_infos.as_slice())] {
+                for namespace in [None, Some("tenant")] {
+                    let eligible = !is_eagle && block_mm_infos.is_none();
+                    router
+                        .get_overlap_scores(&tokens, None, block_mm_infos, None, namespace, true)
+                        .await
+                        .unwrap();
+                    for return_routing_hashes in [false, true] {
+                        router
+                            .find_best_match_details_with_policy_class(
+                                None,
+                                &tokens,
+                                block_mm_infos,
+                                None,
+                                false,
+                                return_routing_hashes,
+                                None,
+                                namespace.map(str::to_owned),
+                                0.0,
+                                0,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                RoutingConstraints::default(),
+                            )
+                            .await
+                            .unwrap();
+                    }
+                    assert_eq!(
+                        std::mem::take(&mut *cache.queries.lock().unwrap()),
+                        vec![(eligible, namespace.map(str::to_owned)); 3],
+                    );
+                }
+            }
+        }
+        router
+            .get_overlap_scores(&tokens, None, None, None, None, false)
+            .await
+            .unwrap();
+        assert!(cache.queries.lock().unwrap().is_empty());
+        router.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shared_cache_shutdown_cancels_and_awaits_both_task_handles() {
+        let mut router = make_local_shared_cache_router(1, None).await;
+        let cancellation = router.cancellation_token();
+        let (first_cancelled, first_observed) = tokio::sync::oneshot::channel();
+        let (second_cancelled, second_observed) = tokio::sync::oneshot::channel();
+        let (release_first, first_release) = tokio::sync::oneshot::channel();
+        let (release_second, second_release) = tokio::sync::oneshot::channel();
+        let (first_finished, first_done) = tokio::sync::oneshot::channel();
+        let (second_finished, second_done) = tokio::sync::oneshot::channel();
+        let first_cancellation = cancellation.clone();
+        let second_cancellation = cancellation.clone();
+        router.set_shared_cache_tasks([
+            tokio::spawn(async move {
+                first_cancellation.cancelled().await;
+                first_cancelled.send(()).unwrap();
+                first_release.await.unwrap();
+                first_finished.send(()).unwrap();
+            }),
+            tokio::spawn(async move {
+                second_cancellation.cancelled().await;
+                second_cancelled.send(()).unwrap();
+                second_release.await.unwrap();
+                second_finished.send(()).unwrap();
+            }),
+        ]);
+        let mut shutdown = Box::pin(router.shutdown());
+        let timeout = Duration::from_secs(2);
+        tokio::time::timeout(timeout, async {
+            tokio::select! {
+                biased;
+                _ = &mut shutdown => panic!("shutdown returned before either task was released"),
+                result = async { first_observed.await.unwrap(); second_observed.await.unwrap(); } => result,
+            }
+        }).await.unwrap();
+        assert!(cancellation.is_cancelled());
+        release_first.send(()).unwrap();
+        tokio::time::timeout(timeout, async {
+            tokio::select! {
+                biased;
+                _ = &mut shutdown => panic!("shutdown returned before its second task was released"),
+                result = first_done => result.unwrap(),
+            }
+        }).await.unwrap();
+        assert!(matches!(
+            futures::poll!(&mut shutdown),
+            std::task::Poll::Pending
+        ));
+        release_second.send(()).unwrap();
+        tokio::time::timeout(timeout, &mut shutdown).await.unwrap();
+        second_done.await.unwrap();
     }
 
     /// Picks worker 0 and records which construction it belongs to. Its
