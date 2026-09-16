@@ -90,7 +90,7 @@ pub(crate) fn http_action_for_class(class: dynamo_runtime::error::ErrorClass) ->
         ErrorClass::Internal => {
             response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
         }
-        _ => unreachable!("normalized error class must be canonical"),
+        _ => response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"),
     }
 }
 

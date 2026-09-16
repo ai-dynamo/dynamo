@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use super::{
     RouteDoc, apply_request_tool_call_parsing_options,
     disconnect::{
-        ConnectionHandle, StreamErrorSignal, create_connection_monitor, monitor_for_disconnects,
+        ConnectionHandle, StreamErrorSignal, create_connection_monitor,
         monitor_for_disconnects_with_activity_and_error_signal,
         monitor_for_disconnects_with_error_signal,
     },
@@ -288,7 +288,7 @@ pub(super) fn metric_error_type_for_class(class: dynamo_runtime::error::ErrorCla
         ErrorClass::BackendProtocol | ErrorClass::DeadlineExceeded | ErrorClass::Internal => {
             ErrorType::Internal
         }
-        _ => unreachable!("normalized error class must be canonical"),
+        _ => ErrorType::Internal,
     }
 }
 
@@ -5006,22 +5006,34 @@ async fn videos(
             },
         )
         .await;
+        let error_signal = StreamErrorSignal::default();
+        let producer_error_signal = error_signal.clone();
         let stream = stream.flat_map(move |response| {
+            let semantic_error = set_stream_semantic_error(&response, &producer_error_signal);
             let sse_result = process_response_using_event_converter_and_observe_metrics(
                 EventConverter::from(response),
                 &mut response_collector,
                 &mut http_queue_guard,
             );
+            if semantic_error && matches!(sse_result, Ok(Some(_))) {
+                producer_error_signal.mark_terminal_event_emitted();
+            }
             match sse_result {
                 Ok(Some(ev)) => stream::iter(vec![Ok(ev)]),
                 Ok(None) => stream::iter(vec![]),
                 Err(e) => stream::iter(vec![Err(e)]),
             }
         });
-        // monitor_for_disconnects: arms stream_handle, pre-marks inflight Cancelled,
-        // emits data:[DONE] on natural end, demotes to Internal on mid-stream Err,
+        // The disconnect monitor arms stream_handle, pre-marks inflight Cancelled,
+        // emits data:[DONE] on natural end, classifies typed mid-stream errors,
         // and kills the engine context when the client disconnects.
-        let stream = monitor_for_disconnects(stream, ctx, inflight, stream_handle);
+        let stream = monitor_for_disconnects_with_error_signal(
+            stream,
+            ctx,
+            inflight,
+            stream_handle,
+            error_signal,
+        );
 
         let mut sse_stream = Sse::new(stream);
         if let Some(keep_alive) = state.sse_keep_alive() {

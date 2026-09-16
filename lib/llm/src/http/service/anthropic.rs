@@ -1363,7 +1363,7 @@ fn anthropic_error_type_for_class(class: ErrorClass) -> &'static str {
         | ErrorClass::BackendProtocol
         | ErrorClass::NotImplemented
         | ErrorClass::Internal => "api_error",
-        _ => unreachable!("normalized error class must be canonical"),
+        _ => "api_error",
     }
 }
 
