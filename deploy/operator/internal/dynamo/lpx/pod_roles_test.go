@@ -341,8 +341,8 @@ func TestConfigureNodeLocalLPURuntimeRoles(t *testing.T) {
 		RunAsGroup:   ptr.To(int64(0)),
 		RunAsNonRoot: ptr.To(false),
 	}, agentContainer.SecurityContext)
-	require.True(t, agentContainer.TTY)
-	require.True(t, agentContainer.Stdin)
+	require.False(t, agentContainer.TTY)
+	require.False(t, agentContainer.Stdin)
 	require.Nil(t, agentContainer.LivenessProbe)
 	require.Nil(t, agentContainer.StartupProbe)
 	require.Nil(t, agentContainer.Lifecycle)

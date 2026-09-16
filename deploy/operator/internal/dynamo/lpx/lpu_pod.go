@@ -37,13 +37,11 @@ func ensureLPUNodeTolerations(podSpec *corev1.PodSpec) {
 }
 
 func applyLPUWorkerContainerBase(container *corev1.Container) {
-	// Workers need privileged device access and an interactive runtime session.
+	// Workers need privileged device access.
 	container.SecurityContext = &corev1.SecurityContext{
 		Privileged: ptr.To(true),
 		RunAsUser:  ptr.To(int64(0)),
 	}
-	container.TTY = true
-	container.Stdin = true
 
 	// Agent scheduling already initialized device resources; add runtime CPU and hugepage requirements.
 	cpuRequest := *resource.NewQuantity(defaultLPUAgentCPUs, resource.DecimalSI)

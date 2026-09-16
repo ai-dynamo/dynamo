@@ -307,8 +307,6 @@ func configureNodeLocalAgentWorkerContainer(
 			RunAsGroup:   ptr.To(int64(0)),
 			RunAsNonRoot: ptr.To(false),
 		}
-		container.TTY = true
-		container.Stdin = true
 
 		// Remove health and lifecycle behavior owned by the source image process.
 		container.LivenessProbe = nil

@@ -557,8 +557,6 @@ spec:
               periodSeconds: 5
               successThreshold: 1
               timeoutSeconds: 1
-            stdin: true
-            tty: true
             volumeMounts:
             - mountPath: /nfs
               name: model-storage
