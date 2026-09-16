@@ -3,6 +3,7 @@
 
 """Unit tests for SGLang backend components."""
 
+import asyncio
 import logging
 import os
 import re
@@ -17,6 +18,7 @@ from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 from sglang.srt.managers.io_struct import ProfileReq
 
 import dynamo.sglang._compat as sglang_compat
+import dynamo.sglang._disagg as disagg_mod
 import dynamo.sglang.args as sglang_args
 from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
 from dynamo.common.snapshot.constants import SNAPSHOT_CONTROL_DIR_ENV
@@ -43,6 +45,7 @@ from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
+from dynamo.sglang.publisher import finish_worker_teardown
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
 from dynamo.sglang.tests.conftest import make_cli_args_fixture
@@ -1651,3 +1654,282 @@ async def test_lora_registration_model_type_gate(
     assert captured["kv_cache_block_size"] == 32
     assert captured["runtime_config"] is lora_runtime_config
     assert "token_budget" in captured["runtime_config"].runtime_data
+
+
+async def _real_shaped_metrics_task() -> asyncio.Task:
+    """A metrics task shaped like publisher.run()/_idle(): parked on one await,
+    with no cleanup work after cancellation."""
+    started = asyncio.Event()
+
+    async def metrics_loop():
+        started.set()
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(metrics_loop())
+    await started.wait()
+    return task
+
+
+def _fake_teardown_targets(steps):
+    """A fake handler.cleanup + run_deferred_handlers pair for
+    finish_worker_teardown tests."""
+
+    def cleanup():
+        steps.append("handler.cleanup")
+
+    async def run_deferred_handlers():
+        steps.append("run_deferred_handlers")
+
+    return cleanup, run_deferred_handlers
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_worker_teardown_surfaces_cancellation_after_metrics_unwind():
+    started = asyncio.Event()
+    unwinding = asyncio.Event()
+    release_metrics = asyncio.Event()
+    steps = []
+
+    async def metrics_loop():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            unwinding.set()
+            await release_metrics.wait()
+            raise
+
+    async def deferred():
+        steps.append("run_deferred_handlers")
+
+    metrics_task = asyncio.create_task(metrics_loop())
+    await started.wait()
+
+    async def caller():
+        try:
+            await finish_worker_teardown(
+                metrics_task,
+                lambda: steps.append("handler.cleanup"),
+                deferred,
+            )
+        except asyncio.CancelledError:
+            steps.append("caller.cancelled")
+            raise
+
+    outer = asyncio.create_task(caller())
+
+    await unwinding.wait()
+    outer.cancel()
+    release_metrics.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await outer
+
+    assert steps == ["handler.cleanup", "run_deferred_handlers", "caller.cancelled"]
+    assert metrics_task.cancelled()
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_worker_teardown_surfaces_cancellation_after_deferred_cleanup():
+    metrics_task = await _real_shaped_metrics_task()
+    deferred_started = asyncio.Event()
+    release_deferred = asyncio.Event()
+    steps = []
+
+    def cleanup():
+        steps.append("handler.cleanup")
+
+    async def deferred():
+        deferred_started.set()
+        await release_deferred.wait()
+        steps.append("run_deferred_handlers")
+
+    async def caller():
+        try:
+            await finish_worker_teardown(metrics_task, cleanup, deferred)
+        except asyncio.CancelledError:
+            steps.append("caller.cancelled")
+            raise
+
+    outer = asyncio.create_task(caller())
+    await deferred_started.wait()
+    outer.cancel()
+    release_deferred.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await outer
+
+    assert steps == ["handler.cleanup", "run_deferred_handlers", "caller.cancelled"]
+    assert metrics_task.cancelled()
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_worker_teardown_is_silent_when_nothing_cancels():
+    """The ordinary shutdown path: teardown runs, nothing is raised."""
+    metrics_task = await _real_shaped_metrics_task()
+    steps = []
+    cleanup, run_deferred_handlers = _fake_teardown_targets(steps)
+
+    await finish_worker_teardown(metrics_task, cleanup, run_deferred_handlers)
+
+    assert steps == ["handler.cleanup", "run_deferred_handlers"]
+    assert metrics_task.cancelled()
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_worker_teardown_keeps_the_body_failure(caplog):
+    """When the worker body already failed, that exception is the diagnostic;
+    the cancellation is logged instead of replacing it."""
+    started = asyncio.Event()
+    unwinding = asyncio.Event()
+    release_metrics = asyncio.Event()
+    steps = []
+    cleanup, run_deferred_handlers = _fake_teardown_targets(steps)
+
+    async def metrics_loop():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            unwinding.set()
+            await release_metrics.wait()
+            raise
+
+    metrics_task = asyncio.create_task(metrics_loop())
+    await started.wait()
+
+    async def failing_worker():
+        try:
+            raise RuntimeError("nats is down")
+        finally:
+            await finish_worker_teardown(
+                metrics_task, cleanup, run_deferred_handlers, body_failed=True
+            )
+
+    outer = asyncio.create_task(failing_worker())
+    await unwinding.wait()
+    outer.cancel()
+    release_metrics.set()
+
+    with pytest.raises(RuntimeError, match="nats is down"):
+        await outer
+
+    assert steps == ["handler.cleanup", "run_deferred_handlers"]
+    assert "an earlier exception is already propagating" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("warmup_error", "message"),
+    [
+        (asyncio.TimeoutError(), "Prefill warmup timed out"),
+        (ValueError("boom"), "Prefill warmup failed: boom"),
+    ],
+)
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_prefill_warmup_failure_cancels_metrics(
+    monkeypatch, warmup_error, message
+):
+    import dynamo.sglang.init_llm as init_llm_mod
+
+    metrics_started = asyncio.Event()
+
+    async def metrics_loop():
+        metrics_started.set()
+        await asyncio.Event().wait()
+
+    async def fail_warmup(engine, port):
+        raise warmup_error
+
+    monkeypatch.setattr(disagg_mod, "warmup_prefill_engine", fail_warmup)
+    metrics_task = asyncio.create_task(metrics_loop())
+    await metrics_started.wait()
+
+    with pytest.raises(RuntimeError, match=message) as raised:
+        await init_llm_mod._warmup_prefill_engine(
+            object(),
+            SimpleNamespace(disaggregation_bootstrap_port=1234),
+            metrics_task,
+        )
+
+    assert raised.value.__cause__ is warmup_error
+    assert metrics_task.cancelled()
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_prefill_warmup_cancellation_cancels_metrics(monkeypatch):
+    import dynamo.sglang.init_llm as init_llm_mod
+
+    warmup_started = asyncio.Event()
+
+    async def suspended_warmup(engine, port):
+        warmup_started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(disagg_mod, "warmup_prefill_engine", suspended_warmup)
+    metrics_task = await _real_shaped_metrics_task()
+    warmup_task = asyncio.create_task(
+        init_llm_mod._warmup_prefill_engine(
+            object(),
+            SimpleNamespace(disaggregation_bootstrap_port=1234),
+            metrics_task,
+        )
+    )
+    try:
+        await warmup_started.wait()
+        warmup_task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await warmup_task
+
+        assert metrics_task.done()
+        assert metrics_task.cancelled()
+    finally:
+        if not metrics_task.done():
+            metrics_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await metrics_task
+
+
+def _import_sglang_main_without_reconfiguring_logging(monkeypatch):
+    from dynamo.runtime import logging as runtime_logging
+
+    configure_dynamo_logging = runtime_logging.configure_dynamo_logging
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime_logging, "configure_dynamo_logging", lambda: None)
+        import dynamo.sglang.main as sglang_main
+
+    sglang_main.configure_dynamo_logging = configure_dynamo_logging
+    return sglang_main
+
+
+def test_main_treats_cancellation_as_clean_exit(monkeypatch):
+    sglang_main = _import_sglang_main_without_reconfiguring_logging(monkeypatch)
+    messages = []
+    monkeypatch.setattr(sglang_main.logger, "info", messages.append)
+
+    async def cancelled_worker():
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(sglang_main, "worker", cancelled_worker)
+
+    sglang_main.main()
+
+    assert messages == ["Worker cancelled; shutdown complete"]
+
+
+def test_main_preserves_worker_failure(monkeypatch):
+    sglang_main = _import_sglang_main_without_reconfiguring_logging(monkeypatch)
+
+    async def failing_worker():
+        raise RuntimeError("worker failed")
+
+    monkeypatch.setattr(sglang_main, "worker", failing_worker)
+
+    with pytest.raises(RuntimeError, match="worker failed"):
+        sglang_main.main()
