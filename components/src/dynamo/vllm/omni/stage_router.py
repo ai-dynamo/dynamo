@@ -319,6 +319,7 @@ async def init_omni_stage_router(
         # Aggregated with no peer dependencies.
         worker_type=WorkerType.Aggregated,
         needs=[],
+        revision=getattr(config.engine_args, "revision", None),
     )
     register_model_taint_route(runtime, generate_endpoint)
     logger.info("OmniStageRouter registered at '%s'", generate_endpoint)

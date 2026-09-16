@@ -151,6 +151,7 @@ async def init_omni(
             # frontend, so they register as Aggregated.
             worker_type=WorkerType.Aggregated,
             needs=[],
+            revision=getattr(config.engine_args, "revision", None),
             max_gpu_lora_count=_base_model_lora_capacity(config, lora_enabled),
         )
 
@@ -222,7 +223,9 @@ async def worker():
         config.served_model_name = config.engine_args.served_model_name = config.model
 
     if not os.path.exists(config.model):
-        await fetch_model(config.model)
+        await fetch_model(
+            config.model, revision=getattr(config.engine_args, "revision", None)
+        )
 
     shutdown_event = asyncio.Event()
     runtime, loop = create_runtime(
