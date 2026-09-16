@@ -127,6 +127,29 @@ func workerHashSpec(dcd *v1beta1.DynamoComponentDeployment) v1beta1.DynamoCompon
 		spec.Experimental.Grove.ForceScalingGroup = nil
 	}
 
+	// Empty wrappers and disabled checkpoint configurations are equivalent to omission.
+	if spec.Experimental != nil {
+		if spec.Experimental.Grove != nil && *spec.Experimental.Grove == (v1beta1.GroveSpec{}) {
+			spec.Experimental.Grove = nil
+		}
+		if spec.Experimental.Checkpoint != nil && !spec.Experimental.Checkpoint.Enabled {
+			spec.Experimental.Checkpoint = nil
+		}
+		if *spec.Experimental == (v1beta1.ExperimentalSpec{}) {
+			spec.Experimental = nil
+		}
+	}
+
+	// Omitted and backend-default cache paths render identically. This requires
+	// GenerateDynamoComponentsDeployments to populate spec.BackendFramework
+	// on the generated DCD before workerHashSpec is called.
+	if spec.CompilationCache != nil {
+		defaultPath := getDefaultCompilationCacheMountPoint(BackendFramework(spec.BackendFramework))
+		if defaultPath != "" && spec.CompilationCache.MountPath == defaultPath {
+			spec.CompilationCache.MountPath = ""
+		}
+	}
+
 	return *spec
 }
 
