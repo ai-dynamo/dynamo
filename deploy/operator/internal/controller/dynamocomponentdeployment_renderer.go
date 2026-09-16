@@ -267,10 +267,10 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 
 // applyDiscoveryLabels marks the pod for the Kubernetes discovery backend.
 //
-// The elastic-EP follower is skipped for the same reason buildCliqueForRole skips
-// RoleGMS: it runs a bare Ray join, not the Dynamo runtime, so it never registers a
-// DynamoWorkerMetadata CR. Labelling it would only keep it in the discovery daemon's
-// reflector store and wake its debounce loop on every scale-up/scale-down.
+// The elastic-EP follower is skipped (same reason buildCliqueForRole skips RoleGMS): it runs
+// a bare Ray join, not the Dynamo runtime, so it never registers a DynamoWorkerMetadata CR.
+// Labelling it would only park it in the discovery daemon's reflector store and wake its
+// debounce loop on every scale-up/scale-down.
 func (r *dcdWorkloadRenderer) applyDiscoveryLabels(role dynamo.Role, podAnnotations, podLabels map[string]string) {
 	if role == dynamo.RoleFollower {
 		return
@@ -282,20 +282,14 @@ func (r *dcdWorkloadRenderer) applyDiscoveryLabels(role dynamo.Role, podAnnotati
 	podLabels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
 }
 
-// applyNVLinkTopologyCapability conditionally applies NVLink-partition pod affinity to followers.
+// applyNVLinkTopologyCapability drops the follower's NVLink-partition affinity on clusters
+// that can never satisfy it.
 //
-// By default, synthesis requires followers to land on the leader's `nvidia.com/gpu.clique`.
-// This guarantees NVLink connectivity and prevents silent runtime failures where the
-// follower appears healthy but cannot communicate with the leader.
-//
-// However, this label is only stamped on specific hardware (like GB200s). If the leader
-// lands on a node without this label, the follower's affinity can never be satisfied,
-// causing it to hang in a Pending state indefinitely.
-//
-// To prevent this, we drop the affinity requirement if the *leader's* node lacks the
-// label, allowing the follower to schedule normally. (Note: We must check the leader's
-// node specifically, as the presence of an unrelated GB200 elsewhere in a mixed cluster
-// will not satisfy the affinity.)
+// Synthesis pins followers to the leader's `nvidia.com/gpu.clique` so they share an NVLink
+// partition; without it a follower looks healthy but cannot talk to the leader. That label
+// exists only on some hardware (GB200s), so elsewhere the follower stays Pending forever.
+// The test is the *leader's* node, not the cluster: an unrelated GB200 elsewhere in a mixed
+// cluster does not satisfy the affinity.
 func (r *dcdWorkloadRenderer) applyNVLinkTopologyCapability(
 	ctx context.Context,
 	role dynamo.Role,
@@ -310,11 +304,7 @@ func (r *dcdWorkloadRenderer) applyNVLinkTopologyCapability(
 	kept := make([]corev1.PodAffinityTerm, 0, len(terms))
 	var dropped bool
 	for _, term := range terms {
-		// Only the term synthesis added is ours to remove. The follower deep-copies the
-		// leader's spec, so a user may have their own gpu.clique term here -- and one written
-		// with MatchExpressions rather than MatchLabels would look unsatisfiable to the
-		// lookup below and be deleted silently. Match on the generation label synthesis
-		// stamps, which a user term does not carry.
+		// Only synthesis's own term is ours to remove; see isSynthesizedLeaderCliqueTerm.
 		if !isSynthesizedLeaderCliqueTerm(term) {
 			kept = append(kept, term)
 			continue
@@ -323,9 +313,7 @@ func (r *dcdWorkloadRenderer) applyNVLinkTopologyCapability(
 		if err != nil {
 			return errors.Wrap(err, "failed to determine whether the elastic-EP leader sits in an NVLink partition")
 		}
-		// Only a proven-unsupported cluster drops the term. Unknown keeps it: the
-		// scheduler evaluates pod affinity when it places the pod, and retries until it
-		// can, so a leader that is merely not scheduled yet resolves itself.
+		// Only proven-unsupported drops the term; unknown keeps it. See nvlinkSupport.
 		if support != nvlinkUnsupported {
 			kept = append(kept, term)
 			continue
@@ -341,8 +329,7 @@ func (r *dcdWorkloadRenderer) applyNVLinkTopologyCapability(
 		"topologyKey", commonconsts.NodeLabelGPUClique,
 	)
 	podSpec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution = kept
-	// Leave no empty PodAffinity behind: an affinity with no terms is meaningless and
-	// only makes the rendered pod spec harder to read.
+	// Leave no empty PodAffinity behind: it means nothing and only clutters the pod spec.
 	if len(kept) == 0 {
 		podSpec.Affinity.PodAffinity = nil
 	}
@@ -350,13 +337,13 @@ func (r *dcdWorkloadRenderer) applyNVLinkTopologyCapability(
 }
 
 // isSynthesizedLeaderCliqueTerm reports whether a required pod-affinity term is the one
-// synthesizeElasticEPFollowerDCD added, rather than one the follower inherited from the
-// leader's user-supplied affinity.
+// synthesizeElasticEPFollowerDCD added, rather than one the follower inherited by deep-copying
+// the leader's user-supplied affinity.
 //
-// The distinguishing mark is KubeLabelDynamoSelector: synthesis pins its term to a single
-// leader DCD generation, and a user-authored term has no reason to carry that internal
-// label. Topology key alone is not enough -- a user may legitimately write their own
-// gpu.clique term, and removing it would silently discard their scheduling intent.
+// The mark is KubeLabelDynamoSelector, which pins the term to one leader DCD generation and
+// which a user term has no reason to carry. Topology key alone is not enough: a user may write
+// their own gpu.clique term, and one using MatchExpressions instead of MatchLabels would look
+// unsatisfiable to the node lookup and be dropped silently.
 func isSynthesizedLeaderCliqueTerm(term corev1.PodAffinityTerm) bool {
 	if term.TopologyKey != commonconsts.NodeLabelGPUClique || term.LabelSelector == nil {
 		return false
@@ -365,18 +352,15 @@ func isSynthesizedLeaderCliqueTerm(term corev1.PodAffinityTerm) bool {
 	return ours
 }
 
-// nvlinkSupport is the three-way answer to "can the follower's partition affinity ever
-// be satisfied?". Two-way was the bug: it collapsed "the leader is not scheduled yet"
-// into "this cluster has no NVLink", and dropped a term the scheduler would have
-// honoured moments later.
+// nvlinkSupport is the three-way answer to "can the follower's partition affinity ever be
+// satisfied?". Not a bool: two-way collapsed "the leader is not scheduled yet" into "this
+// cluster has no NVLink", dropping a term the scheduler would have honoured moments later.
 type nvlinkSupport int
 
 const (
 	// nvlinkUnknown means no leader pod is scheduled yet, so there is nothing to compare
-	// against. Keep the term: pod affinity is evaluated by the scheduler at scheduling
-	// time, not here, and the scheduler retries a Pending pod until the leader lands.
-	// Dropping it would turn a transient the scheduler resolves on its own into a
-	// permanent loss of the guarantee.
+	// against. Keep the term: the scheduler evaluates pod affinity when it places the pod and
+	// retries a Pending pod until the leader lands, so this resolves itself.
 	nvlinkUnknown nvlinkSupport = iota
 	// nvlinkSupported means a scheduled leader sits on a node advertising a partition.
 	nvlinkSupported
@@ -385,12 +369,9 @@ const (
 	nvlinkUnsupported
 )
 
-// leaderNVLinkSupport reports whether the node running this follower's leader advertises
-// an NVLink partition, or that no leader is placed yet.
-//
-// Only a *scheduled* leader on an unlabelled node proves the cluster cannot satisfy the
-// term. Everything else -- no leader pods, a leader still being placed, a node we may not
-// read -- is unknown, and unknown keeps the term.
+// leaderNVLinkSupport reports whether the node running this follower's leader advertises an
+// NVLink partition. Only a *scheduled* leader on an unlabelled node is unsupported; no leader
+// pods, a leader still being placed, or a node we may not read are all unknown.
 func (r *dcdWorkloadRenderer) leaderNVLinkSupport(
 	ctx context.Context,
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
@@ -415,12 +396,11 @@ func (r *dcdWorkloadRenderer) leaderNVLinkSupport(
 		}
 		node := &corev1.Node{}
 		if err := r.nodeReader.Get(ctx, types.NamespacedName{Name: nodeName}, node); err != nil {
-			// Forbidden is treated like NotFound: both mean "cannot tell whether this is
-			// an NVLink node", which is unknown rather than unsupported, so the term
-			// stays. Namespace-restricted mode grants the manager a namespaced Role,
-			// which cannot carry a cluster-scoped Node rule at all, so returning an error
-			// here would wedge the whole reconcile instead of leaving one placement
-			// decision undecided.
+			// Forbidden is treated like NotFound: both mean "cannot tell whether this is an
+			// NVLink node", which is unknown, not unsupported, so the term stays. Erroring
+			// out would wedge the whole reconcile over one undecided placement: in
+			// namespace-restricted mode the manager gets a namespaced Role, which cannot
+			// carry a cluster-scoped Node rule at all.
 			if k8serrors.IsNotFound(err) || k8serrors.IsForbidden(err) {
 				log.FromContext(ctx).V(1).Info(
 					"cannot read the elastic-EP leader's node; scheduling the follower without partition affinity",
@@ -433,8 +413,7 @@ func (r *dcdWorkloadRenderer) leaderNVLinkSupport(
 		if _, ok := node.Labels[commonconsts.NodeLabelGPUClique]; ok {
 			return nvlinkSupported, nil
 		}
-		// A scheduled leader on an unlabelled node is the one positive answer: this
-		// cluster has no NVLink partitions, so the term can never be satisfied.
+		// Scheduled leader, unlabelled node: this cluster has no NVLink partitions.
 		return nvlinkUnsupported, nil
 	}
 	// No leader pod is scheduled yet. Unknown, not unsupported.

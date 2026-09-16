@@ -279,14 +279,13 @@ func inferencePoolAvailabilityError(ctx context.Context, mgr ctrl.Manager) error
 	)
 }
 
-// validateElasticEPRequiresCommand rejects a vLLM component that requests the
-// elastic-EP Ray topology (--enable-elastic-ep with --data-parallel-backend ray,
-// including the -dpb alias and flag=value spellings) but omits the main
-// container command. The operator starts the single-pod Ray head by rewriting
-// the container to run "ray start ... && <command>", which needs an explicit
-// executable; with only the image ENTRYPOINT (empty command) it cannot build
-// that command, so elastic EP would silently never start. Fail closed here with
-// an actionable error rather than admit a request the operator cannot fulfill.
+// validateElasticEPRequiresCommand requires an explicit main container command on a vLLM
+// component that requests the elastic-EP Ray topology (--enable-elastic-ep with
+// --data-parallel-backend ray, including the -dpb alias and flag=value spellings).
+//
+// The operator starts the single-pod Ray head by rewriting the container to run
+// "ray start ... && <command>". With only the image ENTRYPOINT (empty command) there is
+// nothing to wrap, so elastic EP would silently never start: fail closed instead.
 func validateElasticEPRequiresCommand(
 	backendFramework string,
 	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
@@ -318,18 +317,14 @@ func validateElasticEPRequiresCommand(
 // validateElasticEPSingleReplica rejects a vLLM component that requests the elastic-EP
 // Ray topology with more than one replica.
 //
-// Elastic EP grows by adding followers to one leader's Ray cluster, not by adding
-// leaders -- the leader is the Ray head. Two replicas therefore mean two independent Ray
-// clusters, but the operator renders them with one identity: a single "<component>-ray"
-// headless Service selecting every pod carrying the component labels, and a single
-// follower derived per component. A follower would join whichever head DNS happened to
-// resolve, and nothing can express which leader it belongs to.
-//
-// Running several independent elastic-EP clusters is a reasonable thing to want. It needs
-// per-replica identity -- a Ray Service and follower set per replica -- which this
-// operator does not render yet. Reject it here rather than silently degrade: without this
-// the operator quietly stops emitting both the Ray Service and the follower, leaving the
-// user with leaders that can never grow and no indication why.
+// The leader is the Ray head; elastic EP grows by adding followers to it, not leaders. Two
+// replicas mean two independent Ray clusters, but the operator renders one identity for
+// them: one "<component>-ray" headless Service selecting every pod with the component
+// labels, and one follower per component, so a follower would join whichever head DNS
+// resolved with no way to name its leader. Per-replica identity (a Ray Service and
+// follower set each) is not rendered yet, and without this check the operator silently
+// emits neither the Ray Service nor the follower, leaving leaders that can never grow and
+// no indication why.
 func validateElasticEPSingleReplica(
 	backendFramework string,
 	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
@@ -358,17 +353,13 @@ func validateElasticEPSingleReplica(
 	return allErrs
 }
 
-// validateElasticEPSingleReplicaRatcheted applies the single-replica rule while letting
-// an unchanged pre-existing violation through.
+// validateElasticEPSingleReplicaRatcheted applies the single-replica rule but lets an
+// unchanged pre-existing violation through, so existing objects stay editable.
 //
-// The rule is gated, and a cluster-wide gate can be switched on long after a component
-// was admitted -- admission never re-runs on a gate flip. Without a ratchet, enabling the
-// gate would freeze every already-accepted component with replicas > 1: not just its
-// replica count, but any unrelated edit to it, because the stateless rule fires again on
-// every UPDATE. Ratcheting on an unchanged replica count keeps the rule effective for new
-// violations while leaving existing objects editable.
-//
-// oldSpec is nil on create, where there is nothing to ratchet against.
+// The rule is gated and admission never re-runs when a cluster-wide gate flips on, so a
+// component with replicas > 1 can already exist once the gate is enabled. The rule is
+// stateless, so it would then fire on every UPDATE and block any edit to that component,
+// not just its replica count. oldSpec is nil on create: nothing to ratchet against.
 func validateElasticEPSingleReplicaRatcheted(
 	backendFramework string,
 	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
@@ -379,9 +370,8 @@ func validateElasticEPSingleReplicaRatcheted(
 	if len(newErrs) == 0 || oldSpec == nil {
 		return newErrs
 	}
-	// Only an identical violation is tolerated. Changing the replica count -- in either
-	// direction, including making it worse -- re-asserts the rule, so a user cannot edit
-	// their way further from it under cover of the ratchet.
+	// Tolerate only an identical violation: any change to the replica count, in either
+	// direction and including making it worse, re-asserts the rule.
 	if len(validateElasticEPSingleReplica(backendFramework, oldSpec, fldPath)) == 0 {
 		return newErrs
 	}

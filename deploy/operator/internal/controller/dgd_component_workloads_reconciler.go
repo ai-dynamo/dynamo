@@ -39,12 +39,11 @@ import (
 
 // componentWorkloadsReconciler owns the component pathway's complete DCD graph
 // reconciliation without depending on the top-level DGD reconciler.
-// This reconciler deliberately does not carry features.ElasticEPRayPoC. Nothing on this
-// pathway branches on it: follower synthesis is ungated (it is the deployment's declared
-// width, not capacity the PoC invents), and a follower's replica count freezes at whatever
-// is live regardless of the gate. The gate's remaining job is the admission rule in
-// internal/webhook/validation. Holding a copy here that nothing reads is how a gate field
-// silently stops meaning anything.
+// It deliberately holds no features.ElasticEPRayPoC copy -- nothing here branches on the
+// gate. Follower synthesis is ungated (it stamps the deployment's declared width, not
+// capacity the PoC invents) and follower replicas freeze at the live value either way. The
+// gate's only remaining job is the admission rule in internal/webhook/validation; an unread
+// copy here would just let it silently stop meaning anything.
 type componentWorkloadsReconciler struct {
 	syncer  dgdResourceSyncer
 	rollout *dgdWorkerRolloutReconciler
@@ -99,10 +98,10 @@ func (r *componentWorkloadsReconciler) Reconcile(
 
 	for key, dcd := range dcds {
 		// checkpointInfos is keyed by declared component name, so a synthesized elastic-EP
-		// follower looks up nil -- which is correct. Its command is a bare
-		// `ray start --block`, so inheriting the leader's checkpoint would make it a CRIU
-		// restore target for an engine it never runs. The GMS claim template is the
-		// opposite case and does resolve to the leader; see dynamo.ElasticEPComponentIdentity.
+		// follower resolves to nil -- correct: it runs a bare `ray start --block`, and the
+		// leader's checkpoint would make it a CRIU restore target for an engine it never runs.
+		// The GMS claim template is the opposite case and does resolve to the leader; see
+		// dynamo.ElasticEPComponentIdentity.
 		if err := r.applyCheckpointStartupPolicy(dcd, checkpointInfos[key]); err != nil {
 			return ReconcileResult{}, fmt.Errorf("failed to apply checkpoint startup policy for %s: %w", key, err)
 		}
@@ -285,27 +284,20 @@ func (r *componentWorkloadsReconciler) preserveExistingDCDState(
 
 	desired.Spec.BackendFramework = existing.Spec.BackendFramework
 
-	// A synthesized follower's replica count is seeded once, at creation, and never
-	// re-asserted afterwards.
-	//
-	// Synthesis is ungated and re-derives the follower on every pass, stamping the
-	// declared launch width (`--data-parallel-size` minus the leader's own rank). That
-	// stamp is what a follower is CREATED with; it is not a target the operator drives
-	// the count back to. Once the object exists, the live value wins in both directions:
+	// A synthesized follower's replica count is seeded at creation and never re-asserted:
+	// once the object exists, the live value wins in both directions.
 	//
 	//   scaled up   3 -> 5   stays 5
 	//   scaled down 3 -> 1   stays 1
 	//
-	// This holds at either gate position, which makes the gate deliberately absent from
-	// this decision. "Gate off" means the count stops changing -- it freezes wherever it
-	// is -- not that the operator drags it back to the declared width. Dragging it back
-	// would be the worse of the two failures in both directions: downward it deletes pods
-	// that may hold live engine ranks (nothing calls scale_elastic_ep to drain them
-	// first, and DYN-3838 / DYN-2660 record what that leaves behind), and upward it
-	// re-adds capacity an operator deliberately removed.
-	//
-	// Without the preservation at all, generation classifies any external scale as a
-	// manual change: a cluster reverted `replicas: 1` within two seconds, logging
+	// Synthesis restamps the declared launch width (`--data-parallel-size` minus the
+	// leader's own rank) every pass, but that is a creation value, not a target -- at either
+	// gate position (see the type doc); "gate off" freezes the count rather than dragging it
+	// back to the declared width. Dragging it back would delete pods that may hold live
+	// engine ranks (nothing calls scale_elastic_ep to drain them first; DYN-3838 / DYN-2660
+	// record what that leaves behind), or re-add capacity an operator deliberately removed.
+	// And without preserving at all, generation classifies any external scale as a manual
+	// change: a cluster reverted `replicas: 1` within two seconds, logging
 	// "Manual changes detected ... will be overwritten".
 	if existing.GetAnnotations()[consts.KubeAnnotationElasticEPFollower] == consts.KubeLabelValueTrue &&
 		existing.Spec.Replicas != nil {
@@ -315,17 +307,12 @@ func (r *componentWorkloadsReconciler) preserveExistingDCDState(
 }
 
 // deleteOrphanedElasticEPFollowers removes synthesized elastic-EP follower DCDs that
-// generation no longer produces.
-//
-// A follower is derived, never declared, so nothing else will ever clean it up. The
-// rollout path prunes worker DCDs by comparing their hash label against the current
-// worker generation, and a follower's label still matches -- the hash is deliberately
-// gate-independent -- so it would survive as an orphan owned by no one.
-//
-// Three things strand a follower this way: an administrator disabling
-// features.ElasticEPRayPoC, a user removing the elastic-EP flags from the leader, and a
-// user deleting the leader component outright. Comparing against what generation
-// actually produced covers all three without asking why.
+// generation no longer produces. A follower is derived, never declared, and the rollout
+// path's hash-label pruning misses it (a follower's hash label is deliberately
+// gate-independent, so it still matches), so nothing else would ever clean it up. Three
+// things strand one: disabling features.ElasticEPRayPoC, removing the elastic-EP flags from
+// the leader, and deleting the leader component outright. Comparing against what generation
+// actually produced covers all three.
 func (r *componentWorkloadsReconciler) deleteOrphanedElasticEPFollowers(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
@@ -357,11 +344,9 @@ func (r *componentWorkloadsReconciler) deleteOrphanedElasticEPFollowers(
 		if _, keep := wanted[existing.Name]; keep {
 			continue
 		}
-		// Prove ownership before destroying anything. The list is narrowed only by the
-		// DGD-name label and the follower annotation, and both are mutable and settable
-		// by anyone -- so without this a standalone or foreign-owned DCD that happens to
-		// carry those two values lands in this loop and is deleted by a DGD that does not
-		// control it.
+		// Prove ownership before deleting: the DGD-name label and follower annotation that
+		// narrowed the list are mutable and settable by anyone, so without this a standalone
+		// or foreign-owned DCD carrying both is deleted by a DGD that does not control it.
 		if !metav1.IsControlledBy(existing, dgd) {
 			logger.Info(
 				"Skipping a follower-marked DynamoComponentDeployment this DynamoGraphDeployment does not control",
@@ -370,18 +355,14 @@ func (r *componentWorkloadsReconciler) deleteOrphanedElasticEPFollowers(
 			continue
 		}
 		// Only release a follower that is provably empty. Nothing in the operator calls
-		// scale_elastic_ep -- there is no engine-control client in the tree -- so deleting
-		// a follower that still holds ranks leaves the engine committed to a DP size whose
-		// members are gone: DYN-3838 records the leader surviving at restart=0 with
-		// inference stopped, and DYN-2660 records the orphaned placement group then
-		// blocking every later scale-up until the pod restarts. DYN-3686 classifies that
-		// state as a fault on the recovery path, not a scale-down signal, so the operator
-		// must not manufacture it.
-		//
-		// Today this is vacuous for the disable case by construction -- a follower rests at
-		// zero and only an external scale client moves it -- so it is not dead code, it is
-		// the precondition a Phase 7 drain will satisfy. It also gives "turning the gate
-		// off stops scaling" its literal meaning: running capacity is left alone.
+		// scale_elastic_ep (no engine-control client in the tree), so deleting a follower that
+		// still holds ranks leaves the engine committed to a DP size whose members are gone:
+		// DYN-3838 records the leader surviving at restart=0 with inference stopped, DYN-2660
+		// the orphaned placement group then blocking every later scale-up until the pod
+		// restarts, and DYN-3686 classifies that state as a recovery-path fault, not a
+		// scale-down signal. Vacuous for the gate-disable case today (a follower rests at zero;
+		// only an external scale client moves it), it is the precondition a Phase 7 drain will
+		// satisfy and makes "gate off stops scaling" leave running capacity alone.
 		if replicas := existing.Spec.Replicas; replicas != nil && *replicas > 0 {
 			logger.Info(
 				"Refusing to delete an elastic-EP follower that still has replicas; scale it to zero first",
@@ -397,11 +378,11 @@ func (r *componentWorkloadsReconciler) deleteOrphanedElasticEPFollowers(
 			continue
 		}
 		logger.Info("Deleting orphaned elastic-EP follower", "name", existing.Name)
-		// UID and resourceVersion preconditions, so this cannot lose a delete race. The
-		// name is reused across generations, so between the List above and this call the
-		// object may already have been replaced by a follower that generation does want.
-		// Without the preconditions that replacement is what gets deleted; with them the
-		// API server refuses and the next reconcile re-evaluates.
+		// UID and resourceVersion preconditions, so this cannot lose a delete race: names are
+		// reused across generations, so between the List above and this call the object may
+		// already have been replaced by a follower generation does want. Without them that
+		// replacement is deleted; with them the API server refuses and the next reconcile
+		// re-evaluates.
 		preconditions := client.Preconditions{
 			UID:             &existing.UID,
 			ResourceVersion: &existing.ResourceVersion,
