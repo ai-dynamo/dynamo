@@ -689,6 +689,24 @@ mod tests {
     }
 
     #[test]
+    fn cumulative_offset_never_rewinds_on_regression() {
+        // Mirror the engine loop: emit the new tail, then advance the offset
+        // monotonically (token_offset.max(len)) so a regressive chunk can't cause
+        // re-emission when the sequence later grows again.
+        let mut offset = 0usize;
+        let mut step = |ids: &[i32]| -> Vec<i32> {
+            let new = new_output_ids(ids, offset).to_vec();
+            offset = offset.max(ids.len());
+            new
+        };
+        assert_eq!(step(&[1, 2, 3]), vec![1, 2, 3]);
+        // Regressive chunk: emits nothing and leaves the offset at 3.
+        assert_eq!(step(&[1, 2]), Vec::<i32>::new());
+        // Growth resumes: only the genuinely-new tail is emitted, not 1..3 again.
+        assert_eq!(step(&[1, 2, 3, 4]), vec![4]);
+    }
+
+    #[test]
     fn logprobs_are_sliced_from_cumulative_metadata() {
         let meta = HashMap::from([
             (

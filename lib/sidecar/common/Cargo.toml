@@ -11,9 +11,6 @@ homepage.workspace = true
 repository.workspace = true
 description = "Shared gRPC transport and CLI infrastructure for Dynamo sidecars"
 
-[features]
-testing = ["dynamo-backend-common/testing", "tokio/test-util"]
-
 [dependencies]
 dynamo-backend-common = { workspace = true }
 

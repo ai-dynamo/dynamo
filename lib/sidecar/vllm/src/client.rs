@@ -3,60 +3,42 @@
 
 use dynamo_backend_common::DynamoError;
 use dynamo_sidecar_common::{
-    DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, GrpcEndpoint, GrpcTransportConfig, NativeStream,
+    DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, GrpcEndpoint, GrpcTransportConfig,
 };
 
 pub(crate) use dynamo_sidecar_common::{engine_shutdown, invalid_argument, status_to_dynamo};
 
 use crate::proto as pb;
 
-pub(crate) enum VllmClient {
-    Grpc(GrpcChannelPool),
-    #[cfg(test)]
-    Scripted(
-        dynamo_sidecar_common::testing::ScriptedClient<pb::GenerateRequest, pb::GenerateResponse>,
-    ),
+pub(crate) struct VllmClient {
+    pool: GrpcChannelPool,
 }
 
 impl VllmClient {
-    fn pool(&self) -> &GrpcChannelPool {
-        match self {
-            Self::Grpc(pool) => pool,
-            #[cfg(test)]
-            Self::Scripted(_) => panic!("scripted generation has no control transport"),
-        }
-    }
-
     pub(crate) async fn connect(
         endpoint: &GrpcEndpoint,
         transport: GrpcTransportConfig,
     ) -> Result<Self, DynamoError> {
         let pool = GrpcChannelPool::connect("vLLM", endpoint, transport).await?;
-        Ok(Self::Grpc(pool))
+        Ok(Self { pool })
     }
 
     pub(crate) fn connection_count(&self) -> usize {
-        self.pool().len()
+        self.pool.len()
     }
 
     pub(crate) async fn generate_stream(
         &self,
         request: pb::GenerateRequest,
-    ) -> Result<NativeStream<pb::GenerateResponse>, DynamoError> {
-        let response = match self {
-            Self::Grpc(pool) => {
-                let mut client = pb::generate_client::GenerateClient::new(pool.next_channel())
-                    .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
-                    .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE);
-                client
-                    .generate_stream(request)
-                    .await
-                    .map(|response| NativeStream::Grpc(response.into_inner()))
-            }
-            #[cfg(test)]
-            Self::Scripted(script) => script.open(request).await,
-        };
-        response.map_err(|status| status_to_dynamo("GenerateStream", status))
+    ) -> Result<tonic::Streaming<pb::GenerateResponse>, DynamoError> {
+        let mut client = pb::generate_client::GenerateClient::new(self.pool.next_channel())
+            .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
+            .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE);
+        client
+            .generate_stream(request)
+            .await
+            .map(tonic::Response::into_inner)
+            .map_err(|status| status_to_dynamo("GenerateStream", status))
     }
 }
 

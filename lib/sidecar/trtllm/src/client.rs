@@ -8,7 +8,7 @@ use std::time::Duration;
 use dynamo_backend_common::DynamoError;
 use dynamo_sidecar_common::{
     DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, GrpcEndpoint, GrpcTransportConfig,
-    NativeStream, connection_timeout,
+    connection_timeout,
 };
 use tonic::transport::Channel;
 
@@ -21,37 +21,25 @@ use crate::proto::trtllm_service_client::TrtllmServiceClient;
 /// connected-but-unresponsive server cannot hang `start` or `abort`.
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub(crate) enum TrtllmClient {
-    Grpc(GrpcChannelPool),
-    #[cfg(test)]
-    Scripted(
-        dynamo_sidecar_common::testing::ScriptedClient<pb::GenerateRequest, pb::GenerateResponse>,
-    ),
+pub(crate) struct TrtllmClient {
+    pool: GrpcChannelPool,
 }
 
 impl TrtllmClient {
-    fn pool(&self) -> &GrpcChannelPool {
-        match self {
-            Self::Grpc(pool) => pool,
-            #[cfg(test)]
-            Self::Scripted(_) => panic!("scripted generation has no control transport"),
-        }
-    }
-
     pub(crate) async fn connect(
         endpoint: &GrpcEndpoint,
         transport: GrpcTransportConfig,
     ) -> Result<Self, DynamoError> {
         let pool = GrpcChannelPool::connect("TensorRT-LLM", endpoint, transport).await?;
-        Ok(Self::Grpc(pool))
+        Ok(Self { pool })
     }
 
     pub(crate) fn connection_count(&self) -> usize {
-        self.pool().len()
+        self.pool.len()
     }
 
     fn client(&self) -> TrtllmServiceClient<Channel> {
-        TrtllmServiceClient::new(self.pool().next_channel())
+        TrtllmServiceClient::new(self.pool.next_channel())
             .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
             .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
     }
@@ -59,17 +47,12 @@ impl TrtllmClient {
     pub(crate) async fn generate(
         &self,
         request: pb::GenerateRequest,
-    ) -> Result<NativeStream<pb::GenerateResponse>, DynamoError> {
-        let response = match self {
-            Self::Grpc(_) => self
-                .client()
-                .generate(request)
-                .await
-                .map(|response| NativeStream::Grpc(response.into_inner())),
-            #[cfg(test)]
-            Self::Scripted(script) => script.open(request).await,
-        };
-        response.map_err(|status| status_to_dynamo("Generate", status))
+    ) -> Result<tonic::Streaming<pb::GenerateResponse>, DynamoError> {
+        self.client()
+            .generate(request)
+            .await
+            .map(tonic::Response::into_inner)
+            .map_err(|status| status_to_dynamo("Generate", status))
     }
 
     /// Queries `GetModelInfo` and returns the reported maximum sequence length
