@@ -306,7 +306,9 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   Advanced overflow-queue size for requests waiting in Dynamo before entering the engine. Applies
   whether or not the engine limit is set explicitly. The effective per-worker-process cap is the
   engine limit plus this queue limit, counted across the TCP and NATS request planes together and
-  across every endpoint the process serves.
+  across every endpoint the process serves. Set to `0` to disable queueing at the backend admission
+  gate: requests are rejected as queue full when the engine-request limit is reached. Unset or
+  invalid values, including negative integers, retain the default.
 </ParamField>
 
 <ParamField path="DYN_DYNAMO_REQUEST_QUEUE_TIMEOUT_MS" type="integer" default="5000">

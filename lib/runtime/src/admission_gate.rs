@@ -26,8 +26,10 @@
 //!
 //! The FIFO queue length resolves independently:
 //!
-//! 1. a positive [`DYN_DYNAMO_REQUEST_QUEUE_LIMIT`];
+//! 1. a non-negative [`DYN_DYNAMO_REQUEST_QUEUE_LIMIT`];
 //! 2. [`DEFAULT_QUEUE_CAPACITY`].
+//!
+//! A zero queue length rejects requests immediately when the gate is at capacity.
 //!
 //! # Controlled delay and adaptive LIFO
 //!
@@ -220,6 +222,21 @@ fn resolve_concurrency_limit(env_override: Option<usize>, hint: Option<usize>) -
         return limit;
     }
     DEFAULT_CONCURRENCY_LIMIT
+}
+
+/// Resolve the queue length; zero disables queueing at the gate.
+fn resolve_queue_capacity(raw: Option<&str>) -> usize {
+    let Some(raw) = raw else {
+        return DEFAULT_QUEUE_CAPACITY;
+    };
+    raw.trim().parse::<usize>().unwrap_or_else(|_| {
+        tracing::warn!(
+            env = DYN_DYNAMO_REQUEST_QUEUE_LIMIT,
+            value = %raw,
+            "Ignoring invalid backend admission queue limit; expected a non-negative integer"
+        );
+        DEFAULT_QUEUE_CAPACITY
+    })
 }
 
 /// Resolve the maximum queue delay from an already-parsed override, in whole
@@ -732,8 +749,11 @@ pub(crate) struct BackendAdmissionGate {
 impl BackendAdmissionGate {
     fn from_environment() -> Arc<Self> {
         let env_override = positive_env(DYN_ENGINE_REQUEST_LIMIT);
-        let queue_capacity =
-            positive_env(DYN_DYNAMO_REQUEST_QUEUE_LIMIT).unwrap_or(DEFAULT_QUEUE_CAPACITY);
+        let queue_capacity = resolve_queue_capacity(
+            std::env::var(DYN_DYNAMO_REQUEST_QUEUE_LIMIT)
+                .ok()
+                .as_deref(),
+        );
         let queue_delay = resolve_queue_delay(positive_env(DYN_DYNAMO_REQUEST_QUEUE_TIMEOUT_MS));
         let policy = QueuePolicy::from_environment();
         let gate = Self::new(env_override, queue_capacity, queue_delay, policy);
@@ -1413,7 +1433,47 @@ mod tests {
         }
     }
 
+    #[test]
+    fn zero_queue_capacity_is_a_valid_override() {
+        for (raw, expected) in [
+            (None, DEFAULT_QUEUE_CAPACITY),
+            (Some("17"), 17),
+            (Some("0"), 0),
+            (Some(" 0 "), 0),
+            (Some(""), DEFAULT_QUEUE_CAPACITY),
+            (Some("-1"), DEFAULT_QUEUE_CAPACITY),
+            (Some("invalid"), DEFAULT_QUEUE_CAPACITY),
+            (
+                Some("99999999999999999999999999999999"),
+                DEFAULT_QUEUE_CAPACITY,
+            ),
+        ] {
+            assert_eq!(resolve_queue_capacity(raw), expected, "raw={raw:?}");
+        }
+    }
+
     ///////////////////// ADMISSION: N + EXACT Q /////////////////////
+
+    #[tokio::test]
+    async fn zero_queue_rejects_at_capacity_and_admits_after_release() {
+        use futures::FutureExt;
+
+        let gate = gate(1, resolve_queue_capacity(Some("0")));
+        let held = permit(gate.acquire(None).await);
+        let overflow = gate.acquire(None).now_or_never().expect("must not wait");
+        assert!(is_queue_full(&overflow));
+        assert_eq!(published(&gate), (1, 0, 1, 0));
+        assert_eq!(refusals(&gate), (1, 0));
+        assert_eq!(dequeues(&gate), (0, 0));
+        assert!(gate.expiry_driver.get().is_none());
+
+        drop(held);
+        let next = permit(gate.acquire(None).now_or_never().expect("capacity is free"));
+        assert_eq!(published(&gate), (1, 0, 1, 0));
+        assert_eq!(received(&gate), (2, 1, 0));
+        drop(next);
+        assert_eq!(published(&gate), (0, 0, 1, 0));
+    }
 
     #[tokio::test]
     async fn n_direct_admissions_then_exactly_q_queue_then_reject() {
