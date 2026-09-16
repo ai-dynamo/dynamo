@@ -19,6 +19,7 @@ layer instead (true of the Rust path as well).
 
 from __future__ import annotations
 
+import errno
 import socket
 
 from aiohttp.abc import AbstractResolver, ResolveResult
@@ -82,8 +83,14 @@ class BlocklistResolver(AbstractResolver):
             # ``host`` is caller-supplied and unbounded; this text reaches an
             # error response and a log line through the facade's connection
             # error, so bound it the way every other message on this path is.
+            #
+            # Two-argument OSError on purpose: aiohttp wraps this in
+            # ClientConnectorDNSError and renders ``strerror``, so the
+            # one-argument form reaches the caller as a bare "[None]" and the
+            # reason is lost exactly where an operator would read it.
             raise SsrfBlockedAddress(
-                f"host {describe_media_source(host)} resolves only to blocked IPs"
+                errno.EHOSTUNREACH,
+                f"host {describe_media_source(host)} resolves only to blocked IPs",
             )
         return allowed
 

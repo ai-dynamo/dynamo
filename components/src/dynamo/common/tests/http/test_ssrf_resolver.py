@@ -11,6 +11,8 @@ none remain. No network.
 
 from __future__ import annotations
 
+import errno
+
 import pytest
 
 from dynamo.common.http._ssrf_resolver import BlocklistResolver, SsrfBlockedAddress
@@ -106,3 +108,21 @@ async def test_blocked_message_bounds_the_hostname() -> None:
 
     assert len(str(excinfo.value)) < 500
     assert "h" * 200 not in str(excinfo.value)
+
+
+async def test_blocked_reason_survives_into_strerror() -> None:
+    """aiohttp renders ``strerror``, not ``str(exc)``, for a connector error.
+
+    A one-argument OSError leaves ``strerror`` as None, and the caller then
+    receives ``Cannot connect to host ... [None]`` with the reason dropped at
+    the one place an operator reads it.
+    """
+    resolver = _resolver_with(["169.254.169.254"])
+
+    with pytest.raises(SsrfBlockedAddress) as excinfo:
+        await resolver.resolve("evil.example.com")
+
+    assert excinfo.value.strerror == (
+        "host evil.example.com resolves only to blocked IPs"
+    )
+    assert excinfo.value.errno == errno.EHOSTUNREACH
