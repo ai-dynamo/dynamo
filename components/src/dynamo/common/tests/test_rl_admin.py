@@ -121,6 +121,17 @@ def test_register_rl_routes_passes_gated_by_through() -> None:
     )
     assert runtime.gated == [("update_weights_from_disk", False)]
 
+    # gated_by=True (RL enabled) forwards True — the runtime then wires the route.
+    runtime.gated.clear()
+    register_rl_routes(
+        runtime,
+        registry,
+        {"update_weights_from_disk": ping},
+        enable_dispatch=True,
+        gated_by=True,
+    )
+    assert runtime.gated == [("update_weights_from_disk", True)]
+
 
 def test_first_endpoint_response_returns_first_chunk() -> None:
     async def endpoint(_body: dict):
