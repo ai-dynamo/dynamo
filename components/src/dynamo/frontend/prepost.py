@@ -13,16 +13,13 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Protocol, TypeGuard, cast
 
+from packaging.version import Version
+from vllm import __version__ as vllm_version
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedFunction,
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
-    DeltaFunctionCall,
-    DeltaMessage,
-    DeltaToolCall,
 )
 from vllm.reasoning import ReasoningParser
 from vllm.renderers import ChatParams, merge_kwargs
@@ -37,6 +34,19 @@ from dynamo.llm.exceptions import InvalidArgument
 
 from .thinking import apply_default_thinking_mode_to_template_kwargs
 from .utils import legacy_guided_decoding
+
+if Version(vllm_version).release >= (0, 29):
+    from vllm.entrypoints.generate.base.protocol import (
+        DeltaFunctionCall,
+        DeltaMessage,
+        DeltaToolCall,
+    )
+else:
+    from vllm.entrypoints.openai.engine.protocol import (
+        DeltaFunctionCall,
+        DeltaMessage,
+        DeltaToolCall,
+    )
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
