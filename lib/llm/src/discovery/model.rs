@@ -101,6 +101,43 @@ struct NamespaceReadinessEval {
 /// See [`Model::claim_engine_error_report`].
 const ENGINE_ERROR_REPORT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// How many namespaces [`format_namespace_summary`] names before it reports the
+/// rest as a count. A globally scoped model sees every deployment's worker
+/// generations, so the summary needs a bound that does not grow with discovery.
+const ENGINE_ERROR_NAMESPACE_SAMPLE: usize = 8;
+
+/// Render namespace readiness for the engine-error warning, naming at most
+/// [`ENGINE_ERROR_NAMESPACE_SAMPLE`] namespaces and counting the remainder.
+/// `namespaces` is sorted, so the sample is the same on every report.
+fn format_namespace_summary(readiness: &ModelReadiness) -> String {
+    let mut summary = readiness
+        .namespaces
+        .iter()
+        .take(ENGINE_ERROR_NAMESPACE_SAMPLE)
+        .map(|(namespace, detail)| {
+            format!(
+                "{namespace}: ready={}{}",
+                detail.ready,
+                detail
+                    .reason
+                    .as_ref()
+                    .map(|reason| format!(" ({reason})"))
+                    .unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    if let Some(omitted) = readiness
+        .namespaces
+        .len()
+        .checked_sub(ENGINE_ERROR_NAMESPACE_SAMPLE)
+        .filter(|omitted| *omitted > 0)
+    {
+        summary.push_str(&format!("; +{omitted} more"));
+    }
+    summary
+}
+
 /// A named model backed by one or more WorkerSets.
 pub struct Model {
     name: String,
@@ -745,22 +782,7 @@ impl Model {
     fn engine_error(&self, engine_exists: bool) -> ModelManagerError {
         if self.claim_engine_error_report() {
             let readiness = self.namespace_readiness();
-            let namespaces = readiness
-                .namespaces
-                .iter()
-                .map(|(namespace, detail)| {
-                    format!(
-                        "{namespace}: ready={}{}",
-                        detail.ready,
-                        detail
-                            .reason
-                            .as_ref()
-                            .map(|reason| format!(" ({reason})"))
-                            .unwrap_or_default()
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("; ");
+            let namespaces = format_namespace_summary(&readiness);
             if engine_exists {
                 tracing::warn!(
                     model_name = %self.name,
@@ -995,6 +1017,43 @@ mod tests {
         assert!(!snapshot.claim_engine_error_report());
         assert!(!snapshot.snapshot().claim_engine_error_report());
         assert!(!model.claim_engine_error_report());
+    }
+
+    #[test]
+    fn namespace_summary_is_bounded_and_counts_the_rest() {
+        let readiness = |count: usize| ModelReadiness {
+            model: "llama".to_string(),
+            ready: false,
+            reason: None,
+            namespaces: (0..count)
+                .map(|i| {
+                    (
+                        format!("ns{i:03}"),
+                        NamespaceReadiness {
+                            ready: false,
+                            reason: None,
+                            worker_types: Default::default(),
+                            present: Vec::new(),
+                            missing_worker_types: Vec::new(),
+                        },
+                    )
+                })
+                .collect(),
+        };
+
+        let small = format_namespace_summary(&readiness(3));
+        assert_eq!(small.matches("ready=").count(), 3);
+        assert!(!small.contains("more"));
+
+        // A globally scoped model can discover far more namespaces than are
+        // useful in one warning; the sample stays fixed and sorted.
+        let large = format_namespace_summary(&readiness(500));
+        assert_eq!(
+            large.matches("ready=").count(),
+            ENGINE_ERROR_NAMESPACE_SAMPLE
+        );
+        assert!(large.starts_with("ns000: "));
+        assert!(large.ends_with("; +492 more"));
     }
 
     #[test]
