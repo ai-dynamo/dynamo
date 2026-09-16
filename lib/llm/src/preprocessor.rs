@@ -3010,6 +3010,9 @@ impl OpenAIPreprocessor {
     }
 
     fn request_has_effective_tools<R: OAIChatLikeRequest>(request: &R) -> bool {
+        // `OAIChatLikeRequest` has no equivalent method, so this generic path mirrors
+        // `CreateChatCompletionRequest::has_effective_tools`;
+        // `effective_tool_predicates_match_protocol_definition` pins parity.
         request
             .tools()
             .as_ref()
@@ -7741,6 +7744,104 @@ mod tests {
                 && terminal_choices[0].delta.tool_calls.is_none(),
             "the observable recovery delta must not expose raw markup or partial arguments"
         );
+    }
+
+    #[test]
+    fn effective_tool_predicates_match_protocol_definition() {
+        let cases = [
+            (
+                "no tools",
+                serde_json::json!({
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "test"}]
+                }),
+            ),
+            (
+                "empty top-level tools",
+                serde_json::json!({
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "test"}],
+                    "tools": []
+                }),
+            ),
+            (
+                "top-level tools",
+                serde_json::json!({
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "test"}],
+                    "tools": [{
+                        "type": "function",
+                        "function": {
+                            "name": "lookup",
+                            "parameters": {"type": "object"}
+                        }
+                    }]
+                }),
+            ),
+            (
+                "empty system tools",
+                serde_json::json!({
+                    "model": "test-model",
+                    "messages": [
+                        {"role": "system", "content": "", "tools": []},
+                        {"role": "user", "content": "test"}
+                    ]
+                }),
+            ),
+            (
+                "system tools",
+                serde_json::json!({
+                    "model": "test-model",
+                    "messages": [
+                        {"role": "system", "content": "", "tools": [{"name": "lookup"}]},
+                        {"role": "user", "content": "test"}
+                    ]
+                }),
+            ),
+            (
+                "later system tools",
+                serde_json::json!({
+                    "model": "test-model",
+                    "messages": [
+                        {"role": "system", "content": "", "tools": []},
+                        {"role": "user", "content": "test"},
+                        {"role": "system", "content": "", "tools": [{"name": "lookup"}]}
+                    ]
+                }),
+            ),
+        ];
+
+        for (case, value) in cases {
+            let request: NvCreateChatCompletionRequest =
+                serde_json::from_value(value).expect("request must deserialize");
+            assert_eq!(
+                OpenAIPreprocessor::request_has_effective_tools(&request),
+                request.inner.has_effective_tools(),
+                "effective-tool predicates diverged for {case}"
+            );
+        }
+
+        let developer_tools =
+            serde_json::from_value::<NvCreateChatCompletionRequest>(serde_json::json!({
+                "model": "test-model",
+                "messages": [
+                    {"role": "developer", "content": "policy", "tools": [{"name": "lookup"}]},
+                    {"role": "user", "content": "test"}
+                ]
+            }));
+        match developer_tools {
+            Ok(request) => assert_eq!(
+                OpenAIPreprocessor::request_has_effective_tools(&request),
+                request.inner.has_effective_tools(),
+                "generic predicate must track newly supported developer tools"
+            ),
+            Err(error) => assert!(
+                error
+                    .to_string()
+                    .contains("`tools` is only accepted on system messages, not on role developer"),
+                "unexpected developer-tools rejection: {error}"
+            ),
+        }
     }
 
     const HARMONY_CALL_TOKEN_ID: TokenIdType = 42;

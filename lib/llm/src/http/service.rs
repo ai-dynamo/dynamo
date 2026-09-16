@@ -61,8 +61,8 @@ fn apply_request_tool_call_parsing_options(
         .as_ref()
         .unwrap_or(&ChatCompletionToolChoiceOption::Auto);
     let converted_tool_choice = crate::preprocessor::tool_choice::convert_tool_choice(tool_choice);
-    let converted_tools =
-        crate::preprocessor::tool_choice::effective_tool_definitions(&request.inner)?;
+    let effective_tools = crate::preprocessor::tool_choice::effective_tools(&request.inner)?;
+    let converted_tools = crate::preprocessor::tool_choice::convert_tools(effective_tools.as_ref());
     let uses_structural_tag = crate::preprocessor::structural_tag::structural_tag_decision(
         parsing_options.tool_call_parser.as_deref(),
         &converted_tool_choice,
@@ -73,12 +73,14 @@ fn apply_request_tool_call_parsing_options(
         parsing_options.exclude_tools_when_tool_choice_none,
     )?
     .is_required();
-    let guided_tool_constraint = crate::preprocessor::tool_choice::guided_tool_constraint(
-        request,
-        parsing_options.tool_call_parser.as_deref(),
-        parsing_options.reasoning_parser.as_deref(),
-        uses_structural_tag,
-    )?;
+    let guided_tool_constraint =
+        crate::preprocessor::tool_choice::guided_tool_constraint_with_effective_tools(
+            request,
+            parsing_options.tool_call_parser.as_deref(),
+            parsing_options.reasoning_parser.as_deref(),
+            uses_structural_tag,
+            effective_tools.as_ref(),
+        )?;
     Ok(parsing_options
         .with_guided_tool_constraint(guided_tool_constraint)
         .with_tool_call_parsing_enabled(tool_call_parsing_enabled)

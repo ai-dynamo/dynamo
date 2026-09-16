@@ -243,13 +243,34 @@ pub(crate) fn guided_tool_constraint(
     if uses_structural_tag {
         return Ok(GuidedToolConstraint::StructuralTag);
     }
+    let tools = effective_tools(&request.inner)?;
+    guided_tool_constraint_with_effective_tools(
+        request,
+        tool_call_parser,
+        reasoning_parser,
+        false,
+        tools.as_ref(),
+    )
+}
+
+/// Derive the guided-tool constraint from an effective tool set the caller has
+/// already normalized and validated through [`effective_tools`].
+pub(crate) fn guided_tool_constraint_with_effective_tools(
+    request: &NvCreateChatCompletionRequest,
+    tool_call_parser: Option<&str>,
+    reasoning_parser: Option<&str>,
+    uses_structural_tag: bool,
+    tools: &[ChatCompletionTool],
+) -> Result<GuidedToolConstraint, DynamoError> {
+    if uses_structural_tag {
+        return Ok(GuidedToolConstraint::StructuralTag);
+    }
     let tool_choice = request
         .inner
         .tool_choice
         .as_ref()
         .unwrap_or(&ChatCompletionToolChoiceOption::Auto);
-    let tools = effective_tools(&request.inner)?;
-    validate_openai_tool_choice(Some(tool_choice), Some(tools.as_ref()))
+    validate_openai_tool_choice(Some(tool_choice), Some(tools))
         .map_err(|error| invalid_argument(error.to_string()))?;
     let is_forced_tool_choice = matches!(
         tool_choice,
@@ -275,7 +296,7 @@ pub(crate) fn guided_tool_constraint(
     // empty `tools` list under `tool_choice: "required"`).
     match get_tool_choice_guidance_from_tools(
         Some(tool_choice),
-        Some(tools.as_ref()),
+        Some(tools),
         request.inner.parallel_tool_calls,
     ) {
         Ok(Some(_)) => Ok(installed_json_constraint(tool_choice)),
