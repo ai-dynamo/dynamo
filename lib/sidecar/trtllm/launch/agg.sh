@@ -94,8 +94,11 @@ fi
 # proto/README.md's checksum) -- 0.4.2 lacks the include_stop_token_in_output
 # field (added by 0.4.14) our proto and Rust code both expect, which makes
 # every request fail with "'GenerateRequest' object has no attribute
-# 'include_stop_token_in_output'".
-if ! "$TRTLLM_PYTHON" -c "import smg_grpc_proto" >/dev/null 2>&1; then
+# 'include_stop_token_in_output'". Check the resolved version, not just
+# importability: an image whose TRT-LLM install already pulled an older
+# smg-grpc-proto (e.g. via its own grpc-smg extra) would otherwise satisfy a
+# bare `import` check and skip straight past this pin.
+if ! "$TRTLLM_PYTHON" -c "import importlib.metadata as m; assert m.version('smg-grpc-proto') == '0.4.14'" >/dev/null 2>&1; then
     "$TRTLLM_PYTHON" -m pip install --no-cache-dir "smg-grpc-proto==0.4.14"
 fi
 
