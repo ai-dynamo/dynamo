@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
 use crate::client::{self, Client, Discovery, Pool};
-use crate::metadata_upload::{MetadataDelivery, MetadataUploadService, grpc_metadata};
+use crate::metadata_upload::{MetadataDelivery, MetadataUploadService};
 use crate::native_http::{self, NativeHttp};
 use crate::proto as pb;
 use crate::protocol::{
@@ -36,7 +36,7 @@ pub struct SglangSidecarEngine {
     disaggregation_mode: DisaggregationMode,
     bootstrap_host: Option<String>,
     bootstrap_port: Option<u16>,
-    metadata_upload: Option<Arc<MetadataUploadService>>,
+    metadata_upload: Option<MetadataUploadService>,
     state: OnceCell<StartedState>,
     cancel: CancellationToken,
 }
@@ -104,7 +104,7 @@ impl SglangSidecarEngine {
 
         let common = args.sidecar.common;
         let metadata_upload = if common.enable_rl && !disaggregation_mode.is_prefill() {
-            Some(Arc::new(MetadataUploadService::new(args.metadata_upload)?))
+            Some(MetadataUploadService::new(args.metadata_upload)?)
         } else {
             None
         };
@@ -384,19 +384,6 @@ impl LLMEngine for SglangSidecarEngine {
                             continue;
                         }
 
-                        let ((log_probs, top_logprobs), engine_data) = match metadata_delivery
-                            .response_fields(
-                                &response.meta_info,
-                                return_tokens_as_ids,
-                                response.finished,
-                            )
-                        {
-                            Ok(values) => values,
-                            Err(err) => {
-                                yield Err(err);
-                                break;
-                            }
-                        };
                         generated = generated.saturating_add(token_ids.len() as u32);
                         if response.finished {
                             let mut terminal = match terminal_from_meta(
@@ -410,26 +397,27 @@ impl LLMEngine for SglangSidecarEngine {
                                     break;
                                 }
                             };
-                            if let Some(uploader) = metadata_delivery.uploader() {
-                                let uploaded = tokio::select! {
-                                    biased;
-                                    _ = ctx.stopped() => None,
-                                    _ = cancel.cancelled() => None,
-                                    result = uploader.upload(grpc_metadata(&response.meta_info)) => Some(result),
-                                };
-                                match uploaded {
-                                    Some(Ok(())) => {}
-                                    Some(Err(error)) => {
-                                        yield Err(error);
-                                        break;
-                                    }
-                                    None => {
-                                        yield Ok(LLMEngineOutput::cancelled()
-                                            .with_usage(usage(observed_prompt_tokens, generated)));
-                                        break;
-                                    }
+                            let fields = tokio::select! {
+                                biased;
+                                _ = ctx.stopped() => None,
+                                _ = cancel.cancelled() => None,
+                                result = metadata_delivery.finish(
+                                    &response.meta_info,
+                                    return_tokens_as_ids,
+                                ) => Some(result),
+                            };
+                            let ((log_probs, top_logprobs), engine_data) = match fields {
+                                Some(Ok(fields)) => fields,
+                                Some(Err(error)) => {
+                                    yield Err(error);
+                                    break;
                                 }
-                            }
+                                None => {
+                                    yield Ok(LLMEngineOutput::cancelled()
+                                        .with_usage(usage(observed_prompt_tokens, generated)));
+                                    break;
+                                }
+                            };
                             terminal.token_ids = token_ids;
                             terminal.log_probs = log_probs;
                             terminal.top_logprobs = top_logprobs;
@@ -439,6 +427,15 @@ impl LLMEngine for SglangSidecarEngine {
                         }
 
                         if !token_ids.is_empty() {
+                            let ((log_probs, top_logprobs), engine_data) = match metadata_delivery
+                                .chunk_fields(&response.meta_info, return_tokens_as_ids)
+                            {
+                                Ok(fields) => fields,
+                                Err(error) => {
+                                    yield Err(error);
+                                    break;
+                                }
+                            };
                             yield Ok(LLMEngineOutput {
                                 token_ids,
                                 log_probs,

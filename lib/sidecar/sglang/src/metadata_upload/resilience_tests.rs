@@ -30,8 +30,8 @@ fn policy(capacity: usize) -> OperatorPolicy {
     }
 }
 
-fn operator_cache(capacity: usize) -> Arc<OperatorCache> {
-    Arc::new(OperatorCache::new(policy(capacity)))
+fn operator_cache(capacity: usize) -> OperatorCache {
+    OperatorCache::new(policy(capacity))
 }
 
 fn request() -> PreprocessedRequest {
@@ -55,15 +55,41 @@ fn request() -> PreprocessedRequest {
 async fn concurrent_cache_misses_build_one_operator() {
     let directory = tempfile::tempdir().unwrap();
     let url = format!("fs://{}", directory.path().display());
-    let cache = operator_cache(2);
+    let cache = Arc::new(operator_cache(2));
+    let barrier = Arc::new(tokio::sync::Barrier::new(33));
     let mut tasks = Vec::new();
     for _ in 0..32 {
         let cache = cache.clone();
         let url = url.clone();
-        tasks.push(tokio::spawn(async move { cache.get(url, "url").await }));
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            cache.get(url, "url").await
+        }));
     }
+    barrier.wait().await;
     for task in tasks {
         task.await.unwrap().unwrap();
+    }
+    assert_eq!(cache.build_count.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn concurrent_cache_misses_share_construction_failure() {
+    let cache = Arc::new(operator_cache(2));
+    let barrier = Arc::new(tokio::sync::Barrier::new(33));
+    let mut tasks = Vec::new();
+    for _ in 0..32 {
+        let cache = cache.clone();
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            cache.get("unknown://destination".to_string(), "url").await
+        }));
+    }
+    barrier.wait().await;
+    for task in tasks {
+        assert!(task.await.unwrap().is_err());
     }
     assert_eq!(cache.build_count.load(Ordering::Relaxed), 1);
 }
@@ -101,10 +127,7 @@ async fn timeout_exhausts_retries_before_fallback() {
     let mut timeout_policy = policy(2);
     timeout_policy.io_timeout = Duration::from_millis(5);
     timeout_policy.retry_max_times = 1;
-    let (primary, primary_attempts) = test_operator(
-        WriteBehavior::Sleep(Duration::from_millis(50)),
-        timeout_policy,
-    );
+    let (primary, primary_attempts) = test_operator(WriteBehavior::Pending, timeout_policy);
     let (fallback, fallback_attempts) = test_operator(WriteBehavior::Success, policy(2));
     cache.insert("test://primary", primary).await;
     cache.insert("test://fallback", fallback).await;
@@ -112,9 +135,10 @@ async fn timeout_exhausts_retries_before_fallback() {
     let delivery = service.delivery_for(&request()).await.unwrap();
 
     delivery
-        .uploader()
-        .unwrap()
-        .upload(json!({"id": "timeout"}))
+        .finish(
+            &std::collections::HashMap::from([("id".into(), "timeout".into())]),
+            false,
+        )
         .await
         .unwrap();
 
@@ -126,7 +150,7 @@ async fn timeout_exhausts_retries_before_fallback() {
 enum WriteBehavior {
     Success,
     FailUntil(usize),
-    Sleep(Duration),
+    Pending,
 }
 
 #[derive(Clone, Debug)]
@@ -254,10 +278,7 @@ impl oio::Write for TestWriter {
                 Err(Error::new(ErrorKind::Unexpected, "injected temporary failure").set_temporary())
             }
             WriteBehavior::FailUntil(_) => Ok(file_metadata(self.size)),
-            WriteBehavior::Sleep(duration) => {
-                tokio::time::sleep(duration).await;
-                Ok(file_metadata(self.size))
-            }
+            WriteBehavior::Pending => std::future::pending().await,
         }
     }
 

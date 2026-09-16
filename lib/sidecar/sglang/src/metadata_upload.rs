@@ -23,24 +23,25 @@ pub(crate) use config::MetadataUploadArgs;
 use config::OperatorPolicy;
 
 const OUTPUT_PATH: &str = "choice_0.msgpack.zst";
+type CachedOperator = Arc<OnceCell<Result<Operator, DynamoError>>>;
+type ResponseFields = (ExtractedLogprobs, Option<Value>);
 
 pub(crate) struct MetadataUploadService {
-    operators: Arc<OperatorCache>,
+    operators: OperatorCache,
 }
 
 pub(crate) enum MetadataDelivery {
     Inline,
-    Upload(MetadataUploader),
+    Upload(Box<MetadataUploader>),
 }
 
 pub(crate) struct MetadataUploader {
     primary: Operator,
-    fallback: Option<String>,
-    operators: Arc<OperatorCache>,
+    fallback: Option<Operator>,
 }
 
 pub(crate) struct OperatorCache {
-    operators: Mutex<LruCache<String, Arc<OnceCell<Operator>>>>,
+    operators: Mutex<LruCache<String, CachedOperator>>,
     policy: OperatorPolicy,
     #[cfg(test)]
     build_count: std::sync::atomic::AtomicUsize,
@@ -85,7 +86,7 @@ impl OperatorCache {
         };
         let policy = self.policy;
         let operator = cell
-            .get_or_try_init(|| async {
+            .get_or_init(|| async {
                 #[cfg(test)]
                 self.build_count
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -98,14 +99,14 @@ impl OperatorCache {
                         ))
                     })?
             })
-            .await?;
-        Ok(operator.clone())
+            .await;
+        operator.clone()
     }
 
     #[cfg(test)]
     async fn insert(&self, url: &str, operator: Operator) {
         let cell = OnceCell::new();
-        cell.set(operator).expect("new OnceCell must be empty");
+        cell.set(Ok(operator)).expect("new OnceCell must be empty");
         self.operators
             .lock()
             .await
@@ -116,7 +117,7 @@ impl OperatorCache {
 impl MetadataUploadService {
     pub(crate) fn new(args: MetadataUploadArgs) -> Result<Self, DynamoError> {
         Ok(Self {
-            operators: Arc::new(OperatorCache::new(args.try_into()?)),
+            operators: OperatorCache::new(args.try_into()?),
         })
     }
 
@@ -140,39 +141,52 @@ impl MetadataUploadService {
         let config = MetadataUploadConfig::deserialize(config).map_err(|error| {
             client::invalid_arg(format!("invalid extra_args.nvext.metadata_upload: {error}"))
         })?;
-        let primary = self.operators.get(config.url, "url").await?;
-        let fallback = config
-            .fallback_url
-            .map(|url| normalize_url(url, "fallback_url"))
-            .transpose()?;
-        Ok(MetadataDelivery::Upload(MetadataUploader {
+        let primary = self.operators.get(config.url, "url");
+        let fallback = async {
+            match config.fallback_url {
+                Some(url) => self.operators.get(url, "fallback_url").await.map(Some),
+                None => Ok(None),
+            }
+        };
+        let (primary, fallback) = tokio::join!(primary, fallback);
+        let primary = primary?;
+        let fallback = fallback?;
+        Ok(MetadataDelivery::Upload(Box::new(MetadataUploader {
             primary,
             fallback,
-            operators: self.operators.clone(),
-        }))
+        })))
     }
 }
 
 impl MetadataDelivery {
-    pub(crate) fn response_fields(
+    pub(crate) fn chunk_fields(
         &self,
         meta: &HashMap<String, String>,
         return_tokens_as_ids: bool,
-        terminal: bool,
-    ) -> Result<(ExtractedLogprobs, Option<Value>), DynamoError> {
+    ) -> Result<ResponseFields, DynamoError> {
         match self {
             Self::Inline => Ok((
                 extract_logprobs(meta, return_tokens_as_ids)?,
-                engine_data_from_meta(meta, terminal)?,
+                engine_data_from_meta(meta, false)?,
             )),
             Self::Upload(_) => Ok(((None, None), None)),
         }
     }
 
-    pub(crate) fn uploader(&self) -> Option<&MetadataUploader> {
+    pub(crate) async fn finish(
+        &self,
+        meta: &HashMap<String, String>,
+        return_tokens_as_ids: bool,
+    ) -> Result<ResponseFields, DynamoError> {
         match self {
-            Self::Inline => None,
-            Self::Upload(uploader) => Some(uploader),
+            Self::Inline => Ok((
+                extract_logprobs(meta, return_tokens_as_ids)?,
+                engine_data_from_meta(meta, true)?,
+            )),
+            Self::Upload(uploader) => {
+                uploader.upload(grpc_metadata(meta)).await?;
+                Ok(((None, None), None))
+            }
         }
     }
 }
@@ -191,15 +205,11 @@ impl MetadataUploader {
         match write(&self.primary, compressed.clone()).await {
             Ok(()) => Ok(()),
             Err(primary_error) => {
-                let Some(fallback_url) = self.fallback.as_ref() else {
+                let Some(fallback) = self.fallback.as_ref() else {
                     return Err(primary_error);
                 };
                 tracing::warn!(error = %primary_error, "primary metadata upload failed; attempting fallback");
-                let fallback = self
-                    .operators
-                    .get(fallback_url.clone(), "fallback_url")
-                    .await?;
-                write(&fallback, compressed).await
+                write(fallback, compressed).await
             }
         }
     }
@@ -316,14 +326,13 @@ mod tests {
     use std::io::Cursor;
     use std::num::NonZeroUsize;
     use std::path::Path;
-    use std::sync::Arc;
     use std::time::Duration;
 
     use dynamo_backend_common::{OutputOptions, SamplingOptions, StopConditions};
     use serde_json::{Value, json};
 
     use super::config::OperatorPolicy;
-    use super::{MetadataUploadService, OUTPUT_PATH, OperatorCache, grpc_metadata};
+    use super::{MetadataDelivery, MetadataUploadService, OUTPUT_PATH, OperatorCache};
 
     fn policy(capacity: usize) -> OperatorPolicy {
         OperatorPolicy {
@@ -338,8 +347,8 @@ mod tests {
         }
     }
 
-    fn operator_cache(capacity: usize) -> Arc<OperatorCache> {
-        Arc::new(OperatorCache::new(policy(capacity)))
+    fn operator_cache(capacity: usize) -> OperatorCache {
+        OperatorCache::new(policy(capacity))
     }
 
     fn service(capacity: usize) -> MetadataUploadService {
@@ -369,29 +378,56 @@ mod tests {
         let configured = request(json!({
             "nvext": {"metadata_upload": {"url": "fs:///tmp/metadata"}}
         }));
-        assert!(
-            service(2)
-                .delivery_for(&configured)
-                .await
-                .unwrap()
-                .uploader()
-                .is_some()
-        );
+        assert!(matches!(
+            service(2).delivery_for(&configured).await.unwrap(),
+            MetadataDelivery::Upload(_)
+        ));
 
         let unconfigured = request(json!({"nvext": {}}));
-        assert!(
-            service(2)
-                .delivery_for(&unconfigured)
-                .await
-                .unwrap()
-                .uploader()
-                .is_none()
-        );
+        assert!(matches!(
+            service(2).delivery_for(&unconfigured).await.unwrap(),
+            MetadataDelivery::Inline
+        ));
 
         let invalid = request(json!({
             "nvext": {"metadata_upload": {"url": "fs:///tmp", "format": "json"}}
         }));
         assert!(service(2).delivery_for(&invalid).await.is_err());
+
+        let invalid_fallback = request(json!({
+            "nvext": {"metadata_upload": {
+                "url": "fs:///tmp",
+                "fallback_url": "unknown://destination"
+            }}
+        }));
+        assert!(service(2).delivery_for(&invalid_fallback).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn delivery_mode_owns_inline_response_fields() {
+        let meta = std::collections::HashMap::from([
+            ("output_token_logprobs".into(), r#"[[-0.1,101,"a"]]"#.into()),
+            ("routed_experts".into(), "[1,2]".into()),
+        ]);
+        let inline = service(2)
+            .delivery_for(&request(json!({"nvext": {}})))
+            .await
+            .unwrap();
+        let ((logprobs, _), engine_data) = inline.chunk_fields(&meta, false).unwrap();
+        assert_eq!(logprobs.unwrap(), vec![-0.1]);
+        assert_eq!(engine_data.unwrap()["routed_experts"], json!([1, 2]));
+
+        opendal::OperatorRegistry::get().register::<opendal::services::Memory>("metadata-fields");
+        let remote = service(2)
+            .delivery_for(&request(json!({
+                "nvext": {"metadata_upload": {"url": "metadata-fields://rollout"}}
+            })))
+            .await
+            .unwrap();
+        assert_eq!(
+            remote.chunk_fields(&meta, false).unwrap(),
+            ((None, None), None)
+        );
     }
 
     #[tokio::test]
@@ -402,13 +438,15 @@ mod tests {
             "nvext": {"metadata_upload": {"url": url}}
         }));
         let delivery = service(2).delivery_for(&configured).await.unwrap();
-        let uploader = delivery.uploader().unwrap();
-        uploader
-            .upload(grpc_metadata(&std::collections::HashMap::from([
-                ("id".into(), "sglang-1".into()),
-                ("finish_reason".into(), r#"{"type":"stop"}"#.into()),
-                ("output_token_logprobs".into(), r#"[[-0.1,101,"a"]]"#.into()),
-            ])))
+        delivery
+            .finish(
+                &std::collections::HashMap::from([
+                    ("id".into(), "sglang-1".into()),
+                    ("finish_reason".into(), r#"{"type":"stop"}"#.into()),
+                    ("output_token_logprobs".into(), r#"[[-0.1,101,"a"]]"#.into()),
+                ]),
+                false,
+            )
             .await
             .unwrap();
 
@@ -439,9 +477,13 @@ mod tests {
             }}
         }));
         let delivery = service(2).delivery_for(&configured).await.unwrap();
-        let uploader = delivery.uploader().unwrap();
-
-        uploader.upload(json!({"id": "sglang-2"})).await.unwrap();
+        delivery
+            .finish(
+                &std::collections::HashMap::from([("id".into(), "sglang-2".into())]),
+                false,
+            )
+            .await
+            .unwrap();
 
         assert_eq!(std::fs::read(primary).unwrap(), b"primary sentinel");
         assert!(fallback.join(OUTPUT_PATH).is_file());
@@ -454,14 +496,10 @@ mod tests {
             "nvext": {"metadata_upload": {"url": "custom-metadata://rollout"}}
         }));
 
-        assert!(
-            service(2)
-                .delivery_for(&configured)
-                .await
-                .unwrap()
-                .uploader()
-                .is_some()
-        );
+        assert!(matches!(
+            service(2).delivery_for(&configured).await.unwrap(),
+            MetadataDelivery::Upload(_)
+        ));
     }
 
     #[tokio::test]

@@ -40,7 +40,7 @@ pub struct MetadataUploadArgs {
         env = "DYN_SGLANG_METADATA_UPLOAD_RETRY_MAX_TIMES",
         default_value = "3"
     )]
-    pub retry_max_times: NonZeroUsize,
+    pub retry_max_times: usize,
 
     /// Initial exponential retry delay in milliseconds.
     #[arg(
@@ -101,7 +101,7 @@ impl TryFrom<MetadataUploadArgs> for OperatorPolicy {
             capacity: args.operator_cache_capacity,
             timeout: Duration::from_secs(args.timeout_secs.get()),
             io_timeout: Duration::from_secs(args.io_timeout_secs.get()),
-            retry_max_times: args.retry_max_times.get(),
+            retry_max_times: args.retry_max_times,
             retry_min_delay: Duration::from_millis(args.retry_min_delay_ms),
             retry_max_delay: Duration::from_millis(args.retry_max_delay_ms),
             retry_factor: args.retry_factor,
@@ -143,7 +143,7 @@ mod tests {
         assert_eq!(policy.operator_cache_capacity.get(), 8);
         assert_eq!(policy.timeout_secs.get(), 11);
         assert_eq!(policy.io_timeout_secs.get(), 12);
-        assert_eq!(policy.retry_max_times.get(), 4);
+        assert_eq!(policy.retry_max_times, 4);
         assert_eq!(policy.retry_min_delay_ms, 20);
         assert_eq!(policy.retry_max_delay_ms, 200);
         assert_eq!(policy.retry_factor, 1.5);
@@ -181,5 +181,19 @@ mod tests {
                 .unwrap();
             assert_eq!(arg.get_env().unwrap(), env);
         }
+    }
+
+    #[test]
+    fn zero_retries_is_valid() {
+        let args = Args::try_parse_from([
+            "dynamo-sglang-sidecar",
+            "--grpc-endpoint",
+            "127.0.0.1:30000",
+            "--metadata-upload-retry-max-times",
+            "0",
+        ])
+        .unwrap();
+
+        assert_eq!(args.metadata_upload.retry_max_times, 0);
     }
 }
