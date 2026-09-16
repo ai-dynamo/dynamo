@@ -439,7 +439,7 @@ func TestInjectElasticEPRayLaunchFlags_Follower(t *testing.T) {
 			}
 
 			t.Log("rewriting the follower's launch command")
-			if !injectElasticEPRayLaunchFlags(container, RoleFollower, tt.serviceName, nil, tt.leaderService) {
+			if !injectElasticEPRayLaunchFlags(container, RoleFollower, tt.serviceName, nil, tt.leaderService, 0) {
 				t.Fatal("expected the follower launch to be injected")
 			}
 			if len(container.Args) != 1 {
@@ -629,6 +629,83 @@ func TestElasticEPGenerationIsIndependentOfTheGate(t *testing.T) {
 	}
 }
 
+// TestElasticEPLeaderDoesNotWaitWithoutSynthesizedFollowers is the regression guard for a
+// bug this PR introduced and a risk review caught before it shipped.
+//
+// The width wait and the --data-parallel-size-local pin were originally keyed on
+// --data-parallel-size. That flag says how many data-parallel RANKS the engine wants; it
+// says nothing about how many PODS they run in. A single pod with several GPUs runs them
+// intra-pod, and two shipped shapes do exactly that:
+//
+//   - the Grove pathway, which renders this same RoleMain arm but deliberately never
+//     synthesizes a follower (grove#676); Grove is the DEFAULT provider on any cluster
+//     where the Grove API is installed and the DGD does not opt out
+//   - any component with replicas > 1, where IsSinglePodElasticEPShape declines and no
+//     follower is derived either
+//
+// tests/fault_tolerance/deploy/templates/vllm/moe_elastic_ep_demo.yaml is the first shape
+// exactly: one pod, 4 GPUs, --data-parallel-size 2, no enable-grove annotation. Keyed on
+// the flag, that manifest waited 20 minutes for a second Ray node nothing would ever
+// create and then exited 1 -- a working deployment turned into a CrashLoopBackOff.
+//
+// So the trigger is the follower count synthesis actually stamped, and its absence must
+// render the leader exactly as it rendered before any of this.
+//
+// Mutation check: re-keying either on getFlagValue(..., dataParallelSizeFlag) fails every
+// subtest here.
+func TestElasticEPLeaderDoesNotWaitWithoutSynthesizedFollowers(t *testing.T) {
+	// Renders WITHOUT going through synthesis, which is what Grove and replicas > 1 do.
+	renderUnsynthesized := func(t *testing.T, component *v1beta1.DynamoComponentDeploymentSharedSpec) string {
+		t.Helper()
+		container := GetMainContainer(component).DeepCopy()
+		if err := (&VLLMBackend{}).UpdateContainer(
+			container, 1, RoleMain, component, "test-service",
+			&GroveMultinodeDeployer{}, staticContainerGPUCount(4),
+		); err != nil {
+			t.Fatalf("UpdateContainer: %v", err)
+		}
+		return strings.Join(container.Args, " ")
+	}
+
+	elasticDP2 := func() *v1beta1.DynamoComponentDeploymentSharedSpec {
+		return vllmComponent("--enable-elastic-ep", "--data-parallel-backend", "ray", "--data-parallel-size", "2")
+	}
+
+	for _, tt := range []struct {
+		name      string
+		component *v1beta1.DynamoComponentDeploymentSharedSpec
+	}{
+		{
+			// The shipped demo manifest's shape: Grove renders it, Grove creates no
+			// follower, so there is never a second Ray node.
+			name:      "Grove leader: no follower is ever synthesized",
+			component: elasticDP2(),
+		},
+		{
+			// IsSinglePodElasticEPShape declines at replicas > 1, so no follower is
+			// derived, yet every replica still renders as RoleMain.
+			name:      "replicas > 1: no follower is derived either",
+			component: withReplicas(elasticDP2(), 2),
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			script := renderUnsynthesized(t, tt.component)
+
+			if strings.Contains(script, "ray.nodes()") {
+				t.Errorf("leader must NOT wait for Ray nodes that nothing will create; got: %s", script)
+			}
+			if strings.Contains(script, dataParallelSizeLocalFlag) {
+				t.Errorf("leader must NOT be pinned to one local rank when its ranks run intra-pod; got: %s", script)
+			}
+			// The Ray head itself still renders -- that shipped in #12943 and is not
+			// conditional on any of this.
+			if !strings.Contains(script, "ray start --head") {
+				t.Errorf("the Ray head must still be injected; got: %s", script)
+			}
+		})
+	}
+}
+
 // TestElasticEPLeaderGetsDataParallelSizeLocal pins the second half of the sizing rule.
 //
 // ElasticEPFollowerReplicas derives the follower count from --data-parallel-size on the
@@ -645,12 +722,19 @@ func TestElasticEPGenerationIsIndependentOfTheGate(t *testing.T) {
 // Mutation check: deleting the injectElasticEPDataParallelSizeLocal call fails the dp=4
 // subtest and nothing else.
 func TestElasticEPLeaderGetsDataParallelSizeLocal(t *testing.T) {
+	// followers is what synthesis stamped on the leader, and it -- not
+	// --data-parallel-size -- is what licenses the pin. Rendering through
+	// synthesizeElasticEPFollowerDCD rather than hand-setting the annotation keeps the
+	// two halves honest: if synthesis stops stamping it, these tests go red.
 	render := func(t *testing.T, extraArgs ...string) string {
 		t.Helper()
 		component := vllmComponent(append([]string{"--enable-elastic-ep", "--data-parallel-backend", "ray"}, extraArgs...)...)
-		container := GetMainContainer(component).DeepCopy()
+		leader := leaderDCD(component)
+		synthesizeElasticEPFollowerDCD(leader, leaderComponent)
+		leaderSpec := &leader.Spec.DynamoComponentDeploymentSharedSpec
+		container := GetMainContainer(leaderSpec).DeepCopy()
 		if err := (&VLLMBackend{}).UpdateContainer(
-			container, 1, RoleMain, component, "test-service",
+			container, 1, RoleMain, leaderSpec, "test-service",
 			&GroveMultinodeDeployer{}, staticContainerGPUCount(1),
 		); err != nil {
 			t.Fatalf("UpdateContainer: %v", err)
@@ -710,13 +794,19 @@ func TestElasticEPLeaderGetsDataParallelSizeLocal(t *testing.T) {
 //
 // Mutation check: deleting the widthGate branch fails the dp=4 subtest and nothing else.
 func TestElasticEPLeaderWaitsForDeclaredWidth(t *testing.T) {
+	// Rendered through synthesis, because the wait is licensed by the follower count
+	// synthesis stamps on the leader -- not by --data-parallel-size. A leader whose
+	// followers were never created (Grove, or replicas > 1) must get no wait at all;
+	// TestElasticEPLeaderDoesNotWaitWithoutSynthesizedFollowers covers that directly.
 	render := func(t *testing.T, extraArgs ...string) string {
 		t.Helper()
 		component := vllmComponent(append([]string{"--enable-elastic-ep", "--data-parallel-backend", "ray"}, extraArgs...)...)
-		container := GetMainContainer(component).DeepCopy()
-		backend := &VLLMBackend{}
-		if err := backend.UpdateContainer(
-			container, 1, RoleMain, component, "test-service",
+		leader := leaderDCD(component)
+		synthesizeElasticEPFollowerDCD(leader, leaderComponent)
+		leaderSpec := &leader.Spec.DynamoComponentDeploymentSharedSpec
+		container := GetMainContainer(leaderSpec).DeepCopy()
+		if err := (&VLLMBackend{}).UpdateContainer(
+			container, 1, RoleMain, leaderSpec, "test-service",
 			&GroveMultinodeDeployer{}, staticContainerGPUCount(1),
 		); err != nil {
 			t.Fatalf("UpdateContainer: %v", err)

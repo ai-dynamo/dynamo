@@ -72,6 +72,23 @@ const (
 	// must not be resolved this way. Operator-set, never user-set.
 	KubeAnnotationElasticEPLeaderComponent = "nvidia.com/elastic-ep-leader-component"
 
+	// KubeAnnotationElasticEPFollowerReplicas records how many followers were actually
+	// synthesized for this leader, and is the ONLY thing that may switch on the
+	// multi-pod elastic-EP launch behaviour: the leader's wait for its declared width,
+	// and the --data-parallel-size-local pin that spreads ranks across those pods.
+	//
+	// Keying either of those on --data-parallel-size instead is wrong, because that flag
+	// does not imply a multi-pod topology. A single pod with several GPUs runs
+	// data-parallel ranks INTRA-pod, which is what the Grove pathway does -- it never
+	// synthesizes a follower (grove#676) -- and what any component with replicas > 1
+	// does, since no follower is derived there either. Waiting for N Ray nodes in those
+	// shapes waits forever for pods nothing will create, and pinning the leader to one
+	// local rank sends the rest to nodes that do not exist.
+	//
+	// Written by synthesizeElasticEPFollowerDCD onto the LEADER's pod template, so it is
+	// present exactly when a follower exists to satisfy it. Operator-set, never user-set.
+	KubeAnnotationElasticEPFollowerReplicas = "nvidia.com/elastic-ep-follower-replicas"
+
 	// KubeAnnotationElasticEPLeaderService carries the headless Service name the follower
 	// joins, so it never recomputes an address the emitter may have scoped differently.
 	// See dynamo.ElasticEPLeaderServiceNameForDCD. Operator-set, never user-set.

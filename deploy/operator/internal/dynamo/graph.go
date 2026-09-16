@@ -468,10 +468,29 @@ func synthesizeElasticEPFollowerDCD(leaderDCD *v1beta1.DynamoComponentDeployment
 	if leaderContainer == nil || len(leaderContainer.Command) == 0 {
 		return nil
 	}
+	followerReplicas := ElasticEPFollowerReplicas(leaderContainer)
+
+	// Tell the LEADER how many followers it is getting, before deep-copying it.
+	//
+	// This annotation is what licenses the multi-pod launch behaviour in the backend --
+	// the wait for the declared width, and the --data-parallel-size-local pin. It is
+	// written here, and only here, because this is the one place that knows a follower
+	// will actually exist. Reaching the same conclusion from --data-parallel-size alone
+	// would be wrong: a single pod with several GPUs runs its data-parallel ranks
+	// intra-pod, which is exactly what the Grove pathway does (it never synthesizes a
+	// follower, grove#676) and what any replicas > 1 component does. Those shapes would
+	// wait forever for pods nothing creates.
+	//
+	// Written even when it is zero, so the backend can distinguish "the operator
+	// considered this and derived no followers" from "the operator never looked".
+	leaderPodTemplate := ensurePodTemplate(&leaderDCD.Spec.DynamoComponentDeploymentSharedSpec)
+	leaderPodTemplate.Annotations[commonconsts.KubeAnnotationElasticEPFollowerReplicas] =
+		strconv.Itoa(int(followerReplicas))
+
 	followerComponentName := elasticEPFollowerName(leaderComponentName)
 	follower := leaderDCD.DeepCopy()
 	follower.Name = elasticEPFollowerName(leaderDCD.Name)
-	follower.Spec.Replicas = ptr.To(ElasticEPFollowerReplicas(leaderContainer))
+	follower.Spec.Replicas = ptr.To(followerReplicas)
 
 	// Drop the leader's checkpoint configuration. The deep copy carries
 	// spec.experimental.checkpoint verbatim, and an explicit checkpointRef there is
