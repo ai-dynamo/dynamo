@@ -14,6 +14,7 @@
 //! adding a family is a one-line change here plus support in that crate.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
 
 use async_stream::stream;
 use dynamo_protocols::types::{
@@ -50,7 +51,12 @@ use super::{NvCreateChatCompletionStreamResponse, stream_choice_chunk_from_templ
 pub(crate) const V2_FAMILIES: &[&str] = &["qwen3_coder", "deepseek_v4"];
 
 pub(crate) fn selected_version() -> anyhow::Result<ParserVersion> {
-    parser_version()
+    static VERSION: LazyLock<Result<ParserVersion, String>> =
+        LazyLock::new(|| parser_version().map_err(|error| error.to_string()));
+    VERSION
+        .as_ref()
+        .copied()
+        .map_err(|error| anyhow::anyhow!(error.clone()))
 }
 
 pub(crate) fn enabled() -> bool {
@@ -91,10 +97,14 @@ fn validate_parser_version_for_mode(
             Ok(())
         }
         ParserVersion::V2 => {
-            if ![tool_call_parser, reasoning_parser]
+            let configured = [tool_call_parser, reasoning_parser]
                 .into_iter()
                 .flatten()
-                .any(|parser| V2_FAMILIES.contains(&parser) || UNIFIED_FAMILIES.contains(&parser))
+                .collect::<Vec<_>>();
+            if !configured.is_empty()
+                && !configured
+                    .iter()
+                    .any(|parser| V2_FAMILIES.contains(parser) || UNIFIED_FAMILIES.contains(parser))
             {
                 anyhow::bail!(
                     "{}=v2 was requested, but the configured parser has no compatible v2 implementation",
@@ -1482,8 +1492,6 @@ mod tests {
         }
         assert_eq!(unified_family(Some("qwen3_coder"), None), None);
         assert_eq!(unified_family(None, None), None);
-        // Default-on: `unified_family` reads no environment variable. muse routes to
-        // The unified parser is default-on independently of the tool-parser rollback.
         assert!(
             unified_family(Some("muse_glimmer"), None).is_some(),
             "muse must route by default"
