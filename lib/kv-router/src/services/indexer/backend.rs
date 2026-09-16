@@ -919,6 +919,7 @@ pub(crate) mod test_util {
             KvCacheEvent {
                 event_id,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
+                    shared_cache_eligible: false,
                     parent_hash,
                     start_position: None,
                     blocks,

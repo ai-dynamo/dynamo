@@ -883,6 +883,7 @@ fn open_loop_preparation_preserves_query_first_ties_and_removed_blocks() -> anyh
                 event: KvCacheEvent {
                     event_id: 8,
                     data: KvCacheEventData::Stored(KvCacheStoreData {
+                        shared_cache_eligible: false,
                         parent_hash: None,
                         start_position: Some(0),
                         blocks: vec![
