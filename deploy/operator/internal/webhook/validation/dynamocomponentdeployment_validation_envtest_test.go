@@ -1099,12 +1099,27 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			},
 		},
 		{
-			name: "v1alpha1 EPP requires one replica",
+			name: "v1alpha1 native Rust EPP accepts more than one replica",
 			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: consts.ComponentTypeEPP,
 				Replicas:      &validMinAvail,
 				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
 					MainContainer: &corev1.Container{Image: frontendImage150},
+				},
+			}),
+		},
+		{
+			name: "v1alpha1 legacy Go EPP still requires one replica",
+			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeEPP,
+				Replicas:      &validMinAvail,
+				EPPConfig: &nvidiacomv1alpha1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+					},
+				},
+				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{Image: legacyEPPImage140},
 				},
 			}),
 			wantWebhookErrs: []string{
