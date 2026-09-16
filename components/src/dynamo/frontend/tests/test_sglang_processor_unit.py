@@ -2398,9 +2398,9 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
             exclude_tools_when_tool_choice_none=False,
         )
         # With flag off, both should have similar token counts (tools in template)
-        assert len(with_none.prompt_token_ids) == len(with_auto.prompt_token_ids), (
-            "tool_choice=none with flag off should keep tools in template"
-        )
+        assert len(with_none.prompt_token_ids) == len(
+            with_auto.prompt_token_ids
+        ), "tool_choice=none with flag off should keep tools in template"
 
     def test_named_tool_choice_missing_function_raises(self, tokenizer):
         """Named tool_choice referencing a function absent from tools raises ValueError."""

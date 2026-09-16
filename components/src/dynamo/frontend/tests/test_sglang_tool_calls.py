@@ -737,9 +737,9 @@ class TestStreamingToolCallDeltas:  # FRONTEND.4 — incremental tool-call delta
             "The whole tool call arrived in a single frame; argument deltas "
             "must stream the way plain content does."
         )
-        assert min(tool_frames) < max(finish_frames), (
-            "The first tool-call frame must precede the finish frame."
-        )
+        assert min(tool_frames) < max(
+            finish_frames
+        ), "The first tool-call frame must precede the finish frame."
 
     def test_header_fields_emitted_exactly_once(self, tokenizer):
         results = _run_postprocessor(tokenizer, self.TEXT, 3)
