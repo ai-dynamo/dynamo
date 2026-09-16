@@ -988,6 +988,7 @@ impl Client {
                     }
                     DiscoveryEvent::Added(_) => {}
                     DiscoveryEvent::ModelTaintsUpdated(_) => {}
+                    DiscoveryEvent::Resync(_) => {}
                     DiscoveryEvent::Removed(id) => {
                         if let DiscoveryInstanceId::Endpoint(endpoint_id) = id {
                             map.remove(&endpoint_id.instance_id);

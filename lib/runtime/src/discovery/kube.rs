@@ -458,34 +458,33 @@ impl Discovery for KubeDiscoveryClient {
 
                 match recv_result {
                     Ok(event) => {
-                        let forward = match &event {
+                        let forwarded = match &event {
                             DiscoveryEvent::Added(instance) => {
                                 if instance.matches(&query) {
                                     let id = instance.id();
                                     if known.get(&id) != Some(instance) {
-                                        known.insert(id, instance.clone());
-                                        true
+                                        known.insert(id.clone(), instance.clone());
+                                        Some(("added", id))
                                     } else {
-                                        false
+                                        None
                                     }
                                 } else {
-                                    false
+                                    None
                                 }
                             }
-                            DiscoveryEvent::Removed(id) => known.remove(id).is_some(),
-                            DiscoveryEvent::ModelTaintsUpdated(update) => {
-                                known.contains_key(&DiscoveryInstanceId::Model(update.id.clone()))
+                            DiscoveryEvent::Removed(id) => {
+                                known.remove(id).is_some().then(|| ("removed", id.clone()))
                             }
+                            DiscoveryEvent::ModelTaintsUpdated(update) => {
+                                let id = DiscoveryInstanceId::Model(update.id.clone());
+                                known
+                                    .contains_key(&id)
+                                    .then_some(("model_taints_updated", id))
+                            }
+                            // The daemon publishes incremental events only.
+                            DiscoveryEvent::Resync(_) => None,
                         };
-                        if forward {
-                            let (event_kind, instance_id) = match &event {
-                                DiscoveryEvent::Added(i) => ("added", i.id()),
-                                DiscoveryEvent::ModelTaintsUpdated(u) => (
-                                    "model_taints_updated",
-                                    DiscoveryInstanceId::Model(u.id.clone()),
-                                ),
-                                DiscoveryEvent::Removed(id) => ("removed", id.clone()),
-                            };
+                        if let Some((event_kind, instance_id)) = forwarded {
                             tracing::info!(
                                 stream_id = %stream_id,
                                 event_kind,

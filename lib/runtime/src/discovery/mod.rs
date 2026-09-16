@@ -1193,6 +1193,13 @@ pub enum DiscoveryEvent {
     ModelTaintsUpdated(ModelTaintsUpdate),
     /// An instance was removed (identified by its unique ID)
     Removed(DiscoveryInstanceId),
+    /// The backend resynchronized. The payload holds every instance that matches the query at
+    /// that moment.
+    ///
+    /// A consumer that builds its state from this stream only can ignore this event. A consumer
+    /// that holds state from another source, such as a [`Discovery::list`] call, must replace its
+    /// state with the payload.
+    Resync(Vec<DiscoveryInstance>),
 }
 
 /// A scoped, idempotent update to an existing model card's routing taints.

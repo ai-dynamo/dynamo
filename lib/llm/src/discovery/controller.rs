@@ -333,6 +333,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 tracing::error!("Unexpected non-model removal in model discovery stream");
                 false
             }
+            DiscoveryEvent::Resync(_) => false,
         };
     }
 

@@ -543,6 +543,7 @@ impl MembershipState {
                 self.cards.remove(&id).is_some()
             }
             DiscoveryEvent::Removed(_) => false,
+            DiscoveryEvent::Resync(_) => false,
         }
     }
 
