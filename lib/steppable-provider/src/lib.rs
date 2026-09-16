@@ -812,13 +812,17 @@ unsafe fn submit_compact_hash_buffer_range_impl(
         // Safety: the validated non-empty registered buffer covers `start`.
         unsafe { buffer.data.add(start) }
     };
-    let lease: Arc<dyn CompactHashIdsLease> = Arc::from(Box::new(HostHashIdsLease {
+    // The core lease API uses `Arc` for local lifecycle ownership. This host
+    // buffer pointer deliberately does not cross threads, so it must not gain
+    // an unsound `Send` or `Sync` implementation merely to satisfy Clippy.
+    #[allow(clippy::arc_with_non_send_sync)]
+    let lease: Arc<dyn CompactHashIdsLease> = Arc::new(HostHashIdsLease {
         data,
         len: range.len as usize,
         buffer_id: range.buffer_id,
         callbacks,
         accepted: AtomicBool::new(false),
-    }) as Box<dyn CompactHashIdsLease>);
+    });
     let request = CompactDirectRequest::leased(direct, input_token_count, trace_block_size, lease);
     match replay.engine.submit_compact(request) {
         Ok(uuid) => {

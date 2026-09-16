@@ -391,6 +391,11 @@ fn leased_compact_buffer_releases_once_at_terminal_completion() {
     assert!(step_to_terminal(table, handle, id));
     assert_eq!(log.count.load(Ordering::SeqCst), 1);
     assert_eq!(log.last_buffer_id.load(Ordering::SeqCst), buffer_id.0);
+    assert_eq!(
+        submit_hash_buffer_range(tail, handle, buffer_id, [60; 16]),
+        StatusV1::INVALID_ARGUMENT
+    );
+    assert_eq!(log.count.load(Ordering::SeqCst), 1);
 
     unsafe { table.destroy.expect("destroy")(handle) };
     assert_eq!(log.count.load(Ordering::SeqCst), 1);
@@ -417,6 +422,11 @@ fn leased_compact_buffer_releases_once_when_canceled() {
     assert_eq!(canceled, 1);
     assert_eq!(log.count.load(Ordering::SeqCst), 1);
     assert_eq!(log.last_buffer_id.load(Ordering::SeqCst), buffer_id.0);
+    assert_eq!(
+        submit_hash_buffer_range(tail, handle, buffer_id, [61; 16]),
+        StatusV1::INVALID_ARGUMENT
+    );
+    assert_eq!(log.count.load(Ordering::SeqCst), 1);
 
     unsafe { table.destroy.expect("destroy")(handle) };
     assert_eq!(log.count.load(Ordering::SeqCst), 1);
