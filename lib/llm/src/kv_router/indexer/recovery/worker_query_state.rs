@@ -228,6 +228,7 @@ mod tests {
                 data: KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash: None,
                     start_position: None,
+                    shared_cache_eligible: false,
                     blocks: vec![KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(event_id),
                         tokens_hash: LocalBlockHash(event_id),

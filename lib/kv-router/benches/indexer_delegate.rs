@@ -47,6 +47,7 @@ fn bench(c: &mut Criterion) {
                     data: KvCacheEventData::Stored(KvCacheStoreData {
                         parent_hash: None,
                         start_position: None,
+                        shared_cache_eligible: false,
                         blocks: local
                             .into_iter()
                             .zip(sequence)

@@ -100,6 +100,7 @@ async fn seed_prefix_on_worker_one(core: &SelectionCore) {
                 data: KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash: None,
                     start_position: None,
+                    shared_cache_eligible: false,
                     blocks,
                 }),
                 dp_rank: 0,

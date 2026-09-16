@@ -555,6 +555,7 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
                     KvCacheEvent {
                         event_id,
                         data: KvCacheEventData::Stored(KvCacheStoreData {
+                            shared_cache_eligible: false,
                             parent_hash,
                             start_position: None,
                             blocks: vec![block.clone()],
@@ -1043,6 +1044,7 @@ mod tests {
             0,
             dp_rank,
             KvCacheEventData::Stored(KvCacheStoreData {
+                shared_cache_eligible: false,
                 parent_hash: None,
                 start_position: None,
                 blocks: stored_blocks(values),
@@ -1069,6 +1071,7 @@ mod tests {
             0,
             0,
             KvCacheEventData::Stored(KvCacheStoreData {
+                shared_cache_eligible: false,
                 parent_hash,
                 start_position: None,
                 blocks: stored_blocks_with_sequence_hashes(&suffix_hashes, suffix_seq_hashes),
@@ -1360,6 +1363,7 @@ mod tests {
             0,
             0,
             KvCacheEventData::Stored(KvCacheStoreData {
+                shared_cache_eligible: false,
                 parent_hash: Some(anchor.anchor_id),
                 start_position: None,
                 blocks: suffix_blocks,
