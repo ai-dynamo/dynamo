@@ -55,12 +55,10 @@ repository = "https://github.com/ai-dynamo/dynamo.git"
 keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
 [workspace.dependencies]
-# Published separately by https://github.com/ai-dynamo/aisimulate. Pinned to the
-# ajc/kvrouter-steppable branch (not the machine-local path this replaced) so this
-# workspace resolves to the same aisimulate-core source/commit as aiperf's git
-# dependency on the same branch -- a path dependency here and a git dependency
-# there are different Cargo SourceIds and do not unify, even at identical content.
-aisimulate-core = { git = "https://github.com/ai-dynamo/aisimulate.git", branch = "ajc/kvrouter-steppable" }
+# The explicit KV-router steppable oracle must use the same local AISimulate
+# core source as the outer dynamic plugin. A git SourceId here would create a
+# second, incompatible copy of the replay traits in the provider cdylib.
+aisimulate-core = { path = "../aisimulate-dynamic-abi/crates/core" }
 
 # Local crates
 dynamo-runtime = { path = "lib/runtime", version = "1.5.0" }
