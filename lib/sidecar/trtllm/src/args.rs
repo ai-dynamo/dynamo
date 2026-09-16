@@ -22,9 +22,9 @@ pub(crate) struct Args {
     /// `Control.GetModelInfo` reports; that report is used only when this
     /// argument is omitted, and a disagreement is logged at WARN. Supply this
     /// whenever the engine was started without `--max_seq_len`, because
-    /// TensorRT-LLM then reports its `max_input_len` default instead of a real
-    /// context length. With neither source, requests that omit `max_tokens` are
-    /// rejected. See the note in `convert.rs`.
+    /// TensorRT-LLM then leaves `max_context_length` unset and the sidecar has
+    /// no window to register. With neither source, requests that omit
+    /// `max_tokens` are rejected.
     #[arg(long, env = "TRTLLM_CONTEXT_LENGTH", value_parser = clap::value_parser!(u32).range(1..))]
     pub context_length: Option<u32>,
 }

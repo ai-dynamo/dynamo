@@ -31,10 +31,11 @@ registration, request conversion, transport, cancellation, and abort.
 The integration does **not** support multimodal input, LoRA, encode workers,
 beam search, or `n > 1`.
 
-A routing target selected by the KV router is forwarded to the engine as the
-protocol's `openengine-target-dp-rank` metadata. `KvSessionRef.dp_rank` remains
-authoritative for a session's KV affinity, so a decode request follows the
-handoff rather than the header.
+Data-parallel rank targeting is rejected: the server answers
+`openengine-target-dp-rank` with `UNIMPLEMENTED`, so a request carrying a rank
+hint is refused up front instead of failing in the engine.
+`KvSessionRef.dp_rank` still carries a disaggregated session's KV affinity,
+inside the request body.
 
 > [!NOTE]
 > `Control.GetModelInfo` supplies the registered context length (and the default
@@ -103,9 +104,9 @@ The context length comes from `--context-length` (or `TRTLLM_CONTEXT_LENGTH`)
 when it is supplied, and from `Control.GetModelInfo` otherwise; a disagreement
 between the two is logged at WARN and the configured value wins. Supply it
 whenever the engine was started without `--max_seq_len`, because TensorRT-LLM
-then reports its `max_input_len` default instead of a real context length and
-the sidecar discards that value. With neither source the worker still
-registers, and only requests that omit `max_tokens` are rejected.
+then leaves `max_context_length` unset and the sidecar has nothing to register
+the window from. With neither source the worker still registers, and only
+requests that omit `max_tokens` are rejected.
 
 Startup waits for the engine: TensorRT-LLM binds its gRPC port before the model
 finishes loading, so the sidecar retries `GetModelInfo` until
