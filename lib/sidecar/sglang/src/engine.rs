@@ -253,6 +253,10 @@ impl LLMEngine for SglangSidecarEngine {
             .state
             .get()
             .ok_or_else(|| client::engine_shutdown("generate called before start"))?;
+        let metadata_uploader = MetadataUploader::from_request(
+            &request,
+            self.metadata_upload_enabled && !self.disaggregation_mode.is_prefill(),
+        )?;
         if let Some(native_request) = native_http::request(
             &request,
             ctx.id(),
@@ -265,12 +269,13 @@ impl LLMEngine for SglangSidecarEngine {
                     "native SGLang Generate is unavailable because no ready incremental HTTP endpoint was discovered",
                 )
             })?;
-            return Ok(native_http.generate(native_request, ctx, self.cancel.clone()));
+            return Ok(native_http.generate(
+                native_request,
+                ctx,
+                self.cancel.clone(),
+                metadata_uploader,
+            ));
         }
-        let metadata_uploader = MetadataUploader::from_request(
-            &request,
-            self.metadata_upload_enabled && !self.disaggregation_mode.is_prefill(),
-        )?;
         let mut grpc_client = state.pool.stream_client();
 
         let prompt_tokens = request.token_ids.len() as u32;

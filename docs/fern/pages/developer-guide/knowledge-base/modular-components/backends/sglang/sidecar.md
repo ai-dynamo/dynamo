@@ -28,6 +28,46 @@ in-process backend; sidecar feature parity is still under evaluation. See the
 [SGLang sidecar README](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/README.md)
 for current protocol details.
 
+## Upload Response Metadata
+
+Start the sidecar with `--enable-rl` or `DYN_ENABLE_RL=true` to allow
+out-of-band metadata uploads. Then set `nvext.metadata_upload` on each
+OpenAI-compatible generation request that requires an artifact:
+
+```json
+{
+  "nvext": {
+    "metadata_upload": {
+      "url": "s3://bucket/root/rollout-1",
+      "fallback_url": "file:///var/tmp/rollout-1"
+    }
+  }
+}
+```
+
+The sidecar writes the final cumulative SGLang `meta_info` to
+`choice_0.msgpack.zst`. It tries `fallback_url` only when the primary upload
+fails. The packaged sidecar supports `file://`, `s3://`, `gs://`, and `az://`
+URLs through OpenDAL.
+
+| API or worker role | Support |
+|---|---|
+| `POST /v1/chat/completions` | Supported |
+| `POST /v1/completions` | Supported |
+| `POST /v1/responses` | Supported |
+| Native SGLang `POST` or `PUT /generate` | Supported |
+| Aggregated worker | Uploads final metadata |
+| Disaggregated prefill worker | Does not upload |
+| Disaggregated decode worker | Uploads final metadata |
+
+The native `/generate` adapter treats the complete `nvext` object as
+Dynamo-owned and does not forward it to SGLang. When metadata upload is active,
+the streamed `meta_info` retains the request ID, finish reason, and token
+counts. Large fields such as routed experts and token log probabilities appear
+only in the uploaded artifact. See
+[NVIDIA Request Extensions](../../../../additional-resources/nvidia-request-extensions-nvext.md)
+for the field contract.
+
 ## Launch Locally
 
 From a Dynamo source checkout, build or install Dynamo so

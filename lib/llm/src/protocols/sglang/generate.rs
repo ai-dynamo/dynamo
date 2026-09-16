@@ -11,6 +11,8 @@
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
+use crate::protocols::common::extensions::NvExt;
+
 fn sampling_field<T>(object: Option<&Map<String, Value>>, name: &str) -> Result<Option<T>, String>
 where
     T: serde::de::DeserializeOwned,
@@ -35,6 +37,9 @@ pub struct SglangGenerateRequest {
     pub stream: bool,
     #[serde(default)]
     pub priority: Option<i32>,
+    /// Dynamo-owned request extensions. These are never forwarded to SGLang.
+    #[serde(default)]
+    pub nvext: Option<NvExt>,
     #[serde(flatten)]
     passthrough: Map<String, Value>,
 }
@@ -85,7 +90,7 @@ impl SglangGenerateRequest {
     }
 
     /// Move the native request into its routed input and opaque worker envelope.
-    pub fn into_worker_envelope(self, request_id: &str) -> (Vec<u32>, Value) {
+    pub fn into_worker_envelope(self, request_id: &str) -> (Vec<u32>, Value, Option<NvExt>) {
         let mut envelope = self.passthrough;
         envelope.insert(
             "sampling_params".to_string(),
@@ -95,7 +100,7 @@ impl SglangGenerateRequest {
         );
         envelope.insert("rid".to_string(), Value::String(request_id.to_string()));
         envelope.insert("stream".to_string(), Value::Bool(true));
-        (self.input_ids, Value::Object(envelope))
+        (self.input_ids, Value::Object(envelope), self.nvext)
     }
 }
 
@@ -118,13 +123,18 @@ mod tests {
             "token_ids_logprob": [17],
             "session_id": "session-1",
             "future_top_level_field": {"opaque": true},
+            "nvext": {
+                "metadata_upload": {
+                    "url": "s3://bucket/rollout"
+                }
+            },
             "priority": 9
         }))
         .unwrap();
 
         assert_eq!(request.max_new_tokens().unwrap(), Some(7));
         assert!(request.validate().is_ok());
-        let (input_ids, envelope) = request.into_worker_envelope("resolved-request");
+        let (input_ids, envelope, nvext) = request.into_worker_envelope("resolved-request");
         assert_eq!(input_ids, [1, 2, 3]);
         assert_eq!(envelope["rid"], "resolved-request");
         assert_eq!(envelope["stream"], true);
@@ -136,8 +146,13 @@ mod tests {
             true
         );
         assert_eq!(envelope["future_top_level_field"]["opaque"], true);
+        assert_eq!(
+            nvext.unwrap().metadata_upload.unwrap().url,
+            "s3://bucket/rollout"
+        );
         assert!(envelope.get("input_ids").is_none());
         assert!(envelope.get("priority").is_none());
+        assert!(envelope.get("nvext").is_none());
     }
 
     #[test]
@@ -173,5 +188,16 @@ mod tests {
         }))
         .unwrap();
         assert!(request.validate().unwrap_err().contains("must be 1"));
+    }
+
+    #[test]
+    fn request_rejects_unknown_nvext_fields() {
+        let error = serde_json::from_value::<SglangGenerateRequest>(serde_json::json!({
+            "input_ids": [1],
+            "nvext": {"future_sglang_field": true}
+        }))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("future_sglang_field"));
     }
 }

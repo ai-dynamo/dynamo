@@ -37,6 +37,25 @@ curl -N http://localhost:8000/generate \
 
 Set `DYN_SGLANG_ENABLE_GENERATE=1` on the frontend. The worker must accept token input; do not start it with `--use-sglang-tokenizer`, which selects text input and prevents the worker from advertising `/generate`.
 
+For an RL-enabled SGLang sidecar, add the Dynamo-owned `nvext` object to write
+the final SGLang metadata out of band:
+
+```json
+{
+  "nvext": {
+    "metadata_upload": {
+      "url": "s3://bucket/root/rollout-1",
+      "fallback_url": "file:///var/tmp/rollout-1"
+    }
+  }
+}
+```
+
+The native adapter removes `nvext` before it forwards the request to SGLang.
+The response keeps the request ID, finish reason, and token counts inline;
+large routed-expert and token-log-probability fields appear only in the
+uploaded artifact.
+
 Use an OpenAI-compatible route when the adapter needs one envelope across backends or named NVIDIA request extensions. This example bypasses frontend tokenization and asks Dynamo to return the effective prompt token sequence, generated token IDs, and prompt log probabilities:
 
 ```bash
