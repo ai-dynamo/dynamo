@@ -238,7 +238,7 @@ def _register_routes(handler):
     registered = {}
 
     class _Runtime:
-        def register_engine_route(self, path, route_handler):
+        def register_engine_route(self, path, route_handler, gated_by=None):
             registered[path] = route_handler
 
     handler.config = SimpleNamespace(dynamo_args=SimpleNamespace(engine_routes=[]))

@@ -270,7 +270,7 @@ def test_configured_engine_route_cannot_replace_built_in_route(reserved_path):
     registered_routes = []
 
     class Runtime:
-        def register_engine_route(self, path, route_handler):
+        def register_engine_route(self, path, route_handler, gated_by=None):
             registered_routes.append((path, route_handler))
 
     with pytest.raises(
@@ -323,7 +323,7 @@ def test_builtin_engine_routes_include_model_taint_update(monkeypatch):
     taint_route_endpoints = []
 
     class Runtime:
-        def register_engine_route(self, path, route_handler):
+        def register_engine_route(self, path, route_handler, gated_by=None):
             registered_routes.append((path, route_handler))
 
     runtime = Runtime()
@@ -341,6 +341,44 @@ def test_builtin_engine_routes_include_model_taint_update(monkeypatch):
         "control/start_profile",
         "control/stop_profile",
     }
+
+
+@pytest.mark.parametrize("enable_rl", [True, False])
+def test_weight_update_routes_gated_on_enable_rl(monkeypatch, enable_rl):
+    # The RCE-capable weight-update routes must register with gated_by=enable_rl
+    # (so the runtime drops them when RL is off), while the always-on built-ins
+    # stay ungated. Guards against silently dropping the gate on line handler_base
+    # register_engine_route(..., gated_by=enable_rl).
+    handler = object.__new__(DecodeWorkerHandler)
+    handler.engine = SimpleNamespace()
+    handler.generate_endpoint = object()
+    handler.config = SimpleNamespace(
+        dynamo_args=SimpleNamespace(engine_routes=[], enable_rl=enable_rl)
+    )
+
+    gated_by_path: dict = {}
+
+    class Runtime:
+        def register_engine_route(self, path, route_handler, gated_by=None):
+            gated_by_path[path] = gated_by
+
+    monkeypatch.setattr(
+        "dynamo.sglang.request_handlers.handler_base.register_model_taint_route",
+        lambda *_: None,
+    )
+    handler.register_engine_routes(Runtime())
+
+    weight_update_routes = {
+        "control/update_weights_from_disk",
+        "control/update_weights_from_tensor",
+        "control/update_weights_from_distributed",
+        "control/update_weights_from_ipc",
+        "control/update_weight_version",
+    }
+    for path in weight_update_routes:
+        assert gated_by_path[path] == enable_rl, path
+    for path in ("control/start_profile", "control/stop_profile"):
+        assert gated_by_path[path] is None, path
 
 
 def _make_sglang_config(**overrides):
