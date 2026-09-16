@@ -5280,8 +5280,8 @@ async fn videos(
     let mut http_queue_guard = Some(http_queue_guard);
 
     if streaming {
-        // [gluo TODO] revisit the cancellation handling here,
-        // should be unified with chat_completions.
+        // Wait for the first backend event before committing SSE 200 so a
+        // material-fetch 403 answers HTTP 403 instead of 200/internal.
         let ctx = stream.context();
         let (mut connection_handle, stream_handle) = create_connection_monitor(
             ctx.clone(),
@@ -5293,6 +5293,20 @@ async fn videos(
             },
         )
         .await;
+        let stream = match until_client_disconnects(
+            check_for_backend_error_info(stream, BackendErrorCheck::UntilFirstEvent),
+            &ctx,
+        )
+        .await
+        {
+            Ok(stream) => stream,
+            Err(error_response) => {
+                connection_handle.disarm();
+                log_pre_commit_error(&request_id, &error_response);
+                inflight.mark_error(extract_error_type_from_response(&error_response));
+                return Err(error_response);
+            }
+        };
         let error_signal = StreamErrorSignal::default();
         let producer_error_signal = error_signal.clone();
         let stream = stream.flat_map(move |response| {
@@ -5343,7 +5357,7 @@ async fn videos(
             .await
             .map_err(|e| {
                 let err_response =
-                    non_streaming_aggregation_error_response(e, "Failed to fold videos stream");
+                    non_streaming_aggregation_error_response(e, "Failed to generate videos");
                 inflight.mark_error(extract_error_type_from_response(&err_response));
                 err_response
             })?;
