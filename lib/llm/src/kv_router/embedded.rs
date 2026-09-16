@@ -22,6 +22,7 @@ use dynamo_kv_router::scheduling::{
     NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, QueueLimitKind, QueueRejection,
     WorkerAvailabilityProvider,
 };
+use dynamo_kv_router::sequences::ReplicaWorkerPolicy;
 use dynamo_kv_router::services::selection::{
     CatalogObserver, CatalogReconciler, DEFAULT_MODEL_NAME, HostCache, HostEligibility, HostLoad,
     HostReplication, HostTelemetry, KvEventIngress, KvIndexSource, SelectionHost,
@@ -286,6 +287,7 @@ impl EmbeddedSelection {
             replication: HostReplication {
                 channels: replica_sync,
                 request_leases,
+                replica_worker_policy: ReplicaWorkerPolicy::LazyRegister,
             },
         })
         .build()

@@ -1633,6 +1633,81 @@ async fn prefill_complete_is_idempotent_for_a_live_booking() {
 }
 
 #[tokio::test]
+async fn early_peer_accounting_follows_host_policy_without_granting_eligibility() {
+    for policy in [
+        ReplicaWorkerPolicy::LazyRegister,
+        ReplicaWorkerPolicy::RequireRegistered,
+    ] {
+        let (outbound_tx, _outbound_rx) = mpsc::channel(16);
+        let (inbound_tx, inbound_rx) = mpsc::channel(16);
+        let channels = parking_lot::Mutex::new(Some(HostReplicaChannels {
+            outbound: Some(outbound_tx),
+            inbound_tx: inbound_tx.clone(),
+            inbound_rx,
+            process_id: 7,
+            ingress_observer: None,
+        }));
+        let core = core_with_host(SelectionHost {
+            replication: HostReplication {
+                channels: Some(Arc::new(move |_| channels.lock().take())),
+                replica_worker_policy: policy,
+                ..HostReplication::default()
+            },
+            ..SelectionHost::default()
+        });
+        core.upsert_worker(worker(1)).await.unwrap();
+        core.select_and_reserve(reserve_request("warm"))
+            .await
+            .unwrap();
+        core.free_reservation("warm").await.unwrap();
+        for (request_id, worker_id) in [("early", 2), ("barrier", 1)] {
+            inbound_tx
+                .send(ActiveSequenceEvent {
+                    request_id: request_id.to_string(),
+                    worker: WorkerWithDpRank::new(worker_id, 0),
+                    data: ActiveSequenceEventData::AddRequest {
+                        token_sequence: Some(vec![1, 2]),
+                        track_prefill_tokens: false,
+                        expected_output_tokens: None,
+                        prefill_load_hint: None,
+                    },
+                    router_id: 99,
+                    lora_name: None,
+                })
+                .await
+                .unwrap();
+        }
+        wait_until("peer batch applied", || {
+            core.indexed_booking("barrier").is_some()
+        })
+        .await;
+        assert_eq!(
+            core.indexed_booking("early").is_some(),
+            policy == ReplicaWorkerPolicy::LazyRegister
+        );
+        assert!(
+            !core
+                .catalog
+                .is_schedulable(WorkerAffinityTarget::new(2, None), &default_key())
+        );
+        let mut request = select_request();
+        request.allowed_worker_ids = Some(HashSet::from([2]));
+        assert!(
+            core.select(request).await.is_err(),
+            "accounting alone made worker 2 selectable"
+        );
+        core.upsert_worker(worker(2)).await.unwrap();
+        core.select_and_reserve(reserve_request("after-discovery"))
+            .await
+            .unwrap();
+        assert_eq!(
+            core.indexed_booking("early").is_some(),
+            policy == ReplicaWorkerPolicy::LazyRegister
+        );
+    }
+}
+
+#[tokio::test]
 async fn mirrored_replica_bookings_are_indexed_until_freed() {
     let (outbound_tx, _outbound_rx) = mpsc::channel(16);
     let (inbound_tx, inbound_rx) = mpsc::channel(16);

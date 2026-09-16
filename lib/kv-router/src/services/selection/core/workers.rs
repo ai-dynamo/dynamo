@@ -283,7 +283,7 @@ impl SelectionCore {
                     scoped_replica_sync.process_id,
                     worker_label,
                     SequenceTrackerOptions {
-                        replica_worker_policy: ReplicaWorkerPolicy::RequireRegistered,
+                        replica_worker_policy: self.host.replication.replica_worker_policy,
                         expiry_duration: self
                             .host
                             .replication

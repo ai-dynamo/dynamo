@@ -225,11 +225,24 @@ pub struct HostTelemetry {
 
 /// Replica-sync transport the host carries for partitions this core does not
 /// mesh itself (ignored when the service runs its own ZMQ replica sync).
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct HostReplication {
     pub channels: Option<HostReplicaSyncFactory>,
     /// Owns request expiry when supplied; the partition then expires only through lifecycle events.
     pub request_leases: Option<Arc<dyn ReplicaRequestLeaseObserver>>,
+    /// Whether peer events may create accounting before catalog discovery.
+    /// This does not make an undiscovered worker eligible for selection.
+    pub replica_worker_policy: ReplicaWorkerPolicy,
+}
+
+impl Default for HostReplication {
+    fn default() -> Self {
+        Self {
+            channels: None,
+            request_leases: None,
+            replica_worker_policy: ReplicaWorkerPolicy::RequireRegistered,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
