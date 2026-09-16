@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, call
 
 import pytest
+
 from dynamo.common.token_budget import TOKEN_BUDGET_RUNTIME_KEY
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, WorkerType
 from dynamo.vllm.capacity import get_metrics_model_name, get_spec_decode_runtime_data

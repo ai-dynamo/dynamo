@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+
 from dynamo.vllm import mooncake_store_runtime as runtime
 
 pytestmark = [
@@ -87,18 +88,16 @@ def resolved_store(monkeypatch):
     modules = {
         runtime._SPEC_MODULE: specs,
         runtime._MANAGER_MODULE: managers,
-        runtime._STORE_MODULE + ".connector": SimpleNamespace(
-            MooncakeStoreConnector=MooncakeStoreConnector
-        ),
-        runtime._STORE_MODULE + ".worker": SimpleNamespace(
-            MooncakeStoreWorker=MooncakeStoreWorker
-        ),
-        runtime._STORE_MODULE + ".coordinator": SimpleNamespace(
+        runtime._STORE_MODULE
+        + ".connector": SimpleNamespace(MooncakeStoreConnector=MooncakeStoreConnector),
+        runtime._STORE_MODULE
+        + ".worker": SimpleNamespace(MooncakeStoreWorker=MooncakeStoreWorker),
+        runtime._STORE_MODULE
+        + ".coordinator": SimpleNamespace(
             MooncakeStoreCoordinator=MooncakeStoreCoordinator
         ),
-        runtime._STORE_MODULE + ".data": SimpleNamespace(
-            ChunkedTokenDatabase=ChunkedTokenDatabase
-        ),
+        runtime._STORE_MODULE
+        + ".data": SimpleNamespace(ChunkedTokenDatabase=ChunkedTokenDatabase),
         "vllm.distributed.kv_transfer.kv_connector.v1.multi_connector": SimpleNamespace(
             MultiConnector=MultiConnector
         ),
