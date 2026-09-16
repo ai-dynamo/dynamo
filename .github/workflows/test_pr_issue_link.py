@@ -30,6 +30,7 @@ nothing here touches the network.
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -425,3 +426,25 @@ def test_fork_linear_overflow_does_not_mask_a_github_outage(
         PR_AUTHOR_ASSOCIATION="CONTRIBUTOR",
     )
     assert code == 0
+
+
+# ------------------------------------------------------------------
+# The blocking date, which lives in two files a human edits
+# ------------------------------------------------------------------
+
+
+def test_the_template_and_the_workflow_name_the_same_blocking_date() -> None:
+    """Nothing else keeps the two copies in step.
+
+    `BLOCKING_DATE` drives the message a contributor sees when the check
+    fails. The pull request template carries the same date so they read it
+    before it fails. A date set deliberately far out is the kind that slips,
+    and bumping one without the other leaves the template telling people the
+    old one.
+    """
+    workflows = Path(__file__).parent
+    workflow = (workflows / "pr-issue-link.yml").read_text()
+    template = (workflows.parent / "pull_request_template.md").read_text()
+    match = re.search(r'BLOCKING_DATE:\s*"(\d{4}-\d{2}-\d{2})"', workflow)
+    assert match, "the workflow does not set BLOCKING_DATE"
+    assert f"becomes required on {match.group(1)}" in template

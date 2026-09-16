@@ -40,6 +40,10 @@ env:
   # adjust to, and the cost of that lands on people who did nothing wrong.
   # It falls after the v1.6.0 code freeze on 2026-10-07, so this check is
   # advisory for all of 1.6 and first governs what lands in 1.7.
+  #
+  # The pull request template names this date too, so that a contributor reads
+  # it before the check fails rather than after. Bump both together; the unit
+  # tests below fail when they disagree.
   BLOCKING_DATE: "2026-10-15"
 
 jobs:
@@ -80,7 +84,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          sparse-checkout: .github/workflows
+          # The whole directory, not just workflows: one test reads the pull
+          # request template, which carries the second copy of the date.
+          sparse-checkout: .github
           persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
