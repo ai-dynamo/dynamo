@@ -127,6 +127,15 @@ func workerHashSpec(dcd *v1beta1.DynamoComponentDeployment) v1beta1.DynamoCompon
 		spec.Experimental.Grove.ForceScalingGroup = nil
 	}
 
+	// Canonicalize the backend-default cache path to omission. Generated DCDs
+	// already carry the backend resolved for rendering.
+	if spec.CompilationCache != nil {
+		defaultPath := getDefaultCompilationCacheMountPoint(BackendFramework(spec.BackendFramework))
+		if defaultPath != "" && spec.CompilationCache.MountPath == defaultPath {
+			spec.CompilationCache.MountPath = ""
+		}
+	}
+
 	return *spec
 }
 

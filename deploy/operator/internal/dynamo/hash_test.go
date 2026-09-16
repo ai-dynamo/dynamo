@@ -18,13 +18,17 @@
 package dynamo
 
 import (
+	"context"
 	"testing"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	runtimefeatures "github.com/ai-dynamo/dynamo/deploy/operator/internal/features/runtime"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -472,4 +476,55 @@ func TestSortEnvVars(t *testing.T) {
 	assert.Equal(t, "C", sorted[2].Name)
 	// Original not mutated
 	assert.Equal(t, "C", envs[0].Name)
+}
+
+func TestComputeBetaDGDWorkersSpecHash_CanonicalizesCompilationCacheMountPath(t *testing.T) {
+	for _, backendSource := range []string{"explicit", "detected"} {
+		t.Run(backendSource, func(t *testing.T) {
+			t.Log("Build equivalent omitted and explicit default cache paths")
+			omitted := betaDGDWithRuntimeVersion(t, "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0", "")
+			omitted.Spec.BackendFramework = string(BackendFrameworkVLLM)
+			if backendSource == "detected" {
+				omitted.Spec.BackendFramework = ""
+				omitted.Spec.Components[0].PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.vllm"}
+			}
+			omitted.Spec.Components[0].CompilationCache = &v1beta1.CompilationCacheConfig{PVCName: "compilation-cache"}
+			explicit := omitted.DeepCopy()
+			explicit.Spec.Components[0].CompilationCache.MountPath = commonconsts.DefaultVLLMCacheMountPoint
+			originalOmitted, originalExplicit := omitted.DeepCopy(), explicit.DeepCopy()
+
+			t.Log("Verify equal rendered workloads and worker hashes without mutating either input")
+			omittedRendered, err := GenerateGrovePodCliqueSet(context.Background(), omitted, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+			require.NoError(t, err)
+			explicitRendered, err := GenerateGrovePodCliqueSet(context.Background(), explicit, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+			require.NoError(t, err)
+			require.Equal(t, omittedRendered.Spec, explicitRendered.Spec)
+			assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, omitted), mustComputeBetaDGDWorkersSpecHash(t, explicit))
+			assert.Equal(t, originalOmitted, omitted)
+			assert.Equal(t, originalExplicit, explicit)
+		})
+	}
+
+	t.Log("Keep custom paths and PVC identity in the worker hash")
+	base := betaDGDWithRuntimeVersion(t, "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0", "")
+	base.Spec.BackendFramework = string(BackendFrameworkVLLM)
+	base.Spec.Components[0].CompilationCache = &v1beta1.CompilationCacheConfig{PVCName: "compilation-cache"}
+	baseHash := mustComputeBetaDGDWorkersSpecHash(t, base)
+	for _, cache := range []v1beta1.CompilationCacheConfig{
+		{PVCName: "compilation-cache", MountPath: "/custom/cache"},
+		{PVCName: "other-cache"},
+	} {
+		changed := base.DeepCopy()
+		changed.Spec.Components[0].CompilationCache = &cache
+		assert.NotEqual(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, changed), "cache: %+v", cache)
+	}
+
+	t.Log("Preserve explicit paths for a backend without a default cache path")
+	dcd := &v1beta1.DynamoComponentDeployment{}
+	dcd.Spec.BackendFramework = string(BackendFrameworkSGLang)
+	dcd.Spec.CompilationCache = &v1beta1.CompilationCacheConfig{
+		PVCName: "compilation-cache", MountPath: commonconsts.DefaultVLLMCacheMountPoint,
+	}
+	normalized := workerHashSpec(dcd)
+	assert.Equal(t, commonconsts.DefaultVLLMCacheMountPoint, normalized.CompilationCache.MountPath)
 }
