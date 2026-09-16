@@ -124,13 +124,13 @@ impl PrefillTask {
                         let terminal = output.as_ref().is_none_or(|output| {
                             output.data.as_ref().is_some_and(|data| data.finish_reason.is_some())
                         });
-                        if terminal {
-                            if let Err(error) = completion.as_mut().await {
-                                request_context.stop_generating();
-                                stream_context.stop_generating();
-                                yield Annotated::from_err(error);
-                                return;
-                            }
+                        if terminal
+                            && let Err(error) = completion.as_mut().await
+                        {
+                            request_context.stop_generating();
+                            stream_context.stop_generating();
+                            yield Annotated::from_err(error);
+                            return;
                         }
                         match output {
                             Some(output) => yield output,
