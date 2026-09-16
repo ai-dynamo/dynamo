@@ -601,6 +601,22 @@ class TestI2VEngineInputs:
         assert second_inputs.sampling_params_list[0].extra_args == {}
 
     @pytest.mark.asyncio
+    async def test_video_fps_only_preserves_model_num_frames(self):
+        handler = _make_handler()
+        model_defaults = handler.engine_client.default_sampling_params_list[0]
+        model_defaults.num_frames = 33
+        req = NvCreateVideoRequest(
+            prompt="cat", model="video-model", nvext=VideoNvExt(fps=8)
+        )
+
+        result = await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+        sp = result.sampling_params_list[0]
+
+        assert sp.num_frames == 33
+        assert sp.fps == 8
+        assert sp.frame_rate == 8.0
+
+    @pytest.mark.asyncio
     async def test_explicit_video_fields_override_model_defaults(self):
         handler = _make_handler()
         model_defaults = handler.engine_client.default_sampling_params_list[0]
@@ -627,10 +643,13 @@ class TestI2VEngineInputs:
         assert sp.seed == 42
         assert result.fps == 24
 
+    @pytest.mark.parametrize("fps", [None, 8])
     @pytest.mark.asyncio
-    async def test_video_uses_video_default_for_image_num_frames_sentinel(self):
+    async def test_video_uses_video_default_for_image_num_frames_sentinel(self, fps):
         handler = _make_handler()
-        req = NvCreateVideoRequest(prompt="cat", model="video-model")
+        req = NvCreateVideoRequest(
+            prompt="cat", model="video-model", nvext=VideoNvExt(fps=fps)
+        )
 
         result = await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
 

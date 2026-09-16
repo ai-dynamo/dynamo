@@ -289,7 +289,11 @@ class OmniArgGroup(ArgGroup):
             flag_name="--ulysses-a2a-permute",
             env_var="DYN_OMNI_ULYSSES_A2A_PERMUTE",
             default=False,
-            help="Use the fused all-to-all permutation path for Ulysses attention.",
+            help=(
+                "Use vLLM-Omni's fused permute-free all-to-all for eligible "
+                "Ulysses exchanges. Requires --ulysses-degree > 1; enabling "
+                "it JIT-compiles a CUDA kernel at worker start."
+            ),
         )
         add_argument(
             g,
