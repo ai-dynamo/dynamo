@@ -47,6 +47,7 @@ def test_register_and_serve_registers_and_serves(patched_worker, tmp_path):
     config.server_id = "triton"
 
     loaded_model = MagicMock(name="model")
+    loaded_model.config.return_value = {}
     server = MagicMock(name="server")
     server.model.return_value = loaded_model
 
