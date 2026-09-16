@@ -101,12 +101,11 @@ fn sglang_sidecar_argv(argv: Vec<String>) -> Vec<String> {
 #[pyo3(signature = (argv=None))]
 fn _run_sglang_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let cli_argv = sglang_sidecar_argv(argv.unwrap_or_default());
-    let sidecar = py
-        .allow_threads(move || dynamo_sglang_sidecar::SglangSidecar::try_from_args(cli_argv))
-        .map_err(sidecar_startup_to_pyerr)?;
-
-    py.allow_threads(move || sidecar.run())
-        .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))
+    py.allow_threads(move || dynamo_sglang_sidecar::run(cli_argv))
+        .map_err(|error| match error.downcast::<SidecarStartupError>() {
+            Ok(error) => sidecar_startup_to_pyerr(error),
+            Err(error) => pyo3::exceptions::PyRuntimeError::new_err(error.to_string()),
+        })
 }
 
 const VLLM_SIDECAR_PROGRAM_NAME: &str = "dynamo-vllm-sidecar";
