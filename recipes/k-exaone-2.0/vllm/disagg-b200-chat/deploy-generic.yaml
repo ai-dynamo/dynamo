@@ -73,7 +73,7 @@ spec:
             value: "5560"
           - name: KV_TRANSFER_CONFIG
             value: '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"cuda","kv_connector_extra_config":{"num_threads":8}}'
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:79a9d1b103d81fbdda1e97dc476a31adcaf6056e2d2f465b09173a5578a574b8
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-k-exaone-2.0-750b-post.1
           name: main
           resources:
             limits:
@@ -104,9 +104,6 @@ spec:
             readOnly: true
           - mountPath: /dev/shm
             name: dshm
-        # needed only by the interim worker image below; drop it when that image is public.
-        imagePullSecrets:
-        - name: acr-token-secret
         nodeSelector:
           nvidia.com/gpu.product: NVIDIA-B200
         tolerations:
@@ -176,7 +173,7 @@ spec:
             value: "5558"
           - name: KV_TRANSFER_CONFIG
             value: '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cuda","kv_connector_extra_config":{"num_threads":8}}'
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:79a9d1b103d81fbdda1e97dc476a31adcaf6056e2d2f465b09173a5578a574b8
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-k-exaone-2.0-750b-post.1
           name: main
           resources:
             limits:
@@ -207,9 +204,6 @@ spec:
             readOnly: true
           - mountPath: /dev/shm
             name: dshm
-        # needed only by the interim worker image below; drop it when that image is public.
-        imagePullSecrets:
-        - name: acr-token-secret
         nodeSelector:
           nvidia.com/gpu.product: NVIDIA-B200
         tolerations:

@@ -111,7 +111,6 @@ spec:
           aiperf profile \
           -m "${TARGET_MODEL}" \
           --tokenizer "${TARGET_MODEL}" \
-          --tokenizer-trust-remote-code \
           --url "http://${ENDPOINT}" \
           --streaming \
           --ui simple \
@@ -128,7 +127,6 @@ spec:
           aiperf profile \
           -m "${TARGET_MODEL}" \
           --tokenizer "${TARGET_MODEL}" \
-          --tokenizer-trust-remote-code \
           --input-file "${TRACE_FILE}" \
           --custom-dataset-type mooncake_trace \
           --num-requests $(wc -l < "${TRACE_FILE}") \

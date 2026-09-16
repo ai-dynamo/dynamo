@@ -43,8 +43,8 @@ traces/8k_1k_70kv_chat_new_noschedule_short_15perc.jsonl
   -> ../../../kimi-k2.6/perf/traces/8k_1k_70kv_chat_new_noschedule_short_15perc.jsonl
 ```
 
-The default 15% trace contains 3,541 requests. Its SHA-256 is
-`f20d3f2bc83dd1306cda659fbe34e7c4d85ca5497626c98bc0b1c4d2211379d0`.
+The default 15% trace contains 1,805 requests. Its SHA-256 is
+`b1221bca72b69f842897f339624306a84857f1b55ea0d866525f94d9ceb9b871`.
 
 ## Workflow
 
@@ -86,8 +86,10 @@ kubectl wait --for=condition=Complete job/k-exaone-2-bench \
   -n ${NAMESPACE} --timeout=10800s
 ```
 
-The Job uses `nvcr.io/nvidia/ai-dynamo/aiperf:0.11.0` directly and does
-not install or patch AIPerf at runtime.
+The Job runs `python:3.12-slim` and installs `aiperf==0.12.0` at start, together
+with `transformers>=5` -- required, because this model's tokenizer_config declares
+`tokenizer_class: TokenizersBackend`, which does not exist in the transformers 4.x
+line and makes aiperf fail before it issues a request.
 
 ### 4. Fetch artifacts
 

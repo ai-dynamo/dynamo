@@ -85,20 +85,16 @@ spec:
       sharedMemorySize: 40Gi
       podTemplate:
         spec:
-          # needed only by the interim worker image below; drop it when that image is public.
-          imagePullSecrets: [{name: acr-token-secret}]
           nodeSelector:
             nvidia.com/gpu.product: NVIDIA-B200
           tolerations:
             - {key: nvidia.com/gpu, operator: Equal, value: "true", effect: NoSchedule}
           containers:
             - name: main
-              # DEV IMAGE, digest-pinned. NOT a public image: external users cannot pull it.
-              # Blocked on ai-dynamo/dynamo#14599 (one-line lm_head prefix fix) merging and a
-              # public nvcr.io tag being cut -- stock vLLM 0.28.0 cannot load this NVFP4
-              # checkpoint without it. Swap to nvcr.io/nvidia/ai-dynamo/vllm-runtime:<tag>
-              # pinned to the MULTI-ARCH INDEX digest before this recipe ships.
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:79a9d1b103d81fbdda1e97dc476a31adcaf6056e2d2f465b09173a5578a574b8
+              # Public released runtime for this model. Carries vLLM 0.28.0 plus the
+              # exaone_moe lm_head prefix fix (ai-dynamo/dynamo#14599); stock vLLM 0.28.0
+              # cannot load this NVFP4 checkpoint without it.
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-k-exaone-2.0-750b-post.1
               env:
                 - {name: VLLM_NIXL_SIDE_CHANNEL_PORT, value: "5560"}
                 - {name: KV_TRANSFER_CONFIG, value: '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"cuda","kv_connector_extra_config":{"num_threads":8}}'}
@@ -154,8 +150,6 @@ spec:
       sharedMemorySize: 40Gi
       podTemplate:
         spec:
-          # needed only by the interim worker image below; drop it when that image is public.
-          imagePullSecrets: [{name: acr-token-secret}]
           nodeSelector:
             nvidia.com/gpu.product: NVIDIA-B200
           # Pack decode onto prefill's node so the NIXL KV hop stays on one fabric.
@@ -177,12 +171,10 @@ spec:
             - {key: nvidia.com/gpu, operator: Equal, value: "true", effect: NoSchedule}
           containers:
             - name: main
-              # DEV IMAGE, digest-pinned. NOT a public image: external users cannot pull it.
-              # Blocked on ai-dynamo/dynamo#14599 (one-line lm_head prefix fix) merging and a
-              # public nvcr.io tag being cut -- stock vLLM 0.28.0 cannot load this NVFP4
-              # checkpoint without it. Swap to nvcr.io/nvidia/ai-dynamo/vllm-runtime:<tag>
-              # pinned to the MULTI-ARCH INDEX digest before this recipe ships.
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:79a9d1b103d81fbdda1e97dc476a31adcaf6056e2d2f465b09173a5578a574b8
+              # Public released runtime for this model. Carries vLLM 0.28.0 plus the
+              # exaone_moe lm_head prefix fix (ai-dynamo/dynamo#14599); stock vLLM 0.28.0
+              # cannot load this NVFP4 checkpoint without it.
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-k-exaone-2.0-750b-post.1
               env:
                 - {name: VLLM_NIXL_SIDE_CHANNEL_PORT, value: "5558"}
                 - {name: KV_TRANSFER_CONFIG, value: '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cuda","kv_connector_extra_config":{"num_threads":8}}'}
