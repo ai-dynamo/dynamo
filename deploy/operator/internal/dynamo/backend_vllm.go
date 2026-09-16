@@ -110,8 +110,8 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 		// Pin the leader to one local rank BEFORE the command is wrapped -- the other half
 		// of the sizing rule synthesis derives the follower count from ("one pod is one
 		// node is one rank"). Order matters: injectElasticEPRayLaunchFlags below collapses
-		// Command and Args into one shell string, after which getExpandedArgs can no longer
-		// see the flags and this injection silently does nothing. Without it
+		// Command and Args into one shell string, after which the flag scan can no longer
+		// see them and this injection silently does nothing. Without it
 		// vLLM's create_dp_placement_groups puts EVERY rank on the DP master and aborts
 		//   ValueError: Not enough resources to allocate N DP ranks on DP master node
 		//               <ip>, possible to fit 1 DP ranks.
@@ -749,11 +749,15 @@ func elasticEPSynthesizedFollowers(annotations map[string]string) int {
 // Deliberately no-ops when the leader declares one rank or none (no followers, so vLLM
 // decides the local split and deployments predating this render unchanged), and when the
 // user already set --data-parallel-size-local (the operator supplies a default, it does not
-// overrule an explicit choice). A flag hidden behind an env-var expansion getExpandedArgs
+// overrule an explicit choice). A flag hidden behind an env-var expansion the operator
 // cannot see leaves the duplicate for vLLM to reject -- the same exposure every other
 // injection here already has.
+//
+// Reads Command AND Args, for the same reason ElasticEPFollowerReplicas does: the two must
+// agree on where a flag may live, or a leader gets followers without the local-rank pin
+// that makes them reachable.
 func injectElasticEPDataParallelSizeLocal(container *corev1.Container) {
-	expandedArgs := getExpandedArgs(container)
+	expandedArgs := getExpandedCommandLine(container)
 	if getFlagValue(expandedArgs, dataParallelSizeFlag) <= 1 {
 		return
 	}

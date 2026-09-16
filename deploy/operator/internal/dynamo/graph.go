@@ -397,7 +397,14 @@ func IsSinglePodElasticEPShape(component *v1beta1.DynamoComponentDeploymentShare
 // getFlagValue defaults an absent flag to 1, which keeps every pre-existing single-rank
 // deployment rendering exactly as before.
 func ElasticEPFollowerReplicas(leaderContainer *corev1.Container) int32 {
-	dataParallelSize := getFlagValue(getExpandedArgs(leaderContainer), dataParallelSizeFlag)
+	// Command AND Args, matching IsElasticEPRayLaunch. Reading only Args made the two halves
+	// of this feature disagree about where a flag may live: the predicate would see
+	// --enable-elastic-ep in `command:` and enable the whole path, while this read saw
+	// nothing and defaulted to one rank. A declared --data-parallel-size 4 then rendered as
+	// ONE pod with no width gate and no local-rank pin, and vLLM aborted placing four ranks
+	// on the master. Admission requires a non-empty command, so that manifest shape is one
+	// users are actively pushed toward.
+	dataParallelSize := getFlagValue(getExpandedCommandLine(leaderContainer), dataParallelSizeFlag)
 	if dataParallelSize <= 1 {
 		return 0
 	}

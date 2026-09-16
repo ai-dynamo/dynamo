@@ -980,6 +980,74 @@ func TestElasticEPFollowerReplicasTracksDeclaredWidth(t *testing.T) {
 	}
 }
 
+// TestElasticEPSizingReadsTheSameCommandLineAsDetection pins the two halves of this feature
+// to one answer about where a flag may live.
+//
+// IsElasticEPRayLaunch scans Command AND Args, so it enables the whole path for a manifest
+// that writes the vLLM invocation in `command:`. Sizing used to scan Args only, so for that
+// same manifest it saw no --data-parallel-size and defaulted to one rank. The result was a
+// declared width of N rendering as ONE pod: no follower, no width gate, no local-rank pin --
+// and vLLM then aborting because it placed every rank on the DP master.
+//
+// That manifest shape is not exotic: validateElasticEPRequiresCommand REJECTS an empty
+// command, so users are actively pushed toward writing the invocation there.
+//
+// Mutation check: reverting either read to getExpandedArgs fails the matching subtest here
+// and nothing else.
+func TestElasticEPSizingReadsTheSameCommandLineAsDetection(t *testing.T) {
+	// The whole invocation in Command, Args empty -- what a user writes when they follow the
+	// "elastic EP requires an explicit container command" admission error literally.
+	inCommand := &corev1.Container{
+		Name: commonconsts.MainContainerName,
+		Command: []string{
+			"python3", "-m", "dynamo.vllm",
+			"--model", "deepseek-ai/DeepSeek-V2-Lite",
+			"--enable-elastic-ep",
+			"--data-parallel-backend", "ray",
+			"--data-parallel-size", "4",
+		},
+	}
+
+	t.Run("detection and sizing agree for flags in Command", func(t *testing.T) {
+		if !IsElasticEPRayLaunch(inCommand) {
+			t.Fatal("IsElasticEPRayLaunch did not detect flags in Command; " +
+				"this test's premise is that it does")
+		}
+		if got := ElasticEPFollowerReplicas(inCommand); got != 3 {
+			t.Errorf("ElasticEPFollowerReplicas() = %d, want 3: detection enabled the path "+
+				"from Command, so sizing must read Command too -- otherwise a declared "+
+				"--data-parallel-size 4 renders as one pod and the engine aborts", got)
+		}
+	})
+
+	t.Run("the local-rank pin is injected for flags in Command", func(t *testing.T) {
+		container := inCommand.DeepCopy()
+		injectElasticEPDataParallelSizeLocal(container)
+		joined := strings.Join(append(append([]string{}, container.Command...), container.Args...), " ")
+		if !strings.Contains(joined, dataParallelSizeLocalFlag+" 1") {
+			t.Errorf("--data-parallel-size-local 1 was not injected for a Command-only "+
+				"invocation; got %q. Followers without the pin are unreachable: vLLM puts "+
+				"every rank on the DP master and aborts", joined)
+		}
+	})
+
+	t.Run("the standard shell-wrapped shape is unchanged", func(t *testing.T) {
+		// Every shipped elastic-EP manifest uses this form, so it is the one that must not
+		// move: command is the shell, args carry the invocation.
+		shellWrapped := &corev1.Container{
+			Name:    commonconsts.MainContainerName,
+			Command: []string{"/bin/sh", "-c"},
+			Args: []string{
+				"python3 -m dynamo.vllm --enable-elastic-ep --data-parallel-backend ray " +
+					"--data-parallel-size 4",
+			},
+		}
+		if got := ElasticEPFollowerReplicas(shellWrapped); got != 3 {
+			t.Errorf("ElasticEPFollowerReplicas() = %d, want 3 for the shipped manifest shape", got)
+		}
+	})
+}
+
 // TestSynthesizeElasticEPFollowerDCD_AffinityUsesPodStampedNamespace pins the source of
 // the dynamo-namespace value in the follower's placement terms.
 //
