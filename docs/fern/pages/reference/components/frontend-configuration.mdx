@@ -127,7 +127,7 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 ### KV scoring and cache locality
 
 <ParamField path="--load-aware / --no-load-aware" type="boolean" default="false">
-  Preset for KV load-aware routing without cache-reuse signals; implies `--router-mode kv`.
+  Preset for KV load-aware routing without cache-reuse signals; implies `--router-mode kv`. Incompatible with `--shared-cache-type mooncake-store`, which requires local GPU event learning.
 
   Environment variable: `DYN_ROUTER_LOAD_AWARE`
 </ParamField>
@@ -174,11 +174,23 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 </ParamField>
 
 <ParamField path="--shared-cache-type" type="string" default="none">
-  **Experimental.** External shared KV-cache implementation.
+  **Experimental.** External shared KV-cache implementation. `hicache` indexes SGLang HiCache keys from Mooncake events. `mooncake-store` indexes vLLM `MooncakeStoreConnector` objects using resolved worker metadata and learned GPU identities.
 
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>none</Badge> <Badge intent="note" minimal>hicache</Badge></span>
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>none</Badge> <Badge intent="note" minimal>hicache</Badge> <Badge intent="note" minimal>mooncake-store</Badge></span>
+
+  `mooncake-store` requires `--router-mode kv`, `--router-kv-events`, positive `--router-kv-overlap-score-credit`, and a local indexer. It rejects `--load-aware`, `--no-router-kv-events`, `--use-remote-indexer`, and zero device-overlap credit. The worker must explicitly enable `dynamo.vllm.mooncake_store_runtime.MooncakeStoreWorkerExtension`; selecting the frontend flag does not configure workers. See [Mooncake Store Shared-Cache Routing](../../developer-guide/knowledge-base/modular-components/backends/vllm/native-kv-offloading.md#mooncake-store-shared-cache-routing) for exact dependency pins, publisher settings, supported inputs, and geometry restrictions.
+
+  Every admitted worker must advertise a compatible contract. Missing or unsupported metadata disables only the optional shared-cache hint; ordinary GPU routing and worker admission remain unchanged. Unsupported multimodal, prompt-embedding, speculative, and arbitrary extra-key inputs cannot contribute shared hints. Existing worker-role and custom-selector cache-input gates still apply; decode-only hops do not gain a store subscriber.
+
+  Explicitly selecting `mooncake-store` requires a frontend that supports this value. Leaving the feature disabled preserves the normal N-2 worker/frontend compatibility contract.
 
   Environment variable: `DYN_SHARED_CACHE_TYPE`
+</ParamField>
+
+<ParamField path="DYN_MOONCAKE_KV_EVENTS_ENDPOINT" type="string" default="null">
+  Mooncake publisher endpoint, for example `tcp://127.0.0.1:5557`. This environment variable is the only frontend endpoint source for the shared-cache subscriber; workers do not advertise an endpoint for this feature. `mooncake-store` requires a nonempty value when the router's role and selector enable shared-cache learning; a missing value fails construction with a targeted error.
+
+  For `mooncake-store`, the endpoint must remain associated with the workers' configured master, default tenant, and fixed publisher backend identity. The adapter does not verify this association through a live connector getter. Mooncake HA failover, non-default tenants, and authoritative store reconciliation are not supported. The event-only estimate can undercount conservative common boundaries and can remain stale after undetected event loss. Workers still check actual availability before reuse.
 </ParamField>
 
 <ParamField path="--router-temperature" type="float" default="0.0">
@@ -219,7 +231,7 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 
 <ParamField path="--use-remote-indexer / --no-use-remote-indexer" type="boolean" default="false">
   **Experimental.** Query a remote KV indexer served by a worker component instead of maintaining a
-  local primary indexer.
+  local primary indexer. Incompatible with `--shared-cache-type mooncake-store`, which learns identities from local GPU events.
 
   Environment variable: `DYN_USE_REMOTE_INDEXER`
 </ParamField>
