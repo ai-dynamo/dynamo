@@ -2123,7 +2123,7 @@ async fn build_local_model(
         );
     }
 
-    let rt_cfg = ModelRuntimeConfig {
+    let mut rt_cfg = ModelRuntimeConfig {
         context_length: llm.context_length,
         total_kv_blocks: llm.total_kv_blocks,
         max_num_seqs: llm.max_num_seqs,
@@ -2143,6 +2143,8 @@ async fn build_local_model(
         runtime_data,
         ..ModelRuntimeConfig::default()
     };
+
+    crate::topology::apply_topology_config(&mut rt_cfg).await?;
 
     let mut builder = LocalModelBuilder::default();
     builder
@@ -2459,6 +2461,81 @@ mod tests {
             e.error_type(),
             ErrorType::Backend(BackendError::InvalidArgument)
         );
+    }
+
+    #[tokio::test]
+    async fn build_local_model_publishes_topology_policy_and_taints() {
+        // Run the env-reading registration path in a child test process so
+        // topology settings cannot leak into concurrently running worker tests.
+        if std::env::var_os("DYNAMO_TEST_TOPOLOGY_CHILD").is_none() {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("zone"), "zone-a\n").unwrap();
+            std::fs::write(dir.path().join("rack"), "rack-1").unwrap();
+            for enforcement in ["required", "preferred", "invalid"] {
+                let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+                command
+                    .args([
+                        "--exact",
+                        "worker::tests::build_local_model_publishes_topology_policy_and_taints",
+                        "--nocapture",
+                    ])
+                    .env("DYNAMO_TEST_TOPOLOGY_CHILD", "1")
+                    .env("DYN_TOPOLOGY_ENABLED", "true")
+                    .env("DYN_TOPOLOGY_MOUNT_PATH", dir.path())
+                    .env("DYN_KV_TRANSFER_DOMAIN", "zone")
+                    .env("DYN_KV_TRANSFER_ENFORCEMENT", enforcement)
+                    .env_remove("DYN_KV_TRANSFER_PREFERRED_WEIGHT");
+                if enforcement == "preferred" {
+                    command.env("DYN_KV_TRANSFER_PREFERRED_WEIGHT", "0.85");
+                }
+                let output = command.output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "{enforcement}: {}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                );
+            }
+            return;
+        }
+
+        let enforcement = std::env::var("DYN_KV_TRANSFER_ENFORCEMENT").unwrap();
+        let result =
+            build_local_model(&WorkerConfig::default(), &EngineConfig::default(), false).await;
+        if enforcement == "invalid" {
+            assert!(
+                result.is_err(),
+                "invalid policy must prevent model construction"
+            );
+            return;
+        }
+        let local_model = result.unwrap();
+        let card = serde_json::to_value(local_model.card()).unwrap();
+        let config = &card["runtime_config"];
+        assert_eq!(
+            config["topology_domains"],
+            serde_json::json!({
+                "zone": "zone-a", "rack": "rack-1",
+            })
+        );
+        assert_eq!(config["kv_transfer_domain"], "zone");
+        assert_eq!(config["kv_transfer_enforcement"], enforcement);
+        if enforcement == "preferred" {
+            assert_eq!(
+                local_model.runtime_config().kv_transfer_preferred_weight,
+                Some(0.85)
+            );
+        } else {
+            assert!(
+                local_model
+                    .runtime_config()
+                    .kv_transfer_preferred_weight
+                    .is_none()
+            );
+        }
+        let taints = config["taints"].as_array().unwrap();
+        assert!(taints.contains(&serde_json::json!("dynamo.topology/zone=zone-a")));
+        assert!(taints.contains(&serde_json::json!("dynamo.topology/rack=rack-1")));
     }
 
     #[tokio::test]
