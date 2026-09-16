@@ -819,13 +819,14 @@ func TestComponentWorkloadsReconciler_PreserveExistingDCDState(t *testing.T) {
 func TestComponentWorkloadsReconciler_ApplyCheckpointStartupPolicy(t *testing.T) {
 	workloads := &componentWorkloadsReconciler{}
 	tests := []struct {
-		name              string
-		replicas          int32
-		podTemplate       *corev1.PodTemplateSpec
-		checkpointInfo    checkpoint.CheckpointInfo
-		wantReplicas      int32
-		wantStartupPolicy nvidiacomv1beta1.CheckpointStartupPolicy
-		wantCandidate     bool
+		name                  string
+		replicas              int32
+		podTemplate           *corev1.PodTemplateSpec
+		checkpointInfo        checkpoint.CheckpointInfo
+		wantReplicas          int32
+		wantStartupPolicy     nvidiacomv1beta1.CheckpointStartupPolicy
+		wantCandidate         bool
+		wantCompatibilityHash bool
 	}{
 		{
 			name:     "unready explicit snapshot gates replicas under wait policy",
@@ -841,14 +842,30 @@ func TestComponentWorkloadsReconciler_ApplyCheckpointStartupPolicy(t *testing.T)
 			wantStartupPolicy: nvidiacomv1beta1.CheckpointStartupPolicyWaitForCheckpoint,
 		},
 		{
+			name:     "pending explicit snapshot carries compatibility without becoming a restore candidate",
+			replicas: 2,
+			checkpointInfo: checkpoint.CheckpointInfo{
+				Enabled:                   true,
+				Exists:                    true,
+				Ready:                     false,
+				CheckpointName:            "snapshot-name",
+				StartupPolicy:             nvidiacomv1alpha1.CheckpointStartupPolicyImmediate,
+				SnapshotCompatibilityHash: "compatibility-v1",
+			},
+			wantReplicas:          2,
+			wantStartupPolicy:     nvidiacomv1beta1.CheckpointStartupPolicyImmediate,
+			wantCompatibilityHash: true,
+		},
+		{
 			name:     "ready snapshot stamps pinned candidate metadata",
 			replicas: 2,
 			checkpointInfo: checkpoint.CheckpointInfo{
-				Enabled:        true,
-				Exists:         true,
-				Ready:          true,
-				CheckpointName: "snapshot-name",
-				StartupPolicy:  nvidiacomv1alpha1.CheckpointStartupPolicyImmediate,
+				Enabled:                   true,
+				Exists:                    true,
+				Ready:                     true,
+				CheckpointName:            "snapshot-name",
+				StartupPolicy:             nvidiacomv1alpha1.CheckpointStartupPolicyImmediate,
+				SnapshotCompatibilityHash: "compatibility-v1",
 				NativeSnapshot: &checkpoint.ResolvedPodSnapshot{
 					UID:                  types.UID("snapshot-uid"),
 					BoundContentName:     "content-a",
@@ -856,9 +873,10 @@ func TestComponentWorkloadsReconciler_ApplyCheckpointStartupPolicy(t *testing.T)
 					GMSMode:              commonconsts.SnapshotGMSModeDisabled,
 				},
 			},
-			wantReplicas:      2,
-			wantStartupPolicy: nvidiacomv1beta1.CheckpointStartupPolicyImmediate,
-			wantCandidate:     true,
+			wantReplicas:          2,
+			wantStartupPolicy:     nvidiacomv1beta1.CheckpointStartupPolicyImmediate,
+			wantCandidate:         true,
+			wantCompatibilityHash: true,
 		},
 	}
 
@@ -886,6 +904,10 @@ func TestComponentWorkloadsReconciler_ApplyCheckpointStartupPolicy(t *testing.T)
 			assert.Nil(t, dcd.Spec.Experimental.Checkpoint.Job)
 			assert.Equal(t, tt.wantStartupPolicy, dcd.Spec.Experimental.Checkpoint.StartupPolicy)
 			assert.Equal(t, tt.wantReplicas, *dcd.Spec.Replicas)
+			if tt.wantCompatibilityHash {
+				require.NotNil(t, dcd.Spec.PodTemplate)
+				assert.Equal(t, "compatibility-v1", dcd.Spec.PodTemplate.Annotations[commonconsts.SnapshotCandidateCompatibilityHashAnnotation])
+			}
 			if !tt.wantCandidate {
 				return
 			}
@@ -927,9 +949,10 @@ func TestComponentWorkloadsReconciler_ApplyPendingAutomaticSnapshotPolicy(t *tes
 				},
 			}
 			info := &checkpoint.CheckpointInfo{
-				Enabled:          true,
-				AutomaticCapture: true,
-				StartupPolicy:    tt.startupPolicy,
+				Enabled:                   true,
+				AutomaticCapture:          true,
+				StartupPolicy:             tt.startupPolicy,
+				SnapshotCompatibilityHash: "compatibility-v1",
 				AutomaticSnapshotJob: &checkpoint.SnapshotJobReference{
 					Name: "checkpoint-worker",
 					UID:  types.UID("snapshot-job-uid"),
