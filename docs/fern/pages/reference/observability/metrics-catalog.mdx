@@ -293,6 +293,24 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
   Predicted KV cache hit rate at routing time (0.0–1.0).
 </ParamField>
 
+<ParamField path="dynamo_component_router_decisions_total" type="counter">
+  Routing decisions made by the router. Close to the number of arriving requests, but not equal to it: a migration retry or a hard session-affinity retry adds a decision, disaggregated serving makes one prefill and one decode decision per request, and caller-pinned selections are excluded because the caller chose the worker. Labeled by `worker_type`.
+</ParamField>
+
+<ParamField path="dynamo_component_router_decision_kv_optimal_total" type="counter">
+  Routing decisions that selected the eligible instance holding the most known KV cache overlap. Equal-overlap ties count as optimal. Divide by `dynamo_component_router_decisions_total` for the share of decisions that gave up no reachable cache locality. Labeled by `worker_type`.
+</ParamField>
+
+<ParamField path="dynamo_component_router_input_f0_total" type="counter">
+  Input tokens observed across routing decisions. This is the denominator for `dynamo_component_router_input_f2_total`. It does not match the sum of the `dynamo_component_router_input_sequence_tokens` histogram, which is recorded when a request is dispatched rather than when it is routed. Labeled by `worker_type`.
+</ParamField>
+
+<ParamField path="dynamo_component_router_input_f2_total" type="counter">
+  Input tokens already cached on the eligible instance with the most KV cache overlap, counted whether or not the router selected that instance. `f2 / f0` is therefore the prefix cache hit rate the router could have reached, not the one it did reach — compare it against `dynamo_component_router_kv_hit_rate` to see how much of the ceiling routing gives away. Labeled by `worker_type`.
+
+  <Note>The numbering skips `f1` on purpose. The router and the indexer cannot evaluate `f1`, so no such counter is emitted here. Do not reuse the name for something else.</Note>
+</ParamField>
+
 <ParamField path="dynamo_component_router_non_max_overlap_selections_total" type="counter">
   Admitted prefill scheduler selections routed to a worker with less KV cache overlap than another eligible worker. Pinned requests and equal-overlap ties are excluded. Labeled by `worker_type` (`prefill`).
 </ParamField>
@@ -360,6 +378,7 @@ Not all router metrics appear in every deployment. This matrix shows which group
 | Metric group | Frontend + KV (agg) | Frontend + KV (disagg) | Frontend + non-KV | Standalone router |
 |---|---|---|---|---|
 | `dynamo_component_router_*` | Registered and populated | Registered and populated | Registered, **always zero** | Populated (on `DYN_SYSTEM_PORT`) |
+| `dynamo_component_router_decisions_total`, `..._decision_kv_optimal_total`, `..._input_f0_total`, `..._input_f2_total` | Registered for both `worker_type` values; only the routed one is populated | Registered and populated for `worker_type` = `prefill`/`decode` | Registered, **always zero** | Populated (on `DYN_SYSTEM_PORT`) |
 | `dynamo_router_overhead_*` | Registered and populated | Registered and populated | **Not registered** | **Not created** |
 | `dynamo_frontend_router_queue_*` | Registered; populated when a CLI or policy-class queue threshold is set | Registered; populated when a CLI or policy-class queue threshold is set | **Not registered** | **Not created** |
 | `dynamo_component_kv_cache_events_applied` | Populated when KV events received | Populated when KV events received | **Not registered** | Populated when KV events received |
