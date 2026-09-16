@@ -1,29 +1,34 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Node-local KV relaying. No engine, model registration, or request ingress.
+//! Node-local KV relaying using the follower engine's metadata-only gRPC server.
+//! No model registration or request ingress.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
-use dynamo_backend_common::{CommonArgs, DynamoError};
+use dynamo_backend_common::{CommonArgs, DisaggregationMode, DynamoError};
 use dynamo_llm::discovery::{RuntimeConfigWatch, runtime_config_watch};
 use dynamo_llm::kv_router::publisher::{KvEventPublisher, KvEventSourceConfig};
 use dynamo_llm::local_model::runtime_config::ModelRuntimeConfig;
 use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::distributed::{DistributedConfig, DistributedRuntime};
 use dynamo_runtime::{Runtime, logging};
+use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
 use serde::Deserialize;
+use serde_json::Value;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
-use crate::client;
-use crate::context::{KV_CONFIG_KEY, SidecarContext, WORKER_GROUP_KEY};
+use crate::client::{self, KV_CONFIG_KEY, NodeMetadata, WORKER_GROUP_KEY};
+
+const METADATA_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 pub(crate) struct HeadlessSidecar {
-    context: SidecarContext,
-    group_id: String,
+    grpc_endpoint: GrpcEndpoint,
+    transport: GrpcTransportConfig,
     common: CommonArgs,
     discovery_timeout: Duration,
 }
@@ -36,21 +41,14 @@ struct LeaderKvConfig {
 
 impl HeadlessSidecar {
     pub(crate) fn from_args(args: Args) -> Result<Self, DynamoError> {
-        let context = args
-            .sidecar_context
-            .expect("dispatcher checked telemetry context");
-        let group_id = context
-            .worker_group_id()
-            .map_err(|error| client::invalid_arg(error.to_string()))?
-            .ok_or_else(|| client::invalid_arg("telemetry mode requires a multinode group"))?;
         if args.sidecar.common.route_to_encoder || args.sidecar.common.enable_rl {
             return Err(client::invalid_arg(
                 "telemetry mode cannot register encoder or RL request routes",
             ));
         }
         Ok(Self {
-            context,
-            group_id,
+            grpc_endpoint: args.sidecar.resolve_grpc_endpoint()?,
+            transport: args.sidecar.grpc.config(),
             common: args.sidecar.common,
             discovery_timeout: Duration::from_secs(args.leader_discovery_timeout_secs),
         })
@@ -83,21 +81,61 @@ impl HeadlessSidecar {
     }
 
     async fn run_inner(&self, runtime: Runtime, shutdown: CancellationToken) -> Result<()> {
+        // Followers only implement GetServerInfo. Do not use the full engine's
+        // model discovery, HealthCheck, connection pool, or native HTTP client.
+        let (mut client, metadata, mode) = self.connect_local_engine().await?;
+        let group_id = metadata
+            .worker_group_id()?
+            .context("telemetry-only mode requires a multinode group")?;
+
+        // Supervise the local engine while waiting for the leader too. Engines
+        // and sidecars are managed externally and require a coordinated restart
+        // after a failure; the live KV stream has no replay/recovery here.
+        tokio::select! {
+            _ = shutdown.cancelled() => Ok(()),
+            result = monitor_local_engine(&mut client, &metadata, mode, self.transport.connect_attempt_timeout) => result,
+            result = self.relay(runtime, shutdown.clone(), &metadata, mode, &group_id) => result,
+        }
+    }
+
+    async fn connect_local_engine(
+        &self,
+    ) -> Result<(client::Client, NodeMetadata, DisaggregationMode)> {
+        let deadline = Instant::now() + self.transport.startup_deadline;
+        let mut client = client::connect(&self.grpc_endpoint, &self.transport, deadline).await?;
+        let info = client::get_server_info(&mut client, deadline).await?;
+        let (metadata, mode) = follower_metadata(&info)?;
+        Ok((client, metadata, mode))
+    }
+
+    async fn relay(
+        &self,
+        runtime: Runtime,
+        shutdown: CancellationToken,
+        metadata: &NodeMetadata,
+        mode: DisaggregationMode,
+        group_id: &str,
+    ) -> Result<()> {
         let drt = DistributedRuntime::new(runtime, DistributedConfig::from_settings()).await?;
+        let component = if mode == DisaggregationMode::Aggregated {
+            &self.common.component
+        } else {
+            mode.discovery_component()
+        };
         let endpoint = drt
             .namespace(&self.common.namespace)?
-            .component(&self.common.component)?
+            .component(component)?
             .endpoint(&self.common.endpoint);
-        tracing::info!(node_rank = self.context.node_rank, group = %self.group_id,
+        tracing::info!(node_rank = metadata.node_rank, group = group_id,
             endpoint = %endpoint.id(), "Waiting for SGLang leader for local KV publishing");
         let mut configs = runtime_config_watch(&endpoint, shutdown.clone()).await?;
         let (worker_id, config) = tokio::time::timeout(self.discovery_timeout,
-            wait_for_leader(&mut configs, &self.group_id, &shutdown)).await
+            wait_for_leader(&mut configs, group_id, &shutdown)).await
             .context("timed out waiting for SGLang leader; check namespace, component, endpoint, and dist_init_addr")??;
-        let leader = validate_leader(&self.context, &config)?;
-        let _publishers = start_publishers(&endpoint, &self.context, worker_id, &config, &leader)?;
-        tracing::info!(node_rank = self.context.node_rank, worker_id, group = %self.group_id,
-            local_ranks = ?self.context.kv_event_sources.iter().map(|source| source.dp_rank).collect::<Vec<_>>(),
+        let leader = validate_leader(metadata, &config)?;
+        let _publishers = start_publishers(&endpoint, metadata, worker_id, &config, &leader)?;
+        tracing::info!(node_rank = metadata.node_rank, worker_id, group = group_id,
+            local_ranks = ?metadata.kv_event_sources.iter().map(|source| source.dp_rank).collect::<Vec<_>>(),
             "SGLang headless sidecar publishing local KV events");
 
         loop {
@@ -105,14 +143,62 @@ impl HeadlessSidecar {
                 _ = shutdown.cancelled() => return Ok(()),
                 result = configs.changed() => {
                     result.context("leader discovery watch closed")?;
-                    check_leader_unchanged(&configs.borrow_and_update(), &self.group_id, worker_id, &config)?;
+                    check_leader_unchanged(&configs.borrow_and_update(), group_id, worker_id, &config)?;
                 }
             }
         }
         // Publisher Drop cancels local subscriptions; the follower never owns
-        // the leader's serving registration. Independent sidecar restart is not
-        // supported by SGLang's managed lifecycle.
+        // the leader's serving registration.
     }
+}
+
+fn follower_metadata(info: &Value) -> Result<(NodeMetadata, DisaggregationMode)> {
+    let metadata = NodeMetadata::from_server_info(info)?
+        .context("telemetry-only mode requires GetServerInfo.kv_event_sources; upgrade SGLang")?;
+    ensure!(
+        metadata.node_rank > 0 && metadata.nnodes > 1,
+        "--telemetry-only requires a follower node; run the leader sidecar without this flag"
+    );
+    ensure!(
+        !metadata.kv_event_sources.is_empty(),
+        "telemetry-only node has no local KV sources; do not launch a sidecar on a TP-only follower without a publisher"
+    );
+    Ok((metadata, client::discovery_mode(info)?))
+}
+
+async fn monitor_local_engine(
+    client: &mut client::Client,
+    original: &NodeMetadata,
+    mode: DisaggregationMode,
+    timeout: Duration,
+) -> Result<()> {
+    let mut ticks = tokio::time::interval_at(
+        Instant::now() + METADATA_POLL_INTERVAL,
+        METADATA_POLL_INTERVAL,
+    );
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        ticks.tick().await;
+        check_local_engine(client, original, mode, timeout).await?;
+    }
+}
+
+async fn check_local_engine(
+    client: &mut client::Client,
+    original: &NodeMetadata,
+    mode: DisaggregationMode,
+    timeout: Duration,
+) -> Result<()> {
+    let info = client::get_server_info(client, Instant::now() + timeout)
+        .await
+        .context("local SGLang metadata server unavailable; restart the distributed engine instance and its sidecars")?;
+    let (current, current_mode) = follower_metadata(&info)
+        .context("local SGLang metadata became invalid; restart the distributed engine instance and its sidecars")?;
+    ensure!(
+        &current == original && current_mode == mode,
+        "local SGLang topology or KV source configuration changed; restart the distributed engine instance and its sidecars"
+    );
+    Ok(())
 }
 
 fn check_leader_unchanged(
@@ -170,10 +256,7 @@ async fn wait_for_leader(
     }
 }
 
-fn validate_leader(
-    context: &SidecarContext,
-    config: &ModelRuntimeConfig,
-) -> Result<LeaderKvConfig> {
+fn validate_leader(context: &NodeMetadata, config: &ModelRuntimeConfig) -> Result<LeaderKvConfig> {
     ensure!(
         config.data_parallel_start_rank == 0,
         "SGLang leader must serve the complete global DP range"
@@ -197,7 +280,7 @@ fn validate_leader(
 
 fn start_publishers(
     endpoint: &Endpoint,
-    context: &SidecarContext,
+    context: &NodeMetadata,
     worker_id: u64,
     config: &ModelRuntimeConfig,
     leader: &LeaderKvConfig,
@@ -229,9 +312,189 @@ fn start_publishers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::tests::context_json;
+    use std::convert::Infallible;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context as TaskContext, Poll};
+
+    use clap::Parser;
     use serde_json::json;
     use tokio::sync::watch;
+    use tonic::body::Body;
+    use tonic::codegen::{BoxFuture, Service, http};
+
+    use crate::proto as pb;
+
+    // One real gRPC method, matching the upstream follower server. Recording
+    // every URI makes accidental full-engine discovery/health RPCs visible.
+    #[derive(Clone)]
+    struct MetadataService {
+        info: Arc<Mutex<Value>>,
+        calls: Arc<Mutex<Vec<String>>>,
+        unavailable: Arc<AtomicBool>,
+    }
+
+    impl tonic::server::NamedService for MetadataService {
+        const NAME: &'static str = "sglang.runtime.v1.SglangService";
+    }
+
+    impl tonic::server::UnaryService<pb::GetServerInfoRequest> for MetadataService {
+        type Response = pb::GetServerInfoResponse;
+        type Future = BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
+
+        fn call(&mut self, _: tonic::Request<pb::GetServerInfoRequest>) -> Self::Future {
+            let json_info = self.info.lock().unwrap().to_string();
+            let unavailable = self.unavailable.load(Ordering::Relaxed);
+            Box::pin(async move {
+                if unavailable {
+                    return Err(tonic::Status::unavailable("local engine stopped"));
+                }
+                Ok(tonic::Response::new(pb::GetServerInfoResponse {
+                    json_info,
+                }))
+            })
+        }
+    }
+
+    impl Service<http::Request<Body>> for MetadataService {
+        type Response = http::Response<Body>;
+        type Error = Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+
+        fn poll_ready(&mut self, _: &mut TaskContext<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, request: http::Request<Body>) -> Self::Future {
+            let path = request.uri().path().to_owned();
+            self.calls.lock().unwrap().push(path.clone());
+            let service = self.clone();
+            Box::pin(async move {
+                if path != "/sglang.runtime.v1.SglangService/GetServerInfo" {
+                    return Ok(tonic::Status::unimplemented("metadata-only follower").into_http());
+                }
+                let mut grpc = tonic::server::Grpc::new(tonic::codec::ProstCodec::default());
+                Ok(grpc.unary(service, request).await)
+            })
+        }
+    }
+
+    struct MetadataServer {
+        endpoint: String,
+        service: MetadataService,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl MetadataServer {
+        async fn start() -> Self {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let service = MetadataService {
+                info: Arc::new(Mutex::new(follower_info())),
+                calls: Arc::default(),
+                unavailable: Arc::default(),
+            };
+            let incoming = futures::stream::unfold(listener, |listener| async move {
+                let connection = listener.accept().await.map(|(stream, _)| stream);
+                Some((connection, listener))
+            });
+            let server = tonic::transport::Server::builder().add_service(service.clone());
+            let task =
+                tokio::spawn(async move { server.serve_with_incoming(incoming).await.unwrap() });
+            Self {
+                endpoint,
+                service,
+                task,
+            }
+        }
+    }
+
+    impl Drop for MetadataServer {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    fn follower_info() -> Value {
+        json!({"node_rank":1,"nnodes":2,"dp_size":8,
+            "dist_init_addr":"127.0.0.1:2345", "disaggregation_mode":"prefill",
+            "kv_event_sources":[{"dp_rank":4,"endpoint":"tcp://127.0.0.1:5561",
+                "topic":"","block_size":64}]})
+    }
+
+    #[test]
+    fn telemetry_requires_follower_metadata_and_local_sources() {
+        let mut info = follower_info();
+        let (metadata, mode) = follower_metadata(&info).unwrap();
+        assert_eq!(metadata.node_rank, 1);
+        assert_eq!(mode, DisaggregationMode::Prefill);
+        info["node_rank"] = json!(0);
+        assert!(follower_metadata(&info).is_err());
+        info["node_rank"] = json!(1);
+        info["kv_event_sources"] = json!([]);
+        assert!(follower_metadata(&info).is_err());
+        info.as_object_mut().unwrap().remove("kv_event_sources");
+        assert!(follower_metadata(&info).is_err());
+    }
+
+    #[tokio::test]
+    async fn follower_discovers_and_monitors_using_only_server_info() {
+        let server = MetadataServer::start().await;
+        let args = Args::try_parse_from([
+            "sidecar",
+            "--telemetry-only",
+            "--grpc-endpoint",
+            &server.endpoint,
+            "--grpc-startup-deadline-secs",
+            "5",
+        ])
+        .unwrap();
+        let sidecar = HeadlessSidecar::from_args(args).unwrap();
+        let (mut client, original, mode) = sidecar.connect_local_engine().await.unwrap();
+        assert_eq!(mode, DisaggregationMode::Prefill);
+        let timeout = Duration::from_secs(1);
+        // A misplaced full sidecar fails with an actionable mode error, without
+        // asking the follower for any of the unsupported inference RPCs.
+        let error = client::discover(&mut client, Instant::now() + timeout)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("use --telemetry-only"));
+        check_local_engine(&mut client, &original, mode, timeout)
+            .await
+            .unwrap();
+        // Unrelated live server fields do not invalidate the KV contract.
+        server.service.info.lock().unwrap()["uptime"] = json!(42);
+        check_local_engine(&mut client, &original, mode, timeout)
+            .await
+            .unwrap();
+        server.service.info.lock().unwrap()["kv_event_sources"][0]["endpoint"] =
+            json!("tcp://127.0.0.1:5562");
+        assert!(
+            check_local_engine(&mut client, &original, mode, timeout)
+                .await
+                .is_err()
+        );
+        *server.service.info.lock().unwrap() = follower_info();
+        server.service.info.lock().unwrap()["disaggregation_mode"] = json!("decode");
+        assert!(
+            check_local_engine(&mut client, &original, mode, timeout)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            server.service.calls.lock().unwrap().as_slice(),
+            vec!["/sglang.runtime.v1.SglangService/GetServerInfo"; 6]
+        );
+        server.service.unavailable.store(true, Ordering::Relaxed);
+        let error = check_local_engine(&mut client, &original, mode, timeout)
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("local SGLang metadata server unavailable")
+        );
+    }
 
     fn leader(group: &str) -> ModelRuntimeConfig {
         ModelRuntimeConfig {
@@ -277,7 +540,7 @@ mod tests {
 
     #[test]
     fn rejects_incompatible_or_duplicate_rank_ownership() {
-        let context: SidecarContext = context_json("telemetry").to_string().parse().unwrap();
+        let (context, _) = follower_metadata(&follower_info()).unwrap();
         let mut config = leader("A");
         validate_leader(&context, &config).unwrap();
         config.data_parallel_size = 4;
@@ -332,9 +595,9 @@ mod tests {
             .set_linger(0)
             .bind(&source_address)
             .unwrap();
-        let mut raw = context_json("telemetry");
+        let mut raw = follower_info();
         raw["kv_event_sources"][0]["endpoint"] = json!(source_address);
-        let context: SidecarContext = raw.to_string().parse().unwrap();
+        let (context, _) = follower_metadata(&raw).unwrap();
         let config = leader("A");
         let metadata = validate_leader(&context, &config).unwrap();
         let mut subscriber = EventSubscriber::for_endpoint(&endpoint, KV_EVENT_SUBJECT)

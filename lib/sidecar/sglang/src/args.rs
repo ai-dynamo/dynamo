@@ -3,23 +3,36 @@
 
 //! Command-line arguments for the SGLang sidecar.
 
-use dynamo_backend_common::CommonArgs;
-use dynamo_sidecar_common::GrpcTransportArgs;
+use dynamo_backend_common::{CommonArgs, DynamoError};
+use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportArgs};
 
-use crate::context::SidecarContext;
+use crate::client;
 
-/// SGLang alone supports a telemetry-only launch without a gRPC endpoint.
+/// Both serving and telemetry-only sidecars discover their local engine over gRPC.
 #[derive(clap::Args, Debug, Clone)]
 pub struct SglangSidecarArgs {
     #[command(flatten)]
     pub common: CommonArgs,
 
-    /// Engine gRPC endpoint, required in full mode. Falls back to SGLANG_GRPC_ENDPOINT.
+    /// Local engine gRPC endpoint. Falls back to SGLANG_GRPC_ENDPOINT.
     #[arg(long, env = "DYN_SIDECAR_GRPC_ENDPOINT")]
     pub grpc_endpoint: Option<String>,
 
     #[command(flatten)]
     pub grpc: GrpcTransportArgs,
+}
+
+impl SglangSidecarArgs {
+    pub(crate) fn resolve_grpc_endpoint(&self) -> Result<GrpcEndpoint, DynamoError> {
+        let endpoint = self
+            .grpc_endpoint
+            .clone()
+            .or_else(|| std::env::var("SGLANG_GRPC_ENDPOINT").ok())
+            .ok_or_else(|| {
+                client::invalid_arg("sidecar requires --grpc-endpoint or SGLANG_GRPC_ENDPOINT")
+            })?;
+        GrpcEndpoint::parse(&endpoint, "--grpc-endpoint")
+    }
 }
 
 /// Parsed sidecar arguments.
@@ -32,9 +45,9 @@ pub struct Args {
     #[command(flatten)]
     pub sidecar: SglangSidecarArgs,
 
-    /// Versioned node-local context supplied by SGLang's managed sidecar launcher.
-    #[arg(long, env = "SGLANG_SIDECAR_CONTEXT")]
-    pub sidecar_context: Option<SidecarContext>,
+    /// Relay a follower node's local KV events without registering a request endpoint.
+    #[arg(long)]
+    pub telemetry_only: bool,
 
     /// Maximum wait for a matching leader registration in telemetry mode.
     #[arg(long, default_value_t = 1800, value_parser = clap::value_parser!(u64).range(1..))]

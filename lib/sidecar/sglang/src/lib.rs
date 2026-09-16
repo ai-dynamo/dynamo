@@ -18,12 +18,10 @@ use clap::Parser;
 use dynamo_sidecar_common::SidecarStartupError;
 
 use args::Args;
-use context::SidecarMode;
 use headless::HeadlessSidecar;
 
 pub mod args;
 pub mod client;
-pub mod context;
 pub mod engine;
 mod headless;
 mod native_http;
@@ -41,33 +39,26 @@ pub use engine::SglangSidecarEngine;
 /// distinguish invalid configuration from runtime failures.
 pub fn run(argv: Vec<String>) -> anyhow::Result<()> {
     let args = Args::try_parse_from(argv).map_err(SidecarStartupError::from)?;
-    match args
-        .sidecar_context
-        .as_ref()
-        .map_or(SidecarMode::Full, |context| context.mode)
-    {
-        SidecarMode::Full => {
-            let (engine, config) =
-                SglangSidecarEngine::from_parsed(args).map_err(SidecarStartupError::from)?;
-            dynamo_backend_common::run(Arc::new(engine), config)
-        }
-        SidecarMode::Telemetry => HeadlessSidecar::from_args(args)
+    if args.telemetry_only {
+        HeadlessSidecar::from_args(args)
             .map_err(SidecarStartupError::from)?
-            .run(),
+            .run()
+    } else {
+        let (engine, config) =
+            SglangSidecarEngine::from_parsed(args).map_err(SidecarStartupError::from)?;
+        dynamo_backend_common::run(Arc::new(engine), config)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::tests::context_json;
 
     #[test]
     fn telemetry_uses_headless_validation_before_grpc() {
         let error = run(vec![
             "sidecar".into(),
-            "--sidecar-context".into(),
-            context_json("telemetry").to_string(),
+            "--telemetry-only".into(),
             "--grpc-endpoint".into(),
             "not-a-grpc-address".into(),
             // Stop at headless validation, before starting a runtime.

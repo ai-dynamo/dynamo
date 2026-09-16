@@ -27,8 +27,7 @@ fn executable_exposes_sglang_and_shared_sidecar_contracts() {
         "DYN_SIDECAR_GRPC_RETRY_INTERVAL_SECS",
         "--grpc-startup-deadline-secs",
         "DYN_SIDECAR_GRPC_STARTUP_DEADLINE_SECS",
-        "--sidecar-context",
-        "SGLANG_SIDECAR_CONTEXT",
+        "--telemetry-only",
         "--leader-discovery-timeout-secs",
     ] {
         assert!(stdout.contains(expected), "help omits {expected}");
@@ -36,13 +35,17 @@ fn executable_exposes_sglang_and_shared_sidecar_contracts() {
 }
 
 #[test]
-fn invalid_launch_context_fails_before_grpc_or_discovery() {
-    let output = Command::new(env!("CARGO_BIN_EXE_dynamo-sglang-sidecar"))
-        .env("SGLANG_SIDECAR_CONTEXT", "not-json")
-        .env_remove("SGLANG_GRPC_ENDPOINT")
-        .env_remove("DYN_SIDECAR_GRPC_ENDPOINT")
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid SGLANG_SIDECAR_CONTEXT"));
+fn both_modes_require_a_local_grpc_endpoint() {
+    for mode in [None, Some("--telemetry-only")] {
+        let output = Command::new(env!("CARGO_BIN_EXE_dynamo-sglang-sidecar"))
+            .args(mode)
+            .env_remove("SGLANG_GRPC_ENDPOINT")
+            .env_remove("DYN_SIDECAR_GRPC_ENDPOINT")
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("sidecar requires --grpc-endpoint")
+        );
+    }
 }
