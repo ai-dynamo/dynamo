@@ -115,6 +115,10 @@ class frontend_service:
     OUTPUT_SEQUENCE_TOKENS = "output_sequence_tokens"
     # Predicted KV cache hit rate at routing time (0.0-1.0)
     KV_HIT_RATE = "kv_hit_rate"
+    # Predicted KV cache overlap blocks at routing time (block-weighted hit rate numerator)
+    KV_OVERLAP_BLOCKS_TOTAL = "kv_overlap_blocks_total"
+    # Request ISL blocks at routing time (block-weighted hit rate denominator)
+    KV_ISL_BLOCKS_TOTAL = "kv_isl_blocks_total"
     # Upper-bound estimation of KV cache transfer latency in disaggregated serving (seconds)
     KV_TRANSFER_ESTIMATED_LATENCY_SECONDS = "kv_transfer_estimated_latency_seconds"
     # Shared cache hit rate (0.0-1.0): fraction of request blocks found in shared cache
@@ -463,6 +467,10 @@ class router:
     OUTPUT_SEQUENCE_TOKENS = "router_output_sequence_tokens"
     # Predicted KV cache hit rate at routing time (0.0-1.0)
     KV_HIT_RATE = "router_kv_hit_rate"
+    # Predicted KV cache overlap blocks at routing time (block-weighted hit rate numerator)
+    KV_OVERLAP_BLOCKS_TOTAL = "router_kv_overlap_blocks_total"
+    # Request ISL blocks at routing time (block-weighted hit rate denominator)
+    KV_ISL_BLOCKS_TOTAL = "router_kv_isl_blocks_total"
     # Shared cache hit rate (0.0-1.0): fraction of request blocks found in shared cache
     SHARED_CACHE_HIT_RATE = "router_shared_cache_hit_rate"
     # Shared cache blocks beyond device overlap for the selected worker

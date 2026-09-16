@@ -991,32 +991,7 @@ mod prefill_start_tests {
     }
 
     fn test_metrics() -> Arc<RouterRequestMetrics> {
-        fn hist(name: &str) -> prometheus::Histogram {
-            prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(name, name)).unwrap()
-        }
-        fn hist_vec(name: &str) -> prometheus::HistogramVec {
-            prometheus::HistogramVec::new(prometheus::HistogramOpts::new(name, name), &["reason"])
-                .unwrap()
-        }
-        Arc::new(RouterRequestMetrics {
-            requests_started_total: prometheus::IntCounter::new("requests_started_total", "test")
-                .unwrap(),
-            requests_total: prometheus::IntCounter::new("requests_total", "test").unwrap(),
-            time_to_first_token_seconds: hist("ttft_seconds"),
-            inter_token_latency_seconds: hist("itl_seconds"),
-            input_sequence_tokens: hist("isl_tokens"),
-            output_sequence_tokens: hist("osl_tokens"),
-            kv_hit_rate: hist("kv_hit_rate"),
-            kv_transfer_estimated_latency_seconds: hist("kv_transfer_seconds"),
-            shared_cache_hit_rate: hist("shared_cache_hit_rate"),
-            shared_cache_beyond_blocks: hist("shared_cache_beyond_blocks"),
-            non_max_overlap_selections_total: prometheus::IntCounterVec::new(
-                prometheus::Opts::new("non_max_overlap_selections_total", "test"),
-                &["reason"],
-            )
-            .unwrap(),
-            overlap_blocks_lost: hist_vec("overlap_blocks_lost"),
-        })
+        Arc::new(RouterRequestMetrics::for_test())
     }
 
     async fn dispatch_once(phase: RequestPhase, annotations: Vec<String>) -> Arc<RequestTracker> {

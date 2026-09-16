@@ -202,6 +202,12 @@ pub mod frontend_service {
     /// Predicted KV cache hit rate at routing time (0.0-1.0)
     pub const KV_HIT_RATE: &str = "kv_hit_rate";
 
+    /// Predicted KV cache overlap blocks at routing time (block-weighted hit rate numerator)
+    pub const KV_OVERLAP_BLOCKS_TOTAL: &str = "kv_overlap_blocks_total";
+
+    /// Request ISL blocks at routing time (block-weighted hit rate denominator)
+    pub const KV_ISL_BLOCKS_TOTAL: &str = "kv_isl_blocks_total";
+
     /// Upper-bound estimation of KV cache transfer latency in disaggregated serving (seconds)
     pub const KV_TRANSFER_ESTIMATED_LATENCY_SECONDS: &str = "kv_transfer_estimated_latency_seconds";
 
@@ -657,6 +663,12 @@ pub mod router {
 
     /// Predicted KV cache hit rate at routing time (0.0-1.0)
     pub const KV_HIT_RATE: &str = "router_kv_hit_rate";
+
+    /// Predicted KV cache overlap blocks at routing time (block-weighted hit rate numerator)
+    pub const KV_OVERLAP_BLOCKS_TOTAL: &str = "router_kv_overlap_blocks_total";
+
+    /// Request ISL blocks at routing time (block-weighted hit rate denominator)
+    pub const KV_ISL_BLOCKS_TOTAL: &str = "router_kv_isl_blocks_total";
 
     /// Shared cache hit rate (0.0-1.0): fraction of request blocks found in shared cache
     pub const SHARED_CACHE_HIT_RATE: &str = "router_shared_cache_hit_rate";
