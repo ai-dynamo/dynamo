@@ -12,6 +12,7 @@ members = [
     "lib/kv-hashing",
     "lib/mocker",
     "lib/placement-plugin",
+    "lib/steppable-provider",
     "lib/kv-router",
     "lib/router-plugins/catalog",
     "examples/router/custom-policy-example/soft-pin-repin",

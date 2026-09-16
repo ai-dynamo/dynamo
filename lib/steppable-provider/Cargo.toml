@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-steppable-provider"
+description = "Benchmark-only monolithic Dynamo KV-router SteppableReplay provider"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+aiperf-steppable-abi = { path = "../../../../dynamic-simulation-abi/crates/steppable-abi" }
+aisimulate-core = { workspace = true }
+anyhow = { workspace = true }
+dynamo-mocker = { workspace = true, features = ["replay-bench"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
