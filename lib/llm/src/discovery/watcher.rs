@@ -412,6 +412,11 @@ impl ModelWatcher {
         card.download_config(self.local_model_path.as_deref())
             .await?;
 
+        crate::protocols::openai::chat_completions::tool_parser_v2::validate_v1_fallback(
+            card.runtime_config.tool_call_parser.as_deref(),
+            card.runtime_config.reasoning_parser.as_deref(),
+        )?;
+
         validate_policy_worker_role(card, &self.plugins)?;
 
         // Prepare without exact video routing unless the cohort agreed on a contract.

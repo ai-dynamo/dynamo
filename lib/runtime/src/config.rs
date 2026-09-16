@@ -344,11 +344,11 @@ impl RuntimeConfig {
     }
 
     pub fn reject_deprecated_parser_env() -> Result<()> {
-        use environment_names::llm::DYN_PARSER_REVERT_TO_V1;
+        use environment_names::llm::DYN_PARSER_VERSION;
 
         if std::env::var("DYN_ENABLE_EXPERIMENTAL_PARSERS_V2").is_ok() {
             anyhow::bail!(
-                "DYN_ENABLE_EXPERIMENTAL_PARSERS_V2 is no longer supported; remove it. V2 parsers are selected by default. Set {DYN_PARSER_REVERT_TO_V1}=1 to use a V1 parser when available."
+                "DYN_ENABLE_EXPERIMENTAL_PARSERS_V2 is no longer supported; remove it. The latest compatible parser is selected by default. Set {DYN_PARSER_VERSION}=v1 or v2 to select an explicit parser generation."
             );
         }
         Ok(())
@@ -587,7 +587,7 @@ mod tests {
                     .to_string()
                     .contains("DYN_ENABLE_EXPERIMENTAL_PARSERS_V2 is no longer supported")
             );
-            assert!(error.to_string().contains("DYN_PARSER_REVERT_TO_V1"));
+            assert!(error.to_string().contains("DYN_PARSER_VERSION"));
         });
     }
 

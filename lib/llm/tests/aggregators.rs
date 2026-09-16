@@ -17,7 +17,7 @@ use dynamo_protocols::types::{
     ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionStreamResponseDelta,
     CreateChatCompletionStreamResponse, Role,
 };
-use dynamo_runtime::config::{env_is_truthy, environment_names::llm as env_llm};
+use dynamo_runtime::config::environment_names::llm as env_llm;
 use futures::StreamExt;
 
 fn get_text(content: &ChatCompletionMessageContent) -> &str {
@@ -305,7 +305,10 @@ async fn run_qwen_unified_batch_suppression_assertions() {
 #[tokio::test]
 #[ignore = "only run as a child process spawned by the parent test"]
 async fn qwen_unified_batch_suppression_child() {
-    assert!(!env_is_truthy(env_llm::DYN_PARSER_REVERT_TO_V1));
+    assert_ne!(
+        std::env::var(env_llm::DYN_PARSER_VERSION).as_deref(),
+        Ok("v1")
+    );
     run_qwen_unified_batch_suppression_assertions().await;
 }
 
@@ -322,7 +325,7 @@ fn test_qwen_unified_batch_suppresses_forbidden_calls_and_strips_markup() {
             "--nocapture",
             "--test-threads=1",
         ])
-        .env_remove(env_llm::DYN_PARSER_REVERT_TO_V1)
+        .env_remove(env_llm::DYN_PARSER_VERSION)
         .status()
         .expect("failed to spawn child test process");
     assert!(
@@ -372,7 +375,10 @@ async fn run_qwen_unified_batch_v1_assertions() {
 #[tokio::test]
 #[ignore = "only run as a child process spawned by the parent test"]
 async fn qwen_unified_batch_v1_child() {
-    assert!(env_is_truthy(env_llm::DYN_PARSER_REVERT_TO_V1));
+    assert_eq!(
+        std::env::var(env_llm::DYN_PARSER_VERSION).as_deref(),
+        Ok("v1")
+    );
     run_qwen_unified_batch_v1_assertions().await;
 }
 
@@ -388,7 +394,7 @@ fn test_qwen_unified_batch_reverts_to_v1_when_requested() {
             "--nocapture",
             "--test-threads=1",
         ])
-        .env(env_llm::DYN_PARSER_REVERT_TO_V1, "1")
+        .env(env_llm::DYN_PARSER_VERSION, "v1")
         .status()
         .expect("failed to spawn child test process");
     assert!(
