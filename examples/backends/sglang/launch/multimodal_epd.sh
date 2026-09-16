@@ -155,9 +155,8 @@ print_launch_banner --multimodal "Launching Multimodal E/PD ($GPU_LABEL)" "$MODE
 python3 -m dynamo.frontend &
 
 # run SGLang multimodal inference worker
-# Started before the encode worker: the encode worker blocks on instances of
-# backend.generate, which only this worker registers, so it can never finish
-# starting first.
+# Start before the encode worker: that worker waits for instances of
+# backend.generate, which only this worker registers.
 # NOTE: Each worker picks a random NCCL port (get_free_port) for torch.distributed.
 # This has a TOCTOU race — the port can be grabbed before init_process_group binds it,
 # causing sporadic EADDRINUSE.  Pass --nccl-port <unique_port> per worker to avoid this.
@@ -180,14 +179,8 @@ env ${_WORKER_CUDA_PIN:+"$_WORKER_CUDA_PIN"} python3 -m dynamo.sglang \
   $WORKER_EXTRA_ARGS &
 
 if [[ "$SINGLE_GPU" == "true" ]]; then
-    # Both workers load on the same GPU and each sizes its allocation against
-    # the memory free when it loads, so loading them at once can leave the
-    # scheduler out of memory. Wait for the PD worker instead of sleeping a
-    # fixed time that a model load regularly outlives.
-    # Gate on the PD worker, not the encode worker: the encode worker holds its
-    # own readiness until backend.generate has instances, so its /health cannot
-    # turn 200 before this worker is up.
-    # || true: don't let set -e kill the script on timeout (wait_for_ready returns 1).
+    # Both workers size their allocation against free memory at load, so loading
+    # them together can exhaust the GPU. || true: a timeout must not end the script.
     echo "Waiting for PD worker to initialize..."
     wait_for_ready "http://localhost:${DYN_SYSTEM_PORT2:-8082}/health" 120 || true
 fi

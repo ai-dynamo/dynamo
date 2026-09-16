@@ -829,10 +829,8 @@ sglang_configs = {
             # See video_agg_qwen: installs decord, so likewise a
             # installs_extra_dependencies case.
             pytest.mark.installs_extra_dependencies,
-            # No profiled_vram_gib: this case has not been VRAM-profiled, so it
-            # runs in the sequential stage. multimodal_epd.sh passes no
-            # --mem-fraction-static; the DYN_ENCODE_GPU_MEM / DYN_WORKER_GPU_MEM
-            # values below are inert -- no SGLang launch script reads them.
+            # No profiled_vram_gib: unprofiled cases run in the sequential stage.
+            # DYN_ENCODE_GPU_MEM / DYN_WORKER_GPU_MEM below are inert; nothing reads them.
             pytest.mark.timeout(360),
             pytest.mark.pre_merge,
         ],
