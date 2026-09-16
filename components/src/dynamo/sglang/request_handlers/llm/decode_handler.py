@@ -769,6 +769,26 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     # the engine's opaque engine_data passthrough (surfaced by the frontend
                     # as nvext.routed_experts); disaggregated_params stays KV-transfer only.
                     engine_data["routed_experts"] = routed_experts
+                # SGLang reports usage during generation. Forward it before any
+                # metadata upload clears meta_info so continuous-usage clients
+                # receive cache accounting even when they close the stream early.
+                input_tokens = meta_info.get("prompt_tokens")
+                completion_tokens = meta_info.get("completion_tokens")
+                cached_tokens = meta_info.get("cached_tokens")
+                if input_tokens is not None and completion_tokens is not None:
+                    completion_usage = {
+                        "prompt_tokens": input_tokens,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": input_tokens + completion_tokens,
+                    }
+                    # Preserve an engine-reported zero without inventing a count
+                    # when cache metadata is unavailable.
+                    if cached_tokens is not None:
+                        completion_usage["prompt_tokens_details"] = {
+                            "cached_tokens": cached_tokens
+                        }
+                    out["completion_usage"] = completion_usage
+
                 if finish_reason:
                     prompt_payload = (
                         _shared_logprobs.extract_prompt_logprobs_from_sglang_meta(
@@ -777,23 +797,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     )
                     if prompt_payload is not None and metadata_uploader is None:
                         engine_data["prompt_logprobs"] = prompt_payload
-                    input_tokens = meta_info.get("prompt_tokens")
-                    completion_tokens = meta_info.get("completion_tokens")
-                    cached_tokens = meta_info.get("cached_tokens")
-                    prefill_prompt_tokens_details = None
-                    if cached_tokens is not None and cached_tokens > 0:
-                        prefill_prompt_tokens_details = {"cached_tokens": cached_tokens}
-                    if input_tokens is not None and completion_tokens is not None:
-                        completion_usage = {
-                            "prompt_tokens": input_tokens,
-                            "completion_tokens": completion_tokens,
-                            "total_tokens": input_tokens + completion_tokens,
-                        }
-                        if prefill_prompt_tokens_details is not None:
-                            completion_usage[
-                                "prompt_tokens_details"
-                            ] = prefill_prompt_tokens_details
-                        out["completion_usage"] = completion_usage
                     if metadata_uploader is not None:
                         try:
                             await metadata_uploader.upload_choice(output_idx, meta_info)

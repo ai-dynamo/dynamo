@@ -3340,14 +3340,17 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     if top_logprobs is not None:
                         out["top_logprobs"] = top_logprobs
 
+                    # vLLM reports cached prompt tokens before generation finishes.
+                    # Forward usage with each emitted delta so continuous-usage
+                    # clients can account for cache hits even if they stop early.
+                    # The frontend controls whether usage is exposed on the wire.
+                    out["completion_usage"] = BaseWorkerHandler._build_completion_usage(
+                        request_output=res,
+                        completion_token_counts=total_output_tokens_by_index,
+                    )
+
                     if finish_reason:
                         out["finish_reason"] = normalize_finish_reason(finish_reason)
-                        out[
-                            "completion_usage"
-                        ] = BaseWorkerHandler._build_completion_usage(
-                            request_output=res,
-                            completion_token_counts=total_output_tokens_by_index,
-                        )
                         if prompt_logprobs_payload is not None:
                             _attach_prompt_logprobs_engine_data(
                                 out, prompt_logprobs_payload
