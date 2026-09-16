@@ -204,6 +204,13 @@ repos:
       language: system
       files: ^scripts/check_action_pins\.py$
       pass_filenames: false
+    - id: pynvvideocodec-spec
+      name: Check the PyNvVideoCodec spec is consistent
+      entry: python3 tests/dependencies/test_pynvvideocodec_floor.py
+      language: python
+      additional_dependencies: [packaging, pytest]
+      pass_filenames: false
+      always_run: true
     - id: validate-agent-instructions
       name: Validate AGENTS.md and CLAUDE.md pairs
       entry: python3 scripts/validate_agent_instructions.py
