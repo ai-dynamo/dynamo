@@ -266,6 +266,25 @@ class TestUsageStatistics:
             "gpu_hit_tokens": 2,
             "cpu_hit_tokens": 1,
             "cpu_lookup_tokens": 2,
+            "worker_lookup_tokens": 4,
+            "worker_used_tokens": 3,
+            "tiers": [
+                {
+                    "tier": "gpu",
+                    "events": [
+                        {"event": "found", "tokens": 2, "accuracy": "exact"},
+                        {"event": "used", "tokens": 2, "accuracy": "exact"},
+                    ],
+                },
+                {
+                    "tier": "cpu",
+                    "events": [
+                        {"event": "lookup", "tokens": 2, "accuracy": "exact"},
+                        {"event": "found", "tokens": 1, "accuracy": "exact"},
+                        {"event": "used", "tokens": 1, "accuracy": "exact"},
+                    ],
+                },
+            ],
         }
 
     def test_cache_loss_engine_data_marks_missing_worker_counters_incomplete(self):
@@ -293,6 +312,29 @@ class TestUsageStatistics:
             "gpu_hit_tokens": 3,
             "cpu_hit_tokens": 0,
             "cpu_lookup_tokens": 0,
+            "worker_lookup_tokens": 3,
+            "worker_used_tokens": 3,
+            "tiers": [
+                {
+                    "tier": "gpu",
+                    "events": [
+                        {"event": "found", "tokens": 3, "accuracy": "exact"},
+                        {"event": "used", "tokens": 3, "accuracy": "exact"},
+                    ],
+                },
+                {
+                    "tier": "cpu",
+                    "events": [
+                        {
+                            "event": "lookup",
+                            "tokens": 0,
+                            "accuracy": "lower_bound",
+                        },
+                        {"event": "found", "tokens": 0, "accuracy": "exact"},
+                        {"event": "used", "tokens": 0, "accuracy": "exact"},
+                    ],
+                },
+            ],
         }
 
     def test_cache_loss_engine_data_uses_stock_external_counter(self):
@@ -310,4 +352,27 @@ class TestUsageStatistics:
             "gpu_hit_tokens": 2,
             "cpu_hit_tokens": 1,
             "cpu_lookup_tokens": 1,
+            "worker_lookup_tokens": 3,
+            "worker_used_tokens": 3,
+            "tiers": [
+                {
+                    "tier": "gpu",
+                    "events": [
+                        {"event": "found", "tokens": 2, "accuracy": "exact"},
+                        {"event": "used", "tokens": 2, "accuracy": "exact"},
+                    ],
+                },
+                {
+                    "tier": "cpu",
+                    "events": [
+                        {
+                            "event": "lookup",
+                            "tokens": 1,
+                            "accuracy": "lower_bound",
+                        },
+                        {"event": "found", "tokens": 1, "accuracy": "exact"},
+                        {"event": "used", "tokens": 1, "accuracy": "exact"},
+                    ],
+                },
+            ],
         }

@@ -65,7 +65,8 @@ use prometheus::{
 use crate::http::service::metrics::generate_log_buckets;
 use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
 use dynamo_kv_router::{
-    indexer::ApproximateLruStats, protocols::cache_reuse_funnel_f2_onward_enabled,
+    indexer::ApproximateLruStats,
+    protocols::{cache_reuse_funnel_f2_onward_enabled, cache_reuse_funnel_tier_detail_enabled},
 };
 
 pub(crate) const ROUTER_WORKER_ID_LABEL: &str = "router_worker_id";
@@ -861,6 +862,7 @@ pub struct RouterRequestMetrics {
     pub non_max_overlap_selections_total: IntCounterVec,
     pub overlap_blocks_lost: HistogramVec,
     pub(crate) cache_loss_worker_stages: Option<CacheLossWorkerStageMetrics>,
+    pub(crate) cache_loss_tier_details: Option<CacheLossTierDetailMetrics>,
 }
 
 #[cfg_attr(test, derive(Clone))]
@@ -869,6 +871,20 @@ pub(crate) struct CacheLossWorkerStageMetrics {
     funnel_tokens_total: [IntCounter; CACHE_LOSS_FUNNEL_STAGES.len()],
     complete_observations_total: IntCounter,
     incomplete_observations_total: IntCounter,
+}
+
+#[cfg_attr(test, derive(Clone))]
+pub(crate) struct CacheLossTierDetailMetrics {
+    tokens_total: IntCounterVec,
+    complete_observations_total: IntCounter,
+    incomplete_observations_total: IntCounter,
+}
+
+pub(crate) struct CacheLossTierMetricObservation<'a> {
+    pub tier: &'a str,
+    pub event: &'a str,
+    pub accuracy: &'a str,
+    pub tokens: u64,
 }
 
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
@@ -1024,6 +1040,31 @@ impl RouterRequestMetrics {
                             .with_label_values(&["incomplete"]),
                     }
                 });
+                let cache_loss_tier_details = cache_reuse_funnel_tier_detail_enabled().then(|| {
+                    let tokens_total = metrics
+                        .create_intcountervec(
+                            &router_metric("cache_loss_tier_tokens_total"),
+                            "Worker-observed cache tokens by tier, event, and measurement accuracy",
+                            &["tier", "event", "accuracy"],
+                            extra_labels,
+                        )
+                        .expect("failed to create router_cache_loss_tier_tokens_total");
+                    let observations = metrics
+                        .create_intcountervec(
+                            &router_metric("cache_loss_tier_observations_total"),
+                            "Tier-resolved cache observations by result",
+                            &["result"],
+                            extra_labels,
+                        )
+                        .expect("failed to create router_cache_loss_tier_observations_total");
+                    CacheLossTierDetailMetrics {
+                        tokens_total,
+                        complete_observations_total: observations
+                            .with_label_values(&["complete"]),
+                        incomplete_observations_total: observations
+                            .with_label_values(&["incomplete"]),
+                    }
+                });
                 Arc::new(Self {
                     requests_started_total,
                     requests_total,
@@ -1038,6 +1079,7 @@ impl RouterRequestMetrics {
                     non_max_overlap_selections_total,
                     overlap_blocks_lost,
                     cache_loss_worker_stages,
+                    cache_loss_tier_details,
                 })
             })
             .clone()
@@ -1083,6 +1125,28 @@ impl RouterRequestMetrics {
 
     pub fn observe_cache_loss_incomplete(&self) {
         if let Some(metrics) = &self.cache_loss_worker_stages {
+            metrics.incomplete_observations_total.inc();
+        }
+    }
+
+    pub(crate) fn observe_cache_loss_tiers(
+        &self,
+        observations: &[CacheLossTierMetricObservation<'_>],
+    ) {
+        let Some(metrics) = &self.cache_loss_tier_details else {
+            return;
+        };
+        for observation in observations {
+            metrics
+                .tokens_total
+                .with_label_values(&[observation.tier, observation.event, observation.accuracy])
+                .inc_by(observation.tokens);
+        }
+        metrics.complete_observations_total.inc();
+    }
+
+    pub(crate) fn observe_cache_loss_tier_incomplete(&self) {
+        if let Some(metrics) = &self.cache_loss_tier_details {
             metrics.incomplete_observations_total.inc();
         }
     }

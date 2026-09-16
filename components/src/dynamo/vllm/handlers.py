@@ -122,6 +122,9 @@ _FULL_VOCAB_LOGPROBS_SENTINEL = 2**32 - 1
 CACHE_REUSE_FUNNEL_F2_ONWARD_ENABLED: Final[bool] = os.environ.get(
     "DYN_CACHE_REUSE_FUNNEL_F2_ONWARD_ENABLED", ""
 ).strip().lower() in {"1", "true", "yes", "on"}
+CACHE_REUSE_FUNNEL_TIER_DETAIL_ENABLED: Final[bool] = os.environ.get(
+    "DYN_CACHE_REUSE_FUNNEL_TIER_DETAIL_ENABLED", ""
+).strip().lower() in {"1", "true", "yes", "on"}
 
 # Marker set by the Rust conditional-disagg bypass path. When present on a
 # DECODE-mode worker, the request runs as local prefill+decode instead of
@@ -3206,10 +3209,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 else None
             )
         external_lookups = getattr(request_output, "num_external_lookup_tokens", None)
+        external_lookup_accuracy = "exact"
         if not isinstance(external_lookups, int):
             # Stock vLLM reports successful external computation but not lookup
             # attempts. Successful hits are a conservative lower bound.
             external_lookups = external_hits
+            external_lookup_accuracy = "lower_bound"
         values = (local_hits, external_hits, external_lookups)
         if prompt_tokens is None or any(not isinstance(value, int) for value in values):
             return {"complete": False}
@@ -3219,6 +3224,29 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             "gpu_hit_tokens": local_hits,
             "cpu_hit_tokens": external_hits,
             "cpu_lookup_tokens": external_lookups,
+            "worker_lookup_tokens": local_hits + external_lookups,
+            "worker_used_tokens": local_hits + external_hits,
+            "tiers": [
+                {
+                    "tier": "gpu",
+                    "events": [
+                        {"event": "found", "tokens": local_hits, "accuracy": "exact"},
+                        {"event": "used", "tokens": local_hits, "accuracy": "exact"},
+                    ],
+                },
+                {
+                    "tier": "cpu",
+                    "events": [
+                        {
+                            "event": "lookup",
+                            "tokens": external_lookups,
+                            "accuracy": external_lookup_accuracy,
+                        },
+                        {"event": "found", "tokens": external_hits, "accuracy": "exact"},
+                        {"event": "used", "tokens": external_hits, "accuracy": "exact"},
+                    ],
+                },
+            ],
         }
 
     @staticmethod
@@ -3389,7 +3417,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             request_output=res,
                             completion_token_counts=total_output_tokens_by_index,
                         )
-                        if CACHE_REUSE_FUNNEL_F2_ONWARD_ENABLED:
+                        if (
+                            CACHE_REUSE_FUNNEL_F2_ONWARD_ENABLED
+                            or CACHE_REUSE_FUNNEL_TIER_DETAIL_ENABLED
+                        ):
                             out.setdefault("engine_data", {})[
                                 "cache_loss"
                             ] = BaseWorkerHandler._cache_loss_engine_data(res)

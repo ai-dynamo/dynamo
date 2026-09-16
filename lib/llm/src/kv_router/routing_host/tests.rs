@@ -699,11 +699,15 @@ async fn terminal_item_does_not_skip_transport_eof() {
         WorkerWithDpRank::from_worker_id(0),
         dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
         &request(),
-        Some(CacheLossTracking::new(RouteObservation {
-            prompt_tokens: 1,
-            best_router_tokens: 0,
-            selected_router_tokens: 0,
-        })),
+        Some(CacheLossTracking::new(
+            RouteObservation {
+                prompt_tokens: 1,
+                best_router_tokens: 0,
+                selected_router_tokens: 0,
+            },
+            true,
+            false,
+        )),
     );
     let monitored = monitor_response_stream(source, context, guard);
     tokio::pin!(monitored);
