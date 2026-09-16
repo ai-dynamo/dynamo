@@ -20,43 +20,72 @@ layer instead (true of the Rust path as well).
 from __future__ import annotations
 
 import socket
-from typing import Any
 
-from .url_validator import is_blocked_ip
+from aiohttp.abc import AbstractResolver, ResolveResult
+from aiohttp.helpers import proxies_from_env
+from aiohttp.resolver import DefaultResolver
+
+from .url_validator import describe_media_source, is_blocked_ip
 
 
 class SsrfBlockedAddress(OSError):
     """Raised at connect time when every resolved IP is in a blocked range."""
 
 
-try:  # guard the aiohttp import so the module still loads if aiohttp is absent.
-    from aiohttp.abc import AbstractResolver
-    from aiohttp.resolver import DefaultResolver
+def _env_proxy_hosts() -> frozenset[str]:
+    """Hosts of any egress proxy configured in the environment.
 
-    class BlocklistResolver(AbstractResolver):
-        """aiohttp resolver that drops blocked IPs before the connector dials.
+    The session runs with ``trust_env=True``, so when a proxy is configured the
+    connector dials *the proxy*, and it is the proxy's own address that reaches
+    this resolver -- the origin is resolved by the proxy, out of our sight. A
+    corporate proxy on a private address would therefore be filtered here and
+    take out every fetch: measured, HTTP_PROXY at a private host turns each one
+    into ClientConnectorDNSError. Exempt the configured proxy so proxied
+    deployments keep working, and see the module docstring for what that means
+    for enforcement.
+    """
+    return frozenset(
+        info.proxy.host
+        for info in proxies_from_env().values()
+        if info.proxy.host is not None
+    )
 
-        Returns the full set of non-blocked addresses (not just the first) so
-        aiohttp keeps its normal multi-address / Happy-Eyeballs fallback.
-        """
 
-        def __init__(self, *, allow_private_ips: bool) -> None:
-            self._inner = DefaultResolver()
-            self._allow_private_ips = allow_private_ips
+class BlocklistResolver(AbstractResolver):
+    """aiohttp resolver that drops blocked IPs before the connector dials.
 
-        async def resolve(
-            self, host: str, port: int = 0, family: int = socket.AF_INET
-        ) -> list[dict[str, Any]]:
-            hosts = await self._inner.resolve(host, port, family)
-            if self._allow_private_ips:
-                return hosts
-            allowed = [h for h in hosts if not is_blocked_ip(h["host"])]
-            if not allowed:
-                raise SsrfBlockedAddress(f"host {host!r} resolves only to blocked IPs")
-            return allowed
+    Returns the full set of non-blocked addresses (not just the first) so
+    aiohttp keeps its normal multi-address / Happy-Eyeballs fallback.
 
-        async def close(self) -> None:
-            await self._inner.close()
+    Note aiohttp short-circuits IP literals in ``TCPConnector._resolve_host``
+    and never calls a resolver for them, so literal blocked addresses are
+    ``validate_url``'s job, not this one. This covers the hostname case, which
+    is the one that rebinds.
+    """
 
-except ImportError:  # pragma: no cover - aiohttp always present in practice
-    BlocklistResolver = None  # type: ignore[assignment,misc]
+    def __init__(self, *, allow_private_ips: bool) -> None:
+        self._inner = DefaultResolver()
+        self._allow_private_ips = allow_private_ips
+        self._proxy_hosts = _env_proxy_hosts()
+
+    async def resolve(
+        self,
+        host: str,
+        port: int = 0,
+        family: socket.AddressFamily = socket.AF_INET,
+    ) -> list[ResolveResult]:
+        hosts = await self._inner.resolve(host, port, family)
+        if self._allow_private_ips or host in self._proxy_hosts:
+            return hosts
+        allowed = [h for h in hosts if not is_blocked_ip(h["host"])]
+        if not allowed:
+            # ``host`` is caller-supplied and unbounded; this text reaches an
+            # error response and a log line through the facade's connection
+            # error, so bound it the way every other message on this path is.
+            raise SsrfBlockedAddress(
+                f"host {describe_media_source(host)} resolves only to blocked IPs"
+            )
+        return allowed
+
+    async def close(self) -> None:
+        await self._inner.close()

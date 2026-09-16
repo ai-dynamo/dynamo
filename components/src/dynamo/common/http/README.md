@@ -14,7 +14,19 @@ rate when one request fans out to many URLs (e.g. 100 image fetches),
 and it exposes a `TCPConnector(resolver=...)` DNS hook that pins the
 validated DNS answers as a connect-time SSRF backstop against DNS
 rebinding — the default client wires a `BlocklistResolver` (see
-`_ssrf_resolver.py`) keyed to the `DYN_MM_ALLOW_INTERNAL` env baseline. See the
+`_ssrf_resolver.py`) keyed to the `DYN_MM_ALLOW_INTERNAL` env baseline.
+
+> [!IMPORTANT]
+> The backstop governs **direct** connections only. With an egress proxy
+> configured (`HTTP_PROXY` / `HTTPS_PROXY` — the session runs `trust_env=True`),
+> the connector dials the proxy and the *proxy* resolves the origin, out of this
+> resolver's sight. The configured proxy is therefore exempt from filtering, so
+> a proxy on a private address keeps working; enforcement for proxied fetches
+> has to happen at the proxy or network layer. Note aiohttp never calls a
+> resolver for an IP literal, so literal blocked addresses are `validate_url`'s
+> job rather than the backstop's.
+
+See the
 [NeMo Gym aiohttp vs httpx note](https://docs.nvidia.com/nemo/gym/latest/infrastructure/engineering-notes/aiohttp-vs-httpx.html)
 for the fan-out latency comparison.
 

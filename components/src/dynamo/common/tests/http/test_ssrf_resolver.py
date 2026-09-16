@@ -62,3 +62,47 @@ async def test_allow_private_ips_bypasses_filtering() -> None:
     resolver._inner = _FakeInner(["169.254.169.254", "10.0.0.5"])
     out = await resolver.resolve("internal.svc")
     assert [h["host"] for h in out] == ["169.254.169.254", "10.0.0.5"]
+
+
+async def test_configured_egress_proxy_is_not_filtered(monkeypatch) -> None:
+    """A corporate proxy on a private address must not be filtered out.
+
+    The session runs with ``trust_env=True``, so with a proxy configured the
+    connector dials the proxy and it is the proxy's own address that reaches
+    this resolver. Filtering it turns every fetch into a connection error --
+    measured before the exemption, HTTP_PROXY at a private host failed them all.
+    """
+    # aiohttp's proxies_from_env() prefers the lowercase name, and CI images can
+    # carry one already -- clear both so this test controls what is configured.
+    monkeypatch.delenv("http_proxy", raising=False)
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.internal:3128")
+
+    resolver = BlocklistResolver(allow_private_ips=False)
+    resolver._inner = _FakeInner(["10.1.2.3"])
+
+    hosts = await resolver.resolve("proxy.internal")
+
+    assert [h["host"] for h in hosts] == ["10.1.2.3"]
+
+
+async def test_a_non_proxy_host_is_still_filtered(monkeypatch) -> None:
+    """Control: the exemption is for the configured proxy only."""
+    monkeypatch.delenv("http_proxy", raising=False)
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.internal:3128")
+
+    resolver = BlocklistResolver(allow_private_ips=False)
+    resolver._inner = _FakeInner(["10.1.2.3"])
+
+    with pytest.raises(SsrfBlockedAddress):
+        await resolver.resolve("origin.example.com")
+
+
+async def test_blocked_message_bounds_the_hostname() -> None:
+    """The host is caller-supplied; this text reaches a response and a log."""
+    resolver = _resolver_with(["169.254.169.254"])
+
+    with pytest.raises(SsrfBlockedAddress) as excinfo:
+        await resolver.resolve("h" * 200_000 + ".example.com")
+
+    assert len(str(excinfo.value)) < 500
+    assert "h" * 200 not in str(excinfo.value)
