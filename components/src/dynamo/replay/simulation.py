@@ -43,7 +43,6 @@ _ROUTER_HOOK = HookCapability(
     api_version=1,
 )
 _REPLAY_SPEC_API_VERSION = 1
-_AGENTIC_MODEL_PROJECTION_POLICY = "project_to_configured_target"
 _SUPPORTED_BACKEND_TOPOLOGIES = (
     ("vllm", "agg"),
     ("vllm", "disagg"),
@@ -158,23 +157,6 @@ class DynamoReplayRunner:
                 agentic_input_format=trace_format,
                 agentic_lanes=agentic_lanes,
             )
-            graph = metadata.get("agentic_graph")
-            if not isinstance(graph, dict):
-                raise RuntimeError("agentic replay did not report graph identity")
-            source_models = graph.get("source_models")
-            if not isinstance(source_models, list) or not all(
-                isinstance(model, str) and model for model in source_models
-            ):
-                raise RuntimeError("agentic graph did not report valid source_models")
-            if execution_model is None:
-                raise RuntimeError(
-                    "agentic execution did not declare its configured target model"
-                )
-            metadata["agentic_model_projection"] = {
-                "policy": _AGENTIC_MODEL_PROJECTION_POLICY,
-                "source_models": source_models,
-                "target_model": execution_model,
-            }
         self._require_goodput_metric(metrics, spec)
         return ReplayReport(metrics=metrics, metadata=metadata)
 

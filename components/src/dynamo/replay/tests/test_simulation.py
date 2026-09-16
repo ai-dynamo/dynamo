@@ -23,12 +23,9 @@ from aisimulate.sweeper.replay import (
     ReplaySpec,
 )
 
-from dynamo.replay import (
-    PlannerReplayDetails,
-    ReplayReport,
-    run_trace_replay,
-    simulation,
-)
+from dynamo.replay import PlannerReplayDetails, ReplayReport
+from dynamo.replay import api as replay_api
+from dynamo.replay import run_trace_replay, simulation
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -171,14 +168,7 @@ def test_trace_paths_only_workload_routes_to_trace_replay(monkeypatch) -> None:
 
     def fake_run_trace_replay(**kwargs):
         seen.update(kwargs)
-        return _report(
-            {
-                "completed_requests": 2,
-                "agentic_graph": {
-                    "source_models": ["source-a", "source-b"],
-                },
-            }
-        )
+        return _report({"completed_requests": 2})
 
     monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
     monkeypatch.setattr(simulation, "run_trace_replay", fake_run_trace_replay)
@@ -218,7 +208,7 @@ def test_weka_runner_delegates_without_inventing_a_source_block_size(
 ) -> None:
     seen = {}
 
-    def fake_run_trace_replay(**kwargs):
+    def fake_native_replay(_trace_files, **kwargs):
         seen.update(kwargs)
         return _report(
             {
@@ -231,7 +221,7 @@ def test_weka_runner_delegates_without_inventing_a_source_block_size(
         )
 
     monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
-    monkeypatch.setattr(simulation, "run_trace_replay", fake_run_trace_replay)
+    monkeypatch.setattr(replay_api, "_run_mocker_trace_replay", fake_native_replay)
     spec = ReplaySpec(
         backend_deployment=_agg_deployment(),
         workload={

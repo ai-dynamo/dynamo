@@ -11,9 +11,8 @@ use dynamo_mocker::common::protocols::{
     SglangArgs as RsSglangArgs, TrtllmArgs as RsTrtllmArgs, WorkerType as RsWorkerType,
 };
 use dynamo_mocker::loadgen::{
-    AgenticTrace, ArrivalSpec, DelaySpec, DynamoRequestTrace, LengthSpec, SyntheticTraceSpec,
-    Trace as RsTrace, TraceFileFormat, WekaImportOptions, WekaNestedTimestampBasis,
-    WekaResolvedTimestampBasis,
+    ArrivalSpec, DelaySpec, DynamoRequestTrace, LengthSpec, SyntheticTraceSpec, Trace as RsTrace,
+    TraceFileFormat, WekaImportOptions, WekaNestedTimestampBasis, WekaResolvedTimestampBasis,
 };
 use dynamo_mocker::replay::{
     ReplayArgsMode, ReplayScalingDecision, ReplayScalingPolicy, ReplayScalingSnapshot,
@@ -117,23 +116,14 @@ fn replay_summary_to_python(
     report: &dynamo_mocker::replay::TraceSimulationReport,
     weka_nested_timestamp_basis: Option<WekaResolvedTimestampBasis>,
 ) -> PyResult<PyObject> {
-    // Match AISimulate's report field without changing its shared report type.
-    #[derive(Serialize)]
-    struct Summary<'a> {
-        #[serde(flatten)]
-        report: &'a dynamo_mocker::replay::TraceSimulationReport,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        weka_nested_timestamp_basis: Option<WekaResolvedTimestampBasis>,
+    let summary = pythonize(py, report).map_err(to_pyerr)?;
+    if let Some(basis) = weka_nested_timestamp_basis {
+        summary.set_item(
+            "weka_nested_timestamp_basis",
+            pythonize(py, &basis).map_err(to_pyerr)?,
+        )?;
     }
-    pythonize(
-        py,
-        &Summary {
-            report,
-            weka_nested_timestamp_basis,
-        },
-    )
-    .map(Bound::unbind)
-    .map_err(to_pyerr)
+    Ok(summary.unbind())
 }
 
 struct ResolvedAicPerfConfig<'a> {
@@ -1048,9 +1038,23 @@ pub fn run_mocker_trace_replay(
                 "agentic_lanes requires trace_format='agentic_mooncake', 'weka', or 'dynamo'"
             );
         }
-        if trace_format == dynamo_mocker::loadgen::TraceFileFormat::Dynamo {
-            let trace =
-                DynamoRequestTrace::from_request_trace_files(&trace_files, trace_block_size)?;
+        if matches!(
+            trace_format,
+            TraceFileFormat::Dynamo | TraceFileFormat::Weka
+        ) {
+            let (trace, resolved_basis) = if trace_format == TraceFileFormat::Weka {
+                let (graph, basis) = dynamo_mocker::loadgen::load_weka_agentic_graph_with_options(
+                    &trace_files[0],
+                    trace_block_size,
+                    weka_options,
+                )?;
+                (DynamoRequestTrace::Agentic(graph), Some(basis))
+            } else {
+                (
+                    DynamoRequestTrace::from_request_trace_files(&trace_files, trace_block_size)?,
+                    None,
+                )
+            };
             if matches!(&trace, DynamoRequestTrace::Agentic(_)) && execution_model.is_none() {
                 anyhow::bail!("agentic execution requires a configured target model");
             }
@@ -1069,39 +1073,6 @@ pub fn run_mocker_trace_replay(
                 max_sim_time_ms,
                 sla,
                 scaling_policy,
-            )
-            .map(|report| (report, None));
-        }
-
-        if trace_format == TraceFileFormat::Weka {
-            anyhow::ensure!(
-                scaling_policy.is_none(),
-                "scaling_policy replay does not support agentic traces"
-            );
-            anyhow::ensure!(
-                replay_concurrency.is_none(),
-                "weka trace format is not supported with replay_concurrency"
-            );
-            let (trace, resolved_basis) =
-                dynamo_mocker::replay::load_agentic_trace_from_file_with_options(
-                    &trace_files[0],
-                    trace_block_size.unwrap_or(0),
-                    trace_format,
-                    arrival_speedup_ratio,
-                    weka_options,
-                )?;
-            return run_loaded_agentic_trace(
-                args_selection,
-                trace,
-                router_config,
-                prefill_load_estimator,
-                num_workers,
-                agentic_lanes,
-                &replay_mode,
-                router_mode,
-                record_per_request,
-                max_sim_time_ms,
-                sla,
             )
             .map(|report| (report, resolved_basis));
         }
@@ -1389,19 +1360,49 @@ fn run_loaded_dynamo_request_trace(
             let trace = trace
                 .normalize_starts()
                 .speed_up_timing(arrival_speedup_ratio)?;
-            run_loaded_agentic_trace(
-                args_selection,
-                trace,
-                router_config,
-                prefill_load_estimator,
-                num_workers,
-                agentic_lanes,
-                replay_mode,
-                router_mode,
-                record_per_request,
-                max_sim_time_ms,
-                sla,
-            )
+            match (args_selection, replay_mode) {
+                (ReplayArgsSelection::Aggregated(args), "offline") => dynamo_mocker::replay::simulate_agentic_trace_workload_with_router_mode(
+                    *args,
+                    router_config,
+                    prefill_load_estimator,
+                    trace,
+                    num_workers,
+                    router_mode,
+                    record_per_request,
+                    max_sim_time_ms,
+                    agentic_lanes,
+                    sla,
+                ),
+                (ReplayArgsSelection::Aggregated(args), "online") => dynamo_mocker::replay::simulate_agentic_trace_live_workload_with_router_mode_and_options(
+                    *args,
+                    router_config,
+                    prefill_load_estimator,
+                    trace,
+                    num_workers,
+                    router_mode,
+                    record_per_request,
+                    agentic_lanes,
+                    sla,
+                ),
+                (ReplayArgsSelection::Disagg(config), "offline") => dynamo_mocker::replay::simulate_agentic_trace_workload_disagg_with_router_mode(
+                    *config,
+                    router_config,
+                    prefill_load_estimator,
+                    trace,
+                    router_mode,
+                    record_per_request,
+                    max_sim_time_ms,
+                    agentic_lanes,
+                    sla,
+                ),
+                (ReplayArgsSelection::Disagg(_), "online") => anyhow::bail!(
+                    "online P/D agentic replay is not supported"
+                ),
+                (_, other) => anyhow::bail!(
+                    "replay_mode must be either 'offline' or 'online', got '{}'",
+                    other
+                ),
+            }
         }
     }
 }
@@ -1429,71 +1430,6 @@ fn write_per_request_jsonl(
     }
     writer.flush()?;
     Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn run_loaded_agentic_trace(
-    args_selection: ReplayArgsSelection,
-    trace: AgenticTrace,
-    router_config: Option<dynamo_kv_router::config::KvRouterConfig>,
-    prefill_load_estimator: Option<dynamo_mocker::replay::ReplayPrefillLoadEstimator>,
-    num_workers: usize,
-    agentic_lanes: Option<usize>,
-    replay_mode: &str,
-    router_mode: dynamo_mocker::replay::ReplayRouterMode,
-    record_per_request: bool,
-    max_sim_time_ms: Option<f64>,
-    sla: dynamo_mocker::replay::SlaThresholds,
-) -> anyhow::Result<dynamo_mocker::replay::TraceSimulationReport> {
-    match (args_selection, replay_mode) {
-        (ReplayArgsSelection::Aggregated(args), "offline") => {
-            dynamo_mocker::replay::simulate_agentic_trace_workload_with_router_mode(
-                *args,
-                router_config,
-                prefill_load_estimator,
-                trace,
-                num_workers,
-                router_mode,
-                record_per_request,
-                max_sim_time_ms,
-                agentic_lanes,
-                sla,
-            )
-        }
-        (ReplayArgsSelection::Aggregated(args), "online") => {
-            dynamo_mocker::replay::simulate_agentic_trace_live_workload_with_router_mode_and_options(
-                *args,
-                router_config,
-                prefill_load_estimator,
-                trace,
-                num_workers,
-                router_mode,
-                record_per_request,
-                agentic_lanes,
-                sla,
-            )
-        }
-        (ReplayArgsSelection::Disagg(config), "offline") => {
-            dynamo_mocker::replay::simulate_agentic_trace_workload_disagg_with_router_mode(
-                *config,
-                router_config,
-                prefill_load_estimator,
-                trace,
-                router_mode,
-                record_per_request,
-                max_sim_time_ms,
-                agentic_lanes,
-                sla,
-            )
-        }
-        (ReplayArgsSelection::Disagg(_), "online") => {
-            anyhow::bail!("online P/D agentic replay is not supported")
-        }
-        (_, other) => anyhow::bail!(
-            "replay_mode must be either 'offline' or 'online', got '{}'",
-            other
-        ),
-    }
 }
 
 #[pyfunction]
@@ -1899,36 +1835,11 @@ fn validate_disagg_replay_mode(replay_mode: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_synthetic_requests, fpm_snapshots_to_json, parse_weka_import_options,
-        reconcile_replay_dp_topology, validate_disagg_replay_mode,
+        build_synthetic_requests, fpm_snapshots_to_json, reconcile_replay_dp_topology,
+        validate_disagg_replay_mode,
     };
     use dynamo_mocker::common::protocols::{ForwardPassSnapshot, MockEngineArgs};
-    use dynamo_mocker::loadgen::{ArrivalSpec, TraceFileFormat, WekaNestedTimestampBasis};
-
-    #[test]
-    fn weka_timestamp_basis_validates_and_preserves_explicit_options() {
-        for (value, expected) in [
-            (None, WekaNestedTimestampBasis::Auto),
-            (Some("auto"), WekaNestedTimestampBasis::Auto),
-            (Some("absolute"), WekaNestedTimestampBasis::Absolute),
-            (Some("relative"), WekaNestedTimestampBasis::Relative),
-        ] {
-            let options = parse_weka_import_options(TraceFileFormat::Weka, value).unwrap();
-            assert_eq!(options.nested_timestamp_basis, expected);
-        }
-        assert!(parse_weka_import_options(TraceFileFormat::Mooncake, None).is_ok());
-        for basis in ["auto", "absolute", "relative"] {
-            let error =
-                parse_weka_import_options(TraceFileFormat::Mooncake, Some(basis)).unwrap_err();
-            assert!(error.to_string().contains("requires trace_format='weka'"));
-        }
-        let error = parse_weka_import_options(TraceFileFormat::Weka, Some("unknown")).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("must be 'auto', 'absolute', or 'relative'")
-        );
-    }
+    use dynamo_mocker::loadgen::ArrivalSpec;
 
     #[test]
     fn online_disaggregation_is_rejected_with_stable_message() {

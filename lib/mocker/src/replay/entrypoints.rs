@@ -17,10 +17,7 @@ use super::{
     ReplayWorkerArtifacts, SlaThresholds, TraceSimulationReport,
 };
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
-use crate::loadgen::{
-    AgenticTrace, Trace, TraceFileFormat, WekaImportOptions, WekaResolvedTimestampBasis,
-    load_weka_agentic_graph_with_options,
-};
+use crate::loadgen::{AgenticTrace, Trace, TraceFileFormat, load_weka_agentic_graph};
 use crate::scheduler::RouterEventVisibility;
 
 /// Replay artifact KV-event timestamp visibility override.
@@ -79,48 +76,17 @@ fn load_agentic_trace_from_file(
     trace_format: TraceFileFormat,
     arrival_speedup_ratio: f64,
 ) -> Result<AgenticTrace> {
-    load_agentic_trace_from_file_with_options(
-        trace_path,
-        trace_block_size,
-        trace_format,
-        arrival_speedup_ratio,
-        WekaImportOptions::default(),
-    )
-    .map(|(trace, _)| trace)
-}
-
-/// Load an agentic trace and retain Weka's corpus-wide resolved timestamp basis.
-#[doc(hidden)]
-pub fn load_agentic_trace_from_file_with_options(
-    trace_path: &Path,
-    trace_block_size: usize,
-    trace_format: TraceFileFormat,
-    arrival_speedup_ratio: f64,
-    weka_options: WekaImportOptions,
-) -> Result<(AgenticTrace, Option<WekaResolvedTimestampBasis>)> {
-    let (trace, resolved_basis) = match trace_format {
-        TraceFileFormat::AgenticMooncake => {
-            (AgenticTrace::from_agentic_mooncake(trace_path)?, None)
-        }
-        // AISimulate owns Weka validation and lowering. Dynamo keeps only this
-        // runtime composition seam so existing `trace_format="weka"` callers
-        // continue to receive the canonical validated agentic graph.
-        // A zero value is Dynamo's internal sentinel for an omitted source
-        // block-size assertion; Weka itself rejects zero block sizes.
-        TraceFileFormat::Weka => {
-            let (trace, resolved_basis) = load_weka_agentic_graph_with_options(
-                trace_path,
-                (trace_block_size != 0).then_some(trace_block_size),
-                weka_options,
-            )?;
-            (trace, Some(resolved_basis))
-        }
+    let trace = match trace_format {
+        TraceFileFormat::AgenticMooncake => AgenticTrace::from_agentic_mooncake(trace_path)?,
+        TraceFileFormat::Weka => load_weka_agentic_graph(
+            trace_path,
+            (trace_block_size != 0).then_some(trace_block_size),
+        )?,
         _ => bail!("{} is not an agentic trace format", trace_format.as_str()),
     };
-    let trace = trace
+    trace
         .normalize_starts()
-        .speed_up_timing(arrival_speedup_ratio)?;
-    Ok((trace, resolved_basis))
+        .speed_up_timing(arrival_speedup_ratio)
 }
 
 fn is_agentic_trace_format(trace_format: TraceFileFormat) -> bool {
@@ -2848,65 +2814,5 @@ mod tests {
                 .to_string()
                 .contains("Weka source block size 4 does not match configured block size 512")
         );
-    }
-
-    #[test]
-    fn weka_nested_timestamp_override_survives_loading_and_timing_normalization() {
-        use crate::loadgen::WekaNestedTimestampBasis;
-
-        let directory = tempfile::tempdir().unwrap();
-        let source = directory.path().join("nested.json");
-        std::fs::write(
-            &source,
-            serde_json::to_vec(&serde_json::json!({
-                "id": "play",
-                "models": ["model"],
-                "block_size": 4,
-                "hash_id_scope": "local",
-                "requests": [
-                    {"t": 0.0, "type": "s", "model": "model", "in": 4, "out": 1, "hash_ids": [1]},
-                    {"t": 1.0, "type": "subagent", "agent_id": "worker", "subagent_type": "Explore", "status": "completed", "models": ["model"], "requests": [
-                        {"t": 2.0, "type": "s", "model": "model", "in": 4, "out": 1, "hash_ids": [2]}
-                    ]}
-                ]
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-
-        // Auto sees no relative witness: the child is later than its marker.
-        // Relative must still add the marker offset, including after a cache hit.
-        for (basis, child_start_ms) in [
-            (WekaNestedTimestampBasis::Auto, 2_000.0),
-            (WekaNestedTimestampBasis::Absolute, 2_000.0),
-            (WekaNestedTimestampBasis::Relative, 3_000.0),
-            (WekaNestedTimestampBasis::Auto, 2_000.0),
-        ] {
-            for speedup in [1.0, 2.0] {
-                let (trace, resolved_basis) = load_agentic_trace_from_file_with_options(
-                    &source,
-                    0,
-                    TraceFileFormat::Weka,
-                    speedup,
-                    WekaImportOptions {
-                        nested_timestamp_basis: basis,
-                    },
-                )
-                .unwrap();
-                assert_eq!(
-                    resolved_basis,
-                    Some(if basis == WekaNestedTimestampBasis::Relative {
-                        WekaResolvedTimestampBasis::Relative
-                    } else {
-                        WekaResolvedTimestampBasis::Absolute
-                    })
-                );
-                assert_eq!(trace.node_count(), 2);
-                assert_eq!(trace.nodes()[0].not_before_ms(), 0.0);
-                assert_eq!(trace.nodes()[1].not_before_ms(), child_start_ms / speedup);
-            }
-        }
-        let default = load_agentic_trace_from_file(&source, 0, TraceFileFormat::Weka, 1.0).unwrap();
-        assert_eq!(default.nodes()[1].not_before_ms(), 2_000.0);
     }
 }
