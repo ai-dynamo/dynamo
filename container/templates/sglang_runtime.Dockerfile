@@ -274,6 +274,47 @@ RUN set -eux; \
         /usr/local/src/ffmpeg \
         /root/.cache/pip; \
     ldconfig
+
+# The dev-dsv41 Ubuntu 24.04 base also carries its distro FFmpeg stack. It is
+# outside the Python-wheel and /usr/local cleanup above, so remove the complete
+# set of FFmpeg packages after that cleanup rather than only libx264/libx265:
+# on arm64 the residual libavutil/libpostproc/libsw* libraries are independently
+# caught by the media-codec policy. Querying dpkg keeps this valid across the
+# base image's architecture/version suffixes and intentionally avoids
+# autoremove: its dependency graph includes the runtime JIT toolchain and CUDA
+# math libraries.
+RUN set -eux; \
+    purge="$(dpkg-query -W -f='${Package}\n' 2>/dev/null \
+        | grep -E '^(ffmpeg|libav[a-z]|libsw[a-z]|libpostproc|libx264|libx265|libmp3lame|libaom|libdav1d|libvpx|libtheora|libvorbis|libopus|libsoxr|libcaca|libcdio|libzvbi|libgme|libvidstab|libdc1394|libraw1394|libiec61883|libtwolame|libshine|libsrt[0-9]|libudfread|libsvtav1|libbs2b|librubberband|libchromaprint|libcodec2|libgsm|libass[0-9]|libbluray|libxvidcore|libflite)' \
+        || true)"; \
+    if [ -n "$purge" ]; then \
+        DEBIAN_FRONTEND=noninteractive apt-get purge -y $purge; \
+    fi; \
+    rm -rf /var/lib/apt/lists/*; \
+    ldconfig
+
+{% if context.get(framework, {}).get(device_key, {}).get("prune_dev_dsv41_packages", "false") == "true" %}
+# dev-dsv41 is a SGLang development image, not a redistributable serving
+# runtime. Remove its measured build, debug, desktop, and MPI-development
+# payload so this day-0 image is governed by the normal license policy instead
+# of an exception. The package list is pinned in the build context, filtered to
+# what the current architecture actually has installed, and deliberately avoids
+# autoremove so JIT/CUDA dependencies cannot be swept as incidental orphans.
+RUN --mount=type=bind,source=./container/deps/sglang/dev-dsv41-nonruntime-packages.txt,target=/tmp/dev-dsv41-nonruntime-packages.txt,readonly \
+    set -eux; \
+    purge=""; \
+    while IFS= read -r package; do \
+        case "$package" in ""|\#*) continue ;; esac; \
+        if [ "$(dpkg-query -W -f='${db:Status-Status}' "$package" 2>/dev/null || true)" = "installed" ]; then \
+            purge="$purge $package"; \
+        fi; \
+    done < /tmp/dev-dsv41-nonruntime-packages.txt; \
+    if [ -n "$purge" ]; then \
+        DEBIAN_FRONTEND=noninteractive apt-get purge -y --no-auto-remove $purge; \
+    fi; \
+    rm -rf /var/lib/apt/lists/*; \
+    ldconfig
+{% endif %}
 {% endif %}
 
 # Drop the Nsight efa_metrics plugin the CUDA floor carries: a Go NIC sampler

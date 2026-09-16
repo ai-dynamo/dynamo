@@ -111,6 +111,19 @@ pub const VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY: &str =
 /// on the active LoRA adapter. Missing and explicit `false` are equivalent.
 pub const VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY: &str = "vllm_enable_tower_connector_lora";
 
+/// Worker-advertised support for the prefill-continues-decode marker.
+///
+/// A worker that does not know the marker ignores it and takes its normal
+/// prefill path: it answers with a handoff message and holds cache for a decode
+/// worker that will never connect. So the router must never ask a worker for a
+/// continuation unless that worker declared it here.
+///
+/// Read with [`ModelRuntimeConfig::supports_runtime_capability`], so a JSON
+/// bool `true` and the canonical truthy strings both count. Absent, `false`,
+/// and anything else all mean no, and the router refuses the whole pool if any
+/// worker it could route to fails this.
+pub const PREFILL_CONTINUE_CAPABILITY: &str = "prefill_continue";
+
 /// Worker-advertised support for Dynamo's SGLang-compatible `POST /generate`
 /// adapter.
 ///
@@ -565,6 +578,16 @@ fn validate_kv_transfer_domain(domain: &str) -> Result<(), ValidationError> {
 }
 
 fn validate_model_runtime_config(config: &ModelRuntimeConfig) -> Result<(), ValidationError> {
+    let parsers = [
+        config.tool_call_parser.as_deref(),
+        config.reasoning_parser.as_deref(),
+    ];
+    if parsers.contains(&Some("deepseek_v41")) && parsers != [Some("deepseek_v41"); 2] {
+        return Err(validation_error(
+            "incompatible_parser_pair",
+            "deepseek_v41 requires both tool_call_parser and reasoning_parser to be deepseek_v41",
+        ));
+    }
     if config.data_parallel_size == 0 {
         return Err(validation_error(
             "invalid_data_parallel_size",
@@ -1338,10 +1361,29 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_v41_rejects_conflicting_parser_pairs() {
+        for (tool, reasoning, valid) in [
+            (Some("deepseek_v41"), None, false),
+            (None, Some("deepseek_v41"), false),
+            (Some("deepseek_v41"), Some("deepseek_v41"), true),
+            (Some("deepseek_v41"), Some("qwen3"), false),
+            (Some("qwen3_coder"), Some("deepseek_v41"), false),
+        ] {
+            let config = ModelRuntimeConfig {
+                tool_call_parser: tool.map(str::to_string),
+                reasoning_parser: reasoning.map(str::to_string),
+                ..Default::default()
+            };
+            assert_eq!(validate_model_runtime_config(&config).is_ok(), valid);
+        }
+    }
+
+    #[test]
     fn test_validate_config_checks_tool_call_parser() {
         let validate = |parser: &str| {
             ModelRuntimeConfig {
                 tool_call_parser: Some(parser.to_string()),
+                reasoning_parser: (parser == "deepseek_v41").then(|| parser.to_string()),
                 ..Default::default()
             }
             .validate_config()

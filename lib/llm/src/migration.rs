@@ -158,6 +158,7 @@ fn is_migratable_for_request(
             RequestPhase::Prefill,
             RequestPhase::Decode,
             RequestPhase::Aggregated,
+            RequestPhase::Continuation,
         ]
         .into_iter()
         .all(allows_phase);
