@@ -211,7 +211,11 @@ def main() -> int:
         github_refs, key=lambda r: (r not in intent_github, r[0], int(r[1]))
     )
     ordered_refs = all_refs[:MAX_CANDIDATES]
-    definitive_github = False
+    # True once any candidate has been decided: the API answered about it, or
+    # the check deliberately declined to look. Both are decisions. Only an
+    # outage leaves a candidate undecided, and only an outage earns the
+    # fail-open pass on the candidates past the bound.
+    decided_github = False
     for ref_repo, number in ordered_refs:
         exists, api_ok = verify_github_issue(ref_repo, number, gh_token)
         label = f"#{number}" if ref_repo == repo else f"{ref_repo}#{number}"
@@ -231,22 +235,27 @@ def main() -> int:
             visible, repo_api_ok = repo_visibility[ref_repo]
             if not repo_api_ok:
                 unverified.append(f"GitHub reference {label} (API unavailable)")
-            elif not visible:
-                invisible_repo_refs.append(label)
             else:
-                definitive_github = True
+                # An invisible repository is an answer, not an outage: the
+                # repository lookup came back cleanly. Eleven invented
+                # repository names in a description would otherwise cross the
+                # bound below and pass with nothing needing to exist.
+                if not visible:
+                    invisible_repo_refs.append(label)
+                decided_github = True
         else:
-            definitive_github = True
+            decided_github = True
         if verified:
             break
 
-    if not verified and len(all_refs) > MAX_CANDIDATES and not definitive_github:
+    if not verified and len(all_refs) > MAX_CANDIDATES and not decided_github:
         # Aggregation and release pull requests can carry more references than
         # the lookup budget, and a candidate nobody checked must not hard-fail
-        # a pull request. Once a checked candidate has come back definitive the
-        # API is up and the cap is a cap, not an outage. Reporting the
-        # remainder as unverified there passed a pull request whose every
-        # reference resolved to another pull request.
+        # a pull request. Once a candidate has been decided, though, the cap is
+        # a cap and not an outage. Reporting the remainder as unverified there
+        # passed a pull request whose every reference resolved to another pull
+        # request, and one whose every reference named a repository that does
+        # not exist.
         unverified.append(
             f"{len(all_refs) - MAX_CANDIDATES} further GitHub references "
             f"beyond the {MAX_CANDIDATES}-lookup bound (not verified)"
@@ -254,7 +263,7 @@ def main() -> int:
 
     all_linear_ids = sorted(linear_ids, key=lambda i: (i not in intent_linear, i))
     fork_linear_ids: list[str] = []
-    definitive_linear = False
+    decided_linear = False
     for identifier in all_linear_ids[:MAX_CANDIDATES]:
         if verified:
             break
@@ -264,6 +273,10 @@ def main() -> int:
             # unverifiable ID pass the check; community contributors
             # reference GitHub issues.
             fork_linear_ids.append(identifier)
+            # Declining to look is a decision, not an outage. Without this the
+            # bound below turns eleven Linear-shaped tokens from a fork into a
+            # pass, having made no API call at all.
+            decided_linear = True
             continue
         exists, api_ok = verify_linear_issue(identifier, linear_key)
         if exists:
@@ -271,9 +284,9 @@ def main() -> int:
         elif not api_ok:
             unverified.append(f"Linear reference {identifier} (not verified)")
         else:
-            definitive_linear = True
+            decided_linear = True
 
-    if not verified and len(all_linear_ids) > MAX_CANDIDATES and not definitive_linear:
+    if not verified and len(all_linear_ids) > MAX_CANDIDATES and not decided_linear:
         unverified.append(
             f"{len(all_linear_ids) - MAX_CANDIDATES} further Linear references "
             f"beyond the {MAX_CANDIDATES}-lookup bound (not verified)"

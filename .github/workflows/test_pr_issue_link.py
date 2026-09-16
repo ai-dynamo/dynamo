@@ -356,3 +356,72 @@ def test_summary_is_appended_to_the_step_summary_file(
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
     assert pr_issue_link.main() == 0
     assert "GitHub issue #123" in summary.read_text()
+
+
+# ------------------------------------------------------------------
+# The paths that decline to verify
+# ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("count", [10, 11])
+def test_invisible_cross_repo_references_fail_on_both_sides_of_the_bound(
+    monkeypatch: pytest.MonkeyPatch, count: int
+) -> None:
+    """Declining to look is a decision, so the bound must not rescue it.
+
+    An invented repository name answers 404 on both the issue and the
+    repository, which lands the reference in `invisible_repo_refs`. Nothing has
+    to exist for a body to carry eleven of them.
+    """
+    api = FakeApi(repos={f"ai-dynamo/absent-{n}": (False, True) for n in range(count)})
+    body = " ".join(f"ai-dynamo/absent-{n}#7" for n in range(count))
+    code, api = run(monkeypatch, api, PR_BODY=body)
+    assert code == 1
+    assert len(api.repo_calls) == min(count, pr_issue_link.MAX_CANDIDATES)
+
+
+def test_invisible_cross_repo_overflow_with_a_repository_outage_fails_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The repository lookup failing is an outage, and outages still pass."""
+    api = FakeApi(repos={f"ai-dynamo/absent-{n}": (False, False) for n in range(11)})
+    body = " ".join(f"ai-dynamo/absent-{n}#7" for n in range(11))
+    code, api = run(monkeypatch, api, PR_BODY=body)
+    assert code == 0
+
+
+@pytest.mark.parametrize("count", [10, 11])
+def test_fork_linear_identifiers_fail_on_both_sides_of_the_bound(
+    monkeypatch: pytest.MonkeyPatch, count: int
+) -> None:
+    """A fork's Linear identifiers are never looked up, so they never pass.
+
+    The fork gate skips verification before any request, so without marking
+    the candidate decided the bound turns these into a pass having made no API
+    call at all.
+    """
+    body = " ".join(f"AAA-{n}" for n in range(1, count + 1))
+    code, api = run(
+        monkeypatch,
+        PR_BODY=body,
+        PR_HEAD_REPO="contributor/dynamo",
+        PR_AUTHOR_ASSOCIATION="CONTRIBUTOR",
+    )
+    assert code == 1
+    assert api.linear_calls == []
+
+
+def test_fork_linear_overflow_does_not_mask_a_github_outage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fork PR with a real GitHub outage still fails open."""
+    api = FakeApi(default_github=(False, False))
+    body = " ".join(f"AAA-{n}" for n in range(1, 12)) + "\n\nFixes #5"
+    code, api = run(
+        monkeypatch,
+        api,
+        PR_BODY=body,
+        PR_HEAD_REPO="contributor/dynamo",
+        PR_AUTHOR_ASSOCIATION="CONTRIBUTOR",
+    )
+    assert code == 0
