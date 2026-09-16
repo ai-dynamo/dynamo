@@ -211,3 +211,9 @@ def test_uuid_and_strip_propagates_to_aiperf(
     run_sweep(config, repo_root=tmp_path)
 
     assert mock_aiperf.call_args.kwargs["uuid_and_strip"] is True
+    assert (
+        mock_server_cls.return_value.start.call_args.kwargs["env_overrides"][
+            "DYN_BENCHMARK_ARM"
+        ]
+        == "cfg-0"
+    )

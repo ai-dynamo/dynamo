@@ -21,6 +21,7 @@ class ServerManager:
     def __init__(self, port: int = 8000, timeout: int = 600) -> None:
         self.port = port
         self.timeout = timeout
+        self.terminate_timeout = 15.0
         self._process: Optional[subprocess.Popen] = None
 
     @property
@@ -50,6 +51,15 @@ class ServerManager:
         env = os.environ.copy()
         if env_overrides:
             env.update(env_overrides)
+        env["DYN_HTTP_PORT"] = str(self.port)
+        default_terminate_timeout = (
+            300.0 if env.get("DYN_DISABLE_NSYS", "1") != "1" else 15.0
+        )
+        self.terminate_timeout = float(
+            env.get("DYN_SERVER_TERMINATE_TIMEOUT", default_terminate_timeout)
+        )
+        if self.terminate_timeout <= 0:
+            raise ValueError("DYN_SERVER_TERMINATE_TIMEOUT must be positive")
 
         print(f"Launching: {' '.join(cmd)}", flush=True)
         self._process = subprocess.Popen(
@@ -111,7 +121,7 @@ class ServerManager:
                 pass
 
         try:
-            self._process.wait(timeout=15)
+            self._process.wait(timeout=self.terminate_timeout)
         except subprocess.TimeoutExpired:
             try:
                 os.killpg(pid, signal.SIGKILL)

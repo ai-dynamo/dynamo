@@ -57,6 +57,21 @@ configs:
     extra_args: [--no-enable-prefix-caching, --multimodal-embedding-cache-capacity-gb, "10"]
 ```
 
+### vLLM workflow environment
+
+| Variable | Purpose |
+|---|---|
+| `DYN_DISABLE_NSYS` | Set to `0` to profile the vLLM server; defaults to `1`. |
+| `DYN_NSYS_BIN` | Nsight Systems executable path. |
+| `DYN_NSYS_DIR` / `DYN_NSYS_TMPDIR` | Final report and temporary capture directories. |
+| `DYN_NSYS_TRACE` | Nsight trace domains; defaults to `cuda,nvtx`. |
+| `DYN_NSYS_OUTPUT_PREFIX` | Report prefix; the orchestrator appends the arm label. |
+| `DYN_SERVER_TERMINATE_TIMEOUT` | Orchestrator shutdown timeout; defaults to 300 seconds with profiling and 15 otherwise. |
+| `DYN_SERVER_SHUTDOWN_GRACE_SECONDS` | Wrapper grace period before SIGKILL; defaults to 150 seconds with profiling and 10 otherwise. |
+| `DYN_PYTHON` | Python executable used by the repetition wrapper. |
+| `VLLM_SOURCE_REVISION` | Required tested-vLLM revision recorded by the repetition wrapper. |
+
+
 ## CLI Overrides
 
 Any top-level YAML field can be overridden from the command line:

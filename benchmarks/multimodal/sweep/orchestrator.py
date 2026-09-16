@@ -118,6 +118,10 @@ def _run_config(
 ) -> None:
     """Run all sweep values for a single benchmark config."""
     workflow_abs = _resolve_workflow(bench_cfg.workflow, repo_root)
+    arm_env_overrides = {
+        **env_overrides,
+        "DYN_BENCHMARK_ARM": bench_cfg.label,
+    }
     _print_banner(f"Config: {bench_cfg.label}", char="#")
 
     # Collect pending runs, skipping those with existing results.
@@ -151,7 +155,7 @@ def _run_config(
             workflow_script=workflow_abs,
             model=config.model,
             extra_args=bench_cfg.extra_args,
-            env_overrides=env_overrides,
+            env_overrides=arm_env_overrides,
         )
 
     try:
@@ -166,7 +170,7 @@ def _run_config(
                     workflow_script=workflow_abs,
                     model=config.model,
                     extra_args=bench_cfg.extra_args,
-                    env_overrides=env_overrides,
+                    env_overrides=arm_env_overrides,
                 )
 
             try:
