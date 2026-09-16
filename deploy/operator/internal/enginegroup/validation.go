@@ -88,6 +88,71 @@ func validateGroupStatus(status GroupStatus) error {
 	return nil
 }
 
+// TerminalDeletionEvidenceReady validates one fresh cross-subsystem observation and reports whether it proves that
+// finalizer removal cannot leave serving state behind or allow an accepted non-empty target to converge later.
+func TerminalDeletionEvidenceReady(
+	status GroupStatus,
+	capacity CapacityObservation,
+	traffic TrafficObservation,
+	membership MembershipObservation,
+) (bool, error) {
+	if err := validateGroupStatus(status); err != nil {
+		return false, fmt.Errorf("validate durable status: %w", err)
+	}
+	fresh, err := statusWithFreshObservations(status, capacity, traffic, membership)
+	if err != nil {
+		return false, err
+	}
+
+	// Both the newest desired level and the last acknowledged level must be terminally empty. A newer non-empty
+	// desired target could have been accepted despite a transport error and converge after finalizer removal.
+	if fresh.Capacity.Desired == nil || fresh.Capacity.Accepted == nil ||
+		len(fresh.Capacity.Desired.Replicas) != 0 || len(fresh.Capacity.Accepted.Replicas) != 0 ||
+		fresh.Traffic.Desired == nil || fresh.Traffic.Accepted == nil ||
+		len(fresh.Traffic.Desired.Admitted) != 0 || len(fresh.Traffic.Accepted.Admitted) != 0 {
+		return false, nil
+	}
+	if !terminalCapacityTargetConverged(*fresh.Capacity.Accepted, capacity) ||
+		!trafficTargetConverged(*fresh.Traffic.Accepted, traffic) {
+		return false, nil
+	}
+	if len(capacity.Allocations) != 0 || len(traffic.Admitted) != 0 || len(traffic.Draining) != 0 ||
+		len(membership.CommittedTopology.Replicas) != 0 {
+		return false, nil
+	}
+	if membership.Transition != nil &&
+		(membership.Transition.Phase == MembershipTransitionPhasePending ||
+			membership.Transition.Phase == MembershipTransitionPhaseUnknown) {
+		return false, nil
+	}
+	return true, nil
+}
+
+// UninitializedDeletionEvidenceReady validates fresh external truth for a group whose durable journal was never
+// created. No controller effect can precede that journal, so an authoritatively empty world is safe to delete.
+func UninitializedDeletionEvidenceReady(
+	capacity CapacityObservation,
+	traffic TrafficObservation,
+	membership MembershipObservation,
+) (bool, error) {
+	if err := validateCapacityObservation(capacity); err != nil {
+		return false, fmt.Errorf("validate capacity observation: %w", err)
+	}
+	if err := validateTrafficObservation(traffic); err != nil {
+		return false, fmt.Errorf("validate traffic observation: %w", err)
+	}
+	if membership.RequestedTransitionID != "" {
+		return false, errors.New("uninitialized membership observation is scoped to an unexpected transition")
+	}
+	if err := validateMembershipObservation(membership, nil); err != nil {
+		return false, fmt.Errorf("validate membership observation: %w", err)
+	}
+	return len(capacity.Allocations) == 0 &&
+		len(traffic.Admitted) == 0 &&
+		len(traffic.Draining) == 0 &&
+		len(membership.CommittedTopology.Replicas) == 0, nil
+}
+
 func validateAcceptedTargets(status GroupStatus) error {
 	// Accepted capacity must be an acknowledged version of the current desired-target lineage.
 	if status.Capacity.Accepted != nil {
@@ -97,8 +162,8 @@ func validateAcceptedTargets(status GroupStatus) error {
 		if status.Capacity.Accepted.ControlRevision > status.Capacity.Desired.ControlRevision {
 			return errors.New("accepted capacity target is newer than the desired target")
 		}
-		if status.Capacity.Accepted.ControlRevision > status.Capacity.Observed.AppliedRevision {
-			return errors.New("accepted capacity target has not been acknowledged by the adapter")
+		if status.Capacity.Accepted.ControlRevision != status.Capacity.Observed.AppliedRevision {
+			return errors.New("accepted capacity target does not match the adapter applied revision")
 		}
 		if status.Capacity.Accepted.ControlRevision == status.Capacity.Desired.ControlRevision &&
 			!sameCapacityTargetIntent(*status.Capacity.Accepted, *status.Capacity.Desired) {
@@ -114,8 +179,8 @@ func validateAcceptedTargets(status GroupStatus) error {
 		if status.Traffic.Accepted.ControlRevision > status.Traffic.Desired.ControlRevision {
 			return errors.New("accepted traffic target is newer than the desired target")
 		}
-		if status.Traffic.Accepted.ControlRevision > status.Traffic.Observed.AppliedRevision {
-			return errors.New("accepted traffic target has not been acknowledged by the adapter")
+		if status.Traffic.Accepted.ControlRevision != status.Traffic.Observed.AppliedRevision {
+			return errors.New("accepted traffic target does not match the adapter applied revision")
 		}
 		if status.Traffic.Accepted.ControlRevision == status.Traffic.Desired.ControlRevision &&
 			!sameTrafficTargetIntent(*status.Traffic.Accepted, *status.Traffic.Desired) {
@@ -816,7 +881,7 @@ func validateVerificationStatus(status GroupStatus) error {
 			return errors.New("passed verification lacks proof or carries failure")
 		}
 		topology, found := status.Topologies.Snapshot(verification.Proof.TopologyGeneration)
-		if !found || verification.Proof.RuntimeDigest != topologyRuntimeDigest(topology) {
+		if !found || verification.Proof.RuntimeDigest != TopologyRuntimeDigest(topology) {
 			return errors.New("serving proof does not match retained topology history")
 		}
 	case VerificationPhaseFailed:

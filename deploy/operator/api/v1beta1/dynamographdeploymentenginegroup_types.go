@@ -121,6 +121,11 @@ type DynamoGraphDeploymentEngineGroupStatus struct {
 	// +optional
 	TargetValidation *EngineGroupTargetValidationStatus `json:"targetValidation,omitempty"`
 
+	// reconciliation is the controller's durable desired, accepted, and observed journal.
+	// It is persisted before external effects so the same transition can resume after restart.
+	// +optional
+	Reconciliation *EngineGroupReconciliationStatus `json:"reconciliation,omitempty"`
+
 	// conditions contains the latest observations of group availability, progress, degradation,
 	// target convergence, target validity, and topology authority.
 	// +optional
