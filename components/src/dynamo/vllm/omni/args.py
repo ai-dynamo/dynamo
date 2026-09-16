@@ -72,6 +72,7 @@ class OmniParallelKwargs:
     """
 
     ulysses_degree: int = 1
+    ulysses_a2a_permute: bool = False
     ring_degree: int = 1
     allgather_degree: int = 1
     cfg_parallel_size: int = 1
@@ -282,6 +283,13 @@ class OmniArgGroup(ArgGroup):
             default=1,
             arg_type=int,
             help="Number of GPUs used for Ulysses sequence parallelism in diffusion.",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--ulysses-a2a-permute",
+            env_var="DYN_OMNI_ULYSSES_A2A_PERMUTE",
+            default=False,
+            help="Use the fused all-to-all permutation path for Ulysses attention.",
         )
         add_argument(
             g,

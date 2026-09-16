@@ -97,7 +97,7 @@ class TestDiffusionParallelConfigCoverage:
 
     def test_parallel_fields_forwarded_from_separate_configs(self):
         """Construct the real vLLM-Omni config from both argument groups."""
-        config = _make_config(text_encoder_tp_size=2)
+        config = _make_config(text_encoder_tp_size=2, ulysses_a2a_permute=True)
         config.engine_args.tensor_parallel_size = 4
         config.engine_args.pipeline_parallel_size = 3
         config.engine_args.data_parallel_size = 5
@@ -108,6 +108,7 @@ class TestDiffusionParallelConfigCoverage:
         assert parallel_config.pipeline_parallel_size == 3
         assert parallel_config.data_parallel_size == 5
         assert parallel_config.text_encoder_tp_size == 2
+        assert parallel_config.ulysses_a2a_permute is True
 
     def test_output_modalities_forwarded_to_async_omni(self):
         config = _make_config()

@@ -121,6 +121,15 @@ def test_startup_lora_paths_parse_as_diffusion_options():
     ]
 
 
+def test_ulysses_a2a_permute_parses_as_parallel_option():
+    parser = argparse.ArgumentParser()
+    OmniArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(["--ulysses-a2a-permute"])
+
+    assert args.ulysses_a2a_permute is True
+
+
 @pytest.mark.parametrize("fps", [0, -1, -100])
 def test_omni_config_invalid_video_fps(fps):
     config = _make_omni_config(default_video_fps=fps)
