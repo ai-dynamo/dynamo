@@ -4687,9 +4687,12 @@ async fn videos(
         let response = NvVideosResponse::from_annotated_stream(stream)
             .await
             .map_err(|e| {
-                tracing::error!("Failed to fold videos stream for {}: {:?}", request_id, e);
+                // Same fold path as images/audio: typed worker errors keep their
+                // semantics. A material fetch 403 classified as
+                // Backend(InvalidArgument) with an HTTP envelope becomes HTTP 403
+                // and a client/validation metric, not a sanitized 500/internal.
                 let err_response =
-                    ErrorMessage::internal_server_error("Failed to fold videos stream");
+                    ErrorMessage::from_anyhow(anyhow::Error::new(e), "Failed to generate videos");
                 inflight.mark_error(extract_error_type_from_response(&err_response));
                 err_response
             })?;
@@ -6315,6 +6318,32 @@ mod tests {
         assert_eq!(response.0, StatusCode::BAD_REQUEST);
         assert_eq!(response.1.code, StatusCode::BAD_REQUEST.as_u16());
         assert!(response.1.message.contains("does not currently support"));
+    }
+
+    /// `py_err_to_dynamo` wraps urllib `HTTPError` 4xx as Backend(InvalidArgument)
+    /// plus a `{"message","code"}` envelope. A material URI 403 must stay a
+    /// client fault: HTTP 403, metrics validation, never internal/500.
+    #[test]
+    fn test_backend_material_http_403_envelope_is_not_internal() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynErrorType};
+
+        let err: anyhow::Error = DynamoError::builder()
+            .error_type(DynErrorType::Backend(BackendError::InvalidArgument))
+            .message(
+                serde_json::json!({"message": "HTTP Error 403: Forbidden", "code": 403})
+                    .to_string(),
+            )
+            .build()
+            .into();
+
+        let response = ErrorMessage::from_anyhow(err, "Failed to generate videos");
+        assert_eq!(response.0, StatusCode::FORBIDDEN);
+        assert_eq!(response.1.message, "HTTP Error 403: Forbidden");
+        assert_ne!(response.1.error_type.to_lowercase(), "internal");
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::Validation
+        );
     }
 
     /// A worker that refuses a request before the response stream opens must

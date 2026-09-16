@@ -134,27 +134,43 @@ define_dynamo_exceptions!(
     (StreamIncomplete, BackendError::StreamIncomplete),
 );
 
+/// Read a non-empty string attribute, treating missing, `None`, and
+/// non-string values as absent.
+fn py_attr_string(value: &Bound<'_, PyAny>, name: &str) -> Option<String> {
+    let attr = value.getattr(name).ok()?;
+    if attr.is_none() {
+        return None;
+    }
+    attr.extract::<String>()
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn py_attr_u16(value: &Bound<'_, PyAny>, name: &str) -> Option<u16> {
+    value.getattr(name).ok()?.extract::<u16>().ok()
+}
+
 /// Read `(code, message)` off a Python exception carrying an HTTP-style
-/// status. Accepts `.code` (matches [`HttpError`] in `http.rs`) or `.status`
-/// (matches `dynamo.common.http.HttpStatusError`) plus `.message`.
+/// status. Accepts `.code` (matches [`HttpError`] in `http.rs` and
+/// `urllib.error.HTTPError`) or `.status` (matches
+/// `dynamo.common.http.HttpStatusError`).
 ///
-/// SECURITY: `.message` is forwarded verbatim to clients on 4xx responses
-/// (HTTP protocol contract). Python callers must ensure it contains no
-/// internal state, file paths, traceback strings, or backend identifiers.
+/// The public message prefers `.message`, then urllib's `.msg` / `.reason`.
+/// It never falls back to `str(exc)`, because some HTTP libraries put the
+/// request URL (and signed query strings) in the exception text.
+///
+/// SECURITY: the chosen message is forwarded verbatim to clients on 4xx
+/// responses (HTTP protocol contract). Python callers must ensure it contains
+/// no internal state, file paths, traceback strings, or backend identifiers.
 /// Non-4xx codes (including 5xx) are sanitized downstream — the original
 /// message survives in server logs only.
 pub fn extract_http_like_error(py: Python<'_>, err: &PyErr) -> Option<(u16, String)> {
     let value = err.value(py);
-    let code = value
-        .getattr("code")
-        .ok()
-        .and_then(|a| a.extract::<u16>().ok())
-        .or_else(|| {
-            value
-                .getattr("status")
-                .ok()
-                .and_then(|a| a.extract::<u16>().ok())
-        })?;
-    let message = value.getattr("message").ok()?.extract::<String>().ok()?;
+    let code = py_attr_u16(&value, "code").or_else(|| py_attr_u16(&value, "status"))?;
+    let message = py_attr_string(&value, "message")
+        .or_else(|| py_attr_string(&value, "msg"))
+        .or_else(|| py_attr_string(&value, "reason"))
+        .unwrap_or_else(|| format!("HTTP {code}"));
     Some((code, message))
 }

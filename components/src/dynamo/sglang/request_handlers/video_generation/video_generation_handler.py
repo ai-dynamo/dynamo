@@ -168,6 +168,15 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
             yield response.model_dump()
 
         except Exception as e:
+            # Material fetch 4xx (urllib HTTPError, HttpStatusError, HttpError)
+            # must leave generate() as a typed exception so the frontend can
+            # answer HTTP 4xx instead of folding a failed payload into 200/500.
+            code = getattr(e, "code", None)
+            if not isinstance(code, int):
+                code = getattr(e, "status", None)
+            if isinstance(code, int) and 400 <= code < 500:
+                logger.warning("Video material fetch failed with HTTP %s: %s", code, e)
+                raise
             logger.error(f"Error in video generation: {e}", exc_info=True)
             # Return error response
             error_response = VideoGenerationResponse(
