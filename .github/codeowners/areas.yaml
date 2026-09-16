@@ -459,6 +459,7 @@ areas:
   github_team: '@ai-dynamo/dynamo-rl-codeowners'
   path_globs:
   - components/src/dynamo/common/rl/
+  - examples/rl/
   - lib/rl/
   - tests/rl/
 - label: performance
@@ -1063,7 +1064,7 @@ shared:
   owners:
   - router
   - kv-memory
-- glob: lib/llm/src/preprocessor/lightseek_mm.rs
+- glob: lib/llm/src/preprocessor/mm_routing/
   owners:
   - frontend
   - multimodal
