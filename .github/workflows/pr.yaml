@@ -374,7 +374,11 @@ jobs:
   sidecar-vllm-test:
     name: sidecar-runtime # This name overlaps with other sidecar jobs to group them in the UI
     needs: [changed-files, vllm-build, sidecar-build]
-    if: ${{ !cancelled() && needs.changed-files.outputs.sidecar == 'true' && needs.sidecar-build.result == 'success' }}
+    # vllm-build must have succeeded or been intentionally skipped (a
+    # lib/sidecar-only PR) -- not failed or cancelled -- or the fallback below
+    # would silently test this PR's sidecar binary against main's vllm image
+    # and report green while this PR's own vllm-runtime build is red.
+    if: ${{ !cancelled() && needs.changed-files.outputs.sidecar == 'true' && needs.sidecar-build.result == 'success' && (needs.vllm-build.result == 'success' || needs.vllm-build.result == 'skipped') }}
     permissions:
       actions: read
       contents: read
@@ -398,7 +402,9 @@ jobs:
   sidecar-sglang-test:
     name: sidecar-runtime # This name overlaps with other sidecar jobs to group them in the UI
     needs: [changed-files, sglang-build, sidecar-build]
-    if: ${{ !cancelled() && needs.changed-files.outputs.sidecar == 'true' && needs.sidecar-build.result == 'success' }}
+    # See sidecar-vllm-test above: sglang-build must have succeeded or been
+    # intentionally skipped, not failed or cancelled.
+    if: ${{ !cancelled() && needs.changed-files.outputs.sidecar == 'true' && needs.sidecar-build.result == 'success' && (needs.sglang-build.result == 'success' || needs.sglang-build.result == 'skipped') }}
     permissions:
       actions: read
       contents: read
@@ -422,7 +428,9 @@ jobs:
   sidecar-trtllm-test:
     name: sidecar-runtime # This name overlaps with other sidecar jobs to group them in the UI
     needs: [changed-files, trtllm-build, sidecar-build]
-    if: ${{ !cancelled() && needs.changed-files.outputs.sidecar == 'true' && needs.sidecar-build.result == 'success' }}
+    # See sidecar-vllm-test above: trtllm-build must have succeeded or been
+    # intentionally skipped, not failed or cancelled.
+    if: ${{ !cancelled() && needs.changed-files.outputs.sidecar == 'true' && needs.sidecar-build.result == 'success' && (needs.trtllm-build.result == 'success' || needs.trtllm-build.result == 'skipped') }}
     permissions:
       actions: read
       contents: read

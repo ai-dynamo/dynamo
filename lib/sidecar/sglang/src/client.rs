@@ -57,17 +57,18 @@ pub async fn connect(
                 let now = Instant::now();
                 if last_logged_at.is_none_or(|last| now.duration_since(last) >= RETRY_LOG_INTERVAL)
                 {
-                    // WARN, not silent: matches GrpcChannelPool::connect_until_ready's
-                    // retry-logging convention (lib/sidecar/common/src/transport.rs) so
-                    // a sidecar stuck retrying its connection to SGLang isn't
-                    // indistinguishable from a true hang.
-                    tracing::warn!(
-                        endpoint = %uri,
-                        attempt,
-                        elapsed = ?started.elapsed(),
-                        retry_interval = ?cfg.retry_interval,
-                        error = %last_err,
-                        "SGLang gRPC connection attempt failed; retrying"
+                    // eprintln!, not tracing::warn!: this runs from bootstrap_discover,
+                    // called during from_args() -- before dynamo_backend_common::run()
+                    // installs the global tracing subscriber (logging::init(), called
+                    // from run_worker). A tracing event emitted with no subscriber
+                    // installed is silently dropped, so a warn! here would be exactly as
+                    // invisible as the debug! it replaced. Matches the same
+                    // already-established bootstrap-path pattern in
+                    // lib/sidecar/vllm/src/engine.rs's own bootstrap_discover call.
+                    eprintln!(
+                        "SGLang gRPC connection attempt failed; retrying (endpoint={uri}, attempt={attempt}, elapsed={:?}, retry_interval={:?}, error={last_err})",
+                        started.elapsed(),
+                        cfg.retry_interval,
                     );
                     last_logged_at = Some(now);
                 }
