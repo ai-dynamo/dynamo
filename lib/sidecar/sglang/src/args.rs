@@ -11,11 +11,11 @@ use dynamo_sidecar_common::SidecarArgs;
 pub struct MetadataUploadArgs {
     /// Maximum number of OpenDAL operators retained by the metadata upload LRU.
     #[arg(
-        long = "metadata-upload-cache-capacity",
-        env = "DYN_SGLANG_METADATA_UPLOAD_CACHE_CAPACITY",
+        long = "metadata-upload-operator-cache-capacity",
+        env = "DYN_SGLANG_METADATA_UPLOAD_OPERATOR_CACHE_CAPACITY",
         default_value = "64"
     )]
-    pub cache_capacity: NonZeroUsize,
+    pub operator_cache_capacity: NonZeroUsize,
 
     /// OpenDAL control-operation timeout in seconds.
     #[arg(
@@ -109,7 +109,7 @@ mod tests {
             "dynamo-sglang-sidecar",
             "--grpc-endpoint",
             "127.0.0.1:30000",
-            "--metadata-upload-cache-capacity",
+            "--metadata-upload-operator-cache-capacity",
             "8",
             "--metadata-upload-timeout-secs",
             "11",
@@ -127,7 +127,7 @@ mod tests {
         ])
         .unwrap();
         let policy = args.metadata_upload;
-        assert_eq!(policy.cache_capacity.get(), 8);
+        assert_eq!(policy.operator_cache_capacity.get(), 8);
         assert_eq!(policy.timeout_secs.get(), 11);
         assert_eq!(policy.io_timeout_secs.get(), 12);
         assert_eq!(policy.retry_max_times.get(), 4);
@@ -139,8 +139,8 @@ mod tests {
         let command = Args::command();
         for (id, env) in [
             (
-                "cache_capacity",
-                "DYN_SGLANG_METADATA_UPLOAD_CACHE_CAPACITY",
+                "operator_cache_capacity",
+                "DYN_SGLANG_METADATA_UPLOAD_OPERATOR_CACHE_CAPACITY",
             ),
             ("timeout_secs", "DYN_SGLANG_METADATA_UPLOAD_TIMEOUT_SECS"),
             (

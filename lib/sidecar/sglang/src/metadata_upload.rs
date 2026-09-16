@@ -70,7 +70,7 @@ impl OperatorCache {
             ));
         }
         Ok(Self::new(
-            args.cache_capacity,
+            args.operator_cache_capacity,
             OperatorConfig {
                 timeout: Duration::from_secs(args.timeout_secs.get()),
                 io_timeout: Duration::from_secs(args.io_timeout_secs.get()),
