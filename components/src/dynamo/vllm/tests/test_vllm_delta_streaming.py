@@ -7,7 +7,11 @@ import numpy as np
 import pytest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 
-from dynamo.vllm.handlers import BaseWorkerHandler, build_sampling_params
+from dynamo.vllm.handlers import (
+    BaseWorkerHandler,
+    _should_include_routed_experts_response,
+    build_sampling_params,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -149,6 +153,26 @@ class _FailingArtifactSession(_RecordingArtifactSession):
 
     async def finalize_choice(self, *, choice_index, token_start):
         raise RuntimeError("provider detail must not escape")
+
+
+@pytest.mark.parametrize(
+    ("backend_request", "has_artifact_session", "expected"),
+    [
+        ({}, False, True),
+        ({}, True, False),
+        ({"nvext": {"extra_fields": ["engine_data"]}}, True, True),
+        ({"nvext": {"extra_fields": ["routed_experts"]}}, True, True),
+    ],
+)
+def test_routed_experts_response_selection_preserves_non_artifact_behavior(
+    backend_request, has_artifact_session, expected
+) -> None:
+    artifact_session = object() if has_artifact_session else None
+
+    assert (
+        _should_include_routed_experts_response(backend_request, artifact_session)
+        is expected
+    )
 
 
 def test_build_sampling_params_forces_delta_token_mode():

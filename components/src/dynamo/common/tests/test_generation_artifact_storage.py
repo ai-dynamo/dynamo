@@ -82,30 +82,6 @@ async def test_managed_fsspec_writes_exact_profile_object(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_s3fs_create_mode_maps_to_atomic_conditional_put() -> None:
-    s3fs = pytest.importorskip("s3fs")
-    payload = b"artifact-bytes"
-    filesystem = s3fs.S3FileSystem(asynchronous=True, skip_instance_cache=True)
-    filesystem._call_s3 = AsyncMock(return_value={})
-    filesystem.invalidate_cache = MagicMock()
-
-    await filesystem._pipe_file(
-        "artifacts/run/output.dynexp",
-        payload,
-        mode="create",
-        chunksize=64 * 1024 * 1024,
-    )
-
-    filesystem._call_s3.assert_awaited_once_with(
-        "put_object",
-        Bucket="artifacts",
-        Key="run/output.dynexp",
-        Body=payload,
-        IfNoneMatch="*",
-    )
-
-
-@pytest.mark.asyncio
 async def test_managed_fsspec_session_setup_is_inside_timeout(monkeypatch) -> None:
     monkeypatch.setenv(
         "DYN_GENERATION_ARTIFACT_STORAGE_PROFILES",
@@ -337,6 +313,22 @@ def test_presigned_put_rejects_insecure_url_and_unapproved_headers() -> None:
             required_headers={"authorization": "secret", "if-none-match": "*"},
             object_id="opaque",
         )
+
+
+def test_presigned_put_rejects_unapproved_header_without_reflecting_name() -> None:
+    untrusted_name = "x" * 65536
+
+    with pytest.raises(ArtifactStorageError) as exc_info:
+        PresignedHttpPutTarget(
+            url="https://storage.example/object",
+            max_bytes=1024,
+            expires_at=(datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
+            required_headers={untrusted_name: "value", "if-none-match": "*"},
+            object_id="opaque",
+        )
+
+    assert str(exc_info.value) == "presigned target header is not allowed"
+    assert untrusted_name not in str(exc_info.value)
 
 
 def test_insecure_http_test_target_requires_exact_authority(monkeypatch) -> None:

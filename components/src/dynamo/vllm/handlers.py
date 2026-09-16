@@ -549,6 +549,18 @@ def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
     )
 
 
+def _should_include_routed_experts_response(
+    request: Dict[str, Any],
+    generation_artifact_session: VllmGenerationArtifactSession | None,
+) -> bool:
+    """Preserve native routed-experts responses unless artifact capture owns them."""
+    return (
+        generation_artifact_session is None
+        or _nvext_extra_field_requested(request, "engine_data")
+        or _nvext_extra_field_requested(request, "routed_experts")
+    )
+
+
 # Must match DYNAMO_CACHE_SALT_PREFIX in lib/kv-router/src/zmq_wire/extra_keys.rs.
 _DYNAMO_CACHE_SALT_PREFIX = "dynamo-cache-salt:"
 
@@ -3809,8 +3821,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # `NvExtResponseFieldSelection.engine_data` so this payload
                 # only reaches clients that asked for it.
                 want_engine_data = _nvext_extra_field_requested(request, "engine_data")
-                include_routed_experts_response = want_engine_data or (
-                    _nvext_extra_field_requested(request, "routed_experts")
+                include_routed_experts_response = (
+                    _should_include_routed_experts_response(
+                        request, generation_artifact_session
+                    )
                 )
                 # Prompt token IDs the engine actually saw. Either the
                 # pre-tokenized `nvext.token_data` (TITO) or whatever the

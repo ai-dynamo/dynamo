@@ -118,9 +118,7 @@ class PresignedHttpPutTarget:
                 raise ArtifactStorageError("presigned target header name is invalid")
             normalized = name.lower().strip()
             if normalized not in _ALLOWED_HEADERS:
-                raise ArtifactStorageError(
-                    f"presigned target header {name!r} is not allowed"
-                )
+                raise ArtifactStorageError("presigned target header is not allowed")
             if (
                 not isinstance(value, str)
                 or len(value.encode()) > _MAX_HEADER_VALUE_BYTES
