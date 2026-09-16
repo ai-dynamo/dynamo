@@ -81,7 +81,7 @@ impl SglangSidecarEngine {
             ));
         }
 
-        let endpoint = args.sidecar.resolve_grpc_endpoint()?;
+        let endpoint = args.sidecar.grpc_endpoint;
         let transport = args.sidecar.grpc.config();
         let discovery = bootstrap_discover(&endpoint, &transport)?;
         let disaggregation_mode = client::discovery_mode(&discovery.server_info)?;

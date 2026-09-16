@@ -47,7 +47,7 @@ impl HeadlessSidecar {
             ));
         }
         Ok(Self {
-            grpc_endpoint: args.sidecar.resolve_grpc_endpoint()?,
+            grpc_endpoint: args.sidecar.grpc_endpoint,
             transport: args.sidecar.grpc.config(),
             common: args.sidecar.common,
             discovery_timeout: Duration::from_secs(args.leader_discovery_timeout_secs),

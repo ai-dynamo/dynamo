@@ -3,37 +3,7 @@
 
 //! Command-line arguments for the SGLang sidecar.
 
-use dynamo_backend_common::{CommonArgs, DynamoError};
-use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportArgs};
-
-use crate::client;
-
-/// Both serving and telemetry-only sidecars discover their local engine over gRPC.
-#[derive(clap::Args, Debug, Clone)]
-pub struct SglangSidecarArgs {
-    #[command(flatten)]
-    pub common: CommonArgs,
-
-    /// Local engine gRPC endpoint. Falls back to SGLANG_GRPC_ENDPOINT.
-    #[arg(long, env = "DYN_SIDECAR_GRPC_ENDPOINT")]
-    pub grpc_endpoint: Option<String>,
-
-    #[command(flatten)]
-    pub grpc: GrpcTransportArgs,
-}
-
-impl SglangSidecarArgs {
-    pub(crate) fn resolve_grpc_endpoint(&self) -> Result<GrpcEndpoint, DynamoError> {
-        let endpoint = self
-            .grpc_endpoint
-            .clone()
-            .or_else(|| std::env::var("SGLANG_GRPC_ENDPOINT").ok())
-            .ok_or_else(|| {
-                client::invalid_arg("sidecar requires --grpc-endpoint or SGLANG_GRPC_ENDPOINT")
-            })?;
-        GrpcEndpoint::parse(&endpoint, "--grpc-endpoint")
-    }
-}
+use dynamo_sidecar_common::SidecarArgs;
 
 /// Parsed sidecar arguments.
 #[derive(clap::Parser, Debug, Clone)]
@@ -43,7 +13,7 @@ impl SglangSidecarArgs {
 )]
 pub struct Args {
     #[command(flatten)]
-    pub sidecar: SglangSidecarArgs,
+    pub sidecar: SidecarArgs,
 
     /// Relay a follower node's local KV events without registering a request endpoint.
     #[arg(long)]
