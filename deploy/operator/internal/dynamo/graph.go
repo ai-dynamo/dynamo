@@ -481,11 +481,19 @@ func synthesizeElasticEPFollowerDCD(leaderDCD *v1beta1.DynamoComponentDeployment
 	// follower, grove#676) and what any replicas > 1 component does. Those shapes would
 	// wait forever for pods nothing creates.
 	//
-	// Written even when it is zero, so the backend can distinguish "the operator
-	// considered this and derived no followers" from "the operator never looked".
-	leaderPodTemplate := ensurePodTemplate(&leaderDCD.Spec.DynamoComponentDeploymentSharedSpec)
-	leaderPodTemplate.Annotations[commonconsts.KubeAnnotationElasticEPFollowerReplicas] =
-		strconv.Itoa(int(followerReplicas))
+	// Written ONLY when there is at least one follower. This annotation lives on the
+	// leader's POD TEMPLATE, so writing it changes the pod hash and rolls the
+	// deployment -- and a leader that derives no followers behaves identically with the
+	// annotation absent or set to "0", because elasticEPSynthesizedFollowers maps both
+	// to zero. Stamping "0" would therefore restart every existing single-rank
+	// elastic-EP deployment on operator upgrade to buy nothing. Observed exactly that on
+	// dynamo-aws-gb300: the upgrade rolled two serving deployments into new generations
+	// that could not schedule, and neither served again until capacity was freed.
+	if followerReplicas > 0 {
+		leaderPodTemplate := ensurePodTemplate(&leaderDCD.Spec.DynamoComponentDeploymentSharedSpec)
+		leaderPodTemplate.Annotations[commonconsts.KubeAnnotationElasticEPFollowerReplicas] =
+			strconv.Itoa(int(followerReplicas))
+	}
 
 	followerComponentName := elasticEPFollowerName(leaderComponentName)
 	follower := leaderDCD.DeepCopy()

@@ -629,6 +629,56 @@ func TestElasticEPGenerationIsIndependentOfTheGate(t *testing.T) {
 	}
 }
 
+// TestSynthesizeElasticEPFollowerDCD_DoesNotTouchASingleRankLeader guards the upgrade
+// path for every deployment that derives no followers.
+//
+// The follower-count annotation lives on the leader's POD TEMPLATE, so writing it changes
+// the pod hash and rolls the deployment. A leader with no followers behaves identically
+// whether the annotation is absent or "0" -- elasticEPSynthesizedFollowers maps both to
+// zero -- so stamping "0" would restart every existing single-rank elastic-EP deployment
+// on operator upgrade and buy nothing.
+//
+// Seen for real on dynamo-aws-gb300: the upgrade rolled two serving deployments into new
+// generations that could not schedule, and neither served again until capacity was freed.
+//
+// Mutation check: stamping unconditionally fails this.
+func TestSynthesizeElasticEPFollowerDCD_DoesNotTouchASingleRankLeader(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		args []string
+	}{
+		{name: "no --data-parallel-size", args: []string{"--enable-elastic-ep", "--data-parallel-backend", "ray"}},
+		{name: "dp=1", args: []string{"--enable-elastic-ep", "--data-parallel-backend", "ray", "--data-parallel-size", "1"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			leader := leaderDCD(vllmComponent(tt.args...))
+			before := GetPodTemplateAnnotations(&leader.Spec.DynamoComponentDeploymentSharedSpec)
+			beforeCount := len(before)
+
+			synthesizeElasticEPFollowerDCD(leader, leaderComponent)
+
+			after := GetPodTemplateAnnotations(&leader.Spec.DynamoComponentDeploymentSharedSpec)
+			if _, stamped := after[commonconsts.KubeAnnotationElasticEPFollowerReplicas]; stamped {
+				t.Errorf("a leader with no followers must not gain the follower-count annotation; "+
+					"it changes the pod hash and rolls a serving deployment for no behaviour change (got %v)", after)
+			}
+			if len(after) != beforeCount {
+				t.Errorf("the leader's pod-template annotations changed (%d -> %d): %v", beforeCount, len(after), after)
+			}
+		})
+	}
+
+	// And the positive case, so this cannot pass by never stamping at all.
+	t.Run("dp=4 does stamp, because the behaviour genuinely changes", func(t *testing.T) {
+		leader := leaderDCD(vllmComponent("--enable-elastic-ep", "--data-parallel-backend", "ray", "--data-parallel-size", "4"))
+		synthesizeElasticEPFollowerDCD(leader, leaderComponent)
+		got := GetPodTemplateAnnotations(&leader.Spec.DynamoComponentDeploymentSharedSpec)[commonconsts.KubeAnnotationElasticEPFollowerReplicas]
+		if got != "3" {
+			t.Errorf("follower-count annotation = %q, want \"3\"", got)
+		}
+	})
+}
+
 // TestElasticEPLeaderDoesNotWaitWithoutSynthesizedFollowers is the regression guard for a
 // bug this PR introduced and a risk review caught before it shipped.
 //
