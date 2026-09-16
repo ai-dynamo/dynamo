@@ -232,13 +232,13 @@ cargo fmt --all && cargo clippy --workspace
   `style`, and `build`.
 - PR descriptions must include `Summary` and `Validation`.
 - Sign every commit with DCO: `git commit -s`.
-- For fork PRs that qualify for automatic trusted-CI approval, every commit must have a
-  cryptographic signature that GitHub reports as `Verified`; a DCO sign-off alone does not
-  satisfy this requirement. Signing commits does not itself qualify a PR for automatic approval;
-  a maintainer can manually approve the current head with `/ok to test <sha>`.
-  Only an authenticated full-CI request from `glamr-agent` on a PR authored by that same
-  GitHub account is exempt from cryptographic signatures. Other automatic approval paths
-  still require verified commit signatures.
+- For fork PRs that qualify for automatic CI approval, GitHub must report every commit's
+  signature as `Verified`. A DCO sign-off alone is not enough. Signing commits does not
+  grant automatic approval; a maintainer can approve the current head manually with
+  `/ok to test <sha>`.
+  The only signature exception is a full-CI request from `glamr-agent` on its own PR.
+  The workflow checks both GitHub account IDs and requires the request's full SHA to
+  match the PR's current head. Other automatic approvals still require verified signatures.
 - Do not hand-edit a generated artifact — change its source and regenerate. A
   generated file says so in a `do not edit` marker, and its generator has a
   `--check` mode that fails when the committed output is stale. Resolve a
@@ -259,9 +259,8 @@ cargo fmt --all && cargo clippy --workspace
   skill automates all of this.
 - Full CI on a PR runs only after a maintainer comments `/ok to test <sha>` with the short
   SHA of the latest commit; copy-pr-bot then creates the `pull-request/N` branch that
-  triggers it. For an eligible fork PR, the automatic approval flow posts that command only
-  after every PR commit is GitHub-verified, except for authenticated GLAMR requests on its own PRs.
-  Fix failures before requesting human review.
+  triggers it. For an eligible fork PR, automatic approval posts this command after the
+  checks above pass. Fix CI failures before requesting human review.
 - Architecture changes require a Dynamo Enhancement Proposal (DEP), filed as a GitHub
   issue on `ai-dynamo/dynamo` with `dep:*` labels (the `dep-create` skill automates this).
 

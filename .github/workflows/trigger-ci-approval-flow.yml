@@ -1,63 +1,42 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Intent
-# ------
-# Safely approve trusted CI for the exact head commit of a pull request from a fork. Fork PRs do
-# not receive this approval automatically because their code is external to the repository. This
-# workflow evaluates who is responsible for the PR update and posts the
-# `/ok to test <head-sha>` command that starts the trusted CI flow only when all checks pass.
+# Approve CI for a fork PR by posting `/ok to test <head-sha>`.
+# Approval applies only to that commit.
 #
-# When this workflow runs
-# -----------------------
-# The workflow receives `pull_request_target` events when a fork PR is opened, synchronized by a
-# new push, or reopened. The job is skipped for branches in this repository because those branches
-# use the normal internal-contributor CI path.
+# This workflow handles fork PRs when they are opened, pushed to, or reopened,
+# and when glamr-agent posts a CI request. PRs from branches in this repository
+# use the internal-contributor CI workflow instead.
 #
-# A fork PR can receive approval through any of these paths:
+# Automatic approval is allowed in these cases:
 #
-# 1. The PR author has write, maintain, or admin access to this repository. This path applies when
-#    the PR is opened or reopened. A synchronized update must also be pushed by a maintainer.
-# 2. The PR author is listed in the `APPROVED_EXTERNAL_CONTRIBUTORS` environment secret. This path
-#    applies when the PR is opened, synchronized, or reopened.
-# 3. A user with write, maintain, or admin access to this repository synchronizes the PR branch.
-#    For example, a maintainer may merge `main` into a contributor's branch. This path approves
-#    only the head created by that synchronization; it does not make the PR or contributor trusted
-#    for later pushes.
-# 4. `glamr-agent` posts `@dynamo-ops please run full CI for <full-head-sha>`, optionally
-#    preceded by a label and colon, on its own PR. The commenter and PR author must both
-#    have GLAMR's GitHub account ID.
-#    The SHA must match the open fork PR's head when resolved. This path trusts the account
-#    identity and does not require signed commits.
-#    Set the repository Actions variable GLAMR_CI_REQUESTS_DISABLED=true to disable this path.
+# 1. A maintainer opens or reopens a PR. Here, a maintainer is someone with write,
+#    maintain, or admin access to this repository.
+# 2. A PR author listed in APPROVED_EXTERNAL_CONTRIBUTORS opens, updates, or
+#    reopens a PR.
+# 3. A maintainer pushes to a PR branch, for example by merging main into it.
+#    Approval covers that head commit. Later pushes need a new approval.
+# 4. glamr-agent posts `@dynamo-ops please run full CI for <full-head-sha>` on
+#    its own PR. The request may start with a label and colon. Both the commenter
+#    and PR author must have GitHub account ID 282374502, and the SHA must match
+#    the PR's current head. This case does not require signed commits.
+#    Set the repository Actions variable GLAMR_CI_REQUESTS_DISABLED=true to
+#    disable these requests.
 #
-# Paths 1-3 require every commit in the captured base-to-head comparison to have a signature
-# that GitHub reports as verified. If any commit is unsigned, the workflow does not post
-# `/ok to test`. For PRs authored
-# by maintainers, it explains which commits failed verification. Approved external contributors
-# receive guidance for either signing the commits or requesting manual approval. Other external
-# contributors wait for manual approval without receiving an unsigned-commit comment. Repository-
-# permission lookup failures fail closed for the maintainer paths, and malformed contributor-list
-# configuration fails closed for the approved-author path.
+# Cases 1-3 require GitHub to verify the signature of every commit in the recorded
+# base-to-head comparison. If verification fails, the workflow tells maintainer
+# authors which commits failed. Authors on the approved list receive instructions
+# for signing or getting manual approval. Other contributors receive no comment.
+# Failed permission lookups cannot grant maintainer approval. An invalid approved
+# contributor list cannot grant approval through that list.
 #
-# Why a contributor's PR may not trigger trusted CI
-# -------------------------------------------------
-# - A new contributor who is not on the approved list needs a maintainer to approve the current
-#   head, either by synchronizing the branch or by posting the approval command manually.
-# - A contributor push after a maintainer synchronization creates a new head and removes the
-#   one-head approval. The new head must be approved again.
-# - Except for GLAMR requests on its own PRs, every PR commit must be signed and verified,
-#   including commits added before a maintainer update.
-# - Contributors must enable "Allow edits from maintainers" before a maintainer can update a branch
-#   in a user-owned fork.
+# A maintainer can also approve CI manually with `/ok to test <head-sha>`.
+# To let a maintainer push to a user-owned fork, the contributor must enable
+# "Allow edits from maintainers" on the PR.
 #
-# Desired state
-# -------------
-# The workflow posts `/ok to test <captured-head-sha>` after checking its approval path and,
-# when required, verifying every commit in the captured base-to-head comparison. The final read
-# requires the PR to remain open with the same base and head, but that read and comment creation are separate
-# operations. The PR may change before publication; the consumer must enforce the command's
-# SHA when approval is required. Later heads require their own approval evaluation.
+# Before posting approval, the workflow checks that the PR is still open and its
+# base and head have not changed. A push can arrive after this check, so the CI
+# trigger must also check the command's SHA when approval is required.
 
 name: Trigger CI Approval Flow
 
@@ -77,7 +56,7 @@ permissions:
 
 jobs:
   ok-to-test:
-    # GitHub account ID 282374502 is glamr-agent; authenticate by ID, not comment text.
+    # GitHub account ID 282374502 belongs to glamr-agent.
     if: >-
       (github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.fork) ||
       (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
@@ -219,7 +198,7 @@ jobs:
           fi
       - name: Verify commit signatures
         id: signature_check
-        # Only authenticated glamr-agent requests on its own PRs may skip signatures.
+        # Skip signatures only when glamr-agent requests CI on its own PR.
         if: steps.approval_check.outputs.is_approved == 'true' && steps.request.outputs.glamr_request_approved != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -341,8 +320,8 @@ jobs:
             echo "CI approval already posted for $PR_SHA."
             exit 0
           fi
-          # This read can reject an already-stale request, but cannot prevent a later push.
-          # Keep the command below bound to the captured, verified PR_SHA.
+          # Reject requests if the base or head has changed. A later push is still possible,
+          # so the approval command must use the SHA checked by this workflow.
           pr=$(gh api "repos/$REPO_OWNER/$REPO_NAME/pulls/$PR_NUMBER")
           jq -e --arg sha "$PR_SHA" --arg base "$PR_BASE" \
             '.state == "open" and .head.sha == $sha and .base.sha == $base' <<< "$pr" > /dev/null || exit 0
