@@ -387,7 +387,6 @@ def main(argv: list[str] | None = None) -> int:
             'string. Use the = form -- --pip-args="--no-index --find-links '
             '/wheels" -- so a value starting with a dash is not mistaken '
             "for an option (for air-gapped hosts)"
-            "air-gapped hosts)"
         ),
     )
     parser.add_argument(

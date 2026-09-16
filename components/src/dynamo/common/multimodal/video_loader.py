@@ -61,11 +61,13 @@ def _attributable_to_cv2(exc: BaseException, media_io: Any | None = None) -> boo
 
 @functools.lru_cache(maxsize=1)
 def _cv2_lacks_video_backend() -> bool:
-    """Return whether OpenCV imports but lacks FFmpeg and GStreamer."""
+    """Return whether OpenCV is broken or lacks FFmpeg and GStreamer."""
     try:
         import cv2
     except ImportError:
         return False
+    except Exception:  # noqa: BLE001 - a broken import has no usable video backend
+        return True
     build_info = cv2.getBuildInformation()
     return not any(
         re.search(rf"^\s*{backend}:\s*YES", build_info, re.MULTILINE | re.IGNORECASE)
@@ -235,7 +237,7 @@ class VideoLoader:
                 "opencv-python-headless",
                 "cv2",
                 codec,
-                cause="the image's OpenCV is built without a video backend",
+                cause=str(exc),
             ) from exc
 
     def _extract_nvdec_args(self, media_io: Any) -> dict[str, Any]:
