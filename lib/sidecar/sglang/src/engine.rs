@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
 use crate::client::{self, Client, Discovery, Pool};
-use crate::metadata_upload::{MetadataUploader, grpc_metadata};
+use crate::metadata_upload::{MetadataUploader, OperatorCache, grpc_metadata};
 use crate::native_http::{self, NativeHttp};
 use crate::proto as pb;
 use crate::protocol::{
@@ -37,6 +37,7 @@ pub struct SglangSidecarEngine {
     bootstrap_host: Option<String>,
     bootstrap_port: Option<u16>,
     metadata_upload_enabled: bool,
+    metadata_upload_operators: Arc<OperatorCache>,
     state: OnceCell<StartedState>,
     cancel: CancellationToken,
 }
@@ -77,6 +78,7 @@ impl SglangSidecarEngine {
                 "route-to-encoder is not supported by the SGLang sidecar",
             ));
         }
+        let metadata_upload_operators = Arc::new(OperatorCache::from_args(&args.metadata_upload)?);
 
         let endpoint = args.sidecar.grpc_endpoint;
         let transport = args.sidecar.grpc.config();
@@ -139,6 +141,7 @@ impl SglangSidecarEngine {
                 bootstrap_host,
                 bootstrap_port,
                 metadata_upload_enabled,
+                metadata_upload_operators,
                 state: OnceCell::new(),
                 cancel: CancellationToken::new(),
             },
@@ -284,6 +287,7 @@ impl LLMEngine for SglangSidecarEngine {
         let metadata_uploader = MetadataUploader::from_request(
             &request,
             self.metadata_upload_enabled && !self.disaggregation_mode.is_prefill(),
+            self.metadata_upload_operators.clone(),
         )
         .await?;
         let prefill_handoff = if self.disaggregation_mode.is_prefill() {

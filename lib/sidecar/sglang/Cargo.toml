@@ -29,8 +29,11 @@ async-stream = { workspace = true }
 async-trait = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 futures = { workspace = true }
+lru = { workspace = true }
 opendal = { version = "0.59.1", default-features = false, features = [
     "http-transport-reqwest",
+    "layers-retry",
+    "layers-timeout",
     "services-fs",
     "services-s3",
 ] }

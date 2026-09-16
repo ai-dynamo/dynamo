@@ -3068,6 +3068,7 @@ dependencies = [
  "dynamo-runtime",
  "dynamo-sidecar-common",
  "futures",
+ "lru 0.16.4",
  "opendal",
  "prost 0.13.5",
  "rand 0.9.4",
@@ -6768,6 +6769,8 @@ checksum = "f950151f9587a51a7bed70a15fa0cff464eae96e41ae7499f97067bdafdf43eb"
 dependencies = [
  "opendal-core",
  "opendal-http-transport-reqwest",
+ "opendal-layer-retry",
+ "opendal-layer-timeout",
  "opendal-service-fs",
  "opendal-service-s3",
 ]
@@ -6810,6 +6813,27 @@ dependencies = [
  "http-body 1.0.1",
  "opendal-core",
  "reqwest 0.13.4",
+]
+
+[[package]]
+name = "opendal-layer-retry"
+version = "0.59.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06306202c97c54fb41bdbbdcb854c8798823f0022ae7aac7a40c8a1023aa83a6"
+dependencies = [
+ "backon",
+ "log",
+ "opendal-core",
+]
+
+[[package]]
+name = "opendal-layer-timeout"
+version = "0.59.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6bd334cbd0a0bc934146733e74a80a5faf8db8e014781a25f6d9d80d7b87c981"
+dependencies = [
+ "opendal-core",
+ "tokio",
 ]
 
 [[package]]
