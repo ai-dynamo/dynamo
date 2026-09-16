@@ -174,6 +174,7 @@ pub(crate) async fn build(
                     Some(kv_indexer_metrics),
                 ),
                 approx: None,
+                shared_cache: None,
                 primary_records_routing_decisions: true,
                 session_updates,
             });
@@ -195,6 +196,7 @@ pub(crate) async fn build(
                 Some(kv_indexer_metrics),
             ),
             approx: None,
+            shared_cache: None,
             primary_records_routing_decisions: true,
             session_updates,
         });
@@ -225,6 +227,7 @@ pub(crate) async fn build(
                 Some(kv_indexer_metrics),
             ),
             approx,
+            shared_cache: None,
             primary_records_routing_decisions: false,
             session_updates,
         });
@@ -243,6 +246,7 @@ pub(crate) async fn build(
         primary,
         lower_tier: LowerTierIndexers::new_with_metrics(1, block_size, Some(kv_indexer_metrics)),
         approx,
+        shared_cache: None,
         primary_records_routing_decisions: false,
         session_updates,
     })
@@ -271,12 +275,51 @@ fn predict_on_route_side_indexer(
 }
 
 #[cfg(test)]
-pub(super) mod test_util {
-    use dynamo_kv_router::protocols::{
-        ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
-        KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier,
-        compute_seq_hash_for_block,
+pub(crate) mod test_util {
+    use dynamo_kv_router::{
+        indexer::KvIndexerInterface,
+        protocols::{
+            ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
+            KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier,
+            compute_seq_hash_for_block,
+        },
+        services::indexer::backend::create_indexer,
     };
+
+    use super::Indexer;
+
+    pub(crate) fn make_test_indexer(block_size: u32) -> Indexer {
+        create_indexer(block_size, 1)
+    }
+
+    pub(crate) fn make_test_concurrent_indexer(block_size: u32) -> Indexer {
+        create_indexer(block_size, 2)
+    }
+
+    pub(crate) async fn flush_indexer(indexer: &Indexer) {
+        let lower_tier = match indexer {
+            Indexer::Single {
+                primary,
+                lower_tier,
+                ..
+            } => {
+                primary.flush_and_wait().await.unwrap();
+                lower_tier
+            }
+            Indexer::Concurrent {
+                primary,
+                lower_tier,
+                ..
+            } => {
+                primary.flush_and_wait().await.unwrap();
+                lower_tier
+            }
+            Indexer::Remote { .. } | Indexer::None => return,
+        };
+        for indexer in lower_tier.all() {
+            indexer.dump_events().await.unwrap();
+        }
+    }
 
     pub(crate) fn store_event(
         worker_id: u64,

@@ -1453,6 +1453,7 @@ mod tests {
                 primary: indexer,
                 lower_tier: LowerTierIndexers::new(1, 4),
                 approx: None,
+                shared_cache: None,
                 primary_records_routing_decisions: false,
                 session_updates: None,
             },

@@ -181,6 +181,127 @@ def test_deprecated_overlap_score_weight_env_coexists_with_canonical_settings(
     assert config.kv_router_kwargs()["overlap_score_weight"] == 0.0
 
 
+@pytest.mark.parametrize("cache_type", ["none", "hicache", "mooncake-store"])
+def test_shared_cache_type_cli_flows_to_binding_kwargs(cache_type: str) -> None:
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(["--shared-cache-type", cache_type])
+    kwargs = KvRouterConfigBase.from_cli_args(args).kv_router_kwargs()
+
+    assert kwargs["shared_cache_type"] == cache_type
+    assert kwargs["shared_cache_multiplier"] == 0.5
+
+
+def test_mooncake_store_environment_and_cli_precedence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DYN_SHARED_CACHE_TYPE", "mooncake-store")
+    monkeypatch.setenv("DYN_SHARED_CACHE_MULTIPLIER", "0.3")
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    kwargs = KvRouterConfigBase.from_cli_args(parser.parse_args([])).kv_router_kwargs()
+    assert kwargs["shared_cache_type"] == "mooncake-store"
+    assert kwargs["shared_cache_multiplier"] == 0.3
+
+    args = parser.parse_args(
+        ["--shared-cache-type", "none", "--shared-cache-multiplier", "0"]
+    )
+    kwargs = KvRouterConfigBase.from_cli_args(args).kv_router_kwargs()
+    assert kwargs["shared_cache_type"] == "none"
+    assert kwargs["shared_cache_multiplier"] == 0.0
+
+
+@pytest.mark.parametrize("cache_type", ["mooncakestore", "mooncake_store", "redis"])
+def test_shared_cache_type_rejects_unknown_cli_values(cache_type: str) -> None:
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--shared-cache-type", cache_type])
+
+
+@pytest.mark.parametrize(
+    "router_mode",
+    [
+        "round-robin",
+        "random",
+        "power-of-two",
+        "direct",
+        "least-loaded",
+        "device-aware-weighted",
+    ],
+)
+def test_mooncake_store_frontend_requires_kv_router_mode(router_mode: str) -> None:
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(
+            ["--shared-cache-type", "mooncake-store", "--router-mode", router_mode]
+        )
+    )
+
+    with pytest.raises(ValueError, match="mooncake-store requires --router-mode=kv"):
+        config.validate()
+    assert config.shared_cache_type == "mooncake-store"
+
+
+@pytest.mark.parametrize("frontend", [False, True])
+def test_mooncake_store_rejects_load_aware_before_preset(frontend: bool) -> None:
+    parser = argparse.ArgumentParser()
+    group = FrontendArgGroup() if frontend else KvRouterArgGroup()
+    group.add_arguments(parser)
+    argv = ["--shared-cache-type", "mooncake-store", "--load-aware"]
+    if frontend:
+        argv.extend(["--router-mode", "kv"])
+    config_class = FrontendConfig if frontend else KvRouterConfigBase
+    config = config_class.from_cli_args(parser.parse_args(argv))
+
+    with pytest.raises(
+        ValueError, match="mooncake-store is incompatible with --load-aware"
+    ):
+        if frontend:
+            config.validate()
+        else:
+            config.kv_router_kwargs()
+    assert config.shared_cache_type == "mooncake-store"
+    assert config.use_kv_events is True
+    assert config.overlap_score_credit == 1.0
+
+
+def test_mooncake_store_frontend_preserves_parsed_config_over_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DYN_SHARED_CACHE_TYPE", "hicache")
+    monkeypatch.setenv("DYN_ROUTER_MODE", "round-robin")
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(
+            ["--shared-cache-type", "mooncake-store", "--router-mode", "kv"]
+        )
+    )
+
+    config.validate()
+    assert config.shared_cache_type == "mooncake-store"
+    assert config.kv_router_kwargs()["shared_cache_type"] == "mooncake-store"
+    assert config.router_mode == "kv"
+    assert kv_router_args.os.environ["DYN_SHARED_CACHE_TYPE"] == "hicache"
+    assert kv_router_args.os.environ["DYN_ROUTER_MODE"] == "round-robin"
+
+
+def test_mooncake_store_help_names_worker_and_event_requirements() -> None:
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+    help_by_dest = {action.dest: action.help for action in parser._actions}
+
+    shared_cache_help = help_by_dest["shared_cache_type"]
+    assert "MooncakeStoreWorkerExtension" in shared_cache_help
+    assert "local KV events" in shared_cache_help
+    assert "--use-remote-indexer" in shared_cache_help
+
+
 def test_decode_active_request_weight_flows_to_binding_kwargs() -> None:
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)
