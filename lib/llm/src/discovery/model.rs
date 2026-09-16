@@ -98,10 +98,16 @@ struct NamespaceReadinessEval {
     ambiguous: std::collections::HashSet<crate::worker_type::WorkerType>,
 }
 
+/// How often one model may report that it has no servable WorkerSet.
+/// See [`Model::claim_engine_error_report`].
+const ENGINE_ERROR_REPORT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// A named model backed by one or more WorkerSets.
 pub struct Model {
     name: String,
     worker_sets: DashMap<String, Arc<WorkerSet>>,
+    /// When this model last reported having no servable WorkerSet.
+    last_engine_error_report: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 impl Model {
@@ -109,6 +115,7 @@ impl Model {
         Self {
             name,
             worker_sets: DashMap::new(),
+            last_engine_error_report: std::sync::Mutex::new(None),
         }
     }
 
@@ -726,45 +733,68 @@ impl Model {
     ///
     /// Both answers are otherwise silent: the caller sees a bare 404 or 503 and
     /// the reasons `namespace_readiness` already computed are never emitted.
-    /// The 404 is the harder one — it means the model name is in the catalog
-    /// (some WorkerSet committed) while no WorkerSet carries the requested
-    /// engine, which usually means a peer WorkerSet failed to build one.
+    /// On the HTTP path the readiness gate (`check_model_serving_ready`) has
+    /// already answered 503 for a committed model whose namespaces are all
+    /// incomplete, so reaching `ModelNotFound` here means the model is ready
+    /// but no WorkerSet carries an engine of the requested kind.
     fn engine_error(&self, engine_exists: bool) -> ModelManagerError {
-        let readiness = self.namespace_readiness();
-        let namespaces = readiness
-            .namespaces
-            .iter()
-            .map(|(namespace, detail)| {
-                format!(
-                    "{namespace}: ready={}{}",
-                    detail.ready,
-                    detail
-                        .reason
-                        .as_ref()
-                        .map(|reason| format!(" ({reason})"))
-                        .unwrap_or_default()
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("; ");
+        if self.claim_engine_error_report() {
+            let readiness = self.namespace_readiness();
+            let namespaces = readiness
+                .namespaces
+                .iter()
+                .map(|(namespace, detail)| {
+                    format!(
+                        "{namespace}: ready={}{}",
+                        detail.ready,
+                        detail
+                            .reason
+                            .as_ref()
+                            .map(|reason| format!(" ({reason})"))
+                            .unwrap_or_default()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            if engine_exists {
+                tracing::warn!(
+                    model_name = %self.name,
+                    worker_sets = self.worker_set_count(),
+                    namespaces = %namespaces,
+                    "No WorkerSet can serve this request"
+                );
+            } else {
+                tracing::warn!(
+                    model_name = %self.name,
+                    worker_sets = self.worker_set_count(),
+                    namespaces = %namespaces,
+                    "No WorkerSet of this model carries the requested engine; \
+                     check earlier model-materialization warnings for the WorkerSet that failed to build"
+                );
+            }
+        }
         if engine_exists {
-            tracing::warn!(
-                model_name = %self.name,
-                worker_sets = self.worker_set_count(),
-                namespaces = %namespaces,
-                "No WorkerSet can serve this request"
-            );
             ModelManagerError::ModelUnavailable(self.name.clone())
         } else {
-            tracing::warn!(
-                model_name = %self.name,
-                worker_sets = self.worker_set_count(),
-                namespaces = %namespaces,
-                "No WorkerSet of this model carries the requested engine; \
-                 check earlier model-materialization warnings for the WorkerSet that failed to build"
-            );
             ModelManagerError::ModelNotFound(self.name.clone())
         }
+    }
+
+    /// Whether this failure may be reported, at most once per
+    /// [`ENGINE_ERROR_REPORT_INTERVAL`] for this model.
+    ///
+    /// `engine_error` is on the request path, so a client retrying a model that
+    /// is stuck would otherwise pay one readiness scan and one warning line per
+    /// request. A repeating interval rather than a one-shot flag, because a
+    /// model that breaks again after recovering has to be able to say so.
+    fn claim_engine_error_report(&self) -> bool {
+        let now = std::time::Instant::now();
+        let mut last = self.last_engine_error_report.lock().unwrap();
+        if last.is_some_and(|last| now.duration_since(last) < ENGINE_ERROR_REPORT_INTERVAL) {
+            return false;
+        }
+        *last = Some(now);
+        true
     }
 
     // -- Internal selection --

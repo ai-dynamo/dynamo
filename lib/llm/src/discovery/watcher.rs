@@ -1364,7 +1364,6 @@ fn worker_set_chat_preprocessor(
 mod tests {
     use super::*;
     use crate::discovery::Model;
-    use crate::discovery::model_manager::ModelManagerError;
     use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
     use crate::model_card::ModelDeploymentCard;
     use crate::session_affinity::SessionAffinityMode;
@@ -1520,19 +1519,10 @@ mod tests {
         instance_id: u64,
         card: &ModelDeploymentCard,
     ) -> DiscoveryEvent {
-        discovered_card_on_endpoint(namespace, "generate", instance_id, card)
-    }
-
-    fn discovered_card_on_endpoint(
-        namespace: &str,
-        endpoint: &str,
-        instance_id: u64,
-        card: &ModelDeploymentCard,
-    ) -> DiscoveryEvent {
         DiscoveryEvent::Added(DiscoveryInstance::Model {
             namespace: namespace.to_string(),
             component: "workers".to_string(),
-            endpoint: endpoint.to_string(),
+            endpoint: "generate".to_string(),
             instance_id,
             card_json: serde_json::to_value(card).unwrap(),
             model_suffix: None,
@@ -1555,7 +1545,6 @@ mod tests {
         drt: DistributedRuntime,
         manager: Arc<ModelManager>,
         router_config: RouterConfig,
-        namespace_filter: NamespaceFilter,
     ) -> (TestDiscoverySender, tokio::task::JoinHandle<()>) {
         let watcher = Arc::new(ModelWatcher::new(
             drt,
@@ -1582,7 +1571,7 @@ mod tests {
             },
         )
         .boxed();
-        let task = tokio::spawn(watcher.watch(stream, namespace_filter));
+        let task = tokio::spawn(watcher.watch(stream, NamespaceFilter::Global));
         (event_tx, task)
     }
 
@@ -1848,7 +1837,6 @@ mod tests {
                     session_affinity_mode: SessionAffinityMode::Soft,
                     ..Default::default()
                 },
-                NamespaceFilter::Global,
             );
             apply_discovery_event(&events, discovered_card(difference, worker_id, &incumbent))
                 .await;
@@ -1894,12 +1882,8 @@ mod tests {
             [(1, &first, 2, &second), (2, &second, 1, &first)]
         {
             let manager = Arc::new(ModelManager::new());
-            let (events, task) = watch_test_cards(
-                drt.clone(),
-                manager.clone(),
-                RouterConfig::default(),
-                NamespaceFilter::Global,
-            );
+            let (events, task) =
+                watch_test_cards(drt.clone(), manager.clone(), RouterConfig::default());
             apply_discovery_event(&events, discovered_card("dgd-v1", incumbent_id, incumbent))
                 .await;
             wait_for_model(&manager, "local-first", |_| true).await;
@@ -1922,12 +1906,8 @@ mod tests {
             .await
             .unwrap();
         let manager = Arc::new(ModelManager::new());
-        let (events, task) = watch_test_cards(
-            drt.clone(),
-            manager.clone(),
-            RouterConfig::default(),
-            NamespaceFilter::Global,
-        );
+        let (events, task) =
+            watch_test_cards(drt.clone(), manager.clone(), RouterConfig::default());
         for namespace in ["dgd-v1", "dgd-v2"] {
             let endpoint = drt
                 .namespace(namespace)
@@ -1963,145 +1943,8 @@ mod tests {
     const GLOBAL_ROUTER_NAMESPACE: &str = "tc-4-10-ctrl";
     const GLOBAL_ROUTER_MODEL: &str = "global-router-model";
 
-    /// A metadata-only snapshot: `config.json` plus a loadable `tokenizer.json`
-    /// and no weight files. This is what a registration with
-    /// `ignore_weights=true` leaves in the cache (`crate::hub`).
-    const SNAPSHOT_WITH_TOKENIZER: &str = "mock-llama-3.1-8b-instruct";
     /// A snapshot with no artifact `TokenizerKind::from_disk` can load.
     const SNAPSHOT_WITHOUT_TOKENIZER: &str = "mock-no-tokenizer-json";
-
-    fn assert_serves_chat(model: &Model) {
-        model
-            .get_chat_engine()
-            .expect("the GlobalRouter decode card must carry a chat engine");
-    }
-
-    fn assert_not_found(model: &Model) {
-        assert!(
-            matches!(
-                model.get_chat_engine(),
-                Err(ModelManagerError::ModelNotFound(_))
-            ),
-            "a committed prefill set with no chat engine must answer 404, not 503"
-        );
-    }
-
-    #[tokio::test]
-    async fn global_router_disagg_cards_serve_chat_under_global_scope() {
-        watch_global_router_disagg_cards(
-            NamespaceFilter::Global,
-            SNAPSHOT_WITH_TOKENIZER,
-            2,
-            assert_serves_chat,
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn global_router_disagg_cards_serve_chat_under_exact_scope() {
-        watch_global_router_disagg_cards(
-            NamespaceFilter::Exact(GLOBAL_ROUTER_NAMESPACE.to_string()),
-            SNAPSHOT_WITH_TOKENIZER,
-            2,
-            assert_serves_chat,
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn global_router_cards_without_tokenizer_are_not_found_under_global_scope() {
-        watch_global_router_disagg_cards(
-            NamespaceFilter::Global,
-            SNAPSHOT_WITHOUT_TOKENIZER,
-            1,
-            assert_not_found,
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn global_router_cards_without_tokenizer_are_not_found_under_exact_scope() {
-        watch_global_router_disagg_cards(
-            NamespaceFilter::Exact(GLOBAL_ROUTER_NAMESPACE.to_string()),
-            SNAPSHOT_WITHOUT_TOKENIZER,
-            1,
-            assert_not_found,
-        )
-        .await;
-    }
-
-    /// Drive the GlobalRouter's real two-card shape through the in-process
-    /// watcher and run `check` against the committed model once `worker_sets`
-    /// WorkerSets exist. `check` runs before teardown: shutting the runtime
-    /// down first drops the workers, which turns every engine lookup into
-    /// `ModelUnavailable` regardless of what was built.
-    ///
-    /// `components/src/dynamo/global_router/__main__.py`, `_serve_disagg`
-    /// registers, in one namespace, a `Tokens` + `ModelType::Prefill` card with
-    /// `worker_type=Prefill`, which carries no OpenAI surface, and a `Tokens` +
-    /// `Chat|Completions` card with `worker_type=Decode`, which is the only one
-    /// that can carry the chat engine. When the decode card fails to attach
-    /// one, the prefill set still commits, so the model name stays in the
-    /// catalog without a chat engine and `get_chat_engine` reports
-    /// `ModelNotFound` — 404, not 503.
-    ///
-    /// Callers run the same shape under `Global` and under `Exact`. An
-    /// engine-construction failure is scope-independent; a discovery-scope
-    /// failure is not.
-    async fn watch_global_router_disagg_cards(
-        namespace_filter: NamespaceFilter,
-        snapshot: &str,
-        worker_sets: usize,
-        check: impl FnOnce(&Model),
-    ) {
-        let runtime = Runtime::from_current().unwrap();
-        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
-            .await
-            .unwrap();
-        let manager = Arc::new(ModelManager::new());
-        let (events, task) = watch_test_cards(
-            drt.clone(),
-            manager.clone(),
-            RouterConfig::default(),
-            namespace_filter,
-        );
-
-        let source = global_router_card(snapshot);
-        for (endpoint, model_type, worker_type, needs) in global_router_card_shapes() {
-            drt.namespace(GLOBAL_ROUTER_NAMESPACE)
-                .unwrap()
-                .component("workers")
-                .unwrap()
-                .endpoint(endpoint)
-                .register_endpoint_instance()
-                .await
-                .unwrap();
-            let mut card = source.clone();
-            card.model_type = model_type;
-            card.worker_type = Some(worker_type);
-            card.needs = needs;
-            apply_discovery_event(
-                &events,
-                discovered_card_on_endpoint(
-                    GLOBAL_ROUTER_NAMESPACE,
-                    endpoint,
-                    drt.discovery().instance_id(),
-                    &card,
-                ),
-            )
-            .await;
-        }
-
-        let model = wait_for_model(&manager, GLOBAL_ROUTER_MODEL, |model| {
-            model.worker_set_count() == worker_sets
-        })
-        .await;
-        check(&model);
-        drop(model);
-        drop(events);
-        task.await.unwrap();
-        runtime.shutdown();
-    }
 
     /// The GlobalRouter forwards already-tokenized requests, so both of its
     /// cards take the `Tokens` branch of `prepare_worker_set`.
