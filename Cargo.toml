@@ -13,6 +13,7 @@ members = [
     "lib/mocker",
     "lib/placement-plugin",
     "lib/placement-abi",
+    "lib/steppable-abi",
     "lib/steppable-provider",
     "lib/kv-router",
     "lib/router-plugins/catalog",

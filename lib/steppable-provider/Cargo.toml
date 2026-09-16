@@ -16,7 +16,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-aiperf-steppable-abi = { path = "../../../../dynamic-simulation-abi/crates/steppable-abi" }
+aiperf-steppable-abi = { path = "../steppable-abi", version = "0.13.0" }
 aisimulate-core = { workspace = true }
 anyhow = { workspace = true }
 dynamo-mocker = { workspace = true, features = ["replay-bench"] }
