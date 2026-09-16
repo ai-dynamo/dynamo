@@ -1064,6 +1064,10 @@ shared:
   owners:
   - router
   - kv-memory
+- glob: lib/llm/src/kv_router/shared_cache/
+  owners:
+  - router
+  - kv-memory
 - glob: lib/llm/src/preprocessor/mm_routing/
   owners:
   - frontend
