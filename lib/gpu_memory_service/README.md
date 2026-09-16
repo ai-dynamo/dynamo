@@ -610,4 +610,4 @@ To bound how long a restored engine waits for the published weights layout befor
 --model-loader-extra-config '{"gms_ro_connect_timeout_ms": 300000}'
 ```
 
-The value bounds both weight admissions an engine performs: the first one, during device init, and the remap after a shadow is promoted. An expiry during the remap is fatal and exits the worker. The default is `null`, which waits indefinitely.
+The default is `null`, which waits indefinitely. Set an integer value to fail after that many milliseconds.
