@@ -4472,6 +4472,45 @@ class TestReasoningParsing:  # FRONTEND.9 — reasoning ↔ tool-call orchestrat
 class TestUtilities:  # (mixed — see per-test annotations)
     """Test shared utility functions."""
 
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            (None, True),
+            ("1", True),
+            ("true", True),
+            ("TRUE", True),
+            (" on ", True),
+            ("yes", True),
+            ("0", False),
+            ("false", False),
+            ("False", False),
+            ("off", False),
+            ("no", False),
+        ],
+    )
+    def test_parse_tool_stream_env(self, raw, expected):  # FRONTEND.4
+        """DYN_SGLANG_TOOL_STREAM parsing: default true, bool-ish words."""
+        assert sglang_processor_module._parse_tool_stream_env(raw) is expected
+
+    def test_parse_tool_stream_env_invalid_warns(self):  # FRONTEND.4
+        """An unparseable value warns and keeps the streaming default."""
+        assert sglang_processor_module._parse_tool_stream_env("maybe") is True
+
+    def test_processor_reads_tool_stream_env(
+        self, tokenizer, monkeypatch
+    ):  # FRONTEND.1
+        """SglangProcessor picks up DYN_SGLANG_TOOL_STREAM at construction."""
+        routed_engine = FakeRoutedEngine(items=[])
+        monkeypatch.setenv("DYN_SGLANG_TOOL_STREAM", "false")
+        processor = SglangProcessor(
+            tokenizer=tokenizer,
+            routed_engine=routed_engine,
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            eos_token_ids=None,
+        )
+        assert processor.tool_stream is False
+
     def test_random_uuid_format(self):  # FRONTEND.4
         """random_uuid produces 16-char hex string."""
         uid = random_uuid()

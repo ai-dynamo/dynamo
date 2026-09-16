@@ -888,3 +888,62 @@ class TestFinishRecoveryReconciliation:  # FRONTEND.4 — recovery completes, ne
         assert delivered_args == '{"city": "Paris"}'
         assert final is not None
         assert final["finish_reason"] == "tool_calls"
+
+
+# ---------------------------------------------------------------------------
+# tool_stream opt-out (legacy single-frame delivery, DYN_SGLANG_TOOL_STREAM)
+# ---------------------------------------------------------------------------
+
+
+class TestToolStreamDisabled:  # FRONTEND.4 — legacy delivery opt-out
+    """``tool_stream=False`` restores the legacy hold-until-finish delivery.
+
+    The fully assembled call arrives in the single finish frame, exactly
+    as pre-fix dynamo did, while reasoning keeps streaming incrementally.
+    The processor wires this from ``DYN_SGLANG_TOOL_STREAM``.
+    """
+
+    TEXT = TestSingleToolCall.TEXT
+
+    def _run(self, tokenizer, batch_size):
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=FunctionCallParser(tools=TOOLS, tool_call_parser="hermes"),
+            reasoning_parser=ReasoningParser(model_type="qwen3", stream_reasoning=True),
+            tool_stream=False,
+        )
+        token_ids = tokenizer.encode(self.TEXT)
+        results = []
+        for i in range(0, len(token_ids), batch_size):
+            batch = token_ids[i : i + batch_size]
+            is_last = i + batch_size >= len(token_ids)
+            choice = post.process_output(
+                {"token_ids": batch, "finish_reason": "stop" if is_last else None}
+            )
+            if choice:
+                results.append(choice)
+        return results
+
+    def test_tool_calls_arrive_in_single_finish_frame(self, tokenizer):
+        results = self._run(tokenizer, 3)
+        tool_frames = [r for r in results if r["delta"].get("tool_calls")]
+        assert tool_frames, "expected a tool_calls frame"
+        assert len(tool_frames) == 1, (
+            "tool_stream=False must deliver the assembled call in exactly "
+            f"one frame; got {len(tool_frames)}"
+        )
+        frame = tool_frames[0]
+        assert frame["finish_reason"] == "tool_calls"
+        tc = frame["delta"]["tool_calls"]
+        assert len(tc) == 1
+        assert tc[0]["function"]["name"] == "search_gutenberg_books"
+        assert json.loads(tc[0]["function"]["arguments"]) == {
+            "search_terms": ["James Joyce"]
+        }
+
+    def test_reasoning_still_streams(self, tokenizer):
+        results = self._run(tokenizer, 3)
+        reasoning_frames = [r for r in results if r["delta"].get("reasoning_content")]
+        assert reasoning_frames, "reasoning must still stream incrementally"
+        reasoning = "".join(r["delta"].get("reasoning_content", "") for r in results)
+        assert "search for books" in reasoning
