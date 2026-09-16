@@ -927,16 +927,31 @@ mod tests {
         let readiness_done = Arc::new(AtomicBool::new(false));
         let cr_done = Arc::new(AtomicBool::new(false));
 
-        let never_ending = |done: Arc<AtomicBool>| {
+        let never_ending = |done: Arc<AtomicBool>, started: tokio::sync::oneshot::Sender<()>| {
             tokio::spawn(async move {
                 let _guard = SetOnDrop(done);
+                // A task aborted before its first poll never runs any of its
+                // body -- including constructing `_guard` above -- so it would
+                // never set `done` either. Signal once actually running (i.e.
+                // once `_guard` unquestionably exists) so the test only aborts
+                // real, in-flight tasks, matching what happens to the reflector
+                // loops this stands in for.
+                let _ = started.send(());
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
                 }
             })
         };
-        let readiness_handle = never_ending(readiness_done.clone());
-        let cr_handle = never_ending(cr_done.clone());
+        let (readiness_started_tx, readiness_started_rx) = tokio::sync::oneshot::channel();
+        let (cr_started_tx, cr_started_rx) = tokio::sync::oneshot::channel();
+        let readiness_handle = never_ending(readiness_done.clone(), readiness_started_tx);
+        let cr_handle = never_ending(cr_done.clone(), cr_started_tx);
+        readiness_started_rx
+            .await
+            .expect("readiness task must start before this test aborts it");
+        cr_started_rx
+            .await
+            .expect("CR task must start before this test aborts it");
 
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
