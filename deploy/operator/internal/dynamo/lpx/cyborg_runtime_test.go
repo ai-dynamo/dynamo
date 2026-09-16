@@ -6,7 +6,6 @@
 package lpx
 
 import (
-	"os/exec"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -30,54 +29,33 @@ func TestWrapCyborgDecodeForSwaBatchSkipsBatchOne(t *testing.T) {
 	require.Equal(t, original, container)
 }
 
-func TestWrapCyborgDecodeForSwaBatch(t *testing.T) {
+func TestWrapCyborgStartupPreservesArgumentVector(t *testing.T) {
 	t.Parallel()
 
-	t.Log("Define computed and explicitly overridden SWA cache ID scenarios")
-	tests := []struct {
-		name string
-		env  []string
-		want string
+	for _, test := range []struct {
+		name       string
+		batchSize  int
+		configFile string
+		wantFlags  []string
 	}{
-		{
-			name: "computes replica-local range with global offset",
-			env: []string{
-				"CYBORG_FPGA_GPI_REPLICA_INDEX=3",
-				"CYBORG_BATCH_SIZE=2",
-			},
-			want: "6,7",
-		},
-		{
-			name: "keeps explicit override",
-			env: []string{
-				"CYBORG_FPGA_GPI_REPLICA_INDEX=3",
-				"CYBORG_BATCH_SIZE=2",
-				"CYBORG_SWA_CACHE_IDS=100,101",
-			},
-			want: "100,101",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+		{"hosts", 1, "lpu_servers", []string{"--expand-hosts", "--"}},
+		{"batch", 2, "", []string{"--swa-batch-ids", "--"}},
+		{"hosts and batch", 2, "lpu_servers", []string{"--expand-hosts", "--swa-batch-ids", "--"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			t.Log("Wrap the actual command and preserve literal argument boundaries")
+			t.Log("Select image helper options while preserving a caller-owned shell and literal arguments")
 			command := []string{"/bin/sh", "-c"}
-			args := []string{`printf '%s\n' "${CYBORG_SWA_CACHE_IDS}" "$@"`, "--", "argument with spaces", "literal '$HOME'", ""}
+			args := []string{`printf '%s\n' "$@"`, "--", "argument with spaces", "literal '$HOME'", ""}
 			container := &corev1.Container{Command: command, Args: args}
-			wrapCyborgStartup(container, 2, "")
+			want := append(append(append([]string{}, test.wantFlags...), command...), args...)
+			wrapCyborgStartup(container, test.batchSize, test.configFile)
 
-			t.Log("Changing caller-owned slices must not change the wrapped invocation")
-			command[0] = "mutated-command"
-			args[2] = "mutated-argument"
-			cmd := exec.Command(container.Command[0], append(container.Command[1:], container.Args...)...)
-			cmd.Env = tt.env
-
-			t.Log("Execute the wrapper and verify cache IDs and forwarded argument bytes")
-			out, err := cmd.Output()
-			require.NoError(t, err)
-			require.Equal(t, tt.want+"\nargument with spaces\nliteral '$HOME'\n\n", string(out))
+			t.Log("Keep the wrapped invocation independent of subsequent caller slice mutations")
+			command[0], args[2] = "mutated-command", "mutated-argument"
+			require.Equal(t, []string{"/usr/local/bin/cyborg-entrypoint"}, container.Command)
+			require.Equal(t, want, container.Args)
 		})
 	}
 }
@@ -101,6 +79,6 @@ func TestPinnedCyborgLauncher(t *testing.T) {
 	container := &corev1.Container{Image: pinnedCyborgImage, Command: []string{"/bin/bash", "-lc"}, Args: []string{pinnedCyborgLauncher}}
 	wrapCyborgStartup(container, 2, "lpu_servers")
 	require.Equal(t, pinnedCyborgImage, container.Image)
-	require.Equal(t, []string{"/bin/bash", "-lc", pinnedCyborgLauncher}, container.Args[4:])
-	require.Contains(t, container.Args[0], "export CYBORG_SWA_CACHE_IDS")
+	require.Equal(t, []string{"/bin/bash", "-lc", pinnedCyborgLauncher}, container.Args[3:])
+	require.Equal(t, []string{"--expand-hosts", "--swa-batch-ids", "--"}, container.Args[:3])
 }

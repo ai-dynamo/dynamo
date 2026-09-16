@@ -22,8 +22,6 @@ const (
 	conductorSSHPrivateKeyPath       = conductorSSHKeyDir + "/private.key"
 	conductorSSHKeyInitContainerName = "prepare-ssh-key"
 	conductorSSHKeyVolumeName        = "single-v2-ssh-key"
-	conductorSSHKeyInitCommand       = "set -euo pipefail; cp " + runtimeSSHSecretPrivateKeyPath + " " +
-		conductorSSHPrivateKeyPath + "; chmod 600 " + conductorSSHPrivateKeyPath
 )
 
 func validateSSHVolume(podSpec *corev1.PodSpec, secretName string) error {
@@ -67,8 +65,8 @@ func addConductorSSHKey(podSpec *corev1.PodSpec, conductor *corev1.Container, se
 		Name:            conductorSSHKeyInitContainerName,
 		Image:           conductor.Image,
 		ImagePullPolicy: conductor.ImagePullPolicy,
-		Command:         []string{"/bin/bash"},
-		Args:            []string{"-c", conductorSSHKeyInitCommand},
+		Command:         []string{"/bin/install"},
+		Args:            []string{"-m", "0600", runtimeSSHSecretPrivateKeyPath, conductorSSHPrivateKeyPath},
 		SecurityContext: &corev1.SecurityContext{
 			RunAsUser:    ptr.To(int64(0)),
 			RunAsGroup:   ptr.To(int64(0)),

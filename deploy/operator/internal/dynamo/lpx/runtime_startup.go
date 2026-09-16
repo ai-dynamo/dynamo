@@ -12,37 +12,15 @@ import (
 	"k8s.io/utils/ptr"
 )
 
-const runtimeConfigExpansion = `: "${GROVE_PCSG_NAME:?missing GROVE_PCSG_NAME}" "${GROVE_PCSG_INDEX:?missing GROVE_PCSG_INDEX}" "${GROVE_HEADLESS_SERVICE:?missing GROVE_HEADLESS_SERVICE}"
-sed -e "s|\${GROVE_PCSG_NAME}|${GROVE_PCSG_NAME}|g" -e "s|\${GROVE_PCSG_INDEX}|${GROVE_PCSG_INDEX}|g" -e "s|\${GROVE_HEADLESS_SERVICE}|${GROVE_HEADLESS_SERVICE}|g" "$1" > "$2"
-shift 2
-`
-
-// wrapRuntimeStartup prepares an optional fixed config and executes the original argument vector.
-// configFile and initialization are operator-owned, never user-supplied shell fragments.
-func wrapRuntimeStartup(container *corev1.Container, defaultCommand, configFile, initialization string) {
-	// Keep paths and the complete caller argument vector out of the shell source.
-	args := []string{initialization + "exec \"$@\"\n", "--"}
-	if configFile != "" {
-		args[0] = runtimeConfigExpansion + args[0]
-		args = append(args, lpuConfigMountPath+"/"+configFile, runtimeTemporaryStorageMountPath+"/"+configFile)
-	}
-	if len(container.Command) == 0 {
-		args = append(args, defaultCommand)
-	} else {
-		args = append(args, container.Command...)
-	}
-	args = append(args, container.Args...)
-	container.Command, container.Args = []string{"/bin/sh", "-ec"}, args
-}
-
-// validateRuntimeConfigStorage requires writable, Pod-local storage for expanded configuration.
-func validateRuntimeConfigStorage(podSpec *corev1.PodSpec, container *corev1.Container, configFile string) error {
+// validateRuntimeConfigStorage requires the config mount and a writable, Pod-local runtime workspace.
+// expandedConfigFile is empty when the runtime reads configuration directly.
+func validateRuntimeConfigStorage(podSpec *corev1.PodSpec, container *corev1.Container, expandedConfigFile string) error {
 	// Reject incompatible authored bindings instead of replacing their volumes or mounts.
 	hasConfigMount := false
 	var mount corev1.VolumeMount
 	for _, existing := range container.VolumeMounts {
 		hasConfigMount = hasConfigMount || existing.MountPath == lpuConfigMountPath
-		if existing.MountPath == runtimeTemporaryStorageMountPath+"/"+configFile {
+		if expandedConfigFile != "" && existing.MountPath == runtimeTemporaryStorageMountPath+"/"+expandedConfigFile {
 			return fmt.Errorf("LPX runtime configuration cannot overwrite a volume mounted at %q", existing.MountPath)
 		}
 		if existing.MountPath == runtimeTemporaryStorageMountPath {

@@ -63,31 +63,28 @@ func applyCyborgSWACacheIDs(container *corev1.Container, cyborgBatchSize int) {
 	}
 }
 
-const cyborgSwaBatchIDsInitialization = `if [ -z "${CYBORG_SWA_CACHE_IDS+x}" ]; then
-	: "${CYBORG_FPGA_GPI_REPLICA_INDEX:?CYBORG_FPGA_GPI_REPLICA_INDEX is required}"
-	: "${CYBORG_BATCH_SIZE:?CYBORG_BATCH_SIZE is required}"
-	base=$((CYBORG_FPGA_GPI_REPLICA_INDEX * CYBORG_BATCH_SIZE))
-	ids="${base}"
-	i=1
-	while [ "${i}" -lt "${CYBORG_BATCH_SIZE}" ]; do
-		ids="${ids},$((base + i))"
-		i=$((i + 1))
-	done
-	export CYBORG_SWA_CACHE_IDS="${ids}"
-fi
-`
-
 // wrapCyborgStartup prepares engine-local hosts and SWA IDs in one wrapper.
 func wrapCyborgStartup(container *corev1.Container, cyborgBatchSize int, configFile string) {
 	if cyborgBatchSize == 1 && configFile == "" {
 		return
 	}
 
-	initialization := ""
-	if cyborgBatchSize > 1 {
-		initialization = cyborgSwaBatchIDsInitialization
+	args := make([]string, 0, 3+len(container.Command)+len(container.Args))
+	if configFile != "" {
+		args = append(args, "--expand-hosts")
 	}
-	wrapRuntimeStartup(container, "/usr/local/bin/cyborg", configFile, initialization)
+	if cyborgBatchSize > 1 {
+		args = append(args, "--swa-batch-ids")
+	}
+	args = append(args, "--")
+	if len(container.Command) == 0 {
+		args = append(args, "/usr/local/bin/cyborg")
+	} else {
+		args = append(args, container.Command...)
+	}
+	args = append(args, container.Args...)
+	container.Command = []string{"/usr/local/bin/cyborg-entrypoint"}
+	container.Args = args
 }
 
 // cyborgRuntimeIO requires a nonnil normalized build and validates its Cyborg replica domain.

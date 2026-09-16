@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 )
 
@@ -132,7 +133,7 @@ func TestApplyLPUWorkerContainerBaseClampsCPURequestToLimit(t *testing.T) {
 			}
 
 			t.Log("Apply the LPX worker runtime defaults")
-			applyLPUWorkerContainerBase(&container, false)
+			applyLPUWorkerContainerBase(&container)
 
 			t.Log("Clamp the default request to the configured limit")
 			require.True(t, container.Resources.Requests.Cpu().Equal(resource.MustParse(test.want)))
@@ -293,8 +294,8 @@ func TestConfigureNodeLocalLPURuntimeRoles(t *testing.T) {
 	conductorContainer := conductor.Containers[0]
 	require.Equal(t, conductorMounts, conductorContainer.VolumeMounts)
 	require.Equal(t, "conductor", conductorContainer.Name)
-	require.Equal(t, []string{"/bin/sh", "-ec"}, conductorContainer.Command)
-	require.Equal(t, []string{runtimeConfigExpansion + "exec \"$@\"\n", "--", "/configs/datacenter.toml", "/tmp/datacenter.toml", "/bin/nova"}, conductorContainer.Args[:5])
+	require.Equal(t, []string{"/bin/nova"}, conductorContainer.Command)
+	requireFlagValue(t, conductorContainer.Args, "--datacenter-config-filepath", "/configs/datacenter.toml")
 	require.Contains(t, conductorContainer.Args, "--instance-model-name")
 	requireFlagValue(t, conductorContainer.Args, "--allocation", "lpu-wkr-m-0")
 	require.GreaterOrEqual(t, len(conductorContainer.Args), len(nodeLocalHXAgentEnvironmentArgs))
@@ -325,8 +326,8 @@ func TestConfigureNodeLocalLPURuntimeRoles(t *testing.T) {
 	agentContainer := agent.Containers[0]
 	require.Equal(t, agentMounts, agentContainer.VolumeMounts)
 	require.Equal(t, lpuAgentContainerName, agentContainer.Name)
-	require.Equal(t, []string{"/bin/bash"}, agentContainer.Command)
-	require.Equal(t, []string{"-c", lpuWorkerRunCommand}, agentContainer.Args)
+	require.Equal(t, []string{"/bin/quasar-entrypoint"}, agentContainer.Command)
+	require.Empty(t, agentContainer.Args)
 	require.Empty(t, testContainerEnvValue(agentContainer.Env, "LPU_RUN_SYSTEM_INIT"))
 	require.Equal(t, "cvp", testContainerEnvValue(agentContainer.Env, "LPU_FPGA_RECONFIGURE_METHOD"))
 	require.Equal(t, "custom", testContainerEnvValue(agentContainer.Env, "GROQ_V2_RESET_ON_OPEN"))
@@ -415,6 +416,48 @@ func TestXTSSHSecretNameIsNotUsedAsVolumeName(t *testing.T) {
 			require.Equal(t, sshSecretName, sshVolume.Secret.SecretName)
 			require.NotContains(t, testVolumeNames(test.pod.Volumes), sshSecretName)
 			require.Contains(t, test.mounts, corev1.VolumeMount{Name: "ssh-secret", MountPath: "/ssh-pk", ReadOnly: true})
+		})
+	}
+}
+
+func TestGeneratedAgentLaunchCommands(t *testing.T) {
+	for _, test := range []struct {
+		name              string
+		family            BuildFamily
+		direct, multiNode bool
+		command           []string
+		args              []string
+	}{
+		{"XT SSH worker", BuildFamilyXT, false, false, []string{"/bin/quasar-entrypoint"}, []string{"--partition-metadata"}},
+		{"HX SSH worker", BuildFamilyHX, false, false, []string{"/bin/quasar-entrypoint"}, nil},
+		{"direct single-node", BuildFamilyXT, true, false, []string{"/bin/hydra-entrypoint"}, []string{"start"}},
+		{"direct multi-node", BuildFamilyXT, true, true, []string{"/bin/hydra-entrypoint"}, []string{"start"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Configure a runtime role without an authored startup command")
+			pod := renderTestPodSpec()
+			pod.Containers[0].Command, pod.Containers[0].Args = nil, nil
+			configureAgentScheduling(&pod, test.family)
+			if test.direct {
+				require.NoError(t, configureDirectHybridAgentRuntime(&pod, "graph-lpu", "ssh-secret", test.multiNode))
+			} else {
+				require.NoError(t, configureNodeLocalAgentRuntime(&pod, test.family, false, "ssh-secret"))
+			}
+
+			t.Log("Execute the installed launcher after all role defaults have been applied")
+			agent := pod.Containers[0]
+			require.Equal(t, test.command, agent.Command)
+			require.Equal(t, test.args, agent.Args)
+			if test.direct {
+				require.Equal(t, []string{"/bin/hydra-entrypoint", "ready"}, agent.StartupProbe.Exec.Command)
+				require.Equal(t, []string{"/bin/hydra-entrypoint", "ready"}, agent.ReadinessProbe.Exec.Command)
+				require.EqualValues(t, 240, agent.StartupProbe.FailureThreshold)
+				require.EqualValues(t, 6, agent.ReadinessProbe.FailureThreshold)
+				require.EqualValues(t, 5, agent.ReadinessProbe.PeriodSeconds)
+				require.EqualValues(t, 1, agent.ReadinessProbe.TimeoutSeconds)
+			} else {
+				require.Equal(t, intstr.FromInt(LPUSSHPort), agent.ReadinessProbe.TCPSocket.Port)
+			}
 		})
 	}
 }

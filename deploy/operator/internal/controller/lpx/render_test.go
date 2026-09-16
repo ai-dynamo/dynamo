@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -520,9 +519,10 @@ func TestLPXSpecDecodeConductorTemplate(t *testing.T) {
 				if clique.Name == plan.ConductorTemplate {
 					conductors++
 					require.Equal(t, wantImage, container.Image)
-					require.Equal(t, []string{"/bin/sh", "-ec"}, container.Command)
-					require.Contains(t, container.Args[0], `exec "$@"`)
-					require.Equal(t, []string{"--", "/configs/datacenter.toml", "/tmp/datacenter.toml", "/bin/nova"}, container.Args[1:5])
+					require.Equal(t, []string{"/bin/nova"}, container.Command)
+					configFlag := slices.Index(container.Args, "--datacenter-config-filepath")
+					require.GreaterOrEqual(t, configFlag, 0)
+					require.Equal(t, "/configs/datacenter.toml", container.Args[configFlag+1])
 					if explicit {
 						template := target.ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate
 						require.Equal(t, "explicit-conductor", clique.Labels["owner"])
@@ -1234,10 +1234,8 @@ func TestGenerateGrovePodCliqueSet_ImplicitV2HybridPreservesAgentRuntime(t *test
 
 	main := agent.Spec.PodSpec.Containers[0]
 	require.Equal(t, "agent", main.Name)
-	require.Equal(t, []string{"/bin/bash"}, main.Command)
-	require.Len(t, main.Args, 2)
-	require.Equal(t, "-c", main.Args[0])
-	require.Contains(t, main.Args[1], "exec numactl")
+	require.Equal(t, []string{"/bin/hydra-entrypoint"}, main.Command)
+	require.Equal(t, []string{"start"}, main.Args)
 	require.NotContains(t, main.Args, "--agent-env-vars")
 	require.NotNil(t, main.SecurityContext)
 	require.True(t, *main.SecurityContext.Privileged)
@@ -1295,9 +1293,8 @@ func TestGenerateGrovePodCliqueSet_ImplicitV2HybridPreservesAgentRuntime(t *test
 	require.Contains(t, cyborg.Spec.PodSpec.Containers, sidecar)
 	require.NotEmpty(t, cyborg.Spec.PodSpec.Containers)
 	cyborgMain := cyborg.Spec.PodSpec.Containers[0]
-	require.Equal(t, []string{"/bin/sh", "-ec"}, cyborgMain.Command)
-	require.Contains(t, cyborgMain.Args[0], `export CYBORG_SWA_CACHE_IDS="${ids}"`)
-	require.Equal(t, []string{"--", "/configs/lpu_servers", "/tmp/lpu_servers", "/opt/gpu-runtime", "serve"}, cyborgMain.Args[1:])
+	require.Equal(t, []string{"/usr/local/bin/cyborg-entrypoint"}, cyborgMain.Command)
+	require.Equal(t, []string{"--expand-hosts", "--swa-batch-ids", "--", "/opt/gpu-runtime", "serve"}, cyborgMain.Args)
 	require.Contains(t, cyborgMain.VolumeMounts, corev1.VolumeMount{Name: "config", MountPath: "/configs"})
 	require.True(t, slices.ContainsFunc(cyborgMain.VolumeMounts, func(mount corev1.VolumeMount) bool { return mount.Name == "infiniband" }))
 
@@ -1498,10 +1495,13 @@ func TestGenerateGrovePodCliqueSet_V2NodeLocalPreservesImageEntrypoint(t *testin
 							agents++
 							require.False(t, slices.ContainsFunc(clique.Spec.PodSpec.Volumes, func(volume corev1.Volume) bool { return volume.Name == "tmp" }))
 							if len(intent.command)+len(intent.args) == 0 {
-								require.Equal(t, []string{"/bin/bash"}, main.Command)
-								require.Len(t, main.Args, 2)
-								require.Equal(t, "-c", main.Args[0])
-								require.Contains(t, main.Args[1], "GROVE_PCLQ_POD_INDEX")
+								if mode.hybrid {
+									require.Equal(t, []string{"/bin/hydra-entrypoint"}, main.Command)
+									require.Equal(t, []string{"start"}, main.Args)
+								} else {
+									require.Equal(t, []string{"/bin/quasar-entrypoint"}, main.Command)
+									require.Equal(t, []string{"--partition-metadata"}, main.Args)
+								}
 							} else {
 								wantCommand := intent.command
 								require.Equal(t, wantCommand, main.Command)
@@ -1513,8 +1513,8 @@ func TestGenerateGrovePodCliqueSet_V2NodeLocalPreservesImageEntrypoint(t *testin
 							if len(command) == 0 {
 								command = []string{"/bin/nova"}
 							}
-							require.Equal(t, []string{"/bin/sh", "-ec"}, main.Command)
-							require.Equal(t, append(slices.Clone(command), intent.args...), main.Args[4:4+len(command)+len(intent.args)])
+							require.Equal(t, command, main.Command)
+							require.True(t, slices.Equal(intent.args, main.Args[:len(intent.args)]))
 							allocation := slices.Index(main.Args, "--allocation")
 							require.GreaterOrEqual(t, allocation, 0)
 							require.Equal(t, strings.Join(clique.Spec.StartsAfter, ","), main.Args[allocation+1])
@@ -1529,8 +1529,9 @@ func TestGenerateGrovePodCliqueSet_V2NodeLocalPreservesImageEntrypoint(t *testin
 							if len(wantCommand) == 0 {
 								wantCommand = []string{"/usr/local/bin/cyborg"}
 							}
-							require.Equal(t, []string{"/bin/sh", "-ec"}, main.Command)
-							require.Equal(t, append(slices.Clone(wantCommand), wantArgs...), main.Args[4:])
+							require.Equal(t, []string{"/usr/local/bin/cyborg-entrypoint"}, main.Command)
+							require.Equal(t, []string{"--expand-hosts", "--"}, main.Args[:2])
+							require.Equal(t, append(slices.Clone(wantCommand), wantArgs...), main.Args[2:])
 							require.NotNil(t, main.LivenessProbe)
 							require.NotNil(t, main.ReadinessProbe)
 							require.NotNil(t, main.StartupProbe)
@@ -1635,10 +1636,9 @@ func TestLPXRenderingPreservesCyborgOverrides(t *testing.T) {
 	require.Equal(t, "9", env["TOTAL_REPLICAS"])
 	require.Equal(t, "/custom-servers", env["SERVER_HOSTS_FILE"])
 
-	t.Log("Run SWA initialization without reading the replaced generated ConfigMap")
-	command := exec.CommandContext(t.Context(), "/bin/sh", "-ec", main.Args[0], "--", "/bin/sh", "-c", `printf '%s %s' "$SERVER_HOSTS_FILE" "$CYBORG_SWA_CACHE_IDS"`)
-	command.Env = []string{"SERVER_HOSTS_FILE=/custom-servers", "CYBORG_FPGA_GPI_REPLICA_INDEX=3", "CYBORG_BATCH_SIZE=2"}
-	output, err := command.CombinedOutput()
-	require.NoError(t, err, string(output))
-	require.Equal(t, "/custom-servers 6,7", string(output))
+	t.Log("Select only SWA initialization while preserving the authored command and host-file override")
+	require.Equal(t, []string{"/usr/local/bin/cyborg-entrypoint"}, main.Command)
+	wantArgs := append([]string{"--swa-batch-ids", "--"}, leader.Spec.Containers[0].Command...)
+	wantArgs = append(wantArgs, leader.Spec.Containers[0].Args...)
+	require.Equal(t, wantArgs, main.Args)
 }

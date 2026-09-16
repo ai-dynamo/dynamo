@@ -229,132 +229,9 @@ spec:
         podSpec:
           containers:
           - args:
-            - -c
-            - "set -euo pipefail\n\nrun_lpu_system_init() {\n\tif [[ ! -e /dev/fd
-              ]]; then\n\t\tln -svf /proc/self/fd /dev/fd || true\n\tfi\n\tmkdir -p
-              /tmp\n\tmkdir -p /var/run/dpdk/rte || true\n\tchmod 777 /var/run/dpdk/rte
-              || true\n\tulimit -l unlimited || true\n\n\tif command -v lpu-system-init
-              >/dev/null 2>&1; then\n\t\tlocal init_ok=\"unknown\"\n\t\tlocal init_status=0\n\t\tfor
-              attempt in $(seq 1 2); do\n\t\t\techo \"Running lpu-system-init (attempt
-              ${attempt})...\"\n\t\t\tlocal init_output\n\t\t\tlocal -a init_args=(--ci-precommand)\n\t\t\tif
-              (( attempt == 2 )); then\n\t\t\t\tinit_args+=(--ci-remediation-commands)\n\t\t\tfi\n\t\t\tset
-              +e\n\t\t\tinit_output=\"$(lpu-system-init \"${init_args[@]}\" 2>&1)\"\n\t\t\tinit_status=$?\n\t\t\tset
-              -e\n\t\t\techo \"${init_output}\"\n\t\t\tinit_ok=\"$(echo \"${init_output}\"
-              | grep -o '\"ok\": *[a-z]*' | tail -1 | grep -o 'true\\|false' || echo
-              \"unknown\")\"\n\t\t\tif (( init_status == 0 )) && [[ \"${init_ok}\"
-              != \"false\" ]]; then\n\t\t\t\tbreak\n\t\t\tfi\n\t\t\tif (( attempt
-              == 1 )); then\n\t\t\t\tif (( init_status != 0 )); then\n\t\t\t\t\techo
-              \"lpu-system-init exited with status ${init_status}; retrying with remediation\"
-              >&2\n\t\t\t\telse\n\t\t\t\t\techo \"lpu-system-init reported ok=false;
-              retrying with remediation\" >&2\n\t\t\t\tfi\n\t\t\tfi\n\t\tdone\n\t\tif
-              (( init_status != 0 )) || [[ \"${init_ok}\" == \"false\" ]]; then\n\t\t\techo
-              \"lpu-system-init failed after 2 attempts; aborting\" >&2\n\t\t\texit
-              1\n\t\tfi\n\telse\n\t\techo \"lpu-system-init not found; continuing
-              without pre-init\" >&2\n\tfi\n}\n\nset -euo pipefail\n\nLPU_CONFIG_DIR=\"${LPU_CONFIG_DIR:-/configs}\"\nCLIQUE_POD_INDEX=\"${GROVE_PCLQ_POD_INDEX:-}\"\nif
-              ! [[ \"${CLIQUE_POD_INDEX}\" =~ ^[0-9]+$ ]]; then\n\techo \"GROVE_PCLQ_POD_INDEX
-              must be a non-negative integer, got ${CLIQUE_POD_INDEX:-<empty>}\" >&2\n\texit
-              1\nfi\n\nreadarray -t PARTITION_NODE_COUNTS < \"${LPU_CONFIG_DIR}/nodes_per_partition\"\nreadarray
-              -t PARTITION_NODE_OFFSETS < \"${LPU_CONFIG_DIR}/partition_node_offsets\"\nif
-              (( ${#PARTITION_NODE_COUNTS[@]} == 0 || ${#PARTITION_NODE_COUNTS[@]}
-              != ${#PARTITION_NODE_OFFSETS[@]} )); then\n\techo \"nodes_per_partition
-              and partition_node_offsets must contain the same non-zero number of
-              rows\" >&2\n\texit 1\nfi\n\nif [[ -f \"${LPU_CONFIG_DIR}/partition_models\"
-              ]]; then\n\treadarray -t PARTITION_MODELS < \"${LPU_CONFIG_DIR}/partition_models\"\n\treadarray
-              -t PARTITION_INDICES < \"${LPU_CONFIG_DIR}/partition_indices\"\n\tif
-              [[ -z \"${LPU_MODEL_NAME:-}\" ]]; then\n\t\techo \"LPU_MODEL_NAME is
-              required when partition_models is configured\" >&2\n\t\texit 1\n\tfi\n\tif
-              (( ${#PARTITION_MODELS[@]} != ${#PARTITION_NODE_COUNTS[@]} || ${#PARTITION_INDICES[@]}
-              != ${#PARTITION_NODE_COUNTS[@]} )); then\n\t\techo \"partition_models
-              and partition_indices must match the partition config row count\" >&2\n\t\texit
-              1\n\tfi\nelse\n\tPARTITION_MODELS=()\n\tPARTITION_INDICES=()\nfi\n\nCONFIG_PARTITION_INDEX=\"\"\nLOGICAL_PARTITION_INDEX=\"\"\nPARTITION_RANK=\"\"\nNODE_COUNT=\"\"\nNODE_OFFSET=\"\"\nPARTITION_MATCH_COUNT=0\nfor
-              i in \"${!PARTITION_NODE_COUNTS[@]}\"; do\n\trow_node_count=\"${PARTITION_NODE_COUNTS[$i]}\"\n\trow_node_offset=\"${PARTITION_NODE_OFFSETS[$i]}\"\n\tif
-              ! [[ \"${row_node_count}\" =~ ^[1-9][0-9]*$ && \"${row_node_offset}\"
-              =~ ^[0-9]+$ ]]; then\n\t\techo \"Invalid partition row ${i}: node count
-              ${row_node_count}, node offset ${row_node_offset}\" >&2\n\t\texit 1\n\tfi\n\tif
-              (( ${#PARTITION_MODELS[@]} > 0 )) && [[ \"${PARTITION_MODELS[$i]}\"
-              != \"${LPU_MODEL_NAME}\" ]]; then\n\t\tcontinue\n\tfi\n\tif (( CLIQUE_POD_INDEX
-              < row_node_offset || CLIQUE_POD_INDEX >= row_node_offset + row_node_count
-              )); then\n\t\tcontinue\n\tfi\n\n\tCONFIG_PARTITION_INDEX=\"${i}\"\n\tLOGICAL_PARTITION_INDEX=\"${PARTITION_INDICES[$i]:-${i}}\"\n\tPARTITION_RANK=\"$((CLIQUE_POD_INDEX
-              - row_node_offset))\"\n\tNODE_COUNT=\"${row_node_count}\"\n\tNODE_OFFSET=\"${row_node_offset}\"\n\tPARTITION_MATCH_COUNT=$((PARTITION_MATCH_COUNT
-              + 1))\ndone\n\nif (( PARTITION_MATCH_COUNT != 1 )); then\n\techo \"Grove
-              pod index ${CLIQUE_POD_INDEX} matched ${PARTITION_MATCH_COUNT} partition
-              rows for model ${LPU_MODEL_NAME:-<default>}\" >&2\n\texit 1\nfi\nif
-              ! [[ \"${LOGICAL_PARTITION_INDEX}\" =~ ^[0-9]+$ ]]; then\n\techo \"Invalid
-              logical partition index ${LOGICAL_PARTITION_INDEX} for config row ${CONFIG_PARTITION_INDEX}\"
-              >&2\n\texit 1\nfi\n\n# Preserve legacy Agent names from Dynamo's runtime
-              partition mapping.\nexport PARTITION_ID=\"${LOGICAL_PARTITION_INDEX}\"\nexport
-              RANK_IN_PARTITION=\"${PARTITION_RANK}\"\n\nAGENT_BINARY=\"${AGENT_BINARY:-agent-hybrid-v2-roce}\"\nHOME=\"${HOME:-/root}\"\nMPI_SSH_PORT=\"${MPI_SSH_PORT:-2222}\"\nREADINESS_PORT=\"${READINESS_PORT:-19878}\"\nRDMA_PORT=\"${RDMA_PORT:-19877}\"\n\nreadarray
-              -t SOURCE_PARTITIONS < \"${LPU_CONFIG_DIR}/partition_ids\"\nreadarray
-              -t PARTITION_PATHS < \"${LPU_CONFIG_DIR}/partition_paths\"\nreadarray
-              -t TOPOLOGIES < \"${LPU_CONFIG_DIR}/topologies\"\n\nSOURCE_PARTITION=\"${SOURCE_PARTITIONS[$CONFIG_PARTITION_INDEX]}\"\nPARTITION_PATH=\"${PARTITION_PATHS[$CONFIG_PARTITION_INDEX]}\"\nTOPOLOGY=\"${TOPOLOGIES[$CONFIG_PARTITION_INDEX]}\"\n\nagent_part_from_partition_path()
-              {\n\tlocal part_path=\"$1\"\n\tlocal part_name=\"${part_path##*/}\"\n\tif
-              [[ \"${part_name}\" =~ ^part-?([0-9]+)$ ]]; then\n\t\tprintf \"%s\\n\"
-              \"${BASH_REMATCH[1]}\"\n\t\treturn\n\tfi\n\n\tprintf \"%s\\n\" \"${SOURCE_PARTITION}\"\n}\n\nagent_assemble_dir_from_partition_path()
-              {\n\tlocal part_path=\"$1\"\n\tlocal agent_part=\"$2\"\n\tlocal part_name=\"${part_path##*/}\"\n\tlocal
-              parent=\"${part_path%/*}\"\n\tif [[ \"${part_name}\" != \"part-${agent_part}\"
-              ]]; then\n\t\tlocal assemble_dir=\"/tmp/dynamo-agent-assemble/row-${CONFIG_PARTITION_INDEX}\"\n\t\tmkdir
-              -p \"${assemble_dir}\"\n\t\tln -sfn \"${GAS_DIR}/${part_path}\" \"${assemble_dir}/part-${agent_part}\"\n\t\tprintf
-              \"%s\\n\" \"${assemble_dir}\"\n\t\treturn\n\tfi\n\tif [[ \"${parent}\"
-              == \"${part_path}\" ]]; then\n\t\tprintf \"%s\\n\" \"${GAS_DIR}\"\n\t\treturn\n\tfi\n\tprintf
-              \"%s/%s\\n\" \"${GAS_DIR}\" \"${parent}\"\n}\n\nAGENT_PART=\"$(agent_part_from_partition_path
-              \"${PARTITION_PATH}\")\"\nAGENT_ASSEMBLE_DIR=\"$(agent_assemble_dir_from_partition_path
-              \"${PARTITION_PATH}\" \"${AGENT_PART}\")\"\n\nsetup_ssh() {\n\tmkdir
-              -p \"${HOME}/.ssh\" \"${HOME}/.ssh/host_keys\"\n\tcp /ssh-pk/private.key
-              \"${HOME}/.ssh/id_rsa\"\n\tcp /ssh-pk/private.key.pub \"${HOME}/.ssh/id_rsa.pub\"\n\tcp
-              /ssh-pk/private.key.pub \"${HOME}/.ssh/authorized_keys\"\n\tchmod 600
-              \"${HOME}/.ssh/id_rsa\" \"${HOME}/.ssh/authorized_keys\"\n\tchmod 644
-              \"${HOME}/.ssh/id_rsa.pub\"\n\tprintf \"Host *\\nIdentityFile %s/.ssh/id_rsa\\nStrictHostKeyChecking
-              no\\nPort %s\\n\" \"${HOME}\" \"${MPI_SSH_PORT}\" > \"${HOME}/.ssh/config\"\n\n\ttest
-              -f \"${HOME}/.ssh/host_keys/ssh_host_rsa_key\" || ssh-keygen -t rsa
-              -f \"${HOME}/.ssh/host_keys/ssh_host_rsa_key\" -N \"\" -q\n\ttest -f
-              \"${HOME}/.ssh/host_keys/ssh_host_ecdsa_key\" || ssh-keygen -t ecdsa
-              -f \"${HOME}/.ssh/host_keys/ssh_host_ecdsa_key\" -N \"\" -q\n\ttest
-              -f \"${HOME}/.ssh/host_keys/ssh_host_ed25519_key\" || ssh-keygen -t
-              ed25519 -f \"${HOME}/.ssh/host_keys/ssh_host_ed25519_key\" -N \"\" -q\n}\n\nrun_sshd()
-              {\n\tsetup_ssh\n\techo \"Starting sshd on port ${MPI_SSH_PORT} for partition
-              ${LOGICAL_PARTITION_INDEX} rank ${PARTITION_RANK}\"\n\texec /bin/sshd
-              -D -e \\\n\t\t-o \"PidFile none\" \\\n\t\t-o \"Port ${MPI_SSH_PORT}\"
-              \\\n\t\t-o \"AuthorizedKeysFile ${HOME}/.ssh/authorized_keys\" \\\n\t\t-o
-              \"StrictModes no\" \\\n\t\t-o \"PermitRootLogin yes\" \\\n\t\t-o \"PubkeyAuthentication
-              yes\" \\\n\t\t-o \"SetEnv PARTITION_ID=\\\"${PARTITION_ID}\\\" RANK_IN_PARTITION=\\\"${RANK_IN_PARTITION}\\\"\"
-              \\\n\t\t-h \"${HOME}/.ssh/host_keys/ssh_host_rsa_key\" \\\n\t\t-h \"${HOME}/.ssh/host_keys/ssh_host_ecdsa_key\"
-              \\\n\t\t-h \"${HOME}/.ssh/host_keys/ssh_host_ed25519_key\"\n}\n\npartition_hostnames()
-              {\n\tfor ((rank = 0; rank < NODE_COUNT; rank++)); do\n\t\tlocal node_index=$((NODE_OFFSET
-              + rank))\n\t\tprintf \"%s-%d.%s\\n\" \"${GROVE_PCLQ_NAME}\" \"${node_index}\"
-              \"${GROVE_HEADLESS_SERVICE}\"\n\tdone\n}\n\nwait_for_peer_ssh() {\n\tlocal
-              host=\"$1\"\n\tfor i in $(seq 1 120); do\n\t\tif ssh -o ConnectTimeout=2
-              \"root@${host}\" echo ok >/dev/null 2>&1; then\n\t\t\techo \"${host}:${MPI_SSH_PORT}
-              reachable\"\n\t\t\treturn\n\t\tfi\n\t\tif [[ \"${i}\" == \"120\" ]];
-              then\n\t\t\techo \"${host}:${MPI_SSH_PORT} unreachable after 120 attempts\"
-              >&2\n\t\t\texit 1\n\t\tfi\n\t\tsleep 1\n\tdone\n}\n\nrun_lpu_system_init\ncommand
-              -v \"${AGENT_BINARY}\"\n\nif (( NODE_COUNT == 1 )); then\n\techo \"Starting
-              ${AGENT_BINARY} for logical partition ${LOGICAL_PARTITION_INDEX}, source
-              partition ${SOURCE_PARTITION}, part path ${PARTITION_PATH}, assemble-dir
-              ${AGENT_ASSEMBLE_DIR}, topology ${TOPOLOGY}\"\n\texec \"${AGENT_BINARY}\"
-              \\\n\t\t--assemble-dir \"${AGENT_ASSEMBLE_DIR}\" \\\n\t\t--part \"${AGENT_PART}\"
-              \\\n\t\t--topology \"${TOPOLOGY}\" \\\n\t\t--port \"${RDMA_PORT}\" \\\n\t\t--readiness-port
-              \"${READINESS_PORT}\" \\\n\t\t--stage-name continue\nfi\n\nif [[ \"${PARTITION_RANK}\"
-              != \"0\" ]]; then\n\trun_sshd\nfi\n\nsetup_ssh\nPARTITION_HOSTS=\"$(partition_hostnames)\"\nreadarray
-              -t NODE_HOSTS <<< \"${PARTITION_HOSTS}\"\n\nMPI_HOSTS=()\nMPI_HOSTS+=(\"${POD_IP}:1\")\nfor
-              host in \"${NODE_HOSTS[@]:1}\"; do\n\tMPI_HOSTS+=(\"${host}:1\")\ndone\nMPI_HOST_LIST=$(IFS=,;
-              echo \"${MPI_HOSTS[*]}\")\n\nfor host in \"${NODE_HOSTS[@]:1}\"; do\n\twait_for_peer_ssh
-              \"${host}\"\ndone\n\nMPI_ARGS=(\n\t--allow-run-as-root\n\t--host \"${MPI_HOST_LIST}\"\n\t-np
-              \"${NODE_COUNT}\"\n\t--map-by ppr:1:node:OVERSUBSCRIBE\n\t--mca pml
-              ob1\n\t--mca btl tcp,self\n\t--mca mtl ^ofi\n\t--mca plm_rsh_args \"-p
-              ${MPI_SSH_PORT}\"\n\t--bind-to none\n\t-x GROQ_DRACO_NETWORK_UP_CHECK_TIMEOUT\n\t-x
-              DRACO_FORCE_RECONFIGURE\n\t-x DRACO_MAXFILE_OVERRIDE\n\t-x LPU_VSAP_DIB_CREDIT_AUTO_RESTORE_US\n\t--output
-              TAG\n)\nif [[ -n \"${MPI_BTL_TCP_IF_INCLUDE:-}\" ]]; then\n\tMPI_ARGS+=(--mca
-              btl_tcp_if_include \"${MPI_BTL_TCP_IF_INCLUDE}\")\nfi\n\necho \"Starting
-              mpirun for logical partition ${LOGICAL_PARTITION_INDEX}, source partition
-              ${SOURCE_PARTITION}, part path ${PARTITION_PATH}, assemble-dir ${AGENT_ASSEMBLE_DIR},
-              topology ${TOPOLOGY}\"\nexec numactl --cpunodebind=0 --membind=0 mpirun
-              \"${MPI_ARGS[@]}\" -- \\\n\t\"${AGENT_BINARY}\" \\\n\t\t--assemble-dir
-              \"${AGENT_ASSEMBLE_DIR}\" \\\n\t\t--part \"${AGENT_PART}\" \\\n\t\t--topology
-              \"${TOPOLOGY}\" \\\n\t\t--multinode \\\n\t\t--port \"${RDMA_PORT}\"
-              \\\n\t\t--readiness-port \"${READINESS_PORT}\" \\\n\t\t--stage-name
-              continue\n"
+            - start
             command:
-            - /bin/bash
+            - /bin/hydra-entrypoint
             env:
             - name: DYN_COMPONENT
               value: lpx
@@ -414,45 +291,8 @@ spec:
             readinessProbe:
               exec:
                 command:
-                - /bin/bash
-                - -c
-                - "set -euo pipefail\n\nLPU_CONFIG_DIR=\"${LPU_CONFIG_DIR:-/configs}\"\nCLIQUE_POD_INDEX=\"${GROVE_PCLQ_POD_INDEX:-}\"\nif
-                  ! [[ \"${CLIQUE_POD_INDEX}\" =~ ^[0-9]+$ ]]; then\n\techo \"GROVE_PCLQ_POD_INDEX
-                  must be a non-negative integer, got ${CLIQUE_POD_INDEX:-<empty>}\"
-                  >&2\n\texit 1\nfi\n\nreadarray -t PARTITION_NODE_COUNTS < \"${LPU_CONFIG_DIR}/nodes_per_partition\"\nreadarray
-                  -t PARTITION_NODE_OFFSETS < \"${LPU_CONFIG_DIR}/partition_node_offsets\"\nif
-                  (( ${#PARTITION_NODE_COUNTS[@]} == 0 || ${#PARTITION_NODE_COUNTS[@]}
-                  != ${#PARTITION_NODE_OFFSETS[@]} )); then\n\techo \"nodes_per_partition
-                  and partition_node_offsets must contain the same non-zero number
-                  of rows\" >&2\n\texit 1\nfi\n\nif [[ -f \"${LPU_CONFIG_DIR}/partition_models\"
-                  ]]; then\n\treadarray -t PARTITION_MODELS < \"${LPU_CONFIG_DIR}/partition_models\"\n\treadarray
-                  -t PARTITION_INDICES < \"${LPU_CONFIG_DIR}/partition_indices\"\n\tif
-                  [[ -z \"${LPU_MODEL_NAME:-}\" ]]; then\n\t\techo \"LPU_MODEL_NAME
-                  is required when partition_models is configured\" >&2\n\t\texit
-                  1\n\tfi\n\tif (( ${#PARTITION_MODELS[@]} != ${#PARTITION_NODE_COUNTS[@]}
-                  || ${#PARTITION_INDICES[@]} != ${#PARTITION_NODE_COUNTS[@]} ));
-                  then\n\t\techo \"partition_models and partition_indices must match
-                  the partition config row count\" >&2\n\t\texit 1\n\tfi\nelse\n\tPARTITION_MODELS=()\n\tPARTITION_INDICES=()\nfi\n\nCONFIG_PARTITION_INDEX=\"\"\nLOGICAL_PARTITION_INDEX=\"\"\nPARTITION_RANK=\"\"\nNODE_COUNT=\"\"\nNODE_OFFSET=\"\"\nPARTITION_MATCH_COUNT=0\nfor
-                  i in \"${!PARTITION_NODE_COUNTS[@]}\"; do\n\trow_node_count=\"${PARTITION_NODE_COUNTS[$i]}\"\n\trow_node_offset=\"${PARTITION_NODE_OFFSETS[$i]}\"\n\tif
-                  ! [[ \"${row_node_count}\" =~ ^[1-9][0-9]*$ && \"${row_node_offset}\"
-                  =~ ^[0-9]+$ ]]; then\n\t\techo \"Invalid partition row ${i}: node
-                  count ${row_node_count}, node offset ${row_node_offset}\" >&2\n\t\texit
-                  1\n\tfi\n\tif (( ${#PARTITION_MODELS[@]} > 0 )) && [[ \"${PARTITION_MODELS[$i]}\"
-                  != \"${LPU_MODEL_NAME}\" ]]; then\n\t\tcontinue\n\tfi\n\tif (( CLIQUE_POD_INDEX
-                  < row_node_offset || CLIQUE_POD_INDEX >= row_node_offset + row_node_count
-                  )); then\n\t\tcontinue\n\tfi\n\n\tCONFIG_PARTITION_INDEX=\"${i}\"\n\tLOGICAL_PARTITION_INDEX=\"${PARTITION_INDICES[$i]:-${i}}\"\n\tPARTITION_RANK=\"$((CLIQUE_POD_INDEX
-                  - row_node_offset))\"\n\tNODE_COUNT=\"${row_node_count}\"\n\tNODE_OFFSET=\"${row_node_offset}\"\n\tPARTITION_MATCH_COUNT=$((PARTITION_MATCH_COUNT
-                  + 1))\ndone\n\nif (( PARTITION_MATCH_COUNT != 1 )); then\n\techo
-                  \"Grove pod index ${CLIQUE_POD_INDEX} matched ${PARTITION_MATCH_COUNT}
-                  partition rows for model ${LPU_MODEL_NAME:-<default>}\" >&2\n\texit
-                  1\nfi\nif ! [[ \"${LOGICAL_PARTITION_INDEX}\" =~ ^[0-9]+$ ]]; then\n\techo
-                  \"Invalid logical partition index ${LOGICAL_PARTITION_INDEX} for
-                  config row ${CONFIG_PARTITION_INDEX}\" >&2\n\texit 1\nfi\n\nif ((
-                  NODE_COUNT > 1 )) && [[ \"${PARTITION_RANK}\" != \"0\" ]]; then\n\tcat
-                  < /dev/null > \"/dev/tcp/127.0.0.1/${MPI_SSH_PORT:-2222}\"\nelse\n\texec
-                  3<>\"/dev/tcp/127.0.0.1/${READINESS_PORT:-19878}\"\n\tprintf \"GET
-                  /readyz HTTP/1.0\\r\\n\\r\\n\" >&3\n\tread -r STATUS <&3\n\t[[ \"${STATUS}\"
-                  == *\" 200 \"* ]]\nfi"
+                - /bin/hydra-entrypoint
+                - ready
               failureThreshold: 6
               periodSeconds: 5
               successThreshold: 1
@@ -471,45 +311,8 @@ spec:
             startupProbe:
               exec:
                 command:
-                - /bin/bash
-                - -c
-                - "set -euo pipefail\n\nLPU_CONFIG_DIR=\"${LPU_CONFIG_DIR:-/configs}\"\nCLIQUE_POD_INDEX=\"${GROVE_PCLQ_POD_INDEX:-}\"\nif
-                  ! [[ \"${CLIQUE_POD_INDEX}\" =~ ^[0-9]+$ ]]; then\n\techo \"GROVE_PCLQ_POD_INDEX
-                  must be a non-negative integer, got ${CLIQUE_POD_INDEX:-<empty>}\"
-                  >&2\n\texit 1\nfi\n\nreadarray -t PARTITION_NODE_COUNTS < \"${LPU_CONFIG_DIR}/nodes_per_partition\"\nreadarray
-                  -t PARTITION_NODE_OFFSETS < \"${LPU_CONFIG_DIR}/partition_node_offsets\"\nif
-                  (( ${#PARTITION_NODE_COUNTS[@]} == 0 || ${#PARTITION_NODE_COUNTS[@]}
-                  != ${#PARTITION_NODE_OFFSETS[@]} )); then\n\techo \"nodes_per_partition
-                  and partition_node_offsets must contain the same non-zero number
-                  of rows\" >&2\n\texit 1\nfi\n\nif [[ -f \"${LPU_CONFIG_DIR}/partition_models\"
-                  ]]; then\n\treadarray -t PARTITION_MODELS < \"${LPU_CONFIG_DIR}/partition_models\"\n\treadarray
-                  -t PARTITION_INDICES < \"${LPU_CONFIG_DIR}/partition_indices\"\n\tif
-                  [[ -z \"${LPU_MODEL_NAME:-}\" ]]; then\n\t\techo \"LPU_MODEL_NAME
-                  is required when partition_models is configured\" >&2\n\t\texit
-                  1\n\tfi\n\tif (( ${#PARTITION_MODELS[@]} != ${#PARTITION_NODE_COUNTS[@]}
-                  || ${#PARTITION_INDICES[@]} != ${#PARTITION_NODE_COUNTS[@]} ));
-                  then\n\t\techo \"partition_models and partition_indices must match
-                  the partition config row count\" >&2\n\t\texit 1\n\tfi\nelse\n\tPARTITION_MODELS=()\n\tPARTITION_INDICES=()\nfi\n\nCONFIG_PARTITION_INDEX=\"\"\nLOGICAL_PARTITION_INDEX=\"\"\nPARTITION_RANK=\"\"\nNODE_COUNT=\"\"\nNODE_OFFSET=\"\"\nPARTITION_MATCH_COUNT=0\nfor
-                  i in \"${!PARTITION_NODE_COUNTS[@]}\"; do\n\trow_node_count=\"${PARTITION_NODE_COUNTS[$i]}\"\n\trow_node_offset=\"${PARTITION_NODE_OFFSETS[$i]}\"\n\tif
-                  ! [[ \"${row_node_count}\" =~ ^[1-9][0-9]*$ && \"${row_node_offset}\"
-                  =~ ^[0-9]+$ ]]; then\n\t\techo \"Invalid partition row ${i}: node
-                  count ${row_node_count}, node offset ${row_node_offset}\" >&2\n\t\texit
-                  1\n\tfi\n\tif (( ${#PARTITION_MODELS[@]} > 0 )) && [[ \"${PARTITION_MODELS[$i]}\"
-                  != \"${LPU_MODEL_NAME}\" ]]; then\n\t\tcontinue\n\tfi\n\tif (( CLIQUE_POD_INDEX
-                  < row_node_offset || CLIQUE_POD_INDEX >= row_node_offset + row_node_count
-                  )); then\n\t\tcontinue\n\tfi\n\n\tCONFIG_PARTITION_INDEX=\"${i}\"\n\tLOGICAL_PARTITION_INDEX=\"${PARTITION_INDICES[$i]:-${i}}\"\n\tPARTITION_RANK=\"$((CLIQUE_POD_INDEX
-                  - row_node_offset))\"\n\tNODE_COUNT=\"${row_node_count}\"\n\tNODE_OFFSET=\"${row_node_offset}\"\n\tPARTITION_MATCH_COUNT=$((PARTITION_MATCH_COUNT
-                  + 1))\ndone\n\nif (( PARTITION_MATCH_COUNT != 1 )); then\n\techo
-                  \"Grove pod index ${CLIQUE_POD_INDEX} matched ${PARTITION_MATCH_COUNT}
-                  partition rows for model ${LPU_MODEL_NAME:-<default>}\" >&2\n\texit
-                  1\nfi\nif ! [[ \"${LOGICAL_PARTITION_INDEX}\" =~ ^[0-9]+$ ]]; then\n\techo
-                  \"Invalid logical partition index ${LOGICAL_PARTITION_INDEX} for
-                  config row ${CONFIG_PARTITION_INDEX}\" >&2\n\texit 1\nfi\n\nif ((
-                  NODE_COUNT > 1 )) && [[ \"${PARTITION_RANK}\" != \"0\" ]]; then\n\tcat
-                  < /dev/null > \"/dev/tcp/127.0.0.1/${MPI_SSH_PORT:-2222}\"\nelse\n\texec
-                  3<>\"/dev/tcp/127.0.0.1/${READINESS_PORT:-19878}\"\n\tprintf \"GET
-                  /readyz HTTP/1.0\\r\\n\\r\\n\" >&3\n\tread -r STATUS <&3\n\t[[ \"${STATUS}\"
-                  == *\" 200 \"* ]]\nfi"
+                - /bin/hydra-entrypoint
+                - ready
               failureThreshold: 240
               periodSeconds: 5
               successThreshold: 1

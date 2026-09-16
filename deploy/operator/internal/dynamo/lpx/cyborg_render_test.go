@@ -84,9 +84,8 @@ func TestRenderHybridProjectsManifestRuntimeIO(t *testing.T) {
 	})
 	require.Contains(t, cyborg.Spec.PodSpec.Volumes, renderTestPodSpec().Volumes[0])
 	require.Contains(t, cyborg.Spec.PodSpec.Containers[0].VolumeMounts, renderTestPodSpec().Containers[0].VolumeMounts[0])
-	require.Equal(t, []string{"/bin/sh", "-ec"}, cyborg.Spec.PodSpec.Containers[0].Command)
-	require.Contains(t, cyborg.Spec.PodSpec.Containers[0].Args[0], `export CYBORG_SWA_CACHE_IDS="${ids}"`)
-	require.Equal(t, []string{"--", "/configs/lpu_servers", "/tmp/lpu_servers", "/usr/local/bin/dynamo_main"}, cyborg.Spec.PodSpec.Containers[0].Args[1:])
+	require.Equal(t, []string{"/usr/local/bin/cyborg-entrypoint"}, cyborg.Spec.PodSpec.Containers[0].Command)
+	require.Equal(t, []string{"--expand-hosts", "--swa-batch-ids", "--", "/usr/local/bin/dynamo_main"}, cyborg.Spec.PodSpec.Containers[0].Args)
 
 	t.Log("Preserve an image-owned entrypoint")
 	imageEntrypointPCS := renderTestPCS(true)
@@ -103,7 +102,7 @@ func TestRenderHybridProjectsManifestRuntimeIO(t *testing.T) {
 	input.Stages = map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}}
 	_, err = renderSelectedForTest(imageEntrypointPCS, []*ModelProjection{projection}, input)
 	require.NoError(t, err)
-	require.Equal(t, []string{"/usr/local/bin/cyborg", "serve"}, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Args[4:])
+	require.Equal(t, []string{"/usr/local/bin/cyborg", "serve"}, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Args[3:])
 
 	t.Log("Reject incomplete endpoint and fanout coverage of the same split-I/O runtime")
 

@@ -90,19 +90,12 @@ spec:
         podSpec:
           containers:
           - args:
-            - |
-              : "${GROVE_PCSG_NAME:?missing GROVE_PCSG_NAME}" "${GROVE_PCSG_INDEX:?missing GROVE_PCSG_INDEX}" "${GROVE_HEADLESS_SERVICE:?missing GROVE_HEADLESS_SERVICE}"
-              sed -e "s|\${GROVE_PCSG_NAME}|${GROVE_PCSG_NAME}|g" -e "s|\${GROVE_PCSG_INDEX}|${GROVE_PCSG_INDEX}|g" -e "s|\${GROVE_HEADLESS_SERVICE}|${GROVE_HEADLESS_SERVICE}|g" "$1" > "$2"
-              shift 2
-              exec "$@"
+            - --expand-hosts
             - --
-            - /configs/lpu_servers
-            - /tmp/lpu_servers
             - /opt/gpu-runtime
             - serve
             command:
-            - /bin/sh
-            - -ec
+            - /usr/local/bin/cyborg-entrypoint
             env:
             - name: CYBORG_BATCH_SIZE
               value: "1"

@@ -14,17 +14,19 @@ import (
 )
 
 const (
-	lpuModelConfigFilepath              = lpuConfigMountPath + "/model_config.toml"
-	lpuExpandedDatacenterConfigFilepath = runtimeTemporaryStorageMountPath + "/datacenter.toml"
+	lpuModelConfigFilepath      = lpuConfigMountPath + "/model_config.toml"
+	lpuDatacenterConfigFilepath = lpuConfigMountPath + "/datacenter.toml"
 )
 
 func updateLPUConductorContainer(
 	container *corev1.Container,
 	allocation string,
 ) {
-	// Expand this engine's topology before the default or explicitly authored command.
+	// Nova reads the original configuration and expands hostname templates natively.
 	container.Name = "conductor"
-	wrapRuntimeStartup(container, "/bin/nova", "datacenter.toml", "")
+	if len(container.Command) == 0 {
+		container.Command = []string{"/bin/nova"}
+	}
 
 	// Nova and OpenMPI require root in the supported direct-DGD runtime.
 	if container.SecurityContext == nil {
@@ -49,7 +51,7 @@ func updateLPUConductorContainer(
 
 		// configmap
 		"--datacenter-config-filepath",
-		lpuExpandedDatacenterConfigFilepath,
+		lpuDatacenterConfigFilepath,
 		"--model-config-filepath",
 		lpuModelConfigFilepath,
 

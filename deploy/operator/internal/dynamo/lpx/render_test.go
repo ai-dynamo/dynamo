@@ -238,8 +238,8 @@ func TestRenderMaterializesAgentModelFromBasePodSpec(t *testing.T) {
 	conductor := namedClique(t, rendered, "lpu-ldr")
 	require.Nil(t, conductor.Spec.PodSpec.Affinity)
 	require.Equal(t, conductorPodSpec.NodeSelector, conductor.Spec.PodSpec.NodeSelector)
-	require.Equal(t, []string{"/bin/sh", "-ec"}, conductor.Spec.PodSpec.Containers[0].Command)
-	require.Equal(t, []string{"/bin/bash", "-c", "custom-agent"}, conductor.Spec.PodSpec.Containers[0].Args[4:7])
+	require.Equal(t, []string{"/bin/bash"}, conductor.Spec.PodSpec.Containers[0].Command)
+	require.Equal(t, []string{"-c", "custom-agent"}, conductor.Spec.PodSpec.Containers[0].Args[:2])
 	require.Equal(t, modelAnnotationSource, conductor.Spec.PodSpec.Containers[0].Env[0].ValueFrom)
 	require.Empty(t, conductor.Spec.PodSpec.Containers[0].Env[0].Value)
 

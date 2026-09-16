@@ -86,15 +86,6 @@ spec:
         podSpec:
           containers:
           - args:
-            - |
-              : "${GROVE_PCSG_NAME:?missing GROVE_PCSG_NAME}" "${GROVE_PCSG_INDEX:?missing GROVE_PCSG_INDEX}" "${GROVE_HEADLESS_SERVICE:?missing GROVE_HEADLESS_SERVICE}"
-              sed -e "s|\${GROVE_PCSG_NAME}|${GROVE_PCSG_NAME}|g" -e "s|\${GROVE_PCSG_INDEX}|${GROVE_PCSG_INDEX}|g" -e "s|\${GROVE_HEADLESS_SERVICE}|${GROVE_HEADLESS_SERVICE}|g" "$1" > "$2"
-              shift 2
-              exec "$@"
-            - --
-            - /configs/datacenter.toml
-            - /tmp/datacenter.toml
-            - /bin/nova
             - --instance-model-name
             - test/llama32-1b-lp30
             - --agent-path
@@ -108,7 +99,7 @@ spec:
             - --control-server-addr
             - $(POD_IP):51045
             - --datacenter-config-filepath
-            - /tmp/datacenter.toml
+            - /configs/datacenter.toml
             - --model-config-filepath
             - /configs/model_config.toml
             - --json-logs
@@ -179,8 +170,7 @@ spec:
             - --agent-env-vars
             - REDFISH_BMC_ENABLED=false
             command:
-            - /bin/sh
-            - -ec
+            - /bin/nova
             env:
             - name: DYN_COMPONENT
               value: lpx
@@ -248,11 +238,12 @@ spec:
               name: shared-memory
           initContainers:
           - args:
-            - -c
-            - set -euo pipefail; cp /ssh-pk/private.key /tmp/dynamo-lpu-ssh/private.key;
-              chmod 600 /tmp/dynamo-lpu-ssh/private.key
+            - -m
+            - "0600"
+            - /ssh-pk/private.key
+            - /tmp/dynamo-lpu-ssh/private.key
             command:
-            - /bin/bash
+            - /bin/install
             image: example.invalid/lpu-runtime:test
             name: prepare-ssh-key
             resources: {}
@@ -316,58 +307,8 @@ spec:
         minAvailable: 1
         podSpec:
           containers:
-          - args:
-            - -c
-            - "set -euo pipefail\n\nrun_lpu_system_init() {\n\tif [[ ! -e /dev/fd
-              ]]; then\n\t\tln -svf /proc/self/fd /dev/fd || true\n\tfi\n\tmkdir -p
-              /tmp\n\tmkdir -p /var/run/dpdk/rte || true\n\tchmod 777 /var/run/dpdk/rte
-              || true\n\tulimit -l unlimited || true\n\n\tif command -v lpu-system-init
-              >/dev/null 2>&1; then\n\t\tlocal init_ok=\"unknown\"\n\t\tlocal init_status=0\n\t\tfor
-              attempt in $(seq 1 2); do\n\t\t\techo \"Running lpu-system-init (attempt
-              ${attempt})...\"\n\t\t\tlocal init_output\n\t\t\tlocal -a init_args=(--ci-precommand)\n\t\t\tif
-              (( attempt == 2 )); then\n\t\t\t\tinit_args+=(--ci-remediation-commands)\n\t\t\tfi\n\t\t\tset
-              +e\n\t\t\tinit_output=\"$(lpu-system-init \"${init_args[@]}\" 2>&1)\"\n\t\t\tinit_status=$?\n\t\t\tset
-              -e\n\t\t\techo \"${init_output}\"\n\t\t\tinit_ok=\"$(echo \"${init_output}\"
-              | grep -o '\"ok\": *[a-z]*' | tail -1 | grep -o 'true\\|false' || echo
-              \"unknown\")\"\n\t\t\tif (( init_status == 0 )) && [[ \"${init_ok}\"
-              != \"false\" ]]; then\n\t\t\t\tbreak\n\t\t\tfi\n\t\t\tif (( attempt
-              == 1 )); then\n\t\t\t\tif (( init_status != 0 )); then\n\t\t\t\t\techo
-              \"lpu-system-init exited with status ${init_status}; retrying with remediation\"
-              >&2\n\t\t\t\telse\n\t\t\t\t\techo \"lpu-system-init reported ok=false;
-              retrying with remediation\" >&2\n\t\t\t\tfi\n\t\t\tfi\n\t\tdone\n\t\tif
-              (( init_status != 0 )) || [[ \"${init_ok}\" == \"false\" ]]; then\n\t\t\techo
-              \"lpu-system-init failed after 2 attempts; aborting\" >&2\n\t\t\texit
-              1\n\t\tfi\n\telse\n\t\techo \"lpu-system-init not found; continuing
-              without pre-init\" >&2\n\tfi\n}\n\nHOME=\"${HOME:-/root}\"\n\nif [[
-              \"${LPU_RUN_SYSTEM_INIT:-true}\" == \"true\" ]]; then\n\trun_lpu_system_init\nfi\n\nulimit
-              -l unlimited || true\n\nmkdir -p $HOME/.ssh $HOME/.ssh/host_keys\nls
-              -la /ssh-pk/\ncp /ssh-pk/private.key $HOME/.ssh/id_rsa\ncp /ssh-pk/private.key.pub
-              $HOME/.ssh/id_rsa.pub\ncp /ssh-pk/private.key.pub $HOME/.ssh/authorized_keys\nchmod
-              600 $HOME/.ssh/id_rsa $HOME/.ssh/authorized_keys\nchmod 644 $HOME/.ssh/id_rsa.pub\nprintf
-              'Host *\\nIdentityFile '$HOME'/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort
-              2222\\n' > $HOME/.ssh/config\n\ntest -f \"$HOME/.ssh/host_keys/ssh_host_rsa_key\"
-              || ssh-keygen -t rsa -f $HOME/.ssh/host_keys/ssh_host_rsa_key -N ''\ntest
-              -f \"$HOME/.ssh/host_keys/ssh_host_ecdsa_key\" || ssh-keygen -t ecdsa
-              -f $HOME/.ssh/host_keys/ssh_host_ecdsa_key -N ''\ntest -f \"$HOME/.ssh/host_keys/ssh_host_ed25519_key\"
-              || ssh-keygen -t ed25519 -f $HOME/.ssh/host_keys/ssh_host_ed25519_key
-              -N ''\n\n\nif command -v setcap >/dev/null 2>&1; then\n\tfor binary
-              in /bin-unwrapped/agent_v2.unwrapped /bin-unwrapped/agent_v2_perfetto_trace.unwrapped
-              /bin/agent_v2 /bin/agent_v2_perfetto_trace; do\n\t\tif [[ -e \"$binary\"
-              ]]; then\n\t\t\techo \"Lifting capabilities of $binary\"\n\t\t\tsetcap
-              cap_sys_nice,cap_sys_resource,cap_sys_admin,cap_dac_override,cap_sys_rawio,cap_sys_ptrace=+ep
-              \"$(realpath \"$binary\")\" || true\n\t\tfi\n\tdone\nfi\n\n# Pass down
-              information from the k8s downward API into SSH sessions.\nSETENV_LINE=\"\"\nSETENV_LINE=\"${SETENV_LINE}
-              K8S_POD_NAME=\\\"$POD_NAME\\\"\"\nSETENV_LINE=\"${SETENV_LINE} K8S_POD_NAMESPACE=\\\"$POD_NAMESPACE\\\"\"\nSETENV_LINE=\"${SETENV_LINE}
-              K8S_POD_UID=\\\"$POD_UID\\\"\"\nif [[ -n \"${LPU_MODEL_NAME:-}\" ]];
-              then\n\tSETENV_LINE=\"${SETENV_LINE} LPU_MODEL_NAME=\\\"$LPU_MODEL_NAME\\\"\"\nfi\nexec
-              /bin/sshd -D -e \\\n\t-o \"PidFile none\" \\\n\t-o \"Port 2222\" \\\n\t-o
-              \"AuthorizedKeysFile $HOME/.ssh/authorized_keys\" \\\n\t-o \"StrictModes
-              no\" \\\n\t-o PermitRootLogin=yes \\\n\t-o PasswordAuthentication=no
-              \\\n\t-o PubkeyAuthentication=yes \\\n\t-o \"SetEnv $SETENV_LINE\" \\\n\t-h
-              \"$HOME/.ssh/host_keys/ssh_host_rsa_key\" \\\n\t-h \"$HOME/.ssh/host_keys/ssh_host_ecdsa_key\"
-              \\\n\t-h \"$HOME/.ssh/host_keys/ssh_host_ed25519_key\"\n"
-            command:
-            - /bin/bash
+          - command:
+            - /bin/quasar-entrypoint
             env:
             - name: BMC_SSH_ENABLED
               value: "false"

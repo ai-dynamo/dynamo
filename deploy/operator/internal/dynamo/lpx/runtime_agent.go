@@ -121,12 +121,13 @@ func configureDirectHybridAgentRuntime(
 	agent.Args, _ = stripNovaOnlyArgs(agent.Args)
 	hasCustomStartup := len(agent.Command) != 0 || len(agent.Args) != 0
 	agent.Name = lpuAgentContainerName
-	applyLPUWorkerContainerBase(agent, hasCustomStartup)
-	if len(agent.Args) == 0 && !hasCustomStartup {
+	applyLPUWorkerContainerBase(agent)
+	if !hasCustomStartup {
 		if err := validateGeneratedAgentMounts(agent, true, multiNode); err != nil {
 			return err
 		}
-		agent.Args = []string{"-c", lpuPartitionRunCommand}
+		agent.Command = []string{"/bin/hydra-entrypoint"}
+		agent.Args = []string{"start"}
 	}
 
 	if !hasCustomStartup || agent.StartupProbe == nil {
@@ -200,7 +201,7 @@ func configureNodeLocalConductorRuntime(
 
 	// Materialize the GPC conductor around the image's Nova binary.
 	setNodeLocalPodIPEnv(conductor, isXT)
-	if err := validateRuntimeConfigStorage(conductorPodSpec, conductor, "datacenter.toml"); err != nil {
+	if err := validateRuntimeConfigStorage(conductorPodSpec, conductor, ""); err != nil {
 		return err
 	}
 	updateLPUConductorContainer(conductor, allocation)
@@ -249,7 +250,7 @@ func configureNodeLocalAgentRuntime(
 		return err
 	}
 
-	// Check only the paths consumed by the selected generated worker script.
+	// Check only the paths consumed by the selected image launcher.
 	if !preserveAgentEntrypoint {
 		if err := validateGeneratedAgentMounts(agent, isXT, true); err != nil {
 			return err
@@ -258,7 +259,7 @@ func configureNodeLocalAgentRuntime(
 
 	// Apply the family-specific worker resource and initialization requirements.
 	if isXT {
-		applyLPUWorkerContainerBase(agent, preserveAgentEntrypoint)
+		applyLPUWorkerContainerBase(agent)
 		agent.SecurityContext.RunAsGroup = ptr.To(int64(0))
 		agent.SecurityContext.RunAsNonRoot = ptr.To(false)
 	} else {
@@ -287,13 +288,11 @@ func configureNodeLocalAgentWorkerContainer(
 ) {
 	// The Agent pod hosts SSHD; Nova starts /bin/agent in a separate MPI process.
 	if !preserveEntrypoint {
-		runCommand := lpuWorkerRunCommand
+		container.Command = []string{"/bin/quasar-entrypoint"}
+		container.Args = nil
 		if isXT {
-			runCommand = lpuPartitionWorkerRunCommand
-		} else {
-			container.Command = []string{"/bin/bash"}
+			container.Args = []string{"--partition-metadata"}
 		}
-		container.Args = []string{"-c", runCommand}
 	}
 
 	if isXT {

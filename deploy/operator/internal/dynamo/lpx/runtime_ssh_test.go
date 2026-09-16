@@ -88,6 +88,8 @@ func TestAddConductorSSHKeyValidatesAuthoredStorage(t *testing.T) {
 			require.Equal(t, before.Volumes, pod.Volumes)
 			require.Equal(t, before.Containers, pod.Containers)
 			require.Len(t, pod.InitContainers, 1)
+			require.Equal(t, []string{"/bin/install"}, pod.InitContainers[0].Command)
+			require.Equal(t, []string{"-m", "0600", "/ssh-pk/private.key", "/tmp/dynamo-lpu-ssh/private.key"}, pod.InitContainers[0].Args)
 		})
 	}
 }

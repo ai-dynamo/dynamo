@@ -94,15 +94,6 @@ spec:
         podSpec:
           containers:
           - args:
-            - |
-              : "${GROVE_PCSG_NAME:?missing GROVE_PCSG_NAME}" "${GROVE_PCSG_INDEX:?missing GROVE_PCSG_INDEX}" "${GROVE_HEADLESS_SERVICE:?missing GROVE_HEADLESS_SERVICE}"
-              sed -e "s|\${GROVE_PCSG_NAME}|${GROVE_PCSG_NAME}|g" -e "s|\${GROVE_PCSG_INDEX}|${GROVE_PCSG_INDEX}|g" -e "s|\${GROVE_HEADLESS_SERVICE}|${GROVE_HEADLESS_SERVICE}|g" "$1" > "$2"
-              shift 2
-              exec "$@"
-            - --
-            - /configs/datacenter.toml
-            - /tmp/datacenter.toml
-            - /opt/dynamo-lpu
             - serve
             - --agent-path
             - /bin/agent
@@ -115,7 +106,7 @@ spec:
             - --control-server-addr
             - $(POD_IP):51045
             - --datacenter-config-filepath
-            - /tmp/datacenter.toml
+            - /configs/datacenter.toml
             - --model-config-filepath
             - /configs/model_config.toml
             - --json-logs
@@ -148,8 +139,7 @@ spec:
             - --store-backend
             - kubernetes
             command:
-            - /bin/sh
-            - -ec
+            - /opt/dynamo-lpu
             env:
             - name: DYN_COMPONENT
               value: lpx
@@ -217,11 +207,12 @@ spec:
               name: shared-memory
           initContainers:
           - args:
-            - -c
-            - set -euo pipefail; cp /ssh-pk/private.key /tmp/dynamo-lpu-ssh/private.key;
-              chmod 600 /tmp/dynamo-lpu-ssh/private.key
+            - -m
+            - "0600"
+            - /ssh-pk/private.key
+            - /tmp/dynamo-lpu-ssh/private.key
             command:
-            - /bin/bash
+            - /bin/install
             image: example.invalid/lpu-runtime:test
             name: prepare-ssh-key
             resources: {}
