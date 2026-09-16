@@ -18,7 +18,7 @@ use crate::CancellationToken;
 use crate::discovery::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryMetadata,
     DiscoveryQuery, DiscoverySpec, DiscoveryStream, MAX_JSON_SAFE_PUBLISHER_ID,
-    ModelCardInstanceId, reconcile_discovery_snapshot,
+    ModelCardInstanceId, reconcile_discovery_snapshot, resync_discovery_events,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -509,9 +509,7 @@ impl Discovery for KubeDiscoveryClient {
                             .map(|i| (i.id(), i))
                             .collect();
                         drop(state);
-                        let (events, reconciled) = reconcile_discovery_snapshot(&known, current);
-                        known = reconciled;
-                        for event in events {
+                        for event in resync_discovery_events(&mut known, current) {
                             if out_tx.send(Ok(event)).is_err() {
                                 return;
                             }

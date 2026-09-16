@@ -1196,7 +1196,8 @@ pub enum DiscoveryEvent {
     /// The backend resynchronized. The payload holds every instance that matches the query at
     /// that moment.
     ///
-    /// A consumer that builds its state from this stream only can ignore this event. A consumer
+    /// The stream sends this event after the incremental events of the same resync. A consumer
+    /// that builds its state only from this stream can ignore this event. A consumer
     /// that holds state from another source, such as a [`Discovery::list`] call, must replace its
     /// state with the payload.
     Resync(Vec<DiscoveryInstance>),
@@ -1481,6 +1482,20 @@ pub(crate) fn reconcile_discovery_snapshot(
     (events, next)
 }
 
+/// Reconcile an authoritative snapshot after a backend resync.
+///
+/// Returns the changes between `known` and the snapshot, then one [`DiscoveryEvent::Resync`]
+/// with the reconciled set. `known` becomes the reconciled set.
+pub(crate) fn resync_discovery_events(
+    known: &mut HashMap<DiscoveryInstanceId, DiscoveryInstance>,
+    current: HashMap<DiscoveryInstanceId, DiscoveryInstance>,
+) -> Vec<DiscoveryEvent> {
+    let (mut events, reconciled) = reconcile_discovery_snapshot(known, current);
+    *known = reconciled;
+    events.push(DiscoveryEvent::Resync(known.values().cloned().collect()));
+    events
+}
+
 fn model_with_updated_taints(
     existing: &DiscoveryInstance,
     mut taints: HashSet<String>,
@@ -1623,14 +1638,19 @@ pub trait Discovery: Send + Sync {
     /// This is a one-time snapshot without watching for changes
     async fn list(&self, query: DiscoveryQuery) -> Result<Vec<DiscoveryInstance>>;
 
-    /// Returns a stream of discovery events (Added/Removed) for the given discovery query
+    /// Returns a stream of discovery events for the given discovery query
     ///
     /// An implementation establishes the watch before it returns. The stream reports the state at
-    /// that moment, and then every change that follows.
+    /// that moment as `Added` events, and then every change that follows.
     ///
-    /// A caller that also needs a [`Discovery::list`] snapshot calls `list_and_watch` first. A
-    /// `list` before the watch can show an instance that an unregister removes before the
-    /// snapshot, and the stream never reports that removal.
+    /// A backend can fall behind and resynchronize from an authoritative snapshot. The stream then
+    /// reports the changes between its own state and that snapshot, and after them one
+    /// [`DiscoveryEvent::Resync`] that holds the full set. A change that started and ended inside
+    /// the gap is not reported as a change.
+    ///
+    /// A caller that also needs a [`Discovery::list`] snapshot calls `list_and_watch` first, and
+    /// replaces its state on every `Resync`. A `list` before the watch can show an instance that
+    /// an unregister removes before the snapshot, and no event reports that removal.
     ///
     /// The optional cancellation token can be used to stop the watch stream
     async fn list_and_watch(

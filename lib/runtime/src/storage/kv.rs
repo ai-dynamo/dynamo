@@ -21,6 +21,8 @@ use serde::{Deserialize, Serialize};
 use tokio_util::task::AbortOnDropHandle;
 
 mod mem;
+#[cfg(test)]
+pub(crate) use mem::MEMORY_EVENT_BUFFER_CAPACITY;
 pub use mem::MemoryStore;
 mod nats;
 pub use nats::NATSStore;
@@ -337,7 +339,8 @@ impl Manager {
     /// Returns a receiver for all the existing keys of a bucket, and then for every later change.
     ///
     /// This method establishes the watch before it returns: [`Bucket::watch`] has captured the
-    /// initial snapshot, so every change that follows reaches the receiver. A caller that also
+    /// initial snapshot, so every change that follows reaches the receiver, as its own event or
+    /// inside a later [`WatchEvent::Resync`] that replaces all earlier state. A caller that also
     /// reads the bucket directly must read it after this returns. A read before the watch can
     /// show a key that a delete removes before the snapshot, and the receiver never reports that
     /// delete.
