@@ -16,7 +16,7 @@ pub mod quic_response;
 pub mod tcp;
 
 use crate::SystemHealth;
-use crate::error::DynamoError;
+use crate::error::{DynamoError, ErrorType};
 use crate::traits::DistributedRuntimeProvider;
 use std::sync::{Arc, OnceLock};
 
@@ -269,8 +269,9 @@ pub struct ResponseStreamPrologue {
     /// convenience: worker and frontend are deployed independently, so during a
     /// rolling upgrade an old worker sends a prologue without this field and a
     /// new worker sends one an old frontend does not know. A required field
-    /// would break the handshake in both directions; an absent or unrecognized
-    /// field decodes to `None` and the frontend falls back to the untyped behavior.
+    /// would break the handshake in both directions; an absent field or unrecognized legacy
+    /// `error_type` decodes to `None` and the frontend falls back to the untyped behavior.
+    /// A payload with the semantic `class` field uses `DynamoError`'s fail-closed policy.
     #[serde(
         default,
         deserialize_with = "deserialize_typed_error",
@@ -284,7 +285,21 @@ where
     D: serde::Deserializer<'de>,
 {
     let typed_error = Option::<serde_json::Value>::deserialize(deserializer)?;
-    Ok(typed_error.and_then(|typed_error| serde_json::from_value(typed_error).ok()))
+    Ok(typed_error.and_then(|typed_error| {
+        // The legacy enum decoder rejected future variants. ErrorClass is tolerant, so
+        // compare the raw value with its canonical round trip to preserve that fallback.
+        if typed_error.get("class").is_none()
+            && let Some(wire_error_type) = typed_error.get("error_type")
+        {
+            let round_trip = serde_json::from_value::<ErrorType>(wire_error_type.clone())
+                .ok()
+                .and_then(|error_type| serde_json::to_value(error_type).ok());
+            if round_trip.as_ref() != Some(wire_error_type) {
+                return None;
+            }
+        }
+        serde_json::from_value(typed_error).ok()
+    }))
 }
 
 /// A pre-stream failure as it reaches the requesting side of the transport.
@@ -744,6 +759,56 @@ mod tests {
             decoded.typed_error.map(|e| e.error_type()),
             Some(ErrorType::Backend(BackendError::InvalidArgument))
         );
+    }
+
+    #[test]
+    fn prologue_accepts_a_known_legacy_typed_error() {
+        let legacy = br#"{
+            "error":"Generate Error: unsupported input",
+            "typed_error":{"error_type":"InvalidArgument","message":"unsupported input"}
+        }"#;
+        let prologue: ResponseStreamPrologue =
+            serde_json::from_slice(legacy).expect("a known legacy typed error must decode");
+        let error = prologue
+            .typed_error
+            .expect("a known legacy typed error must remain typed");
+
+        assert_eq!(error.error_type(), ErrorType::InvalidArgument);
+        assert_eq!(error.class(), ErrorType::InvalidRequest);
+        assert_eq!(error.reason().as_str(), "request.invalid_argument");
+    }
+
+    #[test]
+    fn prologue_ignores_a_future_legacy_typed_error() {
+        let future = br#"{
+            "error":"Generate Error: future failure",
+            "typed_error":{"error_type":"VariantFromTheFuture","message":"future failure"}
+        }"#;
+        let prologue: ResponseStreamPrologue = serde_json::from_slice(future)
+            .expect("a future legacy typed error must not reject the prologue");
+
+        assert!(prologue.typed_error.is_none());
+    }
+
+    #[test]
+    fn prologue_fails_closed_for_a_future_semantic_class() {
+        let future = br#"{
+            "error":"Generate Error: future failure",
+            "typed_error":{
+                "class":"FutureErrorClass",
+                "reason":"runtime.internal",
+                "public":{"type":"message","message":"must not escape"}
+            }
+        }"#;
+        let prologue: ResponseStreamPrologue = serde_json::from_slice(future)
+            .expect("a future semantic class must not reject the prologue");
+        let error = prologue
+            .typed_error
+            .expect("semantic errors use the DynamoError fail-closed identity");
+
+        assert_eq!(error.class(), ErrorType::Internal);
+        assert_eq!(error.reason().as_str(), "runtime.invalid_error");
+        assert!(error.public_details().is_none());
     }
 
     #[test]

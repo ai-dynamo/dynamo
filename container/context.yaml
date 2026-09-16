@@ -77,7 +77,7 @@ vllm:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: vllm/vllm-openai
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.28.0-ubuntu2404
+    runtime_image_tag: v0.29.0-ubuntu2404
     # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.2-base-ubuntu24.04
     # (Docker Hub), NOT a self-baseline of the third-party vllm/vllm-openai image.
     # vllm-openai is built FROM nvidia/cuda, so this attributes everything vLLM
@@ -91,23 +91,18 @@ vllm:
     runtime_image: vllm/vllm-openai-xpu
     base_image_tag: v0.27.1
     runtime_image_tag: v0.27.1
-    # Match the vLLM 0.27.1 XPU image. vLLM-Omni 0.28 imports APIs only
-    # available in vLLM 0.28 and fails during vLLM plugin discovery.
     vllm_omni_ref: "v0.27.0rc1"
     baseline_sbom: vllm-openai-xpu@3309c2e1
   cpu:
     base_image: ubuntu
     runtime_image: vllm/vllm-openai-cpu
     base_image_tag: 22.04
-    runtime_image_tag: v0.28.0
+    runtime_image_tag: v0.29.0
     # No baseline_sbom: cpu images are unshipped and skip the compliance stages.
-  vllm_omni_ref: "v0.28.0rc1"
-  # vLLM-Omni 0.28.0rc1 requires transformers>=5.10.1,<5.15, while vLLM's own
-  # unbounded transformers>=5.5.3 lets the release images resolve to 5.15.1.
-  # Omni is layered against the installed Transformers version, so without
-  # this pin its dependency solve is unsatisfiable. Remove the pin once
-  # vLLM-Omni lifts its <5.15 upper bound.
+  vllm_omni_ref: "v0.29.0rc1"
+  # Omni requires Transformers <5.15, which requires tokenizers <=0.23.0.
   transformers_version: "5.14.1"
+  tokenizers_version: "0.22.2"
   nixl_ref: v1.3.2
   max_jobs: "10"
   enable_media_ffmpeg: "true"
