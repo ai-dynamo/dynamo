@@ -14,6 +14,7 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
 
 <form className="dynamo-recipe-catalog-shell">
 <input className="dynamo-filter-input" type="radio" id="provider-all" name="provider" defaultChecked />
+<input className="dynamo-filter-input" type="radio" id="provider-skt" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="provider-nvidia" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="provider-google" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="provider-qwen" name="provider" />
@@ -38,17 +39,18 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
   <div className="dynamo-recipe-browser-header">
     <div>
       <p className="dynamo-recipe-eyebrow">Recipe catalog</p>
-      <h3>20 model families</h3>
+      <h3>21 model families</h3>
       <p>Filter by provider, runtime, and hardware. Each card notes its serving technique and workload shape.</p>
     </div>
     <div className="dynamo-catalog-facts">
-      <strong>111</strong>
+      <strong>113</strong>
       <span>Deployable configurations</span>
       <button className="dynamo-filter-reset" type="reset">Reset filters</button>
     </div>
   </div>
 
 <div className="dynamo-filter-row"><span className="dynamo-recipe-label">Provider</span><div className="dynamo-filter-options"><label className="dynamo-recipe-chip" htmlFor="provider-all">All</label>
+<label className="dynamo-recipe-chip" htmlFor="provider-skt">SK Telecom</label>
 <label className="dynamo-recipe-chip" htmlFor="provider-nvidia">NVIDIA</label>
 <label className="dynamo-recipe-chip" htmlFor="provider-google">Google</label>
 <label className="dynamo-recipe-chip" htmlFor="provider-qwen">Qwen</label>
@@ -107,6 +109,16 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
     <div className="dynamo-model-tags"><span>vLLM</span><span>4x/8x GB200 · 8x/16x H200</span><span>Agentic · up to 1M context</span></div>
   <a className="dynamo-card-link" href="glm-5-3-flash.mdx" aria-label="Open the GLM-5.3-Flash recipe">Open recipe</a>
   </div>
+  <div className="dynamo-model-card" data-recipe-card data-provider="skt" data-runtime="vllm" data-hardware="b200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="chat">
+    <div className="dynamo-model-card-top">
+      <span className="dynamo-model-mark" aria-hidden="true">SK</span>
+      <div><h3>A.X-K2</h3><p>SK Telecom</p></div>
+    </div>
+    <p className="dynamo-model-summary">B200 chat profiles with NVFP4 weights, FP8 KV cache, EAGLE3, and KV-aware routing. Choose two aggregate workers or two prefill workers and one decode worker.</p>
+    <div className="dynamo-model-tags"><span>vLLM</span><span>8x / 12x B200</span><span>Chat</span></div>
+    <a className="dynamo-card-link" href="ax-k2.mdx" aria-label="Open the A.X-K2 recipe">Open recipe</a>
+  </div>
+
   <div className="dynamo-model-card" data-recipe-card data-provider="moonshot" data-runtime="vllm sglang" data-hardware="h200 gb200 gb300" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/moonshotai.webp" alt="" />

@@ -77,6 +77,7 @@ use crate::protocols::openai::{
         NvCreatePoolingRequest, NvCreatePoolingResponse, PoolingEmbedDType, PoolingEncodingFormat,
         PoolingEndianness, PoolingOutput,
     },
+    rerank::{NvCreateRerankRequest, NvCreateRerankResponse},
     responses::{
         NvCreateResponse, NvResponse, ResponseParams, ResponsesConversionError,
         chat_completion_to_response,
@@ -117,7 +118,7 @@ pub(super) fn rl_router(
     drt: Arc<dynamo_runtime::DistributedRuntime>,
 ) -> anyhow::Result<axum::Router> {
     let config = dynamo_rl::RlDiscoveryConfig::from_env(drt);
-    let state = dynamo_rl::RlDiscoveryState::new(config);
+    let state = dynamo_rl::RlDiscoveryState::new_from_env(config);
     Ok(dynamo_rl::rl_router(state))
 }
 
@@ -272,20 +273,20 @@ fn responses_error_code(status_code: StatusCode) -> &'static str {
     }
 }
 
-/// Match `InvalidArgument` at top-level OR under `Backend()`.
-/// `py_err_to_dynamo` wraps Python `ValueError`/`TypeError` as
-/// `Backend(InvalidArgument)`; both variants are 400-worthy.
+fn is_invalid_argument(error: &dynamo_runtime::error::DynamoError) -> bool {
+    matches!(
+        error.reason().as_str(),
+        "backend.invalid_argument" | "request.invalid_argument"
+    )
+}
+
 pub(crate) fn find_invalid_argument_in_chain<'a>(
     err: &'a (dyn std::error::Error + 'static),
 ) -> Option<&'a dynamo_runtime::error::DynamoError> {
-    use dynamo_runtime::error::{BackendError, ErrorType};
     let mut current = Some(err);
     while let Some(e) = current {
         if let Some(dynamo_err) = e.downcast_ref::<dynamo_runtime::error::DynamoError>()
-            && matches!(
-                dynamo_err.error_type(),
-                ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument)
-            )
+            && is_invalid_argument(dynamo_err)
         {
             return Some(dynamo_err);
         }
@@ -1767,7 +1768,92 @@ async fn classify(
     Ok(Json(response).into_response())
 }
 
-fn pooling_or_classify_bad_request(message: String) -> ErrorResponse {
+#[tracing::instrument(skip_all)]
+async fn rerank(
+    State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+    Json(mut request): Json<NvCreateRerankRequest>,
+) -> Result<Response, ErrorResponse> {
+    check_ready(&state)?;
+    check_model_serving_ready(&state, &request.model)?;
+
+    if !state.nvext_enabled() {
+        warn_nvext_disabled(
+            "rerank",
+            request
+                .nvext
+                .as_ref()
+                .is_some_and(|nvext| nvext.annotations.is_some()),
+        );
+        request.nvext = None;
+    }
+
+    let canonical = state.manager().resolve_canonical_name(&request.model);
+    if canonical != request.model {
+        request.model = canonical;
+    }
+    let request_id = get_or_create_request_id(&headers);
+    let request = context_from_headers(request, request_id, &headers)?;
+    let request_id = request.id().to_string();
+    let model = &request.model;
+    let metric_model = state.manager().metric_model_for(model).to_string();
+    let mut inflight = state.metrics_clone().create_inflight_guard(
+        &metric_model,
+        Endpoint::Rerank,
+        false,
+        &request_id,
+    );
+
+    if let Err(message) = request.validate_semantics() {
+        inflight.mark_error(ErrorType::Validation);
+        return Err(pooling_family_bad_request(message.to_string()));
+    }
+
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
+    let engine = state.manager().get_rerank_engine(model).map_err(|error| {
+        let response = ErrorMessage::from_model_error(&error);
+        inflight.mark_error(extract_error_type_from_response(&response));
+        response
+    })?;
+    let mut response_collector = state
+        .metrics_clone()
+        .create_response_collector(&metric_model);
+    let model_name = model.to_string();
+    let stream = engine.generate(request).await.map_err(|error| {
+        if super::metrics::request_was_rejected(error.as_ref()) {
+            state
+                .metrics_clone()
+                .inc_rejection(&model_name, Endpoint::Rerank);
+        }
+        let response = ErrorMessage::from_anyhow(error, "Failed to generate reranking");
+        inflight.mark_error(extract_error_type_from_response(&response));
+        response
+    })?;
+
+    let mut http_queue_guard = Some(http_queue_guard);
+    let stream = stream.inspect(move |response| {
+        process_response_and_observe_metrics(
+            response,
+            &mut response_collector,
+            &mut http_queue_guard,
+        );
+    });
+    let response = NvCreateRerankResponse::from_annotated_stream(stream)
+        .await
+        .map_err(|error| {
+            let response = ErrorMessage::from_anyhow(
+                anyhow::Error::new(error),
+                "Failed to fold rerank stream",
+            );
+            inflight.mark_error(extract_error_type_from_response(&response));
+            response
+        })?;
+
+    inflight.mark_ok();
+    Ok(Json(response).into_response())
+}
+
+fn pooling_family_bad_request(message: String) -> ErrorResponse {
     let code = StatusCode::BAD_REQUEST;
     (
         code,
@@ -1783,7 +1869,7 @@ fn pooling_or_classify_bad_request(message: String) -> ErrorResponse {
 
 fn validate_pooling_cache_salt(cache_salt: Option<&str>) -> Result<(), ErrorResponse> {
     if cache_salt == Some("") {
-        return Err(pooling_or_classify_bad_request(
+        return Err(pooling_family_bad_request(
             "Parameter 'cache_salt' must be a non-empty string if provided.".to_string(),
         ));
     }
@@ -1999,7 +2085,7 @@ async fn pooling(
     // vLLM currently rejects dimensionality reduction on `/pooling`.
     if request.dimensions.is_some() {
         inflight.mark_error(ErrorType::Validation);
-        return Err(pooling_or_classify_bad_request(
+        return Err(pooling_family_bad_request(
             "dimensions is currently not supported".to_string(),
         ));
     }
@@ -2399,16 +2485,12 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
     if let Some(event_type) = &event.event
         && event_type == "error"
     {
-        use dynamo_runtime::error::{BackendError, ErrorType};
-
         // Classify only this event's error, not its causes. An inner invalid
         // argument must not override an outer unavailable or internal error.
-        let invalid_argument = event.error.as_ref().filter(|error| {
-            matches!(
-                error.error_type(),
-                ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument)
-            )
-        });
+        let invalid_argument = event
+            .error
+            .as_ref()
+            .filter(|error| is_invalid_argument(error));
 
         // Extract error string: prefer DynamoError field, fallback to legacy comment.
         // Use message() instead of to_string() for DynamoError to avoid prefixing
@@ -4186,6 +4268,22 @@ pub fn classify_router(
     (vec![doc], router)
 }
 
+/// Create an Axum [`Router`] for SGLang-compatible cross-encoder reranking.
+/// If no path is provided, the default path is `/v1/rerank`.
+pub fn rerank_router(
+    state: Arc<service_v2::State>,
+    path: Option<String>,
+) -> (Vec<RouteDoc>, Router) {
+    let path = path.unwrap_or("/v1/rerank".to_string());
+    let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let router = Router::new()
+        .route(&path, post(rerank))
+        .layer(middleware::from_fn(smart_json_error_middleware))
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
+        .with_state(state);
+    (vec![doc], router)
+}
+
 /// Create an Axum [`Router`] for the `/v1/pooling` endpoint (raw pooler output
 /// from pooling-runner models). If no path is provided, the default path is
 /// `/v1/pooling`. Deployments migrating clients from native `vllm-serve`
@@ -4934,7 +5032,7 @@ async fn handler_audio_speech(
             .frontend_accepts_audio_chunks = Some(true);
     }
     request.nest_passthrough();
-    let request = context_from_headers(request, request_id, &headers)?;
+    let mut request = context_from_headers(request, request_id, &headers)?;
 
     // model is optional in the request; fall back to a model that can actually
     // serve right now (complete worker set), not just any displayable one, so
@@ -4949,15 +5047,23 @@ async fn handler_audio_speech(
             .unwrap_or_default()
     });
     // Per-model serving readiness gate (now that we have a resolved model
-    // name string).
+    // name string). Runs on the requested name so a 503 quotes back what the
+    // caller asked for.
     check_model_serving_ready(&state, &model)?;
+
+    // Audio registrations honor --served-model-name aliases, so resolve one to
+    // its primary before it reaches routing, metrics, or the engine request.
+    // Readiness is published per primary name, and every other alias-bearing
+    // surface keeps the request model consistent with that name.
+    let model = state.manager().resolve_canonical_name(&model);
+    request.model = Some(model.clone());
 
     let context = request.context();
     let (mut connection_handle, stream_handle) = create_connection_monitor(
         context,
         Some(state.metrics_clone()),
         CancellationLabels {
-            model: model.clone(),
+            model: state.manager().metric_model_for(&model).to_string(),
             endpoint: Endpoint::Audios.to_string(),
             request_type: if streams_audio_chunks {
                 "stream"
@@ -5011,13 +5117,15 @@ async fn audio_speech(
         .map_err(|e| ErrorMessage::from_model_error(&e))?;
 
     let mut inflight = state.metrics_clone().create_inflight_guard(
-        &model,
+        &metric_model,
         Endpoint::Audios,
         streams_audio_chunks,
         &request_id,
     );
 
-    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+    let mut response_collector = state
+        .metrics_clone()
+        .create_response_collector(&metric_model);
 
     let ctx = request.context();
     inflight.mark_error(ErrorType::Cancelled);
@@ -5025,7 +5133,7 @@ async fn audio_speech(
         if super::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::Audios);
+                .inc_rejection(&metric_model, super::metrics::Endpoint::Audios);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate audio");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -5274,6 +5382,36 @@ mod tests {
     };
 
     const BACKUP_ERROR_MESSAGE: &str = "Failed to generate completions";
+
+    #[test]
+    fn wire_normalized_invalid_request_is_found_through_error_context() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+
+        let original = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+            .message("invalid request")
+            .build();
+        let wire = serde_json::to_value(original).unwrap();
+        let normalized: DynamoError = serde_json::from_value(wire).unwrap();
+        assert_eq!(
+            normalized.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+
+        let error = anyhow::Error::new(normalized).context("request validation failed");
+        assert_eq!(
+            find_invalid_argument_in_chain(error.as_ref()).map(DynamoError::message),
+            Some("invalid request")
+        );
+
+        let private_error = anyhow::Error::new(
+            DynamoError::builder()
+                .error_type(ErrorType::InvalidRequest)
+                .message("private diagnostic")
+                .build(),
+        );
+        assert!(find_invalid_argument_in_chain(private_error.as_ref()).is_none());
+    }
 
     fn binary_pooling_response() -> NvCreatePoolingResponse {
         NvCreatePoolingResponse {
@@ -7344,21 +7482,37 @@ mod tests {
         use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
         use futures::stream;
 
-        for error_type in [
-            ErrorType::InvalidArgument,
-            ErrorType::Backend(BackendError::InvalidArgument),
+        let wire = serde_json::to_value(
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                .message("unsupported JSON schema keyword")
+                .build(),
+        )
+        .unwrap();
+        let normalized: DynamoError = serde_json::from_value(wire).unwrap();
+        assert_eq!(
+            normalized.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+        assert_eq!(normalized.class(), ErrorType::InvalidRequest);
+
+        for error in [
+            DynamoError::builder()
+                .error_type(ErrorType::InvalidArgument)
+                .message("unsupported JSON schema keyword")
+                .build(),
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                .message("unsupported JSON schema keyword")
+                .build(),
+            normalized,
         ] {
             let error_event = Annotated::<NvCreateChatCompletionStreamResponse> {
                 data: None,
                 id: None,
                 event: Some("error".to_string()),
                 comment: None,
-                error: Some(
-                    DynamoError::builder()
-                        .error_type(error_type)
-                        .message("unsupported JSON schema keyword")
-                        .build(),
-                ),
+                error: Some(error),
             };
 
             let result = check_for_backend_error(

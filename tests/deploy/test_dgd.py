@@ -153,6 +153,9 @@ async def test_deployment(
         deployment_spec.add_arg_to_service(
             worker_service.name, "--gpu-memory-utilization", "0.7"
         )
+        deployment_spec.add_arg_to_service(
+            worker_service.name, "--max-model-len", "4096"
+        )
 
     model = model_service.model
     assert model is not None

@@ -34,9 +34,9 @@ dependencies = [
 
 [[package]]
 name = "aisimulate-core"
-version = "0.12.0-dev.1"
+version = "0.12.0-dev.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4db6a085073ecb1c2569f796ba44742ed4681f8f4060daaed2456ef4ea9b652"
+checksum = "ec87377a578ece6834d384b93bfba15f5809c754f5495efa452fe985cdb0edd5"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -2906,9 +2906,9 @@ dependencies = [
 
 [[package]]
 name = "fastokens"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35ff8cf975d8f772e7d4c3be439659b0b23b1ae1086ebee7204573807053ff7f"
+checksum = "102017e5eb15d2d2d5308f5bcb537390e38b0547174000f408d1f9d6aa62a369"
 dependencies = [
  "daachorse",
  "fancy-regex 0.17.0",
