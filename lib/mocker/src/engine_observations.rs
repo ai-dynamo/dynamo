@@ -20,6 +20,7 @@ pub(crate) fn dynamo_kv_event(event: KvEvent) -> (KvCacheEvent, Option<Vec<Vec<u
                 .map(|block| block.token_ids.clone())
                 .collect::<Option<Vec<_>>>();
             let data = KvCacheEventData::Stored(KvCacheStoreData {
+                shared_cache_eligible: false,
                 parent_hash: stored.parent_hash.map(ExternalSequenceBlockHash),
                 start_position: stored.start_position.map(|position| {
                     u32::try_from(position)

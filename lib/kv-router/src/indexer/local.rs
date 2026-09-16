@@ -936,6 +936,7 @@ mod tests {
             KvCacheEvent {
                 event_id,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
+                    shared_cache_eligible: false,
                     parent_hash: Some(ExternalSequenceBlockHash(parent_hash)),
                     start_position: None,
                     blocks: vec![KvCacheStoredBlockData {
@@ -961,6 +962,7 @@ mod tests {
         let event = KvCacheEvent {
             event_id,
             data: KvCacheEventData::Stored(KvCacheStoreData {
+                shared_cache_eligible: false,
                 parent_hash: Some(ExternalSequenceBlockHash(parent_hash)),
                 start_position: None,
                 blocks: vec![KvCacheStoredBlockData {
