@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 import zstandard as zstd
 
-from dynamo.artifacts.format_v1 import (
+from dynamo.vllm.generation_artifact_format import (
     CODEC_NONE,
     CODEC_ZSTD,
     GenerationArtifactChoice,
@@ -331,7 +331,7 @@ def test_decoder_rejects_truncated_route_tensor() -> None:
         None,
     )
     with patch(
-        "dynamo.artifacts.format_v1._validate_choice",
+        "dynamo.vllm.generation_artifact_format._validate_choice",
         return_value=validated,
     ):
         encoded = encode_generation_artifact(malformed, codec=CODEC_NONE).data
@@ -452,7 +452,10 @@ def test_decoder_rejects_noncanonical_component_dtypes(
         np.asarray(choice.routed_experts, dtype=route_dtype),
         np.asarray(choice.selected_logprobs, dtype=logprob_dtype),
     )
-    with patch("dynamo.artifacts.format_v1._validate_choice", return_value=validated):
+    with patch(
+        "dynamo.vllm.generation_artifact_format._validate_choice",
+        return_value=validated,
+    ):
         encoded = encode_generation_artifact(view, codec=CODEC_NONE).data
 
     with pytest.raises(GenerationArtifactFormatError, match=message):

@@ -9,12 +9,12 @@ from unittest.mock import AsyncMock, patch
 import numpy as np
 import pytest
 
-from dynamo.artifacts.format_v1 import decode_generation_artifact
 from dynamo.vllm.generation_artifact import (
     ArtifactCaptureError,
     VllmGenerationArtifactSession,
     _resolve_router_layout,
 )
+from dynamo.vllm.generation_artifact_format import decode_generation_artifact
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 
@@ -37,7 +37,7 @@ def _enable_managed_test_storage(monkeypatch):
         _pipe_file=pipe_file,
     )
     with patch(
-        "dynamo.artifacts.storage.url_to_fs",
+        "dynamo.common.generation_artifact_storage.url_to_fs",
         return_value=(filesystem, "generation-artifacts/root"),
     ):
         yield stored

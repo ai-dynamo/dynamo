@@ -14,17 +14,17 @@ from typing import Any
 
 import numpy as np
 
-from dynamo.artifacts.format_v1 import (
-    GenerationArtifactChoice,
-    GenerationArtifactView,
-    encode_generation_artifact,
-)
-from dynamo.artifacts.storage import (
+from dynamo.common.generation_artifact_storage import (
     ArtifactStorageError,
     ArtifactTarget,
     PresignedHttpPutTarget,
     put_artifact,
     target_from_settings,
+)
+from dynamo.vllm.generation_artifact_format import (
+    GenerationArtifactChoice,
+    GenerationArtifactView,
+    encode_generation_artifact,
 )
 
 _SUPPORTED_CONTENTS = frozenset({"moe_routes", "selected_logprobs"})

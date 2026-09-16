@@ -9,13 +9,13 @@ use dynamo_protocols::types::StopReason;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+use crate::protocols::TokenIdType;
 use crate::protocols::agents::{
-    agent_context_header_values, session_affinity_header_value, AgentContextHeaderValues,
+    AgentContextHeaderValues, agent_context_header_values, session_affinity_header_value,
 };
 use crate::protocols::common::FinishReason;
 use crate::protocols::common::llm_backend::PromptLogprobs;
 use crate::protocols::common::timing::{RequestTracker, TimingInfo};
-use crate::protocols::TokenIdType;
 
 /// Request-level taint constraints carried by `nvext.routing_constraints`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
@@ -1014,7 +1014,8 @@ impl NvExtResponseFieldSelection {
         };
 
         let generation_artifact = if let Some(artifact) = self.generation_artifact.as_ref() {
-            let receipt = engine_data_from_backend
+            let receipt = input
+                .engine_data
                 .as_ref()
                 .and_then(|data| data.get("generation_artifact"))
                 .cloned();
@@ -1250,23 +1251,29 @@ mod tests {
         assert_eq!(upload.url, "s3://bucket/root/rollouts");
         assert!(!NvExtResponseFieldSelection::from_nvext(Some(&nvext)).engine_data);
 
-        assert!(serde_json::from_value::<NvExt>(serde_json::json!({
-            "metadata_upload": {}
-        }))
-        .is_err());
-        assert!(serde_json::from_value::<NvExt>(serde_json::json!({
-            "metadata_upload": {
-                "url": ""
-            }
-        }))
-        .is_err());
-        assert!(serde_json::from_value::<NvExt>(serde_json::json!({
-            "metadata_upload": {
-                "url": "s3://bucket/root/rollouts",
-                "format": "json"
-            }
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<NvExt>(serde_json::json!({
+                "metadata_upload": {}
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<NvExt>(serde_json::json!({
+                "metadata_upload": {
+                    "url": ""
+                }
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<NvExt>(serde_json::json!({
+                "metadata_upload": {
+                    "url": "s3://bucket/root/rollouts",
+                    "format": "json"
+                }
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -1374,10 +1381,12 @@ mod tests {
                 "delivery": {"mode": "object_store", "target": {"kind": "presigned_http_put", "url": "https://example/x", "max_bytes": 0, "object_id": "x"}}
             }),
         ] {
-            assert!(serde_json::from_value::<NvExt>(serde_json::json!({
-                "generation_artifact": invalid
-            }))
-            .is_err());
+            assert!(
+                serde_json::from_value::<NvExt>(serde_json::json!({
+                    "generation_artifact": invalid
+                }))
+                .is_err()
+            );
         }
 
         let opaque: NvExt = serde_json::from_value(serde_json::json!({
@@ -2055,32 +2064,32 @@ mod tests {
         );
     }
 
-    fn tracker_with_prefill_worker(
-    ) -> std::sync::Arc<crate::protocols::common::timing::RequestTracker> {
+    fn tracker_with_prefill_worker()
+    -> std::sync::Arc<crate::protocols::common::timing::RequestTracker> {
         use crate::protocols::common::timing::{RequestTracker, WORKER_TYPE_PREFILL};
         let tracker = std::sync::Arc::new(RequestTracker::new());
         tracker.record_worker(42, Some(0), WORKER_TYPE_PREFILL);
         tracker
     }
 
-    fn tracker_with_query_token_ids(
-    ) -> std::sync::Arc<crate::protocols::common::timing::RequestTracker> {
+    fn tracker_with_query_token_ids()
+    -> std::sync::Arc<crate::protocols::common::timing::RequestTracker> {
         use crate::protocols::common::timing::RequestTracker;
         let tracker = std::sync::Arc::new(RequestTracker::new());
         tracker.set_external_query_token_ids(vec![11u32, 22, 33]);
         tracker
     }
 
-    fn tracker_with_prompt_token_ids(
-    ) -> std::sync::Arc<crate::protocols::common::timing::RequestTracker> {
+    fn tracker_with_prompt_token_ids()
+    -> std::sync::Arc<crate::protocols::common::timing::RequestTracker> {
         use crate::protocols::common::timing::RequestTracker;
         let tracker = std::sync::Arc::new(RequestTracker::new());
         tracker.set_prompt_token_ids(vec![101u32, 102, 103]);
         tracker
     }
 
-    fn tracker_with_forwarded_worker_info(
-    ) -> std::sync::Arc<crate::protocols::common::timing::RequestTracker> {
+    fn tracker_with_forwarded_worker_info()
+    -> std::sync::Arc<crate::protocols::common::timing::RequestTracker> {
         use crate::protocols::common::timing::RequestTracker;
         let tracker = std::sync::Arc::new(RequestTracker::new());
         tracker.set_external_worker_info(WorkerIdInfo {
@@ -2239,9 +2248,14 @@ mod tests {
             "generation_artifact": receipt,
             "internal": "must-not-leak"
         });
+        let finish_reason = FinishReason::Stop;
 
         let out = selection
-            .build_response_nvext(None, true, Some(engine_data), None, None, None)
+            .build_response_nvext(NvExtResponseInput {
+                finish_reason: Some(&finish_reason),
+                engine_data: Some(engine_data),
+                ..Default::default()
+            })
             .expect("generation artifact receipt should be projected");
 
         assert_eq!(out.generation_artifact, Some(receipt));
@@ -2257,9 +2271,13 @@ mod tests {
             }),
             ..Default::default()
         };
+        let finish_reason = FinishReason::Stop;
 
         let out = selection
-            .build_response_nvext(None, true, None, None, None, None)
+            .build_response_nvext(NvExtResponseInput {
+                finish_reason: Some(&finish_reason),
+                ..Default::default()
+            })
             .expect("missing terminal receipt must be explicit");
         let artifact = out.generation_artifact.expect("failed artifact receipt");
 

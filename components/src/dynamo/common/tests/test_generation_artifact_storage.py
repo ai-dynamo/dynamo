@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from aiohttp import web
 
-from dynamo.artifacts.storage import (
+from dynamo.common.generation_artifact_storage import (
     ArtifactStorageError,
     ManagedFsspecTarget,
     PresignedHttpPutTarget,
@@ -56,7 +56,7 @@ async def test_managed_fsspec_writes_exact_profile_object(monkeypatch) -> None:
     )
 
     with patch(
-        "dynamo.artifacts.storage.url_to_fs",
+        "dynamo.common.generation_artifact_storage.url_to_fs",
         return_value=(filesystem, "artifacts/run"),
     ) as url_to_fs:
         receipt = await put_artifact(
@@ -136,11 +136,11 @@ async def test_managed_fsspec_session_setup_is_inside_timeout(monkeypatch) -> No
     )
     with (
         patch(
-            "dynamo.artifacts.storage.url_to_fs",
+            "dynamo.common.generation_artifact_storage.url_to_fs",
             return_value=(filesystem, "artifacts/run"),
         ),
         patch(
-            "dynamo.artifacts.storage.asyncio.timeout",
+            "dynamo.common.generation_artifact_storage.asyncio.timeout",
             return_value=timeout_probe,
         ),
     ):
@@ -173,11 +173,11 @@ async def test_managed_timeout_bounds_blocking_session_cleanup(monkeypatch) -> N
     started = time.monotonic()
     with (
         patch(
-            "dynamo.artifacts.storage.url_to_fs",
+            "dynamo.common.generation_artifact_storage.url_to_fs",
             return_value=(filesystem, "artifacts/run"),
         ),
         patch(
-            "dynamo.artifacts.storage.asyncio.timeout",
+            "dynamo.common.generation_artifact_storage.asyncio.timeout",
             side_effect=[real_timeout(1), real_timeout(0.01)],
         ),
         pytest.raises(ArtifactStorageError, match="managed artifact write failed"),
@@ -230,7 +230,10 @@ async def test_presigned_put_preserves_exact_url_and_hides_capability() -> None:
         object_id="opaque-1",
     )
 
-    with patch("dynamo.artifacts.storage._ExactHttpPutFileSystem", return_value=fs):
+    with patch(
+        "dynamo.common.generation_artifact_storage._ExactHttpPutFileSystem",
+        return_value=fs,
+    ):
         receipt = await put_artifact(payload, target)
 
     fs._pipe_file.assert_awaited_once_with(
@@ -263,7 +266,7 @@ async def test_presigned_put_closes_each_request_filesystem() -> None:
         return filesystem
 
     with patch(
-        "dynamo.artifacts.storage._ExactHttpPutFileSystem",
+        "dynamo.common.generation_artifact_storage._ExactHttpPutFileSystem",
         side_effect=filesystem_factory,
     ):
         await put_artifact(b"first", target)
@@ -285,7 +288,10 @@ async def test_presigned_put_rejects_oversize_before_network() -> None:
         object_id="opaque-1",
     )
     with (
-        patch("dynamo.artifacts.storage._ExactHttpPutFileSystem", return_value=fs),
+        patch(
+            "dynamo.common.generation_artifact_storage._ExactHttpPutFileSystem",
+            return_value=fs,
+        ),
         pytest.raises(ArtifactStorageError, match="max_bytes"),
     ):
         await put_artifact(b"four", target)
@@ -307,8 +313,11 @@ async def test_presigned_put_rechecks_expiry_immediately_before_network() -> Non
     clock.fromisoformat.side_effect = datetime.fromisoformat
     clock.now.return_value = expires + timedelta(seconds=1)
     with (
-        patch("dynamo.artifacts.storage.datetime", clock),
-        patch("dynamo.artifacts.storage._ExactHttpPutFileSystem", return_value=fs),
+        patch("dynamo.common.generation_artifact_storage.datetime", clock),
+        patch(
+            "dynamo.common.generation_artifact_storage._ExactHttpPutFileSystem",
+            return_value=fs,
+        ),
         pytest.raises(ArtifactStorageError, match="expired"),
     ):
         await put_artifact(b"data", target)
@@ -447,7 +456,10 @@ async def test_provider_errors_are_sanitized(monkeypatch) -> None:
         aclose=AsyncMock(),
     )
     with (
-        patch("dynamo.artifacts.storage._ExactHttpPutFileSystem", return_value=fs),
+        patch(
+            "dynamo.common.generation_artifact_storage._ExactHttpPutFileSystem",
+            return_value=fs,
+        ),
         pytest.raises(
             ArtifactStorageError, match="presigned artifact PUT failed"
         ) as error,
@@ -484,7 +496,7 @@ async def test_managed_max_bytes_cannot_enable_multipart_upload(monkeypatch) -> 
     )
 
     with (
-        patch("dynamo.artifacts.storage.url_to_fs") as url_to_fs,
+        patch("dynamo.common.generation_artifact_storage.url_to_fs") as url_to_fs,
         pytest.raises(ArtifactStorageError, match="byte limit"),
     ):
         await put_artifact(b"data", target)
@@ -648,7 +660,7 @@ async def test_managed_target_is_operator_gated_and_prefix_scoped(monkeypatch) -
         profile="training", object_key="authorized/output.dynexp"
     )
     with (
-        patch("dynamo.artifacts.storage.url_to_fs") as url_to_fs,
+        patch("dynamo.common.generation_artifact_storage.url_to_fs") as url_to_fs,
         pytest.raises(ArtifactStorageError, match="s3-compatible provider"),
     ):
         await put_artifact(b"data", target)

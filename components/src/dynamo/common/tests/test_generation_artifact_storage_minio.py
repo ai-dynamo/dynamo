@@ -13,7 +13,7 @@ import boto3
 import pytest
 from botocore.client import Config
 
-from dynamo.artifacts.storage import (
+from dynamo.common.generation_artifact_storage import (
     ArtifactStorageError,
     ManagedFsspecTarget,
     PresignedHttpPutTarget,

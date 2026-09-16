@@ -10,13 +10,12 @@
 # purely to clear the GPL binary.
 
 --no-binary imageio-ffmpeg
-imageio-ffmpeg>=0.6.0  # binary skipped per --no-binary directive at top of file
 
 # The upstream vllm-openai base bundles cryptography at the prior major; floor
 # it so the --no-deps install refreshes the bundled copy to the current release
 # line.
 cryptography>=50.0.0
-msgspec==0.19.0
+imageio-ffmpeg>=0.6.0  # binary skipped per --no-binary directive at top of file
 # Refresh the upstream image's bundled mooncake wheel: older builds vendor a
 # stale Go dependency set inside libetcd_wrapper.so, and current wheels carry
 # the updated etcd client stack. vllm-openai is built with
@@ -26,6 +25,7 @@ msgspec==0.19.0
 # libcudart.so.12, so the floor has to name the CUDA 13 distribution. CUDA
 # only: stripped for the XPU and CPU images in vllm_runtime.Dockerfile.
 mooncake-transfer-engine-cuda13>=0.3.13.post1,<0.4
+msgspec==0.19.0
 # The upstream vllm-openai image bundles pillow at an older patch release;
 # floor it so the --no-deps install moves it to the current patch line.
 pillow>=12.3.0
