@@ -1163,11 +1163,8 @@ class WorkerFactory:
         engine_id = os.environ.get("ENGINE_ID", "0")
         raw_timeout = os.environ.get(ENV_SHADOW_PAUSE_TIMEOUT_SECONDS)
         timeout_s = float(raw_timeout) if raw_timeout else SHADOW_PAUSE_TIMEOUT_SECONDS
-        # Exactly "0" waives the bound; everything else must be a positive
-        # finite number. float() also accepts "nan", "inf", and "-1", and all
-        # three otherwise reach an unbounded wait by accident: NaN and a
-        # negative compare false against 0 and fall to the else branch, and
-        # wait_for(inf) never fires.
+        # Zero disables the bound; reject negative and non-finite values so
+        # malformed settings cannot silently restore an indefinite wait.
         if not math.isfinite(timeout_s) or timeout_s < 0:
             raise RuntimeError(
                 f"{ENV_SHADOW_PAUSE_TIMEOUT_SECONDS}={raw_timeout!r} is not a "

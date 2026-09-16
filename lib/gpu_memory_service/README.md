@@ -594,6 +594,8 @@ Tensor pointers remain valid because the original virtual addresses are preserve
 
 This enables a shadow engine to release its GPU memory, let a primary engine use the GPU, and then reclaim the memory after the primary is killed. The mutable KV cache always moves through a fresh RW layout in its own GMS tag before it is reallocated.
 
+In Dynamo's vLLM `--gms-shadow-mode`, the initial pause before failover election has a 900-second timeout. Set `DYN_GMS_SHADOW_PAUSE_TIMEOUT_SECONDS` to a positive finite number of seconds to override it, or zero to wait indefinitely. If the pause times out, startup fails without publishing standby readiness. This timeout is separate from the weights-admission timeout below.
+
 ### Configuration via `model_loader_extra_config`
 
 To force read-only mode (import only, never load from disk), pass `gms_read_only` via the framework's `--model-loader-extra-config` flag:
@@ -616,3 +618,5 @@ An explicit value always wins. When the key is absent, the default depends on th
 
 - a primary engine (`ENGINE_ID=0`) and any engine outside shadow mode default to `null`, which waits indefinitely;
 - a failover shadow (`ENGINE_ID` other than `0`, under `--gms-shadow-mode`) defaults to `900000` ms. GMS prefers writers, so with two or more shadows a reader can be refused admission behind a queued writer, and an untimed refusal parks the worker with no log and no traceback.
+
+These deadlines turn stalled startup operations into visible failures. They do not change GMS lock admission or guarantee that restarting a worker resolves the contention. The wait for the GMS socket to become available is capped separately at 30 seconds, even when the admission timeout is longer or `null`.
