@@ -86,10 +86,12 @@ func renderLPUConfigMap(
 		}
 	}
 	var datacenterTOML strings.Builder
-	_ = toml.NewEncoder(&datacenterTOML).Encode(map[string]any{
+	if err := toml.NewEncoder(&datacenterTOML).Encode(map[string]any{
 		"model_base_paths": []string{modelStoragePath},
 		"datacenters":      map[string]any{"racks": datacenterRacks},
-	})
+	}); err != nil {
+		return nil, fmt.Errorf("render datacenter.toml: %w", err)
+	}
 
 	data := resolvedPartitionData(projections)
 	if projections[0].pipeline == PipelineLPX {
