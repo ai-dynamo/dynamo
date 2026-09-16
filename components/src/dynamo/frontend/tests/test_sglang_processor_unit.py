@@ -2398,9 +2398,9 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
             exclude_tools_when_tool_choice_none=False,
         )
         # With flag off, both should have similar token counts (tools in template)
-        assert len(with_none.prompt_token_ids) == len(
-            with_auto.prompt_token_ids
-        ), "tool_choice=none with flag off should keep tools in template"
+        assert len(with_none.prompt_token_ids) == len(with_auto.prompt_token_ids), (
+            "tool_choice=none with flag off should keep tools in template"
+        )
 
     def test_named_tool_choice_missing_function_raises(self, tokenizer):
         """Named tool_choice referencing a function absent from tools raises ValueError."""
@@ -4427,7 +4427,10 @@ class TestReasoningParsing:  # FRONTEND.9 — reasoning ↔ tool-call orchestrat
         token_ids = case_tokenizer.encode(text)
         reasoning = ""
         content = ""
-        tool_calls = []
+        # Assemble tool_calls the way an OpenAI client does: id/name from
+        # the first frame that carries them, argument fragments concatenated
+        # per index.
+        tool_calls: dict[int, dict] = {}
         finish_reason = None
         for offset in range(0, len(token_ids), 3):
             batch = token_ids[offset : offset + 3]
@@ -4439,17 +4442,26 @@ class TestReasoningParsing:  # FRONTEND.9 — reasoning ↔ tool-call orchestrat
                 delta = choice.get("delta", {})
                 reasoning += delta.get("reasoning_content", "")
                 content += delta.get("content", "")
-                tool_calls.extend(delta.get("tool_calls", []))
+                for entry in delta.get("tool_calls", []):
+                    idx = entry.get("index", 0)
+                    merged = tool_calls.setdefault(idx, {"function": {}})
+                    if entry.get("id"):
+                        merged["id"] = entry["id"]
+                    fn = entry.get("function") or {}
+                    if fn.get("name"):
+                        merged["function"]["name"] = fn["name"]
+                    merged["function"]["arguments"] = merged["function"].get(
+                        "arguments", ""
+                    ) + (fn.get("arguments") or "")
                 finish_reason = choice.get("finish_reason") or finish_reason
 
+        assembled = [tool_calls[idx] for idx in sorted(tool_calls)]
         assert reasoning == expected_reasoning
         assert content == ""
         assert finish_reason == "tool_calls"
-        assert len(tool_calls) == 1
-        assert tool_calls[0]["function"]["name"] == "get_weather"
-        assert json.loads(tool_calls[0]["function"]["arguments"]) == {
-            "city": "New York"
-        }
+        assert len(assembled) == 1
+        assert assembled[0]["function"]["name"] == "get_weather"
+        assert json.loads(assembled[0]["function"]["arguments"]) == {"city": "New York"}
 
 
 # ---------------------------------------------------------------------------
