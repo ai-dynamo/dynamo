@@ -5,9 +5,7 @@
 
 use std::collections::HashMap;
 use std::io::Write;
-use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::time::Duration;
 
 use dynamo_backend_common::{DynamoError, PreprocessedRequest};
 use lru::LruCache;
@@ -15,12 +13,25 @@ use opendal::layers::{RetryLayer, TimeoutLayer};
 use opendal::{Buffer, Operator};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OnceCell};
 
-use crate::args::MetadataUploadArgs;
 use crate::client;
+use crate::protocol::{ExtractedLogprobs, engine_data_from_meta, extract_logprobs};
+
+mod config;
+pub(crate) use config::MetadataUploadArgs;
+use config::OperatorPolicy;
 
 const OUTPUT_PATH: &str = "choice_0.msgpack.zst";
+
+pub(crate) struct MetadataUploadService {
+    operators: Arc<OperatorCache>,
+}
+
+pub(crate) enum MetadataDelivery {
+    Inline,
+    Upload(MetadataUploader),
+}
 
 pub(crate) struct MetadataUploader {
     primary: Operator,
@@ -29,19 +40,10 @@ pub(crate) struct MetadataUploader {
 }
 
 pub(crate) struct OperatorCache {
-    operators: Mutex<LruCache<String, Operator>>,
-    config: OperatorConfig,
-}
-
-#[derive(Clone, Copy)]
-struct OperatorConfig {
-    timeout: Duration,
-    io_timeout: Duration,
-    retry_max_times: usize,
-    retry_min_delay: Duration,
-    retry_max_delay: Duration,
-    retry_factor: f32,
-    retry_jitter: bool,
+    operators: Mutex<LruCache<String, Arc<OnceCell<Operator>>>>,
+    policy: OperatorPolicy,
+    #[cfg(test)]
+    build_count: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Serialize)]
@@ -58,72 +60,70 @@ struct MetadataUploadConfig {
 }
 
 impl OperatorCache {
-    pub(crate) fn from_args(args: &MetadataUploadArgs) -> Result<Self, DynamoError> {
-        if !args.retry_factor.is_finite() || args.retry_factor < 1.0 {
-            return Err(client::invalid_arg(
-                "metadata-upload-retry-factor must be finite and at least 1.0",
-            ));
-        }
-        if args.retry_max_delay_ms < args.retry_min_delay_ms {
-            return Err(client::invalid_arg(
-                "metadata-upload-retry-max-delay-ms must be greater than or equal to metadata-upload-retry-min-delay-ms",
-            ));
-        }
-        Ok(Self::new(
-            args.operator_cache_capacity,
-            OperatorConfig {
-                timeout: Duration::from_secs(args.timeout_secs.get()),
-                io_timeout: Duration::from_secs(args.io_timeout_secs.get()),
-                retry_max_times: args.retry_max_times.get(),
-                retry_min_delay: Duration::from_millis(args.retry_min_delay_ms),
-                retry_max_delay: Duration::from_millis(args.retry_max_delay_ms),
-                retry_factor: args.retry_factor,
-                retry_jitter: args.retry_jitter,
-            },
-        ))
-    }
-
-    fn new(capacity: NonZeroUsize, config: OperatorConfig) -> Self {
+    fn new(policy: OperatorPolicy) -> Self {
         // Ensure built-in services are registered when this crate is linked statically.
         opendal::install_default();
         Self {
-            operators: Mutex::new(LruCache::new(capacity)),
-            config,
+            operators: Mutex::new(LruCache::new(policy.capacity)),
+            policy,
+            #[cfg(test)]
+            build_count: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
     async fn get(&self, raw: String, field: &'static str) -> Result<Operator, DynamoError> {
         let url = normalize_url(raw, field)?;
-        if let Some(operator) = self.operators.lock().await.get(&url).cloned() {
-            return Ok(operator);
-        }
+        let cell = {
+            let mut operators = self.operators.lock().await;
+            if let Some(cell) = operators.get(&url) {
+                cell.clone()
+            } else {
+                let cell = Arc::new(OnceCell::new());
+                operators.put(url.clone(), cell.clone());
+                cell
+            }
+        };
+        let policy = self.policy;
+        let operator = cell
+            .get_or_try_init(|| async {
+                #[cfg(test)]
+                self.build_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let build_url = url.clone();
+                tokio::task::spawn_blocking(move || build_operator(&build_url, policy))
+                    .await
+                    .map_err(|error| {
+                        client::protocol_error(format!(
+                            "metadata upload setup task failed: {error}"
+                        ))
+                    })?
+            })
+            .await?;
+        Ok(operator.clone())
+    }
 
-        let build_url = url.clone();
-        let config = self.config;
-        let operator = tokio::task::spawn_blocking(move || build_operator(&build_url, config))
+    #[cfg(test)]
+    async fn insert(&self, url: &str, operator: Operator) {
+        let cell = OnceCell::new();
+        cell.set(operator).expect("new OnceCell must be empty");
+        self.operators
+            .lock()
             .await
-            .map_err(|error| {
-                client::protocol_error(format!("metadata upload setup task failed: {error}"))
-            })??;
-
-        let mut operators = self.operators.lock().await;
-        if let Some(operator) = operators.get(&url).cloned() {
-            return Ok(operator);
-        }
-        operators.put(url, operator.clone());
-        Ok(operator)
+            .put(url.to_string(), Arc::new(cell));
     }
 }
 
-impl MetadataUploader {
-    pub(crate) async fn from_request(
+impl MetadataUploadService {
+    pub(crate) fn new(args: MetadataUploadArgs) -> Result<Self, DynamoError> {
+        Ok(Self {
+            operators: Arc::new(OperatorCache::new(args.try_into()?)),
+        })
+    }
+
+    pub(crate) async fn delivery_for(
+        &self,
         request: &PreprocessedRequest,
-        enabled: bool,
-        operators: Arc<OperatorCache>,
-    ) -> Result<Option<Self>, DynamoError> {
-        if !enabled {
-            return Ok(None);
-        }
+    ) -> Result<MetadataDelivery, DynamoError> {
         let Some(config) = request
             .extra_args
             .as_ref()
@@ -132,26 +132,52 @@ impl MetadataUploader {
             .and_then(Value::as_object)
             .and_then(|nvext| nvext.get("metadata_upload"))
         else {
-            return Ok(None);
+            return Ok(MetadataDelivery::Inline);
         };
         if config.is_null() {
-            return Ok(None);
+            return Ok(MetadataDelivery::Inline);
         }
         let config = MetadataUploadConfig::deserialize(config).map_err(|error| {
             client::invalid_arg(format!("invalid extra_args.nvext.metadata_upload: {error}"))
         })?;
-        let primary = operators.get(config.url, "url").await?;
+        let primary = self.operators.get(config.url, "url").await?;
         let fallback = config
             .fallback_url
             .map(|url| normalize_url(url, "fallback_url"))
             .transpose()?;
-        Ok(Some(Self {
+        Ok(MetadataDelivery::Upload(MetadataUploader {
             primary,
             fallback,
-            operators,
+            operators: self.operators.clone(),
         }))
     }
+}
 
+impl MetadataDelivery {
+    pub(crate) fn response_fields(
+        &self,
+        meta: &HashMap<String, String>,
+        return_tokens_as_ids: bool,
+        terminal: bool,
+    ) -> Result<(ExtractedLogprobs, Option<Value>), DynamoError> {
+        match self {
+            Self::Inline => Ok((
+                extract_logprobs(meta, return_tokens_as_ids)?,
+                engine_data_from_meta(meta, terminal)?,
+            )),
+            Self::Upload(_) => Ok(((None, None), None)),
+        }
+    }
+
+    pub(crate) fn uploader(&self) -> Option<&MetadataUploader> {
+        match self {
+            Self::Inline => None,
+            Self::Upload(uploader) => Some(uploader),
+        }
+    }
+}
+
+impl MetadataUploader {
     pub(crate) async fn upload(&self, metadata: Value) -> Result<(), DynamoError> {
         if metadata.as_object().is_some_and(|value| value.is_empty()) {
             return Ok(());
@@ -189,24 +215,9 @@ fn normalize_url(raw: String, field: &str) -> Result<String, DynamoError> {
     Ok(raw.to_string())
 }
 
-fn build_operator(raw: &str, config: OperatorConfig) -> Result<Operator, DynamoError> {
-    let retry = RetryLayer::new()
-        .with_factor(config.retry_factor)
-        .with_min_delay(config.retry_min_delay)
-        .with_max_delay(config.retry_max_delay)
-        .with_max_times(config.retry_max_times);
-    let retry = if config.retry_jitter {
-        retry.with_jitter()
-    } else {
-        retry
-    };
-    let timeout = TimeoutLayer::new()
-        .with_timeout(config.timeout)
-        .with_io_timeout(config.io_timeout);
+fn build_operator(raw: &str, policy: OperatorPolicy) -> Result<Operator, DynamoError> {
     Operator::from_uri(raw)
-        // Timeout must be inside RetryLayer so a timeout cannot drop a
-        // stateful retry future before OpenDAL restores its body state.
-        .map(|operator| operator.layer(timeout).layer(retry))
+        .map(|operator| configure_operator(operator, policy))
         .map_err(|error| {
             client::invalid_arg(format!(
                 "could not configure `{}` metadata upload destination: {error}",
@@ -215,6 +226,25 @@ fn build_operator(raw: &str, config: OperatorConfig) -> Result<Operator, DynamoE
                     .unwrap_or("unknown")
             ))
         })
+}
+
+fn configure_operator(operator: Operator, policy: OperatorPolicy) -> Operator {
+    let retry = RetryLayer::new()
+        .with_factor(policy.retry_factor)
+        .with_min_delay(policy.retry_min_delay)
+        .with_max_delay(policy.retry_max_delay)
+        .with_max_times(policy.retry_max_times);
+    let retry = if policy.retry_jitter {
+        retry.with_jitter()
+    } else {
+        retry
+    };
+    let timeout = TimeoutLayer::new()
+        .with_timeout(policy.timeout)
+        .with_io_timeout(policy.io_timeout);
+    // Timeout must be inside RetryLayer so a timeout cannot drop a stateful
+    // retry future before OpenDAL restores its body state.
+    operator.layer(timeout).layer(retry)
 }
 
 async fn write(operator: &Operator, data: Buffer) -> Result<(), DynamoError> {
@@ -292,21 +322,30 @@ mod tests {
     use dynamo_backend_common::{OutputOptions, SamplingOptions, StopConditions};
     use serde_json::{Value, json};
 
-    use super::{MetadataUploader, OUTPUT_PATH, OperatorCache, OperatorConfig, grpc_metadata};
+    use super::config::OperatorPolicy;
+    use super::{MetadataUploadService, OUTPUT_PATH, OperatorCache, grpc_metadata};
+
+    fn policy(capacity: usize) -> OperatorPolicy {
+        OperatorPolicy {
+            capacity: NonZeroUsize::new(capacity).unwrap(),
+            timeout: Duration::from_secs(10),
+            io_timeout: Duration::from_secs(10),
+            retry_max_times: 3,
+            retry_min_delay: Duration::from_millis(1),
+            retry_max_delay: Duration::from_millis(10),
+            retry_factor: 2.0,
+            retry_jitter: false,
+        }
+    }
 
     fn operator_cache(capacity: usize) -> Arc<OperatorCache> {
-        Arc::new(OperatorCache::new(
-            NonZeroUsize::new(capacity).unwrap(),
-            OperatorConfig {
-                timeout: Duration::from_secs(10),
-                io_timeout: Duration::from_secs(10),
-                retry_max_times: 3,
-                retry_min_delay: Duration::from_millis(1),
-                retry_max_delay: Duration::from_millis(10),
-                retry_factor: 2.0,
-                retry_jitter: false,
-            },
-        ))
+        Arc::new(OperatorCache::new(policy(capacity)))
+    }
+
+    fn service(capacity: usize) -> MetadataUploadService {
+        MetadataUploadService {
+            operators: operator_cache(capacity),
+        }
     }
 
     fn fs_uri(path: &Path) -> String {
@@ -326,31 +365,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn metadata_upload_is_rl_gated_and_strict() {
+    async fn request_configuration_is_optional_and_strict() {
         let configured = request(json!({
             "nvext": {"metadata_upload": {"url": "fs:///tmp/metadata"}}
         }));
         assert!(
-            MetadataUploader::from_request(&configured, false, operator_cache(2))
+            service(2)
+                .delivery_for(&configured)
                 .await
                 .unwrap()
-                .is_none()
-        );
-        assert!(
-            MetadataUploader::from_request(&configured, true, operator_cache(2))
-                .await
-                .unwrap()
+                .uploader()
                 .is_some()
+        );
+
+        let unconfigured = request(json!({"nvext": {}}));
+        assert!(
+            service(2)
+                .delivery_for(&unconfigured)
+                .await
+                .unwrap()
+                .uploader()
+                .is_none()
         );
 
         let invalid = request(json!({
             "nvext": {"metadata_upload": {"url": "fs:///tmp", "format": "json"}}
         }));
-        assert!(
-            MetadataUploader::from_request(&invalid, true, operator_cache(2))
-                .await
-                .is_err()
-        );
+        assert!(service(2).delivery_for(&invalid).await.is_err());
     }
 
     #[tokio::test]
@@ -360,10 +401,8 @@ mod tests {
         let configured = request(json!({
             "nvext": {"metadata_upload": {"url": url}}
         }));
-        let uploader = MetadataUploader::from_request(&configured, true, operator_cache(2))
-            .await
-            .unwrap()
-            .unwrap();
+        let delivery = service(2).delivery_for(&configured).await.unwrap();
+        let uploader = delivery.uploader().unwrap();
         uploader
             .upload(grpc_metadata(&std::collections::HashMap::from([
                 ("id".into(), "sglang-1".into()),
@@ -399,10 +438,8 @@ mod tests {
                 "fallback_url": fs_uri(&fallback)
             }}
         }));
-        let uploader = MetadataUploader::from_request(&configured, true, operator_cache(2))
-            .await
-            .unwrap()
-            .unwrap();
+        let delivery = service(2).delivery_for(&configured).await.unwrap();
+        let uploader = delivery.uploader().unwrap();
 
         uploader.upload(json!({"id": "sglang-2"})).await.unwrap();
 
@@ -418,9 +455,11 @@ mod tests {
         }));
 
         assert!(
-            MetadataUploader::from_request(&configured, true, operator_cache(2))
+            service(2)
+                .delivery_for(&configured)
                 .await
                 .unwrap()
+                .uploader()
                 .is_some()
         );
     }
@@ -444,3 +483,7 @@ mod tests {
         assert!(operators.peek(&third).is_some());
     }
 }
+
+#[cfg(test)]
+#[path = "metadata_upload/resilience_tests.rs"]
+mod resilience_tests;
