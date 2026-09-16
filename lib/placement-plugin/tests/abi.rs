@@ -4,9 +4,12 @@
 use std::ffi::c_void;
 
 use aisimulate_placement_abi::{
-    ByteSliceV1, PlacementCreateRequestV1, PlacementHandleV1, PlacementLimitsV1,
-    PluginDescriptorV1, SchedulerIdSliceV1, StatusV1, WorkerCapacitySliceV1, WorkerCapacityV1,
-    WorkerTopologySliceV1, WorkerTopologyV1, validate_descriptor_v1,
+    AdmissionDecisionV1, BlockHashSliceV1, ByteSliceV1, EngineObservationV1, PlacementAdmissionV1,
+    PlacementBatchResultV1, PlacementCreateRequestV1, PlacementHandleV1, PlacementLimitsV1,
+    PlacementMetadataV1, PlacementMutationKindV1, PlacementMutationPayloadV1,
+    PlacementMutationSliceV1, PlacementMutationV1, PluginDescriptorV1, PromptIdentityV1,
+    SchedulerIdSliceV1, StatusV1, WorkerCapacitySliceV1, WorkerCapacityV1, WorkerTopologySliceV1,
+    WorkerTopologyV1, validate_descriptor_v1,
 };
 
 #[test]
@@ -78,4 +81,499 @@ fn provider_creates_and_destroys_a_narrow_validated_kv_router_instance() {
     assert!(error.data.is_null());
     // Safety: the handle was created by this exact V1 operation table.
     unsafe { table.destroy.expect("required destroy operation")(handle) };
+}
+
+#[test]
+fn provider_admits_a_materialized_prompt_and_returns_host_topology_ids() {
+    let (table, handle) = create_provider();
+    let tokens = [11_u32, 12, 13, 14];
+    let mutation = PlacementMutationV1 {
+        struct_size: std::mem::size_of::<PlacementMutationV1>() as u32,
+        kind: PlacementMutationKindV1::ADMIT,
+        flags: 0,
+        sequence: 1,
+        now_ms: 0.0,
+        payload: PlacementMutationPayloadV1 {
+            admission: PlacementAdmissionV1 {
+                request_id: [1; 16],
+                flags: 0,
+                priority: 0,
+                prompt_tokens: tokens.len() as u64,
+                max_output_tokens: 1,
+                prompt_identity: PromptIdentityV1 {
+                    flags: PromptIdentityV1::MATERIALIZED_TOKEN_IDS_PRESENT,
+                    reserved: 0,
+                    materialized_token_ids: aisimulate_placement_abi::TokenIdSliceV1 {
+                        data: tokens.as_ptr(),
+                        len: tokens.len() as u64,
+                    },
+                    ..PromptIdentityV1::OMITTED
+                },
+                metadata: PlacementMetadataV1::EMPTY,
+                session_id: ByteSliceV1::EMPTY,
+            },
+        },
+    };
+    let mut result = empty_result();
+
+    let status = unsafe {
+        table.apply_batch.expect("required apply operation")(
+            handle,
+            PlacementMutationSliceV1 {
+                data: &mutation,
+                len: 1,
+            },
+            &mut result,
+        )
+    };
+
+    assert_eq!(status, StatusV1::OK);
+    assert_eq!(result.applied_mutations, 1);
+    assert_eq!(result.pending_count, 0);
+    assert_eq!(result.admission_results.len, 1);
+    let admission = unsafe { &*result.admission_results.data };
+    assert_eq!(admission.request_id, [1; 16]);
+    assert_eq!(admission.decision, AdmissionDecisionV1::IMMEDIATE);
+    assert_eq!(admission.placement.worker_id, 7);
+    assert_eq!(admission.placement.scheduler_id, 19);
+
+    unsafe {
+        table.release_results.expect("required release operation")(result);
+        table.destroy.expect("required destroy operation")(handle);
+    }
+}
+
+#[test]
+fn provider_queues_when_busy_then_releases_after_request_terminal() {
+    let (table, handle) = create_provider();
+    let first = admission_mutation([2; 16], 0.0);
+    let first_result = apply_one(&table, handle, &first);
+    assert_eq!(first_result.pending_count, 0);
+    unsafe { table.release_results.expect("required release operation")(first_result) };
+
+    let second = admission_mutation([3; 16], 1.0);
+    let second_result = apply_one(&table, handle, &second);
+    assert_eq!(second_result.pending_count, 1);
+    let queued = unsafe { &*second_result.admission_results.data };
+    assert_eq!(queued.decision, AdmissionDecisionV1::QUEUED);
+    unsafe { table.release_results.expect("required release operation")(second_result) };
+
+    let terminal = lifecycle_mutation(PlacementMutationKindV1::REQUEST_TERMINAL, [2; 16], 2.0);
+    let released_result = apply_one(&table, handle, &terminal);
+    assert_eq!(released_result.pending_count, 0);
+    assert_eq!(released_result.released.len, 1);
+    let released = unsafe { &*released_result.released.data };
+    assert_eq!(released.request_id, [3; 16]);
+    assert_eq!(released.worker_id, 7);
+    assert_eq!(released.scheduler_id, 19);
+
+    unsafe {
+        table.release_results.expect("required release operation")(released_result);
+        table.destroy.expect("required destroy operation")(handle);
+    }
+}
+
+#[test]
+fn provider_cancels_a_pending_request_without_releasing_it_later() {
+    let (table, handle) = create_provider();
+    let first = admission_mutation([4; 16], 0.0);
+    let second = admission_mutation([5; 16], 1.0);
+    unsafe {
+        table.release_results.expect("required release operation")(apply_one(
+            &table, handle, &first,
+        ))
+    };
+    unsafe {
+        table.release_results.expect("required release operation")(apply_one(
+            &table, handle, &second,
+        ))
+    };
+
+    let cancel = lifecycle_mutation(PlacementMutationKindV1::CANCEL_PENDING, [5; 16], 2.0);
+    let cancelled = apply_one(&table, handle, &cancel);
+    assert_eq!(cancelled.pending_count, 0);
+    unsafe { table.release_results.expect("required release operation")(cancelled) };
+
+    let terminal = lifecycle_mutation(PlacementMutationKindV1::REQUEST_TERMINAL, [4; 16], 3.0);
+    let terminal_result = apply_one(&table, handle, &terminal);
+    assert_eq!(terminal_result.released.len, 0);
+    unsafe {
+        table.release_results.expect("required release operation")(terminal_result);
+        table.destroy.expect("required destroy operation")(handle);
+    }
+}
+
+#[test]
+fn provider_releases_pending_request_after_prefill_completion() {
+    let (table, handle) = create_provider();
+    let first = admission_mutation([6; 16], 0.0);
+    let second = admission_mutation([7; 16], 1.0);
+    unsafe {
+        table.release_results.expect("required release operation")(apply_one(
+            &table, handle, &first,
+        ))
+    };
+    unsafe {
+        table.release_results.expect("required release operation")(apply_one(
+            &table, handle, &second,
+        ))
+    };
+
+    let prefill = lifecycle_mutation(PlacementMutationKindV1::PREFILL_COMPLETED, [6; 16], 2.0);
+    let result = apply_one(&table, handle, &prefill);
+    assert_eq!(result.pending_count, 0);
+    assert_eq!(result.released.len, 1);
+    assert_eq!(unsafe { &*result.released.data }.request_id, [7; 16]);
+    unsafe {
+        table.release_results.expect("required release operation")(result);
+        table.destroy.expect("required destroy operation")(handle);
+    }
+}
+
+#[test]
+fn provider_settles_topology_with_stable_worker_and_scheduler_ids() {
+    let (table, handle) = create_provider();
+    let first = admission_mutation([8; 16], 0.0);
+    let second = admission_mutation([9; 16], 1.0);
+    unsafe {
+        table.release_results.expect("required release operation")(apply_one(
+            &table, handle, &first,
+        ))
+    };
+    unsafe {
+        table.release_results.expect("required release operation")(apply_one(
+            &table, handle, &second,
+        ))
+    };
+
+    let draining = worker_mutation(PlacementMutationKindV1::WORKER_DRAINING, 7, 19, 2.0);
+    let ready = worker_mutation(PlacementMutationKindV1::WORKER_READY, 8, 29, 3.0);
+    unsafe {
+        table.release_results.expect("required release operation")(apply_one(
+            &table, handle, &draining,
+        ))
+    };
+    unsafe {
+        table.release_results.expect("required release operation")(apply_one(
+            &table, handle, &ready,
+        ))
+    };
+
+    let settled = PlacementMutationV1::topology_settled(4.0);
+    let result = apply_one(&table, handle, &settled);
+    assert_eq!(result.pending_count, 0);
+    assert_eq!(result.released.len, 1);
+    let released = unsafe { &*result.released.data };
+    assert_eq!(released.request_id, [9; 16]);
+    assert_eq!(released.worker_id, 8);
+    assert_eq!(released.scheduler_id, 29);
+    unsafe {
+        table.release_results.expect("required release operation")(result);
+        table.destroy.expect("required destroy operation")(handle);
+    }
+}
+
+#[test]
+fn provider_accepts_paired_hash_identity_with_typed_replay_metadata() {
+    let (table, handle) = create_provider();
+    let local_hashes = [101_u64];
+    let sequence_hashes = [202_u64];
+    let metadata = br#"{"authored_id":"request","session_id":"session","metadata":null,"prompt_token_source":"materialized"}"#;
+    let mutation = PlacementMutationV1 {
+        struct_size: std::mem::size_of::<PlacementMutationV1>() as u32,
+        kind: PlacementMutationKindV1::ADMIT,
+        flags: 0,
+        sequence: 1,
+        now_ms: 0.0,
+        payload: PlacementMutationPayloadV1 {
+            admission: PlacementAdmissionV1 {
+                request_id: [10; 16],
+                flags: 0,
+                priority: 0,
+                prompt_tokens: 4,
+                max_output_tokens: 1,
+                prompt_identity: PromptIdentityV1 {
+                    flags: PromptIdentityV1::LOCAL_BLOCK_HASHES_PRESENT
+                        | PromptIdentityV1::SEQUENCE_BLOCK_HASHES_PRESENT,
+                    reserved: 0,
+                    materialized_token_ids: Default::default(),
+                    local_block_hashes: BlockHashSliceV1 {
+                        data: local_hashes.as_ptr(),
+                        len: local_hashes.len() as u64,
+                    },
+                    sequence_block_hashes: BlockHashSliceV1 {
+                        data: sequence_hashes.as_ptr(),
+                        len: sequence_hashes.len() as u64,
+                    },
+                },
+                metadata: PlacementMetadataV1 {
+                    format: aisimulate_placement_abi::AdmissionMetadataFormatV1::JSON_UTF8,
+                    flags: 0,
+                    bytes: ByteSliceV1 {
+                        data: metadata.as_ptr(),
+                        len: metadata.len() as u64,
+                    },
+                },
+                session_id: ByteSliceV1::EMPTY,
+            },
+        },
+    };
+    let result = apply_one(&table, handle, &mutation);
+    assert_eq!(result.admission_results.len, 1);
+    assert_eq!(
+        unsafe { &*result.admission_results.data }.decision,
+        AdmissionDecisionV1::IMMEDIATE
+    );
+    unsafe {
+        table.release_results.expect("required release operation")(result);
+        table.destroy.expect("required destroy operation")(handle);
+    }
+}
+
+#[test]
+fn provider_rejects_unsupported_observations_with_a_bounded_diagnostic() {
+    let (table, handle) = create_provider();
+    let mutation = unsupported_engine_observation(0.0);
+    let mut result = empty_result();
+    let status = unsafe {
+        table.apply_batch.expect("required apply operation")(
+            handle,
+            PlacementMutationSliceV1 {
+                data: &mutation,
+                len: 1,
+            },
+            &mut result,
+        )
+    };
+    assert_eq!(status, StatusV1::UNSUPPORTED);
+    assert_eq!(result.applied_mutations, 0);
+    let mut error = ByteSliceV1::EMPTY;
+    assert_eq!(
+        unsafe { table.last_error.expect("required last error operation")(handle, &mut error) },
+        StatusV1::OK
+    );
+    assert!(error.len > 0);
+    assert!(error.len <= 256);
+    unsafe {
+        table
+            .release_bytes
+            .expect("required byte release operation")(error);
+        table.destroy.expect("required destroy operation")(handle);
+    }
+}
+
+#[test]
+fn provider_reports_the_committed_prefix_before_an_unsupported_observation() {
+    let (table, handle) = create_provider();
+    let admission = admission_mutation([11; 16], 0.0);
+    let observation = unsupported_engine_observation(1.0);
+    let mutations = [admission, observation];
+    let mut result = empty_result();
+    let status = unsafe {
+        table.apply_batch.expect("required apply operation")(
+            handle,
+            PlacementMutationSliceV1 {
+                data: mutations.as_ptr(),
+                len: mutations.len() as u64,
+            },
+            &mut result,
+        )
+    };
+    assert_eq!(status, StatusV1::UNSUPPORTED);
+    assert_eq!(result.applied_mutations, 1);
+    assert_eq!(result.pending_count, 0);
+    unsafe { table.destroy.expect("required destroy operation")(handle) };
+}
+
+fn create_provider() -> (aisimulate_placement_abi::PluginVTableV1, PlacementHandleV1) {
+    let scheduler_ids = [19_u64];
+    let workers = [WorkerTopologyV1 {
+        worker_id: 7,
+        scheduler_ids: SchedulerIdSliceV1 {
+            data: scheduler_ids.as_ptr(),
+            len: scheduler_ids.len() as u64,
+        },
+    }];
+    let capacities = [WorkerCapacityV1 {
+        worker_id: 7,
+        total_kv_blocks: 100,
+        available_kv_blocks: 100,
+        max_running_requests: 1,
+        flags: 0,
+        reserved: 0,
+    }];
+    let request = PlacementCreateRequestV1 {
+        struct_size: std::mem::size_of::<PlacementCreateRequestV1>() as u32,
+        payload_version: 1,
+        flags: 0,
+        reserved: 0,
+        selector_seed: [0; 32],
+        workers: WorkerTopologySliceV1 {
+            data: workers.as_ptr(),
+            len: workers.len() as u64,
+        },
+        capacities: WorkerCapacitySliceV1 {
+            data: capacities.as_ptr(),
+            len: capacities.len() as u64,
+        },
+        options_namespace: ByteSliceV1::EMPTY,
+        provider_options: ByteSliceV1::EMPTY,
+        limits: PlacementLimitsV1 {
+            max_mutations: 8,
+            max_admission_results: 8,
+            max_released: 8,
+            max_diagnostic_bytes: 256,
+        },
+    };
+    let descriptor = dynamo_placement_plugin::dynamo_placement_plugin_entry_v1();
+    let table = unsafe { *validate_descriptor_v1(descriptor).expect("valid descriptor") };
+    let mut handle = PlacementHandleV1(std::ptr::null_mut());
+    let mut error = ByteSliceV1::EMPTY;
+
+    let status = unsafe {
+        table.create.expect("required create operation")(request, &mut handle, &mut error)
+    };
+    assert_eq!(status, StatusV1::OK);
+    assert!(!handle.0.is_null());
+    assert!(error.data.is_null());
+    (table, handle)
+}
+
+fn empty_result() -> PlacementBatchResultV1 {
+    PlacementBatchResultV1 {
+        struct_size: 0,
+        flags: 0,
+        applied_mutations: 0,
+        pending_count: 0,
+        admission_results: aisimulate_placement_abi::PlacementResultSliceV1 {
+            data: std::ptr::null(),
+            len: 0,
+        },
+        released: aisimulate_placement_abi::PlacementSliceV1 {
+            data: std::ptr::null(),
+            len: 0,
+        },
+        diagnostics: aisimulate_placement_abi::PlacementDiagnosticSliceV1 {
+            data: std::ptr::null(),
+            len: 0,
+        },
+    }
+}
+
+fn apply_one(
+    table: &aisimulate_placement_abi::PluginVTableV1,
+    handle: PlacementHandleV1,
+    mutation: &PlacementMutationV1,
+) -> PlacementBatchResultV1 {
+    let mut result = empty_result();
+    let status = unsafe {
+        table.apply_batch.expect("required apply operation")(
+            handle,
+            PlacementMutationSliceV1 {
+                data: mutation,
+                len: 1,
+            },
+            &mut result,
+        )
+    };
+    assert_eq!(status, StatusV1::OK);
+    assert_eq!(result.applied_mutations, 1);
+    result
+}
+
+fn admission_mutation(request_id: [u8; 16], now_ms: f64) -> PlacementMutationV1 {
+    static TOKENS: [u32; 4] = [11, 12, 13, 14];
+    PlacementMutationV1 {
+        struct_size: std::mem::size_of::<PlacementMutationV1>() as u32,
+        kind: PlacementMutationKindV1::ADMIT,
+        flags: 0,
+        sequence: 1,
+        now_ms,
+        payload: PlacementMutationPayloadV1 {
+            admission: PlacementAdmissionV1 {
+                request_id,
+                flags: 0,
+                priority: 0,
+                prompt_tokens: TOKENS.len() as u64,
+                max_output_tokens: 1,
+                prompt_identity: PromptIdentityV1 {
+                    flags: PromptIdentityV1::MATERIALIZED_TOKEN_IDS_PRESENT,
+                    reserved: 0,
+                    materialized_token_ids: aisimulate_placement_abi::TokenIdSliceV1 {
+                        data: TOKENS.as_ptr(),
+                        len: TOKENS.len() as u64,
+                    },
+                    ..PromptIdentityV1::OMITTED
+                },
+                metadata: PlacementMetadataV1::EMPTY,
+                session_id: ByteSliceV1::EMPTY,
+            },
+        },
+    }
+}
+
+fn lifecycle_mutation(
+    kind: PlacementMutationKindV1,
+    request_id: [u8; 16],
+    now_ms: f64,
+) -> PlacementMutationV1 {
+    PlacementMutationV1 {
+        struct_size: std::mem::size_of::<PlacementMutationV1>() as u32,
+        kind,
+        flags: 0,
+        sequence: 1,
+        now_ms,
+        payload: PlacementMutationPayloadV1 {
+            request_lifecycle: aisimulate_placement_abi::RequestLifecycleV1 {
+                request_id,
+                flags: 0,
+                reserved: 0,
+            },
+        },
+    }
+}
+
+fn worker_mutation(
+    kind: PlacementMutationKindV1,
+    worker_id: u64,
+    scheduler_id: u64,
+    now_ms: f64,
+) -> PlacementMutationV1 {
+    let scheduler_ids = Box::leak(Box::new([scheduler_id]));
+    PlacementMutationV1 {
+        struct_size: std::mem::size_of::<PlacementMutationV1>() as u32,
+        kind,
+        flags: 0,
+        sequence: 1,
+        now_ms,
+        payload: PlacementMutationPayloadV1 {
+            worker: WorkerTopologyV1 {
+                worker_id,
+                scheduler_ids: SchedulerIdSliceV1 {
+                    data: scheduler_ids.as_ptr(),
+                    len: scheduler_ids.len() as u64,
+                },
+            },
+        },
+    }
+}
+
+fn unsupported_engine_observation(now_ms: f64) -> PlacementMutationV1 {
+    PlacementMutationV1 {
+        struct_size: std::mem::size_of::<PlacementMutationV1>() as u32,
+        kind: PlacementMutationKindV1::OBSERVE_ENGINE,
+        flags: 0,
+        sequence: 1,
+        now_ms,
+        payload: PlacementMutationPayloadV1 {
+            engine: EngineObservationV1 {
+                worker_id: 7,
+                scheduler_id: 19,
+                request_id: [0; 16],
+                event_kind: 1,
+                flags: 0,
+                value: 0,
+            },
+        },
+    }
 }

@@ -16,5 +16,8 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+aisimulate-core = { workspace = true }
 aisimulate-placement-abi = { path = "/home/anthony/nvidia/projects/aiperf-rs/.worktrees/deps/aisimulate-dynamic-abi/crates/placement-abi" }
 dynamo-mocker = { workspace = true, features = ["replay-bench"] }
+serde_json = { workspace = true }
+uuid = { workspace = true }
