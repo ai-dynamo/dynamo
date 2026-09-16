@@ -679,6 +679,22 @@ class TestI2VEngineInputs:
         with pytest.raises(ValueError, match="seconds must be greater than zero"):
             await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
 
+    @pytest.mark.asyncio
+    async def test_video_rejection_propagates_as_invalid_argument(self):
+        handler = _make_handler()
+        handler.config.output_modalities = ["video"]
+        request = {
+            "prompt": "cat",
+            "model": "video-model",
+            "nvext": {"fps": 0},
+        }
+
+        with pytest.raises(InvalidArgument) as excinfo:
+            async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                pass
+
+        assert str(excinfo.value) == "nvext.fps must be greater than zero"
+
     async def test_media_passthrough_reaches_sampling_params(self):
         """A top-level SDK extra_body field, nested by the frontend under
         extra_args["media_passthrough"], rides sampling params extra_args to
