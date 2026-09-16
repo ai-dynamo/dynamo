@@ -276,7 +276,7 @@ async def test_shutdown_abort_chunk_raises_engine_shutdown(processor_name):
     handler = _new_decode_handler()
     handler.shutdown_event = asyncio.Event()
     handler.shutdown_event.set()
-    context = SimpleNamespace(id=lambda: "request-id")
+    context = SimpleNamespace(id=lambda: "request-id", is_stopped=lambda: False)
 
     async def stream():
         yield {
