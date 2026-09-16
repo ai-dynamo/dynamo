@@ -5,18 +5,135 @@ import asyncio
 import logging
 from typing import Optional
 
-from prometheus_client import CollectorRegistry
+from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
 from vllm.config import VllmConfig
 from vllm.v1.metrics.loggers import StatLoggerBase
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 from dynamo.common.utils.prometheus import LLMBackendMetrics
 from dynamo.llm import WorkerMetricsPublisher
+from dynamo.prometheus_names import labels, name_prefix
 from dynamo.runtime import Endpoint
 
 # Create a dedicated registry for dynamo_component metrics
 # This ensures these metrics are isolated and can be exposed via their own callback
 DYNAMO_COMPONENT_REGISTRY = CollectorRegistry()
+
+
+class PrometheusDecodeRemotePrefillAdmissionMetrics:
+    """Prometheus metrics for decode remote-prefill admission."""
+
+    def __init__(
+        self,
+        registry: CollectorRegistry,
+        model_name: str,
+        component_name: str,
+    ) -> None:
+        labelnames = [labels.MODEL, labels.COMPONENT, labels.DP_RANK]
+        prefix = f"{name_prefix.COMPONENT}_decode_remote_prefill_admission"
+        self.configured_limit = Gauge(
+            f"{prefix}_limit",
+            "Configured pre-first-output request limit per local DP rank.",
+            labelnames=labelnames,
+            registry=registry,
+            multiprocess_mode="max",
+        )
+        self.active = Gauge(
+            f"{prefix}_active",
+            "Remote-prefill decode requests admitted before first output.",
+            labelnames=labelnames,
+            registry=registry,
+            multiprocess_mode="max",
+        )
+        self.waiting = Gauge(
+            f"{prefix}_waiting",
+            "Remote-prefill decode requests waiting for admission.",
+            labelnames=labelnames,
+            registry=registry,
+            multiprocess_mode="max",
+        )
+        self.wait_seconds = Histogram(
+            f"{prefix}_wait_seconds",
+            "Time spent waiting for remote-prefill decode admission.",
+            labelnames=labelnames,
+            registry=registry,
+            buckets=(
+                0.0001,
+                0.0005,
+                0.001,
+                0.005,
+                0.01,
+                0.05,
+                0.1,
+                0.25,
+                0.5,
+                1.0,
+                2.5,
+                5.0,
+                10.0,
+            ),
+        )
+        self.limit_hits = Counter(
+            f"{prefix}_limit_hits_total",
+            "Remote-prefill requests that found their local DP limit full.",
+            labelnames=labelnames,
+            registry=registry,
+        )
+        self.cancelled_waiters = Counter(
+            f"{prefix}_cancelled_waiters_total",
+            "Remote-prefill requests cancelled while waiting for admission.",
+            labelnames=labelnames,
+            registry=registry,
+        )
+        self.releases = Counter(
+            f"{prefix}_releases_total",
+            "Remote-prefill admission permits released by terminal reason.",
+            labelnames=[*labelnames, "reason"],
+            registry=registry,
+        )
+        self.model_name = model_name
+        self.component_name = component_name
+
+    def _labels(self, dp_rank: int | None) -> dict[str, str]:
+        return {
+            labels.MODEL: self.model_name,
+            labels.COMPONENT: self.component_name,
+            labels.DP_RANK: "unrouted" if dp_rank is None else str(dp_rank),
+        }
+
+    def set_state(
+        self,
+        dp_rank: int | None,
+        *,
+        limit: int,
+        active: int,
+        waiting: int,
+    ) -> None:
+        metric_labels = self._labels(dp_rank)
+        self.configured_limit.labels(**metric_labels).set(limit)
+        self.active.labels(**metric_labels).set(active)
+        self.waiting.labels(**metric_labels).set(waiting)
+
+    def observe_wait(
+        self,
+        dp_rank: int | None,
+        *,
+        wait_seconds: float,
+        limit_hit: bool,
+    ) -> None:
+        metric_labels = self._labels(dp_rank)
+        self.wait_seconds.labels(**metric_labels).observe(wait_seconds)
+        if limit_hit:
+            self.limit_hits.labels(**metric_labels).inc()
+
+    def record_cancelled(self, dp_rank: int | None) -> None:
+        self.cancelled_waiters.labels(**self._labels(dp_rank)).inc()
+
+    def record_release(self, dp_rank: int | None, reason: str) -> None:
+        self.releases.labels(
+            **self._labels(dp_rank),
+            reason=reason,
+        ).inc()
 
 
 class DynamoStatLoggerPublisher(StatLoggerBase):
