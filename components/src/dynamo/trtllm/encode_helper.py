@@ -245,7 +245,7 @@ class EncodeHelper:
             Response with NIXL metadata, shape, dtype, and auxiliary data
         """
         logging.info(f"EncodeHelper: loading embeddings from {embedding_paths[0]}")
-        loaded_data = multimodal_processor.load_tensor_from_path_or_url(
+        loaded_data = await multimodal_processor.load_tensor_from_path_or_url(
             embedding_paths[0]
         )
 

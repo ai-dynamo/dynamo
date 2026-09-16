@@ -20,6 +20,7 @@ use dynamo_kv_router::{
     selector::{DefaultWorkerSelector, WorkerSelector},
 };
 use dynamo_runtime::{
+    error::{ErrorType, match_error_chain},
     pipeline::{
         AsyncEngineContextProvider, Context, ManyOut, Operator, ResponseStream, RouterMode,
         ServerStreamingEngine, SingleIn, async_trait, propagate_first_response_guard,
@@ -401,7 +402,13 @@ where
                 Ok(None) => {
                     (req, context) = conditional_request.into_parts();
                 }
-                Err(error) if crate::kv_router::routing_host::is_cancelled(&error) => {
+                Err(error)
+                    if match_error_chain(
+                        error.as_ref(),
+                        &[ErrorType::Cancelled, ErrorType::InvalidArgument],
+                        &[],
+                    ) =>
+                {
                     return Err(error);
                 }
                 Err(error) => {
@@ -845,6 +852,76 @@ mod tests {
                 "{label}: the decode leg must record which prefill worker holds the blocks"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn conditional_disagg_rejects_unknown_decode_target_before_fallback() {
+        use crate::kv_router::KvRouter;
+        use dynamo_runtime::{
+            DistributedRuntime, Runtime, distributed::DistributedConfig, pipeline::PushRouter,
+        };
+
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let endpoint = distributed
+            .namespace("conditional-invalid-worker")
+            .unwrap()
+            .component("decode")
+            .unwrap()
+            .endpoint("generate");
+        let client = endpoint.client().await.unwrap();
+        let (_workers_tx, workers) = watch::channel(HashMap::<u64, ModelRuntimeConfig>::new());
+        let config = KvRouterConfig {
+            skip_initial_worker_wait: true,
+            use_kv_events: false,
+            router_track_active_blocks: false,
+            ..Default::default()
+        };
+        let chooser = KvRouter::new(
+            endpoint,
+            client.clone(),
+            workers,
+            None,
+            16,
+            DefaultWorkerSelector::new(Some(config.clone()), "decode"),
+            Some(config),
+            None,
+            "decode",
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let inner = PushRouter::from_client(client, RouterMode::KV)
+            .await
+            .unwrap();
+        let host = Arc::new(RoutingHost::new(inner, Arc::new(chooser), None).unwrap());
+        let router = active_conditional_router();
+        assert!(router.decode_routing_host.set(host).is_ok());
+        let downstream = Arc::new(QueryOnlyDecodeHost::default());
+        let mut request = query_only_request();
+        request.annotations.clear();
+        request.routing_mut().decode_worker_id = Some(u64::MAX);
+
+        // No prefill binding: the old fallback would continue to downstream instead
+        // of returning the preview's client error.
+        let error = router
+            .generate(SingleIn::new(request), downstream.clone())
+            .await
+            .unwrap_err();
+        assert!(match_error_chain(
+            error.as_ref(),
+            &[ErrorType::InvalidArgument],
+            &[]
+        ));
+        assert_eq!(downstream.requests.load(Ordering::Relaxed), 0);
+        drop(router);
+        runtime.shutdown();
     }
 
     #[tokio::test]
