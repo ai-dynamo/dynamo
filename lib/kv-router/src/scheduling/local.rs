@@ -503,10 +503,6 @@ where
         .await
     }
 
-    pub fn register_workers(&self, worker_ids: &HashSet<WorkerId>) {
-        self.queue.register_workers(worker_ids);
-    }
-
     pub async fn add_request(&self, req: SequenceRequest) -> Result<(), SequenceError> {
         self.slots.add_request(req, Instant::now())
     }
@@ -612,12 +608,23 @@ where
         &self,
         booking: &SchedulerBookingDescriptor,
     ) -> Result<LifecycleMutationOutcome, SequenceError> {
+        self.free_if_booking_with_cleanup(booking, || {}).await
+    }
+
+    /// Complete owner cleanup after a successful release (including a stale
+    /// booking's `NoChange`), before the cancellable queue-progress wait.
+    pub(crate) async fn free_if_booking_with_cleanup(
+        &self,
+        booking: &SchedulerBookingDescriptor,
+        cleanup: impl FnOnce(),
+    ) -> Result<LifecycleMutationOutcome, SequenceError> {
         let outcome = self.slots.free_if_booking(
             &booking.request_id,
             booking.worker,
             booking.attempt_id,
             Instant::now(),
         )?;
+        cleanup();
         if outcome.is_applied() {
             self.queue.update_worker(booking.worker).await;
         }
@@ -1566,21 +1573,6 @@ mod tests {
         let loads = scheduler.get_potential_loads(None, 0, HashMap::new(), true);
         assert_eq!(loads.len(), 1);
         assert_eq!(loads[0].potential_prefill_tokens, 40);
-
-        cancel_token.cancel();
-    }
-
-    #[tokio::test]
-    async fn test_register_workers_uses_default_dp_fallback() {
-        let (scheduler, _slots, _cfg_tx, cancel_token) =
-            make_scheduler(HashMap::new(), None, false, None);
-
-        scheduler.register_workers(&HashSet::from([42]));
-        let loads = scheduler.get_potential_loads(None, 64, HashMap::new(), true);
-
-        assert_eq!(loads.len(), 1);
-        assert_eq!(loads[0].worker_id, 42);
-        assert_eq!(loads[0].dp_rank, 0);
 
         cancel_token.cancel();
     }

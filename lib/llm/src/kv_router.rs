@@ -2851,6 +2851,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_find_best_match_maps_overload_to_resource_exhausted() {
+        let router = make_test_router(SelectionPolicySource::Registry, None).await;
+        router.client.set_overloaded_instances(&[0, 1]);
+
+        let Err(error) = find_best_match(&router, &[11, 12], false).await else {
+            panic!("overloaded pool must not route");
+        };
+        assert!(dynamo_runtime::error::match_error_chain(
+            error.as_ref(),
+            &[ErrorType::ResourceExhausted],
+            &[]
+        ));
+        assert!(
+            error
+                .to_string()
+                .contains("all eligible workers are overloaded")
+        );
+
+        router.client.set_overloaded_instances(&[]);
+        assert!(find_best_match(&router, &[11, 12], false).await.is_ok());
+    }
+
+    #[tokio::test]
     async fn test_find_best_match_maps_filtered_workers_to_unavailable() {
         let policy = SelectionPolicySource::Factory(Arc::new(|config: &KvRouterConfig, _, _| {
             WorkerSelectionPolicy::new_with_filters(

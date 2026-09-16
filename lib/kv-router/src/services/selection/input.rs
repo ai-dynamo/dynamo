@@ -169,7 +169,7 @@ impl PromptView<'_> {
         Ok(normalize_hashes(block_hashes, sequence_hashes, isl_tokens)?.block_hashes)
     }
 
-    fn routing_tokens_and_mm_infos(&self) -> Option<RoutingTokensAndMmInfos<'_>> {
+    pub(super) fn routing_tokens_and_mm_infos(&self) -> Option<RoutingTokensAndMmInfos<'_>> {
         if let Some(mm_routing_info) = self.mm_routing_info
             && !mm_routing_info.routing_token_ids.is_empty()
         {

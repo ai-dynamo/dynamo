@@ -105,7 +105,7 @@ pub(super) struct ReservationIndexObserver {
 
 impl ReplicaRequestLeaseObserver for ReservationIndexObserver {
     fn admitted(&self, booking: SchedulerBookingDescriptor) {
-        {
+        let displaced = {
             let mut index = self.index.write();
             // A peer only admits an id this partition's scheduler does not hold,
             // so an existing row for it is a stale booking (expired, not yet
@@ -123,9 +123,13 @@ impl ReplicaRequestLeaseObserver for ReservationIndexObserver {
                         claim_id: None,
                         _affinity_lease: None,
                     },
-                );
+                )
+            } else {
+                None
             }
-        }
+        };
+        // Releasing an affinity lease takes a shard lock and publishes to peers.
+        drop(displaced);
         if let Some(host) = &self.host {
             host.admitted(booking);
         }
@@ -197,7 +201,8 @@ impl SelectionCore {
             Ok(response) => response,
             // The session moved: the cached worker can never be booked for it.
             Err(SelectionError::BadRequest(message)) => {
-                self.selection_cache.discard(&key, &req.selection_id);
+                self.selection_cache
+                    .remove(&key, &req.selection_id, generation);
                 return Err(SelectionError::BadRequest(message));
             }
             Err(error) => return Err(error),
@@ -314,7 +319,8 @@ impl SelectionCore {
         // Hash-only reservations (sequence hashes without block hashes) carry
         // nothing an indexer can key on; recording is skipped for them.
         let can_record = entry.indexer.records_routing_decisions()
-            && (req.prompt.token_ids.is_some() || req.prompt.block_hashes.is_some());
+            && (req.prompt.view().routing_tokens_and_mm_infos().is_some()
+                || req.prompt.block_hashes.is_some());
         let routing_hashes = can_record
             .then(|| {
                 req.prompt
@@ -490,8 +496,12 @@ impl SelectionCore {
         let Some((entry, booking)) = self.indexed_booking(selection_id) else {
             return Err(Self::reservation_not_found(selection_id));
         };
-        let outcome = entry.scheduler.free_if_booking(&booking).await?;
-        forget_reservation_if(&self.reservation_index, &entry.key, &booking);
+        let outcome = entry
+            .scheduler
+            .free_if_booking_with_cleanup(&booking, || {
+                forget_reservation_if(&self.reservation_index, &entry.key, &booking);
+            })
+            .await?;
         match outcome {
             LifecycleMutationOutcome::Applied => Ok(()),
             LifecycleMutationOutcome::NoChange => Err(Self::reservation_not_found(selection_id)),

@@ -33,7 +33,6 @@ use crate::protocols::{
     LocalBlockHash, PrefillLoadHint, WorkerConfigLike, WorkerId, WorkerSelectionResult,
     WorkerWithDpRank,
 };
-use crate::sequences::topology::WorkerDpRange;
 use crate::sequences::{
     ActiveSequencesMultiWorker, LifecycleMutationOutcome, SequenceError, SequencePublisher,
     SequenceRequest,
@@ -513,12 +512,12 @@ pub struct SchedulerQueue<
     /// Incremented after push, decremented after pop. Lock-free reads via `Relaxed` load.
     pending_isl_tokens: Arc<AtomicUsize>,
     class_counters: Arc<Vec<ClassQueueCounters>>,
-    slots: Arc<ActiveSequencesMultiWorker<P>>,
-    workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
     queueing_enabled: bool,
     supports_overlap_refresh: bool,
     non_max_overlap_selection_observer: Arc<OnceLock<NonMaxOverlapSelectionObserver>>,
-    _marker: PhantomData<fn() -> (Sel, RF)>,
+    #[allow(clippy::type_complexity)]
+    // Covariant type markers, without ownership or auto-trait bounds.
+    _marker: PhantomData<fn() -> (P, C, Sel, RF)>,
 }
 
 impl<
@@ -620,8 +619,8 @@ impl<
             pending_count: Arc::clone(&pending_count),
             pending_isl_tokens: Arc::clone(&pending_isl_tokens),
             class_counters: Arc::clone(&class_counters),
-            slots: Arc::clone(&slots),
-            workers_with_configs: workers_with_configs.clone(),
+            slots,
+            workers_with_configs,
             start_time: Instant::now(),
             block_size,
             selector,
@@ -639,8 +638,6 @@ impl<
             pending_count,
             pending_isl_tokens,
             class_counters,
-            slots,
-            workers_with_configs,
             queueing_enabled,
             supports_overlap_refresh: overlap_refresh_after.is_some(),
             non_max_overlap_selection_observer,
@@ -656,29 +653,6 @@ impl<
     RF: OverlapScoresRefresh + Send + Sync + 'static,
 > SchedulerQueue<P, C, Sel, RF>
 {
-    /// Register externally-provided workers in the slot tracker.
-    ///
-    /// Looks up DP rank/size from the discovery watch channel; defaults to
-    /// `(0, 1)` for workers not yet known to discovery.
-    pub fn register_workers(&self, worker_ids: &std::collections::HashSet<u64>) {
-        let discovery_workers = self.workers_with_configs.borrow();
-        for &worker_id in worker_ids {
-            let (dp_start, dp_size) = discovery_workers
-                .get(&worker_id)
-                .map(|runtime_config| {
-                    (
-                        runtime_config.data_parallel_start_rank(),
-                        runtime_config.data_parallel_size(),
-                    )
-                })
-                .unwrap_or((0, 1));
-            let range = WorkerDpRange::new(worker_id, dp_start, dp_size);
-            if let Err(error) = self.slots.upsert_worker(range) {
-                tracing::warn!(worker_id, %error, "Invalid externally-provided worker topology");
-            }
-        }
-    }
-
     /// Install the observer for admitted selections that sacrifice KV overlap.
     ///
     /// Returns `false` when an observer is already installed.
@@ -1729,6 +1703,7 @@ mod tests {
     use crate::scheduling::OverlapSignals;
     use crate::scheduling::types::{KvSchedulerError, ScheduleMode};
     use crate::scheduling::{RefreshedOverlap, RouterPolicyConfig};
+    use crate::sequences::topology::WorkerDpRange;
     use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher};
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
     use crate::{DefaultWorkerSelector, WorkerInputs, WorkerSelector};
@@ -3311,10 +3286,9 @@ policy_classes:
         ));
     }
 
-    /// Simulates the EPP path: router starts with zero workers (skip_initial_worker_wait),
-    /// then register_workers lazily injects workers before routing.
+    /// A queue starting with zero workers can route after slots and configs arrive.
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_register_workers_lazy_epp_path() {
+    async fn test_worker_updates_after_empty_start() {
         let block_size = 16;
         let isl = 512;
 
@@ -3330,7 +3304,7 @@ policy_classes:
                 resp,
                 Err(crate::scheduling::types::KvSchedulerError::NoEndpoints)
             ),
-            "expected NoEndpoints before register_workers, got {resp:?}"
+            "expected NoEndpoints before worker updates, got {resp:?}"
         );
 
         // Lazily register two workers in the slot tracker (EPP supplies pod list)
@@ -3372,9 +3346,9 @@ policy_classes:
             .unwrap();
     }
 
-    /// Register_workers is additive: calling with a new set does NOT remove old workers.
+    /// Upserting a new worker preserves existing workers.
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_register_workers_additive() {
+    async fn test_worker_updates_are_additive() {
         let block_size = 16;
         let isl = 256;
 

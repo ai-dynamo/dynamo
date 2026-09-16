@@ -308,8 +308,13 @@ async fn wait_for_overlap(
     .expect("approximate indexer never credited the booked prompt")
 }
 
+#[rstest::rstest]
+#[case::text(false)]
+#[case::multimodal_only(true)]
 #[tokio::test]
-async fn bookings_populate_the_approximate_primary_without_kv_events() {
+async fn bookings_populate_the_approximate_primary_without_kv_events(
+    #[case] multimodal_only: bool,
+) {
     // use_kv_events=false: the primary is approximate and bookings feed it.
     let core = local_core(test_config(false));
     core.upsert_worker(worker(1)).await.expect("worker upsert");
@@ -356,9 +361,13 @@ async fn bookings_populate_the_approximate_primary_without_kv_events() {
     assert_eq!(credited.worker_id, 2);
 
     // And the explicit reservation form.
-    let prompt_c = || PromptRequest {
-        token_ids: Some(vec![9, 10, 11, 12]),
-        ..PromptRequest::default()
+    let prompt_c = || {
+        serde_json::from_value::<PromptRequest>(if multimodal_only {
+            serde_json::json!({"mm_routing_info": {"routing_token_ids": [9, 10, 11, 12]}})
+        } else {
+            serde_json::json!({"token_ids": [9, 10, 11, 12]})
+        })
+        .expect("valid wire prompt")
     };
     core.create_reservation(ReservationRequest {
         worker_id: Some(1),
@@ -375,6 +384,7 @@ async fn bookings_populate_the_approximate_primary_without_kv_events() {
     })
     .await;
     assert_eq!(credited.worker_id, 1);
+    assert_eq!(credited.overlap.longest_matched, 4);
 }
 
 #[tokio::test]
@@ -1584,6 +1594,56 @@ fn index_observer_replaces_stale_and_claimed_rows_of_its_partition() {
     assert_eq!(index.read()["shared"].booking, Some(booking(4)));
 }
 
+#[tokio::test]
+async fn index_observer_releases_displaced_affinity_after_unlock() {
+    use super::super::affinity::{AffinityReplicaSink, AffinityVersion};
+    use crate::scheduling::AttemptId;
+
+    struct UnlockedIndexSink {
+        index: Arc<ReservationIndex>,
+        published: AtomicBool,
+    }
+
+    impl AffinityReplicaSink for UnlockedIndexSink {
+        fn publish(&self, _: &str, _: WorkerAffinityTarget, _: AffinityVersion) {
+            assert!(self.index.try_write().is_some(), "index must be unlocked");
+            self.published.store(true, Ordering::Relaxed);
+        }
+    }
+
+    let core = core_with_session_affinity();
+    core.upsert_worker(worker(1)).await.expect("worker upsert");
+    core.select_and_reserve(session_reservation("shared", "s"))
+        .await
+        .expect("local booking");
+    let (entry, booking) = core.indexed_booking("shared").expect("indexed booking");
+    // A scheduler release that bypasses the core leaves a stale indexed lease.
+    entry.scheduler.free_if_booking(&booking).await.unwrap();
+    let table = entry.affinity.get().expect("affinity table");
+    let sink = Arc::new(UnlockedIndexSink {
+        index: Arc::clone(&core.reservation_index),
+        published: AtomicBool::new(false),
+    });
+    assert!(table.enable_replication(1, sink.clone()));
+    let replacement = SchedulerBookingDescriptor {
+        attempt_id: AttemptId::new(999),
+        ..booking
+    };
+    let observer = ReservationIndexObserver {
+        index: Arc::clone(&core.reservation_index),
+        partition: default_key(),
+        host: None,
+    };
+    observer.admitted(replacement.clone());
+
+    assert!(sink.published.load(Ordering::Relaxed));
+    assert_eq!(table.lease_count("s"), Some(0));
+    assert_eq!(
+        core.reservation_index.read()["shared"].booking,
+        Some(replacement)
+    );
+}
+
 #[rstest::rstest]
 #[tokio::test]
 async fn replaced_claim_cannot_remove_or_overwrite_a_new_reservation(
@@ -2654,6 +2714,83 @@ async fn two_phase_replay_rejects_a_worker_the_session_left() {
     })
     .await;
     assert!(core.reservation_index.read().is_empty());
+}
+
+#[tokio::test]
+async fn failed_replay_preserves_a_newer_cached_selection() {
+    let core = core_with_session_affinity();
+    for id in [1, 2] {
+        core.upsert_worker(worker(id)).await.expect("worker upsert");
+    }
+    let request = |worker_id| {
+        let mut request = select_request();
+        request.selection_id = Some("pending".to_string());
+        request.session_id = Some("s".to_string());
+        request.allowed_worker_ids = Some(HashSet::from([worker_id]));
+        request
+    };
+    core.select(request(1)).await.expect("first select");
+
+    let entry = core.entry(&default_key()).expect("entry");
+    let table = entry.affinity.get().expect("affinity table");
+    let initializer = table.acquire("s", None).await.expect("initializer");
+    let mut replay = Box::pin(core.create_reservation(replay_reservation("pending")));
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(replay.as_mut().poll(&mut context).is_pending());
+
+    assert_eq!(core.select(request(2)).await.expect("refresh").worker_id, 2);
+    let _lease = table
+        .commit(initializer, WorkerAffinityTarget::new(2, Some(0)))
+        .expect("bind elsewhere");
+    assert!(matches!(replay.await, Err(SelectionError::BadRequest(_))));
+    wait_until("rejected booking release", || {
+        !entry.scheduler.has_request("pending")
+    })
+    .await;
+
+    let replacement = core
+        .create_reservation(replay_reservation("pending"))
+        .await
+        .expect("new selection survives the old replay failure");
+    assert_eq!(replacement.worker_id, 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancelled_free_releases_reservation_and_affinity() {
+    let mut config = test_config(false);
+    config.router_queue_threshold = Some(0.0);
+    let core = core_with(
+        config,
+        SelectionHost::default(),
+        None,
+        WorkerType::Aggregated,
+        Some(SessionAffinityConfig::new(Duration::from_secs(1))),
+    );
+    core.upsert_worker(worker(1)).await.expect("worker upsert");
+    core.select_and_reserve(session_reservation("r1", "s"))
+        .await
+        .expect("booking");
+    let entry = core.entry(&default_key()).expect("entry");
+
+    // An unpolled free must leave the live booking and its lease untouched.
+    drop(core.free_reservation("r1"));
+    assert!(entry.scheduler.has_request("r1"));
+    assert_eq!(lease_count(&core, "s"), Some(1));
+
+    let mut freeing = Box::pin(core.free_reservation("r1"));
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(freeing.as_mut().poll(&mut context).is_pending());
+    assert!(!entry.scheduler.has_request("r1"));
+    // The queue actor has not acknowledged the release yet.
+    drop(freeing);
+    assert!(!core.reservation_index.read().contains_key("r1"));
+    assert_eq!(lease_count(&core, "s"), Some(0));
+
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert_eq!(bound_worker(&core, "s"), None);
+    core.select_and_reserve(session_reservation("r1", "s"))
+        .await
+        .expect("cancelled cleanup must not prevent ID reuse");
 }
 
 #[tokio::test]
