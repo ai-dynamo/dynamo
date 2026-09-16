@@ -182,6 +182,9 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 {# Inline expression, not a block tag: render.py leaves trim_blocks off, so a tag
    on its own line inside the RUN breaks the backslash continuation. #}
 {% set vllm_rs_required = "1" if device == "cuda" else "0" %}
+{# TODO: Remove this workaround once bundled vllm-rs accepts extra output fields. #}
+{% set vllm_rs_allowlist = "1" if target not in ("dev", "local-dev") else "0" %}
+{% set vllm_rs_plugins = "modelexpress" if context.vllm.enable_modelexpress == "true" else "" %}
 
 # The vLLM 0.28.0 release images resolve the unbounded `transformers>=5.5.3`
 # requirement to 5.15.1, but vLLM-Omni 0.28.0rc1 caps Transformers below 5.15.
@@ -465,13 +468,19 @@ RUN rm -rf /workspace/vllm
 # Remove the codec-bearing video-DECODE wheels inherited from the vllm-openai
 # base. Each bundles its own full ffmpeg carrying software H.264/H.265/AAC;
 # PyAV and decord additionally ship GPL libx264/libx265. Dynamo's vLLM component
-# imports none of the removed wheels, so they are unused decode-side dead weight.
+# keeps OpenCV for mistral_common's cv2.resize, rebuilt at the base image's
+# version with video backends disabled. Other codec-bearing wheels are removed.
 # (PyNvVideoCodec is KEPT for NVDEC hardware decode -- see the note below.) The in-tree
 # LGPL ffmpeg + imageio-ffmpeg installed above are intentionally KEPT for the
 # omni video-encode path, which uses the royalty-free VP9 (libvpx_vp9) encoder —
 # no H.264 is built. Direct rm makes the removal robust regardless of how the
 # base image's pip is configured; the guards fail the build if any of them survive.
 RUN set -eux; \
+    OPENCV_VERSION="$(python3 -m pip show opencv-python-headless 2>/dev/null | awk '/^Version:/{print $2}')"; \
+    if [ -z "${OPENCV_VERSION}" ]; then \
+        OPENCV_VERSION="$(python3 -m pip show opencv-python 2>/dev/null | awk '/^Version:/{print $2}')"; \
+    fi; \
+    test -n "${OPENCV_VERSION}" || { echo "ERROR: base image must provide version metadata for opencv-python-headless or opencv-python" >&2; exit 1; }; \
     python3 -m pip uninstall --yes \
         av decord decord2 opencv-python opencv-python-headless torchcodec \
         || true; \
@@ -489,7 +498,14 @@ RUN set -eux; \
     ! python3 -c "import cv2" 2>/dev/null; \
     ! python3 -c "import av" 2>/dev/null; \
     ! python3 -c "import decord" 2>/dev/null; \
-    ! python3 -c "import torchcodec" 2>/dev/null
+    ! python3 -c "import torchcodec" 2>/dev/null; \
+    ENABLE_HEADLESS=1 ENABLE_CONTRIB=0 MAKEFLAGS="-j$(nproc)" \
+    CMAKE_ARGS="-DWITH_FFMPEG=OFF -DWITH_GSTREAMER=OFF -DVIDEOIO_ENABLE_PLUGINS=OFF -DWITH_1394=OFF -DWITH_V4L=OFF -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF -DENABLE_CCACHE=OFF" \
+    python3 -m pip install --no-binary opencv-python-headless "opencv-python-headless==${OPENCV_VERSION}"; \
+    rm -rf /root/.cache/pip; \
+    python3 -c "import cv2; cv2.resize"; \
+    ! ls -d "${SITE_PACKAGES}"/opencv_python*.libs 2>/dev/null; \
+    python3 -c "import cv2,re,sys; enabled=[name for name,value in re.findall(r'^\s*(FFMPEG|GSTREAMER):\s*(\S+)', cv2.getBuildInformation(), re.M|re.I) if value.upper()=='YES']; sys.exit('ERROR: cv2 was built with video backends: '+', '.join(enabled) if enabled else 0)"
 
 # PyNvVideoCodec is KEPT (removed from the purge above) but UPGRADED to >=2.2.0 by
 # the requirements install: the base image's 2.0.4 bundles a full FFmpeg (incl.
@@ -531,18 +547,28 @@ if actual != expected:
     raise RuntimeError(f"expected transformers {expected}, found {actual}")
 PY
 
-# `vllm-rs` ships inside the installed `vllm` package, not as a console script;
-# linking it keeps the binary at that package's vLLM revision. Fatal on cuda only.
+# Use the packaged binary to match the installed vLLM version.
 RUN set -eu; \
     pkg="$({{ python_executable }} -c 'import os, vllm; print(os.path.dirname(vllm.__file__))')"; \
     if [ -f "${pkg}/vllm-rs" ] && [ -x "${pkg}/vllm-rs" ]; then \
-        ln -sf "${pkg}/vllm-rs" {{ vllm_rs_link }}; \
+        if [ "{{ vllm_rs_allowlist }}" = "1" ]; then \
+            printf '%s\n' \
+                '#!/bin/sh' \
+                '# Keep Omni from changing the EngineCore output schema.' \
+                'VLLM_PLUGINS="${VLLM_PLUGINS-{{ vllm_rs_plugins }}}"' \
+                'export VLLM_PLUGINS' \
+                "exec \"${pkg}/vllm-rs\" \"\$@\"" \
+                > {{ vllm_rs_link }}; \
+            chmod 755 {{ vllm_rs_link }}; \
+        else \
+            ln -sf "${pkg}/vllm-rs" {{ vllm_rs_link }}; \
+        fi; \
         vllm-rs --help >/dev/null; \
     elif [ "{{ vllm_rs_required }}" = "1" ]; then \
         echo "ERROR: installed vllm package (${pkg}) ships no executable vllm-rs" >&2; \
         exit 1; \
     else \
-        echo "WARNING: installed vllm package (${pkg}) ships no executable vllm-rs; not linking it onto PATH" >&2; \
+        echo "WARNING: installed vllm package (${pkg}) ships no executable vllm-rs; not putting it onto PATH" >&2; \
     fi
 
 USER dynamo
