@@ -882,7 +882,7 @@ impl KvRouter {
                 policy_factory,
             },
             workers_with_configs.clone(),
-            Some(Arc::new(request_leases.clone())),
+            Some(request_leases.replica_observer()),
             cancellation_token.child_token(),
         )
         .await?;

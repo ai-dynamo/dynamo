@@ -241,6 +241,83 @@ fn mooncake_passive_construction_needs_no_runtime_and_retains_no_tasks() {
 }
 
 #[tokio::test]
+async fn mooncake_failed_router_construction_releases_passive_cache_and_watches() {
+    use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+
+    for threads in [1, 2] {
+        let fixture = WatchFixture::single_worker();
+        let cache_weak = Arc::downgrade(&fixture.cache);
+        let watch_weak = Arc::downgrade(&fixture.watch);
+        let workers = fixture.watch.lock().configs.clone();
+        let WatchFixture {
+            admitted,
+            configs,
+            watch,
+            cache,
+        } = fixture;
+        drop(watch);
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let component = drt
+            .namespace(format!("failed-mooncake-router-{threads}"))
+            .unwrap()
+            .component("worker")
+            .unwrap();
+        let endpoint = component.endpoint("generate");
+        let client = endpoint.client().await.unwrap();
+        let config = dynamo_kv_router::config::KvRouterConfig {
+            skip_initial_worker_wait: true,
+            router_event_threads: threads,
+            ..Default::default()
+        };
+        let result = KvRouter::new_with_worker_role(
+            endpoint,
+            client,
+            workers,
+            None,
+            BLOCK_SIZE,
+            SelectionPolicySource::Registry,
+            Some(config),
+            None,
+            Some(WorkerType::Prefill),
+            "prefill",
+            None,
+            false,
+            Some(cache),
+            None,
+        )
+        .await;
+        let error = result
+            .err()
+            .expect("missing source membership must fail after local indexer construction");
+        assert!(
+            error
+                .to_string()
+                .contains("KV source membership watch is required")
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if cache_weak.upgrade().is_none()
+                    && watch_weak.upgrade().is_none()
+                    && admitted.receiver_count() == 0
+                    && configs.receiver_count() == 0
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|error| panic!(
+            "router construction cleanup timed out: {error}; threads={threads}, cache={}, watch={}, admitted={}, configs={}",
+            cache_weak.strong_count(), watch_weak.strong_count(), admitted.receiver_count(), configs.receiver_count(),
+        ));
+    }
+}
+
+#[tokio::test]
 async fn mooncake_pending_watch_changes_withhold_queries_and_new_learning() {
     for change_configs in [false, true] {
         let fixture = WatchFixture::single_worker();
