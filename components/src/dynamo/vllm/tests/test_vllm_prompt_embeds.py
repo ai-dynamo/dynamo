@@ -256,6 +256,7 @@ class TestUsageStatistics:
     def test_cache_loss_engine_data_uses_worker_counters(self):
         mock_output = Mock()
         mock_output.prompt_token_ids = [1, 2, 3, 4]
+        mock_output.num_cached_tokens = 3
         mock_output.num_local_cached_tokens = 2
         mock_output.num_external_cached_tokens = 1
         mock_output.num_external_lookup_tokens = 2
@@ -376,3 +377,23 @@ class TestUsageStatistics:
                 },
             ],
         }
+
+    def test_cache_loss_engine_data_separates_external_found_from_used(self):
+        mock_output = Mock()
+        mock_output.prompt_token_ids = list(range(10))
+        mock_output.num_cached_tokens = 9
+        mock_output.num_local_cached_tokens = None
+        mock_output.num_external_cached_tokens = None
+        mock_output.num_external_computed_tokens = 10
+        mock_output.num_external_lookup_tokens = None
+
+        result = BaseWorkerHandler._cache_loss_engine_data(mock_output)
+
+        assert result["complete"] is True
+        assert result["cpu_hit_tokens"] == 9
+        assert result["worker_used_tokens"] == 9
+        assert result["tiers"][1]["events"] == [
+            {"event": "lookup", "tokens": 10, "accuracy": "lower_bound"},
+            {"event": "found", "tokens": 10, "accuracy": "exact"},
+            {"event": "used", "tokens": 9, "accuracy": "exact"},
+        ]

@@ -887,6 +887,13 @@ pub(crate) struct CacheLossTierMetricObservation<'a> {
     pub tokens: u64,
 }
 
+fn cache_loss_metric_tier(tier: &str) -> &str {
+    match tier {
+        "gpu" | "cpu" | "peer" | "remote" | "disk" => tier,
+        _ => "other",
+    }
+}
+
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
 
 impl RouterRequestMetrics {
@@ -1139,7 +1146,11 @@ impl RouterRequestMetrics {
         for observation in observations {
             metrics
                 .tokens_total
-                .with_label_values(&[observation.tier, observation.event, observation.accuracy])
+                .with_label_values(&[
+                    cache_loss_metric_tier(observation.tier),
+                    observation.event,
+                    observation.accuracy,
+                ])
                 .inc_by(observation.tokens);
         }
         metrics.complete_observations_total.inc();
@@ -1393,6 +1404,13 @@ mod tests {
         let mut buffer = Vec::new();
         encoder.encode(&registry.gather(), &mut buffer).unwrap();
         String::from_utf8(buffer).unwrap()
+    }
+
+    #[test]
+    fn cache_loss_metric_tier_bounds_label_cardinality() {
+        assert_eq!(cache_loss_metric_tier("gpu"), "gpu");
+        assert_eq!(cache_loss_metric_tier("peer"), "peer");
+        assert_eq!(cache_loss_metric_tier("remote_ssd"), "other");
     }
 
     #[test]

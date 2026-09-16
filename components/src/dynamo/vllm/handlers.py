@@ -3192,7 +3192,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     @staticmethod
     def _cache_loss_engine_data(request_output: RequestOutput) -> Dict[str, Any]:
-        """Expose final cache counters for internal router observability."""
         prompt_tokens = getattr(request_output, "prompt_token_ids", None)
         local_hits = getattr(request_output, "num_local_cached_tokens", None)
         aggregate_hits = getattr(request_output, "num_cached_tokens", None)
@@ -3208,6 +3207,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 if isinstance(aggregate_hits, int)
                 else None
             )
+        external_used = (
+            aggregate_hits - local_hits
+            if isinstance(aggregate_hits, int) and isinstance(local_hits, int)
+            else None
+        )
         external_lookups = getattr(request_output, "num_external_lookup_tokens", None)
         external_lookup_accuracy = "exact"
         if not isinstance(external_lookups, int):
@@ -3215,17 +3219,21 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             # attempts. Successful hits are a conservative lower bound.
             external_lookups = external_hits
             external_lookup_accuracy = "lower_bound"
-        values = (local_hits, external_hits, external_lookups)
-        if prompt_tokens is None or any(not isinstance(value, int) for value in values):
+        values = (local_hits, external_hits, external_used, external_lookups)
+        if (
+            prompt_tokens is None
+            or any(not isinstance(value, int) or value < 0 for value in values)
+            or external_used > external_hits
+        ):
             return {"complete": False}
         return {
             "complete": True,
             "prompt_tokens": len(prompt_tokens),
             "gpu_hit_tokens": local_hits,
-            "cpu_hit_tokens": external_hits,
+            "cpu_hit_tokens": external_used,
             "cpu_lookup_tokens": external_lookups,
             "worker_lookup_tokens": local_hits + external_lookups,
-            "worker_used_tokens": local_hits + external_hits,
+            "worker_used_tokens": local_hits + external_used,
             "tiers": [
                 {
                     "tier": "gpu",
@@ -3247,7 +3255,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             "tokens": external_hits,
                             "accuracy": "exact",
                         },
-                        {"event": "used", "tokens": external_hits, "accuracy": "exact"},
+                        {"event": "used", "tokens": external_used, "accuracy": "exact"},
                     ],
                 },
             ],
