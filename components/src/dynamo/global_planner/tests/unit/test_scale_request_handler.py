@@ -418,11 +418,12 @@ def _install_connector(handler, dgd_key, dgd_spec_dict, parent_dgd_name="my-dgd"
 
 def _install_real_connector(handler, dgd_key, dgd_spec_dict, parent_dgd_name="my-dgd"):
     """Attach a real KubernetesConnector backed by a mocked Kubernetes API."""
-    connector = KubernetesConnector.__new__(KubernetesConnector)
-    connector.parent_dgd_name = parent_dgd_name
-    connector.graph_deployment_name = parent_dgd_name
-    connector.raise_not_ready = True
-    connector.kube_api = MagicMock()
+    with patch("dynamo.planner.connectors.kubernetes.KubernetesAPI"):
+        connector = KubernetesConnector(
+            dynamo_namespace="test",
+            parent_dgd_name=parent_dgd_name,
+            raise_not_ready=True,
+        )
     connector.kube_api.get_graph_deployment.return_value = dgd_spec_dict
     connector.kube_api.is_deployment_ready.return_value = True
     connector.kube_api.wait_for_graph_deployment_ready = AsyncMock()

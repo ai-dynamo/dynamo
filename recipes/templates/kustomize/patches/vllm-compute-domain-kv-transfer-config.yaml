@@ -13,39 +13,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-- op: test
-  path: /spec/components/1/name
-  value: PrefillWorker
-- op: test
-  path: /spec/components/1/type
-  value: prefill
-- op: test
-  path: /spec/components/1/podTemplate/spec/containers/0/name
-  value: main
-- op: test
-  path: /spec/components/1/podTemplate/spec/containers/0/env/0/name
-  value: KV_TRANSFER_CONFIG
-- op: test
-  path: /spec/components/1/podTemplate/spec/containers/0/env/0/value
-  value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
-- op: replace
-  path: /spec/components/1/podTemplate/spec/containers/0/env/0/value
-  value: &kv-transfer-config 'your-kv-transfer-config'
-- op: test
-  path: /spec/components/2/name
-  value: DecodeWorker
-- op: test
-  path: /spec/components/2/type
-  value: decode
-- op: test
-  path: /spec/components/2/podTemplate/spec/containers/0/name
-  value: main
-- op: test
-  path: /spec/components/2/podTemplate/spec/containers/0/env/0/name
-  value: KV_TRANSFER_CONFIG
-- op: test
-  path: /spec/components/2/podTemplate/spec/containers/0/env/0/value
-  value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
-- op: replace
-  path: /spec/components/2/podTemplate/spec/containers/0/env/0/value
-  value: *kv-transfer-config
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  # The root patch target selects the DGD by group, version, and kind. Kustomize
+  # ignores this name; it exists only because a strategic merge patch needs one.
+  name: canonical-recipe
+spec:
+  components:
+    - name: Frontend
+    - name: PrefillWorker
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              env:
+                - name: KV_TRANSFER_CONFIG
+                  value: &kv-transfer-config 'your-kv-transfer-config'
+    - name: DecodeWorker
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              env:
+                - name: KV_TRANSFER_CONFIG
+                  value: *kv-transfer-config

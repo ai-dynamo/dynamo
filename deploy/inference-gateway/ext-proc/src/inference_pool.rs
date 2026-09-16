@@ -9,6 +9,12 @@
 //! Currently supports only pools with at least one match label and exactly one
 //! target port. Additional configurations may be supported in the future, for
 //! example to enable data-parallel-aware routing.
+//!
+//! # Required k8s RBAC
+//!
+//! Standalone mode only (`DYN_EPP_MODE=standalone`). Needs the following
+//! permission granted to SA `dynamo-epp` in `examples/onramp/agg.yaml`:
+//! - `inference.networking.k8s.io/inferencepools:list/watch`
 
 use std::collections::BTreeMap;
 

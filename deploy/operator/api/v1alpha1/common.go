@@ -76,10 +76,25 @@ type ComponentRoleSpec struct {
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Name string `json:"name"`
 
+	// Replicas is the logical cardinality of this role in one complete component
+	// instance. The enclosing component type defines the cardinality. For
+	// multinode components, admission defaults and persists omitted values from
+	// Multinode.NodeCount; leader must be 1 and worker must be
+	// Multinode.NodeCount minus 1.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	Replicas *int32 `json:"replicas,omitempty"`
+
 	// ProviderOverride configures the provider workload unit generated for this
 	// role. It is supported only for components embedded in a DGD.
 	// +optional
 	ProviderOverride *ProviderOverride `json:"providerOverride,omitempty"`
+
+	// PodTemplate defines the Pod configuration for this role. Admission permits
+	// it only when the enclosing component type explicitly supports role-specific
+	// Pod templates. No component type supports it in this release.
+	// +optional
+	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 }
 
 // +kubebuilder:validation:XValidation:rule="!has(self.create) || self.create == false || (has(self.size) && has(self.storageClass) && has(self.volumeAccessMode))",message="When create is true, size, storageClass, and volumeAccessMode are required"
