@@ -5,6 +5,7 @@ mod broker_zmq;
 mod direct_zmq;
 mod recovery_lane;
 mod source_health;
+mod startup;
 mod state_agent;
 mod subscriber;
 mod target;

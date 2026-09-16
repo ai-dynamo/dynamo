@@ -173,6 +173,7 @@ fn log_env_config(config: &KvRouterConfig) {
         router_temperature = config.router_temperature,
         use_kv_events = config.use_kv_events,
         router_replica_sync = config.router_replica_sync,
+        wait_for_recovery = config.wait_for_recovery,
         router_track_active_blocks = config.router_track_active_blocks,
         router_track_output_blocks = config.router_track_output_blocks,
         router_assume_kv_reuse = config.router_assume_kv_reuse,
@@ -263,6 +264,9 @@ fn kv_router_config_from_lookup(
     }
     if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_REPLICA_SYNC") {
         config.router_replica_sync = value;
+    }
+    if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_WAIT_FOR_RECOVERY") {
+        config.wait_for_recovery = value;
     }
     if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_TRACK_ACTIVE_BLOCKS") {
         config.router_track_active_blocks = value;
@@ -662,6 +666,7 @@ struct KvRouterConfigSerde {
     #[serde(rename = "durable_kv_events")]
     legacy_durable_kv_events: bool,
     router_replica_sync: bool,
+    wait_for_recovery: bool,
     router_track_active_blocks: bool,
     router_track_output_blocks: bool,
     router_assume_kv_reuse: bool,
@@ -708,6 +713,7 @@ impl Default for KvRouterConfigSerde {
             use_kv_events: config.use_kv_events,
             legacy_durable_kv_events: false,
             router_replica_sync: config.router_replica_sync,
+            wait_for_recovery: config.wait_for_recovery,
             router_track_active_blocks: config.router_track_active_blocks,
             router_track_output_blocks: config.router_track_output_blocks,
             router_assume_kv_reuse: config.router_assume_kv_reuse,
@@ -777,6 +783,11 @@ pub struct KvRouterConfig {
     pub use_kv_events: bool,
 
     pub router_replica_sync: bool,
+
+    /// Wait for recovery attempts from 95% of recoverable worker ranks, up to 600 seconds.
+    /// Includes arriving workers and excludes departed workers during startup.
+    /// This is independent of the initial worker-discovery gate.
+    pub wait_for_recovery: bool,
 
     /// Whether to track active blocks in the router (default: true)
     pub router_track_active_blocks: bool,
@@ -955,6 +966,7 @@ impl Default for KvRouterConfig {
             router_temperature: 0.0,
             use_kv_events: true,
             router_replica_sync: false,
+            wait_for_recovery: false,
             router_track_active_blocks: true,
             router_track_output_blocks: false,
             router_assume_kv_reuse: true,
@@ -1019,6 +1031,7 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             router_temperature: compat.router_temperature,
             use_kv_events: compat.use_kv_events,
             router_replica_sync: compat.router_replica_sync,
+            wait_for_recovery: compat.wait_for_recovery,
             router_track_active_blocks: compat.router_track_active_blocks,
             router_track_output_blocks: compat.router_track_output_blocks,
             router_assume_kv_reuse: compat.router_assume_kv_reuse,
@@ -1600,6 +1613,7 @@ mod tests {
             ("DYN_ROUTER_TEMPERATURE", "0.7"),
             ("DYN_ROUTER_USE_KV_EVENTS", "false"),
             ("DYN_ROUTER_REPLICA_SYNC", "yes"),
+            ("DYN_ROUTER_WAIT_FOR_RECOVERY", "true"),
             ("DYN_ROUTER_TRACK_ACTIVE_BLOCKS", "0"),
             ("DYN_ROUTER_TRACK_OUTPUT_BLOCKS", "on"),
             ("DYN_ROUTER_ASSUME_KV_REUSE", "false"),
@@ -1634,6 +1648,7 @@ mod tests {
         assert_eq!(config.router_temperature, 0.7);
         assert!(!config.use_kv_events);
         assert!(config.router_replica_sync);
+        assert!(config.wait_for_recovery);
         assert!(!config.router_track_active_blocks);
         assert!(config.router_track_output_blocks);
         assert!(!config.router_assume_kv_reuse);
@@ -1962,6 +1977,15 @@ mod tests {
             config.router_policy_config.as_deref(),
             Some(policy_file.path().to_str().unwrap())
         );
+    }
+
+    #[test]
+    fn test_kv_router_config_deserializes_wait_for_recovery() {
+        let default: KvRouterConfig = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(!default.wait_for_recovery);
+
+        let config: KvRouterConfig = serde_json::from_str(r#"{"wait_for_recovery":true}"#).unwrap();
+        assert!(config.wait_for_recovery);
     }
 
     #[test]

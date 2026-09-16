@@ -818,6 +818,7 @@ where
                     kv_event_source_requirement,
                     metric_worker_type,
                     cancellation_token.child_token(),
+                    kv_router_config.wait_for_recovery,
                 )
                 .await?,
             )
