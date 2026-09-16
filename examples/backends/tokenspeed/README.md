@@ -13,16 +13,22 @@ This example uses
 [`meituan-longcat/LongCat-Flash-Chat-FP8`](https://huggingface.co/meituan-longcat/LongCat-Flash-Chat-FP8).
 TokenSpeed revision
 [`1b859c107b1d`](https://github.com/lightseekorg/tokenspeed/tree/1b859c107b1d8450b750403f9c2e00251ecc59f3)
-registers its `LongcatFlashForCausalLM` architecture.
+registers its `LongcatFlashForCausalLM` architecture. The
+[official TokenSpeed recipe catalog](https://lightseek.org/tokenspeed/recipes/models)
+does not list LongCat. This is an experimental Dynamo integration example.
 
 ## Prerequisites
 
-- Three hosts with eight H200 GPUs each: one host per replica. The model owner's
-  [FP8 deployment guide](https://github.com/meituan-longcat/LongCat-Flash-Chat/blob/main/docs/deployment_guide.md)
-  lists eight H20 GPUs with 141 GB each. TokenSpeed explicitly lists H200 among
-  its [supported GPUs](https://github.com/lightseekorg/tokenspeed/blob/1b859c107b1d8450b750403f9c2e00251ecc59f3/.github/ISSUE_TEMPLATE/1-bug-report.yml#L13-L15),
-  with CUDA 13 and driver 580 or newer recommended. H200 is the target for this
-  example; TokenSpeed does not publish a separate LongCat/H200 recipe.
+- Three hosts, with either eight H200 GPUs or four GB300 GPUs per host: one
+  host per replica. TokenSpeed lists both among its
+  [supported GPUs](https://github.com/lightseekorg/tokenspeed/blob/1b859c107b1d8450b750403f9c2e00251ecc59f3/.github/ISSUE_TEMPLATE/1-bug-report.yml#L13-L15),
+  with CUDA 13 and driver 580 or newer recommended. This is general hardware
+  support, not a LongCat-specific recipe. The model owner's
+  [deployment guide](https://github.com/meituan-longcat/LongCat-Flash-Chat/blob/main/docs/deployment_guide.md)
+  describes FP8 on eight 141 GB H20 GPUs with SGLang or vLLM.
+- GB300 requires the native LongCat routing fix in
+  [TokenSpeed PR #1582](https://github.com/lightseekorg/tokenspeed/pull/1582).
+  The build instructions below apply the exact tested source.
 - A working RDMA fabric between hosts, with GPU memory registration available to
   Mooncake. Expose `/dev/infiniband` to containers and use unlimited locked memory.
 - Shared etcd and NATS services reachable from all processes. See
@@ -32,10 +38,12 @@ registers its `LongcatFlashForCausalLM` architecture.
 
 Attention data parallelism must be one inside each worker. Scale with independent
 replicas. Both prefill and decode must use matching tensor/expert parallelism and
-cache geometry. The launcher selects `flashinfer_cutlass` for LongCat's mixed
-FP8/BF16 experts and precomputed expert routing.
+cache geometry. The launcher's H200 default uses `flashinfer_cutlass`. GB300 uses
+`flashinfer_trtllm` with the native routing fix and the flags below.
 
 ## Build the Image
+
+### H200
 
 From the Dynamo repository root, use the shared TokenSpeed image builder:
 
@@ -53,6 +61,43 @@ docker build \
 This pins the upstream NVIDIA runner for x86 H200 hosts. It installs TokenSpeed
 from source and builds Dynamo's Rust extension from the current checkout.
 Make the resulting image available on all three hosts.
+
+### GB300
+
+Build on an ARM64 host with the matching runner and CUDA architecture:
+
+```bash
+docker build \
+  -f recipes/kimi-k2.5/tokenspeed/agg/nvidia/Dockerfile \
+  --target runtime \
+  --build-arg BASE_IMAGE=lightseekorg/tokenspeed-runner@sha256:2d9477bc2417572be8740676e8e038b564938c9ab466421f23daca441c97b153 \
+  --build-arg TOKENSPEED_GIT_REF=1b859c107b1d8450b750403f9c2e00251ecc59f3 \
+  --build-arg CUDA_ARCH_LIST=10.3a \
+  --build-arg MAX_JOBS=16 \
+  --build-arg CARGO_BUILD_JOBS=32 \
+  -t dynamo-tokenspeed:longcat-flash-gb300-base .
+```
+
+Apply the pinned native LongCat fix. It selects precomputed SwiGLU expert
+routing, which LongCat's zero-expert path requires. The base revision selects an
+incompatible MoE plan for the Blackwell FP8 backend.
+
+```bash
+patch_dir=$(mktemp -d)
+curl --fail --location \
+  https://raw.githubusercontent.com/nv-yna/tokenspeed/a8a41686835e3b255670857424f9f8f9b70c0205/python/tokenspeed/runtime/models/longcat_flash.py \
+  --output "$patch_dir/longcat_flash.py"
+printf '%s  %s\n' \
+  949c96de91cdc85312d2d6b9e596a02f8822a676d6dcdd454321483e91a411ee \
+  "$patch_dir/longcat_flash.py" | sha256sum --check
+cat > "$patch_dir/Dockerfile" <<'DOCKERFILE'
+FROM dynamo-tokenspeed:longcat-flash-gb300-base
+COPY longcat_flash.py /opt/tokenspeed/python/tokenspeed/runtime/models/longcat_flash.py
+DOCKERFILE
+docker build -t dynamo-tokenspeed:longcat-flash-gb300 "$patch_dir"
+```
+
+Make this patched image available on all three GB300 hosts.
 
 ## Download the Checkpoint
 
@@ -80,7 +125,7 @@ updated model metadata.
 
 ## Launch
 
-Run the commands below inside containers with all eight GPUs exposed, host
+Run the commands below inside containers with all GPUs on the host exposed, host
 networking, host IPC, RDMA devices, and `--ulimit memlock=-1`.
 
 Set these variables in every process's environment:
@@ -123,6 +168,44 @@ The launcher sets attention TP=8, EP=8, an 8,192-token context limit, and prefix
 granularity 64, with a 32,768-token cache capacity. It enables native KV events and gives each worker a unique local
 IPC socket. Additional command-line arguments are forwarded to the selected
 process. Use `ENGINE_PORT`, `BOOTSTRAP_PORT`, and `HTTP_PORT` to change ports.
+
+### GB300 Worker Options
+
+Use the shared environment above, then set these on every GB300 worker:
+
+```bash
+export TENSOR_PARALLEL_SIZE=4
+export MAX_TOTAL_TOKENS=262144
+export DYN_SYSTEM_PORT=8081
+```
+
+Start each prefill worker:
+
+```bash
+bash examples/backends/tokenspeed/launch_disagg.sh prefill \
+  --max-model-len 131072 --max-num-seqs 4 \
+  --moe-backend flashinfer_trtllm --force-deterministic-rsag
+```
+
+Start decode:
+
+```bash
+bash examples/backends/tokenspeed/launch_disagg.sh decode \
+  --max-model-len 131072 --max-num-seqs 4 \
+  --moe-backend flashinfer_trtllm --force-deterministic-rsag \
+  --disable-prefill-graph
+```
+
+`--force-deterministic-rsag` uses the native NCCL collective path. Disabling the
+decode worker's prefill graph avoids a failure during its optional prefill graph
+capture; decode CUDA graphs remain enabled. Start the frontend as above.
+
+Seven short requests completed on this GB300 configuration, including four
+unforced repeats that selected the prefill worker holding their prefix. Native
+prefill logs reported 832 or 896 reused tokens, and the cold control reported
+zero. These requests establish generation, transfer, and cache-routing
+feasibility. The configured 131,072-token limit is not a measured long-context
+or throughput result.
 
 ## Verify Generation and KV Routing
 
