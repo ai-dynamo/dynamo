@@ -231,9 +231,6 @@ SYSTEM_PORT_DECODE=$(dyn_port DYN_SYSTEM_PORT 3 8083)
 # model load). Short-term workaround; drop it (set VLLM_USE_V2_MODEL_RUNNER=1)
 # once the V2 encoder-only path is fixed upstream. MoE VLMs are unaffected.
 echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU (--gpu-memory-utilization $DYN_ENCODE_GPU_MEM)..."
-SYSTEM_PORT_ENCODE=$(dyn_port DYN_SYSTEM_PORT 1 8081)
-SYSTEM_PORT_PREFILL=$(dyn_port DYN_SYSTEM_PORT 2 8082)
-SYSTEM_PORT_DECODE=$(dyn_port DYN_SYSTEM_PORT 3 8083)
 DYN_SYSTEM_PORT=$SYSTEM_PORT_ENCODE \
 VLLM_USE_V2_MODEL_RUNNER=${VLLM_USE_V2_MODEL_RUNNER:-0} \
 VLLM_NIXL_SIDE_CHANNEL_PORT=$VLLM_NIXL_SIDE_CHANNEL_PORT_ENCODE \
