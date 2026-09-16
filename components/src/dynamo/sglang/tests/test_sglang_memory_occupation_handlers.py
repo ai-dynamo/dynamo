@@ -2,17 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import sys
-import types
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from dynamo.sglang.request_handlers.handler_base import (
-    BaseWorkerHandler,
-    SGLangEnginePauseController,
-)
+from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
 pytestmark = [
     pytest.mark.unit,
@@ -20,24 +15,6 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
-
-
-@pytest.fixture(autouse=True)
-def _stub_sglang_io_struct(monkeypatch):
-    """Keep unit tests independent from CUDA-only sglang imports."""
-
-    io_struct = types.ModuleType("sglang.srt.managers.io_struct")
-
-    class _Req:
-        def __init__(self, tags=None):
-            self.tags = tags
-
-    io_struct.PauseGenerationReqInput = _Req
-    io_struct.ReleaseMemoryOccupationReqInput = _Req
-    io_struct.ResumeMemoryOccupationReqInput = _Req
-    io_struct.ContinueGenerationReqInput = _Req
-
-    monkeypatch.setitem(sys.modules, "sglang.srt.managers.io_struct", io_struct)
 
 
 class _TestWorkerHandler(BaseWorkerHandler):
@@ -50,6 +27,7 @@ def handler():
     handler = _TestWorkerHandler.__new__(_TestWorkerHandler)
     handler.engine = SimpleNamespace(
         tokenizer_manager=SimpleNamespace(
+            is_pause=False,
             pause_generation=AsyncMock(),
             release_memory_occupation=AsyncMock(),
             resume_memory_occupation=AsyncMock(),
@@ -65,165 +43,103 @@ def handler():
         unregister_endpoint_instance=AsyncMock(),
         register_endpoint_instance=AsyncMock(),
     )
-    handler._pause_controller = SGLangEnginePauseController(handler.engine)
-    handler._pause_lock = asyncio.Lock()
+    handler._engine_route_lock = asyncio.Lock()
     return handler
 
 
-@pytest.mark.asyncio
-async def test_release_and_resume_are_idempotent(handler):
-    first_release = await handler.release_memory_occupation({})
-    second_release = await handler.release_memory_occupation({})
+def _registered_engine_routes(handler, configured_routes=None):
+    registered = {}
 
-    first_resume = await handler.resume_memory_occupation({})
-    second_resume = await handler.resume_memory_occupation({})
+    class Runtime:
+        def register_engine_route(self, path, route_handler):
+            registered[path] = route_handler
 
-    assert first_release["status"] == "ok"
-    assert second_release["status"] == "ok"
-    assert first_resume["status"] == "ok"
-    assert second_resume["status"] == "ok"
-    assert second_release["message"] == "Memory already released"
-    assert second_resume["message"] == "Memory already resumed"
-
-    release_req = (
-        handler.engine.tokenizer_manager.release_memory_occupation.await_args.args[0]
+    handler.config = SimpleNamespace(
+        dynamo_args=SimpleNamespace(engine_routes=configured_routes or [])
     )
-    resume_req = (
-        handler.engine.tokenizer_manager.resume_memory_occupation.await_args.args[0]
-    )
-    assert release_req.tags is None
-    assert resume_req.tags is None
-
-    handler.engine.tokenizer_manager.pause_generation.assert_awaited_once()
-    handler.engine.tokenizer_manager.release_memory_occupation.assert_awaited_once()
-    handler.generate_endpoint.unregister_endpoint_instance.assert_awaited_once()
-
-    handler.engine.tokenizer_manager.resume_memory_occupation.assert_awaited_once()
-    handler.engine.tokenizer_manager.continue_generation.assert_awaited_once()
-    handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
+    handler.register_engine_routes(Runtime())
+    return registered
 
 
-@pytest.mark.asyncio
-async def test_memory_occupation_handlers_forward_tags_exactly(handler):
-    await handler.release_memory_occupation({"tags": []})
-    resume_result = await handler.resume_memory_occupation({"tags": []})
+def _make_native_manager_methods_routable(manager):
+    mocks = {}
+    for method_name in (
+        "pause_generation",
+        "continue_generation",
+        "release_memory_occupation",
+        "resume_memory_occupation",
+    ):
+        method_mock = getattr(manager, method_name)
+        mocks[method_name] = method_mock
 
-    assert resume_result["status"] == "ok"
-    release_req = (
-        handler.engine.tokenizer_manager.release_memory_occupation.await_args.args[0]
-    )
-    resume_req = (
-        handler.engine.tokenizer_manager.resume_memory_occupation.await_args.args[0]
-    )
-    assert release_req.tags == []
-    assert resume_req.tags == []
+        async def route_method(_method_mock=method_mock, **kwargs):
+            return await _method_mock(**kwargs)
 
-    handler.engine.tokenizer_manager.pause_generation.reset_mock()
-    handler.engine.tokenizer_manager.release_memory_occupation.reset_mock()
-    handler.engine.tokenizer_manager.resume_memory_occupation.reset_mock()
-    handler.engine.tokenizer_manager.continue_generation.reset_mock()
-    handler.generate_endpoint.unregister_endpoint_instance.reset_mock()
-    handler.generate_endpoint.register_endpoint_instance.reset_mock()
-
-    await handler.release_memory_occupation({"tags": ["weights"]})
-    resume_result = await handler.resume_memory_occupation({})
-
-    assert resume_result["status"] == "ok"
-    release_req = (
-        handler.engine.tokenizer_manager.release_memory_occupation.await_args.args[0]
-    )
-    resume_req = (
-        handler.engine.tokenizer_manager.resume_memory_occupation.await_args.args[0]
-    )
-    assert release_req.tags == ["weights"]
-    assert resume_req.tags is None
-    handler.engine.tokenizer_manager.continue_generation.assert_awaited_once()
-    handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
+        setattr(manager, method_name, route_method)
+    return mocks
 
 
 @pytest.mark.asyncio
-async def test_resume_recovers_generation_pause_after_failed_release_rollback(handler):
+async def test_native_memory_routes_follow_sglang_pause_state(handler):
     manager = handler.engine.tokenizer_manager
-    manager.release_memory_occupation = AsyncMock(
-        side_effect=RuntimeError("release failed")
-    )
-    failed_continue = AsyncMock(side_effect=RuntimeError("continue failed"))
-    manager.continue_generation = failed_continue
+    method_mocks = _make_native_manager_methods_routable(manager)
 
-    release_result = await handler.release_memory_occupation({})
+    async def pause_generation(**_kwargs):
+        manager.is_pause = True
 
-    assert release_result["status"] == "error"
-    assert handler._pause_controller.is_paused is False
-    assert handler._pause_controller.needs_resume_recovery is True
-    failed_continue.assert_awaited_once()
-    handler.generate_endpoint.unregister_endpoint_instance.assert_awaited_once()
+    async def continue_generation(**_kwargs):
+        manager.is_pause = False
 
-    manager.continue_generation = AsyncMock()
-    resume_result = await handler.resume_memory_occupation({})
+    method_mocks["pause_generation"].side_effect = pause_generation
+    method_mocks["continue_generation"].side_effect = continue_generation
+    routes = _registered_engine_routes(handler)
 
-    assert resume_result["status"] == "ok"
-    manager.resume_memory_occupation.assert_not_awaited()
-    manager.continue_generation.assert_awaited_once()
-    handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
-    assert handler._pause_controller.needs_resume_recovery is False
+    assert {
+        "pause_generation",
+        "continue_generation",
+        "release_memory_occupation",
+        "resume_memory_occupation",
+    }.issubset(routes)
 
+    await routes["pause_generation"]({})
+    await routes["release_memory_occupation"]({"tags": ["weights", "kv_cache"]})
+    await routes["resume_memory_occupation"]({"tags": ["weights"]})
 
-@pytest.mark.asyncio
-async def test_release_reregisters_after_clean_pause_rollback(handler):
-    manager = handler.engine.tokenizer_manager
-    manager.release_memory_occupation = AsyncMock(
-        side_effect=RuntimeError("release failed")
-    )
+    assert manager.is_pause is True
+    assert handler.generate_endpoint.unregister_endpoint_instance.await_count == 3
+    handler.generate_endpoint.register_endpoint_instance.assert_not_awaited()
 
-    release_result = await handler.release_memory_occupation({})
+    await routes["resume_memory_occupation"]({"tags": ["kv_cache"]})
 
-    # Rollback continued generation cleanly, so the engine is serving-safe again.
-    assert release_result["status"] == "error"
-    assert handler._pause_controller.is_paused is False
-    assert handler._pause_controller.needs_resume_recovery is False
-    manager.continue_generation.assert_awaited_once()
-    handler.generate_endpoint.unregister_endpoint_instance.assert_awaited_once()
-    # The endpoint must rejoin the routing pool since resume will early-return.
+    assert handler.generate_endpoint.unregister_endpoint_instance.await_count == 4
+    handler.generate_endpoint.register_endpoint_instance.assert_not_awaited()
+
+    await routes["continue_generation"]({})
+
+    assert manager.is_pause is False
     handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("method_name", "endpoint_method"),
-    [
-        ("release_memory_occupation", "unregister_endpoint_instance"),
-        ("resume_memory_occupation", "register_endpoint_instance"),
-    ],
-)
-async def test_memory_control_returns_error_without_pause_controller(
-    handler,
-    method_name,
-    endpoint_method,
-):
-    handler.engine = None
-    handler._pause_controller = None
+async def test_configured_engine_route_overrides_default_and_syncs_discovery(handler):
+    custom_pause_mock = AsyncMock(return_value={"custom": True})
 
-    result = await getattr(handler, method_name)({})
+    async def custom_pause():
+        return await custom_pause_mock()
 
-    assert result == {
-        "status": "error",
-        "message": "memory control not supported on this worker",
-    }
-    getattr(handler.generate_endpoint, endpoint_method).assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_resume_keeps_paused_state_when_register_fails(handler):
-    await handler.release_memory_occupation({})
-    handler.generate_endpoint.register_endpoint_instance = AsyncMock(
-        side_effect=RuntimeError("discovery write timeout")
+    handler.engine.custom_pause = custom_pause
+    handler.engine.tokenizer_manager.is_pause = True
+    method_mocks = _make_native_manager_methods_routable(
+        handler.engine.tokenizer_manager
     )
+    routes = _registered_engine_routes(handler, ["pause_generation=custom_pause"])
 
-    result = await handler.resume_memory_occupation({})
+    result = await routes["pause_generation"]({})
 
-    assert result["status"] == "error"
-    assert handler._pause_controller is not None
-    assert handler._pause_controller.is_paused is True
+    assert result == {"custom": True}
+    custom_pause_mock.assert_awaited_once_with()
+    method_mocks["pause_generation"].assert_not_awaited()
+    handler.generate_endpoint.unregister_endpoint_instance.assert_awaited_once()
 
 
 @pytest.mark.asyncio
