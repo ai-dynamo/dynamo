@@ -629,6 +629,71 @@ func TestElasticEPGenerationIsIndependentOfTheGate(t *testing.T) {
 	}
 }
 
+// TestElasticEPLeaderGetsDataParallelSizeLocal pins the second half of the sizing rule.
+//
+// ElasticEPFollowerReplicas derives the follower count from --data-parallel-size on the
+// rule "one pod is one node is one rank". That same rule fixes the leader at exactly one
+// local rank, and the operator now says so rather than leaving it to the user. When the
+// two halves disagreed, vLLM put every rank on the DP master and aborted with
+//
+//	ValueError: Not enough resources to allocate 4 DP ranks on DP master node <ip>,
+//	            possible to fit 1 DP ranks.
+//
+// while three follower pods sat idle in the Ray cluster it had ignored. Caught on
+// dynamo-aws-gb300; the error never names the missing flag.
+//
+// Mutation check: deleting the injectElasticEPDataParallelSizeLocal call fails the dp=4
+// subtest and nothing else.
+func TestElasticEPLeaderGetsDataParallelSizeLocal(t *testing.T) {
+	render := func(t *testing.T, extraArgs ...string) string {
+		t.Helper()
+		component := vllmComponent(append([]string{"--enable-elastic-ep", "--data-parallel-backend", "ray"}, extraArgs...)...)
+		container := GetMainContainer(component).DeepCopy()
+		if err := (&VLLMBackend{}).UpdateContainer(
+			container, 1, RoleMain, component, "test-service",
+			&GroveMultinodeDeployer{}, staticContainerGPUCount(1),
+		); err != nil {
+			t.Fatalf("UpdateContainer: %v", err)
+		}
+		return strings.Join(container.Args, " ")
+	}
+
+	t.Run("a multi-rank leader is pinned to one local rank", func(t *testing.T) {
+		script := render(t, "--data-parallel-size", "4")
+		if !strings.Contains(script, "--data-parallel-size-local 1") {
+			t.Errorf("leader must be pinned to one local rank, or vLLM packs all 4 onto the DP master; got: %s", script)
+		}
+	})
+
+	// An explicit choice wins. The operator supplies a default; it does not overrule a
+	// user who has deliberately asked for a different split.
+	t.Run("an explicit local size is left alone", func(t *testing.T) {
+		script := render(t, "--data-parallel-size", "4", "--data-parallel-size-local", "2")
+		if !strings.Contains(script, "--data-parallel-size-local 2") {
+			t.Errorf("the user's explicit local size must survive; got: %s", script)
+		}
+		if strings.Contains(script, "--data-parallel-size-local 1") {
+			t.Errorf("the operator must not append a second local size; got: %s", script)
+		}
+	})
+
+	// No-regression: a single-rank leader has no followers, so the local split is vLLM's
+	// business and the rendered command must not change.
+	for _, tt := range []struct {
+		name string
+		args []string
+	}{
+		{name: "no --data-parallel-size", args: nil},
+		{name: "dp=1", args: []string{"--data-parallel-size", "1"}},
+	} {
+		t.Run(tt.name+" gets no local size", func(t *testing.T) {
+			if script := render(t, tt.args...); strings.Contains(script, dataParallelSizeLocalFlag) {
+				t.Errorf("a single-rank leader must not gain a local size; got: %s", script)
+			}
+		})
+	}
+}
+
 // TestElasticEPLeaderWaitsForDeclaredWidth pins the other half of a full-width launch.
 //
 // Seeding N-1 followers is not enough on its own. vLLM's create_dp_placement_groups reads

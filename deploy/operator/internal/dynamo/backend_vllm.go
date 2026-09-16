@@ -100,6 +100,19 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 		// a serving deployment nobody edited. The gate governs what this PoC adds
 		// (follower synthesis, the non-Grove Service, the single-replica rule), not what
 		// it inherited.
+		//
+		// Supply the other half of the sizing rule before the command is wrapped.
+		// ElasticEPFollowerReplicas already derives the follower count from
+		// --data-parallel-size on the rule "one pod is one node is one rank"; that same
+		// rule fixes the leader at exactly one local rank. Deriving only the first half
+		// and leaving the second to the user is how the two came to disagree: with the
+		// flag absent, vLLM's create_dp_placement_groups puts EVERY rank on the DP master
+		// and aborts with
+		//   ValueError: Not enough resources to allocate N DP ranks on DP master node
+		//               <ip>, possible to fit 1 DP ranks.
+		// while N-1 follower pods sit idle in the Ray cluster it just ignored. The message
+		// never names the missing flag, so this fails a long way from its cause.
+		injectElasticEPDataParallelSizeLocal(container)
 		if injectElasticEPRayLaunchFlags(container, role, serviceName, multinodeDeployer, "") {
 			// Bind both addresses only when a Ray head was actually injected.
 			//
@@ -598,8 +611,14 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 						`print(sum(1 for n in ray.nodes() if n['Alive']))" 2>/dev/null)" -ge %d ] 2>/dev/null; `+
 						`do i=$((i+1)); [ "$i" -ge 240 ] && { echo "ERROR: only $(python3 -c "import ray; `+
 						`ray.init(address='127.0.0.1:%s', log_to_driver=False); print(sum(1 for n in ray.nodes() if n['Alive']))" 2>/dev/null) `+
-						`of %d data-parallel ranks joined Ray within 20m" >&2; exit 1; }; `+
-						`echo 'waiting for %d Ray nodes before starting the engine...'; sleep 5; done`,
+						`of %d data-parallel ranks joined Ray within 20m. The follower pods are probably `+
+						`Pending for lack of GPUs -- check with: kubectl get pods -l nvidia.com/dynamo-component. `+
+						`Note this can deadlock during a rolling update on a full cluster: this leader stays `+
+						`unready until its followers join, the followers cannot schedule until a GPU frees, `+
+						`and the GPU is held by the previous leader that is waiting for THIS one to become `+
+						`ready. Free capacity, or retire the previous generation first." >&2; exit 1; }; `+
+						`echo 'waiting for %d Ray nodes before starting the engine (followers Pending? this can `+
+						`deadlock a rolling update when no GPU is free)...'; sleep 5; done`,
 					VLLMPort, dp, VLLMPort, dp, dp,
 				)
 			}
@@ -695,6 +714,34 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 	}
 	container.Command = []string{"/bin/sh", "-c"}
 	return true
+}
+
+// injectElasticEPDataParallelSizeLocal pins an elastic-EP leader to one local
+// data-parallel rank, completing the sizing rule the follower count is derived from.
+//
+// No-ops in three cases, each deliberate:
+//
+//   - The leader declares one rank or none. There are no followers, so the local split is
+//     whatever vLLM decides and every deployment predating this renders unchanged.
+//   - The user already set --data-parallel-size-local. Their value wins; the operator
+//     supplies a default, it does not overrule an explicit choice.
+//   - The container carries the flag through an env-var expansion the operator cannot
+//     see, in which case getExpandedArgs will not report it and the duplicate is vLLM's
+//     to reject -- the same exposure every other injection here already has.
+func injectElasticEPDataParallelSizeLocal(container *corev1.Container) {
+	expandedArgs := getExpandedArgs(container)
+	if getFlagValue(expandedArgs, dataParallelSizeFlag) <= 1 {
+		return
+	}
+	if hasFlag(expandedArgs, dataParallelSizeLocalFlag) {
+		return
+	}
+	injectFlagsIntoContainerCommand(
+		container,
+		fmt.Sprintf("%s 1", dataParallelSizeLocalFlag),
+		false,
+		"vllm",
+	)
 }
 
 // IsElasticEPRayLaunch reports whether the container asks for the elastic-EP Ray
