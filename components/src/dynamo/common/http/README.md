@@ -11,9 +11,10 @@ uses aiohttp.
 `AiohttpClient` is the single supported backend. Its connector queues
 pending connections in `O(1)`, so latency stays close to the offered
 rate when one request fans out to many URLs (e.g. 100 image fetches),
-and it exposes a `TCPConnector(resolver=...)` DNS hook that can pin
-validated DNS answers for a connect-time SSRF backstop (the default
-client here uses the stock resolver; the pinning lands as a follow-up). See the
+and it exposes a `TCPConnector(resolver=...)` DNS hook that pins the
+validated DNS answers as a connect-time SSRF backstop against DNS
+rebinding — the default client wires a `BlocklistResolver` (see
+`_ssrf_resolver.py`) keyed to the `DYN_MM_ALLOW_INTERNAL` env baseline. See the
 [NeMo Gym aiohttp vs httpx note](https://docs.nvidia.com/nemo/gym/latest/infrastructure/engineering-notes/aiohttp-vs-httpx.html)
 for the fan-out latency comparison.
 

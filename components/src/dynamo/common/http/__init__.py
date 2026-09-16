@@ -11,9 +11,10 @@ follows redirects manually and revalidates each hop against the policy.
 
 ``DYN_HTTP_BACKEND`` accepts only ``aiohttp``; any other value logs a warning
 and uses aiohttp. aiohttp scales well under fan-out and exposes a
-``TCPConnector(resolver=...)`` hook that a policy-aware resolver can use to pin
-validated DNS answers (the connect-time SSRF backstop lands on top of this
-capability; it is not wired in the default client here).
+``TCPConnector(resolver=...)`` hook. The default client wires a
+``BlocklistResolver`` (``_ssrf_resolver.py``) into it that pins validated DNS
+answers at connect time — the SSRF backstop against DNS rebinding, keyed to the
+``DYN_MM_ALLOW_INTERNAL`` env baseline.
 """
 
 from __future__ import annotations
