@@ -24,7 +24,7 @@ use dynamo_protocols::types::{
     ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
     ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
     ChatCompletionTool, ChatCompletionToolChoiceOption, ChatCompletionToolType,
-    CreateChatCompletionRequest, FunctionName, FunctionObject, FunctionType,
+    CreateChatCompletionRequest, FinishReason, FunctionName, FunctionObject, FunctionType,
     ImageDetail as ChatImageDetail, ImageUrl, ReasoningContent,
     ReasoningEffort as ChatReasoningEffort, ResponseFormat, ServiceTier as ChatServiceTier,
 };
@@ -679,7 +679,8 @@ fn convert_input_items_to_messages(
 ///
 /// Bare function names are preserved for model compatibility. Reject collisions
 /// from different origins instead of guessing which namespace to restore on the
-/// response path.
+/// response path. Return `InvalidArgument` for non-function tools, including
+/// namespace members, instead of silently discarding unsupported definitions.
 fn convert_tools(tools: &[Tool]) -> anyhow::Result<Vec<ChatCompletionTool>> {
     let mut converted = Vec::new();
     let mut origins = HashMap::<String, Option<String>>::new();
@@ -719,27 +720,41 @@ fn convert_tools(tools: &[Tool]) -> anyhow::Result<Vec<ChatCompletionTool>> {
             }
             Tool::Namespace(namespace) => {
                 for tool in &namespace.tools {
-                    if let NamespaceToolParamTool::Function(f) = tool {
-                        push_function(
+                    match tool {
+                        NamespaceToolParamTool::Function(f) => push_function(
                             &f.name,
                             &f.description,
                             &f.parameters,
                             f.strict,
                             Some(&namespace.name),
-                        )?;
+                        )?,
+                        _ => return unsupported_tool(tool, "tools"),
                     }
                 }
             }
-            // Only function tools are forwarded to Chat Completions.
-            _ => {}
+            _ => return unsupported_tool(tool, "tools"),
         }
     }
     Ok(converted)
 }
 
+/// Identify an unsupported tool or choice by its serialized type and return
+/// `InvalidArgument` with the affected request field and supported alternatives.
+fn unsupported_tool<T>(tool: &impl serde::Serialize, field: &str) -> anyhow::Result<T> {
+    let value = serde_json::to_value(tool)?;
+    let tool_type = value["type"].as_str().unwrap_or("unknown");
+    Err(ResponsesConversionError::InvalidArgument(format!(
+        "Unsupported Responses {field} type '{tool_type}': the Chat Completions adapter supports only function tools and none, auto, required, or named function tool choices"
+    ))
+    .into())
+}
+
 /// Convert Responses API ToolChoiceParam to ChatCompletionToolChoiceOption.
-fn convert_tool_choice(tc: &ToolChoiceParam) -> ChatCompletionToolChoiceOption {
-    match tc {
+///
+/// Preserve supported modes and named functions; return `InvalidArgument` for
+/// choices whose semantics cannot be represented by the adapter.
+fn convert_tool_choice(tc: &ToolChoiceParam) -> anyhow::Result<ChatCompletionToolChoiceOption> {
+    Ok(match tc {
         ToolChoiceParam::Mode(mode) => match mode {
             ToolChoiceOptions::None => ChatCompletionToolChoiceOption::None,
             ToolChoiceOptions::Auto => ChatCompletionToolChoiceOption::Auto,
@@ -753,15 +768,8 @@ fn convert_tool_choice(tc: &ToolChoiceParam) -> ChatCompletionToolChoiceOption {
                 },
             })
         }
-        ToolChoiceParam::Hosted(_) => {
-            // Hosted tools are not forwarded to chat completions
-            ChatCompletionToolChoiceOption::Auto
-        }
-        _ => {
-            // Other tool choice types (AllowedTools, Mcp, Custom, etc.) default to auto
-            ChatCompletionToolChoiceOption::Auto
-        }
-    }
+        _ => return unsupported_tool(tc, "tool_choice"),
+    })
 }
 
 /// Convert Responses API `text.format` to Chat Completions `response_format`.
@@ -876,7 +884,12 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             .filter(|t: &Vec<_>| !t.is_empty());
 
         // Convert tool_choice if present
-        let tool_choice = resp.inner.tool_choice.as_ref().map(convert_tool_choice);
+        let tool_choice = resp
+            .inner
+            .tool_choice
+            .as_ref()
+            .map(convert_tool_choice)
+            .transpose()?;
 
         // Determine stream setting: respect caller's preference, default to true for aggregation
         let stream = resp.inner.stream.or(Some(true));
@@ -1045,6 +1058,19 @@ pub struct ResponseParams {
     pub safety_identifier: Option<String>,
 }
 
+/// Map a terminal Chat Completions reason that makes a Responses result non-success-like.
+/// The Responses protocol has no content-filter status, so preserve the failure semantics
+/// with an incomplete response and a reason clients can inspect.
+pub(crate) fn responses_incomplete_reason(
+    finish_reason: Option<FinishReason>,
+) -> Option<&'static str> {
+    match finish_reason {
+        Some(FinishReason::Length) => Some("max_output_tokens"),
+        Some(FinishReason::ContentFilter) => Some("content_filter"),
+        _ => None,
+    }
+}
+
 impl ResponseParams {
     fn reasoning_summary_requested(&self) -> bool {
         self.reasoning
@@ -1151,11 +1177,10 @@ pub fn chat_completion_to_response(
 
     let choice = chat_resp.choices.into_iter().next();
     let mut output = Vec::new();
-    let mut output_limit_reached = false;
+    let mut incomplete_reason = None;
 
     if let Some(choice) = choice {
-        output_limit_reached =
-            choice.finish_reason == Some(dynamo_protocols::types::FinishReason::Length);
+        incomplete_reason = responses_incomplete_reason(choice.finish_reason);
 
         // Reasoning precedes tool calls so output order matches the decoded turn.
         if let Some(reasoning_text) = choice.message.reasoning_content
@@ -1248,17 +1273,14 @@ pub fn chat_completion_to_response(
     }
 
     let created_at = chat_resp.created as u64;
-    let status = if output_limit_reached {
+    let status = if incomplete_reason.is_some() {
         Status::Incomplete
     } else {
         Status::Completed
     };
-    if output_limit_reached {
-        // Unary responses do not expose explicit phase boundaries. A message
-        // or function call proves reasoning finished before the terminal item
-        // exhausted the output budget.
+    if incomplete_reason.is_some() {
         // The budget runs out once, inside the item the model was still writing.
-        // Every earlier item finished, so only the terminal one is incomplete.
+        // Earlier output items were complete and must not be relabelled.
         let terminal = output
             .iter()
             .rposition(|item| matches!(item, OutputItem::Message(_) | OutputItem::FunctionCall(_)));
@@ -1281,7 +1303,7 @@ pub fn chat_completion_to_response(
         id: response_id,
         object: "response".to_string(),
         created_at,
-        completed_at: (!output_limit_reached).then_some(created_at),
+        completed_at: incomplete_reason.is_none().then_some(created_at),
         model: if chat_resp.model == "unknown" {
             params.model.clone().unwrap_or(chat_resp.model)
         } else {
@@ -1315,8 +1337,8 @@ pub fn chat_completion_to_response(
         billing: None,
         conversation: None,
         error: None,
-        incomplete_details: output_limit_reached.then(|| IncompleteDetails {
-            reason: "max_output_tokens".to_string(),
+        incomplete_details: incomplete_reason.map(|reason| IncompleteDetails {
+            reason: reason.to_string(),
         }),
         instructions: params.instructions.clone().map(Instructions::Text),
         max_output_tokens: params.max_output_tokens,
@@ -3443,7 +3465,6 @@ thinking
         make_chat_resp_with_tool_calls(finish_reason, &[arguments])
     }
 
-    /// One tool call per entry in `arguments`, for a choice that carries parallel calls.
     fn make_chat_resp_with_tool_calls(
         finish_reason: dynamo_protocols::types::FinishReason,
         arguments: &[&str],
@@ -3456,12 +3477,12 @@ thinking
             arguments
                 .iter()
                 .enumerate()
-                .map(|(index, args)| ChatCompletionMessageToolCall {
+                .map(|(index, arguments)| ChatCompletionMessageToolCall {
                     id: format!("call_abc{index}"),
                     r#type: FunctionType::Function,
                     function: dynamo_protocols::types::FunctionCall {
                         name: "get_weather".into(),
-                        arguments: (*args).into(),
+                        arguments: (*arguments).into(),
                     },
                 })
                 .collect(),
@@ -3651,6 +3672,32 @@ thinking
     }
 
     #[test]
+    fn test_content_filter_returns_non_success_response() {
+        let chat_resp = make_chat_resp_with_text("blocked");
+        let mut chat_resp = chat_resp;
+        chat_resp.inner.choices[0].finish_reason =
+            Some(dynamo_protocols::types::FinishReason::ContentFilter);
+
+        let response =
+            chat_completion_to_response(chat_resp, &ResponseParams::default(), None).unwrap();
+
+        assert_eq!(response.inner.status, Status::Incomplete);
+        assert_eq!(response.inner.completed_at, None);
+        assert_eq!(
+            response
+                .inner
+                .incomplete_details
+                .as_ref()
+                .map(|details| details.reason.as_str()),
+            Some("content_filter")
+        );
+        let OutputItem::Message(message) = &response.inner.output[0] else {
+            panic!("expected message output");
+        };
+        assert_eq!(message.status, OutputStatus::Incomplete);
+    }
+
+    #[test]
     fn test_unmodified_length_with_tool_call_returns_incomplete_response() {
         let chat_resp = make_chat_resp_with_tool_call(
             dynamo_protocols::types::FinishReason::Length,
@@ -3675,8 +3722,6 @@ thinking
         assert_eq!(call.status, Some(OutputStatus::Incomplete));
     }
 
-    /// The output budget runs out once, inside the call the model was writing. Every
-    /// earlier call finished, so only the terminal item is incomplete.
     #[test]
     fn test_length_marks_only_the_terminal_tool_call_incomplete() {
         let chat_resp = make_chat_resp_with_tool_calls(
@@ -3702,8 +3747,7 @@ thinking
             vec![
                 Some(OutputStatus::Completed),
                 Some(OutputStatus::Incomplete)
-            ],
-            "a call the model finished must not be reported as incomplete"
+            ]
         );
     }
 

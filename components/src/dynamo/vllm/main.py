@@ -390,7 +390,7 @@ def _resolve_image_token_id(config: Config, vllm_config: VllmConfig) -> Optional
 
     Resolved via the SAME Rust logic the frontend uses
     (`dynamo._core.resolve_routing_image_token_id` ->
-    `lightseek_mm::resolve_routing_tokens`), returning `chat_placeholder_token_id`
+    `mm_routing::image::resolve_routing_tokens`), returning `chat_placeholder_token_id`
     so the KV-event normalizer keys on the identical token the frontend
     substitutes `pad_value` over — no per-family drift between the two.
 
@@ -760,7 +760,7 @@ def setup_vllm_engine(
     if component_gauges is not None:
         component_gauges.set_model_load_time(load_time)
 
-    logger.info(f"VllmWorker for {config.served_model_name} has been initialized")
+    logger.info(f"worker for {config.served_model_name} has been initialized")
 
     embedding_cleanup_resource: EmbeddingEngineCleanupResource | None = None
     if embedding_process_group is not None:

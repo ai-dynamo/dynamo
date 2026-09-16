@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 -->
 
@@ -50,11 +50,13 @@ These recipes demonstrate aggregated or disaggregated serving:
 | **[Qwen3.5-122B-A10B-FP8](qwen3.5-122b/fp8/vllm/disagg-h200-agentic/)** | vLLM | Disaggregated | 3x H200 | ✅ | ✅ | Hybrid GDN+MoE, 1P2D over NIXL, KV-aware routing, no MTP; agentic profile | ❌ |
 | **[GLM-5-NVFP4](glm-5-nvfp4/sglang/disagg/)** | SGLang | Disagg Prefill/Decode | 20x GB200 | ✅ | ✅ | NVFP4, EAGLE speculative decoding, TP16 decode + TP4 prefill, stable SGLang runtime image | ❌ |
 | **[GLM-5.2](glm-5.2/)** | SGLang | Aggregated + Disaggregated | 16x/20x B200 or 24x/16x H200 | ✅ | ✅ | B200 NVFP4 or H200 FP8 with FP8 KV, KV-aware routing, EAGLE, B200 HiCache CPU offload, agentic trace profile | ❌ |
+| **[A.X-K2](ax-k2/)** | vLLM | Aggregated / Disaggregated | 8x / 12x B200 | ✅ | ✅ | Two TP4 aggregate workers or 2P1D TP4 over NIXL; prefill async disabled in 2P1D, EAGLE3 k=3 on both roles, NVFP4 + FP8 KV, sparse MLA, FlashInfer autotuning disabled, KV-aware routing | ❌ |
 | **[DeepSeek-R1](deepseek-r1/sglang/disagg-8gpu/)** | SGLang | Disagg WideEP | 16x H200 | ✅ | ❌ | TP=8, single-node. Use `model-download-sglang.yaml` | ❌ |
 | **[DeepSeek-R1](deepseek-r1/sglang/disagg-16gpu/)** | SGLang | Disagg WideEP | 32x H200 | ✅ | ❌ | TP=16, multi-node. Use `model-download-sglang.yaml` | ❌ |
 | **[DeepSeek-R1](deepseek-r1/trtllm/disagg/wide_ep/gb200/)** | TensorRT-LLM | Disagg WideEP (GB200) | 36x GB200 | ✅ | ✅ | Multi-node: 8 decode + 1 prefill nodes | ❌ |
 | **[DeepSeek-R1](deepseek-r1/)** | vLLM | Disagg DEP16 | 32x H200 | ✅ | ❌ | Multi-node, data-expert parallel | ❌ |
 | **[DeepSeek-V4-Flash](deepseek-v4/deepseek-v4-flash/)** | vLLM | Agg + Disagg | 4x B200 / 4x H200 | ✅ | ✅ | Text — MoE 284B / 13B active, NVFP4 (B200) / public FP8 (H200) + FP8 KV, agg TP4 (B200) / DP4+TP1+EP (H200), MTP (H200), KV-aware routing, agentic trace profile, reasoning + tool calling; plus disagg 2P1D (12x B200) / 4P3D (28x H200) | ❌ |
+| **[DeepSeek-V4.1-Flash](deepseek-v4.1-flash/)** | SGLang | Agg + Disagg | 8x GB200 | ✅ | ❌ | Day-0, not benchmarked — MoE, FP8 dense + FP4 experts + FP8 KV, 1M ctx, TP4 + EP4, KV-aware routing, DSpark spec dec (agg only), reasoning + tool calling; plus disagg 1P1D with Mooncake KV transfer over MNNVL | ❌ |
 | **[DeepSeek-V4-Pro](deepseek-v4/deepseek-v4-pro/)** | vLLM | Agg + Disagg | 8x B200 / 8x H200 | ✅ | ✅ | Text — MoE 1.6T / 49B active (1M ctx; 86k on H200), NVFP4 (B200) / public FP8 (H200) + FP8 KV, TP8 + EP, MTP-2 (B200), KV-aware routing, agentic trace profile, reasoning + tool calling; plus disagg 1P1D (16x B200) / 1P3D (32x H200) | ❌ |
 | **[DeepSeek-V4-Pro-0813](deepseek-v4/deepseek-v4-pro-0813/)** | vLLM | Agg + Disagg | 8x GB200 / 8x H200 | ✅ | ✅ | Text — MoE 1.6T, MXFP4 experts + FP8 KV, 1M ctx, TP8 + EP, KV-aware routing, DSpark spec dec (GB200), agentic trace validated. Distinct checkpoint from DeepSeek-V4-Pro — do not share a model cache. | ❌ |
 | **[Kimi-K2.5](kimi-k2.5/trtllm/disagg-eagle-kv-router/)** | TensorRT-LLM | Disaggregated | 24x GB200 | ✅ | ✅ | DEP4 prefill + TEP4 decode, TRTLLM-native KV host offload | ❌ |
@@ -307,7 +309,7 @@ resources:
 **Scaling:**
 ```yaml
 services:
-  VllmDecodeWorker:
+  decode:
     replicas: 2  # Scale to multiple workers
 ```
 

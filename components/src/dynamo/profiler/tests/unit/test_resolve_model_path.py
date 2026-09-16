@@ -498,6 +498,7 @@ class TestThoroughResolvesModelPath:
                 "tolerations": [],
                 "runtime_backend": "trtllm",
                 "model_name_or_path": _HF_ID,
+                "trust_remote_code": False,
             }
             for call in materialize.call_args_list
         )

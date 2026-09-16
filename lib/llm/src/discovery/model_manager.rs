@@ -440,6 +440,19 @@ impl ModelManager {
             .map(|entry| entry.value().clone())
     }
 
+    /// Reject a local model registration that would claim an alias-reserved name.
+    ///
+    /// Callers hold `reservation_lock` so this check is atomic with alias
+    /// registration.
+    fn ensure_name_not_alias(&self, model_name: &str) -> Result<(), ModelManagerError> {
+        if self.alias_to_primary.contains_key(model_name) {
+            return Err(ModelManagerError::ModelAlreadyExists(
+                model_name.to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Remove a Model if it has no remaining WorkerSets.
     ///
     /// The caller holds `reservation_lock` and publishes the resulting catalog update.
@@ -703,6 +716,10 @@ impl ModelManager {
         }
         self.validate_adapter_claims(&primary, adapters.iter().map(|(_, card)| card))?;
 
+        let role = representative
+            .worker_type
+            .map_or("unspecified", |worker_type| worker_type.as_str());
+
         let worker_set = Arc::new(worker_set);
         self.get_or_create_model(&primary)
             .add_worker_set(worker_set_key.to_string(), worker_set.clone());
@@ -710,6 +727,15 @@ impl ModelManager {
             self.alias_to_primary.insert(alias.clone(), primary.clone());
             self.get_or_create_model(alias)
                 .add_worker_set(worker_set_key.to_string(), worker_set.clone());
+            // Emitted from the claim itself so the event cannot report an alias
+            // that was not registered, and once per role so a disaggregated
+            // deployment shows which roles claimed the name.
+            tracing::info!(
+                model_name = %primary,
+                alias = %alias,
+                role = %role,
+                "Registering model alias"
+            );
         }
         for (_, adapter) in &adapters {
             let adapter_view = Arc::new(worker_set.adapter_view(adapter.clone()));
@@ -1032,16 +1058,27 @@ impl ModelManager {
             .is_some_and(|m| m.is_ready_to_serve())
     }
 
-    /// Snapshot the serving readiness of every registered model.
+    /// Snapshot the serving readiness of every registered primary model name.
     ///
     /// Each value is derived from [`Model::is_ready_to_serve`], the same
     /// selection gate used by request routing and KServe model readiness.
     /// Results are sorted by model name so scrape output is deterministic.
+    ///
+    /// An alias is registered in `models` under its own name so that routing can
+    /// resolve it, which would otherwise emit a second, duplicate reading for the
+    /// deployment it points at. Alias names are therefore filtered out here, so a
+    /// caller sees one entry per primary name — matching the request path, which
+    /// canonicalizes an alias through [`Self::resolve_canonical_name`] before it
+    /// labels a metric. Both maps are read from the single loaded catalog guard,
+    /// so they always come from the same published snapshot. A LoRA adapter is a
+    /// distinct servable model rather than a second name for one, is never
+    /// recorded in `aliases`, and so keeps its own entry.
     pub(crate) fn registered_model_readiness(&self) -> Vec<(String, bool)> {
         let catalog = self.catalog.load();
         let mut readiness = catalog
             .models
             .iter()
+            .filter(|(name, _)| !catalog.aliases.contains_key(name.as_str()))
             .map(|(name, model)| (name.clone(), model.is_ready_to_serve()))
             .collect::<Vec<_>>();
         readiness.sort_unstable_by(|left, right| left.0.cmp(&right.0));
@@ -1480,6 +1517,7 @@ impl ModelManager {
         engine: OpenAIChatCompletionsStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_chat_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1503,6 +1541,7 @@ impl ModelManager {
         engine: OpenAICompletionsStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_completions_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1526,6 +1565,7 @@ impl ModelManager {
         engine: OpenAIEmbeddingsStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_embeddings_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1549,6 +1589,7 @@ impl ModelManager {
         engine: OpenAIClassifyStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_classify_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1572,6 +1613,7 @@ impl ModelManager {
         engine: OpenAIPoolingStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_pooling_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1595,6 +1637,7 @@ impl ModelManager {
         engine: TensorStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_tensor_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1618,6 +1661,7 @@ impl ModelManager {
         engine: OpenAIImagesStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_images_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1641,6 +1685,7 @@ impl ModelManager {
         engine: OpenAIVideosStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_videos_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1664,6 +1709,7 @@ impl ModelManager {
         engine: OpenAIAudiosStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_audios_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1687,6 +1733,7 @@ impl ModelManager {
         engine: RealtimeBidirectionalEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_realtime_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1710,6 +1757,7 @@ impl ModelManager {
         engine: GenerateStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_generate_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1733,6 +1781,7 @@ impl ModelManager {
         card_checksum: &str,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_prefill() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -2364,7 +2413,7 @@ impl ModelManager {
         let prefill_providers = worker_sets
             .iter()
             .filter(|worker_set| worker_set.card().worker_type == Some(WorkerType::Prefill))
-            .filter_map(|worker_set| worker_set.topology_endpoint().cloned())
+            .filter_map(|worker_set| worker_set.topology_target().cloned())
             .collect::<Vec<_>>();
         let decode_consumers = worker_sets
             .iter()
@@ -2374,7 +2423,11 @@ impl ModelManager {
             .then(|| prefill_providers[0].clone());
         for worker_set in &decode_consumers {
             if let Some(router) = &worker_set.prefill_router {
-                router.set_target(prefill_target.clone());
+                router.set_target(
+                    prefill_target
+                        .clone()
+                        .map(super::WorkerSetTarget::Committed),
+                );
             }
         }
 
@@ -2384,7 +2437,7 @@ impl ModelManager {
                 worker_set.card().worker_type == Some(WorkerType::Encode)
                     && worker_set.card().model_type.is_empty()
             })
-            .filter_map(|worker_set| worker_set.topology_endpoint().cloned())
+            .filter_map(|worker_set| worker_set.topology_target().cloned())
             .collect::<Vec<_>>();
         let unique_encode = (encode_providers.len() == 1).then(|| encode_providers[0].clone());
         let capable_prefill = (prefill_providers.len() == 1)
@@ -2404,7 +2457,12 @@ impl ModelManager {
                     Self::supports_encoder_result_handoff(worker_set.card())
                 }
             };
-            router.set_target(routing_enabled.then(|| unique_encode.clone()).flatten());
+            router.set_target(
+                routing_enabled
+                    .then(|| unique_encode.clone())
+                    .flatten()
+                    .map(super::WorkerSetTarget::Committed),
+            );
         }
     }
 
@@ -3354,6 +3412,152 @@ mod tests {
         assert_eq!(manager.resolve_canonical_name("alias"), "alias");
     }
 
+    #[derive(Debug, Clone)]
+    struct CapturedEvent {
+        message: String,
+        fields: HashMap<String, String>,
+    }
+
+    impl CapturedEvent {
+        fn field(&self, name: &str) -> &str {
+            self.fields
+                .get(name)
+                .map(String::as_str)
+                .unwrap_or_default()
+        }
+    }
+
+    struct CaptureLayer(Arc<std::sync::Mutex<Vec<CapturedEvent>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::layer::Layer<S> for CaptureLayer {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            struct Visitor(CapturedEvent);
+
+            impl Visitor {
+                fn put(&mut self, name: &str, value: String) {
+                    if name == "message" {
+                        self.0.message = value;
+                    } else {
+                        self.0.fields.insert(name.to_string(), value);
+                    }
+                }
+            }
+
+            impl tracing::field::Visit for Visitor {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    self.put(field.name(), format!("{value:?}"));
+                }
+
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    self.put(field.name(), value.to_string());
+                }
+            }
+
+            let mut visitor = Visitor(CapturedEvent {
+                message: String::new(),
+                fields: HashMap::new(),
+            });
+            event.record(&mut visitor);
+            self.0.lock().unwrap().push(visitor.0);
+        }
+    }
+
+    fn capture_events<T>(body: impl FnOnce() -> T) -> (T, Vec<CapturedEvent>) {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CaptureLayer(Arc::clone(&captured)));
+        let out = tracing::subscriber::with_default(subscriber, body);
+        let events = captured.lock().unwrap().clone();
+        (out, events)
+    }
+
+    fn alias_claim_events(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {
+        events
+            .iter()
+            .filter(|event| event.message == "Registering model alias")
+            .collect()
+    }
+
+    /// A card for one role of a two-role prefill/decode topology. `needs` names the
+    /// peer role, so neither role is ready on its own.
+    fn alias_role_card(role: WorkerType, aliases: &[&str]) -> ModelDeploymentCard {
+        let mut card = ModelDeploymentCard::with_name_only("alias-topology-model");
+        card.worker_type = Some(role);
+        card.model_type = match role {
+            WorkerType::Prefill => crate::model_type::ModelType::empty(),
+            _ => crate::model_type::ModelType::Chat,
+        };
+        card.needs = match role {
+            WorkerType::Prefill => vec![vec![WorkerType::Decode]],
+            WorkerType::Decode => vec![vec![WorkerType::Prefill]],
+            _ => Vec::new(),
+        };
+        card.aliases = aliases.iter().map(|alias| alias.to_string()).collect();
+        card
+    }
+
+    fn commit_alias_role(manager: &ModelManager, role: WorkerType, aliases: &[&str]) {
+        let namespace = "alias-deployment";
+        let card = alias_role_card(role, aliases);
+        let worker_set = WorkerSet::new(
+            namespace.to_string(),
+            card.mdcsum().to_string(),
+            card.clone(),
+        );
+        manager
+            .commit_discovery_group(
+                &format!("alias-group-{namespace}-{role}"),
+                &format!("{namespace}-{role}"),
+                worker_set,
+                vec![(format!("alias-instance-{namespace}-{role}"), card)],
+                Vec::new(),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn disaggregated_pair_sharing_an_alias_reports_one_claim_per_role() {
+        let manager = ModelManager::new();
+
+        let (_, events) = capture_events(|| {
+            commit_alias_role(&manager, WorkerType::Prefill, &["shared-alias"]);
+            commit_alias_role(&manager, WorkerType::Decode, &["shared-alias"]);
+        });
+
+        let claims = alias_claim_events(&events);
+        assert_eq!(claims.len(), 2, "expected one claim per role: {events:#?}");
+        let mut roles = claims
+            .iter()
+            .map(|event| event.field("role"))
+            .collect::<Vec<_>>();
+        roles.sort_unstable();
+        assert_eq!(roles, ["decode", "prefill"]);
+        for claim in &claims {
+            assert_eq!(claim.field("model_name"), "alias-topology-model");
+            assert_eq!(claim.field("alias"), "shared-alias");
+        }
+
+        assert_eq!(
+            manager.resolve_canonical_name("shared-alias"),
+            "alias-topology-model"
+        );
+        assert!(
+            manager
+                .get_model("shared-alias")
+                .unwrap()
+                .has_ready_workers()
+        );
+    }
+
     #[test]
     fn discovery_group_derives_adapter_model_and_lora_projection() {
         let manager = ModelManager::new();
@@ -3454,9 +3658,18 @@ mod tests {
         Option<Arc<crate::kv_router::EncoderRouter>>,
     ) {
         let card = topology_card(role);
-        let mut worker_set =
-            WorkerSet::new(endpoint.id().namespace, card.mdcsum().to_string(), card);
-        worker_set.set_topology_endpoint(endpoint);
+        let mut worker_set = WorkerSet::new(
+            endpoint.id().namespace,
+            card.mdcsum().to_string(),
+            card.clone(),
+        );
+        worker_set.set_topology_target(crate::discovery::CommittedWorkerSetTarget {
+            group: endpoint.id().to_string(),
+            endpoint,
+            generation: 1,
+            card: Arc::new(card),
+            admitted_ids: tokio::sync::watch::channel(Vec::new()).1,
+        });
         if role != WorkerType::Decode {
             return (worker_set, None, None);
         }
