@@ -22,8 +22,8 @@ Accepted references, matching how the Linear GitHub integration links work:
   branch name (``user/dyn-1234-short-description``).
 - A GitHub issue reference in the PR title or description: ``#123``, a
   closing keyword form (``Fixes #123``), an org-scoped cross-repo reference
-  (``ai-dynamo/enhancements#12`` - DEP and contribution-request issues live in
-  sibling repositories), or a full issue URL.
+  (``ai-dynamo/enhancements#12`` - contribution requests and the older DEPs
+  live in sibling repositories), or a full issue URL.
 
 Every candidate is verified against the corresponding API; a reference to an
 issue that does not exist does not count. Verification failures caused by API
@@ -187,9 +187,11 @@ def main() -> int:
     github_refs = {(repo, n) for n in GITHUB_REF_RE.findall(text)}
     org = repo.split("/")[0]
     for other_repo, number in CROSS_REPO_RE.findall(text) + ISSUE_URL_RE.findall(text):
-        # Cross-repo references count when they stay inside the same org -
-        # DEP issues (ai-dynamo/enhancements) and contribution requests live
-        # in sibling repositories.
+        # Cross-repo references count when they stay inside the same org.
+        # Contribution requests and the DEPs written before August live in
+        # sibling repositories. A DEP filed today is an issue in this
+        # repository, from `.github/ISSUE_TEMPLATE/dep.yml`, so it needs no
+        # cross-repo form at all.
         if other_repo.split("/")[0].lower() == org.lower():
             github_refs.add((other_repo, number))
 
@@ -324,8 +326,9 @@ def main() -> int:
             "- A Linear issue, for example `Closes DYN-1234` in the description, or the",
             "  issue ID in the branch name (`user/dyn-1234-description`).",
             "- A GitHub issue: `Fixes #123` to close it, or a non-closing form like",
-            "  `Part of #123` for long-running tracking issues (DEPs). Org repos count",
-            "  too, for example `ai-dynamo/enhancements#12`.",
+            "  `Part of #123` for an issue that outlives the PR, which is what a DEP",
+            "  in this repository needs. Issues in sibling repositories in the org",
+            "  count too, for example `ai-dynamo/enhancements#12`.",
             "",
             "If no issue exists yet, create one first and start the work from it.",
             f"This check is advisory today and becomes required on {blocking_date}.",
