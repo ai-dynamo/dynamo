@@ -2422,7 +2422,7 @@ mod tests {
     #[tokio::test]
     async fn test_unknown_typed_error_preserves_the_legacy_prologue_error() {
         let options = ServerOptions::builder().port(0).build().unwrap();
-        let server = TcpStreamServer::new_with_resolver(options, FailingIpResolver)
+        let server = TcpStreamServer::new_with_resolver(options, StubResolver::not_found())
             .await
             .unwrap();
         let context = Context::new(());
