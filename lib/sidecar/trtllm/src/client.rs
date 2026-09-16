@@ -88,9 +88,9 @@ impl TrtllmClient {
     /// Reads the server's advertised limits, keeping positive values.
     ///
     /// An engine started without `--max_seq_len` leaves `max_context_length`
-    /// unset rather than substituting a placeholder (measured against
-    /// 1.3.0rc26), so `None` here means "the server did not say", and
-    /// `--context-length` is the operator's way to supply it.
+    /// unset rather than substituting its `max_input_len` default (measured
+    /// against TensorRT-LLM main at 8bbaf66bd5), so `None` here means "the
+    /// server did not say", and `--context-length` supplies it instead.
     async fn get_model_info(&self, model: &str) -> Result<ModelLimits, tonic::Status> {
         let info = self
             .control()
