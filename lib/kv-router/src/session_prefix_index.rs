@@ -1,9 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Session lineage retained independently of physical cache eviction.
+//! Session lineage tracked independently of physical cache eviction.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -13,6 +14,9 @@ use crate::protocols::{ExternalSequenceBlockHash, WorkerWithDpRank};
 
 /// Logical session identity as owned by this index.
 pub type SessionId = String;
+
+const DEFAULT_MAX_SESSIONS: usize = 16_384;
+const CLEANUP_INTERVAL: Duration = Duration::from_millis(crate::cleanup::CLEANUP_INTERVAL_MS);
 
 new_key_type! {
     /// Generational handle to a [`LogicalNode`] in the arena.
@@ -71,19 +75,51 @@ pub struct SessionPrefixIndexer {
 #[derive(Debug, Default)]
 struct SessionEntry {
     worker_frontiers: FxHashMap<WorkerWithDpRank, FxHashSet<NodeId>>,
+    last_touch: Option<u64>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct IndexState {
     nodes: SlotMap<NodeId, LogicalNode>,
     hash_to_node: FxHashMap<ExternalSequenceBlockHash, NodeId>,
     session_to_worker_frontiers: HashMap<SessionId, SessionEntry>,
     worker_frontier_to_sessions: FxHashMap<WorkerWithDpRank, FxHashMap<NodeId, HashSet<SessionId>>>,
+    lru: BTreeMap<u64, SessionId>,
+    next_touch: u64,
+    max_sessions: usize,
+    prune_candidates: FxHashSet<NodeId>,
+    last_cleanup: Instant,
+}
+
+impl Default for IndexState {
+    fn default() -> Self {
+        Self {
+            nodes: SlotMap::default(),
+            hash_to_node: FxHashMap::default(),
+            session_to_worker_frontiers: HashMap::default(),
+            worker_frontier_to_sessions: FxHashMap::default(),
+            lru: BTreeMap::default(),
+            next_touch: 0,
+            max_sessions: DEFAULT_MAX_SESSIONS,
+            prune_candidates: FxHashSet::default(),
+            last_cleanup: Instant::now(),
+        }
+    }
 }
 
 impl SessionPrefixIndexer {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[cfg(test)]
+    fn with_max_sessions(max_sessions: usize) -> Self {
+        Self {
+            state: RwLock::new(IndexState {
+                max_sessions: max_sessions.max(1),
+                ..IndexState::default()
+            }),
+        }
     }
 
     pub fn get_node_from_hash(&self, block_hash: ExternalSequenceBlockHash) -> Option<NodeId> {
@@ -169,7 +205,9 @@ impl SessionPrefixIndexer {
     ) -> Result<bool, SessionPrefixIndexError> {
         let mut state = self.state.write();
         let node = state.resolve_or_insert_root(matched_hash);
-        Ok(state.advance_frontier(session_id, worker, node))
+        let updated = state.advance_frontier(session_id, worker, node);
+        state.maybe_cleanup();
+        Ok(updated)
     }
 
     /// Records a stored block chain and reports whether the frontier advanced.
@@ -205,7 +243,9 @@ impl SessionPrefixIndexer {
         }
 
         let leaf = parent.expect("non-empty block chain always yields a node");
-        Ok(state.advance_frontier(session_id, worker, leaf))
+        let updated = state.advance_frontier(session_id, worker, leaf);
+        state.maybe_cleanup();
+        Ok(updated)
     }
 
     /// Recedes worker-local session frontiers affected by removed blocks.
@@ -218,14 +258,18 @@ impl SessionPrefixIndexer {
             return 0;
         }
 
-        self.state
-            .write()
-            .recede_removed_frontiers(worker, block_hashes)
+        let mut state = self.state.write();
+        let updated = state.recede_removed_frontiers(worker, block_hashes);
+        state.maybe_cleanup();
+        updated
     }
 
     /// Removes every session frontier associated with one worker rank.
     pub fn clear_worker_frontiers(&self, worker: WorkerWithDpRank) -> usize {
-        self.state.write().clear_worker_frontiers(worker)
+        let mut state = self.state.write();
+        let updated = state.clear_worker_frontiers(worker);
+        state.maybe_cleanup();
+        updated
     }
 
     pub fn node_count(&self) -> usize {
@@ -292,6 +336,93 @@ impl IndexState {
         Ok(())
     }
 
+    fn touch_session(&mut self, session_id: &str) {
+        let touch = self.next_touch;
+        self.next_touch += 1;
+        let Some(entry) = self.session_to_worker_frontiers.get_mut(session_id) else {
+            return;
+        };
+        if let Some(previous) = entry.last_touch.replace(touch) {
+            self.lru.remove(&previous);
+        }
+        self.lru.insert(touch, session_id.to_string());
+    }
+
+    fn enforce_session_cap(&mut self) {
+        while self.session_to_worker_frontiers.len() > self.max_sessions {
+            let Some((_, victim)) = self.lru.pop_first() else {
+                debug_assert!(false, "session LRU is empty while over capacity");
+                break;
+            };
+            self.drop_session_bindings(&victim);
+            tracing::debug!(
+                session_id = %victim,
+                max_sessions = self.max_sessions,
+                "session prefix index evicted its least recently used session"
+            );
+        }
+    }
+
+    fn drop_session_bindings(&mut self, session_id: &str) -> bool {
+        let Some(entry) = self.session_to_worker_frontiers.remove(session_id) else {
+            return false;
+        };
+        if let Some(last_touch) = entry.last_touch {
+            self.lru.remove(&last_touch);
+        }
+        for (worker, frontiers) in entry.worker_frontiers {
+            for node in frontiers {
+                self.nodes[node].frontier_refs -= 1;
+                self.remove_reverse_frontier(worker, node, session_id);
+                self.queue_prune_candidate(node);
+            }
+        }
+        true
+    }
+
+    fn queue_prune_candidate(&mut self, node: NodeId) {
+        if self
+            .nodes
+            .get(node)
+            .is_some_and(|entry| entry.frontier_refs == 0 && entry.child_count == 0)
+        {
+            self.prune_candidates.insert(node);
+        }
+    }
+
+    fn maybe_cleanup(&mut self) {
+        if self.last_cleanup.elapsed() < CLEANUP_INTERVAL {
+            return;
+        }
+        self.prune_stale_nodes();
+        self.last_cleanup = Instant::now();
+    }
+
+    fn prune_stale_nodes(&mut self) -> usize {
+        let mut removed = 0;
+        while let Some(node) = self.prune_candidates.iter().next().copied() {
+            self.prune_candidates.remove(&node);
+            let Some(entry) = self.nodes.get(node).copied() else {
+                continue;
+            };
+            if entry.frontier_refs > 0 || entry.child_count > 0 {
+                continue;
+            }
+
+            self.nodes.remove(node);
+            self.hash_to_node.remove(&entry.block_hash);
+            removed += 1;
+
+            if let Some(parent) = entry.parent {
+                let parent_entry = &mut self.nodes[parent];
+                debug_assert!(parent_entry.child_count > 0);
+                parent_entry.child_count -= 1;
+                self.queue_prune_candidate(parent);
+            }
+        }
+        removed
+    }
+
     fn resolve_or_insert_root(&mut self, block_hash: ExternalSequenceBlockHash) -> NodeId {
         match self.hash_to_node.get(&block_hash).copied() {
             Some(node) => node,
@@ -354,6 +485,7 @@ impl IndexState {
                         .any(|&frontier| self.is_ancestor_or_self(node, frontier))
             });
         if already_reached {
+            self.touch_session(session_id);
             return false;
         }
 
@@ -374,6 +506,8 @@ impl IndexState {
             self.remove_frontier_binding(session_id, worker, frontier);
         }
         self.add_frontier_binding(session_id, worker, node);
+        self.touch_session(session_id);
+        self.enforce_session_cap();
         true
     }
 
@@ -416,6 +550,7 @@ impl IndexState {
 
         self.nodes[node].frontier_refs -= 1;
         self.remove_reverse_frontier(worker, node, session_id);
+        self.queue_prune_candidate(node);
 
         let remove_worker = self
             .session_to_worker_frontiers
@@ -425,12 +560,15 @@ impl IndexState {
         if remove_worker && let Some(entry) = self.session_to_worker_frontiers.get_mut(session_id) {
             entry.worker_frontiers.remove(&worker);
         }
-        let remove_session = self
+        let remove_session_entry = self
             .session_to_worker_frontiers
             .get(session_id)
             .is_some_and(|entry| entry.worker_frontiers.is_empty());
-        if remove_session {
-            self.session_to_worker_frontiers.remove(session_id);
+        if remove_session_entry
+            && let Some(entry) = self.session_to_worker_frontiers.remove(session_id)
+            && let Some(last_touch) = entry.last_touch
+        {
+            self.lru.remove(&last_touch);
         }
         true
     }
@@ -791,6 +929,40 @@ mod tests {
     }
 
     #[test]
+    fn session_cap_evicts_the_least_recently_used_bindings() {
+        let chain = hashes(vec![1]);
+        let indexer = SessionPrefixIndexer::with_max_sessions(2);
+
+        indexer
+            .update_session_from_match("s1", worker(1), chain[0])
+            .unwrap();
+        indexer
+            .update_session_from_match("s2", worker(1), chain[0])
+            .unwrap();
+        indexer
+            .update_session_from_match("s1", worker(1), chain[0])
+            .unwrap();
+        indexer
+            .update_session_from_match("s3", worker(1), chain[0])
+            .unwrap();
+
+        assert_eq!(indexer.session_count(), 2);
+        assert!(!indexer.get_session_frontiers("s1").is_empty());
+        assert!(indexer.get_session_frontiers("s2").is_empty());
+        assert!(!indexer.get_session_frontiers("s3").is_empty());
+        assert_eq!(
+            indexer.node_count(),
+            1,
+            "evicting one session must preserve topology shared by survivors"
+        );
+        let state = indexer.state.read();
+        let node = state.hash_to_node[&chain[0]];
+        let sessions = &state.worker_frontier_to_sessions[&worker(1)][&node];
+        assert_eq!(sessions.len(), 2);
+        assert!(!sessions.contains("s2"));
+    }
+
+    #[test]
     fn removal_recedes_only_the_affected_worker_frontier() {
         let chain = hashes(vec![1, 2, 3]);
         let indexer = SessionPrefixIndexer::new();
@@ -878,6 +1050,27 @@ mod tests {
         assert!(lineage_on_worker(&indexer, "s1", worker(2)).is_empty());
         assert_eq!(lineage_on_worker(&indexer, "s1", worker(1)), vec![chain]);
         assert_eq!(indexer.node_count(), 2, "clear preserves logical topology");
+    }
+
+    #[test]
+    fn opportunistic_cleanup_reclaims_unreferenced_tail() {
+        let chain = hashes(vec![1, 2, 3]);
+        let indexer = SessionPrefixIndexer::new();
+
+        indexer
+            .update_session_from_stored_blocks("s1", worker(1), None, &chain)
+            .unwrap();
+        indexer.state.write().last_cleanup = Instant::now() - CLEANUP_INTERVAL;
+
+        assert_eq!(
+            indexer.update_session_from_removed_blocks(worker(1), &chain[1..]),
+            1
+        );
+        assert_eq!(lineage_of(&indexer, "s1"), vec![vec![chain[0]]]);
+        assert_eq!(indexer.node_count(), 1);
+        assert!(indexer.get_node_from_hash(chain[0]).is_some());
+        assert!(indexer.get_node_from_hash(chain[1]).is_none());
+        assert!(indexer.get_node_from_hash(chain[2]).is_none());
     }
 
     #[test]
