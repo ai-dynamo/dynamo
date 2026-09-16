@@ -97,8 +97,10 @@ fi
 # 'include_stop_token_in_output'". Check the resolved version, not just
 # importability: an image whose TRT-LLM install already pulled an older
 # smg-grpc-proto (e.g. via its own grpc-smg extra) would otherwise satisfy a
-# bare `import` check and skip straight past this pin.
-if ! "$TRTLLM_PYTHON" -c "import importlib.metadata as m; assert m.version('smg-grpc-proto') == '0.4.14'" >/dev/null 2>&1; then
+# bare `import` check and skip straight past this pin. sys.exit, not assert:
+# `assert` is stripped entirely under `python -O`/`PYTHONOPTIMIZE`, which
+# would make this check fail open (exit 0) even with the package missing.
+if ! "$TRTLLM_PYTHON" -c "import importlib.metadata as m, sys; sys.exit(0 if m.version('smg-grpc-proto') == '0.4.14' else 1)" >/dev/null 2>&1; then
     "$TRTLLM_PYTHON" -m pip install --no-cache-dir "smg-grpc-proto==0.4.14"
 fi
 

@@ -512,7 +512,7 @@ fn bootstrap_discover(
         .map_err(|err| client::engine_shutdown(format!("bootstrap runtime: {err}")))?;
     runtime.block_on(async {
         let deadline = Instant::now() + transport.startup_deadline;
-        let mut grpc_client = client::connect(endpoint, transport, deadline).await?;
+        let mut grpc_client = client::connect(endpoint, transport, deadline, true).await?;
         client::discover(&mut grpc_client, deadline).await
     })
 }

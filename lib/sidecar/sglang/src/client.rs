@@ -31,10 +31,15 @@ pub struct Discovery {
     pub server_info: Value,
 }
 
+/// `bootstrap`: true when called before `dynamo_backend_common::run` installs
+/// the global tracing subscriber (the `bootstrap_discover` path during
+/// `from_args()`), false once running inside `LLMEngine::start` (via
+/// `Pool::connect`) where the subscriber is live.
 pub async fn connect(
     uri: &GrpcEndpoint,
     cfg: &GrpcTransportConfig,
     deadline: Instant,
+    bootstrap: bool,
 ) -> Result<Client, DynamoError> {
     let endpoint = Endpoint::from_shared(uri.to_string())
         .map_err(|err| invalid_arg(format!("invalid SGLang gRPC endpoint `{uri}`: {err}")))?;
@@ -57,19 +62,29 @@ pub async fn connect(
                 let now = Instant::now();
                 if last_logged_at.is_none_or(|last| now.duration_since(last) >= RETRY_LOG_INTERVAL)
                 {
-                    // eprintln!, not tracing::warn!: this runs from bootstrap_discover,
-                    // called during from_args() -- before dynamo_backend_common::run()
-                    // installs the global tracing subscriber (logging::init(), called
-                    // from run_worker). A tracing event emitted with no subscriber
-                    // installed is silently dropped, so a warn! here would be exactly as
-                    // invisible as the debug! it replaced. Matches the same
-                    // already-established bootstrap-path pattern in
-                    // lib/sidecar/vllm/src/engine.rs's own bootstrap_discover call.
-                    eprintln!(
-                        "SGLang gRPC connection attempt failed; retrying (endpoint={uri}, attempt={attempt}, elapsed={:?}, retry_interval={:?}, error={last_err})",
-                        started.elapsed(),
-                        cfg.retry_interval,
-                    );
+                    // eprintln! on the bootstrap path: tracing events emitted before
+                    // dynamo_backend_common::run() installs the global subscriber are
+                    // silently dropped, which would make this warning exactly as
+                    // invisible as the debug! it replaced. On the post-init path
+                    // (Pool::connect, called from LLMEngine::start), route through
+                    // tracing like everything else so the line gets levels,
+                    // timestamps, and filtering.
+                    if bootstrap {
+                        eprintln!(
+                            "SGLang gRPC connection attempt failed; retrying (endpoint={uri}, attempt={attempt}, elapsed={:?}, retry_interval={:?}, error={last_err})",
+                            started.elapsed(),
+                            cfg.retry_interval,
+                        );
+                    } else {
+                        tracing::warn!(
+                            endpoint = %uri,
+                            attempt,
+                            elapsed = ?started.elapsed(),
+                            retry_interval = ?cfg.retry_interval,
+                            error = %last_err,
+                            "SGLang gRPC connection attempt failed; retrying"
+                        );
+                    }
                     last_logged_at = Some(now);
                 }
                 tokio::time::sleep_until((now + cfg.retry_interval).min(deadline)).await;
@@ -111,6 +126,9 @@ pub struct Pool {
 }
 
 impl Pool {
+    // bootstrap=false: Pool::connect's only call site is LLMEngine::start
+    // (lib/sidecar/sglang/src/engine.rs), after the tracing subscriber is
+    // installed. See connect()'s own doc comment.
     pub async fn connect(
         uri: &GrpcEndpoint,
         cfg: &GrpcTransportConfig,
@@ -119,7 +137,7 @@ impl Pool {
         let size = cfg.connections.get();
         let mut clients = Vec::with_capacity(size);
         for _ in 0..size {
-            clients.push(connect(uri, cfg, deadline).await?);
+            clients.push(connect(uri, cfg, deadline, false).await?);
         }
         Ok(Self {
             clients,
