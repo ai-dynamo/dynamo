@@ -636,6 +636,34 @@ def test_pre_merge_runs_all_api_generators_hermetically() -> None:
     assert "kubernetes_drift=true" in generate
     gate = _publish_step_run(K8S_DRIFT_GATE_STEP)
     assert "exit 1" in gate
+    # Wiring and polarity, not only shape. `steps.<id>` for an id that does
+    # not exist renders empty, so dropping or renaming `id: api_refs`, or
+    # inverting either the probe or the gate, leaves the gate permanently
+    # inert while every assertion above still passes. Nothing else in the repo
+    # catches a dangling step reference: no hook or workflow runs actionlint.
+    fern_docs = yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / "fern-docs.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    by_name = {
+        step.get("name"): step
+        for step in fern_docs["jobs"]["preview-or-publish-docs"]["steps"]
+    }
+    assert by_name[K8S_DRIFT_GATE_STEP]["if"] == (
+        "${{ !cancelled() && steps."
+        f"{by_name['Generate API references']['id']}"
+        ".outputs.kubernetes_drift == 'true' }}"
+    )
+    assert re.search(
+        r"--check[^\n]*then\n\s*echo \"kubernetes_drift=false\"[^\n]*\n"
+        r"\s*else\n\s*echo \"kubernetes_drift=true\"",
+        generate,
+    )
+    # The regenerated page is rsynced before the gate runs, so write mode needs
+    # its own floor: a generator that exits 0 on a gutted page must not publish.
+    assert "regenerated_bytes" in generate
+    assert "committed_bytes * 4 / 5" in generate
     # The gate is only honest if it runs after the site has been published.
     assert publish.index("Publish Docs") < publish.index(K8S_DRIFT_GATE_STEP)
     assert "Generate API references" in publish
