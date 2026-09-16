@@ -9,7 +9,15 @@
 
 use std::sync::Arc;
 
-use aiperf_runtime::extensions::{AIPerfExtension, AIPerfRegistry, ExtensionError};
+use aiperf_protocol::sidecar_input::BuiltinRunnerSidecarInputAdapterResolver;
+use aiperf_runtime::application::Application;
+use aiperf_runtime::dataset_input::BuiltinRunnerDatasetInputAdapterResolver;
+use aiperf_runtime::execution_factories::native_execution_factories;
+use aiperf_runtime::extensions::{
+    AIPerfExtension, AIPerfRegistry, AIPerfRegistryFactory, BuiltinAIPerfRegistryFactory,
+    ExtensionError,
+};
+use aiperf_runtime::graph_input::BuiltinRunnerGraphInputAdapterResolver;
 use aiperf_simulate::aisimulate::{
     OfflineEngineConfig, OfflineEngineFactory, OfflinePlacement, OfflineTopology,
 };
@@ -35,9 +43,16 @@ pub struct DynamoKvRouterEngineFactory {
     _private: (),
 }
 
-fn selector_seed(config: &OfflineEngineConfig) -> Result<Option<u64>> {
+fn selector_seed(config: &OfflineEngineConfig) -> Result<u64> {
     match config.placement {
-        OfflinePlacement::KvRouter { selector_seed } => Ok(selector_seed),
+        OfflinePlacement::KvRouter {
+            selector_seed: Some(selector_seed),
+        } => Ok(selector_seed),
+        OfflinePlacement::KvRouter {
+            selector_seed: None,
+        } => anyhow::bail!(
+            "Dynamo KV-router placement requires a deterministic selector seed in a static simulation bundle"
+        ),
         OfflinePlacement::RoundRobin => anyhow::bail!(
             "Dynamo KV-router placement was requested but the configuration authors placement {:?}; the run report would describe routing that did not happen",
             config.placement
@@ -45,7 +60,7 @@ fn selector_seed(config: &OfflineEngineConfig) -> Result<Option<u64>> {
     }
 }
 
-fn ensure_supported(config: &OfflineEngineConfig) -> Result<Option<u64>> {
+fn ensure_supported(config: &OfflineEngineConfig) -> Result<u64> {
     let selector_seed = selector_seed(config)?;
     anyhow::ensure!(
         matches!(config.topology, OfflineTopology::Aggregated),
@@ -103,7 +118,7 @@ impl OfflineEngineFactory for DynamoKvRouterEngineFactory {
                         None,
                         None,
                         topology.len(),
-                        seed,
+                        Some(seed),
                     )
                     .context("constructing the Dynamo KV-router placement policy")?;
                     Ok(Box::new(placement) as BoxedPlacementPolicy)
@@ -134,5 +149,35 @@ impl AIPerfExtension for DynamoAISimulateExtension {
             engine_factory: Arc::new(DynamoKvRouterEngineFactory::default()),
         })
         .register(registry)
+    }
+}
+
+/// Composition root for an AIPerf distribution linked with Dynamo's KV router.
+///
+/// Consumers pass this factory to the AIPerf application instead of manually
+/// mutating a registry. The resulting immutable registry inventory therefore
+/// always contains the `aisimulate` transport and the Dynamo provider together.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DynamoAIPerfRegistryFactory;
+
+impl DynamoAIPerfRegistryFactory {
+    /// Compose a complete production application around the Dynamo bundle.
+    pub fn application(distribution_id: impl Into<String>) -> Result<Application> {
+        Application::new(
+            distribution_id,
+            &Self,
+            native_execution_factories(),
+            Arc::new(BuiltinRunnerGraphInputAdapterResolver::new()),
+            Arc::new(BuiltinRunnerDatasetInputAdapterResolver::new()),
+            Arc::new(BuiltinRunnerSidecarInputAdapterResolver::new()),
+        )
+    }
+}
+
+impl AIPerfRegistryFactory for DynamoAIPerfRegistryFactory {
+    fn build(&self) -> Result<AIPerfRegistry, ExtensionError> {
+        BuiltinAIPerfRegistryFactory
+            .build()?
+            .with_builtin_extensions([&DynamoAISimulateExtension as &dyn AIPerfExtension])
     }
 }

@@ -3,7 +3,6 @@
 
 [workspace]
 members = [
-    "lib/aiperf-sim",
     "lib/llm",
     "lib/rl",
     "lib/runtime",
@@ -46,6 +45,7 @@ members = [
     "deploy/inference-gateway/ext-proc",
     "deploy/inference-gateway/sidecar",
 ]
+exclude = ["lib/aiperf-sim"]
 resolver = "3"
 
 [workspace.package]
