@@ -542,15 +542,31 @@ def test_ten_proposals_do_not_hide_the_work_issue_behind_the_bound(
     assert api.github_calls == [f"{REPO}#900"]
 
 
+@pytest.mark.parametrize(
+    ("count", "expected"),
+    [
+        (11, "1 further reference went unchecked"),
+        (13, "3 further references went unchecked"),
+    ],
+)
 def test_the_failure_says_when_candidates_went_unchecked(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    count: int,
+    expected: str,
 ) -> None:
-    """Eleven closing-form proposals exhaust the budget with one left over."""
-    keys = {f"{REPO}#{n}": (True, True) for n in range(101, 112)}
+    """Closing-form proposals exhaust the budget and the rest go unlooked-at.
+
+    Both halves of the sentence are pinned. The subject agreed in number from
+    the start and the pronoun did not, which is the shape of fault that came
+    back once already because nothing held it.
+    """
+    keys = {f"{REPO}#{n}": (True, True) for n in range(101, 101 + count)}
     api = FakeApi(github=keys, deps=set(keys))
-    body = " ".join(f"Closes #{n}" for n in range(101, 112))
+    body = " ".join(f"Closes #{n}" for n in range(101, 101 + count))
     code, api = run(monkeypatch, api, PR_BODY=body)
     assert code == 1
     out = capsys.readouterr().out
-    assert "1 further reference went unchecked" in out
+    assert expected in out
+    assert "before reaching the rest." in out
     assert "are Dynamo Enhancement Proposals" in out
