@@ -1201,8 +1201,21 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
 
         return bootstrap_host, bootstrap_port
 
+    def _abort_requests(self, request_ids: set[str]) -> None:
+        if not request_ids:
+            return
+        if not getattr(self.engine, "tokenizer_manager", None):
+            logging.error("SGLang tokenizer_manager not found for abort requests")
+            return
+        for request_id in request_ids:
+            self.engine.tokenizer_manager.abort_request(rid=request_id, abort_all=False)
+        request_ids.clear()
+
     async def _handle_cancellation(
-        self, request_id_future: asyncio.Future, context: Context
+        self,
+        request_id_future: asyncio.Future,
+        context: Context,
+        request_ids: set[str] | None = None,
     ):
         """Background task to handle cancellation and shutdown by monitoring both signals.
 
@@ -1210,6 +1223,7 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             request_id_future: Future that will be set with the SGLang request ID
                               when the first response arrives.
             context: Context object for cancellation handling.
+            request_ids: Live set of unfinished parallel-choice IDs, when available.
 
         Raises:
             EngineShutdown: If shutdown event was triggered.
@@ -1255,22 +1269,9 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
                 f"Cancellation or shutdown signal received for SGLang Request ID {sglang_request_id}, Context: {context.id()}"
             )
 
-            # Call abort_request on the tokenizer_manager through the engine
-            if (
-                hasattr(self.engine, "tokenizer_manager")
-                and self.engine.tokenizer_manager
-            ):
-                logging.info(
-                    f"Calling SGLang abort_request for Request ID {sglang_request_id}"
-                )
-                self.engine.tokenizer_manager.abort_request(
-                    rid=sglang_request_id, abort_all=False
-                )
-                logging.info(f"Aborted Request ID: {context.id()}")
-            else:
-                logging.error(
-                    f"SGLang tokenizer_manager not found for abort request: {context.id()}"
-                )
+            self._abort_requests(
+                request_ids if request_ids is not None else {sglang_request_id}
+            )
 
             # Check which event triggered and raise EngineShutdown if shutdown
             if shutdown_task and shutdown_task in done:
@@ -1300,7 +1301,10 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
 
     @asynccontextmanager
     async def _cancellation_monitor(
-        self, request_id_future: asyncio.Future, context: Context
+        self,
+        request_id_future: asyncio.Future,
+        context: Context,
+        request_ids: set[str] | None = None,
     ) -> AsyncGenerator[asyncio.Task, None]:
         """
         Context manager for monitoring request cancellation and shutdown.
@@ -1313,6 +1317,7 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             request_id_future: Future that will be set with the SGLang request ID
                               when the first response arrives.
             context: Context object for cancellation handling
+            request_ids: Live set of unfinished parallel-choice IDs to abort on exit.
 
         Yields:
             asyncio.Task: The cancellation monitoring task being managed
@@ -1321,12 +1326,15 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
 
         # Start the cancellation monitoring task
         cancellation_task = asyncio.create_task(
-            self._handle_cancellation(request_id_future, context)
+            self._handle_cancellation(request_id_future, context, request_ids)
         )
 
         try:
             yield cancellation_task
         finally:
+            # Stream closure can beat the monitor's cancellation wake-up.
+            if request_ids is not None:
+                self._abort_requests(request_ids)
             # Clean up the background cancellation task
             request_id = "unknown"
             if request_id_future.done() and not request_id_future.cancelled():
