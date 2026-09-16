@@ -1462,6 +1462,7 @@ mod tests {
         hashes: &[u64],
     ) -> KvCacheStoreData {
         KvCacheStoreData {
+            shared_cache_eligible: false,
             parent_hash,
             start_position: None,
             blocks: hashes
@@ -1515,6 +1516,7 @@ mod tests {
             KvCacheEvent {
                 event_id,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
+                    shared_cache_eligible: false,
                     parent_hash,
                     start_position,
                     blocks: blocks
@@ -2104,6 +2106,7 @@ mod tests {
         let root_external = ExternalSequenceBlockHash(5001);
         let child_external = ExternalSequenceBlockHash(5002);
         let root_store = KvCacheStoreData {
+            shared_cache_eligible: false,
             parent_hash: None,
             start_position: None,
             blocks: vec![KvCacheStoredBlockData {
@@ -2113,6 +2116,7 @@ mod tests {
             }],
         };
         let child_store = KvCacheStoreData {
+            shared_cache_eligible: false,
             parent_hash: Some(root_external),
             start_position: None,
             blocks: vec![KvCacheStoredBlockData {
@@ -2158,6 +2162,7 @@ mod tests {
     fn recovery_rejects_child_before_parent_and_nonzero_orphan_position() {
         let parent = ExternalSequenceBlockHash(6001);
         let child_store = KvCacheStoreData {
+            shared_cache_eligible: false,
             parent_hash: Some(parent),
             start_position: None,
             blocks: vec![KvCacheStoredBlockData {
@@ -2167,6 +2172,7 @@ mod tests {
             }],
         };
         let orphan_positional = KvCacheStoreData {
+            shared_cache_eligible: false,
             parent_hash: None,
             start_position: Some(7),
             blocks: vec![KvCacheStoredBlockData {

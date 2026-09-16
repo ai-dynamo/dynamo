@@ -950,6 +950,7 @@ mod interface_tests {
                 0,
                 0,
                 KvCacheEventData::Stored(KvCacheStoreData {
+                    shared_cache_eligible: false,
                     parent_hash: None,
                     start_position: None,
                     blocks: stored_blocks_with_sequence_hashes(&block_hashes, &sequence_hashes),
@@ -1674,6 +1675,7 @@ mod lora_tests {
                 0,
                 0,
                 KvCacheEventData::Stored(KvCacheStoreData {
+                    shared_cache_eligible: false,
                     parent_hash: None,
                     start_position: None,
                     blocks: stored_blocks_with_sequence_hashes(&base_local, &base_seq),
@@ -1689,6 +1691,7 @@ mod lora_tests {
                 0,
                 0,
                 KvCacheEventData::Stored(KvCacheStoreData {
+                    shared_cache_eligible: false,
                     parent_hash: None,
                     start_position: None,
                     blocks: stored_blocks_with_sequence_hashes(&lora_local, &lora_seq),
@@ -1771,6 +1774,7 @@ mod lora_tests {
                 0,
                 0,
                 KvCacheEventData::Stored(KvCacheStoreData {
+                    shared_cache_eligible: false,
                     parent_hash: None,
                     start_position: None,
                     blocks: stored_blocks_with_sequence_hashes(&hashes_a, &seq_a),
@@ -1785,6 +1789,7 @@ mod lora_tests {
                 0,
                 0,
                 KvCacheEventData::Stored(KvCacheStoreData {
+                    shared_cache_eligible: false,
                     parent_hash: None,
                     start_position: None,
                     blocks: stored_blocks_with_sequence_hashes(&hashes_b, &seq_b),
@@ -1846,6 +1851,7 @@ mod lora_tests {
                 0,
                 0,
                 KvCacheEventData::Stored(KvCacheStoreData {
+                    shared_cache_eligible: false,
                     parent_hash: None,
                     start_position: None,
                     blocks: stored_blocks_with_sequence_hashes(&hashes_a, &seq_a),
@@ -1859,6 +1865,7 @@ mod lora_tests {
                 0,
                 0,
                 KvCacheEventData::Stored(KvCacheStoreData {
+                    shared_cache_eligible: false,
                     parent_hash: None,
                     start_position: None,
                     blocks: stored_blocks_with_sequence_hashes(&hashes_b, &seq_b),
@@ -2421,6 +2428,7 @@ mod local_indexer_tests {
             KvCacheEvent {
                 event_id,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
+                    shared_cache_eligible: false,
                     parent_hash: None,
                     start_position: None,
                     blocks: vec![KvCacheStoredBlockData {
@@ -2483,6 +2491,7 @@ mod local_indexer_tests {
                 KvCacheEvent {
                     event_id: id,
                     data: KvCacheEventData::Stored(KvCacheStoreData {
+                        shared_cache_eligible: false,
                         parent_hash: None,
                         start_position: None,
                         blocks: vec![KvCacheStoredBlockData {
@@ -2680,6 +2689,7 @@ mod local_indexer_tests {
             KvCacheEvent {
                 event_id: 1,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
+                    shared_cache_eligible: false,
                     parent_hash: None,
                     start_position: None,
                     blocks: vec![KvCacheStoredBlockData {
@@ -2737,6 +2747,7 @@ mod local_indexer_tests {
             KvCacheEvent {
                 event_id: 1,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
+                    shared_cache_eligible: false,
                     parent_hash: None,
                     start_position: None,
                     blocks: vec![KvCacheStoredBlockData {
