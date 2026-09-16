@@ -176,23 +176,6 @@ fn namespace_scope(filter: &NamespaceFilter) -> &str {
     }
 }
 
-/// Whether `namespace` is inside `filter` for the purposes of RL discovery.
-///
-/// [`NamespaceFilter::Prefix`] matches on a bare `starts_with`, which also admits a
-/// sibling deployment whose name merely begins with the prefix: under
-/// `DYN_NAMESPACE_PREFIX=myns-dgd` it would take in `myns-dgd2`. The endpoints reached
-/// here are RL control endpoints, so the scope is the prefix itself plus the
-/// hyphen-delimited worker generations beneath it — the same shape
-/// `DYN_NAMESPACE_WORKER_SUFFIX` produces.
-fn namespace_in_scope(filter: &NamespaceFilter, namespace: &str) -> bool {
-    match filter {
-        NamespaceFilter::Prefix(prefix) => namespace
-            .strip_prefix(prefix.as_str())
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with('-')),
-        filter => filter.matches(namespace),
-    }
-}
-
 impl RlDiscoveryConfig {
     pub fn from_env(runtime: Arc<DistributedRuntime>) -> Self {
         let namespace = std::env::var("DYN_NAMESPACE").unwrap_or_else(|_| DEFAULT_NAMESPACE.into());
@@ -410,9 +393,7 @@ async fn list_workers(state: &RlDiscoveryState) -> anyhow::Result<Vec<RlWorkerIn
         .unwrap_or_default()
         .into_iter()
         .filter(|instance| match instance {
-            DiscoveryInstance::Model { namespace, .. } => {
-                namespace_in_scope(&state.namespace_filter, namespace)
-            }
+            DiscoveryInstance::Model { namespace, .. } => state.namespace_filter.matches(namespace),
             _ => true,
         })
         .collect();
@@ -424,7 +405,7 @@ async fn list_workers(state: &RlDiscoveryState) -> anyhow::Result<Vec<RlWorkerIn
             DiscoveryInstance::Endpoint(endpoint) => Some(endpoint),
             _ => None,
         })
-        .filter(|endpoint| namespace_in_scope(&state.namespace_filter, &endpoint.namespace))
+        .filter(|endpoint| state.namespace_filter.matches(&endpoint.namespace))
         .filter(|endpoint| endpoint.endpoint == config.rl_endpoint)
         .filter(|endpoint| {
             config
@@ -1080,10 +1061,10 @@ mod tests {
     fn prefix_scope_stops_at_a_hyphen() {
         let filter = NamespaceFilter::Prefix("myns-dgd".to_string());
 
-        assert!(namespace_in_scope(&filter, "myns-dgd"));
-        assert!(namespace_in_scope(&filter, "myns-dgd-abc123"));
-        assert!(!namespace_in_scope(&filter, "myns-dgd2"));
-        assert!(!namespace_in_scope(&filter, "myns"));
+        assert!(filter.matches("myns-dgd"));
+        assert!(filter.matches("myns-dgd-abc123"));
+        assert!(!filter.matches("myns-dgd2"));
+        assert!(!filter.matches("myns"));
     }
 
     #[test]
@@ -1095,8 +1076,8 @@ mod tests {
             NamespaceFilter::from_namespace_and_prefix(Some("ns"), Some(GLOBAL_NAMESPACE)),
             "a frontend with globalDynamoNamespace must not route to workers RL cannot see"
         );
-        assert!(namespace_in_scope(&filter, "mydgd-9ed17bcc"));
-        assert!(namespace_in_scope(&filter, GLOBAL_NAMESPACE));
+        assert!(filter.matches("mydgd-9ed17bcc"));
+        assert!(filter.matches(GLOBAL_NAMESPACE));
         assert_eq!(namespace_scope(&filter), GLOBAL_NAMESPACE);
     }
 

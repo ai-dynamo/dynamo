@@ -243,6 +243,18 @@ where
                 model.namespace(),
                 model.namespace_prefix(),
             );
+            // Record the resolved scope and both inputs. The prefix wins over
+            // the namespace whenever it is set, and on Kubernetes the operator
+            // sets it on every frontend container, so the effective scope is
+            // often not the one the `--namespace` flag suggests. Without this
+            // line a frontend that discovers nothing looks identical to one
+            // whose workers never registered.
+            tracing::info!(
+                scope = ?namespace_filter,
+                namespace = model.namespace().unwrap_or("<unset>"),
+                namespace_prefix = model.namespace_prefix().unwrap_or("<unset>"),
+                "Model discovery scope resolved"
+            );
             let local_model_path =
                 (!model.path().as_os_str().is_empty()).then(|| model.path().to_path_buf());
             let generate_engine_capabilities = http_service.generate_engine_capabilities();

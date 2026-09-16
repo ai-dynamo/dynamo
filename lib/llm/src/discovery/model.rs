@@ -723,10 +723,46 @@ impl Model {
     /// Return the appropriate error when no servable WorkerSet was found.
     /// If the engine exists but no WorkerSet can serve (zero workers, prefill not activated,
     /// etc.), return ModelUnavailable (maps to 503). Otherwise ModelNotFound (maps to 404).
+    ///
+    /// Both answers are otherwise silent: the caller sees a bare 404 or 503 and
+    /// the reasons `namespace_readiness` already computed are never emitted.
+    /// The 404 is the harder one — it means the model name is in the catalog
+    /// (some WorkerSet committed) while no WorkerSet carries the requested
+    /// engine, which usually means a peer WorkerSet failed to build one.
     fn engine_error(&self, engine_exists: bool) -> ModelManagerError {
+        let readiness = self.namespace_readiness();
+        let namespaces = readiness
+            .namespaces
+            .iter()
+            .map(|(namespace, detail)| {
+                format!(
+                    "{namespace}: ready={}{}",
+                    detail.ready,
+                    detail
+                        .reason
+                        .as_ref()
+                        .map(|reason| format!(" ({reason})"))
+                        .unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
         if engine_exists {
+            tracing::warn!(
+                model_name = %self.name,
+                worker_sets = self.worker_set_count(),
+                namespaces = %namespaces,
+                "No WorkerSet can serve this request"
+            );
             ModelManagerError::ModelUnavailable(self.name.clone())
         } else {
+            tracing::warn!(
+                model_name = %self.name,
+                worker_sets = self.worker_set_count(),
+                namespaces = %namespaces,
+                "No WorkerSet of this model carries the requested engine; \
+                 check earlier model-materialization warnings for the WorkerSet that failed to build"
+            );
             ModelManagerError::ModelNotFound(self.name.clone())
         }
     }
