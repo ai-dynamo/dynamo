@@ -41,7 +41,7 @@ _RO_CONNECT_TIMEOUT_MS = 4200
 
 
 @pytest.fixture
-def init_device_calls(monkeypatch):
+def init_device_calls(monkeypatch, tmp_path):
     """Run ``GMSWorker.init_device`` with every device collaborator replaced.
 
     Returns the keyword arguments the worker handed to the client-manager
@@ -65,6 +65,12 @@ def init_device_calls(monkeypatch):
         gms_worker, "get_or_create_gms_client_memory_manager", fake_factory
     )
     monkeypatch.setattr(gms_worker, "get_vmm_device_type", lambda: VMMDeviceType.CUDA)
+    # Socket discovery queries NVML for a GPU UUID, which gpu_0 runners lack.
+    monkeypatch.setattr(
+        gms_worker,
+        "get_socket_path",
+        lambda device, tag: str(tmp_path / f"gms_{device}_{tag}.sock"),
+    )
     monkeypatch.setattr(
         "vllm.platforms.current_platform",
         SimpleNamespace(set_device=lambda _device: None),
