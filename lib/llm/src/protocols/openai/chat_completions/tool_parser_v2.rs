@@ -102,9 +102,9 @@ fn validate_parser_version_for_mode(
                 .flatten()
                 .collect::<Vec<_>>();
             if !configured.is_empty()
-                && !configured
-                    .iter()
-                    .any(|parser| V2_FAMILIES.contains(parser) || UNIFIED_FAMILIES.contains(parser))
+                && configured.iter().any(|parser| {
+                    !V2_FAMILIES.contains(parser) && !UNIFIED_FAMILIES.contains(parser)
+                })
             {
                 anyhow::bail!(
                     "{}=v2 was requested, but the configured parser has no compatible v2 implementation",
@@ -1510,14 +1510,19 @@ mod tests {
                 .is_ok()
         );
         assert!(
-            validate_parser_version_for_mode(ParserVersion::V1, Some("deepseek_v4"), None).is_ok()
-        );
-        assert!(
             validate_parser_version_for_mode(ParserVersion::Auto, Some("muse_glimmer"), None)
                 .is_ok()
         );
         assert!(
             validate_parser_version_for_mode(ParserVersion::V2, Some("muse_glimmer"), None).is_ok()
+        );
+        assert!(
+            validate_parser_version_for_mode(
+                ParserVersion::V2,
+                Some("qwen3_coder"),
+                Some("hermes")
+            )
+            .is_err()
         );
         assert!(validate_parser_version_for_mode(ParserVersion::V2, Some("hermes"), None).is_err());
     }
