@@ -256,16 +256,21 @@ RUN /usr/bin/python3 -m pip uninstall -y --break-system-packages opencv-python-h
     ! /usr/bin/python3 -c "import cv2" 2>/dev/null && \
     [ ! -e /usr/local/lib/python3.12/dist-packages/opencv_python_headless.libs ]
 
-# Raise the bundled fastapi/starlette pair to what the pinned TensorRT-LLM
-# already asks for. tensorrt-llm 1.3.0rc26 declares `fastapi>=0.136.3` and
-# `starlette>=1.3.1`; the base image ships 0.121.3 and 0.50.0, so the image is
-# below its own framework's stated requirement.
+# Raise the bundled fastapi/starlette/prometheus-fastapi-instrumentator stack
+# to what the pinned TensorRT-LLM already asks for. tensorrt-llm 1.3.0rc26
+# declares `fastapi>=0.136.3`, `starlette>=1.3.1` and
+# `prometheus_fastapi_instrumentator>=8.1.0`; the base image ships 0.121.3,
+# 0.50.0 and 7.1.0, so the image is below its own framework's stated
+# requirement on all three.
 #
-# The two have to move together. Every fastapi below 0.135.2 caps starlette --
-# 0.121.3 pins `starlette<0.51.0` -- so raising starlette alone leaves the
+# All three have to move together. Every fastapi below 0.135.2 caps starlette
+# -- 0.121.3 pins `starlette<0.51.0` -- and instrumentator 7.1.0 caps starlette
+# below 1.0 (`starlette<1.0.0,>=0.30.0`), so raising starlette alone leaves the
 # system-site solve unsatisfiable, and raising fastapi alone does not move
 # starlette off 0.50.0 because 0.50.0 already satisfies `starlette>=0.46.0`.
-# Naming both is what makes the pair land.
+# Instrumentator 8.1.0 is the first release that accepts starlette>=1.0.0
+# (`starlette<2.0.0,>=1.0.0`) and is exactly the floor the pinned TRT-LLM asks
+# for. Naming all three is what makes the stack land.
 #
 # Floors, not pins: these track what TRT-LLM requires rather than a version this
 # repo chose, so a base image that catches up makes this block a no-op instead of
@@ -276,15 +281,18 @@ RUN /usr/bin/python3 -m pip uninstall -y --break-system-packages opencv-python-h
 # set, plain pip targets the venv and leaves the system-site copy in place.
 RUN set -eu; \
     /usr/bin/python3 -m pip install --break-system-packages --no-cache-dir \
-        'fastapi>=0.141.1' 'starlette>=1.3.1'; \
+        'fastapi>=0.141.1' 'prometheus-fastapi-instrumentator>=8.1.0' 'starlette>=1.3.1'; \
     f=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("fastapi"))'); \
     s=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("starlette"))'); \
-    echo "fastapi $f / starlette $s"; \
+    i=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("prometheus-fastapi-instrumentator"))'); \
+    echo "fastapi $f / starlette $s / prometheus-fastapi-instrumentator $i"; \
     [ "$(printf '%s\n0.141.1\n' "$f" | sort -V | tail -1)" = "$f" ] \
         || { echo "ERROR: wanted fastapi >= 0.141.1, got $f" >&2; exit 1; }; \
     [ "$(printf '%s\n1.3.1\n' "$s" | sort -V | tail -1)" = "$s" ] \
         || { echo "ERROR: wanted starlette >= 1.3.1, got $s" >&2; exit 1; }; \
-    /usr/bin/python3 -c 'import fastapi, starlette'
+    [ "$(printf '%s\n8.1.0\n' "$i" | sort -V | tail -1)" = "$i" ] \
+        || { echo "ERROR: wanted prometheus-fastapi-instrumentator >= 8.1.0, got $i" >&2; exit 1; }; \
+    /usr/bin/python3 -c 'import fastapi, prometheus_fastapi_instrumentator, starlette'
 
 # Upgrade DALI past its own media-codec cleanup. Upstream restricted DALI's
 # vendored ffmpeg build to drop the software h264/hevc/aac decoders
@@ -630,14 +638,17 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 # whatever runtime_full holds, so listing one that did not move costs nothing and
 # omitting one that did would leave stale metadata behind.
 #
-# fastapi and starlette are the aiohttp case again: runtime_full upgrades both in
-# system site and the version-stamped metadata directory is renamed by the upgrade
-# (starlette-0.50.0.dist-info -> starlette-1.3.1.dist-info). The inventory reads
-# that directory, so without these entries the base image's copies would ship
-# beside the upgraded ones and the upgrade would not show. Their own dependencies
-# are deliberately absent: the base already carries anyio 4.13.0, pydantic 2.13.4
-# and typing-extensions 4.15.0, all of which satisfy the new floors, so pip leaves
-# them alone and nothing is renamed.
+# fastapi, starlette and prometheus-fastapi-instrumentator are the aiohttp
+# case again: runtime_full upgrades all three in system site and each
+# version-stamped metadata directory is renamed by the upgrade
+# (starlette-0.50.0.dist-info -> starlette-1.3.1.dist-info,
+# prometheus_fastapi_instrumentator-7.1.0.dist-info -> -8.1.0.dist-info,
+# fastapi likewise). The inventory reads those directories, so without these
+# entries the base image's copies would ship beside the upgraded ones and the
+# upgrade would not show. Their own dependencies are deliberately absent: the
+# base already carries anyio 4.13.0, pydantic 2.13.4 and typing-extensions
+# 4.15.0, all of which satisfy the new floors, so pip leaves them alone and
+# nothing is renamed.
 RUN rm -rf /workspace /home/ubuntu \
     /usr/local/bin/etcd \
     /usr/local/bin/etcdctl \
@@ -671,6 +682,8 @@ RUN rm -rf /workspace /home/ubuntu \
     /usr/local/lib/python3.12/dist-packages/attrs-* \
     /usr/local/lib/python3.12/dist-packages/fastapi \
     /usr/local/lib/python3.12/dist-packages/fastapi-* \
+    /usr/local/lib/python3.12/dist-packages/prometheus_fastapi_instrumentator \
+    /usr/local/lib/python3.12/dist-packages/prometheus_fastapi_instrumentator-* \
     /usr/local/lib/python3.12/dist-packages/starlette \
     /usr/local/lib/python3.12/dist-packages/starlette-* && \
     ! /usr/bin/python3 -c "import cv2" 2>/dev/null && \
