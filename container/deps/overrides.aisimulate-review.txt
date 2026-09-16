@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# TODO(AIC-1810): the ai-dynamo review wheel records the immutable AISimulate
+# TODO(GH-14355): the ai-dynamo review wheel records the immutable AISimulate
 # VCS requirement. Runtime image stages do not carry Git or a Rust toolchain,
 # so resolve that requirement to the wheel built from the same commit in the
 # shared wheelhouse. Remove this override with the VCS pins when matching

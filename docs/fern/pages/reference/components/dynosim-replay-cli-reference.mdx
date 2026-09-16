@@ -151,10 +151,31 @@ metadata. Dynamo format accepts multiple trace shards. Weka accepts one file or 
 formats accept exactly one file.
 
 For Weka traces, `traffic.source.nested_timestamp_basis` controls how nested timestamps
-are interpreted: `auto` uses AISimulate's heuristic, `absolute` uses timestamps directly,
-and `relative` adds the parent marker's timestamp. Explicit overrides take precedence over
-the heuristic. For example, a marker at 1 second with a child timestamp of 2 seconds is
-interpreted as 3 seconds with `relative`, and as 2 seconds with `absolute`.
+are interpreted:
+
+- `auto` (the default) scans the entire corpus and selects one basis for all nested requests.
+  If any replayable child timestamp precedes its parent marker, it selects `relative`;
+  otherwise, it selects `absolute`. A corpus without replayable nested requests resolves to
+  `not_applicable`. It does not choose a separate basis for each child or file.
+- `absolute` uses timestamps directly and rejects a child timestamp before its parent marker,
+  apart from the importer's timestamp-rounding tolerance.
+- `relative` adds the parent marker's timestamp to each child timestamp.
+
+Explicit `absolute` and `relative` overrides take precedence over inference. For example, a marker
+at 1 second with a child timestamp of 2 seconds is interpreted as 3 seconds with `relative`, and
+as 2 seconds with `absolute`. `auto` chooses 2 seconds for that corpus unless another child
+provides evidence for relative timestamps.
+
+AISimulate's Weka importer also changes two behaviors from the former Dynamo importer:
+
+- A source request with `out: 0` retains zero output tokens and runs as a prefill-only request.
+  The former importer used `max(1, out)`. Output-token counts, throughput, and timing metrics
+  can therefore change for the same corpus.
+- A missing or null `api_time` remains absent (`None`) in `recorded_api_time_ms`, preserving
+  the distinction from an explicit zero. Dependency classification uses a zero-duration
+  interval at the request timestamp when that duration is unknown. These requests were
+  previously rejected. The fallback can affect inferred dependency edges and replay timing;
+  it does not assert that the measured API duration was zero.
 
 `mooncake-delta`, `agentic_mooncake`, and `weka` require aggregated engine mode.
 The two agentic formats also require `trace_timestamps` and reject the virtual-time cutoff.
@@ -197,6 +218,13 @@ report = run_trace_replay(
 
 Agentic reports retain the sorted source-model labels in `agentic_graph.source_models` and record
 the explicit projection policy and target in `agentic_model_projection`.
+
+Weka reports also expose the resolved timestamp basis as the string
+`weka_nested_timestamp_basis`: `absolute`, `relative`, or `not_applicable`. For offline
+`run_trace_replay(...)`, read `report.summary["weka_nested_timestamp_basis"]`; online replay
+includes the same field in its summary dictionary. The Dynamo runner includes it in
+`report.metadata`, including when raw-report capture is disabled. The requested basis remains
+in the workload configuration.
 
 Agentic Mooncake v2 begins with a required versioned header:
 

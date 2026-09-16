@@ -74,6 +74,7 @@ def test_run_trace_replay_smoke_matrix(
         input_tokens=64,
         output_tokens=2,
     )
+    assert "weka_nested_timestamp_basis" not in _report_summary(report)
 
 
 @pytest.mark.parametrize("engine_type", ["vllm", "sglang"])
@@ -437,6 +438,56 @@ def test_run_trace_replay_rejects_applied_compute_agentic_format_without_concurr
         )
 
 
+def _write_weka_trace(
+    path: Path, *, nested_timestamps: tuple[float, float] | None = None
+) -> Path:
+    requests = [
+        {
+            "t": 0.0,
+            "type": "s",
+            "model": "model",
+            "in": 64,
+            "out": 1,
+            "hash_ids": [1],
+        }
+    ]
+    if nested_timestamps is not None:
+        marker_time, child_time = nested_timestamps
+        requests.append(
+            {
+                "t": marker_time,
+                "type": "subagent",
+                "agent_id": "worker",
+                "subagent_type": "Explore",
+                "status": "completed",
+                "models": ["model"],
+                "requests": [
+                    {
+                        "t": child_time,
+                        "type": "s",
+                        "model": "model",
+                        "in": 64,
+                        "out": 1,
+                        "hash_ids": [2],
+                    }
+                ],
+            }
+        )
+    path.write_text(
+        json.dumps(
+            {
+                "id": path.stem,
+                "models": ["model"],
+                "block_size": 64,
+                "hash_id_scope": "local",
+                "requests": requests,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
 @pytest.mark.parametrize(
     ("basis", "child_start_ms"),
     [(None, 2_000.0), ("auto", 2_000.0), ("absolute", 2_000.0), ("relative", 3_000.0)],
@@ -445,45 +496,8 @@ def test_run_trace_replay_rejects_applied_compute_agentic_format_without_concurr
 def test_weka_nested_timestamp_override_reaches_native_replay(
     tmp_path, basis, child_start_ms, arrival_speedup_ratio
 ):
-    trace_path = tmp_path / "nested.json"
-    trace_path.write_text(
-        json.dumps(
-            {
-                "id": "play",
-                "models": ["model"],
-                "block_size": 64,
-                "hash_id_scope": "local",
-                "requests": [
-                    {
-                        "t": 0.0,
-                        "type": "s",
-                        "model": "model",
-                        "in": 64,
-                        "out": 1,
-                        "hash_ids": [1],
-                    },
-                    {
-                        "t": 1.0,
-                        "type": "subagent",
-                        "agent_id": "worker",
-                        "subagent_type": "Explore",
-                        "status": "completed",
-                        "models": ["model"],
-                        "requests": [
-                            {
-                                "t": 2.0,
-                                "type": "s",
-                                "model": "model",
-                                "in": 64,
-                                "out": 1,
-                                "hash_ids": [2],
-                            }
-                        ],
-                    },
-                ],
-            }
-        ),
-        encoding="utf-8",
+    trace_path = _write_weka_trace(
+        tmp_path / "nested.json", nested_timestamps=(1.0, 2.0)
     )
 
     report = run_trace_replay(
@@ -497,6 +511,9 @@ def test_weka_nested_timestamp_override_reaches_native_replay(
     )
 
     assert report.summary["completed_requests"] == 2
+    assert report.summary["weka_nested_timestamp_basis"] == (
+        "relative" if basis == "relative" else "absolute"
+    )
     root, child = sorted(
         report.per_request, key=lambda record: record["arrival_time_ms"]
     )
@@ -506,6 +523,64 @@ def test_weka_nested_timestamp_override_reaches_native_replay(
     assert child["arrival_time_ms"] == (
         root["terminal_time_ms"] + child_start_ms / arrival_speedup_ratio
     )
+
+
+@pytest.mark.parametrize("replay_mode", ["offline", "online"])
+def test_weka_auto_reports_corpus_wide_resolved_timestamp_basis(tmp_path, replay_mode):
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    ambiguous = _write_weka_trace(
+        corpus / "ambiguous.json", nested_timestamps=(0.010, 0.0105)
+    )
+    original_bytes = ambiguous.read_bytes()
+    for source, expected_basis, child_delay_ms, expected_count in [
+        (ambiguous, "absolute", 10.5, 2),
+        (corpus, "relative", 20.5, 4),
+    ]:
+        if source == corpus:
+            # A pre-marker child in another file changes Auto for the whole
+            # corpus, including the byte-identical ambiguous trace.
+            _write_weka_trace(corpus / "witness.json", nested_timestamps=(0.020, 0.001))
+        report = run_trace_replay(
+            source,
+            extra_engine_args=_vllm_args(),
+            trace_format="weka",
+            execution_model="target-model",
+            replay_mode=replay_mode,
+            capture_per_request=replay_mode == "offline",
+        )
+        summary = _report_summary(report)
+        assert summary["weka_nested_timestamp_basis"] == expected_basis
+        assert summary["completed_requests"] == expected_count
+        if replay_mode == "offline":
+            root, child = sorted(
+                (
+                    record
+                    for record in report.per_request
+                    if record["play_id"].endswith(":play:ambiguous")
+                ),
+                key=lambda record: record["arrival_time_ms"],
+            )
+            assert child["arrival_time_ms"] - root["terminal_time_ms"] == pytest.approx(
+                child_delay_ms
+            )
+    assert ambiguous.read_bytes() == original_bytes
+
+
+@pytest.mark.parametrize("replay_mode", ["offline", "online"])
+def test_weka_without_nested_requests_reports_timestamp_basis_not_applicable(
+    tmp_path, replay_mode
+):
+    report = run_trace_replay(
+        _write_weka_trace(tmp_path / "flat.json"),
+        extra_engine_args=_vllm_args(),
+        trace_format="weka",
+        execution_model="target-model",
+        replay_mode=replay_mode,
+    )
+    summary = _report_summary(report)
+    assert summary["completed_requests"] == 1
+    assert summary["weka_nested_timestamp_basis"] == "not_applicable"
 
 
 def test_direct_agentic_dynamo_trace_rejects_replay_concurrency():

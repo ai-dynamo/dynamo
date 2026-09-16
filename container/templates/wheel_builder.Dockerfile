@@ -635,7 +635,7 @@ COPY deploy/inference-gateway/sidecar/ /opt/dynamo/deploy/inference-gateway/side
 {% if target in ("runtime", "planner", "frontend") %}
 COPY container/deps/requirements.aisimulate.txt /opt/dynamo/container/deps/requirements.aisimulate.txt
 
-# TODO(AIC-1810): while the Weka importer is pinned to its public review
+# TODO(GH-14355): while the Weka importer is pinned to its public review
 # revision, build only that distribution from the immutable VCS requirement.
 # Replace this with the published-wheel download path when matching PyPI and
 # crates.io dev releases are available. Runtime images continue to own

@@ -202,11 +202,19 @@ def test_trace_paths_only_workload_routes_to_trace_replay(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize(
-    "nested_timestamp_basis", [None, "auto", "absolute", "relative"]
+    ("nested_timestamp_basis", "resolved_timestamp_basis"),
+    [
+        (None, "relative"),
+        ("auto", "relative"),
+        ("absolute", "absolute"),
+        ("relative", "relative"),
+        (None, "not_applicable"),
+    ],
 )
 def test_weka_runner_delegates_without_inventing_a_source_block_size(
     monkeypatch,
     nested_timestamp_basis,
+    resolved_timestamp_basis,
 ) -> None:
     seen = {}
 
@@ -218,6 +226,7 @@ def test_weka_runner_delegates_without_inventing_a_source_block_size(
                 "agentic_graph": {
                     "source_models": ["source-a", "source-b"],
                 },
+                "weka_nested_timestamp_basis": resolved_timestamp_basis,
             }
         )
 
@@ -244,6 +253,7 @@ def test_weka_runner_delegates_without_inventing_a_source_block_size(
         "agentic_qualification": "functional_only",
         "agentic_input_format": "weka",
         "agentic_lanes": 1,
+        "weka_nested_timestamp_basis": resolved_timestamp_basis,
         "agentic_graph": {
             "source_models": ["source-a", "source-b"],
         },
@@ -253,6 +263,7 @@ def test_weka_runner_delegates_without_inventing_a_source_block_size(
             "target_model": "target-model",
         },
     }
+    assert "native_report" not in report.metadata
 
 
 def test_weka_runner_requires_a_configured_execution_target_model() -> None:

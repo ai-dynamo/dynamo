@@ -18,7 +18,8 @@ use super::{
 };
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
 use crate::loadgen::{
-    AgenticTrace, Trace, TraceFileFormat, WekaImportOptions, load_weka_agentic_graph_with_options,
+    AgenticTrace, Trace, TraceFileFormat, WekaImportOptions, WekaResolvedTimestampBasis,
+    load_weka_agentic_graph_with_options,
 };
 use crate::scheduler::RouterEventVisibility;
 
@@ -85,9 +86,10 @@ fn load_agentic_trace_from_file(
         arrival_speedup_ratio,
         WekaImportOptions::default(),
     )
+    .map(|(trace, _)| trace)
 }
 
-/// Load and normalize an agentic trace, preserving explicit Weka import options.
+/// Load an agentic trace and retain Weka's corpus-wide resolved timestamp basis.
 #[doc(hidden)]
 pub fn load_agentic_trace_from_file_with_options(
     trace_path: &Path,
@@ -95,27 +97,30 @@ pub fn load_agentic_trace_from_file_with_options(
     trace_format: TraceFileFormat,
     arrival_speedup_ratio: f64,
     weka_options: WekaImportOptions,
-) -> Result<AgenticTrace> {
-    let trace = match trace_format {
-        TraceFileFormat::AgenticMooncake => AgenticTrace::from_agentic_mooncake(trace_path)?,
+) -> Result<(AgenticTrace, Option<WekaResolvedTimestampBasis>)> {
+    let (trace, resolved_basis) = match trace_format {
+        TraceFileFormat::AgenticMooncake => {
+            (AgenticTrace::from_agentic_mooncake(trace_path)?, None)
+        }
         // AISimulate owns Weka validation and lowering. Dynamo keeps only this
         // runtime composition seam so existing `trace_format="weka"` callers
         // continue to receive the canonical validated agentic graph.
         // A zero value is Dynamo's internal sentinel for an omitted source
         // block-size assertion; Weka itself rejects zero block sizes.
         TraceFileFormat::Weka => {
-            load_weka_agentic_graph_with_options(
+            let (trace, resolved_basis) = load_weka_agentic_graph_with_options(
                 trace_path,
                 (trace_block_size != 0).then_some(trace_block_size),
                 weka_options,
-            )?
-            .0
+            )?;
+            (trace, Some(resolved_basis))
         }
         _ => bail!("{} is not an agentic trace format", trace_format.as_str()),
     };
-    trace
+    let trace = trace
         .normalize_starts()
-        .speed_up_timing(arrival_speedup_ratio)
+        .speed_up_timing(arrival_speedup_ratio)?;
+    Ok((trace, resolved_basis))
 }
 
 fn is_agentic_trace_format(trace_format: TraceFileFormat) -> bool {
@@ -2878,7 +2883,7 @@ mod tests {
             (WekaNestedTimestampBasis::Auto, 2_000.0),
         ] {
             for speedup in [1.0, 2.0] {
-                let trace = load_agentic_trace_from_file_with_options(
+                let (trace, resolved_basis) = load_agentic_trace_from_file_with_options(
                     &source,
                     0,
                     TraceFileFormat::Weka,
@@ -2888,6 +2893,14 @@ mod tests {
                     },
                 )
                 .unwrap();
+                assert_eq!(
+                    resolved_basis,
+                    Some(if basis == WekaNestedTimestampBasis::Relative {
+                        WekaResolvedTimestampBasis::Relative
+                    } else {
+                        WekaResolvedTimestampBasis::Absolute
+                    })
+                );
                 assert_eq!(trace.node_count(), 2);
                 assert_eq!(trace.nodes()[0].not_before_ms(), 0.0);
                 assert_eq!(trace.nodes()[1].not_before_ms(), child_start_ms / speedup);

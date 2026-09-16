@@ -13,6 +13,7 @@ use dynamo_mocker::common::protocols::{
 use dynamo_mocker::loadgen::{
     AgenticTrace, ArrivalSpec, DelaySpec, DynamoRequestTrace, LengthSpec, SyntheticTraceSpec,
     Trace as RsTrace, TraceFileFormat, WekaImportOptions, WekaNestedTimestampBasis,
+    WekaResolvedTimestampBasis,
 };
 use dynamo_mocker::replay::{
     ReplayArgsMode, ReplayScalingDecision, ReplayScalingPolicy, ReplayScalingSnapshot,
@@ -46,6 +47,7 @@ struct OfflineReplayCoverage {
 #[derive(Debug)]
 pub struct OfflineReplayResult {
     report: dynamo_mocker::replay::TraceSimulationReport,
+    weka_nested_timestamp_basis: Option<WekaResolvedTimestampBasis>,
     lifecycle_operations: Vec<dynamo_mocker::replay::LifecycleOperation>,
     capture_per_request: bool,
     coverage: OfflineReplayCoverage,
@@ -57,6 +59,7 @@ impl OfflineReplayResult {
         capture_per_request: bool,
         capture_planner_details: bool,
         runtime_evidence: dynamo_mocker::replay::OfflineRuntimeEvidence,
+        weka_nested_timestamp_basis: Option<WekaResolvedTimestampBasis>,
     ) -> Self {
         let dynamo_mocker::replay::OfflineRuntimeEvidence {
             lifecycle_operations,
@@ -69,6 +72,7 @@ impl OfflineReplayResult {
         };
         Self {
             report,
+            weka_nested_timestamp_basis,
             lifecycle_operations,
             capture_per_request,
             coverage,
@@ -80,9 +84,7 @@ impl OfflineReplayResult {
 impl OfflineReplayResult {
     #[getter]
     fn summary(&self, py: Python<'_>) -> PyResult<PyObject> {
-        pythonize(py, &self.report)
-            .map(Bound::unbind)
-            .map_err(to_pyerr)
+        replay_summary_to_python(py, &self.report, self.weka_nested_timestamp_basis)
     }
 
     #[getter]
@@ -108,6 +110,30 @@ impl OfflineReplayResult {
             .map(Bound::unbind)
             .map_err(to_pyerr)
     }
+}
+
+fn replay_summary_to_python(
+    py: Python<'_>,
+    report: &dynamo_mocker::replay::TraceSimulationReport,
+    weka_nested_timestamp_basis: Option<WekaResolvedTimestampBasis>,
+) -> PyResult<PyObject> {
+    // Match AISimulate's report field without changing its shared report type.
+    #[derive(Serialize)]
+    struct Summary<'a> {
+        #[serde(flatten)]
+        report: &'a dynamo_mocker::replay::TraceSimulationReport,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        weka_nested_timestamp_basis: Option<WekaResolvedTimestampBasis>,
+    }
+    pythonize(
+        py,
+        &Summary {
+            report,
+            weka_nested_timestamp_basis,
+        },
+    )
+    .map(Bound::unbind)
+    .map_err(to_pyerr)
 }
 
 struct ResolvedAicPerfConfig<'a> {
@@ -1043,7 +1069,8 @@ pub fn run_mocker_trace_replay(
                 max_sim_time_ms,
                 sla,
                 scaling_policy,
-            );
+            )
+            .map(|report| (report, None));
         }
 
         if trace_format == TraceFileFormat::Weka {
@@ -1055,13 +1082,14 @@ pub fn run_mocker_trace_replay(
                 replay_concurrency.is_none(),
                 "weka trace format is not supported with replay_concurrency"
             );
-            let trace = dynamo_mocker::replay::load_agentic_trace_from_file_with_options(
-                &trace_files[0],
-                trace_block_size.unwrap_or(0),
-                trace_format,
-                arrival_speedup_ratio,
-                weka_options,
-            )?;
+            let (trace, resolved_basis) =
+                dynamo_mocker::replay::load_agentic_trace_from_file_with_options(
+                    &trace_files[0],
+                    trace_block_size.unwrap_or(0),
+                    trace_format,
+                    arrival_speedup_ratio,
+                    weka_options,
+                )?;
             return run_loaded_agentic_trace(
                 args_selection,
                 trace,
@@ -1074,7 +1102,8 @@ pub fn run_mocker_trace_replay(
                 record_per_request,
                 max_sim_time_ms,
                 sla,
-            );
+            )
+            .map(|report| (report, resolved_basis));
         }
 
         let trace_block_size = trace_block_size.unwrap_or(512);
@@ -1200,8 +1229,9 @@ pub fn run_mocker_trace_replay(
                 )
             }
         }
+        .map(|report| (report, None))
     };
-    let report = if let Some(callback) = scaling_policy {
+    let (report, resolved_weka_basis) = if let Some(callback) = scaling_policy {
         let callback_error = PyReplayScalingErrorSlot::default();
         run(Some(Box::new(PyReplayScalingPolicy {
             callback,
@@ -1228,11 +1258,12 @@ pub fn run_mocker_trace_replay(
                 record_per_request,
                 capture_planner_details,
                 runtime_evidence,
+                resolved_weka_basis,
             ),
         )
         .map(Py::into_any);
     }
-    pythonize(py, &report).map(Bound::unbind).map_err(to_pyerr)
+    replay_summary_to_python(py, &report, resolved_weka_basis)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1802,6 +1833,7 @@ pub fn run_mocker_synthetic_trace_replay(
                 record_per_request,
                 capture_planner_details,
                 runtime_evidence,
+                None,
             ),
         )
         .map(Py::into_any);

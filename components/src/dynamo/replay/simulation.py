@@ -532,6 +532,9 @@ class DynamoReplayRunner:
             value = trace_report.get(name)
             if isinstance(value, dict):
                 metadata[name] = value
+        resolved_weka_basis = trace_report.get("weka_nested_timestamp_basis")
+        if isinstance(resolved_weka_basis, str):
+            metadata["weka_nested_timestamp_basis"] = resolved_weka_basis
 
         metrics: dict[str, float] = {}
         for name, value in trace_report.items():

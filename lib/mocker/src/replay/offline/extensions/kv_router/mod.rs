@@ -17,8 +17,8 @@ use dynamo_kv_router::protocols::{
 };
 use dynamo_kv_router::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::scheduling::{
-    OverlapSignals, PolicyClassConfig, PolicyProfile, PolicyQueue, QueueSnapshot, ScheduleMode,
-    WorkerPlacement,
+    OverlapSignals, PolicyClassConfig, PolicyProfile, PolicyQueue, QueueSnapshot,
+    RoutingEligibility, ScheduleMode, WorkerPlacement,
 };
 use dynamo_kv_router::sequences::topology::WorkerDpRange;
 use dynamo_kv_router::{
@@ -922,6 +922,27 @@ impl OfflineReplayRouter {
         }
     }
 
+    fn best_available_overlap_blocks(
+        &self,
+        overlaps: &OverlapScores,
+        eligibility: RoutingEligibility<'_>,
+    ) -> u32 {
+        // Preserve the fleet-wide cache statistic: a pin changes placement,
+        // not this maximum over eligible workers and valid replay DP ranks.
+        overlaps
+            .scores
+            .iter()
+            .filter(|(worker, _)| {
+                self.workers_with_configs
+                    .get(&worker.worker_id)
+                    .is_some_and(|config| eligibility.allows_worker(worker.worker_id, config))
+                    && worker.dp_rank < self.dp_size
+            })
+            .map(|(_, overlap)| *overlap)
+            .max()
+            .unwrap_or(0)
+    }
+
     fn admit_request(
         &mut self,
         request: PendingRequest,
@@ -931,16 +952,9 @@ impl OfflineReplayRouter {
             .slots
             .project_worker_loads(request.token_seq.as_deref(), decay_now);
         let scheduling_request = request.scheduling_request(self.block_size as usize, worker_loads);
-        let best_available_overlap_blocks = u32::try_from(
-            dynamo_kv_router::scheduling::SchedulingContext::new(
-                &scheduling_request,
-                &self.workers_with_configs,
-            )
-            .best_cached_tokens()
-                / self.block_size as usize,
-        )
-        .unwrap_or(u32::MAX);
         let eligibility = scheduling_request.eligibility();
+        let best_available_overlap_blocks =
+            self.best_available_overlap_blocks(&request.overlaps, eligibility);
         let selection = self
             .selector
             .select_worker(WorkerSelectionInput::configured(
@@ -1101,7 +1115,7 @@ mod tests {
     use dynamo_kv_router::protocols::{
         BlockHashOptions, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData,
         KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier,
-        WorkerId,
+        WorkerId, WorkerWithDpRank,
     };
     use dynamo_kv_router::{PrefillLoadEstimator, TrackingHashAlgorithm};
     use rustc_hash::FxHashMap;
@@ -1440,6 +1454,47 @@ mod tests {
                 isl_blocks: 1,
             }]
         );
+    }
+
+    #[test]
+    fn best_available_overlap_preserves_eligible_fleet_maximum() {
+        let mut args = replay_args();
+        args.dp_size = 2;
+        let mut router = OfflineReplayRouter::new(&args, None, None, 3).unwrap();
+        router.remove_worker(2).unwrap();
+        let target = request_with_priorities(1, 7, 320, 0, 0);
+        let mut pending = router
+            .build_pending_request(&target, target.max_output_tokens, None, None)
+            .unwrap();
+        let best_worker = WorkerWithDpRank::new(0, 1);
+        let pinned_worker = WorkerWithDpRank::new(1, 0);
+        pending.overlaps.scores.extend([
+            (best_worker, 2),
+            (pinned_worker, 1),
+            (WorkerWithDpRank::new(0, args.dp_size), 4),
+            (WorkerWithDpRank::new(2, 0), 5),
+        ]);
+
+        let mut scheduling_request =
+            pending.scheduling_request(args.block_size as usize, FxHashMap::default());
+        for pin in [None, Some(pinned_worker)] {
+            scheduling_request.pinned_worker = pin;
+            assert_eq!(
+                router.best_available_overlap_blocks(
+                    &pending.overlaps,
+                    scheduling_request.eligibility(),
+                ),
+                2,
+                "the fleet maximum excludes removed workers and invalid DP ranks, even with pin {pin:?}",
+            );
+        }
+
+        let admitted = router
+            .admit_request(pending, router.decay_now(0.0))
+            .unwrap();
+        assert_eq!(admitted.worker_idx, 1);
+        assert_eq!(admitted.overlap_blocks, 2);
+        assert_eq!(admitted.best_available_overlap_blocks, 2);
     }
 
     #[test]
