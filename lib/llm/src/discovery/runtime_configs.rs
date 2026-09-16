@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Weak};
 
 use futures::StreamExt;
 use tokio::sync::watch;
@@ -20,13 +21,10 @@ use dynamo_kv_router::protocols::WorkerId;
 /// Type alias for the runtime config watch receiver.
 pub type RuntimeConfigWatch = watch::Receiver<HashMap<WorkerId, ModelRuntimeConfig>>;
 
-// `lifecycle` bounds this task directly rather than leaving it to notice its
-// receiver is gone. That receiver-drop signal only reaches this task via a
-// failed `tx.send`, and `tx.send` is only attempted when a discovery event
-// actually changes `configs` — so on a quiescent endpoint (no discovery
-// events, the case a retired WorkerSet is usually in) this task can sit in
-// `stream.next()` forever, past every consumer's exit, past `lifecycle`
-// cancelling. See the "WorkerSet churn" test below.
+pub(crate) type RuntimeConfigSender = watch::Sender<HashMap<WorkerId, ModelRuntimeConfig>>;
+
+// Both cancellation and receiver closure stop idle discovery streams without
+// waiting for another model-config event.
 fn base_runtime_config_watch(
     mut stream: DiscoveryStream,
     lifecycle: CancellationToken,
@@ -38,6 +36,7 @@ fn base_runtime_config_watch(
         loop {
             let result = tokio::select! {
                 _ = lifecycle.cancelled() => break,
+                _ = tx.closed() => break,
                 event = stream.next() => match event {
                     Some(result) => result,
                     None => break,
@@ -122,13 +121,21 @@ fn base_runtime_config_watch(
 /// `monitor_instance_source` task to the lifetime of its last `instance_avail_watcher`
 /// receiver, so it needs no token here — dropping this function's receivers already
 /// stops it. A caller scoped to something narrower than the process, such as a monitor
-/// bound to one `WorkerSet`'s lifecycle, must still pass that scope's own token, or
-/// `base_runtime_config_watch`'s task outlives every dropped reference the caller holds
-/// and leaks until process shutdown.
+/// bound to one `WorkerSet`'s lifecycle, should pass that scope's own token to
+/// stop promptly even while another receiver remains alive.
 pub async fn runtime_config_watch(
     endpoint: &Endpoint,
     lifecycle: CancellationToken,
 ) -> anyhow::Result<RuntimeConfigWatch> {
+    Ok(runtime_config_watch_with_sender(endpoint, lifecycle)
+        .await?
+        .0)
+}
+
+pub(crate) async fn runtime_config_watch_with_sender(
+    endpoint: &Endpoint,
+    lifecycle: CancellationToken,
+) -> anyhow::Result<(RuntimeConfigWatch, Weak<RuntimeConfigSender>)> {
     let component = endpoint.component();
     let cancel_token = component.drt().primary_token();
 
@@ -152,6 +159,8 @@ pub async fn runtime_config_watch(
     let mut configs_rx = base_runtime_config_watch(stream, lifecycle.clone());
 
     let (tx, rx) = watch::channel(HashMap::new());
+    let tx = Arc::new(tx);
+    let sender = Arc::downgrade(&tx);
 
     tokio::spawn(async move {
         loop {
@@ -188,7 +197,7 @@ pub async fn runtime_config_watch(
         }
     });
 
-    Ok(rx)
+    Ok((rx, sender))
 }
 
 #[cfg(test)]
