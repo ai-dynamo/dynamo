@@ -36,6 +36,9 @@ struct RegistryState {
 
 impl RegistryState {
     fn publish(&mut self) {
+        if self.watchers.is_empty() {
+            return;
+        }
         let instances = Arc::new(self.instances.clone());
         self.watchers
             .retain(|watcher| watcher.send(instances.clone()).is_ok());
