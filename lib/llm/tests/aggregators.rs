@@ -273,7 +273,7 @@ async fn run_qwen_unified_batch_suppression_assertions() {
         .with_tool_call_parsing_enabled(false);
     assert!(
         options.tool_call_parser.is_some(),
-        "with the flag set, the qwen3 pair must retain the whole-response decoder \
+        "by default, the qwen3 pair must retain the whole-response decoder \
          so it can still strip native markup even though tool calls are suppressed"
     );
 
@@ -303,32 +303,16 @@ async fn run_qwen_unified_batch_suppression_assertions() {
 }
 
 #[tokio::test]
-#[ignore = "only run as a child process spawned by \
-            test_qwen_unified_batch_suppresses_forbidden_calls_and_strips_markup, \
-            with the experimental flag set in that child's own environment; running \
-            it directly outside that harness gives no guarantee the flag is set"]
+#[ignore = "only run as a child process spawned by the parent test"]
 async fn qwen_unified_batch_suppression_child() {
-    assert!(
-        env_is_truthy(env_llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2),
-        "this child test must only ever run with the flag set by its parent"
-    );
+    assert!(!env_is_truthy(env_llm::DYN_PARSER_REVERT_TO_V1));
     run_qwen_unified_batch_suppression_assertions().await;
 }
 
 #[test]
 fn test_qwen_unified_batch_suppresses_forbidden_calls_and_strips_markup() {
-    // The real suppression gate lives inside `ChatCompletionAggregator::apply`'s
-    // function body (`aggregator.rs`'s `qwen3_unified_family` block), re-checking
-    // the process-wide flag itself rather than taking it as a parameter — so no
-    // flag-independent call from this process can route through it. Mutating this
-    // (the shared, multi-threaded) test process's own environment would leak into
-    // every other test in this binary regardless of execution order, which is
-    // forbidden. Instead, this parent test — itself flag-independent, so it always
-    // actually runs and asserts something — re-executes this exact compiled test
-    // binary, filtered to ONLY the `#[ignore]`d child test above, with the flag set
-    // solely in that CHILD PROCESS's own environment. The child is a distinct,
-    // `#[ignore]`d function name, not this same function, so there is no recursive
-    // self-spawn: `--exact <child> --ignored` can only ever select that one child.
+    // Re-execute the child in an isolated process because the parser decision is
+    // intentionally cached for the process lifetime.
     let exe = std::env::current_exe().expect("test binary path for self re-exec");
     let status = std::process::Command::new(exe)
         .args([
@@ -338,7 +322,7 @@ fn test_qwen_unified_batch_suppresses_forbidden_calls_and_strips_markup() {
             "--nocapture",
             "--test-threads=1",
         ])
-        .env(env_llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2, "1")
+        .env_remove(env_llm::DYN_PARSER_REVERT_TO_V1)
         .status()
         .expect("failed to spawn child test process");
     assert!(
@@ -347,7 +331,7 @@ fn test_qwen_unified_batch_suppresses_forbidden_calls_and_strips_markup() {
     );
 }
 
-async fn run_qwen_unified_batch_flag_off_assertions() {
+async fn run_qwen_unified_batch_v1_assertions() {
     let raw = concat!(
         "<think>Look it up.</think>",
         "<tool_call>\n<function=get_weather>\n",
@@ -357,7 +341,7 @@ async fn run_qwen_unified_batch_flag_off_assertions() {
         .with_tool_call_parsing_enabled(false);
     assert_eq!(
         options.tool_call_parser, None,
-        "with the flag unset, a qwen3 pair must not retain a whole-response decoder \
+        "with the v1 rollback set, a qwen3 pair must not retain a whole-response decoder \
          when tool-call parsing is disabled"
     );
 
@@ -386,39 +370,25 @@ async fn run_qwen_unified_batch_flag_off_assertions() {
 }
 
 #[tokio::test]
-#[ignore = "only run as a child process spawned by \
-            test_qwen_unified_batch_stays_off_without_the_experimental_flag, with the \
-            experimental flag explicitly cleared in that child's own environment; \
-            running it directly outside that harness gives no guarantee the flag is \
-            actually unset"]
-async fn qwen_unified_batch_flag_off_child() {
-    assert!(
-        !env_is_truthy(env_llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2),
-        "this child test must only ever run with the flag explicitly cleared by its parent"
-    );
-    run_qwen_unified_batch_flag_off_assertions().await;
+#[ignore = "only run as a child process spawned by the parent test"]
+async fn qwen_unified_batch_v1_child() {
+    assert!(env_is_truthy(env_llm::DYN_PARSER_REVERT_TO_V1));
+    run_qwen_unified_batch_v1_assertions().await;
 }
 
 #[test]
-fn test_qwen_unified_batch_stays_off_without_the_experimental_flag() {
-    // Mirrors the suppression parent/child design above: re-executes this exact
-    // compiled test binary, filtered to ONLY the `#[ignore]`d child test, with the
-    // flag explicitly CLEARED in that child process's own environment
-    // (`env_remove`) rather than relying on the ambient absence of the flag. This
-    // parent is flag-independent and always spawns and requires the real-assertion
-    // child, so it passes correctly whether the surrounding test invocation (or
-    // ladder lane) happens to run with the flag externally set or unset — unlike a
-    // single-process test whose premise assertion would fail under a flag-on lane.
+fn test_qwen_unified_batch_reverts_to_v1_when_requested() {
+    // Isolate the rollback environment in a child process.
     let exe = std::env::current_exe().expect("test binary path for self re-exec");
     let status = std::process::Command::new(exe)
         .args([
             "--exact",
-            "qwen_unified_batch_flag_off_child",
+            "qwen_unified_batch_v1_child",
             "--ignored",
             "--nocapture",
             "--test-threads=1",
         ])
-        .env_remove(env_llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2)
+        .env(env_llm::DYN_PARSER_REVERT_TO_V1, "1")
         .status()
         .expect("failed to spawn child test process");
     assert!(
@@ -494,10 +464,6 @@ async fn test_qwen_unified_batch_finalizes_raw_guided_json() {
 
 #[tokio::test]
 async fn test_qwen_unified_batch_recovers_native_structural_tag_output() {
-    if !env_is_truthy(env_llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2) {
-        return;
-    }
-
     let raw = concat!(
         "<think>Look it up.</think>",
         "<tool_call>\n<function=get_weather>\n",
@@ -526,10 +492,6 @@ async fn test_qwen_unified_batch_recovers_native_structural_tag_output() {
 /// `unified_parser::batch_tool_output_mode`/`parse_complete`'s native-fallback filter.
 #[tokio::test]
 async fn test_qwen_unified_batch_drops_native_tool_markup_naming_a_different_tool() {
-    if !env_is_truthy(env_llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2) {
-        return;
-    }
-
     let raw = concat!(
         "<think>Look it up.</think>",
         "<tool_call>\n<function=get_stock_price>\n",

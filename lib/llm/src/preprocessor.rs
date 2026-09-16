@@ -4878,7 +4878,7 @@ impl OpenAIPreprocessor {
         // jail outright: muse (`tool_parser_v2`, default-on — its v1 reasoning
         // parser is gone, so `get_reasoning_parser_from_name` falls back to
         // `Basic`, which cannot read the `to=self<|message|>` grammar) and Qwen3
-        // (`unified_parser`, gated on `DYN_ENABLE_EXPERIMENTAL_PARSERS_V2`). Both
+        // (`unified_parser`). Both
         // run regardless of has_tools — they own reasoning and strip its markers
         // even with zero tools — and both route their output through the SAME
         // shared response policy below, which is what suppresses `tool_calls` for

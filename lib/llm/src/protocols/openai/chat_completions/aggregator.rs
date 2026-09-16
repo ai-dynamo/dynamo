@@ -537,8 +537,7 @@ impl DeltaAggregator {
         // Two independent families each own ONE unified parser (topology B: raw
         // model text reaches the frontend un-split) that replaces the split
         // reasoning/tool-call finalize below outright: Qwen3 (`unified_parser`,
-        // gated on DYN_ENABLE_EXPERIMENTAL_PARSERS_V2) and muse (`tool_parser_v2`,
-        // default-on). This is the safety net for output that reached the
+        // and muse (`tool_parser_v2`). This is the safety net for output that reached the
         // aggregator unparsed; a request the worker already streamed through the
         // matching `apply_stream`/`apply_unified_stream` arrives with `tool_calls`
         // populated and is skipped by each guard below.
@@ -737,10 +736,10 @@ impl DeltaAggregator {
                     continue;
                 };
 
-                // With DYN_ENABLE_EXPERIMENTAL_PARSERS_V2, supported families use the
-                // v2 parser for batch too (no jail / no aggregate-finalize):
+                // Supported families use the v2 parser for batch too (no jail / no
+                // aggregate-finalize) unless the explicit v1 rollback is set:
                 // parse_complete drops a value truncated at EOF instead of guessing it.
-                // Other families and the flag-off path keep the v1 finalize path.
+                // Other families and the rollback path keep the v1 finalize path.
                 // Guided JSON is handled above from the exact carried constraint.
                 let parse_result = parse_complete_tool_output(
                     &choice.text,

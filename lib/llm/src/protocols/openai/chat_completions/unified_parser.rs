@@ -1,10 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Opt-in ordered reasoning, text, and tool-call parsing through one state machine.
-//!
-//! Gated behind
-//! [`DYN_ENABLE_EXPERIMENTAL_PARSERS_V2`](dynamo_runtime::config::environment_names::llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2).
+//! Ordered reasoning, text, and tool-call parsing through one state machine.
 //!
 //! # What this replaces
 //!
@@ -74,20 +71,11 @@ const QWEN3_TOOL_CALL_PARSER: &str = "qwen3_coder";
 /// Dynamo's `--dyn-reasoning-parser` name that pairs into [`QWEN3_UNIFIED_FAMILY`].
 const QWEN3_REASONING_PARSER: &str = "qwen3";
 
-/// Whether the experimental v2 parser path is enabled. Read once — env vars are fixed
-/// for the process lifetime, so re-reading per request would only add syscalls.
-///
-/// This reuses `DYN_ENABLE_EXPERIMENTAL_PARSERS_V2` rather than adding a second switch.
-/// That flag already means "route this family through `dynamo-parsers-v2` instead of the
-/// v1 jail, for BOTH the batch and the streaming path". The unified parser is the same
-/// intent carried one step further: it also takes over reasoning, so the family stops
-/// needing a separate reasoning parser at all. Two flags would have to define what
-/// setting only one of them means for a family that has both, and the answer is not
-/// interesting — so there is one flag, and the parser PAIR decides which v2 shape a
-/// request gets (see `configured_family`).
-fn experimental_parsers_v2_enabled() -> bool {
+/// Whether the v2 parser path is enabled. V2 is the default; the explicit rollback
+/// switch selects v1 where a v1 parser is available.
+fn parsers_v2_enabled() -> bool {
     static ENABLED: LazyLock<bool> =
-        LazyLock::new(|| env_is_truthy(env_llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2));
+        LazyLock::new(|| !env_is_truthy(env_llm::DYN_PARSER_REVERT_TO_V1));
     *ENABLED
 }
 
@@ -125,11 +113,11 @@ pub(crate) fn selected_family(
         ?tool_call_parser,
         ?reasoning_parser,
         ?configured,
-        flag_on = experimental_parsers_v2_enabled(),
+        v2_enabled = parsers_v2_enabled(),
         "unified parser path decision"
     );
     configured.filter(|family| match *family {
-        QWEN3_UNIFIED_FAMILY => experimental_parsers_v2_enabled(),
+        QWEN3_UNIFIED_FAMILY => parsers_v2_enabled(),
         // A family with no opt-in flag stays off; adding one here is what turns it on.
         _ => false,
     })
@@ -153,7 +141,7 @@ pub(crate) fn selected_batch_family(
     reasoning_parser: Option<&str>,
 ) -> Option<&'static str> {
     configured_batch_family(tool_call_parser, reasoning_parser).filter(|family| match *family {
-        QWEN3_UNIFIED_FAMILY => experimental_parsers_v2_enabled(),
+        QWEN3_UNIFIED_FAMILY => parsers_v2_enabled(),
         _ => false,
     })
 }
@@ -1518,29 +1506,19 @@ mod tests {
     }
 
     #[test]
-    fn selected_family_needs_the_env_flag() {
-        // The env flag is process-wide and read once, so this asserts the relationship
-        // between the two functions rather than mutating the environment: whatever the
-        // flag says, `selected_family` never selects a pair `configured_family` rejects,
-        // and it agrees with `configured_family` exactly when the flag is on.
+    fn selected_family_uses_v2_by_default() {
+        // The v2 parser is the default. The explicit rollback is covered by the
+        // process-level configuration tests because this decision is cached once.
         let pair = (Some("qwen3_coder"), Some("qwen3"));
         assert_eq!(
             configured_family(pair.0, pair.1),
             Some(QWEN3_UNIFIED_FAMILY)
         );
-        if experimental_parsers_v2_enabled() {
-            assert_eq!(
-                selected_family(pair.0, pair.1),
-                Some(QWEN3_UNIFIED_FAMILY),
-                "flag on: the configured pair must be selected"
-            );
-        } else {
-            assert_eq!(
-                selected_family(pair.0, pair.1),
-                None,
-                "flag off: the configured pair must NOT be selected"
-            );
-        }
+        assert_eq!(
+            selected_family(pair.0, pair.1),
+            Some(QWEN3_UNIFIED_FAMILY),
+            "the configured pair must select the v2 parser by default"
+        );
         // Never selected regardless of the flag.
         assert_eq!(selected_family(Some("qwen3_coder"), None), None);
         assert_eq!(selected_family(None, Some("qwen3")), None);

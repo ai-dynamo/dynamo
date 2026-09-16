@@ -3,9 +3,7 @@
 
 //! Tool calls routed through the `dynamo-parsers-v2` streaming parser, bypassing the jail.
 //!
-//! Gated behind
-//! [`DYN_ENABLE_EXPERIMENTAL_PARSERS_V2`](dynamo_runtime::config::environment_names::llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2).
-//! When enabled, the families in `V2_FAMILIES` (Qwen3-Coder, DeepSeek-V4) stream
+//! The families in `V2_FAMILIES` (Qwen3-Coder, DeepSeek-V4) stream
 //! straight through their `dynamo_parsers_v2` parser instead of
 //! `JailedStream`: the v2 parser owns incremental
 //! tool-call emission and drops a parameter value truncated at EOF rather than
@@ -40,7 +38,7 @@ use crate::protocols::openai::GuidedToolConstraint;
 
 use super::{NvCreateChatCompletionStreamResponse, stream_choice_chunk_from_template};
 
-// TODO: when glm47 is added here AND DYN_ENABLE_EXPERIMENTAL_PARSERS_V2 is set,
+// TODO: when glm47 is added here,
 // port the streaming <tool_call> truncation recovery from apply_tool_calling_jail
 // (preprocessor.rs) to tool_parser_v2::apply_stream. The v2 path skips the jail
 // entirely, so the ChoiceRecovery buffer and finish_reason=length synthetic-chunk
@@ -52,12 +50,11 @@ use super::{NvCreateChatCompletionStreamResponse, stream_choice_chunk_from_templ
 /// dynamo's `tool_call_parser` names so a parser name maps straight to a v2 family.
 pub(crate) const V2_FAMILIES: &[&str] = &["qwen3_coder", "deepseek_v4"];
 
-/// Whether the experimental v2 tool-parser routing is enabled. Read once from
-/// [`DYN_ENABLE_EXPERIMENTAL_PARSERS_V2`](env_llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2) —
-/// env vars are fixed for the process lifetime, so the result is cached.
+/// Whether v2 tool-parser routing is enabled. V2 is the default; the explicit rollback
+/// switch selects v1 where a v1 parser is available.
 pub(crate) fn enabled() -> bool {
     static ENABLED: LazyLock<bool> =
-        LazyLock::new(|| env_is_truthy(env_llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2));
+        LazyLock::new(|| !env_is_truthy(env_llm::DYN_PARSER_REVERT_TO_V1));
     *ENABLED
 }
 
@@ -67,7 +64,7 @@ pub(crate) fn supports_family(family: &str) -> bool {
 }
 
 /// Families served by the v2 UNIFIED parser (reasoning + content + tool calls in
-/// ONE ordered pass), default-on — no `DYN_ENABLE_EXPERIMENTAL_PARSERS_V2` gate.
+/// ONE ordered pass), default-on — no opt-in gate.
 /// Muse has no usable v1 reasoning parser (the v1 crate dropped the variant, so
 /// `get_reasoning_parser_from_name` falls back to `Basic`, which cannot read the
 /// `to=self<|message|>` grammar), so the unified pass is the only correct path.
@@ -1415,15 +1412,10 @@ mod tests {
         assert_eq!(unified_family(Some("qwen3_coder"), None), None);
         assert_eq!(unified_family(None, None), None);
         // Default-on: `unified_family` reads no environment variable. muse routes to
-        // the unified parser whether or not the experimental v2 gate is set — proven
-        // here by routing while `enabled()` (DYN_ENABLE_EXPERIMENTAL_PARSERS_V2) is off.
-        assert!(
-            !enabled(),
-            "test env should not set DYN_ENABLE_EXPERIMENTAL_PARSERS_V2"
-        );
+        // The unified parser is default-on independently of the tool-parser rollback.
         assert!(
             unified_family(Some("muse_glimmer"), None).is_some(),
-            "muse must route with the experimental v2 gate OFF (default-on)"
+            "muse must route by default"
         );
     }
 

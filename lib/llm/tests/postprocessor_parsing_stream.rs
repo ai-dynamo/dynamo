@@ -3543,16 +3543,12 @@ async fn tool_choice_minimax_m2_required_thinking_disabled_keeps_tool_xml() {
     assert!(finish_reasons.contains(&FinishReason::ToolCalls));
 }
 
-/// Exercises the experimental parsers-v2 gate end-to-end. `tool_choice=Auto` + a v2
-/// family (`qwen3_coder`) is the only combination the gate routes to
-/// `tool_parser_v2::apply_stream`; `required`/`named` (above) always stay on the v1
-/// jail. The flag is read once at process startup, so a single test covers BOTH
-/// paths via the startup switch: run with `DYN_ENABLE_EXPERIMENTAL_PARSERS_V2` unset
-/// and this goes through the v1 jail; set it and the identical stream goes through
-/// the v2 parser. A complete tool call must extract cleanly with no raw markup
-/// leaking into content on either path, so the same assertion validates both.
+/// Exercises the default v2 parser route end-to-end. `tool_choice=Auto` + a v2
+/// family (`qwen3_coder`) routes to `tool_parser_v2::apply_stream`; `required`/`named`
+/// (above) still use the v1 jail when the request mode requires it. A complete tool
+/// call must extract cleanly with no raw markup leaking into content.
 #[tokio::test]
-async fn tool_calls_qwen3_coder_auto_routes_through_experimental_gate() {
+async fn tool_calls_qwen3_coder_auto_routes_through_v2_by_default() {
     let xml = "<tool_call>\n<function=get_weather>\n<parameter=location>\nSan Francisco\n</parameter>\n</function>\n</tool_call>";
     let preprocessor = build_preprocessor(None, Some("qwen3_coder"));
     let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
@@ -3571,11 +3567,7 @@ async fn tool_calls_qwen3_coder_auto_routes_through_experimental_gate() {
         ..
     } = drain_stream(output_stream).await;
 
-    let path = if dynamo_runtime::config::env_is_truthy("DYN_ENABLE_EXPERIMENTAL_PARSERS_V2") {
-        "qwen3_coder auto -> dynamo-parsers-v2 (DYN_ENABLE_EXPERIMENTAL_PARSERS_V2 on)"
-    } else {
-        "qwen3_coder auto -> v1 jail (flag off)"
-    };
+    let path = "qwen3_coder auto -> dynamo-parsers-v2 by default";
     assert_clean_tool_call(path, &content, &tool_calls, "San Francisco");
     // Both paths must honor the OpenAI contract: a tool-call stream terminates with
     // finish_reason=ToolCalls — v1 via the jail's fix_finish_reason, v2 via apply_stream.
