@@ -37,6 +37,7 @@ def _isolate_synthetic_content_env(monkeypatch):
     monkeypatch.delenv("DYN_BENCH_PREFILL_REAL_SEED", raising=False)
     monkeypatch.delenv("DYN_BENCH_GIANT_KV_THRESHOLD", raising=False)
     monkeypatch.delenv("DYN_BENCH_GIANT_KV_REPEATS", raising=False)
+    monkeypatch.delenv("DYN_BENCH_KV_WARMUP_STATE", raising=False)
 
 
 # Module-level import: triggers real site-packages ``vllm`` to load before
@@ -4810,7 +4811,18 @@ def _kvwarm_no_dataset_resolution():
     raise AssertionError("the gate test must not resolve the real dataset")
 
 
-def _kvwarm_gate_stub(*, state_groups=(), experts=8, ep=True, prefix=True):
+def _kvwarm_gate_stub(
+    *,
+    state_groups=(),
+    experts=8,
+    ep=True,
+    prefix=True,
+    align_state=False,
+    managers=None,
+):
+    """``align_state`` gives every Mamba spec vLLM's ``align`` cache mode;
+    ``managers`` optionally supplies the coordinator's single-type managers
+    (the gate consults them for the state-copy capability)."""
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub.vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(enable_expert_parallel=ep),
@@ -4819,12 +4831,17 @@ def _kvwarm_gate_stub(*, state_groups=(), experts=8, ep=True, prefix=True):
         ),
     )
     stub.cache_config = SimpleNamespace(enable_prefix_caching=prefix)
-    groups = [
-        SimpleNamespace(kv_cache_spec=type(name, (), {})()) for name in state_groups
-    ]
+    groups = []
+    for name in state_groups:
+        attrs = {"mamba_cache_mode": "align"} if align_state and "Mamba" in name else {}
+        groups.append(SimpleNamespace(kv_cache_spec=type(name, (), attrs)()))
     stub.kv_cache_manager = SimpleNamespace(
         kv_cache_config=SimpleNamespace(kv_cache_groups=groups)
     )
+    if managers is not None:
+        stub.kv_cache_manager.coordinator = SimpleNamespace(
+            single_type_managers=list(managers)
+        )
     # Host-local inputs the gate proves: a pool that holds one chain at the
     # depth cap (max_model_len - 4 = 60 tokens) and a tokenizer. The dataset
     # itself is never resolved here (that would download it); tests that
@@ -4863,10 +4880,130 @@ def _kvwarm_collection_bodies(count, length=80):
 
 
 def test_kvwarm_gate_rejects_recurrent_state_layers(monkeypatch):
+    """A Mamba group outside vLLM's ``align`` cache mode lays its state out
+    differently from the one-running-state-block table the shadow borrows."""
     monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
     stub = _kvwarm_gate_stub(state_groups=("FullAttentionSpec", "MambaSpec"))
     assert InstrumentedScheduler._kvwarm_warm_eligible(stub) is False
     assert stub._kvwarm_meta["skip_reason"] == "hybrid_state_layers_unsupported"
+
+
+def test_kvwarm_gate_admits_align_mode_state_layers(monkeypatch):
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
+    stub = _kvwarm_gate_stub(
+        state_groups=("FullAttentionSpec", "MambaSpec"), align_state=True
+    )
+    assert InstrumentedScheduler._kvwarm_state_layer_groups(stub) == []
+    assert InstrumentedScheduler._kvwarm_warm_eligible(stub) is True
+    assert stub._kvwarm_meta["state_mode_requested"] == "auto"
+    assert stub._kvwarm_meta["state_mode"] is None
+
+
+@pytest.mark.parametrize("requested", ["auto", "copy"])
+def test_kvwarm_gate_refuses_an_explicit_copy_without_cow(monkeypatch, requested):
+    """The frozen 0.25.1 image has no ``_apply_cow``: ``auto`` runs in place
+    there, an explicit ``copy`` is refused before any chain is built."""
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP_STATE", requested)
+    pool = _FakePool()
+    stub = _kvwarm_gate_stub(
+        state_groups=("FullAttentionSpec", "MambaSpec"),
+        align_state=True,
+        managers=[
+            _FakeManager([], cow=False),
+            _FakeMambaManager(pool, _FakeBlock(500), cow=False),
+        ],
+    )
+    eligible = InstrumentedScheduler._kvwarm_warm_eligible(stub)
+    if requested == "copy":
+        assert eligible is False
+        assert stub._kvwarm_meta["skip_reason"] == "state_copy_unsupported"
+    else:
+        assert eligible is True
+        assert InstrumentedScheduler._kvwarm_state_mode(stub) == "inplace"
+    assert stub._kvwarm_meta["state_mode_requested"] == requested
+
+
+@pytest.mark.parametrize("requested", ["auto", "inplace"])
+def test_kvwarm_gate_refuses_in_place_state_where_partial_tails_are_hashed(
+    monkeypatch, requested
+):
+    """A vLLM whose Mamba manager hashes partial tails (block size above the
+    hash block size) would register the shadow's state slot under the
+    shadow's key on every output update; with the chain's own block there
+    that corrupts the chain's prefix entry. ``auto`` forks on such a build,
+    an explicit ``inplace`` is refused before any chain is built."""
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP_STATE", requested)
+    pool = _FakePool()
+    stub = _kvwarm_gate_stub(
+        state_groups=("FullAttentionSpec", "MambaSpec"),
+        align_state=True,
+        managers=[
+            _FakeManager([], cow=True),
+            _FakeMambaManager(pool, _FakeBlock(500), cow=True, partial_tail=True),
+        ],
+    )
+    stub.kv_cache_manager.block_pool = pool
+    eligible = InstrumentedScheduler._kvwarm_warm_eligible(stub)
+    if requested == "inplace":
+        assert eligible is False
+        assert stub._kvwarm_meta["skip_reason"] == "state_inplace_unsupported"
+    else:
+        assert eligible is True
+        assert InstrumentedScheduler._kvwarm_state_mode(stub) == "copy"
+    # A state block as large as the hash block is never partially hashed.
+    pool.hash_block_size = 64
+    assert InstrumentedScheduler._kvwarm_state_inplace_supported(stub) is True
+
+
+def test_kvwarm_gate_keys_state_groups_on_the_cache_mode_not_the_name(monkeypatch):
+    """The gate and the registration must refuse the same groups: a spec that
+    carries a non-align ``mamba_cache_mode`` is refused whatever it is
+    called, and a Mamba-named spec without a cache mode is refused too."""
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
+    stub = _kvwarm_gate_stub(state_groups=("FullAttentionSpec",))
+    groups = stub.kv_cache_manager.kv_cache_config.kv_cache_groups
+    groups.append(
+        SimpleNamespace(
+            kv_cache_spec=type("LinearStateSpec", (), {"mamba_cache_mode": "all"})()
+        )
+    )
+    assert InstrumentedScheduler._kvwarm_state_layer_groups(stub) == ["LinearStateSpec"]
+    assert InstrumentedScheduler._kvwarm_warm_eligible(stub) is False
+    assert stub._kvwarm_meta["skip_reason"] == "hybrid_state_layers_unsupported"
+    groups[-1] = SimpleNamespace(kv_cache_spec=type("MambaSpec", (), {})())
+    assert InstrumentedScheduler._kvwarm_state_layer_groups(stub) == ["MambaSpec"]
+    groups[-1] = SimpleNamespace(
+        kv_cache_spec=type("LinearStateSpec", (), {"mamba_cache_mode": "align"})()
+    )
+    assert InstrumentedScheduler._kvwarm_state_layer_groups(stub) == []
+
+
+def test_kvwarm_gate_validates_the_state_mode_only_where_it_matters(monkeypatch):
+    """``DYN_BENCH_KV_WARMUP_STATE`` concerns hybrid layouts with the warm-up
+    on; anywhere else an unparseable value is recorded and ignored rather
+    than failing a run it has no bearing on."""
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP_STATE", "bogus")
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "off")
+    off = _kvwarm_gate_stub(state_groups=("FullAttentionSpec", "MambaSpec"))
+    assert InstrumentedScheduler._kvwarm_warm_eligible(off) is False
+    assert off._kvwarm_meta["skip_reason"] == "flag_off"
+    assert off._kvwarm_meta["state_mode_requested"] == "bogus"
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
+    pure = _kvwarm_gate_stub(state_groups=("FullAttentionSpec",))
+    assert InstrumentedScheduler._kvwarm_warm_eligible(pure) is True
+    assert InstrumentedScheduler._kvwarm_state_mode(pure) is None
+    pool = _FakePool()
+    hybrid = _kvwarm_gate_stub(
+        state_groups=("FullAttentionSpec", "MambaSpec"),
+        align_state=True,
+        managers=[_FakeManager([], cow=True), _FakeMambaManager(pool, _FakeBlock(500))],
+    )
+    assert InstrumentedScheduler._kvwarm_warm_eligible(hybrid) is False
+    assert hybrid._kvwarm_meta["skip_reason"] == "state_mode_invalid"
+    with pytest.raises(ValueError, match="bogus"):
+        InstrumentedScheduler._kvwarm_state_mode_requested(hybrid)
 
 
 def test_kvwarm_gate_admits_pure_attention_moe_ep(monkeypatch):
@@ -5307,13 +5444,20 @@ class _FakeBlock:
 class _FakePool:
     """``BlockPool`` reference semantics: ``touch`` is +1, ``get_new_blocks``
     hands out blocks at ref 1, ``free_blocks`` is -1 and a block joins the
-    free queue only when it reaches 0 (a free past 0 is a double free)."""
+    free queue only when it reaches 0 (a free past 0 is a double free). The
+    null block (id 0) pads skipped slots; vLLM does not maintain its count
+    and never queues it. ``hash_block_size`` is the prefix-hash granularity
+    of a hybrid layout: the attention block size, below the state block."""
 
     def __init__(self, next_id=1000):
         self.next_id = next_id
         self.touched = []
         self.freed = []
         self.free_queue = []
+        self.null_block = _FakeBlock(0)
+        self.null_block.is_null = True
+        self.null_block.ref_cnt = 0
+        self.hash_block_size = 16
 
     def touch(self, blocks):
         self.touched.extend(blocks)
@@ -5329,6 +5473,9 @@ class _FakePool:
 
     def free_blocks(self, ordered_blocks):
         for b in ordered_blocks:
+            if b.is_null:
+                b.ref_cnt -= 1
+                continue
             assert b.ref_cnt > 0, f"double free of block {b.block_id}"
             b.ref_cnt -= 1
             self.freed.append(b)
@@ -5368,6 +5515,33 @@ class _FakeManager:
         return self.req_to_blocks.pop(req_id, [])
 
 
+class _FakeMambaManager(_FakeManager):
+    """Align-mode ``MambaManager`` surface: one running-state block per request
+    at the end of a null-padded table (``[null, null, S]`` is a 192-token
+    chain at block size 64, its state block last), the align bookkeeping
+    ``pop_blocks_for_free`` drops like vLLM's, and ``_apply_cow`` as in
+    ``_FakeManager``. ``partial_tail`` marks a vLLM whose manager registers
+    partial-tail prefix entries (``_cache_partial_tail_block``): the shadow's
+    state slot gets hashed on every output update there, so the scheduler
+    must not put the chain's own block in it."""
+
+    mamba_cache_mode = "align"
+    block_size = 64
+    num_speculative_blocks = 0
+
+    def __init__(self, pool, state, cow=True, partial_tail=False):
+        super().__init__([pool.null_block, pool.null_block, state], cow=cow)
+        self.last_state_block_idx = {"chain": 1}
+        self._allocated_block_reqs = {"chain"}
+        if partial_tail:
+            self._cache_partial_tail_block = lambda request, num_tokens: None
+
+    def pop_blocks_for_free(self, req_id):
+        self._allocated_block_reqs.discard(req_id)
+        self.last_state_block_idx.pop(req_id, None)
+        return super().pop_blocks_for_free(req_id)
+
+
 def _take_kv_cache_block_copies(manager):
     """``KVCacheManager.take_kv_cache_block_copies``: drain every manager's
     pending (source, cow) pairs into copy descriptors plus the retained
@@ -5396,6 +5570,32 @@ def _shadow_stub(cow=True):
     stub.kv_cache_manager = manager
     stub.cache_config = SimpleNamespace(block_size=16)
     return stub, mgr, pool, chain
+
+
+def _hybrid_shadow_stub(cow=True, partial_tail=False):
+    """Two KV-cache groups over one pool: full attention (12 blocks of 16 =
+    192 tokens) and an align-mode Mamba group whose 192-token chain (parked
+    with every token computed) holds its running state in block 500 at slot
+    2 of ``[null, null, S]``."""
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    pool = _FakePool()
+    chain = [_FakeBlock(i) for i in range(12)]
+    state = _FakeBlock(500)
+    attn = _FakeManager(chain, cow=cow)
+    mamba = _FakeMambaManager(pool, state, cow=cow, partial_tail=partial_tail)
+    manager = SimpleNamespace(
+        block_pool=pool,
+        coordinator=SimpleNamespace(single_type_managers=[attn, mamba]),
+        num_kv_cache_groups=2,
+    )
+    if cow:
+        manager.take_kv_cache_block_copies = lambda: _take_kv_cache_block_copies(
+            manager
+        )
+    stub.kv_cache_manager = manager
+    stub.cache_config = SimpleNamespace(block_size=16)
+    stub.requests = {"chain": SimpleNamespace(num_computed_tokens=192)}
+    return stub, attn, mamba, pool, chain, state
 
 
 def test_kvwarm_shadow_registration_shares_prefix_and_forks_tail_with_cow():
@@ -5658,14 +5858,15 @@ def test_kvwarm_stage_shadow_shortfall_takes_the_rung_worst_case(monkeypatch):
     )
     seen = []
 
-    def shortfall(injected, headroom):
-        seen.append((list(injected), headroom))
+    def shortfall(injected, headroom, state_mode):
+        seen.append((list(injected), headroom, state_mode))
         return 5 if injected[0] == 46 else 0
 
     stub._kvwarm_shadow_pool_shortfall = shortfall
     assert InstrumentedScheduler._kvwarm_stage_shadow_shortfall(stub, 4) == 5
-    # Only this rung's covered points, with the full repeat count as headroom.
-    assert seen == [([63] * 4, 3), ([46] * 4, 3)]
+    # Only this rung's covered points, with the full repeat count as headroom
+    # and no state mode on a layout without recurrent-state groups.
+    assert seen == [([63] * 4, 3, None), ([46] * 4, 3, None)]
 
 
 def test_kvwarm_stage_sync_timeout_reaches_the_soft_deadline():
@@ -5974,9 +6175,413 @@ def test_kvwarm_shadow_lifecycle_returns_every_reference(cow):
     assert len(pool.free_queue) == len(chain) + 1
 
 
-def _kvwarm_injection_stub(chain_ids):
+# ---------------------------------------------------------------------------
+# Recurrent-state (align-mode Mamba) groups: the shadow borrows the chain's
+# single running-state block instead of a positional prefix
+# ---------------------------------------------------------------------------
+
+
+def test_kvwarm_state_shadow_in_place_puts_the_chain_state_at_the_read_slot():
+    """No CoW anywhere (the 0.25.1 image): the shadow's state table is null
+    up to ``prev0 = (ctx - 1) // 64``, where the chain's own state block sits
+    with the shadow's reference on it; nothing is zeroed for that group."""
+    stub, attn, mamba, pool, chain, state = _hybrid_shadow_stub(cow=False)
+    # ctx=100: attention shares 6 blocks and zero-fills one tail block; the
+    # state slot is 99 // 64 = 1 and writes 100..103 stay in that slot.
+    table, zero_ids = InstrumentedScheduler._kvwarm_register_shadow(
+        stub, "shadow", "chain", 100, 3, "inplace"
+    )
+    assert table == ([*range(6), 1000], [0, 500])
+    assert zero_ids == [1000]
+    assert mamba.req_to_blocks["shadow"][0] is pool.null_block
+    assert mamba.req_to_blocks["shadow"][1] is state
+    assert state.ref_cnt == 2
+    assert [b.block_id for b in pool.touched] == [*range(6), 500]
+    assert mamba.cows == []
+    # The whole table counts as cached: vLLM must not hash the null slots.
+    assert mamba.num_cached_block["shadow"] == 2
+    assert attn.num_cached_block["shadow"] == 6
+    # The chain's own table is untouched.
+    assert mamba.req_to_blocks["chain"] == [pool.null_block, pool.null_block, state]
+
+
+def test_kvwarm_state_shadow_copy_forks_the_chain_state_like_an_attention_tail():
+    """Copy mode: the state block takes the hit-ref first, the fork replaces
+    it in the read slot through ``_apply_cow`` (retention +1), and the
+    retained release after registration returns both to their owners."""
+    stub, attn, mamba, pool, chain, state = _hybrid_shadow_stub(cow=True)
+    table, zero_ids = InstrumentedScheduler._kvwarm_register_shadow(
+        stub, "shadow", "chain", 100, 3, "copy"
+    )
+    fork = mamba.req_to_blocks["shadow"][1]
+    assert table == ([*range(6), 1000], [0, fork.block_id])
+    assert fork.block_id == 1001 and zero_ids == []
+    assert mamba.cows == [(500, 1001)]
+    assert (state.ref_cnt, fork.ref_cnt) == (2, 2)
+    assert [b.block_id for b in pool.touched] == [*range(6), 6, 500]
+    copies = InstrumentedScheduler._kvwarm_take_cow_copies(stub)
+    assert copies == [(6, 1000), (500, 1001)]
+    assert (state.ref_cnt, fork.ref_cnt) == (1, 1)
+    assert pool.free_queue == []
+
+
+@pytest.mark.parametrize(
+    ("ctx", "expected"),
+    [
+        # 125 // 64 = 1, 129 // 64 = 2: the third steady write crosses.
+        (126, [0, 500, 1002]),
+        # 127 // 64 = 1, 128 // 64 = 2: the admission write itself crosses.
+        (128, [0, 500, 1001]),
+        # 63 // 64 = 0, 67 // 64 = 1: a slot-0 state moving into slot 1.
+        (64, [500, 1001]),
+    ],
+)
+def test_kvwarm_state_shadow_pre_places_a_blank_block_at_the_crossing(ctx, expected):
+    """Every state slot a write within the headroom moves into gets a fresh
+    private block at registration; the runner copies the previous slot's
+    state into it before reading, so the blank is not zeroed and the steady
+    steps allocate nothing."""
+    stub, attn, mamba, pool, chain, state = _hybrid_shadow_stub(cow=False)
+    table, zero_ids = InstrumentedScheduler._kvwarm_register_shadow(
+        stub, "shadow", "chain", ctx, 3, "inplace"
+    )
+    assert table[1] == expected
+    blank = mamba.req_to_blocks["shadow"][-1]
+    assert blank.ref_cnt == 1 and blank.block_id not in zero_ids
+    # The attention group's zero list is what it always was.
+    assert zero_ids == table[0][ctx // 16 :]
+
+
+def test_kvwarm_state_shadow_keeps_the_speculative_scratch_after_the_state():
+    """vLLM reads ``1 + num_speculative_blocks`` slots from the state slot on;
+    the shadow's table ends with that many private blocks."""
+    stub, attn, mamba, pool, chain, state = _hybrid_shadow_stub(cow=False)
+    mamba.num_speculative_blocks = 1
+    # A 128-token chain: its state at slot 1, one speculative block after it.
+    stub.requests["chain"].num_computed_tokens = 128
+    mamba.req_to_blocks["chain"] = [pool.null_block, state, _FakeBlock(501)]
+    table, _ = InstrumentedScheduler._kvwarm_register_shadow(
+        stub, "shadow", "chain", 100, 3, "inplace"
+    )
+    assert table[1] == [0, 500, 1001]
+    pool.get_num_free_blocks = lambda: 0
+    assert (
+        InstrumentedScheduler._kvwarm_shadow_pool_shortfall(stub, [100], 3, "inplace")
+        == 2
+    )
+
+
+def test_kvwarm_state_shadow_reads_the_state_slot_from_the_chain_depth(caplog):
+    """The state slot is ``(computed depth - 1) // bs`` of the chain request,
+    not a property of the table's shape: a chunked prefill leaves the earlier
+    state block live below it (the chain's ``last_state_block_idx`` still
+    names it), ``remove_skipped_blocks`` may have nulled it instead, and
+    draft tokens can over-allocate the table past the state and its
+    speculative scratch. Without drafts the state must be the last block."""
+    stub, attn, mamba, pool, chain, state = _hybrid_shadow_stub(cow=False)
+    stub.requests["chain"].num_computed_tokens = 128
+    earlier = _FakeBlock(499)
+    mamba.req_to_blocks["chain"] = [earlier, state]
+    mamba.last_state_block_idx["chain"] = 0
+    table, _ = InstrumentedScheduler._kvwarm_register_shadow(
+        stub, "shadow", "chain", 100, 3, "inplace"
+    )
+    assert table[1] == [0, 500]
+    assert (earlier.ref_cnt, state.ref_cnt) == (1, 2)
+    mamba.req_to_blocks["chain"] = [pool.null_block, state]
+    table, _ = InstrumentedScheduler._kvwarm_register_shadow(
+        stub, "nulled", "chain", 100, 3, "inplace"
+    )
+    assert table[1] == [0, 500]
+    # Over-allocated by a rejected draft: the state slot is trusted, the
+    # extra block only reported.
+    mamba.num_speculative_blocks = 1
+    mamba.req_to_blocks["chain"] = [
+        pool.null_block,
+        state,
+        _FakeBlock(501),
+        _FakeBlock(502),
+    ]
+    with caplog.at_level("WARNING"):
+        table, _ = InstrumentedScheduler._kvwarm_register_shadow(
+            stub, "drafted", "chain", 100, 3, "inplace"
+        )
+    assert table[1] == [0, 500, 1003]
+    assert "past its state slot 1" in caplog.text
+    # Without drafts a block past the state is a layout this code does not
+    # model; a chain whose state slot is null or beyond its table holds no
+    # state at all.
+    mamba.num_speculative_blocks = 0
+    mamba.req_to_blocks["chain"] = [pool.null_block, state, _FakeBlock(503)]
+    with pytest.raises(RuntimeError, match="past its state slot"):
+        InstrumentedScheduler._kvwarm_register_shadow(
+            stub, "long", "chain", 100, 3, "inplace"
+        )
+    mamba.req_to_blocks["chain"] = [pool.null_block, pool.null_block]
+    with pytest.raises(RuntimeError, match="no recurrent state"):
+        InstrumentedScheduler._kvwarm_register_shadow(
+            stub, "other", "chain", 100, 3, "inplace"
+        )
+    mamba.req_to_blocks["chain"] = [pool.null_block, state]
+    stub.requests["chain"].num_computed_tokens = 192
+    with pytest.raises(RuntimeError, match="no recurrent state"):
+        InstrumentedScheduler._kvwarm_register_shadow(
+            stub, "short", "chain", 100, 3, "inplace"
+        )
+
+
+@pytest.mark.parametrize(
+    ("state_mode", "cow", "partial_tail", "match"),
+    [
+        (None, True, False, "unresolved"),
+        ("auto", True, False, "unresolved"),
+        ("copy", False, False, "needs a manager with CoW"),
+        ("inplace", True, True, "hashes partial tails"),
+    ],
+)
+def test_kvwarm_state_shadow_rejects_an_unusable_mode_and_unwinds(
+    state_mode, cow, partial_tail, match
+):
+    """The attention group is staged first; a state group that cannot be
+    served returns its tail and leaves no reference behind."""
+    stub, attn, mamba, pool, chain, state = _hybrid_shadow_stub(
+        cow=cow, partial_tail=partial_tail
+    )
+    with pytest.raises(RuntimeError, match=match):
+        InstrumentedScheduler._kvwarm_register_shadow(
+            stub, "shadow", "chain", 100, 3, state_mode
+        )
+    assert [b.block_id for b in pool.freed] == [1000]
+    assert pool.free_queue == pool.freed and pool.touched == []
+    assert all(b.ref_cnt == 1 for b in [*chain, state])
+    for mgr in (attn, mamba):
+        assert "shadow" not in mgr.req_to_blocks
+        assert mgr.take_pending_cow_copies() == []
+
+
+def test_kvwarm_state_shadow_rejects_a_non_align_mamba_group():
+    stub, attn, mamba, pool, chain, state = _hybrid_shadow_stub(cow=False)
+    mamba.mamba_cache_mode = "all"
+    with pytest.raises(RuntimeError, match="unsupported"):
+        InstrumentedScheduler._kvwarm_register_shadow(
+            stub, "shadow", "chain", 100, 3, "inplace"
+        )
+    assert pool.touched == [] and all(b.ref_cnt == 1 for b in chain)
+
+
+def test_kvwarm_shadow_tail_blocks_count_the_state_group_per_manager(monkeypatch):
+    """Planning reserves, per shadow and state group, the fork (when the
+    run's state mode is copy), one blank for a crossing within the headroom
+    and the speculative scratch, on top of the attention tail."""
+    attention = SimpleNamespace(block_size=16)
+    state_cow = SimpleNamespace(
+        block_size=64,
+        mamba_cache_mode="align",
+        num_speculative_blocks=0,
+        _apply_cow=lambda *args: None,
+    )
+    state_plain = SimpleNamespace(
+        block_size=64, mamba_cache_mode="align", num_speculative_blocks=0
+    )
+    state_partial = SimpleNamespace(
+        block_size=64,
+        mamba_cache_mode="align",
+        num_speculative_blocks=0,
+        _apply_cow=lambda *args: None,
+        _cache_partial_tail_block=lambda *args: None,
+    )
+
+    def planner(managers):
+        stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+        stub.cache_config = SimpleNamespace(block_size=16)
+        stub.kv_cache_manager = SimpleNamespace(
+            block_pool=SimpleNamespace(hash_block_size=16),
+            coordinator=SimpleNamespace(single_type_managers=managers),
+        )
+        return stub
+
+    # attention 1 + ceil(3 / 16) = 2; state: fork 1 + ceil(4 / 64) = 2
+    assert (
+        InstrumentedScheduler._kvwarm_shadow_tail_blocks(
+            planner([attention, state_cow]), 3
+        )
+        == 4
+    )
+    assert (
+        InstrumentedScheduler._kvwarm_shadow_tail_blocks(
+            planner([attention, state_partial]), 3
+        )
+        == 4
+    )
+    # No fork without CoW (auto runs in place), or when in-place is requested.
+    assert (
+        InstrumentedScheduler._kvwarm_shadow_tail_blocks(
+            planner([attention, state_plain]), 3
+        )
+        == 3
+    )
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP_STATE", "inplace")
+    assert (
+        InstrumentedScheduler._kvwarm_shadow_tail_blocks(
+            planner([attention, state_cow]), 3
+        )
+        == 3
+    )
+    monkeypatch.delenv("DYN_BENCH_KV_WARMUP_STATE")
+    # A headroom past one state block can cross twice.
+    assert (
+        InstrumentedScheduler._kvwarm_shadow_tail_blocks(planner([state_plain]), 70)
+        == 2
+    )
+    state_cow.num_speculative_blocks = 2
+    assert (
+        InstrumentedScheduler._kvwarm_shadow_tail_blocks(planner([state_cow]), 3) == 4
+    )
+
+
+def test_kvwarm_shadow_pool_shortfall_adds_the_state_group_blocks():
+    """Pre-check arithmetic per group and request: attention tails as before;
+    the state group draws the fork only in copy mode plus one blank per
+    crossed slot (ctx=126 crosses within a headroom of 3, ctx=100 does not)."""
+    stub, attn, mamba, pool, chain, state = _hybrid_shadow_stub(cow=True)
+    # attention: ctx=100 -> 7 - 6 = 1, ctx=126 -> 9 - 7 = 2; state (copy):
+    # ctx=100 -> 1 + 0, ctx=126 -> 1 + 1: six blocks in total.
+    pool.get_num_free_blocks = lambda: 6
+    assert (
+        InstrumentedScheduler._kvwarm_shadow_pool_shortfall(stub, [100, 126], 3, "copy")
+        == 0
+    )
+    pool.get_num_free_blocks = lambda: 5
+    assert (
+        InstrumentedScheduler._kvwarm_shadow_pool_shortfall(stub, [100, 126], 3, "copy")
+        == 1
+    )
+    assert (
+        InstrumentedScheduler._kvwarm_shadow_pool_shortfall(
+            stub, [100, 126], 3, "inplace"
+        )
+        == 0
+    )
+    pool.get_num_free_blocks = lambda: 3
+    assert (
+        InstrumentedScheduler._kvwarm_shadow_pool_shortfall(
+            stub, [100, 126], 3, "inplace"
+        )
+        == 1
+    )
+
+
+def test_kvwarm_state_mode_resolution(monkeypatch):
+    """``DYN_BENCH_KV_WARMUP_STATE`` parsing and the ``auto`` rule: copy when
+    every state manager forks, else in place where the managers admit it --
+    a function of the layout, never of the pool, so every attention-DP rank
+    and every pool check (plan, stage, injection) name the same mode. Pure
+    attention has no mode."""
+    stub, attn, mamba, pool, chain, state = _hybrid_shadow_stub(cow=True)
+    assert InstrumentedScheduler._kvwarm_state_mode_requested(stub) == "auto"
+    for free in (10, 1, 0):
+        pool.get_num_free_blocks = lambda free=free: free
+        assert InstrumentedScheduler._kvwarm_state_mode(stub) == "copy"
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP_STATE", " COPY ")
+    assert InstrumentedScheduler._kvwarm_state_mode_requested(stub) == "copy"
+    assert InstrumentedScheduler._kvwarm_state_mode(stub) == "copy"
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP_STATE", "inplace")
+    assert InstrumentedScheduler._kvwarm_state_mode(stub) == "inplace"
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP_STATE", "bogus")
+    with pytest.raises(ValueError, match="bogus"):
+        InstrumentedScheduler._kvwarm_state_mode_requested(stub)
+    monkeypatch.delenv("DYN_BENCH_KV_WARMUP_STATE")
+    plain, *_ = _hybrid_shadow_stub(cow=False)
+    assert InstrumentedScheduler._kvwarm_state_mode(plain) == "inplace"
+    hashed, *_ = _hybrid_shadow_stub(cow=True, partial_tail=True)
+    assert InstrumentedScheduler._kvwarm_state_mode(hashed) == "copy"
+    stuck, *_ = _hybrid_shadow_stub(cow=False, partial_tail=True)
+    assert InstrumentedScheduler._kvwarm_state_mode(stuck) is None
+    assert (
+        InstrumentedScheduler._kvwarm_state_gate_reason(stuck)
+        == "state_hand_off_unsupported"
+    )
+    pure, *_ = _shadow_stub(cow=True)
+    assert InstrumentedScheduler._kvwarm_state_mode(pure) is None
+    assert InstrumentedScheduler._kvwarm_state_gate_reason(pure) is None
+
+
+def test_kvwarm_stamp_state_marks_the_row_and_the_metadata():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_current_point = BenchmarkPoint(
+        point_type="decode",
+        total_kv_read_tokens=101,
+        batch_size=1,
+        sample_reasons=["kvwarm_real_kv"],
+    )
+    InstrumentedScheduler._kvwarm_stamp_state(stub, "copy", 192)
+    assert stub._bench_current_point.sample_reasons == [
+        "kvwarm_real_kv",
+        "kvwarm_state_copy",
+        "kvwarm_state_depth=192",
+    ]
+    assert stub._kvwarm_meta["state_mode"] == "copy"
+    InstrumentedScheduler._kvwarm_stamp_state(stub, "copy", 192)
+    assert stub._kvwarm_meta["state_mode"] == "copy"
+
+
+@pytest.mark.parametrize("cow", [True, False])
+def test_kvwarm_state_shadow_lifecycle_returns_every_reference(cow):
+    """``test_kvwarm_shadow_lifecycle_returns_every_reference`` over a hybrid
+    layout, in copy mode (CoW) and in place (no CoW): after the shadow and
+    the chain are released through ``free_blocks(reversed(
+    pop_blocks_for_free(req_id)))`` per manager, every real block sits at
+    ref 0 exactly once, the null block was never queued, and the Mamba
+    manager keeps no align bookkeeping for either request."""
+    stub, attn, mamba, pool, chain, state = _hybrid_shadow_stub(cow=cow)
+    mode = "copy" if cow else "inplace"
+    ctx, headroom = 126, 3  # crosses into a second state slot
+    table, _ = InstrumentedScheduler._kvwarm_register_shadow(
+        stub, "shadow", "chain", ctx, headroom, mode
+    )
+    if cow:
+        # Two attention tail forks and the state fork ride the admission
+        # step; their retentions are released at once.
+        assert len(InstrumentedScheduler._kvwarm_take_cow_copies(stub)) == 3
+    assert [b.ref_cnt for b in chain] == [2] * 7 + [1] * 5
+    assert state.ref_cnt == (1 if cow else 2)
+    private = [
+        b
+        for mgr in (attn, mamba)
+        for b in mgr.req_to_blocks["shadow"]
+        if not b.is_null and b not in chain and b is not state
+    ]
+    # Two attention tail blocks (forked or zero-filled), the crossing blank
+    # and, in copy mode, the state fork.
+    assert len(private) == (4 if cow else 3)
+    assert all(b.ref_cnt == 1 for b in private)
+
+    for mgr in (attn, mamba):
+        pool.free_blocks(reversed(mgr.pop_blocks_for_free("shadow")))
+        assert "shadow" not in mgr.num_cached_block
+    assert all(b.ref_cnt == 1 for b in [*chain, state])
+    assert all(b.ref_cnt == 0 for b in private)
+    assert sorted(b.block_id for b in pool.free_queue) == sorted(
+        b.block_id for b in private
+    )
+    assert pool.null_block not in pool.free_queue
+
+    for mgr in (attn, mamba):
+        pool.free_blocks(reversed(mgr.pop_blocks_for_free("chain")))
+    assert all(b.ref_cnt == 0 for b in [*chain, state])
+    assert sorted(b.block_id for b in pool.free_queue) == sorted(
+        b.block_id for b in [*private, *chain, state]
+    )
+    assert len(pool.free_queue) == len(private) + len(chain) + 1
+    assert mamba.req_to_blocks == {} and mamba.last_state_block_idx == {}
+    assert mamba._allocated_block_reqs == set()
+
+
+def _kvwarm_injection_stub(chain_ids, hybrid=False):
     """Everything ``_kvwarm_inject_borrowed`` reads, over the fake pool and a
-    CoW manager; every chain owns ten blocks (160 tokens) at ref 1, parked."""
+    CoW manager; every chain owns ten blocks (160 tokens) at ref 1, parked.
+    ``hybrid`` adds an align-mode Mamba group (block 500 + 100 * index holds
+    each chain's state) and the point being injected."""
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     chains = {
         chain_id: [_FakeBlock(100 * index + i) for i in range(10)]
@@ -5986,10 +6591,28 @@ def _kvwarm_injection_stub(chain_ids):
     mgr.req_to_blocks = dict(chains)
     pool = _FakePool()
     pool.get_num_free_blocks = lambda: 10
+    managers = [mgr]
+    if hybrid:
+        states = {
+            chain_id: _FakeBlock(500 + 100 * index)
+            for index, chain_id in enumerate(chain_ids)
+        }
+        mamba = _FakeMambaManager(pool, states[chain_ids[0]], cow=True)
+        mamba.req_to_blocks = {
+            chain_id: [pool.null_block, pool.null_block, state]
+            for chain_id, state in states.items()
+        }
+        managers.append(mamba)
+        stub._bench_current_point = BenchmarkPoint(
+            point_type="decode",
+            total_kv_read_tokens=101 * len(chain_ids),
+            batch_size=len(chain_ids),
+            sample_reasons=["kvwarm_real_kv"],
+        )
     manager = SimpleNamespace(
         block_pool=pool,
-        coordinator=SimpleNamespace(single_type_managers=[mgr]),
-        num_kv_cache_groups=1,
+        coordinator=SimpleNamespace(single_type_managers=managers),
+        num_kv_cache_groups=len(managers),
     )
     manager.take_kv_cache_block_copies = lambda: _take_kv_cache_block_copies(manager)
     stub.kv_cache_manager = manager
@@ -5997,7 +6620,8 @@ def _kvwarm_injection_stub(chain_ids):
     stub._kvwarm_chain_ids = list(chain_ids)
     stub._kvwarm_chain_prompts = {chain_id: list(range(160)) for chain_id in chain_ids}
     stub.requests = {
-        chain_id: SimpleNamespace(request_id=chain_id) for chain_id in chain_ids
+        chain_id: SimpleNamespace(request_id=chain_id, num_computed_tokens=160)
+        for chain_id in chain_ids
     }
     stub.running = []
     stub.finished_req_ids = set()
@@ -6044,6 +6668,89 @@ def test_kvwarm_inject_borrowed_releases_cow_retentions_before_the_step_runs():
     assert stub._bench_active_req_ids == {"__bench_0"}
     assert stub._kvwarm_borrowed_ids == {"__bench_0"}
     assert stub.requests["__bench_0"].status == RequestStatus.RUNNING
+
+
+@pytest.mark.parametrize("requested", ["auto", "inplace"])
+def test_kvwarm_inject_borrowed_hands_the_state_over_and_stamps_the_point(
+    monkeypatch, requested
+):
+    """On a hybrid layout the injection uses the run's state mode, registers
+    every group, rides the state fork's copy on the admission step like the
+    attention forks, and stamps the point with the mode and the chain depth
+    the borrowed state summarises."""
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP_STATE", requested)
+    stub, mgr, pool, chains = _kvwarm_injection_stub(["chain-a"], hybrid=True)
+    mamba = stub.kv_cache_manager.coordinator.single_type_managers[1]
+    state = mamba.req_to_blocks["chain-a"][2]
+
+    output = InstrumentedScheduler._kvwarm_inject_borrowed(stub, [100])
+
+    shadow_state = mamba.req_to_blocks["__bench_0"]
+    assert shadow_state[0] is pool.null_block
+    if requested == "auto":
+        # Copy: the fork sits in the read slot, the copy rides the step.
+        fork = shadow_state[1]
+        assert fork is not state and fork.ref_cnt == 1
+        assert output.kv_cache_block_copies == [(6, 1000), (state.block_id, 1001)]
+        assert output.scheduled_new_reqs[0].block_ids == ([*range(6), 1000], [0, 1001])
+        assert state.ref_cnt == 1
+        mode = "copy"
+    else:
+        assert shadow_state[1] is state and state.ref_cnt == 2
+        assert output.kv_cache_block_copies == [(6, 1000)]
+        assert output.scheduled_new_reqs[0].block_ids == ([*range(6), 1000], [0, 500])
+        mode = "inplace"
+    assert mamba.take_pending_cow_copies() == []
+    assert stub._bench_current_point.sample_reasons == [
+        "kvwarm_real_kv",
+        f"kvwarm_state_{mode}",
+        "kvwarm_state_depth=160",
+    ]
+    assert stub._kvwarm_meta["state_mode"] == mode
+    assert stub._kvwarm_meta["state_mode_requested"] == requested
+
+
+def test_kvwarm_inject_borrowed_stamps_the_same_state_mode_on_every_rank():
+    """The stamp enters the point digest attention-DP ranks compare, so the
+    mode must not depend on the rank's pool: two ranks with different free
+    counts stamp the same mode and digest, and a pool short of the fork
+    skips the point (the shortfall path) instead of switching modes."""
+    digests = []
+    for free in (10, 2):
+        stub, mgr, pool, chains = _kvwarm_injection_stub(["chain-a"], hybrid=True)
+        pool.get_num_free_blocks = lambda free=free: free
+        InstrumentedScheduler._kvwarm_inject_borrowed(stub, [100])
+        assert stub._bench_current_point.sample_reasons == [
+            "kvwarm_real_kv",
+            "kvwarm_state_copy",
+            "kvwarm_state_depth=160",
+        ]
+        digests.append(
+            instrumented_scheduler_module._benchmark_point_digest(
+                stub._bench_current_point
+            )
+        )
+    assert digests[0] == digests[1]
+    stub, mgr, pool, chains = _kvwarm_injection_stub(["chain-a"], hybrid=True)
+    mamba = stub.kv_cache_manager.coordinator.single_type_managers[1]
+    pool.get_num_free_blocks = lambda: 1  # the attention tail alone fits
+    output = InstrumentedScheduler._kvwarm_inject_borrowed(stub, [100])
+    assert output.total_num_scheduled_tokens == 0
+    assert (
+        "__bench_0" not in mgr.req_to_blocks and "__bench_0" not in mamba.req_to_blocks
+    )
+    assert stub._bench_current_point.sample_reasons == ["kvwarm_real_kv"]
+    assert getattr(stub, "_kvwarm_meta", None) is None
+
+
+def test_kvwarm_inject_borrowed_leaves_pure_attention_points_unstamped():
+    stub, mgr, pool, chains = _kvwarm_injection_stub(["chain-a"])
+    stub._bench_current_point = BenchmarkPoint(
+        point_type="decode", total_kv_read_tokens=41, sample_reasons=["kvwarm_real_kv"]
+    )
+    InstrumentedScheduler._kvwarm_inject_borrowed(stub, [40])
+    assert stub._bench_current_point.sample_reasons == ["kvwarm_real_kv"]
+    assert getattr(stub, "_kvwarm_meta", None) is None
 
 
 def test_kvwarm_inject_borrowed_drops_queued_copies_when_a_later_shadow_fails():
