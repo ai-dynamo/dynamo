@@ -1649,7 +1649,17 @@ mod tests_startup_helpers {
             }],
             data_parallel_rank: Some(0),
         };
-        let payload = rmps::to_vec(&batch).unwrap();
+        let payload =
+            rmps::to_vec_named(&(batch.ts, &batch.events, batch.data_parallel_rank)).unwrap();
+        let decoded: KvEventBatch =
+            rmps::from_slice(&payload).expect("failed to decode ZMQ test event");
+        assert!(matches!(
+            decoded.events.as_slice(),
+            [RawKvEvent::BlockStored {
+                shared_cache_eligible: false,
+                ..
+            }]
+        ));
 
         let event = tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
             let mut publish_interval =
