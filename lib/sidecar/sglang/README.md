@@ -57,7 +57,58 @@ python3 -m sglang.launch_server \
 The entry point configures Dynamo logging when `main()` runs, then calls the
 private `dynamo._core.backend._run_sglang_sidecar(argv)` binding. The binding
 prepends the executable name expected by clap, releases the GIL, and runs the
-same unified worker lifecycle as the standalone executable.
+same mode dispatcher as the standalone executable.
+
+## Node-local KV sidecars (multinode)
+
+This opt-in path requires the version-1 launch context from
+[SGLang #39659](https://github.com/sgl-project/sglang/pull/39659). It does not
+require follower gRPC servers. Enable `--sidecar-scope local-telemetry` alongside
+`--sidecar dynamo.sglang.sidecar` in SGLang. Without a launch context, the
+existing gRPC-only startup and multinode KV-discovery guard are unchanged.
+
+SGLang supplies `SGLANG_SIDECAR_CONTEXT` when it launches each sidecar:
+
+- Node 0 uses `mode: "full"`: normal request serving and global DP registration,
+  but subscribes only to the explicitly listed local KV sources.
+- A follower with local KV publishers uses `mode: "telemetry"`: no gRPC client,
+  model registration, or inference request endpoint. It relays its own local
+  events directly to Dynamo.
+- A TP-only follower without a local KV publisher needs no sidecar. SGLang
+  decides whether to launch one; Dynamo does not infer ownership from node rank.
+
+Both modes consume `kv_event_sources` exactly as supplied, including global
+`dp_rank`, connectable `endpoint`, `topic`, and logical `block_size`. Dynamo
+does not reconstruct rank ranges or ports from `dp_size`. An empty full-mode
+source list stays empty.
+
+The leader advertises the existing `sglang_worker_group_id` derived from the
+shared `dist_init_addr`, plus its KV block size and locally owned ranks in
+runtime metadata. Followers use Dynamo's runtime-config discovery watch to
+find that group's serving worker. Each follower retains its own publisher
+identity, while its events carry the **leader's worker ID and the source's
+global DP rank**. This associates cache locations with a routable target; it
+does not send the events through the leader sidecar.
+
+All sidecars in a group must use the same Dynamo namespace, component, and
+endpoint. For PD disaggregation, pass `DYN_COMPONENT=prefill` on every prefill
+node and `DYN_COMPONENT=decode` on every decode node (or the corresponding
+`--component` sidecar argument). A headless sidecar has no gRPC discovery from
+which to infer the PD role. Separate prefill/decode engine groups need distinct
+`dist_init_addr` values, as in the in-process integration.
+
+Followers may start before the leader; discovery is cancellable and bounded
+by `--leader-discovery-timeout-secs` (default 1800). Missing, ambiguous, or
+incompatible leader metadata produces an explicit startup error. If a running
+follower loses its leader or observes a changed publishing identity/config,
+it exits: restart the distributed engine group, not just the sidecar. This
+matches SGLang's managed-sidecar failure policy and avoids continuing under a
+stale serving-worker identity.
+
+This change adds **KV events only**, not forward-pass metrics or scheduler
+load publishing. It reuses the existing advisory ZMQ relay: it does not add a
+readiness handshake, lossless startup, or independent sidecar restart/replay.
+`replay_endpoint` is accepted in the context but is not consumed by this relay.
 
 ## Deploy on Kubernetes (quick start)
 

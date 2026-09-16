@@ -22,6 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
 use crate::client::{self, Client, Discovery, Pool};
+use crate::context::{KV_CONFIG_KEY, SidecarContext, SidecarMode, WORKER_GROUP_KEY};
 use crate::native_http::{self, NativeHttp};
 use crate::proto as pb;
 use crate::protocol::{
@@ -35,6 +36,8 @@ pub struct SglangSidecarEngine {
     disaggregation_mode: DisaggregationMode,
     bootstrap_host: Option<String>,
     bootstrap_port: Option<u16>,
+    local_context: Option<SidecarContext>,
+    worker_group_id: Option<String>,
     state: OnceCell<StartedState>,
     cancel: CancellationToken,
 }
@@ -69,14 +72,39 @@ impl SglangSidecarEngine {
         Self::from_parsed(args).map_err(Into::into)
     }
 
-    fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
+    pub(crate) fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
+        if args
+            .sidecar_context
+            .as_ref()
+            .is_some_and(|ctx| ctx.mode != SidecarMode::Full)
+        {
+            return Err(client::invalid_arg(
+                "telemetry context requires the headless sidecar entry point",
+            ));
+        }
         if args.sidecar.common.route_to_encoder {
             return Err(client::invalid_arg(
                 "route-to-encoder is not supported by the SGLang sidecar",
             ));
         }
 
-        let endpoint = args.sidecar.grpc_endpoint;
+        let endpoint = args
+            .sidecar
+            .grpc_endpoint
+            .or_else(|| std::env::var("SGLANG_GRPC_ENDPOINT").ok())
+            .ok_or_else(|| {
+                client::invalid_arg(
+                    "full sidecar mode requires --grpc-endpoint or SGLANG_GRPC_ENDPOINT",
+                )
+            })?;
+        let endpoint = GrpcEndpoint::parse(&endpoint, "--grpc-endpoint")?;
+        let worker_group_id = args
+            .sidecar_context
+            .as_ref()
+            .map(SidecarContext::worker_group_id)
+            .transpose()
+            .map_err(|error| client::invalid_arg(error.to_string()))?
+            .flatten();
         let transport = args.sidecar.grpc.config();
         let discovery = bootstrap_discover(&endpoint, &transport)?;
         let disaggregation_mode = discovery_mode(&discovery)?;
@@ -135,6 +163,8 @@ impl SglangSidecarEngine {
                 disaggregation_mode,
                 bootstrap_host,
                 bootstrap_port,
+                local_context: args.sidecar_context,
+                worker_group_id,
                 state: OnceCell::new(),
                 cancel: CancellationToken::new(),
             },
@@ -220,7 +250,12 @@ impl LLMEngine for SglangSidecarEngine {
                 .runtime_data
                 .insert("sglang_generate".into(), true.into());
         }
-        let kv_event_sources = discover_kv_event_sources(&discovery, &config, &self.endpoint)?;
+        let kv_event_sources = match &self.local_context {
+            Some(context) => {
+                local_kv_event_sources(context, self.worker_group_id.as_deref(), &mut config)?
+            }
+            None => discover_kv_event_sources(&discovery, &config, &self.endpoint)?,
+        };
         let connection_count = pool.len();
         let kv_event_source_count = kv_event_sources.len();
         self.state
@@ -611,6 +646,38 @@ fn is_routable_host(host: &str) -> bool {
     host.parse::<IpAddr>()
         .map(|address| !address.is_loopback() && !address.is_unspecified())
         .unwrap_or(true)
+}
+
+fn local_kv_event_sources(
+    context: &SidecarContext,
+    worker_group_id: Option<&str>,
+    config: &mut EngineConfig,
+) -> Result<Vec<DiscoveredKvEventSource>, DynamoError> {
+    let llm = config
+        .llm
+        .as_ref()
+        .ok_or_else(|| client::invalid_arg("KV sources require LLM registration"))?;
+    context
+        .validate_registration(llm.data_parallel_size.unwrap_or(1), llm.kv_cache_block_size)
+        .map_err(|error| client::invalid_arg(error.to_string()))?;
+    if let Some(group_id) = worker_group_id {
+        config
+            .runtime_data
+            .insert(WORKER_GROUP_KEY.into(), group_id.into());
+    }
+    config.runtime_data.insert(KV_CONFIG_KEY.into(), serde_json::json!({
+        "block_size": llm.kv_cache_block_size,
+        "local_dp_ranks": context.kv_event_sources.iter().map(|source| source.dp_rank).collect::<Vec<_>>(),
+    }));
+    Ok(context
+        .kv_event_sources
+        .iter()
+        .map(|source| DiscoveredKvEventSource {
+            endpoint: source.endpoint.clone(),
+            topic: source.topic.clone(),
+            dp_rank: source.dp_rank,
+        })
+        .collect())
 }
 
 fn discover_kv_event_sources(
@@ -1263,5 +1330,48 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn local_context_overrides_global_sources_without_shrinking_registration() {
+        use crate::context::{
+            KV_CONFIG_KEY, SidecarContext, WORKER_GROUP_KEY, tests::context_json,
+        };
+
+        let discovery = discovery(json!({
+            "page_size": 64, "dp_size": 8, "nnodes": 2,
+            "kv_events": {
+                "publisher": "zmq", "endpoint_host": "*",
+                "endpoint_port_base": 5557, "topic": "kv", "block_size": 64,
+                "dp_size": 8
+            }
+        }));
+        let mut config =
+            build_engine_config(&discovery, DisaggregationMode::Aggregated, None, None).unwrap();
+        let mut context: SidecarContext = context_json("full").to_string().parse().unwrap();
+        let sources = super::local_kv_event_sources(&context, Some("group"), &mut config).unwrap();
+        assert_eq!(sources.len(), context.kv_event_sources.len());
+        assert_eq!(sources[0].endpoint, context.kv_event_sources[0].endpoint);
+        assert_eq!(sources[0].dp_rank, context.kv_event_sources[0].dp_rank);
+        assert_eq!(config.llm.as_ref().unwrap().data_parallel_size, Some(8));
+        assert_eq!(config.runtime_data[WORKER_GROUP_KEY], "group");
+        assert_eq!(config.runtime_data[KV_CONFIG_KEY]["block_size"], 64);
+
+        // An explicit empty source list must not fall back to all global ranks.
+        context.kv_event_sources.clear();
+        assert!(
+            super::local_kv_event_sources(&context, Some("group"), &mut config)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            config.runtime_data[KV_CONFIG_KEY]["local_dp_ranks"],
+            json!([])
+        );
+        assert_eq!(config.llm.as_ref().unwrap().data_parallel_size, Some(8));
+
+        // Engines without the new launch contract retain the old guard.
+        let endpoint = GrpcEndpoint::parse("http://worker.example:30001", "test").unwrap();
+        assert!(discover_kv_event_sources(&discovery, &config, &endpoint).is_err());
     }
 }

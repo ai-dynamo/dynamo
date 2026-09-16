@@ -101,11 +101,11 @@ fn sglang_sidecar_argv(argv: Vec<String>) -> Vec<String> {
 #[pyo3(signature = (argv=None))]
 fn _run_sglang_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let cli_argv = sglang_sidecar_argv(argv.unwrap_or_default());
-    let (engine, config) = py
-        .allow_threads(move || dynamo_sglang_sidecar::SglangSidecarEngine::try_from_args(cli_argv))
+    let sidecar = py
+        .allow_threads(move || dynamo_sglang_sidecar::SglangSidecar::try_from_args(cli_argv))
         .map_err(sidecar_startup_to_pyerr)?;
 
-    py.allow_threads(move || dynamo_backend_common::run(Arc::new(engine), config))
+    py.allow_threads(move || sidecar.run())
         .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))
 }
 
