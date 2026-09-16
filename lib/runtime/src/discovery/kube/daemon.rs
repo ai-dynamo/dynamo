@@ -325,9 +325,6 @@ impl DiscoveryDaemon {
             }
         };
 
-        // Own the complete lifetime of both reflector tasks: every exit path
-        // above lands here, so returning from `run` means the readiness and CR
-        // watches have actually stopped, not just that this loop did.
         stop_reflector_tasks(readiness_handle, cr_handle).await;
 
         tracing::info!("Discovery daemon stopped");
@@ -555,6 +552,7 @@ mod tests {
     use crate::component::{Instance, TransportType};
     use crate::discovery::{DiscoveryEvent, DiscoveryInstance};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ManagedFieldsEntry, OwnerReference};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     const TEST_POD_UID: &str = "pod-uid-test";
 
@@ -907,26 +905,38 @@ mod tests {
         assert!(managed_fields_summary(&cr).is_none());
     }
 
-    /// Regression test for issue #13874: `DiscoveryDaemon::run` used to spawn its
-    /// two reflector tasks and discard the `JoinHandle`s, so nothing ever stopped
-    /// them -- they (and the Kubernetes watch each one owned) simply outlived the
-    /// daemon. `stop_reflector_tasks` is the exact cleanup `run` now calls on
-    /// every exit path; this exercises it directly against two tasks that would
-    /// otherwise run forever, standing in for the reflector loops. If `abort`
-    /// were only requested and not awaited, or a handle were dropped instead of
-    /// joined, this would hang instead of returning -- caught here by the
-    /// bounded timeout rather than actually waiting on it.
+    /// Sets its flag on drop, including when the future holding it is aborted
+    /// rather than run to completion -- unlike checking that `stop_reflector_tasks`
+    /// merely returns, this distinguishes an implementation that awaits both
+    /// handles from one that only calls `abort` (which schedules cancellation
+    /// but does not itself wait for the task's drop glue to run).
+    struct SetOnDrop(Arc<AtomicBool>);
+
+    impl Drop for SetOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Regression test for issue #13874: `stop_reflector_tasks` must actually
+    /// wait for both tasks to finish, not just request cancellation. A handle
+    /// that is aborted but never awaited, or dropped instead of joined, would
+    /// leave this hanging past the timeout instead of returning.
     #[tokio::test]
     async fn stop_reflector_tasks_awaits_both_aborted_handles() {
-        let never_ending = || {
-            tokio::spawn(async {
+        let readiness_done = Arc::new(AtomicBool::new(false));
+        let cr_done = Arc::new(AtomicBool::new(false));
+
+        let never_ending = |done: Arc<AtomicBool>| {
+            tokio::spawn(async move {
+                let _guard = SetOnDrop(done);
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
                 }
             })
         };
-        let readiness_handle = never_ending();
-        let cr_handle = never_ending();
+        let readiness_handle = never_ending(readiness_done.clone());
+        let cr_handle = never_ending(cr_done.clone());
 
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
@@ -934,5 +944,19 @@ mod tests {
         )
         .await
         .expect("stop_reflector_tasks must return once both tasks are aborted, not hang");
+
+        // `stop_reflector_tasks` returning is not itself proof that either task
+        // finished -- an implementation that only calls `abort()` and never
+        // awaits the handle would also return immediately. Awaiting a
+        // `JoinHandle` only resolves once the task (including its drop glue)
+        // has actually finished, so these must already be set here.
+        assert!(
+            readiness_done.load(Ordering::SeqCst),
+            "readiness task must have actually finished, not just been asked to abort"
+        );
+        assert!(
+            cr_done.load(Ordering::SeqCst),
+            "CR task must have actually finished, not just been asked to abort"
+        );
     }
 }
