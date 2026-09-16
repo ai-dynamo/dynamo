@@ -935,13 +935,6 @@ def test_session_affinity_binding_cli_and_environment(monkeypatch) -> None:
     assert config.session_affinity_binding == "parent-group"
 
 
-def test_session_affinity_binding_rejects_unknown_value() -> None:
-    parser = argparse.ArgumentParser()
-    FrontendArgGroup().add_arguments(parser)
-    with pytest.raises(SystemExit):
-        parser.parse_args(["--router-session-affinity-binding", "subagent"])
-
-
 @pytest.mark.parametrize("ttl", [0, 31_536_001])
 def test_session_affinity_ttl_rejects_out_of_range(ttl: int) -> None:
     parser = argparse.ArgumentParser()

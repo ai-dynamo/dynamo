@@ -111,7 +111,6 @@ link no catalog and reject a configured policy type at startup.
 |---|---|
 | `default` | Dynamo's built-in selector and cost model. Reserved; always available. |
 | `dynamo-two-tier-cost-fn` | Ranks on two tiers instead of one additive cost: active-request load first, then device-KV prefix overlap. Prefers the worker holding the largest prefix overlap unless load is badly imbalanced. Thresholds and selection order ported from the experimental SGLang router's `cache_aware_zmq` policy. Thresholds are tunable; the defaults reproduce it exactly. |
-| `dynamo-soft-affinity-load-guard` | Keeps a soft session binding as a preference rather than an exclusive pin: retains the bound worker while it holds at most `max_active_requests`, otherwise moves only to a worker at least `move_margin` requests less loaded. Pair with `--router-session-affinity-binding parent-group` to co-locate the subagents of one parent session. |
 
 Write the instance into the same YAML file that `--router-policy-config` already points at:
 
@@ -160,38 +159,8 @@ rather than being silently ignored. It selects the least-loaded worker once the 
 largest count is more than 1.1 times the smallest; otherwise it prefers the worker holding the
 largest device-KV overlap when that overlap covers more than 50% of the request's blocks.
 
-`dynamo-soft-affinity-load-guard` takes two optional parameters:
-
-```yaml
-    - name: dynamo-soft-affinity-load-guard
-      type: dynamo-soft-affinity-load-guard
-      parameters:
-        max_active_requests: 32
-        move_margin: 2
-```
-
-| Parameter | Default | Meaning |
-|---|---|---|
-| `max_active_requests` | `32` | Active requests the bound worker may already hold before the binding becomes eligible to move. Counts every request that worker is serving, not just this binding's, so it must sit above ordinary per-worker concurrency or the binding moves on nearly every request and loses the prefix it exists to reuse. Compared inclusively. |
-
-| `move_margin` | `2` | How many fewer active requests an alternative must hold before the binding moves to it. Must be at least `1`. |
-
-The margin is hysteresis. Without it, load that alternates by a single request between workers
-relocates the binding on every request and walks it across the pool, losing the prefix it exists to
-reuse; a swing larger than the margin still moves it. If a group must never move, do not use this
-policy: run `--router-session-affinity-mode hard --router-session-affinity-binding parent-group`
-instead. Hard mode pins the group to its first worker and does not migrate it because of load; it
-resets when the target becomes unusable or dispatch fails, at the cost of no load balancing across a
-fan-out.
-
-> [!IMPORTANT]
-> This policy only sees a binding when one reaches selection as an advisory target, which means
-> `--router-session-affinity-mode soft`. Under the default `hard` mode a
-> bound session arrives as a pinned target and the candidate set is narrowed to one worker before
-> any policy runs.
-
 **Experimental.** Available since v1.5. To co-locate the subagents of one parent session, run
-`--router-session-affinity-mode soft --router-session-affinity-binding parent-group`. A request that
+`--router-session-affinity-binding parent-group`. A request that
 carries a parent session id then binds under an internal key derived from that parent id instead of
 its own session, so the subagents of one parent share a binding while the parent keeps its own.
 Dynamo's affinity coordinator owns that binding: it commits only after a successful dispatch, is
@@ -325,8 +294,7 @@ The first successfully dispatched request binds the session ID to its selected w
 
 `--router-session-affinity-binding` (or `DYN_ROUTER_SESSION_AFFINITY_BINDING`) chooses which id a
 binding is keyed on: `session` (default) keys every request on its own session id; `parent-group`
-binds a subagent under its parent's group. It is frontend-only and never appears on a model card. See
-[Worker-Selection Policies](#worker-selection-policies) for how it pairs with the load-guard policy.
+binds a subagent under its parent's group. It is frontend-only and never appears on a model card.
 
 For soft affinity, Dynamo commits a changed binding after dispatch returns a response stream. Selection, setup, or dispatch failure before that point leaves the old binding intact. A later stream error or cancellation does not roll back the rebind. Explicit request targets remain exact in both modes.
 

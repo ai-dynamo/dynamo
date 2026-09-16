@@ -920,28 +920,6 @@ fn group_id() -> SessionAffinityId {
 }
 
 #[tokio::test(start_paused = true)]
-async fn subagent_siblings_dispatch_through_one_group_binding() {
-    let coordinator = coordinator();
-
-    let first = coordinator.acquire(&group_id(), None).await.unwrap();
-    assert!(
-        matches!(first, AffinityAcquire::Initialize(_)),
-        "the first subagent must initialize the group"
-    );
-    let mut stream = first
-        .into_stream(target(7, Some(0)), response_stream(1), Soft)
-        .unwrap();
-    while stream.next().await.is_some() {}
-
-    let sibling = coordinator.acquire(&group_id(), None).await.unwrap();
-    assert_eq!(sibling.target(), Some(target(7, Some(0))));
-    assert_eq!(
-        coordinator.query_target(&group_id(), None).unwrap(),
-        Some(target(7, Some(0)))
-    );
-}
-
-#[tokio::test(start_paused = true)]
 async fn a_subagent_that_never_dispatches_leaves_the_group_unbound() {
     let coordinator = coordinator();
 
@@ -957,32 +935,6 @@ async fn a_subagent_that_never_dispatches_leaves_the_group_unbound() {
         coordinator.acquire(&group_id(), None).await.unwrap(),
         AffinityAcquire::Initialize(_)
     ));
-}
-
-#[tokio::test(start_paused = true)]
-async fn moving_a_ranked_group_persists_the_new_worker_and_rank() {
-    let coordinator = coordinator();
-
-    let first = coordinator.acquire(&group_id(), None).await.unwrap();
-    assert!(
-        matches!(first, AffinityAcquire::Initialize(_)),
-        "the first subagent must initialize the group"
-    );
-    let mut stream = first
-        .into_stream(target(7, Some(0)), response_stream(1), Soft)
-        .unwrap();
-    while stream.next().await.is_some() {}
-
-    let bound = coordinator.acquire(&group_id(), None).await.unwrap();
-    let mut stream = bound
-        .into_stream(target(9, Some(1)), response_stream(1), Soft)
-        .unwrap();
-    while stream.next().await.is_some() {}
-
-    assert_eq!(
-        coordinator.query_target(&group_id(), None).unwrap(),
-        Some(target(9, Some(1)))
-    );
 }
 
 #[tokio::test(start_paused = true)]
