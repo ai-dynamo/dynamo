@@ -136,7 +136,7 @@ The selected worker receives the same per-video hash, and its KV events use that
 The standard OpenAI chat payload uses a `video_url` content part:
 
 ```bash
-VIDEO_URL="https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-Omni/demo/draw.mp4"
+VIDEO_URL="https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.webm"
 
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
@@ -155,7 +155,7 @@ curl http://localhost:8000/v1/chat/completions \
 JSON
 ```
 
-Send the request twice to populate and then reuse the worker's KV cache. Video decode requires H.264 or H.265 input and an NVIDIA GPU with a video decode engine. See [Video Decode GPU Requirements](video-decode-gpu-requirements.md).
+Send the request twice to populate and then reuse the worker's KV cache. Exact routing through the default Rust frontend supports VP8 or VP9 video in MP4, WebM, or MKV containers. The in-tree frontend decoder does not support H.264 or H.265. Re-encode those inputs to VP9, or disable frontend decoding and let the backend decode them through NVDEC or an installed software decoder; with backend-only decoding, video identity does not contribute to exact routing. See [Additional Media Decoders](additional-media-decoders.md) and [Video Decode GPU Requirements](video-decode-gpu-requirements.md).
 
 ## Verify Video Routing
 
