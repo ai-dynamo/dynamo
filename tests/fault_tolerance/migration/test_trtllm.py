@@ -38,6 +38,8 @@ AGGREGATED_MAX_TOKENS = 3072
 AGGREGATED_PROMPT_REPETITIONS = 128
 DECODE_MAX_SEQ_LEN = 4096
 DECODE_MAX_TOKENS = 3072
+PREFILL_MAX_SEQ_LEN = 8192
+PREFILL_MAX_TOKENS = 64
 KV_TRANSFER_MAX_SEQ_LEN = 2048
 KV_TRANSFER_MAX_TOKENS = 1536
 KV_TRANSFER_BASELINE_MAX_TOKENS = 256
@@ -82,6 +84,38 @@ MIGRATION_CASES = [
         False,
         "nats",
         id="max_seq_len_not_exceeded-worker_failure-completion-unary-nats",
+    ),
+]
+
+PREFILL_MIGRATION_SKIP = pytest.mark.skip(
+    reason=(
+        "TRT-LLM prefill-worker migration remains unsupported; the prior xfail "
+        "timed out (https://github.com/ai-dynamo/dynamo/pull/7104)"
+    )
+)
+
+# Retain one contract for each migration-limit outcome without restoring the
+# old Cartesian matrix. Profile VRAM before removing the skip.
+PREFILL_MIGRATION_CASES = [
+    pytest.param(
+        3,
+        None,
+        True,
+        "chat",
+        False,
+        "nats",
+        marks=PREFILL_MIGRATION_SKIP,
+        id="migration_enabled-worker_failure-chat-unary-nats",
+    ),
+    pytest.param(
+        0,
+        None,
+        True,
+        "completion",
+        False,
+        "tcp",
+        marks=PREFILL_MIGRATION_SKIP,
+        id="migration_disabled-worker_failure-completion-unary-tcp",
     ),
 ]
 
@@ -158,6 +192,19 @@ MIGRATION_PARAMETERS = pytest.mark.parametrize(
         "request_plane",
     ),
     MIGRATION_CASES,
+    indirect=["request_plane"],
+)
+
+PREFILL_MIGRATION_PARAMETERS = pytest.mark.parametrize(
+    (
+        "migration_limit",
+        "migration_max_seq_len",
+        "immediate_kill",
+        "request_api",
+        "stream",
+        "request_plane",
+    ),
+    PREFILL_MIGRATION_CASES,
     indirect=["request_plane"],
 )
 
@@ -426,6 +473,80 @@ def test_request_migration_trtllm_aggregated(
                 verify_replacement_worker=True,
                 force_max_output_tokens=True,
             )
+
+
+@pytest.mark.timeout(350)  # Preserve the historical bound for this topology.
+@pytest.mark.nightly
+@pytest.mark.requested_trtllm_kv_tokens(8192)
+@PREFILL_MIGRATION_PARAMETERS
+def test_request_migration_trtllm_prefill(
+    request,
+    runtime_services_dynamic_ports,
+    set_ucx_tls_no_mm,
+    predownload_models,
+    migration_limit,
+    migration_max_seq_len,
+    immediate_kill,
+    request_api,
+    stream,
+    tmp_path,
+):
+    """Preserve enabled and disabled prefill-worker migration contracts."""
+    with DynamoFrontendProcess(
+        request,
+        migration_limit=migration_limit,
+        migration_max_seq_len=migration_max_seq_len,
+    ) as frontend:
+        decode_worker = DynamoWorkerProcess(
+            request,
+            "decode-worker",
+            frontend.frontend_port,
+            tmp_path,
+            mode="decode",
+            max_seq_len=PREFILL_MAX_SEQ_LEN,
+        )
+        with decode_worker:
+            wait_for_endpoint_instances(
+                frontend.frontend_port,
+                {("backend", "generate"): 1},
+            )
+
+            prefill1 = DynamoWorkerProcess(
+                request,
+                "prefill-worker-1",
+                frontend.frontend_port,
+                tmp_path,
+                mode="prefill",
+                max_seq_len=PREFILL_MAX_SEQ_LEN,
+            )
+            prefill2 = DynamoWorkerProcess(
+                request,
+                "prefill-worker-2",
+                frontend.frontend_port,
+                tmp_path,
+                mode="prefill",
+                max_seq_len=PREFILL_MAX_SEQ_LEN,
+            )
+            with managed_processes_concurrently(prefill1, prefill2):
+                wait_for_endpoint_instances(
+                    frontend.frontend_port,
+                    {("prefill", "generate"): 2, ("backend", "generate"): 1},
+                )
+
+                run_migration_test(
+                    frontend,
+                    prefill1,
+                    prefill2,
+                    receiving_pattern="Prefill Request ID: ",
+                    migration_limit=migration_limit,
+                    migration_max_seq_len=migration_max_seq_len,
+                    immediate_kill=immediate_kill,
+                    use_chat_completion=(request_api == "chat"),
+                    stream=stream,
+                    max_tokens=PREFILL_MAX_TOKENS,
+                    use_long_prompt=True,
+                    expected_ongoing_request_count=1,
+                )
 
 
 @pytest.mark.timeout(350)  # 3x average
