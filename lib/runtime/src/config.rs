@@ -346,7 +346,7 @@ impl RuntimeConfig {
     pub fn reject_deprecated_parser_env() -> Result<()> {
         use environment_names::llm::DYN_PARSER_VERSION;
 
-        if std::env::var("DYN_ENABLE_EXPERIMENTAL_PARSERS_V2").is_ok() {
+        if std::env::var_os("DYN_ENABLE_EXPERIMENTAL_PARSERS_V2").is_some() {
             anyhow::bail!(
                 "DYN_ENABLE_EXPERIMENTAL_PARSERS_V2 is no longer supported; remove it. The latest compatible parser is selected by default. Set {DYN_PARSER_VERSION}=v1 or v2 to select an explicit parser generation."
             );

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use dynamo_llm::model_card::ModelDeploymentCard;
-use dynamo_llm::preprocessor::OpenAIPreprocessor;
+use dynamo_llm::preprocessor::{OpenAIPreprocessor, ToolProcessingRoute};
 use dynamo_llm::protocols::openai::ParsingOptions;
 use dynamo_llm::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use dynamo_llm::protocols::openai::chat_completions::{
@@ -3552,6 +3552,10 @@ async fn tool_calls_qwen3_coder_auto_routes_through_v2_by_default() {
     let xml = "<tool_call>\n<function=get_weather>\n<parameter=location>\nSan Francisco\n</parameter>\n</function>\n</tool_call>";
     let preprocessor = build_preprocessor(None, Some("qwen3_coder"));
     let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+    assert!(matches!(
+        preprocessor.tool_processing_route(&request, &Default::default()),
+        Ok(ToolProcessingRoute::ParserV2(ref family)) if family == "qwen3_coder"
+    ));
     let input_stream = stream::iter(
         vec![mock_content_chunk(xml), mock_final_chunk()]
             .into_iter()
