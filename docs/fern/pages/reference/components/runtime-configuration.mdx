@@ -323,17 +323,17 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   only while `DYN_DYNAMO_REQUEST_QUEUE_ENABLE_CONTROLLED_DELAY` is enabled.
 </ParamField>
 
-<ParamField path="DYN_DYNAMO_REQUEST_QUEUE_ENABLE_CONTROLLED_DELAY" type="boolean" default="true">
+<ParamField path="DYN_DYNAMO_REQUEST_QUEUE_ENABLE_CONTROLLED_DELAY" type="boolean" default="false">
   Advanced switch for whether a queued request that outlives `DYN_DYNAMO_REQUEST_QUEUE_TIMEOUT_MS` is
   rejected. Enabled, a request that passes its deadline leaves the queue at once and is refused.
   Disabled, nothing leaves the queue for age: a request may wait longer than the delay and still be
   admitted in its FIFO turn, and the queue length limit becomes the only backpressure.
 
   Accepts `1`/`true`/`on`/`yes` and `0`/`false`/`off`/`no`, case-insensitively. Environment-only:
-  there is no command-line flag. An unset, empty or unrecognized value leaves it enabled.
+  there is no command-line flag. An unset, empty or unrecognized value leaves it disabled.
 </ParamField>
 
-<ParamField path="DYN_DYNAMO_REQUEST_QUEUE_ENABLE_ADAPTIVE_LIFO" type="boolean" default="true">
+<ParamField path="DYN_DYNAMO_REQUEST_QUEUE_ENABLE_ADAPTIVE_LIFO" type="boolean" default="false">
   Advanced switch for which queued request the worker admits after it has rejected one. Enabled, a
   freed slot that followed a rejection goes to the newest queued request — the one with the most of
   its queue delay left — and the admission after that goes to the oldest again. Disabled, a freed

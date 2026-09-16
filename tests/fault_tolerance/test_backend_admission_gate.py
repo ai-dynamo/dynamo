@@ -643,7 +643,7 @@ def test_queue_delay_disabled_admits_waiting_requests(
         dynamo_dynamic_ports,
         request_plane,
         queue_delay_ms=QUEUE_DELAY_MS,
-        controlled_delay="0",
+        # Both policy switches are unset: expiry is disabled by default.
     ) as system_port:
         _run(dynamo_dynamic_ports.frontend_port, system_port, scenario)
 
@@ -731,6 +731,7 @@ def test_controlled_delay_rejects_expired_front_requests(
         dynamo_dynamic_ports,
         request_plane,
         queue_delay_ms=QUEUE_DELAY_MS,
+        controlled_delay="1",
         adaptive_lifo="0",
     ) as system_port:
         _run(dynamo_dynamic_ports.frontend_port, system_port, scenario)
@@ -806,6 +807,7 @@ def test_fifo_can_complete_after_queue_deadline_without_adaptive_lifo(
         dynamo_dynamic_ports,
         request_plane,
         queue_delay_ms=QUEUE_DELAY_MS,
+        controlled_delay="1",
         adaptive_lifo="0",
     ) as system_port:
         _run(dynamo_dynamic_ports.frontend_port, system_port, scenario)
@@ -879,6 +881,8 @@ def test_adaptive_lifo_avoids_near_expiry_front_admission(
         dynamo_dynamic_ports,
         request_plane,
         queue_delay_ms=QUEUE_DELAY_MS,
+        controlled_delay="1",
+        adaptive_lifo="1",
     ) as system_port:
         _run(dynamo_dynamic_ports.frontend_port, system_port, scenario)
 

@@ -33,7 +33,8 @@
 //!
 //! # Controlled delay and adaptive LIFO
 //!
-//! Two separate policies act on the queue, each with its own switch. Controlled
+//! Both policies are disabled by default; the concurrency limit and bounded
+//! FIFO queue remain active. Each policy has its own switch. Controlled
 //! delay decides *whether* a request that has waited too long is rejected
 //! instead of eventually entering the backend; adaptive LIFO decides *which*
 //! still-eligible request the next freed slot goes to once controlled delay has
@@ -42,8 +43,8 @@
 //!
 //! ## Controlled delay
 //!
-//! Queueing is bounded in time as well as in length. Every entry is stamped
-//! with `enqueue time + queue delay` under the state lock, so FIFO order is
+//! When enabled, queueing is bounded in time as well as in length. Every entry
+//! is stamped with `enqueue time + queue delay` under the state lock, so FIFO order is
 //! also nondecreasing deadline order. The delay is one process-wide budget:
 //! a positive [`DYN_DYNAMO_REQUEST_QUEUE_TIMEOUT_MS`], otherwise
 //! [`DEFAULT_QUEUE_DELAY`]. It bounds queue residence only — an admitted
@@ -60,9 +61,9 @@
 //! [`ErrorType::WorkerOverloaded`] naming the queue delay — an overload, not a
 //! cancellation and not a backend fault.
 //!
-//! [`DYN_DYNAMO_REQUEST_QUEUE_ENABLE_CONTROLLED_DELAY`] turns that rejection
-//! off, leaving the bounded FIFO by itself: nothing is stamped out of the queue
-//! for age, a request may wait longer than the delay and still be admitted in
+//! Set [`DYN_DYNAMO_REQUEST_QUEUE_ENABLE_CONTROLLED_DELAY`] to true to enable
+//! expiry rejection. By default, the bounded FIFO stands alone: nothing leaves
+//! the queue for age, a request may wait longer than the delay and still be admitted in
 //! FIFO order, and no timer is armed at all. Such a request is not an expired
 //! one — expiry is simply not in force — so it is never counted as a rejection.
 //! The queue length bound is the only backpressure left.
@@ -80,8 +81,9 @@
 //! check of its own, since the due prefix is removed immediately beforehand and
 //! the uniform budget makes deadlines nondecreasing along the FIFO, so a live
 //! front implies a live back.
-//! [`DYN_DYNAMO_REQUEST_QUEUE_ENABLE_ADAPTIVE_LIFO`] turns the back selection
-//! off and leaves the delay, the expiry and the front rejection untouched.
+//! Set [`DYN_DYNAMO_REQUEST_QUEUE_ENABLE_ADAPTIVE_LIFO`] to true to enable back
+//! selection. By default, selection stays FIFO. The delay, expiry and front
+//! rejection are untouched by this switch.
 //!
 //! # Where the hint comes from
 //!
@@ -163,8 +165,8 @@ const DEFAULT_QUEUE_CAPACITY: usize = 40_000;
 /// Default maximum queue residence before a queued request is given up on.
 const DEFAULT_QUEUE_DELAY: Duration = Duration::from_millis(5_000);
 
-/// Both queue policies are on unless an operator deliberately turns one off.
-const DEFAULT_POLICY_ENABLED: bool = true;
+/// Both queue policies are off unless an operator explicitly enables them.
+const DEFAULT_POLICY_ENABLED: bool = false;
 
 /// The message a shed request is refused with.
 const OVERLOADED_MESSAGE: &str = "Server overloaded: worker at capacity";
@@ -1286,8 +1288,13 @@ mod tests {
         gate_with_delay(limit, queue, Duration::from_secs(3_600))
     }
 
+    const ENABLED_POLICIES: QueuePolicy = QueuePolicy {
+        controlled_delay: true,
+        adaptive_lifo: true,
+    };
+
     fn gate_with_delay(limit: usize, queue: usize, delay: Duration) -> Arc<BackendAdmissionGate> {
-        gate_with_policy(limit, queue, delay, QueuePolicy::default())
+        gate_with_policy(limit, queue, delay, ENABLED_POLICIES)
     }
 
     fn gate_with_policy(
@@ -1303,7 +1310,7 @@ mod tests {
     fn without_adaptive_lifo() -> QueuePolicy {
         QueuePolicy {
             adaptive_lifo: false,
-            ..QueuePolicy::default()
+            ..ENABLED_POLICIES
         }
     }
 
@@ -1311,7 +1318,7 @@ mod tests {
     fn without_controlled_delay() -> QueuePolicy {
         QueuePolicy {
             controlled_delay: false,
-            ..QueuePolicy::default()
+            ..ENABLED_POLICIES
         }
     }
 
@@ -1799,19 +1806,19 @@ mod tests {
 
     /// Both switches speak the canonical Dynamo boolean vocabulary, and every
     /// way of not making a choice — unset, declared empty, or a spelling outside
-    /// it — keeps the enabled default.
+    /// it — keeps the disabled default.
     #[test]
-    fn both_queue_policy_switches_default_on_and_read_the_canonical_vocabulary() {
-        const { assert!(DEFAULT_POLICY_ENABLED) };
+    fn both_queue_policy_switches_default_off_and_read_the_canonical_vocabulary() {
+        const { assert!(!DEFAULT_POLICY_ENABLED) };
         for env in [
             DYN_DYNAMO_REQUEST_QUEUE_ENABLE_CONTROLLED_DELAY,
             DYN_DYNAMO_REQUEST_QUEUE_ENABLE_ADAPTIVE_LIFO,
         ] {
             for (raw, expected) in [
-                (None, true),
-                (Some(""), true),
-                (Some("   "), true),
-                (Some("enabled"), true),
+                (None, false),
+                (Some(""), false),
+                (Some("   "), false),
+                (Some("enabled"), false),
                 (Some("1"), true),
                 (Some("TRUE"), true),
                 (Some("On"), true),
@@ -1950,8 +1957,7 @@ mod tests {
             )
         }
 
-        let gate =
-            BackendAdmissionGate::new(None, 8, Duration::from_millis(50), QueuePolicy::default());
+        let gate = BackendAdmissionGate::new(None, 8, Duration::from_millis(50), ENABLED_POLICIES);
         gate.set_limit_for_test(1);
         let held = permit(gate.acquire(None).await);
 
@@ -2203,9 +2209,9 @@ mod tests {
     /// has waited well past the delay is still admitted, in FIFO order, and is
     /// never counted as expired.
     #[tokio::test(start_paused = true)]
-    async fn controlled_delay_off_admits_a_request_that_outwaited_the_delay() {
-        let delay = Duration::from_millis(200);
-        let gate = gate_with_policy(1, 8, delay, without_controlled_delay());
+    async fn default_policy_admits_a_request_that_outwaited_the_delay() {
+        let delay = DEFAULT_QUEUE_DELAY;
+        let gate = gate_with_policy(1, 8, delay, QueuePolicy::default());
         let held = permit(gate.acquire(None).await);
 
         let first = spawn_queued_admit(&gate).await;
@@ -2216,6 +2222,7 @@ mod tests {
         // grant-path check must find nothing due either.
         tokio::time::sleep(delay * 10).await;
         assert_eq!(gate.queued(), 2, "no entry may leave the queue for age");
+        assert!(gate.expiry_driver.get().is_none());
 
         drop(held);
         // Held, not dropped in place: releasing it here would pass the slot

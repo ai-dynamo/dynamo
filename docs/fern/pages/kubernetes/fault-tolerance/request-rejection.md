@@ -140,24 +140,26 @@ overflow-queue size and defaults to `40000`. The effective cap is `N + Q` in-fli
 worker process, counted across the TCP and NATS request planes together and across every endpoint the
 process serves.
 
-`DYN_DYNAMO_REQUEST_QUEUE_TIMEOUT_MS` bounds how long a request may wait in that overflow queue, in
-whole milliseconds, and defaults to `5000`. It is environment-only, with no command-line flag. A
-request still queued when its deadline passes leaves the queue immediately and is refused exactly as
+When Controlled Delay is enabled, `DYN_DYNAMO_REQUEST_QUEUE_TIMEOUT_MS` bounds how long a request
+may wait in that overflow queue, in whole milliseconds, and defaults to `5000`. It is environment-only,
+with no command-line flag. A request still queued when its deadline passes leaves the queue immediately
+and is refused exactly as
 a full queue refuses one. Set it lower when a stale queued request is worth less than the queue place
 it holds, and higher when clients would rather wait. It does not limit how long an admitted request
 may run.
 
-Set `DYN_DYNAMO_REQUEST_QUEUE_ENABLE_CONTROLLED_DELAY` to `0` on the **worker** component to stop
-rejecting queued requests for age altogether. Nothing then leaves the queue for waiting too long: a
+Set `DYN_DYNAMO_REQUEST_QUEUE_ENABLE_CONTROLLED_DELAY` to `1` on the **worker** component to enable
+expiry rejection. It is disabled by default. Without it, nothing leaves the queue for waiting too long: a
 request may wait longer than the delay and is still admitted in its FIFO turn, and the queue length
 limit is the only backpressure left.
 
-After the worker has rejected a queued request for age, the next slot it frees goes to the newest
-queued request rather than the oldest, and the slot after that goes to the oldest again — so a worker
+With Adaptive LIFO enabled, after the worker has rejected a queued request for age, the next slot
+it frees goes to the newest queued request rather than the oldest, and the slot after that goes to the
+oldest again — so a worker
 recovering from a backlog does not work through requests whose queue delay is nearly spent. Set
-`DYN_DYNAMO_REQUEST_QUEUE_ENABLE_ADAPTIVE_LIFO` to `0` on the **worker** component to serve the
-oldest queued request in every case. The queue delay, the deadlines and which requests are rejected
-are the same either way.
+`DYN_DYNAMO_REQUEST_QUEUE_ENABLE_ADAPTIVE_LIFO` to `1` on the **worker** component to enable it.
+It is disabled by default, so the oldest queued request is selected. The queue delay, the deadlines
+and which requests are rejected are the same either way.
 
 See [Runtime Configuration](../../reference/components/runtime-configuration.mdx#operations) for the exact
 fields and [Worker-Side Request Admission](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-rejection-architecture.md#worker-side-request-admission)

@@ -152,8 +152,9 @@ read independently of the engine limit, and defaults to `40000`.
 
 ### Controlled Delay
 
-Queueing is bounded in time as well as in length. Every request that joins the FIFO is stamped, at
-enqueue, with a deadline of `enqueue time + queue delay`. The delay is one process-wide budget: it
+When Controlled Delay is enabled, queueing is bounded in time as well as in length. Every request
+that joins the FIFO is stamped, at enqueue, with a deadline of `enqueue time + queue delay`. The delay
+is one process-wide budget: it
 defaults to `5000` milliseconds and is overridden by a positive `DYN_DYNAMO_REQUEST_QUEUE_TIMEOUT_MS`,
 in whole milliseconds, down to `1`. That override is environment-only; there is no command-line flag.
 An unset, unparseable or non-positive value leaves the default in place.
@@ -173,9 +174,9 @@ queued request also re-checks the head deadline first, so a slot released before
 still never given to a request the delay budget has already given up on. This is
 transport-independent: the same gate, timer and expiry result apply over TCP and NATS.
 
-`DYN_DYNAMO_REQUEST_QUEUE_ENABLE_CONTROLLED_DELAY` turns that expiry rejection off. It accepts
+`DYN_DYNAMO_REQUEST_QUEUE_ENABLE_CONTROLLED_DELAY` enables that expiry rejection. It accepts
 `1`/`true`/`on`/`yes` and `0`/`false`/`off`/`no`, case-insensitively, and is environment-only with no
-command-line flag. Unset, empty and unrecognized values leave it enabled, and an unrecognized one is
+command-line flag. Unset, empty and unrecognized values leave it disabled, and an unrecognized one is
 logged. Disabled, the bounded FIFO stands alone: nothing leaves the queue for age, a request may wait
 longer than the delay and still be admitted in its FIFO turn, and the gate arms no timer at all. Such
 a request is not an expired one — expiry is simply not in force — so it is never counted as a
@@ -183,7 +184,7 @@ rejection, and the queue length bound becomes the only backpressure.
 
 ### Adaptive LIFO
 
-Which queued request the freed capacity goes to is a separate policy. Rejection is
+Which queued request the freed capacity goes to is a separate, opt-in policy. When enabled, rejection is
 always from the front of the queue; selection is not. An admission that rejected nothing takes the
 oldest queued request, exactly as before; one that rejected at least one request takes the newest
 instead, that being the request with the most of its delay budget left. That applies to one
@@ -194,8 +195,8 @@ request — its caller had already gone — counts for nothing. Selecting from t
 deadline check, because the due prefix is removed immediately before every admission and one
 process-wide delay budget makes deadlines nondecreasing along the queue.
 
-`DYN_DYNAMO_REQUEST_QUEUE_ENABLE_ADAPTIVE_LIFO` turns the back selection off, with the same boolean
-vocabulary, the same enabled default and the same environment-only scope. Turning it off changes
+`DYN_DYNAMO_REQUEST_QUEUE_ENABLE_ADAPTIVE_LIFO` enables back selection, with the same boolean
+vocabulary, the same disabled default and the same environment-only scope. Turning it off changes
 selection alone: the queue delay, the deadlines and which requests are rejected are all unaffected.
 Adaptive LIFO also does nothing until Controlled Delay has actually rejected a live waiter, so with
 Controlled Delay disabled it never takes effect — but neither switch changes the other's behavior.
