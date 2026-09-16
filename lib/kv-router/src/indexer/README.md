@@ -114,8 +114,24 @@ RadixBlock
 ├── state.worker_cutoffs: HashMap<Worker, Position>
 ├── state.full_edge_workers: HashSet<Worker>
 ├── children: HashMap<LocalBlockHash, SharedRadixBlock>
+├── parent: Weak<RefCell<RadixBlock>>
 └── internal: bool
 ```
+
+Children and worker lookups hold strong references; parent links are weak to avoid
+reference cycles. A child is keyed by its first local block hash. Splits preserve
+that key for the prefix and update the parent links of children moved to the suffix.
+Cleanup detaches an unowned node only if the parent's slot still points to it, so
+an old detached node cannot remove a replacement.
+
+This single-threaded tree cleans up eagerly during mutations. The shared helper in
+[`cleanup.rs`](../cleanup.rs) uses `Arc<RwLock<_>>` and periodic concurrent sweeps;
+it does not support this tree's `Rc<RefCell<_>>` handles.
+
+The existing mid-chain removal gap can leave descendant lookup entries alive; see
+the `TODO(CORRECTNESS)` in `apply_removed`. Such detached nodes can also retain weak
+parent links. A weak link retains the parent's allocation after its value is
+dropped. Complete descendant and back-link cleanup remains separate follow-up work.
 
 ### Visual Representation
 
@@ -151,9 +167,9 @@ RadixBlock
 
 **remove_blocks(worker, block_hashes)**:
 1. For each hash, find node via `lookup[worker][hash]`
-2. Remove worker from node's `workers` set
-3. If `workers` empty, clear children (cascading cleanup)
-4. Remove from `lookup[worker]`
+2. Truncate the worker's coverage at the removed block
+3. Clear child edges if no worker covers the full node; detach the node if it has no owners
+4. Remove newly uncovered hashes from `lookup[worker]`
 
 **find_matches(local_hashes, early_exit)**:
 1. Start at root with all workers as candidates
