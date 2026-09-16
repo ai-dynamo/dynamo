@@ -18,6 +18,14 @@
 # Floor them so the --no-deps install refreshes the bundled copies in place to
 # the current patch releases (see also mistune/soupsieve/tornado below).
 aiohttp>=3.14.3
+# tensorrt-llm 1.3.0rc26 declares `fastapi>=0.136.3` and `starlette>=1.3.1`, but
+# the upstream tensorrt-llm/release image bundles fastapi 0.121.3 and starlette
+# 0.50.0 -- below what the pinned TRT-LLM itself asks for. fastapi below 0.135.2
+# caps starlette (0.121.3 pins starlette<0.51.0), so the two have to move
+# together. Floors here refresh the bundled copies in place under --no-deps;
+# trtllm_runtime.Dockerfile raises the system copies to the same floors. Keep
+# the specifiers in step.
+fastapi>=0.141.1
 gitpython>=3.1.58
 
 # Used by the trtllm video_diffusion handler to encode generated frames to MP4.
@@ -49,6 +57,7 @@ pillow>=12.3.0
 # same floor. Keep the two specifiers in step.
 PyNvVideoCodec>=2.2.0
 soupsieve>=2.8.4  # JupyterLab stack; see note above jupyter-server
+starlette>=1.3.1  # moves with the fastapi floor above; see note there
 tornado>=6.5.6  # JupyterLab stack; see note above jupyter-server
 # Required by ai_dynamo_runtime (companion to msgspec above).
 uvloop>=0.21.0

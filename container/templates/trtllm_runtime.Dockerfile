@@ -256,6 +256,36 @@ RUN /usr/bin/python3 -m pip uninstall -y --break-system-packages opencv-python-h
     ! /usr/bin/python3 -c "import cv2" 2>/dev/null && \
     [ ! -e /usr/local/lib/python3.12/dist-packages/opencv_python_headless.libs ]
 
+# Raise the bundled fastapi/starlette pair to what the pinned TensorRT-LLM
+# already asks for. tensorrt-llm 1.3.0rc26 declares `fastapi>=0.136.3` and
+# `starlette>=1.3.1`; the base image ships 0.121.3 and 0.50.0, so the image is
+# below its own framework's stated requirement.
+#
+# The two have to move together. Every fastapi below 0.135.2 caps starlette --
+# 0.121.3 pins `starlette<0.51.0` -- so raising starlette alone leaves the
+# system-site solve unsatisfiable, and raising fastapi alone does not move
+# starlette off 0.50.0 because 0.50.0 already satisfies `starlette>=0.46.0`.
+# Naming both is what makes the pair land.
+#
+# Floors, not pins: these track what TRT-LLM requires rather than a version this
+# repo chose, so a base image that catches up makes this block a no-op instead of
+# a downgrade. requirements.trtllm.txt carries the same floors for
+# /opt/dynamo/venv; keep the two in step.
+#
+# System interpreter for the same reason as the blocks above: with VIRTUAL_ENV
+# set, plain pip targets the venv and leaves the system-site copy in place.
+RUN set -eu; \
+    /usr/bin/python3 -m pip install --break-system-packages --no-cache-dir \
+        'fastapi>=0.141.1' 'starlette>=1.3.1'; \
+    f=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("fastapi"))'); \
+    s=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("starlette"))'); \
+    echo "fastapi $f / starlette $s"; \
+    [ "$(printf '%s\n0.141.1\n' "$f" | sort -V | tail -1)" = "$f" ] \
+        || { echo "ERROR: wanted fastapi >= 0.141.1, got $f" >&2; exit 1; }; \
+    [ "$(printf '%s\n1.3.1\n' "$s" | sort -V | tail -1)" = "$s" ] \
+        || { echo "ERROR: wanted starlette >= 1.3.1, got $s" >&2; exit 1; }; \
+    /usr/bin/python3 -c 'import fastapi, starlette'
+
 # Upgrade DALI past its own media-codec cleanup. Upstream restricted DALI's
 # vendored ffmpeg build to drop the software h264/hevc/aac decoders
 # (NVIDIA/DALI_deps#162, NVIDIA/DALI#6352), first released in 2.1.1; the base
@@ -599,6 +629,15 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 # has the same doubling problem. Dropping them here is free: the overlay restores
 # whatever runtime_full holds, so listing one that did not move costs nothing and
 # omitting one that did would leave stale metadata behind.
+#
+# fastapi and starlette are the aiohttp case again: runtime_full upgrades both in
+# system site and the version-stamped metadata directory is renamed by the upgrade
+# (starlette-0.50.0.dist-info -> starlette-1.3.1.dist-info). The inventory reads
+# that directory, so without these entries the base image's copies would ship
+# beside the upgraded ones and the upgrade would not show. Their own dependencies
+# are deliberately absent: the base already carries anyio 4.13.0, pydantic 2.13.4
+# and typing-extensions 4.15.0, all of which satisfy the new floors, so pip leaves
+# them alone and nothing is renamed.
 RUN rm -rf /workspace /home/ubuntu \
     /usr/local/bin/etcd \
     /usr/local/bin/etcdctl \
@@ -629,7 +668,11 @@ RUN rm -rf /workspace /home/ubuntu \
     /usr/local/lib/python3.12/dist-packages/aiohappyeyeballs-* \
     /usr/local/lib/python3.12/dist-packages/attr \
     /usr/local/lib/python3.12/dist-packages/attrs \
-    /usr/local/lib/python3.12/dist-packages/attrs-* && \
+    /usr/local/lib/python3.12/dist-packages/attrs-* \
+    /usr/local/lib/python3.12/dist-packages/fastapi \
+    /usr/local/lib/python3.12/dist-packages/fastapi-* \
+    /usr/local/lib/python3.12/dist-packages/starlette \
+    /usr/local/lib/python3.12/dist-packages/starlette-* && \
     ! /usr/bin/python3 -c "import cv2" 2>/dev/null && \
     ! /usr/bin/python3 -c "import wandb" 2>/dev/null
 COPY --from=runtime_full / /
