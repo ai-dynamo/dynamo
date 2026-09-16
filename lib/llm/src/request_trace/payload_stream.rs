@@ -87,7 +87,6 @@ where
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match Pin::new(&mut self.inner).poll_next(cx) {
             Poll::Ready(Some(chunk)) => {
-                // Store chunk for aggregation
                 self.chunks.push(chunk.clone());
                 // Capture the prefix now: the SSE monitor drops this stream on error.
                 if chunk.is_error()
@@ -100,12 +99,10 @@ where
                             tx.send(aggregate_with_partial_recovery(chunks, parsing_options).await);
                     });
                 }
-                // Forward the chunk unchanged downstream
                 Poll::Ready(Some(chunk))
             }
             Poll::Ready(None) => {
                 if let Some(tx) = self.done_tx.take() {
-                    // Aggregate all collected chunks
                     let chunks = std::mem::take(&mut self.chunks);
                     if chunks.is_empty() {
                         tracing::debug!(
