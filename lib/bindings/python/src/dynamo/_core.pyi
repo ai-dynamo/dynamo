@@ -1913,7 +1913,12 @@ class KvRouterConfig:
                 The index neither holds nor restores KV cache, so a match is a routing hint rather than a guarantee that the blocks are still resident.
                 The index retains at most 16,384 least-recently-used sessions and opportunistically reclaims unreferenced logical leaves.
             shared_cache_multiplier: Credit multiplier for shared cache hits beyond the device prefix (default: 0.0).
-            shared_cache_type: External shared KV cache type, "none" or "hicache" (default: "none").
+            shared_cache_type: External shared KV cache type, "none", "hicache", or
+                "mooncake-store" (default: "none"). Mooncake Store requires local
+                KV events, positive overlap_score_credit, and compatible vLLM worker
+                metadata from the explicit MooncakeStoreWorkerExtension. It cannot
+                be combined with use_remote_indexer=True. Missing or unsupported
+                metadata disables only the shared-cache hint, not GPU routing.
             conditional_disagg_enabled: Enable conditional-disagg bypass from prefill to decode (default: False).
             conditional_disagg_policy: Conditional-disagg policy, one of "isl_bounding", "prefill_load", or "isl_or_load" (default: "isl_bounding").
             conditional_disagg_eff_isl_threshold: For "isl_bounding" and the ISL arm of "isl_or_load", require effective ISL to be below this many tokens (default: 2048).
