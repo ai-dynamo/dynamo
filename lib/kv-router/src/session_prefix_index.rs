@@ -228,12 +228,6 @@ impl SessionPrefixIndexer {
         self.state.write().clear_worker_frontiers(worker)
     }
 
-    /// Removes a session and reclaims its unshared nodes.
-    pub fn remove_session(&self, session_id: &str) -> bool {
-        let mut state = self.state.write();
-        state.drop_session(session_id)
-    }
-
     pub fn node_count(&self) -> usize {
         self.state.read().nodes.len()
     }
@@ -295,20 +289,6 @@ impl IndexState {
             expected_parent = Some(block_hash);
         }
         Ok(())
-    }
-
-    // Explicit session removal reclaims unshared lineage nodes.
-    fn drop_session(&mut self, session_id: &str) -> bool {
-        let Some(entry) = self.session_to_worker_frontiers.remove(session_id) else {
-            return false;
-        };
-        for (worker, frontiers) in entry.worker_frontiers {
-            for frontier in frontiers {
-                self.remove_reverse_frontier(worker, frontier, session_id);
-                self.release_frontier(frontier);
-            }
-        }
-        true
     }
 
     fn resolve_or_insert_root(&mut self, block_hash: ExternalSequenceBlockHash) -> NodeId {
@@ -545,25 +525,6 @@ impl IndexState {
             self.remove_frontier_binding(session_id, worker, *node);
         }
         affected.len()
-    }
-
-    // Reclaim ancestors until reaching a shared frontier or parent.
-    fn release_frontier(&mut self, frontier: NodeId) {
-        self.nodes[frontier].frontier_refs -= 1;
-
-        let mut current = Some(frontier);
-        while let Some(node) = current {
-            let entry = self.nodes[node];
-            if entry.frontier_refs > 0 || entry.child_count > 0 {
-                break;
-            }
-            self.nodes.remove(node);
-            self.hash_to_node.remove(&entry.block_hash);
-            if let Some(parent) = entry.parent {
-                self.nodes[parent].child_count -= 1;
-            }
-            current = entry.parent;
-        }
     }
 }
 
@@ -915,75 +876,6 @@ mod tests {
         assert!(lineage_on_worker(&indexer, "s1", worker(2)).is_empty());
         assert_eq!(lineage_on_worker(&indexer, "s1", worker(1)), vec![chain]);
         assert_eq!(indexer.node_count(), 2, "clear preserves logical topology");
-    }
-
-    #[test]
-    fn removing_a_session_frees_only_its_exclusive_tail() {
-        let trunk = hashes(vec![1, 2]);
-        let tail = hashes(vec![3]);
-        let indexer = SessionPrefixIndexer::new();
-
-        indexer
-            .update_session_from_stored_blocks("s1", worker(1), None, &trunk)
-            .unwrap();
-        indexer
-            .update_session_from_stored_blocks("s2", worker(1), None, &trunk)
-            .unwrap();
-        indexer
-            .update_session_from_stored_blocks("s2", worker(1), Some(trunk[1]), &tail)
-            .unwrap();
-        assert_eq!(indexer.node_count(), 3);
-
-        assert!(indexer.remove_session("s2"));
-        assert_eq!(
-            indexer.node_count(),
-            2,
-            "only the tail s2 held exclusively is reclaimed"
-        );
-        assert_eq!(indexer.get_node_from_hash(tail[0]), None);
-        assert_eq!(
-            lineage_of(&indexer, "s1"),
-            vec![trunk.clone()],
-            "the surviving session keeps the shared trunk"
-        );
-
-        assert!(indexer.remove_session("s1"));
-        assert_eq!(
-            indexer.node_count(),
-            0,
-            "the last session out releases every slot"
-        );
-        assert_eq!(indexer.session_count(), 0);
-        assert_eq!(indexer.get_node_from_hash(trunk[0]), None);
-
-        assert!(
-            !indexer.remove_session("s1"),
-            "removing an unknown session reports that nothing was removed"
-        );
-    }
-
-    #[test]
-    fn stale_node_handles_do_not_alias_after_reuse() {
-        let first = hashes(vec![1]);
-        let second = hashes(vec![2]);
-        let indexer = SessionPrefixIndexer::new();
-
-        indexer
-            .update_session_from_match("s1", worker(1), first[0])
-            .unwrap();
-        let stale = indexer.get_node_from_hash(first[0]).unwrap();
-        indexer.remove_session("s1");
-
-        indexer
-            .update_session_from_match("s2", worker(1), second[0])
-            .unwrap();
-        let fresh = indexer.get_node_from_hash(second[0]).unwrap();
-
-        assert_ne!(stale, fresh, "the generational key must not be reissued");
-        assert!(
-            indexer.get_node(stale).is_none(),
-            "a handle to a removed node must not resolve to its replacement"
-        );
     }
 
     #[test]
