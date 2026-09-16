@@ -41,6 +41,8 @@ const (
 )
 
 func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
+	const updatedSidecarImage = "runtime:1.6.0"
+
 	var (
 		oneReplica       = int32(1)
 		validReplicas    = int32(3)
@@ -118,7 +120,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		// Native-sidecar admission, including alpha conversion and unchanged update invariants.
 		{name: "native sidecar beta create", deployment: nativeDCDForAdmission(t, false, nil)},
 		{name: "native sidecar beta update", oldDeployment: nativeDCDForAdmission(t, false, nil), deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
-			c.PodTemplate.Spec.InitContainers[0].Image = "runtime:1.6.0"
+			c.PodTemplate.Spec.InitContainers[0].Image = updatedSidecarImage
 		})},
 		{name: "native sidecar beta disabled checkpoint", deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: false}}
@@ -149,7 +151,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		},
 		{name: "native sidecar alpha create", deployment: nativeDCDForAdmission(t, true, nil)},
 		{name: "native sidecar alpha update", oldDeployment: nativeDCDForAdmission(t, true, nil), deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
-			c.PodTemplate.Spec.InitContainers[0].Image = "runtime:1.6.0"
+			c.PodTemplate.Spec.InitContainers[0].Image = updatedSidecarImage
 		})},
 		{name: "native sidecar alpha disabled checkpoint", deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: false}}

@@ -117,13 +117,12 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	ComponentType ComponentType `json:"type,omitempty"`
 
-	// RuntimeVersionOverride declares the Dynamo runtime version in this component's
-	// main image. DGD admission requires it when the main image in the selected component or role
-	// PodTemplates has no parseable semantic-version tag; controller-generated DCDs may omit it. Set
-	// it also when a parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH
-	// value, for example "1.4.0". It does not change the image. Setting or changing an override that
-	// resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with every selected
-	// template's runtime version.
+	// RuntimeVersionOverride declares the Dynamo runtime compatibility version in the runtime
+	// image: main by default, or the init container selected by dynamoSidecar. DGD admission requires
+	// it when that image has no parseable semantic-version tag; controller-generated DCDs may omit it.
+	// Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical
+	// MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to
+	// version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
 	// +kubebuilder:validation:Pattern=`^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$`
 	// +optional
 	RuntimeVersionOverride string `json:"runtimeVersionOverride,omitempty"`
