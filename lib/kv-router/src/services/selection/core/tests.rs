@@ -1726,6 +1726,74 @@ async fn prefill_complete_is_idempotent_for_a_live_booking() {
 }
 
 #[tokio::test]
+async fn repeated_affinity_invalidation_yields_and_preserves_new_bindings() {
+    use super::super::affinity::AffinityVersion;
+    use std::future::Future;
+
+    for cancel in [false, true] {
+        let mut core = core_with_session_affinity();
+        core.upsert_worker(worker(1)).await.unwrap();
+        let key = default_key();
+        let entry = core.entry(&key).unwrap();
+        let table = entry.affinity.get().unwrap().clone();
+        let unavailable = WorkerAffinityTarget::new(2, Some(0));
+        table.apply_replica_update(
+            "s".into(),
+            unavailable,
+            AffinityVersion {
+                sequence: 1,
+                writer_id: 99,
+            },
+        );
+        let invalidations = Arc::new(AtomicUsize::new(0));
+        core.after_affinity_invalidation = Some(Arc::new({
+            let table = table.clone();
+            let invalidations = invalidations.clone();
+            move || {
+                let count = invalidations.fetch_add(1, Ordering::SeqCst) + 1;
+                // A finite burst also makes a missing yield fail instead of hanging the test.
+                if count <= 64 {
+                    table.apply_replica_update(
+                        "s".into(),
+                        unavailable,
+                        AffinityVersion {
+                            sequence: count as u64 + 1,
+                            writer_id: 99,
+                        },
+                    );
+                }
+            }
+        }));
+        let mut pending = Box::pin(core.hold_session(&table, "s", &key));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(pending.as_mut().poll(&mut context).is_pending());
+        assert_eq!(invalidations.load(Ordering::SeqCst), 32);
+        if cancel {
+            core.cancel_token.cancel();
+            assert!(matches!(
+                pending.await,
+                Err(SelectionError::Scheduler(
+                    KvSchedulerError::SubscriberShutdown
+                ))
+            ));
+        } else {
+            let healthy = WorkerAffinityTarget::new(1, Some(0));
+            table.apply_replica_update(
+                "s".into(),
+                healthy,
+                AffinityVersion {
+                    sequence: 100,
+                    writer_id: 99,
+                },
+            );
+            let hold = pending.await.unwrap().unwrap();
+            assert!(matches!(hold, Hold::Bound { target, .. } if target == healthy));
+            assert_eq!(invalidations.load(Ordering::SeqCst), 32);
+        }
+    }
+}
+
+#[tokio::test]
 async fn early_peer_accounting_follows_host_policy_without_granting_eligibility() {
     for policy in [
         ReplicaWorkerPolicy::LazyRegister,

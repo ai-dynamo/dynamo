@@ -293,6 +293,8 @@ pub struct SelectionCore {
     /// Scheduler-config publishes that changed a partition's worker map.
     #[cfg(test)]
     pub(super) publish_count: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    pub(super) after_affinity_invalidation: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 fn affinity_error(error: AffinityError) -> SelectionError {
@@ -397,6 +399,8 @@ impl SelectionCore {
             fail_upsert_for: parking_lot::Mutex::default(),
             #[cfg(test)]
             publish_count: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            after_affinity_invalidation: None,
         }
     }
 

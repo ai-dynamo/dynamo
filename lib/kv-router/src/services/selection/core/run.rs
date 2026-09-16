@@ -48,6 +48,7 @@ use super::hint::{hint_capable_partition, transfer_hint_for_selection};
 /// `try_acquire` then `join_initializing` attempts before a commit that finds
 /// the session initializing routes unpinned (see the module doc).
 const JOIN_ATTEMPTS: usize = 2;
+const AFFINITY_INVALIDATIONS_BEFORE_YIELD: usize = 32;
 use super::*;
 
 /// Action id of the single `kv.fetch` action a selection's KV hint carries.
@@ -576,6 +577,7 @@ impl SelectionCore {
         session_id: &str,
         key: &RoutingPartitionId,
     ) -> Result<Option<Hold>, SelectionError> {
+        let mut invalidations = 0;
         loop {
             let acquired = tokio::select! {
                 _ = self.cancel_token.cancelled() => {
@@ -593,6 +595,17 @@ impl SelectionCore {
                         "Session affinity target is not schedulable; re-initializing"
                     );
                     lease.invalidate();
+                    drop(lease);
+                    #[cfg(test)]
+                    if let Some(hook) = &self.after_affinity_invalidation {
+                        hook();
+                    }
+                    invalidations += 1;
+                    if invalidations == AFFINITY_INVALIDATIONS_BEFORE_YIELD {
+                        // Replica updates can keep acquire immediately ready.
+                        tokio::task::yield_now().await;
+                        invalidations = 0;
+                    }
                 }
                 Ok(hold) => return Ok(Some(hold)),
                 Err(AffinityError::ResourceExhausted(_)) => {
