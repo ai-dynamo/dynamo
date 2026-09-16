@@ -353,6 +353,66 @@ fn opaque_non_json_replay_metadata_is_accepted_by_the_abi_table() {
 }
 
 #[test]
+fn replay_metadata_limit_rejects_before_request_commitment() {
+    let (table, handle) = create_replay();
+    let prompt = [10_u32];
+    let authored_id = b"metadata-boundary";
+    let at_limit = vec![0xff_u8; dynamo_steppable_provider::MAX_REPLAY_CONTEXT_METADATA_BYTES];
+    let over_limit = vec![0xff_u8; at_limit.len() + 1];
+    let context = |metadata: &[u8]| aiperf_steppable_abi::ReplayContextV1 {
+        struct_size: std::mem::size_of::<aiperf_steppable_abi::ReplayContextV1>() as u32,
+        flags: REPLAY_CONTEXT_FLAG_METADATA,
+        authored_id: ByteSliceV1 {
+            data: authored_id.as_ptr(),
+            len: authored_id.len() as u64,
+        },
+        session_id: ByteSliceV1::EMPTY,
+        metadata: ByteSliceV1 {
+            data: metadata.as_ptr(),
+            len: metadata.len() as u64,
+        },
+        turn_index: 0,
+        prompt_token_source: 0,
+        reserved: 0,
+    };
+
+    let mut at_limit_request = request(&prompt, [46; 16]);
+    at_limit_request.flags |= REQUEST_FLAG_REPLAY_CONTEXT;
+    at_limit_request.replay_context = context(&at_limit);
+    let mut returned = [0; 16];
+    assert_eq!(
+        unsafe { table.submit.expect("at-limit submit")(handle, at_limit_request, &mut returned) },
+        StatusV1::OK
+    );
+    assert_eq!(returned, [46; 16]);
+
+    let mut oversized_request = request(&prompt, [47; 16]);
+    oversized_request.flags |= REQUEST_FLAG_REPLAY_CONTEXT;
+    oversized_request.replay_context = context(&over_limit);
+    returned = [99; 16];
+    assert_eq!(
+        unsafe {
+            table.submit.expect("oversized submit")(handle, oversized_request, &mut returned)
+        },
+        StatusV1::INVALID_ARGUMENT
+    );
+    assert_eq!(returned, [0; 16]);
+
+    assert_eq!(
+        unsafe {
+            table.submit.expect("submit after oversized rejection")(
+                handle,
+                request(&prompt, [47; 16]),
+                &mut returned,
+            )
+        },
+        StatusV1::OK
+    );
+    assert_eq!(returned, [47; 16]);
+    unsafe { table.destroy.expect("destroy")(handle) };
+}
+
+#[test]
 fn provider_cdylib_loads_through_the_fixed_steppable_entrypoint() {
     let test_binary = std::env::current_exe().expect("test binary path");
     let cdylib = test_binary

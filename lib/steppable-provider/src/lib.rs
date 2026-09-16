@@ -167,6 +167,13 @@ impl BackendConfig {
 
 const MAX_PROVIDER_PAYLOAD_BYTES: u64 = 1024 * 1024;
 
+/// Maximum opaque replay-context metadata accepted for one request.
+///
+/// This matches the V1 placement ABI's tagged-metadata limit. The core stores
+/// opaque bytes as JSON values, so the bound is checked before the reversible
+/// byte-array lowering can allocate one JSON value per byte.
+pub const MAX_REPLAY_CONTEXT_METADATA_BYTES: usize = 64 * 1024;
+
 type RouterPlacement = DynPlacement<RouterEventObservation, KvReplayMetadata>;
 
 fn router_args(engine: &ReplayEngineConfig) -> anyhow::Result<MockEngineArgs> {
@@ -378,8 +385,12 @@ unsafe fn replay_context(
         // or rejecting caller data. An array cannot collide with the core's
         // object-only routing controls and round-trips every byte, including
         // invalid UTF-8.
+        let metadata = unsafe { borrowed_bytes(context.metadata) }?;
+        if metadata.len() > MAX_REPLAY_CONTEXT_METADATA_BYTES {
+            return Err(StatusV1::INVALID_ARGUMENT);
+        }
         serde_json::Value::Array(
-            unsafe { borrowed_bytes(context.metadata) }?
+            metadata
                 .iter()
                 .copied()
                 .map(serde_json::Value::from)
