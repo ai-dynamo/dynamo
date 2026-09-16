@@ -121,14 +121,20 @@ jobs:
           KUBECONFIG: ${{ github.workspace }}/.kubeconfig-vcluster
         run: |
           set -euo pipefail
-          kubectl delete namespace "${DGDR_NAMESPACE}" \
+          source .github/scripts/retry_kubectl.sh
+          retry_kubectl delete namespace "${DGDR_NAMESPACE}" \
             --ignore-not-found --wait=true --timeout=5m
+          manifest=$(mktemp)
+          chmod 600 "$manifest"
+          trap 'rm -f "$manifest"' EXIT
           kubectl create namespace "${DGDR_NAMESPACE}" \
-            --dry-run=client -o yaml | kubectl apply -f -
+            --dry-run=client -o yaml > "$manifest"
+          retry_kubectl apply -f "$manifest"
           kubectl create secret generic hf-token-secret \
             --namespace="${DGDR_NAMESPACE}" \
             --from-literal=HF_TOKEN="${HF_TOKEN}" \
-            --dry-run=client -o yaml | kubectl apply -f -
+            --dry-run=client -o yaml > "$manifest"
+          retry_kubectl apply -f "$manifest"
 
       - name: Verify DGDR test prerequisites
         shell: bash
@@ -136,10 +142,11 @@ jobs:
           KUBECONFIG: ${{ github.workspace }}/.kubeconfig-vcluster
         run: |
           set -euo pipefail
-          kubectl wait --for=condition=established \
+          source .github/scripts/retry_kubectl.sh
+          retry_kubectl wait --for=condition=established \
             crd/dynamographdeploymentrequests.nvidia.com \
             --timeout=120s
-          kubectl get secret hf-token-secret -n "${DGDR_NAMESPACE}" >/dev/null
+          retry_kubectl get secret hf-token-secret -n "${DGDR_NAMESPACE}" >/dev/null
 
       - name: Run CPU DGDR tests
         uses: $/.github/actions/dynamo-deploy-test
@@ -162,5 +169,21 @@ jobs:
         env:
           KUBECONFIG: ${{ github.workspace }}/.kubeconfig-vcluster
         run: |
-          kubectl delete namespace "${DGDR_NAMESPACE}" \
+          set -euo pipefail
+          source .github/scripts/retry_kubectl.sh
+          retry_kubectl delete namespace "${DGDR_NAMESPACE}" \
             --ignore-not-found --wait=true --timeout=5m
+
+      - name: Collect vCluster diagnostics on failure
+        if: failure()
+        shell: bash
+        run: bash .github/scripts/collect_vcluster_diagnostics.sh "${RUNNER_TEMP}/dgdr-vcluster-diagnostics"
+
+      - name: Upload vCluster diagnostics
+        if: failure()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          name: vcluster-diagnostics-dgdr-${{ matrix.suite }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/dgdr-vcluster-diagnostics/
+          retention-days: 7
+          if-no-files-found: warn

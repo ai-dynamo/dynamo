@@ -28,7 +28,7 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
           value: chat
 
       services:
-        VllmWorker:
+        worker:
           extraPodSpec:
             mainContainer:
               args:
@@ -162,6 +162,17 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   This variable changes the discovery address, not the listener address. Direct ZMQ continues to bind
   an IPv4 wildcard, so an IPv6 value does not enable IPv6 listening. This variable does not affect
   NATS or ZMQ broker mode.
+</ParamField>
+
+<ParamField path="DYN_ZMQ_IO_THREADS" type="integer" default="4">
+  Number of libzmq background I/O threads in the process-wide event-plane context. All event-plane
+  PUB/SUB sockets in a frontend or worker process share this context. This setting does not change
+  the Tokio runtime size or the number of KV indexer threads.
+
+  Set a positive integer before starting the process. Dynamo reads the value when it first creates
+  the shared context; invalid values fail context initialization. Restart the process to change it.
+  Set `1` to restore the previous single-thread setting. This variable does not affect NATS or ZMQ
+  contexts created outside the shared event-plane transport.
 </ParamField>
 
 <ParamField path="--connector" type="string" default="null">

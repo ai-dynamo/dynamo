@@ -112,6 +112,8 @@ def _unsupported_fpm_trace_role(dynamo_config: DynamoConfig) -> Optional[str]:
     """Return the worker role when the selected path does not create an FPM relay."""
     if is_snapshot_enabled():
         return "snapshot"
+    if dynamo_config.rerank_worker:
+        return "rerank"
     if dynamo_config.embedding_worker:
         return "embedding"
     if (
@@ -450,9 +452,14 @@ async def parse_args(args: list[str]) -> Config:
     if dynamo_config.enable_multimodal:
         parsed_args.enable_multimodal = True
 
-    # If --embedding-worker is set, also set SGLang's --is-embedding flag
-    if dynamo_config.embedding_worker:
+    # Both dedicated pooling modes use SGLang's embedding engine.
+    if dynamo_config.embedding_worker or dynamo_config.rerank_worker:
         parsed_args.is_embedding = True
+    if dynamo_config.rerank_worker and (
+        parsed_args.disaggregation_mode != "null"
+        or getattr(parsed_args, "dllm_algorithm", None)
+    ):
+        raise ValueError("--rerank-worker requires aggregated cross-encoder serving")
 
     # Enable encoder_only mode for multimodal encode workers to load only vision encoder
     # This significantly reduces memory usage by avoiding loading the full LLM weights
@@ -461,7 +468,9 @@ async def parse_args(args: list[str]) -> Config:
 
     endpoint = dynamo_config.endpoint
     if endpoint is None:
-        if dynamo_config.embedding_worker:
+        if dynamo_config.rerank_worker:
+            endpoint = f"dyn://{namespace}.rerank.generate"
+        elif dynamo_config.embedding_worker:
             endpoint = f"dyn://{namespace}.backend.generate"
         elif dynamo_config.image_diffusion_worker:
             endpoint = f"dyn://{namespace}.backend.generate"
@@ -549,8 +558,13 @@ async def parse_args(args: list[str]) -> Config:
     if should_fetch_model(parsed_args, model_path):
         await fetch_model(model_path)
 
-    if is_snapshot_enabled():
+    snapshot_enabled = is_snapshot_enabled()
+    if snapshot_enabled:
         configure_snapshot_capture_env()
+        # SGLang reads these raw fields before late resolution, so snapshot mode
+        # must set them before ServerArgs creation.
+        parsed_args.enable_memory_saver = True
+        parsed_args.enable_forward_pass_metrics = False
 
     # TODO: sglang downloads the model in `from_cli_args`, which means we had to
     # fetch_model (download the model) here, in `parse_args`. `parse_args` should not
@@ -571,7 +585,11 @@ async def parse_args(args: list[str]) -> Config:
         parsed_args.enable_memory_saver = True
 
     fpm_source = _forward_pass_metrics_source(dynamo_config)
-    if fpm_source and not getattr(parsed_args, "enable_forward_pass_metrics", False):
+    if (
+        not snapshot_enabled
+        and fpm_source
+        and not getattr(parsed_args, "enable_forward_pass_metrics", False)
+    ):
         parsed_args.enable_forward_pass_metrics = True
         logging.info("Enabled forward_pass_metrics from %s", fpm_source)
 

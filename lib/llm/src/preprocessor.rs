@@ -11,11 +11,9 @@
 //!
 //! The Preprocessor will accept any IngressRequest and transform it to a BackendRequest.
 
-#[cfg(feature = "mm-routing")]
-pub mod lightseek_mm;
 pub mod media;
-#[cfg(all(feature = "mm-routing", any(feature = "media-ffmpeg", test)))]
-mod mm_routing;
+#[cfg(feature = "mm-routing")]
+pub mod mm_routing;
 pub mod prompt;
 pub mod speculative_prefill;
 pub(crate) mod structural_tag;
@@ -52,11 +50,15 @@ use std::{
     pin::Pin,
     sync::{Arc, Mutex, OnceLock},
 };
+use tokio_util::sync::CancellationToken;
 use tracing;
 
-#[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
-use crate::local_model::runtime_config::VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY;
 use crate::local_model::runtime_config::{TOKEN_BUDGET_RUNTIME_KEY, TokenBudget};
+#[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
+use crate::local_model::runtime_config::{
+    VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+    VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+};
 #[cfg(feature = "mm-routing")]
 use crate::model_card::ModelInfoType;
 use crate::model_card::{ModelDeploymentCard, ModelInfo, PromptFormatterArtifact};
@@ -112,7 +114,6 @@ pub use crate::protocols::common::metrics::{
 };
 pub use crate::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
 
-use crate::protocols::common::invalid_argument_error;
 use crate::protocols::common::llm_backend::EmbeddingsEngineOutput;
 
 fn routing_priorities(hints: Option<&AgentHints>) -> (Option<f64>, Option<u32>, Option<i32>) {
@@ -124,6 +125,14 @@ fn routing_priorities(hints: Option<&AgentHints>) -> (Option<f64>, Option<u32>, 
     let strict_priority = hints.and_then(|h| h.strict_priority);
     let priority = hints.and_then(|h| h.priority);
     (priority_jump, strict_priority, priority)
+}
+
+pub(crate) fn invalid_argument_error(message: impl Into<String>) -> anyhow::Error {
+    DynamoError::builder()
+        .error_type(ErrorType::InvalidArgument)
+        .message(message.into())
+        .build()
+        .into()
 }
 
 // Preserves terminal versus recoverable failures when moka shares a
@@ -777,6 +786,7 @@ enum MmRoutingEntry {
     Video {
         mm_hash: u64,
         placeholder_token_id: TokenIdType,
+        event_video_token_id: Option<TokenIdType>,
         target_tokens: Vec<TokenIdType>,
         replacement_tokens: Vec<TokenIdType>,
     },
@@ -825,6 +835,10 @@ fn routing_bos_to_prepend(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RoutingImagePromptLayout {
     RepeatedPad,
+    WrappedRepeatedPad {
+        image_start: TokenIdType,
+        image_end: TokenIdType,
+    },
     KimiK3 {
         media_begin: TokenIdType,
         media_content: TokenIdType,
@@ -840,19 +854,25 @@ enum RoutingImageDimensionPolicy {
 }
 
 #[cfg(feature = "mm-routing")]
+fn runtime_has_vllm_generate_capability(
+    runtime_config: &crate::local_model::runtime_config::ModelRuntimeConfig,
+) -> bool {
+    use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
+
+    runtime_config
+        .get_engine_specific::<bool>(VLLM_INFERENCE_V1_GENERATE_CAPABILITY)
+        .ok()
+        .flatten()
+        .unwrap_or(false)
+}
+
+#[cfg(feature = "mm-routing")]
 fn routing_image_dimension_policy(
     runtime_config: &crate::local_model::runtime_config::ModelRuntimeConfig,
     frontend_decoding: bool,
     prompt_layout: Option<RoutingImagePromptLayout>,
 ) -> RoutingImageDimensionPolicy {
-    use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
-
-    let is_vllm = runtime_config
-        .get_engine_specific::<bool>(VLLM_INFERENCE_V1_GENERATE_CAPABILITY)
-        .ok()
-        .flatten()
-        .unwrap_or(false);
-    if is_vllm
+    if runtime_has_vllm_generate_capability(runtime_config)
         && !frontend_decoding
         && matches!(prompt_layout, Some(RoutingImagePromptLayout::KimiK3 { .. }))
     {
@@ -875,27 +895,65 @@ fn encode_routing_segment(
 #[cfg(feature = "mm-routing")]
 fn resolve_routing_image_prompt_layout(
     tokenizer: &dyn Tokenizer,
-    kind: lightseek_mm::ImagePromptKind,
+    kind: mm_routing::image::ImagePromptKind,
+    expected_image_token_id: Option<TokenIdType>,
 ) -> Result<RoutingImagePromptLayout> {
-    if kind == lightseek_mm::ImagePromptKind::RepeatedPad {
+    if kind == mm_routing::image::ImagePromptKind::RepeatedPad {
         return Ok(RoutingImagePromptLayout::RepeatedPad);
     }
 
-    let resolve_control = |token: &str| -> Result<TokenIdType> {
+    let resolve_segmented_control = |label: &str, token: &str| -> Result<TokenIdType> {
         let ids = encode_routing_segment(tokenizer, token, true)?;
         if ids.len() != 1 {
             bail!(
-                "Kimi-K3 routing control token {token:?} encoded to {} ids ({ids:?}); expected exactly one",
+                "{label} routing control token {token:?} encoded to {} ids ({ids:?}); expected exactly one",
                 ids.len()
             );
         }
         Ok(ids[0])
     };
 
+    if kind == mm_routing::image::ImagePromptKind::Nemotron {
+        // Nemotron's fixed image controls are already registered as atomic
+        // HF added tokens. Resolve them through the same ordinary `encode`
+        // path used for the rendered request; unlike Kimi-K3, this layout has
+        // no mixed trusted/untrusted segment that requires `encode_segments`.
+        let resolve_atomic_control = |label: &str, token: &str| -> Result<TokenIdType> {
+            let ids = tokenizer.encode(token)?.token_ids().to_vec();
+            if ids.len() != 1 {
+                bail!(
+                    "{label} routing control token {token:?} encoded to {} ids ({ids:?}); expected exactly one",
+                    ids.len()
+                );
+            }
+            Ok(ids[0])
+        };
+        let image_context = resolve_atomic_control(
+            "Nemotron image-context",
+            mm_routing::nemotron::IMAGE_CONTEXT,
+        )?;
+        let expected_image_token_id =
+            expected_image_token_id.context("Nemotron image context token id is unavailable")?;
+        anyhow::ensure!(
+            image_context == expected_image_token_id,
+            "Nemotron tokenizer image-context id {image_context} does not match config id {expected_image_token_id}"
+        );
+        return Ok(RoutingImagePromptLayout::WrappedRepeatedPad {
+            image_start: resolve_atomic_control(
+                "Nemotron image-start",
+                mm_routing::nemotron::IMAGE_START,
+            )?,
+            image_end: resolve_atomic_control(
+                "Nemotron image-end",
+                mm_routing::nemotron::IMAGE_END,
+            )?,
+        });
+    }
+
     Ok(RoutingImagePromptLayout::KimiK3 {
-        media_begin: resolve_control("<|media_begin|>")?,
-        media_content: resolve_control("<|media_content|>")?,
-        media_end: resolve_control("<|media_end|>")?,
+        media_begin: resolve_segmented_control("Kimi-K3 media-begin", "<|media_begin|>")?,
+        media_content: resolve_segmented_control("Kimi-K3 media-content", "<|media_content|>")?,
+        media_end: resolve_segmented_control("Kimi-K3 media-end", "<|media_end|>")?,
     })
 }
 
@@ -931,6 +989,14 @@ fn append_mm_routing_replacement_with_fill(
     match layout {
         RoutingImagePromptLayout::RepeatedPad => {
             expanded.extend(std::iter::repeat_n(fill_token, num_image_tokens));
+        }
+        RoutingImagePromptLayout::WrappedRepeatedPad {
+            image_start,
+            image_end,
+        } => {
+            expanded.push(image_start);
+            expanded.extend(std::iter::repeat_n(fill_token, num_image_tokens));
+            expanded.push(image_end);
         }
         RoutingImagePromptLayout::KimiK3 {
             media_begin,
@@ -970,7 +1036,7 @@ fn apply_tracked_mm_replacements(
     Vec<Option<dynamo_kv_router::protocols::BlockExtraInfo>>,
 )> {
     use dynamo_kv_router::protocols::{BlockExtraInfo, BlockMmObjectInfo};
-    use dynamo_kv_router::zmq_wire::normalize_mm_placeholder_runs;
+    use dynamo_kv_router::zmq_wire::{normalize_mm_placeholder_runs, normalize_mm_token_runs};
 
     anyhow::ensure!(block_size > 0, "MM routing block size must be positive");
     anyhow::ensure!(
@@ -1062,13 +1128,21 @@ fn apply_tracked_mm_replacements(
 
         let worker_block = &worker_tokens[block_start..block_end];
         let routing_block = &mut routing_tokens[block_start..block_end];
-        match normalize_mm_placeholder_runs(
-            worker_block,
-            image_token_id,
-            video_token_id,
-            &mm_hashes,
-        ) {
-            Some((normalized, _)) => {
+        let normalized = if video_token_id.is_some() {
+            normalize_mm_placeholder_runs(worker_block, image_token_id, video_token_id, &mm_hashes)
+                .map(|(tokens, _)| tokens)
+        } else if let Some(image_token_id) = image_token_id
+            && worker_block.contains(&image_token_id)
+        {
+            // This mirrors the legacy worker event path used by models such
+            // as Nemotron, whose image and video embeddings share <image>.
+            normalize_mm_token_runs(worker_block, image_token_id, &mm_hashes)
+                .map(|(tokens, _)| tokens)
+        } else {
+            None
+        };
+        match normalized {
+            Some(normalized) => {
                 anyhow::ensure!(
                     normalized == routing_block,
                     "frontend MM replacement differs from KV-event normalization"
@@ -1570,11 +1644,13 @@ pub struct OpenAIPreprocessor {
     token_budget: Option<TokenBudget>,
     /// Model context limit used by the embedding truncation contract.
     context_length: u32,
+    /// Tracks warmups and cancels them when this preprocessor is retired.
+    speculative_prefill_tasks: speculative_prefill::PrefillTasks,
     /// Per-image token-count engine. `None` when the feature is disabled, the
     /// model isn't covered by the registry, or `preprocessor_config.json` is
     /// unreadable.
     #[cfg(feature = "mm-routing")]
-    image_token_counter: Option<lightseek_mm::LightseekMmCounter>,
+    image_token_counter: Option<mm_routing::image::ImageRoutingProcessor>,
     /// Lightweight model-visible video expansion. Unlike the image counter,
     /// this does not resize or normalize pixels in the frontend.
     #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
@@ -1591,8 +1667,9 @@ pub struct OpenAIPreprocessor {
     #[cfg(feature = "mm-routing")]
     routing_image_token_id: Option<crate::protocols::TokenIdType>,
     /// Model-specific routing-side image prompt shape. Most families replace
-    /// only an existing pad token; Kimi-K3 also inserts its structural wrapper
-    /// and pre-resize dimensions. `None` disables exact MM routing.
+    /// only an existing pad token; Kimi-K3 inserts its structural/dimension
+    /// block, while Nemotron wraps its repeated image tokens in delimiters.
+    /// `None` disables exact MM routing.
     #[cfg(feature = "mm-routing")]
     routing_image_prompt_layout: Option<RoutingImagePromptLayout>,
     /// Dimension semantics used by URL-passthrough routing. Kimi-K3's vLLM
@@ -2239,7 +2316,7 @@ impl OpenAIPreprocessor {
         let tokenizer = mdc.tokenizer()?;
         let PromptFormatter::OAI(formatter) = embedding_prompt_formatter(&mdc)?;
         let embedding_tokenizers = EmbeddingTokenizerState::new(&mdc)?;
-        Self::new_with_parts_inner(mdc, formatter, tokenizer, Some(embedding_tokenizers))
+        Self::new_with_parts_inner(mdc, formatter, tokenizer, Some(embedding_tokenizers), None)
     }
 
     pub fn new_with_parts(
@@ -2247,7 +2324,17 @@ impl OpenAIPreprocessor {
         formatter: Arc<dyn OAIPromptFormatter>,
         tokenizer: crate::tokenizers::Tokenizer,
     ) -> Result<Arc<Self>> {
-        Self::new_with_parts_inner(mdc, formatter, tokenizer, None)
+        Self::new_with_parts_and_cancel(mdc, formatter, tokenizer, None)
+    }
+
+    /// Builds a preprocessor with an optional speculative-prefill shutdown token.
+    pub fn new_with_parts_and_cancel(
+        mdc: ModelDeploymentCard,
+        formatter: Arc<dyn OAIPromptFormatter>,
+        tokenizer: crate::tokenizers::Tokenizer,
+        speculative_prefill_cancel: Option<CancellationToken>,
+    ) -> Result<Arc<Self>> {
+        Self::new_with_parts_inner(mdc, formatter, tokenizer, None, speculative_prefill_cancel)
     }
 
     fn new_with_parts_inner(
@@ -2255,6 +2342,7 @@ impl OpenAIPreprocessor {
         formatter: Arc<dyn OAIPromptFormatter>,
         tokenizer: crate::tokenizers::Tokenizer,
         embedding_tokenizers: Option<EmbeddingTokenizerState>,
+        speculative_prefill_cancel: Option<CancellationToken>,
     ) -> Result<Arc<Self>> {
         let mdcsum = mdc.mdcsum().to_string();
         let tokenizer: Arc<dyn Tokenizer> = (*tokenizer).clone();
@@ -2341,12 +2429,17 @@ impl OpenAIPreprocessor {
                 // Resolve counter + image-token id independently so the
                 // summary log can name which piece is missing.
                 let (counter, counter_err): (
-                    Option<lightseek_mm::LightseekMmCounter>,
+                    Option<mm_routing::image::ImageRoutingProcessor>,
                     Option<String>,
-                ) = match lightseek_mm::LightseekMmCounter::try_new(
+                ) = match mm_routing::image::ImageRoutingProcessor::try_new_for_runtime(
                     model_id,
                     Some(model_type),
                     model_dir,
+                    if runtime_has_vllm_generate_capability(&runtime_config) {
+                        mm_routing::image::ImageRoutingRuntime::VllmNativeGenerate
+                    } else {
+                        mm_routing::image::ImageRoutingRuntime::BackendNeutral
+                    },
                 ) {
                     Ok(c) => (Some(c), None),
                     Err(e) => (None, Some(e.to_string())),
@@ -2357,11 +2450,18 @@ impl OpenAIPreprocessor {
                     // One-shot config/tokenizer_config read for all
                     // routing-side token info. Parsing lives next to the
                     // spec resolution in the MM-routing module.
-                    let routing_tokens =
-                        lightseek_mm::resolve_routing_tokens(model_id, model_dir, counter.as_ref());
+                    let routing_tokens = mm_routing::image::resolve_routing_tokens(
+                        model_id,
+                        model_dir,
+                        counter.as_ref(),
+                    );
                     let prompt_layout =
                             routing_tokens.image_prompt_kind.and_then(|kind| {
-                                match resolve_routing_image_prompt_layout(tokenizer.as_ref(), kind) {
+                                match resolve_routing_image_prompt_layout(
+                                    tokenizer.as_ref(),
+                                    kind,
+                                    routing_tokens.chat_placeholder_token_id,
+                                ) {
                                     Ok(layout) => Some(layout),
                                     Err(e) => {
                                         tracing::warn!(
@@ -2398,7 +2498,7 @@ impl OpenAIPreprocessor {
                         let mut reasons: Vec<String> = Vec::new();
                         if !counter_ok {
                             reasons.push(format!(
-                                "model not supported by the MM-routing registry ({})",
+                                "image routing processor unavailable ({})",
                                 counter_err.as_deref().unwrap_or("unknown error")
                             ));
                         }
@@ -2437,7 +2537,7 @@ impl OpenAIPreprocessor {
 
         #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
         let video_routing_processor = {
-            let processor_contract = match runtime_config
+            let qwen_contract = match runtime_config
                 .get_engine_specific::<mm_routing::QwenVideoProcessorContract>(
                     VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
                 ) {
@@ -2452,17 +2552,39 @@ impl OpenAIPreprocessor {
                     None
                 }
             };
+            let nemotron_contract = match runtime_config
+                .get_engine_specific::<mm_routing::NemotronVideoProcessorContract>(
+                    VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+                ) {
+                Ok(target) => target,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "mm_routing",
+                        %error,
+                        key = VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+                        "invalid Nemotron video processor runtime metadata; exact video routing disabled"
+                    );
+                    None
+                }
+            };
+            let contracts = mm_routing::VideoProcessorContracts {
+                qwen: qwen_contract,
+                nemotron: nemotron_contract,
+            };
             if fastokens_active {
                 None
             } else {
-                match (image_token_inputs.as_ref(), processor_contract) {
-                    (Some((model_id, model_type, model_dir)), Some(processor_contract)) => {
+                match (
+                    image_token_inputs.as_ref(),
+                    contracts.qwen.is_some() || contracts.nemotron.is_some(),
+                ) {
+                    (Some((model_id, model_type, model_dir)), true) => {
                         match mm_routing::VideoRoutingProcessor::try_new(
                             model_id,
                             model_type,
                             model_dir,
                             tokenizer.clone(),
-                            processor_contract,
+                            contracts,
                         ) {
                             Ok(processor) => processor,
                             Err(error) => {
@@ -2566,6 +2688,9 @@ impl OpenAIPreprocessor {
             media_loader,
             token_budget,
             context_length,
+            speculative_prefill_tasks: speculative_prefill::PrefillTasks::new(
+                speculative_prefill_cancel.as_ref(),
+            ),
             #[cfg(feature = "mm-routing")]
             image_token_counter,
             #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
@@ -3198,7 +3323,11 @@ impl OpenAIPreprocessor {
         // Private per-request total for frontend metrics. `None` means the SMG
         // counter is unavailable or checked addition overflowed.
         #[cfg(feature = "mm-routing")]
-        let mut image_tokens = self.image_token_counter.as_ref().map(|_| 0usize);
+        let mut image_tokens = self.image_token_counter.as_ref().and_then(|counter| {
+            // Request-budgeted processors need the rendered text and complete
+            // image batch before they can report an exact metric.
+            (!counter.uses_request_context_budget()).then_some(0usize)
+        });
         // A raw/passthrough video, unsupported decoded-video processor, or
         // ambiguous consecutive-video layout makes exact routing unavailable.
         // In that case the whole request falls back rather than publishing a
@@ -3240,12 +3369,6 @@ impl OpenAIPreprocessor {
                     continue;
                 };
 
-                if type_str != "image_url" && uuid.is_some() {
-                    return Err(invalid_argument_error(
-                        "multimodal cache UUIDs are supported only for image_url parts with vLLM",
-                    ));
-                }
-
                 #[cfg(feature = "mm-routing")]
                 if type_str == "image_url" {
                     total_image_count += 1;
@@ -3269,12 +3392,10 @@ impl OpenAIPreprocessor {
                 let slots = media_map.entry(type_str.to_string()).or_default();
                 let slot_idx = slots.len();
                 has_user_uuid |= uuid.is_some();
-                if type_str == "image_url" {
-                    uuid_map
-                        .entry(type_str.to_string())
-                        .or_default()
-                        .push(uuid.clone());
-                }
+                uuid_map
+                    .entry(type_str.to_string())
+                    .or_default()
+                    .push(uuid.clone());
 
                 match (url, uuid) {
                     (Some(url), _) => {
@@ -3293,8 +3414,13 @@ impl OpenAIPreprocessor {
                         }
                         slots.push(MultimodalData::Url(url));
                     }
-                    (None, Some(uuid)) => {
+                    (None, Some(uuid)) if type_str == "image_url" => {
                         slots.push(MultimodalData::UuidOnly(uuid));
+                    }
+                    (None, Some(_)) => {
+                        return Err(invalid_argument_error(format!(
+                            "UUID-only cache reuse is not supported for media modality `{type_str}`; provide a media URL"
+                        )));
                     }
                     (None, None) => {
                         return Err(invalid_argument_error(format!(
@@ -3366,7 +3492,11 @@ impl OpenAIPreprocessor {
                                 (Self::hash_image_url(source_url), "url_fallback")
                             }
                         };
-                        if let Some(counter) = self.image_token_counter.as_ref() {
+                        if let Some(counter) = self
+                            .image_token_counter
+                            .as_ref()
+                            .filter(|counter| !counter.uses_request_context_budget())
+                        {
                             let n = counter.count_tokens(w, h);
                             tracing::debug!(
                                 target: "mm_routing",
@@ -3422,6 +3552,7 @@ impl OpenAIPreprocessor {
                             Ok(MmRoutingEntry::Video {
                                 mm_hash,
                                 placeholder_token_id: routing.placeholder_token_id,
+                                event_video_token_id: routing.event_video_token_id,
                                 target_tokens: routing.target_tokens,
                                 replacement_tokens: routing.replacement_tokens,
                             })
@@ -3467,7 +3598,11 @@ impl OpenAIPreprocessor {
             for ((mm_hash, url), dim_res) in url_passthrough_images.into_iter().zip(dim_results) {
                 match dim_res {
                     Ok((w, h)) => {
-                        if let Some(counter) = self.image_token_counter.as_ref() {
+                        if let Some(counter) = self
+                            .image_token_counter
+                            .as_ref()
+                            .filter(|counter| !counter.uses_request_context_budget())
+                        {
                             let n = counter.count_tokens(w, h);
                             tracing::debug!(
                                 target: "mm_routing",
@@ -3573,14 +3708,62 @@ impl OpenAIPreprocessor {
                 .filter(|entry| matches!(entry, MmRoutingEntry::Image { .. }))
                 .count();
             #[cfg(feature = "mm-routing")]
-            let mm_routing_info = if exact_mm_routing_eligible
+            let exact_mm_routing_ready = exact_mm_routing_eligible
                 && exact_mm_routing_preconditions_met(
                     has_user_uuid,
                     resolved_image_count,
                     total_image_count,
                     has_processor_override,
-                ) {
-                self.build_mm_exact_routing_info(&mm_routing_entries, token_ids)
+                );
+            #[cfg(feature = "mm-routing")]
+            let request_budgeted_image_counter = self
+                .image_token_counter
+                .as_ref()
+                .filter(|counter| counter.uses_request_context_budget());
+            #[cfg(feature = "mm-routing")]
+            let image_text_prompt_len = if exact_mm_routing_ready {
+                match request_budgeted_image_counter {
+                    Some(counter) => {
+                        counter
+                            .context_budget_text_len(
+                                self.tokenizer.clone(),
+                                formatted_prompt,
+                                resolved_image_count,
+                            )
+                            .await
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            };
+            #[cfg(feature = "mm-routing")]
+            if let Some(counter) = request_budgeted_image_counter {
+                image_tokens = image_text_prompt_len.and_then(|text_prompt_len| {
+                    let dimensions: Vec<_> = mm_routing_entries
+                        .iter()
+                        .filter_map(|entry| match entry {
+                            MmRoutingEntry::Image { width, height, .. } => Some((*width, *height)),
+                            MmRoutingEntry::Video { .. } => None,
+                        })
+                        .collect();
+                    counter
+                        .count_tokens_for_images(
+                            &dimensions,
+                            self.context_length as usize,
+                            text_prompt_len,
+                        )
+                        .ok()
+                        .and_then(|counts| counts.into_iter().try_fold(0usize, usize::checked_add))
+                });
+            }
+            #[cfg(feature = "mm-routing")]
+            let mm_routing_info = if exact_mm_routing_ready {
+                self.build_mm_exact_routing_info(
+                    &mm_routing_entries,
+                    token_ids,
+                    image_text_prompt_len,
+                )
             } else {
                 None
             };
@@ -3668,7 +3851,7 @@ impl OpenAIPreprocessor {
                 height: entry.height,
             })
             .collect();
-        if let Some(info) = self.build_mm_exact_routing_info(&entries, token_ids) {
+        if let Some(info) = self.build_mm_exact_routing_info(&entries, token_ids, None) {
             builder.mm_routing_info(Some(info));
         }
         Ok(())
@@ -3679,6 +3862,7 @@ impl OpenAIPreprocessor {
         &self,
         entries: &[MmRoutingEntry],
         token_ids: &[crate::protocols::TokenIdType],
+        image_text_prompt_len: Option<usize>,
     ) -> Option<crate::protocols::common::preprocessor::MmRoutingInfo> {
         use crate::protocols::common::preprocessor::MmRoutingInfo;
 
@@ -3764,10 +3948,41 @@ impl OpenAIPreprocessor {
                 );
                 return None;
             }
-            let n_tokens: Vec<usize> = images
+            let dimensions: Vec<(u32, u32)> = images
                 .iter()
-                .map(|image| counter.count_tokens(image.width, image.height))
+                .map(|image| (image.width, image.height))
                 .collect();
+            let text_prompt_len = if counter.uses_request_context_budget() {
+                match image_text_prompt_len {
+                    Some(text_prompt_len) => text_prompt_len,
+                    None => {
+                        tracing::debug!(
+                            target: "mm_routing",
+                            model = counter.model_id(),
+                            "request text length unavailable for batch image budgeting; skipping MM routing info"
+                        );
+                        return None;
+                    }
+                }
+            } else {
+                token_ids.len()
+            };
+            let n_tokens = match counter.count_tokens_for_images(
+                &dimensions,
+                self.context_length as usize,
+                text_prompt_len,
+            ) {
+                Ok(counts) => counts,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "mm_routing",
+                        model = counter.model_id(),
+                        %error,
+                        "request-wide image-token accounting failed; skipping MM routing info"
+                    );
+                    return None;
+                }
+            };
             let (expanded, expanded_prompt_len) = try_expand_mm_routing_tokens(
                 self.tokenizer.as_ref(),
                 self.routing_image_prompt_layout
@@ -3781,14 +3996,32 @@ impl OpenAIPreprocessor {
             )?;
             (expanded, expanded_prompt_len, Vec::new())
         } else {
+            if image_counter_required
+                && self.image_token_counter.as_ref().is_some_and(
+                    mm_routing::image::ImageRoutingProcessor::uses_request_context_budget,
+                )
+            {
+                tracing::debug!(
+                    target: "mm_routing",
+                    "request-budgeted image expansion is unsupported for mixed modalities; skipping MM routing info"
+                );
+                return None;
+            }
             let mut replacements = Vec::with_capacity(entries.len());
             let video_token_id = entries.iter().find_map(|entry| match entry {
                 MmRoutingEntry::Video {
-                    placeholder_token_id,
+                    event_video_token_id,
                     ..
-                } => Some(*placeholder_token_id),
+                } => *event_video_token_id,
                 MmRoutingEntry::Image { .. } => None,
             });
+            if video_token_id.is_none() && entries.len() != 1 {
+                tracing::debug!(
+                    target: "mm_routing",
+                    "shared image/video placeholders support one video-only object; skipping exact routing for this media layout"
+                );
+                return None;
+            }
             for entry in entries {
                 let replacement = match entry {
                     MmRoutingEntry::Image {
@@ -3849,6 +4082,7 @@ impl OpenAIPreprocessor {
                     MmRoutingEntry::Video {
                         mm_hash,
                         placeholder_token_id,
+                        event_video_token_id: _,
                         target_tokens,
                         replacement_tokens,
                     } => {
@@ -5425,32 +5659,23 @@ impl OpenAIPreprocessor {
         let pending = Arc::new(Mutex::new(PendingDynamoMetadata::default()));
         let pending_in = Arc::clone(&pending);
 
-        // Per-choice recovery state — allocated only for glm47 since only that
-        // parser emits <tool_call> XML that can be truncated at max_tokens.
-        // Buffers raw input and tracks what the jail emitted per choice.index
-        // so n > 1 is handled correctly and double-emit is avoided.
+        // The legacy jail recognizes markers with a substring search. Retain
+        // GLM47 text per choice so the terminal chunk can use the shared
+        // quote-aware marker policy before exposing content to the client.
         #[derive(Default)]
         struct ChoiceRecovery {
             input_text: String,
             emitted_text: String,
-            recovered: bool,
-        }
-        // Named so the bool in the recoveries tuple is legible at each use site.
-        struct PendingRecovery {
-            choice_idx: u32,
-            tail: String,
-            tail_already_emitted: bool,
         }
         let is_glm47 = tool_call_parser.as_deref() == Some("glm47");
-        // Token strings from the parser config so recovery matches the parser
-        // even if the defaults are ever overridden.
-        let glm47_cfg = dynamo_parsers::tool_calling::config::Glm47ParserConfig::default();
-        let glm47_start = glm47_cfg.tool_call_start;
-        let glm47_end = glm47_cfg.tool_call_end;
+        let glm47_config = dynamo_parsers::tool_calling::config::Glm47ParserConfig::default();
+        let glm47_start = glm47_config.tool_call_start;
+        let glm47_end = glm47_config.tool_call_end;
         let choice_recovery: Arc<Mutex<std::collections::HashMap<u32, ChoiceRecovery>>> =
             Arc::new(Mutex::new(std::collections::HashMap::new()));
         let choice_recovery_in = Arc::clone(&choice_recovery);
-        let glm47_start_jail = glm47_start.clone();
+        let glm47_start_in = glm47_start.clone();
+        let glm47_end_in = glm47_end.clone();
 
         // The jail's own (vendored, out-of-scope) finalize logic cannot tell an
         // error-terminated input stream from one that genuinely completed — it
@@ -5512,34 +5737,52 @@ impl OpenAIPreprocessor {
                     merge_response_nvext(&mut p.nvext, nv.nvext.take());
                 }
             }
-            // Buffer input content only for glm47 (truncation recovery).
-            // Only retain from the last <tool_call> marker onward to bound
-            // memory on long responses.
             if is_glm47 && let Some(data) = &a.data {
-                let mut cr = choice_recovery_in.lock().expect("choice recovery poisoned");
+                let mut recovery = choice_recovery_in
+                    .lock()
+                    .expect("choice recovery buffer poisoned");
                 for choice in &data.inner.choices {
                     if let Some(ChatCompletionMessageContent::Text(content)) = &choice.delta.content
                     {
-                        let state = cr.entry(choice.index).or_default();
+                        let state = recovery.entry(choice.index).or_default();
                         state.input_text.push_str(content);
-                        // Drop everything before the last marker to keep
-                        // the buffer small. Walk back to a char boundary
-                        // before draining so a multi-byte char split
-                        // across chunks never triggers a panic.
-                        let mut keep_from = match state.input_text.rfind(glm47_start_jail.as_str())
-                        {
-                            Some(pos) => pos,
-                            // No marker yet — keep enough tail to
-                            // catch a marker split across two chunks.
-                            None => state
-                                .input_text
-                                .len()
-                                .saturating_sub(glm47_start_jail.len() - 1),
-                        };
-                        while keep_from > 0 && !state.input_text.is_char_boundary(keep_from) {
-                            keep_from -= 1;
+                        // A completed call is already owned by the jail. Retain only
+                        // the suffix after it, so terminal recovery examines the
+                        // final unfinished call while the shared scanner decides
+                        // whether each opener is real or quoted prose.
+                        while let Some(marker_start) = crate::protocols::openai::chat_completions::unified_parser::first_unquoted_native_tool_call_marker(&state.input_text, "glm47") {
+                            let after_marker =
+                                &state.input_text[marker_start + glm47_start_in.len()..];
+                            let Some(end) = after_marker.find(&glm47_end_in) else {
+                                break;
+                            };
+                            state.input_text.drain(
+                                ..marker_start
+                                    + glm47_start_in.len()
+                                    + end
+                                    + glm47_end_in.len(),
+                            );
+                            state.emitted_text.clear();
                         }
-                        state.input_text.drain(..keep_from);
+                        // Text the client already holds cannot change what terminal
+                        // recovery emits, so drop it and keep the buffer proportional
+                        // to what is still pending. Without this the buffer grows for
+                        // the whole response and every chunk rescans all of it.
+                        //
+                        // A quote character is the exception: the marker scanner reads
+                        // `"<tool_call>"` as prose, and it can only know that from the
+                        // quote to its left. Dropping a quote-free prefix cannot change
+                        // any later verdict, so that is the only prefix dropped here.
+                        // A response that quotes on every chunk keeps the old growth.
+                        if !state.emitted_text.is_empty()
+                            && !state.input_text.contains(['"', '\'', '`'])
+                            && crate::protocols::openai::chat_completions::unified_parser::unquoted_native_tool_call_marker_or_prefix_start(&state.input_text, "glm47").is_none()
+                            && let Some(unemitted) =
+                                state.input_text.strip_prefix(state.emitted_text.as_str())
+                        {
+                            state.input_text = unemitted.to_string();
+                            state.emitted_text.clear();
+                        }
                     }
                 }
             }
@@ -5627,139 +5870,50 @@ impl OpenAIPreprocessor {
                 error: None,
             };
 
-            // glm47: on finish_reason=length, recover the last incomplete
-            // <tool_call> block. rfind skips complete blocks so earlier parsed
-            // calls are never duplicated. Recovered content WILL contain raw
-            // markup — callers that require "no tool tags in content" must
-            // filter on finish_reason=length.
-            //
-            // TODO: this recovery runs inside apply_tool_calling_jail, which
-            // the v2 path bypasses (use_parsers_v2 branch above). Adding
-            // "glm47" to V2_FAMILIES in tool_parser_v2.rs silently disables
-            // streaming recovery while aggregator.rs keeps running. At that
-            // point hoist this above the jail/v2 branch — it only needs
-            // buffered input text + finish_reason, both available there.
-            // Pass 1 (immutable): compute the recovery tail per choice and
-            // whether the jail already released it as content on this chunk.
-            // We collect into a Vec so we can release the immutable borrow on
-            // nv_chunk before mutating it in pass 2.
-            let recoveries: Vec<PendingRecovery> = if is_glm47 {
-                let mut cr = choice_recovery.lock().expect("choice recovery poisoned");
-                nv_chunk
-                    .data
-                    .iter()
-                    .flat_map(|data| data.inner.choices.iter())
-                    .filter_map(|choice| {
-                        let state = cr.entry(choice.index).or_default();
-                        if !state.recovered
-                            && let Some(ChatCompletionMessageContent::Text(t)) =
-                                &choice.delta.content
+            if is_glm47 && let Some(data) = &mut nv_chunk.data {
+                let mut recovery = choice_recovery
+                    .lock()
+                    .expect("choice recovery buffer poisoned");
+                for choice in &mut data.inner.choices {
+                    let state = recovery.entry(choice.index).or_default();
+                    if let Some(marker_start) = crate::protocols::openai::chat_completions::unified_parser::unquoted_native_tool_call_marker_or_prefix_start(&state.input_text, "glm47") {
+                        let desired_content = &state.input_text[..marker_start];
+                        if choice.finish_reason
+                            == Some(dynamo_protocols::types::FinishReason::Length)
+                            && crate::protocols::openai::chat_completions::unified_parser::first_unquoted_native_tool_call_marker(&state.input_text, "glm47").is_some()
                         {
-                            state.emitted_text.push_str(t);
-                            // Bound like input_text: retain only the suffix from
-                            // the last marker onward — all the contains(&tail)
-                            // check needs.
-                            let mut keep_from = match state.emitted_text.rfind(glm47_start.as_str())
-                            {
-                                Some(pos) => pos,
-                                None => state
-                                    .emitted_text
-                                    .len()
-                                    .saturating_sub(glm47_start.len() - 1),
-                            };
-                            while keep_from > 0 && !state.emitted_text.is_char_boundary(keep_from) {
-                                keep_from -= 1;
-                            }
-                            state.emitted_text.drain(..keep_from);
+                            tracing::warn!(
+                                choice_index = choice.index,
+                                why = "truncated_native_tool_call_suppressed",
+                                suppressed_bytes = state.input_text.len() - desired_content.len(),
+                                "glm47 streaming: suppressing incomplete native tool output on length finish"
+                            );
+                            let replacement = desired_content
+                                .strip_prefix(&state.emitted_text)
+                                .unwrap_or_default();
+                            choice.delta.content = (!replacement.is_empty()).then(|| {
+                                ChatCompletionMessageContent::Text(replacement.to_string())
+                            });
                         }
-                        if state.recovered
-                            || !matches!(
-                                choice.finish_reason,
-                                Some(dynamo_protocols::types::FinishReason::Length)
-                            )
-                        {
-                            return None;
-                        }
-                        let tail =
-                            state
-                                .input_text
-                                .rfind(glm47_start.as_str())
-                                .and_then(|pos| {
-                                    let t = &state.input_text[pos..];
-                                    if !t.contains(glm47_end.as_str()) {
-                                        Some(t.to_string())
-                                    } else {
-                                        None
-                                    }
-                                })?;
-                        let tail_already_emitted = state.emitted_text.contains(&tail);
-                        state.recovered = true;
-                        Some(PendingRecovery {
-                            choice_idx: choice.index,
-                            tail,
-                            tail_already_emitted,
-                        })
-                    })
-                    .collect()
-            } else {
-                vec![]
-            };
-
-            // Pass 2 (mutable): when the jail already released the tail verbatim,
-            // suppress the finish chunk's content entirely. The recovery chunk
-            // carries just the marker-onwards tail, matching the non-streaming
-            // path (rfind result only, no post-call prose).
-            for pr in &recoveries {
-                if !pr.tail_already_emitted {
-                    continue;
-                }
-                if let Some(ref mut data) = nv_chunk.data {
-                    for rc in data
-                        .inner
-                        .choices
-                        .iter_mut()
-                        .filter(|c| c.index == pr.choice_idx)
+                    } else if choice.finish_reason
+                        == Some(dynamo_protocols::types::FinishReason::Length)
+                        && choice.delta.tool_calls.is_none()
                     {
-                        // The jail released the truncated block verbatim as content
-                        // on this chunk, potentially preceded by post-call prose.
-                        // glm47's parser drops post-call prose deliberately, so
-                        // suppress the whole content here and let the recovery
-                        // chunk carry just the marker-onwards tail — matching batch.
-                        rc.delta.content = None;
+                        let replacement = state
+                            .input_text
+                            .strip_prefix(&state.emitted_text)
+                            .unwrap_or_default();
+                        choice.delta.content = (!replacement.is_empty())
+                            .then(|| ChatCompletionMessageContent::Text(replacement.to_string()));
+                    }
+
+                    if let Some(ChatCompletionMessageContent::Text(content)) = &choice.delta.content {
+                        state.emitted_text.push_str(content);
                     }
                 }
             }
 
-            // Pass 3: emit a recovery chunk per affected choice carrying just
-            // the truncated tail (marker onwards, no post-call prose).
-            let recovery_chunks: Vec<_> = recoveries
-                .into_iter()
-                .filter_map(|pr| {
-                    let PendingRecovery {
-                        choice_idx, tail, ..
-                    } = pr;
-                    tracing::warn!(
-                        choice_index = choice_idx,
-                        recovered_bytes = tail.len(),
-                        "glm47 streaming: partial <tool_call> emitted as content \
-                         on length finish"
-                    );
-                    let mut rec = nv_chunk.clone();
-                    rec.id = None;
-                    scrub_synthetic_chunk_metadata(&mut rec);
-                    let rd = rec.data.as_mut()?;
-                    rd.inner.choices.retain(|c| c.index == choice_idx);
-                    for rc in &mut rd.inner.choices {
-                        rc.delta.content = Some(ChatCompletionMessageContent::Text(tail.clone()));
-                        rc.delta.tool_calls = None;
-                        rc.finish_reason = None;
-                        rc.logprobs = None;
-                    }
-                    Some(rec)
-                })
-                .collect();
-
-            futures::stream::iter(recovery_chunks.into_iter().chain(std::iter::once(nv_chunk)))
+            futures::stream::iter(std::iter::once(nv_chunk))
         });
 
         // Once an upstream error is latched, drop any output the jail synthesized
@@ -7102,9 +7256,11 @@ impl
         let final_stream = speculative_prefill::maybe_wrap_stream(
             final_stream,
             &request,
+            &request_id,
             &next,
             &self.formatter,
             &self.tokenizer,
+            &self.speculative_prefill_tasks,
         );
 
         let final_stream = crate::request_trace::wrap_chat_request_end_stream(
@@ -7663,6 +7819,159 @@ mod tests {
         chunk
     }
 
+    fn glm47_stream_chunk(
+        content: &str,
+        finish_reason: Option<FinishReason>,
+    ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        let mut chunk = chat_stream_chunk(0, Some(Role::Assistant));
+        let choice = &mut chunk.data.as_mut().unwrap().inner.choices[0];
+        choice.delta.content = Some(ChatCompletionMessageContent::Text(content.to_string()));
+        choice.finish_reason = finish_reason;
+        chunk
+    }
+
+    async fn apply_glm47_streaming_length(
+        chunks: &[&str],
+    ) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
+        let chunks: Vec<String> = chunks.iter().map(|chunk| (*chunk).to_string()).collect();
+        let chunk_count = chunks.len();
+        OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("glm47".to_string()),
+            None,
+            None,
+            false,
+            false,
+            stream::iter(chunks.into_iter().enumerate().map(move |(index, content)| {
+                glm47_stream_chunk(
+                    &content,
+                    (index + 1 == chunk_count).then_some(FinishReason::Length),
+                )
+            })),
+        )
+        .collect()
+        .await
+    }
+
+    fn stream_content(output: &[Annotated<NvCreateChatCompletionStreamResponse>]) -> String {
+        output
+            .iter()
+            .flat_map(|response| response.data.iter())
+            .flat_map(|data| data.inner.choices.iter())
+            .filter_map(|choice| match &choice.delta.content {
+                Some(ChatCompletionMessageContent::Text(content)) => Some(content.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn assert_glm47_streaming_length_output(
+        output: &[Annotated<NvCreateChatCompletionStreamResponse>],
+        expected_content: &str,
+        split: usize,
+    ) {
+        assert_eq!(
+            stream_content(output),
+            expected_content,
+            "split at byte {split} must reconstruct the complete visible response"
+        );
+        assert!(
+            output
+                .iter()
+                .flat_map(|response| response.data.iter())
+                .flat_map(|data| data.inner.choices.iter())
+                .any(|choice| choice.finish_reason == Some(FinishReason::Length)),
+            "split at byte {split} must preserve the terminal length delta"
+        );
+    }
+
+    #[tokio::test]
+    async fn glm47_streaming_length_preserves_prose_and_suppresses_incomplete_marker() {
+        let output = apply_glm47_streaming_length(&[
+            "I can help. <tool_call>get_weather<arg_key>city</arg_key><arg_value>Par",
+        ])
+        .await;
+
+        assert_eq!(stream_content(&output), "I can help. ");
+        assert!(
+            output
+                .iter()
+                .flat_map(|response| response.data.iter())
+                .flat_map(|data| data.inner.choices.iter())
+                .any(|choice| choice.finish_reason == Some(FinishReason::Length))
+        );
+    }
+
+    #[tokio::test]
+    async fn glm47_streaming_length_preserves_quoted_marker_prose() {
+        let content = r#"The literal "<tool_call>" marker is part of the explanation."#;
+        for split in content.char_indices().map(|(index, _)| index).skip(1) {
+            let output =
+                apply_glm47_streaming_length(&[&content[..split], &content[split..]]).await;
+            assert_glm47_streaming_length_output(&output, content, split);
+        }
+    }
+
+    #[tokio::test]
+    async fn glm47_streaming_length_suppresses_incomplete_marker_at_every_split() {
+        let input = "I can help. <tool_call>get_weather<arg_key>city</arg_key><arg_value>Par";
+        for split in input.char_indices().map(|(index, _)| index).skip(1) {
+            let output = apply_glm47_streaming_length(&[&input[..split], &input[split..]]).await;
+            assert_glm47_streaming_length_output(&output, "I can help. ", split);
+        }
+    }
+
+    /// A prose-only answer never completes a call, so nothing drains the recovery
+    /// buffer through the marker path. The buffer must still stay proportional to the
+    /// unemitted tail, or every chunk rescans the whole response.
+    #[tokio::test]
+    async fn glm47_streaming_prose_only_round_trips_without_retaining_the_response() {
+        let chunk_text = "the quick brown fox ";
+        let chunks: Vec<&str> = std::iter::repeat_n(chunk_text, 400).collect();
+        let output = apply_glm47_streaming_length(&chunks).await;
+
+        assert_eq!(stream_content(&output), chunk_text.repeat(400));
+    }
+
+    /// The recovery buffer holds only what the client has not seen yet, so a long
+    /// prose answer must still arrive whole. Without the compaction this text is
+    /// retained and rescanned in full on every chunk.
+    #[tokio::test]
+    async fn glm47_streaming_long_prose_survives_buffer_compaction() {
+        let chunks: Vec<String> = (0..400).map(|i| format!("chunk {i} of prose. ")).collect();
+        let expected: String = chunks.concat();
+        let borrowed: Vec<&str> = chunks.iter().map(String::as_str).collect();
+
+        let output = apply_glm47_streaming_length(&borrowed).await;
+
+        assert_eq!(stream_content(&output), expected);
+    }
+
+    #[tokio::test]
+    async fn glm47_streaming_length_keeps_an_empty_safe_terminal_recovery_delta() {
+        let output = apply_glm47_streaming_length(&[
+            "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Par",
+        ])
+        .await;
+
+        assert!(stream_content(&output).is_empty());
+        let terminal_choices: Vec<_> = output
+            .iter()
+            .flat_map(|response| response.data.iter())
+            .flat_map(|data| data.inner.choices.iter())
+            .filter(|choice| choice.finish_reason == Some(FinishReason::Length))
+            .collect();
+        assert_eq!(
+            terminal_choices.len(),
+            1,
+            "the recovery event must be observable"
+        );
+        assert!(
+            terminal_choices[0].delta.content.is_none()
+                && terminal_choices[0].delta.tool_calls.is_none(),
+            "the observable recovery delta must not expose raw markup or partial arguments"
+        );
+    }
+
     async fn apply_kimi_k3_no_tools(
         leaked_reasoning: &str,
     ) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
@@ -7940,9 +8249,13 @@ mod tests {
     #[cfg(feature = "mm-routing")]
     impl crate::tokenizers::traits::Encoder for RoutingTestTokenizer {
         fn encode(&self, input: &str) -> anyhow::Result<Encoding> {
-            Ok(Encoding::Sp(
-                input.bytes().map(|byte| 1000 + u32::from(byte)).collect(),
-            ))
+            let ids = match input {
+                "<image>" => vec![18],
+                "<img>" => vec![19],
+                "</img>" => vec![20],
+                _ => input.bytes().map(|byte| 1000 + u32::from(byte)).collect(),
+            };
+            Ok(Encoding::Sp(ids))
         }
 
         fn encode_batch(&self, inputs: &[&str]) -> anyhow::Result<Vec<Encoding>> {
@@ -7964,6 +8277,9 @@ mod tests {
                         "<|media_begin|>" => 163602,
                         "<|media_content|>" => 163603,
                         "<|media_end|>" => 163604,
+                        "<img>" => 19,
+                        "<image>" => 18,
+                        "</img>" => 20,
                         other => anyhow::bail!("unexpected control segment {other:?}"),
                     });
                 } else {
@@ -8065,9 +8381,12 @@ mod tests {
             atomic_controls: true,
             fail_plain_text: false,
         };
-        let layout =
-            resolve_routing_image_prompt_layout(&tokenizer, lightseek_mm::ImagePromptKind::KimiK3)
-                .unwrap();
+        let layout = resolve_routing_image_prompt_layout(
+            &tokenizer,
+            mm_routing::image::ImagePromptKind::KimiK3,
+            None,
+        )
+        .unwrap();
         let image = MmImageEntry {
             mm_hash: 0x1234,
             width: 320,
@@ -8119,15 +8438,64 @@ mod tests {
 
     #[cfg(feature = "mm-routing")]
     #[test]
+    fn nemotron_routing_replacement_preserves_image_wrappers() {
+        let tokenizer = RoutingTestTokenizer {
+            // The HF tokenizer backend does not implement segmented encoding;
+            // Nemotron must resolve its fixed added tokens through `encode`.
+            atomic_controls: false,
+            fail_plain_text: false,
+        };
+        let layout = resolve_routing_image_prompt_layout(
+            &tokenizer,
+            mm_routing::image::ImagePromptKind::Nemotron,
+            Some(18),
+        )
+        .unwrap();
+        let image = MmImageEntry {
+            mm_hash: 0x1234,
+            width: 224,
+            height: 224,
+        };
+        let fill = dynamo_kv_router::protocols::pad_value_for_mm_hash(image.mm_hash);
+        let mut expanded = vec![7];
+
+        append_mm_routing_replacement(&mut expanded, &tokenizer, layout, image, 3).unwrap();
+
+        assert_eq!(expanded, vec![7, 19, fill, fill, fill, 20]);
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn nemotron_layout_rejects_tokenizer_and_config_id_mismatch() {
+        let tokenizer = RoutingTestTokenizer {
+            atomic_controls: true,
+            fail_plain_text: false,
+        };
+
+        let error = resolve_routing_image_prompt_layout(
+            &tokenizer,
+            mm_routing::image::ImagePromptKind::Nemotron,
+            Some(99),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("does not match config id"));
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
     fn kimi_k3_layout_resolution_rejects_non_atomic_control_tokens() {
         let tokenizer = RoutingTestTokenizer {
             atomic_controls: false,
             fail_plain_text: false,
         };
 
-        let error =
-            resolve_routing_image_prompt_layout(&tokenizer, lightseek_mm::ImagePromptKind::KimiK3)
-                .unwrap_err();
+        let error = resolve_routing_image_prompt_layout(
+            &tokenizer,
+            mm_routing::image::ImagePromptKind::KimiK3,
+            None,
+        )
+        .unwrap_err();
 
         assert!(error.to_string().contains("expected exactly one"));
     }
@@ -8139,9 +8507,12 @@ mod tests {
             atomic_controls: true,
             fail_plain_text: false,
         };
-        let layout =
-            resolve_routing_image_prompt_layout(&tokenizer, lightseek_mm::ImagePromptKind::KimiK3)
-                .unwrap();
+        let layout = resolve_routing_image_prompt_layout(
+            &tokenizer,
+            mm_routing::image::ImagePromptKind::KimiK3,
+            None,
+        )
+        .unwrap();
         let image = MmImageEntry {
             mm_hash: 0x1234,
             width: 320,
@@ -8200,9 +8571,12 @@ mod tests {
             atomic_controls: true,
             fail_plain_text: false,
         };
-        let layout =
-            resolve_routing_image_prompt_layout(&tokenizer, lightseek_mm::ImagePromptKind::KimiK3)
-                .unwrap();
+        let layout = resolve_routing_image_prompt_layout(
+            &tokenizer,
+            mm_routing::image::ImagePromptKind::KimiK3,
+            None,
+        )
+        .unwrap();
         let image_entry = MmImageEntry {
             mm_hash: 0x1234,
             width: 320,
@@ -8231,9 +8605,12 @@ mod tests {
             atomic_controls: true,
             fail_plain_text: true,
         };
-        let layout =
-            resolve_routing_image_prompt_layout(&tokenizer, lightseek_mm::ImagePromptKind::KimiK3)
-                .unwrap();
+        let layout = resolve_routing_image_prompt_layout(
+            &tokenizer,
+            mm_routing::image::ImagePromptKind::KimiK3,
+            None,
+        )
+        .unwrap();
         let image = MmImageEntry {
             mm_hash: 0x1234,
             width: 320,
@@ -8309,7 +8686,7 @@ mod tests {
     fn exact_routing_rejects_image_placeholder_count_mismatch() {
         let model_dir = tempfile::tempdir().unwrap();
         std::fs::write(model_dir.path().join("preprocessor_config.json"), "{}").unwrap();
-        let counter = lightseek_mm::LightseekMmCounter::try_new(
+        let counter = mm_routing::image::ImageRoutingProcessor::try_new(
             "Qwen/Qwen3-VL-2B-Instruct",
             Some("qwen3_vl"),
             model_dir.path(),
@@ -8336,15 +8713,125 @@ mod tests {
 
         assert!(
             preprocessor
-                .build_mm_exact_routing_info(&image, &[7, 8])
+                .build_mm_exact_routing_info(&image, &[7, 8], None)
                 .is_none(),
             "missing placeholder must fail closed at the production boundary"
         );
         assert!(
             preprocessor
-                .build_mm_exact_routing_info(&image, &[7, 10, 10, 8])
+                .build_mm_exact_routing_info(&image, &[7, 10, 10, 8], None)
                 .is_none(),
             "extra placeholder must fail closed at the production boundary"
+        );
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[tokio::test]
+    async fn nemotron_exact_routing_uses_vllm_dummy_text_budget() {
+        let model_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            model_dir.path().join("config.json"),
+            serde_json::json!({
+                "architectures": [mm_routing::nemotron::MODEL_TYPE],
+                "model_type": mm_routing::nemotron::MODEL_TYPE,
+                "force_image_size": 512,
+                "patch_size": 16,
+                "downsample_ratio": 0.5,
+                "img_context_token": mm_routing::nemotron::IMAGE_CONTEXT,
+                "img_context_token_id": 18,
+                "img_start_token": mm_routing::nemotron::IMAGE_START,
+                "img_end_token": mm_routing::nemotron::IMAGE_END,
+                "vision_config": {
+                    "args": {
+                        "min_num_patches": 1024,
+                        "max_num_patches": 13312
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            model_dir.path().join("preprocessor_config.json"),
+            serde_json::json!({
+                "image_processor_type": "NemotronH_Nano_Omni_Reasoning_V3ImageProcessor",
+                "image_size": 512,
+                "patch_size": 16,
+                "downsample_ratio": 0.5
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let counter = mm_routing::image::ImageRoutingProcessor::try_new(
+            "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-FP8",
+            Some(mm_routing::nemotron::MODEL_TYPE),
+            model_dir.path(),
+        )
+        .unwrap();
+        let image_text_prompt_len = counter
+            .context_budget_text_len(
+                Arc::new(RoutingTestTokenizer {
+                    atomic_controls: true,
+                    fail_plain_text: false,
+                }),
+                Some("before<image>middle<image>after<image>"),
+                3,
+            )
+            .await;
+        assert_eq!(image_text_prompt_len, Some(0));
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let mut preprocessor = match Arc::try_unwrap(OpenAIPreprocessor::new(mdc).unwrap()) {
+            Ok(preprocessor) => preprocessor,
+            Err(_) => panic!("test preprocessor unexpectedly shared"),
+        };
+        preprocessor.image_token_counter = Some(counter);
+        preprocessor.routing_image_token_id = Some(18);
+        preprocessor.routing_image_prompt_layout = Some(
+            resolve_routing_image_prompt_layout(
+                &RoutingTestTokenizer {
+                    atomic_controls: true,
+                    fail_plain_text: false,
+                },
+                mm_routing::image::ImagePromptKind::Nemotron,
+                Some(18),
+            )
+            .unwrap(),
+        );
+        preprocessor.context_length = 4096;
+        preprocessor.kv_cache_block_size = 16;
+
+        let entries = [0x1234, 0x5678, 0x9abc].map(|mm_hash| MmRoutingEntry::Image {
+            mm_hash,
+            width: 1920,
+            height: 1080,
+        });
+        let routing = preprocessor
+            .build_mm_exact_routing_info(
+                &entries,
+                &[7, 18, 8, 18, 9, 18, 10],
+                image_text_prompt_len,
+            )
+            .expect("Nemotron routing info should be exact");
+
+        // vLLM 0.28 budgets these three images to 1,323 tokens each. Each
+        // image also contributes its atomic <img> and </img> delimiters.
+        assert_eq!(routing.expanded_prompt_len, 4 + 3 * (1323 + 2));
+        assert_eq!(routing.routing_token_ids.len(), 3984);
+        assert_eq!(routing.routing_token_ids[0], 7);
+        assert_eq!(routing.routing_token_ids[1], 19);
+        assert_eq!(routing.routing_token_ids[1325], 20);
+        assert_eq!(routing.routing_token_ids[1326], 8);
+        assert!(routing.block_mm_infos.is_empty());
+
+        assert!(
+            preprocessor
+                .build_mm_exact_routing_info(&entries, &[7, 18, 8, 18, 9, 18, 10], None)
+                .is_none(),
+            "missing rendered-text length must fail closed"
         );
     }
 
@@ -9823,6 +10310,14 @@ mod tests {
         {% if not ns.has_user %}{{ raise_exception('No user query found in messages.') }}{% endif %}\
         {{ messages[0]['content'] }}";
 
+    const REQUIRES_LEADING_SYSTEM_TEMPLATE: &str = "\
+        {%- for message in messages -%}\
+            {%- if message['role'] == 'system' and not loop.first -%}\
+                {{- raise_exception('System message must be at the beginning.') -}}\
+            {%- endif -%}\
+            {{- message['role'] }}:{{ message['content'] }}\n\
+        {%- endfor -%}";
+
     fn render_through_preprocessor(
         formatter: &dyn OAIPromptFormatter,
         request: &dyn OAIChatLikeRequest,
@@ -9876,6 +10371,43 @@ mod tests {
         let rendered = render_through_preprocessor(formatter.as_ref(), &request).unwrap();
 
         assert_eq!(rendered.as_str(), "hello");
+    }
+
+    #[test]
+    fn test_nonleading_system_message_normalized_for_strict_template() {
+        let formatter = test_prompt_formatter(REQUIRES_LEADING_SYSTEM_TEMPLATE);
+        let anthropic_request: crate::protocols::anthropic::AnthropicCreateMessageRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "max_tokens": 100,
+                "system": "You are Claude Code.",
+                "messages": [
+                    {"role": "user", "content": "Run make test."},
+                    {"role": "system", "content": "Available agent types and skills."}
+                ],
+                "tools": [{
+                    "name": "Bash",
+                    "description": "Run a shell command",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "command": {"type": "string"}
+                        },
+                        "required": ["command"]
+                    }
+                }]
+            }))
+            .unwrap();
+        let request: NvCreateChatCompletionRequest = anthropic_request.try_into().unwrap();
+
+        let rendered = render_through_preprocessor(formatter.as_ref(), &request).unwrap();
+
+        assert_eq!(
+            rendered.as_str(),
+            "system:You are Claude Code.\
+             user:Run make test.\
+             user:Available agent types and skills."
+        );
     }
 
     #[test]
@@ -11589,6 +12121,40 @@ mod tests {
 
     #[cfg(feature = "mm-routing")]
     #[test]
+    fn shared_placeholder_video_matches_legacy_worker_normalization() {
+        use dynamo_kv_router::protocols::pad_value_for_mm_hash;
+
+        let mm_hash = 41;
+        let pad = pad_value_for_mm_hash(mm_hash);
+        let replacement = TrackedMmRoutingReplacement {
+            mm_hash,
+            target_tokens: vec![7],
+            worker_tokens: vec![100, 19, 18, 18, 20, 101, 19, 18, 20],
+            routing_tokens: vec![100, 19, pad, pad, 20, 101, 19, pad, 20],
+        };
+
+        let (tokens, prompt_len, block_infos) =
+            apply_tracked_mm_replacements(None, &[replacement], &[7], 4, Some(18), None).unwrap();
+
+        assert_eq!(prompt_len, 9);
+        assert_eq!(tokens, [100, 19, pad, pad, 20, 101, 19, pad, 20, 0, 0, 0]);
+        assert_eq!(block_infos.len(), 3);
+        assert!(block_infos[0].is_none());
+        assert!(block_infos[1].is_none());
+        assert_eq!(
+            block_infos[2]
+                .as_ref()
+                .unwrap()
+                .mm_objects
+                .iter()
+                .map(|object| object.mm_hash)
+                .collect::<Vec<_>>(),
+            [mm_hash]
+        );
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
     fn routing_bos_preserves_image_behavior_and_skips_video_only_requests() {
         assert_eq!(routing_bos_to_prepend(Some(1), true), Some(1));
         assert_eq!(routing_bos_to_prepend(None, true), None);
@@ -11601,6 +12167,7 @@ mod tests {
         let video = |mm_hash| MmRoutingEntry::Video {
             mm_hash,
             placeholder_token_id: 3,
+            event_video_token_id: Some(3),
             target_tokens: vec![3],
             replacement_tokens: vec![3],
         };

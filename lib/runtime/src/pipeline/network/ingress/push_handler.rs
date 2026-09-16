@@ -3,11 +3,14 @@
 
 use super::*;
 
+use crate::admission_gate;
 use crate::engine::AsyncEngineContext;
+use crate::error::DynamoError;
 use crate::metrics::prometheus_names::work_handler;
 use crate::metrics::work_handler_perf::{
     WORK_HANDLER_NETWORK_TRANSIT_SECONDS, WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS,
 };
+use crate::pipeline::network::StreamPrologueError;
 use crate::pipeline::{ManyIn, RequestStream};
 use futures::StreamExt;
 use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge};
@@ -108,6 +111,10 @@ impl WorkHandlerMetrics {
             metrics_labels,
         )?;
 
+        // The gate admits on this endpoint's behalf, so expose its family here
+        // too. Idempotent: the gate is process-global and every endpoint asks.
+        admission_gate::register_metrics(endpoint.get_metrics_registry());
+
         Ok(Self::new(
             request_counter,
             request_duration,
@@ -143,6 +150,20 @@ impl Drop for RequestMetricsGuard {
 trait ResponsePublisher {
     async fn send(&self, payload: Bytes) -> anyhow::Result<()>;
     async fn send_prologue(&mut self, error: Option<String>) -> anyhow::Result<()>;
+
+    /// Send a failure prologue keeping the worker's [`crate::error::ErrorType`]
+    /// where the transport can carry it.
+    ///
+    /// The default drops the type and sends the text alone. That is what the
+    /// QUIC response plane does: its error frame is a raw byte payload with no
+    /// field to put a typed error in, so a typed refusal over QUIC classifies
+    /// exactly as it did before this method existed.
+    async fn send_prologue_typed(
+        &mut self,
+        error: Option<StreamPrologueError>,
+    ) -> anyhow::Result<()> {
+        self.send_prologue(error.map(|error| error.message)).await
+    }
     async fn finish(&mut self) -> anyhow::Result<()>;
     async fn abort(&mut self) -> anyhow::Result<()>;
 
@@ -190,6 +211,15 @@ impl ResponsePublisher for StreamSender {
 
     async fn send_prologue(&mut self, error: Option<String>) -> anyhow::Result<()> {
         StreamSender::send_prologue(self, error)
+            .await
+            .map_err(anyhow::Error::msg)
+    }
+
+    async fn send_prologue_typed(
+        &mut self,
+        error: Option<StreamPrologueError>,
+    ) -> anyhow::Result<()> {
+        StreamSender::send_prologue_typed(self, error)
             .await
             .map_err(anyhow::Error::msg)
     }
@@ -664,11 +694,16 @@ where
 
         let request_context = request.context();
         tracing::trace!("calling generate");
-        let stream = self
-            .segment
-            .get()
-            .expect("segment not set")
-            .generate(request)
+        // Route backend generation through the transport-independent admission
+        // boundary. Admission errors follow the existing generate error path.
+        let stream = admission_gate::global()
+            .admit(
+                Some(request_context.as_ref()),
+                self.segment
+                    .get()
+                    .expect("segment not set")
+                    .generate(request),
+            )
             .await
             .map_err(|error| {
                 if let Some(metrics) = self.metrics() {
@@ -719,7 +754,14 @@ where
                 {
                     let _ = publisher.abort().await;
                 } else {
-                    let _ = publisher.send_prologue(Some(error_string)).await;
+                    // Send the worker's error type with the display text, so a
+                    // frontend can tell a request the backend cannot serve from
+                    // a transport failure.
+                    let prologue_error = StreamPrologueError::new(
+                        error_string,
+                        typed_error_from_pipeline_error(&error),
+                    );
+                    let _ = publisher.send_prologue_typed(Some(prologue_error)).await;
                 }
                 return Err(error);
             }
@@ -935,6 +977,21 @@ where
     }
 }
 
+/// Recover the worker's typed error from a pipeline failure, for the prologue.
+///
+/// `GenerateError` must unwrap its `anyhow::Error` payload first. `anyhow::Error`
+/// does not implement `std::error::Error`, so that variant exposes no `source()`
+/// and converting the enclosing `PipelineError` yields a bare
+/// `ErrorType::Unknown`, losing the worker error type. Any other variant carries
+/// no worker error and converts to `ErrorType::Unknown`.
+pub(crate) fn typed_error_from_pipeline_error(e: &PipelineError) -> DynamoError {
+    let source: &(dyn std::error::Error + 'static) = match e {
+        PipelineError::GenerateError(inner) => inner.as_ref(),
+        other => other,
+    };
+    DynamoError::from(source)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -945,9 +1002,41 @@ mod tests {
     use prometheus::{Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, Opts};
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    use crate::error::{BackendError, ErrorType};
+
     type TestRequest = serde_json::Value;
     type TestResponse = Annotated<serde_json::Value>;
     type TestIngress = Ingress<SingleIn<TestRequest>, ManyOut<TestResponse>>;
+
+    /// The positive half of the recovery hop: a worker's typed refusal, boxed
+    /// into the `anyhow::Error` payload of `PipelineError::GenerateError`,
+    /// comes back out with its type intact.
+    #[test]
+    fn generate_error_payload_keeps_the_workers_error_type() {
+        let e = PipelineError::GenerateError(anyhow::Error::new(
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                .message("multimodal input is not supported by this backend")
+                .build(),
+        ));
+
+        assert_eq!(
+            typed_error_from_pipeline_error(&e).error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument),
+            "the worker's type must survive the anyhow payload"
+        );
+    }
+
+    /// The negative half: a failure that is not a worker's `generate()` error
+    /// has no worker classification and uses the canonical internal fallback.
+    #[test]
+    fn non_generate_pipeline_error_is_internal_unclassified() {
+        let e = PipelineError::DeserializationError("bad request payload".to_string());
+        let error = typed_error_from_pipeline_error(&e);
+
+        assert_eq!(error.class(), ErrorType::Internal);
+        assert_eq!(error.reason().as_str(), "runtime.unclassified");
+    }
 
     #[derive(Default)]
     struct MismatchPublisher {

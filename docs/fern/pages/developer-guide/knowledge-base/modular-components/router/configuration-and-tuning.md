@@ -15,11 +15,58 @@ For the routing cost model and worker-selection behavior, see
 
 The Frontend configuration is the default for worker sets that do not advertise router settings. A worker set that advertises router configuration replaces that default for requests routed to the set; it does not merge individual settings with the Frontend configuration.
 
-Every replica in a worker set must advertise the same routing configuration. A worker set is defined by namespace, component, endpoint, model, and worker type. Mixed router settings split the set into conflicting cohorts, so Dynamo admits no instances from that set.
+Every replica admitted to a worker set must have the same model deployment card (MDC) checksum after discovery normalization and tokenizer overrides. A worker set is defined by namespace, component, endpoint, model, and worker type. The first valid card observed by a Frontend reserves the set's configuration; replicas with a different checksum receive no traffic and cannot disrupt that configuration.
 
 When a worker set advertises `--router-mode kv`, restate every non-default setting that it needs. An omitted worker flag selects the shared default, not the Frontend's tuned value. This distinction matters most when the Frontend and workers receive different environment variables, such as separate Kubernetes services.
 
 For example, if the Frontend sets `--router-kv-overlap-score-credit 2.5` but a worker set advertises only `--router-mode kv`, the worker set uses the default overlap credit of `1.0`. If both processes inherit the same environment variable, they resolve to the same value. Check the `Activating prefill router` log line to confirm the resolved configuration for each hop.
+
+### Worker-Set Admission and Succession
+
+The first configuration retains its reservation while any matching workers remain,
+including during queued construction, failed construction, and retries. Workers
+with a different checksum form rejected cohorts. Their registration, removal,
+and adapter updates cannot change the incumbent's admissions, serving state,
+routing configuration, or retry schedule. A larger rejected cohort has no priority
+over the incumbent. The Frontend logs each newly rejected cohort at `ERROR`.
+
+Checksum equality is stricter than equivalent serving behavior. Different advertised
+router settings, absent versus explicit defaults, and different model `source_path`
+values can produce different checksums even when workers could serve requests the
+same way. These differences reject only the newcomer. Supported legacy cards still
+join when existing discovery-boundary normalization produces matching checksums;
+there is no additional equivalence check or normalized materialization fingerprint.
+The MDC checksum algorithm and metadata-cache identity are unchanged.
+
+When the last incumbent worker disappears, the Frontend withdraws its pipeline and
+starts a fresh pipeline for the oldest remaining cohort. Duplicate discovery events
+and snapshots preserve cohort order. A cohort that disappears completely and later
+returns joins the end. Old pipelines cannot route through the successor, even if it
+uses the same endpoint or checksum.
+
+For example, a rolling update can serve `model-a` from both `dgd-name-v1` and
+`dgd-name-v2`. These versioned namespaces identify separate worker sets, each with
+its own admitted configuration and routing pipeline. Their cards do not need to
+match each other. Within either set, a replica advertising a different local model
+directory is rejected if that difference changes its MDC checksum.
+
+Admission applies to every discovery-managed Frontend routing hop, including
+prefill and encoder requests. Each hop uses its committed worker set's selected
+card and admitted instances. Prefill routing mode and KV block size come from that
+card. Compatible replicas can join without rebuilding the hop; succession replaces
+its configuration even if the endpoint is unchanged.
+
+> [!NOTE]
+> Selection is local to each Frontend. Frontends that observe conflicting cards in
+> different orders may choose different incumbents; no cross-Frontend agreement is
+> promised. This intentionally favors serving each Frontend's admitted incumbent
+> over serving none. Different local winners are expected; discovery does not
+> withdraw service or run a shared election to force agreement.
+>
+> Frontend readiness reflects committed membership. The KV DC Relay
+> evaluates discovery independently and may remain conservative while a Frontend
+> serves its incumbent. The shared readiness evaluator produces the same answer
+> only for equivalent input units.
 
 ## Routing Behavior
 
@@ -36,7 +83,7 @@ For example, if the Frontend sets `--router-kv-overlap-score-credit 2.5` but a w
 - `--router-prefill-load-model`: Selects the router's prompt-side load model. `none` keeps the existing static prompt load accounting. `aic` predicts one expected prefill duration per admitted request and lazily decays only the oldest active prefill request on each worker.
 - `--router-queue-threshold`: Optional queue threshold fraction for prefill token capacity. Queueing is disabled by default; setting a numeric value enables it. The router holds incoming requests in a priority queue while all eligible workers exceed `threshold * max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch rather than rejecting work, so routing decisions use the freshest load metrics at the moment a request is sent to a worker. `nvext.agent_hints.strict_priority` selects an absolute pending-queue tier, while `nvext.agent_hints.priority` adjusts ordering within the configured policy. Must be greater than or equal to 0; use `0.0` for maximum queueing sensitivity. See the SGLang note under [Tuning Guidelines](#tuning-guidelines) for caveats around how `max_num_batched_tokens` is populated on that backend, and see [Priority Scheduling](../../../../use-cases/agents/priority-scheduling.md) for how router priority differs from backend engine priority.
 - `--router-queue-policy`: Scheduling policy for the router queue: `fcfs` (default) or `wspt`.
-- `--router-policy-config`: Startup-only YAML path for policy-class queues and custom worker-selection instances. When omitted, `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class. The equivalent environment variable is `DYN_ROUTER_POLICY_CONFIG`. See [Write Custom Routing Strategies](custom-worker-selection.mdx) for the linked-policy schema.
+- `--router-policy-config`: Startup-only YAML path for policy-class queues and worker-selection instances. When omitted, `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class. The equivalent environment variable is `DYN_ROUTER_POLICY_CONFIG`. See [Worker-Selection Policies](#worker-selection-policies) to select a built-in policy, and [Write Custom Routing Strategies](custom-worker-selection.mdx) for the linked-policy schema.
 
 For how queue backpressure differs from candidate filtering and busy-threshold overload handling, see [Router Filtering](worker-filtering.md).
 
@@ -48,6 +95,86 @@ YAML accept only `fcfs` and `wspt`.
 For each policy, the complete pending-queue key is
 `(strict_priority, policy_key)`. Higher strict tiers always win; the selected
 policy orders requests within a tier.
+
+### Worker-Selection Policies
+
+A worker-selection policy replaces the worker-ranking step of the routing pipeline: it decides which
+eligible worker receives a request. Dynamo still owns discovery, eligibility, queueing, reservations,
+accounting, and metrics. The built-in selector and its cost model above remain the default.
+
+The Dynamo frontend ships a set of built-in worker-selection policies, so selecting one needs
+`--router-policy-config` only — no rebuild, no custom image. They come from the policy catalog the
+Python bindings link by default; a build that disables default features, and the standalone EPP,
+link no catalog and reject a configured policy type at startup.
+
+| Policy type | Behavior |
+|---|---|
+| `default` | Dynamo's built-in selector and cost model. Reserved; always available. |
+| `dynamo-two-tier-cost-fn` | Ranks on two tiers instead of one additive cost: active-request load first, then device-KV prefix overlap. Prefers the worker holding the largest prefix overlap unless load is badly imbalanced. Thresholds and selection order ported from the experimental SGLang router's `cache_aware_zmq` policy. Thresholds are tunable; the defaults reproduce it exactly. |
+
+Write the instance into the same YAML file that `--router-policy-config` already points at:
+
+```yaml
+worker_selection:
+  aggregated: dynamo-two-tier-cost-fn
+  prefill: dynamo-two-tier-cost-fn
+  decode: dynamo-two-tier-cost-fn
+  instances:
+    - name: dynamo-two-tier-cost-fn
+      type: dynamo-two-tier-cost-fn
+```
+
+`aggregated`, `prefill`, `decode`, and `encode` each select a named instance, so prefill and decode
+pools can run different policies. An omitted stage falls back to the built-in selector. `name` is
+yours to choose; `type` must be one of the policy types above.
+
+```bash
+python3 -m dynamo.frontend --router-mode kv --router-policy-config worker-selection.yaml
+```
+
+#### Tune a Policy
+
+A policy instance may carry a `parameters` mapping that the policy itself validates at startup.
+Omitting it keeps every default, so `dynamo-two-tier-cost-fn` with no `parameters` reproduces the
+experimental router exactly. Add any subset to tune it:
+
+```yaml
+    - name: dynamo-two-tier-cost-fn
+      type: dynamo-two-tier-cost-fn
+      parameters:
+        cache_threshold: 0.5
+        balance_abs_threshold: 32
+        balance_rel_threshold: 1.1
+```
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `cache_threshold` | `0.5` | Fraction of the request's blocks that must be device-resident on the best worker before the cache tier applies. Compared strictly. Must be in `[0.0, 1.0]`. |
+| `balance_abs_threshold` | `32` | Minimum active-request spread before the load tier applies. |
+| `balance_rel_threshold` | `1.1` | Minimum ratio of largest to smallest active-request count before the load tier applies. Must be at least `1.0`. |
+
+Both load gates must hold before the load tier displaces the cache tier. Parameters are validated at
+startup, so an out-of-range value or an unknown key fails the process immediately, naming the key,
+rather than being silently ignored. It selects the least-loaded worker once the active-request spread is greater than 32 and the
+largest count is more than 1.1 times the smallest; otherwise it prefers the worker holding the
+largest device-KV overlap when that overlap covers more than 50% of the request's blocks.
+
+#### Override the Selection
+
+`DYN_ROUTER_WORKER_SELECTION_POLICY` overrides every stage. `--router-prefill-policy` and
+`--router-decode-policy`, and their `DYN_ROUTER_PREFILL_POLICY` and `DYN_ROUTER_DECODE_POLICY`
+environment variables, override one stage each. Precedence for a stage is: stage flag, stage
+environment variable, `DYN_ROUTER_WORKER_SELECTION_POLICY`, the YAML stage selection, then
+Dynamo's built-in selector. There is no YAML-wide default: a stage with no selection falls straight
+to the built-in selector, and `worker_selection` rejects unknown keys. Passing `default` explicitly selects the built-in selector
+for that scope, which makes it a quick way to A/B a policy against the default.
+
+> [!NOTE]
+> If a configured policy type is not linked into the running build, startup fails with the list of
+> policy types that are linked. It does not silently fall back to the default selector.
+
+To write your own policy instead of using a built-in one, see
+[Write Custom Routing Strategies](custom-worker-selection.mdx).
 
 ### Policy-Class Queues
 

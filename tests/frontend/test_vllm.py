@@ -72,7 +72,7 @@ SYSTEM_HEALTH_TOOL = {
 }
 
 
-class VllmWorkerProcess(ManagedProcess):
+class WorkerProcess(ManagedProcess):
     """Vllm Worker process for GPT-OSS model."""
 
     def __init__(
@@ -188,7 +188,7 @@ def start_services(
         terminate_all_matching_process_names=False,
     ):
         logger.info("Frontend started for tests")
-        with VllmWorkerProcess(
+        with WorkerProcess(
             request,
             frontend_port=frontend_port,
             system_port=system_port,

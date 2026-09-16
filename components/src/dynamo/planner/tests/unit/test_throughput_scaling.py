@@ -71,8 +71,8 @@ def test_prefill_throughput_uses_component_minimum_override():
 def _disagg_state(
     current_p: int,
     current_d: int,
-    raw_p: int,
-    raw_d: int,
+    raw_p: Optional[int],
+    raw_d: Optional[int],
     *,
     enable_load_scaling: bool,
     cap: int = 8,
@@ -111,10 +111,16 @@ def _disagg_state(
         )
     )
 
+    # A None raw count stands for a perf model that cannot size the tick. The
+    # real _compute_* record the aggregate reason, so the stubs do too.
     def _prefill(_self, _demand, _isl, _osl, _kv_hit_rate=None):
+        if raw_p is None:
+            _self._diag_throughput_reason = "model_not_ready"
         return raw_p
 
     def _decode(_self, _demand, _isl, _osl):
+        if raw_d is None:
+            _self._diag_throughput_reason = "model_not_ready"
         return raw_d
 
     state._compute_prefill_replicas = MethodType(_prefill, state)
@@ -383,6 +389,56 @@ def test_single_endpoint_recovery_overrides_cap_without_minimum_gpu_budget():
     assert decision.num_prefill == 30
 
 
+def test_disagg_throughput_applies_min_endpoint_floor_when_perf_model_not_ready():
+    state = _disagg_state(
+        1,
+        1,
+        None,
+        None,
+        enable_load_scaling=False,
+        min_gpus=-1,
+        decode_min_endpoint=3,
+    )
+
+    decision = state._throughput_disagg(1.0, 1.0, 1.0)
+
+    assert decision is not None
+    assert (decision.num_prefill, decision.num_decode) == (1, 3)
+    assert state.diagnostics().throughput_decision_reason == "model_not_ready"
+
+
+def test_disagg_throughput_holds_when_perf_model_not_ready_and_floor_already_met():
+    state = _disagg_state(
+        1,
+        3,
+        None,
+        None,
+        enable_load_scaling=False,
+        min_gpus=-1,
+        decode_min_endpoint=3,
+    )
+
+    assert state._throughput_disagg(1.0, 1.0, 1.0) is None
+    assert state.diagnostics().throughput_decision_reason == "model_not_ready"
+
+
+def test_single_throughput_applies_min_endpoint_floor_when_perf_model_not_ready():
+    state = _disagg_state(
+        1,
+        1,
+        None,
+        None,
+        enable_load_scaling=False,
+        min_gpus=-1,
+        decode_min_endpoint=3,
+    )
+
+    decision = state._throughput_single(1.0, 1.0, 1.0, "decode")
+
+    assert decision is not None
+    assert decision.num_decode == 3
+
+
 def test_agg_throughput_uses_replica_cap():
     state = _disagg_state(
         1,
@@ -412,6 +468,39 @@ def test_agg_throughput_uses_replica_cap():
 
     assert decision is not None
     assert decision.num_decode == 18
+
+
+def test_agg_throughput_applies_min_endpoint_floor_when_perf_model_not_ready():
+    state = _disagg_state(
+        1,
+        1,
+        None,
+        None,
+        enable_load_scaling=False,
+        min_gpus=-1,
+        max_gpus=100,
+        decode_min_endpoint=3,
+    )
+    state._capabilities = WorkerCapabilities(
+        decode=EngineCapabilities(
+            gpu_cost_per_replica=1,
+            max_num_batched_tokens=4096,
+        )
+    )
+    state._agg_regression = SimpleNamespace(
+        find_engine_capacity_rps=lambda **_kwargs: SimpleNamespace(
+            rps=0.0,
+            ttft_ms=1.0,
+            itl_ms=1.0,
+            eligible=True,
+        )
+    )
+
+    decision = state._throughput_agg(1.0, 1.0, 1.0)
+
+    assert decision is not None
+    assert decision.num_decode == 3
+    assert state.diagnostics().throughput_decision_reason == "model_not_ready"
 
 
 def test_mixed_scaling_funds_only_atomic_part_of_large_throughput_floor():
@@ -455,3 +544,57 @@ def test_engine_rps_recommendation_is_independent_of_sidecar_cost(
     )
 
     assert replicas == 3
+
+
+@pytest.mark.parametrize("mode", ["prefill", "decode", "disagg", "agg"])
+@pytest.mark.parametrize("model_ready", [False, True])
+def test_startup_cancellation_requires_a_throughput_estimate(mode, model_ready):
+    estimate = 1 if model_ready else None
+    state = _disagg_state(
+        1,
+        1,
+        estimate,
+        estimate,
+        enable_load_scaling=False,
+        min_gpus=-1,
+        max_gpus=-1,
+    )
+    state._config.mode = mode
+    state.observe_worker_counts(
+        WorkerCounts(
+            ready_num_prefill=1,
+            ready_num_decode=1,
+            prefill_scaling_in_progress=mode in ("prefill", "disagg"),
+            decode_scaling_in_progress=mode != "prefill",
+            pending_num_prefill=1 if mode in ("prefill", "disagg") else 0,
+            pending_num_decode=1 if mode != "prefill" else 0,
+        )
+    )
+    if mode == "agg":
+        state.update_capabilities(
+            WorkerCapabilities(
+                decode=EngineCapabilities(
+                    gpu_cost_per_replica=1,
+                    max_num_batched_tokens=4096,
+                )
+            )
+        )
+        state._agg_regression = SimpleNamespace(
+            find_engine_capacity_rps=lambda **_kwargs: (
+                SimpleNamespace(rps=1.0, ttft_ms=1.0, itl_ms=1.0, eligible=True)
+                if model_ready
+                else None
+            )
+        )
+        decision = state._throughput_agg(1.0, 1.0, 1.0)
+    elif mode == "disagg":
+        decision = state._throughput_disagg(1.0, 1.0, 1.0)
+    else:
+        decision = state._throughput_single(1.0, 1.0, 1.0, mode)
+
+    if model_ready:
+        assert decision is not None
+        assert (decision.num_prefill if mode == "prefill" else decision.num_decode) == 1
+    else:
+        assert decision is None
+        assert state.diagnostics().throughput_decision_reason == "model_not_ready"

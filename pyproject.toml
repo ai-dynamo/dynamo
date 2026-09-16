@@ -14,7 +14,7 @@ license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
     "ai-dynamo-runtime==1.5.0",
-    "aisimulate==0.1.0.dev2; python_version >= '3.11' and python_version < '3.14'",
+    "aisimulate==0.12.0.dev2; python_version >= '3.11' and python_version < '3.14'",
     "aiohttp>=3.14.3,<4.0",
     "transformers>=4.56.0",
     "kubernetes>=32.0.1,<33.0.0",
@@ -50,7 +50,7 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 [project.optional-dependencies]
 trtllm =[
     "uvloop",
-    "tensorrt-llm==1.3.0rc25",
+    "tensorrt-llm==1.3.0rc26",
     # tensorrt-llm declares an uncapped `mpmath>=1.3.0`; under `--pre` the resolver
     # picks mpmath 1.5.0a0 (mpmath.libmp.bitcount removed) and backtracks sympy to
     # the uncapped 1.14.0rc1, which still imports bitcount -> torch._dynamo dies at
@@ -61,7 +61,7 @@ trtllm =[
 vllm = [
     "uvloop",
     "nixl[cu13]==1.3.2",
-    "vllm[flashinfer,runai,otel]==0.28.0",
+    "vllm[flashinfer,runai,otel]==0.29.0",
     # vllm-omni is not part of ai-dynamo[vllm]: container builds inherit the
     # framework stack from vllm/vllm-openai, and pip/uv dependency resolution
     # for omni can override the vLLM torch stack.
@@ -110,6 +110,7 @@ docs = { requires-python = ">=3.11" }
 [project.entry-points.pytest11]
 vllm_tests = "dynamo.vllm.tests.conftest"
 trtllm_tests = "dynamo.trtllm.tests.conftest"
+triton_tests = "dynamo.triton.tests.conftest"
 sglang_tests = "dynamo.sglang.tests.conftest"
 
 [project.entry-points."aisimulate.sweep_config_providers"]
@@ -164,6 +165,9 @@ path = "hatch_build.py"
 packages = [
     "components/src/dynamo",
 ]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.codespell]
 # note: pre-commit passes explicit lists of files here, which this skip file list doesn't override -
@@ -236,6 +240,9 @@ xfail_strict = true
 log_cli_level = "INFO"
 filterwarnings = [
     "error",
+    # DGDR still uses AISimulate 0.12's supported legacy sweep API until its
+    # migration to the new Sweeper API is implemented.
+    'ignore:`aiconfigurator\.sdk\.sweep\.sweep_(agg|disagg)\(\)` is deprecated:DeprecationWarning',
     # chardet 6.x is pulled in transitively but requests 2.32.x only supports chardet <6;
     # charset_normalizer is used at runtime so the warning is benign.
     "ignore:.*doesn't match a supported version",
@@ -334,6 +341,8 @@ markers = [
     "vllm: marks tests as requiring vllm",
     "trtllm: marks tests as requiring trtllm",
     "sglang: marks tests as requiring sglang",
+    "triton: marks tests as requiring triton",
+    "triton_qa: marks the Triton QA test suite",
     "lmcache: marks tests as requiring lmcache",
     "framework_agnostic: marks tests that inspect the container image itself; they carry framework markers for CI selection but need no framework module installed",
     "multimodal: marks tests as multimodal (image/video) tests",
@@ -352,7 +361,7 @@ markers = [
     "k8s: marks tests as requiring Kubernetes",
     "fault_tolerance: marks tests as fault tolerance tests",
     "deploy: marks tests as deployment tests",
-    "framework_only: marks standard framework deployment tests (vllm, sglang, trtllm)",
+    "framework_only: marks standard framework deployment tests (vllm, sglang, trtllm, triton)",
     "framework_with_gaie: marks tests for GAIE (Gateway API Inference Extension) deployment",
     "framework_with_efa: marks deployment tests that require an EFA-capable cluster and an -efa image",
     "snapshot_restore: marks standalone Snapshot checkpoint/restore deployment tests",
@@ -447,6 +456,12 @@ ignore_missing_imports = true
 # Absent from the CPU lint env and ships no type stubs, so mypy would raise
 # import-not-found on the guarded `import PyNvVideoCodec`.
 module = ["PyNvVideoCodec", "PyNvVideoCodec.*"]
+follow_imports = "skip"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# OpenCV is optional and absent from the lint environment.
+module = ["cv2", "cv2.*"]
 follow_imports = "skip"
 ignore_missing_imports = true
 
