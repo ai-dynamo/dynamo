@@ -93,6 +93,7 @@ where
         is_query_only: bool,
         budget: &CleanupBudget,
     ) -> Result<(WorkerSelection, Option<AffinityAcquire>), Error> {
+        self.validate_explicit_worker(request.content(), phase)?;
         self.select_with_session_affinity(request, phase, is_query_only, budget, |target| {
             self.select_request(request, phase, is_query_only, target, budget)
         })
@@ -132,6 +133,7 @@ where
         if self.kv_router_if_enabled().is_none() {
             return Err(anyhow::anyhow!("KV route previews require KV routing"));
         }
+        self.validate_explicit_worker(request.content(), phase)?;
 
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
