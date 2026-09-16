@@ -20,6 +20,7 @@ ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
 ARG VLLM_OMNI_REF
 ARG TRANSFORMERS_VERSION
+ARG TOKENIZERS_VERSION
 ARG NIXL_REF
 {% if device == "cuda" %}
 ARG CUDA_MAJOR
@@ -186,15 +187,11 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 {% set vllm_rs_allowlist = "1" if target not in ("dev", "local-dev") else "0" %}
 {% set vllm_rs_plugins = "modelexpress" if context.vllm.enable_modelexpress == "true" else "" %}
 
-# The vLLM 0.28.0 release images resolve the unbounded `transformers>=5.5.3`
-# requirement to 5.15.1, but vLLM-Omni 0.28.0rc1 caps Transformers below 5.15.
-# Omni is layered against the installed Transformers version, so install the
-# compatible release first and its dependency solve sees the final Transformers
-# invariant instead of resolving against 5.15.1.
+# Align Transformers and tokenizers before freezing Omni's protected dependencies.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} --no-deps \
-        "transformers==${TRANSFORMERS_VERSION}"
+        "transformers==${TRANSFORMERS_VERSION}" "tokenizers==${TOKENIZERS_VERSION}"
 
 {% if device != "cuda" %}
 # NIXL meta package always tries to find a cuda-backend
@@ -368,7 +365,6 @@ RUN --mount=type=bind,source=./container/deps/vllm/validate_torch_compile_smoke.
 # IMAGEIO_FFMPEG_EXE. This remains ungated by enable_media_ffmpeg so the
 # media-enabled runtime wheel and the omni video-export path always have their
 # required shared libraries and CLI available.
-{% if device == "cuda" or device == "xpu" %}
 RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
     mkdir -p /usr/local/lib/pkgconfig && \
     cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/ && \
@@ -393,7 +389,6 @@ RUN set -eu; \
         echo "ERROR: shipped ffmpeg ($ff) exposes an H.264/H.265/AAC/NVENC encoder" >&2; \
         exit 1; \
     fi
-{% endif %}
 
 # Replace the upstream vllm/vllm-openai image's imageio-ffmpeg (which ships a
 # GPL-encumbered prebuilt ffmpeg binary in <site-packages>/imageio_ffmpeg/binaries/)
@@ -403,7 +398,7 @@ RUN set -eu; \
 # The vllm-openai base sets UV_CACHE_DIR=/opt/uv/cache and used to bake a uv
 # cache there (v0.27.1 carried archived wheel copies, including mooncake, that
 # duplicated installed packages and kept stale versions on disk after floors
-# refreshed them). The pinned v0.28.0 base mounts a cache over that path in
+# refreshed them). Recent upstream bases mount a cache over that path in
 # every uv RUN and ships only the empty directory, so the rm below is a no-op
 # today. It stays as a guard against a base that bakes the cache again: the
 # cache would sit in an inherited layer, so removing it here does not shrink
@@ -531,20 +526,15 @@ assert eps, 'modelexpress vllm.general_plugins entry point not found'; \
 [ep.load()() for ep in eps]"
 {% endif %}
 
-# vLLM-Omni is installed with the current Transformers version in its protected
-# constraints file, so an incompatible Omni requirement fails during dependency
-# resolution. Check the completed image as well so a later package layer cannot
-# silently replace the vLLM-Omni-compatible Transformers release. A global
-# `uv pip check` is not appropriate here: the upstream runtime and Dynamo's
-# deliberate --no-deps layers contain unrelated package-metadata conflicts.
-RUN {{ python_executable }} - "${TRANSFORMERS_VERSION}" <<'PY'
+# Check that later package layers preserve the Omni-compatible versions.
+RUN {{ python_executable }} - "${TRANSFORMERS_VERSION}" "${TOKENIZERS_VERSION}" <<'PY'
 import importlib.metadata as md
 import sys
 
-actual = md.version("transformers")
-expected = sys.argv[1]
-if actual != expected:
-    raise RuntimeError(f"expected transformers {expected}, found {actual}")
+for package, expected in zip(("transformers", "tokenizers"), sys.argv[1:]):
+    actual = md.version(package)
+    if actual != expected:
+        raise RuntimeError(f"expected {package} {expected}, found {actual}")
 PY
 
 # Use the packaged binary to match the installed vLLM version.

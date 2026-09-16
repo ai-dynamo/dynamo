@@ -31,6 +31,8 @@
 #     --mooncake-ib-device to the node's IB device list before applying.
 #   * DYN_SYSTEM_ENABLED=true so the leader exposes the :9090 system server that
 #     serves /engine/control/*.
+#   * BOTH the decode and the prefill CUDA graph disabled, passed explicitly
+#     below: SGLang asserts this for elastic-EP scale-up and exits on startup.
 #
 # The joining group is NOT launched by the operator yet (that orchestration is
 # tracked separately). The accompanying run_sglang_elastic_ep_scale_up_test.sh
@@ -128,6 +130,10 @@ spec:
             - "4"
             - --max-ep-size
             - "8"
+            - --cuda-graph-backend-decode
+            - disabled
+            - --cuda-graph-backend-prefill
+            - disabled
             # Stable rendezvous address the joining group dials on scale-up.
             # Sourced from SGLANG_ELASTIC_SCALE_DIST_INIT (single source of truth).
             - --dist-init-addr
