@@ -14,6 +14,7 @@ use kube::{
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast, mpsc};
+use tokio::task::JoinHandle;
 
 use super::crd::DynamoWorkerMetadata;
 use super::utils::{KubeDiscoveryMode, PodInfo, extract_endpoint_info, extract_ready_containers};
@@ -109,11 +110,15 @@ fn cr_event(event: watcher::Event<DynamoWorkerMetadata>) -> Option<CrEvent> {
 }
 
 impl DiscoverySource {
+    /// Spawns the readiness reflector task and returns its handle alongside the
+    /// store. The caller owns the task's lifetime: abort and await the handle on
+    /// every exit path so the underlying Kubernetes watch is released instead of
+    /// running detached for the life of the runtime (see issue #13874).
     fn new(
         pod_info: &PodInfo,
         kube_client: KubeClient,
         events: mpsc::Sender<ReadinessEvent>,
-    ) -> Self {
+    ) -> (Self, JoinHandle<()>) {
         let labels = Config::default()
             .labels("nvidia.com/dynamo-discovery-backend=kubernetes")
             .labels("nvidia.com/dynamo-discovery-enabled=true");
@@ -125,7 +130,7 @@ impl DiscoverySource {
                 tracing::info!("Daemon watching EndpointSlices (pod mode)");
 
                 let stream = reflector(writer, watcher(api, labels)).default_backoff();
-                tokio::spawn(async move {
+                let handle = tokio::spawn(async move {
                     tokio::pin!(stream);
                     while let Some(res) = stream.next().await {
                         match res {
@@ -143,7 +148,7 @@ impl DiscoverySource {
                     }
                 });
 
-                Self::EndpointSlice(reader)
+                (Self::EndpointSlice(reader), handle)
             }
             KubeDiscoveryMode::Container => {
                 let api: Api<Pod> = Api::namespaced(kube_client, &pod_info.pod_namespace);
@@ -151,7 +156,7 @@ impl DiscoverySource {
                 tracing::info!("Daemon watching Pods (container mode)");
 
                 let stream = reflector(writer, watcher(api, labels)).default_backoff();
-                tokio::spawn(async move {
+                let handle = tokio::spawn(async move {
                     tokio::pin!(stream);
                     while let Some(res) = stream.next().await {
                         match res {
@@ -169,7 +174,7 @@ impl DiscoverySource {
                     }
                 });
 
-                Self::Pod(reader)
+                (Self::Pod(reader), handle)
             }
         }
     }
@@ -225,7 +230,8 @@ impl DiscoveryDaemon {
         tracing::info!("Discovery daemon starting");
 
         let (readiness_tx, mut readiness_rx) = mpsc::channel(SOURCE_CHANNEL_CAPACITY);
-        let source = DiscoverySource::new(&self.pod_info, self.kube_client.clone(), readiness_tx);
+        let (source, readiness_handle) =
+            DiscoverySource::new(&self.pod_info, self.kube_client.clone(), readiness_tx);
 
         let metadata_crs: Api<DynamoWorkerMetadata> =
             Api::namespaced(self.kube_client.clone(), &self.pod_info.pod_namespace);
@@ -239,7 +245,7 @@ impl DiscoveryDaemon {
 
         let cr_reflector_stream =
             reflector(cr_writer, watcher(metadata_crs, Config::default())).default_backoff();
-        tokio::spawn(async move {
+        let cr_handle = tokio::spawn(async move {
             tokio::pin!(cr_reflector_stream);
             while let Some(res) = cr_reflector_stream.next().await {
                 match res {
@@ -261,17 +267,22 @@ impl DiscoveryDaemon {
         let mut readiness_index = ReadinessIndex::default();
         let mut valid_cr_cache: HashMap<String, CachedCrMetadata> = HashMap::new();
 
-        loop {
+        // The loop itself yields the daemon's outcome via `break` instead of
+        // returning directly, so every exit path -- cancellation or either
+        // reflector channel closing -- reaches the cleanup below before this
+        // function returns. See issue #13874: without this, an early `bail!`
+        // from inside the loop would skip stopping the two reflector tasks.
+        let outcome: Result<()> = loop {
             let mut changes = BatchChanges::default();
 
             tokio::select! {
                 _ = self.cancel_token.cancelled() => {
                     tracing::info!("Discovery daemon received cancellation");
-                    break;
+                    break Ok(());
                 }
                 event = readiness_rx.recv() => {
                     let Some(event) = event else {
-                        anyhow::bail!("Readiness reflector stream stopped");
+                        break Err(anyhow::anyhow!("Readiness reflector stream stopped"));
                     };
                     apply_readiness_event(
                         event,
@@ -283,7 +294,7 @@ impl DiscoveryDaemon {
                 }
                 event = cr_rx.recv() => {
                     let Some(event) = event else {
-                        anyhow::bail!("DynamoWorkerMetadata reflector stream stopped");
+                        break Err(anyhow::anyhow!("DynamoWorkerMetadata reflector stream stopped"));
                     };
                     apply_cr_event(
                         event,
@@ -312,11 +323,28 @@ impl DiscoveryDaemon {
                     event_tx.send(event).ok();
                 }
             }
-        }
+        };
+
+        // Own the complete lifetime of both reflector tasks: every exit path
+        // above lands here, so returning from `run` means the readiness and CR
+        // watches have actually stopped, not just that this loop did.
+        stop_reflector_tasks(readiness_handle, cr_handle).await;
 
         tracing::info!("Discovery daemon stopped");
-        Ok(())
+        outcome
     }
+}
+
+/// Aborts both reflector tasks and waits for them to actually finish. `abort`
+/// only requests cancellation -- it takes effect the next time the target task
+/// reaches an `.await` point -- so this does not return until both tasks have,
+/// releasing whatever Kubernetes watch stream and reflector writer each one
+/// held (issue #13874).
+async fn stop_reflector_tasks(readiness_handle: JoinHandle<()>, cr_handle: JoinHandle<()>) {
+    readiness_handle.abort();
+    cr_handle.abort();
+    let _ = readiness_handle.await;
+    let _ = cr_handle.await;
 }
 
 fn apply_readiness_event(
@@ -877,5 +905,34 @@ mod tests {
         );
 
         assert!(managed_fields_summary(&cr).is_none());
+    }
+
+    /// Regression test for issue #13874: `DiscoveryDaemon::run` used to spawn its
+    /// two reflector tasks and discard the `JoinHandle`s, so nothing ever stopped
+    /// them -- they (and the Kubernetes watch each one owned) simply outlived the
+    /// daemon. `stop_reflector_tasks` is the exact cleanup `run` now calls on
+    /// every exit path; this exercises it directly against two tasks that would
+    /// otherwise run forever, standing in for the reflector loops. If `abort`
+    /// were only requested and not awaited, or a handle were dropped instead of
+    /// joined, this would hang instead of returning -- caught here by the
+    /// bounded timeout rather than actually waiting on it.
+    #[tokio::test]
+    async fn stop_reflector_tasks_awaits_both_aborted_handles() {
+        let never_ending = || {
+            tokio::spawn(async {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                }
+            })
+        };
+        let readiness_handle = never_ending();
+        let cr_handle = never_ending();
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stop_reflector_tasks(readiness_handle, cr_handle),
+        )
+        .await
+        .expect("stop_reflector_tasks must return once both tasks are aborted, not hang");
     }
 }
