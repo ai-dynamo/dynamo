@@ -320,6 +320,7 @@ impl RuntimeConfig {
     /// Environment variables are prefixed with `DYN_RUNTIME_` and `DYN_SYSTEM`
     pub fn from_settings() -> Result<RuntimeConfig> {
         use environment_names::runtime::system as env_system;
+        Self::reject_deprecated_parser_env()?;
         // Check for deprecated environment variables
         if std::env::var(env_system::DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS).is_ok() {
             tracing::warn!(
@@ -340,6 +341,17 @@ impl RuntimeConfig {
         let config: RuntimeConfig = Self::figment().extract()?;
         config.validate()?;
         Ok(config)
+    }
+
+    pub fn reject_deprecated_parser_env() -> Result<()> {
+        use environment_names::llm::DYN_PARSER_REVERT_TO_V1;
+
+        if std::env::var("DYN_ENABLE_EXPERIMENTAL_PARSERS_V2").is_ok() {
+            anyhow::bail!(
+                "DYN_ENABLE_EXPERIMENTAL_PARSERS_V2 is no longer supported; remove it. V2 parsers are selected by default. Set {DYN_PARSER_REVERT_TO_V1}=1 to use a V1 parser when available."
+            );
+        }
+        Ok(())
     }
 
     /// Check if System server should be enabled
@@ -562,6 +574,20 @@ mod tests {
             let config = RuntimeConfig::from_settings().expect("from_settings failed");
             assert_eq!(config.num_worker_threads, Some(7), "{WORKERS} was not read");
             assert_eq!(config.max_blocking_threads, 11, "{BLOCKING} was not read");
+        });
+    }
+
+    #[test]
+    fn test_rejects_deprecated_v2_parser_env() {
+        temp_env::with_var("DYN_ENABLE_EXPERIMENTAL_PARSERS_V2", Some("1"), || {
+            let error = RuntimeConfig::reject_deprecated_parser_env()
+                .expect_err("the deprecated parser switch must be rejected");
+            assert!(
+                error
+                    .to_string()
+                    .contains("DYN_ENABLE_EXPERIMENTAL_PARSERS_V2 is no longer supported")
+            );
+            assert!(error.to_string().contains("DYN_PARSER_REVERT_TO_V1"));
         });
     }
 
