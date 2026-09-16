@@ -173,6 +173,15 @@ overrides:
     license: LicenseRef-NVIDIA-Proprietary
     source: "Internal NVIDIA tool — distributed via NGC under the NVIDIA Software License Agreement"
 
+  # --- Open-source Python wheels with non-SPDX metadata ---
+  # instanttensor publishes `License: Apache License`, which the conservative
+  # metadata normalizer does not map to an SPDX identifier. Its release source
+  # archive and upstream repository both include the Apache-2.0 license text.
+  - ecosystem: python
+    name: instanttensor
+    license: Apache-2.0
+    source: "InstantTensor v0.1.9 upstream LICENSE — https://github.com/scitix/InstantTensor/blob/v0.1.9/LICENSE"
+
   # --- Intel oneAPI Python wheels ---
   # oneccl / oneccl-devel wheel METADATA sets License: "Intel Simplified Software
   # License" and Classifier: "License :: Other/Proprietary License" — neither
