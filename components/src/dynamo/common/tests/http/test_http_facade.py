@@ -214,7 +214,7 @@ async def test_collect_capped_does_not_echo_an_unbounded_url() -> None:
 
 async def test_http_status_error_bounds_both_halves_of_its_message() -> None:
     """The video diffusion handler puts str(exc) straight in its response body,
-    and httpx's own status-error text repeats the URL, so neither the url nor
+    and aiohttp's own status-error text repeats the URL, so neither the url nor
     the backend message can go in at full length."""
     url = "https://example.com/" + "u" * 200_000
     err = base.HttpStatusError(404, "Not Found " + "m" * 200_000, url)
