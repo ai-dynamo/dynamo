@@ -1,13 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Lightweight model-visible video token expansion for MM-aware routing.
+//! Lightweight model-visible media token expansion for MM-aware routing.
 
-// The facade is instantiated only when FFmpeg-backed frontend video decoding
-// is enabled. Its model-specific unit tests remain available without FFmpeg.
+// The video facade is instantiated only when FFmpeg-backed frontend decoding
+// is enabled. Image-only model helpers and unit tests remain available without
+// FFmpeg.
 #![cfg_attr(not(feature = "media-ffmpeg"), allow(dead_code))]
 
 mod config;
+pub mod image;
+pub(super) mod nemotron;
 mod qwen3;
 
 use std::{path::Path, sync::Arc};

@@ -10,7 +10,12 @@ from typing import Optional
 from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.config.planner_config import PlannerConfig
-from dynamo.planner.connectors.base import PlannerConnector, is_power_aware_connector
+from dynamo.planner.connectors.base import (
+    PlannerConnector,
+    PowerAwareConnector,
+    is_power_aware_connector,
+    is_startup_aware_connector,
+)
 from dynamo.planner.core.budget import minimum_power_footprint_fits
 from dynamo.planner.core.types import FpmObservations, TrafficObservation
 from dynamo.planner.environment.interface import (
@@ -507,6 +512,7 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
             if self.require_decode and self._state.decode.info is not None
             else None
         )
+        power_controller: Optional[PowerAwareConnector] = None
         if self.config.enable_power_awareness:
             if not is_power_aware_connector(self.controller):
                 raise DeploymentValidationError(
@@ -519,7 +525,42 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
                         "this connector does not."
                     ]
                 )
-            counts = await self.controller.get_power_aware_worker_counts(
+            power_controller = self.controller
+        if is_startup_aware_connector(self.controller):
+            inventory = await self.controller.get_worker_inventory(
+                prefill_component_name=prefill_name,
+                decode_component_name=decode_name,
+            )
+            if inventory is not None:
+                for required, replicas, active, expected, scaling, pending in (
+                    (
+                        self.require_prefill,
+                        self._state.prefill.replicas,
+                        inventory.ready_num_prefill,
+                        inventory.expected_num_prefill,
+                        inventory.prefill_scaling_in_progress,
+                        inventory.pending_num_prefill,
+                    ),
+                    (
+                        self.require_decode,
+                        self._state.decode.replicas,
+                        inventory.ready_num_decode,
+                        inventory.expected_num_decode,
+                        inventory.decode_scaling_in_progress,
+                        inventory.pending_num_decode,
+                    ),
+                ):
+                    if required:
+                        replicas.active = active or 0
+                        replicas.expected = expected
+                        replicas.scaling = scaling
+                        replicas.pending_startup = pending
+                return
+        # Never retain previously verified pending counts after losing access.
+        self._state.prefill.replicas.pending_startup = 0
+        self._state.decode.replicas.pending_startup = 0
+        if power_controller is not None:
+            counts = await power_controller.get_power_aware_worker_counts(
                 prefill_component_name=prefill_name,
                 decode_component_name=decode_name,
             )

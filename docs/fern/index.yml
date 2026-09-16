@@ -680,6 +680,8 @@ navigation:
             path: pages/use-cases/reinforcement-learning/verl.md
           - page: NeMo RL Integration
             path: pages/use-cases/reinforcement-learning/nemo-rl.md
+          - page: Slime Integration
+            path: pages/use-cases/reinforcement-learning/slime.md
           - page: External Trainer Integration
             path: pages/use-cases/reinforcement-learning/implementation-guide.md
           - page: RL Integration Reference
@@ -792,6 +794,9 @@ navigation:
           - page: GLM-5.3-Flash
             path: pages/recipes/model-recipes/glm-5-3-flash.mdx
             slug: glm-5-3-flash
+          - page: A.X-K2
+            path: pages/recipes/model-recipes/ax-k2.mdx
+            slug: ax-k2
           - page: Kimi-K3
             path: pages/recipes/model-recipes/kimi-k3.mdx
             slug: kimi-k3
