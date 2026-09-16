@@ -3543,10 +3543,7 @@ async fn tool_choice_minimax_m2_required_thinking_disabled_keeps_tool_xml() {
     assert!(finish_reasons.contains(&FinishReason::ToolCalls));
 }
 
-/// Exercises the default v2 parser route end-to-end. `tool_choice=Auto` + a v2
-/// family (`qwen3_coder`) routes to `tool_parser_v2::apply_stream`; `required`/`named`
-/// (above) still use the v1 jail when the request mode requires it. A complete tool
-/// call must extract cleanly with no raw markup leaking into content.
+/// `Auto` is required because forced and named tool choices use the v1 jail.
 #[tokio::test]
 async fn tool_calls_qwen3_coder_auto_routes_through_v2_by_default() {
     let xml = "<tool_call>\n<function=get_weather>\n<parameter=location>\nSan Francisco\n</parameter>\n</function>\n</tool_call>";
