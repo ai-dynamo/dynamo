@@ -482,10 +482,14 @@ def test_a_work_issue_alongside_a_proposal_passes(
 
 
 def test_a_proposal_does_not_stop_the_search(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The proposal sorts first, and the work issue behind it still passes."""
+    """The proposal is checked first, and the work issue behind it still passes.
+
+    The work issue carries no keyword here, so it sorts behind the proposal
+    and the loop has to continue past a decided candidate to reach it.
+    """
     dep = f"{REPO}#5"
     api = FakeApi(github={dep: (True, True), f"{REPO}#900": (True, True)}, deps={dep})
-    code, api = run(monkeypatch, api, PR_BODY="Part of #5 and Closes #900")
+    code, api = run(monkeypatch, api, PR_BODY="Part of #5, see also #900")
     assert code == 0
     assert api.github_calls == [dep, f"{REPO}#900"]
 
@@ -509,3 +513,44 @@ def test_a_proposal_with_an_outage_fails_open_and_still_names_it(
     assert code == 0
     out = capsys.readouterr().out
     assert "#14897 is a Dynamo Enhancement Proposal" in out
+
+
+def test_a_closing_reference_is_checked_before_a_proposal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`Closes` says unit of work; `Part of` says umbrella. Rank accordingly."""
+    dep = f"{REPO}#5"
+    api = FakeApi(github={dep: (True, True), f"{REPO}#900": (True, True)}, deps={dep})
+    code, api = run(monkeypatch, api, PR_BODY="Part of #5 and Closes #900")
+    assert code == 0
+    assert api.github_calls == [f"{REPO}#900"]
+
+
+def test_ten_proposals_do_not_hide_the_work_issue_behind_the_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A decided candidate spends a lookup, so ten of them could bury the work.
+
+    Without closing-first ordering the work issue falls outside the budget and
+    a correctly linked pull request is reported as proposal only.
+    """
+    deps = {f"{REPO}#{n}": (True, True) for n in range(1, 11)}
+    api = FakeApi(github={**deps, f"{REPO}#900": (True, True)}, deps=set(deps))
+    body = " ".join(f"Part of #{n}" for n in range(1, 11)) + "\n\nCloses #900"
+    code, api = run(monkeypatch, api, PR_BODY=body)
+    assert code == 0
+    assert api.github_calls == [f"{REPO}#900"]
+
+
+def test_the_failure_says_when_candidates_went_unchecked(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Eleven closing-form proposals exhaust the budget with one left over."""
+    keys = {f"{REPO}#{n}": (True, True) for n in range(101, 112)}
+    api = FakeApi(github=keys, deps=set(keys))
+    body = " ".join(f"Closes #{n}" for n in range(101, 112))
+    code, api = run(monkeypatch, api, PR_BODY=body)
+    assert code == 1
+    out = capsys.readouterr().out
+    assert "1 further reference went unchecked" in out
+    assert "are Dynamo Enhancement Proposals" in out

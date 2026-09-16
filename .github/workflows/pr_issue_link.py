@@ -62,14 +62,21 @@ ISSUE_URL_RE = re.compile(rf"github\.com/({REPO_PAT})/issues/(\d{{1,7}})\b")
 # A magic word marks the reference the author meant as the link. Both forms
 # order the lookup budget, so a release pull request carrying dozens of
 # references still spends its lookups on the one that matters.
-MAGIC_WORDS = (
-    r"clos(?:e|es|ed)|fix(?:es|ed)?|resolv(?:e|es|ed)|part of|refs?|relates to"
+# A closing keyword says the issue is the unit of work this pull request
+# completes. A non-closing one says the issue outlives it, which is what a
+# proposal umbrella takes. Closing references are checked first, so ten
+# `Part of <dep>` lines cannot spend the lookup budget ahead of the
+# `Closes #900` that actually answers the check.
+CLOSING_WORDS = r"clos(?:e|es|ed)|fix(?:es|ed)?|resolv(?:e|es|ed)"
+REFERENCE_WORDS = r"part of|refs?|relates to"
+MAGIC_WORDS = rf"{CLOSING_WORDS}|{REFERENCE_WORDS}"
+_GITHUB_REF_TAIL = (
+    rf"\b[\s:]*(?:https?://github\.com/({REPO_PAT})/issues/|({REPO_PAT})?#)"
+    rf"(\d{{1,7}})\b"
 )
-INTENT_GITHUB_RE = re.compile(
-    rf"\b(?:{MAGIC_WORDS})\b[\s:]*"
-    rf"(?:https?://github\.com/({REPO_PAT})/issues/|({REPO_PAT})?#)"
-    rf"(\d{{1,7}})\b",
-    re.IGNORECASE,
+INTENT_GITHUB_RE = re.compile(rf"\b(?:{MAGIC_WORDS}){_GITHUB_REF_TAIL}", re.IGNORECASE)
+CLOSING_GITHUB_RE = re.compile(
+    rf"\b(?:{CLOSING_WORDS}){_GITHUB_REF_TAIL}", re.IGNORECASE
 )
 INTENT_LINEAR_RE = re.compile(
     rf"\b(?:{MAGIC_WORDS})\b[\s:]*({LINEAR_ID})\b", re.IGNORECASE
@@ -219,6 +226,10 @@ def main() -> int:
         (url_repo or inline_repo or repo, number)
         for url_repo, inline_repo, number in INTENT_GITHUB_RE.findall(text)
     }
+    closing_github = {
+        (url_repo or inline_repo or repo, number)
+        for url_repo, inline_repo, number in CLOSING_GITHUB_RE.findall(text)
+    }
     intent_linear = {m.upper() for m in INTENT_LINEAR_RE.findall(text)} | branch_ids
 
     verified: list[str] = []
@@ -231,7 +242,13 @@ def main() -> int:
     repo_visibility: dict[str, tuple[bool, bool]] = {}
 
     all_refs = sorted(
-        github_refs, key=lambda r: (r not in intent_github, r[0], int(r[1]))
+        github_refs,
+        key=lambda r: (
+            r not in closing_github,
+            r not in intent_github,
+            r[0],
+            int(r[1]),
+        ),
     )
     ordered_refs = all_refs[:MAX_CANDIDATES]
     # True once any candidate has been decided: the API answered about it, or
@@ -349,12 +366,28 @@ def main() -> int:
 
     dep_lead = (
         [
-            f"Found {', '.join(dep_refs)}, which is a Dynamo Enhancement Proposal.",
+            f"Found {', '.join(dep_refs)}, which "
+            + (
+                "is a Dynamo Enhancement Proposal."
+                if len(dep_refs) == 1
+                else "are Dynamo Enhancement Proposals."
+            ),
             "A DEP is a proposal umbrella: it stays open across many pull requests, so",
             "it records what the work is part of and not what this change is. Keep the",
             "reference and link the work as well.",
             "",
         ]
+        + (
+            [
+                f"{(over := len(all_refs) - MAX_CANDIDATES)} further "
+                f"reference{'' if over == 1 else 's'} went unchecked: the "
+                f"{MAX_CANDIDATES}-lookup bound was spent before reaching "
+                "them. A closing form (`Closes #123`) is checked first.",
+                "",
+            ]
+            if len(all_refs) > MAX_CANDIDATES
+            else []
+        )
         if dep_refs
         else []
     )
