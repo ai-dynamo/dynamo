@@ -309,7 +309,11 @@ type OverridesSpec struct {
 	// rather than PSA — the same authority any Pod author in the namespace already
 	// holds. Grant create/update on DGDRs only to principals trusted to create Pods in
 	// the namespace. The profiling Job always runs in the DGDR's own namespace and
-	// overrides cannot change that, so a DGDR cannot escape its namespace.
+	// overrides cannot change that — but namespace containment is not node or
+	// cross-tenant isolation: if admission permits privileged containers, host
+	// namespaces, host devices, or hostPath mounts, a DGDR creator can obtain those
+	// capabilities through the operator, so apply non-exempt Pod Security Admission
+	// (or equivalent policy) to every resulting Pod.
 	// +optional
 	ProfilingJob *batchv1.JobSpec `json:"profilingJob,omitempty"`
 

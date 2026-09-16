@@ -481,8 +481,11 @@ workload-creation API:
 > would trust to create Pods in that namespace, and use namespaces as the tenancy boundary — see
 > [Kubernetes RBAC good practices](https://kubernetes.io/docs/concepts/security/rbac-good-practices/#workload-creation).
 
-The profiling Job always runs in the DGDR's own namespace; overrides cannot relocate it, so a DGDR
-cannot escape its namespace.
+The profiling Job object always remains in the DGDR's own namespace and overrides cannot relocate
+it — but namespace containment is not node or cross-tenant isolation. If admission permits
+privileged containers, host namespaces, host devices, or `hostPath` mounts, a DGDR creator can
+obtain those capabilities through the operator. Apply non-exempt Pod Security Admission (or
+equivalent policy) to every resulting Pod.
 
 ## Next steps
 
