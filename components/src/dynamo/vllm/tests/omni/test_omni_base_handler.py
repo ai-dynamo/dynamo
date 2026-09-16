@@ -208,6 +208,29 @@ class TestDiffusionParallelConfigCoverage:
         assert kwargs["diffusion_attention_backend"] == "FASTVIDEO_VSA"
         assert kwargs["fastvideo_vsa_topk"] == 64
 
+    def test_diffusion_only_defaults_not_forwarded_to_async_omni(self):
+        kwargs = _build_kwargs(_make_config())
+
+        for field in (
+            "enable_layerwise_offload",
+            "vae_use_slicing",
+            "vae_use_tiling",
+            "boundary_ratio",
+            "enable_cache_dit_summary",
+            "enable_cpu_offload",
+        ):
+            assert field not in kwargs
+
+    def test_explicit_false_diffusion_option_forwarded_to_async_omni(self):
+        config = _make_config()
+        config.diffusion = dataclasses.replace(
+            OmniDiffusionKwargs(), vae_use_tiling=False
+        )
+
+        kwargs = _build_kwargs(config)
+
+        assert kwargs["vae_use_tiling"] is False
+
     def test_lora_disabled_resolves_no_capacity(self):
         config = _make_config()
         handler = BaseOmniHandler.__new__(BaseOmniHandler)

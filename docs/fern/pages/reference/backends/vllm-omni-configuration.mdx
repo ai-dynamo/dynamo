@@ -22,8 +22,8 @@ These are the vLLM-Omni orchestration flags. The omni worker also accepts the sa
 <ParamField path="--stage-configs-path" type="path">
   Path to stage config YAML (optional; vLLM-Omni uses model defaults if omitted).
 </ParamField>
-<ParamField path="--boundary-ratio" type="float" default="0.875">
-  MoE expert switching boundary.
+<ParamField path="--boundary-ratio" type="float">
+  MoE expert switching boundary. If omitted, the vLLM-Omni model pipeline selects its default.
 </ParamField>
 <ParamField path="--flow-shift" type="float">
   Scheduler flow_shift (5.0 for 720p, 12.0 for 480p).

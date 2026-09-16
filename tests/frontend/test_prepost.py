@@ -36,6 +36,7 @@ if HAS_VLLM:
     from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 
     from dynamo.frontend.prepost import StreamingPostProcessor, _prepare_request
+    from dynamo.frontend.vllm_protocol import FunctionDefinition
 else:
     # Fake some types so that `pre-commit` passes
     class CompletionOutput:

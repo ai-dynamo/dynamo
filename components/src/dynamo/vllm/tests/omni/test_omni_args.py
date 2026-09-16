@@ -139,6 +139,48 @@ def test_fastvideo_vsa_topk_parses_as_diffusion_option():
     assert args.fastvideo_vsa_topk == 64
 
 
+def test_diffusion_only_options_remain_unset_when_omitted():
+    parser = argparse.ArgumentParser()
+    OmniArgGroup().add_arguments(parser)
+
+    args = parser.parse_args([])
+
+    assert {
+        "enable_layerwise_offload": args.enable_layerwise_offload,
+        "vae_use_slicing": args.vae_use_slicing,
+        "vae_use_tiling": args.vae_use_tiling,
+        "boundary_ratio": args.boundary_ratio,
+        "enable_cache_dit_summary": args.enable_cache_dit_summary,
+        "enable_cpu_offload": args.enable_cpu_offload,
+    } == {
+        "enable_layerwise_offload": None,
+        "vae_use_slicing": None,
+        "vae_use_tiling": None,
+        "boundary_ratio": None,
+        "enable_cache_dit_summary": None,
+        "enable_cpu_offload": None,
+    }
+
+
+def test_diffusion_bool_option_preserves_explicit_false():
+    parser = argparse.ArgumentParser()
+    OmniArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(["--no-vae-use-tiling"])
+
+    assert args.vae_use_tiling is False
+
+
+def test_diffusion_bool_environment_option_is_parsed(monkeypatch):
+    monkeypatch.setenv("DYN_OMNI_VAE_USE_TILING", "false")
+    parser = argparse.ArgumentParser()
+    OmniArgGroup().add_arguments(parser)
+
+    args = parser.parse_args([])
+
+    assert args.vae_use_tiling is False
+
+
 @pytest.mark.parametrize("fps", [0, -1, -100])
 def test_omni_config_invalid_video_fps(fps):
     config = _make_omni_config(default_video_fps=fps)
