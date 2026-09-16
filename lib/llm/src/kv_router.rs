@@ -15,7 +15,8 @@ use dynamo_kv_router::{
     TrackingHashScope,
     config::{KvRouterConfig, RouterConfigOverride, min_initial_workers_from_env},
     indexer::{
-        ApproximateLruIncarnation, ApproximateLruStats, KvRouterError, RoutingDecisionHashes,
+        ApproximateLruIncarnation, ApproximateLruStats, KvRouterError, MatchDetails,
+        RoutingDecisionHashes,
     },
     kv_hints::{
         KvHint, KvHintAction, KvSourceLocationsPayload, KvTransferCandidateSource,
@@ -507,28 +508,11 @@ fn log_routing_input_hashes(
     );
 }
 
-fn deepest_matched_hash_for_worker(
-    tiered_matches: &indexer::TieredMatchDetails,
+fn matched_hash_for_worker(
+    match_details: &MatchDetails,
     worker: WorkerWithDpRank,
 ) -> Option<ExternalSequenceBlockHash> {
-    tiered_matches
-        .lower_tier
-        .values()
-        .filter_map(|details| details.next_continuations.get(&worker))
-        .filter_map(|continuation| {
-            continuation
-                .last_matched_hash
-                .map(|hash| (continuation.start_pos, hash))
-        })
-        .max_by_key(|(position, _)| *position)
-        .map(|(_, hash)| hash)
-        .or_else(|| {
-            tiered_matches
-                .device
-                .last_matched_hashes
-                .get(&worker)
-                .copied()
-        })
+    match_details.last_matched_hashes.get(&worker).copied()
 }
 
 // for router discovery registration
@@ -719,6 +703,7 @@ where
             KvEventSourceRequirement::derive(worker_role, &kv_router_config);
         let cache_required = required_worker_inputs.contains(WorkerInputs::CACHE)
             || kv_router_config.serve_indexer
+            || kv_router_config.enable_session_prefix_index
             || matches!(
                 kv_event_source_requirement,
                 KvEventSourceRequirement::ConditionalDisaggDecodeCache
@@ -1774,22 +1759,50 @@ where
         if let (Some(session_id), Some(block_hashes)) = (
             session_index_context.as_ref(),
             session_block_hashes.as_deref(),
-        ) {
-            match self.indexer.find_matches_by_tier_ref(block_hashes).await {
-                Ok(tiered_matches) => {
-                    if let Some(matched_hash) =
-                        deepest_matched_hash_for_worker(&tiered_matches, response.best_worker)
-                        && let Err(err) = self.indexer.enqueue_session_match(
-                            session_id,
-                            response.best_worker,
-                            matched_hash,
-                        )
-                    {
-                        tracing::warn!(%err, "failed to record session prefix match");
+        ) && let Some(mut residency_version) =
+            self.indexer.session_residency_version(response.best_worker)
+        {
+            for attempt in 0..2 {
+                match self
+                    .indexer
+                    .find_primary_match_details_ref(block_hashes)
+                    .await
+                {
+                    Ok(match_details) => {
+                        let Some(current_version) =
+                            self.indexer.session_residency_version(response.best_worker)
+                        else {
+                            break;
+                        };
+                        if current_version != residency_version {
+                            if attempt == 0 {
+                                residency_version = current_version;
+                                continue;
+                            }
+                            tracing::debug!(
+                                worker = ?response.best_worker,
+                                "skipping session prefix match during concurrent KV eviction"
+                            );
+                            break;
+                        }
+
+                        if let Some(matched_hash) =
+                            matched_hash_for_worker(&match_details, response.best_worker)
+                            && let Err(err) = self.indexer.enqueue_session_match(
+                                session_id,
+                                response.best_worker,
+                                matched_hash,
+                                residency_version,
+                            )
+                        {
+                            tracing::warn!(%err, "failed to record session prefix match");
+                        }
+                        break;
                     }
-                }
-                Err(err) => {
-                    tracing::warn!(%err, "failed to refresh session prefix match");
+                    Err(err) => {
+                        tracing::warn!(%err, "failed to refresh session prefix match");
+                        break;
+                    }
                 }
             }
         }

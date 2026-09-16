@@ -1,25 +1,54 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::HashSet,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
+use dashmap::{DashMap, mapref::entry::Entry};
 use dynamo_kv_router::{
     ConcurrentRadixTreeCompressed, SessionPrefixIndexer,
     indexer::{KvIndexer, KvRouterError, ThreadPoolIndexer},
     protocols::{ExternalSequenceBlockHash, KvCacheEventData, RouterEvent, WorkerWithDpRank},
 };
-use tokio::sync::mpsc;
-#[cfg(test)]
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 #[derive(Clone)]
 pub struct SessionUpdateSender {
     tx: mpsc::UnboundedSender<SessionUpdateMessage>,
+    residency_versions: Arc<ResidencyVersions>,
+}
+
+#[derive(Default)]
+struct ResidencyVersions {
+    by_worker: DashMap<WorkerWithDpRank, AtomicU64>,
+}
+
+impl ResidencyVersions {
+    fn current(&self, worker: WorkerWithDpRank) -> u64 {
+        self.by_worker
+            .get(&worker)
+            .map_or(0, |version| version.load(Ordering::Acquire))
+    }
+
+    fn advance(&self, worker: WorkerWithDpRank) {
+        match self.by_worker.entry(worker) {
+            Entry::Occupied(version) => {
+                version.get().fetch_add(1, Ordering::AcqRel);
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(AtomicU64::new(1));
+            }
+        }
+    }
 }
 
 enum SessionUpdateMessage {
     Mutation(SessionMutation),
-    #[cfg(test)]
     Flush(oneshot::Sender<()>),
 }
 
@@ -28,6 +57,7 @@ pub(super) enum SessionMutation {
         worker: WorkerWithDpRank,
         session_id: String,
         matched_hash: ExternalSequenceBlockHash,
+        residency_version: u64,
     },
     Stored {
         worker: WorkerWithDpRank,
@@ -62,7 +92,7 @@ impl SessionMutation {
         }
     }
 
-    fn worker(&self) -> WorkerWithDpRank {
+    pub(super) fn worker(&self) -> WorkerWithDpRank {
         match self {
             Self::Matched { worker, .. }
             | Self::Stored { worker, .. }
@@ -71,13 +101,17 @@ impl SessionMutation {
         }
     }
 
-    fn apply(self, index: &SessionPrefixIndexer) {
+    fn apply(self, index: &SessionPrefixIndexer, residency_versions: &ResidencyVersions) {
         match self {
             Self::Matched {
                 worker,
                 session_id,
                 matched_hash,
+                residency_version,
             } => {
+                if residency_versions.current(worker) != residency_version {
+                    return;
+                }
                 if let Err(error) =
                     index.update_session_from_match(&session_id, worker, matched_hash)
                 {
@@ -103,9 +137,11 @@ impl SessionMutation {
                 worker,
                 block_hashes,
             } => {
+                residency_versions.advance(worker);
                 index.update_session_from_removed_blocks(worker, &block_hashes);
             }
             Self::Cleared { worker } => {
+                residency_versions.advance(worker);
                 index.clear_worker_frontiers(worker);
             }
         }
@@ -148,22 +184,21 @@ impl SessionUpdateSender {
 
     fn spawn(index: Arc<SessionPrefixIndexer>, barrier: PrimaryBarrier) -> Self {
         let (tx, mut rx) = mpsc::unbounded_channel();
+        let residency_versions = Arc::new(ResidencyVersions::default());
+        let task_residency_versions = Arc::clone(&residency_versions);
         tokio::spawn(async move {
             while let Some(first) = rx.recv().await {
                 // Give event ingestion one turn to enqueue the rest of its current batch.
                 tokio::task::yield_now().await;
                 let mut mutations = Vec::new();
-                #[cfg(test)]
                 let mut flushes = Vec::new();
                 match first {
                     SessionUpdateMessage::Mutation(mutation) => mutations.push(mutation),
-                    #[cfg(test)]
                     SessionUpdateMessage::Flush(flush) => flushes.push(flush),
                 }
                 while let Ok(message) = rx.try_recv() {
                     match message {
                         SessionUpdateMessage::Mutation(mutation) => mutations.push(mutation),
-                        #[cfg(test)]
                         SessionUpdateMessage::Flush(flush) => flushes.push(flush),
                     }
                 }
@@ -172,7 +207,7 @@ impl SessionUpdateSender {
                     match barrier.wait_for(&mutations).await {
                         Ok(()) => {
                             for mutation in mutations {
-                                mutation.apply(&index);
+                                mutation.apply(&index, &task_residency_versions);
                             }
                         }
                         Err(error) => {
@@ -180,13 +215,19 @@ impl SessionUpdateSender {
                         }
                     }
                 }
-                #[cfg(test)]
                 for flush in flushes {
                     let _ = flush.send(());
                 }
             }
         });
-        Self { tx }
+        Self {
+            tx,
+            residency_versions,
+        }
+    }
+
+    pub(super) fn residency_version(&self, worker: WorkerWithDpRank) -> u64 {
+        self.residency_versions.current(worker)
     }
 
     pub(super) fn enqueue(&self, mutation: SessionMutation) -> Result<(), KvRouterError> {
@@ -195,7 +236,6 @@ impl SessionUpdateSender {
             .map_err(|_| KvRouterError::IndexerOffline)
     }
 
-    #[cfg(test)]
     pub(super) async fn flush(&self) -> Result<(), KvRouterError> {
         let (tx, rx) = oneshot::channel();
         self.tx

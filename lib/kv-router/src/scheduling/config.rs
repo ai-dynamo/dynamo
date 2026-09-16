@@ -1091,6 +1091,14 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), String> {
             "enable_session_prefix_index is not supported with use_remote_indexer=true".to_string(),
         );
     }
+    if config.enable_session_prefix_index
+        && (!config.use_kv_events || config.overlap_score_credit <= 0.0)
+    {
+        return Err(
+            "enable_session_prefix_index requires use_kv_events=true and overlap_score_credit > 0"
+                .to_string(),
+        );
+    }
     if config.serve_indexer && config.overlap_score_credit == 0.0 {
         return Err("serve_indexer requires overlap_score_credit > 0".to_string());
     }

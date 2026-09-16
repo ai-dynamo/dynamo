@@ -2169,6 +2169,7 @@ impl ModelManager {
             .required_worker_inputs()
             .contains(WorkerInputs::CACHE)
             || effective_kv_router_config.serve_indexer
+            || effective_kv_router_config.enable_session_prefix_index
             || matches!(
                 kv_event_source_requirement,
                 KvEventSourceRequirement::ConditionalDisaggDecodeCache

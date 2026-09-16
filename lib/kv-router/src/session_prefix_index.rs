@@ -57,6 +57,10 @@ pub enum SessionPrefixIndexError {
     #[error("unknown anchor block hash {0:?}")]
     UnknownAnchor(ExternalSequenceBlockHash),
 
+    /// A stored chain named an unknown parent without reconnecting known lineage.
+    #[error("unknown parent block hash {parent:?}")]
+    UnknownParent { parent: ExternalSequenceBlockHash },
+
     /// A block was attached beneath a conflicting parent.
     #[error("block {block:?} is already parented elsewhere")]
     ConflictingParent { block: ExternalSequenceBlockHash },
@@ -308,6 +312,7 @@ impl IndexState {
     ) -> Result<(), SessionPrefixIndexError> {
         let mut dominators =
             FxHashSet::with_capacity_and_hasher(block_hashes.len(), Default::default());
+        let mut unknown_parent = None;
         if let Some(parent_hash) = parent_hash {
             dominators.insert(parent_hash);
             if let Some(&parent_node) = self.hash_to_node.get(&parent_hash) {
@@ -316,6 +321,12 @@ impl IndexState {
                         .into_iter()
                         .map(|node| self.nodes[node].block_hash),
                 );
+            } else if !block_hashes.iter().any(|block_hash| {
+                self.hash_to_node
+                    .get(block_hash)
+                    .is_some_and(|&node| self.nodes[node].parent.is_none())
+            }) {
+                unknown_parent = Some(parent_hash);
             }
         }
 
@@ -332,6 +343,9 @@ impl IndexState {
             }
             dominators.insert(block_hash);
             expected_parent = Some(block_hash);
+        }
+        if let Some(parent) = unknown_parent {
+            return Err(SessionPrefixIndexError::UnknownParent { parent });
         }
         Ok(())
     }
@@ -814,6 +828,23 @@ mod tests {
     }
 
     #[test]
+    fn wholly_unknown_parent_is_rejected() {
+        let chain = hashes(vec![1, 2]);
+        let indexer = SessionPrefixIndexer::new();
+
+        let err = indexer
+            .update_session_from_stored_blocks("s1", worker(1), Some(chain[0]), &chain[1..])
+            .expect_err("an unknown parent cannot introduce wholly new lineage");
+
+        assert_eq!(
+            err,
+            SessionPrefixIndexError::UnknownParent { parent: chain[0] }
+        );
+        assert_eq!(indexer.node_count(), 0);
+        assert_eq!(indexer.session_count(), 0);
+    }
+
+    #[test]
     fn conflicting_parent_is_rejected() {
         let chain = hashes(vec![1, 2, 3]);
         let indexer = SessionPrefixIndexer::new();
@@ -1010,6 +1041,23 @@ mod tests {
             0,
             "replaying the same removal must not recede the frontier again"
         );
+    }
+
+    #[test]
+    fn removal_ignores_unknown_hashes_and_recedes_known_frontiers() {
+        let chain = hashes(vec![1, 2, 3]);
+        let unknown = hashes(vec![99])[0];
+        let indexer = SessionPrefixIndexer::new();
+
+        indexer
+            .update_session_from_stored_blocks("s1", worker(1), None, &chain)
+            .unwrap();
+
+        assert_eq!(
+            indexer.update_session_from_removed_blocks(worker(1), &[unknown, chain[1]]),
+            1
+        );
+        assert_eq!(lineage_of(&indexer, "s1"), vec![vec![chain[0]]]);
     }
 
     #[test]
