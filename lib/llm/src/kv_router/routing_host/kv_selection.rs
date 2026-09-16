@@ -97,6 +97,7 @@ struct BestMatchArgs<'a> {
     pinned_worker: Option<WorkerWithDpRank>,
     allowed_worker_ids: Option<HashSet<WorkerId>>,
     routing_constraints: RoutingConstraints,
+    do_not_queue: bool,
     admission: FindBestMatchAdmission,
 }
 
@@ -125,6 +126,7 @@ where
                 args.pinned_worker,
                 args.allowed_worker_ids,
                 args.routing_constraints,
+                args.do_not_queue,
                 args.admission,
             )
             .await?;
@@ -202,6 +204,9 @@ where
             .and_then(|routing| routing.strict_priority)
             .unwrap_or(0);
         let expected_output_tokens = routing.and_then(|routing| routing.expected_output_tokens);
+        let do_not_queue = routing
+            .and_then(|routing| routing.do_not_queue)
+            .unwrap_or(false);
         let routing_constraints = routing
             .and_then(|routing| routing.routing_constraints.clone())
             .unwrap_or_default();
@@ -313,6 +318,7 @@ where
                     pinned_worker: None,
                     allowed_worker_ids,
                     routing_constraints: routing_constraints.clone(),
+                    do_not_queue,
                     admission,
                 })
                 .await?;
@@ -380,6 +386,7 @@ where
             pinned_worker: Some(pinned_worker),
             allowed_worker_ids,
             routing_constraints,
+            do_not_queue,
             admission,
         })
         .await

@@ -1310,6 +1310,7 @@ where
             pinned_worker,
             allowed_worker_ids,
             routing_constraints,
+            false,
         )
         .await
     }
@@ -1337,6 +1338,7 @@ where
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
+        do_not_queue: bool,
     ) -> anyhow::Result<AdmittedFindBestMatchOutcome> {
         match self
             .find_best_match_details_with_policy_class_inner(
@@ -1357,6 +1359,7 @@ where
                 pinned_worker,
                 allowed_worker_ids,
                 routing_constraints,
+                do_not_queue,
                 FindBestMatchAdmission::WithAdmission {
                     track_lifecycle: true,
                 },
@@ -1389,6 +1392,7 @@ where
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
+        do_not_queue: bool,
     ) -> anyhow::Result<FindBestMatchOutcome> {
         let admitted = self
             .find_best_match_details_with_policy_class_admitted(
@@ -1408,6 +1412,7 @@ where
                 pinned_worker,
                 allowed_worker_ids,
                 routing_constraints,
+                do_not_queue,
             )
             .await?;
         if let (
@@ -1445,6 +1450,7 @@ where
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
+        do_not_queue: bool,
     ) -> anyhow::Result<AdmittedFindBestMatchOutcome> {
         match self
             .find_best_match_details_with_policy_class_inner(
@@ -1465,6 +1471,7 @@ where
                 pinned_worker,
                 allowed_worker_ids,
                 routing_constraints,
+                do_not_queue,
                 FindBestMatchAdmission::WithAdmission {
                     track_lifecycle: false,
                 },
@@ -1517,6 +1524,7 @@ where
                 pinned_worker,
                 allowed_worker_ids,
                 routing_constraints,
+                false,
                 FindBestMatchAdmission::WithoutAdmission,
             )
             .await?
@@ -1548,6 +1556,7 @@ where
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
+        do_not_queue: bool,
         admission: FindBestMatchAdmission,
     ) -> anyhow::Result<FindBestMatchInnerOutcome> {
         let start = Instant::now();
@@ -1683,6 +1692,7 @@ where
             strict_priority,
             policy_class,
             session_context,
+            do_not_queue,
             expected_output_tokens,
             affinity_target,
             pinned_worker,
@@ -2264,6 +2274,7 @@ where
                 strict_priority,
                 lora_name,
                 cache_namespace,
+                do_not_queue,
             } => {
                 let request_context = ctx.context();
                 let mut schedule = Box::pin(self.find_best_match_details_with_policy_class(
@@ -2283,6 +2294,7 @@ where
                     None,
                     None,
                     routing_constraints,
+                    do_not_queue,
                 ));
                 let outcome = tokio::select! {
                     biased;
@@ -2315,7 +2327,21 @@ where
                     Ok(FindBestMatchOutcome::QueueRejected { rejection }) => {
                         RouterResponse::QueueRejected { rejection }
                     }
-                    Err(error) => return Err(error),
+                    Err(error) => match error.downcast::<KvSchedulerError>() {
+                        Ok(KvSchedulerError::DoNotQueue {
+                            policy_class,
+                            pending_count,
+                            pending_isl_tokens,
+                            pending_cached_tokens,
+                        }) => RouterResponse::DoNotQueue {
+                            policy_class,
+                            pending_count,
+                            pending_isl_tokens,
+                            pending_cached_tokens,
+                        },
+                        Ok(error) => return Err(error.into()),
+                        Err(error) => return Err(error),
+                    },
                 }
             }
             RouterRequest::PotentialLoads {
@@ -2835,6 +2861,145 @@ mod tests {
         workers.insert(0, ModelRuntimeConfig::default());
         workers.insert(1, ModelRuntimeConfig::default());
         make_test_router_with_workers(selector, shared_cache, workers).await
+    }
+
+    #[tokio::test]
+    async fn router_request_new_honors_do_not_queue_and_preserves_default_queueing() {
+        use futures::StreamExt;
+        use std::time::Duration;
+
+        let component = make_test_component("new-do-not-queue").await;
+        let endpoint = component.endpoint("backend");
+        let client = endpoint.client().await.unwrap();
+        let (_workers_tx, workers) = watch::channel(HashMap::from([(
+            0,
+            ModelRuntimeConfig {
+                max_num_batched_tokens: Some(1024),
+                ..Default::default()
+            },
+        )]));
+        let config = KvRouterConfig {
+            use_kv_events: false,
+            router_track_active_blocks: false,
+            router_track_prefill_tokens: true,
+            router_queue_threshold: Some(0.0),
+            skip_initial_worker_wait: true,
+            ..Default::default()
+        };
+        let router = KvRouter::new_with_worker_role(
+            endpoint,
+            client,
+            workers,
+            None,
+            2,
+            InspectingSelector {
+                expected_hits: None,
+                selected_worker: WorkerWithDpRank::from_worker_id(0),
+            },
+            Some(config),
+            None,
+            None,
+            "decode",
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Exercise the wire contract and the AsyncEngine handler, not just the
+        // scheduler API: older clients omit the flag entirely.
+        let immediate: RouterRequest =
+            serde_json::from_str(r#"{"method":"new","tokens":[11,12,21,22],"do_not_queue":true}"#)
+                .unwrap();
+        let active = SingleIn::new(immediate.clone());
+        let active_id = active.context().id().to_string();
+        let mut response = tokio::time::timeout(Duration::from_secs(5), router.generate(active))
+            .await
+            .expect("idle worker should admit immediately")
+            .unwrap();
+        assert!(matches!(
+            response.next().await.unwrap().data,
+            Some(RouterResponse::New { worker_id: 0, .. })
+        ));
+
+        let default_request: RouterRequest =
+            serde_json::from_str(r#"{"method":"new","tokens":[31,32]}"#).unwrap();
+        assert!(matches!(
+            default_request,
+            RouterRequest::New {
+                do_not_queue: false,
+                ..
+            }
+        ));
+        let queued = SingleIn::new(default_request);
+        let queued_id = queued.context().id().to_string();
+        let mut pending = Box::pin(router.generate(queued));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                tokio::select! {
+                    _ = &mut pending => panic!("busy worker returned before the default request could queue"),
+                    _ = tokio::task::yield_now() => {
+                        if router.pending_count() == 1 {
+                            break;
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .expect("default request should enter the queue");
+        assert_eq!(router.pending_count(), 1);
+        assert_eq!(router.pending_isl_tokens(), 2);
+        let active_before = router
+            .scheduler
+            .get_potential_loads(None, 0, HashMap::new(), false)
+            .into_iter()
+            .map(|load| load.active_requests)
+            .sum::<usize>();
+        assert_eq!(active_before, 1);
+
+        let mut rejected = tokio::time::timeout(
+            Duration::from_secs(5),
+            router.generate(SingleIn::new(immediate)),
+        )
+        .await
+        .expect("do_not_queue should respond while the worker is busy")
+        .unwrap();
+        assert!(matches!(
+            rejected.next().await.unwrap().data,
+            Some(RouterResponse::DoNotQueue {
+                pending_count: 1,
+                pending_isl_tokens: 2,
+                pending_cached_tokens: 0,
+                ..
+            })
+        ));
+        assert_eq!(
+            router
+                .scheduler
+                .get_potential_loads(None, 0, HashMap::new(), false)
+                .into_iter()
+                .map(|load| load.active_requests)
+                .sum::<usize>(),
+            active_before
+        );
+        assert_eq!(router.pending_count(), 1);
+        assert_eq!(router.pending_isl_tokens(), 2);
+
+        router.free(&active_id).await.unwrap();
+        let mut admitted = tokio::time::timeout(Duration::from_secs(5), &mut pending)
+            .await
+            .expect("freeing the worker should admit the queued default request")
+            .unwrap();
+        assert!(matches!(
+            admitted.next().await.unwrap().data,
+            Some(RouterResponse::New { worker_id: 0, .. })
+        ));
+        assert_eq!(router.pending_count(), 0);
+        assert_eq!(router.pending_isl_tokens(), 0);
+        router.free(&queued_id).await.unwrap();
     }
 
     fn transfer_hint_runtime_config(endpoint: Option<&str>) -> ModelRuntimeConfig {

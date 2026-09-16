@@ -92,6 +92,7 @@ where
         policy_class: Option<String>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
+        do_not_queue: bool,
     ) -> Result<PrefillReservation> {
         if reservation_id.is_empty() {
             anyhow::bail!("prefill reservation ID must not be empty");
@@ -131,6 +132,7 @@ where
                 None,
                 allowed_worker_ids,
                 routing_constraints,
+                do_not_queue,
             )
             .await?;
         let (outcome, attempt) = admitted.into_parts();
@@ -179,6 +181,7 @@ where
         strict_priority: u32,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
+        do_not_queue: bool,
     ) -> Result<PrefillQueryOutcome> {
         if self.lifecycle_state() != PrefillLifecycleState::Active {
             return Err(anyhow::anyhow!(PrefillError::NotActivated));
@@ -199,7 +202,7 @@ where
             });
         };
         let outcome = kv_router
-            .find_best_match_details(
+            .find_best_match_details_with_policy_class(
                 None,
                 token_ids,
                 block_mm_infos,
@@ -212,8 +215,11 @@ where
                 strict_priority,
                 None,
                 None,
+                None,
+                None,
                 allowed_worker_ids,
                 routing_constraints,
+                do_not_queue,
             )
             .await?;
         match outcome {
@@ -373,6 +379,7 @@ mod tests {
                 0,
                 None,
                 RoutingConstraints::default(),
+                false,
             )
             .await
             .unwrap()
@@ -591,6 +598,7 @@ mod tests {
                 None,
                 None,
                 RoutingConstraints::default(),
+                false,
             )
             .await
             .unwrap();
@@ -608,6 +616,7 @@ mod tests {
                 None,
                 None,
                 RoutingConstraints::default(),
+                false,
             )
             .await
             .unwrap();
@@ -669,6 +678,7 @@ mod tests {
                 None,
                 None,
                 RoutingConstraints::default(),
+                false,
             )
             .await
             .unwrap();
