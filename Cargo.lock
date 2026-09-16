@@ -2887,6 +2887,7 @@ version = "1.5.0"
 dependencies = [
  "aisimulate-core",
  "aisimulate-placement-abi",
+ "dynamo-kv-router",
  "dynamo-mocker",
  "serde_json",
  "uuid",

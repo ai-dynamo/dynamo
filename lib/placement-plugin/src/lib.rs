@@ -18,12 +18,17 @@ use aisimulate_core::replay::{
     ReplayAdmissionMetadata, ReplayRequestContext, WorkerTopology,
 };
 use aisimulate_placement_abi::{
-    AdmissionDecisionV1, ByteSliceV1, PlacementAdmissionV1, PlacementBatchResultV1,
+    AdmissionDecisionV1, ByteSliceV1, CAPABILITY_LOSSLESS_KV_EVENTS_V1, KvEventKindV1,
+    KvEventSliceV1, KvEventV1, PlacementAdmissionV1, PlacementBatchResultV1,
     PlacementCacheSampleV1, PlacementCreateRequestV1, PlacementDiagnosticSliceV1,
     PlacementHandleV1, PlacementMetadataV1, PlacementMutationKindV1, PlacementMutationSliceV1,
     PlacementResultSliceV1, PlacementResultV1, PlacementSliceV1, PlacementV1, PluginDescriptorV1,
     PluginVTableV1, PromptIdentityV1, StatusV1, WorkerTopologyV1, validate_create_request_v1,
-    validate_mutation_batch_v1,
+    validate_kv_event_batch_v1, validate_mutation_batch_v1,
+};
+use dynamo_kv_router::protocols::{
+    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
+    KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier,
 };
 use dynamo_mocker::placement::{
     KvReplayMetadata, KvRouterConfig, KvRouterPlacement, MockEngineArgs,
@@ -64,6 +69,7 @@ static VTABLE: PluginVTableV1 = PluginVTableV1 {
     release_bytes: Some(release_bytes),
     last_error: Some(last_error),
     destroy: Some(destroy),
+    apply_kv_events: Some(apply_kv_events),
 };
 
 static DESCRIPTOR: PluginDescriptorV1 = PluginDescriptorV1 {
@@ -71,7 +77,7 @@ static DESCRIPTOR: PluginDescriptorV1 = PluginDescriptorV1 {
     abi_minor: PluginDescriptorV1::ABI_MINOR,
     struct_size: std::mem::size_of::<PluginDescriptorV1>() as u32,
     flags: 0,
-    capabilities: 0,
+    capabilities: CAPABILITY_LOSSLESS_KV_EVENTS_V1,
     provider_id: PROVIDER_ID.as_ptr(),
     vtable: &VTABLE,
 };
@@ -317,6 +323,201 @@ unsafe extern "C" fn apply_batch(
             StatusV1::INTERNAL
         }
     }
+}
+
+unsafe extern "C" fn apply_kv_events(
+    handle: PlacementHandleV1,
+    events: KvEventSliceV1,
+    now_ms: f64,
+    out_result: *mut PlacementBatchResultV1,
+) -> StatusV1 {
+    if handle.0.is_null() || out_result.is_null() {
+        return StatusV1::INVALID_ARGUMENT;
+    }
+    // Safety: `out_result` was validated above.
+    unsafe { *out_result = empty_batch_result() };
+    match catch_unwind(AssertUnwindSafe(|| {
+        // Safety: a non-null handle can only be created by this V1 table and
+        // remains exclusively owned by the caller until `destroy`.
+        let placement = unsafe { &mut *handle.0.cast::<ConfiguredPlacement>() };
+        // Safety: `out_result` was validated and initialized above.
+        apply_kv_events_impl(placement, events, now_ms, unsafe { &mut *out_result })
+    })) {
+        Ok(status) => status,
+        Err(_) => {
+            // Safety: the handle remains provider-owned even when a policy
+            // callback panics; do not let an unwind cross the ABI boundary.
+            let placement = unsafe { &mut *handle.0.cast::<ConfiguredPlacement>() };
+            placement.last_error = bounded_message(
+                "dynamo placement provider panicked while applying KV events",
+                placement.max_diagnostic_bytes,
+            );
+            StatusV1::INTERNAL
+        }
+    }
+}
+
+fn apply_kv_events_impl(
+    placement: &mut ConfiguredPlacement,
+    events: KvEventSliceV1,
+    now_ms: f64,
+    out_result: &mut PlacementBatchResultV1,
+) -> StatusV1 {
+    // Safety: the ABI validator verifies the bounded outer and nested slices
+    // before this provider reads any packet or payload.
+    if let Err(status) = unsafe { validate_kv_event_batch_v1(events) } {
+        placement.last_error = "invalid Dynamo placement KV event batch".to_owned();
+        return status;
+    }
+    if !now_ms.is_finite() || now_ms < placement.last_now_ms {
+        placement.last_error =
+            "Dynamo placement KV event time must be finite and monotonic".to_owned();
+        return StatusV1::INVALID_ARGUMENT;
+    }
+    let Ok(event_count) = usize::try_from(events.len) else {
+        placement.last_error = "Dynamo placement KV event count exceeds platform bounds".to_owned();
+        return StatusV1::INVALID_ARGUMENT;
+    };
+    if event_count > placement.max_mutations {
+        placement.last_error =
+            "Dynamo placement KV event count exceeds the negotiated limit".to_owned();
+        return StatusV1::INVALID_ARGUMENT;
+    }
+    if event_count == 0 {
+        placement.last_now_ms = now_ms;
+        placement.last_error.clear();
+        out_result.struct_size = std::mem::size_of::<PlacementBatchResultV1>() as u32;
+        out_result.pending_count =
+            PlacementPolicy::<DirectRequest>::pending_count(&placement.placement) as u64;
+        return StatusV1::OK;
+    }
+    // Safety: `validate_kv_event_batch_v1` established a readable bounded slice.
+    let events = unsafe { std::slice::from_raw_parts(events.data, event_count) };
+    let router_events = match decode_kv_events(placement, events) {
+        Ok(events) => events,
+        Err(error) => {
+            placement.last_error = bounded_message(&error.message, placement.max_diagnostic_bytes);
+            return error.status;
+        }
+    };
+    let released = match placement.placement.observe_router_events(router_events) {
+        Ok(released) => released,
+        Err(error) => {
+            placement.last_error = bounded_message(
+                &format!("Dynamo placement KV observation failed: {error}"),
+                placement.max_diagnostic_bytes,
+            );
+            return StatusV1::REJECTED;
+        }
+    };
+    let mut released_records = Vec::new();
+    if let Err(error) = append_placements(placement, released, &mut released_records) {
+        placement.last_error = bounded_message(&error.message, placement.max_diagnostic_bytes);
+        return error.status;
+    }
+    if released_records.len() > placement.max_released {
+        placement.last_error =
+            "Dynamo placement policy exceeded negotiated released-result bounds".to_owned();
+        out_result.applied_mutations = event_count as u64;
+        out_result.pending_count =
+            PlacementPolicy::<DirectRequest>::pending_count(&placement.placement) as u64;
+        return StatusV1::REJECTED;
+    }
+    placement.last_now_ms = now_ms;
+    placement.last_error.clear();
+    *out_result = PlacementBatchResultV1 {
+        struct_size: std::mem::size_of::<PlacementBatchResultV1>() as u32,
+        flags: 0,
+        applied_mutations: event_count as u64,
+        pending_count: PlacementPolicy::<DirectRequest>::pending_count(&placement.placement) as u64,
+        admission_results: PlacementResultSliceV1 {
+            data: std::ptr::null(),
+            len: 0,
+        },
+        released: owned_placements(released_records),
+        diagnostics: PlacementDiagnosticSliceV1 {
+            data: std::ptr::null(),
+            len: 0,
+        },
+    };
+    StatusV1::OK
+}
+
+fn decode_kv_events(
+    configured: &ConfiguredPlacement,
+    events: &[KvEventV1],
+) -> Result<Vec<RouterEvent>, ApplyError> {
+    events
+        .iter()
+        .map(|event| decode_kv_event(configured, event))
+        .collect()
+}
+
+fn decode_kv_event(
+    configured: &ConfiguredPlacement,
+    event: &KvEventV1,
+) -> Result<RouterEvent, ApplyError> {
+    let route = configured
+        .topology
+        .iter()
+        .find(|route| route.worker_id == event.worker_id)
+        .ok_or_else(|| {
+            ApplyError::rejected(format!(
+                "Dynamo placement does not know KV event worker {}",
+                event.worker_id
+            ))
+        })?;
+    let data = match event.kind {
+        KvEventKindV1::STORED => {
+            let start_position = event
+                .start_position()
+                .map(u32::try_from)
+                .transpose()
+                .map_err(|_| {
+                    ApplyError::rejected(
+                        "Dynamo placement KV event start position exceeds router bounds",
+                    )
+                })?;
+            let blocks = event
+                .stored_blocks()
+                .ok_or_else(|| ApplyError::rejected("invalid Dynamo placement stored KV packet"))?
+                .iter()
+                .map(|block| KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(block.sequence_hash),
+                    tokens_hash: LocalBlockHash(block.token_hash),
+                    mm_extra_info: None,
+                })
+                .collect();
+            KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: event.parent_hash().map(ExternalSequenceBlockHash),
+                start_position,
+                blocks,
+            })
+        }
+        KvEventKindV1::REMOVED => KvCacheEventData::Removed(KvCacheRemoveData {
+            block_hashes: event
+                .removed_hashes()
+                .ok_or_else(|| ApplyError::rejected("invalid Dynamo placement removed KV packet"))?
+                .iter()
+                .copied()
+                .map(ExternalSequenceBlockHash)
+                .collect(),
+        }),
+        _ => {
+            return Err(ApplyError::rejected(
+                "invalid Dynamo placement KV event kind",
+            ));
+        }
+    };
+    Ok(RouterEvent::with_storage_tier(
+        route.router_worker_id as u64,
+        KvCacheEvent {
+            event_id: event.event_id,
+            data,
+            dp_rank: event.dp_rank,
+        },
+        StorageTier::Device,
+    ))
 }
 
 fn apply_batch_impl(

@@ -4,9 +4,10 @@
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 
 use aisimulate_placement_abi::{
-    AdmissionDecisionV1, BlockHashSliceV1, ByteSliceV1, EngineObservationV1, PlacementAdmissionV1,
-    PlacementBatchResultV1, PlacementCreateRequestV1, PlacementHandleV1, PlacementLimitsV1,
-    PlacementMetadataV1, PlacementMutationKindV1, PlacementMutationPayloadV1,
+    AdmissionDecisionV1, BlockHashSliceV1, ByteSliceV1, CAPABILITY_LOSSLESS_KV_EVENTS_V1,
+    EngineObservationV1, KvEventSliceV1, KvEventV1, KvStorageTierV1, KvStoredBlockV1,
+    PlacementAdmissionV1, PlacementBatchResultV1, PlacementCreateRequestV1, PlacementHandleV1,
+    PlacementLimitsV1, PlacementMetadataV1, PlacementMutationKindV1, PlacementMutationPayloadV1,
     PlacementMutationSliceV1, PlacementMutationV1, PluginDescriptorV1, PromptIdentityV1,
     SchedulerIdSliceV1, StatusV1, WorkerCapacitySliceV1, WorkerCapacityV1, WorkerTopologySliceV1,
     WorkerTopologyV1, validate_descriptor_v1,
@@ -22,7 +23,14 @@ fn exported_descriptor_is_a_complete_v1_plugin() {
     // Safety: the provider's descriptor is immutable process-lifetime data.
     let descriptor = unsafe { &*descriptor };
     assert_eq!(descriptor.abi_major, PluginDescriptorV1::ABI_MAJOR);
+    assert_ne!(
+        descriptor.capabilities & CAPABILITY_LOSSLESS_KV_EVENTS_V1,
+        0,
+        "Dynamo's KV-aware provider must advertise the lossless event callback"
+    );
     assert!(!descriptor.provider_id.cast::<c_void>().is_null());
+    // Safety: descriptor validation above establishes the complete immutable table.
+    assert!(unsafe { &*descriptor.vtable }.supports_lossless_kv_events());
 }
 
 #[test]
@@ -135,6 +143,76 @@ fn provider_creates_and_destroys_a_narrow_validated_kv_router_instance() {
     assert!(error.data.is_null());
     // Safety: the handle was created by this exact V1 operation table.
     unsafe { table.destroy.expect("required destroy operation")(handle) };
+}
+
+#[test]
+fn provider_applies_one_lossless_kv_event_to_the_router() {
+    let (table, handle) = create_provider();
+    let blocks = [KvStoredBlockV1 {
+        sequence_hash: 101,
+        token_hash: 202,
+    }];
+    let event = KvEventV1::stored(7, 0, KvStorageTierV1::DEVICE, 1, None, None, &blocks);
+    let mut result = empty_result();
+
+    let status = unsafe {
+        table.apply_kv_events.expect("lossless KV callback")(
+            handle,
+            KvEventSliceV1 {
+                data: &event,
+                len: 1,
+            },
+            0.0,
+            &mut result,
+        )
+    };
+
+    assert_eq!(status, StatusV1::OK);
+    assert_eq!(result.applied_mutations, 1);
+    assert_eq!(result.admission_results.len, 0);
+    unsafe { table.release_results.expect("release results")(result) };
+
+    let local_hashes = [202_u64];
+    let sequence_hashes = [101_u64];
+    let admission = PlacementMutationV1 {
+        struct_size: std::mem::size_of::<PlacementMutationV1>() as u32,
+        kind: PlacementMutationKindV1::ADMIT,
+        flags: 0,
+        sequence: 2,
+        now_ms: 1.0,
+        payload: PlacementMutationPayloadV1 {
+            admission: PlacementAdmissionV1 {
+                request_id: [9; 16],
+                flags: 0,
+                priority: 0,
+                prompt_tokens: 16,
+                max_output_tokens: 1,
+                prompt_identity: PromptIdentityV1 {
+                    flags: PromptIdentityV1::LOCAL_BLOCK_HASHES_PRESENT
+                        | PromptIdentityV1::SEQUENCE_BLOCK_HASHES_PRESENT,
+                    reserved: 0,
+                    materialized_token_ids: Default::default(),
+                    local_block_hashes: BlockHashSliceV1 {
+                        data: local_hashes.as_ptr(),
+                        len: local_hashes.len() as u64,
+                    },
+                    sequence_block_hashes: BlockHashSliceV1 {
+                        data: sequence_hashes.as_ptr(),
+                        len: sequence_hashes.len() as u64,
+                    },
+                },
+                metadata: PlacementMetadataV1::EMPTY,
+                session_id: ByteSliceV1::EMPTY,
+            },
+        },
+    };
+    let admission_result = apply_one(&table, handle, &admission);
+    let placement = unsafe { &*admission_result.admission_results.data }.placement;
+    assert_eq!(placement.cache_sample.overlap_blocks, 1);
+    unsafe {
+        table.release_results.expect("release results")(admission_result);
+        table.destroy.expect("destroy")(handle);
+    }
 }
 
 #[test]

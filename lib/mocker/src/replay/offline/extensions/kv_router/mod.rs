@@ -418,6 +418,13 @@ impl KvRouterPlacement {
             .map(|admission| self.placement(admission))
             .collect()
     }
+
+    /// Applies router-visible KV events and returns any requests released by
+    /// the router as a consequence.
+    pub fn observe_router_events(&mut self, events: Vec<RouterEvent>) -> Result<Vec<Placement>> {
+        let effects = self.router.on_kv_events(events)?;
+        Ok(self.placements(effects.admissions))
+    }
 }
 
 trait PlacementRequestView {
@@ -532,8 +539,7 @@ impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlaceme
     }
 
     fn observe(&mut self, observation: RouterEventBatch, _now_ms: f64) -> Result<Vec<Placement>> {
-        let effects = self.router.on_kv_events(observation.into_events())?;
-        Ok(self.placements(effects.admissions))
+        self.observe_router_events(observation.into_events())
     }
 
     fn cancel_pending(&mut self, request_id: Uuid) -> bool {
