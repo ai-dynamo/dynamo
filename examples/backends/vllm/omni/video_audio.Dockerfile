@@ -32,7 +32,6 @@ RUN uv pip install \
         --system \
         --no-deps \
         av==18.0.0 \
-    && ffmpeg -hide_banner -encoders 2>/dev/null | grep -Eq '(^| )libx264( |$)' \
     && python3 -c \
         'import av; av.codec.Codec("h264", "w"); av.codec.Codec("aac", "w")'
 

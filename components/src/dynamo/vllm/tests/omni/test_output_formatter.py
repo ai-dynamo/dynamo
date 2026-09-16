@@ -492,11 +492,18 @@ class TestDiffusionFormatterVideo:
         with pytest.raises(ValueError, match="Ambiguous channel-first"):
             DiffusionFormatter._video_to_numpy_frames(np.zeros(shape, dtype=np.float32))
 
-    def test_rejects_mismatched_audio_batch(self):
+    @pytest.mark.parametrize(
+        "audio",
+        [
+            np.zeros(128, dtype=np.float32),
+            torch.zeros(1, 2, 128),
+            [np.zeros(128, dtype=np.float32)] * 3,
+            tuple(np.zeros(128, dtype=np.float32) for _ in range(3)),
+        ],
+    )
+    def test_rejects_mismatched_audio_batch(self, audio):
         with pytest.raises(ValueError, match="Expected 2 audio outputs"):
-            DiffusionFormatter._split_audio_outputs(
-                np.zeros((2, 128), dtype=np.float32), expected_count=2
-            )
+            DiffusionFormatter._split_audio_outputs(audio, expected_count=2)
 
 
 class TestBuildCompletionUsage:
