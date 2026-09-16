@@ -198,7 +198,6 @@ jobs:
           fi
       - name: Verify commit signatures
         id: signature_check
-        # Skip signatures only when glamr-agent requests CI on its own PR.
         if: steps.approval_check.outputs.is_approved == 'true' && steps.request.outputs.glamr_request_approved != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
