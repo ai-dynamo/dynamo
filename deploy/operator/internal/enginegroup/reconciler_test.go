@@ -20,6 +20,7 @@ package enginegroup
 import (
 	"context"
 	"errors"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -338,6 +339,10 @@ func TestCoordinatorRestartAfterAmbiguousApplyDoesNotCompete(t *testing.T) {
 	if applyErr == nil || !strings.Contains(applyErr.Error(), "timed out after acceptance") {
 		t.Fatalf("expected ambiguous apply error, got %v", applyErr)
 	}
+	var observationErr *ObservationError
+	if errors.As(applyErr, &observationErr) {
+		t.Fatalf("post-observation apply error was misclassified as stale observation: %v", applyErr)
+	}
 	if scenario.membership.applyCalls != 1 || scenario.status.Membership.Desired == nil ||
 		scenario.status.Membership.Observed.Transition != nil {
 		t.Fatalf("unexpected state after ambiguous apply: calls=%d status=%#v", scenario.membership.applyCalls, scenario.status.Membership)
@@ -368,6 +373,93 @@ func TestCoordinatorRestartAfterAmbiguousApplyDoesNotCompete(t *testing.T) {
 	})
 	if scenario.membership.applyCalls != 1 {
 		t.Fatalf("committed request was applied more than once: %d", scenario.membership.applyCalls)
+	}
+}
+
+func TestCoordinatorClassifiesEachObservationAuthorityFailure(t *testing.T) {
+	tests := []struct {
+		name      string
+		authority ObservationAuthority
+		fail      func(*coordinatorScenario)
+	}{
+		{
+			name:      "capacity",
+			authority: ObservationAuthorityCapacity,
+			fail: func(s *coordinatorScenario) {
+				s.capacity.observeErr = errors.New("capacity unavailable")
+			},
+		},
+		{
+			name:      "traffic",
+			authority: ObservationAuthorityTraffic,
+			fail: func(s *coordinatorScenario) {
+				s.traffic.observeErr = errors.New("traffic unavailable")
+			},
+		},
+		{
+			name:      "membership",
+			authority: ObservationAuthorityMembership,
+			fail: func(s *coordinatorScenario) {
+				s.membership.observeErr = errors.New("membership unavailable")
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			scenario := newCoordinatorScenario(t, engineTopology(1, 1))
+			before := cloneStatus(scenario.status)
+			test.fail(scenario)
+
+			t.Log("reconcile after one external authority stops providing fresh state")
+			err := scenario.reconcile("observe unavailable authority")
+			var observationErr *ObservationError
+			if !errors.As(err, &observationErr) {
+				t.Fatalf("expected typed observation failure, got %v", err)
+			}
+			if observationErr.Authority != test.authority {
+				t.Fatalf("expected %s authority, got %s", test.authority, observationErr.Authority)
+			}
+
+			t.Log("verify stale external observations were not republished into the journal")
+			if !reflect.DeepEqual(before, scenario.status) {
+				t.Fatalf("observation failure changed durable status: before=%#v after=%#v", before, scenario.status)
+			}
+		})
+	}
+}
+
+func TestCoordinatorRejectsRegressedObservationWithoutReplacingDurableState(t *testing.T) {
+	scenario := newCoordinatorScenario(t, engineTopology(1, 1))
+	incarnation := replicaIncarnation(0)
+	target := &CapacityTarget{
+		ControlRevision:       1,
+		TransitionID:          "accepted-capacity",
+		ProfileFingerprint:    "profile-v1",
+		ProcessLifecycleOwner: ProcessLifecycleOwnerOrchestrator,
+		Replicas: []CapacityReplicaTarget{{
+			ReplicaID:   incarnation.ReplicaID,
+			SlotID:      incarnation.SlotID,
+			Incarnation: &incarnation,
+		}},
+	}
+	scenario.status.ControlRevision = 1
+	scenario.status.Capacity.Desired = cloneCapacityTarget(target)
+	scenario.status.Capacity.Accepted = cloneCapacityTarget(target)
+	scenario.status.Capacity.Observed.AppliedRevision = 1
+	scenario.capacity.observation.AppliedRevision = 0
+	before := cloneStatus(scenario.status)
+
+	t.Log("observe a temporary applied-revision regression behind the last accepted capacity target")
+	err := scenario.reconcile("reject regressed capacity observation")
+	var observationErr *ObservationError
+	if !errors.As(err, &observationErr) || observationErr.Authority != ObservationAuthorityCorrelation {
+		t.Fatalf("expected correlated observation failure, got %v", err)
+	}
+
+	t.Log("preserve the complete last valid durable journal so the next observation can recover")
+	if !reflect.DeepEqual(before, scenario.status) {
+		t.Fatalf("invalid observation replaced durable state: before=%#v after=%#v", before, scenario.status)
 	}
 }
 

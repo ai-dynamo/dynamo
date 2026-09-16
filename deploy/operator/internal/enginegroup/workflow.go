@@ -780,7 +780,7 @@ func (c *Coordinator) reconcileServingVerification(
 	if verification.Phase == VerificationPhasePassed {
 		if verification.Proof == nil ||
 			verification.Proof.TopologyGeneration != committed.Generation ||
-			verification.Proof.RuntimeDigest != topologyRuntimeDigest(committed) {
+			verification.Proof.RuntimeDigest != TopologyRuntimeDigest(committed) {
 			return false, false, errors.New("serving proof does not match the committed topology")
 		}
 		return true, false, nil
@@ -814,7 +814,7 @@ func (c *Coordinator) reconcileServingVerification(
 		return false, true, nil
 	}
 	if result.Proof.TopologyGeneration != committed.Generation ||
-		result.Proof.RuntimeDigest != topologyRuntimeDigest(committed) {
+		result.Proof.RuntimeDigest != TopologyRuntimeDigest(committed) {
 		return false, false, errors.New("serving verifier returned proof for another topology")
 	}
 

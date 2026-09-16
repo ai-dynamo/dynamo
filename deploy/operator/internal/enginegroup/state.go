@@ -465,6 +465,11 @@ func sameIncarnation(left, right ReplicaIncarnation) bool {
 		sameCapacityRefs(left.CapacityRefs, right.CapacityRefs)
 }
 
+// SameIncarnation reports whether two incarnations name the same logical, runtime, and physical capacity.
+func SameIncarnation(left, right ReplicaIncarnation) bool {
+	return sameIncarnation(left, right)
+}
+
 func membershipMatchesIncarnation(membership ReplicaMembership, incarnation ReplicaIncarnation) bool {
 	return membership.ReplicaID == incarnation.ReplicaID &&
 		membership.RuntimeIncarnation == incarnation.RuntimeIncarnation
@@ -490,8 +495,19 @@ func sameMemberships(left, right []ReplicaMembership) bool {
 	return true
 }
 
+// SameMembershipSet reports whether two membership lists contain the same logical, runtime, and native identities.
+// Ordering is not significant.
+func SameMembershipSet(left, right []ReplicaMembership) bool {
+	return sameMemberships(left, right)
+}
+
 func sameTopology(left, right MembershipTopology) bool {
 	return left.Generation == right.Generation && sameMemberships(left.Replicas, right.Replicas)
+}
+
+// SameTopology reports whether two topologies have the same generation and exact membership identity set.
+func SameTopology(left, right MembershipTopology) bool {
+	return sameTopology(left, right)
 }
 
 func membershipByID(topology MembershipTopology, replicaID ReplicaID) (ReplicaMembership, bool) {
@@ -539,7 +555,8 @@ func appendTopology(history TopologyHistory, topology MembershipTopology) (Topol
 	return history, nil
 }
 
-func topologyRuntimeDigest(topology MembershipTopology) string {
+// TopologyRuntimeDigest returns the canonical identity a serving proof must echo for one topology.
+func TopologyRuntimeDigest(topology MembershipTopology) string {
 	memberships := normalizeMemberships(topology.Replicas)
 	var input strings.Builder
 	_, _ = fmt.Fprintf(&input, "generation=%d;", topology.Generation)
