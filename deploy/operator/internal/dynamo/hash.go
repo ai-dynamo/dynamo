@@ -127,6 +127,17 @@ func workerHashSpec(dcd *v1beta1.DynamoComponentDeployment) v1beta1.DynamoCompon
 		spec.Experimental.Grove.ForceScalingGroup = nil
 	}
 
+	// Match GetCheckpoint: disabled configurations are equivalent to omission.
+	// Remove the outer wrapper only when no other experimental features remain.
+	if spec.Experimental != nil {
+		if spec.Experimental.Checkpoint != nil && !spec.Experimental.Checkpoint.Enabled {
+			spec.Experimental.Checkpoint = nil
+		}
+		if *spec.Experimental == (v1beta1.ExperimentalSpec{}) {
+			spec.Experimental = nil
+		}
+	}
+
 	return *spec
 }
 
