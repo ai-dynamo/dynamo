@@ -101,7 +101,12 @@ impl SessionMutation {
         }
     }
 
-    fn apply(self, index: &SessionPrefixIndexer, residency_versions: &ResidencyVersions) {
+    async fn apply(
+        self,
+        index: &SessionPrefixIndexer,
+        residency_versions: &ResidencyVersions,
+        barrier: &PrimaryBarrier,
+    ) {
         match self {
             Self::Matched {
                 worker,
@@ -109,7 +114,18 @@ impl SessionMutation {
                 matched_hash,
                 residency_version,
             } => {
-                if residency_versions.current(worker) != residency_version {
+                let is_resident = if residency_versions.current(worker) == residency_version {
+                    true
+                } else {
+                    match barrier.contains_worker_block(worker, matched_hash).await {
+                        Ok(is_resident) => is_resident,
+                        Err(error) => {
+                            tracing::warn!(%error, %session_id, ?worker, "failed to revalidate session prefix match");
+                            false
+                        }
+                    }
+                };
+                if !is_resident {
                     return;
                 }
                 if let Err(error) =
@@ -168,6 +184,17 @@ impl PrimaryBarrier {
         }
         Ok(())
     }
+
+    async fn contains_worker_block(
+        &self,
+        worker: WorkerWithDpRank,
+        block_hash: ExternalSequenceBlockHash,
+    ) -> Result<bool, KvRouterError> {
+        match self {
+            Self::Legacy(primary) => primary.contains_worker_block(worker, block_hash).await,
+            Self::Concurrent(primary) => primary.contains_worker_block(worker, block_hash).await,
+        }
+    }
 }
 
 impl SessionUpdateSender {
@@ -207,7 +234,9 @@ impl SessionUpdateSender {
                     match barrier.wait_for(&mutations).await {
                         Ok(()) => {
                             for mutation in mutations {
-                                mutation.apply(&index, &task_residency_versions);
+                                mutation
+                                    .apply(&index, &task_residency_versions, &barrier)
+                                    .await;
                             }
                         }
                         Err(error) => {

@@ -13,9 +13,9 @@ use tokio_util::sync::CancellationToken;
 use super::{
     ApproximateLruClient, ApproximateLruCommandSink, ApproximateLruIncarnation, ApproximateLruLane,
     ApproximateLruLease, ApproximateLruStats, ApproximateLruTask, ApproximateRetentionConfig,
-    DumpRequest, EventKind, FlushRequest, GetWorkersRequest, KvIndexerInterface, KvIndexerMetrics,
-    KvRouterError, MatchDetails, MatchDetailsRequest, MatchRequest, PreBoundEventCounters,
-    RadixTree, RoutingDecisionRequest, panic_payload_message,
+    ContainsWorkerBlockRequest, DumpRequest, EventKind, FlushRequest, GetWorkersRequest,
+    KvIndexerInterface, KvIndexerMetrics, KvRouterError, MatchDetails, MatchDetailsRequest,
+    MatchRequest, PreBoundEventCounters, RadixTree, RoutingDecisionRequest, panic_payload_message,
 };
 use crate::indexer::pruning::{BlockEntry, PruneConfig, WorkerPruneManager};
 use crate::protocols::*;
@@ -303,6 +303,8 @@ pub struct KvIndexer {
     match_tx: mpsc::Sender<MatchRequest>,
     /// A sender for `MatchDetailsRequest`s.
     match_details_tx: mpsc::Sender<MatchDetailsRequest>,
+    /// A sender for exact worker/block residency checks.
+    contains_worker_block_tx: mpsc::Sender<ContainsWorkerBlockRequest>,
     /// A sender for remove worker requests.
     remove_worker_tx: mpsc::Sender<WorkerId>,
     /// A sender for remove worker dp_rank requests.
@@ -369,6 +371,8 @@ impl KvIndexer {
         let (mutation_tx, mutation_rx) = mpsc::channel::<MutationRequest>(16384);
         let (match_tx, match_rx) = mpsc::channel::<MatchRequest>(128);
         let (match_details_tx, match_details_rx) = mpsc::channel::<MatchDetailsRequest>(128);
+        let (contains_worker_block_tx, contains_worker_block_rx) =
+            mpsc::channel::<ContainsWorkerBlockRequest>(128);
         let (remove_worker_tx, remove_worker_rx) = mpsc::channel::<WorkerId>(16);
         let (remove_worker_dp_rank_tx, remove_worker_dp_rank_rx) =
             mpsc::channel::<(WorkerId, DpRank)>(16);
@@ -398,6 +402,7 @@ impl KvIndexer {
                     let cancel = cancel_clone;
                     let mut match_rx = match_rx;
                     let mut match_details_rx = match_details_rx;
+                    let mut contains_worker_block_rx = contains_worker_block_rx;
                     let mut mutation_rx = mutation_rx;
                     let mut remove_worker_rx = remove_worker_rx;
                     let mut remove_worker_dp_rank_rx = remove_worker_dp_rank_rx;
@@ -473,6 +478,11 @@ impl KvIndexer {
                                     req.retain_kv_transfer_chain,
                                 );
                                 let _ = req.resp.send(matches);
+                            }
+
+                            Some(req) = contains_worker_block_rx.recv() => {
+                                let resident = trie.contains_worker_block(req.worker, req.block_hash);
+                                let _ = req.resp.send(resident);
                             }
 
                             task = async {
@@ -589,6 +599,7 @@ impl KvIndexer {
             mutation_tx,
             match_tx,
             match_details_tx,
+            contains_worker_block_tx,
             remove_worker_tx,
             remove_worker_dp_rank_tx,
             get_workers_tx,
@@ -603,6 +614,25 @@ impl KvIndexer {
 
     pub fn block_size(&self) -> u32 {
         self.kv_block_size
+    }
+
+    pub async fn contains_worker_block(
+        &self,
+        worker: WorkerWithDpRank,
+        block_hash: ExternalSequenceBlockHash,
+    ) -> Result<bool, KvRouterError> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.contains_worker_block_tx
+            .send(ContainsWorkerBlockRequest {
+                worker,
+                block_hash,
+                resp: resp_tx,
+            })
+            .await
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+        resp_rx
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)
     }
 
     pub fn new(

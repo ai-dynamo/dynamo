@@ -1104,6 +1104,9 @@ impl SyncIndexer for LowerTierIndexer {
                     );
                     let _ = sender.send(stats);
                 }
+                WorkerTask::ContainsWorkerBlock { resp, .. } => {
+                    let _ = resp.send(false);
+                }
                 WorkerTask::Flush(sender) => {
                     let _ = sender.send(());
                 }

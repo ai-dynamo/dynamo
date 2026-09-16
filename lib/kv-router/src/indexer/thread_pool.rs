@@ -15,6 +15,7 @@ use dashmap::DashMap;
 use rustc_hash::FxBuildHasher;
 use tokio::sync::oneshot;
 
+use super::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
 use super::{
     ApproximateLruClient, ApproximateLruCommandSink, ApproximateLruIncarnation,
     ApproximateLruLease, ApproximateLruStats, ApproximateLruTask, ApproximateRetentionConfig,
@@ -1089,6 +1090,32 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
     ) -> Result<(), KvRouterError> {
         self.record_routing_decision_hashes(worker, local_hashes, sequence_hashes)
             .await
+    }
+}
+
+impl ThreadPoolIndexer<ConcurrentRadixTreeCompressed> {
+    pub async fn contains_worker_block(
+        &self,
+        worker: WorkerWithDpRank,
+        block_hash: ExternalSequenceBlockHash,
+    ) -> Result<bool, KvRouterError> {
+        let thread_idx = Self::get_or_assign_thread_idx(
+            &self.worker_assignments,
+            &self.worker_assignment_count,
+            worker,
+            self.num_workers,
+        );
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.worker_event_channels[thread_idx]
+            .send(WorkerTask::ContainsWorkerBlock {
+                worker,
+                block_hash,
+                resp: resp_tx,
+            })
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+        resp_rx
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)
     }
 }
 

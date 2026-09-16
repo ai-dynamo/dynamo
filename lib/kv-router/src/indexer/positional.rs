@@ -300,6 +300,16 @@ impl SyncIndexer for PositionalIndexer {
                     );
                     let _ = sender.send(stats);
                 }
+                WorkerTask::ContainsWorkerBlock {
+                    worker,
+                    block_hash,
+                    resp,
+                } => {
+                    let resident = worker_blocks
+                        .get(&worker)
+                        .is_some_and(|worker_blocks| worker_blocks.contains_key(&block_hash));
+                    let _ = resp.send(resident);
+                }
                 WorkerTask::Flush(sender) => {
                     let _ = sender.send(());
                 }
