@@ -1328,6 +1328,47 @@ func TestSelectedNodeLocalLPXReadinessUsesOneFixedScalingGroup(t *testing.T) {
 	}
 }
 
+func TestLPXRequestReadinessDecisions(t *testing.T) {
+	t.Log("Keep staged publication ahead of Grove pending and retain nil continuation")
+	pending := &lpxClosed{incomplete: "Grove is incomplete"}
+	staged := &lpxClosed{incomplete: "The Grove publication identities are staged; LPX publication waits for Grove synchronization"}
+	for _, test := range []struct {
+		name      string
+		identity  *lpxGroveIdentity
+		published bool
+		pending   *lpxClosed
+		want      *lpxClosed
+	}{
+		{name: "staged before pending", identity: &lpxGroveIdentity{complete: true}, pending: pending, want: staged},
+		{name: "staged without pending", identity: &lpxGroveIdentity{complete: true}, want: staged},
+		{name: "published before pending", identity: &lpxGroveIdentity{complete: true}, published: true, pending: pending, want: pending},
+		{name: "incomplete identity", identity: &lpxGroveIdentity{}, pending: pending, want: pending},
+		{name: "missing identity", pending: pending, want: pending},
+		{name: "published continues", identity: &lpxGroveIdentity{complete: true}, published: true},
+		{name: "missing continues"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Resolve the requested replica without changing its current or desired request")
+			requests := []lpxModelMaterializing{{requestName: "engine", replicaIndex: 1}}
+			beforeRequests := slices.Clone(requests)
+			currents := map[string]*lpxv1alpha1.LPUPipelineRequest{}
+			if test.published {
+				currents["engine"] = deadlineTestRequest(&nvidiacomv1alpha1.LPXGraphDeployment{}, "engine", time.Now(), lpxv1alpha1.RequestPhaseBound)
+			}
+			before := currents["engine"].DeepCopy()
+			require.Equal(t, test.want, classifyLPXPublicationReadiness(requests, currents, []*lpxGroveIdentity{nil, test.identity}, test.pending))
+			var want lpxClassification = &lpxBound{}
+			if test.pending != nil {
+				want = test.pending
+			}
+			require.Equal(t, want, classifyLPXCurrentRequests(requests, currents, test.pending))
+			require.Equal(t, beforeRequests, requests)
+			require.Equal(t, before, currents["engine"])
+		})
+	}
+	require.Equal(t, &lpxClosed{incomplete: "Grove is incomplete"}, pending)
+}
+
 func TestLPXClassifiesCurrentSchedulerReceipts(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -1421,6 +1462,22 @@ func TestLPXClassifiesCurrentSchedulerReceipts(t *testing.T) {
 			if test.wantMessage != "" {
 				require.Contains(t, result.Message, test.wantMessage)
 			}
+
+			t.Log("The first failure outranks open requests; otherwise the first non-Bound receipt wins")
+			before := request.DeepCopy()
+			later := request.DeepCopy()
+			later.Status.Diagnostics[0].Detail = "a later scheduler receipt"
+			requests := []lpxModelMaterializing{{requestName: "open"}, {requestName: "observed"}, {requestName: "later"}}
+			currents := map[string]*lpxv1alpha1.LPUPipelineRequest{"open": {}, "observed": request, "later": later}
+			pending := &lpxClosed{incomplete: "Grove is incomplete"}
+			var want lpxClassification = &lpxOpen{}
+			if test.wantState == nvidiacomv1beta1.DGDStateFailed {
+				want = observed
+			}
+			require.Equal(t, want, classifyLPXCurrentRequests(requests, currents, pending))
+			slices.Reverse(requests)
+			require.Equal(t, (*lpxSchedulerObserved)(later.Status), classifyLPXCurrentRequests(requests, currents, pending))
+			require.Equal(t, before, request)
 		})
 	}
 }
@@ -1579,8 +1636,69 @@ func TestLPXAttemptIdentityAndRetirementFence(t *testing.T) {
 	changed.podGangUID = "replacement-podgang-uid"
 	require.ErrorContains(t, validateCurrentLPXRequest(dgd, projection, &changed, current), "immutable annotation")
 
+	t.Log("Resolve current intent from complete identities and preserve inputs while Grove is incomplete")
+	complete := *identity
+	complete.complete, complete.agentUIDs = true, []types.UID{"agent-uid"}
+	computed, intentChanged, err := resolveLPXCurrentRequestIntent(dgd, *projection, &complete, nil)
+	require.NoError(t, err)
+	require.False(t, intentChanged)
+	require.True(t, strings.HasPrefix(computed, "sha256:"))
+	intent := *projection
+	intent.attemptDigest = computed
+	current.Annotations = lpxRequestAnnotations(dgd, &intent, &complete)
+	intent.attemptDigest = "supplied-digest"
+	replacement := complete
+	replacement.agentUIDs = []types.UID{"replacement-agent-uid"}
+	for _, test := range []struct {
+		name        string
+		identity    *lpxGroveIdentity
+		live        *lpxv1alpha1.LPUPipelineRequest
+		drift       bool
+		wantDigest  string
+		wantChanged bool
+	}{
+		{name: "match", identity: &complete, live: current, wantDigest: computed},
+		{name: "new request", identity: &complete, wantDigest: computed},
+		{name: "spec drift", identity: &complete, live: current, drift: true, wantDigest: computed, wantChanged: true},
+		{name: "agent replacement", identity: &replacement, live: current, wantChanged: true},
+		{name: "incomplete with live request", identity: identity, live: current, drift: true, wantDigest: computed},
+		{name: "missing identity with live request", live: current, drift: true, wantDigest: computed},
+		{name: "incomplete without request", identity: identity, wantDigest: intent.attemptDigest},
+		{name: "missing identity and request", wantDigest: intent.attemptDigest},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Compare immutable intent without changing the supplied digest or observed request")
+			live := test.live.DeepCopy()
+			if test.drift {
+				live.Spec.PodGangRef.Name = "other-gang"
+			}
+			beforeLive, beforeDGD, beforeIntent := live.DeepCopy(), dgd.DeepCopy(), intent
+			beforeSpec := intent.modelProjection.RequestSpec(dgd.Namespace, complete.podGangName, nil)
+			var beforeIdentity *lpxGroveIdentity
+			if test.identity != nil {
+				copy := *test.identity
+				copy.agentUIDs = slices.Clone(copy.agentUIDs)
+				beforeIdentity = &copy
+			}
+			got, changed, err := resolveLPXCurrentRequestIntent(dgd, intent, test.identity, live)
+			require.NoError(t, err)
+			require.Equal(t, test.wantChanged, changed)
+			if test.wantDigest == "" {
+				require.NotEqual(t, computed, got, "replacement Agent identity changes the attempt digest")
+			} else {
+				require.Equal(t, test.wantDigest, got)
+			}
+			require.Equal(t, beforeLive, live)
+			require.Equal(t, beforeDGD, dgd)
+			require.Equal(t, beforeIntent, intent)
+			require.Equal(t, beforeIdentity, test.identity)
+			require.Equal(t, beforeSpec, intent.modelProjection.RequestSpec(dgd.Namespace, complete.podGangName, nil))
+		})
+	}
+
+	t.Log("Keep published requests when the deployment generation changes without intent drift")
 	createLPXTestObjects(t, ctx, reconciler.Client, lpxMaterializedObjects(t, reconciler, dgd, source, desired)...)
-	_, err := reconciler.reconcileSelectedLPX(ctx, dgd, desired)
+	_, err = reconciler.reconcileSelectedLPX(ctx, dgd, desired)
 	require.NoError(t, err)
 	_, err = reconciler.reconcileSelectedLPX(ctx, dgd, desired)
 	require.NoError(t, err)

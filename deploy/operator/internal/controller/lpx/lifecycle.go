@@ -774,7 +774,6 @@ func (r *graphReconciler) reconcileSelectedLPX(
 	return classification, err
 }
 
-//nolint:gocyclo // Current-request retirement must remain visibly ordered before Grove observation.
 func (r *graphReconciler) reconcileSelectedLPXFromCurrentRequests(
 	ctx context.Context,
 	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
@@ -798,17 +797,8 @@ func (r *graphReconciler) reconcileSelectedLPXFromCurrentRequests(
 
 	// Validate staged identities without crossing the scheduler-publication boundary.
 	if !allowPublication {
-		for index := range desired.requests {
-			request := &desired.requests[index]
-			identity := groveIdentities[request.replicaIndex]
-			if identity != nil && identity.complete && currents[request.requestName] == nil {
-				return &lpxClosed{
-					incomplete: "The Grove publication identities are staged; LPX publication waits for Grove synchronization",
-				}, nil
-			}
-		}
-		if pending != nil {
-			return pending, nil
+		if closed := classifyLPXPublicationReadiness(desired.requests, currents, groveIdentities, pending); closed != nil {
+			return closed, nil
 		}
 	}
 
@@ -855,14 +845,40 @@ func (r *graphReconciler) reconcileSelectedLPXFromCurrentRequests(
 			return transition, nil
 		}
 	}
+	return classifyLPXCurrentRequests(desired.requests, currents, pending), nil
+}
 
+// classifyLPXPublicationReadiness requires identities to cover every request's replica index.
+// Identity entries, current requests and pending state may be nil.
+func classifyLPXPublicationReadiness(
+	requests []lpxModelMaterializing,
+	currents map[string]*lpxv1alpha1.LPUPipelineRequest,
+	identities []*lpxGroveIdentity,
+	pending *lpxClosed,
+) *lpxClosed {
+	// Complete identities with no request must wait for the Grove synchronization boundary.
+	for _, request := range requests {
+		identity := identities[request.replicaIndex]
+		if identity != nil && identity.complete && currents[request.requestName] == nil {
+			return &lpxClosed{incomplete: "The Grove publication identities are staged; LPX publication waits for Grove synchronization"}
+		}
+	}
+	return pending
+}
+
+// classifyLPXCurrentRequests accepts absent requests and a nil pending state.
+func classifyLPXCurrentRequests(
+	requests []lpxModelMaterializing,
+	currents map[string]*lpxv1alpha1.LPUPipelineRequest,
+	pending *lpxClosed,
+) lpxClassification {
 	// Stream terminal, side-effect-free classifications in request order.
 	var firstNonBound lpxClassification
-	for _, request := range desired.requests {
+	for _, request := range requests {
 		if live := currents[request.requestName]; live != nil {
 			classification := classifyPublishedLPX(live)
 			if state, ok := classification.(*lpxSchedulerObserved); ok && lpxSchedulerResult(state).State == nvidiacomv1beta1.DGDStateFailed {
-				return classification, nil
+				return classification
 			}
 			if _, bound := classification.(*lpxBound); !bound && firstNonBound == nil {
 				firstNonBound = classification
@@ -872,12 +888,12 @@ func (r *graphReconciler) reconcileSelectedLPXFromCurrentRequests(
 
 	// Keep pending behind every published non-bound request.
 	if firstNonBound != nil {
-		return firstNonBound, nil
+		return firstNonBound
 	}
 	if pending != nil {
-		return pending, nil
+		return pending
 	}
-	return &lpxBound{}, nil
+	return &lpxBound{}
 }
 
 func (r *graphReconciler) reconcileSelectedLPXGroveIdentityPrefix(
@@ -938,22 +954,15 @@ func (r *graphReconciler) reconcileSelectedLPXGroveIdentityPrefix(
 		request := &desired.requests[index]
 		live := currents[request.requestName]
 		identity := groveIdentities[request.replicaIndex]
-		if identity != nil && identity.complete {
-			spec, err := json.Marshal(struct {
-				Spec      lpxv1alpha1.LPUPipelineRequestSpec
-				AgentUIDs []types.UID
-			}{request.modelProjection.RequestSpec(deployment.Namespace, identity.podGangName, identity.cyborgClique), identity.agentUIDs})
-			if err != nil {
-				return nil, nil, nil, err
-			}
-			request.attemptDigest = fmt.Sprintf("sha256:%x", sha256.Sum256(spec))
-		} else if live != nil {
-			request.attemptDigest = live.Annotations[lpxAttemptDigestAnnotation]
+		digest, intentChanged, err := resolveLPXCurrentRequestIntent(deployment, *request, identity, live)
+		if err != nil {
+			return nil, nil, nil, err
 		}
+		request.attemptDigest = digest
 		if live == nil {
 			continue
 		}
-		if identity != nil && identity.complete && validateCurrentLPXRequest(deployment, request, identity, live) != nil {
+		if intentChanged {
 			intentional[request.replicaIndex] = true
 		}
 		if intentional[request.replicaIndex] || !live.DeletionTimestamp.IsZero() || lpx.ValidateRequestSize(live) != nil {
@@ -986,6 +995,34 @@ func (r *graphReconciler) reconcileSelectedLPXGroveIdentityPrefix(
 		}
 	}
 	return groveIdentities, pending, nil, nil
+}
+
+// resolveLPXCurrentRequestIntent does not mutate its inputs. deployment must be non-nil;
+// identity and live may be nil while their observations are pending.
+func resolveLPXCurrentRequestIntent(
+	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
+	desired lpxModelMaterializing,
+	identity *lpxGroveIdentity,
+	live *lpxv1alpha1.LPUPipelineRequest,
+) (string, bool, error) {
+	// Preserve the observed digest until Grove supplies a complete replacement identity.
+	if identity == nil || !identity.complete {
+		if live != nil {
+			desired.attemptDigest = live.Annotations[lpxAttemptDigestAnnotation]
+		}
+		return desired.attemptDigest, false, nil
+	}
+
+	// Compare immutable intent using the digest derived from the complete Grove identity.
+	spec, err := json.Marshal(struct {
+		Spec      lpxv1alpha1.LPUPipelineRequestSpec
+		AgentUIDs []types.UID
+	}{desired.modelProjection.RequestSpec(deployment.Namespace, identity.podGangName, identity.cyborgClique), identity.agentUIDs})
+	if err != nil {
+		return "", false, err
+	}
+	desired.attemptDigest = fmt.Sprintf("sha256:%x", sha256.Sum256(spec))
+	return desired.attemptDigest, live != nil && validateCurrentLPXRequest(deployment, &desired, identity, live) != nil, nil
 }
 
 // classifyPublishedLPX classifies a non-nil published request from its current scheduler receipt.
