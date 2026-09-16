@@ -5,7 +5,7 @@
 # ------
 # Safely approve trusted CI for the exact head commit of a pull request from a fork. Fork PRs do
 # not receive this approval automatically because their code is external to the repository. This
-# workflow evaluates who is responsible for the PR update, verifies every PR commit, and posts the
+# workflow evaluates who is responsible for the PR update and posts the
 # `/ok to test <head-sha>` command that starts the trusted CI flow only when all checks pass.
 #
 # When this workflow runs
@@ -14,7 +14,7 @@
 # new push, or reopened. The job is skipped for branches in this repository because those branches
 # use the normal internal-contributor CI path.
 #
-# A fork PR can reach the signature check through any of these approval paths:
+# A fork PR can receive approval through any of these paths:
 #
 # 1. The PR author has write, maintain, or admin access to this repository. This path applies when
 #    the PR is opened or reopened. A synchronized update must also be pushed by a maintainer.
@@ -25,10 +25,13 @@
 #    only the head created by that synchronization; it does not make the PR or contributor trusted
 #    for later pushes.
 # 4. `glamr-agent` posts `@dynamo-ops please run full CI for <full-head-sha>`, optionally
-#    preceded by a label and colon. The SHA must match the open fork PR's head when resolved.
+#    preceded by a label and colon, on its own PR. The commenter and PR author must both
+#    have GLAMR's GitHub account ID.
+#    The SHA must match the open fork PR's head when resolved. This path trusts the account
+#    identity and does not require signed commits.
 #    Set the repository Actions variable GLAMR_CI_REQUESTS_DISABLED=true to disable this path.
 #
-# All paths require every commit in the captured base-to-head comparison to have a signature
+# Paths 1-3 require every commit in the captured base-to-head comparison to have a signature
 # that GitHub reports as verified. If any commit is unsigned, the workflow does not post
 # `/ok to test`. For PRs authored
 # by maintainers, it explains which commits failed verification. Approved external contributors
@@ -43,15 +46,16 @@
 #   head, either by synchronizing the branch or by posting the approval command manually.
 # - A contributor push after a maintainer synchronization creates a new head and removes the
 #   one-head approval. The new head must be approved again.
-# - Every PR commit must be signed and verified, including commits added before a maintainer update.
+# - Except for GLAMR requests on its own PRs, every PR commit must be signed and verified,
+#   including commits added before a maintainer update.
 # - Contributors must enable "Allow edits from maintainers" before a maintainer can update a branch
 #   in a user-owned fork.
 #
 # Desired state
 # -------------
-# The workflow posts `/ok to test <captured-head-sha>` after checking its approval path and
-# verifying every commit in the captured base-to-head comparison. The final read requires the
-# PR to remain open with the same base and head, but that read and comment creation are separate
+# The workflow posts `/ok to test <captured-head-sha>` after checking its approval path and,
+# when required, verifying every commit in the captured base-to-head comparison. The final read
+# requires the PR to remain open with the same base and head, but that read and comment creation are separate
 # operations. The PR may change before publication; the consumer must enforce the command's
 # SHA when approval is required. Later heads require their own approval evaluation.
 
@@ -101,6 +105,7 @@ jobs:
           [[ $(jq -r '.state == "open" and .head.repo.fork == true' <<< "$pr") == true ]] || exit 0
           head=$(jq -r '.head.sha' <<< "$pr")
           if [[ "$GITHUB_EVENT_NAME" == issue_comment ]]; then
+            [[ $(jq -r '.user.id' <<< "$pr") == 282374502 ]] || exit 0
             body=$(jq -r '.comment.body' "$GITHUB_EVENT_PATH")
             pattern='^([^[:space:]]+:[[:blank:]]+)?@dynamo-ops please run full CI for ([0-9a-f]{40})[[:space:]]*$'
             [[ "$body" =~ $pattern ]] || exit 0
@@ -214,7 +219,7 @@ jobs:
           fi
       - name: Verify commit signatures
         id: signature_check
-        if: steps.approval_check.outputs.is_approved == 'true'
+        if: steps.approval_check.outputs.is_approved == 'true' && steps.request.outputs.is_approved != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_BASE: ${{ steps.request.outputs.base }}
@@ -317,7 +322,7 @@ jobs:
             --repo "$REPO_OWNER/$REPO_NAME" \
             --body "$body"
       - name: Comment /ok to test
-        if: steps.approval_check.outputs.is_approved == 'true' && steps.signature_check.outputs.all_signed == 'true'
+        if: steps.approval_check.outputs.is_approved == 'true' && (steps.request.outputs.is_approved == 'true' || steps.signature_check.outputs.all_signed == 'true')
         env:
           GH_TOKEN: ${{ secrets.AUTO_VERIFIER_CI_TOKEN }}
           PR_BASE: ${{ steps.request.outputs.base }}

@@ -236,6 +236,8 @@ cargo fmt --all && cargo clippy --workspace
   cryptographic signature that GitHub reports as `Verified`; a DCO sign-off alone does not
   satisfy this requirement. Signing commits does not itself qualify a PR for automatic approval;
   a maintainer can manually approve the current head with `/ok to test <sha>`.
+  The GLAMR request path instead trusts the authenticated `glamr-agent` account on its own PRs
+  and does not require cryptographic signatures.
 - Do not hand-edit a generated artifact — change its source and regenerate. A
   generated file says so in a `do not edit` marker, and its generator has a
   `--check` mode that fails when the committed output is stale. Resolve a
@@ -257,7 +259,8 @@ cargo fmt --all && cargo clippy --workspace
 - Full CI on a PR runs only after a maintainer comments `/ok to test <sha>` with the short
   SHA of the latest commit; copy-pr-bot then creates the `pull-request/N` branch that
   triggers it. For an eligible fork PR, the automatic approval flow posts that command only
-  after every PR commit is GitHub-verified. Fix failures before requesting human review.
+  after every PR commit is GitHub-verified, except for authenticated GLAMR requests on its own PRs.
+  Fix failures before requesting human review.
 - Architecture changes require a Dynamo Enhancement Proposal (DEP), filed as a GitHub
   issue on `ai-dynamo/dynamo` with `dep:*` labels (the `dep-create` skill automates this).
 
