@@ -10,7 +10,7 @@ trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/gpu_utils.sh"   # build_sglang_gpu_mem_args
-source "$SCRIPT_DIR/../../../common/launch_utils.sh" # print_launch_banner, wait_any_exit
+source "$SCRIPT_DIR/../../../common/launch_utils.sh" # print_launch_banner, wait_any_exit, wait_for_ready
 
 # Default values
 MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
@@ -154,26 +154,10 @@ print_launch_banner --multimodal "Launching Multimodal E/PD ($GPU_LABEL)" "$MODE
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python3 -m dynamo.frontend &
 
-# run SGLang multimodal encode worker (frontend-facing: encodes images, routes to worker)
-echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU..."
-DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
-env ${_ENCODE_CUDA_PIN:+"$_ENCODE_CUDA_PIN"} python3 -m dynamo.sglang \
-  --enable-multimodal \
-  --disaggregation-mode encode \
-  --model-path "$MODEL_NAME" \
-  $SERVED_MODEL_ARG \
-  --chat-template "$CHAT_TEMPLATE" \
-  --skip-tokenizer-init \
-  $ENCODE_EXTRA_ARGS &
-
-if [[ "$SINGLE_GPU" == "true" ]]; then
-    # Wait for encode worker to initialize before starting PD worker.
-    # This prevents both workers from competing for GPU memory simultaneously, which can cause OOM.
-    echo "Waiting for encode worker to initialize..."
-    sleep 5
-fi
-
 # run SGLang multimodal inference worker
+# Started before the encode worker: the encode worker blocks on instances of
+# backend.generate, which only this worker registers, so it can never finish
+# starting first.
 # NOTE: Each worker picks a random NCCL port (get_free_port) for torch.distributed.
 # This has a TOCTOU race — the port can be grabbed before init_process_group binds it,
 # causing sporadic EADDRINUSE.  Pass --nccl-port <unique_port> per worker to avoid this.
@@ -194,6 +178,31 @@ env ${_WORKER_CUDA_PIN:+"$_WORKER_CUDA_PIN"} python3 -m dynamo.sglang \
   --disable-radix-cache \
   --disaggregation-transfer-backend "$TRANSFER_BACKEND" \
   $WORKER_EXTRA_ARGS &
+
+if [[ "$SINGLE_GPU" == "true" ]]; then
+    # Both workers load on the same GPU and each sizes its allocation against
+    # the memory free when it loads, so loading them at once can leave the
+    # scheduler out of memory. Wait for the PD worker instead of sleeping a
+    # fixed time that a model load regularly outlives.
+    # Gate on the PD worker, not the encode worker: the encode worker holds its
+    # own readiness until backend.generate has instances, so its /health cannot
+    # turn 200 before this worker is up.
+    # || true: don't let set -e kill the script on timeout (wait_for_ready returns 1).
+    echo "Waiting for PD worker to initialize..."
+    wait_for_ready "http://localhost:${DYN_SYSTEM_PORT2:-8082}/health" 120 || true
+fi
+
+# run SGLang multimodal encode worker (frontend-facing: encodes images, routes to worker)
+echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU..."
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
+env ${_ENCODE_CUDA_PIN:+"$_ENCODE_CUDA_PIN"} python3 -m dynamo.sglang \
+  --enable-multimodal \
+  --disaggregation-mode encode \
+  --model-path "$MODEL_NAME" \
+  $SERVED_MODEL_ARG \
+  --chat-template "$CHAT_TEMPLATE" \
+  --skip-tokenizer-init \
+  $ENCODE_EXTRA_ARGS &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
 wait_any_exit
