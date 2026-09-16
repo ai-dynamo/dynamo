@@ -2194,6 +2194,7 @@ dependencies = [
  "rayon",
  "reqwest 0.12.28",
  "rmp-serde",
+ "rustc-hash 2.1.2",
  "serde",
  "serde_json",
  "sha2 0.10.9",
