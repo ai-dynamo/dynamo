@@ -3,7 +3,14 @@
 
 import pytest
 
-from benchmarks.router.common import add_expected_osl, tag_requests_with_priority
+# Collection precedes marker filtering, including in the lean Planner image
+# which does not install the router benchmark's graph-synthesis dependency.
+pytest.importorskip("networkx", reason="router benchmark synthesis needs networkx")
+
+from benchmarks.router.common import (  # noqa: E402 -- optional dependency check
+    add_expected_osl,
+    tag_requests_with_priority,
+)
 
 pytestmark = [
     pytest.mark.pre_merge,
