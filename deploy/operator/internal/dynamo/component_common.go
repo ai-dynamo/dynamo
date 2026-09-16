@@ -61,6 +61,7 @@ func NewDiscoveryContext(defaultBackend configv1alpha1.DiscoveryBackend, annotat
 
 type ComponentContext struct {
 	numberOfNodes                  int32
+	ContainerName                  string
 	DynamoNamespace                string
 	ComponentType                  string
 	ParentGraphDeploymentName      string
@@ -87,8 +88,14 @@ func (b *BaseComponentDefaults) getCommonPodSpec() corev1.PodSpec {
 }
 
 func (b *BaseComponentDefaults) getCommonContainer(context ComponentContext) corev1.Container {
+	// Runtime identity follows the selected container in native-sidecar mode.
+	containerName := context.ContainerName
+	if containerName == "" {
+		containerName = commonconsts.MainContainerName
+	}
+
 	container := corev1.Container{
-		Name: commonconsts.MainContainerName,
+		Name: containerName,
 		Command: []string{
 			"/bin/sh",
 			"-c",
@@ -148,7 +155,7 @@ func (b *BaseComponentDefaults) getCommonContainer(context ComponentContext) cor
 	if context.Discovery.Mode == configv1alpha1.KubeDiscoveryModeContainer {
 		container.Env = append(container.Env, corev1.EnvVar{
 			Name:  "CONTAINER_NAME",
-			Value: commonconsts.MainContainerName,
+			Value: containerName,
 		})
 		container.Env = append(container.Env, corev1.EnvVar{
 			Name:  "DYN_KUBE_DISCOVERY_MODE",

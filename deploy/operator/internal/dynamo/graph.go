@@ -1807,9 +1807,16 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 	if err != nil {
 		return nil, err
 	}
-	container, err := componentDefaults.GetBaseContainer(componentContext)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get base container: %w", err)
+
+	// Native-sidecar engines retain their image entrypoint and user configuration.
+	container := corev1.Container{Name: commonconsts.MainContainerName}
+	if component.DynamoSidecar == nil {
+		container, err = componentDefaults.GetBaseContainer(componentContext)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get base container: %w", err)
+		}
+	} else if GetMainContainer(component) == nil {
+		return nil, fmt.Errorf("component %q: dynamoSidecar requires a main engine container", component.ComponentName)
 	}
 
 	if main := GetMainContainer(component); main != nil {
@@ -1845,8 +1852,11 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 		return nil, err
 	}
 
-	AddStandardEnvVars(&container, operatorConfig)
-	AddTransportTLSEnvVars(&container, operatorConfig)
+	// Infrastructure and transport defaults belong to the Dynamo runtime.
+	if component.DynamoSidecar == nil {
+		AddStandardEnvVars(&container, operatorConfig)
+		AddTransportTLSEnvVars(&container, operatorConfig)
+	}
 	frontendSidecarMounts := append([]corev1.VolumeMount(nil), container.VolumeMounts...)
 
 	// Apply backend-specific container modifications
@@ -1863,8 +1873,11 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 	if backend == nil {
 		return nil, fmt.Errorf("unsupported backend framework: %s", backendFramework)
 	}
-	if err := backend.UpdateContainer(&container, numberOfNodes, role, component, serviceName, multinodeDeployer, containerGPUs); err != nil {
-		return nil, fmt.Errorf("failed to update container for backend %s: %w", backendFramework, err)
+	// Native-sidecar single-node engines are launched entirely by the user.
+	if component.DynamoSidecar == nil {
+		if err := backend.UpdateContainer(&container, numberOfNodes, role, component, serviceName, multinodeDeployer, containerGPUs); err != nil {
+			return nil, fmt.Errorf("failed to update container for backend %s: %w", backendFramework, err)
+		}
 	}
 	// get base podspec from component
 	podSpec, err := componentDefaults.GetBasePodSpec(componentContext)
@@ -1910,13 +1923,23 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 	ApplySharedMemoryVolumeAndMount(&podSpec, &container, component.SharedMemorySize)
 	podSpec.Containers = append([]corev1.Container{container}, sidecars...)
 
+	// Merge runtime defaults only into the selected restartable init container.
+	if component.DynamoSidecar != nil {
+		if err := mergeDynamoSidecarDefaults(&podSpec, *component.DynamoSidecar, componentContext, operatorConfig); err != nil {
+			return nil, err
+		}
+	}
+
 	if component.FrontendSidecar != nil {
 		if err := mergeFrontendSidecarDefaults(&podSpec, *component.FrontendSidecar, componentContext, operatorConfig, frontendSidecarMounts); err != nil {
 			return nil, err
 		}
 	}
 
-	backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName, multinodeDeployer)
+	// Backend pod defaults describe the combined Python worker in standard mode.
+	if component.DynamoSidecar == nil {
+		backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName, multinodeDeployer)
+	}
 	podSpec.Volumes = appendMissingPVCVolumesForMounts(podSpec.Volumes, podSpec.Containers[0].VolumeMounts)
 
 	shouldDisableImagePullSecret := annotations[commonconsts.KubeAnnotationDisableImagePullSecretDiscovery] == commonconsts.KubeLabelValueTrue
@@ -1991,6 +2014,29 @@ func validateContainerVolumeMounts(volumeMounts []corev1.VolumeMount) error {
 		if mount.MountPath == "" {
 			return fmt.Errorf("volumeMount.mountPath is required for %s", mount.Name)
 		}
+	}
+	return nil
+}
+
+func mergeContainerByName(base *corev1.Container, override *corev1.Container, annotations map[string]string) error {
+	if override == nil {
+		return nil
+	}
+	user := override.DeepCopy()
+	user.Name = base.Name
+	baseEnv := base.Env
+	if err := mergo.Merge(base, *user, mergo.WithOverride); err != nil {
+		return err
+	}
+	base.Env = MergeEnvsForOrigin(annotations, baseEnv, user.Env)
+	if user.LivenessProbe != nil {
+		base.LivenessProbe = user.LivenessProbe.DeepCopy()
+	}
+	if user.ReadinessProbe != nil {
+		base.ReadinessProbe = user.ReadinessProbe.DeepCopy()
+	}
+	if user.StartupProbe != nil {
+		base.StartupProbe = user.StartupProbe
 	}
 	return nil
 }
@@ -2135,6 +2181,11 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 			Discovery:                      parentContext.Discovery,
 			DynamoNamespace:                parentContext.DynamoNamespace,
 		}
+
+		// Co-located frontend discovery uses its own identity, not the engine's.
+		if parentContext.ContainerName != "" {
+			frontendContext.ContainerName = sidecarName
+		}
 		frontendDefaults := NewFrontendDefaults()
 		base, err := frontendDefaults.GetBaseContainer(frontendContext)
 		if err != nil {
@@ -2194,8 +2245,8 @@ func generateComponentContext(component *v1beta1.DynamoComponentDeploymentShared
 	}
 
 	var image string
-	if main := GetMainContainer(component); main != nil {
-		image = main.Image
+	if runtime := GetDynamoContainer(component); runtime != nil {
+		image = runtime.Image
 	}
 	var resolvedRuntimeVersion *runtimeversion.Version
 	if version, err := runtimeversion.Resolve(image, component.RuntimeVersionOverride); err == nil {
@@ -2214,6 +2265,11 @@ func generateComponentContext(component *v1beta1.DynamoComponentDeploymentShared
 		EPPConfig:                      component.EPPConfig,
 		WorkerHashSuffix:               workerHashSuffix,
 		RuntimeVersion:                 resolvedRuntimeVersion,
+	}
+
+	// A native sidecar owns the worker runtime identity.
+	if component.DynamoSidecar != nil {
+		componentContext.ContainerName = *component.DynamoSidecar
 	}
 	return componentContext, nil
 }
@@ -2315,6 +2371,16 @@ func applyDGDTemplateDefaults(
 		for _, podTemplate := range EnsureComponentPodTemplates(component) {
 			main := ensureMainContainer(podTemplate)
 			main.Env = MergeEnvs(dynamoDeployment.Spec.Env, main.Env)
+
+			// Materialize global env on both processes before a DGD creates its DCDs.
+			if component.DynamoSidecar != nil {
+				for i := range podTemplate.Spec.InitContainers {
+					runtime := &podTemplate.Spec.InitContainers[i]
+					if runtime.Name == *component.DynamoSidecar {
+						runtime.Env = MergeEnvs(dynamoDeployment.Spec.Env, runtime.Env)
+					}
+				}
+			}
 		}
 	}
 
@@ -2352,9 +2418,18 @@ func applyKvTransferPolicyToWorkerComponent(
 		return
 	}
 	for _, podTemplate := range EnsureComponentPodTemplates(component) {
-		main := ensureMainContainer(podTemplate)
-		main.Env = MergeEnvs(removeWorkerKvTransferPolicyEnvVars(main.Env), workerKvTransferPolicyEnvVars(kvt))
-		main.VolumeMounts = appendTopologyLabelVolumeMount(main.VolumeMounts, TopologyLabelVolumeMount())
+		// The runtime publishes routing topology; the engine does not consume this projection.
+		runtime := ensureMainContainer(podTemplate)
+		if component.DynamoSidecar != nil {
+			for i := range podTemplate.Spec.InitContainers {
+				if podTemplate.Spec.InitContainers[i].Name == *component.DynamoSidecar {
+					runtime = &podTemplate.Spec.InitContainers[i]
+					break
+				}
+			}
+		}
+		runtime.Env = MergeEnvs(removeWorkerKvTransferPolicyEnvVars(runtime.Env), workerKvTransferPolicyEnvVars(kvt))
+		runtime.VolumeMounts = appendTopologyLabelVolumeMount(runtime.VolumeMounts, TopologyLabelVolumeMount())
 		podTemplate.Spec.Volumes = appendTopologyLabelVolume(podTemplate.Spec.Volumes, TopologyLabelVolume(kvt, groveClusterTopologyDomains))
 	}
 }
