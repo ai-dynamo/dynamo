@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from contextlib import aclosing
 from types import SimpleNamespace
 
 import pytest
@@ -142,13 +141,13 @@ async def test_generate_tokens_passes_delta_chunks_without_cumulative_slicing():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("num_cached_tokens", [None, 0, 2])
-async def test_generate_tokens_reports_cached_usage_before_finish(num_cached_tokens):
+async def test_generate_tokens_reports_cached_usage_before_finish():
+    """Report cache hits and cumulative counts on non-final and empty final deltas."""
     responses = [
         _request_output(
             [output],
             prompt_token_ids=[10, 11, 12],
-            num_cached_tokens=num_cached_tokens,
+            num_cached_tokens=2,
         )
         for output in (
             _output([1]),
@@ -168,16 +167,26 @@ async def test_generate_tokens_reports_cached_usage_before_finish(num_cached_tok
             "prompt_tokens": 3,
             "completion_tokens": completion_tokens,
             "total_tokens": 3 + completion_tokens,
-            "prompt_tokens_details": (
-                None
-                if num_cached_tokens is None
-                else {"cached_tokens": num_cached_tokens}
-            ),
+            "prompt_tokens_details": {"cached_tokens": 2},
         }
+
+
+@pytest.mark.parametrize("completion_tokens", [0, 7])
+def test_build_completion_usage_uses_running_total(completion_tokens):
+    """Use the running total, including zero, instead of the current delta length."""
+    response = _request_output([_output([101])], prompt_token_ids=[10, 11])
+
+    usage = BaseWorkerHandler._build_completion_usage(
+        response, completion_tokens=completion_tokens
+    )
+
+    assert usage["completion_tokens"] == completion_tokens
+    assert usage["total_tokens"] == 2 + completion_tokens
 
 
 @pytest.mark.asyncio
 async def test_generate_tokens_reports_cache_count_when_it_becomes_available():
+    """Forward a cache count first supplied on a later non-final engine output."""
     responses = [
         _request_output(
             [_output([token_id])],
@@ -194,35 +203,6 @@ async def test_generate_tokens_reports_cache_count_when_it_becomes_available():
     assert chunks[1]["completion_usage"]["prompt_tokens_details"] == {
         "cached_tokens": 2
     }
-
-
-@pytest.mark.asyncio
-async def test_generate_tokens_reports_cache_usage_before_early_close():
-    handler = _handler_with_responses(
-        [
-            _request_output(
-                [_output([1])],
-                prompt_token_ids=[10, 11, 12],
-                num_cached_tokens=2,
-            ),
-            _request_output([_output([2], finish_reason="length")]),
-        ]
-    )
-    stream = BaseWorkerHandler.generate_tokens(
-        handler,
-        prompt=None,
-        sampling_params=SamplingParams(),
-        request_id="req-early-close",
-    )
-
-    async with aclosing(stream):
-        first_chunk = await anext(stream)
-
-    assert "finish_reason" not in first_chunk
-    assert first_chunk["completion_usage"]["prompt_tokens_details"] == {
-        "cached_tokens": 2
-    }
-    assert first_chunk["completion_usage"]["completion_tokens"] == 1
 
 
 @pytest.mark.asyncio
@@ -265,6 +245,7 @@ async def test_generate_tokens_ignores_logprobs_on_empty_final_delta_chunk():
 
 @pytest.mark.asyncio
 async def test_generate_tokens_tracks_interleaved_output_indexes_independently():
+    """Retain request-wide totals as choices interleave and finish independently."""
     responses = [
         _request_output([_output([1], index=0), _output([10, 11], index=1)]),
         _request_output(

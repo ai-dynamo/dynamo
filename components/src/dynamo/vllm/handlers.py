@@ -3142,16 +3142,16 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     @staticmethod
     def _build_completion_usage(
         request_output: RequestOutput,
-        completion_token_counts: dict[int, int] | None = None,
+        completion_tokens: int | None = None,
     ) -> Dict[str, Any]:
         """
         Build completion usage statistics.
 
         Args:
             request_output: vLLM RequestOutput object
-            completion_token_counts: Optional cumulative generated-token counts by
-                                     output index. DELTA-mode streams need this
-                                     because the final vLLM chunk is not cumulative.
+            completion_tokens: Optional cumulative request-wide generated-token
+                               count. DELTA-mode streams maintain this total because
+                               each vLLM chunk contains only newly generated tokens.
 
         Returns:
             Dict with prompt_tokens, completion_tokens, total_tokens, prompt_tokens_details
@@ -3162,9 +3162,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             else None
         )
 
-        if completion_token_counts is not None:
-            completion_tokens = sum(completion_token_counts.values())
-        else:
+        if completion_tokens is None:
             completion_tokens = sum(
                 len(output.token_ids) for output in request_output.outputs
             )
@@ -3239,6 +3237,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         reasoning_ended=None,
         reasoning_parser_kwargs=None,
     ):
+        """Yield token deltas with cumulative usage and available cache details."""
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
             self._log_with_lora_context(
@@ -3265,6 +3264,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             )
 
             total_output_tokens_by_index: dict[int, int] = {}
+            total_output_tokens = 0
             raw_routed_experts_by_output: dict[int, Any] = {}
             # vLLM surfaces prompt_logprobs once (at end-of-prefill) and clears
             # them on subsequent chunks, so the generation-finish chunk often
@@ -3300,6 +3300,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 for output in res.outputs:
                     output_idx = getattr(output, "index", 0) or 0
                     token_ids = list(output.token_ids or [])
+                    total_output_tokens += len(token_ids)
                     total_output_tokens_by_index[
                         output_idx
                     ] = total_output_tokens_by_index.get(output_idx, 0) + len(token_ids)
@@ -3346,7 +3347,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     # The frontend controls whether usage is exposed on the wire.
                     out["completion_usage"] = BaseWorkerHandler._build_completion_usage(
                         request_output=res,
-                        completion_token_counts=total_output_tokens_by_index,
+                        completion_tokens=total_output_tokens,
                     )
 
                     if finish_reason:

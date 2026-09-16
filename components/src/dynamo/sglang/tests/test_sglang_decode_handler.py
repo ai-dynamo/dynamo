@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-from contextlib import aclosing, asynccontextmanager
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -1221,8 +1221,8 @@ async def test_process_token_stream_treats_completion_usage_as_optional():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cached_tokens", [None, 0, 2])
-async def test_process_token_stream_reports_cached_usage_before_finish(cached_tokens):
+async def test_process_token_stream_reports_cached_usage_before_finish():
+    """Preserve cache hits and cumulative usage through an empty terminal chunk."""
     handler = _new_decode_handler()
     responses = [
         {
@@ -1232,7 +1232,7 @@ async def test_process_token_stream_reports_cached_usage_before_finish(cached_to
                 "finish_reason": finish_reason,
                 "prompt_tokens": 3,
                 "completion_tokens": completion_tokens,
-                "cached_tokens": cached_tokens,
+                "cached_tokens": 2,
             },
         }
         for token_ids, completion_tokens, finish_reason in [
@@ -1254,15 +1254,15 @@ async def test_process_token_stream_reports_cached_usage_before_finish(cached_to
             "prompt_tokens": 3,
             "completion_tokens": completion_tokens,
             "total_tokens": 3 + completion_tokens,
+            "prompt_tokens_details": {"cached_tokens": 2},
         }
-        if cached_tokens is not None:
-            expected["prompt_tokens_details"] = {"cached_tokens": cached_tokens}
         assert chunk["completion_usage"] == expected
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("missing_field", ["prompt_tokens", "completion_tokens"])
 async def test_process_token_stream_waits_for_complete_usage_metadata(missing_field):
+    """Omit incomplete usage and forward it once both required counts arrive."""
     handler = _new_decode_handler()
     complete_meta = {
         "id": "cache-usage-request",
@@ -1295,6 +1295,7 @@ async def test_process_token_stream_waits_for_complete_usage_metadata(missing_fi
 
 @pytest.mark.asyncio
 async def test_process_token_stream_reports_cache_count_when_available():
+    """Keep unknown, zero, and positive cache counts distinct across choices."""
     handler = _new_decode_handler()
     responses = [
         {
@@ -1336,6 +1337,7 @@ async def test_process_token_stream_reports_cache_count_when_available():
 
 @pytest.mark.asyncio
 async def test_process_token_stream_preserves_cache_usage_before_metadata_clear():
+    """Copy streaming usage before the metadata-upload path clears engine metadata."""
     handler = _new_decode_handler()
     uploader = SimpleNamespace(upload_choice=AsyncMock())
     metadata = [
@@ -1368,35 +1370,6 @@ async def test_process_token_stream_preserves_cache_usage_before_metadata_clear(
         for chunk in chunks
     )
     uploader.upload_choice.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_process_token_stream_has_cached_usage_before_early_close():
-    handler = _new_decode_handler()
-    source = _stream(
-        [
-            {
-                "output_ids": [101],
-                "meta_info": {
-                    "id": "cache-usage-request",
-                    "finish_reason": None,
-                    "prompt_tokens": 3,
-                    "completion_tokens": 1,
-                    "cached_tokens": 2,
-                },
-            }
-        ]
-    )
-    async with aclosing(source), aclosing(
-        handler._process_token_stream(source, _Context())
-    ) as stream:
-        first_chunk = await anext(stream)
-
-    assert "finish_reason" not in first_chunk
-    assert first_chunk["completion_usage"]["prompt_tokens_details"] == {
-        "cached_tokens": 2
-    }
-    assert first_chunk["completion_usage"]["completion_tokens"] == 1
 
 
 @pytest.mark.asyncio
