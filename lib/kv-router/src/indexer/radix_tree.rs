@@ -3,6 +3,7 @@
 
 //! Single-threaded compressed radix tree for KV cache routing.
 
+use std::sync::Arc;
 use std::{
     cell::RefCell,
     collections::VecDeque,
@@ -83,6 +84,7 @@ impl RadixBlock {
 pub struct RadixTree {
     root: SharedRadixBlock,
     lookup: FxHashMap<WorkerWithDpRank, WorkerLookup>,
+    lifecycle: super::HashLifecycle,
 }
 
 impl Default for RadixTree {
@@ -113,10 +115,18 @@ impl Drop for RadixTree {
 }
 
 impl RadixTree {
+    /// Construct an empty backend with a fixed ownership delegate.
+    pub fn new_with_delegate(delegate: Arc<dyn super::KvIndexerDelegate>) -> Self {
+        let mut backend = Self::new();
+        backend.lifecycle = super::HashLifecycle::new(delegate);
+        backend
+    }
+
     pub fn new() -> Self {
         Self {
             root: Rc::new(RefCell::new(RadixBlock::root())),
             lookup: FxHashMap::default(),
+            lifecycle: super::HashLifecycle::default(),
         }
     }
 
@@ -325,6 +335,7 @@ impl RadixTree {
                     };
                     if !node_ref.state.covers_pos(worker, pos) {
                         self.lookup.get_mut(&worker).unwrap().remove(&parent_hash);
+                        self.lifecycle.remove(worker, parent_hash);
                         self.log_missing_parent(worker, event_id, &store);
                         return Err(KvCacheEventError::ParentBlockNotFound);
                     }
@@ -571,6 +582,7 @@ impl RadixTree {
                 Some(existing) if Rc::ptr_eq(&existing, node) => {}
                 _ => changed = true,
             }
+            self.lifecycle.insert(worker, block.block_hash);
         }
         changed
     }
@@ -667,8 +679,10 @@ impl RadixTree {
                     .remove_worker_at_pos(worker, min_pos, min_hash)
             };
             RadixBlock::prune_unreachable(&node);
+            self.lifecycle.remove(worker, block_hash);
             for stale_hash in outcome.stale_hashes {
                 lookup.remove(&stale_hash);
+                self.lifecycle.remove(worker, stale_hash);
                 eagerly_removed.insert(stale_hash);
             }
         }
@@ -688,6 +702,11 @@ impl RadixTree {
             let Some((worker_key, blocks)) = self.lookup.remove_entry(&worker) else {
                 continue;
             };
+            if self.lifecycle.is_enabled() {
+                for &hash in blocks.keys() {
+                    self.lifecycle.remove(worker, hash);
+                }
+            }
             let mut seen = FxHashSet::default();
             for node in blocks.into_values() {
                 if !seen.insert(Rc::as_ptr(&node)) {
@@ -711,6 +730,11 @@ impl RadixTree {
         let Some(blocks) = self.lookup.remove(&worker) else {
             return;
         };
+        if self.lifecycle.is_enabled() {
+            for &hash in blocks.keys() {
+                self.lifecycle.remove(worker, hash);
+            }
+        }
         let mut seen = FxHashSet::default();
         for node in blocks.into_values() {
             if !seen.insert(Rc::as_ptr(&node)) {

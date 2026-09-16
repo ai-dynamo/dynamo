@@ -457,6 +457,8 @@ impl DcCkfRankReplacement {
 /// Exact and physical CKF state for one DC-local indexer pool.
 #[derive(Debug)]
 pub struct DcCkfState {
+    delegate:
+        Option<std::sync::Arc<dyn crate::indexer::KvIndexerDelegate<CanonicalSequenceBlockHash>>>,
     /// Per-source engine vocabulary. Lineage and ownership commit even when physical admission
     /// is capacity-omitted, so CKF capacity does not bound this memory; the operative bound is
     /// the source engine's own KV-cache block count, because the engine emits `Removed` when it
@@ -486,9 +488,21 @@ pub struct DcCkfState {
 }
 
 impl DcCkfState {
+    /// Construct exact ownership state with a fixed canonical-hash delegate.
+    /// Notifications include owned hashes omitted from the physical filter for capacity.
+    pub fn new_with_delegate(
+        config: CkfConfig,
+        delegate: std::sync::Arc<dyn crate::indexer::KvIndexerDelegate<CanonicalSequenceBlockHash>>,
+    ) -> Result<Self, CkfBuildError> {
+        let mut state = Self::new(config)?;
+        state.delegate = Some(delegate);
+        Ok(state)
+    }
+
     pub fn new(config: CkfConfig) -> Result<Self, CkfBuildError> {
         let bucket_count = config.bucket_count()?;
         Ok(Self {
+            delegate: None,
             source_lineage: FxHashMap::default(),
             canonical_owners: FxHashMap::default(),
             resident_count: 0,
@@ -713,7 +727,20 @@ impl DcCkfState {
         replacement.telemetry.distinct_touched_buckets = self.telemetry.distinct_touched_buckets;
         replacement.telemetry.emitted_images = self.telemetry.emitted_images;
         replacement.telemetry.net_reverted_buckets = self.telemetry.net_reverted_buckets;
-        *self = replacement;
+        replacement.delegate = self.delegate.clone();
+        let previous = std::mem::replace(self, replacement);
+        if let Some(delegate) = &self.delegate {
+            for &hash in previous.canonical_owners.keys() {
+                if !self.canonical_owners.contains_key(&hash) {
+                    delegate.on_remove(hash);
+                }
+            }
+            for &hash in self.canonical_owners.keys() {
+                if !previous.canonical_owners.contains_key(&hash) {
+                    delegate.on_create(hash);
+                }
+            }
+        }
         Ok(self.drain_publication())
     }
 
@@ -938,7 +965,11 @@ impl DcCkfState {
             }
             for (&canonical, &increment) in &scratch.owner_increments {
                 let ownership = self.canonical_owners.entry(canonical).or_default();
+                let created = ownership.owners == 0;
                 ownership.owners += increment;
+                if created && let Some(delegate) = &self.delegate {
+                    delegate.on_create(canonical);
+                }
             }
         }
 
@@ -1166,6 +1197,11 @@ impl DcCkfState {
                 .get_mut(&canonical)
                 .expect("source mapping references missing ownership");
             ownership.owners = current - 1;
+        }
+        if current == 1
+            && let Some(delegate) = &self.delegate
+        {
+            delegate.on_remove(canonical);
         }
         let removed = lineage.remove(&external);
         assert_eq!(removed, Some(canonical));
