@@ -62,14 +62,14 @@ pub(crate) fn enabled() -> bool {
 }
 
 /// Validate that an explicit parser generation exists for the configured family.
-pub(crate) fn validate_v1_fallback(
+pub(crate) fn validate_parser_version(
     tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
 ) -> anyhow::Result<()> {
-    validate_v1_fallback_for_mode(selected_version()?, tool_call_parser, reasoning_parser)
+    validate_parser_version_for_mode(selected_version()?, tool_call_parser, reasoning_parser)
 }
 
-fn validate_v1_fallback_for_mode(
+fn validate_parser_version_for_mode(
     version: ParserVersion,
     tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
@@ -1491,25 +1491,27 @@ mod tests {
     }
 
     #[test]
-    fn v1_fallback_rejects_v2_only_muse_and_allows_v1_families() {
+    fn parser_version_rejects_unavailable_generations() {
         assert!(
-            validate_v1_fallback_for_mode(ParserVersion::V1, Some("muse_glimmer"), None).is_err()
+            validate_parser_version_for_mode(ParserVersion::V1, Some("muse_glimmer"), None)
+                .is_err()
         );
-        assert!(validate_v1_fallback_for_mode(ParserVersion::V1, None, Some("muse")).is_err());
+        assert!(validate_parser_version_for_mode(ParserVersion::V1, None, Some("muse")).is_err());
         assert!(
-            validate_v1_fallback_for_mode(ParserVersion::V1, Some("qwen3_coder"), Some("qwen3"))
+            validate_parser_version_for_mode(ParserVersion::V1, Some("qwen3_coder"), Some("qwen3"))
                 .is_ok()
         );
         assert!(
-            validate_v1_fallback_for_mode(ParserVersion::V1, Some("deepseek_v4"), None).is_ok()
+            validate_parser_version_for_mode(ParserVersion::V1, Some("deepseek_v4"), None).is_ok()
         );
         assert!(
-            validate_v1_fallback_for_mode(ParserVersion::Auto, Some("muse_glimmer"), None).is_ok()
+            validate_parser_version_for_mode(ParserVersion::Auto, Some("muse_glimmer"), None)
+                .is_ok()
         );
         assert!(
-            validate_v1_fallback_for_mode(ParserVersion::V2, Some("muse_glimmer"), None).is_ok()
+            validate_parser_version_for_mode(ParserVersion::V2, Some("muse_glimmer"), None).is_ok()
         );
-        assert!(validate_v1_fallback_for_mode(ParserVersion::V2, Some("hermes"), None).is_err());
+        assert!(validate_parser_version_for_mode(ParserVersion::V2, Some("hermes"), None).is_err());
     }
 
     #[test]
