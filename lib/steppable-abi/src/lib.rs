@@ -31,6 +31,9 @@ pub const REQUEST_FLAG_REPLAY_CONTEXT: u32 = 1 << 6;
 
 /// `PluginDescriptorV1::capabilities`: compact trace requests are supported.
 pub const CAPABILITY_COMPACT_REQUEST_V1: u64 = 1 << 0;
+/// `PluginDescriptorV1::capabilities`: compact hash-buffer leases are
+/// supported through the optional V1 tail.
+pub const CAPABILITY_COMPACT_BUFFER_LEASES_V1: u64 = 1 << 1;
 
 /// `ReplayContextV1::flags`: `session_id` is present.
 pub const REPLAY_CONTEXT_FLAG_SESSION_ID: u32 = 1 << 0;
@@ -137,6 +140,87 @@ impl U32SliceV1 {
         data: std::ptr::null(),
         len: 0,
     };
+}
+
+/// A nonzero host-registered immutable hash-buffer identifier.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HashBufferIdV1(pub u64);
+
+impl HashBufferIdV1 {
+    /// The invalid identifier, which no host may register.
+    pub const INVALID: Self = Self(0);
+
+    /// Returns whether this identifier can name a registered buffer.
+    #[must_use]
+    pub const fn is_valid(self) -> bool {
+        self.0 != Self::INVALID.0
+    }
+}
+
+/// A borrowed range within a host-registered immutable hash buffer.
+///
+/// `len` is the number of compact hash IDs, rather than the logical prompt
+/// length in tokens. Consumers validate `offset + len` against the registered
+/// buffer before dereferencing it.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct HashBufferRangeV1 {
+    /// Nonzero identifier returned by `register_hash_buffer`.
+    pub buffer_id: HashBufferIdV1,
+    /// Start index in the registered `u32` buffer.
+    pub offset: u64,
+    /// Number of compact hash IDs in this request.
+    pub len: u64,
+}
+
+impl HashBufferRangeV1 {
+    /// Returns whether the range has a nonzero buffer ID and does not wrap.
+    ///
+    /// The plugin still validates the resulting end index against the
+    /// registered buffer length before it dereferences the range.
+    #[must_use]
+    pub const fn is_valid(self) -> bool {
+        self.buffer_id.is_valid() && self.offset.checked_add(self.len).is_some()
+    }
+}
+
+/// Callback invoked by a plugin when it no longer retains a hash-buffer
+/// lease.
+///
+/// The callback runs synchronously, must not panic, and must not re-enter the
+/// plugin. It receives the opaque host context supplied at replay creation.
+pub type ReleaseHashBufferFnV1 = unsafe extern "C" fn(*mut c_void, HashBufferIdV1);
+
+/// Host callbacks used only by the compact hash-buffer lease creation tail.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct HashBufferLeaseCallbacksV1 {
+    /// Size of this structure as compiled by the host.
+    pub struct_size: u32,
+    /// Reserved for compatible-minor callback flags.
+    pub flags: u32,
+    /// Opaque context returned unchanged to [`ReleaseHashBufferFnV1`].
+    pub context: *mut c_void,
+    /// Releases one retained hash-buffer lease.
+    pub release_hash_buffer: Option<ReleaseHashBufferFnV1>,
+}
+
+impl HashBufferLeaseCallbacksV1 {
+    /// Empty callbacks, which do not permit a plugin to retain a lease.
+    pub const EMPTY: Self = Self {
+        struct_size: std::mem::size_of::<Self>() as u32,
+        flags: 0,
+        context: std::ptr::null_mut(),
+        release_hash_buffer: None,
+    };
+
+    /// Returns whether this complete callback record can release leases.
+    #[must_use]
+    pub const fn has_release_callback(self) -> bool {
+        self.struct_size as usize >= std::mem::size_of::<Self>()
+            && self.release_hash_buffer.is_some()
+    }
 }
 
 /// A replay request identifier represented in a layout independent of `Uuid`.
@@ -416,6 +500,30 @@ pub struct CreateRequestV1 {
 pub type CreateFnV1 =
     unsafe extern "C" fn(CreateRequestV1, *mut ReplayHandleV1, *mut ByteSliceV1) -> StatusV1;
 
+/// Creates a replay that may retain compact hash-buffer ranges.
+///
+/// This optional V1-tail operation keeps [`CreateFnV1`] byte-for-byte
+/// unchanged for existing plugins. The plugin must reject callbacks without a
+/// release function before it accepts any retained range.
+pub type CreateWithHashBufferLeasesFnV1 = unsafe extern "C" fn(
+    CreateRequestV1,
+    HashBufferLeaseCallbacksV1,
+    *mut ReplayHandleV1,
+    *mut ByteSliceV1,
+) -> StatusV1;
+
+/// Registers an immutable host-owned hash buffer and returns a nonzero ID.
+pub type RegisterHashBufferFnV1 =
+    unsafe extern "C" fn(ReplayHandleV1, U32SliceV1, *mut HashBufferIdV1) -> StatusV1;
+
+/// Submits a compact request that refers to a registered hash-buffer range.
+pub type SubmitCompactHashBufferRangeFnV1 = unsafe extern "C" fn(
+    ReplayHandleV1,
+    CompactRequestV1,
+    HashBufferRangeV1,
+    *mut RequestIdV1,
+) -> StatusV1;
+
 /// One externally driven step request.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -503,6 +611,64 @@ impl PluginDescriptorV1 {
     pub const ABI_MAJOR: u32 = PLUGIN_ABI_MAJOR_V1;
 }
 
+/// The V1 operation-table prefix present in every compatible plugin.
+///
+/// This remains a separate type so a host can safely validate a plugin built
+/// before optional compatible-minor tails were appended.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PluginVTableV1Prefix {
+    pub struct_size: u32,
+    pub flags: u32,
+    pub create: Option<CreateFnV1>,
+    pub submit:
+        Option<unsafe extern "C" fn(ReplayHandleV1, DirectRequestV1, *mut RequestIdV1) -> StatusV1>,
+    pub submit_batch: Option<
+        unsafe extern "C" fn(ReplayHandleV1, DirectRequestSliceV1, RequestIdMutSliceV1) -> StatusV1,
+    >,
+    pub cancel: Option<
+        unsafe extern "C" fn(
+            ReplayHandleV1,
+            *const RequestIdV1,
+            *mut EngineEventV1,
+            *mut u8,
+        ) -> StatusV1,
+    >,
+    pub cancel_batch: Option<
+        unsafe extern "C" fn(ReplayHandleV1, RequestIdSliceV1, *mut EngineEventSliceV1) -> StatusV1,
+    >,
+    pub step:
+        Option<unsafe extern "C" fn(ReplayHandleV1, StepRequestV1, *mut StepResultV1) -> StatusV1>,
+    pub take_report:
+        Option<unsafe extern "C" fn(ReplayHandleV1, f64, *mut ByteSliceV1) -> StatusV1>,
+    pub release_bytes: Option<unsafe extern "C" fn(ByteSliceV1)>,
+    pub release_events: Option<unsafe extern "C" fn(EngineEventSliceV1)>,
+    pub release_request_facts: Option<unsafe extern "C" fn(RequestFactSliceV1)>,
+    pub state: Option<unsafe extern "C" fn(ReplayHandleV1, *mut ReplayStateV1) -> StatusV1>,
+    pub advance_now_ms: Option<unsafe extern "C" fn(ReplayHandleV1, f64) -> StatusV1>,
+    pub set_capture_per_request: Option<unsafe extern "C" fn(ReplayHandleV1, u8) -> StatusV1>,
+    pub set_sla_thresholds:
+        Option<unsafe extern "C" fn(ReplayHandleV1, SlaThresholdsV1) -> StatusV1>,
+    pub last_error: Option<unsafe extern "C" fn(ReplayHandleV1, *mut ByteSliceV1) -> StatusV1>,
+    pub destroy: Option<unsafe extern "C" fn(ReplayHandleV1)>,
+}
+
+/// The compatible-minor V1 function-table tail for compact hash-buffer leases.
+///
+/// Hosts obtain this record only through
+/// [`PluginVTableV1::compact_buffer_leases`], which first proves the table is
+/// large enough to contain the complete tail.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CompactBufferLeaseVTableTailV1 {
+    /// Creates a replay with a host release callback for compact buffer leases.
+    pub create_with_hash_buffer_leases: Option<CreateWithHashBufferLeasesFnV1>,
+    /// Registers one immutable host-owned compact hash-ID buffer.
+    pub register_hash_buffer: Option<RegisterHashBufferFnV1>,
+    /// Submits a compact request by a registered hash-buffer range.
+    pub submit_compact_hash_buffer_range: Option<SubmitCompactHashBufferRangeFnV1>,
+}
+
 /// All callable operations supplied by a Steppable plugin.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -564,13 +730,117 @@ pub struct PluginVTableV1 {
     pub submit_compact: Option<
         unsafe extern "C" fn(ReplayHandleV1, CompactRequestV1, *mut RequestIdV1) -> StatusV1,
     >,
+    /// Creates a replay with a host release callback for compact buffer leases.
+    pub create_with_hash_buffer_leases: Option<CreateWithHashBufferLeasesFnV1>,
+    /// Registers one immutable host-owned compact hash-ID buffer.
+    pub register_hash_buffer: Option<RegisterHashBufferFnV1>,
+    /// Submits a compact request by a registered hash-buffer range.
+    pub submit_compact_hash_buffer_range: Option<SubmitCompactHashBufferRangeFnV1>,
 }
 
 impl PluginVTableV1 {
     /// Bytes a consumer must be able to read for every original V1 operation.
-    pub const REQUIRED_SIZE: usize = std::mem::offset_of!(Self, submit_compact);
+    pub const REQUIRED_SIZE: usize = std::mem::size_of::<PluginVTableV1Prefix>();
     /// Bytes required before a host may read the compact-submit tail.
-    pub const COMPACT_SUBMIT_SIZE: usize = std::mem::size_of::<Self>();
+    pub const COMPACT_SUBMIT_SIZE: usize =
+        std::mem::offset_of!(Self, create_with_hash_buffer_leases);
+    /// Bytes required before a host may read the compact buffer-lease tail.
+    pub const COMPACT_BUFFER_LEASES_SIZE: usize = std::mem::size_of::<Self>();
+
+    /// Returns whether a table of `struct_size` bytes advertises the compact
+    /// request operation without reading beyond the table's declared extent.
+    #[must_use]
+    pub const fn supports_compact_submit(struct_size: u32, present: bool) -> Option<()> {
+        if struct_size as usize >= Self::COMPACT_SUBMIT_SIZE && present {
+            Some(())
+        } else {
+            None
+        }
+    }
+
+    /// Returns whether a descriptor and table expose every compact
+    /// hash-buffer lease operation without reading beyond the declared tail.
+    #[must_use]
+    pub const fn supports_compact_buffer_leases(
+        struct_size: u32,
+        capabilities: u64,
+        create_with_hash_buffer_leases_present: bool,
+        register_hash_buffer_present: bool,
+        submit_compact_hash_buffer_range_present: bool,
+    ) -> bool {
+        struct_size as usize >= Self::COMPACT_BUFFER_LEASES_SIZE
+            && capabilities & CAPABILITY_COMPACT_BUFFER_LEASES_V1 != 0
+            && create_with_hash_buffer_leases_present
+            && register_hash_buffer_present
+            && submit_compact_hash_buffer_range_present
+    }
+
+    /// Reads the compact hash-buffer lease tail only after the descriptor
+    /// capability and declared table extent prove every operation is present.
+    ///
+    /// # Safety
+    ///
+    /// `vtable` must point to a readable V1 prefix and its `struct_size` must
+    /// truthfully describe the readable allocation.
+    pub unsafe fn compact_buffer_leases(
+        vtable: *const PluginVTableV1Prefix,
+        capabilities: u64,
+    ) -> Option<CompactBufferLeaseVTableTailV1> {
+        // Safety: required by this function's contract.
+        let prefix = unsafe { &*vtable };
+        if (prefix.struct_size as usize) < Self::COMPACT_BUFFER_LEASES_SIZE {
+            return None;
+        }
+        let tail = unsafe {
+            vtable
+                .cast::<u8>()
+                .add(std::mem::offset_of!(Self, create_with_hash_buffer_leases))
+                .cast::<CompactBufferLeaseVTableTailV1>()
+                .read()
+        };
+        if Self::supports_compact_buffer_leases(
+            prefix.struct_size,
+            capabilities,
+            tail.create_with_hash_buffer_leases.is_some(),
+            tail.register_hash_buffer.is_some(),
+            tail.submit_compact_hash_buffer_range.is_some(),
+        ) {
+            Some(tail)
+        } else {
+            None
+        }
+    }
+
+    /// Reads the optional compatible-minor tail only after its declared extent
+    /// proves the field is present.
+    ///
+    /// # Safety
+    ///
+    /// `vtable` must point to a readable V1 prefix and its `struct_size` must
+    /// truthfully describe the readable allocation.
+    pub unsafe fn compact_submit(
+        vtable: *const PluginVTableV1Prefix,
+    ) -> Option<unsafe extern "C" fn(ReplayHandleV1, CompactRequestV1, *mut RequestIdV1) -> StatusV1>
+    {
+        // Safety: required by this function's contract.
+        let prefix = unsafe { &*vtable };
+        if (prefix.struct_size as usize) < Self::COMPACT_SUBMIT_SIZE {
+            return None;
+        }
+        unsafe {
+            vtable
+                .cast::<u8>()
+                .add(std::mem::offset_of!(Self, submit_compact))
+                .cast::<Option<
+                    unsafe extern "C" fn(
+                        ReplayHandleV1,
+                        CompactRequestV1,
+                        *mut RequestIdV1,
+                    ) -> StatusV1,
+                >>()
+                .read()
+        }
+    }
 }
 
 /// Why a loaded V1 plugin descriptor cannot be used by a host.
@@ -601,7 +871,7 @@ pub enum DescriptorValidationError {
 /// it must point to readable memory containing at least a [`PluginVTableV1`].
 pub unsafe fn validate_descriptor_v1(
     descriptor: *const PluginDescriptorV1,
-) -> Result<*const PluginVTableV1, DescriptorValidationError> {
+) -> Result<*const PluginVTableV1Prefix, DescriptorValidationError> {
     if descriptor.is_null() {
         return Err(DescriptorValidationError::NullDescriptor);
     }
@@ -619,8 +889,9 @@ pub unsafe fn validate_descriptor_v1(
     if descriptor.vtable.is_null() {
         return Err(DescriptorValidationError::MissingVTable);
     }
-    // Safety: required by this function's contract.
-    let vtable = unsafe { &*descriptor.vtable };
+    // Safety: the descriptor's required V1 table prefix is part of this
+    // function's contract. Do not form a reference to a newer optional tail.
+    let vtable = unsafe { &*descriptor.vtable.cast::<PluginVTableV1Prefix>() };
     if (vtable.struct_size as usize) < PluginVTableV1::REQUIRED_SIZE {
         return Err(DescriptorValidationError::VTableTooSmall);
     }
@@ -643,7 +914,7 @@ pub unsafe fn validate_descriptor_v1(
     {
         return Err(DescriptorValidationError::MissingOperation);
     }
-    Ok(descriptor.vtable)
+    Ok(descriptor.vtable.cast::<PluginVTableV1Prefix>())
 }
 
 /// Fixed entry point exported by every V1 Steppable plugin.

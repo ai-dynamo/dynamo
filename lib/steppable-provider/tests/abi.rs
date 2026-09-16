@@ -2,18 +2,21 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use aiperf_steppable_abi::{
-    ByteSliceV1, CreateRequestV1, DirectRequestSliceV1, DirectRequestV1, EngineEventV1,
-    PluginDescriptorV1, REPLAY_CONTEXT_FLAG_METADATA, REQUEST_FLAG_OUTPUT_TOKEN_IDS,
-    REQUEST_FLAG_REPLAY_CONTEXT, REQUEST_FLAG_UUID, ReplayHandleV1, RequestIdMutSliceV1, StatusV1,
-    StepRequestV1, StepResultV1, U32SliceV1, validate_descriptor_v1,
+    ByteSliceV1, CAPABILITY_COMPACT_BUFFER_LEASES_V1, CompactBufferLeaseVTableTailV1,
+    CompactRequestV1, CreateRequestV1, DirectRequestSliceV1, DirectRequestV1, EngineEventV1,
+    HashBufferIdV1, HashBufferLeaseCallbacksV1, HashBufferRangeV1, PluginDescriptorV1,
+    PluginVTableV1, PluginVTableV1Prefix, REPLAY_CONTEXT_FLAG_METADATA,
+    REQUEST_FLAG_OUTPUT_TOKEN_IDS, REQUEST_FLAG_REPLAY_CONTEXT, REQUEST_FLAG_UUID, ReplayHandleV1,
+    RequestIdMutSliceV1, StatusV1, StepRequestV1, StepResultV1, U32SliceV1, validate_descriptor_v1,
 };
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 fn create_replay_with(
     config: dynamo_steppable_provider::BackendConfig,
 ) -> (
-    &'static aiperf_steppable_abi::PluginVTableV1,
+    &'static aiperf_steppable_abi::PluginVTableV1Prefix,
     ReplayHandleV1,
 ) {
     let descriptor = dynamo_steppable_provider::aiperf_steppable_plugin_v1();
@@ -43,7 +46,7 @@ fn create_replay_with(
 }
 
 fn create_replay() -> (
-    &'static aiperf_steppable_abi::PluginVTableV1,
+    &'static aiperf_steppable_abi::PluginVTableV1Prefix,
     ReplayHandleV1,
 ) {
     create_replay_with(dynamo_steppable_provider::BackendConfig::one_worker())
@@ -72,7 +75,7 @@ fn request(prompt: &[u32], id: [u8; 16]) -> DirectRequestV1 {
 }
 
 fn step_to_terminal(
-    table: &aiperf_steppable_abi::PluginVTableV1,
+    table: &aiperf_steppable_abi::PluginVTableV1Prefix,
     handle: ReplayHandleV1,
     id: [u8; 16],
 ) -> bool {
@@ -111,6 +114,145 @@ fn step_to_terminal(
         }
     }
     false
+}
+
+#[derive(Default)]
+struct ReleaseLog {
+    count: AtomicUsize,
+    last_buffer_id: AtomicU64,
+}
+
+unsafe extern "C" fn record_hash_buffer_release(context: *mut c_void, buffer_id: HashBufferIdV1) {
+    if context.is_null() {
+        return;
+    }
+    // Safety: lease-aware test creation supplies a live `ReleaseLog` for the
+    // whole replay lifetime. The callback only updates atomics and never
+    // re-enters the provider.
+    let log = unsafe { &*context.cast::<ReleaseLog>() };
+    log.last_buffer_id.store(buffer_id.0, Ordering::SeqCst);
+    log.count.fetch_add(1, Ordering::SeqCst);
+}
+
+fn lease_tail() -> (
+    &'static PluginVTableV1Prefix,
+    CompactBufferLeaseVTableTailV1,
+) {
+    let descriptor = dynamo_steppable_provider::aiperf_steppable_plugin_v1();
+    let table = unsafe { &*validate_descriptor_v1(descriptor).expect("complete V1 descriptor") };
+    let descriptor = unsafe { &*descriptor };
+    assert_ne!(
+        descriptor.capabilities & CAPABILITY_COMPACT_BUFFER_LEASES_V1,
+        0
+    );
+    let tail = unsafe {
+        PluginVTableV1::compact_buffer_leases(table, descriptor.capabilities)
+            .expect("complete compact hash-buffer lease tail")
+    };
+    (table, tail)
+}
+
+fn create_leased_replay(
+    log: &ReleaseLog,
+) -> (
+    &'static PluginVTableV1Prefix,
+    CompactBufferLeaseVTableTailV1,
+    ReplayHandleV1,
+) {
+    let (table, tail) = lease_tail();
+    let payload = serde_json::to_vec(&dynamo_steppable_provider::BackendConfig::one_worker())
+        .expect("serializable aggregate configuration");
+    let mut handle = ReplayHandleV1(std::ptr::null_mut());
+    let mut error = ByteSliceV1::EMPTY;
+    assert_eq!(
+        unsafe {
+            tail.create_with_hash_buffer_leases
+                .expect("lease-aware create")(
+                CreateRequestV1 {
+                    struct_size: std::mem::size_of::<CreateRequestV1>() as u32,
+                    flags: 0,
+                    provider_payload: ByteSliceV1 {
+                        data: payload.as_ptr(),
+                        len: payload.len() as u64,
+                    },
+                },
+                HashBufferLeaseCallbacksV1 {
+                    struct_size: std::mem::size_of::<HashBufferLeaseCallbacksV1>() as u32,
+                    flags: 0,
+                    context: std::ptr::from_ref(log).cast_mut().cast(),
+                    release_hash_buffer: Some(record_hash_buffer_release),
+                },
+                &mut handle,
+                &mut error,
+            )
+        },
+        StatusV1::OK
+    );
+    assert!(error.data.is_null());
+    (table, tail, handle)
+}
+
+fn register_hash_buffer(
+    tail: CompactBufferLeaseVTableTailV1,
+    handle: ReplayHandleV1,
+    hash_ids: &[u32],
+) -> HashBufferIdV1 {
+    let mut buffer_id = HashBufferIdV1::INVALID;
+    assert_eq!(
+        unsafe {
+            tail.register_hash_buffer.expect("register hash buffer")(
+                handle,
+                U32SliceV1 {
+                    data: hash_ids.as_ptr(),
+                    len: hash_ids.len() as u64,
+                },
+                &mut buffer_id,
+            )
+        },
+        StatusV1::OK
+    );
+    assert!(buffer_id.is_valid());
+    buffer_id
+}
+
+fn compact_request(id: [u8; 16], hash_ids: U32SliceV1) -> CompactRequestV1 {
+    CompactRequestV1 {
+        struct_size: std::mem::size_of::<CompactRequestV1>() as u32,
+        flags: 0,
+        input_token_count: 8,
+        trace_block_size: 4,
+        reserved: 0,
+        hash_ids,
+        request: request(&[], id),
+    }
+}
+
+fn submit_hash_buffer_range(
+    tail: CompactBufferLeaseVTableTailV1,
+    handle: ReplayHandleV1,
+    buffer_id: HashBufferIdV1,
+    id: [u8; 16],
+) -> StatusV1 {
+    let mut request_id = [0; 16];
+    let status = unsafe {
+        tail.submit_compact_hash_buffer_range
+            .expect("submit compact hash-buffer range")(
+            handle,
+            compact_request(id, U32SliceV1::EMPTY),
+            HashBufferRangeV1 {
+                buffer_id,
+                offset: 0,
+                len: 2,
+            },
+            &mut request_id,
+        )
+    };
+    if status == StatusV1::OK {
+        assert_eq!(request_id, id);
+    } else {
+        assert_eq!(request_id, [0; 16]);
+    }
+    status
 }
 
 #[test]
@@ -231,6 +373,239 @@ fn descriptor_creates_and_completes_one_routed_request() {
         unsafe { CStr::from_ptr(descriptor.provider_id) }.to_bytes(),
         b"dynamo.kv-router.monolithic"
     );
+}
+
+#[test]
+fn leased_compact_buffer_releases_once_at_terminal_completion() {
+    let log = ReleaseLog::default();
+    let (table, tail, handle) = create_leased_replay(&log);
+    let hash_ids = [101_u32, 102];
+    let buffer_id = register_hash_buffer(tail, handle, &hash_ids);
+    let id = [51; 16];
+
+    assert_eq!(
+        submit_hash_buffer_range(tail, handle, buffer_id, id),
+        StatusV1::OK
+    );
+    assert_eq!(log.count.load(Ordering::SeqCst), 0);
+    assert!(step_to_terminal(table, handle, id));
+    assert_eq!(log.count.load(Ordering::SeqCst), 1);
+    assert_eq!(log.last_buffer_id.load(Ordering::SeqCst), buffer_id.0);
+
+    unsafe { table.destroy.expect("destroy")(handle) };
+    assert_eq!(log.count.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn leased_compact_buffer_releases_once_when_canceled() {
+    let log = ReleaseLog::default();
+    let (table, tail, handle) = create_leased_replay(&log);
+    let hash_ids = [201_u32, 202];
+    let buffer_id = register_hash_buffer(tail, handle, &hash_ids);
+    let id = [52; 16];
+    assert_eq!(
+        submit_hash_buffer_range(tail, handle, buffer_id, id),
+        StatusV1::OK
+    );
+
+    let mut event: EngineEventV1 = unsafe { std::mem::zeroed() };
+    let mut canceled = 0;
+    assert_eq!(
+        unsafe { table.cancel.expect("cancel")(handle, &id, &mut event, &mut canceled) },
+        StatusV1::OK
+    );
+    assert_eq!(canceled, 1);
+    assert_eq!(log.count.load(Ordering::SeqCst), 1);
+    assert_eq!(log.last_buffer_id.load(Ordering::SeqCst), buffer_id.0);
+
+    unsafe { table.destroy.expect("destroy")(handle) };
+    assert_eq!(log.count.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn destroy_releases_each_remaining_compact_buffer_once() {
+    let log = ReleaseLog::default();
+    let (table, tail, handle) = create_leased_replay(&log);
+    let hash_ids = [301_u32, 302];
+    let buffer_id = register_hash_buffer(tail, handle, &hash_ids);
+    assert_eq!(
+        submit_hash_buffer_range(tail, handle, buffer_id, [53; 16]),
+        StatusV1::OK
+    );
+    assert_eq!(log.count.load(Ordering::SeqCst), 0);
+
+    unsafe { table.destroy.expect("destroy")(handle) };
+    assert_eq!(log.count.load(Ordering::SeqCst), 1);
+    assert_eq!(log.last_buffer_id.load(Ordering::SeqCst), buffer_id.0);
+}
+
+#[test]
+fn leased_compact_range_validation_fails_closed() {
+    let log = ReleaseLog::default();
+    let (table, tail, handle) = create_leased_replay(&log);
+    let hash_ids = [401_u32, 402];
+    let buffer_id = register_hash_buffer(tail, handle, &hash_ids);
+    let mut request_id = [99; 16];
+
+    assert_eq!(
+        unsafe {
+            tail.submit_compact_hash_buffer_range
+                .expect("submit compact hash-buffer range")(
+                handle,
+                compact_request([54; 16], U32SliceV1::EMPTY),
+                HashBufferRangeV1 {
+                    buffer_id,
+                    offset: 1,
+                    len: 2,
+                },
+                &mut request_id,
+            )
+        },
+        StatusV1::INVALID_ARGUMENT
+    );
+    assert_eq!(request_id, [0; 16]);
+    assert_eq!(log.count.load(Ordering::SeqCst), 0);
+
+    request_id = [99; 16];
+    assert_eq!(
+        unsafe {
+            tail.submit_compact_hash_buffer_range
+                .expect("submit compact hash-buffer range")(
+                handle,
+                compact_request(
+                    [55; 16],
+                    U32SliceV1 {
+                        data: hash_ids.as_ptr(),
+                        len: 0,
+                    },
+                ),
+                HashBufferRangeV1 {
+                    buffer_id,
+                    offset: 0,
+                    len: 2,
+                },
+                &mut request_id,
+            )
+        },
+        StatusV1::INVALID_ARGUMENT
+    );
+    assert_eq!(request_id, [0; 16]);
+
+    request_id = [99; 16];
+    assert_eq!(
+        unsafe {
+            tail.submit_compact_hash_buffer_range
+                .expect("submit compact hash-buffer range")(
+                handle,
+                compact_request([55; 16], U32SliceV1::EMPTY),
+                HashBufferRangeV1 {
+                    buffer_id: HashBufferIdV1(buffer_id.0 + 1),
+                    offset: 0,
+                    len: 2,
+                },
+                &mut request_id,
+            )
+        },
+        StatusV1::INVALID_ARGUMENT
+    );
+    assert_eq!(request_id, [0; 16]);
+
+    assert_eq!(
+        submit_hash_buffer_range(tail, handle, buffer_id, [57; 16]),
+        StatusV1::OK
+    );
+
+    unsafe { table.destroy.expect("destroy")(handle) };
+    assert_eq!(log.count.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn rejected_leased_submission_keeps_the_registration_without_releasing_it() {
+    let log = ReleaseLog::default();
+    let (table, tail, handle) = create_leased_replay(&log);
+    let hash_ids = [451_u32, 452];
+    let first_buffer_id = register_hash_buffer(tail, handle, &hash_ids);
+    let request_id = [58; 16];
+    assert_eq!(
+        submit_hash_buffer_range(tail, handle, first_buffer_id, request_id),
+        StatusV1::OK
+    );
+
+    let rejected_buffer_id = register_hash_buffer(tail, handle, &hash_ids);
+    assert_eq!(
+        submit_hash_buffer_range(tail, handle, rejected_buffer_id, request_id),
+        StatusV1::REJECTED
+    );
+    assert_eq!(log.count.load(Ordering::SeqCst), 0);
+
+    assert_eq!(
+        submit_hash_buffer_range(tail, handle, rejected_buffer_id, [59; 16]),
+        StatusV1::OK
+    );
+    unsafe { table.destroy.expect("destroy")(handle) };
+    assert_eq!(log.count.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn lease_registration_rejects_empty_and_misaligned_buffers() {
+    let log = ReleaseLog::default();
+    let (table, tail, handle) = create_leased_replay(&log);
+    let mut buffer_id = HashBufferIdV1::INVALID;
+    assert_eq!(
+        unsafe {
+            tail.register_hash_buffer.expect("register hash buffer")(
+                handle,
+                U32SliceV1::EMPTY,
+                &mut buffer_id,
+            )
+        },
+        StatusV1::INVALID_ARGUMENT
+    );
+    let bytes = [0_u8; 12];
+    assert_eq!(
+        unsafe {
+            tail.register_hash_buffer.expect("register hash buffer")(
+                handle,
+                U32SliceV1 {
+                    data: bytes.as_ptr().add(1).cast(),
+                    len: 1,
+                },
+                &mut buffer_id,
+            )
+        },
+        StatusV1::INVALID_ARGUMENT
+    );
+    unsafe { table.destroy.expect("destroy")(handle) };
+    assert_eq!(log.count.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn copied_compact_submission_remains_available() {
+    let (table, handle) = create_replay();
+    let hash_ids = [501_u32, 502];
+    let id = [56; 16];
+    let submit = unsafe { PluginVTableV1::compact_submit(table) }
+        .expect("legacy copied compact submission tail");
+    let mut request_id = [0; 16];
+    assert_eq!(
+        unsafe {
+            submit(
+                handle,
+                compact_request(
+                    id,
+                    U32SliceV1 {
+                        data: hash_ids.as_ptr(),
+                        len: hash_ids.len() as u64,
+                    },
+                ),
+                &mut request_id,
+            )
+        },
+        StatusV1::OK
+    );
+    assert_eq!(request_id, id);
+    assert!(step_to_terminal(table, handle, id));
+    unsafe { table.destroy.expect("destroy")(handle) };
 }
 
 #[test]
