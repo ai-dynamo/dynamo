@@ -140,6 +140,16 @@ func workerHashSpec(dcd *v1beta1.DynamoComponentDeployment) v1beta1.DynamoCompon
 		}
 	}
 
+	// Omitted and backend-default cache paths render identically. This requires
+	// GenerateDynamoComponentsDeployments to populate spec.BackendFramework
+	// on the generated DCD before workerHashSpec is called.
+	if spec.CompilationCache != nil {
+		defaultPath := getDefaultCompilationCacheMountPoint(BackendFramework(spec.BackendFramework))
+		if defaultPath != "" && spec.CompilationCache.MountPath == defaultPath {
+			spec.CompilationCache.MountPath = ""
+		}
+	}
+
 	return *spec
 }
 

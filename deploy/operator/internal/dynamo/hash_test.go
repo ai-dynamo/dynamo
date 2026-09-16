@@ -578,3 +578,46 @@ func TestComputeBetaDGDWorkersSpecHash_CanonicalizesDisabledCheckpoint(t *testin
 	}
 	assert.NotEqual(t, mustComputeBetaDGDWorkersSpecHash(t, base), mustComputeBetaDGDWorkersSpecHash(t, enabled))
 }
+
+func TestComputeBetaDGDWorkersSpecHash_CanonicalizesCompilationCacheMountPath(t *testing.T) {
+	t.Log("Build equivalent omitted and explicit default cache paths")
+	omitted := betaDGDWithRuntimeVersion(t, "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0", "")
+	omitted.Spec.BackendFramework = string(BackendFrameworkVLLM)
+	omitted.Spec.Components[0].CompilationCache = &v1beta1.CompilationCacheConfig{PVCName: "compilation-cache"}
+	explicit := omitted.DeepCopy()
+	explicit.Spec.Components[0].CompilationCache.MountPath = commonconsts.DefaultVLLMCacheMountPoint
+	originalOmitted, originalExplicit := omitted.DeepCopy(), explicit.DeepCopy()
+
+	t.Log("Verify equal rendered workloads and worker hashes without mutating either input")
+	omittedRendered, err := GenerateGrovePodCliqueSet(context.Background(), omitted, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+	require.NoError(t, err)
+	explicitRendered, err := GenerateGrovePodCliqueSet(context.Background(), explicit, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, omittedRendered.Spec, explicitRendered.Spec)
+	assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, omitted), mustComputeBetaDGDWorkersSpecHash(t, explicit))
+	assert.Equal(t, originalOmitted, omitted)
+	assert.Equal(t, originalExplicit, explicit)
+
+	t.Log("Keep custom paths and PVC identity in the worker hash")
+	base := betaDGDWithRuntimeVersion(t, "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0", "")
+	base.Spec.BackendFramework = string(BackendFrameworkVLLM)
+	base.Spec.Components[0].CompilationCache = &v1beta1.CompilationCacheConfig{PVCName: "compilation-cache"}
+	baseHash := mustComputeBetaDGDWorkersSpecHash(t, base)
+	for _, cache := range []v1beta1.CompilationCacheConfig{
+		{PVCName: "compilation-cache", MountPath: "/custom/cache"},
+		{PVCName: "other-cache"},
+	} {
+		changed := base.DeepCopy()
+		changed.Spec.Components[0].CompilationCache = &cache
+		assert.NotEqual(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, changed), "cache: %+v", cache)
+	}
+
+	t.Log("Preserve explicit paths for a backend without a default cache path")
+	dcd := &v1beta1.DynamoComponentDeployment{}
+	dcd.Spec.BackendFramework = string(BackendFrameworkSGLang)
+	dcd.Spec.CompilationCache = &v1beta1.CompilationCacheConfig{
+		PVCName: "compilation-cache", MountPath: commonconsts.DefaultVLLMCacheMountPoint,
+	}
+	normalized := workerHashSpec(dcd)
+	assert.Equal(t, commonconsts.DefaultVLLMCacheMountPoint, normalized.CompilationCache.MountPath)
+}
