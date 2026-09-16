@@ -186,8 +186,10 @@ echo
 echo "=== All services are ready ==="
 echo "Frontend:        http://127.0.0.1:${HTTP_PORT}"
 for i in $(seq 1 "${NUM_WORKERS}"); do
-    echo "Worker $i health: http://127.0.0.1:$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))/health"
-    echo "Worker $i kv-events: tcp://*:$((KV_EVENTS_PORT_BASE + (i - 1)))"
+    WORKER_PORT=$(dyn_port DYN_SYSTEM_PORT "$i" $((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2)))
+    KV_EVENTS_PORT=$(dyn_port DYN_VLLM_KV_EVENT_PORT "$i" $((KV_EVENTS_PORT_BASE + (i - 1))))
+    echo "Worker $i health: http://127.0.0.1:${WORKER_PORT}/health"
+    echo "Worker $i kv-events: tcp://*:${KV_EVENTS_PORT}"
 done
 echo
 echo "Architecture: Rust frontend (MM-aware KV router) -> ${NUM_WORKERS}x vLLM workers"
