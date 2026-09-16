@@ -14,14 +14,14 @@ That image is the build's `RUNTIME_IMAGE`, so the result is a single "Dynamo + T
 
 ### Core Dynamo Features
 
-| Feature                                        | Status  | Notes                                                           |
-| :--------------------------------------------- | :-----: | :-------------------------------------------------------------- |
-| Tensor (KServe gRPC) Serving                   |  Ready  | Multiple models per worker                                      |
-| Service Discovery / Routing                    |  Ready  | Via the Dynamo Frontend                                         |
-| Triton backends (TensorRT, ONNX, PyTorch, ...) |  Ready  | Whatever the Triton release image ships                         |
-| TensorRT Plugins                               |  Ready  | Via `--backend-config='tensorrt,plugins=...'`                   |
+| Feature                                        |      Status      | Notes                                                           |
+| :--------------------------------------------- | :--------------: | :-------------------------------------------------------------- |
+| Tensor (KServe gRPC) Serving                   |      Ready       | Multiple models per worker                                      |
+| Service Discovery / Routing                    |      Ready       | Via the Dynamo Frontend                                         |
+| Triton backends (TensorRT, ONNX, PyTorch, ...) |      Ready       | Whatever the Triton release image ships                         |
+| TensorRT Plugins                               |      Ready       | Via `--backend-config='tensorrt,plugins=...'`                   |
 | Routing                                        | Round-Robin only | KV-aware routing is LLM-oriented; tensor models use round-robin |
-| Disaggregated Serving                          |   N/A   | Not applicable to generic tensor models                         |
+| Disaggregated Serving                          |       N/A        | Not applicable to generic tensor models                         |
 
 ## Known limitations
 
@@ -45,10 +45,9 @@ The Triton and KServe features below are not yet supported end-to-end through th
 
 | Triton release tag                      |  CUDA  | NVIDIA driver |
 | :-------------------------------------- | :----: | :-----------: |
-| `nvcr.io/nvidia/tritonserver:26.07-py3` | `13.2` |  `610.43`  |
-| `nvcr.io/nvidia/tritonserver:26.08-py3` | `13.4` |  `615.61`  |
+| `nvcr.io/nvidia/tritonserver:26.08-py3` | `13.4` |   `615.61`    |
 
-The Triton release is pinned in [`container/context.yaml`](https://github.com/ai-dynamo/dynamo/tree/main/container/context.yaml) under `triton.cuda13.2` and `triton.cuda13.4` (`runtime_image_tag`/`base_image_tag`), the same way the other framework runtimes pin their image.
+The Triton release is pinned in [`container/context.yaml`](https://github.com/ai-dynamo/dynamo/tree/main/container/context.yaml) under `triton.cuda13.4` (`runtime_image_tag`/`base_image_tag`), the same way the other framework runtimes pin their image.
 
 ## Prerequisites
 
@@ -106,13 +105,13 @@ The worker exposes the full `triton_runtime.Options` surface as CLI flags, named
 Run `python3 -m dynamo.triton --help` for the complete list.
 Common flags:
 
-| Option                          | Description                                                                                                                                                 |
-| :------------------------------ | :---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--model-repository <path>`     | Model repository to serve (default: `/models`)                                                                                                              |
-| `--backend-directory <path>`    | Triton backends directory (default: `/opt/tritonserver/backends`)                                                                                           |
-| `--backend-config <cfg>`        | Triton backend config, repeatable, e.g. `--backend-config='tensorrt,plugins=/path/lib.so'`                                                                  |
-| `--log-verbose <int>`           | Triton verbose logging level; `0` disables, `>= 1` enables (default: `0`)                                                                                   |
-| `--discovery-backend <backend>` | Service discovery backend: `kubernetes`, `etcd`, `file`, `mem` (default: `etcd`)                                                                            |
+| Option                          | Description                                                                                |
+| :------------------------------ | :----------------------------------------------------------------------------------------- |
+| `--model-repository <path>`     | Model repository to serve (default: `/models`)                                             |
+| `--backend-directory <path>`    | Triton backends directory (default: `/opt/tritonserver/backends`)                          |
+| `--backend-config <cfg>`        | Triton backend config, repeatable, e.g. `--backend-config='tensorrt,plugins=/path/lib.so'` |
+| `--log-verbose <int>`           | Triton verbose logging level; `0` disables, `>= 1` enables (default: `0`)                  |
+| `--discovery-backend <backend>` | Service discovery backend: `kubernetes`, `etcd`, `file`, `mem` (default: `etcd`)           |
 
 ### Environment variables
 

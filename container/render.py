@@ -100,11 +100,11 @@ def parse_args():
         "--cuda-version",
         type=str,
         default="13.0",
-        choices=["13.0", "13.1", "13.2", "13.4"],
+        choices=["13.0", "13.1"],
         help=(
             "CUDA version to use. [13.0 for vllm and sglang, 13.1 for trtllm].\n"
             "Not required for non-cuda devices.\n"
-            "Only Triton supports versions greater than 13.1."
+            "Not supported by Triton - CUDA version is predefined by its release image."
         ),
     )
     parser.add_argument("--make-efa", action="store_true", help="Enable AWS EFA")
@@ -165,7 +165,7 @@ def validate_args(args):
             "target": [
                 "runtime",
             ],
-            "cuda_version": ["13.2", "13.4"],
+            "cuda_version": ["13.4"],
         },
         "dynamo": {
             "device": ["cuda"],
@@ -181,6 +181,19 @@ def validate_args(args):
             "cuda_version": ["13.0"],
         },
     }
+
+    # Triton's CUDA family is fixed by its release image, so it cannot be chosen
+    # by the user: reject an explicitly-passed --cuda-version (detected from argv
+    # since the arg has a default) and pin it to Triton's single valid value.
+    if args.framework == "triton":
+        if any(
+            a == "--cuda-version" or a.startswith("--cuda-version=") for a in sys.argv
+        ):
+            raise ValueError(
+                "--cuda-version cannot be specified for triton: its CUDA family is "
+                "fixed by the Triton release image."
+            )
+        args.cuda_version = valid_inputs["triton"]["cuda_version"][0]
 
     if args.framework in valid_inputs:
         cuda_version_valid = (
