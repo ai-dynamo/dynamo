@@ -1167,6 +1167,49 @@ func TestLPXRestartPreservesBoundProofAndFinalization(t *testing.T) {
 	require.True(t, apierrors.IsNotFound(reconciler.Get(ctx, key, &nvidiacomv1alpha1.LPXGraphDeployment{})))
 }
 
+func TestLPXFinalizationAfterRequestAPIRemoval(t *testing.T) {
+	resource := lpxv1alpha1.GroupVersion.WithResource("lpupipelinerequests").GroupResource()
+	for _, scenario := range []struct {
+		name     string
+		listErr  error
+		finalize bool
+	}{
+		{"removed CRD", apierrors.NewNotFound(resource, ""), true},
+		{"forbidden", apierrors.NewForbidden(resource, "", errors.New("denied")), false},
+		{"transport error", errors.New("connection reset"), false},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			t.Log("Return a request-list error after the operator has discovered the API")
+			ctx := t.Context()
+			source := newLPXTestSource(lpx.PipelineSingle, "build-v2")
+			child := newLPXTestDeployment(t, source)
+			r := newLPXTestReconciler(t, nil, child, source)
+			r.apiReader = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+				List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+					return scenario.listErr
+				},
+			})
+
+			t.Log("Ordinary reconciliation must still fail when requests cannot be listed")
+			_, err := r.listOwnedLPXRequests(ctx, child)
+			require.Error(t, err)
+
+			t.Log("Allow deletion only when the request API is gone, not on operational errors")
+			key := client.ObjectKeyFromObject(child)
+			require.NoError(t, r.Delete(ctx, child))
+			_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+			if scenario.finalize {
+				require.NoError(t, err)
+				require.True(t, apierrors.IsNotFound(r.Get(ctx, key, child)))
+			} else {
+				require.ErrorIs(t, err, scenario.listErr)
+				require.NoError(t, r.Get(ctx, key, child))
+				require.Contains(t, child.Finalizers, lpxGraphDeploymentFinalizer)
+			}
+		})
+	}
+}
+
 func TestSelectedNodeLocalLPXReadinessUsesOneFixedScalingGroup(t *testing.T) {
 	for _, pipeline := range []lpx.Pipeline{lpx.PipelineSingle, lpx.PipelineLPX} {
 		t.Run(string(pipeline), func(t *testing.T) {

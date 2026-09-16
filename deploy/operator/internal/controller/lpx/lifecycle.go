@@ -627,7 +627,7 @@ func (r *graphReconciler) listOwnedLPXRequestsIfAvailable(
 		client.InNamespace(deployment.Namespace),
 	)
 	if err != nil {
-		if meta.IsNoMatchError(err) || k8sruntime.IsNotRegisteredError(err) {
+		if meta.IsNoMatchError(err) || k8sruntime.IsNotRegisteredError(err) || apierrors.IsNotFound(err) {
 			return nil, false, nil
 		}
 		return nil, false, err
