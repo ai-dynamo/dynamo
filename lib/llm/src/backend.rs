@@ -253,7 +253,22 @@ impl
                 });
             }
 
-            match state.stream.next().await {
+            let output = loop {
+                let output = state.stream.next().await;
+                let choice_already_finished = output.as_ref().is_some_and(|output| {
+                    !output.is_event()
+                        && output.data.as_ref().is_some_and(|data| {
+                            state
+                                .finished_choices
+                                .contains(&data.index.unwrap_or_default())
+                        })
+                });
+                if !choice_already_finished {
+                    break output;
+                }
+            };
+
+            match output {
                 Some(output) => {
                     // move to state.process_output
                     // handle any error conditions / unwraps here
@@ -486,6 +501,20 @@ impl
                         data.stop_reason = stop_reason.or(data.stop_reason);
                     }
                     data.text = text;
+
+                    // A tokenizer-free engine can return tokens past a local
+                    // stop in the same chunk. Keep its per-token fields aligned
+                    // with the prefix the decoder consumed.
+                    let consumed = tokens.len();
+                    if consumed < data.token_ids.len() {
+                        data.token_ids.truncate(consumed);
+                        if let Some(log_probs) = data.log_probs.as_mut() {
+                            log_probs.truncate(consumed);
+                        }
+                        if let Some(top_logprobs) = data.top_logprobs.as_mut() {
+                            top_logprobs.truncate(consumed);
+                        }
+                    }
                     data.tokens = Some(tokens);
                     // Snapshot of whatever this choice's decoder is still withholding as a
                     // possible hidden-stop-sequence prefix after this step -- `None` once
@@ -792,6 +821,7 @@ impl Decoder {
     /// In the future, this method may kick off async cpu/tokio tasks and or async cuda tasks to
     /// handle logits post-processing and/or other tasks.
     pub fn step(&mut self, token_id: TokenIdType) -> Result<StepResult> {
+        let below_min_tokens = self.generated_tokens < self.min_tokens;
         // increment the generated tokens
         self.generated_tokens += 1;
 
@@ -807,7 +837,7 @@ impl Decoder {
         }
 
         // stop conditions to not apply until the minimum number of tokens have been generated
-        if self.generated_tokens < self.min_tokens {
+        if below_min_tokens {
             return Ok(StepResult::ok(token));
         }
 
@@ -1146,6 +1176,9 @@ mod tests {
                 [] => "",
                 [101] => "Okay",
                 [102] => " Okay",
+                [103] => "<|user|>",
+                [101, 103] => "Okay<|user|>",
+                [101, 103, 102] => "Okay<|user|> Okay",
                 _ => anyhow::bail!("unexpected token IDs: {token_ids:?}"),
             };
             Ok(traits::DecodeResult::Complete(token.to_string()))
@@ -1156,6 +1189,41 @@ mod tests {
 
     struct SyntheticSglangEngine {
         engine_decodes_text: bool,
+    }
+
+    struct SyntheticSglangStopEngine;
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for SyntheticSglangStopEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let output = |index, token_ids: Vec<TokenIdType>| {
+                let len = token_ids.len();
+                Annotated::from_data(LLMEngineOutput {
+                    token_ids,
+                    log_probs: Some(vec![-0.1; len]),
+                    top_logprobs: Some(vec![vec![]; len]),
+                    index: Some(index),
+                    ..Default::default()
+                })
+            };
+            let outputs = vec![
+                // Choice 0 stops inside this chunk; its suffix must be removed.
+                output(0, vec![101, 103, 102]),
+                // It keeps generating while choice 1 is unfinished; drop this chunk.
+                output(0, vec![102]),
+                output(1, vec![101, 103]),
+            ];
+
+            Ok(ResponseStream::new(
+                Box::pin(futures::stream::iter(outputs)),
+                request.context(),
+            ))
+        }
     }
 
     #[async_trait]
@@ -1296,6 +1364,83 @@ mod tests {
     #[tokio::test]
     async fn test_sglang_top_logprobs_are_decoded_before_engine_text_fast_path() {
         assert_sglang_top_logprobs_are_decoded_in_openai_response(true).await;
+    }
+
+    #[tokio::test]
+    async fn test_sglang_local_stop_discards_all_suffix_tokens() {
+        use crate::protocols::common::extensions::NvExt;
+
+        let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(CandidateDecoder);
+        let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
+        let request = PreprocessedRequest::builder()
+            .model("test-model".to_string())
+            .token_ids(vec![])
+            .stop_conditions(StopConditions {
+                stop_token_ids_hidden: Some(vec![103]),
+                ..Default::default()
+            })
+            .sampling_options(SamplingOptions {
+                n: Some(2),
+                ..Default::default()
+            })
+            .output_options(OutputOptions::default())
+            .build()
+            .expect("valid preprocessed request");
+        let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            Arc::new(SyntheticSglangStopEngine);
+
+        let stream = Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
+            .await
+            .expect("backend generation succeeds");
+        let mut outputs = stream.collect::<Vec<_>>().await;
+        assert_eq!(
+            outputs.len(),
+            2,
+            "chunks after a local stop must be dropped"
+        );
+        let output = outputs
+            .remove(0)
+            .data
+            .expect("response contains backend output");
+        let second = outputs
+            .remove(0)
+            .data
+            .expect("response contains backend output");
+
+        assert_eq!(output.index, Some(0));
+        assert_eq!(output.text.as_deref(), Some("Okay"));
+        assert_eq!(output.tokens, vec![Some("Okay".to_string()), None]);
+        assert_eq!(output.token_ids, vec![101, 103]);
+        assert_eq!(output.log_probs, Some(vec![-0.1; 2]));
+        assert_eq!(output.top_logprobs.as_ref().map(Vec::len), Some(2));
+        assert_eq!(output.finish_reason, Some(FinishReason::Stop));
+        assert_eq!(second.index, Some(1));
+        assert_eq!(second.text.as_deref(), Some("Okay"));
+        assert_eq!(second.token_ids, vec![101, 103]);
+        assert_eq!(second.finish_reason, Some(FinishReason::Stop));
+
+        let nvext = NvExt::builder()
+            .extra_fields(vec!["completion_token_ids".to_string()])
+            .build()
+            .expect("valid nvext selection");
+        let options = DeltaGeneratorOptions::new(None, None, false, Some(&nvext));
+        let mut generator = DeltaGenerator::new(
+            "test-model".to_string(),
+            options,
+            "test-request".to_string(),
+        );
+        let response = generator
+            .choice_from_postprocessor(output)
+            .expect("OpenAI response conversion succeeds");
+
+        assert_eq!(
+            response
+                .nvext
+                .as_ref()
+                .and_then(|fields| fields.get("completion_token_ids")),
+            Some(&serde_json::json!([101, 103]))
+        );
+        assert_eq!(generator.get_usage().completion_tokens, 2);
     }
 
     /// When the tokenizer's decode() returns Err, Decoder::process_token_ids()
