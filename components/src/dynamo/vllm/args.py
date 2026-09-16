@@ -414,9 +414,9 @@ def update_engine_config_with_dynamo(
             elif existing_ext == (
                 "dynamo.vllm.mooncake_store_runtime.MooncakeStoreWorkerExtension"
             ):
-                defaults["worker_extension_cls"] = (
-                    "dynamo.vllm.mooncake_store_worker.MooncakeStoreFpmWorkerExtension"
-                )
+                defaults[
+                    "worker_extension_cls"
+                ] = "dynamo.vllm.mooncake_store_worker.MooncakeStoreFpmWorkerExtension"
             elif existing_ext not in (
                 worker_extension_cls,
                 "dynamo.vllm.mooncake_store_worker.MooncakeStoreFpmWorkerExtension",

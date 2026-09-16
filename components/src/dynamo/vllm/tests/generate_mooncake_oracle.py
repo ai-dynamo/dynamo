@@ -162,7 +162,9 @@ def load_oracle(source_dir):
         future = ast.parse("from __future__ import annotations").body
         tree = ast.Module(body=future + nodes, type_ignores=[])
         # Execution is limited to definitions in the fingerprint-verified sources.
-        exec(compile(ast.fix_missing_locations(tree), str(path), "exec"), namespace)  # noqa: S102
+        exec(
+            compile(ast.fix_missing_locations(tree), str(path), "exec"), namespace
+        )  # noqa: S102
         provenance[relative] = {"sha256": digest, "definitions": list(names)}
     for spec, manager in (
         ("FullAttentionSpec", "FullAttentionManager"),
