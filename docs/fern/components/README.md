@@ -113,8 +113,13 @@ python3 docs/fern/scripts/gen_nightly_selector.py --offline  # empty module, no 
 
 The offline form writes a valid empty module; the selectors then render their
 "not currently available" state for the nightly channel. Without `--offline`
-the generator fails rather than write an empty module, so a publish cannot
-replace live nightly rows with nothing.
+the generator fails rather than write a module that resolved nothing — no NGC
+tags, or an unreachable wheel index — so a publish cannot replace live nightly
+rows with nothing or strip every wheel command.
+
+`simulate_docs_website.sh` generates its own empty copy into the scratch
+checkout via `--out`, so running the composition check leaves the module here
+alone.
 
 `events.generated.ts` and `publisher-logos.generated.ts` are committed instead,
 refreshed by their own workflows, and need no local step.

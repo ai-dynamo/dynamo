@@ -161,14 +161,14 @@ export function InstallSelector({ hardware = "all" }: { hardware?: "all" | "nvid
     : channel === "nightly"
       ? entry?.latest
         ? "Latest nightly"
-        : `Nightly ${entry?.commands.wheel ? entry?.dynamo : entry?.backend_version}`
+        : `Nightly ${form === "wheel" ? entry?.dynamo : entry?.backend_version}`
       : "Build Dynamo from source";
   const role = channel === "stable"
     ? "Latest stable release that supports this version"
     : channel === "nightly"
       ? entry?.latest
         ? "Latest nightly build"
-        : entry?.commands.wheel
+        : form === "wheel"
           ? "Pinned nightly wheel build"
           : "Pinned nightly container build"
       : "Intel XPU local runtime";

@@ -30,6 +30,7 @@ Usage:
     gen_nightly_selector.py            # write the TS module
     gen_nightly_selector.py --stdout   # print it instead
     gen_nightly_selector.py --offline  # write an empty module, no network
+    gen_nightly_selector.py --out PATH # write somewhere other than the source tree
 """
 
 from __future__ import annotations
@@ -50,6 +51,10 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[3]
 OUT = REPO_ROOT / "docs/fern/components/nightly-selector-data.generated.ts"
 CONTEXT = "container/context.yaml"
+PYPROJECT = "pyproject.toml"
+# Files that pin a backend version: context.yaml for the container, pyproject
+# for the wheel extras. A commit touching either can move a row's claim.
+PIN_FILES = (CONTEXT, PYPROJECT)
 PYPI = "https://pypi.nvidia.com"
 NGC_NAMESPACE = "nvidia/ai-dynamo"
 
@@ -133,11 +138,19 @@ def backend_version(doc: dict, fw: Framework) -> str | None:
 
 
 def base_version_at(sha: str) -> str | None:
-    blob = blob_at(sha, "pyproject.toml")
+    blob = blob_at(sha, PYPROJECT)
     if blob is None:
         return None
     m = re.search(r'(?m)^version\s*=\s*"(\d+\.\d+\.\d+)"', blob)
     return m.group(1) if m else None
+
+
+def pins_moved_since(sha: str) -> bool:
+    """Did any backend pin change between ``sha`` and ``HEAD``? Unknown counts as yes."""
+    try:
+        return bool(git(["log", "--oneline", f"{sha}..HEAD", "--", *PIN_FILES]).strip())
+    except subprocess.CalledProcessError:
+        return True
 
 
 # --------------------------------------------------------------------------- #
@@ -189,7 +202,7 @@ def published_wheels() -> set[str] | None:
         with urllib.request.urlopen(f"{PYPI}/ai-dynamo/", timeout=TIMEOUT) as resp:
             html = resp.read().decode()
     except TRANSPORT_ERRORS as exc:
-        warn(f"pypi.nvidia.com index fetch failed: {exc}; wheel commands omitted")
+        warn(f"pypi.nvidia.com index fetch failed: {exc}")
         return None
     except Exception as exc:
         warn(f"pypi.nvidia.com index returned an unexpected response: {exc}")
@@ -197,17 +210,28 @@ def published_wheels() -> set[str] | None:
     return set(re.findall(r"ai_dynamo-(\d+\.\d+\.\d+\.dev\d{8})", html))
 
 
-def wheel_for(yyyymmdd: str, sha: str, published: set[str] | None) -> str | None:
+def wheel_for(yyyymmdd: str, sha: str, published: set[str]) -> str | None:
     base = base_version_at(sha)
     if not base:
         return None
     version = f"{base}.dev{yyyymmdd}"
-    if published is None or version not in published:
-        return None
-    return version
+    return version if version in published else None
 
 
-def newest_published(published: set[str] | None) -> str | None:
+def run_wheel(nights: list[tuple[str, str]], published: set[str]) -> str | None:
+    """Newest wheel published by a night that shipped this backend version."""
+    for yyyymmdd, sha in nights:
+        wheel = wheel_for(yyyymmdd, sha, published)
+        if wheel:
+            return wheel
+    return None
+
+
+def wheel_date(version: str) -> str:
+    return version.partition(".dev")[2]
+
+
+def newest_published(published: set[str]) -> str | None:
     """The newest ``ai-dynamo`` dev wheel on PyPI, independent of any NGC tag."""
     if not published:
         return None
@@ -240,8 +264,7 @@ class NightlyBackendBuild:
     latest: bool
 
 
-def build() -> list[NightlyBackendBuild]:
-    published = published_wheels()
+def build(published: set[str]) -> list[NightlyBackendBuild]:
     rows: list[NightlyBackendBuild] = []
 
     for fw in FRAMEWORKS:
@@ -286,13 +309,16 @@ def build() -> list[NightlyBackendBuild]:
         for index, version in enumerate(order):
             nights = runs[version]
             if index == 0:
-                # Latest row: the container side already points at the rolling
-                # *-runtime-nightly:latest NGC tag, independent of this pick. Give
-                # the wheel the same independence -- the newest wheel PyPI has
-                # published, whether or not that night's container has landed on
-                # NGC yet, instead of requiring both to share one commit.
+                # Latest row: the container side points at the rolling
+                # *-runtime-nightly:latest tag, so the wheel may come from a later
+                # night -- the two jobs do not always land together. Only while it
+                # provably carries this row's backend version, though: no earlier
+                # than the container commit, and no pin moved since. Otherwise use
+                # this version's own run, whose commits were read.
                 yyyymmdd, sha = nights[0]
                 wheel = newest_published(published)
+                if not wheel or wheel_date(wheel) < yyyymmdd or pins_moved_since(sha):
+                    wheel = run_wheel(nights, published)
             else:
                 # Pinned rows describe one immutable build, so the wheel has to
                 # come from the exact commit the container tag names. Fall back to
@@ -372,6 +398,12 @@ def main() -> int:
         action="store_true",
         help="skip the network and write an empty module",
     )
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=OUT,
+        help="destination module (default: the source tree copy)",
+    )
     args = parser.parse_args()
 
     rows: list[NightlyBackendBuild] = []
@@ -381,11 +413,19 @@ def main() -> int:
         # unavailable state from an empty list.
         warn("offline: writing an empty module, nightly rows omitted")
     else:
-        rows = build()
+        # Both guards protect the same invariant: the publish job syncs whatever
+        # this writes, so a module that resolved nothing would replace the live
+        # selector's rows with nothing. Fail and leave the published copy alone.
+        published = published_wheels()
+        if published is None:
+            print(
+                "error: pypi.nvidia.com unreachable; refusing to write a module "
+                "with no wheel commands",
+                file=sys.stderr,
+            )
+            return 1
+        rows = build(published)
         if not rows:
-            # Every backend skipped. An empty module would reach the publish
-            # job's component sync and replace the live selector's nightly rows
-            # with nothing, so fail and leave the last published copy in place.
             print(
                 "error: no nightly data resolved; refusing to write an empty module",
                 file=sys.stderr,
@@ -397,9 +437,10 @@ def main() -> int:
         print(module)
         return 0
 
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text(module)
-    print(f"{OUT.relative_to(REPO_ROOT)}: wrote {len(rows)} nightly build(s)")
+    out = args.out
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(module)
+    print(f"{out}: wrote {len(rows)} nightly build(s)")
     return 0
 
 

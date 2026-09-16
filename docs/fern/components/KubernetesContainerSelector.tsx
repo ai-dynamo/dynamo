@@ -288,9 +288,7 @@ export function KubernetesContainerSelector() {
                 const displayMeta = version.source
                   ? "from main"
                   : channel === "nightly"
-                    ? version.latest
-                      ? "latest nightly"
-                      : version.date ?? "nightly"
+                    ? "latest nightly"
                     : `Dynamo ${version.dynamo}`;
                 return (
                   <button

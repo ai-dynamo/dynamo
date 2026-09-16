@@ -82,6 +82,6 @@ docker run --rm nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:latest pip show vl
 
 ## See Also
 
-- [Release Artifacts](release-artifacts.mdx) — stable and pre-release artifact inventory
+- [Release Artifacts](release-artifacts.mdx) — stable and prerelease artifact inventory
 - [Compatibility](compatibility.mdx) — hardware, platform, CUDA, and driver support
-- [Model Early Access Builds](model-early-access-builds.mdx) — model-specific pre-release container builds
+- [Model Early Access Builds](model-early-access-builds.mdx) — model-specific prerelease container builds
