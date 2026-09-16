@@ -251,6 +251,7 @@ class TestReasoningParserForwarding:
             data_parallel_rank=None,
             trace_headers=None,
             priority=0,
+            session_id=None,
             reasoning_ended=None,
             reasoning_parser_kwargs=None,
         ):
@@ -298,6 +299,7 @@ class TestReasoningParserForwarding:
             data_parallel_rank=None,
             trace_headers=None,
             priority=0,
+            session_id=None,
         ):
             calls["called"] = True
             if False:

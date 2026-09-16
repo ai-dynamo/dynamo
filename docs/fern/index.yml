@@ -557,6 +557,11 @@ navigation:
                       - page: Multimodal
                         slug: tensorrt-llm-multimodal
                         path: pages/developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/multimodal.md
+                  - section: Triton
+                    collapsed: true
+                    contents:
+                      - page: Overview
+                        path: pages/developer-guide/knowledge-base/modular-components/backends/triton/overview.md
                   - section: vLLM
                     collapsed: true
                     contents:
@@ -675,6 +680,8 @@ navigation:
             path: pages/use-cases/reinforcement-learning/verl.md
           - page: NeMo RL Integration
             path: pages/use-cases/reinforcement-learning/nemo-rl.md
+          - page: Slime Integration
+            path: pages/use-cases/reinforcement-learning/slime.md
           - page: External Trainer Integration
             path: pages/use-cases/reinforcement-learning/implementation-guide.md
           - page: RL Integration Reference
@@ -781,12 +788,21 @@ navigation:
           - page: Gemma-4-31B
             path: pages/recipes/model-recipes/gemma-4-31b.mdx
             slug: gemma-4-31b
+          - page: DeepSeek-V4.1-Flash
+            path: pages/recipes/model-recipes/deepseek-v4-1-flash.mdx
+            slug: deepseek-v4-1-flash
           - page: GLM-5.3-Flash
             path: pages/recipes/model-recipes/glm-5-3-flash.mdx
             slug: glm-5-3-flash
+          - page: A.X-K2
+            path: pages/recipes/model-recipes/ax-k2.mdx
+            slug: ax-k2
           - page: Kimi-K3
             path: pages/recipes/model-recipes/kimi-k3.mdx
             slug: kimi-k3
+          - page: Solar Open2 250B
+            path: pages/recipes/model-recipes/solar-open2-250b.mdx
+            slug: solar-open2-250b
           - page: Qwen3.8-Flash-Next
             path: pages/recipes/model-recipes/qwen-3-8-flash-next.mdx
             slug: qwen-3-8-flash-next

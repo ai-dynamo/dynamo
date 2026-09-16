@@ -1458,12 +1458,25 @@ class HttpService:
     It is a OpenAI compatible http ingress into the Dynamo Distributed Runtime.
     """
 
-    def __init__(self, port: Optional[int] = None) -> None:
+    def __init__(
+        self, port: Optional[int] = None, *, wait_for_first_item: bool = False
+    ) -> None:
         """
         Create a new HTTP service.
 
         Args:
             port: Optional port number to bind the service to (default: 8080)
+            wait_for_first_item: When True, a streaming chat, completions,
+                responses, or Anthropic messages request waits for the engine's
+                first item before the HTTP status is committed, so an exception
+                raised by an engine generator before its first ``yield`` maps to
+                the same HTTP error response as it does for a non-streaming
+                request. When False (the default), the service inherits
+                ``DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS``: unset or ``0``, it commits
+                HTTP 200 without waiting and such an error arrives as an SSE
+                error frame; set to a positive number of milliseconds, it waits
+                that long and still maps an error that arrives inside the
+                window. True overrides the variable with an unbounded wait.
         """
         ...
 
@@ -1650,8 +1663,8 @@ class ModelInput:
 class ModelType:
     """OpenAI-style surfaces supported by a model.
 
-    Values are Chat, Completions, Embedding, Classify, Pooling, TensorBased,
-    Images, Audios, Videos, Realtime, and Empty (no OpenAI surface).
+    Values are Chat, Completions, Embedding, Classify, Pooling, Rerank,
+    TensorBased, Images, Audios, Videos, Realtime, and Empty (no OpenAI surface).
     """
     # No OpenAI surface — used by prefill / encode workers whose role is
     # carried by WorkerType. Symmetric with the other ModelType.Foo members.
@@ -1673,6 +1686,8 @@ class ModelType:
     # Raw pooler output served on /v1/pooling (token embeddings, logits, rewards).
     # Usually combined with Classify or Embedding: ModelType.Classify | ModelType.Pooling.
     Pooling: ModelType
+    # Cross-encoder relevance scoring served on /v1/rerank.
+    Rerank: ModelType
 
     def __or__(self, other: ModelType) -> ModelType:
         ...
@@ -1691,6 +1706,10 @@ class ModelType:
 
     def supports_pooling(self) -> bool:
         """Return True if this model type supports /v1/pooling."""
+        ...
+
+    def supports_rerank(self) -> bool:
+        """Return True if this model type supports /v1/rerank."""
         ...
 
 class RouterMode:
@@ -2835,6 +2854,8 @@ class KvDcRelay:
         expected_unique_blocks: int = 1_048_576,
         bind: Optional[str] = None,
         tuning: Optional[Dict[str, int]] = None,
+        sources_file: Optional[str] = None,
+        connection_revision: Optional[str] = None,
     ) -> None:
         ...
 
@@ -3179,6 +3200,7 @@ class EntrypointArgs:
         chat_engine_factory: Optional[Callable] = None,
         aic_perf_config: Optional[AicPerfConfig] = None,
         *,
+        tls_client_ca_cert_path: Optional[str] = None,
         metrics_prefix: Optional[str] = None,
         enable_anthropic_api: Optional[bool] = None,
         strip_anthropic_preamble: Optional[bool] = None,
@@ -3203,6 +3225,7 @@ class EntrypointArgs:
             http_metrics_port: HTTP metrics port (for gRPC service)
             tls_cert_path: TLS certificate path (PEM format)
             tls_key_path: TLS key path (PEM format)
+            tls_client_ca_cert_path: Client CA certificate path for mutual TLS (PEM format)
             extra_engine_args: Optional path to mocker engine arguments JSON
             mocker_engine_args: Typed mocker engine arguments
             runtime_config: Optional runtime configuration for discovery registration

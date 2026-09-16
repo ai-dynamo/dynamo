@@ -552,10 +552,6 @@ where
     /// Optional external shared KV cache pool. When present, `find_best_match`
     /// queries it in parallel with the indexer and factors shared hits into scoring.
     shared_cache: Option<Box<dyn SharedKvCache>>,
-    /// Optional LoRA filter. When present (LoRA serving enabled), candidate workers are
-    /// narrowed to the LoRA's allocated/loaded replicas inside `find_best_match_details`,
-    /// covering both the decode and prefill routers (both built via `kv_chooser_for`).
-    lora_filter: Option<Arc<crate::lora::LoraFilter>>,
     endpoint_registration: Option<dynamo_runtime::discovery::EndpointRegistrationLease>,
     teardown_task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
 }
@@ -770,8 +766,38 @@ where
             Arc::new(move || client_for_overload.overloaded_instance_ids());
 
         let client_for_availability = client.clone();
-        let available_worker_provider: WorkerAvailabilityProvider =
-            Arc::new(move || client_for_availability.available_instance_ids());
+        let workers_for_availability = workers_with_configs.clone();
+        let available_worker_provider: WorkerAvailabilityProvider = Arc::new(move |request| {
+            let available = client_for_availability.available_instance_ids();
+            let (Some(filter), Some(lora_name)) =
+                (lora_filter.as_ref(), request.lora_name.as_deref())
+            else {
+                return available;
+            };
+            let candidates: Vec<_> = match (&request.allowed_worker_ids, available.as_ref()) {
+                (Some(allowed), _) => allowed
+                    .iter()
+                    .filter(|id| {
+                        available
+                            .as_ref()
+                            .is_none_or(|workers| workers.contains(*id))
+                    })
+                    .copied()
+                    .collect(),
+                (None, Some(available)) => available.iter().copied().collect(),
+                (None, None) => workers_for_availability.borrow().keys().copied().collect(),
+            };
+            Some(Arc::new(
+                filter
+                    .filter_worker_ids_for_lora_with_pin(
+                        Some(lora_name),
+                        &candidates,
+                        request.pinned_worker.map(|worker| worker.worker_id),
+                    )
+                    .into_iter()
+                    .collect(),
+            ))
+        });
 
         let scheduler = KvScheduler::start_with_shared_request_leases(
             endpoint.clone(),
@@ -870,7 +896,6 @@ where
             request_leases,
             _served_indexer_handle: served_indexer_handle,
             shared_cache,
-            lora_filter,
             endpoint_registration: None,
             teardown_task_guard: None,
         })
@@ -1219,36 +1244,6 @@ where
         self.indexer
             .record_routing_decision_hashes(worker, hashes)
             .await
-    }
-
-    /// Narrow LoRA candidates, retaining a KV pin only when the worker can serve the adapter.
-    fn narrow_allowed_by_lora(
-        &self,
-        lora_name: Option<&str>,
-        allowed_worker_ids: Option<HashSet<WorkerId>>,
-        pinned_worker: Option<&WorkerWithDpRank>,
-    ) -> Option<HashSet<WorkerId>> {
-        let (Some(filter), Some(lora_name)) = (self.lora_filter.as_ref(), lora_name) else {
-            return allowed_worker_ids;
-        };
-        // Base candidate universe: explicit allow-set if present, else all current workers.
-        let base: Vec<WorkerId> = match &allowed_worker_ids {
-            Some(allowed) => allowed.iter().copied().collect(),
-            None => self.workers_with_configs.borrow().keys().copied().collect(),
-        };
-        if base.is_empty() {
-            return allowed_worker_ids;
-        }
-        Some(
-            filter
-                .filter_worker_ids_for_lora_with_pin(
-                    Some(lora_name),
-                    &base,
-                    pinned_worker.map(|worker| worker.worker_id),
-                )
-                .into_iter()
-                .collect(),
-        )
     }
 
     /// Give these tokens, find the worker with the best weighted cache hit.
@@ -1642,15 +1637,6 @@ where
         // scheduling returns, since `overlap_blocks` isn't known until then.
         let num_blocks = isl_tokens / self.block_size as usize;
         let sc_hits_for_metrics = shared_cache_hits.clone();
-
-        // LoRA-aware candidate narrowing: restrict to this LoRA's allocated/loaded replicas,
-        // strictly within the existing candidate universe (never widening). Covers both the
-        // decode and prefill routers, since both flow through this method.
-        let allowed_worker_ids = self.narrow_allowed_by_lora(
-            lora_name.as_deref(),
-            allowed_worker_ids,
-            pinned_worker.as_ref(),
-        );
 
         let schedule_request = ScheduleRequest {
             mode,
@@ -2767,6 +2753,8 @@ mod tests {
         + 'static,
         shared_cache: Option<Box<dyn SharedKvCache>>,
         workers: HashMap<WorkerId, ModelRuntimeConfig>,
+        lora_filter: Option<Arc<crate::lora::LoraFilter>>,
+        queue_threshold: Option<f64>,
     ) -> KvRouter<
         impl dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> + Send + Sync + 'static,
     > {
@@ -2782,6 +2770,7 @@ mod tests {
             router_track_active_blocks: false,
             shared_cache_multiplier: 0.5,
             skip_initial_worker_wait: true,
+            router_queue_threshold: queue_threshold,
             ..Default::default()
         };
 
@@ -2799,7 +2788,7 @@ mod tests {
             None,
             false,
             shared_cache,
-            None,
+            lora_filter,
         )
         .await
         .unwrap()
@@ -2817,7 +2806,137 @@ mod tests {
         let mut workers = HashMap::new();
         workers.insert(0, ModelRuntimeConfig::default());
         workers.insert(1, ModelRuntimeConfig::default());
-        make_test_router_with_workers(selector, shared_cache, workers).await
+        make_test_router_with_workers(selector, shared_cache, workers, None, None).await
+    }
+
+    #[tokio::test]
+    async fn queued_lora_requests_refresh_registration_without_widening_constraints() {
+        use crate::lora::state_tracker::LoraWorkerProjection;
+        use crate::lora::{LoraFilter, LoraReplicaConfig, LoraRoutingTable, LoraStateTracker};
+        use crate::model_card::LoraInfo;
+
+        let tracker = LoraStateTracker::new();
+        let publish = |loaded: &[u64]| {
+            tracker.replace_endpoint_projection(
+                [1, 2]
+                    .into_iter()
+                    .map(|id| {
+                        (
+                            WorkerWithDpRank::new(id, 0),
+                            LoraWorkerProjection {
+                                capacity: 4,
+                                loras: loaded
+                                    .contains(&id)
+                                    .then(|| LoraInfo {
+                                        name: "adapter".into(),
+                                        max_gpu_lora_count: Some(4),
+                                    })
+                                    .into_iter()
+                                    .collect(),
+                                is_registration_required: true,
+                            },
+                        )
+                    })
+                    .collect(),
+            );
+        };
+        let routing = LoraRoutingTable::new();
+        routing.update_allocation(
+            "adapter".into(),
+            LoraReplicaConfig {
+                lora_name: "adapter".into(),
+                replica_factor: 1,
+                replica_set: vec![WorkerWithDpRank::new(1, 0)],
+                updated_at: Instant::now(),
+                is_active: false,
+            },
+        );
+        let router = make_test_router_with_workers(
+            DefaultWorkerSelector::new(None, "decode"),
+            None,
+            [1, 2]
+                .into_iter()
+                .map(|id| (id, ModelRuntimeConfig::default()))
+                .collect(),
+            Some(Arc::new(LoraFilter::new(routing, tracker.clone()))),
+            Some(0.0),
+        )
+        .await;
+        let route = |id, lora_name, pinned_worker, allowed_worker_ids| {
+            router.find_best_match_details(
+                Some(id),
+                &[1, 2],
+                None,
+                None,
+                true,
+                false,
+                lora_name,
+                None,
+                0.0,
+                0,
+                None,
+                pinned_worker,
+                allowed_worker_ids,
+                RoutingConstraints::default(),
+            )
+        };
+
+        for (pin, allowed, retained, expected) in [
+            (None, Some(HashSet::from([1, 2])), vec![2], Some(2)),
+            (Some(WorkerWithDpRank::new(1, 0)), None, vec![2], None),
+            (None, Some(HashSet::from([1])), vec![2], None),
+            (None, None, vec![], None),
+        ] {
+            publish(&[1, 2]);
+            for (id, worker) in [("busy-a", 1), ("busy-b", 2)] {
+                route(id, None, Some(WorkerWithDpRank::new(worker, 0)), None)
+                    .await
+                    .unwrap();
+            }
+            let queued = route("queued", Some("adapter".into()), pin, allowed);
+            tokio::pin!(queued);
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                tokio::select! {
+                    _ = &mut queued => panic!("request bypassed queue"),
+                    _ = async {
+                        while router.pending_count() != 1 {
+                            tokio::task::yield_now().await;
+                        }
+                    } => {}
+                }
+            })
+            .await
+            .unwrap();
+
+            publish(&retained);
+            router.mark_prefill_completed("busy-a").await.unwrap();
+            if expected.is_some() {
+                assert_eq!(router.pending_count(), 1, "remaining replica is still busy");
+            }
+            router.mark_prefill_completed("busy-b").await.unwrap();
+            let result = tokio::time::timeout(std::time::Duration::from_secs(2), queued)
+                .await
+                .unwrap();
+            match expected {
+                Some(id) => {
+                    assert!(
+                        matches!(result.unwrap(), FindBestMatchOutcome::Routed { worker, .. } if worker.worker_id == id)
+                    );
+                    router.free("queued").await.unwrap();
+                }
+                None => assert!(matches!(
+                    result
+                        .err()
+                        .expect("no eligible worker")
+                        .downcast_ref::<KvSchedulerError>(),
+                    Some(KvSchedulerError::NoEndpoints)
+                )),
+            }
+            assert_eq!(router.pending_count(), 0);
+            for id in ["busy-a", "busy-b"] {
+                router.free(id).await.unwrap();
+            }
+        }
     }
 
     fn transfer_hint_runtime_config(endpoint: Option<&str>) -> ModelRuntimeConfig {
@@ -2904,6 +3023,8 @@ mod tests {
             },
             None,
             workers,
+            None,
+            None,
         )
         .await;
         let candidates = KvTransferCandidates {
@@ -2956,6 +3077,8 @@ mod tests {
                 },
                 None,
                 workers,
+                None,
+                None,
             )
             .await;
             let candidates = KvTransferCandidates {
@@ -2995,6 +3118,8 @@ mod tests {
             },
             None,
             workers,
+            None,
+            None,
         )
         .await;
         let candidates = KvTransferCandidates {
@@ -3038,6 +3163,8 @@ mod tests {
             },
             None,
             workers,
+            None,
+            None,
         )
         .await;
         let candidates = KvTransferCandidates {
@@ -3098,6 +3225,8 @@ mod tests {
             },
             None,
             workers,
+            None,
+            None,
         )
         .await;
         let owner = router_hint_cache_owner();

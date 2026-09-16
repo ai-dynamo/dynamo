@@ -414,6 +414,7 @@ struct SchedulerQueueActor<
     pending: PolicyQueue<QueuedRequest>,
     cleanup: Arc<AdmissionCleanup>,
     profile: PolicyProfile,
+    is_queueing_enabled: bool,
     pending_count: Arc<AtomicUsize>,
     pending_isl_tokens: Arc<AtomicUsize>,
     class_counters: Arc<Vec<ClassQueueCounters>>,
@@ -553,6 +554,7 @@ impl<
             pending,
             cleanup: Arc::clone(&cleanup),
             profile,
+            is_queueing_enabled: queueing_enabled,
             pending_count: Arc::clone(&pending_count),
             pending_isl_tokens: Arc::clone(&pending_isl_tokens),
             class_counters: Arc::clone(&class_counters),
@@ -979,6 +981,13 @@ impl<
         block_hashes: Option<Vec<LocalBlockHash>>,
     ) -> bool {
         let decay_now = Instant::now();
+        if !self.is_queueing_enabled {
+            return self.admit_one(request, attempt_tx, lifecycle_transfer, decay_now);
+        }
+        let available = self
+            .available_worker_provider
+            .as_ref()
+            .and_then(|provider| provider(&request));
         // Synthetic and explicit selections avoid cache work. Family classification
         // samples overlap once and reuses it if the request enters queue storage.
         let (class_index, snapshot) = if let Some(class_index) = self
@@ -988,7 +997,7 @@ impl<
             (class_index, None)
         } else {
             let workers = self.workers_with_configs.borrow();
-            let snapshot = Self::snapshot_for_with(&request, &workers);
+            let snapshot = Self::snapshot_for_with(&request, &workers, available.as_deref());
             let class_index = self
                 .profile
                 .resolve_class_index(request.policy_class.as_deref(), snapshot.uncached_tokens);
@@ -996,13 +1005,20 @@ impl<
         };
         let class = self.profile.class(class_index);
         let should_queue = self.should_queue(class_index, class, || {
-            self.all_workers_prefill_busy(class, request.eligibility(), decay_now)
+            self.all_workers_prefill_busy(
+                class,
+                request
+                    .eligibility()
+                    .with_available_workers(available.as_deref()),
+                decay_now,
+            )
         });
         if !should_queue {
             return self.admit_one(request, attempt_tx, lifecycle_transfer, decay_now);
         }
 
-        let snapshot = snapshot.unwrap_or_else(|| self.snapshot_for(&request));
+        let snapshot =
+            snapshot.unwrap_or_else(|| self.snapshot_for(&request, available.as_deref()));
         tracing::debug!(policy_class = class.name, "queueing request");
         let arrival_offset = self.start_time.elapsed().as_secs_f64();
         let priority_jump = request.priority_jump;
@@ -1053,18 +1069,23 @@ impl<
         class.queueing_enabled() && (self.pending.has_backlog(class_index) || all_workers_busy())
     }
 
-    fn snapshot_for(&self, request: &SchedulingRequest) -> QueueSnapshot {
+    fn snapshot_for(
+        &self,
+        request: &SchedulingRequest,
+        available: Option<&HashSet<WorkerId>>,
+    ) -> QueueSnapshot {
         let workers = self.workers_with_configs.borrow();
-        Self::snapshot_for_with(request, &workers)
+        Self::snapshot_for_with(request, &workers, available)
     }
 
     fn snapshot_for_with(
         request: &SchedulingRequest,
         workers: &HashMap<WorkerId, C>,
+        available: Option<&HashSet<WorkerId>>,
     ) -> QueueSnapshot {
         // Cache overlap is sampled once and reused for classification, queue
         // limits, ordering, DRR cost, and counters.
-        let context = SchedulingContext::new(request, workers);
+        let context = SchedulingContext::new(request, workers).with_available_workers(available);
         QueueSnapshot::new(request.isl_tokens, context.best_cached_tokens())
     }
 
@@ -1175,13 +1196,20 @@ impl<
 
     fn has_dispatchable_ready_head(&self) -> bool {
         let active_tokens = self.slots.active_tokens(Instant::now());
-        let configs = self.workers_with_configs.borrow();
         self.pending.any_ready_head(|_, class, queued| {
+            let available = self
+                .available_worker_provider
+                .as_ref()
+                .and_then(|provider| provider(&queued.request));
+            let configs = self.workers_with_configs.borrow();
             !Self::all_workers_prefill_busy_with(
                 &active_tokens,
                 &configs,
                 class,
-                queued.request.eligibility(),
+                queued
+                    .request
+                    .eligibility()
+                    .with_available_workers(available.as_deref()),
             )
         })
     }
@@ -1212,8 +1240,11 @@ impl<
             let decay_now = Instant::now();
             let active_tokens = self.slots.active_tokens(decay_now);
             let popped = {
-                let configs = self.workers_with_configs.borrow();
+                let provider = self.available_worker_provider.as_ref();
+                let workers = &self.workers_with_configs;
                 self.pending.pop_next(|_, class, queued| {
+                    let available = provider.and_then(|provider| provider(&queued.request));
+                    let configs = workers.borrow();
                     // TODO: This preserves head-of-line blocking within each policy
                     // class. A blocked constrained head can stall later entries in
                     // that class until a bounded non-HOL policy is introduced.
@@ -1221,7 +1252,10 @@ impl<
                         &active_tokens,
                         &configs,
                         class,
-                        queued.request.eligibility(),
+                        queued
+                            .request
+                            .eligibility()
+                            .with_available_workers(available.as_deref()),
                     )
                 })
             };
@@ -1300,14 +1334,15 @@ impl<
             .slots
             .project_worker_loads(request.token_seq.as_deref(), decay_now);
 
+        let available_worker_ids = self
+            .available_worker_provider
+            .as_ref()
+            .and_then(|provider| provider(request));
+
         {
             let workers = self.workers_with_configs.borrow();
             let overloaded_worker_ids = self
                 .overloaded_worker_provider
-                .as_ref()
-                .and_then(|provider| provider());
-            let available_worker_ids = self
-                .available_worker_provider
                 .as_ref()
                 .and_then(|provider| provider());
             let mut eligibility = request
@@ -3144,7 +3179,7 @@ policy_classes:
     #[tokio::test(flavor = "multi_thread")]
     async fn hard_availability_provider_filters_unpinned_and_pinned_selection() {
         let available_worker_provider: WorkerAvailabilityProvider =
-            Arc::new(|| Some(Arc::new(HashSet::from([1]))));
+            Arc::new(|_| Some(Arc::new(HashSet::from([1]))));
         let (queue, slots) =
             make_queue_with_providers(2, 16, 256, None, Some(available_worker_provider));
 

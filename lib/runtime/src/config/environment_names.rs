@@ -460,9 +460,10 @@ pub mod llm {
     /// Set to `0` or leave unset to disable the timeout (default: disabled).
     pub const DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS: &str = "DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS";
 
-    /// Pre-commit peek window in milliseconds for the streaming chat/responses
-    /// paths. Controls how long the frontend polls the engine stream for a
-    /// synchronous backend error before committing HTTP 200.
+    /// Pre-commit peek window in milliseconds for the streaming chat,
+    /// completions, responses, and Anthropic messages paths. Controls how long
+    /// the frontend polls the engine stream for a synchronous backend error
+    /// before committing HTTP 200.
     /// Trades a small first-token latency budget
     /// for the ability to surface `Backend(InvalidArgument)` and other
     /// request-validation errors as HTTP 4xx instead of an SSE error frame.
@@ -472,6 +473,9 @@ pub mod llm {
     /// request-parse / admission p99 latency to opt in — request-validation
     /// errors within the window surface as HTTP 4xx; anything past the window
     /// stays as an SSE error frame. Setting to `0` also disables the peek.
+    ///
+    /// Read once when the HTTP service is built. A policy supplied through
+    /// `HttpServiceConfigBuilder::streaming_backend_error_check` replaces it.
     pub const DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS: &str = "DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS";
 
     /// Enable the LoRA allocation controller (set to "true" to enable)
@@ -518,9 +522,35 @@ pub mod llm {
         /// Custom metrics prefix (overrides default "dynamo_frontend")
         pub const DYN_METRICS_PREFIX: &str = "DYN_METRICS_PREFIX";
 
-        /// Histogram bucket configuration (pattern: `<PREFIX>_MIN`, `<PREFIX>_MAX`, `<PREFIX>_COUNT`)
-        /// Example: DYN_HISTOGRAM_TTFT_MIN, DYN_HISTOGRAM_TTFT_MAX, DYN_HISTOGRAM_TTFT_COUNT
-        pub const HISTOGRAM_PREFIX: &str = "DYN_HISTOGRAM_";
+        /// Histogram bucket configuration prefixes. Each is suffixed with `_MIN`,
+        /// `_MAX`, or `_COUNT` to form the variable that tunes one frontend
+        /// histogram's log-spaced buckets, for example `DYN_METRICS_ITL_MAX`.
+        /// Values are read once, when the frontend builds its metrics.
+        pub const DYN_METRICS_REQUEST_DURATION: &str = "DYN_METRICS_REQUEST_DURATION";
+        /// See [`DYN_METRICS_REQUEST_DURATION`].
+        pub const DYN_METRICS_INPUT_SEQUENCE: &str = "DYN_METRICS_INPUT_SEQUENCE";
+        /// See [`DYN_METRICS_REQUEST_DURATION`].
+        pub const DYN_METRICS_OUTPUT_SEQUENCE: &str = "DYN_METRICS_OUTPUT_SEQUENCE";
+        /// See [`DYN_METRICS_REQUEST_DURATION`].
+        pub const DYN_METRICS_TTFT: &str = "DYN_METRICS_TTFT";
+        /// See [`DYN_METRICS_REQUEST_DURATION`].
+        pub const DYN_METRICS_ITL: &str = "DYN_METRICS_ITL";
+        /// See [`DYN_METRICS_REQUEST_DURATION`].
+        pub const DYN_METRICS_EMBEDDING_LATENCY: &str = "DYN_METRICS_EMBEDDING_LATENCY";
+
+        /// Deprecated prefix for the histogram bucket variables above.
+        ///
+        /// This was once prepended to prefixes that already started with
+        /// `DYN_METRICS_`, so the variables were read under doubled names such as
+        /// `DYN_HISTOGRAM_DYN_METRICS_ITL_MAX`. The doubled form is still accepted
+        /// as a fallback, with a warning, and will be removed in a future release.
+        pub const DEPRECATED_HISTOGRAM_PREFIX: &str = "DYN_HISTOGRAM_";
+
+        /// Former name of [`DEPRECATED_HISTOGRAM_PREFIX`], kept so that code outside
+        /// this workspace importing it keeps compiling. Remove together with the
+        /// doubled-name fallback.
+        #[deprecated(note = "use DEPRECATED_HISTOGRAM_PREFIX")]
+        pub const HISTOGRAM_PREFIX: &str = DEPRECATED_HISTOGRAM_PREFIX;
     }
 
     /// Forward-pass-metrics trace configuration.
@@ -1054,6 +1084,12 @@ mod tests {
             llm::DYN_TOKEN_ECHO_DELAY_MS,
             llm::DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS,
             llm::metrics::DYN_METRICS_PREFIX,
+            llm::metrics::DYN_METRICS_REQUEST_DURATION,
+            llm::metrics::DYN_METRICS_INPUT_SEQUENCE,
+            llm::metrics::DYN_METRICS_OUTPUT_SEQUENCE,
+            llm::metrics::DYN_METRICS_TTFT,
+            llm::metrics::DYN_METRICS_ITL,
+            llm::metrics::DYN_METRICS_EMBEDDING_LATENCY,
             llm::audit::DYN_AUDIT_SINKS,
             llm::audit::DYN_AUDIT_FORCE_LOGGING,
             llm::audit::DYN_AUDIT_CAPACITY,

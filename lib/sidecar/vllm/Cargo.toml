@@ -11,10 +11,6 @@ homepage.workspace = true
 repository.workspace = true
 description = "Rust sidecar for vLLM's native gRPC server"
 
-[package.metadata.cargo-machete]
-# Referenced by protobuf code generated into OUT_DIR.
-ignored = ["prost"]
-
 [[bin]]
 name = "dynamo-vllm-sidecar"
 path = "src/main.rs"
@@ -23,7 +19,7 @@ path = "src/main.rs"
 dynamo-backend-common = { workspace = true }
 dynamo-llm = { path = "../../llm", default-features = false }
 dynamo-runtime = { workspace = true }
-dynamo-sidecar-common = { workspace = true }
+dynamo-sidecar-common = { workspace = true, features = ["tonic-v14"] }
 
 anyhow = { workspace = true }
 async-stream = { workspace = true }
@@ -35,13 +31,10 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 
-prost = { workspace = true }
-prost-types = { workspace = true }
-tonic = { workspace = true }
-tonic-health = { workspace = true }
-
-[build-dependencies]
-tonic-build = { workspace = true }
+prost-types-v14 = { workspace = true }
+tonic-v14 = { workspace = true }
+tonic-health-v14 = { workspace = true }
+vllm-proto = { workspace = true }
 
 [dev-dependencies]
 dynamo-backend-common = { workspace = true, features = ["testing"] }
