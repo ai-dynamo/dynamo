@@ -2,7 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use crate::kv_router::{FindBestMatchAdmission, routing_host::kv_selection::SelectionOutcome};
+use crate::kv_router::{
+    FindBestMatchAdmission,
+    routing_host::{
+        kv_selection::SelectionOutcome,
+        request_guard::{CacheLossTracking, RouteObservation},
+    },
+};
 
 impl<Sel> RoutingHost<Sel>
 where
@@ -342,10 +348,28 @@ where
         let chooser = self.kv_router();
         let block_size = chooser.block_size() as usize;
         let selected_worker = selection.worker;
+        let aggregate_enabled = self.cache_reuse_funnel_f2_onward_enabled;
+        let tier_detail_enabled = self.cache_reuse_funnel_tier_detail_enabled;
+        let cache_loss_tracking = if !is_query_only && (aggregate_enabled || tier_detail_enabled) {
+            Some(CacheLossTracking::new(
+                RouteObservation {
+                    prompt_tokens: routing_parts.token_ids.len() as u64,
+                    best_router_tokens: selection.max_cached_tokens.unwrap_or_default() as u64,
+                    selected_router_tokens: selection.cached_tokens as u64,
+                },
+                aggregate_enabled,
+                tier_detail_enabled,
+            ))
+        } else {
+            None
+        };
         let mut guard = match cleanup {
-            Some(cleanup) => {
-                RequestGuard::new_kv_with_cleanup(self.request_metrics.clone(), cleanup, request)
-            }
+            Some(cleanup) => RequestGuard::new_kv_with_cleanup(
+                self.request_metrics.clone(),
+                cleanup,
+                request,
+                cache_loss_tracking,
+            ),
             None => RequestGuard::new_kv(
                 Arc::clone(chooser),
                 self.request_metrics.clone(),
@@ -353,6 +377,7 @@ where
                 selected_worker,
                 selection.attempt,
                 request,
+                cache_loss_tracking,
             ),
         };
 

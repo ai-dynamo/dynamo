@@ -252,3 +252,148 @@ class TestUsageStatistics:
         assert result["prompt_tokens"] == 5
         assert result["completion_tokens"] == 2
         assert result["prompt_tokens_details"] == expected_prompt_tokens_details
+
+    def test_cache_loss_engine_data_uses_worker_counters(self):
+        mock_output = Mock()
+        mock_output.prompt_token_ids = [1, 2, 3, 4]
+        mock_output.num_cached_tokens = 3
+        mock_output.num_local_cached_tokens = 2
+        mock_output.num_external_cached_tokens = 1
+        mock_output.num_external_lookup_tokens = 2
+
+        assert BaseWorkerHandler._cache_loss_engine_data(mock_output) == {
+            "complete": True,
+            "prompt_tokens": 4,
+            "gpu_hit_tokens": 2,
+            "cpu_hit_tokens": 1,
+            "cpu_lookup_tokens": 2,
+            "worker_lookup_tokens": 4,
+            "worker_used_tokens": 3,
+            "tiers": [
+                {
+                    "tier": "gpu",
+                    "events": [
+                        {"event": "found", "tokens": 2, "accuracy": "exact"},
+                        {"event": "used", "tokens": 2, "accuracy": "exact"},
+                    ],
+                },
+                {
+                    "tier": "cpu",
+                    "events": [
+                        {"event": "lookup", "tokens": 2, "accuracy": "exact"},
+                        {"event": "found", "tokens": 1, "accuracy": "exact"},
+                        {"event": "used", "tokens": 1, "accuracy": "exact"},
+                    ],
+                },
+            ],
+        }
+
+    def test_cache_loss_engine_data_marks_missing_worker_counters_incomplete(self):
+        mock_output = Mock()
+        mock_output.prompt_token_ids = [1, 2]
+        mock_output.num_local_cached_tokens = None
+        mock_output.num_external_cached_tokens = 0
+        mock_output.num_external_lookup_tokens = 0
+
+        assert BaseWorkerHandler._cache_loss_engine_data(mock_output) == {
+            "complete": False
+        }
+
+    def test_cache_loss_engine_data_uses_aggregate_cache_fallback(self):
+        mock_output = Mock()
+        mock_output.prompt_token_ids = [1, 2, 3, 4]
+        mock_output.num_cached_tokens = 3
+        mock_output.num_local_cached_tokens = None
+        mock_output.num_external_cached_tokens = None
+        mock_output.num_external_lookup_tokens = None
+
+        assert BaseWorkerHandler._cache_loss_engine_data(mock_output) == {
+            "complete": True,
+            "prompt_tokens": 4,
+            "gpu_hit_tokens": 3,
+            "cpu_hit_tokens": 0,
+            "cpu_lookup_tokens": 0,
+            "worker_lookup_tokens": 3,
+            "worker_used_tokens": 3,
+            "tiers": [
+                {
+                    "tier": "gpu",
+                    "events": [
+                        {"event": "found", "tokens": 3, "accuracy": "exact"},
+                        {"event": "used", "tokens": 3, "accuracy": "exact"},
+                    ],
+                },
+                {
+                    "tier": "cpu",
+                    "events": [
+                        {
+                            "event": "lookup",
+                            "tokens": 0,
+                            "accuracy": "lower_bound",
+                        },
+                        {"event": "found", "tokens": 0, "accuracy": "exact"},
+                        {"event": "used", "tokens": 0, "accuracy": "exact"},
+                    ],
+                },
+            ],
+        }
+
+    def test_cache_loss_engine_data_uses_stock_external_counter(self):
+        mock_output = Mock()
+        mock_output.prompt_token_ids = [1, 2, 3, 4]
+        mock_output.num_cached_tokens = 3
+        mock_output.num_local_cached_tokens = None
+        mock_output.num_external_cached_tokens = None
+        mock_output.num_external_computed_tokens = 1
+        mock_output.num_external_lookup_tokens = None
+
+        assert BaseWorkerHandler._cache_loss_engine_data(mock_output) == {
+            "complete": True,
+            "prompt_tokens": 4,
+            "gpu_hit_tokens": 2,
+            "cpu_hit_tokens": 1,
+            "cpu_lookup_tokens": 1,
+            "worker_lookup_tokens": 3,
+            "worker_used_tokens": 3,
+            "tiers": [
+                {
+                    "tier": "gpu",
+                    "events": [
+                        {"event": "found", "tokens": 2, "accuracy": "exact"},
+                        {"event": "used", "tokens": 2, "accuracy": "exact"},
+                    ],
+                },
+                {
+                    "tier": "cpu",
+                    "events": [
+                        {
+                            "event": "lookup",
+                            "tokens": 1,
+                            "accuracy": "lower_bound",
+                        },
+                        {"event": "found", "tokens": 1, "accuracy": "exact"},
+                        {"event": "used", "tokens": 1, "accuracy": "exact"},
+                    ],
+                },
+            ],
+        }
+
+    def test_cache_loss_engine_data_separates_external_found_from_used(self):
+        mock_output = Mock()
+        mock_output.prompt_token_ids = list(range(10))
+        mock_output.num_cached_tokens = 9
+        mock_output.num_local_cached_tokens = None
+        mock_output.num_external_cached_tokens = None
+        mock_output.num_external_computed_tokens = 10
+        mock_output.num_external_lookup_tokens = None
+
+        result = BaseWorkerHandler._cache_loss_engine_data(mock_output)
+
+        assert result["complete"] is True
+        assert result["cpu_hit_tokens"] == 9
+        assert result["worker_used_tokens"] == 9
+        assert result["tiers"][1]["events"] == [
+            {"event": "lookup", "tokens": 10, "accuracy": "lower_bound"},
+            {"event": "found", "tokens": 10, "accuracy": "exact"},
+            {"event": "used", "tokens": 9, "accuracy": "exact"},
+        ]
