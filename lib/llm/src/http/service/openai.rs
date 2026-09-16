@@ -7189,10 +7189,8 @@ mod tests {
             .error_type(ErrorType::Backend(BackendError::InvalidArgument))
             .message("unsupported video control")
             .build();
-        let response = ErrorMessage::from_anyhow(
-            anyhow::Error::new(error),
-            "Failed to fold videos stream",
-        );
+        let response =
+            ErrorMessage::from_anyhow(anyhow::Error::new(error), "Failed to fold videos stream");
 
         assert_eq!(response.0, StatusCode::BAD_REQUEST);
         assert_eq!(response.1.code, StatusCode::BAD_REQUEST.as_u16());
