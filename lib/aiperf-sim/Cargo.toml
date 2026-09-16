@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-aiperf-sim"
+description = "Static Dynamo KV-router provider for AIPerf simulation bundles"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+# Development-only sibling-worktree composition: AIPerf's source-level Rust
+# provider contract is not published independently. A distributable bundle
+# must replace these paths with one coordinated, reproducible source release.
+aiperf-runtime = { path = "../../../../dynamic-simulation-abi/crates/runtime" }
+aiperf-simulate = { path = "../../../../dynamic-simulation-abi/crates/simulate" }
+aisimulate-core = { workspace = true }
+anyhow.workspace = true
+dynamo-kv-router = { workspace = true, features = ["bench"] }
+dynamo-mocker = { workspace = true, features = ["replay-bench"] }

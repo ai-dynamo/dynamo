@@ -3,6 +3,7 @@
 
 [workspace]
 members = [
+    "lib/aiperf-sim",
     "lib/llm",
     "lib/rl",
     "lib/runtime",
