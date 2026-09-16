@@ -848,7 +848,7 @@ sglang_configs = {
         env={
             "DYN_ENCODE_GPU_MEM": "0.1",
             "DYN_WORKER_GPU_MEM": "0.4",
-            "DYN_SGL_EMBEDDING_TRANSFER_MODE": "local",
+            "DYN_SGL_EMBEDDING_TRANSFER_MODE": "nixl-read",
             # The clips come from the image_server over plain http on localhost,
             # which the URL policy rejects by default. This model is gated out of
             # NVDEC (see _NVDEC_UNSAFE_MODEL_TYPES), and that disabled path now
@@ -885,7 +885,10 @@ sglang_configs = {
                 ],
                 repeat_count=1,
                 expected_response=MULTIMODAL_VIDEO_EXPECTED,
-                expected_log=["Embedding cache hit for VIDEO URL index 0"],
+                expected_log=[
+                    "Embedding cache hit for VIDEO URL index 0",
+                    "Initialized NIXL agent",
+                ],
                 temperature=0.0,
                 max_tokens=100,
             ),
