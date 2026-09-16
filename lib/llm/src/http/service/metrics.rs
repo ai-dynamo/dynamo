@@ -2749,6 +2749,9 @@ mod tests {
                 frontend_service::INTER_TOKEN_LATENCY_SECONDS
             ),
         );
+        // The exact set is the contract. Note the bottom edge of 0.0018: vLLM's equivalent
+        // starts at 0.01 and cannot resolve anything faster than 10ms per token, so raising
+        // the ceiling must not cost the low-end resolution Dynamo has and vLLM does not.
         assert_eq!(
             bounds,
             vec![
@@ -2756,9 +2759,6 @@ mod tests {
                 1.2, 2.3, 4.1, 7.4, 13.0, 24.0, 44.0, 80.0
             ],
         );
-        // Low-end resolution is kept: vLLM's equivalent starts at 0.01 and cannot resolve
-        // anything faster than 10ms per token.
-        assert!(bounds[1] < 0.002, "bottom edge regressed: {:?}", bounds[1]);
     }
 
     #[test]

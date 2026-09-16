@@ -551,7 +551,7 @@ Rounding can move the top edge either way, so pick a `MAX` that is already two s
 
 `dynamo_frontend_cached_tokens` shares the input sequence buckets, so `DYN_METRICS_INPUT_SEQUENCE_*` changes both histograms.
 
-A histogram's configuration is validated as a set: `MIN` must be above zero, below `MAX`, and `COUNT` must be between 1 and 512. If any part fails, the frontend warns and reverts **all three** values for that histogram together — setting `DYN_METRICS_ITL_MIN=5` against the default `MAX` of `2.0` also discards a perfectly valid `DYN_METRICS_ITL_COUNT=20`.
+A histogram's configuration is validated as a set: `MIN` must be above zero, below `MAX`, and `COUNT` must be between 1 and 512. If any part fails, the frontend warns and reverts **all three** values for that histogram together — setting `DYN_METRICS_ITL_MIN=100` against the default `MAX` of `80.0` also discards a perfectly valid `DYN_METRICS_ITL_COUNT=20`.
 
 A value that cannot be parsed at all is handled per variable, not as a set: it warns, that one variable falls back to its default, and the others still apply.
 
