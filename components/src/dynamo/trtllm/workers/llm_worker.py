@@ -754,6 +754,12 @@ async def init_llm_worker(
         runtime_config = ModelRuntimeConfig()
         runtime_config.kv_state_endpoint = config.kv_state_endpoint
         runtime_config.context_length = config.max_seq_len
+        # A context request that has returned its handoff parameters is holding
+        # KV for the generation server to collect. Aborting it there leaves the
+        # transfer with no receiver until kv_transfer_timeout_ms expires, which
+        # blocks the context server for far longer than finishing the prefill
+        # would have. Before that point the abort is clean.
+        runtime_config.prefill_cancel_until = "pre_handoff"
         publish_trtllm_token_budget(runtime_config, config.max_seq_len)
 
         kv_cache_block_size = config.kv_block_size
