@@ -127,11 +127,13 @@ func workerHashSpec(dcd *v1beta1.DynamoComponentDeployment) v1beta1.DynamoCompon
 		spec.Experimental.Grove.ForceScalingGroup = nil
 	}
 
-	// Empty Grove and Experimental wrappers are equivalent to omission.
-	// Preserve other experimental features, whose presence can be meaningful.
+	// Empty wrappers and disabled checkpoint configurations are equivalent to omission.
 	if spec.Experimental != nil {
 		if spec.Experimental.Grove != nil && *spec.Experimental.Grove == (v1beta1.GroveSpec{}) {
 			spec.Experimental.Grove = nil
+		}
+		if spec.Experimental.Checkpoint != nil && !spec.Experimental.Checkpoint.Enabled {
+			spec.Experimental.Checkpoint = nil
 		}
 		if *spec.Experimental == (v1beta1.ExperimentalSpec{}) {
 			spec.Experimental = nil

@@ -146,7 +146,7 @@ func TestWorkerHashSpec_PreservesOtherExperimentalFeatures(t *testing.T) {
 	}{
 		{"gms", v1beta1.ExperimentalSpec{GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{}}},
 		{"failover", v1beta1.ExperimentalSpec{Failover: &v1beta1.FailoverSpec{}}},
-		{"checkpoint", v1beta1.ExperimentalSpec{Checkpoint: &v1beta1.ComponentCheckpointConfig{}}},
+		{"enabled_checkpoint", v1beta1.ExperimentalSpec{Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -525,4 +525,56 @@ func TestSortEnvVars(t *testing.T) {
 	assert.Equal(t, "C", sorted[2].Name)
 	// Original not mutated
 	assert.Equal(t, "C", envs[0].Name)
+}
+
+func TestComputeBetaDGDWorkersSpecHash_CanonicalizesDisabledCheckpoint(t *testing.T) {
+	t.Log("Build a worker with omitted checkpoint configuration")
+	base := betaDGDWithRuntimeVersion(t, "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0", "")
+	base.Spec.Components[0].Experimental = nil
+
+	cases := []struct {
+		name       string
+		checkpoint *v1beta1.ComponentCheckpointConfig
+		grove      *v1beta1.GroveSpec
+	}{
+		{name: "disabled", checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: false}},
+		{name: "disabled_with_options", checkpoint: &v1beta1.ComponentCheckpointConfig{
+			Enabled: false, CheckpointRef: ptr.To("existing-snapshot"),
+			StartupPolicy:  v1beta1.CheckpointStartupPolicyWaitForCheckpoint,
+			DeletionPolicy: v1beta1.CheckpointDeletionPolicyRetain,
+		}},
+		{name: "disabled_with_grove", checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: false},
+			grove: &v1beta1.GroveSpec{ForceScalingGroup: ptr.To(true)}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Build equivalent omitted and disabled checkpoint configurations")
+			omitted := base.DeepCopy()
+			if tc.grove != nil {
+				omitted.Spec.Components[0].Experimental = &v1beta1.ExperimentalSpec{Grove: tc.grove}
+			}
+			disabled := omitted.DeepCopy()
+			if disabled.Spec.Components[0].Experimental == nil {
+				disabled.Spec.Components[0].Experimental = &v1beta1.ExperimentalSpec{}
+			}
+			disabled.Spec.Components[0].Experimental.Checkpoint = tc.checkpoint
+			original := disabled.DeepCopy()
+
+			t.Log("Verify equal rendered workloads and worker hashes")
+			omittedRendered, err := GenerateGrovePodCliqueSet(context.Background(), omitted, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+			require.NoError(t, err)
+			disabledRendered, err := GenerateGrovePodCliqueSet(context.Background(), disabled, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+			require.NoError(t, err)
+			require.Equal(t, omittedRendered.Spec, disabledRendered.Spec)
+			assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, omitted), mustComputeBetaDGDWorkersSpecHash(t, disabled))
+			assert.Equal(t, original, disabled, "rendering and hashing must preserve the input")
+		})
+	}
+
+	t.Log("Verify enabling checkpointing still changes the worker hash")
+	enabled := base.DeepCopy()
+	enabled.Spec.Components[0].Experimental = &v1beta1.ExperimentalSpec{
+		Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true},
+	}
+	assert.NotEqual(t, mustComputeBetaDGDWorkersSpecHash(t, base), mustComputeBetaDGDWorkersSpecHash(t, enabled))
 }
