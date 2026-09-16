@@ -55,7 +55,7 @@ use crate::{
             classify::OpenAIClassifyStreamingEngine, completions::OpenAICompletionsStreamingEngine,
             embeddings::OpenAIEmbeddingsStreamingEngine, generate::GenerateStreamingEngine,
             images::OpenAIImagesStreamingEngine, pooling::OpenAIPoolingStreamingEngine,
-            videos::OpenAIVideosStreamingEngine,
+            rerank::OpenAIRerankStreamingEngine, videos::OpenAIVideosStreamingEngine,
         },
     },
     worker_type::WorkerType,
@@ -438,6 +438,19 @@ impl ModelManager {
         self.models
             .get(model_name)
             .map(|entry| entry.value().clone())
+    }
+
+    /// Reject a local model registration that would claim an alias-reserved name.
+    ///
+    /// Callers hold `reservation_lock` so this check is atomic with alias
+    /// registration.
+    fn ensure_name_not_alias(&self, model_name: &str) -> Result<(), ModelManagerError> {
+        if self.alias_to_primary.contains_key(model_name) {
+            return Err(ModelManagerError::ModelAlreadyExists(
+                model_name.to_string(),
+            ));
+        }
+        Ok(())
     }
 
     /// Remove a Model if it has no remaining WorkerSets.
@@ -1045,16 +1058,27 @@ impl ModelManager {
             .is_some_and(|m| m.is_ready_to_serve())
     }
 
-    /// Snapshot the serving readiness of every registered model.
+    /// Snapshot the serving readiness of every registered primary model name.
     ///
     /// Each value is derived from [`Model::is_ready_to_serve`], the same
     /// selection gate used by request routing and KServe model readiness.
     /// Results are sorted by model name so scrape output is deterministic.
+    ///
+    /// An alias is registered in `models` under its own name so that routing can
+    /// resolve it, which would otherwise emit a second, duplicate reading for the
+    /// deployment it points at. Alias names are therefore filtered out here, so a
+    /// caller sees one entry per primary name — matching the request path, which
+    /// canonicalizes an alias through [`Self::resolve_canonical_name`] before it
+    /// labels a metric. Both maps are read from the single loaded catalog guard,
+    /// so they always come from the same published snapshot. A LoRA adapter is a
+    /// distinct servable model rather than a second name for one, is never
+    /// recorded in `aliases`, and so keeps its own entry.
     pub(crate) fn registered_model_readiness(&self) -> Vec<(String, bool)> {
         let catalog = self.catalog.load();
         let mut readiness = catalog
             .models
             .iter()
+            .filter(|(name, _)| !catalog.aliases.contains_key(name.as_str()))
             .map(|(name, model)| (name.clone(), model.is_ready_to_serve()))
             .collect::<Vec<_>>();
         readiness.sort_unstable_by(|left, right| left.0.cmp(&right.0));
@@ -1143,6 +1167,16 @@ impl ModelManager {
             .models
             .iter()
             .filter(|(_, model)| model.has_pooling_engine())
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    pub fn list_rerank_models(&self) -> Vec<String> {
+        self.catalog
+            .load()
+            .models
+            .iter()
+            .filter(|(_, model)| model.has_rerank_engine())
             .map(|(name, _)| name.clone())
             .collect()
     }
@@ -1249,6 +1283,7 @@ impl ModelManager {
                 || (model_type.contains(ModelType::Realtime) && model.has_realtime_engine())
                 || (model_type.contains(ModelType::Classify) && model.has_classify_engine())
                 || (model_type.contains(ModelType::Pooling) && model.has_pooling_engine())
+                || (model_type.contains(ModelType::Rerank) && model.has_rerank_engine())
         })
     }
 
@@ -1286,6 +1321,18 @@ impl ModelManager {
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_pooling_engine()
+    }
+
+    pub fn get_rerank_engine(
+        &self,
+        model: &str,
+    ) -> Result<OpenAIRerankStreamingEngine, ModelManagerError> {
+        self.catalog
+            .load()
+            .models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_rerank_engine()
     }
 
     pub fn get_completions_engine(
@@ -1493,6 +1540,7 @@ impl ModelManager {
         engine: OpenAIChatCompletionsStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_chat_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1516,6 +1564,7 @@ impl ModelManager {
         engine: OpenAICompletionsStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_completions_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1539,6 +1588,7 @@ impl ModelManager {
         engine: OpenAIEmbeddingsStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_embeddings_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1562,6 +1612,7 @@ impl ModelManager {
         engine: OpenAIClassifyStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_classify_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1585,6 +1636,7 @@ impl ModelManager {
         engine: OpenAIPoolingStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_pooling_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1601,6 +1653,29 @@ impl ModelManager {
         Ok(())
     }
 
+    pub fn add_rerank_model(
+        &self,
+        model: &str,
+        card_checksum: &str,
+        engine: OpenAIRerankStreamingEngine,
+    ) -> Result<(), ModelManagerError> {
+        let _reservation = self.reservation_lock.lock();
+        let model_entry = self.get_or_create_model(model);
+        if model_entry.has_rerank_engine() {
+            return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
+        }
+        let namespace = format!("__local_rerank_{}", model);
+        let mut ws = WorkerSet::new(
+            namespace.clone(),
+            card_checksum.to_string(),
+            Self::aggregated_local_card(),
+        );
+        ws.rerank_engine = Some(engine);
+        model_entry.add_worker_set(namespace, Arc::new(ws));
+        self.publish_catalog_locked();
+        Ok(())
+    }
+
     pub fn add_tensor_model(
         &self,
         model: &str,
@@ -1608,6 +1683,7 @@ impl ModelManager {
         engine: TensorStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_tensor_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1631,6 +1707,7 @@ impl ModelManager {
         engine: OpenAIImagesStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_images_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1654,6 +1731,7 @@ impl ModelManager {
         engine: OpenAIVideosStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_videos_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1677,6 +1755,7 @@ impl ModelManager {
         engine: OpenAIAudiosStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_audios_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1700,6 +1779,7 @@ impl ModelManager {
         engine: RealtimeBidirectionalEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_realtime_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1723,6 +1803,7 @@ impl ModelManager {
         engine: GenerateStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_generate_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1746,6 +1827,7 @@ impl ModelManager {
         card_checksum: &str,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_prefill() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1813,6 +1895,13 @@ impl ModelManager {
 
     pub fn remove_pooling_model(&self, model: &str) -> Result<(), ModelManagerError> {
         let namespace = format!("__local_pooling_{}", model);
+        self.remove_worker_set(model, &namespace)
+            .map(|_| ())
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))
+    }
+
+    pub fn remove_rerank_model(&self, model: &str) -> Result<(), ModelManagerError> {
+        let namespace = format!("__local_rerank_{}", model);
         self.remove_worker_set(model, &namespace)
             .map(|_| ())
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))
@@ -4009,6 +4098,8 @@ mod tests {
             manager.add_classify_model(name, "ck", Arc::new(UncalledEngine))
         } else if model_type == ModelType::Pooling {
             manager.add_pooling_model(name, "ck", Arc::new(UncalledEngine))
+        } else if model_type == ModelType::Rerank {
+            manager.add_rerank_model(name, "ck", Arc::new(UncalledEngine))
         } else {
             return false;
         };

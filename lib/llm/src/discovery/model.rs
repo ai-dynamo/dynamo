@@ -27,7 +27,7 @@ use crate::types::{
         classify::OpenAIClassifyStreamingEngine, completions::OpenAICompletionsStreamingEngine,
         embeddings::OpenAIEmbeddingsStreamingEngine, generate::GenerateStreamingEngine,
         images::OpenAIImagesStreamingEngine, pooling::OpenAIPoolingStreamingEngine,
-        videos::OpenAIVideosStreamingEngine,
+        rerank::OpenAIRerankStreamingEngine, videos::OpenAIVideosStreamingEngine,
     },
 };
 
@@ -238,6 +238,13 @@ impl Model {
         self.worker_sets
             .iter()
             .any(|entry| entry.value().has_pooling_engine())
+    }
+
+    /// Check if any WorkerSet has a rerank engine.
+    pub fn has_rerank_engine(&self) -> bool {
+        self.worker_sets
+            .iter()
+            .any(|entry| entry.value().has_rerank_engine())
     }
 
     /// Check if any WorkerSet has a tensor engine.
@@ -576,6 +583,11 @@ impl Model {
     pub fn get_pooling_engine(&self) -> Result<OpenAIPoolingStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.pooling_engine.clone())
             .ok_or_else(|| self.engine_error(self.has_pooling_engine()))
+    }
+
+    pub fn get_rerank_engine(&self) -> Result<OpenAIRerankStreamingEngine, ModelManagerError> {
+        self.select_worker_set_with(|ws| ws.rerank_engine.clone())
+            .ok_or_else(|| self.engine_error(self.has_rerank_engine()))
     }
 
     pub fn get_images_engine(&self) -> Result<OpenAIImagesStreamingEngine, ModelManagerError> {

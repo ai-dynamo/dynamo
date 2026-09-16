@@ -612,6 +612,7 @@ fn compute_index(endpoint: &Endpoint, request_type: &RequestType, status: &Statu
         Endpoint::ChatCompletions => 1,
         Endpoint::Embeddings => todo!(),
         Endpoint::Classify => todo!(),
+        Endpoint::Rerank => todo!(),
         Endpoint::Pooling => todo!(),
         Endpoint::Responses => todo!(),
         Endpoint::AnthropicMessages => todo!(),
@@ -2731,6 +2732,69 @@ async fn test_audio_speech_buffers_complete_response_with_content_length() {
 }
 
 #[tokio::test]
+async fn test_audio_speech_alias_meters_under_primary_model() {
+    const PRIMARY: &str = "audio-model";
+    const ALIAS: &str = "audio-model-alias";
+
+    let engine = Arc::new(CompleteAudioEngine::default());
+    // `Notify` keeps one permit from a `notify_one` that arrives before the
+    // wait, so arming it here lets the engine run straight through without a
+    // second task to release it.
+    engine.release.notify_one();
+
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder().port(port).build().unwrap();
+    service
+        .enable_model_endpoint(EndpointType::Audios, true)
+        .unwrap();
+    let state = service.state_clone();
+    let card = ModelDeploymentCard::with_name_only(PRIMARY);
+    state
+        .manager()
+        .add_audios_model(PRIMARY, card.mdcsum(), engine.clone())
+        .unwrap();
+    // Audio requests resolve an alias through its primary model registration.
+    assert!(state.manager().register_alias(ALIAS, PRIMARY));
+
+    let token = CancellationToken::new();
+    let task = service.spawn_with_listener(token.clone(), listener).await;
+    wait_for_service_ready(port).await;
+
+    let response = timeout(
+        std::time::Duration::from_secs(5),
+        reqwest::Client::new()
+            .post(format!("http://localhost:{port}/v1/audio/speech"))
+            .json(&serde_json::json!({
+                "model": ALIAS,
+                "input": "hello",
+                "response_format": "mp3"
+            }))
+            .send(),
+    )
+    .await
+    .expect("audio speech request should complete")
+    .unwrap();
+    assert!(response.status().is_success());
+    assert_eq!(response.bytes().await.unwrap(), "complete-audio");
+
+    let metrics = state.metrics_clone();
+    let counter = |model: &str| {
+        metrics.get_request_counter(
+            model,
+            &Endpoint::Audios,
+            &RequestType::Unary,
+            &Status::Success,
+            &ErrorType::None,
+        )
+    };
+    assert_eq!(counter(PRIMARY), 1);
+    assert_eq!(counter(ALIAS), 0);
+
+    token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn test_audio_speech_disconnect_before_first_chunk_cancels_engine() {
     let engine = Arc::new(FirstAudioGateEngine::default());
     let (port, cancel_token, task) = start_audio_service(engine.clone()).await;
@@ -3029,12 +3093,51 @@ impl
     }
 }
 
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<dynamo_llm::protocols::openai::rerank::NvCreateRerankRequest>,
+        ManyOut<Annotated<dynamo_llm::protocols::openai::rerank::NvCreateRerankResponse>>,
+        Error,
+    > for UncalledPoolingFamilyEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<dynamo_llm::protocols::openai::rerank::NvCreateRerankRequest>,
+    ) -> Result<
+        ManyOut<Annotated<dynamo_llm::protocols::openai::rerank::NvCreateRerankResponse>>,
+        Error,
+    > {
+        use dynamo_llm::protocols::openai::rerank::{NvCreateRerankResponse, RerankResult};
+
+        let (_request, context) = request.transfer(());
+        let response_ctx = context.context();
+        let stream = stream! {
+            yield Annotated::from_data(NvCreateRerankResponse(vec![
+                RerankResult {
+                    score: 0.9,
+                    index: 1,
+                    document: Some("second".to_string()),
+                    meta_info: None,
+                },
+                RerankResult {
+                    score: 0.2,
+                    index: 0,
+                    document: Some("first".to_string()),
+                    meta_info: None,
+                },
+            ]));
+        };
+        Ok(ResponseStream::new(Box::pin(stream), response_ctx))
+    }
+}
+
 /// A request rejected by handler-local validation must still be counted in
 /// `requests_total` with `error_type=validation`, like `chat_completions`.
 /// Validating before the inflight guard would drop these 400s from metrics
 /// (and from the "request completed" log the guard emits on drop).
 #[tokio::test]
-async fn test_classify_and_pooling_validation_errors_are_metered() {
+async fn test_pooling_family_validation_errors_are_metered() {
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder().port(port).build().unwrap();
     service
@@ -3042,6 +3145,9 @@ async fn test_classify_and_pooling_validation_errors_are_metered() {
         .unwrap();
     service
         .enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Pooling, true)
+        .unwrap();
+    service
+        .enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Rerank, true)
         .unwrap();
 
     let state = service.state_clone();
@@ -3060,7 +3166,10 @@ async fn test_classify_and_pooling_validation_errors_are_metered() {
         .add_classify_model("foo", card.mdcsum(), engine.clone())
         .unwrap();
     manager
-        .add_pooling_model("foo", card.mdcsum(), engine)
+        .add_pooling_model("foo", card.mdcsum(), engine.clone())
+        .unwrap();
+    manager
+        .add_rerank_model("foo", card.mdcsum(), engine)
         .unwrap();
 
     let metrics = state.metrics_clone();
@@ -3084,6 +3193,26 @@ async fn test_classify_and_pooling_validation_errors_are_metered() {
         &Status::Error,
         &ErrorType::Validation,
         1,
+    );
+
+    // ==== /v1/rerank: successful responses preserve SGLang's bare-array shape ====
+    let response = client
+        .post(format!("http://localhost:{port}/v1/rerank"))
+        .json(&serde_json::json!({
+            "model": "foo",
+            "query": "query",
+            "documents": ["first", "second"]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.json::<serde_json::Value>().await.unwrap(),
+        serde_json::json!([
+            {"score": 0.9, "index": 1, "document": "second"},
+            {"score": 0.2, "index": 0, "document": "first"}
+        ])
     );
 
     // ==== /v1/pooling: empty cache_salt ====
@@ -3120,6 +3249,29 @@ async fn test_classify_and_pooling_validation_errors_are_metered() {
         &Status::Error,
         &ErrorType::Validation,
         2,
+    );
+
+    // ==== /v1/rerank: top_n must be positive ====
+    let response = client
+        .post(format!("http://localhost:{port}/v1/rerank"))
+        .json(&serde_json::json!({
+            "model": "foo",
+            "query": "query",
+            "documents": ["document"],
+            "top_n": 0
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    compare_counter(
+        &metrics,
+        "foo",
+        &Endpoint::Rerank,
+        &RequestType::Unary,
+        &Status::Error,
+        &ErrorType::Validation,
+        1,
     );
 
     cancel_token.cancel();

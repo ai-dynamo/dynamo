@@ -10108,7 +10108,13 @@ func TestPropagateDGDSpecMetadata(t *testing.T) {
 				Labels:      tt.serviceLabels,
 			}
 			betaComponent := betaComponent(t, component)
-			propagateDGDSpecMetadata(tt.dgdAnnotations, tt.dgdLabels, betaComponent)
+			dgd := &v1beta1.DynamoGraphDeployment{
+				Spec: v1beta1.DynamoGraphDeploymentSpec{
+					Annotations: tt.dgdAnnotations,
+					Labels:      tt.dgdLabels,
+				},
+			}
+			propagateDGDSpecMetadata(dgd, betaComponent)
 			annotations := GetPodTemplateAnnotations(betaComponent)
 			labels := GetPodTemplateLabels(betaComponent)
 
@@ -10126,6 +10132,57 @@ func TestPropagateDGDSpecMetadata(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestApplyDGDTemplateDefaultsPreservesAlphaServiceMetadataPrecedence(t *testing.T) {
+	t.Log("Convert a merged v1alpha1 DGD with conflicting DGD and service discovery annotations")
+	alpha := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{
+				commonconsts.KubeAnnotationDynamoDiscoveryBackend: "etcd",
+			},
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Frontend": {
+					ComponentType: "frontend",
+					Annotations: map[string]string{
+						commonconsts.KubeAnnotationDynamoDiscoveryBackend: "kubernetes",
+					},
+				},
+			},
+		},
+	}
+	beta := &v1beta1.DynamoGraphDeployment{}
+	require.NoError(t, alpha.ConvertTo(beta))
+	component := beta.GetComponentByName("Frontend")
+	require.NotNil(t, component)
+
+	t.Log("Apply DGD defaults to the converted component")
+	applyDGDTemplateDefaults(component, beta, nil)
+
+	t.Log("Verify runtime pod generation consumes the service-level discovery override")
+	podSpec, err := GenerateBasePodSpec(
+		component,
+		BackendFrameworkSGLang,
+		&mockSecretsRetriever{},
+		"test-deployment",
+		"default",
+		RoleMain,
+		1,
+		&configv1alpha1.OperatorConfiguration{
+			Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendEtcd},
+		},
+		commonconsts.MultinodeDeploymentTypeGrove,
+		"Frontend",
+		nil,
+		staticContainerGPUCount(0),
+	)
+	require.NoError(t, err)
+	assert.Contains(t, podSpec.Containers[0].Env, corev1.EnvVar{
+		Name:  commonconsts.DynamoDiscoveryBackendEnvVar,
+		Value: "kubernetes",
+	})
 }
 
 func TestGenerateGrovePodCliqueSet_SpecMetadataPropagation(t *testing.T) {
