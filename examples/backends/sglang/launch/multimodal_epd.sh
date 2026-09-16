@@ -177,12 +177,30 @@ env ${_WORKER_CUDA_PIN:+"$_WORKER_CUDA_PIN"} python3 -m dynamo.sglang \
   --disable-radix-cache \
   --disaggregation-transfer-backend "$TRANSFER_BACKEND" \
   $WORKER_EXTRA_ARGS &
+WORKER_PID=$!
 
 if [[ "$SINGLE_GPU" == "true" ]]; then
-    # Both workers size their allocation against free memory at load, so loading
-    # them together can exhaust the GPU. || true: a timeout must not end the script.
+    # Both workers load onto the same card here, and SGLang sizes each KV pool
+    # against the memory free at load time (this config passes no
+    # --max-total-tokens), so how much each one gets depends on how the two
+    # loads interleave. Gate the encode worker on the PD worker to fix that
+    # order. The gate direction is forced: the encode worker withholds its own
+    # readiness until backend.generate has instances, which only the PD worker
+    # registers, so the encode worker's /health can never turn 200 first.
+    # Watch WORKER_PID as well as the endpoint -- a worker that dies while
+    # loading never answers, and polling it for the full 120s would hide the
+    # error behind a two-minute stall.
+    # || _gate_rc=$?: set -e must not end the script on a timeout.
     echo "Waiting for PD worker to initialize..."
-    wait_for_ready "http://localhost:${DYN_SYSTEM_PORT2:-8082}/health" 120 || true
+    _gate_rc=0
+    wait_for_ready "http://localhost:${DYN_SYSTEM_PORT2:-8082}/health" 120 "$WORKER_PID" || _gate_rc=$?
+    if (( _gate_rc == 2 )); then
+        # PD worker is gone. The encode worker would block in
+        # wait_for_instances() on a backend.generate that will never appear, so
+        # report the PD worker's exit status now instead of starting it.
+        echo "PD worker exited during startup; not starting the encode worker."
+        wait_any_exit
+    fi
 fi
 
 # run SGLang multimodal encode worker (frontend-facing: encodes images, routes to worker)
