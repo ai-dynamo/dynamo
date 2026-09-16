@@ -262,7 +262,8 @@ impl IndexState {
         parent_hash: Option<ExternalSequenceBlockHash>,
         block_hashes: &[ExternalSequenceBlockHash],
     ) -> Result<(), SessionPrefixIndexError> {
-        let mut dominators: FxHashSet<ExternalSequenceBlockHash> = FxHashSet::default();
+        let mut dominators =
+            FxHashSet::with_capacity_and_hasher(block_hashes.len(), Default::default());
         if let Some(parent_hash) = parent_hash {
             dominators.insert(parent_hash);
             if let Some(&parent_node) = self.hash_to_node.get(&parent_hash) {
@@ -347,9 +348,10 @@ impl IndexState {
             .get(session_id)
             .and_then(|entry| entry.worker_frontiers.get(&worker))
             .is_some_and(|frontiers| {
-                frontiers
-                    .iter()
-                    .any(|&frontier| self.is_ancestor_or_self(node, frontier))
+                frontiers.contains(&node)
+                    || frontiers
+                        .iter()
+                        .any(|&frontier| self.is_ancestor_or_self(node, frontier))
             });
         if already_reached {
             return false;
