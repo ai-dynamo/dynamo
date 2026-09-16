@@ -66,7 +66,7 @@ spec:
           command:
           - /bin/bash
           - -lc
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:79a9d1b103d81fbdda1e97dc476a31adcaf6056e2d2f465b09173a5578a574b8
+          image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.4.1-k-exaone-2.0-750b-post.1-rc.1
           name: main
           resources:
             limits:
@@ -94,9 +94,11 @@ spec:
             readOnly: true
           - mountPath: /dev/shm
             name: dshm
-        # needed only by the interim worker image below; drop it when that image is public.
+        # nvstaging requires NGC credentials. Create a dockerconfigjson Secret in your
+        # namespace ($oauthtoken / <NGC API key>) and name it here. Not needed once the
+        # image moves to a public nvcr.io/nvidia/ai-dynamo tag.
         imagePullSecrets:
-        - name: acr-token-secret
+        - name: ngc-secret
         nodeSelector:
           nvidia.com/gpu.product: NVIDIA-B200
         tolerations:

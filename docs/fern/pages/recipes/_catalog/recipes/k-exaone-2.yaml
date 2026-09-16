@@ -19,7 +19,7 @@ targets:
     count: 4
   runtime:
     framework: vllm
-    image: dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:79a9d1b103d81fbdda1e97dc476a31adcaf6056e2d2f465b09173a5578a574b8
+    image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.4.1-k-exaone-2.0-750b-post.1-rc.1
   topology: aggregated
   techniques:
   - mtp-spec-dec
@@ -73,7 +73,7 @@ gaps:
    (9.494% vs 9.458% prefix hit rate), so it is shipped for correct scale-out behaviour rather
    than for throughput."
 - The worker image is an interim internal build; external users cannot pull it. A public
-  nvcr.io/nvidia/ai-dynamo/vllm-runtime tag is blocked on ai-dynamo/dynamo#14599, without which
+  public nvcr.io/nvidia/ai-dynamo tag is blocked on ai-dynamo/dynamo#14599, without which
   stock vLLM 0.28.0 cannot load this NVFP4 checkpoint. The frontend already uses the public
   nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.1 image.
 - 38 of the trace's 1,805 requests exceed the checkpoint's 262,144-token context ceiling and are rejected with HTTP 400 in every run, at every concurrency; throughput is computed over the remainder.

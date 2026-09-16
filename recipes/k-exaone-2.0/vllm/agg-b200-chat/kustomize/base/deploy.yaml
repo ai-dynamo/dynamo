@@ -72,20 +72,26 @@ spec:
       sharedMemorySize: 40Gi
       podTemplate:
         spec:
-          # needed only by the interim worker image below; drop it when that image is public.
-          imagePullSecrets: [{name: acr-token-secret}]
+          # nvstaging requires NGC credentials. Create a dockerconfigjson Secret in your
+          # namespace ($oauthtoken / <NGC API key>) and name it here. Not needed once the
+          # image moves to a public nvcr.io/nvidia/ai-dynamo tag.
+          imagePullSecrets: [{name: ngc-secret}]
           nodeSelector:
             nvidia.com/gpu.product: NVIDIA-B200
           tolerations:
             - {key: nvidia.com/gpu, operator: Equal, value: "true", effect: NoSchedule}
           containers:
             - name: main
-              # DEV IMAGE, digest-pinned. NOT a public image: external users cannot pull it.
+              # STAGING IMAGE. Needs NGC credentials -- nvstaging is not anonymously
+              # pullable, so this is not yet a reproducible reference for external users.
               # Blocked on ai-dynamo/dynamo#14599 (one-line lm_head prefix fix) merging and a
-              # public nvcr.io tag being cut -- stock vLLM 0.28.0 cannot load this NVFP4
-              # checkpoint without it. Swap to nvcr.io/nvidia/ai-dynamo/vllm-runtime:<tag>
-              # pinned to the MULTI-ARCH INDEX digest before this recipe ships.
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:79a9d1b103d81fbdda1e97dc476a31adcaf6056e2d2f465b09173a5578a574b8
+              # public nvcr.io/nvidia/ai-dynamo tag being cut -- stock vLLM 0.28.0 cannot load
+              # this NVFP4 checkpoint without it.
+              # This is an -rc tag and therefore MUTABLE: rc.0 and rc.1 are different builds
+              # (30 of 65 layers differ). Pin the multi-arch INDEX digest before this recipe
+              # ships. rc.1 index digest at time of writing:
+              #   sha256:671b3f6ed5b94a572ae976cd59344bf26b27121618344a97d978d09737e6c7a2
+              image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.4.1-k-exaone-2.0-750b-post.1-rc.1
               command: [/bin/bash, -lc]
               args:
                 - |
