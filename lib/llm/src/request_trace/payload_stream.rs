@@ -18,14 +18,7 @@ use futures::StreamExt;
 type PayloadStream =
     Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>;
 
-/// What the aggregation of a response stream produced, for request payload capture.
-///
-/// `response` is the aggregated record when aggregation succeeded, or the partial
-/// record recovered from the chunks that arrived before a failure. `drop_reason` is
-/// set whenever the record is not a faithful copy of what the client received, and
-/// is published verbatim as the record's `payload_drop_reason`. The two travel
-/// together so the emit site can derive `payload_complete` from the data rather
-/// than assuming it: a partial response is `Some` response *and* `Some` reason.
+/// Aggregated response for audit capture. Partial responses carry a `drop_reason`.
 pub struct PayloadOutcome {
     pub response: Option<NvCreateChatCompletionResponse>,
     pub drop_reason: Option<String>,
@@ -96,11 +89,7 @@ where
             Poll::Ready(Some(chunk)) => {
                 // Store chunk for aggregation
                 self.chunks.push(chunk.clone());
-                // Settle the outcome on the error chunk rather than at end-of-stream.
-                // The SSE monitor in `http::service::disconnect` breaks out of its loop
-                // on the first `Err` it receives and drops this stream, so end-of-stream
-                // is never reached on the streaming path and the buffered prefix would
-                // otherwise be lost behind a `response_stream_dropped` reason.
+                // Capture the prefix now: the SSE monitor drops this stream on error.
                 if chunk.is_error()
                     && let Some(tx) = self.done_tx.take()
                 {

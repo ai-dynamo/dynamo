@@ -75,17 +75,8 @@ impl RequestPayloadHandle {
         &self.request_id
     }
 
-    /// Publish one request trace payload record. Consumes the handle to enforce
-    /// exactly one payload record per request. `response` is `None` on client
-    /// cancel / gateway timeout / aggregation failure, and may be a partial
-    /// record when some content was delivered before a failure; the record still
-    /// carries the request so those cases remain inspectable.
-    ///
-    /// `drop_reason` is required rather than defaulted so a new call site cannot
-    /// quietly re-introduce a record that claims completeness it does not have.
-    /// Pass `None` only for a faithful, fully aggregated response; otherwise pass
-    /// the reason, which is published verbatim as `payload_drop_reason`.
-    /// `payload_complete` is derived from the two together, never assumed.
+    /// Consume the handle to publish one request payload record.
+    /// Pass a `drop_reason` for a missing or partial response.
     pub fn emit(
         self,
         response: Option<Arc<NvCreateChatCompletionResponse>>,
