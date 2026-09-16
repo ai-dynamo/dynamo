@@ -433,6 +433,11 @@ where
         card.download_config(self.local_model_path.as_deref())
             .await?;
 
+        crate::protocols::openai::chat_completions::tool_parser_v2::validate_v1_fallback(
+            card.runtime_config.tool_call_parser.as_deref(),
+            card.runtime_config.reasoning_parser.as_deref(),
+        )?;
+
         validate_selector_worker_role(card, self.require_typed_worker_role)?;
 
         // Use per-worker-set router config if the worker provided one in its MDC,

@@ -46,7 +46,6 @@ use dynamo_protocols::types::{
     ChatCompletionMessageToolCallChunk, ChatCompletionStreamResponseDelta, FinishReason,
     FunctionCall, FunctionCallStream, FunctionType,
 };
-use dynamo_runtime::config::{env_is_truthy, environment_names::llm as env_llm};
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt};
 use uuid::Uuid;
@@ -71,11 +70,15 @@ const QWEN3_TOOL_CALL_PARSER: &str = "qwen3_coder";
 /// Dynamo's `--dyn-reasoning-parser` name that pairs into [`QWEN3_UNIFIED_FAMILY`].
 const QWEN3_REASONING_PARSER: &str = "qwen3";
 
-/// Whether the v2 parser path is enabled. V2 is the default; the explicit rollback
-/// switch selects v1 where a v1 parser is available.
+/// Whether the v2 parser path is selected. An unset version selects the newest
+/// compatible parser generation.
 fn parsers_v2_enabled() -> bool {
-    static ENABLED: LazyLock<bool> =
-        LazyLock::new(|| !env_is_truthy(env_llm::DYN_PARSER_REVERT_TO_V1));
+    static ENABLED: LazyLock<bool> = LazyLock::new(|| {
+        !matches!(
+            crate::protocols::openai::chat_completions::tool_parser_v2::selected_version(),
+            Ok(crate::protocols::openai::chat_completions::tool_parser_v2::ParserVersion::V1)
+        )
+    });
     *ENABLED
 }
 

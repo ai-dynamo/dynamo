@@ -2353,6 +2353,10 @@ impl OpenAIPreprocessor {
         };
         let model_info = model_info.get_model_info()?;
         let tool_call_parser = mdc.runtime_config.tool_call_parser.clone();
+        crate::protocols::openai::chat_completions::tool_parser_v2::validate_v1_fallback(
+            tool_call_parser.as_deref(),
+            mdc.runtime_config.reasoning_parser.as_deref(),
+        )?;
         let normalize_tool_call_args = mdc.runtime_config.tool_call_arguments_format
             == crate::local_model::runtime_config::ToolCallArgumentsFormat::JsonObject
             || mdc.runtime_config.tool_call_parser.as_deref() == Some("glm47");

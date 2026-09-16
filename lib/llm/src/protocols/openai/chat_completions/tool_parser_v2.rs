@@ -14,14 +14,13 @@
 //! adding a family is a one-line change here plus support in that crate.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::LazyLock;
 
 use async_stream::stream;
 use dynamo_protocols::types::{
     ChatCompletionMessageContent, ChatCompletionMessageToolCallChunk, FinishReason,
     FunctionCallStream, FunctionType,
 };
-use dynamo_runtime::config::{env_is_truthy, environment_names::llm as env_llm};
+use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt};
 use uuid::Uuid;
@@ -50,12 +49,84 @@ use super::{NvCreateChatCompletionStreamResponse, stream_choice_chunk_from_templ
 /// dynamo's `tool_call_parser` names so a parser name maps straight to a v2 family.
 pub(crate) const V2_FAMILIES: &[&str] = &["qwen3_coder", "deepseek_v4"];
 
-/// Whether v2 tool-parser routing is enabled. V2 is the default; the explicit rollback
-/// switch selects v1 where a v1 parser is available.
+pub(crate) fn selected_version() -> anyhow::Result<ParserVersion> {
+    parser_version()
+}
+
 pub(crate) fn enabled() -> bool {
-    static ENABLED: LazyLock<bool> =
-        LazyLock::new(|| !env_is_truthy(env_llm::DYN_PARSER_REVERT_TO_V1));
-    *ENABLED
+    match selected_version() {
+        Ok(ParserVersion::Auto | ParserVersion::V2) => true,
+        Ok(ParserVersion::V1) => false,
+        Err(error) => panic!("invalid {}: {error:#}", env_llm::DYN_PARSER_VERSION),
+    }
+}
+
+/// Validate that an explicit parser generation exists for the configured family.
+pub(crate) fn validate_v1_fallback(
+    tool_call_parser: Option<&str>,
+    reasoning_parser: Option<&str>,
+) -> anyhow::Result<()> {
+    validate_v1_fallback_for_mode(selected_version()?, tool_call_parser, reasoning_parser)
+}
+
+fn validate_v1_fallback_for_mode(
+    version: ParserVersion,
+    tool_call_parser: Option<&str>,
+    reasoning_parser: Option<&str>,
+) -> anyhow::Result<()> {
+    match version {
+        ParserVersion::Auto => Ok(()),
+        ParserVersion::V1 => {
+            if [tool_call_parser, reasoning_parser]
+                .into_iter()
+                .flatten()
+                .any(|parser| UNIFIED_FAMILIES.contains(&parser))
+            {
+                anyhow::bail!(
+                    "{}=v1 was requested, but the configured Muse parser has no compatible v1 parser; use {}=auto or select a model with a v1 parser",
+                    env_llm::DYN_PARSER_VERSION,
+                    env_llm::DYN_PARSER_VERSION,
+                );
+            }
+            Ok(())
+        }
+        ParserVersion::V2 => {
+            if ![tool_call_parser, reasoning_parser]
+                .into_iter()
+                .flatten()
+                .any(|parser| V2_FAMILIES.contains(&parser) || UNIFIED_FAMILIES.contains(&parser))
+            {
+                anyhow::bail!(
+                    "{}=v2 was requested, but the configured parser has no compatible v2 implementation",
+                    env_llm::DYN_PARSER_VERSION,
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ParserVersion {
+    Auto,
+    V1,
+    V2,
+}
+
+fn parser_version() -> anyhow::Result<ParserVersion> {
+    match std::env::var(env_llm::DYN_PARSER_VERSION).as_deref() {
+        Ok("v1") => Ok(ParserVersion::V1),
+        Ok("v2") => Ok(ParserVersion::V2),
+        Ok("auto") | Err(std::env::VarError::NotPresent) => Ok(ParserVersion::Auto),
+        Ok(value) => anyhow::bail!(
+            "{} must be unset, auto, v1, or v2; got {value:?}",
+            env_llm::DYN_PARSER_VERSION
+        ),
+        Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!(
+            "{} must be unset, auto, v1, or v2; value is not valid UTF-8",
+            env_llm::DYN_PARSER_VERSION
+        ),
+    }
 }
 
 /// Whether `family` has a v2 parser and should bypass the v1 jail when [`enabled`].
@@ -1417,6 +1488,28 @@ mod tests {
             unified_family(Some("muse_glimmer"), None).is_some(),
             "muse must route by default"
         );
+    }
+
+    #[test]
+    fn v1_fallback_rejects_v2_only_muse_and_allows_v1_families() {
+        assert!(
+            validate_v1_fallback_for_mode(ParserVersion::V1, Some("muse_glimmer"), None).is_err()
+        );
+        assert!(validate_v1_fallback_for_mode(ParserVersion::V1, None, Some("muse")).is_err());
+        assert!(
+            validate_v1_fallback_for_mode(ParserVersion::V1, Some("qwen3_coder"), Some("qwen3"))
+                .is_ok()
+        );
+        assert!(
+            validate_v1_fallback_for_mode(ParserVersion::V1, Some("deepseek_v4"), None).is_ok()
+        );
+        assert!(
+            validate_v1_fallback_for_mode(ParserVersion::Auto, Some("muse_glimmer"), None).is_ok()
+        );
+        assert!(
+            validate_v1_fallback_for_mode(ParserVersion::V2, Some("muse_glimmer"), None).is_ok()
+        );
+        assert!(validate_v1_fallback_for_mode(ParserVersion::V2, Some("hermes"), None).is_err());
     }
 
     #[test]

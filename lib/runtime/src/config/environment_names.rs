@@ -423,7 +423,7 @@ pub mod llm {
     /// Accepted values: "reasoning_content" (default) or "reasoning".
     pub const DYN_REASONING_FIELD_NAME: &str = "DYN_REASONING_FIELD_NAME";
 
-    /// Revert supported parser families to the v1 parser path.
+    /// Select the parser generation. Unset selects the newest compatible generation.
     ///
     /// Which v2 shape a request gets is decided by the configured parsers, not by a
     /// second flag:
@@ -434,9 +434,10 @@ pub mod llm {
     ///   in one ordered stream, so reasoning that followed a tool call stays after it
     ///   instead of being hoisted to the front and fused with the first thought.
     ///
-    /// By default, Dynamo uses a v2 parser when one is available and falls back to v1
-    /// otherwise. Set this to a truthy value to use v1 when that family has a v1 parser.
-    pub const DYN_PARSER_REVERT_TO_V1: &str = "DYN_PARSER_REVERT_TO_V1";
+    /// Accepted values are `auto`, `v1`, `v2`, and future parser generations. Explicit
+    /// generations fail during preprocessor construction when the configured family has
+    /// no compatible parser.
+    pub const DYN_PARSER_VERSION: &str = "DYN_PARSER_VERSION";
 
     /// Rollback lever for incremental guided-tool-call streaming.
     ///
@@ -1069,7 +1070,7 @@ mod tests {
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
             llm::DYN_REASONING_FIELD_NAME,
-            llm::DYN_PARSER_REVERT_TO_V1,
+            llm::DYN_PARSER_VERSION,
             llm::DYN_ENABLE_GUIDED_TOOL_STREAMING,
             llm::DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS,
             llm::DYN_LORA_ALLOCATION_ENABLED,
