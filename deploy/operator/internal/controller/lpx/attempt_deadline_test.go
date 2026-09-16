@@ -402,15 +402,18 @@ func TestLPXAttemptEmptyBatchRetirementPrecedesDeadline(t *testing.T) {
 		name                  string
 		phase                 lpxv1alpha1.RequestPhase
 		replacing, keepClique bool
+		settings              bool
 	}{
 		{name: "scale-in", phase: lpxv1alpha1.RequestPhasePending},
 		{name: "completed-scale-in", phase: lpxv1alpha1.RequestPhaseBound},
 		{name: "native-replacement", phase: lpxv1alpha1.RequestPhasePending, replacing: true},
 		{name: "native-child-still-deleting", phase: lpxv1alpha1.RequestPhasePending, replacing: true, keepClique: true},
 		{name: "completed-native-replacement", phase: lpxv1alpha1.RequestPhaseBound, replacing: true},
+		{name: "settings-edit", phase: lpxv1alpha1.RequestPhasePending, settings: true},
+		{name: "completed-settings-edit", phase: lpxv1alpha1.RequestPhaseBound, settings: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			replacing := tc.replacing
+			replacing := tc.replacing || tc.settings
 			t.Log("Publish two engines, with only the second engine recorded in the scheduling batch")
 			ctx := t.Context()
 			deployment, source, registry := newLPXTestDGD(t, lpx.PipelineSingle)
@@ -433,7 +436,11 @@ func TestLPXAttemptEmptyBatchRetirementPrecedesDeadline(t *testing.T) {
 			deadline := time.Now().UTC().Truncate(time.Second).Add(-time.Minute)
 			deployment.Status.Placement = &nvidiacomv1beta1.PlacementStatus{LPXAttempt: deadlineTestAttempt(deployment, pending, deadline)}
 			source.Spec.Scheduling = deadlineTestScheduling()
-			if replacing {
+			if tc.settings {
+				source.Spec.Components[0].LPX.Settings.Raw = []byte(`{"prop_sync":false}`)
+				deployment.Generation++
+				running.Finalizers = []string{"scheduler.example/cleanup"}
+			} else if replacing {
 				clique := findLPXTestClique(t, objects, desired.plan.ForReplica(1).Agents[0].CliqueName)
 				clique.Finalizers = []string{"grove.example/cleanup"}
 				clique.DeletionTimestamp = ptr.To(metav1.Now())
@@ -454,22 +461,20 @@ func TestLPXAttemptEmptyBatchRetirementPrecedesDeadline(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, r.Get(ctx, key, deployment))
 			attempt := currentLPXAttemptStatus(deployment)
+			require.Equal(t, replacing && tc.phase == lpxv1alpha1.RequestPhasePending, attempt.ExceededAt != nil)
 			if replacing {
 				require.Len(t, attempt.Requests, 1)
 				require.Equal(t, pending.UID, attempt.Requests[0].UID)
 				require.Empty(t, attempt.Requests[0].AttemptDigest)
-				if tc.phase == lpxv1alpha1.RequestPhasePending {
-					require.NotNil(t, attempt.ExceededAt)
-				} else {
+				if tc.phase == lpxv1alpha1.RequestPhaseBound {
 					require.NotNil(t, attempt.DisarmedAt)
 				}
 			} else {
 				require.Equal(t, []nvidiacomv1beta1.LPXAttemptRequestStatus{}, attempt.Requests)
-				require.Nil(t, attempt.ExceededAt)
 				require.NotNil(t, attempt.DisarmedAt)
 			}
 			require.True(t, deadline.Equal(attempt.DeadlineAt.Time))
-			if replacing && !tc.keepClique {
+			if tc.replacing && !tc.keepClique {
 				t.Log("Grove can finish deleting the old clique before scheduler retirement resumes")
 				clique := &grovev1alpha1.PodClique{}
 				cliqueKey := client.ObjectKey{Namespace: deployment.Namespace, Name: desired.plan.ForReplica(1).Agents[0].CliqueName}
@@ -507,15 +512,17 @@ func TestLPXAttemptEmptyBatchRetirementPrecedesDeadline(t *testing.T) {
 				}
 				require.NoError(t, r.Get(ctx, key, deployment))
 				attempt = currentLPXAttemptStatus(deployment)
-				if replacing && tc.phase == lpxv1alpha1.RequestPhaseBound {
+				require.Equal(t, replacing && tc.phase == lpxv1alpha1.RequestPhasePending, attempt.ExceededAt != nil)
+				if tc.replacing && tc.phase == lpxv1alpha1.RequestPhaseBound {
 					require.Nil(t, attempt.DeadlineAt)
 				} else {
 					require.True(t, deadline.Equal(attempt.DeadlineAt.Time))
 				}
 			}
 			if replacing {
-				require.Equal(t, tc.phase == lpxv1alpha1.RequestPhasePending, attempt.ExceededAt != nil)
-				require.Nil(t, attempt.DisarmedAt)
+				if tc.replacing {
+					require.Nil(t, attempt.DisarmedAt)
+				}
 				retiring := getLPXRequest(t, ctx, r.Client, deployment.Namespace, pending.Name)
 				require.False(t, retiring.DeletionTimestamp.IsZero())
 				retiring.Finalizers = []string{lpxAttemptRecordingFinalizer}
@@ -524,15 +531,16 @@ func TestLPXAttemptEmptyBatchRetirementPrecedesDeadline(t *testing.T) {
 				require.NoError(t, err)
 				require.True(t, apierrors.IsNotFound(r.Get(ctx, client.ObjectKeyFromObject(pending), &lpxv1alpha1.LPUPipelineRequest{})))
 			} else {
-				require.Nil(t, attempt.ExceededAt)
 				require.NotNil(t, attempt.DisarmedAt)
 			}
 			stored := getLPXRequest(t, ctx, r.Client, deployment.Namespace, running.Name)
 			require.Equal(t, running.UID, stored.UID)
-			require.True(t, stored.DeletionTimestamp.IsZero())
+			require.Equal(t, tc.settings, !stored.DeletionTimestamp.IsZero())
 			pcs := &grovev1alpha1.PodCliqueSet{}
 			require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: deployment.Namespace, Name: desired.plan.PodCliqueSetName}, pcs))
 			require.Equal(t, types.UID("pcs-uid"), pcs.UID)
+			require.Equal(t, int32(1), pcs.Spec.Replicas)
+			require.True(t, pcs.DeletionTimestamp.IsZero())
 		})
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"time"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -244,8 +245,9 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 func (r *graphReconciler) reconcileWorkload(ctx context.Context, deployment *v1alpha1.LPXGraphDeployment, source *v1beta1.DynamoGraphDeployment, selected *lpxMaterializing) (reconcileOutcome, ctrl.Result, error) {
 	state := reconcileOutcome{State: v1beta1.DGDStatePending, Reason: "LPXPending", Message: "Waiting for the current LPX engine"}
 
+	// Pair retirement with the authoritative PCS, not a cached roster predating current requests.
 	pcs := &grovev1alpha1.PodCliqueSet{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: deployment.Namespace, Name: selected.plan.PodCliqueSetName}, pcs); err != nil {
+	if err := r.apiReader.Get(ctx, client.ObjectKey{Namespace: deployment.Namespace, Name: selected.plan.PodCliqueSetName}, pcs); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return state, ctrl.Result{}, err
 		}
@@ -257,6 +259,19 @@ func (r *graphReconciler) reconcileWorkload(ctx context.Context, deployment *v1a
 	}
 	if err := r.validateLPXPublicationSource(ctx, deployment); err != nil {
 		return state, ctrl.Result{}, err
+	}
+	// Retire obsolete scheduler intent before changing its runtime or engine count.
+	rosterChanged := pcs != nil && metav1.IsControlledBy(pcs, deployment) && !slices.EqualFunc(
+		pcs.Spec.Template.PodCliqueScalingGroupConfigs, desired.Spec.Template.PodCliqueScalingGroupConfigs,
+		func(a, b grovev1alpha1.PodCliqueScalingGroupConfig) bool {
+			return a.Name == b.Name && slices.Equal(a.CliqueNames, b.CliqueNames)
+		})
+	transition, err := r.retireChangedLPXRequests(ctx, deployment, selected, rosterChanged)
+	if err != nil {
+		return state, ctrl.Result{}, err
+	}
+	if transition != nil {
+		return lpxResult(transition), projectLPXLifecycleStatus(deployment, transition), nil
 	}
 	for _, resource := range resources {
 		if err := r.syncLPXResource(ctx, deployment, resource); err != nil {
