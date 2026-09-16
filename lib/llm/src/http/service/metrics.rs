@@ -106,7 +106,14 @@ pub fn request_was_cancelled(err: &(dyn std::error::Error + 'static)) -> bool {
 }
 
 pub fn request_was_timed_out(err: &(dyn std::error::Error + 'static)) -> bool {
-    const TIMEOUT: &[DynamoErrorType] = &[DynamoErrorType::ResponseTimeout];
+    use dynamo_runtime::error::BackendError;
+
+    const TIMEOUT: &[DynamoErrorType] = &[
+        DynamoErrorType::ResponseTimeout,
+        DynamoErrorType::ConnectionTimeout,
+        DynamoErrorType::Backend(BackendError::ResponseTimeout),
+        DynamoErrorType::Backend(BackendError::ConnectionTimeout),
+    ];
     const NON_TIMEOUT: &[DynamoErrorType] = &[];
     dynamo_runtime::error::match_error_chain(err, TIMEOUT, NON_TIMEOUT)
 }

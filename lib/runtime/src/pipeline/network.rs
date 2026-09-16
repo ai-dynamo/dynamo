@@ -893,17 +893,14 @@ mod tests {
             .lifecycle_operation_role
             .set(endpoint_role.clone())
             .expect("new ingress lifecycle role source must be empty");
-        assert_eq!(
-            ingress.lifecycle_operation_role(),
-            LifecycleOperationRole::Worker
-        );
+        assert_eq!(ingress.registered_lifecycle_role(), None);
 
         endpoint_role
             .set(LifecycleOperationRole::Prefill)
             .expect("new endpoint lifecycle role cell must be empty");
         assert_eq!(
-            ingress.lifecycle_operation_role(),
-            LifecycleOperationRole::Prefill
+            ingress.registered_lifecycle_role(),
+            Some(LifecycleOperationRole::Prefill)
         );
     }
 
@@ -1197,7 +1194,6 @@ pub struct Ingress<Req: PipelineIO, Resp: PipelineIO, Adapter = SerdeIngressPayl
     quic_response_client_pool: OnceLock<Arc<quic_response::QuicResponseClientPool>>,
     payload_adapter: Arc<Adapter>,
     lifecycle_operation_role: OnceLock<Arc<OnceLock<LifecycleOperationRole>>>,
-    lifecycle_inference_endpoint: OnceLock<bool>,
 }
 
 impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
@@ -1244,7 +1240,6 @@ where
             quic_response_client_pool: OnceLock::new(),
             payload_adapter: Arc::new(payload_adapter),
             lifecycle_operation_role: OnceLock::new(),
-            lifecycle_inference_endpoint: OnceLock::new(),
         })
     }
 
@@ -1293,14 +1288,6 @@ where
         endpoint: &crate::component::Endpoint,
         metrics_labels: Option<&[(&str, &str)]>,
     ) -> Result<()> {
-        let _ = self
-            .lifecycle_operation_role
-            .set(endpoint.lifecycle_operation_role());
-        // Only generation endpoints participate in the inference lifecycle.
-        // Control-plane RPCs (KV queries, metrics, etc.) keep ordinary tracing.
-        let _ = self
-            .lifecycle_inference_endpoint
-            .set(endpoint.name() == "generate");
         let metrics = WorkHandlerMetrics::from_endpoint(endpoint, metrics_labels)
             .map_err(|e| anyhow::anyhow!("Failed to create work handler metrics: {}", e))?;
 
@@ -1354,17 +1341,27 @@ where
         self.metrics.get()
     }
 
-    fn lifecycle_operation_role(&self) -> LifecycleOperationRole {
+    fn registered_lifecycle_role(&self) -> Option<LifecycleOperationRole> {
         self.lifecycle_operation_role
             .get()
             .and_then(|role| role.get())
             .copied()
-            .unwrap_or(LifecycleOperationRole::Worker)
+    }
+
+    fn bind_lifecycle_endpoint(&self, endpoint: &crate::component::Endpoint) {
+        // Keep an explicitly constructed ingress role; otherwise observe model
+        // registration even when it happens after the endpoint starts serving.
+        let _ = self
+            .lifecycle_operation_role
+            .set(endpoint.lifecycle_operation_role());
     }
 }
 
 #[async_trait]
 pub trait PushWorkHandler: Send + Sync {
+    /// Bind endpoint identity independently of metrics registration.
+    fn bind_endpoint(&self, _endpoint: &crate::component::Endpoint) {}
+
     async fn handle_payload(
         &self,
         payload: Bytes,

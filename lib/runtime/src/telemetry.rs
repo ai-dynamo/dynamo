@@ -3,8 +3,8 @@
 
 //! Native OpenTelemetry request-lifecycle spans.
 //!
-//! This initial registry emits only native span timing and causal parentage. It
-//! intentionally does not attach request attributes, metrics, or detail data.
+//! Coarse runtime timing, causal parentage, request identity, and terminal outcomes.
+//! Engine-internal metrics and invariants are intentionally not instrumented here.
 
 use std::sync::{
     Arc, OnceLock,
@@ -23,12 +23,18 @@ pub const LIFECYCLE_TARGET: &str = "dynamo.request_lifecycle";
 /// Context-registry key used to preserve lifecycle identity through frontend stages.
 pub const LIFECYCLE_TRACE_CONTEXT_KEY: &str = "dynamo.request_lifecycle.trace";
 
+/// Internal wire metadata marking requests with a frontend lifecycle root.
+/// Absent on legacy or uninstrumented frontends; those requests keep ordinary tracing.
+pub const LIFECYCLE_ROOT_METADATA_KEY: &str = "dynamo.lifecycle.root";
+
 const LIFECYCLE_SCHEMA: &str = "v1";
 const DEFAULT_PROFILE: &str = "generic.v1";
 const DEFAULT_MODE: &str = "core";
 
 static PROCESS_EPOCH: OnceLock<String> = OnceLock::new();
 static INSTANCE_ID: OnceLock<String> = OnceLock::new();
+static LIFECYCLE_ENABLED: OnceLock<bool> = OnceLock::new();
+static LIFECYCLE_MODE: OnceLock<&'static str> = OnceLock::new();
 
 /// Operation owner used to distinguish the frontend and P/D worker waves.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -85,8 +91,8 @@ struct LifecycleIdentity {
     /// or prefill/decode operations.
     operation_id: String,
     role: LifecycleOperationRole,
-    profile: String,
-    mode: String,
+    profile: &'static str,
+    mode: &'static str,
     identity_state: &'static str,
 }
 
@@ -100,7 +106,7 @@ impl LifecycleIdentity {
             request_id,
             operation_id: uuid::Uuid::new_v4().to_string(),
             role,
-            profile: DEFAULT_PROFILE.to_string(),
+            profile: DEFAULT_PROFILE,
             mode: lifecycle_mode(),
             identity_state,
         }
@@ -155,7 +161,6 @@ impl LifecycleStage {
                 tracing::info_span!(
                     target: "dynamo.request_lifecycle", $name,
                     "dynamo.request.id" = %identity.request_id,
-                    "dynamo.request.attempt" = 0_u64,
                     "dynamo.operation.id" = %identity.operation_id,
                     "dynamo.operation.role" = identity.role.as_str(),
                     "dynamo.lifecycle.schema" = LIFECYCLE_SCHEMA,
@@ -165,7 +170,6 @@ impl LifecycleStage {
                     "dynamo.instance.id" = instance_id(),
                     "dynamo.process.epoch" = process_epoch(),
                     "dynamo.lifecycle.identity.state" = identity.identity_state,
-                    "dynamo.lifecycle.capture.state" = "recorded",
                 )
             };
         }
@@ -174,7 +178,6 @@ impl LifecycleStage {
             Self::RequestLifecycle => tracing::info_span!(
                 target: "dynamo.request_lifecycle", "request.lifecycle",
                 "dynamo.request.id" = %identity.request_id,
-                "dynamo.request.attempt" = 0_u64,
                 "dynamo.operation.id" = %identity.operation_id,
                 "dynamo.operation.role" = identity.role.as_str(),
                 "dynamo.lifecycle.schema" = LIFECYCLE_SCHEMA,
@@ -184,7 +187,6 @@ impl LifecycleStage {
                 "dynamo.instance.id" = instance_id(),
                 "dynamo.process.epoch" = process_epoch(),
                 "dynamo.lifecycle.identity.state" = identity.identity_state,
-                "dynamo.lifecycle.capture.state" = "recorded",
                 "dynamo.session.id" = tracing::field::Empty,
                 "dynamo.session.source" = tracing::field::Empty,
                 "dynamo.request.terminal.outcome" = tracing::field::Empty,
@@ -425,13 +427,11 @@ impl Drop for TerminalState {
     }
 }
 
-fn lifecycle_mode() -> String {
-    match std::env::var(DYN_LIFECYCLE_TRACE_MODE) {
-        Ok(mode) if mode.trim().eq_ignore_ascii_case("investigation") => {
-            "investigation".to_string()
-        }
-        _ => DEFAULT_MODE.to_string(),
-    }
+fn lifecycle_mode() -> &'static str {
+    LIFECYCLE_MODE.get_or_init(|| match std::env::var(DYN_LIFECYCLE_TRACE_MODE) {
+        Ok(mode) if mode.trim().eq_ignore_ascii_case("investigation") => "investigation",
+        _ => DEFAULT_MODE,
+    })
 }
 
 fn process_epoch() -> &'static str {
@@ -468,7 +468,7 @@ fn worker_response_streaming_stage(role: Option<LifecycleOperationRole>) -> Life
 }
 
 pub(crate) fn lifecycle_tracing_enabled() -> bool {
-    crate::config::env_is_truthy(DYN_LIFECYCLE_TRACE_ENABLED)
+    *LIFECYCLE_ENABLED.get_or_init(|| crate::config::env_is_truthy(DYN_LIFECYCLE_TRACE_ENABLED))
 }
 
 #[cfg(test)]

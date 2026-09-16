@@ -476,7 +476,8 @@ trait IngressDispatch: Send + Sync {
 
     async fn parse_and_build_request(
         &self,
-        payload: Bytes,
+        control_msg: RequestControlMessage,
+        data: Option<Bytes>,
     ) -> Result<ParsedRequest<Self::Request>, PipelineError>;
 }
 
@@ -491,10 +492,9 @@ where
 
     async fn parse_and_build_request(
         &self,
-        payload: Bytes,
+        control_msg: RequestControlMessage,
+        data: Option<Bytes>,
     ) -> Result<ParsedRequest<SingleIn<T>>, PipelineError> {
-        let (control_msg, data) = self.decode_control_message(payload)?;
-
         // The unary path carries the request body in the data half; a
         // header-only envelope means the sender used the bidirectional shape.
         let data = data.ok_or_else(|| {
@@ -550,10 +550,9 @@ where
 
     async fn parse_and_build_request(
         &self,
-        payload: Bytes,
+        control_msg: RequestControlMessage,
+        data: Option<Bytes>,
     ) -> Result<ParsedRequest<ManyIn<T>>, PipelineError> {
-        let (control_msg, data) = self.decode_control_message(payload)?;
-
         // Bidirectional envelopes are header-only — all request frames
         // (including the first) flow on the request-stream socket once it's
         // dialed in. A data payload means the sender used the unary wire
@@ -828,22 +827,6 @@ where
             .unwrap_or_default()
             .as_nanos() as u64;
         let start_time = std::time::Instant::now();
-        let lifecycle = if self.lifecycle_inference_endpoint.get() == Some(&true) {
-            request_id
-                .as_ref()
-                .map(|id| {
-                    LifecycleTrace::from_request_id_with_role(
-                        id.clone(),
-                        self.lifecycle_operation_role(),
-                    )
-                })
-                .unwrap_or_else(|| {
-                    LifecycleTrace::from_environment_with_role(self.lifecycle_operation_role())
-                })
-        } else {
-            LifecycleTrace::new(false)
-        };
-
         // Increment inflight and ensure it's decremented on all exits via RAII guard
         let _inflight_guard = self.metrics().map(|m| {
             m.request_counter.inc();
@@ -860,7 +843,21 @@ where
             }
         });
 
-        // Hold the timing span through setup without entering it: response
+        let (control_msg, data) = self.decode_control_message(payload)?;
+        let lifecycle = match self.registered_lifecycle_role() {
+            Some(role)
+                if control_msg
+                    .metadata
+                    .get(crate::telemetry::LIFECYCLE_ROOT_METADATA_KEY)
+                    .is_some_and(|version| version == "v1") =>
+            {
+                LifecycleTrace::from_request_id_with_role(control_msg.id.clone(), role)
+            }
+            _ => LifecycleTrace::new(false),
+        };
+
+        // Admission begins after the envelope selects capture, before payload
+        // decoding and response setup. Hold without entering it: response
         // readers capture the current span and live until the request ends.
         // They must inherit handle_payload, not prolong worker.admission.
         let worker_admission = lifecycle.start(LifecycleStage::WorkerAdmission);
@@ -869,7 +866,7 @@ where
             response_connection_info,
             frontend_send_ts_ns,
             payload_codec,
-        } = self.parse_and_build_request(payload).await?;
+        } = self.parse_and_build_request(control_msg, data).await?;
 
         // Compute network transit time (T2 - T1) using cross-process wall-clock timestamps
         if let Some(t1_ns) = frontend_send_ts_ns {
@@ -968,6 +965,10 @@ where
     U: Data + std::fmt::Debug,
     Adapter: IngressPayloadAdapter<T, U> + Send + Sync + 'static,
 {
+    fn bind_endpoint(&self, endpoint: &crate::component::Endpoint) {
+        self.bind_lifecycle_endpoint(endpoint);
+    }
+
     fn add_metrics(
         &self,
         endpoint: &crate::component::Endpoint,
@@ -1000,6 +1001,10 @@ where
     U: Data + std::fmt::Debug,
     Adapter: IngressPayloadAdapter<T, U> + Send + Sync + 'static,
 {
+    fn bind_endpoint(&self, endpoint: &crate::component::Endpoint) {
+        self.bind_lifecycle_endpoint(endpoint);
+    }
+
     fn add_metrics(
         &self,
         endpoint: &crate::component::Endpoint,
@@ -1139,13 +1144,33 @@ mod tests {
         use tracing::instrument::WithSubscriber;
         use tracing_subscriber::prelude::*;
 
+        // Configuration is process-scoped. Isolate this enabled-mode test from
+        // other tests which may have initialized the disabled default already.
+        const CHILD: &str = "DYNAMO_LIFECYCLE_ADMISSION_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "pipeline::network::ingress::push_handler::tests::lifecycle_admission_closes_before_generation_and_skips_control_calls",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("DYN_LIFECYCLE_TRACE_ENABLED", "true")
+                .status()
+                .unwrap();
+            assert!(status.success(), "isolated admission regression failed");
+            return;
+        }
+
         temp_env::async_with_vars(
             [
                 ("DYN_LIFECYCLE_TRACE_ENABLED", Some("true")),
                 ("DYN_RESPONSE_PLANE", Some("tcp")),
             ],
             async {
-                for inference in [true, false] {
+                for (inference, rooted) in
+                    [(true, true), (true, false), (false, true), (false, false)]
+                {
                     let capture = AdmissionCapture::default();
                     let subscriber = tracing_subscriber::registry().with(capture.clone());
                     async {
@@ -1155,10 +1180,16 @@ mod tests {
                             let (mut socket, _) = listener.accept().await.unwrap();
                             let _ = tokio::io::copy(&mut socket, &mut tokio::io::sink()).await;
                         });
-                        let ingress =
-                            TestIngress::for_engine(Arc::new(AdmissionProbe(capture, inference)))
-                                .unwrap();
-                        ingress.lifecycle_inference_endpoint.set(inference).unwrap();
+                        let engine = Arc::new(AdmissionProbe(capture, inference && rooted));
+                        let ingress = if inference {
+                            TestIngress::for_engine_with_lifecycle_role(
+                                engine,
+                                crate::telemetry::LifecycleOperationRole::Worker,
+                            )
+                        } else {
+                            TestIngress::for_engine(engine)
+                        }
+                        .unwrap();
                         let connection: ConnectionInfo = tcp::TcpStreamConnectionInfo {
                             address,
                             subject: "admission-probe".to_string(),
@@ -1166,11 +1197,20 @@ mod tests {
                             stream_type: crate::pipeline::network::StreamType::Response,
                         }
                         .into();
+                        let metadata = if rooted {
+                            std::collections::BTreeMap::from([(
+                                crate::telemetry::LIFECYCLE_ROOT_METADATA_KEY,
+                                "v1",
+                            )])
+                        } else {
+                            std::collections::BTreeMap::new()
+                        };
                         let header = serde_json::to_vec(&serde_json::json!({
                             "id": "admission-probe",
                             "request_type": "single_in",
                             "response_type": "many_out",
                             "connection_info": connection,
+                            "metadata": metadata,
                         }))
                         .unwrap();
                         let payload = TwoPartCodec::default()
