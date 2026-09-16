@@ -98,7 +98,6 @@ struct NamespaceReadinessEval {
     ambiguous: std::collections::HashSet<crate::worker_type::WorkerType>,
 }
 
-/// How often one model may report that it has no servable WorkerSet.
 /// See [`Model::claim_engine_error_report`].
 const ENGINE_ERROR_REPORT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
@@ -106,8 +105,10 @@ const ENGINE_ERROR_REPORT_INTERVAL: std::time::Duration = std::time::Duration::f
 pub struct Model {
     name: String,
     worker_sets: DashMap<String, Arc<WorkerSet>>,
-    /// When this model last reported having no servable WorkerSet.
-    last_engine_error_report: std::sync::Mutex<Option<std::time::Instant>>,
+    /// Shared with every [`Model::snapshot`] of this model: requests run against
+    /// committed snapshots, so a throttle held per-snapshot would restart on each
+    /// catalog publication.
+    last_engine_error_report: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
 }
 
 impl Model {
@@ -115,7 +116,7 @@ impl Model {
         Self {
             name,
             worker_sets: DashMap::new(),
-            last_engine_error_report: std::sync::Mutex::new(None),
+            last_engine_error_report: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -189,7 +190,11 @@ impl Model {
     /// long-lived. The membership map is copied so later discovery mutations cannot leak
     /// through an older published catalog.
     pub(crate) fn snapshot(&self) -> Self {
-        let snapshot = Self::new(self.name.clone());
+        let snapshot = Self {
+            name: self.name.clone(),
+            worker_sets: DashMap::new(),
+            last_engine_error_report: Arc::clone(&self.last_engine_error_report),
+        };
         for entry in &self.worker_sets {
             snapshot
                 .worker_sets
@@ -976,6 +981,20 @@ mod tests {
         assert_eq!(model.name(), "llama");
         assert!(model.is_empty());
         assert_eq!(model.worker_set_count(), 0);
+    }
+
+    #[test]
+    fn engine_error_report_stays_throttled_across_snapshots() {
+        let model = Model::new("llama".to_string());
+        assert!(model.claim_engine_error_report());
+
+        // Requests run against committed snapshots, and a publication builds a new
+        // one; the throttle has to carry over or a republishing model reports on
+        // every request.
+        let snapshot = model.snapshot();
+        assert!(!snapshot.claim_engine_error_report());
+        assert!(!snapshot.snapshot().claim_engine_error_report());
+        assert!(!model.claim_engine_error_report());
     }
 
     #[test]

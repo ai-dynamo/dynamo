@@ -137,9 +137,14 @@ mod tests {
         assert!(filter.matches("ns-def456"));
         assert!(!filter.matches("other-ns"));
         assert!(!filter.matches(""));
-        // A sibling deployment sharing a string prefix is a different scope.
         assert!(!filter.matches("ns2"));
         assert!(!filter.matches("nsother-abc123"));
+
+        let filter = NamespaceFilter::Prefix("myns-dgd".to_string());
+        assert!(filter.matches("myns-dgd"));
+        assert!(filter.matches("myns-dgd-abc123"));
+        assert!(!filter.matches("myns-dgd2"));
+        assert!(!filter.matches("myns"));
     }
 
     #[test]

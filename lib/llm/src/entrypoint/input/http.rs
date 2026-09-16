@@ -243,8 +243,6 @@ where
                 model.namespace(),
                 model.namespace_prefix(),
             );
-            // The prefix wins over the namespace whenever it is set, so log both
-            // inputs alongside the scope they resolved to.
             tracing::info!(
                 scope = ?namespace_filter,
                 namespace = model.namespace().unwrap_or("<unset>"),

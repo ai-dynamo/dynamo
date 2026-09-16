@@ -1058,16 +1058,6 @@ mod tests {
     }
 
     #[test]
-    fn prefix_scope_stops_at_a_hyphen() {
-        let filter = NamespaceFilter::Prefix("myns-dgd".to_string());
-
-        assert!(filter.matches("myns-dgd"));
-        assert!(filter.matches("myns-dgd-abc123"));
-        assert!(!filter.matches("myns-dgd2"));
-        assert!(!filter.matches("myns"));
-    }
-
-    #[test]
     fn global_prefix_scope_matches_model_discovery() {
         let filter = resolve_namespace_filter(Some("ns"), Some(GLOBAL_NAMESPACE), None);
 

@@ -46,12 +46,9 @@ const SNAPSHOT_WITH_TOKENIZER: &str = "mock-llama-3.1-8b-instruct";
 /// How long a worker set gets to commit before a case calls it absent.
 const COMMIT_WINDOW: Duration = Duration::from_secs(5);
 
-/// A prefix scope covers one deployment and its worker generations, not a
-/// sibling deployment whose namespace merely starts with the same string.
-/// `ComputeDynamoNamespace` builds `<k8s namespace>-<deployment name>`, so
-/// deployments `dgd` and `dgd2` in one Kubernetes namespace are `myns-dgd` and
-/// `myns-dgd2`. With a bare `starts_with` the frontend of `dgd` serves `dgd2`'s
-/// workers under `dgd2`'s model name.
+/// A frontend scoped to a sibling deployment's prefix must answer 404, not serve
+/// that deployment's workers under its model name. See [`NamespaceFilter::matches`]
+/// for why a bare `starts_with` crosses the boundary.
 #[tokio::test]
 async fn chat_completions_answers_404_for_a_sibling_prefix_namespace() {
     let frontend = Frontend::start(
