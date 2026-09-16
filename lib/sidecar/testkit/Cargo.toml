@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-sidecar-testkit"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "CPU-only test infrastructure for Dynamo sidecars"
+publish = false
+
+[dependencies]
+anyhow = { workspace = true }
+async-stream = { workspace = true }
+dynamo-backend-common = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+dynamo-backend-common = { workspace = true, features = ["testing"] }
+dynamo-mocker = { workspace = true }
+dynamo-vllm-mocker = { path = "../../mocker/servers/vllm" }
+dynamo-sglang-mocker = { path = "../../mocker/servers/sglang" }
+dynamo-vllm-sidecar = { path = "../vllm" }
+dynamo-sglang-sidecar = { path = "../sglang" }
+rstest = "0.26"
+tokio-stream = { workspace = true, features = ["net"] }
+tonic = { workspace = true }

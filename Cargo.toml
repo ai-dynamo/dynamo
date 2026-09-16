@@ -24,6 +24,7 @@ members = [
     "lib/backend-common",
     "lib/backend-common/examples/mocker",
     "lib/sidecar/common",
+    "lib/sidecar/testkit",
     "lib/sidecar/vllm",
     "lib/mocker/servers/vllm",
     "lib/sidecar/sglang",

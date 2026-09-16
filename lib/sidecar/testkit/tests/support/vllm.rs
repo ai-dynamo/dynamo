@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_backend_common::BackendError;
-use dynamo_mocker::common::protocols::MockEngineArgs;
+use dynamo_mocker::common::protocols::EngineType;
+use dynamo_sidecar_testkit::control::{Controller, Protocol};
+use dynamo_sidecar_testkit::server::TestServer;
 use dynamo_vllm_mocker::{MockerServerConfig, VllmMockerService};
 use dynamo_vllm_sidecar::VllmSidecarEngine;
 use dynamo_vllm_sidecar::proto::{
@@ -10,49 +12,47 @@ use dynamo_vllm_sidecar::proto::{
     generate_server::{Generate, GenerateServer},
 };
 use futures::stream::BoxStream;
-use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
 
-#[path = "../../tests/common/mod.rs"]
-mod common;
+use super::{FixtureConfig, SidecarFixture, fast_engine_args};
 
-struct Fixture {
-    endpoint: String,
+pub struct Fixture {
+    config: FixtureConfig,
     service: VllmMockerService,
-    server: JoinHandle<()>,
+    server: TestServer,
 }
 
-impl common::SidecarFixture for Fixture {
+impl SidecarFixture for Fixture {
     type Engine = VllmSidecarEngine;
+    type Protocol = Adapter;
 
-    async fn start(control: common::Control) -> Self {
-        let args = MockEngineArgs::builder()
-            .block_size(4)
-            .num_gpu_blocks(4_096)
-            .max_num_seqs(Some(64))
-            .max_num_batched_tokens(Some(1_024))
-            .speedup_ratio(0.0)
-            .dp_size(1)
-            .build()
-            .unwrap();
-        let service = VllmMockerService::new(MockerServerConfig::default(), args).unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
+    async fn start(control: Controller<Adapter>, config: FixtureConfig) -> Self {
+        let service = VllmMockerService::new(
+            MockerServerConfig {
+                model: config.model.clone(),
+                ..Default::default()
+            },
+            fast_engine_args(EngineType::Vllm),
+        )
+        .unwrap();
         let controlled = ControlledService {
             inner: service.clone(),
             control,
         };
-        let server = tokio::spawn(async move {
+        let server = TestServer::start(move |listener, shutdown| async move {
             tonic::transport::Server::builder()
                 .add_service(GenerateServer::new(controlled))
-                .serve_with_incoming(TcpListenerStream::new(listener))
-                .await
-                .unwrap();
-        });
+                .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
+                    let _ = shutdown.await;
+                })
+                .await?;
+            Ok(())
+        })
+        .await
+        .unwrap();
         Self {
-            endpoint: format!("http://{address}"),
+            config,
             service,
             server,
         }
@@ -62,11 +62,11 @@ impl common::SidecarFixture for Fixture {
         VllmSidecarEngine::from_args(Some(vec![
             "dynamo-vllm-sidecar".into(),
             "--vllm-endpoint".into(),
-            self.endpoint.clone(),
+            self.server.endpoint(),
             "--model-path".into(),
-            "mocker-model".into(),
+            self.config.model.clone(),
             "--grpc-connections".into(),
-            "1".into(),
+            self.config.connections.to_string(),
             "--grpc-startup-deadline-secs".into(),
             "5".into(),
             "--grpc-connect-attempt-timeout-secs".into(),
@@ -83,18 +83,16 @@ impl common::SidecarFixture for Fixture {
     fn active_request_count(&self) -> usize {
         self.service.active_request_count()
     }
-}
 
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        self.server.abort();
+    async fn shutdown(&mut self) {
+        self.server.shutdown().await.unwrap();
     }
 }
 
 #[derive(Clone)]
 struct ControlledService {
     inner: VllmMockerService,
-    control: common::Control,
+    control: Controller<Adapter>,
 }
 
 #[tonic::async_trait]
@@ -112,26 +110,40 @@ impl Generate for ControlledService {
         &self,
         request: Request<pb::GenerateRequest>,
     ) -> Result<Response<Self::GenerateStreamStream>, Status> {
-        let guard = self.control.open(&request.get_ref().request_id).await?;
+        let opened = self.control.open(request.get_ref()).await?;
         let response = self.inner.generate_stream(request).await?;
-        Ok(Response::new(
-            self.control.stream(response.into_inner(), guard),
-        ))
+        Ok(Response::new(opened.wrap(response.into_inner())))
     }
 }
 
-impl common::NativeResponse for pb::GenerateResponse {
-    fn record_tokens(&self, tokens: &mut Vec<u32>) -> bool {
-        let Some(output) = &self.outputs else {
+#[derive(Clone, Copy)]
+pub struct Adapter;
+
+impl Protocol for Adapter {
+    type Request = pb::GenerateRequest;
+    type Response = pb::GenerateResponse;
+    type Error = Status;
+
+    fn request_id(request: &Self::Request) -> &str {
+        &request.request_id
+    }
+
+    fn record_tokens(response: &Self::Response, tokens: &mut Vec<u32>) -> bool {
+        let Some(output) = &response.outputs else {
             return false;
         };
         tokens.extend_from_slice(&output.token_ids);
         !output.token_ids.is_empty()
     }
 
-    fn is_terminal(&self) -> bool {
-        self.outputs
+    fn is_terminal(response: &Self::Response) -> bool {
+        response
+            .outputs
             .as_ref()
             .is_some_and(|output| output.finish_info.is_some())
+    }
+
+    fn injected_error(message: &'static str) -> Self::Error {
+        Status::unavailable(message)
     }
 }

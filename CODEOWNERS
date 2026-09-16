@@ -214,6 +214,7 @@
 /lib/bindings/python/                                                        @ai-dynamo/dynamo-runtime-codeowners
 /lib/llm/src/kernels/                                                        @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/benches/                                                        @ai-dynamo/dynamo-runtime-codeowners
+/lib/sidecar/testkit/                                                        @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/examples/                                                       @ai-dynamo/dynamo-runtime-codeowners
 /lib/sidecar/README.md                                                       @ai-dynamo/dynamo-runtime-codeowners
 /tests/serve/fixtures/                                                       @ai-dynamo/dynamo-runtime-codeowners
