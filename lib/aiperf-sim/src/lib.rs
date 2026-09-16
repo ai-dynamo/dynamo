@@ -27,7 +27,7 @@ use aisimulate_core::replay::loadgen::{DynPlacement, SteppableAgg, SteppableRepl
 use aisimulate_core::replay::{ReplayEngineConfig, ReplayEngineFactory};
 use anyhow::{Context, Result};
 use dynamo_mocker::placement::{
-    KvReplayMetadata, KvRouterPlacement, MockEngineArgs, MockEngineArgsBuilder,
+    KvReplayMetadata, KvRouterConfig, KvRouterPlacement, MockEngineArgs, MockEngineArgsBuilder,
     RouterEventObservation,
 };
 
@@ -115,7 +115,10 @@ impl OfflineEngineFactory for DynamoKvRouterEngineFactory {
                     );
                     let placement = KvRouterPlacement::new(
                         &mock_args,
-                        None,
+                        Some(KvRouterConfig {
+                            router_queue_threshold: Some(0.0),
+                            ..KvRouterConfig::default()
+                        }),
                         None,
                         topology.len(),
                         Some(seed),

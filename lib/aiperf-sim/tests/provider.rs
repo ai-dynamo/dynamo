@@ -9,10 +9,260 @@ use aiperf_runtime::protocol_v2::{EnvelopeV2, OperationV2, PROTOCOL_V2, Sequence
 use aiperf_simulate::aisimulate::{
     OfflineEngineConfig, OfflineEngineFactory, OfflinePlacement, OfflineTopology,
 };
-use aisimulate_core::replay::DirectRequest;
+use aiperf_steppable_abi::{
+    ByteSliceV1, CreateRequestV1, DirectRequestV1, REQUEST_FACT_FLAG_ADMISSION,
+    REQUEST_FACT_FLAG_LATENCIES, REQUEST_FACT_FLAG_OUTPUT_LENGTH, REQUEST_FLAG_ARRIVAL_TIMESTAMP,
+    REQUEST_FLAG_UUID, ReplayContextV1, ReplayHandleV1, StatusV1, StepRequestV1, StepResultV1,
+    U32SliceV1, validate_descriptor_v1,
+};
+use aisimulate_core::replay::{DirectRequest, ReplayTerminalStatus};
 use dynamo_aiperf_sim::{
     DynamoAIPerfRegistryFactory, DynamoAISimulateExtension, DynamoKvRouterEngineFactory,
 };
+use uuid::Uuid;
+
+type RequestFactTrace = ([u8; 16], u32, u64, u64, f64, f64, f64);
+
+#[derive(Debug, PartialEq)]
+struct StepTrace {
+    end_ms: f64,
+    events: Vec<([u8; 16], u32, u32)>,
+    facts: Vec<RequestFactTrace>,
+}
+
+fn request(request: u8) -> DirectRequest {
+    let prefix = if request.is_multiple_of(2) {
+        1_000
+    } else {
+        2_000
+    };
+    DirectRequest {
+        tokens: (0..64).map(|offset| prefix + offset).collect(),
+        max_output_tokens: 8,
+        uuid: Some(Uuid::from_bytes([request; 16])),
+        dp_rank: 0,
+        arrival_timestamp_ms: Some(0.0),
+        ..DirectRequest::default()
+    }
+}
+
+fn terminal_status(status: Option<ReplayTerminalStatus>) -> u32 {
+    match status {
+        Some(ReplayTerminalStatus::Completed) => 1,
+        Some(ReplayTerminalStatus::Rejected) => 2,
+        Some(ReplayTerminalStatus::Canceled) => 3,
+        Some(ReplayTerminalStatus::Failed) => 4,
+        None => 0,
+    }
+}
+
+fn native_trace(config: &OfflineEngineConfig) -> Vec<StepTrace> {
+    let mut engine = DynamoKvRouterEngineFactory::default()
+        .build(config)
+        .expect("source-linked KV-router engine builds");
+    for request_id in 0_u8..24 {
+        engine
+            .submit(request(request_id))
+            .expect("request is accepted");
+    }
+
+    let mut trace = Vec::new();
+    while !engine.is_idle() {
+        let outcome = engine
+            .step_until(1_000_000.0)
+            .expect("source-linked replay advances");
+        let facts = outcome
+            .events
+            .iter()
+            .filter_map(|event| {
+                let mut flags = 0;
+                let mut reused_input_tokens = 0;
+                let mut admission_ms = 0.0;
+                if let Some((at_ms, reused)) = engine.request_admission(event.uuid) {
+                    flags |= REQUEST_FACT_FLAG_ADMISSION;
+                    admission_ms = at_ms;
+                    reused_input_tokens = reused as u64;
+                }
+                let mut ttft_ms = 0.0;
+                let mut mean_itl_ms = 0.0;
+                if let Some((ttft, mean_itl)) = engine.request_latencies(event.uuid) {
+                    flags |= REQUEST_FACT_FLAG_LATENCIES;
+                    ttft_ms = ttft;
+                    mean_itl_ms = mean_itl;
+                }
+                let mut output_length = 0;
+                if let Some(length) = engine.actual_output_length(event.uuid) {
+                    flags |= REQUEST_FACT_FLAG_OUTPUT_LENGTH;
+                    output_length = length as u64;
+                }
+                (flags != 0).then_some((
+                    *event.uuid.as_bytes(),
+                    flags,
+                    reused_input_tokens,
+                    output_length,
+                    admission_ms,
+                    ttft_ms,
+                    mean_itl_ms,
+                ))
+            })
+            .collect();
+        trace.push(StepTrace {
+            end_ms: outcome.end_ms,
+            events: outcome
+                .events
+                .into_iter()
+                .map(|event| {
+                    (
+                        *event.uuid.as_bytes(),
+                        u32::from(event.emitted_token)
+                            | (u32::from(event.terminal_status.is_some()) << 1),
+                        terminal_status(event.terminal_status),
+                    )
+                })
+                .collect(),
+            facts,
+        });
+    }
+    trace
+}
+
+fn monolithic_trace(config: &OfflineEngineConfig) -> Vec<StepTrace> {
+    let descriptor = dynamo_steppable_provider::aiperf_steppable_plugin_v1();
+    let table = unsafe { &*validate_descriptor_v1(descriptor).expect("complete V1 descriptor") };
+    let backend_config = dynamo_steppable_provider::BackendConfig {
+        topology: dynamo_steppable_provider::BackendTopology::Aggregated,
+        engine: config
+            .aggregate_replay_engine_config()
+            .expect("aggregate replay config"),
+        workers: config.workers,
+        dynamic_placement: Some(dynamo_steppable_provider::DynamicPlacementLocator {
+            library_path: PathBuf::from("unused-by-monolith"),
+            selector_seed: [7; 32],
+            options_namespace: Vec::new(),
+            provider_options: Vec::new(),
+            limits: dynamo_steppable_provider::DynamicPlacementLimits::default(),
+        }),
+        ..dynamo_steppable_provider::BackendConfig::default()
+    };
+    let payload = serde_json::to_vec(&backend_config).expect("serializable monolith config");
+    let mut handle = ReplayHandleV1(std::ptr::null_mut());
+    let mut error = ByteSliceV1::EMPTY;
+    assert_eq!(
+        unsafe {
+            table.create.expect("create")(
+                CreateRequestV1 {
+                    struct_size: std::mem::size_of::<CreateRequestV1>() as u32,
+                    flags: 0,
+                    provider_payload: ByteSliceV1 {
+                        data: payload.as_ptr(),
+                        len: payload.len() as u64,
+                    },
+                },
+                &mut handle,
+                &mut error,
+            )
+        },
+        StatusV1::OK
+    );
+
+    for request_id in 0_u8..24 {
+        let request = request(request_id);
+        let mut submitted_id = [0; 16];
+        assert_eq!(
+            unsafe {
+                table.submit.expect("submit")(
+                    handle,
+                    DirectRequestV1 {
+                        struct_size: std::mem::size_of::<DirectRequestV1>() as u32,
+                        flags: REQUEST_FLAG_UUID | REQUEST_FLAG_ARRIVAL_TIMESTAMP,
+                        tokens: U32SliceV1 {
+                            data: request.tokens.as_ptr(),
+                            len: request.tokens.len() as u64,
+                        },
+                        output_token_ids: U32SliceV1::EMPTY,
+                        max_output_tokens: request.max_output_tokens as u64,
+                        uuid: *request.uuid.expect("explicit UUID").as_bytes(),
+                        dp_rank: request.dp_rank,
+                        preferred_dp_rank: 0,
+                        preferred_prefill_dp_rank: 0,
+                        arrival_timestamp_ms: request.arrival_timestamp_ms.expect("arrival"),
+                        priority: 0,
+                        strict_priority: 0,
+                        policy_class: ByteSliceV1::EMPTY,
+                        replay_context: ReplayContextV1::EMPTY,
+                    },
+                    &mut submitted_id,
+                )
+            },
+            StatusV1::OK
+        );
+    }
+
+    let mut trace = Vec::new();
+    loop {
+        let mut result = StepResultV1::EMPTY;
+        assert_eq!(
+            unsafe {
+                table.step.expect("step")(
+                    handle,
+                    StepRequestV1 {
+                        struct_size: std::mem::size_of::<StepRequestV1>() as u32,
+                        flags: 0,
+                        until_ms: 1_000_000.0,
+                    },
+                    &mut result,
+                )
+            },
+            StatusV1::OK
+        );
+        let events = if result.events.len == 0 {
+            Vec::new()
+        } else {
+            unsafe { std::slice::from_raw_parts(result.events.data, result.events.len as usize) }
+                .iter()
+                .map(|event| (event.request_id, event.flags, event.terminal_status))
+                .collect()
+        };
+        let facts = if result.request_facts.len == 0 {
+            Vec::new()
+        } else {
+            unsafe {
+                std::slice::from_raw_parts(
+                    result.request_facts.data,
+                    result.request_facts.len as usize,
+                )
+            }
+            .iter()
+            .map(|fact| {
+                (
+                    fact.request_id,
+                    fact.flags,
+                    fact.reused_input_tokens,
+                    fact.output_length,
+                    fact.admission_ms,
+                    fact.ttft_ms,
+                    fact.mean_itl_ms,
+                )
+            })
+            .collect()
+        };
+        let is_idle = result.is_idle != 0;
+        trace.push(StepTrace {
+            end_ms: result.end_ms,
+            events,
+            facts,
+        });
+        unsafe {
+            table.release_events.expect("release events")(result.events);
+            table.release_request_facts.expect("release facts")(result.request_facts);
+        }
+        if is_idle {
+            break;
+        }
+    }
+    unsafe { table.destroy.expect("destroy")(handle) };
+    trace
+}
 
 fn kv_router_config(selector_seed: u64) -> OfflineEngineConfig {
     OfflineEngineConfig {
@@ -64,6 +314,23 @@ fn dynamo_provider_builds_a_seeded_kv_router_engine() {
         .expect("request is admitted through the KV router");
 
     assert!(engine.next_event_ms().is_some());
+}
+
+#[test]
+fn dynamo_provider_matches_the_monolithic_router_admission_schedule() {
+    let config = OfflineEngineConfig {
+        topology: OfflineTopology::Aggregated,
+        workers: 8,
+        placement: OfflinePlacement::KvRouter {
+            selector_seed: Some(0x0707_0707_0707_0707),
+        },
+        ..OfflineEngineConfig::default()
+    };
+    assert_eq!(
+        native_trace(&config),
+        monolithic_trace(&config),
+        "source-linked and monolithic engines must schedule the same replay"
+    );
 }
 
 #[test]

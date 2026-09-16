@@ -33,4 +33,7 @@ dynamo-mocker = { path = "../mocker", features = ["replay-bench"] }
 
 [dev-dependencies]
 aiperf-runtime = { git = "https://github.com/NVIDIA-dev/aiperf-rs.git", rev = "61e34f3f41d5687e01a6dbda813c54bc93aa3baf", features = ["test-support"] }
+aiperf-steppable-abi = { path = "../steppable-abi", version = "0.13.0" }
+dynamo-steppable-provider = { path = "../steppable-provider" }
 serde_json = "1"
+uuid = "1"

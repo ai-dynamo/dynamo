@@ -776,6 +776,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "aiperf-steppable-abi"
+version = "0.13.0"
+
+[[package]]
 name = "aiperf-streaming"
 version = "0.13.0"
 source = "git+https://github.com/NVIDIA-dev/aiperf-rs.git?rev=61e34f3f41d5687e01a6dbda813c54bc93aa3baf#61e34f3f41d5687e01a6dbda813c54bc93aa3baf"
@@ -1994,11 +1998,14 @@ dependencies = [
  "aiperf-protocol",
  "aiperf-runtime",
  "aiperf-simulate",
+ "aiperf-steppable-abi",
  "aisimulate-core",
  "anyhow",
  "dynamo-kv-router",
  "dynamo-mocker",
+ "dynamo-steppable-provider",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
@@ -2124,6 +2131,19 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
+]
+
+[[package]]
+name = "dynamo-steppable-provider"
+version = "1.5.0"
+dependencies = [
+ "aiperf-steppable-abi",
+ "aisimulate-core",
+ "anyhow",
+ "dynamo-mocker",
+ "serde",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]
