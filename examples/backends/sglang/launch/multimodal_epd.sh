@@ -181,10 +181,12 @@ WORKER_PID=$!
 
 if [[ "$SINGLE_GPU" == "true" ]]; then
     # Both workers load onto the same card here, and SGLang sizes each KV pool
-    # against the memory free at load time (this config passes no
-    # --max-total-tokens), so how much each one gets depends on how the two
-    # loads interleave. Gate the encode worker on the PD worker to fix that
-    # order. The gate direction is forced: the encode worker withholds its own
+    # against the memory free at load time. build_sglang_gpu_mem_args caps that
+    # with --max-total-tokens only when the caller sets
+    # _PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS (see GPU_MEM_ARGS above);
+    # uncapped, how much each worker gets depends on how the two loads
+    # interleave. Gate the encode worker on the PD worker to fix that order.
+    # The gate direction is forced: the encode worker withholds its own
     # readiness until backend.generate has instances, which only the PD worker
     # registers, so the encode worker's /health can never turn 200 first.
     # Watch WORKER_PID as well as the endpoint -- a worker that dies while
