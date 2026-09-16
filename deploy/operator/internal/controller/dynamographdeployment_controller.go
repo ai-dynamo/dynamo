@@ -40,7 +40,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -372,22 +371,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 		}))
 	}
 	if r.RuntimeConfig.Gate.Enabled(features.DisaggregatedSet) {
-		disaggregatedSetWatches := newDisaggregatedSetWatchMapper(mgr.GetClient())
-		ctrlBuilder = ctrlBuilder.Owns(newDisaggregatedSetObject(), builder.WithPredicates(predicate.Funcs{
-			CreateFunc:  func(ce event.CreateEvent) bool { return false },
-			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
-			UpdateFunc:  func(ue event.UpdateEvent) bool { return disaggregatedSetStatusChanged(ue.ObjectOld, ue.ObjectNew) },
-			GenericFunc: func(ge event.GenericEvent) bool { return true },
-		})).Watches(
-			&leaderworkersetv1.LeaderWorkerSet{},
-			handler.EnqueueRequestsFromMapFunc(disaggregatedSetWatches.MapChildLWSToDGD),
-			builder.WithPredicates(predicate.Funcs{
-				CreateFunc:  func(ce event.CreateEvent) bool { return true },
-				DeleteFunc:  func(de event.DeleteEvent) bool { return true },
-				UpdateFunc:  func(ue event.UpdateEvent) bool { return leaderWorkerSetStatusChanged(ue.ObjectOld, ue.ObjectNew) },
-				GenericFunc: func(ge event.GenericEvent) bool { return false },
-			}),
-		)
+		ctrlBuilder = newDisaggregatedSetWatchSetup(mgr.GetClient()).addTo(ctrlBuilder)
 	}
 	if r.RuntimeConfig.Gate.Enabled(features.Grove) {
 		ctrlBuilder = newGroveWatchSetup(r.Client).addTo(ctrlBuilder)

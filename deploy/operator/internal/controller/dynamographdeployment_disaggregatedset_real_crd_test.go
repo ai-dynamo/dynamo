@@ -65,7 +65,7 @@ func TestDisaggregatedSetRealLWSCRDValidationAndConvergence(t *testing.T) {
 	_, found, err := unstructured.NestedFieldNoCopy(desired.Object, "spec", "slices")
 	require.NoError(t, err)
 	require.False(t, found, "DGD does not expose slice cardinality before the grouping API lands")
-	modified, current, err := workloads.syncDisaggregatedSet(t.Context(), dgd, desired)
+	current, modified, err := workloads.resources.Reconcile(t.Context(), dgd, desired)
 	require.NoError(t, err)
 	require.True(t, modified)
 	slices, found, err := unstructured.NestedInt64(current.Object, "spec", "slices")
@@ -76,7 +76,7 @@ func TestDisaggregatedSetRealLWSCRDValidationAndConvergence(t *testing.T) {
 	t.Log("Reconcile identical desired state after API defaulting")
 	desired, err = workloads.generateDisaggregatedSet(t.Context(), dgd, dcds, selection)
 	require.NoError(t, err)
-	modified, _, err = workloads.syncDisaggregatedSet(t.Context(), dgd, desired)
+	_, modified, err = workloads.resources.Reconcile(t.Context(), dgd, desired)
 	require.NoError(t, err)
 	require.False(t, modified, "an identical desired DisaggregatedSet must converge after API defaulting")
 }
