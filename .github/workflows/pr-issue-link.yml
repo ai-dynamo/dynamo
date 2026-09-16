@@ -88,11 +88,14 @@ jobs:
       - run: pip install pytest
       # The check treats an unverifiable reference as an outage and passes, so
       # what becomes a candidate and when the check may fail open are the two
-      # properties worth pinning. Overriding the repository's pytest ini keeps
-      # this independent of the root test configuration.
+      # properties worth pinning. The ini overrides and --confcutdir keep this
+      # independent of the root test configuration, which the sparse checkout
+      # above cannot satisfy anyway: it brings down the root conftest.py
+      # without the tests/ package that conftest imports.
       - name: Unit tests (issue-link check)
         run: |
           python -m pytest .github/workflows/test_pr_issue_link.py -v \
             -p no:cacheprovider \
+            --confcutdir=.github/workflows \
             --override-ini="addopts=" \
             --override-ini="filterwarnings="
