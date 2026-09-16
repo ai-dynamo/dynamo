@@ -4,7 +4,7 @@
 """Facade-level tests: backend resolution + SSRF revalidation loop.
 
 Per-backend exception mapping lives in
-``test_aiohttp_client.py`` / ``test_httpx_client.py``.
+``test_aiohttp_client.py``.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from unittest.mock import patch
 import pytest
 
 from dynamo.common import http as mm_http
-from dynamo.common.http import AiohttpClient, HttpxClient, from_env
+from dynamo.common.http import AiohttpClient, from_env
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 
 pytestmark = [
@@ -47,15 +47,15 @@ async def test_default_backend_is_aiohttp(monkeypatch) -> None:
     assert isinstance(mm_http.get_default_client(), AiohttpClient)
 
 
-async def test_httpx_backend_selected(monkeypatch) -> None:
+async def test_stale_backend_falls_back_to_aiohttp(monkeypatch) -> None:
+    # The httpx backend was removed; any non-aiohttp value warns and uses aiohttp.
     monkeypatch.setenv("DYN_HTTP_BACKEND", "httpx")
-    assert isinstance(mm_http.get_default_client(), HttpxClient)
+    assert isinstance(mm_http.get_default_client(), AiohttpClient)
 
 
-async def test_invalid_backend_raises(monkeypatch) -> None:
+async def test_unknown_backend_falls_back_to_aiohttp(monkeypatch) -> None:
     monkeypatch.setenv("DYN_HTTP_BACKEND", "requests")
-    with pytest.raises(ValueError, match="DYN_HTTP_BACKEND"):
-        mm_http.get_default_client()
+    assert isinstance(mm_http.get_default_client(), AiohttpClient)
 
 
 async def test_legacy_mm_http_env_var_still_honored(monkeypatch) -> None:
@@ -81,10 +81,10 @@ _PERMISSIVE = UrlValidationPolicy(allow_http=True, allow_private_ips=True)
 
 
 def _client_for(name: str):
-    return {"aiohttp": AiohttpClient, "httpx": HttpxClient}[name]
+    return {"aiohttp": AiohttpClient}[name]
 
 
-@pytest.mark.parametrize("backend_name", ["aiohttp", "httpx"])
+@pytest.mark.parametrize("backend_name", ["aiohttp"])
 async def test_fetch_with_policy_returns_first_response(
     monkeypatch, backend_name
 ) -> None:
@@ -106,7 +106,7 @@ async def test_fetch_with_policy_returns_first_response(
     assert call_count["n"] == 1
 
 
-@pytest.mark.parametrize("backend_name", ["aiohttp", "httpx"])
+@pytest.mark.parametrize("backend_name", ["aiohttp"])
 async def test_fetch_with_policy_follows_safe_redirect(
     monkeypatch, backend_name
 ) -> None:
@@ -129,7 +129,7 @@ async def test_fetch_with_policy_follows_safe_redirect(
     assert hops == ["https://example.com/x.png", "https://example.com/final.png"]
 
 
-@pytest.mark.parametrize("backend_name", ["aiohttp", "httpx"])
+@pytest.mark.parametrize("backend_name", ["aiohttp"])
 async def test_fetch_with_policy_blocks_redirect_to_private_ip(
     monkeypatch, backend_name
 ) -> None:
@@ -146,7 +146,7 @@ async def test_fetch_with_policy_blocks_redirect_to_private_ip(
             await mm_http.fetch_bytes("https://8.8.8.8/x.png", 30.0, policy=strict)
 
 
-@pytest.mark.parametrize("backend_name", ["aiohttp", "httpx"])
+@pytest.mark.parametrize("backend_name", ["aiohttp"])
 async def test_fetch_with_policy_enforces_redirect_limit(
     monkeypatch, backend_name
 ) -> None:
