@@ -171,7 +171,7 @@ Those gaps are not symmetric when the outbound queue drops an event: a dropped `
 from a peer for that request's lifetime, while a dropped `free` leaves a phantom booking on the peer
 until the reaper clears it.
 
-#### Choosing Whether to Enable Replica Synchronization
+### Choosing Whether to Enable Replica Synchronization
 
 It is off by default, which matches the Frontend-hosted router. Leaving it off is a real choice rather
 than an oversight, because sharing is not free.
