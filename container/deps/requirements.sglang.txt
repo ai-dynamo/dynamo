@@ -20,7 +20,19 @@ blake3>=1.0.0,<2.0.0  # Dynamo SGLang multimodal request handlers import blake3 
 # --force-reinstall --no-deps, which is the only place the pin can be overlaid.
 # 0.38.0 raises its own floor to safetensors>=0.8.0; --no-deps will not pull
 # that in, so the floor below declares it explicitly.
-diffusers>=0.38.0,<1  # bounded: this file installs with --force-reinstall
+#
+# Capped at <0.40 rather than <1. The next release after 0.39.0, diffusers
+# 0.40.0, raises its own floor to huggingface-hub>=1.23.0, and this file
+# installs --force-reinstall --no-deps -- so pip will neither pull hub along
+# nor validate that the bundled copy already satisfies the new floor. Whether
+# hub 1.23.0 is in the SGLang image is not knowable from this repo either:
+# container/compliance/base_sboms holds the CUDA base's SBOM, not the sglang
+# image's, and sglang 0.5.19 only floors hub at 1.5.0 (transitively through
+# transformers==5.12.1). Cap at the last release whose hub floor
+# (huggingface-hub>=0.34.0 on 0.39.0) is unambiguously satisfied by any
+# realistic upstream image; drop the cap once hub 1.23.0 is verified present
+# in the SGLang image.
+diffusers>=0.38.0,<0.40  # bounded: this file installs with --force-reinstall
 imageio-ffmpeg>=0.6.0  # binary skipped per --no-binary directive above
 # Refresh the upstream image's bundled mooncake wheel: older builds vendor a
 # stale Go dependency set inside libetcd_wrapper.so, and current wheels carry
