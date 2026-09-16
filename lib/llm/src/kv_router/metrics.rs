@@ -863,6 +863,7 @@ pub struct RouterRequestMetrics {
     pub(crate) cache_loss_worker_stages: Option<CacheLossWorkerStageMetrics>,
 }
 
+#[cfg_attr(test, derive(Clone))]
 pub(crate) struct CacheLossWorkerStageMetrics {
     observation_input_tokens_total: IntCounter,
     funnel_tokens_total: [IntCounter; CACHE_LOSS_FUNNEL_STAGES.len()],
