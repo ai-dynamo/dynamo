@@ -329,6 +329,25 @@ func NewCABundleInjector(cl client.Client, cfg *configv1alpha1.OperatorConfigura
 	return injector, nil
 }
 
+// Inject applies the CA bundle only to resources owned by this operator scope.
+func (i *CABundleInjector) Inject(ctx context.Context) error {
+	// Automatic certificate management owns admission CA injection in every scope.
+	if i.cfg.Server.Webhook.CertProvisionMode == configv1alpha1.CertProvisionModeAuto {
+		if i.cfg.Namespace.Restricted != "" {
+			return i.InjectAdmission(ctx)
+		}
+		return i.InjectAll(ctx)
+	}
+
+	// Namespace-restricted operators never own shared CRD conversion configuration.
+	if i.cfg.Namespace.Restricted != "" {
+		return nil
+	}
+
+	// Cluster-wide manual mode receives admission CAs out-of-band but owns conversion CA injection.
+	return i.InjectCRDConversionCA(ctx)
+}
+
 // InjectAll reads the CA bundle from the cert secret and injects it into all
 // webhook configurations owned by this operator instance (scoped by namespace
 // label), and into the multi-version CRD conversion webhooks.
