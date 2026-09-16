@@ -76,4 +76,4 @@ done
 if (( failed )); then
   exit 1
 fi
-echo "gen_llms_tables.py output is deterministic, current, and LF-only."
+echo "gen_llms_tables.py output is deterministic and LF-only."
