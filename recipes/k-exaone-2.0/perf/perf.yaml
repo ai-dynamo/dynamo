@@ -63,14 +63,17 @@ spec:
           # under `set -e` a refusal would abort before the sweep ever starts.
           ulimit -n 600000 || echo "note: could not raise fd limit; continuing"
           apt-get update && apt-get install -y curl jq procps git build-essential && apt-get clean
-          # transformers>=5 is REQUIRED for this model, not a preference: K-EXAONE 2.0's
+          # transformers 5.x is REQUIRED for this model, not a preference: K-EXAONE 2.0's
           # tokenizer_config.json declares tokenizer_class "TokenizersBackend", which does
           # not exist in the transformers 4.x line. With a 4.x pin aiperf raises
-          # TokenizerError before issuing a single request, so the benchmark never runs.
-          # This also keeps the bench tokenizer on the same major version as the serving
-          # image (transformers 5.14.1); a bench pinned to a different tokenizer stack than
-          # the server is measuring a different tokenization than production. nvbug 6778740.
-          pip install "aiperf==0.12.0" "protobuf==7.35.0" "transformers>=5" "tiktoken==0.13.0"
+          # TokenizerError before issuing a single request (nvbug 6778740).
+          # The version is pinned EXACTLY to the serving image's, read from the image itself
+          # rather than assumed: transformers 5.15.1 / tokenizers 0.22.2 on vLLM 0.28.0. This
+          # matters beyond reported token counts -- aiperf loads the tokenizer to synthesize
+          # the Mooncake prompts from input_length and hash_ids, so a different tokenizer
+          # generates a different workload. Verified that this pin resolves with aiperf
+          # 0.12.0 and yields tokenizers 0.22.2, matching the server.
+          pip install "aiperf==0.12.0" "protobuf==7.35.0" "transformers==5.15.1" "tiktoken==0.13.0"
           sysctl -w net.ipv4.ip_local_port_range="1024 65000" 2>/dev/null || true
           export COLUMNS=200
           EPOCH=$(date +%s)

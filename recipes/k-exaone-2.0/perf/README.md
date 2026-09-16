@@ -93,9 +93,11 @@ kubectl wait --for=condition=Complete job/k-exaone-2-bench \
 ```
 
 The Job runs `python:3.12-slim` and installs `aiperf==0.12.0` at start, together
-with `transformers>=5` -- required, because this model's tokenizer_config declares
-`tokenizer_class: TokenizersBackend`, which does not exist in the transformers 4.x
-line and makes aiperf fail before it issues a request.
+with `transformers==5.15.1` -- 5.x is required, because this model's tokenizer_config
+declares `tokenizer_class: TokenizersBackend`, which does not exist in the transformers
+4.x line and makes aiperf fail before it issues a request. The exact version matches the
+serving image, so the bench tokenizes the way the server does; aiperf uses the tokenizer
+to synthesize the trace prompts, so a different one is a different workload.
 
 ### 4. Fetch artifacts
 
