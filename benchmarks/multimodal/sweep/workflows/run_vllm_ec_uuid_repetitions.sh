@@ -36,6 +36,7 @@ import datetime
 import json
 import os
 import pathlib
+import platform
 import shutil
 import subprocess
 import sys
@@ -59,6 +60,23 @@ if not configs:
 concurrencies = config.get("concurrencies")
 sweep_mode = "concurrency" if concurrencies else "request_rate"
 sweep_values = concurrencies or config.get("request_rates") or [4, 8, 16, 32, 64]
+
+
+def command_output(args: list[str]) -> str | None:
+    try:
+        return subprocess.check_output(args, text=True).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+gpu_inventory = command_output(
+    [
+        "nvidia-smi",
+        "--query-gpu=index,uuid,pci.bus_id,name,memory.total",
+        "--format=csv,noheader,nounits",
+    ]
+)
+gpu_topology = command_output(["nvidia-smi", "topo", "-m"])
 
 arm_orders = []
 for iteration, ordered_configs in enumerate(
@@ -101,6 +119,13 @@ metadata = {
     "container_image_digest": os.environ["CONTAINER_IMAGE_DIGEST"],
     "container_image_file": os.environ["CONTAINER_IMAGE_FILE"],
     "harness_revision": os.environ["HARNESS_REVISION"],
+    "node": os.environ.get(
+        "SLURMD_NODENAME", os.environ.get("SLURM_NODELIST")
+    ),
+    "platform_machine": platform.machine(),
+    "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+    "gpu_inventory": gpu_inventory.splitlines() if gpu_inventory else [],
+    "gpu_topology": gpu_topology,
     "datasets": config["input_files"],
     "sweep_mode": sweep_mode,
     "sweep_values": sweep_values,
@@ -194,6 +219,7 @@ print(" -> ".join(item["label"] for item in config["configs"]))
 PY
     )"
     echo "[sweep] ITERATION_ORDER_${iteration}=${iteration_order}"
+    echo "[sweep] CUDA_VISIBLE_DEVICES_${iteration}=${CUDA_VISIBLE_DEVICES:-<unset>}"
     export DYN_NSYS_OUTPUT_PREFIX="${nsys_output_prefix_base}-rep-${iteration}"
     "$PYTHON_BIN" -m benchmarks.multimodal.sweep \
         --config "$iteration_config" \
