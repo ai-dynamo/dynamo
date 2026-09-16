@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-placement-plugin"
+description = "Dynamo KV-router placement provider for the AISimulate dynamic ABI"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+aisimulate-placement-abi = { path = "/home/anthony/nvidia/projects/aiperf-rs/.worktrees/deps/aisimulate-dynamic-abi/crates/placement-abi" }
+dynamo-mocker = { workspace = true, features = ["replay-bench"] }

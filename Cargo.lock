@@ -65,6 +65,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "aisimulate-placement-abi"
+version = "0.12.0"
+
+[[package]]
 name = "aligned"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2868,6 +2872,14 @@ dependencies = [
  "serde_yaml",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "dynamo-placement-plugin"
+version = "1.5.0"
+dependencies = [
+ "aisimulate-placement-abi",
+ "dynamo-mocker",
 ]
 
 [[package]]
