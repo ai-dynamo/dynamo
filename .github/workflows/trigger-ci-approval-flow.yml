@@ -25,7 +25,8 @@
 #    only the head created by that synchronization; it does not make the PR or contributor trusted
 #    for later pushes.
 # 4. `glamr-agent` posts `@dynamo-ops please run full CI for <full-head-sha>`, optionally
-#    preceded by a label and colon. The SHA must match the open fork PR's head when resolved.
+#    preceded by a label and colon. The account must still be a repository collaborator, and
+#    the SHA must match the open fork PR's head when resolved.
 #
 # All paths require every commit in the captured base-to-head comparison to have a signature
 # that GitHub reports as verified. If any commit is unsigned, the workflow does not post
@@ -103,6 +104,9 @@ jobs:
             pattern='^([^[:space:]]+:[[:blank:]]+)?@dynamo-ops please run full CI for ([0-9a-f]{40})[[:space:]]*$'
             [[ "$body" =~ $pattern ]] || exit 0
             [[ "${BASH_REMATCH[2]}" == "$head" ]] || exit 0
+            # Public read permission alone is insufficient; collaborator access must be revocable.
+            requester=$(jq -r '.comment.user.login' "$GITHUB_EVENT_PATH")
+            gh api "repos/$GITHUB_REPOSITORY/collaborators/$requester" --silent
             echo "is_approved=true" >> "$GITHUB_OUTPUT"
           else
             [[ $(jq -r '.pull_request.head.sha' "$GITHUB_EVENT_PATH") == "$head" ]] || exit 0
