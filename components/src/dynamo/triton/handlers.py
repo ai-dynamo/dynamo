@@ -20,10 +20,6 @@ from dynamo.triton.util import (
 
 logger = logging.getLogger(__name__)
 
-# Dynamo's tensor protocol currently lacks Float16 / BFloat16 variants.
-# Remove this guard once upstream support lands.
-_UNSUPPORTED_INPUT_DTYPES = frozenset({"Float16", "BFloat16"})
-
 
 class RequestHandler:
     def __init__(self, server: TritonServer, model: TritonModel):
@@ -99,22 +95,11 @@ class RequestHandler:
             yield response
 
     def _validate_request(self, request: dict) -> None:
-        """Reject non-tensor requests and unsupported input dtypes early."""
+        """Reject non-tensor requests early."""
         if "tensors" not in request:
             raise ValueError(
                 "dynamo.triton only accepts tensor requests; missing 'tensors' "
                 f"key. Received keys: {sorted(request.keys())}"
-            )
-        bad_dtypes = sorted(
-            {
-                tensor["metadata"]["data_type"]
-                for tensor in request["tensors"]
-                if tensor["metadata"]["data_type"] in _UNSUPPORTED_INPUT_DTYPES
-            }
-        )
-        if bad_dtypes:
-            raise ValueError(
-                f"dynamo does not support {' / '.join(bad_dtypes)} input tensors."
             )
 
     def _probe(self) -> dict:
