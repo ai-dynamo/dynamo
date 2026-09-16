@@ -1539,11 +1539,13 @@ fn index_observer_replaces_stale_and_claimed_rows_of_its_partition() {
         worker: WorkerWithDpRank::new(1, 0),
         attempt_id: AttemptId::new(attempt),
     };
-    let row = |partition: &RoutingPartitionId, booking| Reservation {
-        partition: partition.clone(),
-        booking,
-        _affinity_lease: None,
-    };
+    let row =
+        |partition: &RoutingPartitionId, booking: Option<SchedulerBookingDescriptor>| Reservation {
+            partition: partition.clone(),
+            claim_id: booking.is_none().then_some(0),
+            booking,
+            _affinity_lease: None,
+        };
 
     // A stale row (its booking expired before the sweep ran) yields to the mirror.
     index
@@ -1563,6 +1565,7 @@ fn index_observer_replaces_stale_and_claimed_rows_of_its_partition() {
     let claim = ReservationClaim {
         index: &index,
         selection_id: "shared".to_string(),
+        claim_id: 0,
         armed: true,
     };
     index
@@ -1579,6 +1582,96 @@ fn index_observer_replaces_stale_and_claimed_rows_of_its_partition() {
         .insert("shared".to_string(), row(&other, Some(booking(4))));
     observer.admitted(booking(5));
     assert_eq!(index.read()["shared"].booking, Some(booking(4)));
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn replaced_claim_cannot_remove_or_overwrite_a_new_reservation(
+    #[values("drop", "pending", "installed")] replacement: &str,
+) {
+    use crate::scheduling::AttemptId;
+    let core = local_core(test_config(false));
+    let key = default_key();
+    core.upsert_worker(worker(1)).await.unwrap();
+    let other_key = RoutingPartitionId::new("model", "other");
+    core.upsert_worker(WorkerRequest {
+        routing_group: other_key.routing_group.clone(),
+        ..worker(2)
+    })
+    .await
+    .unwrap();
+    // Both partitions have registered slots before the controlled race.
+    for key in [&key, &other_key] {
+        let mut warm = reserve_request("warm");
+        warm.routing_group = key.routing_group.clone();
+        core.select_and_reserve(warm).await.unwrap();
+        core.free_reservation("warm").await.unwrap();
+    }
+    let old = core.claim_reservation("shared", &key).unwrap();
+    let observer = ReservationIndexObserver {
+        index: Arc::clone(&core.reservation_index),
+        partition: key.clone(),
+        host: None,
+    };
+    let peer = SchedulerBookingDescriptor {
+        request_id: "shared".to_string(),
+        worker: WorkerWithDpRank::new(1, 0),
+        attempt_id: AttemptId::new(999),
+    };
+    observer.admitted(peer.clone());
+    observer.completed(&peer);
+    let new = core.claim_reservation("shared", &other_key).unwrap();
+    let request = |worker_id| SequenceRequest {
+        request_id: "shared".to_string(),
+        worker: WorkerWithDpRank::new(worker_id, 0),
+        token_sequence: Some(vec![1, 2]),
+        track_prefill_tokens: false,
+        expected_output_tokens: None,
+        prefill_load_hint: None,
+        lora_name: None,
+    };
+    let old_entry = core.entry(&key).unwrap();
+    let new_entry = core.entry(&other_key).unwrap();
+    let new_id = new.claim_id;
+    let mut new = Some(new);
+    if replacement == "installed" {
+        let booking = new_entry
+            .scheduler
+            .add_request_if_registered_guarded(request(2))
+            .unwrap();
+        new.take().unwrap().install(booking, None).unwrap();
+    }
+    if replacement != "drop" {
+        let booking = old_entry
+            .scheduler
+            .add_request_if_registered_guarded(request(1))
+            .unwrap();
+        assert!(matches!(
+            old.install(booking, None),
+            Err(SelectionError::Conflict(_))
+        ));
+        wait_until("stale booking released", || {
+            !old_entry.scheduler.has_request("shared")
+        })
+        .await;
+    } else {
+        drop(old);
+    }
+    if let Some(new) = new {
+        assert_eq!(
+            core.reservation_index.read()["shared"].claim_id,
+            Some(new_id)
+        );
+        let booking = new_entry
+            .scheduler
+            .add_request_if_registered_guarded(request(2))
+            .unwrap();
+        new.install(booking, None).unwrap();
+    }
+    assert_eq!(core.indexed_booking("shared").unwrap().0.key, other_key);
+    core.free_reservation("shared").await.unwrap();
+    assert!(!new_entry.scheduler.has_request("shared"));
+    assert!(core.reservation_index.read().is_empty());
 }
 
 #[tokio::test]

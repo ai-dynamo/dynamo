@@ -48,7 +48,6 @@ use super::hint::{hint_capable_partition, transfer_hint_for_selection};
 /// `try_acquire` then `join_initializing` attempts before a commit that finds
 /// the session initializing routes unpinned (see the module doc).
 const JOIN_ATTEMPTS: usize = 2;
-use super::reservations::Reservation;
 use super::*;
 
 /// Action id of the single `kv.fetch` action a selection's KV hint carries.
@@ -524,11 +523,7 @@ impl SelectionCore {
                 self.record_routing_decision(&entry, response.best_worker, hashes)
                     .await;
             }
-            claim.install(Reservation {
-                partition: key.clone(),
-                booking: Some(booking.commit()),
-                _affinity_lease: affinity_lease,
-            });
+            claim.install(booking, affinity_lease)?;
             None
         } else {
             booking

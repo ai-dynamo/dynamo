@@ -6,6 +6,10 @@
 //! release them.
 
 use super::*;
+use crate::scheduling::queue::BookingHandle;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_CLAIM_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Resolved inputs for booking a reservation, shared by the cached and explicit
 /// `create_reservation` paths.
@@ -38,6 +42,7 @@ pub(super) type ReservationIndex = RwLock<HashMap<String, Reservation>>;
 pub(super) struct Reservation {
     pub(super) partition: RoutingPartitionId,
     pub(super) booking: Option<SchedulerBookingDescriptor>,
+    pub(super) claim_id: Option<u64>,
     pub(super) _affinity_lease: Option<AffinityLease>,
 }
 
@@ -46,15 +51,31 @@ pub(super) struct Reservation {
 pub(super) struct ReservationClaim<'a> {
     pub(super) index: &'a ReservationIndex,
     pub(super) selection_id: String,
+    pub(super) claim_id: u64,
     pub(super) armed: bool,
 }
 
 impl ReservationClaim<'_> {
-    pub(super) fn install(mut self, reservation: Reservation) {
+    pub(super) fn install(
+        mut self,
+        booking: BookingHandle,
+        affinity_lease: Option<AffinityLease>,
+    ) -> Result<(), SelectionError> {
+        let mut index = self.index.write();
+        let Some(reservation) = index
+            .get_mut(&self.selection_id)
+            .filter(|reservation| reservation.claim_id == Some(self.claim_id))
+        else {
+            return Err(SelectionError::Conflict(format!(
+                "selection {} reservation claim was replaced",
+                self.selection_id
+            )));
+        };
+        reservation.booking = Some(booking.commit());
+        reservation.claim_id = None;
+        reservation._affinity_lease = affinity_lease;
         self.armed = false;
-        self.index
-            .write()
-            .insert(std::mem::take(&mut self.selection_id), reservation);
+        Ok(())
     }
 }
 
@@ -66,7 +87,7 @@ impl Drop for ReservationClaim<'_> {
         let mut index = self.index.write();
         if index
             .get(&self.selection_id)
-            .is_some_and(|reservation| reservation.booking.is_none())
+            .is_some_and(|reservation| reservation.claim_id == Some(self.claim_id))
         {
             index.remove(&self.selection_id);
         }
@@ -99,6 +120,7 @@ impl ReplicaRequestLeaseObserver for ReservationIndexObserver {
                     Reservation {
                         partition: self.partition.clone(),
                         booking: Some(booking.clone()),
+                        claim_id: None,
                         _affinity_lease: None,
                     },
                 );
@@ -375,11 +397,7 @@ impl SelectionCore {
         if let Some(hashes) = routing_hashes {
             self.record_routing_decision(&entry, worker, hashes).await;
         }
-        claim.install(Reservation {
-            partition: key.clone(),
-            booking: Some(booking.commit()),
-            _affinity_lease: affinity_lease,
-        });
+        claim.install(booking, affinity_lease)?;
 
         Ok(ReservationResponse {
             selection_id,
@@ -403,17 +421,20 @@ impl SelectionCore {
                 "selection {selection_id} is already reserved or being reserved"
             )));
         }
+        let claim_id = NEXT_CLAIM_ID.fetch_add(1, Ordering::Relaxed);
         index.insert(
             selection_id.to_string(),
             Reservation {
                 partition: key.clone(),
                 booking: None,
+                claim_id: Some(claim_id),
                 _affinity_lease: None,
             },
         );
         Ok(ReservationClaim {
             index: &self.reservation_index,
             selection_id: selection_id.to_string(),
+            claim_id,
             armed: true,
         })
     }
