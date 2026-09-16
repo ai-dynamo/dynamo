@@ -722,7 +722,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         request_ids.discard(sglang_request_id)
                 if context.is_stopped():
                     # A choice's first chunk can arrive after the monitor fired.
-                    self._abort_requests(request_ids)
+                    self._abort_requests(request_ids, context)
                     continue
 
                 # Check cancellation before yielding to allow proper cleanup.
