@@ -508,9 +508,11 @@ struct ChoiceReasoningState {
     drained: bool,
     // Set the first time this choice's parser is finalized and NEVER reset, even
     // when `drained` is reopened. `ReasoningParser::finish_reasoning_stream` is
-    // not documented to be idempotent, so calling it twice could re-emit text a
+    // not idempotent across the trait — individual parsers may be, but the
+    // contract does not require it — so calling it twice could re-emit text a
     // parser had already handed over. Draining again is fine; finalizing again
-    // is not.
+    // is not. This matters more now that both the terminal-chunk drain and the
+    // end-of-stream fallback finalize every parser, not just the deferring one.
     parser_finished: bool,
 }
 
@@ -596,11 +598,20 @@ where
     })
 }
 
-/// Drain what a choice still holds on the `defer_reasoning_for_nonempty_content`
-/// path, returning `(content, reasoning_content)` to add to its delta. Shared by
-/// the terminal-chunk drain and the end-of-stream fallback so the two cannot
+/// Drain what a choice still holds when its generation ends, returning
+/// `(content, reasoning_content)` to add to its delta. Shared by the
+/// terminal-chunk drain and the end-of-stream fallback so the two cannot
 /// disagree about which channel the leftover bytes belong to.
-fn drain_deferred_reasoning(state: &mut ChoiceReasoningState) -> (Option<String>, Option<String>) {
+///
+/// `defer` selects the attribution rule, and the two are genuinely different
+/// questions. Without deferral nothing was ever held back, so the parser's own
+/// split is authoritative and is passed straight through. With deferral the
+/// buffered bytes are ambiguous by construction — that is why they were held —
+/// and the `force_nonempty_content` promise decides where they land.
+fn drain_choice_reasoning(
+    state: &mut ChoiceReasoningState,
+    defer: bool,
+) -> (Option<String>, Option<String>) {
     if state.drained {
         return (None, None);
     }
@@ -614,6 +625,23 @@ fn drain_deferred_reasoning(state: &mut ChoiceReasoningState) -> (Option<String>
         state.parser_finished = true;
         state.parser.finish_reasoning_stream()
     };
+
+    if !defer {
+        // Nothing was buffered by this transform, so everything the parser just
+        // flushed is text it had not yet emitted — a partial delimiter it was
+        // holding in case the next chunk completed a marker, or, for harmony, a
+        // whole final message stranded behind a malformed header. Keep the
+        // parser's classification: recovered reasoning stays `reasoning_content`
+        // rather than being appended to the answer.
+        debug_assert!(
+            pending.is_empty() && pending_content.is_empty(),
+            "pending buffers are only filled on the deferral path"
+        );
+        return (
+            (!result.normal_text.is_empty()).then_some(result.normal_text),
+            (!result.reasoning_text.is_empty()).then_some(result.reasoning_text),
+        );
+    }
 
     if state.left_reasoning {
         // An answer already streamed as content, so the non-empty-content
@@ -654,12 +682,13 @@ struct ReasoningState {
     prompt_injected_reasoning: bool,
     bypass_bare_guided_json: bool,
     choices: HashMap<u32, ChoiceReasoningState>,
-    // Last emitted content-bearing response, reused as the envelope to carry any
-    // text the parsers are still buffering when the upstream stream ends. Only
-    // retained when `defer_reasoning_for_nonempty_content` is set, to keep the
-    // per-token clone off the common reasoning hot path. Chunks with no choices
-    // (the trailing usage-only chunk) are never retained — that envelope has no
-    // delta slot to attach the flushed bytes to, so the flush would be dropped.
+    // First content-bearing response, reused as the envelope to carry any text
+    // the parsers are still buffering when the upstream stream ends. Captured
+    // once per stream: it contributes only response-level constants, so
+    // refreshing it per chunk bought nothing and cost a full clone on every
+    // token. Chunks with no choices (the trailing usage-only chunk) are never
+    // retained — that envelope has no delta slot to attach the flushed bytes to,
+    // so the flush would be dropped.
     last_response: Option<Annotated<NvCreateChatCompletionStreamResponse>>,
     // Nemotron force-reasoning parsers start inside the reasoning block, so
     // leading model output with no `<think>` is reported as reasoning even when
@@ -6288,7 +6317,7 @@ impl OpenAIPreprocessor {
                 // cannot retract a reasoning_content delta already sent, so it
                 // instead holds reasoning back until it knows whether an answer
                 // follows — see `defer_reasoning_for_nonempty_content` and
-                // `drain_deferred_reasoning`. Both end with the same contract: a
+                // `drain_choice_reasoning`. Both end with the same contract: a
                 // reasoning-only turn surfaces its text as `content`.
                 dynamo_renderer::thinking_bool_from_args(chat_template_args) == Some(false)
             }
@@ -6530,12 +6559,21 @@ impl OpenAIPreprocessor {
                             // A guided-JSON choice that bypassed the parser never
                             // fed it anything, so finishing that parser could only
                             // contribute text the choice never generated.
-                            if defer_reasoning
-                                && choice.finish_reason.is_some()
+                            // Every reasoning parser is finalized here, not just
+                            // the deferring one. A parser that buffers nothing
+                            // flushes nothing and this costs one virtual call per
+                            // finished choice; a parser that IS holding text — a
+                            // partial delimiter, or a harmony final message
+                            // stranded behind a malformed header — would
+                            // otherwise have that text dropped when its state is
+                            // discarded, which is what surfaced to clients as
+                            // `content: null` with `finish_reason: "stop"`.
+                            if choice.finish_reason.is_some()
                                 && !terminal_carries_parts
                                 && bypass_decision == Some(false)
                             {
-                                let (content, reasoning) = drain_deferred_reasoning(choice_state);
+                                let (content, reasoning) =
+                                    drain_choice_reasoning(choice_state, defer_reasoning);
                                 if let Some(content) = content {
                                     let merged = match choice.delta.content.take() {
                                         Some(ChatCompletionMessageContent::Text(existing)) => {
@@ -6570,7 +6608,19 @@ impl OpenAIPreprocessor {
                 // chunks with no choices (the trailing usage-only chunk): they
                 // carry no delta slot, so using one as the flush envelope would
                 // drop the very bytes the flush exists to preserve.
-                if state.defer_reasoning_for_nonempty_content
+                //
+                // Captured ONCE rather than on every chunk. The envelope only
+                // ever supplies response-level constants — `id`, `model`,
+                // `created`, `object`, `service_tier`, `system_fingerprint` —
+                // because `scrub_synthetic_chunk_metadata` clears every
+                // per-chunk field and the synthetic choice below overrides every
+                // field of the template it clones. The last content-bearing
+                // chunk is therefore worth no more than the first, and taking
+                // the first retires a full per-token clone that previously ran
+                // for the whole deferral path. That matters now: the flush is no
+                // longer restricted to `force_nonempty_content`, so a per-chunk
+                // clone here would land on every reasoning request.
+                if state.last_response.is_none()
                     && processed_response
                         .data
                         .as_ref()
@@ -6579,7 +6629,7 @@ impl OpenAIPreprocessor {
                     state.last_response = Some(processed_response.clone());
                 }
                 Some((processed_response, state))
-            } else if !state.defer_reasoning_for_nonempty_content || state.saw_terminal_error {
+            } else if state.saw_terminal_error {
                 // After a backend error the buffered bytes are dropped rather
                 // than surfaced: the request failed, so there is no answer to
                 // complete. See `saw_terminal_error`.
@@ -6592,13 +6642,21 @@ impl OpenAIPreprocessor {
                 // The synthetic chunk it builds is the only case where recovered
                 // bytes arrive after the last upstream chunk, which is
                 // unavoidable when there was no terminal chunk to attach them
-                // to. Only the force_nonempty_content path reaches this branch;
-                // every other parser took the `None` branch above and keeps its
-                // original no-flush EOF behavior. Taking the envelope below
-                // rather than cloning it makes this branch one-shot: once it is
-                // gone the next poll ends the stream.
+                // to. Taking the envelope below rather than cloning it makes
+                // this branch one-shot: once it is gone the next poll ends the
+                // stream.
+                //
+                // Every reasoning parser reaches this branch. It used to be
+                // reserved for the force_nonempty_content path, which meant any
+                // other parser holding state at EOF simply lost it — for gpt-oss
+                // behind a malformed harmony header that was the entire answer,
+                // reported as `content: null`. A parser with nothing buffered
+                // flushes nothing and `flushed` stays empty, so no synthetic
+                // chunk is produced and the stream ends exactly as before.
+                //
                 // Sorted so the emitted choice order is deterministic rather
                 // than following HashMap iteration order.
+                let defer = state.defer_reasoning_for_nonempty_content;
                 let mut indices: Vec<u32> = state.choices.keys().copied().collect();
                 indices.sort_unstable();
                 #[allow(clippy::type_complexity)]
@@ -6609,7 +6667,7 @@ impl OpenAIPreprocessor {
                         if choice_state.guided_json_bypass_decision != Some(false) {
                             return None;
                         }
-                        let (content, reasoning) = drain_deferred_reasoning(choice_state);
+                        let (content, reasoning) = drain_choice_reasoning(choice_state, defer);
                         (content.is_some() || reasoning.is_some())
                             .then_some((index, content, reasoning))
                     })
@@ -7771,6 +7829,240 @@ mod tests {
                 .count(),
             2,
             "one source metric and one usage-trailer metric must survive"
+        );
+    }
+
+    // ---- EOF finalization for every reasoning parser (gpt-oss null-content) ----
+    //
+    // A reasoning parser may hold text when the upstream stream ends: a partial
+    // delimiter it kept in case the next chunk completed a marker, or — for
+    // harmony behind a malformed `<|channel|>final` header — an entire final
+    // message. That text used to be dropped, because the end-of-stream flush ran
+    // only for `force_nonempty_content` requests. The response then carried
+    // `content: null` with `finish_reason: "stop"` and HTTP 200, which nothing
+    // downstream can tell apart from a legitimately empty answer.
+
+    /// One choice-0 content chunk, optionally terminal.
+    fn reasoning_flush_chunk(
+        text: Option<&str>,
+        finish: bool,
+    ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        let mut chunk = chat_stream_chunk(0, None);
+        let choice = &mut chunk.data.as_mut().unwrap().inner.choices[0];
+        choice.delta.content = text.map(|t| ChatCompletionMessageContent::Text(t.to_string()));
+        choice.finish_reason = finish.then_some(FinishReason::Stop);
+        chunk
+    }
+
+    /// Concatenate choice-0 `(content, reasoning_content)` across the output.
+    fn collect_reasoning_flush(
+        output: &[Annotated<NvCreateChatCompletionStreamResponse>],
+    ) -> (String, String) {
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        for response in output {
+            let Some(data) = response.data.as_ref() else {
+                continue;
+            };
+            for choice in data.inner.choices.iter().filter(|c| c.index == 0) {
+                if let Some(ChatCompletionMessageContent::Text(text)) =
+                    choice.delta.content.as_ref()
+                {
+                    content.push_str(text);
+                }
+                if let Some(text) = choice.delta.reasoning_content.as_ref() {
+                    reasoning.push_str(text);
+                }
+            }
+        }
+        (content, reasoning)
+    }
+
+    async fn run_reasoning_flush(
+        chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>>,
+        parser: &str,
+        defer: bool,
+    ) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
+        OpenAIPreprocessor::parse_reasoning_content_from_stream_inner(
+            stream::iter(chunks),
+            parser.to_string(),
+            false,
+            false,
+            defer,
+        )
+        .collect::<Vec<_>>()
+        .await
+    }
+
+    #[tokio::test]
+    async fn reasoning_eof_flush_fires_without_force_nonempty_content() {
+        // `<thi` is a partial `<think>` opener: the parser holds it rather than
+        // emitting it, because the next chunk could complete the marker. No next
+        // chunk comes. Before this change the finalizer was never called for a
+        // plain reasoning request, so those bytes died with the parser state.
+        let output = run_reasoning_flush(
+            vec![
+                reasoning_flush_chunk(Some("<think>thought</think>Answer"), false),
+                reasoning_flush_chunk(Some("<thi"), false),
+                reasoning_flush_chunk(None, true),
+            ],
+            "deepseek_r1",
+            false,
+        )
+        .await;
+
+        let (content, reasoning) = collect_reasoning_flush(&output);
+        assert!(
+            content.contains("Answer"),
+            "the real answer must still stream: {content:?}"
+        );
+        assert!(
+            content.contains("<thi") || reasoning.contains("<thi"),
+            "the held partial delimiter must be flushed, not dropped: \
+             content={content:?} reasoning={reasoning:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_eof_flush_rides_the_terminal_chunk() {
+        // The recovered bytes must land on the chunk that carries
+        // `finish_reason`, not after it: a client that stops reading at the
+        // terminal chunk would never see a later one.
+        let output = run_reasoning_flush(
+            vec![
+                reasoning_flush_chunk(Some("<think>thought</think>Answer"), false),
+                reasoning_flush_chunk(Some("<thi"), false),
+                reasoning_flush_chunk(None, true),
+            ],
+            "deepseek_r1",
+            false,
+        )
+        .await;
+
+        let terminal_index = output
+            .iter()
+            .position(|response| {
+                response.data.as_ref().is_some_and(|data| {
+                    data.inner
+                        .choices
+                        .iter()
+                        .any(|choice| choice.finish_reason.is_some())
+                })
+            })
+            .expect("a terminal chunk must be present");
+        let terminal = output[terminal_index].data.as_ref().unwrap();
+        let carried = terminal.inner.choices.iter().any(|choice| {
+            matches!(
+                choice.delta.content.as_ref(),
+                Some(ChatCompletionMessageContent::Text(text)) if text.contains("<thi")
+            ) || choice
+                .delta
+                .reasoning_content
+                .as_ref()
+                .is_some_and(|text| text.contains("<thi"))
+        });
+        assert!(carried, "flushed bytes must ride the terminal chunk");
+        assert_eq!(
+            terminal_index,
+            output.len() - 1,
+            "no chunk may follow the terminal one when it absorbed the flush"
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_eof_flush_falls_back_when_stream_never_finishes() {
+        // An aborted or truncated generation sends no `finish_reason` at all, so
+        // there is no terminal chunk to attach the flush to. The synthetic chunk
+        // is the only way those bytes reach the client.
+        let output = run_reasoning_flush(
+            vec![
+                reasoning_flush_chunk(Some("<think>thought</think>Answer"), false),
+                reasoning_flush_chunk(Some("<thi"), false),
+            ],
+            "deepseek_r1",
+            false,
+        )
+        .await;
+
+        let (content, reasoning) = collect_reasoning_flush(&output);
+        assert!(
+            content.contains("<thi") || reasoning.contains("<thi"),
+            "a stream that ends without finish_reason must still flush: \
+             content={content:?} reasoning={reasoning:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_eof_flush_is_silent_after_a_backend_error() {
+        // An error is terminal. Emitting recovered text as ordinary content
+        // after it would put an answer on the wire that the generation never
+        // successfully produced.
+        let output = run_reasoning_flush(
+            vec![
+                reasoning_flush_chunk(Some("<think>thought</think>Answer"), false),
+                reasoning_flush_chunk(Some("<thi"), false),
+                Annotated::from_error("backend exploded"),
+            ],
+            "deepseek_r1",
+            false,
+        )
+        .await;
+
+        let (content, reasoning) = collect_reasoning_flush(&output);
+        assert!(
+            !content.contains("<thi") && !reasoning.contains("<thi"),
+            "buffered bytes must stay dropped after a terminal error: \
+             content={content:?} reasoning={reasoning:?}"
+        );
+        assert!(
+            output.iter().any(|response| response.is_error()),
+            "the error itself must still reach the client"
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_eof_flush_leaves_a_well_formed_stream_untouched() {
+        // The widened flush must be invisible when a parser is holding nothing:
+        // same chunk count, same text, no synthetic trailer.
+        let chunks = vec![
+            reasoning_flush_chunk(Some("<think>thought</think>"), false),
+            reasoning_flush_chunk(Some("Answer"), false),
+            reasoning_flush_chunk(None, true),
+        ];
+        let expected_len = chunks.len();
+        let output = run_reasoning_flush(chunks, "deepseek_r1", false).await;
+
+        let (content, reasoning) = collect_reasoning_flush(&output);
+        assert_eq!(content, "Answer");
+        assert_eq!(reasoning, "thought");
+        assert_eq!(
+            output.len(),
+            expected_len,
+            "a parser holding nothing must not add a chunk"
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_eof_flush_does_not_double_emit_on_the_deferral_path() {
+        // Nemotron-style `force_nonempty_content` requests already flushed at
+        // EOF. Widening the gate must not make them flush twice — `drained` and
+        // `parser_finished` are what prevent the terminal-chunk drain and the
+        // end-of-stream fallback from both emitting the same bytes.
+        let output = run_reasoning_flush(
+            vec![
+                reasoning_flush_chunk(Some("reasoned answer"), false),
+                reasoning_flush_chunk(None, true),
+            ],
+            "nemotron_deci",
+            true,
+        )
+        .await;
+
+        let (content, _reasoning) = collect_reasoning_flush(&output);
+        assert_eq!(
+            content.matches("reasoned answer").count(),
+            1,
+            "the deferred answer must be released exactly once: {content:?}"
         );
     }
 
