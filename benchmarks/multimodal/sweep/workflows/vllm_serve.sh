@@ -28,12 +28,21 @@ while [[ $# -gt 0 ]]; do
 done
 
 has_gpu_mem_override=0
+has_max_model_len=0
 for ((i = 0; i < ${#EXTRA_ARGS[@]}; i++)); do
     case "${EXTRA_ARGS[$i]}" in
         --max-model-len)
+            if ((i + 1 >= ${#EXTRA_ARGS[@]})); then
+                echo "ERROR: --max-model-len requires a value" >&2
+                exit 2
+            fi
+            has_max_model_len=1
             MAX_MODEL_LEN="${EXTRA_ARGS[$((i + 1))]}"
             ;;
-        --gpu-memory-utilization|--kv-cache-memory-bytes)
+        --max-model-len=*)
+            has_max_model_len=1
+            ;;
+        --gpu-memory-utilization|--gpu-memory-utilization=*|--kv-cache-memory-bytes|--kv-cache-memory-bytes=*)
             has_gpu_mem_override=1
             ;;
     esac
@@ -74,7 +83,7 @@ VLLM_CMD=(
     --port "$HTTP_PORT"
     --enable-log-requests
 )
-if [[ ! " ${EXTRA_ARGS[*]} " =~ [[:space:]]--max-model-len[[:space:]] ]]; then
+if [[ "$has_max_model_len" == "0" ]]; then
     VLLM_CMD+=(--max-model-len "$MAX_MODEL_LEN")
 fi
 if [[ ${#GPU_MEM_ARGV[@]} -gt 0 ]]; then
@@ -98,6 +107,9 @@ if [[ "${DYN_DISABLE_NSYS:-1}" != "1" ]]; then
     NSYS_DIR="${DYN_NSYS_DIR:-/dynamo-tmp/nsys}"
     NSYS_TMPDIR="${DYN_NSYS_TMPDIR:-/dynamo-tmp/nsys-staging}"
     NSYS_PREFIX="${DYN_NSYS_OUTPUT_PREFIX:-vllm}-${DYN_BENCHMARK_ARM:-standalone}"
+    if [[ -n "${DYN_BENCHMARK_SWEEP:-}" ]]; then
+        NSYS_PREFIX="${NSYS_PREFIX}-${DYN_BENCHMARK_SWEEP}"
+    fi
     mkdir -p "$NSYS_DIR" "$NSYS_TMPDIR"
     export TMPDIR="$NSYS_TMPDIR"
 
@@ -119,8 +131,8 @@ server_pid=0
 cleanup() {
     local exit_code="${1:-0}"
     trap - EXIT INT TERM
-    if [[ "$server_pid" -gt 0 ]] && kill -0 "$server_pid" 2>/dev/null; then
-        kill -INT "$server_pid" 2>/dev/null || true
+    if [[ "$server_pid" -gt 0 ]] && kill -0 -- "-$server_pid" 2>/dev/null; then
+        kill -INT -- "-$server_pid" 2>/dev/null || true
         shutdown_grace="${DYN_SERVER_SHUTDOWN_GRACE_SECONDS:-}"
         if [[ -z "$shutdown_grace" ]]; then
             if [[ "${DYN_DISABLE_NSYS:-1}" == "1" ]]; then
@@ -130,11 +142,11 @@ cleanup() {
             fi
         fi
         for _ in $(seq 1 "$shutdown_grace"); do
-            kill -0 "$server_pid" 2>/dev/null || break
+            kill -0 -- "-$server_pid" 2>/dev/null || break
             sleep 1
         done
-        if kill -0 "$server_pid" 2>/dev/null; then
-            kill -KILL "$server_pid" 2>/dev/null || true
+        if kill -0 -- "-$server_pid" 2>/dev/null; then
+            kill -KILL -- "-$server_pid" 2>/dev/null || true
         fi
         wait "$server_pid" 2>/dev/null || true
     fi
@@ -144,9 +156,9 @@ trap 'cleanup 0' INT TERM
 trap 'cleanup $?' EXIT
 
 if [[ ${#LAUNCH_PREFIX[@]} -gt 0 ]]; then
-    "${LAUNCH_PREFIX[@]}" "${VLLM_CMD[@]}" &
+    setsid "${LAUNCH_PREFIX[@]}" "${VLLM_CMD[@]}" &
 else
-    "${VLLM_CMD[@]}" &
+    setsid "${VLLM_CMD[@]}" &
 fi
 server_pid=$!
 wait "$server_pid"

@@ -10,6 +10,10 @@ REPETITIONS="${3:-4}"
 PYTHON_BIN="${DYN_PYTHON:-python}"
 
 : "${VLLM_SOURCE_REVISION:?VLLM_SOURCE_REVISION must identify the tested vLLM commit}"
+: "${CONTAINER_IMAGE:?CONTAINER_IMAGE must identify the tested runtime image}"
+: "${CONTAINER_IMAGE_DIGEST:?CONTAINER_IMAGE_DIGEST must identify the tested image digest}"
+: "${CONTAINER_IMAGE_FILE:?CONTAINER_IMAGE_FILE must identify the imported image file}"
+: "${HARNESS_REVISION:?HARNESS_REVISION must identify the benchmark harness commit}"
 
 if [[ ! "$REPETITIONS" =~ ^[1-9][0-9]*$ ]]; then
     echo "REPETITIONS must be a positive integer, got: $REPETITIONS" >&2
@@ -41,6 +45,9 @@ config = yaml.safe_load(config_path.read_text())
 configs = config["configs"]
 if not configs:
     raise ValueError(f"No configs found in {config_path}")
+concurrencies = config.get("concurrencies")
+sweep_mode = "concurrency" if concurrencies else "request_rate"
+sweep_values = concurrencies or config.get("request_rates") or [4, 8, 16, 32, 64]
 
 arm_orders = []
 for iteration, ordered_configs in enumerate(
@@ -60,7 +67,10 @@ metadata = {
     "arm_orders": arm_orders,
     "tensor_parallel_sizes": {},
     "ec_cpu_capacity_bytes": {},
-    "nvtx": config.get("env", {}).get("DYN_DISABLE_NSYS", "1") != "1",
+    "nvtx": config.get("env", {}).get(
+        "DYN_DISABLE_NSYS", os.environ.get("DYN_DISABLE_NSYS", "1")
+    )
+    != "1",
     "uuid_and_strip": config.get("uuid_and_strip", False),
     "aiperf_version": subprocess.check_output(
         ["aiperf", "--version"], text=True
@@ -77,8 +87,9 @@ metadata = {
     "container_image_digest": os.environ["CONTAINER_IMAGE_DIGEST"],
     "container_image_file": os.environ["CONTAINER_IMAGE_FILE"],
     "harness_revision": os.environ["HARNESS_REVISION"],
-    "dataset": config["input_files"][0],
-    "concurrency": config["concurrencies"][0],
+    "datasets": config["input_files"],
+    "sweep_mode": sweep_mode,
+    "sweep_values": sweep_values,
     "utc_start_time": datetime.datetime.now(datetime.timezone.utc).isoformat(),
 }
 for arm in configs:
@@ -114,50 +125,38 @@ if [[ ${#arms[@]} -eq 0 || -z "${arms[0]}" ]]; then
 fi
 
 shape_raw="$("$PYTHON_BIN" - "$CONFIG" <<'PY'
-import json
 import pathlib
 import sys
-from collections import defaultdict
 
 import yaml
 
-config = yaml.safe_load(pathlib.Path(sys.argv[1]).read_text())
-dataset = pathlib.Path(config["input_files"][0])
-seen = defaultdict(set)
-included_sessions = set()
-conversation_limit = config.get("conversation_num")
-content = 0
-stripped = 0
-for line_index, line in enumerate(dataset.open()):
-    item = json.loads(line)
-    session_id = item.get("session_id", f"row-{line_index}")
-    if session_id not in included_sessions:
-        if (
-            conversation_limit is not None
-            and len(included_sessions) >= conversation_limit
-        ):
-            continue
-        included_sessions.add(session_id)
-    session_seen = seen[session_id]
-    for image_uuid in item.get("image_uuids", []):
-        if image_uuid in session_seen:
-            stripped += 1
-        else:
-            session_seen.add(image_uuid)
-            content += 1
+from benchmarks.multimodal.sweep.config import input_file_tag
+from benchmarks.multimodal.sweep.dataset_shape import count_uuid_expectations
 
-print(dataset.stem.replace(" ", "_"))
-print(f"concurrency{config['concurrencies'][0]}")
-print(content)
-print(stripped)
+config = yaml.safe_load(pathlib.Path(sys.argv[1]).read_text())
+concurrencies = config.get("concurrencies")
+sweep_mode = "concurrency" if concurrencies else "request_rate"
+sweep_values = concurrencies or config.get("request_rates") or [4, 8, 16, 32, 64]
+for dataset in config["input_files"]:
+    content, stripped = count_uuid_expectations(
+        dataset, conversation_num=config.get("conversation_num")
+    )
+    for value in sorted(sweep_values):
+        print(
+            "\t".join(
+                (
+                    input_file_tag(dataset),
+                    f"{sweep_mode}{value}",
+                    str(content),
+                    str(stripped),
+                )
+            )
+        )
 PY
 )"
-mapfile -t sweep_shape <<< "$shape_raw"
-dataset_tag="${sweep_shape[0]}"
-sweep_tag="${sweep_shape[1]}"
-expected_content="${sweep_shape[2]}"
-expected_stripped="${sweep_shape[3]}"
+mapfile -t sweep_shapes <<< "$shape_raw"
 
+nsys_output_prefix_base="${DYN_NSYS_OUTPUT_PREFIX:-vllm}"
 for ((iteration = 1; iteration <= REPETITIONS; iteration++)); do
     iteration_config="$OUTPUT_BASE/config-rep-$iteration.yaml"
     iteration_order="$("$PYTHON_BIN" - "$iteration_config" <<'PY'
@@ -169,21 +168,26 @@ import yaml
 config = yaml.safe_load(pathlib.Path(sys.argv[1]).read_text())
 print(" -> ".join(item["label"] for item in config["configs"]))
 PY
-)"
+    )"
     echo "[sweep] ITERATION_ORDER_${iteration}=${iteration_order}"
+    export DYN_NSYS_OUTPUT_PREFIX="${nsys_output_prefix_base}-rep-${iteration}"
     "$PYTHON_BIN" -m benchmarks.multimodal.sweep \
         --config "$iteration_config" \
         --output-dir "$OUTPUT_BASE/rep-$iteration" \
         --skip-plots
     echo "[sweep] END_ITER_${iteration}"
     if [[ "$iteration" == "1" ]]; then
-        for arm in "${arms[@]}"; do
-            artifact="$OUTPUT_BASE/rep-1/$dataset_tag/$arm/$sweep_tag"
-            "$PYTHON_BIN" -m benchmarks.multimodal.jsonl.validate_uuid_transport \
-                "$artifact/inputs.json" \
-                --expect-content "$expected_content" \
-                --expect-stripped "$expected_stripped" \
-                --output "$artifact/uuid_transport_summary.json"
+        for shape in "${sweep_shapes[@]}"; do
+            IFS=$'\t' read -r dataset_tag sweep_tag expected_content expected_stripped \
+                <<< "$shape"
+            for arm in "${arms[@]}"; do
+                artifact="$OUTPUT_BASE/rep-1/$dataset_tag/$arm/$sweep_tag"
+                "$PYTHON_BIN" -m benchmarks.multimodal.jsonl.validate_uuid_transport \
+                    "$artifact/inputs.json" \
+                    --expect-content "$expected_content" \
+                    --expect-stripped "$expected_stripped" \
+                    --output "$artifact/uuid_transport_summary.json"
+            done
         done
         echo "[sweep] UUID_TRANSPORT_VALIDATED"
     fi

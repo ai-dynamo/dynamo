@@ -70,6 +70,10 @@ configs:
 | `DYN_SERVER_SHUTDOWN_GRACE_SECONDS` | Wrapper grace period before SIGKILL; defaults to 150 seconds with profiling and 10 otherwise. |
 | `DYN_PYTHON` | Python executable used by the repetition wrapper. |
 | `VLLM_SOURCE_REVISION` | Required tested-vLLM revision recorded by the repetition wrapper. |
+| `CONTAINER_IMAGE` | Required runtime image reference recorded by the repetition wrapper. |
+| `CONTAINER_IMAGE_DIGEST` | Required immutable runtime image digest. |
+| `CONTAINER_IMAGE_FILE` | Required imported image/squashfs path used by the GPU run. |
+| `HARNESS_REVISION` | Required Dynamo benchmark-harness commit. |
 
 
 ## CLI Overrides

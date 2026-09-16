@@ -121,6 +121,7 @@ def _run_config(
     arm_env_overrides = {
         **env_overrides,
         "DYN_BENCHMARK_ARM": bench_cfg.label,
+        "DYN_BENCHMARK_SWEEP": "multi",
     }
     _print_banner(f"Config: {bench_cfg.label}", char="#")
 
@@ -170,7 +171,10 @@ def _run_config(
                     workflow_script=workflow_abs,
                     model=config.model,
                     extra_args=bench_cfg.extra_args,
-                    env_overrides=arm_env_overrides,
+                    env_overrides={
+                        **arm_env_overrides,
+                        "DYN_BENCHMARK_SWEEP": f"{sweep_mode}{value}",
+                    },
                 )
 
             try:

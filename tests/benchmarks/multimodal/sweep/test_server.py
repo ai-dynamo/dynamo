@@ -26,6 +26,7 @@ def test_start_resolves_termination_timeout_and_port(
     process = MagicMock()
 
     with (
+        patch.dict("os.environ", {}, clear=True),
         patch(
             "benchmarks.multimodal.sweep.server.subprocess.Popen",
             return_value=process,
@@ -45,8 +46,51 @@ def test_start_rejects_non_positive_termination_timeout(tmp_path) -> None:
     manager = ServerManager()
 
     with pytest.raises(ValueError, match="must be positive"):
+        with patch.dict("os.environ", {}, clear=True):
+            manager.start(
+                str(workflow),
+                "model",
+                env_overrides={"DYN_SERVER_TERMINATE_TIMEOUT": "0"},
+            )
+
+
+def test_start_rejects_timeout_shorter_than_wrapper_grace(tmp_path) -> None:
+    workflow = tmp_path / "workflow.sh"
+    workflow.write_text("#!/bin/bash\n")
+    manager = ServerManager()
+
+    with (
+        patch.dict("os.environ", {}, clear=True),
+        pytest.raises(ValueError, match="must exceed"),
+    ):
         manager.start(
             str(workflow),
             "model",
-            env_overrides={"DYN_SERVER_TERMINATE_TIMEOUT": "0"},
+            env_overrides={
+                "DYN_SERVER_TERMINATE_TIMEOUT": "15",
+                "DYN_SERVER_SHUTDOWN_GRACE_SECONDS": "20",
+            },
         )
+
+
+def test_start_treats_empty_timeout_override_as_unset(tmp_path) -> None:
+    workflow = tmp_path / "workflow.sh"
+    workflow.write_text("#!/bin/bash\n")
+    process = MagicMock()
+
+    with (
+        patch.dict("os.environ", {}, clear=True),
+        patch(
+            "benchmarks.multimodal.sweep.server.subprocess.Popen",
+            return_value=process,
+        ),
+        patch.object(ServerManager, "wait_for_ready"),
+    ):
+        manager = ServerManager()
+        manager.start(
+            str(workflow),
+            "model",
+            env_overrides={"DYN_SERVER_TERMINATE_TIMEOUT": ""},
+        )
+
+    assert manager.terminate_timeout == 15.0

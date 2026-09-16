@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -105,3 +107,59 @@ def test_vllm_workflow_requires_model() -> None:
 
     assert result.returncode != 0
     assert "--model is required" in result.stderr
+
+
+@pytest.mark.skipif(sys.platform == "darwin", reason="workflow requires GNU setsid")
+def test_vllm_workflow_kills_server_group_after_grace(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    child_pid_file = tmp_path / "child.pid"
+    vllm = bin_dir / "vllm"
+    vllm.write_text(
+        "#!/bin/bash\n"
+        'echo $$ > "$DYN_TEST_CHILD_PID_FILE"\n'
+        "trap '' INT TERM\n"
+        "while true; do sleep 60; done\n"
+    )
+    vllm.chmod(0o755)
+    env = os.environ.copy()
+    env.update(
+        {
+            "DYNAMO_HOME": str(REPO_ROOT),
+            "DYN_DISABLE_NSYS": "1",
+            "DYN_SERVER_SHUTDOWN_GRACE_SECONDS": "1",
+            "DYN_TEST_CHILD_PID_FILE": str(child_pid_file),
+            "PATH": f"{bin_dir}:{env['PATH']}",
+        }
+    )
+    process = subprocess.Popen(
+        ["bash", str(WORKFLOW), "--model", "test-model"],
+        env=env,
+        start_new_session=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    child_pid: int | None = None
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not child_pid_file.exists():
+            time.sleep(0.05)
+        assert child_pid_file.exists()
+        child_pid = int(child_pid_file.read_text())
+
+        os.killpg(process.pid, signal.SIGTERM)
+        process.communicate(timeout=5)
+
+        assert process.returncode == 0
+        with pytest.raises(ProcessLookupError):
+            os.kill(child_pid, 0)
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=5)
+        if child_pid is not None:
+            try:
+                os.killpg(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass

@@ -52,14 +52,24 @@ class ServerManager:
         if env_overrides:
             env.update(env_overrides)
         env["DYN_HTTP_PORT"] = str(self.port)
-        default_terminate_timeout = (
-            300.0 if env.get("DYN_DISABLE_NSYS", "1") != "1" else 15.0
-        )
+        profiling = env.get("DYN_DISABLE_NSYS", "1") != "1"
+        default_terminate_timeout = 300.0 if profiling else 15.0
+        default_shutdown_grace = 150.0 if profiling else 10.0
+        raw_terminate_timeout = env.get("DYN_SERVER_TERMINATE_TIMEOUT")
+        raw_shutdown_grace = env.get("DYN_SERVER_SHUTDOWN_GRACE_SECONDS")
         self.terminate_timeout = float(
-            env.get("DYN_SERVER_TERMINATE_TIMEOUT", default_terminate_timeout)
+            raw_terminate_timeout or default_terminate_timeout
         )
+        shutdown_grace = float(raw_shutdown_grace or default_shutdown_grace)
         if self.terminate_timeout <= 0:
             raise ValueError("DYN_SERVER_TERMINATE_TIMEOUT must be positive")
+        if shutdown_grace <= 0:
+            raise ValueError("DYN_SERVER_SHUTDOWN_GRACE_SECONDS must be positive")
+        if self.terminate_timeout <= shutdown_grace:
+            raise ValueError(
+                "DYN_SERVER_TERMINATE_TIMEOUT must exceed "
+                "DYN_SERVER_SHUTDOWN_GRACE_SECONDS"
+            )
 
         print(f"Launching: {' '.join(cmd)}", flush=True)
         self._process = subprocess.Popen(
