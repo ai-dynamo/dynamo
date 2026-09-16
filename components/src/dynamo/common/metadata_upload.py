@@ -154,20 +154,12 @@ class MetadataUploader:
     def from_settings(cls, settings: dict[str, Any] | None) -> MetadataUploader | None:
         if settings is None:
             return None
-        # The Rust sidecar consumes fallback_url. Accept it here so the shared
-        # request contract does not break the Python SGLang worker.
-        unexpected = settings.keys() - {"url", "fallback_url"}
+        unexpected = settings.keys() - {"url"}
         if unexpected:
             field = min(unexpected)
             raise ValueError(f"metadata_upload.{field} is not supported")
         if "url" not in settings:
             raise ValueError("metadata_upload.url is required")
-        fallback_url = settings.get("fallback_url")
-        if fallback_url is not None:
-            if not isinstance(fallback_url, str):
-                raise ValueError("metadata_upload.fallback_url must be a string")
-            if not fallback_url.strip():
-                raise ValueError("metadata_upload.fallback_url must not be empty")
         return cls(url=settings["url"])
 
     @classmethod

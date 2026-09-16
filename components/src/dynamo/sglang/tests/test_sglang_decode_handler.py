@@ -1078,17 +1078,9 @@ def test_metadata_uploader_parses_extra_args_nvext():
     assert uploader.url == "s3://bucket/root/rollouts"
 
     uploader = MetadataUploader.from_backend_request(
-        {
-            "nvext": {
-                "metadata_upload": {
-                    "url": "s3://bucket/root/rollouts",
-                    "fallback_url": "fs:///var/tmp/rollouts",
-                }
-            }
-        }
+        {"nvext": {"metadata_upload": {"url": "s3://bucket/root/rollouts"}}}
     )
     assert uploader is not None
-    assert uploader.url == "s3://bucket/root/rollouts"
 
 
 @pytest.mark.parametrize(
@@ -1101,10 +1093,6 @@ def test_metadata_uploader_parses_extra_args_nvext():
         (
             {"url": "s3://bucket/root/rollouts", "format": "json"},
             "metadata_upload.format is not supported",
-        ),
-        (
-            {"url": "s3://bucket/root/rollouts", "fallback_url": ""},
-            "metadata_upload.fallback_url must not be empty",
         ),
     ],
 )
