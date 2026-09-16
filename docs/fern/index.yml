@@ -453,6 +453,9 @@ navigation:
           - page: Kimi-K3
             path: pages/recipes/model-recipes/kimi-k3.mdx
             slug: kimi-k3
+          - page: Solar Open2 250B
+            path: pages/recipes/model-recipes/solar-open2-250b.mdx
+            slug: solar-open2-250b
           - page: Qwen3.8-2.4T-A95B
             path: pages/recipes/model-recipes/qwen-3-8-2-4t-a95b-fp8.mdx
             slug: qwen-3-8-2-4t-a95b-fp8
