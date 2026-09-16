@@ -46,6 +46,27 @@ type disaggregatedSetWorkloadsReconciler struct {
 	componentRestartProgress *componentRestartProgressResolver
 }
 
+type disaggregatedSetReconcileInputs struct {
+	workerHashTransition unsupportedWorkerHashTransition
+	rollingUpdateCtx     dynamo.RollingUpdateContext
+	selection            disaggregatedSetSelection
+	normalizedComponents map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+	checkpointGated      bool
+}
+
+type disaggregatedSetReconcileState struct {
+	syncedDS                *unstructured.Unstructured
+	dsModified              bool
+	readiness               disaggregatedSetReadiness
+	dsReady                 bool
+	targetRevision          string
+	dcds                    map[string]*nvidiacomv1beta1.DynamoComponentDeployment
+	selectedServiceNames    map[string]struct{}
+	syncedDSResource        Resource
+	nonSelectedResources    []Resource
+	nonSelectedDCDsModified bool
+}
+
 func (r *disaggregatedSetWorkloadsReconciler) ResolveRestart(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
@@ -66,31 +87,53 @@ func (r *disaggregatedSetWorkloadsReconciler) Reconcile(
 	restartState *dynamo.RestartState,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
 ) (ReconcileResult, error) {
-	resources := []Resource{}
+	inputs, err := r.prepareReconcileInputs(ctx, dgd, restartState, checkpointInfos)
+	if err != nil {
+		return ReconcileResult{}, err
+	}
+	state, err := r.reconcileManagedResources(ctx, dgd, checkpointInfos, inputs)
+	if err != nil {
+		return ReconcileResult{}, err
+	}
+
+	resources := append([]Resource{state.syncedDSResource}, state.nonSelectedResources...)
+	result := checkResourcesReadiness(resources)
+	if err := r.finalizeReconcile(ctx, dgd, inputs, state, result); err != nil {
+		return ReconcileResult{}, err
+	}
+	return result, nil
+}
+
+func (r *disaggregatedSetWorkloadsReconciler) prepareReconcileInputs(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	restartState *dynamo.RestartState,
+	checkpointInfos map[string]*checkpoint.CheckpointInfo,
+) (disaggregatedSetReconcileInputs, error) {
 	logger := log.FromContext(ctx)
 
 	workerHashTransition, err := r.rollout.planUnsupportedWorkerHashTransition(dgd)
 	if err != nil {
-		return ReconcileResult{}, failWorkloadProgram(reasonRollingUpdateFailed, err)
+		return disaggregatedSetReconcileInputs{}, failWorkloadProgram(reasonRollingUpdateFailed, err)
 	}
 	rollingUpdateCtx, err := r.rollout.buildRollingUpdateContext(ctx, dgd)
 	if err != nil {
-		return ReconcileResult{}, fmt.Errorf("failed to build rolling update context: %w", err)
+		return disaggregatedSetReconcileInputs{}, fmt.Errorf("failed to build rolling update context: %w", err)
 	}
 	selection, reason := selectDisaggregatedSetComponents(dgd)
 	if reason != "" {
-		return ReconcileResult{}, fmt.Errorf("failed to select DisaggregatedSet roles: %s", reason)
+		return disaggregatedSetReconcileInputs{}, fmt.Errorf("failed to select DisaggregatedSet roles: %s", reason)
 	}
 
 	existingRestartAnnotations, err := getExistingRestartAnnotationsDCD(ctx, r.componentRestartProgress.reader, dgd)
 	if err != nil {
 		logger.Error(err, "failed to get existing restart annotations")
-		return ReconcileResult{}, fmt.Errorf("failed to get existing restart annotations: %w", err)
+		return disaggregatedSetReconcileInputs{}, fmt.Errorf("failed to get existing restart annotations: %w", err)
 	}
 	existingDSRestartAnnotations, err := r.resources.RestartAnnotations(ctx, dgd, selection)
 	if err != nil {
 		logger.Error(err, "failed to get existing DisaggregatedSet restart annotations")
-		return ReconcileResult{}, fmt.Errorf("failed to get existing DisaggregatedSet restart annotations: %w", err)
+		return disaggregatedSetReconcileInputs{}, fmt.Errorf("failed to get existing DisaggregatedSet restart annotations: %w", err)
 	}
 	maps.Copy(existingRestartAnnotations, existingDSRestartAnnotations)
 
@@ -101,59 +144,155 @@ func (r *disaggregatedSetWorkloadsReconciler) Reconcile(
 		rollingUpdateCtx,
 	)
 	if err != nil {
-		return ReconcileResult{}, fmt.Errorf("failed to normalize components for DisaggregatedSet path: %w", err)
+		return disaggregatedSetReconcileInputs{}, fmt.Errorf("failed to normalize components for DisaggregatedSet path: %w", err)
 	}
-
 	checkpointGated, err := r.applyDisaggregatedSetCheckpointStartupPolicies(normalizedComponents, checkpointInfos, selection)
 	if err != nil {
-		return ReconcileResult{}, err
+		return disaggregatedSetReconcileInputs{}, err
 	}
 
-	desiredDS, err := r.renderer.Render(ctx, dgd, normalizedComponents, selection, rollingUpdateCtx, checkpointInfos)
+	return disaggregatedSetReconcileInputs{
+		workerHashTransition: workerHashTransition,
+		rollingUpdateCtx:     rollingUpdateCtx,
+		selection:            selection,
+		normalizedComponents: normalizedComponents,
+		checkpointGated:      checkpointGated,
+	}, nil
+}
+
+func (r *disaggregatedSetWorkloadsReconciler) reconcileManagedResources(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	checkpointInfos map[string]*checkpoint.CheckpointInfo,
+	inputs disaggregatedSetReconcileInputs,
+) (disaggregatedSetReconcileState, error) {
+	desiredDS, err := r.renderer.Render(
+		ctx,
+		dgd,
+		inputs.normalizedComponents,
+		inputs.selection,
+		inputs.rollingUpdateCtx,
+		checkpointInfos,
+	)
 	if err != nil {
-		return ReconcileResult{}, err
+		return disaggregatedSetReconcileState{}, err
 	}
 	syncedDS, dsModified, err := r.resources.Reconcile(ctx, dgd, desiredDS)
 	if err != nil {
-		return ReconcileResult{}, err
+		return disaggregatedSetReconcileState{}, err
+	}
+	readiness, err := r.readiness.Resolve(ctx, syncedDS, inputs.selection)
+	if err != nil {
+		return disaggregatedSetReconcileState{}, err
 	}
 
-	readiness, err := r.readiness.Resolve(ctx, syncedDS, selection)
-	if err != nil {
-		return ReconcileResult{}, err
-	}
-	dsReady := readiness.Ready && !dsModified && !checkpointGated
+	dsReady := readiness.Ready && !dsModified && !inputs.checkpointGated
 	targetRevision, err := disaggregatedSetTargetRevision(syncedDS)
 	if err != nil {
-		return ReconcileResult{}, err
+		return disaggregatedSetReconcileState{}, err
 	}
-
-	nonSelectedComponents := make(map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec)
-	for componentName, component := range normalizedComponents {
-		if _, selected := selection.componentToRole[componentName]; !selected {
-			nonSelectedComponents[componentName] = component
-		}
-	}
-	dcds, err := dynamo.GenerateDynamoComponentsDeploymentsFromNormalized(dgd, nonSelectedComponents, rollingUpdateCtx)
+	dcds, err := lowerNonSelectedComponents(dgd, inputs.normalizedComponents, inputs.selection, inputs.rollingUpdateCtx)
 	if err != nil {
-		return ReconcileResult{}, fmt.Errorf("failed to lower non-DisaggregatedSet components: %w", err)
+		return disaggregatedSetReconcileState{}, err
 	}
-
 	selectedServiceNames, err := r.stableResources.Reconcile(
 		ctx,
 		dgd,
 		dcds,
-		normalizedComponents,
-		selection,
+		inputs.normalizedComponents,
+		inputs.selection,
 		targetRevision,
 		dsReady,
-		rollingUpdateCtx,
+		inputs.rollingUpdateCtx,
 	)
 	if err != nil {
-		return ReconcileResult{}, err
+		return disaggregatedSetReconcileState{}, err
+	}
+	syncedDSResource, err := buildDisaggregatedSetResourceStatus(syncedDS, readiness, dsModified, inputs.checkpointGated, dsReady)
+	if err != nil {
+		return disaggregatedSetReconcileState{}, err
+	}
+	nonSelectedResources, nonSelectedDCDsModified, err := r.auxiliaryDCDs.Reconcile(ctx, dgd, dcds, inputs.selection)
+	if err != nil {
+		return disaggregatedSetReconcileState{}, err
 	}
 
-	syncedDSResource, err := commoncontroller.NewResourceWithComponentStatuses(
+	return disaggregatedSetReconcileState{
+		syncedDS:                syncedDS,
+		dsModified:              dsModified,
+		readiness:               readiness,
+		dsReady:                 dsReady,
+		targetRevision:          targetRevision,
+		dcds:                    dcds,
+		selectedServiceNames:    selectedServiceNames,
+		syncedDSResource:        syncedDSResource,
+		nonSelectedResources:    nonSelectedResources,
+		nonSelectedDCDsModified: nonSelectedDCDsModified,
+	}, nil
+}
+
+func (r *disaggregatedSetWorkloadsReconciler) finalizeReconcile(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	inputs disaggregatedSetReconcileInputs,
+	state disaggregatedSetReconcileState,
+	result ReconcileResult,
+) error {
+	if err := r.commitObservedWorkerHash(ctx, dgd, inputs, state); err != nil {
+		return err
+	}
+	if state.dsReady {
+		if err := r.auxiliaryDCDs.DeleteSelected(ctx, dgd, inputs.selection); err != nil {
+			return err
+		}
+	}
+	if result.State == nvidiacomv1beta1.DGDStateSuccessful {
+		if err := r.stableResources.DeleteStale(ctx, dgd, state.selectedServiceNames); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *disaggregatedSetWorkloadsReconciler) commitObservedWorkerHash(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	inputs disaggregatedSetReconcileInputs,
+	state disaggregatedSetReconcileState,
+) error {
+	if !inputs.workerHashTransition.needsCommit() || state.dsModified || state.nonSelectedDCDsModified {
+		return nil
+	}
+	observed, err := disaggregatedSetPathwayObservesWorkerHash(
+		dgd,
+		state.syncedDS,
+		inputs.selection,
+		state.dcds,
+		inputs.rollingUpdateCtx.NewWorkerHash,
+	)
+	if err != nil {
+		return failWorkloadProgram(reasonRollingUpdateFailed, err)
+	}
+	if !observed {
+		return nil
+	}
+	if err := r.rollout.commitUnsupportedWorkerHashTransition(ctx, dgd, inputs.workerHashTransition, false); err != nil {
+		return failWorkloadProgram(
+			reasonRollingUpdateFailed,
+			fmt.Errorf("project observed DisaggregatedSet worker hash: %w", err),
+		)
+	}
+	return nil
+}
+
+func buildDisaggregatedSetResourceStatus(
+	syncedDS *unstructured.Unstructured,
+	readiness disaggregatedSetReadiness,
+	dsModified bool,
+	checkpointGated bool,
+	dsReady bool,
+) (Resource, error) {
+	return commoncontroller.NewResourceWithComponentStatuses(
 		syncedDS,
 		func() (bool, string, map[string]nvidiacomv1beta1.ComponentReplicaStatus) {
 			if dsModified {
@@ -165,51 +304,25 @@ func (r *disaggregatedSetWorkloadsReconciler) Reconcile(
 			return dsReady, readiness.Reason, readiness.ComponentStatuses
 		},
 	)
+}
+
+func lowerNonSelectedComponents(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	normalizedComponents map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	selection disaggregatedSetSelection,
+	rollingUpdateCtx dynamo.RollingUpdateContext,
+) (map[string]*nvidiacomv1beta1.DynamoComponentDeployment, error) {
+	nonSelectedComponents := make(map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec)
+	for componentName, component := range normalizedComponents {
+		if _, selected := selection.componentToRole[componentName]; !selected {
+			nonSelectedComponents[componentName] = component
+		}
+	}
+	dcds, err := dynamo.GenerateDynamoComponentsDeploymentsFromNormalized(dgd, nonSelectedComponents, rollingUpdateCtx)
 	if err != nil {
-		return ReconcileResult{}, err
+		return nil, fmt.Errorf("failed to lower non-DisaggregatedSet components: %w", err)
 	}
-	resources = append(resources, syncedDSResource)
-
-	nonSelectedResources, nonSelectedDCDsModified, err := r.auxiliaryDCDs.Reconcile(ctx, dgd, dcds, selection)
-	if err != nil {
-		return ReconcileResult{}, err
-	}
-	resources = append(resources, nonSelectedResources...)
-
-	if workerHashTransition.needsCommit() && !dsModified && !nonSelectedDCDsModified {
-		observed, err := disaggregatedSetPathwayObservesWorkerHash(
-			dgd,
-			syncedDS,
-			selection,
-			dcds,
-			rollingUpdateCtx.NewWorkerHash,
-		)
-		if err != nil {
-			return ReconcileResult{}, failWorkloadProgram(reasonRollingUpdateFailed, err)
-		}
-		if observed {
-			if err := r.rollout.commitUnsupportedWorkerHashTransition(ctx, dgd, workerHashTransition, false); err != nil {
-				return ReconcileResult{}, failWorkloadProgram(
-					reasonRollingUpdateFailed,
-					fmt.Errorf("project observed DisaggregatedSet worker hash: %w", err),
-				)
-			}
-		}
-	}
-
-	if dsReady {
-		if err := r.auxiliaryDCDs.DeleteSelected(ctx, dgd, selection); err != nil {
-			return ReconcileResult{}, err
-		}
-	}
-
-	result := checkResourcesReadiness(resources)
-	if result.State == nvidiacomv1beta1.DGDStateSuccessful {
-		if err := r.stableResources.DeleteStale(ctx, dgd, selectedServiceNames); err != nil {
-			return ReconcileResult{}, err
-		}
-	}
-	return result, nil
+	return dcds, nil
 }
 
 func (r *disaggregatedSetWorkloadsReconciler) computeRestartStatus(
