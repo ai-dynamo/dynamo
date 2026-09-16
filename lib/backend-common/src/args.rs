@@ -141,9 +141,18 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn parses_namespace_with_worker_suffix() {
-        for (namespace, expected) in [
-            (Some("test-namespace"), "test-namespace-worker-hash"),
-            (None, "dynamo-worker-hash"),
+        for (namespace, argv, expected) in [
+            (
+                Some("test-namespace"),
+                &["test"][..],
+                "test-namespace-worker-hash",
+            ),
+            (None, &["test"][..], "dynamo-worker-hash"),
+            (
+                Some("test-namespace"),
+                &["test", "--namespace", "cli"][..],
+                "cli-worker-hash",
+            ),
         ] {
             temp_env::with_vars(
                 [
@@ -151,11 +160,8 @@ mod tests {
                     ("DYN_NAMESPACE_WORKER_SUFFIX", Some("worker-hash")),
                 ],
                 || {
-                    let args = TestArgs::try_parse_from(["test"]).unwrap();
+                    let args = TestArgs::try_parse_from(argv).unwrap();
                     assert_eq!(args.common.namespace, expected);
-
-                    let args = TestArgs::try_parse_from(["test", "--namespace", "cli"]).unwrap();
-                    assert_eq!(args.common.namespace, "cli-worker-hash");
                 },
             );
         }
