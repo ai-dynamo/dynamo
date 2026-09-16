@@ -64,13 +64,19 @@ Put at least one of these in the PR title or description:
 | Situation | Reference form |
 |---|---|
 | This PR completes the issue | `Fixes #123` or `Closes DYN-1234` |
-| The issue outlives this PR (tracking issue, DEP) | `Part of #123` or `refs DYN-1234` |
+| The issue outlives this PR (multi-PR feature, tracking issue) | `Part of #123` or `refs DYN-1234` |
+| The work implements a DEP | `Part of #<dep>` **and** a work issue of its own |
 | The issue lives in a sibling org repository | `ai-dynamo/<repo>#12` or the full issue URL |
 
 Closing keywords close the issue on merge; non-closing forms link without
-closing, which is what a DEP tracking issue or a multi-PR feature issue needs.
-The reference must point at a real issue: the check verifies existence and
-does not count pull-request numbers.
+closing, which is what a multi-PR feature issue needs. The reference must
+point at a real issue: the check verifies existence and does not count
+pull-request numbers.
+
+A DEP does not satisfy the check on its own. It is a proposal umbrella that
+stays open across many pull requests, so it records what the work is part of
+and not what one change is. Keep the `Part of #<dep>` reference and file a
+work issue for the change as well.
 
 ### Remediate a Failing Check
 
@@ -82,7 +88,8 @@ names the date it becomes required.
 
 ## Related
 
-- `dep-create` for proposing architecture changes as DEP issues; reference a
-  DEP from implementing PRs with a non-closing form (`Part of #<dep>`).
+- `dep-create` for proposing architecture changes as DEP issues. An
+  implementing PR carries `Part of #<dep>` alongside its own work issue; the
+  DEP reference alone fails the check.
 - The check's implementation lives at
   `.github/workflows/pr-issue-link.yml` and `pr_issue_link.py`.

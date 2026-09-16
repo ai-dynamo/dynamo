@@ -25,6 +25,11 @@ Accepted references, matching how the Linear GitHub integration links work:
   (``ai-dynamo/enhancements#12`` - contribution requests and the older DEPs
   live in sibling repositories), or a full issue URL.
 
+A Dynamo Enhancement Proposal does not satisfy the check on its own. A DEP is
+a proposal umbrella that stays open across many pull requests, so it says what
+the work is part of and not what any one change is. Keep the ``Part of <dep>``
+reference and link the work issue as well.
+
 Every candidate is verified against the corresponding API; a reference to an
 issue that does not exist does not count. Verification failures caused by API
 outages are treated as unverified-but-present so that an upstream outage never
@@ -71,6 +76,11 @@ INTENT_LINEAR_RE = re.compile(
 )
 HTML_COMMENT_RE = re.compile(r"<!--.*?(?:-->|$)", re.DOTALL)
 BOT_AUTHORS = {"dependabot[bot]", "github-actions[bot]", "copy-pr-bot[bot]"}
+# Every Dynamo Enhancement Proposal carries a lifecycle label under this
+# prefix, set by `.github/ISSUE_TEMPLATE/dep.yml` and moved through review by
+# the `dep-update` skill. Matching the label rather than the title keeps an
+# issue *about* the DEP process from reading as a DEP.
+DEP_LABEL_PREFIX = "dep:"
 # PR text is untrusted input; bound the number of authenticated lookups it
 # can trigger.
 MAX_CANDIDATES = 10
@@ -95,8 +105,13 @@ def http_json(
         return 0, {}
 
 
-def verify_github_issue(repo: str, number: str, token: str) -> tuple[bool, bool]:
-    """Return (exists_as_issue, api_ok)."""
+def verify_github_issue(repo: str, number: str, token: str) -> tuple[bool, bool, bool]:
+    """Return (exists_as_issue, api_ok, is_dep).
+
+    The labels ride along on the response the check already makes, so knowing
+    a reference is a proposal umbrella rather than a unit of work costs no
+    extra call.
+    """
     status, body = http_json(
         f"https://api.github.com/repos/{repo}/issues/{number}",
         headers={
@@ -105,10 +120,12 @@ def verify_github_issue(repo: str, number: str, token: str) -> tuple[bool, bool]
         },
     )
     if status == 200:
-        return "pull_request" not in body, True
+        names = [(label or {}).get("name") or "" for label in body.get("labels") or []]
+        is_dep = any(name.startswith(DEP_LABEL_PREFIX) for name in names)
+        return "pull_request" not in body, True, is_dep
     if status in (404, 410):
-        return False, True
-    return False, False
+        return False, True, False
+    return False, False, False
 
 
 def repo_visible(repo: str, token: str) -> tuple[bool, bool]:
@@ -205,6 +222,10 @@ def main() -> int:
     intent_linear = {m.upper() for m in INTENT_LINEAR_RE.findall(text)} | branch_ids
 
     verified: list[str] = []
+    # Proposal umbrellas found along the way. They are real tracked issues, so
+    # the lookup is decisive and the bound must not rescue them, but they do
+    # not satisfy the check and the search continues past them.
+    dep_refs: list[str] = []
     unverified: list[str] = []
     invisible_repo_refs: list[str] = []
     repo_visibility: dict[str, tuple[bool, bool]] = {}
@@ -219,9 +240,12 @@ def main() -> int:
     # fail-open pass on the candidates past the bound.
     decided_github = False
     for ref_repo, number in ordered_refs:
-        exists, api_ok = verify_github_issue(ref_repo, number, gh_token)
+        exists, api_ok, is_dep = verify_github_issue(ref_repo, number, gh_token)
         label = f"#{number}" if ref_repo == repo else f"{ref_repo}#{number}"
-        if exists:
+        if exists and is_dep:
+            dep_refs.append(label)
+            decided_github = True
+        elif exists:
             verified.append(f"GitHub issue {label}")
         elif not api_ok:
             unverified.append(f"GitHub reference {label} (API unavailable)")
@@ -309,26 +333,52 @@ def main() -> int:
 
     if unverified:
         # References are present but an API kept us from verifying them.
-        # Fail open: an upstream outage should never fail anyone's PR.
+        # Fail open: an upstream outage should never fail anyone's PR. Any
+        # proposal found along the way is still named, so the author is not
+        # left thinking it was what passed.
         summarize(
             ["### PR issue link: present but unverified", ""]
             + [f"- {u}" for u in unverified]
+            + [
+                f"- {d} is a Dynamo Enhancement Proposal and does not satisfy "
+                "the check on its own"
+                for d in dep_refs
+            ]
         )
         return 0
 
+    dep_lead = (
+        [
+            f"Found {', '.join(dep_refs)}, which is a Dynamo Enhancement Proposal.",
+            "A DEP is a proposal umbrella: it stays open across many pull requests, so",
+            "it records what the work is part of and not what this change is. Keep the",
+            "reference and link the work as well.",
+            "",
+        ]
+        if dep_refs
+        else []
+    )
+
     summarize(
         [
-            "### PR issue link: missing",
+            (
+                "### PR issue link: proposal only"
+                if dep_refs
+                else "### PR issue link: missing"
+            ),
             "",
+        ]
+        + dep_lead
+        + [
             "Every PR needs a linked issue so the work is traceable to a tracked task.",
             "Link one of the following and re-run the check (editing the PR description re-triggers it):",
             "",
             "- A Linear issue, for example `Closes DYN-1234` in the description, or the",
             "  issue ID in the branch name (`user/dyn-1234-description`).",
             "- A GitHub issue: `Fixes #123` to close it, or a non-closing form like",
-            "  `Part of #123` for an issue that outlives the PR, which is what a DEP",
-            "  in this repository needs. Issues in sibling repositories in the org",
-            "  count too, for example `ai-dynamo/enhancements#12`.",
+            "  `Part of #123` for an issue that outlives the PR. Issues in sibling",
+            "  repositories in the org count too, for example",
+            "  `ai-dynamo/enhancements#12`.",
             "",
             "If no issue exists yet, create one first and start the work from it.",
             f"This check is advisory today and becomes required on {blocking_date}.",

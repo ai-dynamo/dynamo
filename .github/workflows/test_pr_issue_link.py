@@ -61,7 +61,7 @@ class FakeApi:
 
     Each map is keyed the way the check asks: `owner/repo#number` for GitHub
     issues, `owner/repo` for repository visibility, and the identifier for
-    Linear. Anything absent falls to the default, so a test states only the
+    Linear. `deps` holds the GitHub keys that carry a `dep:` lifecycle label. Anything absent falls to the default, so a test states only the
     references it cares about. Every call is recorded, which is how the
     ordering tests assert what the lookup budget was spent on.
     """
@@ -71,10 +71,12 @@ class FakeApi:
         github: dict[str, tuple[bool, bool]] | None = None,
         repos: dict[str, tuple[bool, bool]] | None = None,
         linear: dict[str, tuple[bool, bool]] | None = None,
+        deps: set[str] | None = None,
         default_github: tuple[bool, bool] = (False, True),
         default_linear: tuple[bool, bool] = (False, True),
     ) -> None:
         self.github = github or {}
+        self.deps = set(deps or ())
         self.repos = repos or {}
         self.linear = linear or {}
         self.default_github = default_github
@@ -85,10 +87,11 @@ class FakeApi:
 
     def verify_github_issue(
         self, repo: str, number: str, token: str
-    ) -> tuple[bool, bool]:
+    ) -> tuple[bool, bool, bool]:
         key = f"{repo}#{number}"
         self.github_calls.append(key)
-        return self.github.get(key, self.default_github)
+        exists, api_ok = self.github.get(key, self.default_github)
+        return exists, api_ok, key in self.deps
 
     def repo_visible(self, repo: str, token: str) -> tuple[bool, bool]:
         self.repo_calls.append(repo)
@@ -448,3 +451,61 @@ def test_the_template_and_the_workflow_name_the_same_blocking_date() -> None:
     match = re.search(r'BLOCKING_DATE:\s*"(\d{4}-\d{2}-\d{2})"', workflow)
     assert match, "the workflow does not set BLOCKING_DATE"
     assert f"becomes required on {match.group(1)}" in template
+
+
+# ------------------------------------------------------------------
+# Proposal umbrellas
+# ------------------------------------------------------------------
+
+DEP = f"{REPO}#14897"
+
+
+def test_a_proposal_alone_does_not_satisfy_the_check(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A DEP is a real issue, and on its own it is not a linked unit of work."""
+    api = FakeApi(github={DEP: (True, True)}, deps={DEP})
+    code, api = run(monkeypatch, api, PR_BODY="Part of #14897")
+    assert code == 1
+    out = capsys.readouterr().out
+    assert "proposal only" in out
+    assert "#14897" in out
+
+
+def test_a_work_issue_alongside_a_proposal_passes(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    api = FakeApi(github={DEP: (True, True), f"{REPO}#123": (True, True)}, deps={DEP})
+    code, api = run(monkeypatch, api, PR_BODY="Closes #123\n\nPart of #14897")
+    assert code == 0
+    assert "proposal only" not in capsys.readouterr().out
+
+
+def test_a_proposal_does_not_stop_the_search(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The proposal sorts first, and the work issue behind it still passes."""
+    dep = f"{REPO}#5"
+    api = FakeApi(github={dep: (True, True), f"{REPO}#900": (True, True)}, deps={dep})
+    code, api = run(monkeypatch, api, PR_BODY="Part of #5 and Closes #900")
+    assert code == 0
+    assert api.github_calls == [dep, f"{REPO}#900"]
+
+
+def test_proposals_past_the_bound_are_not_rescued_by_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A proposal is a decided candidate, so the bound must not pass it."""
+    keys = {f"{REPO}#{n}": (True, True) for n in range(101, 112)}
+    api = FakeApi(github=keys, deps=set(keys))
+    body = " ".join(f"#{n}" for n in range(101, 112))
+    code, api = run(monkeypatch, api, PR_BODY=body)
+    assert code == 1
+
+
+def test_a_proposal_with_an_outage_fails_open_and_still_names_it(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    api = FakeApi(github={DEP: (True, True), f"{REPO}#7": (False, False)}, deps={DEP})
+    code, api = run(monkeypatch, api, PR_BODY="Part of #14897 and Fixes #7")
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "#14897 is a Dynamo Enhancement Proposal" in out
