@@ -46,10 +46,6 @@ where
             return Err(PrefillError::PrefillError(detail, Some(Box::new(error))));
         }
 
-        if let Some(ref tracker) = tracker {
-            tracker.record_prefill_complete();
-        }
-
         let mut prompt_tokens_details = first_output
             .data
             .as_ref()
@@ -69,6 +65,9 @@ where
             });
 
         let completion = if !is_bootstrap {
+            if let Some(ref tracker) = tracker {
+                tracker.record_prefill_complete();
+            }
             while let Some(next) = prefill_response.next().await {
                 if let Some(error) = next.err() {
                     let detail = format!("Prefill router returned error in output stream: {error}");
@@ -89,6 +88,11 @@ where
                 let _task_guard = task_guard;
                 while let Some(output) = prefill_response.next().await {
                     PrefillTask::check_output(&output)?;
+                }
+                // Bootstrap details unblock decode, but do not mean prefill is
+                // complete. Record completion only after its stream finishes.
+                if let Some(tracker) = tracker {
+                    tracker.record_prefill_complete();
                 }
                 Ok(())
             }))
