@@ -621,7 +621,7 @@ where
         let track_output_blocks =
             attempt_id.is_some() && chooser.kv_router_config().router_track_output_blocks;
         if attempt_id.is_some() {
-            request_metrics.requests_started_total().inc();
+            request_metrics.requests_started_total.inc();
         }
         let approximate_lru = cleanup.approximate_lru.clone();
         let output_hashes = approximate_lru
@@ -652,7 +652,7 @@ where
         lora_load: Option<LoraLoadGuard>,
         request: &PreprocessedRequest,
     ) -> Self {
-        request_metrics.requests_started_total().inc();
+        request_metrics.requests_started_total.inc();
         Self {
             cleanup: match occupancy_reservation {
                 Some(reservation) => RequestCleanup::Occupancy {
@@ -999,6 +999,8 @@ mod prefill_start_tests {
                 .unwrap()
         }
         Arc::new(RouterRequestMetrics {
+            requests_started_total: prometheus::IntCounter::new("requests_started_total", "test")
+                .unwrap(),
             requests_total: prometheus::IntCounter::new("requests_total", "test").unwrap(),
             time_to_first_token_seconds: hist("ttft_seconds"),
             inter_token_latency_seconds: hist("itl_seconds"),

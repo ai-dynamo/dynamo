@@ -12,6 +12,7 @@
 #   vllm     -> vllm build and test
 #   sglang   -> sglang build and test
 #   trtllm   -> trtllm build and test
+#   triton   -> triton build and test
 #   frontend -> frontend EPP image build, dynamo build-test
 #   benchmarks -> dynamo build-test (runs tests/benchmarks/** pytest suite)
 #   efa      -> all framework EFA runtime image builds (changes to container/templates/aws.Dockerfile)
@@ -181,6 +182,7 @@ core:
   - 'components/src/dynamo/replay/**'
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
+  - 'components/src/dynamo/experimental/**'
   - 'components/src/dynamo/gpu_memory_service/**'
   # TODO(will): Move TokenSpeed to a dedicated framework filter once CI has
   # TokenSpeed Docker images and backend-specific build/test jobs.
@@ -225,6 +227,8 @@ operator:
   - 'components/src/dynamo/profiler/utils/dgd_override.py'
   - 'components/src/dynamo/profiler/tests/integration/test_dgd_override_go_integration.py'
   - 'components/src/dynamo/profiler/utils/dgdr_*'
+  # The operator check also owns the Go/Python snapshot environment contract test.
+  - 'components/src/dynamo/common/snapshot/**'
 
 snapshot:
   - 'deploy/checkpoint-placeholder/**'
@@ -327,6 +331,7 @@ dgdr:
   - 'tests/deploy/test_dgdr_utils.py'
   - 'tests/deploy/dgd_utils.py'
 
+
 planner:
   - 'container/templates/planner.Dockerfile'
   - 'components/src/dynamo/planner/**'
@@ -377,6 +382,12 @@ trtllm:
   - 'examples/backends/trtllm/**'
   - 'components/src/dynamo/trtllm/**'
   - 'container/templates/trtllm_*'
+  - '!**/*.md'
+  - '!**/*.rst'
+
+triton:
+  - 'components/src/dynamo/triton/**'
+  - 'container/templates/triton_*'
   - '!**/*.md'
   - '!**/*.rst'
 

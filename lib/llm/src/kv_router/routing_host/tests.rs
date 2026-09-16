@@ -1162,6 +1162,7 @@ async fn router_with_worker_configs(
     session_affinity_mode: crate::session_affinity::SessionAffinityMode,
 ) -> (RoutingHost, Runtime) {
     let runtime = Runtime::from_current().unwrap();
+    // Each runtime has its own in-memory discovery store, so fixture namespaces can repeat.
     let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
         .await
         .unwrap();
@@ -1204,12 +1205,14 @@ async fn router_with_worker_configs(
         .map(AffinityCoordinator::new)
         .transpose()
         .unwrap();
-    let router = RoutingHost::new_with_coordinator(
+    let mut router = RoutingHost::new_with_coordinator(
         inner,
         Arc::new(chooser),
         affinity,
         session_affinity_mode,
     );
+    // Parallel tests must not share the process-global request counters.
+    router.request_metrics = router.request_metrics.with_isolated_counters_for_test();
     router
         .inner
         .client
@@ -1425,7 +1428,6 @@ async fn track_request(
 async fn route_plan_from_preview_holds_and_releases_the_decode_reservation() {
     let (router, runtime) = router(None).await;
     let request = Context::new(request());
-    let requests_started_before = router.request_metrics.requests_started_total().get();
 
     let preview = router
         .preview_kv_route(&request, RequestPhase::Decode)
@@ -1437,8 +1439,8 @@ async fn route_plan_from_preview_holds_and_releases_the_decode_reservation() {
         .expect("decode plan should admit one request");
     assert_eq!(plan.signals().worker.worker_id, 7);
     assert_eq!(
-        router.request_metrics.requests_started_total().get(),
-        requests_started_before,
+        router.request_metrics.requests_started_total.get(),
+        0,
         "a topology decision is not a started request"
     );
     let admitted_loads = router
@@ -1466,8 +1468,8 @@ async fn route_plan_from_preview_holds_and_releases_the_decode_reservation() {
         "abandoned plans must release their scheduler reservation: {released_loads:?}"
     );
     assert_eq!(
-        router.request_metrics.requests_started_total().get(),
-        requests_started_before,
+        router.request_metrics.requests_started_total.get(),
+        0,
         "an abandoned plan must not count as a started request"
     );
 
@@ -1480,7 +1482,6 @@ async fn route_plan_from_preview_holds_and_releases_the_decode_reservation() {
 async fn route_preview_does_not_admit_a_request() {
     let (router, runtime) = router(None).await;
     let request = Context::new(request());
-    let requests_started_before = router.request_metrics.requests_started_total().get();
 
     let preview = router
         .preview_kv_route(&request, RequestPhase::Decode)
@@ -1493,10 +1494,7 @@ async fn route_preview_does_not_admit_a_request() {
         .await
         .unwrap();
     assert!(loads.iter().all(|load| load.active_requests == 0));
-    assert_eq!(
-        router.request_metrics.requests_started_total().get(),
-        requests_started_before
-    );
+    assert_eq!(router.request_metrics.requests_started_total.get(), 0);
 
     drop(router);
     runtime.shutdown();
@@ -1575,7 +1573,6 @@ async fn route_preview_does_not_acquire_session_affinity() {
 #[serial_test::serial]
 async fn planned_dispatch_transfers_the_reservation_to_request_cleanup() {
     let (router, runtime) = router(None).await;
-    let requests_started_before = router.request_metrics.requests_started_total().get();
     let request = Context::new(request());
     let preview = router
         .preview_kv_route(&request, RequestPhase::Decode)
@@ -1587,10 +1584,7 @@ async fn planned_dispatch_transfers_the_reservation_to_request_cleanup() {
         .unwrap();
 
     assert!(router.dispatch_kv_plan(request, plan).await.is_err());
-    assert_eq!(
-        router.request_metrics.requests_started_total().get(),
-        requests_started_before + 1
-    );
+    assert_eq!(router.request_metrics.requests_started_total.get(), 1);
     let loads = router
         .kv_router()
         .get_potential_loads(&[], None, None, None, None)
@@ -1607,7 +1601,6 @@ async fn planned_dispatch_transfers_the_reservation_to_request_cleanup() {
 async fn prefill_busy_probe_does_not_admit_a_request() {
     let (router, runtime) = router(None).await;
     let request = Context::new(request());
-    let requests_started_before = router.request_metrics.requests_started_total().get();
 
     assert!(!router.prefill_worker_busy(&request, 0.5).await.unwrap());
     let loads = router
@@ -1616,10 +1609,7 @@ async fn prefill_busy_probe_does_not_admit_a_request() {
         .await
         .unwrap();
     assert!(loads.iter().all(|load| load.active_requests == 0));
-    assert_eq!(
-        router.request_metrics.requests_started_total().get(),
-        requests_started_before
-    );
+    assert_eq!(router.request_metrics.requests_started_total.get(), 0);
 
     drop(router);
     runtime.shutdown();
@@ -1672,8 +1662,6 @@ async fn session_affinity_disabled_does_not_create_coordinator() {
 async fn router_request_counters_follow_admission_and_completion_lifecycle() {
     let (router, runtime) = router(None).await;
     let metrics = router.request_metrics.clone();
-    let started_before = metrics.requests_started_total().get();
-    let completed_before = metrics.requests_total.get();
 
     let controller = Controller::new("pre-admission-cancellation".to_string());
     controller.stop();
@@ -1689,23 +1677,23 @@ async fn router_request_counters_follow_admission_and_completion_lifecycle() {
             .await
             .is_err()
     );
-    assert_eq!(metrics.requests_started_total().get(), started_before);
+    assert_eq!(metrics.requests_started_total.get(), 0);
 
     let (_, _, mut query_guard) = track_request(&router, true).await;
     query_guard.abort().await;
     drop(query_guard);
-    assert_eq!(metrics.requests_started_total().get(), started_before);
+    assert_eq!(metrics.requests_started_total.get(), 0);
 
     let (_, _, mut cancelled_guard) = track_request(&router, false).await;
 
-    assert_eq!(metrics.requests_started_total().get(), started_before + 1);
-    assert_eq!(metrics.requests_total.get(), completed_before);
+    assert_eq!(metrics.requests_started_total.get(), 1);
+    assert_eq!(metrics.requests_total.get(), 0);
 
     // Admission remains counted even when the request aborts before dispatch.
     cancelled_guard.abort().await;
     drop(cancelled_guard);
-    assert_eq!(metrics.requests_started_total().get(), started_before + 1);
-    assert_eq!(metrics.requests_total.get(), completed_before);
+    assert_eq!(metrics.requests_started_total.get(), 1);
+    assert_eq!(metrics.requests_total.get(), 0);
 
     let mut failed_input = request();
     failed_input.migration_state = Some(Default::default());
@@ -1743,16 +1731,16 @@ async fn router_request_counters_follow_admission_and_completion_lifecycle() {
             .is_err()
     );
     assert_eq!(migration_state.excluded_worker_ids(), vec![failed_worker]);
-    assert_eq!(metrics.requests_started_total().get(), started_before + 2);
-    assert_eq!(metrics.requests_total.get(), completed_before);
+    assert_eq!(metrics.requests_started_total.get(), 2);
+    assert_eq!(metrics.requests_total.get(), 0);
 
     let (_, _, mut completed_guard) = track_request(&router, false).await;
     completed_guard.start_dispatch("aggregated");
     completed_guard.mark_dispatched();
     completed_guard.finish().await;
     drop(completed_guard);
-    assert_eq!(metrics.requests_started_total().get(), started_before + 3);
-    assert_eq!(metrics.requests_total.get(), completed_before + 1);
+    assert_eq!(metrics.requests_started_total.get(), 3);
+    assert_eq!(metrics.requests_total.get(), 1);
 
     let mut builtin_guard = RequestGuard::<DefaultWorkerSelector>::new_builtin(
         Arc::clone(&metrics),
@@ -1761,10 +1749,21 @@ async fn router_request_counters_follow_admission_and_completion_lifecycle() {
         None,
         &request(),
     );
-    assert_eq!(metrics.requests_started_total().get(), started_before + 4);
+    assert_eq!(metrics.requests_started_total.get(), 4);
     builtin_guard.abort().await;
     drop(builtin_guard);
-    assert_eq!(metrics.requests_total.get(), completed_before + 1);
+    assert_eq!(metrics.requests_total.get(), 1);
+
+    let (other_router, other_runtime) = router_with_workers(None, &[8]).await;
+    let (_, _, mut other_guard) = track_request(&other_router, false).await;
+    other_guard.start_dispatch("aggregated");
+    other_guard.mark_dispatched();
+    other_guard.finish().await;
+    drop(other_guard);
+    assert_eq!(metrics.requests_started_total.get(), 4);
+    assert_eq!(metrics.requests_total.get(), 1);
+    drop(other_router);
+    other_runtime.shutdown();
 
     drop(router);
     runtime.shutdown();
