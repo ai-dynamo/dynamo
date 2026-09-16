@@ -11,7 +11,7 @@ metadata:
     - workflow
 ---
 
-# Skill: Link Work to Issues
+# Skill: Issue-First Development
 
 <!--
 SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.

@@ -38,11 +38,37 @@ import sys
 import urllib.error
 import urllib.request
 
-LINEAR_TEXT_RE = re.compile(r"\b([A-Z][A-Z0-9]{1,9}-\d{1,6})\b")
+# An owner or repository name is ASCII, starts alphanumeric, and runs to at
+# most 100 characters. Matching the segment on `\w` instead let PR text name a
+# repository that no lookup URL can carry. A non-ASCII segment made urllib
+# raise UnicodeEncodeError, a ValueError, which `http_json` reports as status
+# 0 and the check then reads as an outage and passes; a 9000-character segment
+# did the same by way of a 414. Bounding the pattern keeps both out of the
+# candidate set, which is also the only place the reference text can be
+# bounded before it is echoed into the step summary.
+REPO_SEGMENT = r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}"
+REPO_PAT = rf"{REPO_SEGMENT}/{REPO_SEGMENT}"
+LINEAR_ID = r"[A-Z][A-Z0-9]{1,9}-\d{1,6}"
+LINEAR_TEXT_RE = re.compile(rf"\b({LINEAR_ID})\b")
 LINEAR_BRANCH_RE = re.compile(r"(?:^|[/_-])([a-z][a-z0-9]{1,9}-\d{1,6})(?:$|[/_-])")
 GITHUB_REF_RE = re.compile(r"(?:^|[^\w&])#(\d{1,7})\b")
-CROSS_REPO_RE = re.compile(r"\b([\w.-]+/[\w.-]+)#(\d{1,7})\b")
-ISSUE_URL_RE = re.compile(r"github\.com/([\w.-]+/[\w.-]+)/issues/(\d{1,7})\b")
+CROSS_REPO_RE = re.compile(rf"\b({REPO_PAT})#(\d{{1,7}})\b")
+ISSUE_URL_RE = re.compile(rf"github\.com/({REPO_PAT})/issues/(\d{{1,7}})\b")
+# A magic word marks the reference the author meant as the link. Both forms
+# order the lookup budget, so a release pull request carrying dozens of
+# references still spends its lookups on the one that matters.
+MAGIC_WORDS = (
+    r"clos(?:e|es|ed)|fix(?:es|ed)?|resolv(?:e|es|ed)|part of|refs?|relates to"
+)
+INTENT_GITHUB_RE = re.compile(
+    rf"\b(?:{MAGIC_WORDS})\b[\s:]*"
+    rf"(?:https?://github\.com/({REPO_PAT})/issues/|({REPO_PAT})?#)"
+    rf"(\d{{1,7}})\b",
+    re.IGNORECASE,
+)
+INTENT_LINEAR_RE = re.compile(
+    rf"\b(?:{MAGIC_WORDS})\b[\s:]*({LINEAR_ID})\b", re.IGNORECASE
+)
 HTML_COMMENT_RE = re.compile(r"<!--.*?(?:-->|$)", re.DOTALL)
 BOT_AUTHORS = {"dependabot[bot]", "github-actions[bot]", "copy-pr-bot[bot]"}
 # PR text is untrusted input; bound the number of authenticated lookups it
@@ -156,7 +182,8 @@ def main() -> int:
     # commented-out text must not satisfy the check.
     text = HTML_COMMENT_RE.sub(" ", f"{title}\n{body}")
     linear_ids = set(LINEAR_TEXT_RE.findall(text))
-    linear_ids.update(m.upper() for m in LINEAR_BRANCH_RE.findall(branch))
+    branch_ids = {m.upper() for m in LINEAR_BRANCH_RE.findall(branch)}
+    linear_ids.update(branch_ids)
     github_refs = {(repo, n) for n in GITHUB_REF_RE.findall(text)}
     org = repo.split("/")[0]
     for other_repo, number in CROSS_REPO_RE.findall(text) + ISSUE_URL_RE.findall(text):
@@ -166,13 +193,25 @@ def main() -> int:
         if other_repo.split("/")[0].lower() == org.lower():
             github_refs.add((other_repo, number))
 
+    # A reference behind a magic word, or the identifier in the branch name
+    # the author chose, is the one they meant. Ordering the candidates by that
+    # spends the lookup budget on it first.
+    intent_github = {
+        (url_repo or inline_repo or repo, number)
+        for url_repo, inline_repo, number in INTENT_GITHUB_RE.findall(text)
+    }
+    intent_linear = {m.upper() for m in INTENT_LINEAR_RE.findall(text)} | branch_ids
+
     verified: list[str] = []
     unverified: list[str] = []
     invisible_repo_refs: list[str] = []
     repo_visibility: dict[str, tuple[bool, bool]] = {}
 
-    all_refs = sorted(github_refs, key=lambda r: (r[0], int(r[1])))
+    all_refs = sorted(
+        github_refs, key=lambda r: (r not in intent_github, r[0], int(r[1]))
+    )
     ordered_refs = all_refs[:MAX_CANDIDATES]
+    definitive_github = False
     for ref_repo, number in ordered_refs:
         exists, api_ok = verify_github_issue(ref_repo, number, gh_token)
         label = f"#{number}" if ref_repo == repo else f"{ref_repo}#{number}"
@@ -194,19 +233,28 @@ def main() -> int:
                 unverified.append(f"GitHub reference {label} (API unavailable)")
             elif not visible:
                 invisible_repo_refs.append(label)
+            else:
+                definitive_github = True
+        else:
+            definitive_github = True
         if verified:
             break
 
-    if not verified and len(all_refs) > MAX_CANDIDATES:
-        # Aggregation and release PRs can carry more references than the
-        # lookup budget; never hard-fail on candidates that were not checked.
+    if not verified and len(all_refs) > MAX_CANDIDATES and not definitive_github:
+        # Aggregation and release pull requests can carry more references than
+        # the lookup budget, and a candidate nobody checked must not hard-fail
+        # a pull request. Once a checked candidate has come back definitive the
+        # API is up and the cap is a cap, not an outage. Reporting the
+        # remainder as unverified there passed a pull request whose every
+        # reference resolved to another pull request.
         unverified.append(
             f"{len(all_refs) - MAX_CANDIDATES} further GitHub references "
             f"beyond the {MAX_CANDIDATES}-lookup bound (not verified)"
         )
 
-    all_linear_ids = sorted(linear_ids)
+    all_linear_ids = sorted(linear_ids, key=lambda i: (i not in intent_linear, i))
     fork_linear_ids: list[str] = []
+    definitive_linear = False
     for identifier in all_linear_ids[:MAX_CANDIDATES]:
         if verified:
             break
@@ -222,8 +270,10 @@ def main() -> int:
             verified.append(f"Linear issue {identifier}")
         elif not api_ok:
             unverified.append(f"Linear reference {identifier} (not verified)")
+        else:
+            definitive_linear = True
 
-    if not verified and len(all_linear_ids) > MAX_CANDIDATES:
+    if not verified and len(all_linear_ids) > MAX_CANDIDATES and not definitive_linear:
         unverified.append(
             f"{len(all_linear_ids) - MAX_CANDIDATES} further Linear references "
             f"beyond the {MAX_CANDIDATES}-lookup bound (not verified)"

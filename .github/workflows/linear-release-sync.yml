@@ -21,7 +21,7 @@
 # across concurrently active branches (they may need their own pipeline and
 # access key per stream).
 
-name: Linear Release Sync
+name: Linear Release Sync (main)
 
 on:
   push:

@@ -23,6 +23,14 @@ name: PR Issue Link
 on:
   pull_request_target:
     types: [opened, edited, synchronize, reopened, ready_for_review]
+  # The unit tests below exercise the pull request's own copy of the check, so
+  # they run on `pull_request` and never on `pull_request_target`: a fork's
+  # test file must not execute against the base repository's token.
+  pull_request:
+    paths:
+      - ".github/workflows/pr-issue-link.yml"
+      - ".github/workflows/pr_issue_link.py"
+      - ".github/workflows/test_pr_issue_link.py"
 
 env:
   # Referenced in the failure message; on this date the check is added to the
@@ -38,7 +46,7 @@ jobs:
   check-issue-link:
     name: Require an issue link
     runs-on: ubuntu-latest
-    if: ${{ !github.event.pull_request.draft }}
+    if: ${{ github.event_name == 'pull_request_target' && !github.event.pull_request.draft }}
     permissions:
       contents: read
       issues: read
@@ -61,3 +69,30 @@ jobs:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           REPO: ${{ github.repository }}
         run: python3 .github/workflows/pr_issue_link.py
+
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'pull_request' }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          sparse-checkout: .github/workflows
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      # The check treats an unverifiable reference as an outage and passes, so
+      # what becomes a candidate and when the check may fail open are the two
+      # properties worth pinning. Overriding the repository's pytest ini keeps
+      # this independent of the root test configuration.
+      - name: Unit tests (issue-link check)
+        run: |
+          python -m pytest .github/workflows/test_pr_issue_link.py -v \
+            -p no:cacheprovider \
+            --override-ini="addopts=" \
+            --override-ini="filterwarnings="
