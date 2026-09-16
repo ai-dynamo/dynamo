@@ -139,7 +139,8 @@ struct MaterializedSelectionInput<'a> {
     request: &'a SchedulingRequest,
     context: WorkerSelectionContext<'a>,
     // Both default and custom selection materialize a row for every worker rank
-    // accepted by RoutingEligibility before returning a successful selection.
+    // accepted by RoutingEligibility::validate_worker_rank before returning a
+    // successful selection.
     // That is the same worker set an eligibility-scoped maximum would scan, so
     // accumulating here preserves F2 without a second traversal.
     max_cached_tokens: Cell<Option<usize>>,
@@ -581,6 +582,7 @@ mod test_support {
 mod worker_stage_tests {
     use super::test_support::base_request;
     use super::*;
+    use crate::test_utils::SimpleWorkerConfig;
 
     fn weights() -> LogitWeights {
         LogitWeights {
@@ -626,5 +628,34 @@ mod worker_stage_tests {
         input.row(worker, None, WorkerInputs::NONE);
 
         assert_eq!(input.max_cached_tokens(), None);
+    }
+
+    #[test]
+    fn worker_stage_tracking_excludes_out_of_range_dp_rank() {
+        let workers = HashMap::from([(1, SimpleWorkerConfig::default())]);
+        let mut request = base_request(128);
+        let invalid_rank = WorkerWithDpRank::new(1, 1);
+        request
+            .overlap
+            .effective_cached_tokens
+            .insert(invalid_rank, 96);
+        let input = MaterializedSelectionInput::new_with_worker_stage_tracking(
+            &request,
+            16,
+            weights(),
+            true,
+        );
+        let eligibility = request.eligibility();
+
+        eligibility.for_each_eligible_worker_rank(&workers, |worker, _| {
+            input.row(worker, None, WorkerInputs::NONE);
+        });
+
+        assert!(
+            eligibility
+                .validate_worker_rank(&workers, invalid_rank)
+                .is_err()
+        );
+        assert_eq!(input.max_cached_tokens(), Some(0));
     }
 }
