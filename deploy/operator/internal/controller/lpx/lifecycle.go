@@ -123,9 +123,6 @@ type lpxRetiring struct {
 	retirementReason string
 }
 
-// Error carries retirement through Grove's error-shaped write boundary.
-func (*lpxRetiring) Error() string { return "LPX publication retired before Grove spec write" }
-
 func (*lpxRejected) lpxClassification()          {}
 func (*lpxClosed) lpxClassification()            {}
 func (*lpxOpen) lpxClassification()              {}
@@ -911,17 +908,18 @@ func (r *graphReconciler) reconcileSelectedLPXGroveIdentityPrefix(
 	retire := make(map[int32]bool)
 	intentional := make(map[int32]bool)
 	for replicaIndex, plan := range replicaPlans {
-		identity, incomplete, err := r.observeLPXGroveIdentity(ctx, deployment, desired, snapshot, plan, allAgentGroups)
+		identity, incomplete, drift, err := r.observeLPXGroveIdentity(ctx, deployment, desired, snapshot, plan, allAgentGroups)
 		if err != nil {
-			var drift *lpxRetiring
 			if errors.Is(err, errLPXEngineReplacing) {
 				intentional[int32(replicaIndex)] = true
 				incomplete = err.Error()
-			} else if errors.As(err, &drift) {
-				incomplete = drift.retirementReason
 			} else {
 				return nil, nil, nil, err
 			}
+			retire[int32(replicaIndex)] = true
+		}
+		if drift != nil {
+			incomplete = drift.retirementReason
 			retire[int32(replicaIndex)] = true
 		}
 		if incomplete != "" {
@@ -1011,21 +1009,6 @@ func classifyPublishedLPX(current *lpxv1alpha1.LPUPipelineRequest) lpxClassifica
 		return &lpxBound{}
 	}
 	return (*lpxSchedulerObserved)(status)
-}
-
-func (r *graphReconciler) fenceLPXPublicationBeforeGroveSpecWrite(
-	ctx context.Context,
-	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
-	pcsName string,
-) error {
-	if err := r.validateLPXPublicationSource(ctx, deployment); err != nil {
-		return err
-	}
-	retiring, err := r.retireFirstOwnedLPXRequest(ctx, deployment, pcsName, "LPX publication was retired before synchronizing a Grove PodCliqueSet spec change")
-	if err == nil && retiring != nil {
-		err = retiring
-	}
-	return err
 }
 
 func (r *graphReconciler) createPublishedLPXRequest(
@@ -1168,7 +1151,7 @@ func (r *graphReconciler) observeLPXGroveIdentity(
 	snapshot *lpxGroveSnapshot,
 	plan *lpx.MaterializationPlan,
 	allAgentGroups map[string]struct{},
-) (*lpxGroveIdentity, string, error) {
+) (*lpxGroveIdentity, string, *lpxRetiring, error) {
 	incomplete := snapshot.incomplete
 	// Observe native retirement before gang availability or successor revision readiness.
 	agentUIDs := make([]types.UID, 0, len(plan.Agents))
@@ -1180,14 +1163,14 @@ func (r *graphReconciler) observeLPXGroveIdentity(
 				incomplete = fmt.Sprintf("Waiting for Agent PodClique %q", agent.CliqueName)
 				continue
 			}
-			return nil, "", err
+			return nil, "", nil, err
 		}
 		if !hasCurrentLPXScalingGroupOwner(clique, snapshot.scalingGroup) || clique.UID == "" {
 			incomplete = fmt.Sprintf("Waiting for owned Agent PodClique %q", agent.CliqueName)
 			continue
 		}
 		if !clique.DeletionTimestamp.IsZero() {
-			return nil, "", errLPXEngineReplacing
+			return nil, "", nil, errLPXEngineReplacing
 		}
 		agentUIDs = append(agentUIDs, clique.UID)
 		if !desired.hasCurrentLPXAttemptAnnotations(clique, deployment) ||
@@ -1203,7 +1186,7 @@ func (r *graphReconciler) observeLPXGroveIdentity(
 		allAgentGroups,
 	)
 	if wait != "" {
-		return nil, wait, nil
+		return nil, wait, nil, nil
 	}
 
 	identity := &lpxGroveIdentity{
@@ -1220,7 +1203,7 @@ func (r *graphReconciler) observeLPXGroveIdentity(
 	}
 
 	// A conductor needs complete identity; Cyborg can retain its reference while hashes converge.
-	cyborg, wait, err := r.observeLPXServingClique(
+	cyborg, wait, retiring, err := r.observeLPXServingClique(
 		ctx,
 		deployment,
 		snapshot,
@@ -1228,8 +1211,8 @@ func (r *graphReconciler) observeLPXGroveIdentity(
 		desired,
 		plan,
 	)
-	if err != nil || (wait != "" && cyborg == nil) {
-		return nil, wait, err
+	if err != nil || retiring != nil || (wait != "" && cyborg == nil) {
+		return nil, wait, retiring, err
 	}
 	identity.cyborgClique = cyborg
 	if wait != "" {
@@ -1237,7 +1220,7 @@ func (r *graphReconciler) observeLPXGroveIdentity(
 			incomplete = wait
 		}
 	}
-	return identity, incomplete, nil
+	return identity, incomplete, nil, nil
 }
 
 func (r *graphReconciler) listLPXPublicationPodGangs(
@@ -1334,7 +1317,7 @@ func (r *graphReconciler) observeLPXServingClique(
 	ordinaryPodGangName string,
 	desired *lpxMaterializing,
 	plan *lpx.MaterializationPlan,
-) (*lpxv1alpha1.CyborgPodCliqueReference, string, error) {
+) (*lpxv1alpha1.CyborgPodCliqueReference, string, *lpxRetiring, error) {
 	// Every supported plan has exactly one ordinary-scheduler serving clique.
 	isCyborg := plan.CyborgClique != ""
 	name, role := plan.ConductorClique, lpxv1alpha1.PodRoleConductor
@@ -1349,9 +1332,9 @@ func (r *graphReconciler) observeLPXServingClique(
 	key := types.NamespacedName{Namespace: deployment.Namespace, Name: name}
 	if err := r.apiReader.Get(ctx, key, clique); err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, fmt.Sprintf("Waiting for %s PodClique %q", waitingRoleName, name), nil
+			return nil, fmt.Sprintf("Waiting for %s PodClique %q", waitingRoleName, name), nil, nil
 		}
-		return nil, "", err
+		return nil, "", nil, err
 	}
 	if clique.UID == "" ||
 		clique.Labels[grovecommon.LabelPartOfKey] != snapshot.podCliqueSet.Name ||
@@ -1365,13 +1348,13 @@ func (r *graphReconciler) observeLPXServingClique(
 		return nil, fmt.Sprintf(
 			"%s PodClique %q does not match the current ordinary-scheduler identity",
 			roleName, name,
-		), nil
+		), nil, nil
 	}
 	if !isCyborg {
 		if clique.Status.CurrentPodCliqueSetGenerationHash == nil || *clique.Status.CurrentPodCliqueSetGenerationHash != snapshot.generationHash {
-			return nil, fmt.Sprintf("Waiting for current conductor PodClique %q", clique.Name), nil
+			return nil, fmt.Sprintf("Waiting for current conductor PodClique %q", clique.Name), nil, nil
 		}
-		return nil, "", nil
+		return nil, "", nil, nil
 	}
 
 	// Cyborg publication additionally binds device claims and exact Grove revision hashes.
@@ -1379,7 +1362,7 @@ func (r *graphReconciler) observeLPXServingClique(
 		return nil, fmt.Sprintf(
 			"Cyborg PodClique %q lacks the current LPU scaling-group owner identity",
 			clique.Name,
-		), nil
+		), nil, nil
 	}
 	if !hasLPXCyborgDeviceIntent(clique.Spec.PodSpec) || !hasExpectedLPXCyborgClaimReferences(snapshot.podCliqueSet, clique, plan.CyborgTemplate) {
 		reason := fmt.Sprintf("Cyborg PodClique %q GPU intent or DRA Claim references changed during Grove materialization", clique.Name)
@@ -1387,9 +1370,9 @@ func (r *graphReconciler) observeLPXServingClique(
 		pcs := snapshot.podCliqueSet
 		if pcs.Status.ObservedGeneration != nil && *pcs.Status.ObservedGeneration == pcs.Generation &&
 			clique.Status.CurrentPodCliqueSetGenerationHash != nil && *clique.Status.CurrentPodCliqueSetGenerationHash == snapshot.generationHash {
-			return nil, "", &lpxRetiring{retirementReason: reason}
+			return nil, "", &lpxRetiring{retirementReason: reason}, nil
 		}
-		return nil, reason, nil
+		return nil, reason, nil, nil
 	}
 	reference := &lpxv1alpha1.CyborgPodCliqueReference{Name: clique.Name, UID: string(clique.UID)}
 
@@ -1403,9 +1386,9 @@ func (r *graphReconciler) observeLPXServingClique(
 		return reference, fmt.Sprintf(
 			"Waiting for Grove to materialize the current PodCliqueSet generation in Cyborg PodClique %q",
 			clique.Name,
-		), nil
+		), nil, nil
 	}
-	return reference, "", nil
+	return reference, "", nil, nil
 }
 
 func selectLPXPublicationPodGangs(

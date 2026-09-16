@@ -876,8 +876,9 @@ func TestLPXPublicationFencesLiveSourceAndChildMetadata(t *testing.T) {
 	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(source), liveSource))
 	liveSource.Annotations[consts.KubeAnnotationEnableMetrics] = "false"
 	require.NoError(t, r.Update(t.Context(), liveSource))
-	_, _, err := r.reconcileGrovePodCliqueSetForLPX(t.Context(), child, nil, pcs)
+	_, _, retiring, err := r.reconcileGrovePodCliqueSetForLPX(t.Context(), child, nil, pcs)
 	require.ErrorContains(t, err, "input revision")
+	require.Nil(t, retiring)
 	allPCS := &grovev1alpha1.PodCliqueSetList{}
 	require.NoError(t, r.List(t.Context(), allPCS))
 	require.Empty(t, allPCS.Items)

@@ -33,15 +33,19 @@ func (r *graphReconciler) reconcileGrovePodCliqueSetForLPX(
 	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
 	existingPodCliqueSet *grovev1alpha1.PodCliqueSet,
 	desired *grovev1alpha1.PodCliqueSet,
-) (*grovev1alpha1.PodCliqueSet, bool, error) {
+) (*grovev1alpha1.PodCliqueSet, bool, *lpxRetiring, error) {
 	// A missing observation permits only creation after the publication fence.
 	if existingPodCliqueSet == nil {
-		if err := r.fenceLPXPublicationBeforeGroveSpecWrite(ctx, deployment, desired.Name); err != nil {
-			return nil, false, err
+		if err := r.validateLPXPublicationSource(ctx, deployment); err != nil {
+			return nil, false, nil, err
+		}
+		retiring, err := r.retireFirstOwnedLPXRequest(ctx, deployment, desired.Name, "LPX publication was retired before synchronizing a Grove PodCliqueSet spec change")
+		if err != nil || retiring != nil {
+			return nil, false, retiring, err
 		}
 	}
 
 	// Match normal PCS synchronization; Grove owns rollout and immutable-field validation.
 	modified, synced, err := commoncontroller.SyncObservedResource(ctx, r, deployment, existingPodCliqueSet, desired, commoncontroller.WithPreservedListOrder())
-	return synced, modified, err
+	return synced, modified, nil, err
 }

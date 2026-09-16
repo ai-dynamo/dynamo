@@ -278,14 +278,12 @@ func (r *graphReconciler) reconcileWorkload(ctx context.Context, deployment *v1a
 			return state, ctrl.Result{}, err
 		}
 	}
-	synced, changed, err := r.reconcileGrovePodCliqueSetForLPX(ctx, deployment, pcs, desired)
+	synced, changed, retiring, err := r.reconcileGrovePodCliqueSetForLPX(ctx, deployment, pcs, desired)
 	if err != nil {
-		var retiring *lpxRetiring
-		if errors.As(err, &retiring) {
-			state = lpxResult(retiring)
-			return state, projectLPXLifecycleStatus(deployment, retiring), nil
-		}
 		return state, ctrl.Result{}, err
+	}
+	if retiring != nil {
+		return lpxResult(retiring), projectLPXLifecycleStatus(deployment, retiring), nil
 	}
 	if err := r.reconcileEndpoint(ctx, deployment, source); err != nil {
 		return state, ctrl.Result{}, err
