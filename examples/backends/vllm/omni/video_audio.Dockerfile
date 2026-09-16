@@ -45,7 +45,9 @@ from vllm_omni.diffusion.utils.media_utils import mux_video_audio_bytes
 fps = 24
 sample_rate = 32000
 frames = np.zeros((4, 16, 16, 3), dtype=np.uint8)
-waveform = np.zeros((2, sample_rate // 4), dtype=np.float32)
+waveform = np.zeros(
+    (2, round(sample_rate * len(frames) / fps)), dtype=np.float32
+)
 payload = mux_video_audio_bytes(
     frames,
     waveform,
@@ -59,6 +61,9 @@ with av.open(io.BytesIO(payload), mode="r") as container:
     assert int(video.average_rate) == fps
     assert audio.codec_context.name == "aac"
     assert audio.codec_context.sample_rate == sample_rate
+    video_duration = float(video.duration * video.time_base)
+    audio_duration = float(audio.duration * audio.time_base)
+    assert abs(video_duration - audio_duration) <= 1 / fps
 PY
 
 USER dynamo

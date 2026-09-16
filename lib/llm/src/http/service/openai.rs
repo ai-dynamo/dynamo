@@ -5055,10 +5055,8 @@ async fn videos(
         let response = NvVideosResponse::from_annotated_stream(stream)
             .await
             .map_err(|e| {
-                let err_response = ErrorMessage::from_anyhow(
-                    anyhow::Error::new(e),
-                    "Failed to fold videos stream",
-                );
+                let err_response =
+                    non_streaming_aggregation_error_response(e, "Failed to fold videos stream");
                 inflight.mark_error(extract_error_type_from_response(&err_response));
                 err_response
             })?;
@@ -7190,11 +7188,11 @@ mod tests {
             .message("unsupported video control")
             .build();
         let response =
-            ErrorMessage::from_anyhow(anyhow::Error::new(error), "Failed to fold videos stream");
+            non_streaming_aggregation_error_response(error, "Failed to fold videos stream");
 
         assert_eq!(response.0, StatusCode::BAD_REQUEST);
         assert_eq!(response.1.code, StatusCode::BAD_REQUEST.as_u16());
-        assert_eq!(response.1.message, "unsupported video control");
+        assert_eq!(response.1.message, "Invalid request");
     }
 
     #[test]

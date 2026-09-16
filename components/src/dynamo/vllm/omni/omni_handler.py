@@ -358,19 +358,14 @@ class OmniHandler(BaseOmniHandler):
             )
         except (ValueError, NotImplementedError, RuntimeError) as e:
             logger.error(f"Invalid request {request_id}: {e}")
-            if (
-                isinstance(e, ValueError)
-                and request_type == RequestType.IMAGE_GENERATION
+            if isinstance(e, ValueError) and request_type in (
+                RequestType.IMAGE_GENERATION,
+                RequestType.VIDEO_GENERATION,
             ):
-                # /v1/images/generations folds worker output into
-                # NvImagesResponse, which has no failure shape, so the
-                # chat.completion.chunk _error_chunk returns is not a rejection
-                # the client can read. Re-raise as InvalidArgument instead: it is
-                # a registered binding exception, so errors.rs takes its message
-                # via .value(py).str() and the client sees the reason alone. A
-                # bare ValueError reaches the same 400 through engine.rs's
-                # fallback, but that path uses PyErr::to_string() and renders as
-                # "ValueError: <reason>", leaking the Python type to the API.
+                # Media endpoints cannot interpret the chat.completion.chunk
+                # returned by _error_chunk as a request rejection. Re-raise as
+                # the registered binding exception so the HTTP layer returns a
+                # 400 with the validation reason before generation begins.
                 raise InvalidArgument(str(e)) from e
             yield self._error_chunk(request_id, str(e), request_type)
             return
@@ -742,6 +737,12 @@ class OmniHandler(BaseOmniHandler):
             image: Pre-loaded PIL Image for I2V. When provided, the image is
                 attached to the prompt via ``multi_modal_data`` so vllm-omni's
                 I2V pipeline pre-process can use it.
+
+        Returns:
+            EngineInputs: Validated inputs for video generation.
+
+        Raises:
+            ValueError: If the frame rate or output format is unsupported.
         """
         width, height = parse_size(req.size)
         nvext = req.nvext or VideoNvExt()
@@ -753,6 +754,15 @@ class OmniHandler(BaseOmniHandler):
             default_fps=DEFAULT_VIDEO_FPS,
         )
         fps = nvext.fps if nvext.fps is not None else DEFAULT_VIDEO_FPS
+        if fps <= 0:
+            raise ValueError(f"fps must be greater than zero, got {fps}")
+
+        output_format = req.output_format.lower() if req.output_format else None
+        if output_format not in (None, "mp4"):
+            raise ValueError(
+                f"Unsupported output_format: {req.output_format!r}; "
+                "only 'mp4' is supported"
+            )
 
         prompt = OmniTextPrompt(prompt=req.prompt)
         if nvext.negative_prompt is not None:
@@ -799,6 +809,6 @@ class OmniHandler(BaseOmniHandler):
             request_type=RequestType.VIDEO_GENERATION,
             fps=fps,
             response_format=req.response_format,
-            output_format=req.output_format,
+            output_format=output_format,
             lora_request=lora_request,
         )

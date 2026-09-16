@@ -226,6 +226,30 @@ class TestBuildEngineInputs:
         assert i2v.response_format == response_format
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("fps", [0, -1])
+    async def test_video_generation_rejects_non_positive_fps(self, fps):
+        handler = _make_handler()
+        req = NvCreateVideoRequest(
+            prompt="a drone",
+            model="test-model",
+            nvext=VideoNvExt(num_frames=24, fps=fps),
+        )
+
+        with pytest.raises(ValueError, match="fps must be greater than zero"):
+            await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+
+    @pytest.mark.asyncio
+    async def test_video_generation_normalizes_mp4_output_format(self):
+        handler = _make_handler()
+        req = NvCreateVideoRequest(
+            prompt="a drone", model="test-model", output_format="MP4"
+        )
+
+        inputs = await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+
+        assert inputs.output_format == "mp4"
+
+    @pytest.mark.asyncio
     async def test_audio_generation_delegates_toaudio(self):
         """Audio request delegates to audio."""
         handler = _make_handler()
@@ -1075,6 +1099,27 @@ class TestImageEndpointSizeValidation:
         assert str(excinfo.value) == (
             "width in size='99999x99999' must be between 1 and 4096"
         )
+
+
+class TestVideoEndpointValidation:
+    """Video requests reject invalid controls before generation."""
+
+    @pytest.mark.asyncio
+    async def test_video_rejection_propagates_before_generation(self):
+        handler = _make_handler()
+        handler.config.output_modalities = ["video"]
+        handler.engine_client.generate = MagicMock(
+            side_effect=AssertionError("engine must not run for a rejected request")
+        )
+        request = {
+            "prompt": "a drone",
+            "model": "test-model",
+            "output_format": "webm",
+        }
+
+        with pytest.raises(InvalidArgument, match="only 'mp4' is supported"):
+            async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                pass
 
 
 # ---------------------------------------------------------------------------

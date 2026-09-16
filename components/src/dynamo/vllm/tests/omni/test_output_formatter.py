@@ -254,7 +254,7 @@ class TestDiffusionFormatterVideo:
         stage = SimpleNamespace(
             images=[np.zeros((2, 4, 4, 3), dtype=np.float32)],
             multimodal_output={
-                "audio": np.zeros((1, 2, 128), dtype=np.float32),
+                "audio": np.zeros((1, 2, 2667), dtype=np.float32),
                 "fps": 24,
                 "audio_sample_rate": 32000,
             },
@@ -275,7 +275,7 @@ class TestDiffusionFormatterVideo:
         assert result["data"][0]["audio_sample_rate"] == 32000
         assert result["data"][0]["b64_json"] is not None
         assert mux.call_count == 1
-        assert mux.call_args.args[1].shape == (2, 128)
+        assert mux.call_args.args[1].shape == (2, 2667)
         assert mux.call_args.kwargs["fps"] == 24.0
         assert mux.call_args.kwargs["audio_sample_rate"] == 32000
 
@@ -291,7 +291,9 @@ class TestDiffusionFormatterVideo:
         stage = SimpleNamespace(
             images=[np.zeros((2, 4, 4, 3), dtype=np.float32)],
             multimodal_output={
-                "audio": np.zeros((1, 2, 128), dtype=np.float32),
+                "audio": np.zeros(
+                    (1, 2, round(sample_rate * 2 / 16)), dtype=np.float32
+                ),
                 sample_rate_key: sample_rate,
             },
         )
@@ -311,7 +313,7 @@ class TestDiffusionFormatterVideo:
 
     @pytest.mark.asyncio
     async def test_uses_default_audio_sample_rate_when_metadata_is_absent(self):
-        audio = {"audio": np.zeros((1, 2, 128), dtype=np.float32)}
+        audio = {"audio": np.zeros((1, 2, 2000), dtype=np.float32)}
         video = [np.zeros((2, 4, 4, 3), dtype=np.float32)]
 
         with patch(
@@ -338,7 +340,7 @@ class TestDiffusionFormatterVideo:
         stage = SimpleNamespace(
             images=videos,
             multimodal_output={
-                "audio": np.zeros((2, 2, 128), dtype=np.float32),
+                "audio": np.zeros((2, 2, 2667), dtype=np.float32),
                 "metadata": {
                     "video": {"fps": 24},
                     "audio": {"sample_rate": 32000},
@@ -358,6 +360,42 @@ class TestDiffusionFormatterVideo:
 
         assert len(result["data"]) == 2
         assert mux.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_rejects_mismatched_audio_video_duration_before_mux(self):
+        video = [np.zeros((48, 4, 4, 3), dtype=np.float32)]
+        audio = {
+            "audio": np.zeros((1, 2, 16000), dtype=np.float32),
+            "fps": 24,
+            "audio_sample_rate": 32000,
+        }
+
+        with patch("dynamo.vllm.omni.output_formatter.mux_video_audio_bytes") as mux:
+            result = await _make_diffusion_formatter()._encode_video(
+                video,
+                "req-duration-mismatch",
+                fps=24,
+                multimodal_output=audio,
+                response_format="b64_json",
+            )
+
+        assert result["status"] == "failed"
+        assert "Audio/video duration mismatch" in result["error"]
+        mux.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rejects_non_positive_fallback_fps_before_encoding(self):
+        with patch("dynamo.vllm.omni.output_formatter.encode_to_video_bytes") as encode:
+            result = await _make_diffusion_formatter()._encode_video(
+                [np.zeros((2, 4, 4, 3), dtype=np.float32)],
+                "req-invalid-fps",
+                fps=0,
+                response_format="b64_json",
+            )
+
+        assert result["status"] == "failed"
+        assert "fps must be greater than zero" in result["error"]
+        encode.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_silent_video_keeps_vp9_encoder(self):
@@ -502,8 +540,20 @@ class TestDiffusionFormatterVideo:
         ],
     )
     def test_rejects_mismatched_audio_batch(self, audio):
-        with pytest.raises(ValueError, match="Expected 2 audio outputs"):
+        with pytest.raises(ValueError, match="Expected 2 audio output"):
             DiffusionFormatter._split_audio_outputs(audio, expected_count=2)
+
+    def test_rejects_batched_audio_for_one_video(self):
+        with pytest.raises(ValueError, match="Expected 1 audio output"):
+            DiffusionFormatter._split_audio_outputs(
+                np.zeros((2, 2, 128), dtype=np.float32), expected_count=1
+            )
+
+    def test_rounds_fractional_positive_fps_metadata(self):
+        assert (
+            DiffusionFormatter._resolve_int_metadata({"fps": 23.976}, "fps", "video")
+            == 24
+        )
 
 
 class TestBuildCompletionUsage:

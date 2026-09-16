@@ -260,13 +260,14 @@ class DiffusionFormatter:
         Args:
             images: Primary generated video-frame payload.
             request_id: Identifier included in the response and storage path.
-            fps: Fallback frame rate when metadata does not provide one.
+            fps: Positive fallback frame rate when metadata does not provide one.
             multimodal_output: Optional video, audio, and encoding metadata.
             response_format: ``"url"`` or ``"b64_json"`` output representation.
             output_format: Video container format; currently only ``"mp4"``.
 
         Returns:
-            Dict[str, Any] | None: Completed or failed video response payload.
+            Dict[str, Any] | None: Completed response, or a failed response for
+                invalid media metadata, mismatched durations, or encoding errors.
 
         Raises:
             ValueError: If the response or output format is unsupported.
@@ -287,9 +288,11 @@ class DiffusionFormatter:
             videos = self._split_video_outputs(images, multimodal_output)
             if not videos:
                 raise ValueError("No video outputs found in generation result")
-            resolved_fps = self._resolve_int_metadata(
-                multimodal_output, "fps", "video"
-            ) or int(fps)
+            resolved_fps = self._resolve_int_metadata(multimodal_output, "fps", "video")
+            if resolved_fps is None:
+                resolved_fps = self._coerce_positive_int(fps)
+            if resolved_fps is None:
+                raise ValueError(f"Video fps must be greater than zero, got {fps!r}")
             audio_sample_rate = self._resolve_audio_sample_rate(multimodal_output)
             audio_outputs = self._split_audio_outputs(
                 multimodal_output.get("audio"), len(videos)
@@ -316,6 +319,24 @@ class DiffusionFormatter:
                             "use the video-audio codec overlay"
                         )
                     audio_np = self._audio_to_numpy(audio)
+                    if audio_np.ndim in (1, 2):
+                        # Match the muxer's channel-first/channel-last normalization.
+                        audio_sample_count = max(audio_np.shape)
+                        video_duration_s = frames_np.shape[0] / resolved_fps
+                        audio_duration_s = audio_sample_count / audio_sample_rate
+                        duration_tolerance_s = (
+                            1.0 / resolved_fps + 1.0 / audio_sample_rate
+                        )
+                        if (
+                            abs(video_duration_s - audio_duration_s)
+                            > duration_tolerance_s
+                        ):
+                            raise ValueError(
+                                "Audio/video duration mismatch: "
+                                f"video={video_duration_s:.3f}s, "
+                                f"audio={audio_duration_s:.3f}s, "
+                                f"tolerance={duration_tolerance_s:.3f}s"
+                            )
                     video_bytes = await asyncio.to_thread(
                         mux_video_audio_bytes,
                         frames_np,
@@ -535,7 +556,12 @@ class DiffusionFormatter:
         if audio is None:
             return [None] * expected_count
         if isinstance(audio, (np.ndarray, torch.Tensor)):
-            if audio.ndim >= 3 and audio.shape[0] == expected_count:
+            if audio.ndim >= 3:
+                if audio.shape[0] != expected_count:
+                    raise ValueError(
+                        f"Expected {expected_count} audio output(s) for "
+                        f"{expected_count} videos"
+                    )
                 return [audio[index] for index in range(expected_count)]
             if expected_count == 1:
                 return [audio]
@@ -545,7 +571,7 @@ class DiffusionFormatter:
             if expected_count == 1:
                 return [audio]
         raise ValueError(
-            f"Expected {expected_count} audio outputs for {expected_count} videos"
+            f"Expected {expected_count} audio output(s) for {expected_count} videos"
         )
 
     @staticmethod
@@ -575,7 +601,7 @@ class DiffusionFormatter:
         metadata_section: str,
         metadata_key: str | None = None,
     ) -> int | None:
-        """Resolve positive integer metadata from top-level or nested fields.
+        """Resolve positive numeric metadata rounded to the nearest integer.
 
         Args:
             multimodal_output: Multimodal payload containing optional metadata.
@@ -599,11 +625,7 @@ class DiffusionFormatter:
                     value = section.get(metadata_key or key)
         if value is None:
             return None
-        try:
-            resolved = int(value.item() if hasattr(value, "item") else value)
-        except (TypeError, ValueError):
-            return None
-        return resolved if resolved > 0 else None
+        return DiffusionFormatter._coerce_positive_int(value)
 
     def _resolve_audio_sample_rate(self, multimodal_output: dict[str, Any]) -> int:
         """Resolve an audio sample rate from known metadata aliases.
@@ -642,7 +664,7 @@ class DiffusionFormatter:
 
     @staticmethod
     def _coerce_positive_int(value: Any) -> int | None:
-        """Convert a scalar value to a positive integer when possible.
+        """Round a scalar value to a positive integer when possible.
 
         Args:
             value: Scalar-like value to convert.
@@ -657,7 +679,8 @@ class DiffusionFormatter:
         if value is None:
             return None
         try:
-            resolved = int(value.item() if hasattr(value, "item") else value)
+            scalar = value.item() if hasattr(value, "item") else value
+            resolved = round(float(scalar))
         except (TypeError, ValueError):
             return None
         return resolved if resolved > 0 else None
