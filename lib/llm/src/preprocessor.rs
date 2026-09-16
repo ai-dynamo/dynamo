@@ -188,7 +188,7 @@ fn validate_legacy_jail_nvext_choice_count(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ToolProcessingRoute {
+enum ToolProcessingRoute {
     MuseUnified(String),
     Unified(&'static str),
     ParserV2(String),
@@ -197,7 +197,7 @@ pub enum ToolProcessingRoute {
 }
 
 impl ToolProcessingRoute {
-    pub fn uses_legacy_jail(&self) -> bool {
+    fn uses_legacy_jail(&self) -> bool {
         matches!(self, Self::LegacyJail(_))
     }
 }
@@ -4866,7 +4866,7 @@ impl OpenAIPreprocessor {
         stream
     }
 
-    pub fn tool_processing_route(
+    fn tool_processing_route(
         &self,
         request: &NvCreateChatCompletionRequest,
         guided_tool_constraint: &crate::protocols::openai::GuidedToolConstraint,
