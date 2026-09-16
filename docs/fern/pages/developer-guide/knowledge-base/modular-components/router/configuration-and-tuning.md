@@ -269,10 +269,10 @@ The first successfully dispatched request binds the session ID to its selected w
 | `hard` | Default. Exact-dispatch to the stored target. If the worker or rank is no longer valid, invalidate the binding and retry normal selection once |
 | `soft` | Pass the stored target through the normal selection pipeline as an advisory target. The built-in selector retains it while eligible; a custom policy can choose another worker |
 
-**Experimental.** Available since v1.5. When session affinity is enabled (`--router-session-affinity-ttl-secs`),
-a request that carries a parent session id binds under an internal key derived from that parent id
-instead of its own session, so the subagents of one parent share a binding while the parent keeps
-its own. Dynamo's affinity coordinator owns that binding: it commits only after a successful
+**Experimental.** Available since v1.5. When session affinity is enabled
+(`--router-session-affinity-ttl-secs`), a request that carries a parent session id binds under an
+internal key derived from that parent id instead of its own session, so the subagents of one parent
+share a binding while the parent keeps its own. Dynamo's affinity coordinator owns that binding: it commits only after a successful
 dispatch, is version-checked against concurrent updates, expires on the same TTL, and counts
 against the same global entry limit as any session binding. A request that carries an explicit
 worker target stays on its own session, so it is neither rejected against the group nor able to

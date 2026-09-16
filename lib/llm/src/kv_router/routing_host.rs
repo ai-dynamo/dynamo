@@ -576,9 +576,11 @@ where
         }
     }
 
-    /// The parent keeps its own binding, so a group is placed on its own rather than inheriting
-    /// whichever worker the parent already holds. An explicit per-request target stays on the
-    /// request's own session so it cannot be rejected against, or rebind, the group.
+    /// A request that carries a parent session id binds under the parent's group; every other
+    /// request keys on its own session. The parent keeps its own binding, so a group is placed on
+    /// its own rather than inheriting whichever worker the parent already holds. An explicit
+    /// per-request target stays on the request's own session so it cannot be rejected against, or
+    /// rebind, the group.
     fn affinity_binding_id(
         &self,
         request: &SingleIn<PreprocessedRequest>,
