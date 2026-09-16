@@ -29,9 +29,18 @@ mooncake-transfer-engine-cuda13>=0.3.13.post1,<0.4
 # floor it so the --no-deps install moves it to the current patch line.
 pillow>=12.3.0
 # NVDEC hardware decode for H.264/H.265 video input (common/multimodal/
-# nvdec_decoder). Pin >=2.2.0 and force-reinstall (see the vllm_runtime.Dockerfile
-# install): the vllm-openai base ships PyNvVideoCodec 2.0.4, which bundles a full
-# FFmpeg (libavcodec + libavdevice/libavfilter/libsw*) that the codec gate
-# rejects; 2.2.0 bundles only libavutil + libavformat (container demux, no codec).
+# nvdec_decoder). Pin >=2.2.3, and remove the base copy before installing (see
+# the vllm_runtime.Dockerfile install): the vllm-openai base ships
+# PyNvVideoCodec 2.0.4, which bundles a full FFmpeg 8.1.1 (libavcodec +
+# libavdevice/libavfilter/libsw*) that the codec gate rejects; 2.2.3 bundles
+# only libavutil + libavformat (FFmpeg 9.0.1, container demux, no codec).
 # Requires NVIDIA_DRIVER_CAPABILITIES to include "video" or it cannot import.
-PyNvVideoCodec>=2.2.0
+#
+# Bounded above, per the pinning strategy in container/deps/README.md: the lower
+# bound records the version the multimodal suite was validated against, and
+# without an upper bound it records nothing, because the build resolves whatever
+# is newest. Keep the whole specifier identical to the ones in
+# requirements.{sglang,trtllm}.txt and to any inline install in a runtime
+# template, and its lower bound identical to those templates' guard constants; a
+# test asserts they all agree.
+PyNvVideoCodec>=2.2.3,<3

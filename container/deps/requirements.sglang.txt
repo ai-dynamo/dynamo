@@ -30,9 +30,22 @@ mooncake-transfer-engine-cuda13>=0.3.13.post1,<0.4
 pillow>=12.3.0,<13  # bounded: this file installs with --force-reinstall
 # NVDEC hardware decode for H.264/H.265 video input (dynamo common.multimodal.
 # nvdec_decoder), restoring those codecs after the video-DECODE purge in
-# sglang_runtime.Dockerfile. Pin >=2.2.0: it bundles only libavutil + libavformat
-# (container demux, no software codec); older 2.0.x bundles a full FFmpeg incl.
-# libavcodec that the codec gate rejects. Links libnvcuvid at runtime; requires
-# NVIDIA_DRIVER_CAPABILITIES to include "video" (set in sglang_runtime.Dockerfile).
-PyNvVideoCodec>=2.2.0
+# sglang_runtime.Dockerfile. Pin >=2.2.3: it bundles only libavutil + libavformat
+# (FFmpeg 9.0.1, container demux, no software codec); older 2.0.x/2.1.x bundle a
+# full FFmpeg incl. libavcodec that the codec gate rejects. Links libnvcuvid at
+# runtime; requires NVIDIA_DRIVER_CAPABILITIES to include "video" (set in
+# sglang_runtime.Dockerfile).
+#
+# No pre-install removal here, unlike the vLLM and TRT-LLM images: the
+# lmsysorg/sglang base ships no PyNvVideoCodec today, so this install is the only
+# copy in the image. That is a property of the current base rather than a
+# guarantee, so sglang_runtime.Dockerfile asserts the result -- exactly one
+# dist-info, at or above this floor, and exactly one bundled FFmpeg source
+# tarball -- instead of trusting the claim.
+#
+# Bounded above -- see the note in requirements.vllm.txt. Keep the whole
+# specifier identical to the ones in requirements.{vllm,trtllm}.txt, and its lower
+# bound identical to the guard constants in the three runtime templates; a test
+# asserts they all agree.
+PyNvVideoCodec>=2.2.3,<3
 zstandard==0.23.0

@@ -190,6 +190,114 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
     [ "$CUDA_MAJOR" = "13" ] || { echo "ERROR: requirements.sglang.txt hardcodes the mooncake-transfer-engine-cuda13 distribution; got CUDA_MAJOR=$CUDA_MAJOR" >&2; exit 1; } && \
     pip install --break-system-packages --force-reinstall --no-deps \
         --requirement /tmp/requirements.sglang.txt
+
+# Assert that exactly one PyNvVideoCodec ended up in the image, at or above the
+# floor, carrying none of the libraries the codec gate denies.
+#
+# The lmsysorg/sglang base ships no PyNvVideoCodec today, so unlike the vLLM and
+# TRT-LLM images there is no base copy to delete first -- but that is a property
+# of the current base, not a guarantee, and --force-reinstall above would replace
+# a base copy in place rather than leave two. What a base copy could still leave
+# behind is a second version-stamped FFmpeg source tarball under
+# <data>/external/ffmpeg, which the wheel installs outside site-packages through
+# a `../../../external/ffmpeg/src/ffmpeg-<version>.tar.xz` RECORD entry. Checking
+# the result is what keeps that honest; a comment claiming the base is clean
+# would not.
+#
+# FLOOR is duplicated from requirements.sglang.txt on purpose -- this stage must
+# not parse the file it is checking; tests/dependencies/test_pynvvideocodec_floor.py
+# asserts the two agree.
+RUN python3 - <<'PYEOF'
+import csv
+import glob
+import os
+import re
+import sys
+from importlib.metadata import distributions
+
+FLOOR = "2.2.3"
+NAME = "pynvvideocodec"
+# Mirrors the deny globs in container/compliance/policy/codec_policy.yaml. Kept as
+# families rather than the four this package happens to have shed, so a future
+# release vendoring libpostproc or libx264 is caught here -- beside the install
+# that introduced it -- instead of as an unattributed scan violation later.
+DENIED = (
+    "libavcodec",
+    "libavdevice",
+    "libavfilter",
+    "libswscale",
+    "libswresample",
+    "libpostproc",
+    "libx264",
+    "libx265",
+    "libfdk-aac",
+)
+
+
+def canonical(name):
+    return re.sub(r"[-_.]+", "-", name or "").lower()
+
+
+def parse(version):
+    """Compare on the numeric release only, and never raise.
+
+    A version this cannot split (a release candidate, a dev build) must not kill
+    the build with a traceback where this block has its own message to print.
+    """
+    parts = [int(x) for x in re.findall(r"\d+", version)[:3]]
+    return tuple(parts + [0] * (3 - len(parts)))
+
+
+# Enumerated over sys.path rather than one scheme directory: these images carry
+# both /usr/local/lib/python3.12/dist-packages and /usr/lib/python3/dist-packages,
+# and the wheel declares Root-Is-Purelib: false, so neither purelib nor platlib
+# alone is guaranteed to be the install target or the only place a copy can hide.
+# A surviving base copy beside the new one is the failure being looked for, which
+# is also why this counts distributions instead of asking for one version.
+installed = [d for d in distributions() if canonical(d.metadata["Name"]) == NAME]
+versions = sorted(d.version for d in installed)
+print("PyNvVideoCodec distributions on sys.path:", versions)
+if len(installed) != 1:
+    sys.exit(f"ERROR: expected exactly one PyNvVideoCodec, found {versions}")
+if parse(versions[0]) < parse(FLOOR):
+    sys.exit(f"ERROR: PyNvVideoCodec {versions[0]} is below the {FLOOR} floor")
+
+site = os.path.normpath(str(installed[0].locate_file("")))
+pkg = os.path.join(site, "PyNvVideoCodec")
+bundled = sorted(
+    os.path.relpath(p, pkg)
+    for p in glob.glob(os.path.join(pkg, "**", "lib*.so*"), recursive=True)
+)
+print("PyNvVideoCodec bundles:", bundled)
+# Positive first, and on both libraries: an empty package directory satisfies
+# every negative check below while shipping no demuxer at all.
+for required in ("libavformat", "libavutil"):
+    if not any(os.path.basename(n).startswith(required) for n in bundled):
+        sys.exit(
+            f"ERROR: PyNvVideoCodec bundles no {required}, so the checks below "
+            f"would pass vacuously; found {bundled}"
+        )
+denied = [n for n in bundled if os.path.basename(n).startswith(DENIED)]
+if denied:
+    sys.exit(f"ERROR: PyNvVideoCodec bundles libraries the codec gate denies: {denied}")
+
+# The FFmpeg source tarball lands outside site-packages, so its directory is read
+# from the wheel's own RECORD rather than guessed from a sysconfig path -- the
+# RECORD is what the installer actually wrote, and it moves if the layout does.
+record = installed[0].read_text("RECORD") or ""
+declared = [
+    row[0]
+    for row in csv.reader(record.splitlines())
+    if row and row[0].endswith((".tar.xz", ".tar.gz", ".tar.bz2"))
+]
+if len(declared) != 1:
+    sys.exit(f"ERROR: expected one source tarball in the RECORD, found {declared}")
+external = os.path.dirname(os.path.normpath(os.path.join(site, declared[0])))
+tarballs = sorted(os.path.basename(p) for p in glob.glob(os.path.join(external, "ffmpeg-*.tar.*")))
+print("bundled FFmpeg source tarballs in", external, "->", tarballs)
+if len(tarballs) != 1:
+    sys.exit(f"ERROR: expected exactly one bundled FFmpeg source tarball, found {tarballs}")
+PYEOF
 {% else %}
 # mooncake and PyNvVideoCodec are CUDA-only. The mooncake floor names the CUDA 13
 # distribution, and PyNvVideoCodec decodes on NVDEC through libnvcuvid, so both
