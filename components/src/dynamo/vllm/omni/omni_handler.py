@@ -36,7 +36,11 @@ from dynamo.common.utils.output_modalities import (
     get_output_modalities,
     parse_request_type,
 )
-from dynamo.common.utils.video_utils import compute_num_frames, parse_size
+from dynamo.common.utils.video_utils import (
+    DEFAULT_VIDEO_NUM_FRAMES,
+    compute_num_frames,
+    parse_size,
+)
 from dynamo.llm import (
     ModelInput,
     ModelRuntimeConfig,
@@ -731,6 +735,13 @@ class OmniHandler(BaseOmniHandler):
         nvext: VideoNvExt,
     ) -> None:
         """Overlay only fields explicitly supplied by a video request."""
+        if nvext.num_frames is not None and nvext.num_frames <= 0:
+            raise ValueError("nvext.num_frames must be greater than zero")
+        if nvext.fps is not None and nvext.fps <= 0:
+            raise ValueError("nvext.fps must be greater than zero")
+        if req.seconds is not None and req.seconds <= 0:
+            raise ValueError("seconds must be greater than zero")
+
         if req.size is not None:
             width, height = parse_size(req.size)
             sp.width = width
@@ -739,15 +750,20 @@ class OmniHandler(BaseOmniHandler):
         if nvext.num_frames is not None:
             sp.num_frames = nvext.num_frames
         elif req.seconds is not None:
-            model_fps = getattr(sp, "fps", None) or getattr(sp, "frame_rate", None)
+            frame_rate = (
+                float(nvext.fps) if nvext.fps is not None else sp.resolved_frame_rate
+            )
             sp.num_frames = compute_num_frames(
-                num_frames=None,
                 seconds=req.seconds,
-                fps=nvext.fps or model_fps,
+                fps=frame_rate,
                 default_fps=int(
                     getattr(self.config, "default_video_fps", DEFAULT_VIDEO_FPS)
                 ),
             )
+        elif sp.num_frames == 1:
+            # vllm-omni uses 1 as the image-model sentinel. It is not a usable
+            # video default for pipelines that consume num_frames verbatim.
+            sp.num_frames = DEFAULT_VIDEO_NUM_FRAMES
 
         if nvext.fps is not None:
             sp.fps = nvext.fps
@@ -848,11 +864,11 @@ class OmniHandler(BaseOmniHandler):
         )
         lora_request = self._resolve_and_apply_lora(req.model, sampling_params_list)
 
-        model_fps = getattr(output_sp, "fps", None) or getattr(
-            output_sp, "frame_rate", None
-        )
-        output_fps = int(
-            model_fps or getattr(self.config, "default_video_fps", DEFAULT_VIDEO_FPS)
+        model_fps = output_sp.resolved_frame_rate
+        output_fps = round(
+            model_fps
+            if model_fps is not None
+            else getattr(self.config, "default_video_fps", DEFAULT_VIDEO_FPS)
         )
 
         logger.info(

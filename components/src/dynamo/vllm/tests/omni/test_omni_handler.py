@@ -627,6 +627,58 @@ class TestI2VEngineInputs:
         assert sp.seed == 42
         assert result.fps == 24
 
+    @pytest.mark.asyncio
+    async def test_video_uses_video_default_for_image_num_frames_sentinel(self):
+        handler = _make_handler()
+        req = NvCreateVideoRequest(prompt="cat", model="video-model")
+
+        result = await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+
+        assert result.sampling_params_list[0].num_frames == 97
+
+    @pytest.mark.asyncio
+    async def test_video_resolves_fractional_frame_rate(self):
+        handler = _make_handler()
+        model_defaults = handler.engine_client.default_sampling_params_list[0]
+        model_defaults.fps = 16
+        model_defaults.frame_rate = 23.976
+        req = NvCreateVideoRequest(prompt="cat", model="video-model", seconds=10)
+
+        result = await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+        sp = result.sampling_params_list[0]
+
+        assert sp.num_frames == 240
+        assert isinstance(sp.num_frames, int)
+        assert result.fps == 24
+
+    @pytest.mark.parametrize(
+        ("field", "value", "message"),
+        [
+            ("num_frames", 0, "nvext.num_frames must be greater than zero"),
+            ("num_frames", -1, "nvext.num_frames must be greater than zero"),
+            ("fps", 0, "nvext.fps must be greater than zero"),
+            ("fps", -1, "nvext.fps must be greater than zero"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_video_rejects_non_positive_overrides(self, field, value, message):
+        handler = _make_handler()
+        req = NvCreateVideoRequest(
+            prompt="cat", model="video-model", nvext=VideoNvExt(**{field: value})
+        )
+
+        with pytest.raises(ValueError, match=message):
+            await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+
+    @pytest.mark.parametrize("seconds", [0, -1])
+    @pytest.mark.asyncio
+    async def test_video_rejects_non_positive_duration(self, seconds):
+        handler = _make_handler()
+        req = NvCreateVideoRequest(prompt="cat", model="video-model", seconds=seconds)
+
+        with pytest.raises(ValueError, match="seconds must be greater than zero"):
+            await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+
     async def test_media_passthrough_reaches_sampling_params(self):
         """A top-level SDK extra_body field, nested by the frontend under
         extra_args["media_passthrough"], rides sampling params extra_args to
