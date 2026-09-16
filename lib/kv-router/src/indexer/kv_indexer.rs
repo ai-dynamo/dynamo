@@ -59,6 +59,7 @@ fn apply_routing_decision_with_prune_tracking(
         .iter()
         .zip(routing_req.sequence_hashes.iter());
     let stored_event = KvCacheEventData::Stored(KvCacheStoreData {
+        shared_cache_eligible: false,
         parent_hash: None,
         start_position: None,
         blocks: hashes

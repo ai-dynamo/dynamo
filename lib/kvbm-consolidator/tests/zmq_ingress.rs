@@ -34,6 +34,7 @@ fn bs_event_with_cache_namespace(
     cache_namespace: Option<String>,
 ) -> RawKvEvent {
     RawKvEvent::BlockStored {
+        shared_cache_eligible: false,
         block_hashes: block_hashes
             .into_iter()
             .map(BlockHashValue::Unsigned)

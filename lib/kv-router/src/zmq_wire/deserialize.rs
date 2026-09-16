@@ -9,7 +9,9 @@ use serde::de::{self, IgnoredAny, MapAccess, SeqAccess, Visitor};
 
 use crate::protocols::BlockExtraInfo;
 
-use super::extra_keys::{extra_keys_to_block_mm_infos, extra_keys_to_cache_namespace};
+use super::extra_keys::{
+    extra_keys_are_text_only, extra_keys_to_block_mm_infos, extra_keys_to_cache_namespace,
+};
 use super::filter::{
     BlockStoredTrailingField, KvCacheEventMetadata, KvCacheEventTrailingField, KvCacheSpecKind,
 };
@@ -33,6 +35,14 @@ impl<'de> Deserialize<'de> for RawKvEvent {
 
 struct RawKvEventVisitor;
 
+// Unknown provenance metadata must not reject otherwise usable GPU events.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ProvenanceField<T> {
+    Known(T),
+    Unknown(IgnoredAny),
+}
+
 impl<'de> Visitor<'de> for RawKvEventVisitor {
     type Value = RawKvEvent;
 
@@ -51,6 +61,9 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
         let mut block_size: Option<usize> = None;
         let mut medium: Option<Option<String>> = None;
         let mut lora_name: Option<Option<String>> = None;
+        let mut lora_id: Option<ProvenanceField<u64>> = None;
+        let mut wire_is_eagle: Option<ProvenanceField<bool>> = None;
+        let mut wire_shared_cache_eligible: Option<ProvenanceField<bool>> = None;
         let mut cache_namespace: Option<Option<String>> = None;
         let mut extra_keys: Option<Option<Vec<Option<Vec<ExtraKeyItem>>>>> = None;
         let mut block_mm_infos: Option<Option<Vec<Option<BlockExtraInfo>>>> = None;
@@ -81,6 +94,15 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 }
                 "lora_name" => {
                     lora_name = Some(map.next_value()?);
+                }
+                "lora_id" => {
+                    lora_id = map.next_value()?;
+                }
+                "is_eagle" => {
+                    wire_is_eagle = map.next_value()?;
+                }
+                "shared_cache_eligible" => {
+                    wire_shared_cache_eligible = map.next_value()?;
                 }
                 "cache_salt" => {
                     cache_namespace = Some(map.next_value()?);
@@ -129,9 +151,31 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 let cache_namespace = cache_namespace.unwrap_or(None).or_else(|| {
                     extra_keys_to_cache_namespace(extra_keys.as_deref(), lora_name.as_deref())
                 });
-                let block_mm_infos = block_mm_infos
-                    .unwrap_or(None)
-                    .or_else(|| extra_keys_to_block_mm_infos(extra_keys));
+                let block_mm_infos = block_mm_infos.unwrap_or(None);
+                let known_lora = match lora_id {
+                    None | Some(ProvenanceField::Known(0)) => true,
+                    Some(ProvenanceField::Known(_)) => {
+                        lora_name.as_deref().is_some_and(|name| !name.is_empty())
+                    }
+                    Some(ProvenanceField::Unknown(_)) => false,
+                };
+                let shared_cache_eligible =
+                    matches!(
+                        wire_shared_cache_eligible,
+                        None | Some(ProvenanceField::Known(true))
+                    ) && matches!(wire_is_eagle, None | Some(ProvenanceField::Known(false)))
+                        && !is_eagle
+                        && known_lora
+                        && block_mm_infos
+                            .as_ref()
+                            .is_none_or(|infos| infos.iter().all(Option::is_none))
+                        && extra_keys_are_text_only(
+                            extra_keys.as_deref(),
+                            lora_name.as_deref(),
+                            cache_namespace.as_deref(),
+                        );
+                let block_mm_infos =
+                    block_mm_infos.or_else(|| extra_keys_to_block_mm_infos(extra_keys));
                 Ok(RawKvEvent::BlockStored {
                     block_hashes,
                     parent_block_hash: parent_block_hash.unwrap_or(None),
@@ -148,6 +192,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     locality: locality.unwrap_or(None),
                     ownership: ownership.unwrap_or(None),
                     session_id: session_id.unwrap_or(None),
+                    shared_cache_eligible,
                 })
             }
             Some("BlockRemoved") => {
@@ -200,8 +245,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 let block_size: usize = seq
                     .next_element()?
                     .ok_or_else(|| de::Error::invalid_length(4, &"missing block_size"))?;
-                // Position 5 was lora_id in older formats; consume and discard for compat.
-                let _lora_id: Option<u64> = seq.next_element()?.unwrap_or(None);
+                let lora_id: Option<u64> = seq.next_element()?.unwrap_or(None);
                 let medium: Option<String> = normalize_medium(seq.next_element()?.unwrap_or(None));
                 let lora_name: Option<String> = seq.next_element()?.unwrap_or(None);
                 let extra_keys: Option<Vec<Option<Vec<ExtraKeyItem>>>> =
@@ -222,10 +266,22 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
 
                 let cache_namespace =
                     extra_keys_to_cache_namespace(extra_keys.as_deref(), lora_name.as_deref());
+                let (raw_token_ids, is_eagle) = normalize_token_ids(token_ids);
+                let shared_cache_eligible = !is_eagle
+                    && (lora_id.is_none_or(|id| id == 0)
+                        || lora_name.as_deref().is_some_and(|name| !name.is_empty()))
+                    && parsed
+                        .block_mm_infos
+                        .as_ref()
+                        .is_none_or(|infos| infos.iter().all(Option::is_none))
+                    && extra_keys_are_text_only(
+                        extra_keys.as_deref(),
+                        lora_name.as_deref(),
+                        cache_namespace.as_deref(),
+                    );
                 let block_mm_infos = parsed
                     .block_mm_infos
                     .or_else(|| extra_keys_to_block_mm_infos(extra_keys));
-                let (raw_token_ids, is_eagle) = normalize_token_ids(token_ids);
 
                 Ok(RawKvEvent::BlockStored {
                     block_hashes,
@@ -245,6 +301,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     // vLLM emits session_id in its named-map format. Legacy
                     // positional layouts have no unambiguous session slot.
                     session_id: None,
+                    shared_cache_eligible,
                 })
             }
             "BlockRemoved" => {

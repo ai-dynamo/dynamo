@@ -318,6 +318,7 @@ pub(super) mod test_util {
                 data: KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash,
                     start_position: None,
+                    shared_cache_eligible: false,
                     blocks,
                 }),
                 dp_rank,

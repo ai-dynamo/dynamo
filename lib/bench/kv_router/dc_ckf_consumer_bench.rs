@@ -583,6 +583,7 @@ fn stored_event(
         KvCacheEvent {
             event_id,
             data: KvCacheEventData::Stored(KvCacheStoreData {
+                shared_cache_eligible: false,
                 parent_hash: parent_sequence_hash
                     .map(|hash| ExternalSequenceBlockHash(hash ^ EXTERNAL_MASK)),
                 start_position: None,
