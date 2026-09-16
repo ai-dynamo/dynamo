@@ -25,7 +25,7 @@ use super::filter::{RoutingEligibility, WorkerEligibilityError};
 use super::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
 use crate::protocols::{
     WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank,
-    cache_reuse_worker_stages_enabled,
+    cache_reuse_funnel_f2_onward_enabled,
 };
 
 /// Low-level selector used by routing hosts.
@@ -152,7 +152,7 @@ impl<'a> MaterializedSelectionInput<'a> {
             request,
             block_size,
             weights,
-            cache_reuse_worker_stages_enabled() && request.mode.is_tracked(),
+            cache_reuse_funnel_f2_onward_enabled() && request.mode.is_tracked(),
         )
     }
 

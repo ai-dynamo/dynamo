@@ -65,7 +65,7 @@ use prometheus::{
 use crate::http::service::metrics::generate_log_buckets;
 use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
 use dynamo_kv_router::{
-    indexer::ApproximateLruStats, protocols::cache_reuse_worker_stages_enabled,
+    indexer::ApproximateLruStats, protocols::cache_reuse_funnel_f2_onward_enabled,
 };
 
 pub(crate) const ROUTER_WORKER_ID_LABEL: &str = "router_worker_id";
@@ -990,7 +990,7 @@ impl RouterRequestMetrics {
                     .expect("failed to create router_overlap_blocks_lost");
                 non_max_overlap_selections_total.with_label_values(&[WORKER_TYPE_PREFILL]);
                 overlap_blocks_lost.with_label_values(&[WORKER_TYPE_PREFILL]);
-                let cache_loss_worker_stages = cache_reuse_worker_stages_enabled().then(|| {
+                let cache_loss_worker_stages = cache_reuse_funnel_f2_onward_enabled().then(|| {
                     let observation_input_tokens_total = metrics
                         .create_intcounter(
                             &router_metric("cache_loss_observation_input_tokens_total"),
