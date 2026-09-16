@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::io::Write;
+use std::time::Duration;
 
 use dynamo_backend_common::{DynamoError, PreprocessedRequest};
 use opendal::{Buffer, Operator};
@@ -14,10 +15,11 @@ use serde_json::Value;
 use crate::client;
 
 const OUTPUT_PATH: &str = "choice_0.msgpack.zst";
+const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) struct MetadataUploader {
     primary: Operator,
-    fallback: Option<Operator>,
+    fallback: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -34,7 +36,7 @@ struct MetadataUploadConfig {
 }
 
 impl MetadataUploader {
-    pub(crate) fn from_request(
+    pub(crate) async fn from_request(
         request: &PreprocessedRequest,
         enabled: bool,
     ) -> Result<Option<Self>, DynamoError> {
@@ -59,11 +61,10 @@ impl MetadataUploader {
         })?;
         // Ensure built-in services are registered when this crate is linked statically.
         opendal::install_default();
-        let primary = operator_from_url(&config.url, "url")?;
+        let primary = operator_from_url(config.url, "url").await?;
         let fallback = config
             .fallback_url
-            .as_deref()
-            .map(|url| operator_from_url(url, "fallback_url"))
+            .map(|url| normalize_url(url, "fallback_url"))
             .transpose()?;
         Ok(Some(Self { primary, fallback }))
     }
@@ -78,38 +79,57 @@ impl MetadataUploader {
                 client::protocol_error(format!("SGLang metadata encoding task failed: {error}"))
             })??
             .into();
-        match self.primary.write(OUTPUT_PATH, compressed.clone()).await {
-            Ok(_) => Ok(()),
+        match write(&self.primary, compressed.clone()).await {
+            Ok(()) => Ok(()),
             Err(primary_error) => {
-                let Some(fallback) = self.fallback.as_ref() else {
-                    return Err(upload_error(&self.primary, primary_error));
+                let Some(fallback_url) = self.fallback.as_ref() else {
+                    return Err(primary_error);
                 };
                 tracing::warn!(error = %primary_error, "primary metadata upload failed; attempting fallback");
-                fallback
-                    .write(OUTPUT_PATH, compressed)
-                    .await
-                    .map_err(|error| upload_error(fallback, error))?;
-                Ok(())
+                let fallback = operator_from_url(fallback_url.clone(), "fallback_url").await?;
+                write(&fallback, compressed).await
             }
         }
     }
 }
 
-fn operator_from_url(raw: &str, field: &str) -> Result<Operator, DynamoError> {
+fn normalize_url(raw: String, field: &str) -> Result<String, DynamoError> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Err(client::invalid_arg(format!(
             "extra_args.nvext.metadata_upload.{field} must not be empty"
         )));
     }
-    Operator::from_uri(raw).map_err(|error| {
-        client::invalid_arg(format!(
-            "could not configure `{}` metadata upload destination: {error}",
-            raw.split_once(':')
-                .map(|(scheme, _)| scheme)
-                .unwrap_or("unknown")
-        ))
+    Ok(raw.to_string())
+}
+
+async fn operator_from_url(raw: String, field: &'static str) -> Result<Operator, DynamoError> {
+    tokio::task::spawn_blocking(move || {
+        let raw = normalize_url(raw, field)?;
+        Operator::from_uri(raw.as_str()).map_err(|error| {
+            client::invalid_arg(format!(
+                "could not configure `{}` metadata upload destination: {error}",
+                raw.split_once(':')
+                    .map(|(scheme, _)| scheme)
+                    .unwrap_or("unknown")
+            ))
+        })
     })
+    .await
+    .map_err(|error| {
+        client::protocol_error(format!("metadata upload setup task failed: {error}"))
+    })?
+}
+
+async fn write(operator: &Operator, data: Buffer) -> Result<(), DynamoError> {
+    match tokio::time::timeout(WRITE_TIMEOUT, operator.write(OUTPUT_PATH, data)).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(error)) => Err(upload_error(operator, error)),
+        Err(_) => Err(client::protocol_error(format!(
+            "SGLang metadata upload to {} timed out after {WRITE_TIMEOUT:?}",
+            operator.info().root()
+        ))),
+    }
 }
 
 fn upload_error(operator: &Operator, error: opendal::Error) -> DynamoError {
@@ -194,18 +214,20 @@ mod tests {
             .unwrap()
     }
 
-    #[test]
-    fn metadata_upload_is_rl_gated_and_strict() {
+    #[tokio::test]
+    async fn metadata_upload_is_rl_gated_and_strict() {
         let configured = request(json!({
             "nvext": {"metadata_upload": {"url": "fs:///tmp/metadata"}}
         }));
         assert!(
             MetadataUploader::from_request(&configured, false)
+                .await
                 .unwrap()
                 .is_none()
         );
         assert!(
             MetadataUploader::from_request(&configured, true)
+                .await
                 .unwrap()
                 .is_some()
         );
@@ -213,7 +235,11 @@ mod tests {
         let invalid = request(json!({
             "nvext": {"metadata_upload": {"url": "fs:///tmp", "format": "json"}}
         }));
-        assert!(MetadataUploader::from_request(&invalid, true).is_err());
+        assert!(
+            MetadataUploader::from_request(&invalid, true)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -224,6 +250,7 @@ mod tests {
             "nvext": {"metadata_upload": {"url": url}}
         }));
         let uploader = MetadataUploader::from_request(&configured, true)
+            .await
             .unwrap()
             .unwrap();
         uploader
@@ -262,6 +289,7 @@ mod tests {
             }}
         }));
         let uploader = MetadataUploader::from_request(&configured, true)
+            .await
             .unwrap()
             .unwrap();
 
@@ -271,8 +299,8 @@ mod tests {
         assert!(fallback.join(OUTPUT_PATH).is_file());
     }
 
-    #[test]
-    fn accepts_a_registered_custom_scheme() {
+    #[tokio::test]
+    async fn accepts_a_registered_custom_scheme() {
         opendal::OperatorRegistry::get().register::<opendal::services::Memory>("custom-metadata");
         let configured = request(json!({
             "nvext": {"metadata_upload": {"url": "custom-metadata://rollout"}}
@@ -280,6 +308,7 @@ mod tests {
 
         assert!(
             MetadataUploader::from_request(&configured, true)
+                .await
                 .unwrap()
                 .is_some()
         );

@@ -267,10 +267,6 @@ impl LLMEngine for SglangSidecarEngine {
             })?;
             return Ok(native_http.generate(native_request, ctx, self.cancel.clone()));
         }
-        let metadata_uploader = MetadataUploader::from_request(
-            &request,
-            self.metadata_upload_enabled && !self.disaggregation_mode.is_prefill(),
-        )?;
         let mut grpc_client = state.pool.stream_client();
 
         let prompt_tokens = request.token_ids.len() as u32;
@@ -285,6 +281,11 @@ impl LLMEngine for SglangSidecarEngine {
             self.bootstrap_host.as_deref(),
             self.bootstrap_port,
         )?;
+        let metadata_uploader = MetadataUploader::from_request(
+            &request,
+            self.metadata_upload_enabled && !self.disaggregation_mode.is_prefill(),
+        )
+        .await?;
         let prefill_handoff = if self.disaggregation_mode.is_prefill() {
             grpc_request
                 .disaggregated_params
