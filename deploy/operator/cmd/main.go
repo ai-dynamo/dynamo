@@ -616,6 +616,12 @@ func registerControllers(
 	if err := controller.SetupDynamoGraphDeploymentScalingAdapter(mgr, setupOptions); err != nil {
 		return err
 	}
+	if err := controller.SetupDynamoGraphDeploymentEngineGroup(
+		mgr,
+		controller.DynamoGraphDeploymentEngineGroupSetupOptions{},
+	); err != nil {
+		return err
+	}
 	if err := controller.SetupDynamoGraphDeploymentRequest(mgr, controller.DynamoGraphDeploymentRequestSetupOptions{
 		SetupOptions:            setupOptions,
 		RBACManager:             rbacManager,

@@ -92,6 +92,11 @@ const (
 	// so v1-compatible releases continue to generate new DCDs with the v1 value.
 	KubeLabelDynamoWorkerHash = "nvidia.com/dynamo-worker-hash"
 
+	// Engine Group labels correlate capacity and the allocation-count Scale selector.
+	KubeLabelDynamoEngineGroup            = "nvidia.com/dynamo-engine-group"
+	KubeLabelDynamoScaleRepresentative    = "nvidia.com/dynamo-scale-representative"
+	KubeLabelDynamoScaleRepresentativeYes = "true"
+
 	// CheckpointAutoAnnotation marks operator-created checkpoints whose
 	// lifecycle is tied to an owning DGD generation.
 	CheckpointAutoAnnotation = "nvidia.com/dynamo-auto-checkpoint"
