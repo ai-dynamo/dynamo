@@ -236,8 +236,9 @@ cargo fmt --all && cargo clippy --workspace
   cryptographic signature that GitHub reports as `Verified`; a DCO sign-off alone does not
   satisfy this requirement. Signing commits does not itself qualify a PR for automatic approval;
   a maintainer can manually approve the current head with `/ok to test <sha>`.
-  The GLAMR request path instead trusts the authenticated `glamr-agent` account on its own PRs
-  and does not require cryptographic signatures.
+  Only an authenticated full-CI request from `glamr-agent` on a PR authored by that same
+  GitHub account is exempt from cryptographic signatures. Other automatic approval paths
+  still require verified commit signatures.
 - Do not hand-edit a generated artifact — change its source and regenerate. A
   generated file says so in a `do not edit` marker, and its generator has a
   `--check` mode that fails when the committed output is stale. Resolve a
