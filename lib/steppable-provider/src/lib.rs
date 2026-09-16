@@ -10,14 +10,15 @@
 
 use aiperf_steppable_abi::{
     ByteSliceV1, CreateRequestV1, DirectRequestSliceV1, DirectRequestV1, EngineEventSliceV1,
-    EngineEventV1, PluginDescriptorV1, PluginVTableV1, REPLAY_CONTEXT_FLAG_METADATA,
-    REPLAY_CONTEXT_FLAG_SESSION_ID, REPLAY_CONTEXT_FLAG_TURN_INDEX, REQUEST_FACT_FLAG_ADMISSION,
-    REQUEST_FACT_FLAG_LATENCIES, REQUEST_FACT_FLAG_OUTPUT_LENGTH, REQUEST_FLAG_ARRIVAL_TIMESTAMP,
-    REQUEST_FLAG_OUTPUT_TOKEN_IDS, REQUEST_FLAG_POLICY_CLASS, REQUEST_FLAG_PREFERRED_DP_RANK,
-    REQUEST_FLAG_PREFERRED_PREFILL_DP_RANK, REQUEST_FLAG_REPLAY_CONTEXT, REQUEST_FLAG_UUID,
-    ReplayHandleV1, ReplayStateV1, RequestFactSliceV1, RequestFactV1, RequestIdMutSliceV1,
-    RequestIdSliceV1, RequestIdV1, SLA_FLAG_E2E, SLA_FLAG_ITL, SLA_FLAG_TTFT, SlaThresholdsV1,
-    StatusV1, StepRequestV1, StepResultV1, U32SliceV1,
+    EngineEventV1, MAX_REPLAY_CONTEXT_METADATA_BYTES_V1, PluginDescriptorV1, PluginVTableV1,
+    REPLAY_CONTEXT_FLAG_METADATA, REPLAY_CONTEXT_FLAG_SESSION_ID, REPLAY_CONTEXT_FLAG_TURN_INDEX,
+    REQUEST_FACT_FLAG_ADMISSION, REQUEST_FACT_FLAG_LATENCIES, REQUEST_FACT_FLAG_OUTPUT_LENGTH,
+    REQUEST_FLAG_ARRIVAL_TIMESTAMP, REQUEST_FLAG_OUTPUT_TOKEN_IDS, REQUEST_FLAG_POLICY_CLASS,
+    REQUEST_FLAG_PREFERRED_DP_RANK, REQUEST_FLAG_PREFERRED_PREFILL_DP_RANK,
+    REQUEST_FLAG_REPLAY_CONTEXT, REQUEST_FLAG_UUID, ReplayHandleV1, ReplayStateV1,
+    RequestFactSliceV1, RequestFactV1, RequestIdMutSliceV1, RequestIdSliceV1, RequestIdV1,
+    SLA_FLAG_E2E, SLA_FLAG_ITL, SLA_FLAG_TTFT, SlaThresholdsV1, StatusV1, StepRequestV1,
+    StepResultV1, U32SliceV1,
 };
 use aisimulate_core::replay::loadgen::{DynPlacement, SteppableAgg, SteppableReplay};
 use aisimulate_core::replay::{
@@ -166,13 +167,6 @@ impl BackendConfig {
 }
 
 const MAX_PROVIDER_PAYLOAD_BYTES: u64 = 1024 * 1024;
-
-/// Maximum opaque replay-context metadata accepted for one request.
-///
-/// This matches the V1 placement ABI's tagged-metadata limit. The core stores
-/// opaque bytes as JSON values, so the bound is checked before the reversible
-/// byte-array lowering can allocate one JSON value per byte.
-pub const MAX_REPLAY_CONTEXT_METADATA_BYTES: usize = 64 * 1024;
 
 type RouterPlacement = DynPlacement<RouterEventObservation, KvReplayMetadata>;
 
@@ -386,7 +380,7 @@ unsafe fn replay_context(
         // object-only routing controls and round-trips every byte, including
         // invalid UTF-8.
         let metadata = unsafe { borrowed_bytes(context.metadata) }?;
-        if metadata.len() > MAX_REPLAY_CONTEXT_METADATA_BYTES {
+        if metadata.len() > MAX_REPLAY_CONTEXT_METADATA_BYTES_V1 {
             return Err(StatusV1::INVALID_ARGUMENT);
         }
         serde_json::Value::Array(

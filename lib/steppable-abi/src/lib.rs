@@ -36,6 +36,13 @@ pub const REPLAY_CONTEXT_FLAG_TURN_INDEX: u32 = 1 << 1;
 /// `ReplayContextV1::flags`: `metadata` is present.
 pub const REPLAY_CONTEXT_FLAG_METADATA: u32 = 1 << 2;
 
+/// Largest permitted `ReplayContextV1::metadata` payload in a V1 submission.
+///
+/// The metadata bytes remain opaque to the ABI, but a shared bound lets every
+/// host and provider reject an oversized request before it can partially
+/// mutate replay state. This matches Dynamo's V1 metadata boundary.
+pub const MAX_REPLAY_CONTEXT_METADATA_BYTES_V1: usize = 64 * 1024;
+
 /// `RequestFactV1::flags`: admission fields are present.
 pub const REQUEST_FACT_FLAG_ADMISSION: u32 = 1 << 0;
 /// `RequestFactV1::flags`: latency fields are present.
@@ -150,7 +157,8 @@ pub struct ReplayContextV1 {
     pub authored_id: ByteSliceV1,
     /// Optional conversation/session identity.
     pub session_id: ByteSliceV1,
-    /// Optional application-owned provenance bytes.
+    /// Optional opaque application-owned provenance bytes, bounded by
+    /// [`MAX_REPLAY_CONTEXT_METADATA_BYTES_V1`].
     pub metadata: ByteSliceV1,
     /// Optional authored turn number when the corresponding flag is set.
     pub turn_index: u64,

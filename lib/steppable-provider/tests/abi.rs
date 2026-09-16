@@ -357,7 +357,7 @@ fn replay_metadata_limit_rejects_before_request_commitment() {
     let (table, handle) = create_replay();
     let prompt = [10_u32];
     let authored_id = b"metadata-boundary";
-    let at_limit = vec![0xff_u8; dynamo_steppable_provider::MAX_REPLAY_CONTEXT_METADATA_BYTES];
+    let at_limit = vec![0xff_u8; aiperf_steppable_abi::MAX_REPLAY_CONTEXT_METADATA_BYTES_V1];
     let over_limit = vec![0xff_u8; at_limit.len() + 1];
     let context = |metadata: &[u8]| aiperf_steppable_abi::ReplayContextV1 {
         struct_size: std::mem::size_of::<aiperf_steppable_abi::ReplayContextV1>() as u32,
