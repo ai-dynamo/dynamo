@@ -33,6 +33,7 @@ const knownV1Beta1ConversionFieldSet = `
 DynamoComponentDeploymentSpec.backendFramework
 DynamoComponentDeploymentSpec.compilationCache.mountPath
 DynamoComponentDeploymentSpec.compilationCache.pvcName
+DynamoComponentDeploymentSpec.dynamoSidecar
 DynamoComponentDeploymentSpec.eppConfig.config
 DynamoComponentDeploymentSpec.eppConfig.configMapRef
 DynamoComponentDeploymentSpec.experimental.checkpoint.checkpointRef
@@ -104,6 +105,7 @@ DynamoGraphDeploymentSpec.annotations
 DynamoGraphDeploymentSpec.backendFramework
 DynamoGraphDeploymentSpec.components.compilationCache.mountPath
 DynamoGraphDeploymentSpec.components.compilationCache.pvcName
+DynamoGraphDeploymentSpec.components.dynamoSidecar
 DynamoGraphDeploymentSpec.components.eppConfig.config
 DynamoGraphDeploymentSpec.components.eppConfig.configMapRef
 DynamoGraphDeploymentSpec.components.experimental.checkpoint.checkpointRef

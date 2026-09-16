@@ -19963,6 +19963,16 @@ spec:
                   required:
                     - pvcName
                   type: object
+                dynamoSidecar:
+                  description: |-
+                    dynamoSidecar names the restartable init container running the Dynamo
+                    runtime for a worker, prefill, or decode component. The operator injects
+                    Dynamo defaults into this container; the regular container named main
+                    runs the engine with user-provided commands, ports, and probes.
+                    The named init container must have restartPolicy: Always. Multinode,
+                    enabled checkpoint, GPU memory service, and failover are not supported.
+                    This field is preserved through v1alpha1 conversion annotations.
+                  type: string
                 eppConfig:
                   description: |-
                     eppConfig holds legacy Go-EPP configuration for Endpoint Picker Plugin

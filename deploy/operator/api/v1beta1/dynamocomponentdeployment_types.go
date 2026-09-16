@@ -220,6 +220,16 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	FrontendSidecar *string `json:"frontendSidecar,omitempty"`
 
+	// dynamoSidecar names the restartable init container running the Dynamo
+	// runtime for a worker, prefill, or decode component. The operator injects
+	// Dynamo defaults into this container; the regular container named main
+	// runs the engine with user-provided commands, ports, and probes.
+	// The named init container must have restartPolicy: Always. Multinode,
+	// enabled checkpoint, GPU memory service, and failover are not supported.
+	// This field is preserved through v1alpha1 conversion annotations.
+	// +optional
+	DynamoSidecar *string `json:"dynamoSidecar,omitempty"`
+
 	// compilationCache configures a PVC-backed compilation cache. The operator
 	// handles backend-specific mount paths and environment variables, so
 	// users do not need to hand-wire them into `podTemplate`. Extracted from

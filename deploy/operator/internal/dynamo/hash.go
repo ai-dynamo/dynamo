@@ -183,8 +183,8 @@ func resolvedRuntimeVersionForHash(component *v1beta1.DynamoComponentDeploymentS
 	}
 
 	image := ""
-	if main := GetMainContainer(component); main != nil {
-		image = main.Image
+	if runtime := GetDynamoContainer(component); runtime != nil {
+		image = runtime.Image
 	}
 	version, err := runtimeversion.Resolve(image, component.RuntimeVersionOverride)
 	if err != nil || version.Compare(minimumHashedRuntimeVersion) < 0 {

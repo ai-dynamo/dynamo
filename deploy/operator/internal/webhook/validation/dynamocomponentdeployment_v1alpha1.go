@@ -19,12 +19,14 @@ package validation
 
 import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
 // validateDynamoComponentDeploymentV1alpha1 validates dcd. dcd must not be nil.
 func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentV1alpha1(
 	dcd *nvidiacomv1alpha1.DynamoComponentDeployment,
+	hub *nvidiacomv1beta1.DynamoComponentDeploymentSpec,
 ) field.ErrorList {
 	if !hasDynamoComponentDeploymentV1alpha1CompatibilityFields(dcd) &&
 		!v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
@@ -34,6 +36,7 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentV
 		&dcd.Spec,
 		field.NewPath("spec"),
 		dcd.GetDynamoNamespace(),
+		hub.DynamoSidecar,
 	)
 }
 
@@ -42,10 +45,12 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 	spec *nvidiacomv1alpha1.DynamoComponentDeploymentSpec,
 	fldPath *field.Path,
 	dynamoNamespace string,
+	dynamoSidecar *string,
 ) field.ErrorList {
 	return v.validateDynamoComponentDeploymentSharedSpecV1alpha1(
 		&spec.DynamoComponentDeploymentSharedSpec,
 		fldPath,
 		dynamoNamespace,
+		dynamoSidecar,
 	)
 }
