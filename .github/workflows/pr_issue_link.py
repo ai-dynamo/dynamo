@@ -382,7 +382,7 @@ def main() -> int:
                 f"{(over := len(all_refs) - MAX_CANDIDATES)} further "
                 f"reference{'' if over == 1 else 's'} went unchecked: the "
                 f"{MAX_CANDIDATES}-lookup bound was spent before reaching "
-                "them. A closing form (`Closes #123`) is checked first.",
+                "the rest. A closing form (`Closes #123`) is checked first.",
                 "",
             ]
             if len(all_refs) > MAX_CANDIDATES
