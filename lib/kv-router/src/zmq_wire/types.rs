@@ -129,6 +129,8 @@ pub enum RawKvEvent {
         /// Session that triggered this store or reuse report.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
+        /// Always serialized so re-encoding cannot erase a negative eligibility decision.
+        shared_cache_eligible: bool,
     },
     BlockRemoved {
         block_hashes: Vec<BlockHashValue>,
@@ -233,6 +235,7 @@ impl RawKvEvent {
 #[derive(Debug, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum ExtraKeyItem {
+    Binary(#[serde(deserialize_with = "deserialize_binary_key")] Vec<u8>),
     Hash(String),
     HashWithSignedOffset((String, i64)),
     HashWithUnsignedOffset((String, u64)),
@@ -241,4 +244,35 @@ pub enum ExtraKeyItem {
     Unsigned(u64),
     Float(f64),
     Bool(bool),
+}
+
+fn deserialize_binary_key<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct BinaryKeyVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for BinaryKeyVisitor {
+        type Value = Vec<u8>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a binary extra key")
+        }
+
+        fn visit_bytes<E>(self, value: &[u8]) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(value.to_vec())
+        }
+
+        fn visit_byte_buf<E>(self, value: Vec<u8>) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(value)
+        }
+    }
+
+    deserializer.deserialize_bytes(BinaryKeyVisitor)
 }

@@ -79,6 +79,7 @@ impl<K: Eq> PlacementEventCoalescer<K> {
 fn merge_data(pending: &mut KvCacheEventData, next: KvCacheEventData) {
     match (pending, next) {
         (KvCacheEventData::Stored(pending), KvCacheEventData::Stored(next)) => {
+            pending.shared_cache_eligible &= next.shared_cache_eligible;
             pending.blocks.extend(next.blocks);
         }
         (KvCacheEventData::Removed(pending), KvCacheEventData::Removed(next)) => {
@@ -259,6 +260,7 @@ mod tests {
 
     fn stored(parent: Option<u64>, block: u64) -> PlacementEvent {
         event(KvCacheEventData::Stored(KvCacheStoreData {
+            shared_cache_eligible: false,
             parent_hash: parent.map(ExternalSequenceBlockHash),
             start_position: None,
             blocks: vec![KvCacheStoredBlockData {
@@ -301,6 +303,35 @@ mod tests {
             KvCacheEventData::Removed(data) if data.block_hashes.len() == 2
         ));
         assert!(matches!(output[2].event.data, KvCacheEventData::Cleared));
+    }
+
+    #[test]
+    fn coalescing_requires_positive_shared_cache_provenance_for_every_store() {
+        for (first_eligible, second_eligible) in
+            [(true, true), (true, false), (false, true), (false, false)]
+        {
+            let mut coalescer = PlacementEventCoalescer::new(128);
+            for (mut event, eligible) in [
+                (stored(None, 1), first_eligible),
+                (stored(Some(1), 2), second_eligible),
+            ] {
+                let KvCacheEventData::Stored(store) = &mut event.event.data else {
+                    unreachable!();
+                };
+                store.shared_cache_eligible = eligible;
+                let key = event.placement.clone();
+                assert!(coalescer.push(key, event).iter().all(Option::is_none));
+            }
+            let event = coalescer.flush().unwrap();
+            let KvCacheEventData::Stored(store) = event.event.data else {
+                unreachable!();
+            };
+            assert_eq!(store.blocks.len(), 2);
+            assert_eq!(
+                store.shared_cache_eligible,
+                first_eligible && second_eligible
+            );
+        }
     }
 
     #[test]
