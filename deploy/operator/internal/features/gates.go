@@ -113,9 +113,20 @@ const (
 	// Default: true when provider is istio and DestinationRule is detected; false otherwise
 	Istio Name = "istio"
 
-	// ElasticEPRayPoC enables the operator-managed Ray elastic expert-parallelism path:
-	// the single-pod Ray head, the headless leader Service, the synthesized follower,
-	// and the Ray-specific admission rules and node inspection.
+	// ElasticEPRayPoC enforces the elastic-EP single-replica admission rule: an elastic-EP
+	// leader (--enable-elastic-ep with --data-parallel-backend ray) may declare at most one
+	// replica, because one follower and one "<leader>-ray" Service are derived per
+	// component and two leader replicas would share one DNS name. Ratcheted, so enabling it
+	// on a live cluster does not freeze an existing violating object against every edit.
+	//
+	// It governs NOTHING ELSE, and that is deliberate rather than an oversight. The
+	// single-pod Ray head shipped in #12943, the headless leader Service in #13178, and
+	// follower synthesis renders a deployment's DECLARED width -- so gating any of them
+	// would mean a default-off operator silently strips a live deployment's Ray head on
+	// upgrade, or renders a fraction of the engine the user asked for. See the VLLMBackend
+	// doc and synthesizeElasticEPFollowerDCD. Turning this gate off therefore does not
+	// remove followers, Services, or Ray heads; a follower's replica count simply freezes
+	// wherever it is (preserveExistingDCDState), at either gate position.
 	//
 	// Owner: @tzulingk
 	// Experimental since: v1.5.0

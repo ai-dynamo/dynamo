@@ -42,12 +42,17 @@ gpuDiscovery:
   # -- DEVELOPMENT AND TESTING ONLY: Enable GPU discovery in namespace-restricted mode.
   enabled: true
 elasticEPRayPoC:
-  # -- Enable the operator-managed Ray elastic expert-parallelism path (proof of concept).
-  # Off by default: the path rewrites launch commands and synthesizes workloads, which is an
-  # administrator's grant to give rather than something to infer from a user's engine flags.
-  # Enabling it starts a Ray head on a single-pod elastic-EP leader, synthesizes the on-demand
-  # follower, emits the leader's headless Ray Service, and applies the Ray-specific admission
-  # rules. Turning it back off removes the followers it synthesized.
+  # -- Enforce the elastic-EP single-replica admission rule (proof of concept).
+  # Enabling it rejects an elastic-EP leader (--enable-elastic-ep with
+  # --data-parallel-backend ray) that declares more than one replica, because one follower
+  # and one "<leader>-ray" Service are derived per component and two leader replicas would
+  # share one DNS name. The rule is ratcheted, so enabling it on a live cluster does not
+  # freeze an existing violating object against every edit.
+  # It governs nothing else. The single-pod Ray head, the leader's headless Ray Service and
+  # follower synthesis are all deliberately ungated: they either shipped earlier or render a
+  # deployment's declared width, so gating them would strip a live deployment's Ray head on
+  # upgrade or render a fraction of the engine the user asked for. Turning this back off
+  # therefore removes nothing -- a follower's replica count simply stops changing.
   enabled: false
 controllerManager:
   tolerations: []
