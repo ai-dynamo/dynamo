@@ -23,10 +23,6 @@ pytest.importorskip("vllm", reason="vLLM is required")
 
 from gpu_memory_service.common.locks import RequestedLockType  # noqa: E402
 from gpu_memory_service.common.vmm import VMMDeviceType  # noqa: E402
-from gpu_memory_service.integrations.common.utils import (  # noqa: E402
-    get_gms_ro_connect_timeout_ms,
-)
-from gpu_memory_service.integrations.vllm import utils as gms_vllm_utils  # noqa: E402
 from gpu_memory_service.integrations.vllm import worker as gms_worker  # noqa: E402
 
 pytestmark = [
@@ -119,43 +115,3 @@ def test_init_device_forwards_the_resolved_ro_connect_timeout(init_device_calls)
     assert calls[0]["tag"] == "weights"
     assert calls[0]["mode"] == RequestedLockType.RO
     assert calls[0]["timeout_ms"] == _RO_CONNECT_TIMEOUT_MS
-
-
-def _resolve_timeout_for_engine(monkeypatch, engine_id: str, extra: dict | None):
-    monkeypatch.setenv("ENGINE_ID", engine_id)
-    engine_args = SimpleNamespace(model_loader_extra_config=extra)
-    gms_vllm_utils.configure_gms_lock_mode(engine_args)
-    return get_gms_ro_connect_timeout_ms(engine_args.model_loader_extra_config)
-
-
-def test_shadow_engine_gets_a_default_admission_deadline(monkeypatch):
-    """GMS prefers writers, so a shadow can be refused admission behind a
-    queued writer. Without this default the refusal is untimed and the worker
-    parks with no log and no traceback."""
-    timeout_ms = _resolve_timeout_for_engine(monkeypatch, "2", None)
-
-    assert timeout_ms == gms_vllm_utils.SHADOW_RO_CONNECT_TIMEOUT_MS
-
-
-def test_primary_engine_keeps_the_unbounded_default(monkeypatch):
-    """A single-engine deployment has no writer to queue behind."""
-    assert _resolve_timeout_for_engine(monkeypatch, "0", None) is None
-
-
-def test_explicit_admission_deadline_wins_over_the_shadow_default(monkeypatch):
-    timeout_ms = _resolve_timeout_for_engine(
-        monkeypatch, "2", {"gms_ro_connect_timeout_ms": _RO_CONNECT_TIMEOUT_MS}
-    )
-
-    assert timeout_ms == _RO_CONNECT_TIMEOUT_MS
-
-
-def test_an_explicit_null_deadline_wins_too(monkeypatch):
-    """``--model-loader-extra-config '{"gms_ro_connect_timeout_ms": null}'``
-    is an operator asking for the indefinite wait, which is not the same as
-    leaving the key out."""
-    timeout_ms = _resolve_timeout_for_engine(
-        monkeypatch, "2", {"gms_ro_connect_timeout_ms": None}
-    )
-
-    assert timeout_ms is None

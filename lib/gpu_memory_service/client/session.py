@@ -44,8 +44,6 @@ from gpu_memory_service.common.protocol.messages import (
 
 logger = logging.getLogger(__name__)
 
-_CONNECT_TIMEOUT_MS = 30_000
-
 
 class _GMSClientSession:
     """Connected GMS client session with granted lock state."""
@@ -61,16 +59,13 @@ class _GMSClientSession:
         # Two distinct timeouts apply to this session, and they're asymmetric on
         # purpose:
         #
-        #   socket connect (here) — never waits longer than
-        #     _CONNECT_TIMEOUT_MS, whatever the caller asked for. This is the
-        #     wait for the GMS server's UDS socket to be listening. The server
-        #     is a native sidecar in the same pod (intra-pod GMS) or a sister
-        #     pod under the same Grove gang-schedule (inter-pod GMS), so the
-        #     actual ready window is sub-second to a few seconds in the normal
-        #     case. The ceiling produces a clean ConnectionError on a
+        #   socket connect (here) — bounded by 30 s when the caller passes None.
+        #     This is the wait for the GMS server's UDS socket to be listening.
+        #     The server is a native sidecar in the same pod (intra-pod GMS) or a
+        #     sister pod under the same Grove gang-schedule (inter-pod GMS), so
+        #     the actual ready window is sub-second to a few seconds in the
+        #     normal case. A 30 s ceiling produces a clean ConnectionError on a
         #     missing-server misconfiguration instead of an indefinite hang.
-        #     A caller may ask for less; a lock-admission deadline of minutes
-        #     must not stretch the wait for a socket that may never appear.
         #
         #   handshake / lock acquisition (below) — passes the caller's timeout_ms
         #     through unchanged, including None which means "wait indefinitely."
@@ -78,11 +73,7 @@ class _GMSClientSession:
         #     (engine loading weights, loader committing, etc.) and can be
         #     minutes for large models. We deliberately don't impose a
         #     server-availability ceiling on a workload-shaped wait.
-        self._transport.connect(
-            timeout_ms=_CONNECT_TIMEOUT_MS
-            if timeout_ms is None
-            else min(timeout_ms, _CONNECT_TIMEOUT_MS)
-        )
+        self._transport.connect(timeout_ms=30_000 if timeout_ms is None else timeout_ms)
         try:
             response = self._transport.handshake(lock_type, timeout_ms)
         except Exception:
