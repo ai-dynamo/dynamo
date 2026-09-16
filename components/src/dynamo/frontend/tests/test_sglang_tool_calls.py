@@ -750,6 +750,9 @@ class TestStreamingToolCallDeltas:  # FRONTEND.4 — incremental tool-call delta
         assert len(with_id) == 1, "tool-call id must be emitted exactly once"
         assert with_name[0]["function"]["name"] == "search_gutenberg_books"
         assert with_name[0]["type"] == "function"
+        # OpenAI's streamed chunks always carry `arguments` (empty on the
+        # name-only delta of a call).
+        assert "arguments" in with_name[0]["function"]
 
     def test_fragments_assemble_to_complete_arguments(self, tokenizer):
         """Client-side concatenation across frames yields the complete arguments."""

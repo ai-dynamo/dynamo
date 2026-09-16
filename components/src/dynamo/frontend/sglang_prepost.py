@@ -1175,6 +1175,9 @@ class SglangStreamingPostProcessor:
             entry["id"] = self._tool_call_ids[idx]
             entry["type"] = "function"
             function["name"] = tc.name
+            # OpenAI's streamed tool-call chunks always carry `arguments`
+            # (empty string on the name-only delta), as does native SGLang.
+            function["arguments"] = tc.parameters or ""
             self._streamed_tool_headers[idx] = tc.name
         if tc.parameters:
             function["arguments"] = tc.parameters
