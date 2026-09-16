@@ -223,6 +223,9 @@ pub(crate) struct ModelDiscoveryController<H: ControllerHost> {
     groups: HashMap<GroupKey, DesiredGroup>,
     revision: u64,
     instance_revisions: HashMap<String, u64>,
+    /// The revision at the last `DiscoveryEvent::Resync`. A periodic list that started before
+    /// it can carry an instance the resync removed, so its result is discarded.
+    resync_revision: u64,
     builds: JoinSet<BuildResult<H::Prepared>>,
     reconciliations: JoinSet<ReconciliationResult>,
     active_builds: usize,
@@ -242,6 +245,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             groups: HashMap::new(),
             revision: 0,
             instance_revisions: HashMap::new(),
+            resync_revision: 0,
             builds: JoinSet::new(),
             reconciliations: JoinSet::new(),
             active_builds: 0,
@@ -334,6 +338,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 false
             }
             DiscoveryEvent::Resync(instances) => {
+                self.resync_revision = self.revision;
                 self.apply_reconciliation(
                     ReconciliationResult {
                         revision: self.revision,
@@ -862,6 +867,12 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         result: ReconciliationResult,
         namespace_filter: &NamespaceFilter,
     ) {
+        if result.revision < self.resync_revision {
+            tracing::debug!(
+                "Discarding a model reconciliation snapshot that predates a discovery resync"
+            );
+            return;
+        }
         let instances = match result.instances {
             Ok(instances) => instances,
             Err(error) => {
@@ -1640,6 +1651,27 @@ mod tests {
             &NamespaceFilter::Global,
         );
         assert_eq!(host.members(&group_key()), BTreeSet::from([second.key]));
+    }
+
+    #[tokio::test]
+    async fn a_list_that_predates_a_resync_cannot_revive_a_removed_instance() {
+        let (host, _starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host);
+        let first = instance(1, "spec");
+
+        controller.apply_added(first.clone());
+        // The periodic list starts here and captures `first` before its removal.
+        let list_revision = controller.revision;
+        controller.apply_removed(&first.key);
+        controller.apply_event(DiscoveryEvent::Resync(Vec::new()), &NamespaceFilter::Global);
+        controller.apply_reconciliation(
+            ReconciliationResult {
+                revision: list_revision,
+                instances: Ok(vec![discovery_instance(&first)]),
+            },
+            &NamespaceFilter::Global,
+        );
+        assert!(controller.desired.is_empty());
     }
 
     #[tokio::test]
