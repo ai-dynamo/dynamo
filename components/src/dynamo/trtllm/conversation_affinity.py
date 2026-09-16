@@ -35,10 +35,6 @@ try:  # Requires a TensorRT-LLM release newer than 1.3.0rc20.
 except ImportError:  # pragma: no cover - depends on installed wheel
     ConversationParams = None  # type: ignore[assignment]
 
-from dynamo.common.backend.agent_context import (
-    session_id_from_request,
-)
-
 CONVERSATION_PARAMS_AVAILABLE: bool = ConversationParams is not None
 
 

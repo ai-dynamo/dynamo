@@ -35,6 +35,7 @@ from tensorrt_llm.scheduling_params import SchedulingParams
 
 from dynamo._core import Client, Context
 from dynamo.common.backend import logprobs as _shared_logprobs
+from dynamo.common.backend.agent_context import session_id_from_request
 from dynamo.common.backend.engine import is_generation_stage
 from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
 from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
@@ -50,7 +51,6 @@ from dynamo.trtllm.conversation_affinity import (
     CONVERSATION_PARAMS_AVAILABLE,
     conversation_params_for,
     engine_conversation_affinity_enabled,
-    session_id_from_request,
 )
 from dynamo.trtllm.engine import TensorRTLLMEngine
 from dynamo.trtllm.logits_processing.adapter import create_trtllm_adapters
