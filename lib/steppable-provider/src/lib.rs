@@ -10,23 +10,45 @@
 
 use aiperf_steppable_abi::{
     ByteSliceV1, CreateRequestV1, DirectRequestSliceV1, DirectRequestV1, EngineEventSliceV1,
-    EngineEventV1, PluginDescriptorV1, PluginVTableV1, REQUEST_FACT_FLAG_ADMISSION,
-    REQUEST_FACT_FLAG_LATENCIES, REQUEST_FACT_FLAG_OUTPUT_LENGTH, REQUEST_FLAG_UUID,
+    EngineEventV1, PluginDescriptorV1, PluginVTableV1, REPLAY_CONTEXT_FLAG_METADATA,
+    REPLAY_CONTEXT_FLAG_SESSION_ID, REPLAY_CONTEXT_FLAG_TURN_INDEX, REQUEST_FACT_FLAG_ADMISSION,
+    REQUEST_FACT_FLAG_LATENCIES, REQUEST_FACT_FLAG_OUTPUT_LENGTH, REQUEST_FLAG_ARRIVAL_TIMESTAMP,
+    REQUEST_FLAG_OUTPUT_TOKEN_IDS, REQUEST_FLAG_POLICY_CLASS, REQUEST_FLAG_PREFERRED_DP_RANK,
+    REQUEST_FLAG_PREFERRED_PREFILL_DP_RANK, REQUEST_FLAG_REPLAY_CONTEXT, REQUEST_FLAG_UUID,
     ReplayHandleV1, ReplayStateV1, RequestFactSliceV1, RequestFactV1, RequestIdMutSliceV1,
     RequestIdSliceV1, RequestIdV1, SLA_FLAG_E2E, SLA_FLAG_ITL, SLA_FLAG_TTFT, SlaThresholdsV1,
     StatusV1, StepRequestV1, StepResultV1, U32SliceV1,
 };
 use aisimulate_core::replay::loadgen::{DynPlacement, SteppableAgg, SteppableReplay};
 use aisimulate_core::replay::{
-    DirectRequest, ReplayEngineConfig, ReplayEngineFactory, ReplayTerminalStatus, SlaThresholds,
+    DirectRequest, ReplayEngineConfig, ReplayEngineFactory, ReplayPromptTokenSource,
+    ReplayRequestContext, ReplayTerminalStatus, SlaThresholds,
 };
 use dynamo_mocker::placement::{
-    KvReplayMetadata, KvRouterPlacement, MockEngineArgs, MockEngineArgsBuilder,
+    KvReplayMetadata, KvRouterConfig, KvRouterPlacement, MockEngineArgs, MockEngineArgsBuilder,
     RouterEventObservation,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::ffi::c_char;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use uuid::Uuid;
+
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
+
+#[cfg(test)]
+static FORCE_FFI_PANIC: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+fn panic_when_test_requested() {
+    if FORCE_FFI_PANIC.swap(false, Ordering::SeqCst) {
+        panic!("test-only FFI boundary panic");
+    }
+}
+
+#[cfg(not(test))]
+fn panic_when_test_requested() {}
 
 /// Topology built by the backend for one steppable replay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -163,7 +185,131 @@ const PROVIDER_ID: &[u8] = b"dynamo.kv-router.monolithic\0";
 
 struct BackendReplay {
     engine: Box<dyn SteppableReplay>,
+    config: BackendConfig,
+    /// Successful state transitions since creation. `submit_batch` replays this
+    /// journal into a fresh engine to prove every member can be admitted before
+    /// it touches the live replay, and uses it as the rollback source if the
+    /// live engine ever disagrees with the preflight.
+    journal: Vec<JournalEntry>,
+    /// Explicit UUIDs accepted in the current report epoch. Keeping this in
+    /// lock-step with the engine lets `submit_batch` reject duplicate input
+    /// before it mutates the first request in the batch.
+    submitted_ids: HashSet<Uuid>,
     last_error: String,
+}
+
+#[derive(Clone)]
+enum JournalEntry {
+    Submit(DirectRequest),
+    Cancel(Uuid),
+    StepUntil(f64),
+    AdvanceNow(f64),
+    SetCapturePerRequest(bool),
+    SetSlaThresholds(SlaThresholds),
+    TakeReport(f64),
+}
+
+fn build_engine(config: &BackendConfig) -> anyhow::Result<Box<dyn SteppableReplay>> {
+    anyhow::ensure!(
+        config.version == default_backend_config_version(),
+        "unsupported Dynamo steppable BackendConfig version {}",
+        config.version
+    );
+    anyhow::ensure!(
+        matches!(config.topology, BackendTopology::Aggregated),
+        "the monolithic Dynamo provider supports only aggregated topology"
+    );
+    anyhow::ensure!(
+        config.workers > 0,
+        "aggregate worker count must be positive"
+    );
+    let selector_seed = config.dynamic_placement.as_ref().map_or(0, |locator| {
+        u64::from_le_bytes(
+            locator.selector_seed[..8]
+                .try_into()
+                .expect("fixed-size seed"),
+        )
+    });
+    let router_args = router_args(&config.engine)?;
+    let worker_count = config.workers;
+    let engine =
+        SteppableAgg::<RouterPlacement, RouterEventObservation, KvReplayMetadata>::with_placement(
+            config.engine.clone(),
+            &ReplayEngineFactory::new(),
+            worker_count,
+            move |dp_size, topology| {
+                anyhow::ensure!(
+                    topology.len() == worker_count,
+                    "runtime published {} topology entries for {worker_count} worker(s) at dp_size {dp_size}",
+                    topology.len()
+                );
+                anyhow::ensure!(
+                    dp_size == router_args.dp_size.max(1),
+                    "runtime DP size {dp_size} disagrees with Dynamo engine DP size {}",
+                    router_args.dp_size.max(1)
+                );
+                let placement = KvRouterPlacement::new(
+                    &router_args,
+                    Some(KvRouterConfig {
+                        router_queue_threshold: Some(0.0),
+                        ..KvRouterConfig::default()
+                    }),
+                    None,
+                    topology.len(),
+                    Some(selector_seed),
+                )?;
+                Ok(Box::new(placement) as RouterPlacement)
+            },
+        )?;
+    Ok(Box::new(engine) as Box<dyn SteppableReplay>)
+}
+
+impl BackendReplay {
+    fn rebuild_from_journal(&self) -> anyhow::Result<Box<dyn SteppableReplay>> {
+        let mut rebuilt = build_engine(&self.config)?;
+        for entry in &self.journal {
+            match entry {
+                JournalEntry::Submit(request) => {
+                    rebuilt.submit(request.clone())?;
+                }
+                JournalEntry::Cancel(uuid) => {
+                    rebuilt.cancel(*uuid)?;
+                }
+                JournalEntry::StepUntil(until_ms) => {
+                    rebuilt.step_until(*until_ms)?;
+                }
+                JournalEntry::AdvanceNow(now_ms) => rebuilt.advance_now_ms(*now_ms),
+                JournalEntry::SetCapturePerRequest(capture) => {
+                    rebuilt.set_capture_per_request(*capture);
+                }
+                JournalEntry::SetSlaThresholds(thresholds) => {
+                    rebuilt.set_sla_thresholds(*thresholds);
+                }
+                JournalEntry::TakeReport(wall_ms) => {
+                    rebuilt.take_report(*wall_ms)?;
+                }
+            }
+        }
+        Ok(rebuilt)
+    }
+
+    fn rollback_batch(&mut self) -> anyhow::Result<()> {
+        self.engine = self.rebuild_from_journal()?;
+        self.submitted_ids.clear();
+        for entry in &self.journal {
+            match entry {
+                JournalEntry::Submit(request) => {
+                    if let Some(uuid) = request.uuid {
+                        self.submitted_ids.insert(uuid);
+                    }
+                }
+                // A successful report starts the next UUID-retention epoch.
+                JournalEntry::TakeReport(_) => self.submitted_ids.clear(),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
 }
 
 fn allocated_bytes(value: String) -> ByteSliceV1 {
@@ -193,6 +339,59 @@ unsafe fn borrowed_tokens(slice: U32SliceV1) -> Result<&'static [u32], StatusV1>
     Ok(unsafe { std::slice::from_raw_parts(slice.data, slice.len as usize) })
 }
 
+unsafe fn borrowed_bytes(slice: ByteSliceV1) -> Result<&'static [u8], StatusV1> {
+    if slice.len > usize::MAX as u64 || (slice.data.is_null() && slice.len != 0) {
+        return Err(StatusV1::INVALID_ARGUMENT);
+    }
+    if slice.len == 0 {
+        return Ok(&[]);
+    }
+    Ok(unsafe { std::slice::from_raw_parts(slice.data, slice.len as usize) })
+}
+
+unsafe fn utf8(slice: ByteSliceV1) -> Result<String, StatusV1> {
+    String::from_utf8(unsafe { borrowed_bytes(slice) }?.to_vec())
+        .map_err(|_| StatusV1::INVALID_ARGUMENT)
+}
+
+unsafe fn replay_context(
+    request: DirectRequestV1,
+) -> Result<Option<ReplayRequestContext>, StatusV1> {
+    if request.flags & REQUEST_FLAG_REPLAY_CONTEXT == 0 {
+        return Ok(None);
+    }
+    let context = request.replay_context;
+    if context.struct_size as usize != std::mem::size_of_val(&context) {
+        return Err(StatusV1::INVALID_ARGUMENT);
+    }
+    let authored_id = unsafe { utf8(context.authored_id) }?;
+    if authored_id.is_empty() {
+        return Err(StatusV1::INVALID_ARGUMENT);
+    }
+    let session_id = (context.flags & REPLAY_CONTEXT_FLAG_SESSION_ID != 0)
+        .then(|| unsafe { utf8(context.session_id) })
+        .transpose()?;
+    let metadata = if context.flags & REPLAY_CONTEXT_FLAG_METADATA != 0 {
+        serde_json::from_slice(unsafe { borrowed_bytes(context.metadata) }?)
+            .map_err(|_| StatusV1::INVALID_ARGUMENT)?
+    } else {
+        serde_json::Value::Null
+    };
+    let prompt_token_source = match context.prompt_token_source {
+        0 => ReplayPromptTokenSource::Materialized,
+        1 => ReplayPromptTokenSource::LengthOnlySynthetic,
+        _ => return Err(StatusV1::INVALID_ARGUMENT),
+    };
+    Ok(Some(ReplayRequestContext {
+        authored_id,
+        session_id,
+        turn_index: (context.flags & REPLAY_CONTEXT_FLAG_TURN_INDEX != 0)
+            .then_some(context.turn_index as usize),
+        metadata,
+        prompt_token_source,
+    }))
+}
+
 unsafe fn direct_request(request: DirectRequestV1) -> Result<DirectRequest, StatusV1> {
     if request.struct_size as usize != std::mem::size_of::<DirectRequestV1>()
         || request.max_output_tokens > usize::MAX as u64
@@ -201,25 +400,42 @@ unsafe fn direct_request(request: DirectRequestV1) -> Result<DirectRequest, Stat
     }
     // Safety: input slices are caller-owned and valid for this FFI call.
     let tokens = unsafe { borrowed_tokens(request.tokens) }?.to_vec();
-    // Safety: input slices are caller-owned and valid for this FFI call.
-    let output_token_ids = unsafe { borrowed_tokens(request.output_token_ids) }?.to_vec();
+    let output_token_ids = (request.flags & REQUEST_FLAG_OUTPUT_TOKEN_IDS != 0)
+        .then(|| unsafe { borrowed_tokens(request.output_token_ids) }.map(ToOwned::to_owned))
+        .transpose()?;
+    let policy_class = (request.flags & REQUEST_FLAG_POLICY_CLASS != 0)
+        .then(|| unsafe { utf8(request.policy_class) })
+        .transpose()?;
+    if request.flags & REQUEST_FLAG_ARRIVAL_TIMESTAMP != 0
+        && !request.arrival_timestamp_ms.is_finite()
+    {
+        return Err(StatusV1::INVALID_ARGUMENT);
+    }
     Ok(DirectRequest {
         tokens,
         max_output_tokens: request.max_output_tokens as usize,
-        output_token_ids: (!output_token_ids.is_empty()).then_some(output_token_ids),
-        uuid: (request.flags & REQUEST_FLAG_UUID != 0).then_some(Uuid::from_bytes(request.uuid)),
+        output_token_ids,
+        // Always give the core a concrete ID. Besides making an ABI submit's
+        // returned ID stable for rollback, this lets a batch preflight replay
+        // exactly the same KV-router key space as the live engine.
+        uuid: (request.flags & REQUEST_FLAG_UUID != 0)
+            .then_some(Uuid::from_bytes(request.uuid))
+            .or_else(|| Some(Uuid::new_v4())),
         dp_rank: request.dp_rank,
-        preferred_dp_rank: None,
-        preferred_prefill_dp_rank: None,
-        arrival_timestamp_ms: None,
+        preferred_dp_rank: (request.flags & REQUEST_FLAG_PREFERRED_DP_RANK != 0)
+            .then_some(request.preferred_dp_rank),
+        preferred_prefill_dp_rank: (request.flags & REQUEST_FLAG_PREFERRED_PREFILL_DP_RANK != 0)
+            .then_some(request.preferred_prefill_dp_rank),
+        arrival_timestamp_ms: (request.flags & REQUEST_FLAG_ARRIVAL_TIMESTAMP != 0)
+            .then_some(request.arrival_timestamp_ms),
         priority: request.priority,
         strict_priority: request.strict_priority,
-        policy_class: None,
-        replay_context: None,
+        policy_class,
+        replay_context: unsafe { replay_context(request) }?,
     })
 }
 
-unsafe extern "C" fn create(
+unsafe fn create_impl(
     request: CreateRequestV1,
     handle: *mut ReplayHandleV1,
     error: *mut ByteSliceV1,
@@ -259,60 +475,14 @@ unsafe extern "C" fn create(
             return StatusV1::REJECTED;
         }
     };
-    let created: anyhow::Result<Box<dyn SteppableReplay>> = (|| {
-        anyhow::ensure!(
-            config.version == default_backend_config_version(),
-            "unsupported Dynamo steppable BackendConfig version {}",
-            config.version
-        );
-        anyhow::ensure!(
-            matches!(config.topology, BackendTopology::Aggregated),
-            "the monolithic Dynamo provider supports only aggregated topology"
-        );
-        anyhow::ensure!(
-            config.workers > 0,
-            "aggregate worker count must be positive"
-        );
-        let selector_seed = config.dynamic_placement.as_ref().map_or(0, |locator| {
-            u64::from_le_bytes(
-                locator.selector_seed[..8]
-                    .try_into()
-                    .expect("fixed-size seed"),
-            )
-        });
-        let router_args = router_args(&config.engine)?;
-        let worker_count = config.workers;
-        let engine = SteppableAgg::<RouterPlacement, RouterEventObservation, KvReplayMetadata>::with_placement(
-            config.engine,
-            &ReplayEngineFactory::new(),
-            worker_count,
-            move |dp_size, topology| {
-                anyhow::ensure!(
-                    topology.len() == worker_count,
-                    "runtime published {} topology entries for {worker_count} worker(s) at dp_size {dp_size}",
-                    topology.len()
-                );
-                anyhow::ensure!(
-                    dp_size == router_args.dp_size.max(1),
-                    "runtime DP size {dp_size} disagrees with Dynamo engine DP size {}",
-                    router_args.dp_size.max(1)
-                );
-                let placement = KvRouterPlacement::new(
-                    &router_args,
-                    None,
-                    None,
-                    topology.len(),
-                    Some(selector_seed),
-                )?;
-                Ok(Box::new(placement) as RouterPlacement)
-            },
-        )?;
-        Ok(Box::new(engine) as Box<dyn SteppableReplay>)
-    })();
+    let created = build_engine(&config);
     match created {
         Ok(engine) => {
             let replay = Box::new(BackendReplay {
                 engine,
+                config,
+                journal: Vec::new(),
+                submitted_ids: HashSet::new(),
                 last_error: String::new(),
             });
             // Safety: validated non-null output pointer.
@@ -327,7 +497,7 @@ unsafe extern "C" fn create(
     }
 }
 
-unsafe extern "C" fn submit(
+unsafe fn submit_impl(
     handle: ReplayHandleV1,
     request: DirectRequestV1,
     request_id: *mut RequestIdV1,
@@ -345,8 +515,15 @@ unsafe extern "C" fn submit(
         Ok(replay) => replay,
         Err(status) => return status,
     };
-    match replay.engine.submit(request) {
+    match replay.engine.submit(request.clone()) {
         Ok(uuid) => {
+            replay.submitted_ids.insert(uuid);
+            // `direct_request` always assigns an ID before crossing into the
+            // core, so retain the exact request for deterministic rollback.
+            // The core returns that same explicit ID on success.
+            let mut recorded = request;
+            recorded.uuid = Some(uuid);
+            replay.journal.push(JournalEntry::Submit(recorded));
             // Safety: validated non-null output pointer.
             unsafe { *request_id = *uuid.as_bytes() };
             StatusV1::OK
@@ -358,7 +535,7 @@ unsafe extern "C" fn submit(
     }
 }
 
-unsafe extern "C" fn submit_batch(
+unsafe fn submit_batch_impl(
     handle: ReplayHandleV1,
     requests: DirectRequestSliceV1,
     request_ids: RequestIdMutSliceV1,
@@ -394,23 +571,75 @@ unsafe extern "C" fn submit_batch(
         // Safety: caller supplies a writable output batch matching input size.
         unsafe { std::slice::from_raw_parts_mut(request_ids.data, request_ids.len as usize) }
     };
+    output.fill([0; 16]);
     let replay = match unsafe { backend_mut(handle) } {
         Ok(replay) => replay,
         Err(status) => return status,
     };
-    for (request, output) in converted.into_iter().zip(output.iter_mut()) {
-        match replay.engine.submit(request) {
-            Ok(uuid) => *output = *uuid.as_bytes(),
+    let mut batch_ids = HashSet::with_capacity(converted.len());
+    for request in &converted {
+        if let Some(uuid) = request.uuid
+            && (!batch_ids.insert(uuid) || replay.submitted_ids.contains(&uuid))
+        {
+            replay.last_error = format!("steppable replay request {uuid} is already retained");
+            return StatusV1::REJECTED;
+        }
+    }
+    // `SteppableReplay` intentionally exposes only single-request admission.
+    // Exercise the complete batch against a fresh replay reconstructed from
+    // the journal before touching the live engine. A later duplicate or a
+    // router rejection therefore has no live ID, placement, or collector
+    // commitment. If the live engine nevertheless diverges, restore it from
+    // the same pre-batch journal before returning the failure.
+    let mut preflight = match replay.rebuild_from_journal() {
+        Ok(engine) => engine,
+        Err(error) => {
+            replay.last_error = format!("could not reconstruct batch preflight: {error}");
+            return StatusV1::INTERNAL;
+        }
+    };
+    for request in &converted {
+        if let Err(error) = preflight.submit(request.clone()) {
+            replay.last_error = error.to_string();
+            return StatusV1::REJECTED;
+        }
+    }
+    let mut committed = Vec::with_capacity(converted.len());
+    for (request, request_id) in converted.into_iter().zip(output.iter_mut()) {
+        match replay.engine.submit(request.clone()) {
+            Ok(uuid) => {
+                replay.submitted_ids.insert(uuid);
+                *request_id = *uuid.as_bytes();
+                committed.push((request, uuid));
+            }
             Err(error) => {
-                replay.last_error = error.to_string();
-                return StatusV1::REJECTED;
+                let rollback = replay.rollback_batch();
+                let rollback_succeeded = rollback.is_ok();
+                replay.last_error = match rollback {
+                    Ok(()) => error.to_string(),
+                    Err(rollback_error) => format!(
+                        "batch submission failed ({error}); rollback reconstruction failed ({rollback_error})"
+                    ),
+                };
+                output.fill([0; 16]);
+                return if rollback_succeeded {
+                    StatusV1::REJECTED
+                } else {
+                    StatusV1::INTERNAL
+                };
             }
         }
     }
+    replay
+        .journal
+        .extend(committed.into_iter().map(|(mut request, uuid)| {
+            request.uuid = Some(uuid);
+            JournalEntry::Submit(request)
+        }));
     StatusV1::OK
 }
 
-unsafe extern "C" fn cancel(
+unsafe fn cancel_impl(
     handle: ReplayHandleV1,
     request_id: *const RequestIdV1,
     event: *mut EngineEventV1,
@@ -427,6 +656,7 @@ unsafe extern "C" fn cancel(
     };
     match replay.engine.cancel(request_id) {
         Ok(Some(terminal)) => {
+            replay.journal.push(JournalEntry::Cancel(request_id));
             let terminal_status = match terminal.terminal_status {
                 Some(ReplayTerminalStatus::Completed) => 1,
                 Some(ReplayTerminalStatus::Rejected) => 2,
@@ -448,6 +678,7 @@ unsafe extern "C" fn cancel(
             StatusV1::OK
         }
         Ok(None) => {
+            replay.journal.push(JournalEntry::Cancel(request_id));
             // Safety: validated output pointer.
             unsafe { *canceled = 0 };
             StatusV1::OK
@@ -459,7 +690,7 @@ unsafe extern "C" fn cancel(
     }
 }
 
-unsafe extern "C" fn cancel_batch(
+unsafe fn cancel_batch_impl(
     handle: ReplayHandleV1,
     request_ids: RequestIdSliceV1,
     events: *mut EngineEventSliceV1,
@@ -506,6 +737,11 @@ unsafe extern "C" fn cancel_batch(
             }
         }
     }
+    replay.journal.extend(
+        request_ids
+            .iter()
+            .map(|request_id| JournalEntry::Cancel(Uuid::from_bytes(*request_id))),
+    );
     let terminals = terminals.into_boxed_slice();
     let len = terminals.len() as u64;
     let data = Box::into_raw(terminals).cast::<EngineEventV1>();
@@ -514,7 +750,7 @@ unsafe extern "C" fn cancel_batch(
     StatusV1::OK
 }
 
-unsafe extern "C" fn step(
+unsafe fn step_impl(
     handle: ReplayHandleV1,
     request: StepRequestV1,
     result: *mut StepResultV1,
@@ -537,6 +773,9 @@ unsafe extern "C" fn step(
             return StatusV1::REJECTED;
         }
     };
+    replay
+        .journal
+        .push(JournalEntry::StepUntil(request.until_ms));
     let request_facts = outcome
         .events
         .iter()
@@ -631,7 +870,7 @@ unsafe extern "C" fn step(
     StatusV1::OK
 }
 
-unsafe extern "C" fn take_report(
+unsafe fn take_report_impl(
     handle: ReplayHandleV1,
     wall_ms: f64,
     report: *mut ByteSliceV1,
@@ -650,6 +889,8 @@ unsafe extern "C" fn take_report(
             return StatusV1::REJECTED;
         }
     };
+    replay.submitted_ids.clear();
+    replay.journal.push(JournalEntry::TakeReport(wall_ms));
     let encoded = match serde_json::to_string(&report_value) {
         Ok(encoded) => encoded,
         Err(error) => {
@@ -662,7 +903,7 @@ unsafe extern "C" fn take_report(
     StatusV1::OK
 }
 
-unsafe extern "C" fn release_bytes(bytes: ByteSliceV1) {
+unsafe fn release_bytes_impl(bytes: ByteSliceV1) {
     if bytes.data.is_null() {
         return;
     }
@@ -678,7 +919,7 @@ unsafe extern "C" fn release_bytes(bytes: ByteSliceV1) {
         )));
     }
 }
-unsafe extern "C" fn release_events(events: EngineEventSliceV1) {
+unsafe fn release_events_impl(events: EngineEventSliceV1) {
     if events.data.is_null() {
         return;
     }
@@ -694,7 +935,7 @@ unsafe extern "C" fn release_events(events: EngineEventSliceV1) {
         )));
     }
 }
-unsafe extern "C" fn release_request_facts(facts: RequestFactSliceV1) {
+unsafe fn release_request_facts_impl(facts: RequestFactSliceV1) {
     if facts.data.is_null() || facts.len > usize::MAX as u64 {
         return;
     }
@@ -708,7 +949,8 @@ unsafe extern "C" fn release_request_facts(facts: RequestFactSliceV1) {
     }
 }
 
-unsafe extern "C" fn state(handle: ReplayHandleV1, state: *mut ReplayStateV1) -> StatusV1 {
+unsafe fn state_impl(handle: ReplayHandleV1, state: *mut ReplayStateV1) -> StatusV1 {
+    panic_when_test_requested();
     if state.is_null() {
         return StatusV1::INVALID_ARGUMENT;
     }
@@ -732,7 +974,7 @@ unsafe extern "C" fn state(handle: ReplayHandleV1, state: *mut ReplayStateV1) ->
     StatusV1::OK
 }
 
-unsafe extern "C" fn advance_now_ms(handle: ReplayHandleV1, now_ms: f64) -> StatusV1 {
+unsafe fn advance_now_ms_impl(handle: ReplayHandleV1, now_ms: f64) -> StatusV1 {
     if !now_ms.is_finite() {
         return StatusV1::INVALID_ARGUMENT;
     }
@@ -743,10 +985,11 @@ unsafe extern "C" fn advance_now_ms(handle: ReplayHandleV1, now_ms: f64) -> Stat
         Err(status) => return status,
     };
     replay.engine.advance_now_ms(now_ms);
+    replay.journal.push(JournalEntry::AdvanceNow(now_ms));
     StatusV1::OK
 }
 
-unsafe extern "C" fn set_capture_per_request(handle: ReplayHandleV1, capture: u8) -> StatusV1 {
+unsafe fn set_capture_per_request_impl(handle: ReplayHandleV1, capture: u8) -> StatusV1 {
     if capture > 1 {
         return StatusV1::INVALID_ARGUMENT;
     }
@@ -755,13 +998,13 @@ unsafe extern "C" fn set_capture_per_request(handle: ReplayHandleV1, capture: u8
         Err(status) => return status,
     };
     replay.engine.set_capture_per_request(capture != 0);
+    replay
+        .journal
+        .push(JournalEntry::SetCapturePerRequest(capture != 0));
     StatusV1::OK
 }
 
-unsafe extern "C" fn set_sla_thresholds(
-    handle: ReplayHandleV1,
-    thresholds: SlaThresholdsV1,
-) -> StatusV1 {
+unsafe fn set_sla_thresholds_impl(handle: ReplayHandleV1, thresholds: SlaThresholdsV1) -> StatusV1 {
     let selected = |flag, value| (thresholds.flags & flag != 0).then_some(value);
     let sla = SlaThresholds {
         ttft_ms: selected(SLA_FLAG_TTFT, thresholds.ttft_ms),
@@ -781,10 +1024,11 @@ unsafe extern "C" fn set_sla_thresholds(
         Err(status) => return status,
     };
     replay.engine.set_sla_thresholds(sla);
+    replay.journal.push(JournalEntry::SetSlaThresholds(sla));
     StatusV1::OK
 }
 
-unsafe extern "C" fn last_error(handle: ReplayHandleV1, error: *mut ByteSliceV1) -> StatusV1 {
+unsafe fn last_error_impl(handle: ReplayHandleV1, error: *mut ByteSliceV1) -> StatusV1 {
     if error.is_null() {
         return StatusV1::INVALID_ARGUMENT;
     }
@@ -803,12 +1047,199 @@ unsafe extern "C" fn last_error(handle: ReplayHandleV1, error: *mut ByteSliceV1)
     StatusV1::OK
 }
 
-unsafe extern "C" fn destroy(handle: ReplayHandleV1) {
+unsafe fn destroy_impl(handle: ReplayHandleV1) {
     if handle.0.is_null() {
         return;
     }
     // Safety: caller transfers the unique handle returned by `create`.
     unsafe { drop(Box::from_raw(handle.0.cast::<BackendReplay>())) };
+}
+
+fn panic_status(handle: ReplayHandleV1) -> StatusV1 {
+    // Error recording is best-effort: the only hard FFI guarantee here is
+    // containment. Keep an error in a valid replay when possible, but never
+    // risk a second unwind while handling the first one.
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if let Ok(replay) = unsafe { backend_mut(handle) } {
+            replay.last_error = "panic contained at Dynamo steppable ABI boundary".to_owned();
+        }
+    }));
+    StatusV1::INTERNAL
+}
+
+fn catch_status(operation: impl FnOnce() -> StatusV1, handle: ReplayHandleV1) -> StatusV1 {
+    match catch_unwind(AssertUnwindSafe(operation)) {
+        Ok(status) => status,
+        Err(_) => panic_status(handle),
+    }
+}
+
+unsafe extern "C" fn create(
+    request: CreateRequestV1,
+    handle: *mut ReplayHandleV1,
+    error: *mut ByteSliceV1,
+) -> StatusV1 {
+    if !handle.is_null() {
+        unsafe { *handle = ReplayHandleV1(std::ptr::null_mut()) };
+    }
+    if !error.is_null() {
+        unsafe { *error = ByteSliceV1::EMPTY };
+    }
+    match catch_unwind(AssertUnwindSafe(|| unsafe {
+        create_impl(request, handle, error)
+    })) {
+        Ok(status) => status,
+        Err(_) => StatusV1::INTERNAL,
+    }
+}
+
+unsafe extern "C" fn submit(
+    handle: ReplayHandleV1,
+    request: DirectRequestV1,
+    request_id: *mut RequestIdV1,
+) -> StatusV1 {
+    if !request_id.is_null() {
+        unsafe { *request_id = [0; 16] };
+    }
+    catch_status(
+        || unsafe { submit_impl(handle, request, request_id) },
+        handle,
+    )
+}
+
+unsafe extern "C" fn submit_batch(
+    handle: ReplayHandleV1,
+    requests: DirectRequestSliceV1,
+    request_ids: RequestIdMutSliceV1,
+) -> StatusV1 {
+    if request_ids.len <= usize::MAX as u64 && (!request_ids.data.is_null() || request_ids.len == 0)
+    {
+        let output = if request_ids.len == 0 {
+            &mut []
+        } else {
+            unsafe { std::slice::from_raw_parts_mut(request_ids.data, request_ids.len as usize) }
+        };
+        output.fill([0; 16]);
+    }
+    catch_status(
+        || unsafe { submit_batch_impl(handle, requests, request_ids) },
+        handle,
+    )
+}
+
+unsafe extern "C" fn cancel(
+    handle: ReplayHandleV1,
+    request_id: *const RequestIdV1,
+    event: *mut EngineEventV1,
+    canceled: *mut u8,
+) -> StatusV1 {
+    if !event.is_null() {
+        unsafe { *event = std::mem::zeroed() };
+    }
+    if !canceled.is_null() {
+        unsafe { *canceled = 0 };
+    }
+    catch_status(
+        || unsafe { cancel_impl(handle, request_id, event, canceled) },
+        handle,
+    )
+}
+
+unsafe extern "C" fn cancel_batch(
+    handle: ReplayHandleV1,
+    request_ids: RequestIdSliceV1,
+    events: *mut EngineEventSliceV1,
+) -> StatusV1 {
+    if !events.is_null() {
+        unsafe {
+            *events = EngineEventSliceV1 {
+                data: std::ptr::null(),
+                len: 0,
+            };
+        }
+    }
+    catch_status(
+        || unsafe { cancel_batch_impl(handle, request_ids, events) },
+        handle,
+    )
+}
+
+unsafe extern "C" fn step(
+    handle: ReplayHandleV1,
+    request: StepRequestV1,
+    result: *mut StepResultV1,
+) -> StatusV1 {
+    if !result.is_null() {
+        unsafe { *result = StepResultV1::EMPTY };
+    }
+    catch_status(|| unsafe { step_impl(handle, request, result) }, handle)
+}
+
+unsafe extern "C" fn take_report(
+    handle: ReplayHandleV1,
+    wall_ms: f64,
+    report: *mut ByteSliceV1,
+) -> StatusV1 {
+    if !report.is_null() {
+        unsafe { *report = ByteSliceV1::EMPTY };
+    }
+    catch_status(
+        || unsafe { take_report_impl(handle, wall_ms, report) },
+        handle,
+    )
+}
+
+unsafe extern "C" fn release_bytes(bytes: ByteSliceV1) {
+    let _ = catch_unwind(AssertUnwindSafe(|| unsafe { release_bytes_impl(bytes) }));
+}
+
+unsafe extern "C" fn release_events(events: EngineEventSliceV1) {
+    let _ = catch_unwind(AssertUnwindSafe(|| unsafe { release_events_impl(events) }));
+}
+
+unsafe extern "C" fn release_request_facts(facts: RequestFactSliceV1) {
+    let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
+        release_request_facts_impl(facts)
+    }));
+}
+
+unsafe extern "C" fn state(handle: ReplayHandleV1, state: *mut ReplayStateV1) -> StatusV1 {
+    if !state.is_null() {
+        unsafe { *state = ReplayStateV1::EMPTY };
+    }
+    catch_status(|| unsafe { state_impl(handle, state) }, handle)
+}
+
+unsafe extern "C" fn advance_now_ms(handle: ReplayHandleV1, now_ms: f64) -> StatusV1 {
+    catch_status(|| unsafe { advance_now_ms_impl(handle, now_ms) }, handle)
+}
+
+unsafe extern "C" fn set_capture_per_request(handle: ReplayHandleV1, capture: u8) -> StatusV1 {
+    catch_status(
+        || unsafe { set_capture_per_request_impl(handle, capture) },
+        handle,
+    )
+}
+
+unsafe extern "C" fn set_sla_thresholds(
+    handle: ReplayHandleV1,
+    thresholds: SlaThresholdsV1,
+) -> StatusV1 {
+    catch_status(
+        || unsafe { set_sla_thresholds_impl(handle, thresholds) },
+        handle,
+    )
+}
+
+unsafe extern "C" fn last_error(handle: ReplayHandleV1, error: *mut ByteSliceV1) -> StatusV1 {
+    if !error.is_null() {
+        unsafe { *error = ByteSliceV1::EMPTY };
+    }
+    catch_status(|| unsafe { last_error_impl(handle, error) }, handle)
+}
+
+unsafe extern "C" fn destroy(handle: ReplayHandleV1) {
+    let _ = catch_unwind(AssertUnwindSafe(|| unsafe { destroy_impl(handle) }));
 }
 
 static VTABLE: PluginVTableV1 = PluginVTableV1 {
@@ -845,12 +1276,21 @@ static DESCRIPTOR: PluginDescriptorV1 = PluginDescriptorV1 {
 /// Returns the static V1 plugin descriptor for dynamic loading.
 #[unsafe(no_mangle)]
 pub extern "C" fn aiperf_steppable_plugin_v1() -> *const PluginDescriptorV1 {
-    &DESCRIPTOR
+    catch_unwind(AssertUnwindSafe(|| {
+        &DESCRIPTOR as *const PluginDescriptorV1
+    }))
+    .unwrap_or(std::ptr::null())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aiperf_steppable_abi::{
+        REPLAY_CONTEXT_FLAG_METADATA, REPLAY_CONTEXT_FLAG_SESSION_ID,
+        REPLAY_CONTEXT_FLAG_TURN_INDEX, REQUEST_FLAG_ARRIVAL_TIMESTAMP,
+        REQUEST_FLAG_OUTPUT_TOKEN_IDS, REQUEST_FLAG_POLICY_CLASS, REQUEST_FLAG_PREFERRED_DP_RANK,
+        REQUEST_FLAG_PREFERRED_PREFILL_DP_RANK, REQUEST_FLAG_REPLAY_CONTEXT,
+    };
 
     #[test]
     fn router_args_project_the_aggregate_engine_capacity() {
@@ -867,5 +1307,100 @@ mod tests {
         assert_eq!(args.num_gpu_blocks, 29);
         assert_eq!(args.max_num_batched_tokens, Some(37));
         assert_eq!(args.max_num_seqs, Some(7));
+    }
+
+    #[test]
+    fn direct_request_preserves_all_present_abi_fields_including_empty_plan() {
+        let output = [];
+        let policy = b"priority";
+        let authored = b"trace-17";
+        let session = b"session-2";
+        let metadata = br#"{"source":"abi"}"#;
+        let request = DirectRequestV1 {
+            struct_size: std::mem::size_of::<DirectRequestV1>() as u32,
+            flags: REQUEST_FLAG_OUTPUT_TOKEN_IDS
+                | REQUEST_FLAG_PREFERRED_DP_RANK
+                | REQUEST_FLAG_PREFERRED_PREFILL_DP_RANK
+                | REQUEST_FLAG_ARRIVAL_TIMESTAMP
+                | REQUEST_FLAG_POLICY_CLASS
+                | REQUEST_FLAG_REPLAY_CONTEXT,
+            tokens: U32SliceV1::EMPTY,
+            output_token_ids: U32SliceV1 {
+                data: output.as_ptr(),
+                len: 0,
+            },
+            max_output_tokens: 9,
+            uuid: [8; 16],
+            dp_rank: 1,
+            preferred_dp_rank: 2,
+            preferred_prefill_dp_rank: 3,
+            arrival_timestamp_ms: 4.5,
+            priority: 7,
+            strict_priority: 11,
+            policy_class: ByteSliceV1 {
+                data: policy.as_ptr(),
+                len: policy.len() as u64,
+            },
+            replay_context: aiperf_steppable_abi::ReplayContextV1 {
+                struct_size: std::mem::size_of::<aiperf_steppable_abi::ReplayContextV1>() as u32,
+                flags: REPLAY_CONTEXT_FLAG_SESSION_ID
+                    | REPLAY_CONTEXT_FLAG_TURN_INDEX
+                    | REPLAY_CONTEXT_FLAG_METADATA,
+                authored_id: ByteSliceV1 {
+                    data: authored.as_ptr(),
+                    len: authored.len() as u64,
+                },
+                session_id: ByteSliceV1 {
+                    data: session.as_ptr(),
+                    len: session.len() as u64,
+                },
+                metadata: ByteSliceV1 {
+                    data: metadata.as_ptr(),
+                    len: metadata.len() as u64,
+                },
+                turn_index: 6,
+                prompt_token_source: 0,
+                reserved: 0,
+            },
+        };
+        let converted = unsafe { direct_request(request) }.expect("valid ABI request");
+        assert_eq!(converted.output_token_ids.as_deref(), Some(&[][..]));
+        assert_eq!(converted.preferred_dp_rank, Some(2));
+        assert_eq!(converted.preferred_prefill_dp_rank, Some(3));
+        assert_eq!(converted.arrival_timestamp_ms, Some(4.5));
+        assert_eq!(converted.policy_class.as_deref(), Some("priority"));
+        let context = converted.replay_context.expect("context");
+        assert_eq!(context.authored_id, "trace-17");
+        assert_eq!(context.session_id.as_deref(), Some("session-2"));
+        assert_eq!(context.turn_index, Some(6));
+        assert_eq!(context.metadata, serde_json::json!({"source":"abi"}));
+    }
+
+    #[test]
+    fn panic_in_ffi_callback_becomes_internal_with_empty_output() {
+        let config = BackendConfig::one_worker();
+        let replay = Box::new(BackendReplay {
+            engine: build_engine(&config).expect("test engine"),
+            config,
+            journal: Vec::new(),
+            submitted_ids: HashSet::new(),
+            last_error: String::new(),
+        });
+        let handle = ReplayHandleV1(Box::into_raw(replay).cast());
+        FORCE_FFI_PANIC.store(true, Ordering::SeqCst);
+        let mut output = ReplayStateV1 {
+            now_ms: 1.0,
+            next_event_ms: 1.0,
+            in_flight: 1,
+            is_idle: 1,
+            reserved: [1; 7],
+        };
+
+        assert_eq!(unsafe { state(handle, &mut output) }, StatusV1::INTERNAL);
+        assert_eq!(output.now_ms, 0.0);
+        assert_eq!(output.in_flight, 0);
+        assert_eq!(output.is_idle, ReplayStateV1::EMPTY.is_idle);
+
+        unsafe { destroy(handle) };
     }
 }

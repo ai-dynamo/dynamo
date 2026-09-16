@@ -56,10 +56,10 @@ repository = "https://github.com/ai-dynamo/dynamo.git"
 keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
 [workspace.dependencies]
-# The explicit KV-router steppable oracle must use the same local AISimulate
-# core source as the outer dynamic plugin. A git SourceId here would create a
-# second, incompatible copy of the replay traits in the provider cdylib.
-aisimulate-core = { path = "../aisimulate-dynamic-abi/crates/core" }
+# The monolithic steppable provider must be buildable from a standalone Dynamo
+# checkout. Pin the released KV-router steppable revision, rather than a
+# sibling worktree, so every Dynamo consumer resolves one shippable SourceId.
+aisimulate-core = { git = "https://github.com/ai-dynamo/aisimulate.git", rev = "4fd8aaabb68008e15ada1bb1750183968d56b0eb" }
 
 # Local crates
 dynamo-runtime = { path = "lib/runtime", version = "1.5.0" }

@@ -23,3 +23,7 @@ dynamo-mocker = { workspace = true, features = ["replay-bench"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
+
+[dev-dependencies]
+aisimulate-placement-abi = { path = "/home/anthony/nvidia/projects/aiperf-rs/.worktrees/deps/aisimulate-dynamic-abi/crates/placement-abi" }
+dynamo-placement-plugin = { path = "../placement-plugin" }
