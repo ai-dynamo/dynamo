@@ -24,6 +24,7 @@ TRITON_TO_DYNAMO_DTYPE = {
     "INT32": "Int32",
     "INT64": "Int64",
     "FP16": "Float16",
+    "BF16": "BFloat16",
     "FP32": "Float32",
     "FP64": "Float64",
     "BYTES": "Bytes",

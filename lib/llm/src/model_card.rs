@@ -18,7 +18,10 @@ use std::sync::{Arc, OnceLock};
 
 use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
-use crate::local_model::runtime_config::{ModelRuntimeConfig, TokenizerBackend};
+use crate::local_model::runtime_config::{
+    ModelRuntimeConfig, TokenizerBackend, VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+    VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+};
 use crate::model_type::{ModelInput, ModelType};
 use crate::protocols::tensor::TensorModelConfig;
 use anyhow::{Context, Result};
@@ -32,6 +35,41 @@ use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
 use crate::protocols::TokenIdType;
 
 const DEFAULT_TOKENIZER_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+fn append_runtime_contract_checksum(
+    bytes: &mut Vec<u8>,
+    runtime_config: &ModelRuntimeConfig,
+    key: &str,
+) {
+    let Some(value) = runtime_config.runtime_data.get(key) else {
+        return;
+    };
+    let mut value = value.clone();
+    canonicalize_json_object_keys(&mut value);
+    let value = serde_json::to_vec(&value).expect("serializing serde_json::Value cannot fail");
+
+    // These contracts control model-visible media prompt expansion. Workers
+    // with different contracts must not share a cohort whose preprocessor is
+    // built from one representative card.
+    bytes.extend_from_slice(b"\0dynamo/model-card/runtime-contract/v1\0");
+    bytes.extend_from_slice(&(key.len() as u64).to_be_bytes());
+    bytes.extend_from_slice(key.as_bytes());
+    bytes.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    bytes.extend_from_slice(&value);
+}
+
+fn canonicalize_json_object_keys(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(values) => {
+            values.iter_mut().for_each(canonicalize_json_object_keys);
+        }
+        serde_json::Value::Object(map) => {
+            map.values_mut().for_each(canonicalize_json_object_keys);
+            map.sort_keys();
+        }
+        _ => {}
+    }
+}
 
 fn append_indexer_identity_checksum(bytes: &mut Vec<u8>, spec: &IndexerIdentitySpec) {
     bytes.extend_from_slice(b"dynamo/model-card/indexer-identity/v1");
@@ -1220,6 +1258,21 @@ impl ModelDeploymentCard {
                     crate::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY,
                 ) {
                     bytes_to_hash.extend_from_slice(b"\0vllm_enable_tower_connector_lora\0true");
+                }
+
+                // The frontend constructs one video routing preprocessor from
+                // the cohort's representative card. Partition workers when a
+                // processor contract is missing or differs so every admitted
+                // worker uses the same model-visible prompt expansion.
+                for key in [
+                    VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+                    VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+                ] {
+                    append_runtime_contract_checksum(
+                        &mut bytes_to_hash,
+                        &self.runtime_config,
+                        key,
+                    );
                 }
 
                 // TODO: Do we want any other user_data or runtime_config?
@@ -3199,6 +3252,62 @@ mod ownership_tests {
 
         assert_eq!(missing.mdcsum(), disabled.mdcsum());
         assert_ne!(missing.mdcsum(), enabled.mdcsum());
+    }
+
+    #[test]
+    fn video_processor_runtime_contracts_isolate_worker_sets() {
+        use crate::local_model::runtime_config::{
+            VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+        };
+
+        fn card_with_contract(key: &str, value: serde_json::Value) -> ModelDeploymentCard {
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.runtime_config
+                .runtime_data
+                .insert(key.to_string(), value);
+            card
+        }
+
+        let missing = ModelDeploymentCard::with_name_only("model");
+        let qwen = card_with_contract(
+            VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            serde_json::json!({
+                "placeholder_target": "bare_video_token",
+                "resize_mode": "round_ties_even"
+            }),
+        );
+        let same_qwen = card_with_contract(
+            VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            serde_json::json!({
+                "resize_mode": "round_ties_even",
+                "placeholder_target": "bare_video_token"
+            }),
+        );
+        let different_qwen = card_with_contract(
+            VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            serde_json::json!({
+                "placeholder_target": "vision_wrapped_video_token",
+                "resize_mode": "round_ties_even"
+            }),
+        );
+        let nemotron = card_with_contract(
+            VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            serde_json::json!({"video_pruning_rate": 0.5}),
+        );
+        let different_nemotron = card_with_contract(
+            VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            serde_json::json!({"video_pruning_rate": 0.25}),
+        );
+        let unrelated = card_with_contract("unrelated_runtime_metadata", serde_json::json!(true));
+
+        assert_eq!(missing.mdcsum(), unrelated.mdcsum());
+        assert_ne!(missing.mdcsum(), qwen.mdcsum());
+        assert_eq!(qwen.mdcsum(), same_qwen.mdcsum());
+        assert_ne!(qwen.mdcsum(), different_qwen.mdcsum());
+        assert_ne!(missing.mdcsum(), nemotron.mdcsum());
+        assert_ne!(nemotron.mdcsum(), different_nemotron.mdcsum());
+        assert_ne!(qwen.mdcsum(), nemotron.mdcsum());
     }
 }
 
