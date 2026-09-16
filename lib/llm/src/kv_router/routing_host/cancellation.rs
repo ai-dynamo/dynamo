@@ -87,6 +87,7 @@ impl DispatchCancellation {
             (RequestPhase::Decode, StagedKv::Present) => Self::DispatchWhenStopped,
             (RequestPhase::Decode, StagedKv::Absent)
             | (RequestPhase::Prefill, _)
+            | (RequestPhase::Continuation, _)
             | (RequestPhase::Aggregated, _) => Self::CancelWhenStopped,
         }
     }
