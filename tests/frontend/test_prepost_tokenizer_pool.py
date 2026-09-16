@@ -8,6 +8,7 @@
 
 import asyncio
 import gc
+import threading
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
@@ -40,6 +41,19 @@ class _DummyTokenizer:
         return SimpleNamespace(input_ids=[1, 2, 3])
 
 
+class _BlockingTokenizer(_DummyTokenizer):
+    def __init__(self):
+        super().__init__()
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def __call__(self, prompt, **kwargs):
+        self.started.set()
+        if not self.release.wait(timeout=5):
+            raise TimeoutError("test tokenizer was not released")
+        return super().__call__(prompt, **kwargs)
+
+
 class _SlotsTokenizer:
     # No __weakref__: weakref.ref() raises TypeError.
     __slots__ = ()
@@ -60,9 +74,11 @@ class _RecordingExecutor(ThreadPoolExecutor):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.shutdown_calls = 0
+        self.shutdown_waits = []
 
     def shutdown(self, wait=True, *, cancel_futures=False):
         self.shutdown_calls += 1
+        self.shutdown_waits.append(wait)
         super().shutdown(wait, cancel_futures=cancel_futures)
 
 
@@ -157,6 +173,47 @@ def test_equal_tokenizers_have_independent_executor_lifetimes():
     result = asyncio.run(_call_tokenizer(second, "still live"))
     assert result.input_ids == [1, 2, 3]
     assert second.prompts == ["still live"]
+
+
+async def _run_inflight_tokenizer(tokenizer):
+    tokenizer_ref = weakref.ref(tokenizer)
+    async_tokenizer = prepost._get_async_tokenizer(tokenizer)
+    _, executor = prepost._ASYNC_TOKENIZER_EXECUTORS[id(tokenizer)]
+    future = async_tokenizer("in flight")
+    release = tokenizer.release
+    assert await asyncio.to_thread(tokenizer.started.wait, 5)
+
+    try:
+        # The running work item is the only remaining strong reference to the
+        # tokenizer after the wrapper and caller references are released.
+        del async_tokenizer
+        del tokenizer
+        gc.collect()
+        assert tokenizer_ref() is not None
+
+        release.set()
+        result = await future
+        for _ in range(100):
+            gc.collect()
+            if tokenizer_ref() is None:
+                break
+            await asyncio.sleep(0.01)
+
+        return result, executor, tokenizer_ref()
+    finally:
+        release.set()
+
+
+def test_inflight_tokenizer_is_evicted_from_worker_thread():
+    result, executor, tokenizer = asyncio.run(
+        _run_inflight_tokenizer(_BlockingTokenizer())
+    )
+
+    assert result.input_ids == [1, 2, 3]
+    assert tokenizer is None
+    assert len(prepost._ASYNC_TOKENIZER_EXECUTORS) == 0
+    assert executor.shutdown_calls == 1
+    assert executor.shutdown_waits == [False]
 
 
 def test_non_weakrefable_tokenizer_falls_back_to_strong_pool():
