@@ -576,6 +576,40 @@ where
         }
     }
 
+    /// Check request-supplied targets only at initial selection, not after a route preview
+    /// or when dispatching: a worker disappearing later is a service failure.
+    fn validate_explicit_worker(
+        &self,
+        request: &PreprocessedRequest,
+        phase: RequestPhase,
+    ) -> Result<(), Error> {
+        let Some(routing) = request.routing.as_ref() else {
+            return Ok(());
+        };
+        let target = match phase {
+            RequestPhase::Prefill => routing
+                .prefill_worker_id
+                .map(|id| (id, "prefill_worker_id")),
+            RequestPhase::Decode | RequestPhase::Aggregated => {
+                routing.decode_worker_id.map(|id| (id, "decode_worker_id"))
+            }
+        }
+        .or_else(|| {
+            routing
+                .backend_instance_id
+                .map(|id| (id, "backend_instance_id"))
+        });
+        // Validate discovery membership, not health: unavailable workers are still known.
+        if let Some((worker_id, field)) = target
+            && !self.inner.client.is_instance_discovered(worker_id)
+        {
+            return Err(invalid_argument(format!(
+                "nvext.{field}={worker_id} does not identify a known worker"
+            )));
+        }
+        Ok(())
+    }
+
     fn affinity_target_is_valid(&self, target: AffinityTarget) -> bool {
         if !self.inner.client.is_instance_discovered(target.worker_id) {
             return false;
@@ -812,7 +846,7 @@ where
             let output = LLMEngineOutput {
                 routing_data: Some(RoutingData {
                     worker_id: worker_id_info,
-                    token_ids: Some(request.token_ids.clone()),
+                    token_ids: Some(request.token_ids.as_ref().clone()),
                     ..Default::default()
                 }),
                 ..Default::default()
