@@ -302,13 +302,11 @@ pub struct KvIndexerBuilder {
 }
 
 impl KvIndexerBuilder {
-    /// Fix the ownership delegate before the indexer starts accepting events.
     pub fn delegate(mut self, delegate: Arc<dyn super::KvIndexerDelegate>) -> Self {
         self.delegate = Some(delegate);
         self
     }
 
-    /// Configure approximate retention before starting the indexer.
     pub fn retention(mut self, retention: ApproximateRetentionConfig) -> Self {
         self.retention = Some(retention);
         self

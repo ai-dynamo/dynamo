@@ -66,14 +66,14 @@ fn bench(c: &mut Criterion) {
     group.warm_up_time(Duration::from_secs(1));
     group.measurement_time(Duration::from_secs(3));
     group.throughput(Throughput::Elements(WORKERS * BLOCKS as u64 * 2));
-    for enabled in [false, true] {
-        let backend = if enabled {
+    for is_enabled in [false, true] {
+        let backend = if is_enabled {
             ConcurrentRadixTreeCompressed::new_with_delegate(Arc::new(Delegate))
         } else {
             ConcurrentRadixTreeCompressed::new()
         };
         let indexer = ThreadPoolIndexer::new(backend, 8, 32);
-        group.bench_function(if enabled { "enabled" } else { "disabled" }, |b| {
+        group.bench_function(if is_enabled { "enabled" } else { "disabled" }, |b| {
             b.iter(|| {
                 runtime.block_on(async {
                     for event in &events {

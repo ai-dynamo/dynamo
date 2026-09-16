@@ -727,7 +727,7 @@ impl DcCkfState {
         replacement.telemetry.distinct_touched_buckets = self.telemetry.distinct_touched_buckets;
         replacement.telemetry.emitted_images = self.telemetry.emitted_images;
         replacement.telemetry.net_reverted_buckets = self.telemetry.net_reverted_buckets;
-        replacement.delegate = self.delegate.clone();
+        replacement.delegate = self.delegate.take();
         let previous = std::mem::replace(self, replacement);
         if let Some(delegate) = &self.delegate {
             for &hash in previous.canonical_owners.keys() {
@@ -965,9 +965,9 @@ impl DcCkfState {
             }
             for (&canonical, &increment) in &scratch.owner_increments {
                 let ownership = self.canonical_owners.entry(canonical).or_default();
-                let created = ownership.owners == 0;
+                let is_first_owner = ownership.owners == 0;
                 ownership.owners += increment;
-                if created && let Some(delegate) = &self.delegate {
+                if is_first_owner && let Some(delegate) = &self.delegate {
                     delegate.on_create(canonical);
                 }
             }
@@ -2277,13 +2277,17 @@ mod tests {
     #[test]
     fn replacement_failure_after_valid_prefix_leaves_state_untouched() {
         let existing = WorkerWithDpRank::new(1, 0);
-        let mut state = DcCkfState::new(CkfConfig::new(64)).unwrap();
+        let recorder =
+            std::sync::Arc::new(crate::indexer::delegate_tests::CanonicalRecorder::default());
+        let mut state =
+            DcCkfState::new_with_delegate(CkfConfig::new(64), recorder.clone()).unwrap();
         assert!(
             state
                 .apply_event(stored(existing, 1, &[7]))
                 .first_error()
                 .is_none()
         );
+        assert_eq!(recorder.take(), vec![(true, canonical_root(7))]);
         state.barrier_snapshot().unwrap();
         let lineage_before = state.source_lineage.clone();
         let owners_before = state.canonical_owners.clone();
@@ -2301,6 +2305,14 @@ mod tests {
         assert!(!state.is_resident(&canonical_root(11)));
         assert!(!state.is_resident(&canonical_root(13)));
         assert!(state.drain_publication().is_none());
+        assert!(recorder.take().is_empty());
+
+        state.fail_replacement_install_after = None;
+        state.replace_rank(existing, replacement(&[11])).unwrap();
+        assert_eq!(
+            recorder.take(),
+            vec![(false, canonical_root(7)), (true, canonical_root(11))]
+        );
     }
 
     #[test]

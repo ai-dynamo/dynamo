@@ -215,7 +215,13 @@ async fn delegate_rejected_store_is_silent(
 }
 
 #[derive(Default)]
-struct CanonicalRecorder(Mutex<Vec<(bool, cuckoo::CanonicalSequenceBlockHash)>>);
+pub(super) struct CanonicalRecorder(Mutex<Vec<(bool, cuckoo::CanonicalSequenceBlockHash)>>);
+
+impl CanonicalRecorder {
+    pub(super) fn take(&self) -> Vec<(bool, cuckoo::CanonicalSequenceBlockHash)> {
+        std::mem::take(&mut *self.0.lock().unwrap())
+    }
+}
 
 impl KvIndexerDelegate<cuckoo::CanonicalSequenceBlockHash> for CanonicalRecorder {
     fn on_create(&self, hash: cuckoo::CanonicalSequenceBlockHash) {
@@ -254,6 +260,42 @@ fn delegate_cuckoo_replacement_preserves_shared_ownership() {
         *recorder.0.lock().unwrap(),
         vec![(true, hash), (false, hash), (true, hash), (false, hash)]
     );
+}
+
+#[test]
+fn delegate_cuckoo_nonempty_replacement_reports_only_ownership_changes() {
+    use cuckoo::*;
+    let recorder = Arc::new(CanonicalRecorder::default());
+    let mut indexer = DcCkfState::new_with_delegate(CkfConfig::new(128), recorder.clone()).unwrap();
+    let worker = WorkerWithDpRank::new(1, 0);
+    for (owner, hash) in [(1, 17), (1, 19), (2, 19)] {
+        assert!(
+            indexer
+                .apply_event(make_store_event_with_dp_rank(owner, &[hash], 0))
+                .first_error()
+                .is_none()
+        );
+    }
+    recorder.take();
+    let mut replacement = DcCkfRankReplacement::default();
+    for hash in [17, 23] {
+        replacement
+            .push_event(make_store_event_with_dp_rank(1, &[hash], 0))
+            .unwrap();
+    }
+    indexer.replace_rank(worker, replacement).unwrap();
+    let canonical = |hash| CanonicalSequenceBlockHash::root(LocalBlockHash(hash));
+    assert_eq!(recorder.take(), vec![(true, canonical(23))]);
+    indexer
+        .replace_rank(WorkerWithDpRank::new(2, 0), DcCkfRankReplacement::default())
+        .unwrap();
+    assert_eq!(recorder.take(), vec![(false, canonical(19))]);
+    let mut replacement = DcCkfRankReplacement::default();
+    replacement
+        .push_event(make_store_event_with_dp_rank(1, &[23], 0))
+        .unwrap();
+    indexer.replace_rank(worker, replacement).unwrap();
+    assert_eq!(recorder.take(), vec![(false, canonical(17))]);
 }
 
 #[rstest]

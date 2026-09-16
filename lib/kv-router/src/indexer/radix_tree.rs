@@ -678,7 +678,6 @@ impl RadixTree {
                     .remove_worker_at_pos(worker, min_pos, min_hash)
             };
             RadixBlock::prune_unreachable(&node);
-            self.lifecycle.remove(worker, block_hash);
             for stale_hash in outcome.stale_hashes {
                 lookup.remove(&stale_hash);
                 self.lifecycle.remove(worker, stale_hash);
