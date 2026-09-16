@@ -156,6 +156,43 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		}
 	}
 
+	// Native sidecars select a runtime container and exclude deferred engine layouts.
+	if spec.DynamoSidecar != nil {
+		selectorPath := fldPath.Child("dynamoSidecar")
+		detail := fmt.Sprintf("component %q with dynamoSidecar", spec.ComponentName)
+		if !dynamo.IsWorkerComponent(string(spec.ComponentType)) {
+			allErrs = append(allErrs, field.Forbidden(selectorPath, "is supported only for worker, prefill, and decode components"))
+		}
+		if *spec.DynamoSidecar == "" {
+			allErrs = append(allErrs, field.Invalid(selectorPath, "", "must not be empty"))
+		} else if runtime := dynamo.GetDynamoContainer(spec); runtime == nil {
+			allErrs = append(allErrs, field.Invalid(selectorPath, *spec.DynamoSidecar, "must match a podTemplate.spec.initContainers name"))
+		} else if runtime.RestartPolicy == nil || *runtime.RestartPolicy != corev1.ContainerRestartPolicyAlways {
+			index := containerIndexByName(spec.PodTemplate.Spec.InitContainers, *spec.DynamoSidecar)
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("podTemplate", "spec", "initContainers").Index(index).Child("restartPolicy"), k8sptr.Deref(runtime.RestartPolicy, ""), "must be Always for "+detail))
+		}
+		if engine := dynamo.GetMainContainer(spec); engine == nil {
+			allErrs = append(allErrs, field.Required(fldPath.Child("podTemplate", "spec", "containers"), "main engine container is required for "+detail))
+		} else if engine.Image == "" {
+			index := containerIndexByName(spec.PodTemplate.Spec.Containers, consts.MainContainerName)
+			allErrs = append(allErrs, field.Required(fldPath.Child("podTemplate", "spec", "containers").Index(index).Child("image"), "engine image is required for "+detail))
+		}
+		if spec.Multinode != nil {
+			allErrs = append(allErrs, field.Forbidden(fldPath.Child("multinode"), "is not supported for "+detail))
+		}
+		if spec.Experimental != nil {
+			if spec.Experimental.Checkpoint != nil && spec.Experimental.Checkpoint.Enabled {
+				allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "checkpoint", "enabled"), "is not supported for "+detail))
+			}
+			if spec.Experimental.GPUMemoryService != nil {
+				allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "gpuMemoryService"), "is not supported for "+detail))
+			}
+			if spec.Experimental.Failover != nil {
+				allErrs = append(allErrs, field.Forbidden(fldPath.Child("experimental", "failover"), "is not supported for "+detail))
+			}
+		}
+	}
+
 	if spec.Experimental != nil {
 		allErrs = append(allErrs, v.validateExperimentalSpec(
 			spec.Experimental,

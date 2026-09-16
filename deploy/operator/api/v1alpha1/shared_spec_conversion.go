@@ -610,6 +610,9 @@ func saveSharedHubOnlySpec(src *v1beta1.DynamoComponentDeploymentSharedSpec, con
 	if src == nil || save == nil {
 		return nil
 	}
+	// Alpha represents init containers, but cannot represent the runtime selector.
+	save.DynamoSidecar = src.DynamoSidecar
+
 	if sharedFrontendSidecarNeedsPreservation(src, converted) {
 		save.FrontendSidecar = ptr.To(*src.FrontendSidecar)
 	}
@@ -1702,6 +1705,10 @@ func restoreSharedHubOnlyFields(dst, preserved *v1beta1.DynamoComponentDeploymen
 		return err
 	}
 	dst.PodTemplate = podTemplate
+
+	// Restore only the beta-only selector; live alpha init containers remain authoritative.
+	dst.DynamoSidecar = preserved.DynamoSidecar
+
 	restoreSharedHubOnlyFrontendSidecar(dst, preserved)
 	if dst.Experimental == nil && experimentalIsHubOnlyShape(preserved.Experimental) {
 		dst.Experimental = preserved.Experimental.DeepCopy()

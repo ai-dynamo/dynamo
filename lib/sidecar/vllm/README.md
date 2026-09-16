@@ -257,7 +257,24 @@ There is no published sidecar image yet, so build and push the image from
 sidecar executables; these manifests run `dynamo-vllm-sidecar` as the container
 command.
 
-The sidecar waits for both the Control and Inference services through the standard gRPC health API before registering the worker. The deployment manifests retain lightweight socket probes for container lifecycle monitoring. The engine image must include a `vllm-rs` build compatible with the pinned `vllm-proto` crate.
+The manifests require an operator with the `v1beta1` `dynamoSidecar` field from
+[DEP #14657](https://github.com/ai-dynamo/dynamo/issues/14657). The engine runs in
+`containers[name=main]`; `initContainers[name=dynamo]` is the restartable Dynamo
+sidecar and receives the operator's runtime defaults. Engine exec probes use
+`grpc_health_probe` to check both `vllm.Control` and `vllm.Inference` on loopback.
+A setup init container downloads the pinned probe binary and verifies its checksum;
+offline deployments must supply that binary through an image or volume instead.
+The engine image must include a `vllm-rs` build compatible with the pinned
+`vllm-proto` crate.
+
+Until [DEP #14897](https://github.com/ai-dynamo/dynamo/issues/14897) is implemented,
+the current sidecar waits for engine metadata before starting its HTTP listener.
+The examples override its startup probe with a process check so Kubernetes can
+start the engine, and delay HTTP liveness for five minutes. HTTP readiness still
+waits for sidecar initialization. Increase the engine startup budget and sidecar
+liveness delay together for larger models. These examples demonstrate rendering
+and inference; engine/sidecar restart recovery and shutdown semantics still depend
+on the lifecycle work.
 
 The Dynamo vLLM runtime image exposes `vllm-rs` through the
 [wrapper described above](#runtime-compatibility). On CPU and XPU, check that
@@ -268,7 +285,7 @@ upstream vLLM images and locate the binary inside the Python package.
 
 - A Kubernetes cluster (**v1.29+**, or v1.28 with the `SidecarContainers` feature
   gate) with the Dynamo operator and a GPU node (multiple GPUs plus an RDMA fabric
-  for `disagg.yaml`). The engine runs as a native sidecar (`initContainers` with
+  for `disagg.yaml`). Dynamo runs as a native sidecar (`initContainers` with
   `restartPolicy: Always`), which requires that version.
 - `kubectl` set to that cluster, and a namespace to deploy into.
 - A Hugging Face token for the model.
@@ -290,8 +307,11 @@ build. These manifests set the container `command` to
 
 ### 2. Point the manifest at your image
 
-In `deploy/agg.yaml` (and `deploy/disagg.yaml`), set the `main` worker image to
-the one you pushed. Add `imagePullSecrets` if your registry is private.
+In `deploy/agg.yaml` (and `deploy/disagg.yaml`), set the image of
+`initContainers[name=dynamo]` to the one you pushed. Keep the vLLM engine image
+in `containers[name=main]`. Add `imagePullSecrets` if your registry is private.
+For a custom image tag without a semantic version, set `runtimeVersionOverride`
+to the Dynamo version built into the sidecar image.
 
 ### 3. Create the Hugging Face token secret
 

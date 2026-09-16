@@ -19,12 +19,14 @@ package validation
 
 import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
 // validateDynamoGraphDeploymentV1alpha1 validates dgd. dgd must not be nil.
 func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentV1alpha1(
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
+	hub *nvidiacomv1beta1.DynamoGraphDeployment,
 ) field.ErrorList {
 	if !hasV1Alpha1CompatibilityFields(dgd) &&
 		!v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
@@ -35,6 +37,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentV1alpha1(
 		field.NewPath("spec"),
 		dgd.Name,
 		dgd.Namespace,
+		hub,
 	)
 }
 
@@ -44,6 +47,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecV1alp
 	fldPath *field.Path,
 	dgdName string,
 	dgdNamespace string,
+	hub *nvidiacomv1beta1.DynamoGraphDeployment,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	pvcsPath := fldPath.Child("pvcs")
@@ -60,6 +64,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecV1alp
 			service,
 			servicePath,
 			dynamoNamespace,
+			hub.GetComponentByName(serviceName).DynamoSidecar,
 		)...)
 	}
 	return allErrs
@@ -71,6 +76,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 	newSpec *nvidiacomv1alpha1.DynamoGraphDeploymentSpec,
 	oldSpec *nvidiacomv1alpha1.DynamoGraphDeploymentSpec,
 	fldPath *field.Path,
+	newHub, oldHub *nvidiacomv1beta1.DynamoGraphDeployment,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	servicesPath := fldPath.Child("services")
@@ -84,6 +90,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 			newService,
 			oldService,
 			servicesPath.Key(serviceName),
+			newHub.GetComponentByName(serviceName).DynamoSidecar, oldHub.GetComponentByName(serviceName).DynamoSidecar,
 		)...)
 	}
 	return allErrs

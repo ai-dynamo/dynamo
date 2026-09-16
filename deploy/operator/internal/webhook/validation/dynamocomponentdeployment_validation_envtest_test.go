@@ -65,6 +65,123 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		wantPodAnnotations map[string]string
 		wantRoleReplicas   map[string]int32
 	}{
+		{name: "native sidecar beta rejects gms create",
+			deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
+				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{}}
+			}), wantWebhookErrs: []string{`spec.experimental.gpuMemoryService: Forbidden: is not supported for component "worker" with dynamoSidecar`}},
+		{name: "native sidecar beta rejects failover create",
+			deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
+				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{}, Failover: &nvidiacomv1beta1.FailoverSpec{NumShadows: 1}}
+			}), wantWebhookErrs: []string{`spec.experimental.gpuMemoryService: Forbidden: is not supported for component "worker" with dynamoSidecar`, `spec.experimental.failover: Forbidden: is not supported for component "worker" with dynamoSidecar`}},
+		{name: "native sidecar beta rejects gms update", oldDeployment: nativeDCDForAdmission(t, false, nil),
+			deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
+				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{}}
+			}), wantWebhookErrs: []string{`spec.experimental.gpuMemoryService: Forbidden: is not supported for component "worker" with dynamoSidecar`}},
+		{name: "native sidecar beta rejects failover update", oldDeployment: nativeDCDForAdmission(t, false, nil),
+			deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
+				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{}, Failover: &nvidiacomv1beta1.FailoverSpec{NumShadows: 1}}
+			}), wantWebhookErrs: []string{`spec.experimental.gpuMemoryService: Forbidden: is not supported for component "worker" with dynamoSidecar`, `spec.experimental.failover: Forbidden: is not supported for component "worker" with dynamoSidecar`}},
+		{name: "native sidecar beta rejects multinode", deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+			c.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+		}), wantWebhookErrs: []string{`spec.multinode: Forbidden: is not supported for component "worker" with dynamoSidecar`}},
+		{name: "native sidecar alpha rejects gms create",
+			deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
+				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{}}
+			}), wantWebhookErrs: []string{`spec.experimental.gpuMemoryService: Forbidden: is not supported for component "worker" with dynamoSidecar`}},
+		{name: "native sidecar alpha rejects failover create",
+			deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
+				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{}, Failover: &nvidiacomv1beta1.FailoverSpec{NumShadows: 1}}
+			}), wantWebhookErrs: []string{`spec.experimental.gpuMemoryService: Forbidden: is not supported for component "worker" with dynamoSidecar`, `spec.experimental.failover: Forbidden: is not supported for component "worker" with dynamoSidecar`}},
+		{name: "native sidecar alpha rejects gms update", oldDeployment: nativeDCDForAdmission(t, true, nil),
+			deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
+				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{}}
+			}), wantWebhookErrs: []string{`spec.experimental.gpuMemoryService: Forbidden: is not supported for component "worker" with dynamoSidecar`}},
+		{name: "native sidecar alpha rejects failover update", oldDeployment: nativeDCDForAdmission(t, true, nil),
+			deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.PodTemplate.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
+				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{}, Failover: &nvidiacomv1beta1.FailoverSpec{NumShadows: 1}}
+			}), wantWebhookErrs: []string{`spec.experimental.gpuMemoryService: Forbidden: is not supported for component "worker" with dynamoSidecar`, `spec.experimental.failover: Forbidden: is not supported for component "worker" with dynamoSidecar`}},
+		{name: "native sidecar alpha rejects multinode", deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+			c.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+		}), wantWebhookErrs: []string{`spec.multinode: Forbidden: is not supported for component "worker" with dynamoSidecar`}},
+		{name: "native sidecar requires selected init container", deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) { c.DynamoSidecar = k8sptr.To("missing") }), wantWebhookErrs: []string{`spec.dynamoSidecar: Invalid value: "missing": must match a podTemplate.spec.initContainers name`, `spec.podTemplate.spec.initContainers: Required value: is required`}},
+		{name: "native sidecar requires engine main", deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+			c.PodTemplate.Spec.Containers[0].Name = "engine"
+		}), wantWebhookErrs: []string{`spec.podTemplate.spec.containers: Required value: main engine container is required for component "worker" with dynamoSidecar`}},
+		// Native-sidecar admission, including alpha conversion and unchanged update invariants.
+		{name: "native sidecar beta create", deployment: nativeDCDForAdmission(t, false, nil)},
+		{name: "native sidecar beta update", oldDeployment: nativeDCDForAdmission(t, false, nil), deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+			c.PodTemplate.Spec.InitContainers[0].Image = "runtime:1.6.0"
+		})},
+		{name: "native sidecar beta disabled checkpoint", deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+			c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: false}}
+		})},
+		{name: "native sidecar beta rejects nonrestartable init create",
+			deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.PodTemplate.Spec.InitContainers[0].RestartPolicy = nil
+			}),
+			wantWebhookErrs: []string{`spec.podTemplate.spec.initContainers[0].restartPolicy: Invalid value: "": must be Always for component "worker" with dynamoSidecar`},
+		},
+		{name: "native sidecar beta rejects checkpoint create",
+			deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true}}
+			}),
+			wantWebhookErrs: []string{`spec.experimental.checkpoint.enabled: Forbidden: is not supported for component "worker" with dynamoSidecar`},
+		},
+		{name: "native sidecar beta rejects nonrestartable init update", oldDeployment: nativeDCDForAdmission(t, false, nil),
+			deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.PodTemplate.Spec.InitContainers[0].RestartPolicy = nil
+			}),
+			wantWebhookErrs: []string{`spec.podTemplate.spec.initContainers[0].restartPolicy: Invalid value: "": must be Always for component "worker" with dynamoSidecar`},
+		},
+		{name: "native sidecar beta rejects checkpoint update", oldDeployment: nativeDCDForAdmission(t, false, nil),
+			deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true}}
+			}),
+			wantWebhookErrs: []string{`spec.experimental.checkpoint.enabled: Forbidden: is not supported for component "worker" with dynamoSidecar`},
+		},
+		{name: "native sidecar alpha create", deployment: nativeDCDForAdmission(t, true, nil)},
+		{name: "native sidecar alpha update", oldDeployment: nativeDCDForAdmission(t, true, nil), deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+			c.PodTemplate.Spec.InitContainers[0].Image = "runtime:1.6.0"
+		})},
+		{name: "native sidecar alpha disabled checkpoint", deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+			c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: false}}
+		})},
+		{name: "native sidecar alpha rejects nonrestartable init create",
+			deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.PodTemplate.Spec.InitContainers[0].RestartPolicy = nil
+			}),
+			wantWebhookErrs: []string{`spec.podTemplate.spec.initContainers[0].restartPolicy: Invalid value: "": must be Always for component "worker" with dynamoSidecar`},
+		},
+		{name: "native sidecar alpha rejects checkpoint create",
+			deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true}}
+			}),
+			wantWebhookErrs: []string{`spec.experimental.checkpoint.enabled: Forbidden: is not supported for component "worker" with dynamoSidecar`},
+		},
+		{name: "native sidecar alpha rejects nonrestartable init update", oldDeployment: nativeDCDForAdmission(t, true, nil),
+			deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.PodTemplate.Spec.InitContainers[0].RestartPolicy = nil
+			}),
+			wantWebhookErrs: []string{`spec.podTemplate.spec.initContainers[0].restartPolicy: Invalid value: "": must be Always for component "worker" with dynamoSidecar`},
+		},
+		{name: "native sidecar alpha rejects checkpoint update", oldDeployment: nativeDCDForAdmission(t, true, nil),
+			deployment: nativeDCDForAdmission(t, true, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.Experimental = &nvidiacomv1beta1.ExperimentalSpec{Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true}}
+			}),
+			wantWebhookErrs: []string{`spec.experimental.checkpoint.enabled: Forbidden: is not supported for component "worker" with dynamoSidecar`},
+		},
+		{name: "native sidecar with regular frontend", deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+			c.FrontendSidecar = k8sptr.To("http-frontend")
+			c.PodTemplate.Spec.Containers = append(c.PodTemplate.Spec.Containers, corev1.Container{Name: "http-frontend", Image: "frontend:1.5.0"})
+		})},
 		// Baseline schema and webhook behavior.
 		{
 			name: "valid deployment",
@@ -1222,7 +1339,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.RuntimeVersionOverride = ""
 				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/dynamo-frontend:latest"
 			}),
-			wantWebhookErrs: []string{"spec.runtimeVersionOverride: Required value: is required when the specified main container image has no parseable semantic-version tag"},
+			wantWebhookErrs: []string{"spec.runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag"},
 		},
 		// eppConfig is deprecated but still served, so its shape rules keep
 		// their coverage. The default 1.1.0 fixture image is a pre-1.5.0
@@ -1928,4 +2045,26 @@ func betaDCDForAdmission(
 		mutate(dcd)
 	}
 	return dcd
+}
+
+// nativeDCDForAdmission builds a user-authored native-sidecar topology in either API version.
+func nativeDCDForAdmission(t *testing.T, alpha bool, mutate func(*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec)) runtime.Object {
+	t.Helper()
+	object := betaDCDForAdmission(nil)
+	component := &object.Spec.DynamoComponentDeploymentSharedSpec
+	component.RuntimeVersionOverride = ""
+	component.DynamoSidecar = k8sptr.To("dynamo")
+	component.PodTemplate.Spec.Containers[0].Image = "engine:latest"
+	component.PodTemplate.Spec.InitContainers = []corev1.Container{{Name: "dynamo", Image: "runtime:1.5.0", RestartPolicy: k8sptr.To(corev1.ContainerRestartPolicyAlways)}}
+	if mutate != nil {
+		mutate(component)
+	}
+	if !alpha {
+		return object
+	}
+	spoke := &nvidiacomv1alpha1.DynamoComponentDeployment{}
+	if err := spoke.ConvertFrom(object); err != nil {
+		t.Fatal(err)
+	}
+	return spoke
 }

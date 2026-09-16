@@ -44,7 +44,7 @@ const (
 	vllmDistributedExecutorBackendMP  = "mp"
 	vllmDistributedExecutorBackendRay = "ray"
 
-	runtimeVersionOverrideRequiredMessage = "is required when the specified main container image has no parseable semantic-version tag"
+	runtimeVersionOverrideRequiredMessage = "is required when the specified Dynamo runtime container image has no parseable semantic-version tag"
 )
 
 // runtimeVersionValidationSource identifies the API representation whose field
@@ -87,12 +87,23 @@ func (v *sharedValidation) hasRuntimeVersionSource(source runtimeVersionValidati
 	return v.runtimeVersionSource == source
 }
 
-// runtimeVersionImageAndPath returns the main image and its v1beta1 field path.
+// runtimeVersionImageAndPath returns the Dynamo runtime image and its v1beta1 field path.
 // spec and fldPath must not be nil.
 func runtimeVersionImageAndPath(
 	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
 ) (string, *field.Path) {
+	// In sidecar mode the engine image says nothing about Dynamo compatibility.
+	if spec.DynamoSidecar != nil {
+		imagePath := fldPath.Child("podTemplate", "spec", "initContainers")
+		if spec.PodTemplate != nil {
+			if index := containerIndexByName(spec.PodTemplate.Spec.InitContainers, *spec.DynamoSidecar); index >= 0 {
+				return spec.PodTemplate.Spec.InitContainers[index].Image, imagePath.Index(index).Child("image")
+			}
+		}
+		return "", imagePath
+	}
+
 	imagePath := fldPath.Child("podTemplate", "spec", "containers")
 
 	// Resolve the exact container path when the named main container exists.
@@ -105,12 +116,25 @@ func runtimeVersionImageAndPath(
 	return "", imagePath
 }
 
-// runtimeVersionImageAndPathV1Alpha1 returns the main image and its v1alpha1 field path.
+// runtimeVersionImageAndPathV1Alpha1 returns the runtime image and its alpha field path.
+// dynamoSidecar may be nil for a standard worker.
 // spec and fldPath must not be nil.
 func runtimeVersionImageAndPathV1Alpha1(
 	spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
+	dynamoSidecar *string,
 ) (string, *field.Path) {
+	// The selector comes from typed hub conversion; init containers are live alpha fields.
+	if dynamoSidecar != nil {
+		imagePath := fldPath.Child("extraPodSpec", "initContainers")
+		if spec.ExtraPodSpec != nil && spec.ExtraPodSpec.PodSpec != nil {
+			if index := containerIndexByName(spec.ExtraPodSpec.PodSpec.InitContainers, *dynamoSidecar); index >= 0 {
+				return spec.ExtraPodSpec.PodSpec.InitContainers[index].Image, imagePath.Index(index).Child("image")
+			}
+		}
+		return "", imagePath
+	}
+
 	imagePath := fldPath.Child("extraPodSpec", "mainContainer", "image")
 	if spec.ExtraPodSpec != nil && spec.ExtraPodSpec.MainContainer != nil {
 		return spec.ExtraPodSpec.MainContainer.Image, imagePath
