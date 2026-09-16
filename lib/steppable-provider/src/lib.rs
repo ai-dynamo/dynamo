@@ -9,8 +9,9 @@
 //! data-plane records.
 
 use aiperf_steppable_abi::{
-    ByteSliceV1, CreateRequestV1, DirectRequestSliceV1, DirectRequestV1, EngineEventSliceV1,
-    EngineEventV1, MAX_REPLAY_CONTEXT_METADATA_BYTES_V1, PluginDescriptorV1, PluginVTableV1,
+    ByteSliceV1, CAPABILITY_COMPACT_REQUEST_V1, CompactRequestV1, CreateRequestV1,
+    DirectRequestSliceV1, DirectRequestV1, EngineEventSliceV1, EngineEventV1,
+    MAX_REPLAY_CONTEXT_METADATA_BYTES_V1, PluginDescriptorV1, PluginVTableV1,
     REPLAY_CONTEXT_FLAG_METADATA, REPLAY_CONTEXT_FLAG_SESSION_ID, REPLAY_CONTEXT_FLAG_TURN_INDEX,
     REQUEST_FACT_FLAG_ADMISSION, REQUEST_FACT_FLAG_LATENCIES, REQUEST_FACT_FLAG_OUTPUT_LENGTH,
     REQUEST_FLAG_ARRIVAL_TIMESTAMP, REQUEST_FLAG_OUTPUT_TOKEN_IDS, REQUEST_FLAG_POLICY_CLASS,
@@ -20,7 +21,9 @@ use aiperf_steppable_abi::{
     SLA_FLAG_E2E, SLA_FLAG_ITL, SLA_FLAG_TTFT, SlaThresholdsV1, StatusV1, StepRequestV1,
     StepResultV1, U32SliceV1,
 };
-use aisimulate_core::replay::loadgen::{DynPlacement, SteppableAgg, SteppableReplay};
+use aisimulate_core::replay::loadgen::{
+    CompactDirectRequest, DynPlacement, SteppableAgg, SteppableReplay,
+};
 use aisimulate_core::replay::{
     DirectRequest, ReplayEngineConfig, ReplayEngineFactory, ReplayPromptTokenSource,
     ReplayRequestContext, ReplayTerminalStatus, SlaThresholds,
@@ -202,6 +205,7 @@ struct BackendReplay {
 #[derive(Clone)]
 enum JournalEntry {
     Submit(DirectRequest),
+    SubmitCompact(CompactDirectRequest),
     Cancel(Uuid),
     StepUntil(f64),
     AdvanceNow(f64),
@@ -273,6 +277,9 @@ impl BackendReplay {
                 JournalEntry::Submit(request) => {
                     rebuilt.submit(request.clone())?;
                 }
+                JournalEntry::SubmitCompact(request) => {
+                    rebuilt.submit_compact(request.clone())?;
+                }
                 JournalEntry::Cancel(uuid) => {
                     rebuilt.cancel(*uuid)?;
                 }
@@ -301,6 +308,11 @@ impl BackendReplay {
             match entry {
                 JournalEntry::Submit(request) => {
                     if let Some(uuid) = request.uuid {
+                        self.submitted_ids.insert(uuid);
+                    }
+                }
+                JournalEntry::SubmitCompact(request) => {
+                    if let Some(uuid) = request.request.uuid {
                         self.submitted_ids.insert(uuid);
                     }
                 }
@@ -451,6 +463,28 @@ unsafe fn direct_request(request: DirectRequestV1) -> Result<DirectRequest, Stat
     })
 }
 
+unsafe fn compact_request(request: CompactRequestV1) -> Result<CompactDirectRequest, StatusV1> {
+    if request.struct_size as usize != std::mem::size_of::<CompactRequestV1>()
+        || request.flags != 0
+        || request.reserved != 0
+        || request.input_token_count > usize::MAX as u64
+        || request.trace_block_size == 0
+    {
+        return Err(StatusV1::INVALID_ARGUMENT);
+    }
+    let direct = unsafe { direct_request(request.request) }?;
+    if !direct.tokens.is_empty() {
+        return Err(StatusV1::INVALID_ARGUMENT);
+    }
+    let hash_ids = unsafe { borrowed_tokens(request.hash_ids) }?.to_vec();
+    Ok(CompactDirectRequest {
+        request: direct,
+        input_token_count: request.input_token_count as usize,
+        trace_block_size: request.trace_block_size as usize,
+        hash_ids,
+    })
+}
+
 unsafe fn create_impl(
     request: CreateRequestV1,
     handle: *mut ReplayHandleV1,
@@ -541,6 +575,38 @@ unsafe fn submit_impl(
             recorded.uuid = Some(uuid);
             replay.journal.push(JournalEntry::Submit(recorded));
             // Safety: validated non-null output pointer.
+            unsafe { *request_id = *uuid.as_bytes() };
+            StatusV1::OK
+        }
+        Err(error) => {
+            replay.last_error = error.to_string();
+            StatusV1::REJECTED
+        }
+    }
+}
+
+unsafe fn submit_compact_impl(
+    handle: ReplayHandleV1,
+    request: CompactRequestV1,
+    request_id: *mut RequestIdV1,
+) -> StatusV1 {
+    if request_id.is_null() {
+        return StatusV1::INVALID_ARGUMENT;
+    }
+    let request = match unsafe { compact_request(request) } {
+        Ok(request) => request,
+        Err(status) => return status,
+    };
+    let replay = match unsafe { backend_mut(handle) } {
+        Ok(replay) => replay,
+        Err(status) => return status,
+    };
+    match replay.engine.submit_compact(request.clone()) {
+        Ok(uuid) => {
+            replay.submitted_ids.insert(uuid);
+            let mut recorded = request;
+            recorded.request.uuid = Some(uuid);
+            replay.journal.push(JournalEntry::SubmitCompact(recorded));
             unsafe { *request_id = *uuid.as_bytes() };
             StatusV1::OK
         }
@@ -1123,6 +1189,20 @@ unsafe extern "C" fn submit(
     )
 }
 
+unsafe extern "C" fn submit_compact(
+    handle: ReplayHandleV1,
+    request: CompactRequestV1,
+    request_id: *mut RequestIdV1,
+) -> StatusV1 {
+    if !request_id.is_null() {
+        unsafe { *request_id = [0; 16] };
+    }
+    catch_status(
+        || unsafe { submit_compact_impl(handle, request, request_id) },
+        handle,
+    )
+}
+
 unsafe extern "C" fn submit_batch(
     handle: ReplayHandleV1,
     requests: DirectRequestSliceV1,
@@ -1277,6 +1357,7 @@ static VTABLE: PluginVTableV1 = PluginVTableV1 {
     set_sla_thresholds: Some(set_sla_thresholds),
     last_error: Some(last_error),
     destroy: Some(destroy),
+    submit_compact: Some(submit_compact),
 };
 
 static DESCRIPTOR: PluginDescriptorV1 = PluginDescriptorV1 {
@@ -1284,7 +1365,7 @@ static DESCRIPTOR: PluginDescriptorV1 = PluginDescriptorV1 {
     abi_minor: 0,
     struct_size: std::mem::size_of::<PluginDescriptorV1>() as u32,
     flags: 0,
-    capabilities: 0,
+    capabilities: CAPABILITY_COMPACT_REQUEST_V1,
     provider_id: PROVIDER_ID.as_ptr().cast::<c_char>(),
     vtable: &VTABLE,
 };

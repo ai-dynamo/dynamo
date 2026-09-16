@@ -29,6 +29,9 @@ pub const REQUEST_FLAG_POLICY_CLASS: u32 = 1 << 5;
 /// `DirectRequestV1::flags`: `replay_context` is present.
 pub const REQUEST_FLAG_REPLAY_CONTEXT: u32 = 1 << 6;
 
+/// `PluginDescriptorV1::capabilities`: compact trace requests are supported.
+pub const CAPABILITY_COMPACT_REQUEST_V1: u64 = 1 << 0;
+
 /// `ReplayContextV1::flags`: `session_id` is present.
 pub const REPLAY_CONTEXT_FLAG_SESSION_ID: u32 = 1 << 0;
 /// `ReplayContextV1::flags`: `turn_index` is present.
@@ -217,6 +220,20 @@ pub struct DirectRequestV1 {
     pub policy_class: ByteSliceV1,
     /// Optional correlation/provenance retained by replay.
     pub replay_context: ReplayContextV1,
+}
+
+/// Compact request form emitted by the legacy trace compiler.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct CompactRequestV1 {
+    pub struct_size: u32,
+    pub flags: u32,
+    pub input_token_count: u64,
+    pub trace_block_size: u32,
+    pub reserved: u32,
+    pub hash_ids: U32SliceV1,
+    /// Ordinary submission metadata. Its `tokens` slice must be empty.
+    pub request: DirectRequestV1,
 }
 
 /// A borrowed batch of direct submissions.
@@ -543,11 +560,17 @@ pub struct PluginVTableV1 {
     pub last_error: Option<unsafe extern "C" fn(ReplayHandleV1, *mut ByteSliceV1) -> StatusV1>,
     /// Destroys one replay handle.
     pub destroy: Option<unsafe extern "C" fn(ReplayHandleV1)>,
+    /// Optional compatible-minor compact trace submission operation.
+    pub submit_compact: Option<
+        unsafe extern "C" fn(ReplayHandleV1, CompactRequestV1, *mut RequestIdV1) -> StatusV1,
+    >,
 }
 
 impl PluginVTableV1 {
-    /// Bytes a consumer must be able to read for every V1 operation.
-    pub const REQUIRED_SIZE: usize = std::mem::size_of::<Self>();
+    /// Bytes a consumer must be able to read for every original V1 operation.
+    pub const REQUIRED_SIZE: usize = std::mem::offset_of!(Self, submit_compact);
+    /// Bytes required before a host may read the compact-submit tail.
+    pub const COMPACT_SUBMIT_SIZE: usize = std::mem::size_of::<Self>();
 }
 
 /// Why a loaded V1 plugin descriptor cannot be used by a host.

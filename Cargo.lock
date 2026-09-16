@@ -39,8 +39,8 @@ version = "0.13.0"
 [[package]]
 name = "aisimulate-core"
 version = "0.12.0"
-source = "git+https://github.com/ai-dynamo/aisimulate.git?rev=4fd8aaabb68008e15ada1bb1750183968d56b0eb#4fd8aaabb68008e15ada1bb1750183968d56b0eb"
 dependencies = [
+ "aisimulate-placement-abi 0.12.0",
  "anyhow",
  "bincode 1.3.3",
  "blake3",
@@ -48,6 +48,7 @@ dependencies = [
  "derive_builder",
  "flate2",
  "indicatif 0.18.4",
+ "libloading 0.8.9",
  "log",
  "parquet",
  "pep440_rs",
@@ -66,6 +67,13 @@ dependencies = [
  "tracing",
  "uuid",
  "xxhash-rust",
+]
+
+[[package]]
+name = "aisimulate-placement-abi"
+version = "0.12.0-dynamo-bench"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
@@ -2886,7 +2894,7 @@ name = "dynamo-placement-plugin"
 version = "1.5.0"
 dependencies = [
  "aisimulate-core",
- "aisimulate-placement-abi",
+ "aisimulate-placement-abi 0.12.0-dynamo-bench",
  "dynamo-kv-router",
  "dynamo-mocker",
  "serde_json",
