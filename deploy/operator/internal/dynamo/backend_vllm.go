@@ -494,6 +494,23 @@ func injectRayDistributedLaunchFlags(container *corev1.Container, role Role, ser
 
 // injectElasticEPRayLaunchFlags sets up a cross-node Ray cluster for elastic EP.
 //
+// TWO DIFFERENT TOPOLOGIES SHARE THIS FUNCTION. They are not one feature at two scales,
+// and the "RoleLeader, RoleMain" arm below is the only thing they have in common:
+//
+//	RoleMain + RoleFollower  (numberOfNodes <= 1, non-Grove) -- the ELASTIC path.
+//	  One pod per rank. Followers are separate Deployments that can be added and removed
+//	  while the leader serves, so the pod count is what changes. The leader is pinned to
+//	  one local rank and waits for its declared width before starting.
+//
+//	RoleLeader + RoleWorker  (numberOfNodes > 1) -- the STANDBY path.
+//	  One LeaderWorkerSet gang of fixed size. Every initial rank lands on the LEADER node
+//	  and the worker nodes idle, holding GPUs for a later scale_elastic_ep. The pod count
+//	  never changes; only the engine's rank count can. See the health-gate note below.
+//
+// So a multinode component is not "elastic EP with more nodes": it cannot add or remove a
+// pod at all, and it only starts if the leader node alone can host every declared rank.
+// Every RoleMain-only behaviour below is guarded for that reason, not by oversight.
+//
 // Elastic EP requires --data-parallel-backend ray so that vLLM's Ray executor
 // manages dynamic worker lifecycle. It is explicitly incompatible with
 // --data-parallel-hybrid-lb (the operator's normal multinode DP path), because
@@ -515,9 +532,20 @@ func injectRayDistributedLaunchFlags(container *corev1.Container, role Role, ser
 //   - Waiting for HTTP 200 ensures the worker joins AFTER placement groups are
 //     set, so the leader's GPUs hold all initial DP workers (warm standby).
 //
-// Note: --data-parallel-size-local is intentionally NOT injected. With the
-// health-gate ensuring only the leader is in Ray at vLLM startup, vLLM
-// naturally places all --data-parallel-size workers on the leader node.
+// Note: --data-parallel-size-local is intentionally NOT injected here, and that omission --
+// not the health-gate -- is what actually puts every initial rank on the leader. Absent the
+// flag, vLLM defaults data_parallel_size_local to the full data_parallel_size under the
+// default VLLM_RAY_DP_PACK_STRATEGY=strict, and allocates that many groups on the DP master
+// before considering any other node. Ray membership does not enter into it.
+//
+// The consequence worth knowing: this path only starts if the LEADER NODE ALONE can host
+// every declared rank. One rank per node -- 4 nodes of 1 GPU at dp=4 -- does not warm-stand-
+// by, it fails before any worker matters:
+//
+//	ValueError: Not enough resources to allocate 4 DP ranks on DP master node <ip>,
+//	            possible to fit 1 DP ranks.
+//
+// That shape is what the single-pod + follower path exists to serve.
 //
 // Leader (or a single-pod RoleMain): ray start --head --port=6379 --block & <tcp-poll-ray-ready 150×2s> && <vllm cmd>
 // Worker: <poll /live HTTP until 200> && ray start --address=<leader>:6379 --block
