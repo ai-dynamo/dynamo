@@ -7732,13 +7732,14 @@ func TestGenerateGrovePodCliqueSet_ConvertedCompilationCacheMountIsNotDuplicated
 
 	t.Log("Verify every rendered mount path is unique and the compilation cache appears once")
 	mainContainer := got.Spec.Template.Cliques[0].Spec.PodSpec.Containers[0]
-	mountNamesByPath := make(map[string]string, len(mainContainer.VolumeMounts))
+	mountsByPath := make(map[string]corev1.VolumeMount, len(mainContainer.VolumeMounts))
 	for _, mount := range mainContainer.VolumeMounts {
-		require.NotContains(t, mountNamesByPath, mount.MountPath, "duplicate mountPath %q", mount.MountPath)
-		mountNamesByPath[mount.MountPath] = mount.Name
+		require.NotContains(t, mountsByPath, mount.MountPath, "duplicate mountPath %q", mount.MountPath)
+		mountsByPath[mount.MountPath] = mount
 	}
-	assert.Equal(t, "model-cache", mountNamesByPath["/home/dynamo/.cache/huggingface"])
-	assert.Equal(t, "compilation-cache", mountNamesByPath[compilationCachePath])
+	assert.Equal(t, "model-cache", mountsByPath["/home/dynamo/.cache/huggingface"].Name)
+	assert.Equal(t, "compilation-cache", mountsByPath[compilationCachePath].Name)
+	assert.False(t, mountsByPath[compilationCachePath].ReadOnly)
 
 	t.Log("Verify the compilation-cache mount retains one writable PVC-backed volume")
 	var compilationCacheVolumes []corev1.Volume
