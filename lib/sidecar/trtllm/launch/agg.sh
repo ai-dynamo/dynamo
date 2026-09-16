@@ -66,8 +66,8 @@ TRTLLM_GRPC_PORT="${TRTLLM_GRPC_PORT:-50051}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 # Keep the engine and the sidecar on one number. Started without `--max_seq_len`,
-# TensorRT-LLM reports its `max_input_len` default instead of a context length
-# and the sidecar discards it, so pass the same value to both. When the caller
+# TensorRT-LLM leaves `max_context_length` unset and the sidecar has no window
+# to register, so pass the same value to both. When the caller
 # supplies `--max_seq_len`, theirs wins and the sidecar adopts the engine's
 # `Control.GetModelInfo` report rather than overriding it with a default it was
 # never told about.

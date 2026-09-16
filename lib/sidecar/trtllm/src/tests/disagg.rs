@@ -190,6 +190,13 @@ fn a_prefill_terminal_without_a_handoff_carries_its_tokens() {
             output_index: Some(0),
             tokens: vec![pb::TokenInfo {
                 token_id: 99,
+                logprob: Some(-0.5),
+                rank: Some(1),
+                candidates: vec![pb::LogProb {
+                    token_id: 100,
+                    logprob: -1.5,
+                    ..Default::default()
+                }],
                 ..Default::default()
             }],
             ..Default::default()
@@ -223,6 +230,12 @@ fn a_prefill_terminal_without_a_handoff_carries_its_tokens() {
         [99],
         "the caller gets what the context phase produced"
     );
+    // The held token is the whole answer here, so dropping to bare IDs would
+    // silently strip logprobs a caller asked for and cannot get anywhere else.
+    assert_eq!(terminal.log_probs.as_deref(), Some(&[-0.5][..]));
+    let candidates = terminal.top_logprobs.expect("candidates");
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0][0].token_id, 100);
 }
 
 /// `PrefillReady` is the final response for a context request, so its usage is

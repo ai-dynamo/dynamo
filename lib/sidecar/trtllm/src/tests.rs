@@ -48,7 +48,6 @@ struct FakeTrtllm {
     requests: Arc<Mutex<Vec<pb::GenerateRequest>>>,
     aborts: Arc<Mutex<Vec<String>>>,
     peers: Arc<Mutex<Vec<SocketAddr>>>,
-    dp_ranks: Arc<Mutex<Vec<Option<String>>>>,
     reject: Arc<AtomicBool>,
     hang: Arc<AtomicBool>,
     /// Simulates a server that has not yet accepted the request, so the RPC
@@ -100,13 +99,6 @@ impl pb::inference_server::Inference for FakeTrtllm {
         if let Some(peer) = request.remote_addr() {
             self.peers.lock().await.push(peer);
         }
-        self.dp_ranks.lock().await.push(
-            request
-                .metadata()
-                .get("openengine-target-dp-rank")
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_string),
-        );
         let request = request.into_inner();
         self.requests.lock().await.push(request.clone());
         if self.reject.load(Ordering::SeqCst) {

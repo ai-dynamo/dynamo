@@ -384,6 +384,23 @@ fn validate_request(
             "request priority is not supported by the TensorRT-LLM sidecar",
         ));
     }
+    if request
+        .routing
+        .as_ref()
+        .is_some_and(|routing| routing.dp_rank.is_some() || routing.prefill_dp_rank.is_some())
+    {
+        // The same server branch that rejects `openengine-priority` also rejects
+        // `openengine-target-dp-rank` (`grpc/openengine/request_mapping.py`,
+        // `_trace_headers`), and the servicer turns that into UNIMPLEMENTED --
+        // measured against 1.3.0rc26, including rank 0. Sending it anyway failed
+        // the whole request with a non-migratable 5xx; rejecting here names the
+        // unsupported feature in a 4xx instead. `nvext.dp_rank` and the
+        // `x-dynamo-dp-rank` header both reach this field, so it is reachable
+        // without a KV router.
+        return Err(client::invalid_argument(
+            "data-parallel rank targeting is not supported by the TensorRT-LLM sidecar",
+        ));
+    }
     if request.stop_conditions.max_thinking_tokens.is_some() {
         // A reasoning-token budget the sidecar can neither forward nor enforce.
         return Err(client::invalid_argument(
@@ -438,7 +455,7 @@ enum Phase {
     /// are held back because the decode leg replays them. They only reach the
     /// client through a context request that ends without a handoff, which has
     /// no decode leg to do the replaying.
-    Prefill { held: Vec<u32> },
+    Prefill { held: Vec<pb::TokenInfo> },
 }
 
 /// What a decode leg knows about the context phase that preceded it.
@@ -549,7 +566,10 @@ impl ResponseState {
     ) -> Result<Option<LLMEngineOutput>, DynamoError> {
         check_output_index(token.output_index)?;
         if let Phase::Prefill { held } = &mut self.phase {
-            held.extend(token.tokens.iter().map(|info| info.token_id));
+            // Whole `TokenInfo`s, not just the IDs: a context request that ends
+            // without a handoff returns these to the client, and by then the
+            // logprobs it asked for are gone if only the IDs were kept.
+            held.extend(token.tokens);
             self.completion_tokens = held.len() as u32;
             return Ok(None);
         }
@@ -641,8 +661,16 @@ impl ResponseState {
             Phase::Stream { .. } => Vec::new(),
         };
 
+        let (token_ids, log_probs, top_logprobs) = if held.is_empty() {
+            (Vec::new(), None, None)
+        } else {
+            self.map_tokens(held)?
+        };
+
         let mut terminal = LLMEngineOutput {
-            token_ids: held,
+            token_ids,
+            log_probs,
+            top_logprobs,
             index: Some(0),
             finish_reason: Some(finish_reason),
             completion_usage: Some(CompletionUsage {
@@ -770,9 +798,16 @@ pub(crate) fn engine_error(error: pb::EngineError) -> DynamoError {
         pb::ErrorCode::InvalidArgument | pb::ErrorCode::UnsupportedFeature => {
             client::invalid_argument(message)
         }
-        // The router sheds and migrates on an overload; flattening it to a
-        // generic engine error costs that and surfaces an opaque 500 instead.
-        pb::ErrorCode::Overloaded => client::worker_overloaded(message),
+        // Not `worker_overloaded`, despite the name. The only site in the
+        // TensorRT-LLM servicer that emits this code is the 30-second
+        // consumer-stall watchdog (`grpc/openengine/servicer.py`, "response
+        // consumer stalled"), which fires when *this* sidecar stopped draining
+        // the stream -- the engine has capacity. Marking it migratable would
+        // re-dispatch to a second worker and stall there too, spending two
+        // workers' GPU time and recording local backpressure as worker
+        // capacity. Revisit if a server starts emitting it for real admission
+        // pressure.
+        pb::ErrorCode::Overloaded => client::engine_error(message),
         pb::ErrorCode::Cancelled => client::cancelled(message),
         _ => client::engine_error(message),
     }

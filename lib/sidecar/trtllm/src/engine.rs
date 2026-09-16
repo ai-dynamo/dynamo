@@ -247,14 +247,6 @@ impl LLMEngine for TrtllmSidecarEngine {
             self.limits.get().copied(),
             self.mode,
         )?;
-        // Routing targets travel as protocol metadata, not in the request body.
-        let target_dp_rank = request.routing.as_ref().and_then(|routing| {
-            if self.mode.is_prefill() {
-                routing.prefill_dp_rank.or(routing.dp_rank)
-            } else {
-                routing.dp_rank
-            }
-        });
         let mut state = ResponseState::new(&request, self.mode);
         let cancel = self.cancel.clone();
         // A decode request that took a handoff has KV transferred into it, and
@@ -274,14 +266,18 @@ impl LLMEngine for TrtllmSidecarEngine {
         let shutdown = cancel.clone();
         let mut shutdown_cancellation = Box::pin(async move { shutdown.cancelled().await });
 
-        // No deferral here: nothing has been dispatched yet, so there is no
-        // transferred KV to strand -- the deferral below only applies once the
-        // engine has the request.
+        // The same deferral applies here, not just to the streaming loop below.
+        // `generate` sends the request and then awaits response headers, so
+        // losing this race can drop a request the engine has already accepted
+        // and begun pulling KV for; and an already-stopped context would skip
+        // the dispatch entirely, leaving the prefill worker's blocks with no
+        // decode leg to claim them. Both strand exactly what the deferral
+        // exists to protect. Shutdown still wins -- the process is going away.
         let stream = tokio::select! {
             biased;
-            _ = &mut request_cancellation => None,
+            _ = &mut request_cancellation, if !defer_request_cancellation => None,
             _ = &mut shutdown_cancellation => None,
-            result = client.generate(proto_request, target_dp_rank) => Some(result?),
+            result = client.generate(proto_request) => Some(result?),
         };
         let Some(mut stream) = stream else {
             let output = cancelled(&state);
@@ -340,7 +336,14 @@ impl LLMEngine for TrtllmSidecarEngine {
             return;
         };
         if let Err(error) = client.abort(ctx.id().to_string()).await {
-            tracing::warn!(request_id = ctx.id(), %error, "TensorRT-LLM Control.Abort failed");
+            // Escaped: the message embeds the engine's gRPC status text, and
+            // this site logs at the default level, so raw newlines from the
+            // peer would let it forge what look like separate log records.
+            tracing::warn!(
+                request_id = ctx.id(),
+                error = %error.to_string().escape_debug(),
+                "TensorRT-LLM Control.Abort failed"
+            );
         }
     }
 
