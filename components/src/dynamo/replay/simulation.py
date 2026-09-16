@@ -17,7 +17,6 @@ from enum import Enum
 from numbers import Real
 from typing import Any
 
-from aisimulate.aic import materialize_aic_num_gpu_blocks
 from aisimulate.sweeper.provider import JSONValue, RuntimeHookSpec
 from aisimulate.sweeper.replay import (
     HookCapability,
@@ -30,6 +29,7 @@ from aisimulate.sweeper.replay import (
 from dynamo.llm import AicPerfConfig, KvRouterConfig
 from dynamo.mocker import MockEngineArgs
 from dynamo.replay.api import run_synthetic_trace_replay, run_trace_replay
+from dynamo.replay.config import resolve_aic_num_gpu_blocks
 
 _PLANNER_HOOK = HookCapability(
     provider="dynamo.planner",
@@ -260,7 +260,7 @@ class DynamoReplayRunner:
                 "aic_model_path",
             ):
                 lowered.pop(name, None)
-        lowered = materialize_aic_num_gpu_blocks(lowered)
+        resolve_aic_num_gpu_blocks(lowered)
         # Pipeline parallelism is already represented in the public parallel
         # mapping and used for AIC capacity. MockEngineArgs has no PP field.
         lowered.pop("aic_pp_size", None)

@@ -1,14 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import sys
 from unittest.mock import AsyncMock
 
 import numpy as np
 import pytest
 
-import dynamo.common.multimodal.video_loader as video_loader_module
 from dynamo.common.http import HttpStatusError
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
+from dynamo.common.multimodal import codec_errors
+from dynamo.common.multimodal import video_loader as video_loader_module
 from dynamo.common.multimodal.codec_errors import MissingMediaDecoderError
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
@@ -287,7 +289,9 @@ class _ImportErrorMediaIO:
 
 
 @pytest.mark.asyncio
-async def test_decode_video_bytes_missing_decoder_is_actionable(monkeypatch):
+async def test_decode_video_bytes_missing_decoder_is_actionable(
+    monkeypatch, carrier_imports
+):
     """A bare `No module named 'cv2'` must become the actionable codec error.
 
     Reproduced on a real runtime image before this existed: the user-visible
@@ -297,6 +301,8 @@ async def test_decode_video_bytes_missing_decoder_is_actionable(monkeypatch):
     loader = VideoLoader()
     monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: "vp9")
     monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
+    # cv2 genuinely absent, independent of what the test machine has installed.
+    carrier_imports()
 
     with pytest.raises(MissingMediaDecoderError) as exc_info:
         await loader._decode_video_bytes(b"vp9-bytes", _ImportErrorMediaIO())
@@ -304,8 +310,195 @@ async def test_decode_video_bytes_missing_decoder_is_actionable(monkeypatch):
     msg = str(exc_info.value)
     assert "'vp9'" in msg  # names the codec
     assert VALIDATED_SPECS["opencv-python-headless"] in msg  # bounded spec
-    assert "install_media_decoders vllm" in msg  # installer command
+    assert "pip install" in msg
     assert "cv2" in msg
+
+
+class _SystemErrorMediaIO:
+    """What a cv2 with no video backend does: fail inside VideoCapture."""
+
+    def load_bytes(self, content: bytes):
+        raise SystemError(
+            "<class 'cv2.VideoCapture'> returned a result with an exception set"
+        )
+
+
+@pytest.mark.asyncio
+async def test_decode_video_bytes_backendless_cv2_is_actionable(
+    monkeypatch, carrier_imports
+):
+    """Translate codec-free OpenCV failures into actionable decoder guidance."""
+    loader = VideoLoader()
+    monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: "vp9")
+    monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
+    monkeypatch.setattr(video_loader_module, "_cv2_lacks_video_backend", lambda: True)
+
+    carrier_imports(present=("cv2",))
+    monkeypatch.setattr(
+        codec_errors.importlib.metadata, "version", lambda p: "5.0.0.93"
+    )
+
+    with pytest.raises(MissingMediaDecoderError) as exc_info:
+        await loader._decode_video_bytes(b"vp9-bytes", _SystemErrorMediaIO())
+
+    msg = str(exc_info.value)
+    assert "'vp9'" in msg
+    assert "opencv-python-headless==5.0.0.93" in msg
+    assert "--force-reinstall" in msg
+    assert "video backend" in msg
+
+
+class _FailedOpenMediaIO:
+    """What OpenCV's own video backend raises when VideoCapture opens nothing."""
+
+    def load_bytes(self, content: bytes):
+        raise ValueError("Could not open video stream")
+
+
+@pytest.mark.asyncio
+async def test_decode_video_bytes_failed_open_value_error_is_actionable(
+    monkeypatch, carrier_imports
+):
+    """Translate OpenCV failed-open errors when its video backend is absent."""
+    loader = VideoLoader()
+    monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: "vp9")
+    monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
+    monkeypatch.setattr(video_loader_module, "_cv2_lacks_video_backend", lambda: True)
+
+    carrier_imports(present=("cv2",))
+    monkeypatch.setattr(
+        codec_errors.importlib.metadata, "version", lambda p: "5.0.0.93"
+    )
+
+    with pytest.raises(MissingMediaDecoderError) as exc_info:
+        await loader._decode_video_bytes(b"vp9-bytes", _FailedOpenMediaIO())
+
+    msg = str(exc_info.value)
+    assert "'vp9'" in msg
+    assert "opencv-python-headless==5.0.0.93" in msg
+    assert "--force-reinstall" in msg
+    assert "video backend" in msg
+
+
+class _InitErrorMediaIO:
+    """What a lazily initialised cv2 raises when its own libraries fail to load."""
+
+    def load_bytes(self, content: bytes):
+        raise OSError("cv2: libavcodec.so.60: cannot open shared object file")
+
+
+@pytest.mark.asyncio
+async def test_decode_video_bytes_cv2_os_error_is_actionable(
+    monkeypatch, carrier_imports
+):
+    """Keep the remedy visible when cv2 initialisation fails inside the decode."""
+    loader = VideoLoader()
+    monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: "vp9")
+    monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
+    monkeypatch.setattr(video_loader_module, "_cv2_lacks_video_backend", lambda: True)
+
+    carrier_imports(present=("cv2",))
+    monkeypatch.setattr(
+        codec_errors.importlib.metadata, "version", lambda p: "5.0.0.93"
+    )
+
+    with pytest.raises(MissingMediaDecoderError) as exc_info:
+        await loader._decode_video_bytes(b"vp9-bytes", _InitErrorMediaIO())
+
+    msg = str(exc_info.value)
+    assert "'vp9'" in msg
+    assert "opencv-python-headless==5.0.0.93" in msg
+    assert "--force-reinstall" in msg
+
+
+@pytest.mark.asyncio
+async def test_unrelated_os_error_is_not_blamed_on_opencv(monkeypatch):
+    """An I/O failure that never mentions the carrier keeps its own error."""
+    loader = VideoLoader()
+    monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: "vp9")
+    monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
+    monkeypatch.setattr(video_loader_module, "_cv2_lacks_video_backend", lambda: True)
+
+    class _DiskFullMediaIO:
+        def load_bytes(self, content: bytes):
+            raise OSError("[Errno 28] No space left on device: '/tmp/clip.mp4'")
+
+    with pytest.raises(OSError, match="No space left"):
+        await loader._decode_video_bytes(b"vp9-bytes", _DiskFullMediaIO())
+
+
+@pytest.mark.asyncio
+async def test_backendless_cv2_does_not_pre_empt_a_working_decode(monkeypatch):
+    """Allow configured video backends to decode before checking OpenCV."""
+    loader = VideoLoader()
+    monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: "vp9")
+    monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
+    monkeypatch.setattr(video_loader_module, "_cv2_lacks_video_backend", lambda: True)
+
+    frames = np.zeros((2, 4, 4, 3), dtype=np.uint8)
+
+    class _WorkingMediaIO:
+        def load_bytes(self, content: bytes):
+            return frames, {"frames_indices": [0, 1]}
+
+    decoded, metadata = await loader._decode_video_bytes(
+        b"vp9-bytes", _WorkingMediaIO()
+    )
+    assert decoded is frames
+    assert metadata == {"frames_indices": [0, 1]}
+
+
+@pytest.mark.asyncio
+async def test_other_backend_import_error_is_not_blamed_on_opencv(monkeypatch):
+    """Preserve import errors from other video backends."""
+    loader = VideoLoader()
+    monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: "vp9")
+    monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
+
+    class _PyAvMediaIO:
+        def load_bytes(self, content: bytes):
+            raise ModuleNotFoundError("No module named 'av'", name="av")
+
+    with pytest.raises(ModuleNotFoundError, match="'av'"):
+        await loader._decode_video_bytes(b"vp9-bytes", _PyAvMediaIO())
+
+
+@pytest.mark.asyncio
+async def test_other_backend_system_error_is_not_blamed_on_opencv(monkeypatch):
+    """Preserve other backend failures even when OpenCV lacks video support."""
+    loader = VideoLoader()
+    monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: "vp9")
+    monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
+    monkeypatch.setattr(video_loader_module, "_cv2_lacks_video_backend", lambda: True)
+
+    class _OtherBackendMediaIO:
+        def load_bytes(self, content: bytes):
+            raise SystemError("torchcodec decoder failed to initialise")
+
+    with pytest.raises(SystemError, match="torchcodec"):
+        await loader._decode_video_bytes(b"vp9-bytes", _OtherBackendMediaIO())
+
+
+@pytest.mark.asyncio
+async def test_unrelated_system_error_keeps_its_own_message(monkeypatch):
+    """A SystemError from anywhere else must not be blamed on the codec."""
+    loader = VideoLoader()
+    monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: "vp9")
+    monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
+    monkeypatch.setattr(video_loader_module, "_cv2_lacks_video_backend", lambda: False)
+
+    with pytest.raises(SystemError, match="VideoCapture"):
+        await loader._decode_video_bytes(b"vp9-bytes", _SystemErrorMediaIO())
+
+
+def test_cv2_lacks_video_backend_is_false_when_cv2_absent(monkeypatch):
+    """An absent cv2 is not this case: the ImportError path names it better."""
+    video_loader_module._cv2_lacks_video_backend.cache_clear()
+    monkeypatch.setitem(sys.modules, "cv2", None)
+    try:
+        assert video_loader_module._cv2_lacks_video_backend() is False
+    finally:
+        video_loader_module._cv2_lacks_video_backend.cache_clear()
 
 
 @pytest.mark.asyncio
