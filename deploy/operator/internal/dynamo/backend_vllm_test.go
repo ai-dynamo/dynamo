@@ -1442,7 +1442,7 @@ func TestVLLMBackend_UpdateContainer_NoInterPodGMS(t *testing.T) {
 // So the property is not "gate off leaves the container alone". It is "the gate does not
 // reach this render at all": for the same input, gate-off and gate-on must produce
 // byte-identical Command, Args and Env. Mutation check: restoring
-// IsSinglePodElasticEPLeader on the RoleMain arm fails every subtest below.
+// the shape predicate onto the RoleMain arm fails every subtest below.
 func TestVLLMBackend_ElasticEPRayPoCGateDoesNotChangeLeaderRender(t *testing.T) {
 	elasticEPArgs := []string{"--model", "test", "--enable-elastic-ep", "--data-parallel-backend", "ray"}
 

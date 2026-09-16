@@ -303,10 +303,41 @@ func (r *componentWorkloadsReconciler) preserveExistingDCDState(
 	// Note the deliberate asymmetry with the orphan sweep, which refuses to delete a
 	// follower that still has replicas even when the gate is off. Reverting a count is
 	// recoverable -- the pods come back on the next reconcile; deleting the DCD is not.
-	if r.elasticEPRayPoCEnabled &&
-		existing.GetAnnotations()[consts.KubeAnnotationElasticEPFollower] == consts.KubeLabelValueTrue &&
+	if existing.GetAnnotations()[consts.KubeAnnotationElasticEPFollower] == consts.KubeLabelValueTrue &&
 		existing.Spec.Replicas != nil {
-		desired.Spec.Replicas = existing.Spec.Replicas
+		switch {
+		case r.elasticEPRayPoCEnabled:
+			// Gate on: whatever drives the scale owns the count, and generation must not
+			// re-assert the launch width over it. Without this a cluster reverted
+			// `replicas: 1` within two seconds, logging "Manual changes detected ... will
+			// be overwritten".
+			desired.Spec.Replicas = existing.Spec.Replicas
+
+		case *existing.Spec.Replicas > ptr.Deref(desired.Spec.Replicas, 0):
+			// Gate off, and generation wants FEWER followers than are running. Writing
+			// that number deletes the difference, and those pods hold live engine ranks:
+			// nothing in the operator calls scale_elastic_ep first, so the engine would be
+			// left committed to a data-parallel size whose members are gone. DYN-3838
+			// records the leader surviving at restart=0 with inference stopped, and
+			// DYN-2660 records the orphaned placement group blocking every later scale-up.
+			//
+			// So refuse to shrink, exactly as deleteOrphanedElasticEPFollowers refuses to
+			// release a follower that still has replicas. Turning the gate off means
+			// scaling stops, not that running capacity is torn out from under a serving
+			// engine. Growing back toward the declared width is still allowed below --
+			// adding a rank is safe, removing one is not.
+			log.FromContext(ctx).Info(
+				"Refusing to shrink an elastic-EP follower with the feature gate off; "+
+					"these pods may hold live engine ranks and nothing has drained them",
+				"name", existing.Name,
+				"running", *existing.Spec.Replicas,
+				"declaredWidth", ptr.Deref(desired.Spec.Replicas, 0),
+			)
+			desired.Spec.Replicas = existing.Spec.Replicas
+
+		default:
+			// Gate off and at or below the declared width: let generation grow it back.
+		}
 	}
 	return nil
 }

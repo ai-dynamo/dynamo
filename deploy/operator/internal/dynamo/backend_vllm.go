@@ -568,16 +568,53 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 		if role == RoleMain {
 			nodeIPFlag = fmt.Sprintf(` --node-ip-address="$%s"`, commonconsts.PodIPEnvVar)
 		}
+		// Wait for the declared data-parallel width to be present in Ray before starting
+		// the engine.
+		//
+		// vLLM's create_dp_placement_groups reads the cluster ONCE, at engine start, and
+		// allocates one placement group per rank against whatever it finds. Followers that
+		// have not joined yet simply do not exist to it, and it aborts:
+		//
+		//   ValueError: Not enough resources to allocate 4 placement groups,
+		//               only created 2 placement groups
+		//
+		// Nothing retries, so without this the launch is a race between the leader's own
+		// Ray head coming up and N-1 follower pods being scheduled, pulling, and joining.
+		// Observed on gb300: the same manifest reached 4 nodes on one attempt and 2 on the
+		// next. Waiting is what makes a full-width launch deterministic rather than lucky.
+		//
+		// Counted in nodes rather than GPUs because the sizing rule is one pod per node
+		// per rank, which is the same rule ElasticEPFollowerReplicas derives the follower
+		// count from -- so the two cannot disagree about what "full width" means.
+		//
+		// Emitted only when the component declares more than one rank. At dp=1 there are
+		// no followers to wait for, so every deployment that predates this renders exactly
+		// as before.
+		widthGate := ""
+		if role == RoleMain {
+			if dp := getFlagValue(getExpandedArgs(container), dataParallelSizeFlag); dp > 1 {
+				widthGate = fmt.Sprintf(
+					` && i=0; until [ "$(python3 -c "import ray; ray.init(address='127.0.0.1:%s', log_to_driver=False); `+
+						`print(sum(1 for n in ray.nodes() if n['Alive']))" 2>/dev/null)" -ge %d ] 2>/dev/null; `+
+						`do i=$((i+1)); [ "$i" -ge 240 ] && { echo "ERROR: only $(python3 -c "import ray; `+
+						`ray.init(address='127.0.0.1:%s', log_to_driver=False); print(sum(1 for n in ray.nodes() if n['Alive']))" 2>/dev/null) `+
+						`of %d data-parallel ranks joined Ray within 20m" >&2; exit 1; }; `+
+						`echo 'waiting for %d Ray nodes before starting the engine...'; sleep 5; done`,
+					VLLMPort, dp, VLLMPort, dp, dp,
+				)
+			}
+		}
 		// Poll Ray head readiness with a bounded retry loop (150 × 2 s = 5 min max).
 		// An unbounded `until` loop would spin forever if `ray start --head` crashes
 		// silently or the port never opens.
 		container.Args = []string{fmt.Sprintf(
 			`ray start --head --port=%s%s --block & `+
 				`i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; `+
-				`do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && %s`,
+				`do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done%s && %s`,
 			VLLMPort,
 			nodeIPFlag,
 			VLLMPort,
+			widthGate,
 			vllmCommand,
 		)}
 	case RoleWorker:

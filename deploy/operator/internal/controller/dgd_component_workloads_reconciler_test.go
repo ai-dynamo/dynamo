@@ -340,11 +340,17 @@ func TestPreserveExistingDCDStateKeepsFollowerReplicas(t *testing.T) {
 	//
 	// Mutation check: dropping `r.elasticEPRayPoCEnabled &&` from preserveExistingDCDState
 	// fails this subtest and nothing else.
-	t.Run("with the gate off a scaled follower is reverted to the declared width", func(t *testing.T) {
-		existing := existingDCD("mydgd-decode-flw", true, 5)
+	// With the gate off the operator owns the count, but ownership is asymmetric:
+	// growing back to the declared width adds ranks, which is safe; shrinking to it
+	// deletes pods that may hold live engine ranks, which is not. Nothing in the
+	// operator calls scale_elastic_ep first, so a shrink would leave the engine
+	// committed to a data-parallel size whose members are gone (DYN-3838, DYN-2660) --
+	// the same reason deleteOrphanedElasticEPFollowers refuses a non-empty follower.
+	gateOff := func(t *testing.T, running, declared int32) int32 {
+		t.Helper()
+		existing := existingDCD("mydgd-decode-flw", true, running)
 		c := fake.NewClientBuilder().WithScheme(s).WithObjects(existing).Build()
 		r := &componentWorkloadsReconciler{syncer: newDGDResourceSyncer(c, nil), elasticEPRayPoCEnabled: false}
-
 		desired := &nvidiacomv1beta1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:        existing.Name,
@@ -353,15 +359,25 @@ func TestPreserveExistingDCDStateKeepsFollowerReplicas(t *testing.T) {
 			},
 			Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
 				DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
-					Replicas: ptr.To(int32(3)),
+					Replicas: ptr.To(declared),
 				},
 			},
 		}
 		require.NoError(t, r.preserveExistingDCDState(context.Background(), desired))
-
 		require.NotNil(t, desired.Spec.Replicas)
-		require.Equal(t, int32(3), *desired.Spec.Replicas,
-			"with the gate off the declared launch width wins, so the externally written 5 is discarded")
+		return *desired.Spec.Replicas
+	}
+
+	// Mutation check: deleting the shrink guard in preserveExistingDCDState fails this.
+	t.Run("with the gate off a follower above the declared width is NOT shrunk", func(t *testing.T) {
+		require.Equal(t, int32(5), gateOff(t, 5, 3),
+			"turning the gate off means scaling stops, not that two running ranks are "+
+				"torn out from under a serving engine without being drained first")
+	})
+
+	t.Run("with the gate off a follower below the declared width is grown back", func(t *testing.T) {
+		require.Equal(t, int32(3), gateOff(t, 1, 3),
+			"the deployment must still converge on the width it declared; adding a rank is safe")
 	})
 
 	t.Run("a follower that does not exist yet is seeded at its declared width", func(t *testing.T) {

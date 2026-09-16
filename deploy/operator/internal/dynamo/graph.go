@@ -383,10 +383,13 @@ func ElasticEPComponentIdentity(component *v1beta1.DynamoComponentDeploymentShar
 // renders leader and worker pods that share the component labels, reconciles through
 // the LWS path, and already reaches its leader through the framework hostname.
 //
-// Callers that predate features.ElasticEPRayPoC use this directly: the Grove leader
-// Service shipped ungated in #13178, and gating it would delete a Service that an
-// upgrade never asked to remove. Callers this PoC introduced use
-// IsSinglePodElasticEPLeader instead.
+// Every caller uses this directly, and none of them gates on features.ElasticEPRayPoC.
+// The leader render and the Grove Service shipped before the gate existed (#12943,
+// #13178), so gating them would rewrite or delete a running deployment's resources on an
+// upgrade that only turned the gate off by default. Follower synthesis is ungated for a
+// different reason: the followers are the deployment's declared width, so a gated-off
+// operator that skipped them would silently under-provision the engine. What the gate
+// governs is whether the follower count may later CHANGE -- see preserveExistingDCDState.
 func IsSinglePodElasticEPShape(component *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
 	// Elastic EP is a worker topology: the leader is the engine that heads the Ray
 	// cluster and the follower lends it a GPU. Admission accepts the launch flags on any
@@ -403,18 +406,6 @@ func IsSinglePodElasticEPShape(component *v1beta1.DynamoComponentDeploymentShare
 		return false
 	}
 	return component.Replicas == nil || *component.Replicas == 1
-}
-
-// IsSinglePodElasticEPLeader reports whether a component is a single-pod elastic-EP
-// leader *and* the operator-managed Ray PoC is enabled.
-//
-// This is the predicate for everything the PoC introduced -- follower synthesis and the
-// non-Grove leader Service. It deliberately excludes the leader's own launch rewrite and
-// the Grove Service: both shipped before this gate existed (#12943, #13178), so gating
-// them would rewrite or delete a running deployment's resources on an operator upgrade
-// that only turned the gate off by default.
-func IsSinglePodElasticEPLeader(component *v1beta1.DynamoComponentDeploymentSharedSpec, elasticEPRayPoCEnabled bool) bool {
-	return elasticEPRayPoCEnabled && IsSinglePodElasticEPShape(component)
 }
 
 // synthesizeElasticEPFollowerDCD derives the optional follower DCD for an elastic-EP

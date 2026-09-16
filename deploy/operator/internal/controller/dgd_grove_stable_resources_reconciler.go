@@ -237,7 +237,7 @@ func (r *groveStableResourcesReconciler) syncServiceAnnotations(
 // reconcileElasticEPLeaderService creates the headless Service a single-pod elastic-EP
 // leader is reachable at, or deletes it when toDelete says the component no longer
 // qualifies. See dynamo.GenerateElasticEPHeadlessService and
-// dynamo.IsSinglePodElasticEPLeader.
+// dynamo.IsSinglePodElasticEPShape.
 func (r *groveStableResourcesReconciler) reconcileElasticEPLeaderService(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,

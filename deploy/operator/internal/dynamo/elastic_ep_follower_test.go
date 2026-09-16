@@ -189,7 +189,7 @@ func TestSynthesizeElasticEPFollowerDCD_StripsCheckpointConfig(t *testing.T) {
 // Admission accepts the elastic-EP launch flags on any component, so without a
 // component-type gate a global-vLLM graph could put them on a planner or frontend and
 // have a follower derived for it.
-func TestIsSinglePodElasticEPLeader_RequiresAWorkerComponent(t *testing.T) {
+func TestIsSinglePodElasticEPShape_RequiresAWorkerComponent(t *testing.T) {
 	tests := []struct {
 		name          string
 		componentType v1beta1.ComponentType
@@ -208,8 +208,8 @@ func TestIsSinglePodElasticEPLeader_RequiresAWorkerComponent(t *testing.T) {
 			component.ComponentType = tt.componentType
 
 			t.Log("elastic EP is a worker topology: the leader is the engine heading the Ray cluster")
-			if got := IsSinglePodElasticEPLeader(component, true); got != tt.want {
-				t.Errorf("IsSinglePodElasticEPLeader(%s) = %v, want %v", tt.componentType, got, tt.want)
+			if got := IsSinglePodElasticEPShape(component); got != tt.want {
+				t.Errorf("IsSinglePodElasticEPShape(%s) = %v, want %v", tt.componentType, got, tt.want)
 			}
 		})
 	}
@@ -626,6 +626,74 @@ func TestElasticEPGenerationIsIndependentOfTheGate(t *testing.T) {
 	t.Log("The leader itself is byte-identical: no pod-template change, so no rollout")
 	if diff := cmp.Diff(off[leaderComponent].Spec, on[leaderComponent].Spec); diff != "" {
 		t.Errorf("the leader's spec moved between generations (-a +b):\n%s", diff)
+	}
+}
+
+// TestElasticEPLeaderWaitsForDeclaredWidth pins the other half of a full-width launch.
+//
+// Seeding N-1 followers is not enough on its own. vLLM's create_dp_placement_groups reads
+// the Ray cluster ONCE at engine start and allocates one placement group per rank against
+// whatever it finds; nothing retries. So if the leader starts the engine as soon as its
+// own Ray head is up, the launch becomes a race against N-1 pods being scheduled, pulled
+// and joined, and it loses intermittently:
+//
+//	ValueError: Not enough resources to allocate 4 placement groups,
+//	            only created 2 placement groups
+//
+// Observed on dynamo-aws-gb300: the same manifest reached 4 Ray nodes on one attempt and
+// 2 on the next. The gate is what makes it deterministic.
+//
+// Mutation check: deleting the widthGate branch fails the dp=4 subtest and nothing else.
+func TestElasticEPLeaderWaitsForDeclaredWidth(t *testing.T) {
+	render := func(t *testing.T, extraArgs ...string) string {
+		t.Helper()
+		component := vllmComponent(append([]string{"--enable-elastic-ep", "--data-parallel-backend", "ray"}, extraArgs...)...)
+		container := GetMainContainer(component).DeepCopy()
+		backend := &VLLMBackend{}
+		if err := backend.UpdateContainer(
+			container, 1, RoleMain, component, "test-service",
+			&GroveMultinodeDeployer{}, staticContainerGPUCount(1),
+		); err != nil {
+			t.Fatalf("UpdateContainer: %v", err)
+		}
+		return strings.Join(container.Args, " ")
+	}
+
+	t.Run("dp=4 waits for four Ray nodes before starting the engine", func(t *testing.T) {
+		script := render(t, "--data-parallel-size", "4")
+		if !strings.Contains(script, "-ge 4 ]") {
+			t.Errorf("leader must wait for its declared width before exec'ing vLLM; got: %s", script)
+		}
+		if !strings.Contains(script, "ray.nodes()") {
+			t.Errorf("the wait must count live Ray nodes, matching the one-pod-per-rank sizing rule; got: %s", script)
+		}
+		// The wait has to sit between the head coming up and the engine starting. If it
+		// landed after the engine it would be useless, and before the head it could never
+		// pass -- ray.init needs the head.
+		headIdx := strings.Index(script, "create_connection")
+		waitIdx := strings.Index(script, "ray.nodes()")
+		engineIdx := strings.Index(script, "dynamo.vllm")
+		if !(headIdx < waitIdx && waitIdx < engineIdx) {
+			t.Errorf("the width wait must come after the Ray head is up and before the engine starts; got: %s", script)
+		}
+	})
+
+	// The no-regression case. Everything that predates this change declares a single rank
+	// or no width at all, so it must render byte-for-byte as before -- a wait for one node
+	// would be satisfied by the leader itself, but emitting it at all is a pod-template
+	// change, and a pod-template change rolls a serving deployment.
+	for _, tt := range []struct {
+		name string
+		args []string
+	}{
+		{name: "no --data-parallel-size emits no wait", args: nil},
+		{name: "dp=1 emits no wait", args: []string{"--data-parallel-size", "1"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if script := render(t, tt.args...); strings.Contains(script, "ray.nodes()") {
+				t.Errorf("a single-rank leader must not gain a width wait; got: %s", script)
+			}
+		})
 	}
 }
 

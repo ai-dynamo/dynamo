@@ -62,7 +62,7 @@ func newElasticEPComponent(args string) v1beta1.DynamoComponentDeploymentSharedS
 	}
 }
 
-func TestIsSinglePodElasticEPLeader(t *testing.T) {
+func TestIsSinglePodElasticEPShape(t *testing.T) {
 	tests := []struct {
 		name      string
 		component func() v1beta1.DynamoComponentDeploymentSharedSpec
@@ -132,11 +132,11 @@ func TestIsSinglePodElasticEPLeader(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("Classify the component against the single-pod elastic-EP leader gate")
 			component := tt.component()
-			got := dynamo.IsSinglePodElasticEPLeader(&component, true)
+			got := dynamo.IsSinglePodElasticEPShape(&component)
 
 			t.Log("Verify only a component that renders as exactly one Ray head qualifies")
 			if got != tt.want {
-				t.Errorf("dynamo.IsSinglePodElasticEPLeader = %v, want %v", got, tt.want)
+				t.Errorf("dynamo.IsSinglePodElasticEPShape = %v, want %v", got, tt.want)
 			}
 		})
 	}
