@@ -691,12 +691,7 @@ where
             };
 
             // Add chat engine only if the model supports chat.
-            //
-            // Diagnose the card before the routing requirement. `preprocessed_routing`
-            // is `None` here only when the card has no loadable tokenizer, no
-            // chat_engine_factory, and no Generate surface — which is exactly the case
-            // the final arm reports with an actionable message. Demanding routing first
-            // would shadow that message with an internal one.
+            // Routing resolves lazily; an eager `?` shadows the actionable tokenizer error.
             if card.model_type.supports_chat() {
                 let chat_routing = || {
                     preprocessed_routing.as_ref().ok_or_else(|| {

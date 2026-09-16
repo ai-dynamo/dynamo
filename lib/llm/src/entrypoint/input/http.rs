@@ -243,12 +243,8 @@ where
                 model.namespace(),
                 model.namespace_prefix(),
             );
-            // Record the resolved scope and both inputs. The prefix wins over
-            // the namespace whenever it is set, and on Kubernetes the operator
-            // sets it on every frontend container, so the effective scope is
-            // often not the one the `--namespace` flag suggests. Without this
-            // line a frontend that discovers nothing looks identical to one
-            // whose workers never registered.
+            // The prefix wins over the namespace whenever it is set, so log both
+            // inputs alongside the scope they resolved to.
             tracing::info!(
                 scope = ?namespace_filter,
                 namespace = model.namespace().unwrap_or("<unset>"),
