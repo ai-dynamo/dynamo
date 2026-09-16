@@ -97,7 +97,7 @@ from dynamo.common.http import AiohttpClient
 AiohttpClient(config = None) -> None
 ```
 
-[`components/src/dynamo/common/http/aiohttp_client.py#L28`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/aiohttp_client.py#L28)
+[`components/src/dynamo/common/http/aiohttp_client.py#L39`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/aiohttp_client.py#L39)
 
 **Public methods**
 
@@ -109,7 +109,7 @@ __init__(config = None) -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/aiohttp_client.py#L31)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/aiohttp_client.py#L42)
 
 <h4 id="api-dynamo-common-http-aiohttp-client-aiohttpclient-close">close</h4>
 
@@ -119,7 +119,7 @@ close() -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/aiohttp_client.py#L129)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/aiohttp_client.py#L166)
 </Accordion>
 
 <Accordion id="api-dynamo-common-multimodal-async-encoder-cache-asyncencodercache" title="AsyncEncoderCache (class)">
@@ -720,7 +720,7 @@ instance. Callers reach the public surface via `fetch_bytes`
 and the unified exception classes above; the concrete backend type
 is invisible past instantiation.
 
-[`components/src/dynamo/common/http/base.py#L50`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L50)
+[`components/src/dynamo/common/http/base.py#L94`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L94)
 
 **Public methods**
 
@@ -732,12 +732,12 @@ __init__(config: Optional[HttpConfigBase] = None) -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L59)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L103)
 
 <h4 id="api-dynamo-common-http-base-httpclient-fetch-bytes">fetch_bytes</h4>
 
 ```python
-fetch_bytes(url: str, timeout: float, *, policy: Optional[UrlValidationPolicy] = None) -> bytes
+fetch_bytes(url: str, timeout: float, *, policy: Optional[UrlValidationPolicy] = None, max_bytes: Optional[int] = None) -> bytes
 ```
 
 Fetch ``url`` and return the response body.
@@ -747,12 +747,17 @@ classes above; callers never see native aiohttp classes.
 
 ``policy=None``: use the backend's built-in redirect handling.
 
+``max_bytes`` set: refuse a body larger than that while it is being
+read, so an attacker-chosen URL cannot buffer an unbounded response.
+Raises `UrlValidationError` — it is a verdict on a
+client-supplied source, like the redirect cap below.
+
 ``policy`` set: follow redirects manually and revalidate each
 hop against the policy via `url_validator.validate_url`.
 This is the SSRF-safe path; raises `UrlValidationError`
 if any hop fails or the chain exceeds ``_MAX_REDIRECTS``.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L63)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L107)
 
 <h4 id="api-dynamo-common-http-base-httpclient-close">close</h4>
 
@@ -762,7 +767,7 @@ close() -> None
 
 Close the backend session/client. Idempotent.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L135)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L195)
 </Accordion>
 
 <Accordion id="api-dynamo-common-http-base-httpconnectionerror" title="HttpConnectionError (class)">
@@ -772,7 +777,7 @@ Network-layer failure: DNS, refused, reset, half-close.
 from dynamo.common.http import HttpConnectionError
 ```
 
-[`components/src/dynamo/common/http/base.py#L36`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L36)
+[`components/src/dynamo/common/http/base.py#L46`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L46)
 </Accordion>
 
 <Accordion id="api-dynamo-common-http-base-httperror" title="HttpError (class)">
@@ -782,7 +787,7 @@ Base class for all HTTP fetch failures.
 from dynamo.common.http import HttpError
 ```
 
-[`components/src/dynamo/common/http/base.py#L28`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L28)
+[`components/src/dynamo/common/http/base.py#L38`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L38)
 </Accordion>
 
 <Accordion id="api-dynamo-common-http-base-httpstatuserror" title="HttpStatusError (class)">
@@ -796,7 +801,7 @@ from dynamo.common.http import HttpStatusError
 HttpStatusError(status: int, message: str, url: str) -> None
 ```
 
-[`components/src/dynamo/common/http/base.py#L40`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L40)
+[`components/src/dynamo/common/http/base.py#L50`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L50)
 
 **Public methods**
 
@@ -808,7 +813,7 @@ __init__(status: int, message: str, url: str) -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L43)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L53)
 </Accordion>
 
 <Accordion id="api-dynamo-common-http-base-httptimeouterror" title="HttpTimeoutError (class)">
@@ -818,7 +823,7 @@ Timeout during connect / read / pool-wait.
 from dynamo.common.http import HttpTimeoutError
 ```
 
-[`components/src/dynamo/common/http/base.py#L32`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L32)
+[`components/src/dynamo/common/http/base.py#L42`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/base.py#L42)
 </Accordion>
 
 <Accordion id="api-dynamo-common-multimodal-image-loader-imageloader" title="ImageLoader (class)">
@@ -2249,7 +2254,7 @@ Clears the resolved client so a fresh env-var reading happens on
 the next call (primarily useful in tests that vary
 ``DYN_HTTP_BACKEND``).
 
-[`components/src/dynamo/common/http/__init__.py#L79`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/__init__.py#L79)
+[`components/src/dynamo/common/http/__init__.py#L81`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/__init__.py#L81)
 </Accordion>
 
 <Accordion id="api-dynamo-common-forward-pass-metrics-decode" title="decode (function)">
@@ -2331,7 +2336,7 @@ from dynamo.common.http import fetch_bytes
 ```
 
 ```python
-fetch_bytes(url, timeout, *, policy = None) -> bytes
+fetch_bytes(url, timeout, *, policy = None, max_bytes = None) -> bytes
 ```
 
 [`components/src/dynamo/common/http/__init__.py#L74`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/http/__init__.py#L74)
