@@ -52,7 +52,7 @@ class HttpStatusError(HttpError):
 
     def __init__(self, status: int, message: str, url: str) -> None:
         # Both halves are client-supplied: ``url`` directly, and ``message``
-        # because httpx's own HTTPStatusError text repeats the URL. The video
+        # because aiohttp's own ClientResponseError text repeats the URL. The video
         # diffusion handler puts str(exc) in its response body.
         #
         # ``message`` is bounded in the *attribute*, not just in the rendered

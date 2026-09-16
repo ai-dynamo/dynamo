@@ -16,7 +16,13 @@ from pathlib import Path
 
 import pytest
 
-from dynamo.common.http.media_reference import MAX_MEDIA_BYTES, local_media_reference
+from dynamo.common.http.media_reference import (
+    DEFAULT_MAX_MEDIA_MB,
+    DYN_MM_MAX_FILE_SIZE_MB,
+    MAX_MEDIA_BYTES,
+    local_media_reference,
+    max_media_bytes,
+)
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 
 pytestmark = [
@@ -149,6 +155,81 @@ async def test_the_download_cap_reaches_the_client(monkeypatch) -> None:
 
     async with local_media_reference(
         "https://example.com/big.png", policy, max_bytes=512
+    ):
+        pass
+
+    assert seen["max_bytes"] == 512
+
+
+def test_max_media_bytes_defaults_when_unset(monkeypatch) -> None:
+    """Unset keeps the SGLang default this path carried forward."""
+    monkeypatch.delenv(DYN_MM_MAX_FILE_SIZE_MB, raising=False)
+
+    assert max_media_bytes() == MAX_MEDIA_BYTES
+    assert MAX_MEDIA_BYTES == DEFAULT_MAX_MEDIA_MB * 1024 * 1024
+
+
+def test_max_media_bytes_honours_the_override(monkeypatch) -> None:
+    """The point of the knob: an operator with media over 64 MiB can raise it."""
+    monkeypatch.setenv(DYN_MM_MAX_FILE_SIZE_MB, "128")
+
+    assert max_media_bytes() == 128 * 1024 * 1024
+
+
+def test_max_media_bytes_tolerates_surrounding_whitespace(monkeypatch) -> None:
+    monkeypatch.setenv(DYN_MM_MAX_FILE_SIZE_MB, "  256  ")
+
+    assert max_media_bytes() == 256 * 1024 * 1024
+
+
+@pytest.mark.parametrize("raw", ["abc", "", "   ", "12.5"])
+def test_max_media_bytes_falls_back_on_an_unparseable_value(monkeypatch, raw) -> None:
+    """A malformed operator value must not take the worker down."""
+    monkeypatch.setenv(DYN_MM_MAX_FILE_SIZE_MB, raw)
+
+    assert max_media_bytes() == MAX_MEDIA_BYTES
+
+
+@pytest.mark.parametrize("raw", ["0", "-5"])
+def test_max_media_bytes_refuses_to_drop_the_bound(monkeypatch, raw) -> None:
+    """Non-positive must not read as "unlimited" -- that removes the bound."""
+    monkeypatch.setenv(DYN_MM_MAX_FILE_SIZE_MB, raw)
+
+    assert max_media_bytes() == MAX_MEDIA_BYTES
+
+
+async def test_local_media_reference_uses_the_configured_cap(monkeypatch) -> None:
+    """The resolved value has to reach fetch_bytes, not just exist."""
+    seen = {}
+
+    async def fake_fetch(url, timeout, *, policy=None, max_bytes=None):
+        seen["max_bytes"] = max_bytes
+        return b"PNGDATA"
+
+    monkeypatch.setattr("dynamo.common.http.fetch_bytes", fake_fetch)
+    monkeypatch.setenv(DYN_MM_MAX_FILE_SIZE_MB, "128")
+    policy = UrlValidationPolicy(allow_http=True, allow_private_ips=True)
+
+    async with local_media_reference("https://example.com/img.png", policy):
+        pass
+
+    assert seen["max_bytes"] == 128 * 1024 * 1024
+
+
+async def test_an_explicit_max_bytes_still_wins_over_the_env(monkeypatch) -> None:
+    """Control: the knob must not override a caller that asked for a value."""
+    seen = {}
+
+    async def fake_fetch(url, timeout, *, policy=None, max_bytes=None):
+        seen["max_bytes"] = max_bytes
+        return b"PNGDATA"
+
+    monkeypatch.setattr("dynamo.common.http.fetch_bytes", fake_fetch)
+    monkeypatch.setenv(DYN_MM_MAX_FILE_SIZE_MB, "128")
+    policy = UrlValidationPolicy(allow_http=True, allow_private_ips=True)
+
+    async with local_media_reference(
+        "https://example.com/img.png", policy, max_bytes=512
     ):
         pass
 
