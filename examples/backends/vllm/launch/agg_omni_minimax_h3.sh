@@ -79,10 +79,23 @@ if [[ "$MODEL_PATH" != "$MODEL" ]]; then
     SERVED_MODEL_ARGS=(--served-model-name "$MODEL")
 fi
 
-command -v ffmpeg >/dev/null
-command -v ffprobe >/dev/null
-ffmpeg -hide_banner -encoders 2>/dev/null | grep -E '(^| )libx264( |$)' >/dev/null
-python -c 'import av; av.codec.Codec("h264", "w"); av.codec.Codec("aac", "w")'
+VIDEO_AUDIO_OVERLAY_HINT="Build the opt-in video-audio overlay image from examples/backends/vllm/omni/video_audio.Dockerfile."
+if ! command -v ffmpeg >/dev/null; then
+    echo "Error: ffmpeg was not found. $VIDEO_AUDIO_OVERLAY_HINT" >&2
+    exit 1
+fi
+if ! command -v ffprobe >/dev/null; then
+    echo "Error: ffprobe was not found. $VIDEO_AUDIO_OVERLAY_HINT" >&2
+    exit 1
+fi
+if ! ffmpeg -hide_banner -encoders 2>/dev/null | grep -E '(^| )libx264( |$)' >/dev/null; then
+    echo "Error: ffmpeg cannot encode H.264 because libx264 is unavailable. $VIDEO_AUDIO_OVERLAY_HINT" >&2
+    exit 1
+fi
+if ! python -c 'import av; av.codec.Codec("h264", "w"); av.codec.Codec("aac", "w")' >/dev/null 2>&1; then
+    echo "Error: PyAV cannot encode H.264 and AAC. $VIDEO_AUDIO_OVERLAY_HINT" >&2
+    exit 1
+fi
 
 export VLLM_WORKER_MULTIPROC_METHOD="${VLLM_WORKER_MULTIPROC_METHOD:-spawn}"
 export VLLM_OMNI_VIDEO_SYNC_TIMEOUT="${VLLM_OMNI_VIDEO_SYNC_TIMEOUT:-3600}"

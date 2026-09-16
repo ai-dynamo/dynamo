@@ -20,7 +20,7 @@ Text-to-video generation runs a vLLM-Omni worker with `--output-modalities video
 |---|---|
 | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` | Default model (1 GPU) |
 | `Wan-AI/Wan2.2-T2V-A14B-Diffusers` | |
-| `MiniMaxAI/MiniMax-H3` | Joint 24-FPS video and 32-kHz stereo audio; 4 B200 GPUs recommended |
+| `MiniMaxAI/MiniMax-H3` | Joint 24-FPS video and 32-kHz stereo audio; requires the dedicated [MiniMax-H3 workflow](#minimax-h3) and 4 B200 GPUs |
 
 To run a non-default model, pass `--model` to the launch script:
 
