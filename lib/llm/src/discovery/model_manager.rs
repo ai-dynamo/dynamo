@@ -141,7 +141,7 @@ struct CommittedDiscoveryGroup {
 struct PendingLoraProjection {
     base_capacities: Vec<u32>,
     adapters: HashMap<String, LoraInfo>,
-    requires_registration: bool,
+    is_registration_required: bool,
 }
 
 type EndpointLoraProjection = HashMap<EndpointId, HashMap<WorkerWithDpRank, LoraWorkerProjection>>;
@@ -278,7 +278,7 @@ impl ModelManager {
                 if let Some(capacity) = card.runtime_config.max_gpu_lora_count {
                     worker_projection.base_capacities.push(capacity);
                 }
-                worker_projection.requires_registration |= card
+                worker_projection.is_registration_required |= card
                     .runtime_config
                     .runtime_flag_enabled(crate::lora::LORA_REQUIRES_REGISTRATION);
 
@@ -340,11 +340,11 @@ impl ModelManager {
                             .copied()
                             .or_else(|| adapter_capacities.first().copied())
                             .or_else(|| (!loras.is_empty()).then_some(4))
-                            .or_else(|| projection.requires_registration.then_some(0))?;
+                            .or_else(|| projection.is_registration_required.then_some(0))?;
                         Some((worker, LoraWorkerProjection {
                             capacity,
                             loras,
-                            requires_registration: projection.requires_registration,
+                            is_registration_required: projection.is_registration_required,
                         }))
                     })
                     .collect();
@@ -366,7 +366,7 @@ impl ModelManager {
                     continue;
                 };
                 existing.capacity = existing.capacity.min(projection.capacity);
-                existing.requires_registration |= projection.requires_registration;
+                existing.is_registration_required |= projection.is_registration_required;
                 let mut loras = existing
                     .loras
                     .iter()

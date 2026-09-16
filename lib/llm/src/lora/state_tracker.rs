@@ -132,7 +132,7 @@ impl LoraObservedSnapshot {
 pub(crate) struct LoraWorkerProjection {
     pub(crate) capacity: u32,
     pub(crate) loras: Vec<LoraInfo>,
-    pub(crate) requires_registration: bool,
+    pub(crate) is_registration_required: bool,
 }
 
 /// Tracks one endpoint's complete observed LoRA state.
@@ -251,7 +251,7 @@ impl LoraStateTracker {
         let projection = capacity.map(|capacity| LoraWorkerProjection {
             capacity,
             loras: loras.to_vec(),
-            requires_registration: false,
+            is_registration_required: false,
         });
         self.mutate(|next| replace_worker(next, worker, projection));
     }
@@ -434,7 +434,7 @@ fn replace_worker(
     };
 
     snapshot.worker_capacity.insert(worker, projection.capacity);
-    if projection.requires_registration {
+    if projection.is_registration_required {
         snapshot.registration_required.insert(worker);
     } else {
         snapshot.registration_required.remove(&worker);
