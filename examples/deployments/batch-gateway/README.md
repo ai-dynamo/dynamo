@@ -17,8 +17,7 @@ You need:
 - A Kubernetes cluster with the Dynamo platform installed.
 - One available GPU.
 - `kubectl`, Helm 3, and Python 3.9 or newer.
-- A `model-cache` PVC for the model worker.
-- An `hf-token-secret` secret in the target namespace.
+- Network access from the worker to download the public model.
 - A default storage class that supports `ReadWriteMany` persistent volumes.
 - A Prometheus server installed at the service address used in `llm-d-async-values.yaml` and configured to scrape Dynamo frontend pods. The [Dynamo observability installation guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/kubernetes/installation/observability.md) creates this service and the required PodMonitor setup.
 
@@ -34,18 +33,55 @@ The example uses the following versions:
 
 The readiness-gated Async path requires a Dynamo build that exposes `dynamo_frontend_model_ready`. If the `1.5.0` runtime image has not been published yet, use frontend and worker images built from a Dynamo revision that contains that metric. Older runtime images do not expose the series, so the fail-closed gate remains at zero.
 
-Update the chart version and all three Batch Gateway image tags together, then
-rerun the complete example. Update the Dynamo frontend and worker images
-together and rerun both a direct chat completion and the batch example.
+Update the Batch Gateway chart version in `install.sh` and all three image tags
+together, then rerun the complete example. Update the Async Processor chart
+version in `install.sh` and its image tag together. Update the Dynamo frontend
+and worker images together and rerun both a direct chat completion and the
+batch example.
 
-## Recreate the Example
+## Quick Start: One-Command Installation
+
+Run one command to create the namespace, deploy the DGD and batch storage, and
+install the pinned Async Processor and Batch Gateway charts:
+
+```bash
+cd examples/deployments/batch-gateway
+./install.sh
+```
+
+Set `--namespace` to use a namespace other than `dynamo-batch-example`. Set
+`PROMETHEUS_URL` if Prometheus is not available at the default Dynamo
+observability service address. The installer waits for each dependency before
+installing the next one and configures Batch Gateway to use Async dispatch.
+It remains a thin wrapper around one DGD and two upstream Helm releases; the
+Dynamo operator does not own the Batch Gateway or Async Processor lifecycle.
+
+After the installer completes, follow the printed commands to forward the
+Batch API and run `run_example.py`.
+
+The installer performs these operations using the checked-in manifests and
+values files:
+
+1. Creates the target namespace when it does not already exist.
+2. Applies `batch-infra.yaml` and waits for Valkey.
+3. Applies `dynamo.yaml` and waits for the DGD to become ready.
+4. Installs the pinned Async Processor release with the Dynamo readiness gate.
+5. Installs the pinned Batch Gateway release configured for Async dispatch.
+
+## Manual Installation (Advanced/Troubleshooting)
+
+The one-command installer above is the recommended path. Use the staged
+procedure below when you need to inspect an individual component, customize
+the deployment, troubleshoot a failed step, or validate synchronous dispatch
+before switching to Async. These commands use the same checked-in manifests
+and values files as `install.sh`.
 
 ### 1. Deploy the Dedicated Dynamo Backend
 
 Set a namespace and apply the dedicated backend:
 
 ```bash
-cd examples/deployments/llm-d-batch-gateway
+cd examples/deployments/batch-gateway
 export NAMESPACE=dynamo-batch-example
 
 kubectl apply -n "${NAMESPACE}" -f dynamo.yaml
