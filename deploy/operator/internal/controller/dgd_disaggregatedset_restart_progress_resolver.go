@@ -32,15 +32,20 @@ import (
 // requested restart.
 type disaggregatedSetRestartProgressResolver struct {
 	reader    client.Reader
+	readiness *disaggregatedSetReadinessResolver
 	component *componentRestartProgressResolver
 }
 
+const disaggregatedSetRestartResourceNotFoundReason = "resource not found"
+
 func newDisaggregatedSetRestartProgressResolver(
 	reader client.Reader,
+	readiness *disaggregatedSetReadinessResolver,
 	component *componentRestartProgressResolver,
 ) *disaggregatedSetRestartProgressResolver {
 	return &disaggregatedSetRestartProgressResolver{
 		reader:    reader,
+		readiness: readiness,
 		component: component,
 	}
 }
@@ -64,9 +69,9 @@ func (r *disaggregatedSetRestartProgressResolver) Resolve(
 	}
 
 	dsReady := false
-	dsReason := disaggregatedSetResourceNotFoundReason
+	dsReason := disaggregatedSetRestartResourceNotFoundReason
 	if dsErr == nil {
-		readiness, err := newDisaggregatedSetReadinessResolver(r.reader).Resolve(ctx, ds, selection)
+		readiness, err := r.readiness.Resolve(ctx, ds, selection)
 		if err != nil {
 			dsReason = err.Error()
 		} else {
@@ -87,7 +92,7 @@ func (r *disaggregatedSetRestartProgressResolver) Resolve(
 		}
 
 		if dsErr != nil {
-			reason := disaggregatedSetResourceNotFoundReason
+			reason := disaggregatedSetRestartResourceNotFoundReason
 			if !apierrors.IsNotFound(dsErr) {
 				reason = dsErr.Error()
 			}

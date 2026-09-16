@@ -46,15 +46,16 @@ func newDisaggregatedSetWorkloadsReconciler(
 	rollout *dgdWorkerRolloutReconciler,
 ) *disaggregatedSetWorkloadsReconciler {
 	componentRenderer := newDCDWorkloadRenderer(k8sClient, config, runtimeConfig, dockerSecretRetriever)
+	readiness := newDisaggregatedSetReadinessResolver(k8sClient)
 	componentRestartProgress := newComponentRestartProgressResolver(k8sClient)
 	return &disaggregatedSetWorkloadsReconciler{
-		rollout:                  rollout,
-		renderer:                 newDisaggregatedSetWorkloadRenderer(componentRenderer),
-		resources:                newDisaggregatedSetResourceReconciler(k8sClient),
-		stableResources:          newDisaggregatedSetStableResourcesReconciler(k8sClient, componentRenderer),
-		auxiliaryDCDs:            newDisaggregatedSetAuxiliaryDCDReconciler(k8sClient, recorder),
-		readiness:                newDisaggregatedSetReadinessResolver(k8sClient),
-		restartProgress:          newDisaggregatedSetRestartProgressResolver(k8sClient, componentRestartProgress),
-		componentRestartProgress: componentRestartProgress,
+		reader:          k8sClient,
+		rollout:         rollout,
+		renderer:        newDisaggregatedSetWorkloadRenderer(componentRenderer),
+		resources:       newDisaggregatedSetResourceReconciler(k8sClient),
+		stableResources: newDisaggregatedSetStableResourcesReconciler(k8sClient, componentRenderer),
+		auxiliaryDCDs:   newDisaggregatedSetAuxiliaryDCDReconciler(k8sClient, recorder),
+		readiness:       readiness,
+		restartProgress: newDisaggregatedSetRestartProgressResolver(k8sClient, readiness, componentRestartProgress),
 	}
 }

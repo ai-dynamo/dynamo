@@ -32,19 +32,20 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	disaggregatedsetv1 "sigs.k8s.io/lws/api/disaggregatedset/v1"
 )
 
 type disaggregatedSetWorkloadsReconciler struct {
-	rollout                  *dgdWorkerRolloutReconciler
-	renderer                 *disaggregatedSetWorkloadRenderer
-	resources                *disaggregatedSetResourceReconciler
-	stableResources          *disaggregatedSetStableResourcesReconciler
-	auxiliaryDCDs            *disaggregatedSetAuxiliaryDCDReconciler
-	readiness                *disaggregatedSetReadinessResolver
-	restartProgress          *disaggregatedSetRestartProgressResolver
-	componentRestartProgress *componentRestartProgressResolver
+	reader          client.Reader
+	rollout         *dgdWorkerRolloutReconciler
+	renderer        *disaggregatedSetWorkloadRenderer
+	resources       *disaggregatedSetResourceReconciler
+	stableResources *disaggregatedSetStableResourcesReconciler
+	auxiliaryDCDs   *disaggregatedSetAuxiliaryDCDReconciler
+	readiness       *disaggregatedSetReadinessResolver
+	restartProgress *disaggregatedSetRestartProgressResolver
 }
 
 func (r *disaggregatedSetWorkloadsReconciler) ResolveRestart(
@@ -82,7 +83,7 @@ func (r *disaggregatedSetWorkloadsReconciler) Reconcile(
 	if reason != "" {
 		return ReconcileResult{}, fmt.Errorf("failed to select DisaggregatedSet roles: %s", reason)
 	}
-	existingRestartAnnotations, err := getExistingRestartAnnotationsDCD(ctx, r.componentRestartProgress.reader, dgd)
+	existingRestartAnnotations, err := getExistingRestartAnnotationsDCD(ctx, r.reader, dgd)
 	if err != nil {
 		logger.Error(err, "failed to get existing restart annotations")
 		return ReconcileResult{}, fmt.Errorf("failed to get existing restart annotations: %w", err)

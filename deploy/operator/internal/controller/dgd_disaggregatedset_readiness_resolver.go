@@ -39,8 +39,6 @@ type disaggregatedSetReadiness struct {
 	ComponentStatuses map[string]nvidiacomv1beta1.ComponentReplicaStatus
 }
 
-const disaggregatedSetResourceNotFoundReason = "resource not found"
-
 type disaggregatedSetReadinessResolver struct {
 	reader client.Reader
 }
