@@ -228,7 +228,10 @@ VLLM_ZMQ_PORT_DECODE="$(dyn_port DYN_VLLM_KV_EVENT_PORT 3 "${VLLM_ZMQ_PORT_DECOD
 # model load). Short-term workaround; drop it (set VLLM_USE_V2_MODEL_RUNNER=1)
 # once the V2 encoder-only path is fixed upstream. MoE VLMs are unaffected.
 echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU (--gpu-memory-utilization $DYN_ENCODE_GPU_MEM)..."
-DYN_SYSTEM_PORT="$(dyn_port DYN_SYSTEM_PORT 1 8081)" \
+SYSTEM_PORT_ENCODE=$(dyn_port DYN_SYSTEM_PORT 1 8081)
+SYSTEM_PORT_PREFILL=$(dyn_port DYN_SYSTEM_PORT 2 8082)
+SYSTEM_PORT_DECODE=$(dyn_port DYN_SYSTEM_PORT 3 8083)
+DYN_SYSTEM_PORT=$SYSTEM_PORT_ENCODE \
 VLLM_USE_V2_MODEL_RUNNER=${VLLM_USE_V2_MODEL_RUNNER:-0} \
 VLLM_NIXL_SIDE_CHANNEL_PORT=$VLLM_NIXL_SIDE_CHANNEL_PORT_ENCODE \
 CUDA_VISIBLE_DEVICES=$DYN_ENCODE_WORKER_GPU \
@@ -236,13 +239,13 @@ python -m dynamo.vllm --enable-multimodal --disaggregation-mode encode --model $
 
 # Start prefill worker (also handles encode routing via --route-to-encoder)
 echo "Starting prefill worker on GPU $DYN_PREFILL_WORKER_GPU (${PREFILL_GPU_MEM_ARGS})..."
-DYN_SYSTEM_PORT="$(dyn_port DYN_SYSTEM_PORT 2 8082)" \
+DYN_SYSTEM_PORT=$SYSTEM_PORT_PREFILL \
 VLLM_NIXL_SIDE_CHANNEL_PORT=$VLLM_NIXL_SIDE_CHANNEL_PORT_PREFILL \
 CUDA_VISIBLE_DEVICES=$DYN_PREFILL_WORKER_GPU python -m dynamo.vllm --route-to-encoder --disaggregation-mode prefill --enable-multimodal --enable-mm-embeds --model $MODEL_NAME $PREFILL_GPU_MEM_ARGS $EXTRA_ARGS $PD_EXTRA_ARGS --kv-transfer-config "$KV_TRANSFER_CONFIG" --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_ZMQ_PORT_PREFILL}\"}" &
 
 # Start decode worker
 echo "Starting decode worker on GPU $DYN_DECODE_WORKER_GPU (${DECODE_GPU_MEM_ARGS})..."
-DYN_SYSTEM_PORT="$(dyn_port DYN_SYSTEM_PORT 3 8083)" \
+DYN_SYSTEM_PORT=$SYSTEM_PORT_DECODE \
 VLLM_NIXL_SIDE_CHANNEL_PORT=$VLLM_NIXL_SIDE_CHANNEL_PORT_DECODE \
 CUDA_VISIBLE_DEVICES=$DYN_DECODE_WORKER_GPU python -m dynamo.vllm  --disaggregation-mode decode --enable-multimodal --enable-mm-embeds --model $MODEL_NAME $DECODE_GPU_MEM_ARGS $EXTRA_ARGS $PD_EXTRA_ARGS --kv-transfer-config "$KV_TRANSFER_CONFIG" --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_ZMQ_PORT_DECODE}\"}" &
 

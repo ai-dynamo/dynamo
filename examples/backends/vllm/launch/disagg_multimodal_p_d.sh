@@ -106,9 +106,15 @@ VLLM_NIXL_SIDE_CHANNEL_PORT_PREFILL="$(dyn_port DYN_VLLM_NIXL_SIDE_CHANNEL_PORT 
 VLLM_NIXL_SIDE_CHANNEL_PORT_DECODE="$(dyn_port DYN_VLLM_NIXL_SIDE_CHANNEL_PORT 2 "${VLLM_NIXL_SIDE_CHANNEL_PORT_DECODE:-20099}")"
 VLLM_ZMQ_PORT_PREFILL="$(dyn_port DYN_VLLM_KV_EVENT_PORT 1 "${VLLM_ZMQ_PORT_PREFILL:-20081}")"
 VLLM_ZMQ_PORT_DECODE="$(dyn_port DYN_VLLM_KV_EVENT_PORT 2 "${VLLM_ZMQ_PORT_DECODE:-20082}")"
+SYSTEM_PORT_PREFILL=$(dyn_port DYN_SYSTEM_PORT 1 "${DYN_SYSTEM_PORT:-8081}")
+SYSTEM_PORT_DECODE=$(dyn_port DYN_SYSTEM_PORT 2 8082)
+NIXL_PORT_PREFILL=$(dyn_port DYN_VLLM_NIXL_SIDE_CHANNEL_PORT 1 20098)
+NIXL_PORT_DECODE=$(dyn_port DYN_VLLM_NIXL_SIDE_CHANNEL_PORT 2 20099)
+KV_PORT_PREFILL=$(dyn_port DYN_VLLM_KV_EVENT_PORT 1 20081)
+KV_PORT_DECODE=$(dyn_port DYN_VLLM_KV_EVENT_PORT 2 20082)
 echo "Starting prefill worker on GPU $DYN_PREFILL_WORKER_GPU (${PREFILL_GPU_MEM_ARGS})..."
-VLLM_NIXL_SIDE_CHANNEL_PORT=$VLLM_NIXL_SIDE_CHANNEL_PORT_PREFILL \
-DYN_SYSTEM_PORT="$(dyn_port DYN_SYSTEM_PORT 1 "${DYN_SYSTEM_PORT:-8081}")" \
+VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT_PREFILL \
+DYN_SYSTEM_PORT=$SYSTEM_PORT_PREFILL \
 CUDA_VISIBLE_DEVICES=$DYN_PREFILL_WORKER_GPU \
 python -m "$WORKER_MODULE" \
   --disaggregation-mode prefill \
@@ -118,12 +124,12 @@ python -m "$WORKER_MODULE" \
   $EXTRA_ARGS \
   $PD_EXTRA_ARGS \
   --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
-  --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_ZMQ_PORT_PREFILL}\"}" &
+  --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_PORT_PREFILL}\"}" &
 
 # Start decode worker
 echo "Starting decode worker on GPU $DYN_DECODE_WORKER_GPU (${DECODE_GPU_MEM_ARGS})..."
-VLLM_NIXL_SIDE_CHANNEL_PORT=$VLLM_NIXL_SIDE_CHANNEL_PORT_DECODE \
-DYN_SYSTEM_PORT="$(dyn_port DYN_SYSTEM_PORT 2 8082)" \
+VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT_DECODE \
+DYN_SYSTEM_PORT=$SYSTEM_PORT_DECODE \
 CUDA_VISIBLE_DEVICES=$DYN_DECODE_WORKER_GPU \
 python -m "$WORKER_MODULE" \
   --disaggregation-mode decode \
@@ -134,7 +140,7 @@ python -m "$WORKER_MODULE" \
   $EXTRA_ARGS \
   $PD_EXTRA_ARGS \
   --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
-  --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_ZMQ_PORT_DECODE}\"}" &
+  --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_PORT_DECODE}\"}" &
 
 echo "=================================================="
 echo "All components started. Waiting for initialization..."
