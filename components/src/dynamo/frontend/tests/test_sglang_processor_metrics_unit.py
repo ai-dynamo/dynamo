@@ -116,6 +116,11 @@ def _install_sglang_stubs(install_module):
     _install_module(install_module, "sglang.srt.parser")
     _install_module(
         install_module,
+        "sglang.srt.parser.conversation",
+        chat_template_exists=lambda *args, **kwargs: False,
+    )
+    _install_module(
+        install_module,
         "sglang.srt.parser.jinja_template_utils",
         detect_jinja_template_content_format=lambda *args, **kwargs: "string",
         process_content_for_template_format=lambda content, *_args, **_kwargs: content,
@@ -126,6 +131,21 @@ def _install_sglang_stubs(install_module):
         ReasoningParser=_ReasoningParser,
     )
     _install_module(install_module, "sglang.srt.utils")
+    # The SGLang pre-post module pulls small helpers from
+    # dynamo.common.utils; stub the package so its __init__ (which imports
+    # endpoint_types and friends from dynamo.llm) never runs against the
+    # stubbed dynamo.llm below.
+    _install_module(install_module, "dynamo.common.utils")
+    _install_module(
+        install_module,
+        "dynamo.common.utils.engine_response",
+        trailing_stop_prefix_len=lambda *args, **kwargs: 0,
+    )
+    _install_module(
+        install_module,
+        "dynamo.common.utils.guided_json",
+        admits_only_empty_object=lambda *args, **kwargs: False,
+    )
     _install_module(
         install_module,
         "sglang.srt.utils.hf_transformers_utils",
@@ -152,6 +172,11 @@ def _load_processor_module(module_stubs):
     _install_module(install_module, "dynamo._internal", ModelDeploymentCard=object)
     _install_module(
         install_module,
+        "dynamo.common.multimodal.cache_uuid",
+        reject_unsupported_multimodal_uuids=lambda *args, **kwargs: None,
+    )
+    _install_module(
+        install_module,
         "dynamo.frontend.frontend_args",
         FrontendConfig=object,
     )
@@ -165,6 +190,7 @@ def _load_processor_module(module_stubs):
     _install_module(
         install_module,
         "dynamo.llm.exceptions",
+        HttpError=type("HttpError", (Exception,), {}),
         InvalidArgument=type("InvalidArgument", (Exception,), {}),
         Unknown=type("Unknown", (Exception,), {}),
     )
