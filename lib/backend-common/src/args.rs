@@ -28,8 +28,14 @@ use crate::disagg::DisaggregationMode;
 /// ```
 #[derive(Args, Clone, Debug)]
 pub struct CommonArgs {
-    /// Dynamo namespace for discovery routing.
-    #[arg(long, default_value = "dynamo", env = "DYN_NAMESPACE")]
+    /// Dynamo namespace for discovery routing. A non-empty
+    /// DYN_NAMESPACE_WORKER_SUFFIX is appended as "{namespace}-{suffix}".
+    #[arg(
+        long,
+        default_value = "dynamo",
+        env = "DYN_NAMESPACE",
+        value_parser = parse_worker_namespace
+    )]
     pub namespace: String,
 
     /// Component name within the namespace.
@@ -94,4 +100,64 @@ pub struct CommonArgs {
     /// Publish this worker's engine control/update routes on the RL request-plane endpoint.
     #[arg(long, default_value_t = false, env = "DYN_ENABLE_RL")]
     pub enable_rl: bool,
+}
+
+fn parse_worker_namespace(namespace: &str) -> Result<String, std::convert::Infallible> {
+    match std::env::var("DYN_NAMESPACE_WORKER_SUFFIX") {
+        Ok(suffix) if !suffix.is_empty() => Ok(format!("{namespace}-{suffix}")),
+        _ => Ok(namespace.to_owned()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::CommonArgs;
+
+    #[derive(Parser)]
+    struct TestArgs {
+        #[command(flatten)]
+        common: CommonArgs,
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn parses_namespace_without_worker_suffix() {
+        for suffix in [None, Some("")] {
+            temp_env::with_vars(
+                [
+                    ("DYN_NAMESPACE", Some("test-namespace")),
+                    ("DYN_NAMESPACE_WORKER_SUFFIX", suffix),
+                ],
+                || {
+                    let args = TestArgs::try_parse_from(["test"]).unwrap();
+                    assert_eq!(args.common.namespace, "test-namespace");
+                },
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn parses_namespace_with_worker_suffix() {
+        for (namespace, expected) in [
+            (Some("test-namespace"), "test-namespace-worker-hash"),
+            (None, "dynamo-worker-hash"),
+        ] {
+            temp_env::with_vars(
+                [
+                    ("DYN_NAMESPACE", namespace),
+                    ("DYN_NAMESPACE_WORKER_SUFFIX", Some("worker-hash")),
+                ],
+                || {
+                    let args = TestArgs::try_parse_from(["test"]).unwrap();
+                    assert_eq!(args.common.namespace, expected);
+
+                    let args = TestArgs::try_parse_from(["test", "--namespace", "cli"]).unwrap();
+                    assert_eq!(args.common.namespace, "cli-worker-hash");
+                },
+            );
+        }
+    }
 }
