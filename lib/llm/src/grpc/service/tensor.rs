@@ -28,7 +28,7 @@ use crate::http::service::{
 
 use crate::protocols::tensor;
 use crate::protocols::tensor::{
-    NvCreateTensorRequest, NvCreateTensorResponse, Tensor, TensorMetadata,
+    NvCreateTensorRequest, NvCreateTensorResponse, RequestedOutput, Tensor, TensorMetadata,
 };
 
 use crate::grpc::service::kserve::inference;
@@ -303,9 +303,19 @@ impl TryFrom<inference::ModelInferRequest> for NvCreateTensorRequest {
             },
             model: request.model_name.clone(),
             tensors: Vec::new(),
+            outputs: Vec::with_capacity(request.outputs.len()),
             parameters,
             nvext: None,
         };
+
+        // Requested outputs select which model outputs come back and how; their
+        // parameters (e.g. `classification`) are interpreted by the worker.
+        for output in &request.outputs {
+            tensor_request.outputs.push(RequestedOutput {
+                name: output.name.clone(),
+                parameters: convert_kserve_to_dynamo_params(&output.parameters)?,
+            });
+        }
 
         // iterate through inputs
         for (idx, input) in request.inputs.into_iter().enumerate() {
@@ -853,6 +863,93 @@ impl FromStr for tensor::DataType {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use inference::model_infer_request::InferRequestedOutputTensor;
+    use std::collections::HashMap;
+
+    fn param(choice: Option<ParameterChoice>) -> inference::InferParameter {
+        inference::InferParameter {
+            parameter_choice: choice,
+        }
+    }
+
+    fn classification(k: i64) -> HashMap<String, inference::InferParameter> {
+        HashMap::from([(
+            "classification".to_string(),
+            param(Some(ParameterChoice::Int64Param(k))),
+        )])
+    }
+
+    fn requested_output(
+        name: &str,
+        parameters: HashMap<String, inference::InferParameter>,
+    ) -> InferRequestedOutputTensor {
+        InferRequestedOutputTensor {
+            name: name.to_string(),
+            parameters,
+        }
+    }
+
+    fn infer_request(outputs: Vec<InferRequestedOutputTensor>) -> inference::ModelInferRequest {
+        inference::ModelInferRequest {
+            model_name: "classifier".to_string(),
+            outputs,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn requested_outputs_keep_their_parameters() {
+        let converted = NvCreateTensorRequest::try_from(infer_request(vec![
+            requested_output("OUTPUT0", classification(3)),
+            requested_output("OUTPUT1", HashMap::new()),
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            converted.outputs,
+            vec![
+                RequestedOutput {
+                    name: "OUTPUT0".to_string(),
+                    parameters: tensor::Parameters::from([(
+                        "classification".to_string(),
+                        tensor::ParameterValue::Int64(3),
+                    )]),
+                },
+                RequestedOutput {
+                    name: "OUTPUT1".to_string(),
+                    parameters: tensor::Parameters::new(),
+                },
+            ]
+        );
+        assert_eq!(
+            serde_json::to_value(&converted.outputs[0]).unwrap(),
+            serde_json::json!({"name": "OUTPUT0", "parameters": {"classification": {"int64": 3}}})
+        );
+    }
+
+    #[test]
+    fn requested_outputs_empty_are_omitted_from_json() {
+        let converted = NvCreateTensorRequest::try_from(infer_request(vec![])).unwrap();
+        assert!(converted.outputs.is_empty());
+        assert!(
+            serde_json::to_value(&converted)
+                .unwrap()
+                .get("outputs")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn requested_outputs_valueless_parameter_is_rejected() {
+        let error = NvCreateTensorRequest::try_from(infer_request(vec![requested_output(
+            "OUTPUT0",
+            HashMap::from([("classification".to_string(), param(None))]),
+        )]))
+        .unwrap_err();
+
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert!(error.message().contains("classification"));
+    }
 
     // Golden bytes hardcoded (not derived from to_le_bytes) so a symmetric
     // break in both encode/decode still fires this test.
