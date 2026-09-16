@@ -4463,6 +4463,103 @@ class TestReasoningParsing:  # FRONTEND.9 — reasoning ↔ tool-call orchestrat
         assert assembled[0]["function"]["name"] == "get_weather"
         assert json.loads(assembled[0]["function"]["arguments"]) == {"city": "New York"}
 
+    def test_required_bare_json_streams_incrementally(self, tokenizer):
+        """A guided bare-JSON tool call streams argument deltas, not one giant frame.
+
+        The guided hold-back may only defer while the buffered prefix could
+        still grow into the think tag; once the bare JSON prefix has
+        diverged, the call must flow through the regular streaming tool
+        parser so clients observe argument deltas before finish.
+        """
+        request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "Get weather",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "city": {"type": "string"},
+                                "unit": {"type": "string"},
+                                "detail": {"type": "string"},
+                            },
+                            "required": ["city", "unit", "detail"],
+                        },
+                    },
+                }
+            ],
+            "tool_choice": "required",
+        }
+        tools = convert_tools(request["tools"])
+        tool_parser, reasoning_parser = create_parsers(
+            request,
+            tool_call_parser_name="qwen25",
+            reasoning_parser_name="qwen3",
+            sglang_tools=tools,
+            force_reasoning=True,
+        )
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=tool_parser,
+            reasoning_parser=reasoning_parser,
+            sglang_tools=tools,
+            tool_call_parser_name="qwen25",
+        )
+
+        tool_json = json.dumps(
+            [
+                {
+                    "name": "get_weather",
+                    "parameters": {
+                        "city": "New York",
+                        "unit": "celsius",
+                        "detail": "Sunny with a gentle breeze throughout the day.",
+                    },
+                }
+            ]
+        )
+        token_ids = tokenizer.encode(tool_json)
+        frames = []
+        for offset in range(0, len(token_ids), 3):
+            batch = token_ids[offset : offset + 3]
+            is_last = offset + 3 >= len(token_ids)
+            choice = post.process_output(
+                {"token_ids": batch, "finish_reason": "stop" if is_last else None}
+            )
+            if choice:
+                frames.append(choice)
+
+        tool_frames = [r for r in frames if r["delta"].get("tool_calls")]
+        finish_frames = [r for r in frames if r.get("finish_reason")]
+        assert len(tool_frames) > 1, (
+            "The whole guided tool call arrived in a single frame; "
+            f"argument deltas must stream (got {len(tool_frames)} frame(s))"
+        )
+        assert frames.index(tool_frames[0]) < frames.index(
+            finish_frames[-1]
+        ), "The first tool-call frame must precede the finish frame."
+
+        args = ""
+        name = None
+        finish_reason = None
+        for r in frames:
+            for entry in r["delta"].get("tool_calls", []):
+                fn = entry.get("function") or {}
+                if fn.get("name"):
+                    name = fn["name"]
+                args += fn.get("arguments") or ""
+            if r.get("finish_reason"):
+                finish_reason = r["finish_reason"]
+        assert name == "get_weather"
+        assert finish_reason == "tool_calls"
+        assert json.loads(args) == {
+            "city": "New York",
+            "unit": "celsius",
+            "detail": "Sunny with a gentle breeze throughout the day.",
+        }
+
 
 # ---------------------------------------------------------------------------
 # Utility functions

@@ -67,6 +67,12 @@ class SglangPreprocessResult:
 # A static, per-server boolean is plenty: per-request decoding of prompt
 # tails adds latency on the hot path with nothing to show for it. The
 # per-request reasoning knobs live downstream, matching sglang's API.
+# A guided tool-call array whose first element is an object: '[', optional
+# whitespace, then '{'. The earliest streaming evidence that a
+# bracket-leading guided output is a bare JSON call and not a tagless
+# reasoning preamble that happens to start with '['.
+_GUIDED_BARE_JSON_RE = re.compile(r"\[\s*\{")
+
 _FORCE_REASONING_PATTERNS = (
     # qwen3-family: <|im_start|>assistant\n<think>\n
     re.compile(r"<\|im_start\|>assistant\\n<think>\\n"),
@@ -1062,6 +1068,10 @@ class SglangStreamingPostProcessor:
         self._pending_guided_reasoning_parts: list[str] | None = (
             [] if self._is_json_array_parser and reasoning_parser is not None else None
         )
+        # Set once a guided prefix starting with '['/'{' has diverged from
+        # every think-tag prefix: from then on the guided output bypasses the
+        # reasoning parser and streams straight to the tool-call pipeline.
+        self._guided_bare_json_released: bool = False
         # The frontend owns text shaping. Keep every stop token in the raw
         # engine stream, but exclude a matched stop suffix when decoding
         # user-visible text.
@@ -1444,6 +1454,10 @@ class SglangStreamingPostProcessor:
         if pending is None:
             if not delta_text:
                 return None, ""
+            if self._guided_bare_json_released:
+                # Bare-JSON already confirmed: keep streaming the guided
+                # output straight to the tool-call pipeline.
+                return None, delta_text
             reasoning_text, normal_text = self.reasoning_parser.parse_stream_chunk(
                 delta_text
             )
@@ -1457,19 +1471,33 @@ class SglangStreamingPostProcessor:
         detector = getattr(self.reasoning_parser, "detector", None)
         think_start = getattr(detector, "think_start_token", "")
         starts_reasoning = bool(think_start and stripped.startswith(think_start))
-        could_be_partial_start = bool(
-            stripped
-            and think_start
-            and len(stripped) < len(think_start)
-            and think_start.startswith(stripped)
+        # The prefix only stays ambiguous while it can still grow into the
+        # think tag (any-length prefix match). A bracket-leading guided
+        # output is also ambiguous until the JSON-array shape is
+        # unmistakable: reasoning without an open tag can itself start
+        # with '[' (e.g. "[check the request]"), so only '[\s*{' — a
+        # call array opening with its first object — identically settles
+        # it as bare JSON. Once settled, release the buffer straight to
+        # the tool-call pipeline (NOT through the reasoning parser, which
+        # force_reasoning would filter as reasoning) so a long guided call
+        # streams argument deltas instead of one giant first frame at
+        # finish (client-observed TTFT == E2E).
+        could_grow_into_think = bool(
+            stripped and think_start and think_start.startswith(stripped)
         )
+        bare_json_shape = bool(_GUIDED_BARE_JSON_RE.match(stripped))
 
         if not finish_reason and (
             not stripped
-            or could_be_partial_start
-            or (stripped[0] in "[{" and not starts_reasoning)
+            or could_grow_into_think
+            or (stripped[0] in "[{" and not bare_json_shape)
         ):
             return None, ""
+
+        if not finish_reason and bare_json_shape:
+            self._pending_guided_reasoning_parts = None
+            self._guided_bare_json_released = True
+            return None, buffered
 
         self._pending_guided_reasoning_parts = None
         if finish_reason and _try_parse_json_array(buffered) is not None:
