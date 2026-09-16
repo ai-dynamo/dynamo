@@ -1874,7 +1874,7 @@ class KvRouterConfig:
             enable_session_prefix_index: Track per-session block lineage in a logical prefix index that outlives engine cache eviction (default: False).
                 Lineage is fed from two sources: routing-lookup matches, and stored-block KV events that carry a session ID. Stored blocks without a session ID do not update lineage.
                 The index neither holds nor restores KV cache, so a match is a routing hint rather than a guarantee that the blocks are still resident.
-                Retention is bounded: a session is released when a request marks it final, and failing that the least recently used session is evicted once the tracked-session cap is reached.
+                Session lifecycle cleanup and retention bounds are not yet implemented.
             shared_cache_multiplier: Credit multiplier for shared cache hits beyond the device prefix (default: 0.0).
             shared_cache_type: External shared KV cache type, "none" or "hicache" (default: "none").
             conditional_disagg_enabled: Enable conditional-disagg bypass from prefill to decode (default: False).

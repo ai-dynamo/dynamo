@@ -877,7 +877,7 @@ pub struct KvRouterConfig {
     #[serde(default)]
     pub serve_indexer: bool,
 
-    /// Enable bounded per-session logical prefix tracking.
+    /// Enable per-session logical prefix tracking.
     #[serde(default, skip_serializing_if = "is_default")]
     pub enable_session_prefix_index: bool,
 
