@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from sglang.srt.constants import GPU_MEMORY_ALL_TYPES
 from sglang.srt.managers.io_struct import (
     ContinueGenerationReqInput,
     PauseGenerationReqInput,
@@ -21,10 +22,14 @@ class SGLangEnginePauseController:
         self._engine = engine
         self._is_paused = False
         self._generation_paused = False
+        # Tags released and not yet resumed. Empty means nothing is offloaded, which
+        # is what ``is_paused`` reports on, so a partial resume stays "paused".
+        self._released_tags: set[str] = set()
 
     @property
     def is_paused(self) -> bool:
-        return self._is_paused
+        # Keep the worker paused while any memory region remains unmapped.
+        return self._is_paused or bool(self._released_tags)
 
     @property
     def needs_resume_recovery(self) -> bool:
@@ -54,6 +59,7 @@ class SGLangEnginePauseController:
             raise
 
         self._is_paused = True
+        self._released_tags = set(tags) if tags else set(GPU_MEMORY_ALL_TYPES)
         return True
 
     async def resume(self, tags: list[str] | None = None) -> bool:
@@ -65,6 +71,11 @@ class SGLangEnginePauseController:
                 ResumeMemoryOccupationReqInput(tags=tags),
                 None,
             )
+            self._released_tags -= set(tags) if tags else set(GPU_MEMORY_ALL_TYPES)
+            if self._released_tags:
+                # Generation must stay paused until every released region is back.
+                return True
+            self._is_paused = False
         if self._generation_paused:
             await self._engine.tokenizer_manager.continue_generation(
                 ContinueGenerationReqInput()
@@ -73,5 +84,7 @@ class SGLangEnginePauseController:
         return True
 
     def mark_resumed(self) -> None:
+        if self._released_tags:
+            return
         self._is_paused = False
         self._generation_paused = False
