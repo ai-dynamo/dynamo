@@ -59,3 +59,8 @@
 # docs.rs pages for the 1.4.0 crates exist only after the GA crates publish.
 # Remove after v1.4.0 crates are on crates.io.
 ^https://docs\.rs/[a-z0-9-]+/1\.4\.0$
+
+# The Solar Open2 250B recipe page is introduced by the same PR as its docs link,
+# so the rendered docs URL 404s from CI until the page is published. Remove this
+# entry once the page is live.
+^https://docs\.nvidia\.com/dynamo/latest/recipes/model-recipes/solar-open2-250b$
