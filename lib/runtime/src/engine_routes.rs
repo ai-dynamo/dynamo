@@ -232,6 +232,10 @@ impl EngineRouteRegistry {
             None => default.served_by_default(),
         };
         if !permitted {
+            // Defense-in-depth: a denied route must always end up absent. If a
+            // prior registration already wired this name, drop it so the policy
+            // denial can't leave a stale callback reachable via the dispatch path.
+            self.routes.write().unwrap().remove(route);
             tracing::debug!(
                 route,
                 "engine route not registered (disabled by policy/default)"
@@ -491,6 +495,21 @@ mod tests {
                 );
             },
         );
+    }
+
+    #[test]
+    fn test_denied_reregistration_removes_prior_callback() {
+        // Defense-in-depth: a route registered while permitted, then re-registered
+        // under a policy/default that denies it, must end up absent — not leave the
+        // earlier callback reachable.
+        let cb = || -> EngineRouteCallback {
+            Arc::new(|_| Box::pin(async { Ok(serde_json::json!({"ok": true})) }))
+        };
+        let registry = EngineRouteRegistry::with_policy(EngineRoutePolicy::AllowAll);
+        registry.register("control/foo", cb());
+        assert!(registry.get("control/foo").is_some());
+        registry.register_with_default("control/foo", cb(), RouteDefault::Gated(false));
+        assert!(registry.get("control/foo").is_none());
     }
 
     #[tokio::test]
