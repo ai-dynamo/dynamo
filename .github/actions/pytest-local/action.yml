@@ -38,6 +38,12 @@ inputs:
     default: 'true'
   hf_token:
     required: false
+  triton_artifactory_user:
+    description: 'Artifactory username, for the Triton suites that download QA models from it'
+    required: false
+  triton_artifactory_token:
+    description: 'Artifactory token, for the Triton suites that download QA models from it'
+    required: false
   enable_coverage:
     description: 'Enable coverage collection (true/false)'
     required: false
@@ -66,6 +72,10 @@ inputs:
     description: 'Is this a GPU test job?'
     required: false
     default: 'false'
+  verify_gpu:
+    description: 'Check the GPU through torch before running GPU tests. Set false for images without torch (Triton), leaving the suite to check the GPU it needs.'
+    required: false
+    default: 'true'
   dd_flaky_retry_enabled:
     description: 'Override Datadog automatic test retries for this pytest invocation; empty inherits the job environment'
     required: false
@@ -103,12 +113,15 @@ runs:
         DYNAMO_TEST_FRAMEWORK: ${{ inputs.framework }}
         HF_XET_HIGH_PERFORMANCE: 1
         PYTEST_DD_FLAKY_RETRY_ENABLED: ${{ inputs.dd_flaky_retry_enabled }}
+        TRITON_ARTIFACTORY_USER: ${{ inputs.triton_artifactory_user }}
+        TRITON_ARTIFACTORY_TOKEN: ${{ inputs.triton_artifactory_token }}
+        VERIFY_GPU: ${{ inputs.verify_gpu }}
       run: |
         # Sanitize test_type for the JUnit and coverage filenames this step
         # writes: remove commas and spaces.
         STR_TEST_TYPE=$(echo "${TEST_TYPE}" | tr ', ' '_')
 
-        if [[ "${GPU_TESTS}" == "true" ]]; then
+        if [[ "${GPU_TESTS}" == "true" && "${VERIFY_GPU}" != "false" && "${PYTEST_MARKS}" != *"triton_qa"* ]]; then
           # Only GPU tests require MinIO (LoRA tests). Wait for the job service.
           echo "⏳ Waiting for MinIO to be ready..."
           MAX_ATTEMPTS=30
