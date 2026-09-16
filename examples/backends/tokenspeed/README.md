@@ -204,8 +204,12 @@ Seven short requests completed on this GB300 configuration, including four
 unforced repeats that selected the prefill worker holding their prefix. Native
 prefill logs reported 832 or 896 reused tokens, and the cold control reported
 zero. These requests establish generation, transfer, and cache-routing
-feasibility. The configured 131,072-token limit is not a measured long-context
-or throughput result.
+feasibility. Three additional AgentX prompt checks completed with exactly
+129,133, 42,935, and 108,355 input tokens reported by the frontend, each generating
+one output token. Native logs confirm long prefill and transfer completion.
+TokenSpeed finishes one-token requests before a decode forward, so these checks
+do not exercise decode attention over long transferred KV. They are excluded
+from throughput measurements; the short multi-token requests verify decode.
 
 ## Verify Generation and KV Routing
 
