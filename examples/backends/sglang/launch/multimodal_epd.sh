@@ -200,6 +200,14 @@ if [[ "$SINGLE_GPU" == "true" ]]; then
         # report the PD worker's exit status now instead of starting it.
         echo "PD worker exited during startup; not starting the encode worker."
         wait_any_exit
+    elif (( _gate_rc != 0 )); then
+        # Timed out with the PD worker still alive, so it is still loading -- a
+        # cold weight cache outlasts 120s where a warm one needs about 30s.
+        # Deliberately not fatal: the worker still registers backend.generate
+        # when it finishes, so fall back to the unserialized start rather than
+        # turn a slow launch into a failed one. Only an exited worker (above)
+        # can never recover.
+        echo "PD worker not ready after 120s; starting the encode worker anyway."
     fi
 fi
 
