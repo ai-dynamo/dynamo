@@ -852,16 +852,22 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         # Use Future pattern for request ID - will be set when first response arrives
         request_id_future: asyncio.Future[str] = asyncio.Future()
+        request_ids: set[str] = set()
         first_output_seen = False
-        async with self._cancellation_monitor(request_id_future, context):
+        async with self._cancellation_monitor(request_id_future, context, request_ids):
             async for res in stream_source:
                 meta_info = res.get("meta_info", {})
-                # Extract SGLang request ID from the first response and set the future
-                if not request_id_future.done():
-                    sglang_request_id = meta_info.get("id")
-                    if sglang_request_id:
+                sglang_request_id = meta_info.get("id")
+                if sglang_request_id:
+                    request_ids.add(sglang_request_id)
+                    if not request_id_future.done():
                         request_id_future.set_result(sglang_request_id)
                         logging.debug(f"New SGLang Request ID: {sglang_request_id}")
+                    if meta_info.get("finish_reason"):
+                        request_ids.discard(sglang_request_id)
+                if context.is_stopped():
+                    self._abort_requests(request_ids, context)
+                    continue
 
                 # Check cancellation before yielding to allow proper cleanup.
                 # This lets SGLang proceed to the second token generation, which will
