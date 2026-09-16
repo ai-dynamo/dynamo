@@ -360,9 +360,10 @@ func (r *componentWorkloadsReconciler) deleteOrphanedElasticEPFollowers(
 		// DYN-3838 records the leader surviving at restart=0 with inference stopped, DYN-2660
 		// the orphaned placement group then blocking every later scale-up until the pod
 		// restarts, and DYN-3686 classifies that state as a recovery-path fault, not a
-		// scale-down signal. Vacuous for the gate-disable case today (a follower rests at zero;
-		// only an external scale client moves it), it is the precondition a Phase 7 drain will
-		// satisfy and makes "gate off stops scaling" leave running capacity alone.
+		// scale-down signal. A follower now launches at its declared width rather than at
+		// zero, so this guard is load-bearing from the first reconcile: it is the precondition
+		// a Phase 7 drain will satisfy, and it makes "gate off stops scaling" leave running
+		// capacity alone instead of tearing it out.
 		if replicas := existing.Spec.Replicas; replicas != nil && *replicas > 0 {
 			logger.Info(
 				"Refusing to delete an elastic-EP follower that still has replicas; scale it to zero first",

@@ -406,8 +406,9 @@ func ElasticEPFollowerReplicas(leaderContainer *corev1.Container) int32 {
 
 // synthesizeElasticEPFollowerDCD derives the follower DCD for an elastic-EP leader, or nil
 // when the leader is not a single-pod elastic-EP Ray launch. The follower is a deep copy of
-// the leader (same image, GPU, model args) resting at zero replicas, rendered as
-// RoleFollower. Its component identity is "<leader>-flw", so its Deployment, Service, and
+// the leader (same image, GPU, model args) seeded at the declared launch width -- N-1 for
+// --data-parallel-size N -- and rendered as RoleFollower rather than a serve. Its component
+// identity is "<leader>-flw", so its Deployment, Service, and
 // selector never collide with the leader's, and it carries the leader's Service name on an
 // annotation rather than deriving it.
 //
@@ -426,8 +427,8 @@ func synthesizeElasticEPFollowerDCD(leaderDCD *v1beta1.DynamoComponentDeployment
 	}
 	// Synthesis needs more than Service emission: a Ray head must actually start. A leader
 	// with no explicit Command runs its image ENTRYPOINT, which the operator cannot
-	// reconstruct, so injectElasticEPRayLaunchFlags injects no head and a follower would poll
-	// a /live endpoint that never comes up. Such a leader still gets the Service (harmless,
+	// reconstruct, so injectElasticEPRayLaunchFlags injects no head -- and a follower would
+	// then poll a Ray port that never opens. Such a leader still gets the Service (harmless,
 	// and it may gain a Command later), but no follower.
 	leaderContainer := GetMainContainer(&leaderDCD.Spec.DynamoComponentDeploymentSharedSpec)
 	if leaderContainer == nil || len(leaderContainer.Command) == 0 {
@@ -1256,7 +1257,12 @@ func GenerateElasticEPHeadlessService(params ComponentServiceParams) *corev1.Ser
 					Protocol:   corev1.ProtocolTCP,
 				},
 				{
-					// Leader system/health port; the follower's /live gate polls it.
+					// Leader system/health port. Nothing polls it through this Service
+					// today -- the follower waits on the Ray GCS port above, and the
+					// multinode worker's /live gate reaches its leader by the LWS
+					// hostname, not here. It is published so the leader's engine-control
+					// endpoint is reachable at the same stable name a scale client
+					// already has to know (Phase 6/7 calls scale_elastic_ep on it).
 					Name:       commonconsts.DynamoSystemPortName,
 					Port:       commonconsts.DynamoSystemPort,
 					TargetPort: intstr.FromString(commonconsts.DynamoSystemPortName),
