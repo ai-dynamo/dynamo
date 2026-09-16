@@ -5588,6 +5588,12 @@ class InstrumentedScheduler(AsyncScheduler):
                     # Recurrent state at a deep chain position cannot be
                     # truncated to this point's context. Allocate private
                     # states instead; the worker initializes their values.
+                    # TODO: Support real KDA by checkpointing recurrent and
+                    # conv state at each admission prefix (measured context
+                    # minus one), then copying into private slots after native
+                    # zeroing and outside timed steps. Advance warmup contexts
+                    # in ascending order and bound snapshot residency; validate
+                    # against normal prefill/decode and preserve source state.
                     first, end = recurrent_shadow_range(ctx_len, headroom, bs)
                     fresh = block_pool.get_new_blocks(end - first)
                     staged.append(
