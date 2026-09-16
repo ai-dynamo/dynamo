@@ -3242,7 +3242,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             "tokens": external_lookups,
                             "accuracy": external_lookup_accuracy,
                         },
-                        {"event": "found", "tokens": external_hits, "accuracy": "exact"},
+                        {
+                            "event": "found",
+                            "tokens": external_hits,
+                            "accuracy": "exact",
+                        },
                         {"event": "used", "tokens": external_hits, "accuracy": "exact"},
                     ],
                 },

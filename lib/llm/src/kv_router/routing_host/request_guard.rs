@@ -212,9 +212,8 @@ fn valid_cache_loss_tier_observations(
                 "lower_bound" => "lower_bound",
                 _ => return None,
             };
-            match event {
-                "used" => used_tokens = used_tokens.checked_add(observation.tokens)?,
-                _ => {}
+            if event == "used" {
+                used_tokens = used_tokens.checked_add(observation.tokens)?;
             }
             observations.push(ValidatedCacheLossTierObservation {
                 tier: tier.tier.clone(),
