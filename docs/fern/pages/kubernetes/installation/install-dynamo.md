@@ -139,7 +139,7 @@ helm install dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
   # Option A (install=true): Dynamo installs and manages Grove/KAI as bundled subcharts (dev/testing):
   # --set "global.grove.install=true" \
   # --set "global.kai-scheduler.install=true" \
-  # --set-string "kai-scheduler.scheduler.args.default-staleness-grace-period=-1" \
+  # --set-string "kai-scheduler.scheduler.args.default-staleness-grace-period=-1s" \
   # Option B (enabled=true): Grove/KAI are already installed externally (production):
   # --set "global.grove.enabled=true" \
   # --set "global.kai-scheduler.enabled=true" \

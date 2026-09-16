@@ -5,7 +5,7 @@ title: Install
 subtitle: Pull the enterprise images and Helm chart, and reference them from your deployments.
 ---
 
-The Dynamo Enterprise install path parallels the open-source install path. It uses the same Kubernetes shape, the same values, and the same operational surface. The substantive differences are the container image references and the Helm chart name.
+The Dynamo Enterprise Support install path parallels the open-source install path. It uses the same Kubernetes shape, the same values, and the same operational surface. The substantive differences are the container image references and the Helm chart name.
 
 For the full walkthrough of cluster prerequisites, accelerator support, optional multinode orchestration, RDMA, Prometheus, and shared model storage, follow the [Kubernetes Installation Guide](../kubernetes/installation/install-dynamo.md). The steps below cover only what changes for the enterprise images and chart.
 
@@ -92,4 +92,4 @@ For the full DGD walkthrough (choosing a model, sizing parallelism, applying and
 
 - **Image references.** Enterprise and open-source images both resolve under `nvcr.io/nvidia/ai-dynamo/`. The enterprise repository names carry an `-enterprise` suffix, which is the only difference.
 - **Helm chart.** Enterprise chart: `dynamo-platform-enterprise`. Open-source chart: `dynamo-platform`. The values schema is the same.
-- **Support scope.** Only the images and chart listed above are eligible for commercial support. The Python wheels, Rust crates, and non-listed component containers in the same release remain community-supported.
+- **Support scope.** Only the images and chart listed above are eligible for enterprise support. The Python wheels, Rust crates, and non-listed component containers in the same release remain community-supported.
