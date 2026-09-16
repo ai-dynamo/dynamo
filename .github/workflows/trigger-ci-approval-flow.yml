@@ -25,10 +25,11 @@
 #    only the head created by that synchronization; it does not make the PR or contributor trusted
 #    for later pushes.
 # 4. `glamr-agent` posts `@dynamo-ops please run full CI for <full-head-sha>`, optionally
-#    preceded by a label and colon. The SHA must match the open fork PR's current head.
+#    preceded by a label and colon. The SHA must match the open fork PR's head when resolved.
 #
-# All paths require every commit currently in the PR to have a signature that GitHub reports as
-# verified. If any commit is unsigned, the workflow does not post `/ok to test`. For PRs authored
+# All paths require every commit in the captured base-to-head comparison to have a signature
+# that GitHub reports as verified. If any commit is unsigned, the workflow does not post
+# `/ok to test`. For PRs authored
 # by maintainers, it explains which commits failed verification. Approved external contributors
 # receive guidance for either signing the commits or requesting manual approval. Other external
 # contributors wait for manual approval without receiving an unsigned-commit comment. Repository-
@@ -47,9 +48,11 @@
 #
 # Desired state
 # -------------
-# The workflow posts an `/ok to test` command containing the current PR head SHA only after the
-# current head has a trusted approval path and all commits are verified. Every later push creates a
-# different head SHA and causes the complete approval process to run again.
+# The workflow posts `/ok to test <captured-head-sha>` after checking its approval path and
+# verifying every commit in the captured base-to-head comparison. The final read requires the
+# PR to remain open with the same base and head, but that read and comment creation are separate
+# operations. The PR may change before publication; the consumer must enforce the command's
+# SHA when approval is required. Later heads require their own approval evaluation.
 
 name: Trigger CI Approval Flow
 
@@ -330,6 +333,8 @@ jobs:
             echo "CI approval already posted for $PR_SHA."
             exit 0
           fi
+          # This read can reject an already-stale request, but cannot prevent a later push.
+          # Keep the command below bound to the captured, verified PR_SHA.
           pr=$(gh api "repos/$REPO_OWNER/$REPO_NAME/pulls/$PR_NUMBER")
           jq -e --arg sha "$PR_SHA" --arg base "$PR_BASE" \
             '.state == "open" and .head.sha == $sha and .base.sha == $base' <<< "$pr" > /dev/null || exit 0
