@@ -24,6 +24,7 @@ from yarl import URL
 
 from dynamo.common import http as mm_http
 from dynamo.common.http import AiohttpClient
+from dynamo.common.http._ssrf_resolver import BlocklistResolver
 from dynamo.common.http.url_validator import UrlValidationPolicy
 
 pytestmark = [
@@ -124,6 +125,13 @@ def _make_client_with_session(session) -> AiohttpClient:
 
 _PERMISSIVE = UrlValidationPolicy(allow_http=True, allow_private_ips=True)
 
+# Building the real connector trips aiohttp's notice that ``enable_cleanup_closed``
+# is a no-op on Python >= 3.12.7. That flag is pre-existing on main, so this is
+# scoped to the tests that build a real connector rather than ignored repo-wide.
+_allows_cleanup_closed_notice = pytest.mark.filterwarnings(
+    "ignore:enable_cleanup_closed ignored because:DeprecationWarning"
+)
+
 
 async def test_fetch_bytes_returns_body_on_200() -> None:
     response = _FakeResponse(status=200, body=b"hello")
@@ -187,3 +195,45 @@ async def test_redirect_resolved_through_policy_path() -> None:
 
     body = await client.fetch_bytes("https://h/x.png", 30.0, policy=_PERMISSIVE)
     assert body == b"final"
+
+
+@_allows_cleanup_closed_notice
+async def test_build_session_installs_the_connect_time_resolver() -> None:
+    """The shared connector carries the connect-time resolver.
+
+    Every fetch goes through this one connector, so losing the ``resolver=``
+    wiring silently drops the connect-time check for the whole process while
+    the resolver's own unit tests stay green.
+    """
+    client = AiohttpClient()
+    session = client._build_session()
+    try:
+        assert isinstance(session.connector._resolver, BlocklistResolver)
+    finally:
+        await session.close()
+
+
+@_allows_cleanup_closed_notice
+async def test_connector_resolver_ignores_a_permissive_per_call_policy(
+    monkeypatch,
+) -> None:
+    """A per-request ``allow_private_ips=True`` must not loosen the connector.
+
+    The connector is shared across every caller, so it is keyed to the
+    deployment-wide env baseline instead. ``_PERMISSIVE`` above is a per-call
+    policy and deliberately has no bearing here.
+    """
+    monkeypatch.delenv("DYN_MM_ALLOW_INTERNAL", raising=False)
+    client = AiohttpClient()
+    session = client._build_session()
+    try:
+        assert session.connector._resolver._allow_private_ips is False
+    finally:
+        await session.close()
+
+    monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "1")
+    session = client._build_session()
+    try:
+        assert session.connector._resolver._allow_private_ips is True
+    finally:
+        await session.close()

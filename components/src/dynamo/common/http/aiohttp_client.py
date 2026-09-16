@@ -63,22 +63,21 @@ class AiohttpClient(HttpClient):
         )
 
     def _build_session(self) -> aiohttp.ClientSession:
-        connector_kwargs = dict(
+        connector = aiohttp.TCPConnector(
             limit=self._config.max_connections,
             # Single-origin fan-out is the whole point; capping per-host
             # would defeat it. Hard-coded rather than env-tunable.
             limit_per_host=0,
             keepalive_timeout=self._config.keepalive_timeout,
             enable_cleanup_closed=True,
+            # Connect-time SSRF backstop against DNS rebinding (see _ssrf_resolver).
+            # Deliberately keyed to the env baseline, not the per-call fetch policy:
+            # this shared connector must not let a per-request allow_private_ips=True
+            # loosen the SSRF backstop. DYN_MM_ALLOW_INTERNAL is the deployment knob.
+            resolver=BlocklistResolver(
+                allow_private_ips=UrlValidationPolicy.from_env().allow_private_ips
+            ),
         )
-        # Connect-time SSRF backstop against DNS rebinding (see _ssrf_resolver).
-        # Deliberately keyed to the env baseline, not the per-call fetch policy:
-        # this shared connector must not let a per-request allow_private_ips=True
-        # loosen the SSRF backstop. DYN_MM_ALLOW_INTERNAL is the deployment knob.
-        connector_kwargs["resolver"] = BlocklistResolver(
-            allow_private_ips=UrlValidationPolicy.from_env().allow_private_ips
-        )
-        connector = aiohttp.TCPConnector(**connector_kwargs)
         return aiohttp.ClientSession(connector=connector, trust_env=True)
 
     async def _get_session(self) -> aiohttp.ClientSession:
