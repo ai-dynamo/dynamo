@@ -1981,7 +1981,7 @@ fn fail_client_connection_bundle(
         %bundle_id,
         failure_path,
         ?remote,
-        %reason,
+        reason,
         "QUIC response connection bundle invariant failed"
     );
     for (_, entry) in contexts.lock().drain() {
