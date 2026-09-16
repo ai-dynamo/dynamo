@@ -23,6 +23,7 @@ from tests.serve.common import (
     params_with_model_mark,
     run_serve_deployment,
 )
+from tests.utils.device import detect_target_device
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payloads import (
     AudioSpeechPayload,
@@ -261,4 +262,11 @@ def test_omni_serve_deployment(
     config = dataclasses.replace(
         vllm_omni_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
     )
-    run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
+    extra_env = (
+        {"_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES": "536870912"}
+        if config.name == "omni_audio" and detect_target_device() == "xpu"
+        else None
+    )
+    run_serve_deployment(
+        config, request, ports=dynamo_dynamic_ports, extra_env=extra_env
+    )

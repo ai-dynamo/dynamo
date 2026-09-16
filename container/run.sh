@@ -286,7 +286,7 @@ get_options() {
 
     if [ -n "$HF_HOME" ]; then
         mkdir -p "$HF_HOME"
-        if [[ ${USER} == "root" ]] || [[ ${USER} == "0" ]]; then
+        if [[ ${USER%%:*} == "root" ]] || [[ ${USER%%:*} == "0" ]]; then
             HF_HOME_TARGET="/root/.cache/huggingface"
         else
             HF_HOME_TARGET="/home/dynamo/.cache/huggingface"

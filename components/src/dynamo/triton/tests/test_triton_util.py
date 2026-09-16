@@ -6,6 +6,7 @@ and Dynamo <-> NumPy tensor conversion helpers."""
 
 import re
 
+import ml_dtypes
 import numpy as np
 import pytest
 
@@ -102,6 +103,7 @@ def test_triton_to_dynamo_dtype_covers_supported_types():
         "INT32",
         "INT64",
         "FP16",
+        "BF16",
         "FP32",
         "FP64",
         "BYTES",
@@ -138,6 +140,24 @@ def test_dynamo_tensor_to_numpy_float32_preserves_shape():
     assert arr.dtype == np.float32
     assert arr.shape == (2, 2)
     np.testing.assert_array_equal(arr, np.array([[1.0, 2.0], [3.0, 4.0]], np.float32))
+
+
+def test_dynamo_tensor_to_numpy_float16():
+    """Float16 goes to a native NumPy float16 array (DLPack-compatible on
+    the response side)."""
+    arr = dynamo_tensor_to_numpy(_tensor("IN", "Float16", [3], [1.5, -2.25, 0.5]))
+    assert arr.dtype == np.float16
+    np.testing.assert_array_equal(arr, np.array([1.5, -2.25, 0.5], np.float16))
+
+
+def test_dynamo_tensor_to_numpy_bfloat16():
+    """BFloat16 goes to an ml_dtypes.bfloat16 array. NumPy has no native
+    bfloat16, but tritonclient.utils.triton_to_np_dtype('BF16') returns
+    ml_dtypes.bfloat16, which is what tritonserver's Python bindings expect
+    for a BF16 input tensor."""
+    arr = dynamo_tensor_to_numpy(_tensor("IN", "BFloat16", [3], [1.5, -2.25, 0.5]))
+    assert arr.dtype == ml_dtypes.bfloat16
+    np.testing.assert_array_equal(arr, np.array([1.5, -2.25, 0.5], ml_dtypes.bfloat16))
 
 
 def test_dynamo_tensor_to_numpy_bytes_yields_object_array():

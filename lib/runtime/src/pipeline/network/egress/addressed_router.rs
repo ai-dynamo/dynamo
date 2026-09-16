@@ -30,6 +30,7 @@ use crate::pipeline::network::ResponsePlaneMode;
 use crate::pipeline::network::ResponseService;
 use crate::pipeline::network::ResponseType;
 use crate::pipeline::network::StreamOptions;
+use crate::pipeline::network::StreamPrologueError;
 use crate::pipeline::network::StreamProvider;
 use crate::pipeline::network::StreamReceiver;
 use crate::pipeline::network::StreamSender;
@@ -49,6 +50,72 @@ use std::task::{Context, Poll};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_stream::{StreamExt, StreamNotifyClose, wrappers::ReceiverStream};
 use tracing::Instrument;
+
+/// Error reasons that must never be attached as the cause of a pre-stream
+/// failure, because migration classification walks the whole cause chain.
+///
+/// This must match `MIGRATION_BLOCKING_REASONS` in `lib/llm/src/migration.rs`.
+pub(crate) const MIGRATION_SENSITIVE_ERROR_REASONS: &[&str] = &[
+    "request.cancelled",
+    "backend.cancelled",
+    "capacity.exhausted",
+    "capacity.pool_exhausted",
+];
+
+/// Whether any link of `err`'s chain carries a migration-sensitive reason.
+fn is_migration_sensitive(err: &DynamoError) -> bool {
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(source) = current {
+        if let Some(error) = source.downcast_ref::<DynamoError>()
+            && MIGRATION_SENSITIVE_ERROR_REASONS.contains(&error.reason().as_str())
+        {
+            return true;
+        }
+        current = source.source();
+    }
+    false
+}
+
+/// Build the error returned when the worker fails before any response bytes.
+///
+/// The outer type stays [`ErrorType::CannotConnect`], so retry classification
+/// of the outer error is unchanged. A typed error from the worker's prologue is
+/// attached as the cause, which consumers reach with
+/// the semantic migration classifier.
+///
+/// Because that walk covers the whole chain, an attached cause is as visible as
+/// the outer type, so causes typed one of [`MIGRATION_SENSITIVE_ERROR_REASONS`]
+/// are withheld rather than attached. The worker's text stays in the message
+/// either way; only the machine-readable type is withheld.
+pub(crate) fn pre_stream_failure_error(error: StreamPrologueError) -> DynamoError {
+    let builder = DynamoError::builder()
+        .error_type(ErrorType::CannotConnect)
+        .message(format!(
+            "Worker generate() failed before response stream: {error}"
+        ));
+
+    match error.typed_error {
+        Some(typed) if !is_migration_sensitive(&typed) => builder.cause(typed).build(),
+        _ => builder.build(),
+    }
+}
+
+/// White-box handles for the cross-crate tests in `dynamo-llm`. Gated so a
+/// normal build of this crate exposes no public API for them.
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub mod testing {
+    use super::{DynamoError, StreamPrologueError};
+
+    /// The semantic reason set is pinned by a cross-crate test in `lib/llm/src/migration.rs`.
+    pub fn migration_sensitive_error_reasons() -> &'static [&'static str] {
+        super::MIGRATION_SENSITIVE_ERROR_REASONS
+    }
+
+    pub fn pre_stream_failure_error(error: StreamPrologueError) -> DynamoError {
+        super::pre_stream_failure_error(error)
+    }
+}
 
 const FIRST_RESPONSE_GUARD_CONTEXT_KEY: &str = "dynamo.request_plane.first_response_guard";
 // A timeout cannot safely release registered memory while a remote read may
@@ -775,20 +842,7 @@ impl AddressedPushRouter {
         let response_stream = match response_stream_provider.await {
             Ok(Ok(stream)) => stream,
             Ok(Err(e)) => {
-                // generate() failed before any response bytes; migrate via
-                // CannotConnect since the dominant cause is a worker-local
-                // setup/version issue. The wire prologue carries only an
-                // opaque string today, so app-level rejections also retry
-                // -- safe because no side effects are visible yet. Follow-up:
-                // structured prologue error type for finer routing.
-                return Err(anyhow::anyhow!(
-                    DynamoError::builder()
-                        .error_type(ErrorType::CannotConnect)
-                        .message(format!(
-                            "Worker generate() failed before response stream: {e}"
-                        ))
-                        .build()
-                ));
+                return Err(anyhow::anyhow!(pre_stream_failure_error(e)));
             }
             Err(_recv_err) => {
                 // oneshot dropped: either the discovery watcher cancelled
