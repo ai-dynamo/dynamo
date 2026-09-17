@@ -1,10 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for the DGDC reconcile-diff algorithm (tracking issue #13545,
-item 5). Pure logic, no Kubernetes client needed -- every test constructs
-plain dataclasses directly."""
-
 from __future__ import annotations
 
 import pytest
