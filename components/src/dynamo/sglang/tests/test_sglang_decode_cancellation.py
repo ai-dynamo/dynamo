@@ -550,6 +550,32 @@ async def test_decode_cancellation_drains_buffered_empty_chunk(
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(5)
+@pytest.mark.parametrize("submitted_request_id", [None, "internal-request-id_0"])
+async def test_cancellation_monitor_aborts_parallel_ids_on_stream_close(
+    decode_cancellation_case, submitted_request_id
+):
+    case = decode_cancellation_case
+    request_id_future = asyncio.get_running_loop().create_future()
+    request_id_future.set_result("internal-request-id_0")
+    request_ids = {"internal-request-id_0", "internal-request-id_1"}
+
+    async with case.handler._cancellation_monitor(
+        request_id_future,
+        case.context,
+        submitted_request_id=submitted_request_id,
+        request_ids=request_ids,
+    ):
+        pass
+
+    assert set(case.abort_calls) == {
+        ("internal-request-id_0", False),
+        ("internal-request-id_1", False),
+    }
+    assert not request_ids
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
 @pytest.mark.parametrize("state_kind", ["no_registry", "missing", "null_stats"])
 @pytest.mark.parametrize("abort_fails", [False, True])
 async def test_cancellation_monitor_logs_only_submitted_abort(
