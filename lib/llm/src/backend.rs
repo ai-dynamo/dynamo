@@ -79,7 +79,7 @@ struct DecoderUnfoldState {
     /// Text flushed from a choice's decoder because the underlying engine stream ended
     /// without ever sending that choice a terminal `finish_reason`, queued here so each
     /// flushed choice can be emitted as its own synthetic final chunk.
-    pending_flush: Vec<(u32, String)>,
+    pending_flush: Vec<LLMEngineOutput>,
     /// Set once `stream` has yielded `None`, so it is never polled again -- a `Stream` is
     /// not guaranteed to be safely pollable past its first `None`.
     stream_ended: bool,
@@ -242,13 +242,8 @@ impl
             // `stream` already yielded `None` once; do not poll it again (unspecified
             // behavior for most `Stream` impls). Only drain the flush queue from here on.
             if state.stream_ended {
-                return state.pending_flush.pop().map(|(idx, flushed)| {
-                    let output = Annotated::from_data(LLMEngineOutput {
-                        index: Some(idx),
-                        text: Some(flushed),
-                        finish_reason: Some(FinishReason::Stop),
-                        ..Default::default()
-                    });
+                return state.pending_flush.pop().map(|flushed| {
+                    let output = Annotated::from_data(flushed);
                     (output, state)
                 });
             }
@@ -337,12 +332,28 @@ impl
                             // own text -- it is strictly older -- rather than appending,
                             // which would reorder output (e.g. "there" + withheld "o" must
                             // come out as "othere", not "thereo").
-                            if has_finish
-                                && let Some(flushed) = decoder.flush_jailed()
-                                && let Some(data) = &mut output.data
-                            {
-                                let newer = data.text.take().unwrap_or_default();
-                                data.text = Some(flushed + &newer);
+                            if has_finish && let Some(data) = &mut output.data {
+                                match decoder.finish_decoding() {
+                                    Ok(tail) => {
+                                        let mut flushed = tail.released_text.unwrap_or_default();
+                                        if tail.stop_trigger.is_none() {
+                                            flushed.push_str(&decoder.flush_jailed().unwrap_or_default());
+                                            flushed.push_str(data.text.as_deref().unwrap_or_default());
+                                        } else if !matches!(data.finish_reason, Some(FinishReason::Error(_))) {
+                                            data.finish_reason = Some(FinishReason::Stop);
+                                            data.stop_reason = match &tail.stop_trigger {
+                                                Some(StopTrigger::HiddenStopSequenceDetected(seq)
+                                                    | StopTrigger::VisibleStopSequenceDetected(seq)) => Some(StopReason::String(seq.clone())),
+                                                _ => data.stop_reason.take(),
+                                            };
+                                        }
+                                        data.text = Some(flushed);
+                                    }
+                                    Err(error) => {
+                                        data.text = None;
+                                        data.finish_reason = Some(FinishReason::Error(format!("decode error: {error}")));
+                                    }
+                                }
                             }
                             // Mirror the decoder's current withheld state on every chunk
                             // (terminal or not), even though this chunk didn't change it, so
@@ -381,7 +392,10 @@ impl
                         return Some((output, state));
                     };
 
-                    let mut result = match decoder.process_token_ids(&data.token_ids) {
+                    let mut result = match decoder.process_token_ids_with_finish(
+                        &data.token_ids,
+                        data.finish_reason.is_some(),
+                    ) {
                         Ok(result) => result,
                         Err(e) => {
                             tracing::error!("Failed to process token_ids for choice {choice_idx}: {e}");
@@ -548,17 +562,37 @@ impl
                         if state.finished_choices.contains(idx) {
                             continue;
                         }
-                        if let Some(flushed) = decoder.flush_jailed() {
-                            state.pending_flush.push((*idx, flushed));
+                        match decoder.finish_decoding() {
+                            Ok(tail) => {
+                                let mut text = tail.released_text;
+                                if tail.stop_trigger.is_none()
+                                    && let Some(jailed) = decoder.flush_jailed()
+                                {
+                                    text.get_or_insert_with(String::new).push_str(&jailed);
+                                }
+                                if text.is_some() || tail.stop_trigger.is_some() {
+                                    let stop_reason = match &tail.stop_trigger {
+                                        Some(StopTrigger::HiddenStopSequenceDetected(seq)
+                                            | StopTrigger::VisibleStopSequenceDetected(seq)) => Some(StopReason::String(seq.clone())),
+                                        _ => None,
+                                    };
+                                    state.pending_flush.push(LLMEngineOutput {
+                                        index: Some(*idx), text,
+                                        finish_reason: Some(FinishReason::Stop),
+                                        stop_reason,
+                                        ..Default::default()
+                                    });
+                                }
+                            }
+                            Err(error) => state.pending_flush.push(LLMEngineOutput {
+                                index: Some(*idx),
+                                finish_reason: Some(FinishReason::Error(format!("decode error: {error}"))),
+                                ..Default::default()
+                            }),
                         }
                     }
-                    state.pending_flush.pop().map(|(idx, flushed)| {
-                        let output = Annotated::from_data(LLMEngineOutput {
-                            index: Some(idx),
-                            text: Some(flushed),
-                            finish_reason: Some(FinishReason::Stop),
-                            ..Default::default()
-                        });
+                    state.pending_flush.pop().map(|flushed| {
+                        let output = Annotated::from_data(flushed);
                         (output, state)
                     })
                 }
@@ -825,6 +859,30 @@ impl Decoder {
         // increment the generated tokens
         self.generated_tokens += 1;
 
+        // Close a pending byte run before a hidden stop without decoding the stop
+        // itself. Its text must not swallow output buffered from earlier tokens.
+        if !below_min_tokens
+            && self.hidden_stop_ids.contains(&token_id)
+            && !self.visible_stop_ids.contains(&token_id)
+        {
+            let mut result = self.finish_decoding()?;
+            result.token = None;
+            if result.stop_trigger.is_none() {
+                if let Some(jailed) = self.flush_jailed() {
+                    result
+                        .released_text
+                        .get_or_insert_with(String::new)
+                        .push_str(&jailed);
+                }
+                result.stop_trigger = Some(if self.user_stop_ids.contains(&token_id) {
+                    StopTrigger::UserStopTokenDetected(token_id)
+                } else {
+                    StopTrigger::HiddenStopTokenDetected(token_id)
+                });
+            }
+            return Ok(result);
+        }
+
         // decode the token
         let detokenize_start = self.tracker.as_ref().map(|_| Instant::now());
         let token = {
@@ -842,6 +900,10 @@ impl Decoder {
 
         // Check token stops. Visible token IDs are included in output.
         if self.visible_stop_ids.contains(&token_id) {
+            let mut token = token;
+            if let Some(tail) = self.decode_stream.finish()? {
+                token.get_or_insert_with(String::new).push_str(&tail);
+            }
             // Any text still withheld as a partial hidden-stop-sequence match can never
             // complete now, so it goes out ahead of this (included) token's own text --
             // otherwise it would be silently dropped and, if it were released later, would
@@ -861,24 +923,18 @@ impl Decoder {
             ));
         }
 
-        // Check token stops. User-provided token IDs take precedence over
-        // system/EOS IDs so stop_reason only reports stops the caller requested.
-        if self.hidden_stop_ids.contains(&token_id) {
-            let trigger = if self.user_stop_ids.contains(&token_id) {
-                StopTrigger::UserStopTokenDetected(token_id)
-            } else {
-                StopTrigger::HiddenStopTokenDetected(token_id)
-            };
-            // This token's own text stays hidden, as before. But any text still withheld
-            // from an earlier, never-completed hidden-stop-sequence prefix match is not
-            // part of *this* stop and must still reach the caller.
-            return Ok(StepResult::with_stop_trigger(
-                None,
-                self.flush_jailed(),
-                trigger,
-            ));
-        }
+        self.process_text(token)
+    }
 
+    fn finish_decoding(&mut self) -> Result<StepResult> {
+        let tail = self.decode_stream.finish()?;
+        if self.generated_tokens <= self.min_tokens {
+            return Ok(StepResult::ok(tail));
+        }
+        self.process_text(tail)
+    }
+
+    fn process_text(&mut self, token: Option<String>) -> Result<StepResult> {
         // check stop sequences - the jail will always hold at least the largest stop sequence
         // if jail_max_bytes is 0, then there are no stop sequences
         if self.jail_max_bytes > 0
@@ -1041,6 +1097,14 @@ impl Decoder {
     }
 
     pub fn process_token_ids(&mut self, token_ids: &[TokenIdType]) -> Result<SeqResult> {
+        self.process_token_ids_with_finish(token_ids, false)
+    }
+
+    fn process_token_ids_with_finish(
+        &mut self,
+        token_ids: &[TokenIdType],
+        finished: bool,
+    ) -> Result<SeqResult> {
         let mut text: Option<String> = None;
         let mut tokens = Vec::with_capacity(token_ids.len());
 
@@ -1070,10 +1134,20 @@ impl Decoder {
             }
         }
 
+        let mut stop_trigger = None;
+        if finished {
+            let tail = self.finish_decoding()?;
+            if let Some(released) = tail.released_text {
+                text.get_or_insert_with(String::new).push_str(&released);
+            }
+            // A terminal flush has no token of its own. Preserve the existing
+            // per-token/logprob vector; only append to caller-visible text.
+            stop_trigger = tail.stop_trigger;
+        }
         Ok(SeqResult {
             tokens,
             text,
-            stop_trigger: None,
+            stop_trigger,
         })
     }
 
@@ -1109,6 +1183,57 @@ mod tests {
     use dynamo_runtime::pipeline::{AsyncEngine, Error, ResponseStream};
     use futures::StreamExt;
     use std::sync::Arc;
+
+    #[test]
+    fn byte_fallback_flush_respects_terminal_and_stop_conditions() {
+        let hf: tokenizers::Tokenizer = serde_json::from_value(serde_json::json!({
+            "version": "1.0", "truncation": null, "padding": null,
+            "added_tokens": [], "normalizer": null, "pre_tokenizer": null, "post_processor": null,
+            "decoder": {"type": "Sequence", "decoders": [
+                {"type": "ByteFallback"}, {"type": "Fuse"}]},
+            "model": {"type": "BPE", "vocab": {
+                "<0x61>": 0, "<0xF5>": 1, "<0xC3>": 2, "<0xA9>": 3,
+                " hello": 4, "!": 5, "<eos>": 6}, "merges": [], "byte_fallback": true}
+        }))
+        .unwrap();
+        let tokenizer: crate::tokenizers::Tokenizer =
+            Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf)).into();
+        for (ids, terminal, stop, include, expected) in [
+            (vec![0, 1, 4], true, None, false, "�� hello"),
+            (vec![0, 1], true, None, false, "��"),
+            (vec![2, 3], true, None, false, "é"),
+            (vec![2], true, None, false, "�"),
+            (vec![2, 3, 6], false, None, false, "é"),
+            (vec![0, 1, 6], false, None, false, "��"),
+            (vec![2, 3], true, Some("é"), false, ""),
+            (vec![2, 3], true, Some("é"), true, "é"),
+        ] {
+            let mut decoder = Decoder::new(
+                tokenizer.decode_stream(&[], true),
+                StopConditions {
+                    stop_token_ids_hidden: Some(vec![6]),
+                    stop: stop.map(|s| vec![s.to_string()]),
+                    ..Default::default()
+                },
+                include,
+                None,
+                None,
+            );
+            let mut actual = String::new();
+            for id in ids {
+                let result = decoder.process_token_ids(&[id]).unwrap();
+                actual.push_str(result.text.as_deref().unwrap_or_default());
+            }
+            if terminal {
+                let result = decoder.process_token_ids_with_finish(&[], true).unwrap();
+                actual.push_str(result.text.as_deref().unwrap_or_default());
+                if stop.is_some() {
+                    assert!(result.stop_trigger.is_some());
+                }
+            }
+            assert_eq!(actual, expected);
+        }
+    }
 
     #[test]
     fn test_char_boundary_drain() {
@@ -1809,6 +1934,79 @@ mod tests {
     }
 
     impl traits::Tokenizer for SingleOTokenizer {}
+
+    // Like a valid byte-fallback run, this suffix remains unstable until EOF.
+    struct BufferedOTokenizer;
+
+    impl traits::Encoder for BufferedOTokenizer {
+        fn encode(&self, input: &str) -> anyhow::Result<crate::tokenizers::Encoding> {
+            traits::Encoder::encode(&SingleOTokenizer, input)
+        }
+        fn encode_batch(
+            &self,
+            inputs: &[&str],
+        ) -> anyhow::Result<Vec<crate::tokenizers::Encoding>> {
+            traits::Encoder::encode_batch(&SingleOTokenizer, inputs)
+        }
+    }
+
+    impl traits::Decoder for BufferedOTokenizer {
+        fn has_unstable_suffix(&self, ids: &[TokenIdType], _: bool) -> bool {
+            !ids.is_empty()
+        }
+        fn decode(&self, ids: &[TokenIdType], skip: bool) -> anyhow::Result<traits::DecodeResult> {
+            traits::Decoder::decode(&SingleOTokenizer, ids, skip)
+        }
+    }
+
+    impl traits::Tokenizer for BufferedOTokenizer {}
+
+    #[tokio::test]
+    async fn byte_fallback_flushes_on_bare_eof_and_decoded_terminal() {
+        for bypass in [false, true] {
+            let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(BufferedOTokenizer);
+            let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
+            let request = PreprocessedRequest::builder()
+                .model("test-model".to_string())
+                .token_ids(vec![])
+                .stop_conditions(StopConditions {
+                    stop: Some(vec!["ozzy".to_string()]),
+                    ..Default::default()
+                })
+                .sampling_options(SamplingOptions {
+                    n: Some(if bypass { 1 } else { 2 }),
+                    ..Default::default()
+                })
+                .output_options(OutputOptions::default())
+                .build()
+                .unwrap();
+            let overpolled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+                if bypass {
+                    Arc::new(MixedBypassEngine)
+                } else {
+                    Arc::new(BareEofMultiChoiceEngine {
+                        overpolled: overpolled.clone(),
+                    })
+                };
+            let outputs = Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
+                .await
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await;
+            let choices = if bypass { 1 } else { 2 };
+            for index in 0..choices {
+                let text: String = outputs
+                    .iter()
+                    .filter_map(|o| o.data.as_ref())
+                    .filter(|d| d.index.unwrap_or(0) == index)
+                    .filter_map(|d| d.text.as_deref())
+                    .collect();
+                assert_eq!(text, if bypass { "othere" } else { "oo" });
+            }
+            assert!(!overpolled.load(std::sync::atomic::Ordering::SeqCst));
+        }
+    }
 
     struct MixedBypassEngine;
 
