@@ -3,6 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Aggregated serving through TensorRT-LLM's OpenEngine gRPC server (1 GPU).
+#
+# Run this where `TRTLLM_PYTHON` has TensorRT-LLM installed --
+# `nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc27.dev202609170000` or newer, the
+# first releases carrying the OpenEngine servicer. The bindings it needs are not
+# in that image; the pip step below adds them.
 
 set -e
 
