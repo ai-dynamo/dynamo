@@ -45,13 +45,11 @@ spec:
         # starts before `main`, stops after.
         initContainers:
         - name: trtllm-engine
-          # Build your own: no published TensorRT-LLM release ships OpenEngine
-          # gRPC yet. The image must serve `--grpc-protocol openengine`, expose
-          # the Control service (the sidecar needs GetModelInfo to start, and
-          # the probes below call Health), and have the OpenEngine Python
-          # bindings installed for those probes -- see the README's Run section
-          # for the pinned package versions, which the image must match.
-          image: <trtllm-image-with-openengine>
+          # Layer the OpenEngine Python bindings onto this release and push the
+          # result: the release ships the servicer, but both it and the probes
+          # below import `openengine.v1`, which it does not install. See the
+          # README's Run section for the pinned versions.
+          image: <your-registry>/tensorrt-llm-openengine:1.3.0rc27.dev202609170000
           restartPolicy: Always
           # Readiness via the OpenEngine Control.Health RPC, which reports the
           # engine's own state (grpc + model, plus kv_connector when configured)

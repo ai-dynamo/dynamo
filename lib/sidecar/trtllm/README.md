@@ -68,8 +68,16 @@ and re-run the tests.
 
 ## Run
 
-Start TensorRT-LLM with its OpenEngine gRPC server. This requires the OpenEngine
-Python bindings and a TensorRT-LLM build with OpenEngine gRPC support:
+Start TensorRT-LLM with its OpenEngine gRPC server. Published releases carry the
+server from `nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc27.dev202609170000`
+onward; earlier tags have no OpenEngine servicer at all.
+
+The bindings are a separate install even on those releases. The servicer imports
+`openengine.v1` directly, so a stock image refuses to start the listener:
+
+```text
+Error: Failed to import OpenEngine support: No module named 'openengine'.
+```
 
 ```bash
 # Install the two packages directly rather than through the
@@ -173,11 +181,11 @@ as the container command.
 - `kubectl` set to that cluster, and a namespace to deploy into.
 - A Hugging Face token for the model.
 - A container registry you can push to and the cluster can pull from.
-- A TensorRT-LLM engine image with OpenEngine gRPC support (serving
-  `--grpc-protocol openengine`, implementing the `Control` service, and with the
-  OpenEngine Python bindings installed for the health probes). No published
-  release ships this yet, so `deploy/agg.yaml` leaves it as the placeholder
-  `<trtllm-image-with-openengine>` for you to fill in.
+- A TensorRT-LLM engine image with OpenEngine gRPC support, layered on
+  `nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc27.dev202609170000` or newer. The
+  release ships the servicer but not the OpenEngine Python bindings, which both
+  the servicer and the health probes below import, so add the pinned packages
+  from [Run](#run) on top of it and push the result.
 
 ### 1. Build and push the sidecar image
 
