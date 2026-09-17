@@ -856,6 +856,53 @@ class TestVllmOmniOptionalDependency:
 class TestBenchmarkConfig:
     """Tests for BenchmarkConfig dataclass and grid generation."""
 
+    @pytest.mark.parametrize(
+        ("trace", "worker_cls"),
+        [(False, "auto"), (True, "auto"), (False, "example.ServingWorker")],
+    )
+    def test_disabled_benchmark_preserves_serving_worker(
+        self, monkeypatch, mock_vllm_cli, trace, worker_cls
+    ):
+        for name in (
+            "DYN_BENCHMARK_MODE",
+            "DYN_BENCHMARK_RANDOMIZE_KDA_STATE",
+            "DYN_FORWARDPASS_METRIC_PORT",
+            "DYN_FPM_TRACE",
+            "DYN_GMS_USE_V1",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("DYN_FPM_GC_POLICY", "freeze")
+        flags = [
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--worker-cls",
+            worker_cls,
+            "--worker-extension-cls",
+            "example.ServingExtension",
+            "--additional-config",
+            '{"application_setting": "preserved"}',
+        ]
+        if trace:
+            flags.append("--fpm-trace")
+        mock_vllm_cli(*flags)
+
+        config = parse_args()
+
+        assert config.benchmark_mode is None
+        assert config.benchmark_randomize_kda_state is False
+        assert getattr(config, "_benchmark_additional_config", None) is None
+        assert config.engine_args.additional_config == {
+            "application_setting": "preserved"
+        }
+        assert config.engine_args.worker_cls == worker_cls
+        assert config.engine_args.worker_extension_cls == "example.ServingExtension"
+        expected_scheduler = (
+            "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler"
+            if trace
+            else None
+        )
+        assert config.engine_args.scheduler_cls == expected_scheduler
+
     def test_benchmark_config_defaults(self):
         from dynamo.vllm.instrumented_scheduler import BenchmarkConfig
 
@@ -903,6 +950,7 @@ class TestBenchmarkConfig:
 
         assert config._benchmark_additional_config == {
             "mode": "prefill",
+            "randomize_kda_state": False,
             "warmup_iterations": 2,
             "output_path": str(output),
             "timeout": 900,
@@ -913,6 +961,45 @@ class TestBenchmarkConfig:
             "prefix_max_batch_size_samples": 3,
             "collect_imbalanced": False,
         }
+
+    def test_random_kda_config_selects_worker_and_reaches_scheduler(
+        self, mock_vllm_cli
+    ):
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--benchmark-mode",
+            "decode",
+            "--benchmark-randomize-kda-state",
+        )
+        config = parse_args()
+        assert (
+            config.engine_args.worker_cls
+            == "dynamo.vllm.benchmark_worker.BenchmarkWorker"
+        )
+        assert config._benchmark_additional_config["randomize_kda_state"] is True
+
+    @pytest.mark.parametrize("mode", [None, "prefill"])
+    def test_random_kda_requires_decode_benchmark(self, mock_vllm_cli, mode):
+        flags = ["--model", "Qwen/Qwen3-0.6B", "--benchmark-randomize-kda-state"]
+        if mode:
+            flags.extend(["--benchmark-mode", mode])
+        mock_vllm_cli(*flags)
+        with pytest.raises(ValueError, match="requires --benchmark-mode"):
+            parse_args()
+
+    def test_random_kda_rejects_custom_worker(self, mock_vllm_cli):
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--benchmark-mode",
+            "decode",
+            "--benchmark-randomize-kda-state",
+            "--worker-cls",
+            "custom.Worker",
+        )
+        with pytest.raises(ValueError, match="standard --worker-cls"):
+            parse_args()
 
     def test_benchmark_points_file_is_embedded_in_benchmark_config(
         self, mock_vllm_cli, tmp_path
@@ -1588,6 +1675,7 @@ def _make_dynamo_config(**overrides):
         "enable_multimodal": False,
         "fpm_trace": False,
         "benchmark_mode": None,
+        "benchmark_randomize_kda_state": False,
         "benchmark_warmup_iterations": 5,
         "benchmark_output_path": "/tmp/benchmark_results.json",
         "benchmark_timeout": 900,

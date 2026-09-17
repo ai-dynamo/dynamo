@@ -362,12 +362,25 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             _plain = stop_conditions.get("stop_token_ids") or []
             _merged = list(set(_hidden).union(_plain))
             stop_token_ids = _merged if _merged else None
+            # A tokenizer-free SGLang rejects positive min_new_tokens. Let
+            # Dynamo's decoder enforce the floor and keep the engine running so
+            # it cannot stop before Dynamo reaches it.
+            min_tokens = stop_conditions.get("min_tokens")
+            hold_engine_open = bool(
+                min_tokens
+                and min_tokens > 0
+                and self.config.server_args.skip_tokenizer_init
+            )
+            if hold_engine_open:
+                stop_token_ids = None
 
             param_mapping = {
                 "n": sampling_opts.get("n"),
                 "max_new_tokens": stop_conditions.get("max_tokens"),
-                "min_new_tokens": stop_conditions.get("min_tokens"),
-                "ignore_eos": stop_conditions.get("ignore_eos"),
+                "min_new_tokens": None if hold_engine_open else min_tokens,
+                "ignore_eos": True
+                if hold_engine_open
+                else stop_conditions.get("ignore_eos"),
                 "stop_token_ids": stop_token_ids,
                 **_sampling_option_params(sampling_opts),
                 **self._get_guided_decoding_params(
@@ -697,16 +710,23 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         """
         # Use Future pattern for request ID - will be set when first response arrives
         request_id_future: asyncio.Future[str] = asyncio.Future()
+        request_ids: set[str] = set()
         first_output_seen = False
-        async with self._cancellation_monitor(request_id_future, context):
+        async with self._cancellation_monitor(request_id_future, context, request_ids):
             async for res in stream_source:
                 meta_info = res.get("meta_info", {})
-                # Extract SGLang request ID from the first response and set the future
-                if not request_id_future.done():
-                    sglang_request_id = meta_info.get("id")
-                    if sglang_request_id:
+                sglang_request_id = meta_info.get("id")
+                if sglang_request_id:
+                    request_ids.add(sglang_request_id)
+                    if not request_id_future.done():
                         request_id_future.set_result(sglang_request_id)
                         logging.debug(f"New SGLang Request ID: {sglang_request_id}")
+                    if meta_info.get("finish_reason"):
+                        request_ids.discard(sglang_request_id)
+                if context.is_stopped():
+                    # A choice's first chunk can arrive after the monitor fired.
+                    self._abort_requests(request_ids, context)
+                    continue
 
                 # Check cancellation before yielding to allow proper cleanup.
                 # This lets SGLang proceed to the second token generation, which will
@@ -835,16 +855,22 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         # Use Future pattern for request ID - will be set when first response arrives
         request_id_future: asyncio.Future[str] = asyncio.Future()
+        request_ids: set[str] = set()
         first_output_seen = False
-        async with self._cancellation_monitor(request_id_future, context):
+        async with self._cancellation_monitor(request_id_future, context, request_ids):
             async for res in stream_source:
                 meta_info = res.get("meta_info", {})
-                # Extract SGLang request ID from the first response and set the future
-                if not request_id_future.done():
-                    sglang_request_id = meta_info.get("id")
-                    if sglang_request_id:
+                sglang_request_id = meta_info.get("id")
+                if sglang_request_id:
+                    request_ids.add(sglang_request_id)
+                    if not request_id_future.done():
                         request_id_future.set_result(sglang_request_id)
                         logging.debug(f"New SGLang Request ID: {sglang_request_id}")
+                    if meta_info.get("finish_reason"):
+                        request_ids.discard(sglang_request_id)
+                if context.is_stopped():
+                    self._abort_requests(request_ids, context)
+                    continue
 
                 # Check cancellation before yielding to allow proper cleanup.
                 # This lets SGLang proceed to the second token generation, which will

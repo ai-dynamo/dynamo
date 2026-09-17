@@ -785,6 +785,9 @@ navigation:
           - page: Overview
             path: pages/recipes/model-recipes/overview.mdx
             slug: browse
+          - page: K-EXAONE 2.0
+            path: pages/recipes/model-recipes/k-exaone-2.mdx
+            slug: k-exaone-2
           - page: Gemma-4-31B
             path: pages/recipes/model-recipes/gemma-4-31b.mdx
             slug: gemma-4-31b

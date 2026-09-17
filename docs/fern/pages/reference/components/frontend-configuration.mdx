@@ -56,7 +56,17 @@ see the [TLS reference](tls-configuration.mdx#http-tls-and-mtls).
 The Rust HTTP server also reads these environment variables, which are not exposed as CLI arguments:
 
 <ParamField path="DYN_HTTP_BODY_LIMIT_MB" type="integer" default="192">
-  Maximum request body size in MB.
+  Maximum HTTP request body size in MB. This is the client-facing ingress cap.
+  After preprocessing, the frontend sends the worker-bound frame over the request
+  plane. On the default TCP plane that frame is independently limited by
+  `DYN_TCP_MAX_MESSAGE_SIZE` (32 MiB by default). Inline `data:` media is
+  forwarded once in `multi_modal_data`; a serialized frame that still exceeds the
+  TCP cap is rejected with HTTP 400 before the connection is written. Raise
+  `DYN_TCP_MAX_MESSAGE_SIZE` together with this value when operators need larger
+  inline-media requests, or keep HTTP images as `https://` URLs so only a
+  reference crosses the request plane.
+
+  See [Runtime Configuration](runtime-configuration.mdx) for `DYN_TCP_MAX_MESSAGE_SIZE`.
 </ParamField>
 
 <ParamField path="DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS" type="integer" default="5">

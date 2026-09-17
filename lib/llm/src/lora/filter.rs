@@ -23,6 +23,12 @@ pub struct LoraFilter {
     state_tracker: LoraStateTracker,
 }
 
+impl dynamo_kv_router::scheduling::LoraWorkerFilter for LoraFilter {
+    fn filter_worker_ids_for_lora(&self, lora_name: &str, available: &[WorkerId]) -> Vec<WorkerId> {
+        self.filter_worker_ids_for_lora(Some(lora_name), available)
+    }
+}
+
 impl LoraFilter {
     pub fn new(routing_table: LoraRoutingTable, state_tracker: LoraStateTracker) -> Self {
         Self {
