@@ -111,7 +111,13 @@ class TestDiffusionParallelConfigCoverage:
 
     def test_parallel_fields_forwarded_from_separate_configs(self):
         """Construct the real vLLM-Omni config from both argument groups."""
-        config = _make_config(text_encoder_tp_size=2, ulysses_a2a_permute=True)
+        parallel_overrides = {"text_encoder_tp_size": 2}
+        supports_ulysses_a2a_permute = (
+            "ulysses_a2a_permute" in _diffusion_parallel_fields()
+        )
+        if supports_ulysses_a2a_permute:
+            parallel_overrides["ulysses_a2a_permute"] = True
+        config = _make_config(**parallel_overrides)
         config.engine_args.tensor_parallel_size = 4
         config.engine_args.pipeline_parallel_size = 3
         config.engine_args.data_parallel_size = 5
@@ -122,7 +128,8 @@ class TestDiffusionParallelConfigCoverage:
         assert parallel_config.pipeline_parallel_size == 3
         assert parallel_config.data_parallel_size == 5
         assert parallel_config.text_encoder_tp_size == 2
-        assert parallel_config.ulysses_a2a_permute is True
+        if supports_ulysses_a2a_permute:
+            assert parallel_config.ulysses_a2a_permute is True
 
     def test_unsupported_default_parallel_field_is_omitted(self):
         """Older Omni releases accept configs when new options keep their defaults."""
