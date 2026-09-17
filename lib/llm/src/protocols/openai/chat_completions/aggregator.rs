@@ -74,6 +74,7 @@ async fn parse_complete_tool_output(
     content: &str,
     parser: &str,
     constraint: &crate::protocols::openai::GuidedToolConstraint,
+    tools: &[dynamo_parsers::tool_calling::ToolDefinition],
 ) -> anyhow::Result<(
     Vec<dynamo_parsers::tool_calling::ToolCallResponse>,
     Option<String>,
@@ -113,7 +114,7 @@ async fn parse_complete_tool_output(
         dynamo_runtime::config::ParserVersion::Auto | dynamo_runtime::config::ParserVersion::V2
     ) && super::tool_parser_v2::supports_family(parser)
     {
-        super::tool_parser_v2::parse_complete(content, None, parser)
+        super::tool_parser_v2::parse_complete(content, Some(tools), parser)
             .map(|(calls, normal)| (calls, Some(normal)))
     } else {
         try_tool_call_parse_aggregate_finalize(content, Some(parser), None).await
@@ -761,6 +762,7 @@ impl DeltaAggregator {
                     &choice.text,
                     parser,
                     &parsing_options.guided_tool_constraint,
+                    &parsing_options.tools,
                 )
                 .await;
                 let (tool_calls, content) = match parse_result {
@@ -1002,6 +1004,40 @@ mod tests {
     use super::*;
     use crate::protocols::openai::token_to_utf8_bytes;
     use futures::stream;
+
+    #[tokio::test]
+    async fn v2_batch_parser_uses_request_tool_schema() {
+        let tools = vec![dynamo_parsers::tool_calling::ToolDefinition {
+            name: "set_state".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "count": {"type": "integer"},
+                    "enabled": {"type": "boolean"}
+                }
+            })),
+            strict: None,
+        }];
+        let content = concat!(
+            "<tool_call>\n<function=set_state>\n",
+            "<parameter=count>42</parameter>\n",
+            "<parameter=enabled>true</parameter>\n",
+            "</function>\n</tool_call>"
+        );
+        let (calls, _) = parse_complete_tool_output(
+            content,
+            "qwen3_coder",
+            &crate::protocols::openai::GuidedToolConstraint::None,
+            &tools,
+        )
+        .await
+        .unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&calls[0].function.arguments).unwrap(),
+            serde_json::json!({"count": 42, "enabled": true})
+        );
+    }
 
     #[allow(deprecated)]
     fn create_test_delta(
