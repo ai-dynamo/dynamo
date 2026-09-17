@@ -25,7 +25,7 @@ pub const KV_EVENT_SUBJECT: &str = "kv-events";
 /// Enables request-level router/worker cache reuse stage telemetry.
 /// Disabled by default.
 pub const CACHE_REUSE_METRICS_ENABLED_ENV: &str =
-    "DYN_CACHE_REUSE_METRICS_ENABLED";
+    "DYN_ROUTER_CACHE_REUSE_METRICS";
 
 static CACHE_REUSE_METRICS_ENABLED: LazyLock<bool> =
     LazyLock::new(|| dynamo_truthy::env_is_truthy(CACHE_REUSE_METRICS_ENABLED_ENV));
