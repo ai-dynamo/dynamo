@@ -15,7 +15,9 @@
 
 """Unit tests for the Speech NIM OpenAI realtime transcription adapter."""
 
+import asyncio
 import base64
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -28,8 +30,9 @@ from nemotron_speech.realtime_asr import (  # noqa: E402
     OPENAI_PCM_SAMPLE_RATE,
     PCM16_BYTES_PER_SAMPLE,
     SpeechNimRealtimeTranscriptionHandler,
+    _AudioTurn,
 )
-from riva.client import AudioEncoding  # noqa: E402
+from riva.client import ASRService, AudioEncoding  # noqa: E402
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
@@ -41,8 +44,21 @@ class _Context:
         return False
 
 
-class _FakeAsrService:
+class _FakeCall:
+    def __init__(self, responses):
+        self.responses = iter(responses)
+
+    def __iter__(self):
+        return self.responses
+
+    def cancel(self):
+        pass
+
+
+class _FakeAsrService(ASRService):
     def __init__(self, responses=None) -> None:
+        self.auth = SimpleNamespace(get_auth_metadata=lambda: [])
+        self.stub = SimpleNamespace(StreamingRecognize=self._recognize)
         self.audio = b""
         self.streaming_config = None
         self.responses = responses or [
@@ -50,11 +66,14 @@ class _FakeAsrService:
             _response("hello world", final=True),
         ]
 
-    def streaming_response_generator(self, *, audio_chunks, streaming_config):
-        self.streaming_config = streaming_config
-        for chunk in audio_chunks:
-            self.audio += chunk
-        yield from self.responses
+    def _recognize(self, requests, *, metadata):
+        def responses():
+            self.streaming_config = next(requests).streaming_config
+            for request in requests:
+                self.audio += request.audio_content
+            yield from self.responses
+
+        return _FakeCall(responses())
 
 
 def _response(transcript: str, *, final: bool):
@@ -100,6 +119,41 @@ def _handler(
         commit_padding_ms=commit_padding_ms,
         timeout_s=1.0,
     )
+
+
+@pytest.mark.parametrize("timeout", [False, True])
+async def test_stalled_rpc_is_cancelled_on_disconnect_or_timeout(timeout):
+    started = threading.Event()
+    cancelled = threading.Event()
+
+    class StalledCall:
+        def __iter__(self):
+            started.set()
+            cancelled.wait(timeout=2)
+            return iter(())
+
+        def cancel(self):
+            cancelled.set()
+
+    service = _FakeAsrService()
+    service.stub.StreamingRecognize = lambda *args, **kwargs: StalledCall()
+    handler = _handler(service)
+    handler.timeout_s = 0.01
+    turn = _AudioTurn()
+    task = asyncio.create_task(handler._run_turn(turn, _Context()))
+    try:
+        assert await asyncio.to_thread(started.wait, 1)
+        if timeout:
+            turn.close()
+            await asyncio.wait_for(task, 1)
+        else:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        assert cancelled.is_set()
+    finally:
+        cancelled.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 async def test_streams_pcm_and_emits_canonical_transcription_events():
