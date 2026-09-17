@@ -196,7 +196,6 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # smaller Qwen3.5-0.8B (`agg_router` below) is the pre_merge gater.
             "agg_router": TopologyConfig(
                 health_check_workers=True,
-                health_check_worker_count=2,
                 marks=[pytest.mark.post_merge],
                 timeout_s=400,
                 profiled_vram_gib=13.0,
@@ -223,7 +222,6 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # single-GPU CI environment.
             "agg_router_chat_processor": TopologyConfig(
                 health_check_workers=True,
-                health_check_worker_count=2,
                 marks=[pytest.mark.post_merge],
                 timeout_s=400,
                 profiled_vram_gib=13.0,
@@ -329,7 +327,6 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             ),
             "p_d": TopologyConfig(
                 health_check_workers=True,
-                health_check_worker_count=2,
                 marks=[pytest.mark.post_merge],
                 timeout_s=300,
                 single_gpu=True,
@@ -353,7 +350,6 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         topologies={
             "agg_router": TopologyConfig(
                 health_check_workers=True,
-                health_check_worker_count=2,
                 marks=[pytest.mark.post_merge],
                 timeout_s=500,
                 profiled_vram_gib=19.0,
@@ -384,7 +380,6 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         topologies={
             "agg_router": TopologyConfig(
                 health_check_workers=True,
-                health_check_worker_count=2,
                 marks=[pytest.mark.post_merge],
                 timeout_s=500,
                 profiled_vram_gib=16.0,
@@ -436,7 +431,6 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # threshold 0.7 fires on real degradation, tolerates variance.
             "agg_router": TopologyConfig(
                 health_check_workers=True,
-                health_check_worker_count=2,
                 marks=[pytest.mark.pre_merge],
                 timeout_s=400,
                 profiled_vram_gib=8.0,

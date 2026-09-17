@@ -40,7 +40,7 @@ def _prepare(ports: ServicePorts, directory: str):
         _config(directory), _Request(), ports=ports, extra_env=None
     )
     try:
-        return dict(prepared.merged_env), list(prepared.extra_allocated_ports)
+        return dict(prepared.merged_env)
     finally:
         _cleanup_prepared_deployment(prepared)
 
@@ -60,9 +60,8 @@ def test_prepared_environment_exports_complete_worker_port_vectors(
             kv_event_ports=kv_event_ports,
             nixl_side_channel_ports=nixl_ports,
         )
-        env, extra_ports = _prepare(ports, str(tmp_path))
+        env = _prepare(ports, str(tmp_path))
 
-    assert extra_ports == []
     assert env["DYN_MANAGED_PORTS"] == "1"
     assert env["DYN_SYSTEM_PORT"] == str(system_ports[0])
     assert "DYN_VLLM_KV_EVENT_PORT" not in env

@@ -128,7 +128,6 @@ class _PreparedDeployment:
     frontend_port: int
     system_ports: list
     disagg_bootstrap_port: Optional[int]
-    extra_allocated_ports: list[int]
 
 
 def _prepare_deployment(
@@ -188,8 +187,6 @@ def _prepare_deployment(
             stagger_s = worker_num * 15
             logger.info("Staggering startup by %ds (xdist %s)", stagger_s, worker_id)
             time.sleep(stagger_s)
-
-    extra_allocated_ports: list[int] = []
 
     if ports is not None:
         dynamic_frontend_port = int(ports.frontend_port)
@@ -287,15 +284,12 @@ def _prepare_deployment(
         frontend_port=dynamic_frontend_port,
         system_ports=dynamic_system_ports,
         disagg_bootstrap_port=disagg_bootstrap_port,
-        extra_allocated_ports=extra_allocated_ports,
     )
 
 
 def _cleanup_prepared_deployment(prep: _PreparedDeployment) -> None:
     if prep.disagg_bootstrap_port is not None:
         deallocate_port(prep.disagg_bootstrap_port)
-    for port in prep.extra_allocated_ports:
-        deallocate_port(port)
 
 
 @contextmanager

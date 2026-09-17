@@ -116,7 +116,6 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # (post_merge).
             "agg_router": TopologyConfig(
                 health_check_workers=True,
-                health_check_worker_count=2,
                 marks=[pytest.mark.pre_merge, pytest.mark.xpu_2],
                 gpu_marker="xpu_2",
                 timeout_s=400,
@@ -136,7 +135,6 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # single-GPU CI environment.
             "agg_router_chat_processor": TopologyConfig(
                 health_check_workers=True,
-                health_check_worker_count=2,
                 marks=[pytest.mark.post_merge, pytest.mark.xpu_2],
                 gpu_marker="xpu_2",
                 timeout_s=400,
@@ -182,7 +180,6 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         topologies={
             "agg_router": TopologyConfig(
                 health_check_workers=True,
-                health_check_worker_count=2,
                 marks=[pytest.mark.post_merge],
                 timeout_s=500,
                 gpu_marker="xpu_2",
@@ -199,7 +196,6 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         topologies={
             "agg_router": TopologyConfig(
                 health_check_workers=True,
-                health_check_worker_count=2,
                 marks=[pytest.mark.post_merge],
                 timeout_s=500,
                 gpu_marker="xpu_2",
