@@ -28,6 +28,7 @@ spec:
           - /bin/bash
           - -lc
           image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.1
+          imagePullPolicy: IfNotPresent
           name: main
           ports:
           - containerPort: 8000
@@ -74,10 +75,10 @@ spec:
           - name: KV_TRANSFER_CONFIG
             value: '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"cuda","kv_connector_extra_config":{"num_threads":8}}'
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-k-exaone-2.0-750b-post.1
+          imagePullPolicy: IfNotPresent
           name: main
           resources:
             limits:
-              memory: 480Gi
               nvidia.com/gpu: "4"
               rdma/shared_ib: "4"
             requests:
@@ -90,6 +91,7 @@ spec:
               - IPC_LOCK
               - SYS_PTRACE
               - SYS_RESOURCE
+            runAsGroup: 0
             runAsUser: 0
           startupProbe:
             failureThreshold: 60
@@ -102,8 +104,6 @@ spec:
           - mountPath: /model-cache
             name: model-cache
             readOnly: true
-          - mountPath: /dev/shm
-            name: dshm
         nodeSelector:
           nvidia.com/gpu.product: NVIDIA-B200
         tolerations:
@@ -115,9 +115,6 @@ spec:
         - name: model-cache
           persistentVolumeClaim:
             claimName: model-cache
-        - emptyDir:
-            medium: Memory
-          name: dshm
     replicas: 1
     # digest-pinned image has no semver tag for the operator to parse
     runtimeVersionOverride: 1.4.1
@@ -174,10 +171,10 @@ spec:
           - name: KV_TRANSFER_CONFIG
             value: '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cuda","kv_connector_extra_config":{"num_threads":8}}'
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-k-exaone-2.0-750b-post.1
+          imagePullPolicy: IfNotPresent
           name: main
           resources:
             limits:
-              memory: 480Gi
               nvidia.com/gpu: "4"
               rdma/shared_ib: "4"
             requests:
@@ -190,6 +187,7 @@ spec:
               - IPC_LOCK
               - SYS_PTRACE
               - SYS_RESOURCE
+            runAsGroup: 0
             runAsUser: 0
           startupProbe:
             failureThreshold: 60
@@ -202,8 +200,6 @@ spec:
           - mountPath: /model-cache
             name: model-cache
             readOnly: true
-          - mountPath: /dev/shm
-            name: dshm
         nodeSelector:
           nvidia.com/gpu.product: NVIDIA-B200
         tolerations:
@@ -215,9 +211,6 @@ spec:
         - name: model-cache
           persistentVolumeClaim:
             claimName: model-cache
-        - emptyDir:
-            medium: Memory
-          name: dshm
     replicas: 1
     # digest-pinned image has no semver tag for the operator to parse
     runtimeVersionOverride: 1.4.1
