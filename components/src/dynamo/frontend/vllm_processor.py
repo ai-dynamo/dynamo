@@ -350,6 +350,19 @@ def _normalize_vllm_image_parts(messages: list[Any]) -> None:
                 image_url["detail"] = "auto"
 
 
+def _generation_artifact_worker_nvext(request: dict[str, Any]) -> dict[str, Any] | None:
+    request_nvext = request.get("nvext")
+    if not isinstance(request_nvext, dict):
+        return None
+    generation_artifact = request_nvext.get("generation_artifact")
+    if generation_artifact is None:
+        return None
+    worker_nvext = {"generation_artifact": generation_artifact}
+    if "extra_fields" in request_nvext:
+        worker_nvext["extra_fields"] = request_nvext["extra_fields"]
+    return worker_nvext
+
+
 class VllmProcessor:
     def __init__(
         self,
@@ -740,6 +753,9 @@ class VllmProcessor:
             "annotations": [],
             "routing": request.get("routing"),
         }
+        worker_nvext = _generation_artifact_worker_nvext(request)
+        if worker_nvext is not None:
+            dynamo_preproc["extra_args"] = {"nvext": worker_nvext}
         if guided_decoding is not None:
             dynamo_preproc["sampling_options"]["guided_decoding"] = guided_decoding
         if reasoning_metadata.engine_reasoning_ended is not None:
@@ -1038,6 +1054,45 @@ class VllmProcessor:
                     }
                     if usage := engine_response.get("completion_usage"):
                         dynamo_out["usage"] = reasoning_usage.annotate(usage)
+                    engine_data = engine_response.get("engine_data")
+                    request_nvext = request.get("nvext")
+                    artifact_request = (
+                        request_nvext.get("generation_artifact")
+                        if isinstance(request_nvext, dict)
+                        else None
+                    )
+                    if isinstance(artifact_request, dict) and raw_finish_reason:
+                        response_nvext: dict[str, Any] = {}
+                        extra_fields = request_nvext.get("extra_fields")
+                        if isinstance(extra_fields, list) and isinstance(
+                            engine_data, dict
+                        ):
+                            if "routed_experts" in extra_fields and (
+                                "routed_experts" in engine_data
+                            ):
+                                response_nvext["routed_experts"] = engine_data[
+                                    "routed_experts"
+                                ]
+                            if "engine_data" in extra_fields:
+                                response_nvext["engine_data"] = engine_data
+                        receipt = (
+                            engine_data.get("generation_artifact")
+                            if isinstance(engine_data, dict)
+                            else None
+                        )
+                        if receipt is None:
+                            receipt = {
+                                "format": artifact_request.get("format"),
+                                "contents": artifact_request.get("contents"),
+                                "state": "failed",
+                                "error_code": "artifact_receipt_missing",
+                                "error": (
+                                    "generation worker did not return the requested "
+                                    "artifact receipt"
+                                ),
+                            }
+                        response_nvext["generation_artifact"] = receipt
+                        dynamo_out["nvext"] = response_nvext
                     envelope["data"] = dynamo_out
 
                 metrics = {
