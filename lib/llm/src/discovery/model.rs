@@ -106,9 +106,8 @@ const ENGINE_ERROR_REPORT_INTERVAL: std::time::Duration = std::time::Duration::f
 /// generations, so the summary needs a bound that does not grow with discovery.
 const ENGINE_ERROR_NAMESPACE_SAMPLE: usize = 8;
 
-/// Render namespace readiness for the engine-error warning, naming at most
-/// [`ENGINE_ERROR_NAMESPACE_SAMPLE`] namespaces and counting the remainder.
-/// `namespaces` is sorted, so the sample is the same on every report.
+/// `namespaces` is a sorted map, so the bounded sample names the same
+/// namespaces on every report rather than an arbitrary subset.
 fn format_namespace_summary(readiness: &ModelReadiness) -> String {
     let mut summary = readiness
         .namespaces
@@ -1045,8 +1044,6 @@ mod tests {
         assert_eq!(small.matches("ready=").count(), 3);
         assert!(!small.contains("more"));
 
-        // A globally scoped model can discover far more namespaces than are
-        // useful in one warning; the sample stays fixed and sorted.
         let large = format_namespace_summary(&readiness(500));
         assert_eq!(
             large.matches("ready=").count(),

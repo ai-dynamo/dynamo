@@ -2047,7 +2047,6 @@ mod tests {
     const GLOBAL_ROUTER_NAMESPACE: &str = "tc-4-10-ctrl";
     const GLOBAL_ROUTER_MODEL: &str = "global-router-model";
 
-    /// A snapshot with no artifact `TokenizerKind::from_disk` can load.
     const SNAPSHOT_WITHOUT_TOKENIZER: &str = "mock-no-tokenizer-json";
 
     /// The GlobalRouter forwards already-tokenized requests, so both of its

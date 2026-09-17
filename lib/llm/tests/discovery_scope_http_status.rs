@@ -43,7 +43,6 @@ const MODEL: &str = "global-router-model";
 /// registration with `ignore_weights=true` leaves in the cache.
 const SNAPSHOT_WITH_TOKENIZER: &str = "mock-llama-3.1-8b-instruct";
 
-/// How long a worker set gets to commit before a case calls it absent.
 const COMMIT_WINDOW: Duration = Duration::from_secs(5);
 
 /// A frontend scoped to a sibling deployment's prefix must answer 404, not serve
