@@ -34,7 +34,6 @@ pub struct EngineState {
     pub instance_id: u64,
     pub revision: u64,
     pub healthy: bool,
-    pub server_status: pb::ServerStatus,
     pub is_pause: bool,
     pub discovery: Discovery,
 }
@@ -179,28 +178,18 @@ pub fn parse_engine_state(snapshot: pb::EngineStateSnapshot) -> Result<EngineSta
             "SGLang WatchEngineState returned a zero revision",
         ));
     }
-    let server_status = pb::ServerStatus::try_from(snapshot.server_status)
-        .map_err(|_| protocol_error("SGLang engine state has an unknown server_status"))?;
-    if server_status == pb::ServerStatus::Unspecified {
-        return Err(protocol_error("SGLang engine state omitted server_status"));
-    }
     let model = snapshot
         .model_info
         .ok_or_else(|| protocol_error("SGLang engine state omitted model_info"))?;
     let server = snapshot
         .server_info
         .ok_or_else(|| protocol_error("SGLang engine state omitted server_info"))?;
-    let models = snapshot
-        .models
-        .ok_or_else(|| protocol_error("SGLang engine state omitted models"))?
-        .models;
     Ok(EngineState {
         instance_id: snapshot.instance_id,
         revision: snapshot.revision,
         healthy: snapshot.healthy,
-        server_status,
         is_pause: snapshot.is_pause,
-        discovery: parse_discovery(model, server, models)?,
+        discovery: parse_discovery(model, server, Vec::new())?,
     })
 }
 
@@ -400,7 +389,6 @@ mod tests {
             instance_id: 42,
             revision: 7,
             healthy: true,
-            server_status: pb::ServerStatus::Up as i32,
             is_pause: true,
             model_info: Some(pb::GetModelInfoResponse {
                 model_path: "model-repo".to_string(),
@@ -409,13 +397,11 @@ mod tests {
             server_info: Some(pb::GetServerInfoResponse {
                 json_info: json!({}).to_string(),
             }),
-            models: Some(pb::ListModelsResponse { models: Vec::new() }),
         };
         let state = parse_engine_state(snapshot).unwrap();
         assert_eq!(state.instance_id, 42);
         assert_eq!(state.revision, 7);
         assert!(state.healthy);
-        assert_eq!(state.server_status, pb::ServerStatus::Up);
         assert!(state.is_pause);
         assert_eq!(state.discovery.tokenizer_path, "tokenizer-repo");
 

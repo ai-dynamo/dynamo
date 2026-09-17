@@ -23,12 +23,11 @@ fn engine_state_snapshot_has_stable_wire_tags() {
         instance_id: 7,
         revision: 9,
         healthy: true,
-        server_status: dynamo_sglang_sidecar::proto::ServerStatus::Up as i32,
         is_pause: true,
         ..Default::default()
     };
     assert_eq!(
         snapshot.encode_to_vec(),
-        [0x08, 0x07, 0x10, 0x09, 0x18, 0x01, 0x20, 0x02, 0x28, 0x01]
+        [0x08, 0x07, 0x10, 0x09, 0x18, 0x01, 0x20, 0x01]
     );
 }

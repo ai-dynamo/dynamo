@@ -42,8 +42,7 @@ restores its discovery record so Dynamo clears stale KV-routing state. By
 default, the sidecar also removes the worker from discovery while generation
 is paused. Set `--unregister-on-pause=false` or
 `DYN_SGLANG_UNREGISTER_ON_PAUSE=false` to keep a paused worker in discovery.
-SGLang's computed health controls discovery; its server status gives the
-reason for health changes.
+SGLang's computed health controls discovery.
 
 SGLang remains the source of truth for the worker's aggregated, prefill, or decode role. The inherited `--disaggregation-mode` option and `DYN_DISAGGREGATION_MODE` environment variable have no effect in this sidecar. The SGLang sidecar rejects `--route-to-encoder` because its native protocol does not support encoder workers. Disaggregated workers continue to register under their fixed role components; aggregated workers honor `--component` or `DYN_COMPONENT`.
 
