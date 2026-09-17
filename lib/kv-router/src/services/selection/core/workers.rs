@@ -146,6 +146,11 @@ impl SelectionCore {
     }
 
     fn prepare_worker(&self, record: &mut WorkerCatalogRecord) -> Result<(), SelectionError> {
+        if record.dp_start().checked_add(record.dp_size()).is_none() {
+            return Err(SelectionError::BadRequest(
+                "data parallel rank range overflows u32".to_string(),
+            ));
+        }
         let queueing_enabled = self
             .kv_router_config
             .queueing_enabled(Some(&record.model_name))
