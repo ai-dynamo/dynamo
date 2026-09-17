@@ -1,18 +1,22 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use tonic_health_v14 as tonic_health;
+use tonic_v14 as tonic;
+
 use std::time::Duration;
 
 use dynamo_backend_common::DynamoError;
-use dynamo_sidecar_common::{
-    DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, GrpcEndpoint, GrpcTransportConfig,
-};
+use dynamo_sidecar_common::v14::GrpcChannelPool;
+use dynamo_sidecar_common::{DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcEndpoint, GrpcTransportConfig};
 use tokio::time::{Instant, sleep_until, timeout_at};
 use tonic::metadata::MetadataValue;
+use tonic::transport::Channel;
 use tonic_health::pb::health_check_response::ServingStatus;
 use tonic_health::pb::{HealthCheckRequest, health_client::HealthClient};
 
-pub(crate) use dynamo_sidecar_common::{engine_shutdown, invalid_argument, status_to_dynamo};
+pub(crate) use dynamo_sidecar_common::v14::status_to_dynamo;
+pub(crate) use dynamo_sidecar_common::{engine_shutdown, invalid_argument};
 
 use crate::proto as pb;
 
@@ -45,6 +49,12 @@ impl VllmClient {
 
     pub(crate) fn connection_count(&self) -> usize {
         self.pool.len()
+    }
+
+    pub(crate) fn control_client(&self) -> pb::control_client::ControlClient<Channel> {
+        pb::control_client::ControlClient::new(self.pool.next_channel())
+            .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
+            .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
     }
 
     pub(crate) async fn wait_for_services(
@@ -115,10 +125,7 @@ impl VllmClient {
         &self,
         startup_deadline: Instant,
     ) -> Result<(pb::ModelInfo, pb::ServerInfo), DynamoError> {
-        let channel = self.pool.next_channel();
-        let mut client = pb::control_client::ControlClient::new(channel)
-            .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
-            .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE);
+        let mut client = self.control_client();
         let model = timeout_at(
             startup_deadline,
             client.get_model_info(pb::GetModelInfoRequest {}),

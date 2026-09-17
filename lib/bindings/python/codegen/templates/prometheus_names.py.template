@@ -23,6 +23,15 @@ Usage (both patterns supported):
     from dynamo.prometheus_names import frontend_service, work_handler
     print(frontend_service.REQUESTS_TOTAL)  # "requests_total"
     print(work_handler.ERRORS_TOTAL)  # "errors_total"
+
+Nested Rust modules become nested classes, so the Python path matches the Rust path:
+    from dynamo.prometheus_names import transport, frontend_service
+    print(transport.tcp.ERRORS_TOTAL)  # "tcp_errors_total"
+    print(transport.nats.ERRORS_TOTAL)  # "nats_errors_total"
+
+    # Nested classes also carry label *values*, not just metric names
+    print(frontend_service.operation.TOKENIZE)  # "tokenize"
+    print(frontend_service.error_type.VALIDATION)  # "validation"
 """
 
 from __future__ import annotations

@@ -3,25 +3,30 @@
 
 use anyhow::Error;
 use async_stream::stream;
+use base64::Engine as _;
 use dynamo_llm::protocols::{
     Annotated,
     codec::SseLineCodec,
+    common::extensions::NvExt,
     convert_sse_stream,
     openai::{
+        audios::{AudioData, NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
+use dynamo_llm::types::openai::audios::OpenAIAudiosStreamingEngine;
+use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
 use dynamo_llm::{
+    endpoint_type::EndpointType,
     http::service::{
         Metrics,
         error::HttpError,
         metrics::{Endpoint, ErrorType, RequestType, Status},
-        service_v2::HttpService,
+        service_v2::{BackendErrorCheck, HttpService},
     },
     model_card::ModelDeploymentCard,
 };
-use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::metrics::prometheus_names::{frontend_service, name_prefix};
 use dynamo_runtime::{
     CancellationToken,
@@ -33,7 +38,13 @@ use dynamo_runtime::{
 use futures::StreamExt;
 use prometheus::{Registry, proto::MetricType};
 use reqwest::StatusCode;
-use std::{io::Cursor, sync::Arc};
+use std::{
+    io::Cursor,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 use tokio::time::timeout;
 use tokio_util::codec::FramedRead;
 
@@ -41,28 +52,264 @@ use tokio_util::codec::FramedRead;
 mod ports;
 use ports::bind_random_port;
 
+#[allow(dead_code)]
+#[path = "common/http_harness.rs"]
+mod http_harness;
+#[allow(dead_code)]
+#[path = "common/scripted_chat_engine.rs"]
+mod scripted_chat_engine;
+
 struct CounterEngine {}
+
+#[derive(Default)]
+struct NvExtCaptureEngine {
+    nvext: std::sync::Mutex<Option<Option<NvExt>>>,
+}
+
+impl NvExtCaptureEngine {
+    fn take_nvext(&self) -> Option<NvExt> {
+        self.nvext
+            .lock()
+            .unwrap()
+            .take()
+            .expect("engine did not receive a request")
+    }
+}
 
 struct FirstTokenGateEngine {
     release: Arc<tokio::sync::Notify>,
 }
 
+fn audio_response(
+    request_id: &str,
+    model: &str,
+    output_format: &str,
+    bytes: &[u8],
+    status: &str,
+) -> Annotated<NvAudioSpeechResponse> {
+    Annotated::from_data(NvAudioSpeechResponse {
+        id: request_id.to_string(),
+        object: "audio.speech".to_string(),
+        model: model.to_string(),
+        status: status.to_string(),
+        progress: 100,
+        created: 0,
+        data: vec![AudioData {
+            output_format: output_format.to_string(),
+            url: None,
+            b64_json: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+        }],
+        error: None,
+        inference_time_s: None,
+    })
+}
+
+#[derive(Default)]
+struct ChunkedAudioEngine {
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateAudioSpeechRequest>,
+        ManyOut<Annotated<NvAudioSpeechResponse>>,
+        Error,
+    > for ChunkedAudioEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateAudioSpeechRequest>,
+    ) -> Result<ManyOut<Annotated<NvAudioSpeechResponse>>, Error> {
+        let (request, context) = request.transfer(());
+        let ctx = context.context();
+        let response_ctx = ctx.clone();
+        let request_id = ctx.id().to_string();
+        assert_eq!(
+            request
+                .nvext
+                .and_then(|nvext| nvext.frontend_accepts_audio_chunks),
+            Some(true)
+        );
+        let model = request.model.unwrap_or_default();
+        let release = self.release.clone();
+        let stream = stream! {
+            yield audio_response(&request_id, &model, "pcm", b"first-", "in_progress");
+            release.notified().await;
+            yield audio_response(&request_id, &model, "pcm", b"second", "completed");
+        };
+
+        Ok(ResponseStream::new(Box::pin(stream), response_ctx))
+    }
+}
+
+#[derive(Default)]
+struct CompleteAudioEngine {
+    waiting: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateAudioSpeechRequest>,
+        ManyOut<Annotated<NvAudioSpeechResponse>>,
+        Error,
+    > for CompleteAudioEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateAudioSpeechRequest>,
+    ) -> Result<ManyOut<Annotated<NvAudioSpeechResponse>>, Error> {
+        let (request, context) = request.transfer(());
+        let ctx = context.context();
+        let response_ctx = ctx.clone();
+        let request_id = ctx.id().to_string();
+        assert_ne!(
+            request
+                .nvext
+                .as_ref()
+                .and_then(|nvext| nvext.frontend_accepts_audio_chunks),
+            Some(true)
+        );
+        let output_format = request.response_format.unwrap_or_else(|| "wav".to_string());
+        let model = request.model.unwrap_or_default();
+        let waiting = self.waiting.clone();
+        let release = self.release.clone();
+        let stream = stream! {
+            yield Annotated::from_data(NvAudioSpeechResponse::empty());
+            waiting.notify_one();
+            release.notified().await;
+            yield audio_response(
+                &request_id,
+                &model,
+                &output_format,
+                b"complete-audio",
+                "completed",
+            );
+        };
+
+        Ok(ResponseStream::new(Box::pin(stream), response_ctx))
+    }
+}
+
+#[derive(Default)]
+struct FirstAudioGateEngine {
+    started: Arc<tokio::sync::Notify>,
+    cancelled: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateAudioSpeechRequest>,
+        ManyOut<Annotated<NvAudioSpeechResponse>>,
+        Error,
+    > for FirstAudioGateEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateAudioSpeechRequest>,
+    ) -> Result<ManyOut<Annotated<NvAudioSpeechResponse>>, Error> {
+        let (_request, context) = request.transfer(());
+        let ctx = context.context();
+        let response_ctx = ctx.clone();
+        let started = self.started.clone();
+        let cancelled = self.cancelled.clone();
+        let stream = stream! {
+            started.notify_one();
+            ctx.stopped().await;
+            cancelled.notify_one();
+            yield Annotated::from_data(NvAudioSpeechResponse::empty());
+        };
+
+        Ok(ResponseStream::new(Box::pin(stream), response_ctx))
+    }
+}
+
+async fn start_audio_service(
+    engine: OpenAIAudiosStreamingEngine,
+) -> (
+    u16,
+    CancellationToken,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+) {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder().port(port).build().unwrap();
+    service
+        .enable_model_endpoint(EndpointType::Audios, true)
+        .unwrap();
+    let card = ModelDeploymentCard::with_name_only("audio-model");
+    service
+        .state_clone()
+        .manager()
+        .add_audios_model("audio-model", card.mdcsum(), engine)
+        .unwrap();
+
+    let token = CancellationToken::new();
+    let task = service.spawn_with_listener(token.clone(), listener).await;
+    wait_for_service_ready(port).await;
+    (port, token, task)
+}
+
 // Add a new long-running test engine
 struct LongRunningEngine {
     delay_ms: u64,
-    cancelled: Arc<std::sync::atomic::AtomicBool>,
+    started: Arc<AtomicBool>,
+    cancelled: Arc<AtomicBool>,
+    started_notify: Arc<tokio::sync::Notify>,
+    cancelled_notify: Arc<tokio::sync::Notify>,
 }
 
 impl LongRunningEngine {
     fn new(delay_ms: u64) -> Self {
         Self {
             delay_ms,
-            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            started: Arc::new(AtomicBool::new(false)),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            started_notify: Arc::new(tokio::sync::Notify::new()),
+            cancelled_notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
-    fn was_cancelled(&self) -> bool {
-        self.cancelled.load(std::sync::atomic::Ordering::Acquire)
+    async fn wait_for_started(&self) {
+        wait_for_signal(&self.started, &self.started_notify, "engine start").await;
+    }
+
+    async fn wait_for_cancellation(&self) {
+        wait_for_signal(
+            &self.cancelled,
+            &self.cancelled_notify,
+            "engine cancellation",
+        )
+        .await;
+    }
+}
+
+async fn wait_for_signal(flag: &AtomicBool, notify: &tokio::sync::Notify, signal: &str) {
+    timeout(std::time::Duration::from_secs(3), async {
+        while !flag.load(Ordering::Acquire) {
+            notify.notified().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {signal}"));
+}
+
+struct StreamCancellationGuard {
+    cancelled: Arc<AtomicBool>,
+    cancelled_notify: Arc<tokio::sync::Notify>,
+    completed: bool,
+}
+
+impl Drop for StreamCancellationGuard {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+
+        self.cancelled.store(true, Ordering::Release);
+        self.cancelled_notify.notify_one();
     }
 }
 
@@ -141,6 +388,23 @@ impl
         SingleIn<NvCreateChatCompletionRequest>,
         ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
         Error,
+    > for NvExtCaptureEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateChatCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        self.nvext.lock().unwrap().replace(request.nvext.clone());
+        CounterEngine {}.generate(request).await
+    }
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        Error,
     > for LongRunningEngine
 {
     async fn generate(
@@ -155,25 +419,27 @@ impl
             self.delay_ms
         );
 
-        let cancelled_flag = self.cancelled.clone();
+        let started = self.started.clone();
+        let cancelled = self.cancelled.clone();
+        let started_notify = self.started_notify.clone();
+        let cancelled_notify = self.cancelled_notify.clone();
         let delay_ms = self.delay_ms;
 
         let ctx_clone = ctx.clone();
         let stream = async_stream::stream! {
-
-            // the stream can be dropped or it can be cancelled
-            // either way we consider this a cancellation
-            cancelled_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            let mut cancellation_guard = StreamCancellationGuard {
+                cancelled,
+                cancelled_notify,
+                completed: false,
+            };
+            started.store(true, Ordering::Release);
+            started_notify.notify_one();
 
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_millis(delay_ms)) => {
-                    // the stream went to completion
-                    cancelled_flag.store(false, std::sync::atomic::Ordering::SeqCst);
-
+                    cancellation_guard.completed = true;
                 }
-                _ = ctx_clone.stopped() => {
-                    cancelled_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                }
+                _ = ctx_clone.stopped() => {}
             }
 
             yield Annotated::<NvCreateChatCompletionStreamResponse>::from_annotation("event.dynamo.test.sentinel", &"DONE".to_string()).expect("Failed to create annotated response");
@@ -185,12 +451,35 @@ impl
 
 struct AlwaysFailEngine {}
 
+const INVALID_ARGUMENT_MESSAGE: &str =
+    "Received multimodal data but multimodal processing is not enabled";
+
 /// Engine that yields a single `Backend(InvalidArgument)` error frame as the
-/// first stream event — modeling a text-only model refusing multimodal input.
-struct InvalidArgumentEngine {}
+/// first stream event after `delay` — modeling a text-only model refusing
+/// multimodal input. A non-zero delay models a backend that fails only after
+/// the frontend's bounded peek window has elapsed.
+struct InvalidArgumentEngine {
+    delay: std::time::Duration,
+}
 
 /// Engine that rejects during request admission, before a response stream exists.
 struct AdmissionInvalidArgumentEngine {}
+
+fn invalid_argument_error_frame<T>() -> Annotated<T> {
+    use dynamo_runtime::error::{BackendError, ErrorType as DynErrorType};
+    Annotated {
+        data: None,
+        id: None,
+        event: Some("error".to_string()),
+        comment: None,
+        error: Some(
+            DynamoError::builder()
+                .error_type(DynErrorType::Backend(BackendError::InvalidArgument))
+                .message(INVALID_ARGUMENT_MESSAGE)
+                .build(),
+        ),
+    }
+}
 
 #[async_trait]
 impl
@@ -204,22 +493,35 @@ impl
         &self,
         request: SingleIn<NvCreateChatCompletionRequest>,
     ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
-        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynErrorType};
         let (_request, context) = request.transfer(());
         let ctx = context.context();
+        let delay = self.delay;
         let stream = stream! {
-            yield Annotated::<NvCreateChatCompletionStreamResponse> {
-                data: None,
-                id: None,
-                event: Some("error".to_string()),
-                comment: None,
-                error: Some(
-                    DynamoError::builder()
-                        .error_type(DynErrorType::Backend(BackendError::InvalidArgument))
-                        .message("Received multimodal data but multimodal processing is not enabled")
-                        .build(),
-                ),
-            };
+            tokio::time::sleep(delay).await;
+            yield invalid_argument_error_frame();
+        };
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateCompletionRequest>,
+        ManyOut<Annotated<NvCreateCompletionResponse>>,
+        Error,
+    > for InvalidArgumentEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
+        let (_request, context) = request.transfer(());
+        let ctx = context.context();
+        let delay = self.delay;
+        let stream = stream! {
+            tokio::time::sleep(delay).await;
+            yield invalid_argument_error_frame();
         };
         Ok(ResponseStream::new(Box::pin(stream), ctx))
     }
@@ -310,6 +612,7 @@ fn compute_index(endpoint: &Endpoint, request_type: &RequestType, status: &Statu
         Endpoint::ChatCompletions => 1,
         Endpoint::Embeddings => todo!(),
         Endpoint::Classify => todo!(),
+        Endpoint::Rerank => todo!(),
         Endpoint::Pooling => todo!(),
         Endpoint::Responses => todo!(),
         Endpoint::AnthropicMessages => todo!(),
@@ -1011,45 +1314,18 @@ async fn test_client_disconnect_cancellation_unary() {
         .build()
         .expect("Failed to build request");
 
-    // Start the request and cancel it after 1 second
-    let start_time = std::time::Instant::now();
-
-    let request_future = async {
+    let request_task = tokio::spawn(async move {
         client
             .post(format!("http://localhost:{}/v1/chat/completions", port))
             .json(&request)
             .send()
             .await
-    };
+    });
 
-    // Use timeout to simulate client disconnect after 1 second
-    let result = timeout(std::time::Duration::from_millis(1000), request_future).await;
-
-    let elapsed = start_time.elapsed();
-
-    // The request should timeout (simulating client disconnect)
-    assert!(result.is_err(), "Request should have timed out");
-
-    // Give the service a moment to detect the disconnect and propagate cancellation
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-    // Verify the engine was cancelled
-    assert!(
-        long_running_engine.was_cancelled(),
-        "Engine should have been cancelled due to client disconnect"
-    );
-
-    // Verify cancellation happened quickly (within 2 seconds, not the full 10 seconds)
-    assert!(
-        elapsed < std::time::Duration::from_secs(2),
-        "Cancellation should have propagated quickly, took {:?}",
-        elapsed
-    );
-
-    tracing::info!(
-        "✅ Client disconnect test passed! Request cancelled in {:?}, engine detected cancellation",
-        elapsed
-    );
+    long_running_engine.wait_for_started().await;
+    request_task.abort();
+    assert!(request_task.await.unwrap_err().is_cancelled());
+    long_running_engine.wait_for_cancellation().await;
 
     cancel_token.cancel();
     task.await.unwrap().unwrap();
@@ -1107,51 +1383,18 @@ async fn test_client_disconnect_cancellation_streaming() {
         .build()
         .expect("Failed to build request");
 
-    // Start the request and cancel it after 1 second
-    let start_time = std::time::Instant::now();
-
-    let request_future = async {
-        let response = client
+    let request_task = tokio::spawn(async move {
+        client
             .post(format!("http://localhost:{}/v1/chat/completions", port))
             .json(&request)
             .send()
             .await
-            .unwrap();
+    });
 
-        // Start reading the stream, then drop it to simulate client disconnect
-        let mut stream = response.bytes_stream();
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-        // Read one chunk then drop the stream (simulating client disconnect)
-        let _ = StreamExt::next(&mut stream).await;
-        // Stream gets dropped here when function exits
-    };
-
-    // Use timeout to simulate the streaming request timing out
-    let _result = timeout(std::time::Duration::from_millis(1500), request_future).await;
-
-    let elapsed = start_time.elapsed();
-
-    // Give the service time to detect the disconnect
-    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-
-    // Verify the engine was cancelled
-    assert!(
-        long_running_engine.was_cancelled(),
-        "Engine should have been cancelled due to streaming client disconnect"
-    );
-
-    // Verify cancellation happened reasonably quickly
-    assert!(
-        elapsed < std::time::Duration::from_secs(3),
-        "Stream cancellation should have propagated reasonably quickly, took {:?}",
-        elapsed
-    );
-
-    tracing::info!(
-        "✅ Streaming client disconnect test passed! Stream cancelled in {:?}, engine detected cancellation",
-        elapsed
-    );
+    long_running_engine.wait_for_started().await;
+    request_task.abort();
+    assert!(request_task.await.unwrap_err().is_cancelled());
+    long_running_engine.wait_for_cancellation().await;
 
     cancel_token.cancel();
     task.await.unwrap().unwrap();
@@ -1470,8 +1713,8 @@ async fn test_model_ready_endpoint_non_displayable_shadow() {
     task.await.unwrap().unwrap();
 }
 
-/// With nvext disabled, a request asking for response `extra_fields` must not
-/// produce any `nvext` field in the response.
+/// With nvext disabled, cache salting reaches the engine while all other NvExt
+/// behavior stays disabled, including response `extra_fields`.
 #[tokio::test]
 async fn test_nvext_disabled_strips_request_and_response() {
     dynamo_runtime::logging::init();
@@ -1492,19 +1735,24 @@ async fn test_nvext_disabled_strips_request_and_response() {
     wait_for_service_ready(port).await;
 
     let card = ModelDeploymentCard::with_name_only("test-model");
+    let engine = Arc::new(NvExtCaptureEngine::default());
     manager
-        .add_chat_completions_model("test-model", card.mdcsum(), Arc::new(CounterEngine {}))
+        .add_chat_completions_model("test-model", card.mdcsum(), engine.clone())
         .unwrap();
 
     let response = reqwest::Client::new()
         .post(format!("http://localhost:{port}/v1/chat/completions"))
         .header("x-dynamo-worker-instance-id", "42")
+        .header("x-dynamo-dp-rank", "3")
+        .header("x-dynamo-request-priority", "7")
+        .header("x-tenant-id", "tenant-header")
         .json(&serde_json::json!({
             "model": "test-model",
             "messages": [{"role": "user", "content": "hi"}],
             "stream": true,
             "max_tokens": 1,
             "nvext": {
+                "cache_salt": "tenant-body",
                 "extra_fields": ["worker_id", "timing", "engine_data"],
                 "backend_instance_id": 99
             }
@@ -1515,6 +1763,11 @@ async fn test_nvext_disabled_strips_request_and_response() {
     assert!(response.status().is_success());
 
     let body = response.text().await.expect("read body");
+    let nvext = engine
+        .take_nvext()
+        .expect("cache salt must reach the engine");
+    assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-header"));
+    assert!(!nvext.has_non_cache_salt_fields());
     assert!(
         !body.contains("\"nvext\""),
         "nvext gate off: response must not contain an `nvext` field, got: {body}"
@@ -1528,34 +1781,19 @@ async fn test_nvext_disabled_strips_request_and_response() {
 /// the peek-before-200 helper with chat_completions, so an `InvalidArgument`
 /// frame at t=0 must land as HTTP 400, not HTTP 200 + generic 500 SSE.
 ///
-/// The pre-commit peek is opt-in via `DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS`
-/// (default: unset → peek disabled). Enable it here so the assertion
-/// exercises the fix path. `#[serial]` prevents the env var from bleeding
-/// into other tests that may run in parallel.
+/// The pre-commit peek is off by default, so the bounded window that
+/// `DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS` would configure is set through the
+/// builder here instead.
 #[tokio::test]
-#[serial_test::serial]
 async fn test_streaming_responses_returns_4xx_on_backend_invalid_argument() {
-    // SAFETY: single-threaded via `#[serial]`; no other test reads or writes
-    // this env var concurrently.
-    unsafe {
-        std::env::set_var(env_llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS, "500");
-    }
-    // Guard to unset on any exit path from this test.
-    struct EnvGuard;
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            unsafe {
-                std::env::remove_var(env_llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS);
-            }
-        }
-    }
-    let _guard = EnvGuard;
-
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
         .port(port)
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
+        .streaming_backend_error_check(BackendErrorCheck::Bounded(
+            std::time::Duration::from_millis(500),
+        ))
         .build()
         .unwrap();
     let state = service.state_clone();
@@ -1572,7 +1810,9 @@ async fn test_streaming_responses_returns_4xx_on_backend_invalid_argument() {
         .add_chat_completions_model(
             "invalid-arg-model",
             card.mdcsum(),
-            Arc::new(InvalidArgumentEngine {}),
+            Arc::new(InvalidArgumentEngine {
+                delay: std::time::Duration::ZERO,
+            }),
         )
         .unwrap();
 
@@ -1604,9 +1844,991 @@ async fn test_streaming_responses_returns_4xx_on_backend_invalid_argument() {
         "streaming Backend(InvalidArgument) on /v1/responses must land as HTTP 400 before HTTP 200 is committed; got {status}, body: {text}"
     );
     assert!(
-        text.contains("Received multimodal data but multimodal processing is not enabled"),
+        text.contains(INVALID_ARGUMENT_MESSAGE),
         "expected typed backend error message forwarded to client; got: {text}"
     );
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+const DELAYED_ERROR_MODEL: &str = "delayed-error-model";
+
+/// Delay before `InvalidArgumentEngine` emits its error frame in the tests
+/// below: longer than any bounded peek window they configure, shorter than
+/// the request timeouts.
+///
+/// The margin over the 20 ms window is deliberately wide. `check_for_backend_error`
+/// selects on the window and the stream without bias, so a scheduler stall
+/// longer than the gap would leave both arms ready at once and let the error
+/// win a window that should already have elapsed.
+const BACKEND_ERROR_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+
+async fn post_streaming_with_check(
+    check: BackendErrorCheck,
+    path: &str,
+    body: serde_json::Value,
+) -> (StatusCode, String) {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .port(port)
+        .enable_chat_endpoints(true)
+        .enable_cmpl_endpoints(true)
+        .streaming_backend_error_check(check)
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+    wait_for_service_ready(port).await;
+
+    let card = ModelDeploymentCard::with_name_only(DELAYED_ERROR_MODEL);
+    let engine = Arc::new(InvalidArgumentEngine {
+        delay: BACKEND_ERROR_DELAY,
+    });
+    state
+        .manager()
+        .add_chat_completions_model(DELAYED_ERROR_MODEL, card.mdcsum(), engine.clone())
+        .unwrap();
+    state
+        .manager()
+        .add_completions_model(DELAYED_ERROR_MODEL, card.mdcsum(), engine)
+        .unwrap();
+
+    // Bound the headers too, not just the body: under `UntilFirstEvent` the
+    // status is what the wait holds, so a regression there hangs here rather
+    // than at `response.text()` below.
+    let response = timeout(
+        std::time::Duration::from_secs(5),
+        reqwest::Client::new()
+            .post(format!("http://localhost:{port}{path}"))
+            .json(&body)
+            .send(),
+    )
+    .await
+    .expect("response headers did not arrive")
+    .expect("request failed");
+    let status = response.status();
+    let text = timeout(std::time::Duration::from_secs(5), response.text())
+        .await
+        .expect("response body did not finish")
+        .unwrap_or_default();
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+    (status, text)
+}
+
+fn delayed_error_chat_body() -> serde_json::Value {
+    serde_json::json!({
+        "model": DELAYED_ERROR_MODEL,
+        "stream": true,
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+}
+
+/// With `UntilFirstEvent` the HTTP status is not committed until the backend
+/// produces its first item, and that item is still the first thing the client
+/// reads: the wait must not consume it.
+#[tokio::test]
+async fn test_streaming_chat_until_first_event_holds_status_for_first_item() {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .port(port)
+        .enable_chat_endpoints(true)
+        .streaming_backend_error_check(BackendErrorCheck::UntilFirstEvent)
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+    wait_for_service_ready(port).await;
+
+    let first_token_gate = Arc::new(tokio::sync::Notify::new());
+    let card = ModelDeploymentCard::with_name_only("gated-model");
+    state
+        .manager()
+        .add_chat_completions_model(
+            "gated-model",
+            card.mdcsum(),
+            Arc::new(FirstTokenGateEngine {
+                release: first_token_gate.clone(),
+            }),
+        )
+        .unwrap();
+
+    let body = serde_json::json!({
+        "model": "gated-model",
+        "stream": true,
+        "messages": [{"role": "user", "content": "hi"}],
+    });
+    let client = reqwest::Client::new();
+    let send = client
+        .post(format!("http://localhost:{port}/v1/chat/completions"))
+        .json(&body)
+        .send();
+    tokio::pin!(send);
+
+    assert!(
+        timeout(std::time::Duration::from_millis(300), &mut send)
+            .await
+            .is_err(),
+        "HTTP status was committed before the backend produced its first event"
+    );
+
+    first_token_gate.notify_one();
+    let response = timeout(std::time::Duration::from_secs(5), &mut send)
+        .await
+        .expect("response did not arrive after the first backend event")
+        .expect("request failed");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let text = timeout(std::time::Duration::from_secs(5), response.text())
+        .await
+        .expect("stream did not finish")
+        .expect("failed to read stream");
+    assert!(
+        text.contains("choice 0"),
+        "first backend item was consumed by the wait: {text}"
+    );
+    assert!(
+        text.contains("data: [DONE]"),
+        "stream did not terminate with [DONE]: {text}"
+    );
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+/// A backend error that arrives after any bounded peek window still maps to
+/// its typed 4xx when the service waits for the first event. With a bounded
+/// or skipped check, HTTP 200 has already been committed by then.
+#[tokio::test]
+async fn test_streaming_chat_delayed_backend_error_status_follows_check() {
+    for (check, expected) in [
+        (BackendErrorCheck::Skip, StatusCode::OK),
+        (
+            BackendErrorCheck::Bounded(std::time::Duration::from_millis(20)),
+            StatusCode::OK,
+        ),
+        (BackendErrorCheck::UntilFirstEvent, StatusCode::BAD_REQUEST),
+    ] {
+        let (status, text) =
+            post_streaming_with_check(check, "/v1/chat/completions", delayed_error_chat_body())
+                .await;
+        assert_eq!(status, expected, "{check:?}: body: {text}");
+        if expected == StatusCode::BAD_REQUEST {
+            assert!(
+                text.contains(INVALID_ARGUMENT_MESSAGE),
+                "{check:?}: expected typed backend error message; got: {text}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_streaming_responses_until_first_event_returns_4xx_on_delayed_backend_error() {
+    let body = serde_json::json!({
+        "model": DELAYED_ERROR_MODEL,
+        "stream": true,
+        "input": "hi",
+    });
+    let (status, text) =
+        post_streaming_with_check(BackendErrorCheck::UntilFirstEvent, "/v1/responses", body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {text}");
+    assert!(
+        text.contains(INVALID_ARGUMENT_MESSAGE),
+        "expected typed backend error message; got: {text}"
+    );
+}
+
+/// Streaming completions, single prompt and batch, run the same pre-commit
+/// check as chat: a backend error before the first item is a typed 4xx under a
+/// bounded window that covers it, and stays an HTTP 200 when the check is
+/// skipped. `UntilFirstEvent` reaches this same call site and is covered by the
+/// chat tests above.
+#[tokio::test]
+async fn test_streaming_completions_delayed_backend_error_status_follows_check() {
+    for prompt in [
+        serde_json::json!("hello"),
+        serde_json::json!(["hello", "world"]),
+    ] {
+        let body = serde_json::json!({
+            "model": DELAYED_ERROR_MODEL,
+            "stream": true,
+            "prompt": prompt,
+        });
+        let (status, text) = post_streaming_with_check(
+            BackendErrorCheck::Bounded(std::time::Duration::from_secs(5)),
+            "/v1/completions",
+            body.clone(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "Bounded prompt {prompt}: body: {text}"
+        );
+        assert!(
+            text.contains(INVALID_ARGUMENT_MESSAGE),
+            "Bounded prompt {prompt}: expected typed backend error message; got: {text}"
+        );
+
+        let (status, text) =
+            post_streaming_with_check(BackendErrorCheck::Skip, "/v1/completions", body).await;
+        assert_eq!(status, StatusCode::OK, "Skip prompt {prompt}: body: {text}");
+    }
+}
+
+/// The inflight guard drops after the client already holds the response, so a
+/// counter read straight after the request can race it.
+async fn wait_for_counter(
+    metrics: &Metrics,
+    model: &str,
+    endpoint: &Endpoint,
+    request_type: &RequestType,
+    status: &Status,
+    error_type: &ErrorType,
+    expected: u64,
+) {
+    timeout(std::time::Duration::from_secs(3), async {
+        while metrics.get_request_counter(model, endpoint, request_type, status, error_type)
+            != expected
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "timed out waiting for {}/{}/{}/{} to reach {expected}; got {}",
+            endpoint.as_str(),
+            request_type.as_str(),
+            status.as_str(),
+            error_type.as_str(),
+            metrics.get_request_counter(model, endpoint, request_type, status, error_type)
+        )
+    });
+}
+
+/// Start a service that gates streaming on the first backend event, with `/v1/messages`
+/// enabled and `engine` serving `DELAYED_ERROR_MODEL` as a chat model.
+async fn start_anthropic_first_event_service(
+    engine: OpenAIChatCompletionsStreamingEngine,
+) -> (
+    u16,
+    Arc<Metrics>,
+    CancellationToken,
+    tokio::task::JoinHandle<()>,
+) {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .port(port)
+        .enable_chat_endpoints(true)
+        .enable_anthropic_endpoints(true)
+        .streaming_backend_error_check(BackendErrorCheck::UntilFirstEvent)
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task =
+        tokio::spawn(async move { service.run_with_listener(token, listener).await.unwrap() });
+    wait_for_service_ready(port).await;
+
+    let metrics = state.metrics_clone();
+    let card = ModelDeploymentCard::with_name_only(DELAYED_ERROR_MODEL);
+    state
+        .manager()
+        .add_chat_completions_model(DELAYED_ERROR_MODEL, card.mdcsum(), engine)
+        .unwrap();
+
+    (port, metrics, cancel_token, task)
+}
+
+fn anthropic_stream_body() -> serde_json::Value {
+    serde_json::json!({
+        "model": DELAYED_ERROR_MODEL,
+        "stream": true,
+        "max_tokens": 16,
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+}
+
+/// Chat engine whose first event is a capacity rejection after `delay`.
+///
+/// A rejection is the pre-commit error whose classification the wire status
+/// cannot reproduce: `InvalidArgumentEngine`'s bare 400 carries none, and
+/// `classify_error_for_metrics` falls back to `Internal` for it — which is what
+/// an unclassified guard already reports.
+struct OverloadedEngine {
+    delay: std::time::Duration,
+}
+
+const OVERLOADED_MESSAGE: &str = "every eligible worker is at capacity";
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        Error,
+    > for OverloadedEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateChatCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        let (_request, context) = request.transfer(());
+        let ctx = context.context();
+        let delay = self.delay;
+        let stream = stream! {
+            tokio::time::sleep(delay).await;
+            yield Annotated {
+                data: None,
+                id: None,
+                event: Some("error".to_string()),
+                comment: None,
+                error: Some(
+                    DynamoError::builder()
+                        .error_type(DynamoErrorType::ResourceExhausted)
+                        .message(OVERLOADED_MESSAGE)
+                        .build(),
+                ),
+            };
+        };
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
+
+/// What [`SilentEngine`] does with the kill a client disconnect delivers.
+#[derive(Clone, Copy)]
+enum OnKill {
+    /// Never resolve, so only the kill arm can end the pre-commit wait.
+    StayPending,
+    /// End the stream, so the check resolves `Ok` in the same poll as the kill.
+    EndStream,
+    /// Yield an error frame, so the check resolves `Err` in the same poll as
+    /// the kill.
+    FailStream,
+}
+
+/// Chat engine that yields nothing until its context is killed.
+struct SilentEngine {
+    on_kill: OnKill,
+    started: Arc<AtomicBool>,
+    started_notify: Arc<tokio::sync::Notify>,
+    cancelled: Arc<AtomicBool>,
+    cancelled_notify: Arc<tokio::sync::Notify>,
+}
+
+impl SilentEngine {
+    fn new(on_kill: OnKill) -> Self {
+        Self {
+            on_kill,
+            started: Arc::new(AtomicBool::new(false)),
+            started_notify: Arc::new(tokio::sync::Notify::new()),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            cancelled_notify: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
+    async fn wait_for_started(&self) {
+        wait_for_signal(&self.started, &self.started_notify, "engine start").await;
+    }
+
+    async fn wait_for_cancellation(&self) {
+        wait_for_signal(
+            &self.cancelled,
+            &self.cancelled_notify,
+            "engine cancellation",
+        )
+        .await;
+    }
+
+    /// Report the kill from the context rather than the generator: the handler
+    /// drops the stream when its pre-commit check ends, so a generator that
+    /// recorded cancellation after its own `stopped()` would never run again.
+    fn watch_for_kill(&self, ctx: &Arc<dyn dynamo_runtime::engine::AsyncEngineContext>) {
+        let ctx = ctx.clone();
+        let cancelled = self.cancelled.clone();
+        let cancelled_notify = self.cancelled_notify.clone();
+        tokio::spawn(async move {
+            ctx.killed().await;
+            cancelled.store(true, Ordering::Release);
+            cancelled_notify.notify_one();
+        });
+    }
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        Error,
+    > for SilentEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateChatCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        let (_request, context) = request.transfer(());
+        let ctx = context.context();
+        self.watch_for_kill(&ctx);
+
+        let started = self.started.clone();
+        let started_notify = self.started_notify.clone();
+        let on_kill = self.on_kill;
+        let kill_ctx = ctx.clone();
+        let stream = stream! {
+            started.store(true, Ordering::Release);
+            started_notify.notify_one();
+            match on_kill {
+                OnKill::StayPending => std::future::pending::<()>().await,
+                OnKill::EndStream => kill_ctx.killed().await,
+                OnKill::FailStream => {
+                    kill_ctx.killed().await;
+                    yield invalid_argument_error_frame();
+                }
+            }
+        };
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
+
+/// A backend error before the first event carries its own classification into
+/// the metric.
+///
+/// The Anthropic gate rewrites the body into Anthropic's error format, and only
+/// the status survives that rewrite. Classifying after it leaves the inflight
+/// guard on its `ErrorType::Internal` default, so a capacity rejection is
+/// reported as a server fault.
+#[tokio::test]
+async fn test_anthropic_pre_commit_backend_error_keeps_its_classification() {
+    let (port, metrics, cancel_token, task) =
+        start_anthropic_first_event_service(Arc::new(OverloadedEngine {
+            delay: BACKEND_ERROR_DELAY,
+        }))
+        .await;
+
+    let response = timeout(
+        std::time::Duration::from_secs(5),
+        reqwest::Client::new()
+            .post(format!("http://localhost:{port}/v1/messages"))
+            .json(&anthropic_stream_body())
+            .send(),
+    )
+    .await
+    .expect("response headers did not arrive")
+    .unwrap();
+    assert_eq!(response.status().as_u16(), 529);
+
+    wait_for_counter(
+        &metrics,
+        DELAYED_ERROR_MODEL,
+        &Endpoint::AnthropicMessages,
+        &RequestType::Stream,
+        &Status::Error,
+        &ErrorType::Overload,
+        1,
+    )
+    .await;
+
+    cancel_token.cancel();
+    task.await.unwrap();
+}
+
+/// A client that hangs up during the pre-commit wait is a cancellation, not an
+/// error: same guard, same rewrite, different classification.
+#[tokio::test]
+async fn test_anthropic_pre_commit_disconnect_is_metered_as_cancelled() {
+    let engine = Arc::new(SilentEngine::new(OnKill::StayPending));
+    let (port, metrics, cancel_token, task) =
+        start_anthropic_first_event_service(engine.clone()).await;
+
+    let request_task = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(format!("http://localhost:{port}/v1/messages"))
+            .json(&anthropic_stream_body())
+            .send()
+            .await
+    });
+
+    engine.wait_for_started().await;
+    request_task.abort();
+    assert!(request_task.await.unwrap_err().is_cancelled());
+    engine.wait_for_cancellation().await;
+
+    wait_for_counter(
+        &metrics,
+        DELAYED_ERROR_MODEL,
+        &Endpoint::AnthropicMessages,
+        &RequestType::Stream,
+        &Status::Error,
+        &ErrorType::Cancelled,
+        1,
+    )
+    .await;
+
+    cancel_token.cancel();
+    task.await.unwrap();
+}
+
+/// A disconnect during the pre-commit wait is one disconnect, metered as a
+/// cancellation, whatever the backend does with the kill.
+///
+/// Route handlers run detached, so a handler outlives its connection. A
+/// disconnect during the wait was recorded twice: once when the armed
+/// connection handle dropped, and again when the response — finished for a
+/// client already gone — was dropped unpolled with its stream handle still
+/// armed. A backend that ends its stream on the kill resolves the check `Ok`
+/// in the same poll as the kill, and one that fails its stream resolves it
+/// `Err`; both results are for a connection that is gone.
+async fn assert_pre_commit_disconnect_is_recorded_once(on_kill: OnKill) {
+    const MODEL: &str = "slow-first-event-model";
+
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .port(port)
+        .enable_chat_endpoints(true)
+        .streaming_backend_error_check(BackendErrorCheck::UntilFirstEvent)
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+    wait_for_service_ready(port).await;
+
+    let metrics = state.metrics_clone();
+    let card = ModelDeploymentCard::with_name_only(MODEL);
+    let engine = Arc::new(SilentEngine::new(on_kill));
+    state
+        .manager()
+        .add_chat_completions_model(MODEL, card.mdcsum(), engine.clone())
+        .unwrap();
+
+    let request_task = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(format!("http://localhost:{port}/v1/chat/completions"))
+            .json(&serde_json::json!({
+                "model": MODEL,
+                "stream": true,
+                "messages": [{"role": "user", "content": "hi"}],
+            }))
+            .send()
+            .await
+    });
+
+    engine.wait_for_started().await;
+    request_task.abort();
+    assert!(request_task.await.unwrap_err().is_cancelled());
+    engine.wait_for_cancellation().await;
+
+    wait_for_counter(
+        &metrics,
+        MODEL,
+        &Endpoint::ChatCompletions,
+        &RequestType::Stream,
+        &Status::Error,
+        &ErrorType::Cancelled,
+        1,
+    )
+    .await;
+    // The request counter moves when the handler's guard drops; a second
+    // disconnect, if the handler produced one, is recorded by the connection
+    // monitor task after that. Give it a scheduling window so the assertions
+    // below can see it.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    assert_eq!(
+        metrics.get_client_disconnect_count(),
+        1,
+        "one disconnect must be recorded once"
+    );
+    let cancellation_labels = dynamo_llm::http::service::metrics::CancellationLabels {
+        model: MODEL.to_string(),
+        endpoint: Endpoint::ChatCompletions.to_string(),
+        request_type: RequestType::Stream.as_str().to_string(),
+    };
+    assert_eq!(
+        metrics.get_cancellation_count(&cancellation_labels),
+        1,
+        "one disconnect must be one cancellation"
+    );
+    assert_eq!(
+        metrics.get_inflight_count(MODEL),
+        0,
+        "the handler must release its inflight slot"
+    );
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_disconnect_during_pre_commit_wait_is_recorded_once() {
+    assert_pre_commit_disconnect_is_recorded_once(OnKill::StayPending).await;
+}
+
+#[tokio::test]
+async fn test_disconnect_during_pre_commit_wait_is_recorded_once_when_backend_ends_on_kill() {
+    assert_pre_commit_disconnect_is_recorded_once(OnKill::EndStream).await;
+}
+
+#[tokio::test]
+async fn test_disconnect_during_pre_commit_wait_is_recorded_once_when_backend_fails_on_kill() {
+    assert_pre_commit_disconnect_is_recorded_once(OnKill::FailStream).await;
+}
+
+const BATCH_FAILING_PROMPT: &str = "fail-before-first-event";
+
+/// Completions engine for batch preflight coverage: the prompt that reads
+/// [`BATCH_FAILING_PROMPT`] fails its own check immediately, and every other
+/// prompt runs until its context is killed, recording that it was.
+struct BatchSiblingEngine {
+    started: Arc<AtomicBool>,
+    started_notify: Arc<tokio::sync::Notify>,
+    cancelled: Arc<AtomicBool>,
+    cancelled_notify: Arc<tokio::sync::Notify>,
+}
+
+impl BatchSiblingEngine {
+    fn new() -> Self {
+        Self {
+            started: Arc::new(AtomicBool::new(false)),
+            started_notify: Arc::new(tokio::sync::Notify::new()),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            cancelled_notify: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
+    async fn wait_for_sibling_started(&self) {
+        wait_for_signal(&self.started, &self.started_notify, "sibling start").await;
+    }
+
+    async fn wait_for_sibling_cancellation(&self) {
+        wait_for_signal(
+            &self.cancelled,
+            &self.cancelled_notify,
+            "sibling cancellation",
+        )
+        .await;
+    }
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateCompletionRequest>,
+        ManyOut<Annotated<NvCreateCompletionResponse>>,
+        Error,
+    > for BatchSiblingEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
+        let fails = matches!(
+            &request.inner.prompt,
+            dynamo_protocols::types::Prompt::String(prompt) if prompt == BATCH_FAILING_PROMPT
+        );
+        let (_request, context) = request.transfer(());
+        let ctx = context.context();
+
+        if fails {
+            let stream = stream! { yield invalid_argument_error_frame(); };
+            return Ok(ResponseStream::new(Box::pin(stream), ctx));
+        }
+
+        // Watch the context, not the generator: the failing prompt's error
+        // makes the handler drop every sibling stream, so a cancellation
+        // recorded inside this generator would never run.
+        let ctx_clone = ctx.clone();
+        let cancelled = self.cancelled.clone();
+        let cancelled_notify = self.cancelled_notify.clone();
+        tokio::spawn(async move {
+            ctx_clone.killed().await;
+            cancelled.store(true, Ordering::Release);
+            cancelled_notify.notify_one();
+        });
+
+        let started = self.started.clone();
+        let started_notify = self.started_notify.clone();
+        let stream = stream! {
+            started.store(true, Ordering::Release);
+            started_notify.notify_one();
+            std::future::pending::<()>().await;
+            yield invalid_argument_error_frame();
+        };
+
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
+
+/// One prompt's preflight error stops the prompts still running behind it.
+///
+/// Each prompt gets its own context so it can carry its own request id. Before
+/// those contexts were linked to the request, the failing prompt returned an
+/// HTTP error and dropped its siblings' streams without killing them, leaving
+/// backends generating for a response that would never be sent.
+#[tokio::test]
+async fn test_batch_preflight_error_kills_sibling_prompts() {
+    const MODEL: &str = "batch-sibling-model";
+
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .port(port)
+        .enable_cmpl_endpoints(true)
+        .streaming_backend_error_check(BackendErrorCheck::UntilFirstEvent)
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+    wait_for_service_ready(port).await;
+
+    let card = ModelDeploymentCard::with_name_only(MODEL);
+    let engine = Arc::new(BatchSiblingEngine::new());
+    state
+        .manager()
+        .add_completions_model(MODEL, card.mdcsum(), engine.clone())
+        .unwrap();
+
+    let request_task = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(format!("http://localhost:{port}/v1/completions"))
+            .json(&serde_json::json!({
+                "model": MODEL,
+                "stream": true,
+                // The sibling is first so it is running by the time the second
+                // prompt's check fails.
+                "prompt": ["keep-generating", BATCH_FAILING_PROMPT],
+            }))
+            .send()
+            .await
+    });
+
+    engine.wait_for_sibling_started().await;
+    let response = timeout(std::time::Duration::from_secs(5), request_task)
+        .await
+        .expect("response headers did not arrive")
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    engine.wait_for_sibling_cancellation().await;
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_audio_speech_streams_worker_chunks() {
+    let engine = Arc::new(ChunkedAudioEngine::default());
+    let (port, cancel_token, task) = start_audio_service(engine.clone()).await;
+
+    let response = timeout(
+        std::time::Duration::from_secs(1),
+        reqwest::Client::new()
+            .post(format!("http://localhost:{port}/v1/audio/speech"))
+            .json(&serde_json::json!({
+                "model": "audio-model",
+                "input": "hello",
+                "response_format": "pcm"
+            }))
+            .send(),
+    )
+    .await
+    .expect("response headers should arrive with the first audio chunk")
+    .unwrap();
+    assert!(response.status().is_success());
+    assert_eq!(response.headers().get("content-type").unwrap(), "audio/pcm");
+    assert_eq!(response.content_length(), None);
+
+    let mut chunks = response.bytes_stream();
+    let first = timeout(std::time::Duration::from_secs(1), chunks.next())
+        .await
+        .expect("first chunk should be available immediately")
+        .unwrap()
+        .unwrap();
+    assert_eq!(first, "first-");
+
+    engine.release.notify_one();
+    let second = timeout(std::time::Duration::from_secs(1), chunks.next())
+        .await
+        .expect("second chunk should arrive after release")
+        .unwrap()
+        .unwrap();
+    assert_eq!(second, "second");
+    assert!(chunks.next().await.is_none());
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_audio_speech_buffers_complete_response_with_content_length() {
+    for (response_format, speed, content_type) in
+        [("mp3", None, "audio/mpeg"), ("wav", Some(2.0), "audio/wav")]
+    {
+        let engine = Arc::new(CompleteAudioEngine::default());
+        let (port, cancel_token, task) = start_audio_service(engine.clone()).await;
+
+        let mut body = serde_json::json!({
+            "model": "audio-model",
+            "input": "hello",
+            "response_format": response_format
+        });
+        if let Some(speed) = speed {
+            body["speed"] = speed.into();
+        }
+        let client = reqwest::Client::new();
+        let mut request = Box::pin(
+            client
+                .post(format!("http://localhost:{port}/v1/audio/speech"))
+                .json(&body)
+                .send(),
+        );
+        timeout(std::time::Duration::from_secs(1), async {
+            tokio::select! {
+                result = &mut request => {
+                    panic!("response headers arrived before complete-file encoding: {result:?}");
+                }
+                _ = engine.waiting.notified() => {}
+            }
+        })
+        .await
+        .expect("worker should reach the complete-file gate");
+
+        engine.release.notify_one();
+        let response = timeout(std::time::Duration::from_secs(1), request)
+            .await
+            .expect("complete audio should arrive after release")
+            .unwrap();
+        assert!(response.status().is_success());
+        assert_eq!(
+            response.headers().get("content-type").unwrap(),
+            content_type
+        );
+        assert_eq!(
+            response.content_length(),
+            Some(b"complete-audio".len() as u64)
+        );
+        assert_eq!(response.bytes().await.unwrap(), "complete-audio");
+
+        cancel_token.cancel();
+        task.await.unwrap().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn test_audio_speech_alias_meters_under_primary_model() {
+    const PRIMARY: &str = "audio-model";
+    const ALIAS: &str = "audio-model-alias";
+
+    let engine = Arc::new(CompleteAudioEngine::default());
+    // `Notify` keeps one permit from a `notify_one` that arrives before the
+    // wait, so arming it here lets the engine run straight through without a
+    // second task to release it.
+    engine.release.notify_one();
+
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder().port(port).build().unwrap();
+    service
+        .enable_model_endpoint(EndpointType::Audios, true)
+        .unwrap();
+    let state = service.state_clone();
+    let card = ModelDeploymentCard::with_name_only(PRIMARY);
+    state
+        .manager()
+        .add_audios_model(PRIMARY, card.mdcsum(), engine.clone())
+        .unwrap();
+    // Audio requests resolve an alias through its primary model registration.
+    assert!(state.manager().register_alias(ALIAS, PRIMARY));
+
+    let token = CancellationToken::new();
+    let task = service.spawn_with_listener(token.clone(), listener).await;
+    wait_for_service_ready(port).await;
+
+    let response = timeout(
+        std::time::Duration::from_secs(5),
+        reqwest::Client::new()
+            .post(format!("http://localhost:{port}/v1/audio/speech"))
+            .json(&serde_json::json!({
+                "model": ALIAS,
+                "input": "hello",
+                "response_format": "mp3"
+            }))
+            .send(),
+    )
+    .await
+    .expect("audio speech request should complete")
+    .unwrap();
+    assert!(response.status().is_success());
+    assert_eq!(response.bytes().await.unwrap(), "complete-audio");
+
+    let metrics = state.metrics_clone();
+    let counter = |model: &str| {
+        metrics.get_request_counter(
+            model,
+            &Endpoint::Audios,
+            &RequestType::Unary,
+            &Status::Success,
+            &ErrorType::None,
+        )
+    };
+    assert_eq!(counter(PRIMARY), 1);
+    assert_eq!(counter(ALIAS), 0);
+
+    token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_audio_speech_disconnect_before_first_chunk_cancels_engine() {
+    let engine = Arc::new(FirstAudioGateEngine::default());
+    let (port, cancel_token, task) = start_audio_service(engine.clone()).await;
+
+    let client = reqwest::Client::new();
+    let mut request = Box::pin(
+        client
+            .post(format!("http://localhost:{port}/v1/audio/speech"))
+            .json(&serde_json::json!({
+                "model": "audio-model",
+                "input": "hello",
+                "response_format": "pcm"
+            }))
+            .send(),
+    );
+
+    timeout(std::time::Duration::from_secs(5), async {
+        tokio::select! {
+            result = &mut request => {
+                panic!("request completed before first audio: {result:?}");
+            }
+            _ = engine.started.notified() => {}
+        }
+    })
+    .await
+    .expect("audio engine should have started");
+    drop(request);
+
+    timeout(
+        std::time::Duration::from_secs(2),
+        engine.cancelled.notified(),
+    )
+    .await
+    .expect("disconnect before first audio must cancel the engine context");
 
     cancel_token.cancel();
     task.await.unwrap().unwrap();
@@ -1723,7 +2945,7 @@ async fn test_audio_speech_backend_invalid_argument_returns_4xx() {
         &metrics,
         "tts-model",
         &Endpoint::Audios,
-        &RequestType::Unary,
+        &RequestType::Stream,
         &Status::Error,
         &ErrorType::Validation,
         1,
@@ -1819,7 +3041,7 @@ async fn test_audio_speech_failed_status_meters_as_client_error() {
         &metrics,
         "tts-model",
         &Endpoint::Audios,
-        &RequestType::Unary,
+        &RequestType::Stream,
         &Status::Error,
         &ErrorType::Validation,
         1,
@@ -1871,12 +3093,51 @@ impl
     }
 }
 
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<dynamo_llm::protocols::openai::rerank::NvCreateRerankRequest>,
+        ManyOut<Annotated<dynamo_llm::protocols::openai::rerank::NvCreateRerankResponse>>,
+        Error,
+    > for UncalledPoolingFamilyEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<dynamo_llm::protocols::openai::rerank::NvCreateRerankRequest>,
+    ) -> Result<
+        ManyOut<Annotated<dynamo_llm::protocols::openai::rerank::NvCreateRerankResponse>>,
+        Error,
+    > {
+        use dynamo_llm::protocols::openai::rerank::{NvCreateRerankResponse, RerankResult};
+
+        let (_request, context) = request.transfer(());
+        let response_ctx = context.context();
+        let stream = stream! {
+            yield Annotated::from_data(NvCreateRerankResponse(vec![
+                RerankResult {
+                    score: 0.9,
+                    index: 1,
+                    document: Some("second".to_string()),
+                    meta_info: None,
+                },
+                RerankResult {
+                    score: 0.2,
+                    index: 0,
+                    document: Some("first".to_string()),
+                    meta_info: None,
+                },
+            ]));
+        };
+        Ok(ResponseStream::new(Box::pin(stream), response_ctx))
+    }
+}
+
 /// A request rejected by handler-local validation must still be counted in
 /// `requests_total` with `error_type=validation`, like `chat_completions`.
 /// Validating before the inflight guard would drop these 400s from metrics
 /// (and from the "request completed" log the guard emits on drop).
 #[tokio::test]
-async fn test_classify_and_pooling_validation_errors_are_metered() {
+async fn test_pooling_family_validation_errors_are_metered() {
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder().port(port).build().unwrap();
     service
@@ -1884,6 +3145,9 @@ async fn test_classify_and_pooling_validation_errors_are_metered() {
         .unwrap();
     service
         .enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Pooling, true)
+        .unwrap();
+    service
+        .enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Rerank, true)
         .unwrap();
 
     let state = service.state_clone();
@@ -1902,7 +3166,10 @@ async fn test_classify_and_pooling_validation_errors_are_metered() {
         .add_classify_model("foo", card.mdcsum(), engine.clone())
         .unwrap();
     manager
-        .add_pooling_model("foo", card.mdcsum(), engine)
+        .add_pooling_model("foo", card.mdcsum(), engine.clone())
+        .unwrap();
+    manager
+        .add_rerank_model("foo", card.mdcsum(), engine)
         .unwrap();
 
     let metrics = state.metrics_clone();
@@ -1926,6 +3193,26 @@ async fn test_classify_and_pooling_validation_errors_are_metered() {
         &Status::Error,
         &ErrorType::Validation,
         1,
+    );
+
+    // ==== /v1/rerank: successful responses preserve SGLang's bare-array shape ====
+    let response = client
+        .post(format!("http://localhost:{port}/v1/rerank"))
+        .json(&serde_json::json!({
+            "model": "foo",
+            "query": "query",
+            "documents": ["first", "second"]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.json::<serde_json::Value>().await.unwrap(),
+        serde_json::json!([
+            {"score": 0.9, "index": 1, "document": "second"},
+            {"score": 0.2, "index": 0, "document": "first"}
+        ])
     );
 
     // ==== /v1/pooling: empty cache_salt ====
@@ -1964,6 +3251,313 @@ async fn test_classify_and_pooling_validation_errors_are_metered() {
         2,
     );
 
+    // ==== /v1/rerank: top_n must be positive ====
+    let response = client
+        .post(format!("http://localhost:{port}/v1/rerank"))
+        .json(&serde_json::json!({
+            "model": "foo",
+            "query": "query",
+            "documents": ["document"],
+            "top_n": 0
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    compare_counter(
+        &metrics,
+        "foo",
+        &Endpoint::Rerank,
+        &RequestType::Unary,
+        &Status::Error,
+        &ErrorType::Validation,
+        1,
+    );
+
     cancel_token.cancel();
     task.await.unwrap().unwrap();
+}
+
+// =============================================================================
+// Images route error surfacing: worker exception -> annotated error event ->
+// stream fold -> from_anyhow classification -> HTTP status/body.
+// Regression coverage for the images fold: reverting the from_anyhow routing
+// (back to a hardcoded generic 500) fails the 400 test below.
+// =============================================================================
+
+use dynamo_llm::protocols::openai::images::{NvCreateImageRequest, NvImagesResponse};
+use dynamo_llm::types::openai::images::OpenAIImagesStreamingEngine;
+
+/// Images engine whose stream carries a single error annotation, emulating a
+/// worker that raised during generation (Annotated::from_err on the wire).
+struct ErrorImagesEngine {
+    error: DynamoError,
+}
+
+#[async_trait]
+impl AsyncEngine<SingleIn<NvCreateImageRequest>, ManyOut<Annotated<NvImagesResponse>>, Error>
+    for ErrorImagesEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateImageRequest>,
+    ) -> Result<ManyOut<Annotated<NvImagesResponse>>, Error> {
+        let (_request, context) = request.transfer(());
+        let ctx = context.context();
+        let error = self.error.clone();
+        let stream = stream! {
+            yield Annotated::<NvImagesResponse> {
+                data: None,
+                id: None,
+                event: Some("error".to_string()),
+                comment: None,
+                error: Some(error),
+            };
+        };
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
+
+async fn start_images_service(
+    engine: OpenAIImagesStreamingEngine,
+) -> (
+    u16,
+    CancellationToken,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+) {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder().port(port).build().unwrap();
+    service
+        .enable_model_endpoint(EndpointType::Images, true)
+        .unwrap();
+    let card = ModelDeploymentCard::with_name_only("image-model");
+    service
+        .state_clone()
+        .manager()
+        .add_images_model("image-model", card.mdcsum(), engine)
+        .unwrap();
+
+    let token = CancellationToken::new();
+    let task = service.spawn_with_listener(token.clone(), listener).await;
+    wait_for_service_ready(port).await;
+    (port, token, task)
+}
+
+async fn post_images_generation(port: u16) -> reqwest::Response {
+    reqwest::Client::new()
+        .post(format!("http://localhost:{}/v1/images/generations", port))
+        .json(&serde_json::json!({
+            "model": "image-model",
+            "prompt": "a red apple",
+        }))
+        .send()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn test_images_worker_invalid_argument_maps_to_400_with_message() {
+    let error = DynamoError::builder()
+        .error_type(DynamoErrorType::InvalidArgument)
+        .message("n must be in [1, 10], got 11")
+        .public_message("n must be in [1, 10], got 11")
+        .build();
+    let engine: OpenAIImagesStreamingEngine = Arc::new(ErrorImagesEngine { error });
+    let (port, token, task) = start_images_service(engine).await;
+
+    let response = post_images_generation(port).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response.text().await.unwrap();
+    assert!(
+        body.contains("n must be in [1, 10], got 11"),
+        "validation message must reach the client, got: {body}"
+    );
+
+    token.cancel();
+    let _ = task.await;
+}
+
+#[tokio::test]
+async fn test_images_worker_internal_error_maps_to_sanitized_500() {
+    let error = DynamoError::msg("secret internal detail: db password");
+    let engine: OpenAIImagesStreamingEngine = Arc::new(ErrorImagesEngine { error });
+    let (port, token, task) = start_images_service(engine).await;
+
+    let response = post_images_generation(port).await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = response.text().await.unwrap();
+    assert!(
+        !body.contains("secret internal detail"),
+        "internal details must not leak to the client, got: {body}"
+    );
+
+    token.cancel();
+    let _ = task.await;
+}
+
+mod zero_top_logprobs {
+    //! CPU HTTP regressions for chosen-token logprobs without top alternatives.
+    //!
+    //! Backend output is injected deterministically; these tests exercise the real
+    //! Rust delta converter, HTTP aggregation, and SSE serialization, not inference.
+
+    use std::time::Duration;
+
+    use dynamo_llm::protocols::{
+        Annotated,
+        common::{FinishReason, llm_backend::BackendOutput},
+        openai::{DeltaGeneratorExt, chat_completions::NvCreateChatCompletionRequest},
+    };
+    use serde_json::{Value, json};
+
+    use super::http_harness::{HarnessService, MODEL, parse_json_sse};
+    use super::scripted_chat_engine::Script;
+
+    const TOKENS: [(&str, u32, f64); 2] = [("Hello", 42, -0.125), ("!", 99, -0.75)];
+
+    fn request_body(stream: bool) -> Value {
+        json!({
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Say hello."}],
+            "max_completion_tokens": TOKENS.len(),
+            "stream": stream,
+            "logprobs": true,
+            "top_logprobs": 0,
+        })
+    }
+
+    fn converted_backend_script(body: &Value) -> Script {
+        let mut request: NvCreateChatCompletionRequest =
+            serde_json::from_value(body.clone()).expect("invalid regression request");
+        // Backend preprocessing enables final usage for nonstreaming requests;
+        // the backend always returns chunks for the HTTP handler to aggregate.
+        request.enable_usage_for_nonstreaming(request.inner.stream.unwrap_or(false));
+        let mut generator = request.response_generator("zero-top-regression".to_string());
+        generator.update_isl(3);
+
+        let mut chunks: Script = TOKENS
+            .iter()
+            .enumerate()
+            .map(|(index, &(token, token_id, logprob))| {
+                generator
+                    .choice_from_postprocessor(BackendOutput {
+                        token_ids: vec![token_id],
+                        tokens: vec![Some(token.to_string())],
+                        text: Some(token.to_string()),
+                        cum_log_probs: None,
+                        log_probs: Some(vec![logprob]),
+                        top_logprobs: None,
+                        finish_reason: (index + 1 == TOKENS.len()).then_some(FinishReason::Stop),
+                        stop_reason: None,
+                        index: Some(0),
+                        completion_usage: None,
+                        disaggregated_params: None,
+                        encoder_result: None,
+                        worker_trace_link: None,
+                        engine_data: None,
+                        routing_data: None,
+                        jailed_text: None,
+                    })
+                    .expect("backend output conversion failed")
+            })
+            .map(Annotated::from_data)
+            .collect();
+        if generator.is_usage_enabled() {
+            chunks.push(Annotated::from_data(generator.create_usage_chunk()));
+        }
+        chunks
+    }
+
+    fn assert_chosen_logprobs(content: &Value, expected: &[(&str, u32, f64)]) {
+        let entries = content
+            .as_array()
+            .expect("HTTP logprobs.content must contain chosen-token entries, not null");
+        assert_eq!(entries.len(), expected.len());
+        for (entry, &(token, token_id, logprob)) in entries.iter().zip(expected) {
+            assert_eq!(entry["token"], token);
+            assert_eq!(entry["token_id"], token_id);
+            assert_eq!(entry["bytes"], json!(token.as_bytes()));
+            let actual = entry["logprob"]
+                .as_f64()
+                .expect("chosen-token logprob must be numeric");
+            assert!(actual.is_finite());
+            assert_eq!(actual, logprob);
+            assert_eq!(entry["top_logprobs"], json!([]));
+        }
+    }
+
+    async fn assert_http_response(stream: bool) {
+        let body = request_body(stream);
+        // Do not assert on the generated chunks before sending the HTTP request:
+        // the regression must be observable in the actual HTTP response body.
+        let svc = HarnessService::start([converted_backend_script(&body)]).await;
+        let response = svc
+            .client
+            .post(format!("{}/v1/chat/completions", svc.base_url))
+            .timeout(Duration::from_secs(5))
+            .json(&body)
+            .send()
+            .await
+            .expect("POST /v1/chat/completions failed");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let content_type = response.headers()[reqwest::header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .to_string();
+        let raw = response.text().await.expect("failed to read HTTP response");
+        println!("stream={stream}, top_logprobs=0, HTTP response:\n{raw}");
+
+        if stream {
+            assert!(content_type.starts_with("text/event-stream"));
+            let events = parse_json_sse(&raw).await.expect("invalid SSE response");
+            // The shared message codec consumes the terminal [DONE] sentinel.
+            assert_eq!(raw.matches("data: [DONE]").count(), 1);
+            let chunks: Vec<&Value> = events.iter().map(|event| &event.data).collect();
+            assert_eq!(chunks.len(), TOKENS.len());
+            for (index, chunk) in chunks.iter().enumerate() {
+                assert_eq!(chunk["choices"].as_array().unwrap().len(), 1);
+                let choice = &chunk["choices"][0];
+                assert_eq!(choice["delta"]["content"], TOKENS[index].0);
+                assert_chosen_logprobs(&choice["logprobs"]["content"], &TOKENS[index..=index]);
+            }
+            assert_eq!(
+                chunks.last().unwrap()["choices"][0]["finish_reason"],
+                "stop"
+            );
+        } else {
+            assert!(content_type.starts_with("application/json"));
+            let response: Value = serde_json::from_str(&raw).expect("invalid JSON response");
+            assert_eq!(response["choices"].as_array().unwrap().len(), 1);
+            let choice = &response["choices"][0];
+            assert_eq!(choice["message"]["content"], "Hello!");
+            assert_eq!(choice["finish_reason"], "stop");
+            assert_chosen_logprobs(&choice["logprobs"]["content"], &TOKENS);
+        }
+
+        // The shared harness uses precomputed chunks. Check that the real incoming
+        // request retained the same converter options used to prepare that script.
+        let requests = svc.engine.take_requests().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].inner.logprobs, Some(true));
+        assert_eq!(requests[0].inner.top_logprobs, Some(0));
+        assert_eq!(requests[0].inner.stream, Some(stream));
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
+        svc.shutdown().await;
+    }
+
+    async fn run_case(stream: bool) {
+        tokio::time::timeout(Duration::from_secs(15), assert_http_response(stream))
+            .await
+            .expect("logprobs HTTP regression timed out");
+    }
+
+    #[tokio::test]
+    async fn nonstreaming_top_zero_preserves_chosen_logprobs() {
+        run_case(false).await;
+    }
+
+    #[tokio::test]
+    async fn streaming_top_zero_preserves_chosen_logprobs() {
+        run_case(true).await;
+    }
 }

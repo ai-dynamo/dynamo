@@ -55,7 +55,7 @@ pub(crate) fn invalid_argument(message: impl Into<String>) -> DynamoError {
 /// `Display` impl that produces the user-safe message all live on this
 /// enum — clients see exactly what the enum says, never a backend error
 /// chain, file path, or panic stack.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SanitizedError {
     /// 499 Client Closed Request.
     Cancelled,
@@ -151,6 +151,60 @@ impl SanitizedError {
     /// they stay at debug to avoid drowning real errors.
     pub fn log_as_error(self) -> bool {
         !matches!(self, SanitizedError::Cancelled)
+    }
+}
+
+/// Whether a worker-asserted 5xx keeps its own status on the wire.
+///
+/// Only 503 and the configured overload code (`DYN_HTTP_OVERLOAD_STATUS_CODE`,
+/// 529 by default) do. Dynamo already generates and documents both, so
+/// forwarding them tells a client nothing it could not already receive; any
+/// other 5xx becomes a 500. Reading the overload code from the env rather than
+/// hard-coding 529 keeps one overload status whether the signal came from the
+/// router or from the worker.
+///
+/// This only decides what goes on the wire. Retrying a worker-local overload
+/// against another replica is
+/// <https://github.com/ai-dynamo/dynamo/issues/12383>.
+fn keeps_retry_semantics(status: StatusCode) -> bool {
+    status == StatusCode::SERVICE_UNAVAILABLE || status == overload_status_code()
+}
+
+/// What to do with a status a backend worker asserted for itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendStatusAction {
+    /// Non-499 4xx. Forward the backend's status and message verbatim.
+    ForwardClientError,
+    /// Answer with this sanitized variant, keeping the status it carries.
+    Sanitize(SanitizedError),
+    /// Answer 500. The inner status is what the engine asserted; callers put it
+    /// in the response body so it survives for debugging.
+    CoerceToInternal(StatusCode),
+}
+
+impl BackendStatusAction {
+    /// Triage a worker-asserted status, applying [`keeps_retry_semantics`] on
+    /// top of [`SanitizedError::for_backend_status`].
+    ///
+    /// `DYN_HTTP_OVERLOAD_STATUS_CODE` is not restricted to 5xx (see
+    /// [`parse_overload_status_code`]), so a configured non-5xx overload code
+    /// (e.g. 429) would otherwise fall through
+    /// [`SanitizedError::for_backend_status`]'s 4xx branch and be forwarded
+    /// as a plain client error instead of sanitized and preserved as the
+    /// overload response. Check it first, before that classification runs.
+    pub fn triage(status: StatusCode) -> Self {
+        if status == overload_status_code() && !status.is_server_error() {
+            return BackendStatusAction::Sanitize(SanitizedError::Overloaded);
+        }
+        match SanitizedError::for_backend_status(status) {
+            None => BackendStatusAction::ForwardClientError,
+            Some(SanitizedError::PreserveServerError(asserted))
+                if !keeps_retry_semantics(asserted) =>
+            {
+                BackendStatusAction::CoerceToInternal(asserted)
+            }
+            Some(variant) => BackendStatusAction::Sanitize(variant),
+        }
     }
 }
 
@@ -254,5 +308,49 @@ mod tests {
             SanitizedError::for_backend_status(StatusCode::from_u16(399).unwrap()),
             Some(SanitizedError::Internal)
         ));
+    }
+
+    #[test]
+    fn triage_keeps_only_retry_bearing_5xx_on_the_status_line() {
+        for status in [StatusCode::SERVICE_UNAVAILABLE, overload_status_code()] {
+            assert_eq!(
+                BackendStatusAction::triage(status),
+                BackendStatusAction::Sanitize(SanitizedError::PreserveServerError(status)),
+                "{status} should keep its status line"
+            );
+        }
+    }
+
+    #[test]
+    fn triage_coerces_other_5xx_and_reports_the_asserted_status() {
+        for code in [500u16, 501, 502, 504, 507, 599] {
+            let status = StatusCode::from_u16(code).unwrap();
+            assert_eq!(
+                BackendStatusAction::triage(status),
+                BackendStatusAction::CoerceToInternal(status),
+                "{code} should be coerced to 500 with the asserted status reported"
+            );
+        }
+    }
+
+    #[test]
+    fn triage_leaves_client_errors_and_cancellation_alone() {
+        assert_eq!(
+            BackendStatusAction::triage(StatusCode::BAD_REQUEST),
+            BackendStatusAction::ForwardClientError
+        );
+        assert_eq!(
+            BackendStatusAction::triage(StatusCode::UNSUPPORTED_MEDIA_TYPE),
+            BackendStatusAction::ForwardClientError
+        );
+        assert_eq!(
+            BackendStatusAction::triage(StatusCode::from_u16(499).unwrap()),
+            BackendStatusAction::Sanitize(SanitizedError::Cancelled)
+        );
+        // A non-error status from a backend is nonsense, so it sanitizes too.
+        assert_eq!(
+            BackendStatusAction::triage(StatusCode::from_u16(399).unwrap()),
+            BackendStatusAction::Sanitize(SanitizedError::Internal)
+        );
     }
 }

@@ -6,9 +6,9 @@ from unittest.mock import AsyncMock
 import numpy as np
 import pytest
 
-import dynamo.common.multimodal.audio_loader as audio_loader_module
 from dynamo.common.http import HttpStatusError
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
+from dynamo.common.multimodal import audio_loader as audio_loader_module
 from dynamo.common.multimodal.audio_loader import AudioLoader
 from dynamo.common.multimodal.codec_errors import MissingMediaDecoderError
 from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
@@ -124,14 +124,20 @@ async def test_load_audio_batch_rejects_malformed_items():
 
 
 @pytest.mark.asyncio
-async def test_load_audio_batch_prioritizes_typed_client_error():
+@pytest.mark.parametrize(
+    "client_error",
+    [
+        UrlValidationError("blocked host"),
+        HttpStatusError(415, "Unsupported Media Type", "https://example.com/x.wav"),
+    ],
+)
+async def test_load_audio_batch_prioritizes_typed_client_error(client_error):
     loader = AudioLoader()
-    client_error = UrlValidationError("blocked host")
     loader.load_audio = AsyncMock(  # type: ignore[method-assign]
         side_effect=[RuntimeError("decode failed"), client_error]
     )
 
-    with pytest.raises(UrlValidationError) as exc_info:
+    with pytest.raises(type(client_error)) as exc_info:
         await loader.load_audio_batch(
             [
                 {"Url": "https://example.com/bad.wav"},
@@ -181,11 +187,14 @@ async def test_load_audio_batch_reads_decoded_variant(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_load_audio_missing_decoder_is_actionable():
+async def test_load_audio_missing_decoder_is_actionable(carrier_imports):
     """vLLM's own hint here is `pip install vllm[audio]`, which drags in an
     unpinned stack; the wrap must point at the validated bounded install and
     say there is no hardware alternative for audio."""
     loader = AudioLoader()
+    # 'av' genuinely absent, independent of what the test machine has
+    # installed: _install_hint asks the running interpreter.
+    carrier_imports()
     loader._load_audio_with_vllm = AsyncMock(  # type: ignore[method-assign]
         side_effect=ImportError("Please install vllm[audio] for audio support")
     )

@@ -235,6 +235,16 @@ def pytest_configure(config: pytest.Config) -> None:
         "token_budget_parity: compares native backend and Dynamo prompt/output "
         "overflow behavior",
     )
+    config.addinivalue_line(
+        "markers",
+        "framework_with_efa: marks deployment tests that require an EFA-capable "
+        "cluster and an -efa image",
+    )
+    config.addinivalue_line(
+        "markers",
+        "framework_with_kvcr: marks deployment tests that require a KVCR-capable "
+        "image and multi-host RDMA",
+    )
 
     models_dir = config.getoption("--models-dir", default=None)
     if models_dir and not Path(models_dir).is_dir():
@@ -658,7 +668,12 @@ def pytest_collection_modifyitems(config, items):
     This function is called to modify the list of tests to run.
     """
     _check_sglang_mm_hashes_present(items)
-    # Auto-skip tests marked with a framework marker when the framework is not installed
+    # Auto-skip tests marked with a framework marker when the framework is not
+    # installed. Framework markers are also how CI selects which container runs a
+    # test, so a test that inspects the container itself must carry every
+    # framework marker to be selected everywhere -- and would then be skipped
+    # everywhere, since no image ships all of them. framework_agnostic opts such
+    # a test out of the skip while leaving its selection markers intact.
     framework_markers = {
         "trtllm": "tensorrt_llm",
         "vllm": "vllm",
@@ -670,7 +685,9 @@ def pytest_collection_modifyitems(config, items):
         if importlib.util.find_spec(module_name) is None:
             skip = pytest.mark.skip(reason=f"{module_name} is not installed")
             for item in items:
-                if _item_has_marker(item, marker_name):
+                if _item_has_marker(item, marker_name) and not _item_has_marker(
+                    item, "framework_agnostic"
+                ):
                     item.add_marker(skip)
 
     # Deselect tests based on --max-vram-gib:
@@ -1277,7 +1294,7 @@ def dynamo_dynamic_ports(num_system_ports) -> Generator[ServicePorts, None, None
 
     - frontend_port: OpenAI-compatible HTTP/gRPC ingress (dynamo.frontend)
     - system_ports: List of worker metrics/system ports (configurable count via num_system_ports)
-    - kv_event_port: ZMQ port for vLLM KV event publishing (avoids collisions under xdist)
+    - kv_event_ports: one ZMQ port per worker for vLLM KV event publishing
     """
     # Track ports as they are allocated so a failure mid-sequence (e.g. NIXL
     # allocation raising) still cleans up earlier reservations via finally,
@@ -1288,8 +1305,8 @@ def dynamo_dynamic_ports(num_system_ports) -> Generator[ServicePorts, None, None
         all_ports.append(frontend_port)
         system_port_list = allocate_ports(num_system_ports, DynamoPortRange.SERVE.value)
         all_ports.extend(system_port_list)
-        kv_event_port = allocate_port(DynamoPortRange.SERVE.value)
-        all_ports.append(kv_event_port)
+        kv_event_ports = allocate_ports(num_system_ports, DynamoPortRange.SERVE.value)
+        all_ports.extend(kv_event_ports)
         fpm_port = allocate_port(DynamoPortRange.FPM.value)
         all_ports.append(fpm_port)
         # One NIXL side-channel port per worker (avoids xdist collisions on shared hosts).
@@ -1300,7 +1317,7 @@ def dynamo_dynamic_ports(num_system_ports) -> Generator[ServicePorts, None, None
         yield ServicePorts(
             frontend_port=frontend_port,
             system_ports=system_port_list,
-            kv_event_port=kv_event_port,
+            kv_event_ports=kv_event_ports,
             fpm_port=fpm_port,
             nixl_side_channel_ports=nixl_side_channel_ports,
         )

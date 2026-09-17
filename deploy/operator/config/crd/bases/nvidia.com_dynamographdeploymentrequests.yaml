@@ -561,6 +561,20 @@ spec:
                 features:
                   description: Features controls optional Dynamo platform features in the generated deployment.
                   properties:
+                    kvRouter:
+                      description: |-
+                        KVRouter configures KV-cache-aware routing for the generated deployment.
+                        When enabled, DGDR sets DYN_ROUTER_MODE=kv on the generated Frontend.
+                        Settings in spec.overrides.dgd take precedence: an override can replace
+                        DYN_ROUTER_MODE or pass --router-mode. The flag takes precedence over the
+                        environment variable when both are present.
+                      properties:
+                        enabled:
+                          description: |-
+                            Enabled indicates whether to enable KV-cache-aware routing in the generated DGD.
+                            KV routing optimizes request scheduling based on KV cache locality.
+                          type: boolean
+                      type: object
                     mocker:
                       description: Mocker configures the simulated (mocker) backend for testing without GPUs.
                       properties:
@@ -9238,6 +9252,15 @@ spec:
                       required:
                         - template
                       type: object
+                    trustRemoteCode:
+                      default: false
+                      description: |-
+                        TrustRemoteCode explicitly permits generated vLLM and SGLang workers to
+                        execute custom code from the configured model repository. When enabled,
+                        the profiler adds --trust-remote-code to every generated worker component
+                        after the deployment topology has been generated. Enable this setting only
+                        for model repositories you trust.
+                      type: boolean
                   type: object
                 runtimeVersionOverride:
                   description: |-

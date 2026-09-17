@@ -170,7 +170,7 @@ The `file` mode is the lightest way to get a model answering with no prerequisit
 To use the zero-dependency mode instead, skip the infrastructure step above and pass `--discovery-backend file` to both the frontend and each worker.
 
 <Note>
-This applies to **local, single-machine** setups. On Kubernetes, the Dynamo operator manages discovery natively (via custom resources and EndpointSlices) and sets `DYN_DISCOVERY_BACKEND=kubernetes` automatically — neither `file` mode nor a standalone etcd is used. See the [Discovery Plane](../../developer-guide/knowledge-base/concepts/communication-planes/discovery-plane.md) design doc for the full picture.
+This applies to **local, single-machine** setups. On Kubernetes, the Dynamo operator manages discovery natively (via custom resources and EndpointSlices) and sets `DYN_DISCOVERY_BACKEND=kubernetes` automatically — neither `file` mode nor a standalone etcd is used. See the [Discovery Plane](../../developer-guide/knowledge-base/concepts/system-architecture/architecture.md#discovery-plane) design doc for the full picture.
 </Note>
 
 ## Troubleshooting

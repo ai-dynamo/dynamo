@@ -13,6 +13,8 @@ pytest.importorskip(
 )
 
 from dynamo.planner.simulation.presets import (
+    FPM_SAMPLING,
+    LOAD_SENSITIVITY,
     SCALING_POLICIES,
     fpm_fields,
     load_sensitivity_fields,
@@ -87,6 +89,28 @@ def test_fpm_and_sensitivity_accept_presets_and_custom_search_values() -> None:
         "load_scaling_down_sensitivity": 75,
         "load_min_observations": 4,
     }
+
+
+def test_every_named_preset_covers_its_complete_subitem() -> None:
+    scaling_keys = {
+        "enable_throughput_scaling",
+        "enable_load_scaling",
+        "throughput_adjustment_interval_seconds",
+        "load_adjustment_interval_seconds",
+    }
+    for name in SCALING_POLICIES:
+        assert set(scaling_fields(name)) == scaling_keys
+
+    fpm_keys = {"max_num_fpm_samples", "fpm_sample_bucket_size"}
+    for name in FPM_SAMPLING:
+        assert set(fpm_fields(name)) == fpm_keys
+
+    sensitivity_keys = {
+        "load_scaling_down_sensitivity",
+        "load_min_observations",
+    }
+    for name in LOAD_SENSITIVITY:
+        assert set(load_sensitivity_fields(name)) == sensitivity_keys
 
 
 def test_throughput_intervals_mix_presets_and_custom_search_values() -> None:

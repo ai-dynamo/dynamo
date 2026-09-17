@@ -30,8 +30,8 @@ use dynamo_kv_router::identity::{
     CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
 };
 use dynamo_kv_router::indexer::cuckoo::{
-    CkfConfig, ConsumerInstanceId, DcCkfDelta, DcCkfDeltaSink, DcCkfPublicationBatch,
-    DcCkfPublisher, DcCkfState, LaneLease, ProducerIdentity,
+    CanonicalSequenceBlockHash, CkfConfig, ConsumerInstanceId, DcCkfDelta, DcCkfDeltaSink,
+    DcCkfPublicationBatch, DcCkfPublisher, DcCkfState, LaneLease, ProducerIdentity,
 };
 use dynamo_kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError, RouterEvent,
@@ -520,15 +520,14 @@ fn actor_snapshot(
         .saturating_add(size_of::<ActorPublisher>())
         .saturating_add(memory.filter_bytes())
         .saturating_add(memory.dirty_tracking_bytes())
+        .saturating_add(memory.source_lineage_capacity().saturating_mul(size_of::<(
+            ExternalSequenceBlockHash,
+            CanonicalSequenceBlockHash,
+        )>()))
         .saturating_add(
             memory
-                .member_set_capacity()
-                .saturating_mul(size_of::<ExternalSequenceBlockHash>()),
-        )
-        .saturating_add(
-            memory
-                .refcount_capacity()
-                .saturating_mul(size_of::<(ExternalSequenceBlockHash, u32)>()),
+                .canonical_owner_capacity()
+                .saturating_mul(size_of::<(CanonicalSequenceBlockHash, u32)>()),
         )
         .saturating_add(
             memory

@@ -24,7 +24,7 @@ Storage is especially important for large models and multi-node deployments. A s
 | AKS | [Storage for Model Caching on AKS](aks-storage.md) | Compare Azure Disk, Azure Files, Azure Blob, local CSI, and Azure Managed Lustre. |
 | AKS with high-throughput shared storage | [Azure Lustre CSI Driver](azure-lustre-csi-driver.mdx) | Configure Azure Managed Lustre for large shared model caches. |
 | EKS | [Amazon EFS Setup for EKS](efs.mdx) | Share model weights and compilation cache across EKS nodes. |
-| Any Kubernetes cluster | [Model Caching](../../model-deployment/model-loading/model-caching.mdx) | Wire a cache PVC into Dynamo model loading and deployment templates. |
+| Any Kubernetes cluster | [Shared Storage for Model Caching](../install-dynamo.md#shared-storage-for-model-caching) | Wire a cache PVC into Dynamo model loading and deployment templates. |
 
 ## Selection Guidelines
 
@@ -38,4 +38,4 @@ Storage is especially important for large models and multi-node deployments. A s
 
 1. Pick the storage guide that matches your cloud provider.
 2. Create or verify the storage class and persistent volume claims.
-3. Follow [Model Caching](../../model-deployment/model-loading/model-caching.mdx) to connect the storage to a Dynamo deployment.
+3. Follow [Shared Storage for Model Caching](../install-dynamo.md#shared-storage-for-model-caching) to connect the storage to a Dynamo deployment.

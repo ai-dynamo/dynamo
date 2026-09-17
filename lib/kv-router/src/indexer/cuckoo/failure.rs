@@ -13,8 +13,13 @@ pub enum CkfFailureDomain {
 /// What is known about the relevant domain at the point of failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CkfCommitState {
-    /// This operation made no authoritative write in the relevant domain.
+    /// The failed physical operation made no uncertain authoritative write in the relevant
+    /// domain.
     KnownUnchanged,
+    /// Exact lineage and ownership committed deterministically while the physical admission
+    /// was intentionally omitted. Removal stays resolvable and a repeated store may re-admit
+    /// the block; only the presence fingerprint is missing.
+    ExactCommittedPhysicalOmitted,
     /// At least one authoritative write may have occurred and completion cannot be proven.
     Uncertain,
 }
@@ -56,7 +61,7 @@ impl CkfFailurePoint {
     /// Recovery is selected from the state whose commit became uncertain—not merely from the
     /// error's name.
     pub const fn disposition(self) -> CkfFailureDisposition {
-        use CkfCommitState::{KnownUnchanged, Uncertain};
+        use CkfCommitState::{ExactCommittedPhysicalOmitted, KnownUnchanged, Uncertain};
         use CkfFailureAction::{
             ContinueCapacityOmission, DeactivateAndSnapshot, FenceAndRebuildProducer, RejectSource,
             ReportResourceFailure, RetrySnapshot,
@@ -66,7 +71,7 @@ impl CkfFailurePoint {
         match self {
             Self::BoundedRelocationFailure => CkfFailureDisposition {
                 domain: ProducerCore,
-                commit: KnownUnchanged,
+                commit: ExactCommittedPhysicalOmitted,
                 recovery_domain: None,
                 action: ContinueCapacityOmission,
             },
@@ -117,7 +122,10 @@ mod tests {
     #[test]
     fn dispositions_target_only_the_domain_requiring_recovery() {
         let capacity = CkfFailurePoint::BoundedRelocationFailure.disposition();
-        assert_eq!(capacity.commit, CkfCommitState::KnownUnchanged);
+        assert_eq!(
+            capacity.commit,
+            CkfCommitState::ExactCommittedPhysicalOmitted
+        );
         assert_eq!(capacity.recovery_domain, None);
         assert_eq!(capacity.action, CkfFailureAction::ContinueCapacityOmission);
 

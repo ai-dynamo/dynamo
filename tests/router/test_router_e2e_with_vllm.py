@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from typing import Any, Dict, Optional
 
 import aiohttp
@@ -50,6 +51,9 @@ pytestmark = [
 SPEEDUP_RATIO = 10.0
 BLOCK_SIZE = 16
 
+WORKER_REGISTRATION_TIMEOUT_S = 180.0
+WORKER_REGISTRATION_POLL_S = 0.5
+
 # Shared vLLM configuration for all tests
 # gpu_memory_utilization limits actual VRAM allocation (required for multi-worker on same GPU)
 VLLM_ARGS: Dict[str, Any] = {
@@ -67,11 +71,36 @@ VLLM_ARGS_NO_BLOCK_SIZE: Dict[str, Any] = {
     "enforce_eager": True,  # Disable CUDA graphs for faster startup & lower memory
 }
 
+# Twice vLLM's 165,900,288-byte minimum for TinyLlama at max_model_len=1024.
+DISAGG_KV_CACHE_MEMORY_BYTES = 331_801_000
 
-def _vllm_gpu_mem_args(gpu_memory_utilization: Optional[float]) -> list[str]:
+# Avoid device-wide profiling across the two prefill workers on GPU 0.
+VLLM_ARGS_DISAGG: Dict[str, Any] = {
+    "block_size": BLOCK_SIZE,
+    "model": MODEL_NAME,
+    "kv_cache_memory_bytes": DISAGG_KV_CACHE_MEMORY_BYTES,
+    "max_model_len": 1024,
+    "enforce_eager": True,
+}
+
+
+def _vllm_gpu_mem_args(
+    gpu_memory_utilization: Optional[float],
+    kv_cache_memory_bytes: Optional[int] = None,
+) -> list[str]:
     args = build_gpu_mem_args("build_vllm_gpu_mem_args")
-    if args or gpu_memory_utilization is None:
+    if args:
         return args
+    if kv_cache_memory_bytes is not None:
+        # vLLM checks this admission fraction before applying the byte cap.
+        return [
+            "--kv-cache-memory-bytes",
+            str(kv_cache_memory_bytes),
+            "--gpu-memory-utilization",
+            "0.01",
+        ]
+    if gpu_memory_utilization is None:
+        return []
     return ["--gpu-memory-utilization", str(gpu_memory_utilization)]
 
 
@@ -107,6 +136,7 @@ class VLLMProcess(ManagedEngineProcessMixin):
             vllm_args: Configuration dict with keys:
                 - model: Model name/path (default: TinyLlama-1.1B)
                 - gpu_memory_utilization: Fraction of GPU memory to allocate (optional)
+                - kv_cache_memory_bytes: Per-GPU cache budget (optional)
                 - num_gpu_blocks_override: Cap on number of KV cache blocks (optional)
                 - max_model_len: Maximum sequence length (optional)
                 - enforce_eager: Disable CUDA graphs (default: False)
@@ -191,6 +221,7 @@ class VLLMProcess(ManagedEngineProcessMixin):
 
         model = vllm_args.get("model", MODEL_NAME)
         gpu_memory_utilization = vllm_args.get("gpu_memory_utilization")
+        kv_cache_memory_bytes = vllm_args.get("kv_cache_memory_bytes")
         num_gpu_blocks_override = vllm_args.get("num_gpu_blocks_override")
         max_model_len = vllm_args.get("max_model_len")
         enforce_eager = vllm_args.get("enforce_eager", False)
@@ -242,7 +273,9 @@ class VLLMProcess(ManagedEngineProcessMixin):
                 command.append("--enforce-eager")
 
             # Limit VRAM allocation (required for multi-worker on same GPU)
-            command.extend(_vllm_gpu_mem_args(gpu_memory_utilization))
+            command.extend(
+                _vllm_gpu_mem_args(gpu_memory_utilization, kv_cache_memory_bytes)
+            )
 
             # Add optional max_model_len if specified
             if max_model_len is not None:
@@ -405,20 +438,56 @@ class VLLMProcess(ManagedEngineProcessMixin):
                 process.__enter__()
 
                 new_worker_id = None
-                for _ in range(120):
+                started_at = time.monotonic()
+                deadline = started_at + WORKER_REGISTRATION_TIMEOUT_S
+                while True:
                     ids = set(client.instance_ids())
                     new = ids - known_ids
                     if new:
                         new_worker_id = new.pop()
                         known_ids.add(new_worker_id)
                         break
-                    await asyncio.sleep(0.5)
+                    # A dead worker never registers. Check liveness each poll so the
+                    # loop fails in one interval instead of waiting out the full
+                    # budget. Matches _check_port/_check_url/_check_func.
+                    process._check_process_alive(
+                        f"while waiting for vLLM worker {worker_idx} to register"
+                    )
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    await asyncio.sleep(min(WORKER_REGISTRATION_POLL_S, remaining))
+
+                registration_s = time.monotonic() - started_at
 
                 if new_worker_id is None:
+                    try:
+                        returncode = process.proc.poll() if process.proc else None
+                        if process.proc is None:
+                            liveness = "subprocess was never started"
+                        elif returncode is None:
+                            liveness = "subprocess still running"
+                        else:
+                            liveness = (
+                                f"subprocess already exited with code {returncode}"
+                            )
+                    except (OSError, ValueError) as diag_exc:
+                        liveness = f"subprocess liveness unavailable ({diag_exc})"
                     raise RuntimeError(
                         f"Timed out waiting for vLLM worker {worker_idx} to register "
-                        f"(known_ids={known_ids})"
+                        f"(known_ids={known_ids}) after {registration_s:.1f}s of a "
+                        f"{WORKER_REGISTRATION_TIMEOUT_S:.0f}s budget; {liveness}; "
+                        f"worker log: {process.log_path}"
                     )
+
+                logger.info(
+                    "vLLM worker %s registered as instance %s after %.1fs "
+                    "(budget %.0fs)",
+                    worker_idx,
+                    new_worker_id,
+                    registration_s,
+                    WORKER_REGISTRATION_TIMEOUT_S,
+                )
 
                 zmq_endpoint = f"tcp://127.0.0.1:{self._kv_event_ports[worker_idx]}"
                 replay_endpoint = (
@@ -601,6 +670,7 @@ def test_router_decisions_vllm_multiple_workers(
     )
 
 
+@pytest.mark.h100
 @pytest.mark.gpu_2
 @pytest.mark.nightly
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
@@ -635,6 +705,7 @@ def test_router_decisions_vllm_dp(
     )
 
 
+# The parallel lane reserves one GPU per test; this case requires GPUs 0 and 1.
 @pytest.mark.gpu_2
 @pytest.mark.nightly
 @pytest.mark.timeout(600)
@@ -649,7 +720,7 @@ def test_router_decisions_vllm_disagg(
     run_disagg_router_decisions_test(
         engine_process_cls=VLLMProcess,
         engine_args_name="vllm_args",
-        engine_args=VLLM_ARGS,
+        engine_args=VLLM_ARGS_DISAGG,
         request=request,
         request_plane=request_plane,
         model_name=MODEL_NAME,

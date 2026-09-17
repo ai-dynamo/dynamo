@@ -48,15 +48,3 @@ impl NvExtBuilder {
         self
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // Test default builder configuration
-    #[test]
-    fn test_nv_ext_builder_default() {
-        let nv_ext = NvExt::builder().build().unwrap();
-        assert_eq!(nv_ext.annotations, None);
-    }
-}

@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod model;
+pub(crate) mod readiness;
+pub(crate) use model::GenerateEngineSelection;
 pub use model::Model;
 
 pub mod kv_source_membership;
@@ -26,6 +28,7 @@ mod allocator;
 
 mod worker_set;
 pub use worker_set::WorkerSet;
+pub(crate) use worker_set::{CommittedWorkerSetTarget, WorkerSetTarget, WorkerSetTargetId};
 
 pub(crate) mod runtime_configs;
 pub use runtime_configs::{RuntimeConfigWatch, runtime_config_watch};
@@ -38,5 +41,6 @@ pub use watcher::{ModelUpdate, ModelWatcher};
 
 mod worker_monitor;
 pub use worker_monitor::{
-    KvWorkerMonitor, LoadThresholdConfig, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL, WorkerLoadState,
+    KvWorkerMonitor, LoadThresholdConfig, LoadThresholdHandle, WORKER_TYPE_DECODE,
+    WORKER_TYPE_PREFILL, WorkerLoadState,
 };

@@ -80,6 +80,25 @@ def main() -> None:
     nixl_name, nixl_cuda_major, nixl = nixl_matches[0]
     nixl_files = list(nixl.files or ())
 
+    # The C API library that the Rust bindings dlopen by SONAME. It lives in the
+    # meson-python directory, not the auditwheel one that carries UCX, so it
+    # needs a record of its own.
+    capi_paths = {
+        path
+        for path in (
+            Path(nixl.locate_file(item)).resolve()
+            for item in nixl_files
+            if Path(item).name == "libnixl_capi.so"
+        )
+        if path.is_file()
+    }
+    if len(capi_paths) != 1:
+        raise SystemExit(
+            "nixl-ucx-compat: expected one libnixl_capi.so, "
+            f"found {sorted(map(str, capi_paths))}"
+        )
+    nixl_capi_dir = next(iter(capi_paths)).parent
+
     plugins = set()
     for _, _, nvshmem in cuda_distributions("nvidia-nvshmem"):
         for item in nvshmem.files or ():
@@ -122,6 +141,7 @@ def main() -> None:
     print(f"nixl\t{nixl_name}\t{nixl_cuda_major}")
     print(f"ucx\t{ucx_version}")
     print(f"libdir\t{nixl_lib_dir}")
+    print(f"capidir\t{nixl_capi_dir}")
     for plugin in sorted(plugins):
         print(f"plugin\t{plugin}")
     for alias, target in aliases:

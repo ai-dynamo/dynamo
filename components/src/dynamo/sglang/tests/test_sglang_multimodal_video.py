@@ -1,12 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import importlib
+import json
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import torch
 
+from dynamo.common.constants import DisaggregationMode
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang.protocol import (
     MultiModalGroup,
     MultiModalInput,
@@ -16,11 +22,15 @@ from dynamo.sglang.protocol import (
     StopConditions,
 )
 from dynamo.sglang.request_handlers.multimodal.encode_worker_handler import (
+    _NVDEC_SHIM_FPS,
     Modality,
     MultimodalEncodeWorkerHandler,
+    _install_nvdec_video_metadata_shim,
 )
 from dynamo.sglang.request_handlers.multimodal.worker_handler import (
     EmbeddingsProcessor,
+    MultimodalPrefillWorkerHandler,
+    MultimodalWorkerHandler,
     _build_mm_items,
 )
 
@@ -33,6 +43,35 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.skipif(Modality is None, reason="SGLang Modality is required"),
 ]
+
+
+class _FakeContext:
+    def __init__(self, context_id: str, trace_id: str | None = None):
+        self.trace_id = trace_id
+        self._context_id = context_id
+        self._cancelled = asyncio.Event()
+
+    def id(self) -> str:
+        return self._context_id
+
+    def async_killed_or_stopped(self) -> asyncio.Task[bool]:
+        return asyncio.create_task(self._cancelled.wait())
+
+    def cancel(self) -> None:
+        self._cancelled.set()
+
+
+@asynccontextmanager
+async def _never_cancels(request_id_future, context):
+    task = asyncio.create_task(asyncio.Event().wait())
+    try:
+        yield task
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 def test_extract_media_inputs_supports_video_urls():
@@ -69,6 +108,44 @@ def test_extract_media_inputs_supports_mixed_image_and_video():
     assert video_urls == ["https://example.com/clip.mp4"]
 
 
+@pytest.mark.asyncio
+async def test_encode_media_uses_sglang_0_5_19_pipeline():
+    embeddings = torch.ones((4, 8))
+    preprocess_result = SimpleNamespace(grid_thw=[[1, 2, 2]])
+    encode_context = SimpleNamespace(
+        preprocess_result=preprocess_result,
+        aux_data={"example": "value"},
+    )
+    calls = []
+
+    class _Encoder:
+        async def _prepare_encode_context(
+            self, requests, modality, *, use_global_cache
+        ):
+            calls.append((requests, modality, use_global_cache))
+            return encode_context
+
+        async def _compute_embedding(self, context, *, keep_on_gpu):
+            assert context is encode_context
+            assert keep_on_gpu is False
+            return embeddings
+
+    handler = MultimodalEncodeWorkerHandler.__new__(MultimodalEncodeWorkerHandler)
+    handler.encoder = _Encoder()
+
+    grid_thw, result, aux_data = await handler._encode_media(
+        ["https://example.com/image.png"], Modality.IMAGE
+    )
+
+    assert grid_thw == [[1, 2, 2]]
+    assert result is embeddings
+    assert aux_data == {"example": "value"}
+    requests, modality, use_global_cache = calls[0]
+    assert requests[0]["mm_items"] == ["https://example.com/image.png"]
+    assert modality == Modality.IMAGE
+    assert use_global_cache is False
+
+
 @pytest.mark.multimodal
 def test_extract_media_inputs_rejects_multimodal_cache_uuid():
     handler = MultimodalEncodeWorkerHandler.__new__(MultimodalEncodeWorkerHandler)
@@ -88,6 +165,10 @@ async def test_build_mm_items_routes_video_to_video_data():
     class _FakeEmbeddingsProcessor:
         async def process_embeddings(self, request):
             return embeddings, 17
+
+        @staticmethod
+        def release_embeddings(tensor_id):
+            raise AssertionError("successful construction transfers tensor ownership")
 
         @staticmethod
         def create_multimodal_image_item(
@@ -148,6 +229,339 @@ async def test_build_mm_items_routes_video_to_video_data():
     assert mm_item["video_timestamps"] == [[0.25, 0.75]]
 
 
+@pytest.mark.asyncio
+async def test_multimodal_prefill_starts_before_returning_bootstrap():
+    handler = MultimodalPrefillWorkerHandler.__new__(MultimodalPrefillWorkerHandler)
+    handler.bootstrap_host = "prefill-host"
+    handler.bootstrap_port = 1234
+    handler._consume_tasks = set()
+    handler.embeddings_processor = SimpleNamespace(release_embeddings=lambda _: None)
+    events = []
+
+    handler._validate_and_parse_disagg_request = lambda request: request
+    handler._generate_bootstrap_room = lambda: 17
+
+    async def start_prefill(request, bootstrap_room, rid=None, context=None):
+        events.append(("start", bootstrap_room, rid))
+
+        async def results():
+            events.append(("iterate", None))
+            yield {"meta_info": {"id": "request-id"}}
+
+        return results(), None
+
+    async def wait_for_registration(rid):
+        events.append(("registered", rid))
+
+    handler._start_prefill_generation = start_prefill
+    handler._wait_for_request_registration = wait_for_registration
+    handler._cancellation_monitor = _never_cancels
+
+    request = SimpleNamespace(sampling_params={})
+    stream = handler.generate(request, _FakeContext("request-id"))
+    bootstrap = json.loads(await anext(stream))
+
+    assert events == [
+        ("start", 17, "request-id"),
+        ("registered", "request-id"),
+        ("iterate", None),
+    ]
+    assert bootstrap == {
+        "bootstrap_host": "prefill-host",
+        "bootstrap_port": 1234,
+        "bootstrap_room": 17,
+    }
+
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
+    assert events == [
+        ("start", 17, "request-id"),
+        ("registered", "request-id"),
+        ("iterate", None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_multimodal_prefill_releases_embeddings_when_submission_fails(
+    monkeypatch,
+):
+    import dynamo.sglang.request_handlers.multimodal.worker_handler as worker_handler
+
+    handler = MultimodalPrefillWorkerHandler.__new__(MultimodalPrefillWorkerHandler)
+    handler.bootstrap_host = "prefill-host"
+    handler.bootstrap_port = 1234
+    handler.enable_trace = False
+
+    released = []
+    handler.embeddings_processor = SimpleNamespace(release_embeddings=released.append)
+
+    async def build_mm_items(request, embeddings_processor):
+        return [], [], torch.empty(0), 23
+
+    class FailingEngine:
+        async def async_generate(self, **kwargs):
+            raise RuntimeError("submission failed")
+
+    handler.engine = FailingEngine()
+    monkeypatch.setattr(worker_handler, "_build_mm_items", build_mm_items)
+
+    request = SimpleNamespace(
+        request=SimpleNamespace(request=SimpleNamespace(token_ids=[1, 2, 3])),
+        sampling_params={"max_new_tokens": 1},
+    )
+
+    with pytest.raises(RuntimeError, match="submission failed"):
+        await handler._start_prefill_generation(request, 17)
+
+    assert released == [23]
+
+
+@pytest.mark.asyncio
+async def test_multimodal_prefill_rejects_empty_engine_stream():
+    handler = MultimodalPrefillWorkerHandler.__new__(MultimodalPrefillWorkerHandler)
+    released = []
+    handler.embeddings_processor = SimpleNamespace(release_embeddings=released.append)
+
+    async def wait_for_registration(rid):
+        return None
+
+    handler._wait_for_request_registration = wait_for_registration
+    handler._cancellation_monitor = _never_cancels
+
+    async def empty_results():
+        if False:
+            yield None
+
+    owns_tensor = asyncio.Event()
+    request_started = asyncio.Event()
+
+    with pytest.raises(RuntimeError, match="ended before producing a result"):
+        await handler._consume_results(
+            empty_results(),
+            23,
+            "request-id",
+            _FakeContext("request-id"),
+            owns_tensor,
+            request_started,
+        )
+
+    assert owns_tensor.is_set()
+    assert request_started.is_set()
+    assert released == [23]
+
+
+@pytest.mark.asyncio
+async def test_multimodal_prefill_cancellation_awaits_consumer_cleanup():
+    handler = MultimodalPrefillWorkerHandler.__new__(MultimodalPrefillWorkerHandler)
+    handler.bootstrap_host = "prefill-host"
+    handler.bootstrap_port = 1234
+    handler._consume_tasks = set()
+    released = []
+    handler.embeddings_processor = SimpleNamespace(release_embeddings=released.append)
+
+    handler._validate_and_parse_disagg_request = lambda request: request
+    handler._generate_bootstrap_room = lambda: 17
+    result_stopped = asyncio.Event()
+
+    async def results():
+        try:
+            await asyncio.Event().wait()
+            yield {}
+        finally:
+            result_stopped.set()
+
+    async def start_prefill(request, bootstrap_room, rid=None, context=None):
+        return results(), 23
+
+    async def wait_for_registration(rid):
+        return None
+
+    handler._start_prefill_generation = start_prefill
+    handler._wait_for_request_registration = wait_for_registration
+    handler._cancellation_monitor = _never_cancels
+
+    request = SimpleNamespace(sampling_params={})
+    stream = handler.generate(request, _FakeContext("request-id"))
+    await anext(stream)
+    await stream.aclose()
+
+    assert result_stopped.is_set()
+    assert released == [23]
+    assert not handler._consume_tasks
+
+
+@pytest.mark.asyncio
+async def test_multimodal_prefill_cancels_registered_rid_before_first_result():
+    rid = "dynamo-request-id"
+    abort_calls = []
+    result_stopped = asyncio.Event()
+
+    class _TokenizerManager:
+        def __init__(self):
+            self.rid_to_state = {}
+
+        def abort_request(self, *, rid, abort_all):
+            abort_calls.append((rid, abort_all))
+
+    tokenizer_manager = _TokenizerManager()
+    handler = MultimodalPrefillWorkerHandler.__new__(MultimodalPrefillWorkerHandler)
+    handler.engine = SimpleNamespace(tokenizer_manager=tokenizer_manager)
+    handler.shutdown_event = None
+    handler.embeddings_processor = SimpleNamespace(release_embeddings=lambda _: None)
+
+    async def results():
+        tokenizer_manager.rid_to_state[rid] = object()
+        try:
+            await asyncio.Event().wait()
+            yield {}
+        finally:
+            result_stopped.set()
+
+    owns_tensor = asyncio.Event()
+    request_started = asyncio.Event()
+    context = _FakeContext(rid)
+    consumer = asyncio.create_task(
+        handler._consume_results(
+            results(),
+            None,
+            rid,
+            context,
+            owns_tensor,
+            request_started,
+        )
+    )
+
+    await asyncio.wait_for(request_started.wait(), timeout=1)
+    context.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(consumer, timeout=1)
+
+    assert abort_calls == [(rid, False)]
+    assert result_stopped.is_set()
+
+
+@pytest.mark.asyncio
+async def test_multimodal_prefill_cleanup_awaits_consumers_before_engine_shutdown():
+    handler = MultimodalPrefillWorkerHandler.__new__(MultimodalPrefillWorkerHandler)
+    handler.publisher = None
+    events = []
+
+    async def consumer():
+        try:
+            await asyncio.Event().wait()
+        finally:
+            events.append("consumer stopped")
+
+    task = asyncio.create_task(consumer())
+    await asyncio.sleep(0)
+    handler._consume_tasks = {task}
+    handler.engine = SimpleNamespace(shutdown=lambda: events.append("engine shutdown"))
+
+    await handler.cleanup_async()
+
+    assert events == ["consumer stopped", "engine shutdown"]
+    assert not handler._consume_tasks
+
+
+@pytest.mark.asyncio
+async def test_build_mm_items_releases_embeddings_when_validation_fails():
+    embeddings = torch.zeros((1, 4), dtype=torch.float16)
+    released_tensor_ids = []
+
+    class _FakeEmbeddingsProcessor:
+        async def process_embeddings(self, request):
+            return embeddings, 17
+
+        @staticmethod
+        def create_multimodal_image_item(embeddings, image_grid_thw):
+            raise AssertionError("validation should fail before item construction")
+
+        @staticmethod
+        def create_multimodal_video_item(
+            embeddings,
+            video_grid_thw,
+            second_per_grid_ts=None,
+            video_timestamps=None,
+        ):
+            raise AssertionError("validation should fail before item construction")
+
+        @staticmethod
+        def release_embeddings(tensor_id):
+            released_tensor_ids.append(tensor_id)
+            raise RuntimeError("release failed")
+
+    request = SglangMultimodalRequest(
+        request=PreprocessedRequest(
+            token_ids=[151652, 151656, 151653],
+            stop_conditions=StopConditions(max_tokens=32),
+            sampling_options=SamplingOptions(temperature=0.0),
+        ),
+        multimodal_inputs=[
+            MultiModalGroup(
+                multimodal_input=MultiModalInput(),
+                image_grid_thw=[1, 1, 1],
+                num_mm_tokens=2,
+            )
+        ],
+    )
+
+    with pytest.raises(
+        ValueError, match="Encoded token counts exceed received embedding rows"
+    ):
+        await _build_mm_items(request, _FakeEmbeddingsProcessor())
+
+    assert released_tensor_ids == [17]
+
+
+@pytest.mark.asyncio
+async def test_build_mm_items_releases_embeddings_when_item_construction_fails():
+    embeddings = torch.zeros((1, 4), dtype=torch.float16)
+    released_tensor_ids = []
+
+    class _FakeEmbeddingsProcessor:
+        async def process_embeddings(self, request):
+            return embeddings, 17
+
+        @staticmethod
+        def create_multimodal_image_item(embeddings, image_grid_thw):
+            raise ValueError("image item construction failed")
+
+        @staticmethod
+        def create_multimodal_video_item(
+            embeddings,
+            video_grid_thw,
+            second_per_grid_ts=None,
+            video_timestamps=None,
+        ):
+            raise AssertionError("image item construction should run")
+
+        @staticmethod
+        def release_embeddings(tensor_id):
+            released_tensor_ids.append(tensor_id)
+            raise RuntimeError("release failed")
+
+    request = SglangMultimodalRequest(
+        request=PreprocessedRequest(
+            token_ids=[151652, 151656, 151653],
+            stop_conditions=StopConditions(max_tokens=32),
+            sampling_options=SamplingOptions(temperature=0.0),
+        ),
+        multimodal_inputs=[
+            MultiModalGroup(
+                multimodal_input=MultiModalInput(),
+                image_grid_thw=[1, 1, 1],
+                num_mm_tokens=1,
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match="image item construction failed"):
+        await _build_mm_items(request, _FakeEmbeddingsProcessor())
+
+    assert released_tensor_ids == [17]
+
+
 async def test_nvdec_video_metadata_shim_stamps_valid_metadata():
     """The metadata shim gives pre-decoded ndarray frames a valid metadata dict.
 
@@ -155,26 +569,30 @@ async def test_nvdec_video_metadata_shim_stamps_valid_metadata():
     ndarray, and transformers >= 5.12 strict-rejects the resulting
     ``video_metadata=[None]``. ``_install_nvdec_video_metadata_shim`` wraps it so
     the ndarray carries a valid dict instead (validated end-to-end on gpu-ts
-    against the real ``MMEncoder._encode``: before FAIL -> after PASS).
+    against the real MMEncoder pipeline: before FAIL -> after PASS).
     """
-    es = pytest.importorskip("sglang.srt.disaggregation.encode_server")
-    from dynamo.sglang.request_handlers.multimodal.encode_worker_handler import (
-        _NVDEC_SHIM_FPS,
-        _install_nvdec_video_metadata_shim,
-    )
-
-    saved = es.preprocess_video
+    try:
+        encoder_preprocessor = importlib.import_module(
+            "sglang.srt.disaggregation.encoder.preprocessor"
+        )
+    except ImportError:
+        encoder_preprocessor = pytest.importorskip(
+            "sglang.srt.disaggregation.encode_server"
+        )
+    saved = encoder_preprocessor.preprocess_video
     try:
         _install_nvdec_video_metadata_shim()
-        assert getattr(es.preprocess_video, "_dynamo_nvdec_shim", False)
+        assert getattr(
+            encoder_preprocessor.preprocess_video, "_dynamo_nvdec_shim", False
+        )
 
         # Idempotent: a second install must not double-wrap.
-        wrapped = es.preprocess_video
+        wrapped = encoder_preprocessor.preprocess_video
         _install_nvdec_video_metadata_shim()
-        assert es.preprocess_video is wrapped
+        assert encoder_preprocessor.preprocess_video is wrapped
 
         frames = np.zeros((5, 8, 8, 3), dtype=np.uint8)
-        video, meta = await es.preprocess_video(frames)
+        video, meta = await encoder_preprocessor.preprocess_video(frames)
         assert video is frames
         assert meta == {
             "fps": _NVDEC_SHIM_FPS,
@@ -185,10 +603,10 @@ async def test_nvdec_video_metadata_shim_stamps_valid_metadata():
         }
 
         # Non-ndarray inputs keep None metadata (the shim only touches pixels).
-        _, meta_none = await es.preprocess_video("not-an-array")
+        _, meta_none = await encoder_preprocessor.preprocess_video("not-an-array")
         assert meta_none is None
     finally:
-        es.preprocess_video = saved
+        encoder_preprocessor.preprocess_video = saved
 
 
 # ---------------------------------------------------------------------------
@@ -282,3 +700,64 @@ async def test_vp9_with_software_decoder_passes_bytes_through(monkeypatch):
     result = await handler._maybe_nvdec_decoder("https://example.com/clip.webm")
 
     assert result == b"vp9-bytes"
+
+
+@pytest.mark.asyncio
+async def test_multimodal_decode_rejects_parallel_sampling_before_prefill_handoff():
+    """Reject multimodal n greater than one before contacting prefill."""
+    handler = MultimodalWorkerHandler.__new__(MultimodalWorkerHandler)
+    handler.serving_mode = DisaggregationMode.DECODE
+    prefill_called = False
+
+    class _PrefillClient:
+        async def generate(self, *args, **kwargs):
+            """Fail if decode reaches the prefill handoff."""
+            nonlocal prefill_called
+            prefill_called = True
+            raise AssertionError("prefill handoff ran before validation")
+
+    handler.prefill_client = _PrefillClient()
+    request = SglangMultimodalRequest(
+        request=PreprocessedRequest(
+            token_ids=[1, 2, 3],
+            stop_conditions=StopConditions(max_tokens=1),
+            sampling_options=SamplingOptions(n=2),
+        )
+    )
+
+    with pytest.raises(
+        InvalidArgument, match="disaggregated serving supports only n=1"
+    ):
+        await anext(handler.generate(request, _FakeContext("request-id")))
+
+    assert not prefill_called
+
+
+@pytest.mark.asyncio
+async def test_multimodal_prefill_rejects_parallel_sampling_before_generation():
+    """Reject multimodal n greater than one before allocating a bootstrap room."""
+    handler = MultimodalPrefillWorkerHandler.__new__(MultimodalPrefillWorkerHandler)
+    handler.bootstrap_host = "prefill.invalid"
+    handler.bootstrap_port = 1234
+    handler._consume_tasks = set()
+    bootstrap_allocated = False
+    request = SimpleNamespace(sampling_params={"n": 2})
+    handler._validate_and_parse_disagg_request = lambda _: request
+
+    def generate_bootstrap_room():
+        """Fail if prefill allocates a bootstrap room."""
+        nonlocal bootstrap_allocated
+        bootstrap_allocated = True
+        raise AssertionError("bootstrap room allocated before validation")
+
+    handler._generate_bootstrap_room = generate_bootstrap_room
+
+    stream = handler.generate(request, _FakeContext("request-id"))
+    output = json.loads(await anext(stream))
+
+    assert output["finish_reason"] == "error"
+    assert "disaggregated serving supports only n=1" in output["error"]
+    assert not bootstrap_allocated
+
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)

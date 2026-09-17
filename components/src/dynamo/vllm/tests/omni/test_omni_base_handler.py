@@ -10,8 +10,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 try:
+    from vllm_omni.config import DeployConfig, VllmOmniConfig
     from vllm_omni.diffusion.data import DiffusionParallelConfig
-    from vllm_omni.engine.arg_utils import OmniEngineArgs
+    from vllm_omni.model_executor.models.qwen3_tts.pipeline import QWEN3_TTS_PIPELINE
 
     from dynamo.vllm.omni.args import OmniDiffusionKwargs, OmniParallelKwargs
     from dynamo.vllm.omni.base_handler import BaseOmniHandler
@@ -25,24 +26,26 @@ pytestmark = [
     pytest.mark.pre_merge,
 ]
 
-# These fields are not exposed in OmniParallelKwargs, because they are derived from other fields.
+# Keep upstream defaults for unexposed fields and let it derive the sequence size.
 _SKIP_FIELDS = {
     "sequence_parallel_size",
     "enable_expert_parallel",
     "ulysses_mode",
+    "ulysses_a2a_permute",
     "mask_sp_padding",
+}
+
+# DiffusionParallelConfig fields deliberately sourced from vLLM's shared
+# engine arguments rather than Dynamo's Omni-only parallel argument group.
+_ENGINE_ARG_PARALLEL_FIELDS = {
+    "tensor_parallel_size",
+    "pipeline_parallel_size",
+    "data_parallel_size",
 }
 
 
 def _diffusion_parallel_fields() -> set:
     return {f.name for f in dataclasses.fields(DiffusionParallelConfig)}
-
-
-def _engine_args_fields() -> set:
-    fields: set = set()
-    for cls in OmniEngineArgs.__mro__:
-        fields |= set(getattr(cls, "__annotations__", {}).keys())
-    return fields
 
 
 def _make_config(**parallel_overrides):
@@ -54,14 +57,22 @@ def _make_config(**parallel_overrides):
     cfg.engine_args.enable_lora = False
     cfg.engine_args.max_cpu_loras = None
     cfg.engine_args.max_loras = None
+    cfg.engine_args.tensor_parallel_size = 1
+    cfg.engine_args.pipeline_parallel_size = 1
+    cfg.engine_args.data_parallel_size = 1
     cfg.diffusion = OmniDiffusionKwargs()
     cfg.parallel = dataclasses.replace(OmniParallelKwargs(), **parallel_overrides)
     return cfg
 
 
-def _build_kwargs(config):
+def _build_kwargs(config, stage_type="diffusion"):
     handler = BaseOmniHandler.__new__(BaseOmniHandler)
-    return handler._build_omni_kwargs(config)
+    stages = [SimpleNamespace(stage_type=stage_type)] if stage_type else []
+    with patch(
+        "dynamo.vllm.omni.base_handler.resolve_stage_configs",
+        return_value=(None, stages),
+    ):
+        return handler._build_omni_kwargs(config)
 
 
 class TestDiffusionParallelConfigCoverage:
@@ -72,31 +83,31 @@ class TestDiffusionParallelConfigCoverage:
         Fix by adding it to OmniParallelKwargs and OmniArgGroup, or to _SKIP_FIELDS
         """
         parallel_kwarg_fields = {f.name for f in dataclasses.fields(OmniParallelKwargs)}
-        engine_fields = _engine_args_fields()
-
         uncovered = [
             f
             for f in _diffusion_parallel_fields()
             if f not in _SKIP_FIELDS
             and f not in parallel_kwarg_fields
-            and f not in engine_fields
+            and f not in _ENGINE_ARG_PARALLEL_FIELDS
         ]
         assert not uncovered, (
             f"DiffusionParallelConfig fields not covered: {uncovered}. "
             f"Add to OmniParallelKwargs and OmniArgGroup, or add to _SKIP_FIELDS with a reason."
         )
 
-    def test_tensor_parallel_size_read_from_engine_args(self):
-        """tensor_parallel_size must come from engine_args (vLLM's --tensor-parallel-size),
-        not from OmniParallelKwargs, so it applies to both LLM encoder and diffusion transformer.
-        """
-        config = _make_config()
+    def test_parallel_fields_forwarded_from_separate_configs(self):
+        """Construct the real vLLM-Omni config from both argument groups."""
+        config = _make_config(text_encoder_tp_size=2)
         config.engine_args.tensor_parallel_size = 4
-        with patch("dynamo.vllm.omni.base_handler.DiffusionParallelConfig") as MockCfg:
-            MockCfg.return_value = SimpleNamespace()
-            _build_kwargs(config)
-            _, kwargs = MockCfg.call_args
-            assert kwargs.get("tensor_parallel_size") == 4
+        config.engine_args.pipeline_parallel_size = 3
+        config.engine_args.data_parallel_size = 5
+
+        parallel_config = _build_kwargs(config)["parallel_config"]
+
+        assert parallel_config.tensor_parallel_size == 4
+        assert parallel_config.pipeline_parallel_size == 3
+        assert parallel_config.data_parallel_size == 5
+        assert parallel_config.text_encoder_tp_size == 2
 
     def test_output_modalities_forwarded_to_async_omni(self):
         config = _make_config()
@@ -105,6 +116,29 @@ class TestDiffusionParallelConfigCoverage:
         kwargs = _build_kwargs(config)
 
         assert kwargs["output_modalities"] == ["image"]
+
+    def test_tts_kwargs_accepted_by_upstream_pipeline(self):
+        config = _make_config()
+        config.diffusion.enforce_eager = True
+
+        kwargs = _build_kwargs(config, stage_type="llm")
+
+        VllmOmniConfig.from_pipeline_config(
+            QWEN3_TTS_PIPELINE,
+            user_deploy_config=DeployConfig(),
+            cli_overrides=kwargs,
+        )
+        assert kwargs["enforce_eager"] is True
+
+    def test_diffusion_kwargs_preserved_when_stage_detection_is_deferred(self):
+        config = _make_config()
+        config.diffusion.enable_cpu_offload = True
+        config.diffusion.vae_use_tiling = True
+
+        kwargs = _build_kwargs(config, stage_type=None)
+
+        assert kwargs["enable_cpu_offload"] is True
+        assert kwargs["vae_use_tiling"] is True
 
     def test_lora_disabled_resolves_no_capacity(self):
         config = _make_config()
