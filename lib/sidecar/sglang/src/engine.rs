@@ -21,7 +21,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
-use crate::client::{self, Client, Discovery, Pool};
+use crate::client::{self, Client, Discovery, KV_CONFIG_KEY, NodeMetadata, Pool, WORKER_GROUP_KEY};
 use crate::native_http::{self, NativeHttp};
 use crate::proto as pb;
 use crate::protocol::{
@@ -69,7 +69,12 @@ impl SglangSidecarEngine {
         Self::from_parsed(args).map_err(Into::into)
     }
 
-    fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
+    pub(crate) fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
+        if args.telemetry_only {
+            return Err(client::invalid_arg(
+                "--telemetry-only requires the headless sidecar entry point",
+            ));
+        }
         if args.sidecar.common.route_to_encoder {
             return Err(client::invalid_arg(
                 "route-to-encoder is not supported by the SGLang sidecar",
@@ -79,7 +84,7 @@ impl SglangSidecarEngine {
         let endpoint = args.sidecar.grpc_endpoint;
         let transport = args.sidecar.grpc.config();
         let discovery = bootstrap_discover(&endpoint, &transport)?;
-        let disaggregation_mode = discovery_mode(&discovery)?;
+        let disaggregation_mode = client::discovery_mode(&discovery.server_info)?;
         let bootstrap_host = if disaggregation_mode.is_prefill() {
             resolve_bootstrap_host(
                 args.bootstrap_host.as_deref(),
@@ -179,7 +184,7 @@ impl LLMEngine for SglangSidecarEngine {
         let mut control = pool.control_client();
         self.await_ready(&mut control, deadline).await?;
         let discovery = client::discover(&mut control, deadline).await?;
-        let observed_mode = discovery_mode(&discovery)?;
+        let observed_mode = client::discovery_mode(&discovery.server_info)?;
         if observed_mode != self.disaggregation_mode {
             return Err(client::invalid_arg(format!(
                 "SGLang role changed since bootstrap: registered as {:?}, now reports {:?}",
@@ -220,7 +225,7 @@ impl LLMEngine for SglangSidecarEngine {
                 .runtime_data
                 .insert("sglang_generate".into(), true.into());
         }
-        let kv_event_sources = discover_kv_event_sources(&discovery, &config, &self.endpoint)?;
+        let kv_event_sources = discover_kv_event_sources(&discovery, &mut config, &self.endpoint)?;
         let connection_count = pool.len();
         let kv_event_source_count = kv_event_sources.len();
         self.state
@@ -507,22 +512,6 @@ fn bootstrap_discover(
     })
 }
 
-fn discovery_mode(discovery: &Discovery) -> Result<DisaggregationMode, DynamoError> {
-    match discovery
-        .server_info
-        .get("disaggregation_mode")
-        .and_then(Value::as_str)
-        .unwrap_or("null")
-    {
-        "null" | "agg" | "aggregated" => Ok(DisaggregationMode::Aggregated),
-        "prefill" => Ok(DisaggregationMode::Prefill),
-        "decode" => Ok(DisaggregationMode::Decode),
-        mode => Err(client::protocol_error(format!(
-            "unsupported SGLang disaggregation_mode `{mode}`"
-        ))),
-    }
-}
-
 fn discovery_string(value: &Value, key: &str) -> Option<String> {
     value
         .get(key)
@@ -626,11 +615,52 @@ fn is_routable_host(host: &str) -> bool {
         .unwrap_or(true)
 }
 
+fn local_kv_event_sources(
+    metadata: &NodeMetadata,
+    config: &mut EngineConfig,
+) -> Result<Vec<DiscoveredKvEventSource>, DynamoError> {
+    let llm = config
+        .llm
+        .as_ref()
+        .ok_or_else(|| client::invalid_arg("KV sources require LLM registration"))?;
+    metadata
+        .validate_registration(llm.data_parallel_size.unwrap_or(1), llm.kv_cache_block_size)
+        .map_err(|error| client::invalid_arg(error.to_string()))?;
+    if let Some(group_id) = metadata
+        .worker_group_id()
+        .map_err(|error| client::invalid_arg(error.to_string()))?
+    {
+        config
+            .runtime_data
+            .insert(WORKER_GROUP_KEY.into(), group_id.into());
+    }
+    config.runtime_data.insert(KV_CONFIG_KEY.into(), serde_json::json!({
+        "block_size": llm.kv_cache_block_size,
+        "local_dp_ranks": metadata.kv_event_sources.iter().map(|source| source.dp_rank).collect::<Vec<_>>(),
+    }));
+    Ok(metadata
+        .kv_event_sources
+        .iter()
+        .map(|source| DiscoveredKvEventSource {
+            endpoint: source.endpoint.clone(),
+            topic: source.topic.clone(),
+            dp_rank: source.dp_rank,
+        })
+        .collect())
+}
+
 fn discover_kv_event_sources(
     discovery: &Discovery,
-    engine_config: &EngineConfig,
+    engine_config: &mut EngineConfig,
     grpc_endpoint: &GrpcEndpoint,
 ) -> Result<Vec<DiscoveredKvEventSource>, DynamoError> {
+    // An explicit list is authoritative, including an empty list. Only older
+    // engines without this field may use the legacy single-node descriptor.
+    if let Some(metadata) = NodeMetadata::from_server_info(&discovery.server_info)
+        .map_err(|error| client::protocol_error(error.to_string()))?
+    {
+        return local_kv_event_sources(&metadata, engine_config);
+    }
     let Some(descriptor) = discovery.server_info.get("kv_events") else {
         return Ok(Vec::new());
     };
@@ -1255,11 +1285,11 @@ mod tests {
                 "dp_size": 2
             }
         }));
-        let config =
+        let mut config =
             build_engine_config(&discovery, DisaggregationMode::Aggregated, None, None).unwrap();
         let endpoint = GrpcEndpoint::parse("http://worker.example:30001", "test").unwrap();
 
-        let sources = discover_kv_event_sources(&discovery, &config, &endpoint).unwrap();
+        let sources = discover_kv_event_sources(&discovery, &mut config, &endpoint).unwrap();
 
         assert_eq!(
             sources,
@@ -1276,5 +1306,65 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn local_metadata_overrides_global_sources_without_shrinking_registration() {
+        use crate::client::{KV_CONFIG_KEY, WORKER_GROUP_KEY};
+
+        let mut discovery = discovery(json!({
+            "page_size": 64, "dp_size": 8, "nnodes": 2, "node_rank": 0,
+            "dist_init_addr": "127.0.0.1:2345",
+            "kv_event_sources": [
+                {"dp_rank":0,"endpoint":"tcp://127.0.0.1:5557","topic":"kv","block_size":64},
+                {"dp_rank":1,"endpoint":"tcp://127.0.0.1:5558","topic":"kv","block_size":64},
+                {"dp_rank":2,"endpoint":"tcp://127.0.0.1:5559","topic":"kv","block_size":64},
+                {"dp_rank":3,"endpoint":"tcp://127.0.0.1:5560","topic":"kv","block_size":64}
+            ],
+            "kv_events": {
+                "publisher": "zmq", "endpoint_host": "*",
+                "endpoint_port_base": 5557, "topic": "kv", "block_size": 64,
+                "dp_size": 8
+            }
+        }));
+        let mut config =
+            build_engine_config(&discovery, DisaggregationMode::Aggregated, None, None).unwrap();
+        let endpoint = GrpcEndpoint::parse("http://127.0.0.1:30001", "test").unwrap();
+        let sources = discover_kv_event_sources(&discovery, &mut config, &endpoint).unwrap();
+        assert_eq!(
+            sources
+                .iter()
+                .map(|source| source.dp_rank)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+        assert_eq!(sources[0].endpoint, "tcp://127.0.0.1:5557");
+        assert_eq!(config.llm.as_ref().unwrap().data_parallel_size, Some(8));
+        assert_eq!(
+            config.runtime_data[WORKER_GROUP_KEY],
+            "dist_init:tcp://127.0.0.1:2345"
+        );
+        assert_eq!(config.runtime_data[KV_CONFIG_KEY]["block_size"], 64);
+
+        // An explicit empty source list must not fall back to all global ranks.
+        discovery.server_info["kv_event_sources"] = json!([]);
+        assert!(
+            discover_kv_event_sources(&discovery, &mut config, &endpoint)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            config.runtime_data[KV_CONFIG_KEY]["local_dp_ranks"],
+            json!([])
+        );
+        assert_eq!(config.llm.as_ref().unwrap().data_parallel_size, Some(8));
+
+        // Engines without the new metadata field retain the old multinode guard.
+        discovery
+            .server_info
+            .as_object_mut()
+            .unwrap()
+            .remove("kv_event_sources");
+        assert!(discover_kv_event_sources(&discovery, &mut config, &endpoint).is_err());
     }
 }

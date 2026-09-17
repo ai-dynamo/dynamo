@@ -38,7 +38,7 @@ The sidecar discovers the model and tokenizer paths, served model name, parser d
 
 SGLang remains the source of truth for the worker's aggregated, prefill, or decode role. The inherited `--disaggregation-mode` option and `DYN_DISAGGREGATION_MODE` environment variable have no effect in this sidecar. The SGLang sidecar rejects `--route-to-encoder` because its native protocol does not support encoder workers. Disaggregated workers continue to register under their fixed role components; aggregated workers honor `--component` or `DYN_COMPONENT`.
 
-The sidecar opens eight gRPC connections by default. Override the pool size with `--grpc-connections` or `DYN_SIDECAR_GRPC_CONNECTIONS`.
+The full sidecar opens eight gRPC connections by default. Override the pool size with `--grpc-connections` or `DYN_SIDECAR_GRPC_CONNECTIONS`. Telemetry-only mode uses one metadata connection.
 
 Connection startup uses a 30-second timeout per attempt, a one-second retry and readiness interval, and a 30-minute deadline for establishing the full connection pool. Override them with `--grpc-connect-attempt-timeout-secs`, `--grpc-retry-interval-secs`, and `--grpc-startup-deadline-secs`, or with the corresponding `DYN_SIDECAR_GRPC_*` environment variables.
 
@@ -57,7 +57,35 @@ python3 -m sglang.launch_server \
 The entry point configures Dynamo logging when `main()` runs, then calls the
 private `dynamo._core.backend._run_sglang_sidecar(argv)` binding. The binding
 prepends the executable name expected by clap, releases the GIL, and runs the
-same unified worker lifecycle as the standalone executable.
+same mode dispatcher as the standalone executable.
+
+## Multinode DP and KV routing
+
+For multinode deployments with multiple data-parallel (DP) replicas and KV-aware
+routing, run a full sidecar on the leader (`node_rank=0`) and a separate
+`--telemetry-only` sidecar on each follower node that owns a DP scheduler/KV
+publisher. Each DP rank has its own KV cache; follower sidecars publish those
+local KV events to Dynamo without accepting inference requests. A TP-only
+follower that holds part of a replica but has no local KV publisher does not
+need a sidecar.
+
+Launch each sidecar separately with `--grpc-endpoint` pointing to its local
+SGLang server. This requires an SGLang build exposing node-local
+`kv_event_sources` through `GetServerInfo` on leaders and followers started
+with `--grpc-port`.
+
+For `launch/multinode_kv_router_sidecar.sh`, use an SGLang build including commit
+[`c50b251`](https://github.com/sgl-project/sglang/commit/c50b251da8e455dfbb594f8c3b7ccae6eca72129),
+which provides node-local KV source discovery and explicit publisher binding.
+The stock v0.5.19 image guidance below applies to the single-node examples.
+
+The multinode example also requires SGLang's explicit
+`"bind": true` KV-event option. It binds each rank's publisher to `127.0.0.1`, so
+the engine and its sidecar must share a network namespace. KV events can include
+token IDs and request metadata; loopback prevents remote access but does not
+isolate other processes in that namespace. If overriding this to a non-loopback
+bind, restrict every publisher port (`SGLANG_KV_EVENT_PORT + dp_rank`) to authorized
+consumers using a firewall or network policy.
 
 ## Deploy on Kubernetes (quick start)
 
