@@ -1855,11 +1855,12 @@ mod tests {
         );
         (
             primary.clone(),
-            Indexer::KvIndexer {
+            Indexer::Single {
                 primary,
                 lower_tier: LowerTierIndexers::new(1, 4),
                 approx: None,
                 primary_records_routing_decisions: false,
+                session_updates: None,
             },
         )
     }
@@ -2091,11 +2092,12 @@ mod tests {
             Arc::new(KvIndexerMetrics::new_unregistered()),
         );
         let lower_tiers = LowerTierIndexers::new(1, 4);
-        let indexer = Indexer::KvIndexer {
+        let indexer = Indexer::Single {
             primary,
             lower_tier: lower_tiers.clone(),
             approx: None,
             primary_records_routing_decisions: false,
+            session_updates: None,
         };
         lower_tiers
             .get_or_create(StorageTier::HostPinned)

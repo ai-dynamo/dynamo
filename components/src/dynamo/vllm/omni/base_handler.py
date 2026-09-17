@@ -22,6 +22,7 @@ from dynamo.common.protocols.audio_protocol import NvAudioSpeechResponse
 from dynamo.common.utils.output_modalities import RequestType
 from dynamo.vllm.handlers import BaseWorkerHandler, build_sampling_params
 from dynamo.vllm.lora_state import LoRAState
+from dynamo.vllm.omni.utils import resolve_stage_configs
 
 logger = logging.getLogger(__name__)
 
@@ -126,8 +127,19 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
         if config.stage_configs_path:
             omni_kwargs["deploy_config"] = config.stage_configs_path
 
+        _, stage_configs = resolve_stage_configs(
+            config.model,
+            trust_remote_code=config.engine_args.trust_remote_code,
+            deploy_config_path=config.stage_configs_path,
+        )
+        # Older Omni defers single-stage diffusion detection until engine startup.
+        forward_diffusion_options = not stage_configs or any(
+            stage.stage_type == "diffusion" for stage in stage_configs
+        )
         for field, value in dataclasses.asdict(config.diffusion).items():
-            if value is not None:
+            if value is not None and (
+                forward_diffusion_options or field == "enforce_eager"
+            ):
                 omni_kwargs[field] = value
 
         # These three fields are shared vLLM engine settings. Keep their CLI
