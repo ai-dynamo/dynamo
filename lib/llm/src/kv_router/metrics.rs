@@ -64,12 +64,15 @@ use prometheus::{
 
 use crate::http::service::metrics::generate_log_buckets;
 use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
-use dynamo_kv_router::indexer::ApproximateLruStats;
+use dynamo_kv_router::{
+    indexer::ApproximateLruStats, protocols::cache_reuse_funnel_f2_onward_enabled,
+};
 
 pub(crate) const ROUTER_WORKER_ID_LABEL: &str = "router_worker_id";
 const TARGET_NAMESPACE_LABEL: &str = "target_namespace";
 const TARGET_COMPONENT_LABEL: &str = "target_component";
 const TARGET_ENDPOINT_LABEL: &str = "target_endpoint";
+const CACHE_LOSS_FUNNEL_STAGES: [&str; 5] = ["f0", "f2", "f3", "f4", "f5"];
 
 /// Buckets for CPU-bound compute phases (block hashing, sequence hashing).
 fn compute_overhead_buckets() -> Vec<f64> {
@@ -857,6 +860,15 @@ pub struct RouterRequestMetrics {
     pub shared_cache_beyond_blocks: prometheus::Histogram,
     pub non_max_overlap_selections_total: IntCounterVec,
     pub overlap_blocks_lost: HistogramVec,
+    pub(crate) cache_loss_worker_stages: Option<CacheLossWorkerStageMetrics>,
+}
+
+#[cfg_attr(test, derive(Clone))]
+pub(crate) struct CacheLossWorkerStageMetrics {
+    observation_input_tokens_total: IntCounter,
+    funnel_tokens_total: [IntCounter; CACHE_LOSS_FUNNEL_STAGES.len()],
+    complete_observations_total: IntCounter,
+    incomplete_observations_total: IntCounter,
 }
 
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
@@ -978,6 +990,40 @@ impl RouterRequestMetrics {
                     .expect("failed to create router_overlap_blocks_lost");
                 non_max_overlap_selections_total.with_label_values(&[WORKER_TYPE_PREFILL]);
                 overlap_blocks_lost.with_label_values(&[WORKER_TYPE_PREFILL]);
+                let cache_loss_worker_stages = cache_reuse_funnel_f2_onward_enabled().then(|| {
+                    let observation_input_tokens_total = metrics
+                        .create_intcounter(
+                            &router_metric("cache_loss_observation_input_tokens_total"),
+                            "Prompt tokens observed by cache-loss accounting, including incomplete outcomes",
+                            extra_labels,
+                        )
+                        .expect("failed to create router_cache_loss_observation_input_tokens_total");
+                    let funnel_tokens = metrics
+                        .create_intcountervec(
+                            &router_metric("cache_loss_funnel_tokens_total"),
+                            "Tokens observed at each cache-loss stage; later stages may exceed earlier stages",
+                            &["stage"],
+                            extra_labels,
+                        )
+                        .expect("failed to create router_cache_loss_funnel_tokens_total");
+                    let observations = metrics
+                        .create_intcountervec(
+                            &router_metric("cache_loss_observations_total"),
+                            "Cache-loss funnel observations by result",
+                            &["result"],
+                            extra_labels,
+                        )
+                        .expect("failed to create router_cache_loss_observations_total");
+                    CacheLossWorkerStageMetrics {
+                        observation_input_tokens_total,
+                        funnel_tokens_total: CACHE_LOSS_FUNNEL_STAGES
+                            .map(|stage| funnel_tokens.with_label_values(&[stage])),
+                        complete_observations_total: observations
+                            .with_label_values(&["complete"]),
+                        incomplete_observations_total: observations
+                            .with_label_values(&["incomplete"]),
+                    }
+                });
                 Arc::new(Self {
                     requests_started_total,
                     requests_total,
@@ -991,6 +1037,7 @@ impl RouterRequestMetrics {
                     shared_cache_beyond_blocks,
                     non_max_overlap_selections_total,
                     overlap_blocks_lost,
+                    cache_loss_worker_stages,
                 })
             })
             .clone()
@@ -1016,6 +1063,28 @@ impl RouterRequestMetrics {
         self.overlap_blocks_lost
             .with_label_values(&[worker_type])
             .observe(overlap_blocks_lost);
+    }
+
+    pub fn observe_cache_loss_input(&self, prompt_tokens: u64) {
+        if let Some(metrics) = &self.cache_loss_worker_stages {
+            metrics.observation_input_tokens_total.inc_by(prompt_tokens);
+        }
+    }
+
+    pub fn observe_cache_loss_funnel(&self, stages: [u64; CACHE_LOSS_FUNNEL_STAGES.len()]) {
+        let Some(metrics) = &self.cache_loss_worker_stages else {
+            return;
+        };
+        for (counter, tokens) in metrics.funnel_tokens_total.iter().zip(stages) {
+            counter.inc_by(tokens);
+        }
+        metrics.complete_observations_total.inc();
+    }
+
+    pub fn observe_cache_loss_incomplete(&self) {
+        if let Some(metrics) = &self.cache_loss_worker_stages {
+            metrics.incomplete_observations_total.inc();
+        }
     }
 }
 

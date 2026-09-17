@@ -301,6 +301,18 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
   Difference in effective KV cache overlap between the highest-overlap eligible prefill worker and the selected worker for each non-max-overlap selection. Labeled by `worker_type` (`prefill`).
 </ParamField>
 
+### Cache-reuse funnel telemetry
+
+The optional cache-reuse funnel records prompt-token totals at each handoff from router selection through worker cache lookup. Comparing the stages shows where potential prefix reuse was lost.
+
+Enable it on the router/frontend process:
+
+```bash
+DYN_CACHE_REUSE_FUNNEL_F2_ONWARD_ENABLED=true
+```
+
+It is disabled by default.
+
 ### Per-request routing overhead
 
 `dynamo_router_overhead_*` histograms (milliseconds) track time spent in each phase of the routing decision. Registered on the frontend port with a `router_id` label (the frontend's discovery instance ID). Created only when the frontend has DRT discovery enabled (`--router-mode kv`); absent in non-KV modes and on the standalone router.
