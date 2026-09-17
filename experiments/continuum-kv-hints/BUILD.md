@@ -11,8 +11,9 @@ patch layer that overlays the custom vLLM onto it.
 | + vLLM patch layer | `nvcr.io/nvidian/dynamo-dev/karenc:dynamo-kv-hints-55667792-vllm-43aeef1b` |
 
 - `55667792` = tip of `karenc/continuum-kv-hints-poc` (this Dynamo branch)
-- `43aeef1b` = tip of `karenc/kv-hints-on-v0.29.0` in `~/vllm` (vLLM feature commits
-  cherry-picked onto vLLM v0.29.0)
+- `43aeef1b` = tag alias for `d2b7d4ae81`, tip of `karenc/kv-hints-on-v0.29.0` in
+  `~/vllm` (vLLM feature commits cherry-picked onto vLLM v0.29.0, plus
+  `BlockStored.session_id` from upstream PR #51381)
 
 ## Step 1 — Dynamo base image
 
@@ -49,7 +50,7 @@ touched. The build context is the vLLM checkout.
 
 ```bash
 cd ~/vllm
-git checkout karenc/kv-hints-on-v0.29.0  # cherry-picks of vLLM feature onto v0.29.0
+git checkout karenc/kv-hints-on-v0.29.0  # tip d2b7d4ae81
 
 docker build \
   -t nvcr.io/nvidian/dynamo-dev/karenc:dynamo-kv-hints-55667792-vllm-43aeef1b \
@@ -58,6 +59,31 @@ docker build \
 
 docker push nvcr.io/nvidian/dynamo-dev/karenc:dynamo-kv-hints-55667792-vllm-43aeef1b
 ```
+
+### vLLM files patched
+
+The overlay copies these files from `karenc/kv-hints-on-v0.29.0` into the container's
+`/usr/local/lib/python3.12/dist-packages/vllm/`:
+
+| File | Change |
+|---|---|
+| `v1/kv_hints/__init__.py` | new — KV hint protocol types |
+| `v1/kv_hints/protocol.py` | new — envelope/action dataclasses |
+| `v1/kv_hints/actions.py` | new — evict/retain action parsing |
+| `v1/core/retained_block_queue.py` | new — deferred-free block queue |
+| `v1/core/block_pool.py` | modified — external hash index, retained queue integration, session_id on BlockStored |
+| `v1/core/kv_cache_manager.py` | modified — apply_request_completion_retention/eviction hooks |
+| `v1/core/sched/scheduler.py` | modified — call retention/eviction hooks on request completion |
+| `v1/engine/__init__.py` | modified — kv_hints field on EngineCoreRequest |
+| `v1/engine/async_llm.py` | modified — forward kv_hints from request |
+| `v1/engine/input_processor.py` | modified — forward kv_hints from request |
+| `v1/engine/llm_engine.py` | modified — forward kv_hints from request |
+| `v1/request.py` | modified — kv_hints field on Request |
+| `v1/kv_offload/base.py` | modified — kv_hints in ReqContext |
+| `v1/kv_offload/tiering/kvcr/manager.py` | modified — KVCR hint contract rebased onto envelope |
+| `distributed/kv_events.py` | modified — session_id on BlockStored (upstream PR #51381) |
+| `distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py` | modified — hints plumbing |
+| `engine/protocol.py` | modified — kv_hints in EngineClient protocol |
 
 ## Why two stages?
 
