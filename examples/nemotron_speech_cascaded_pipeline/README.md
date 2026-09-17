@@ -51,7 +51,7 @@ flowchart LR
             ASR["Container: asr-nim<br/>Same Nemotron ASR NIM<br/>1 GPU"]
         end
 
-        subgraph LLMPod["Kubernetes Pod: VllmWorker"]
+        subgraph LLMPod["Kubernetes Pod: worker"]
             LLMWorker["Container: main<br/>Published Dynamo vLLM worker<br/>FP8, TP=1, 1 GPU"]
         end
 
