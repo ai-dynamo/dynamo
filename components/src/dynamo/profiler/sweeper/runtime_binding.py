@@ -1,47 +1,32 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Runtime binding resolution (tracking issue #13545, item 3): "Bind the
-target runtime/backend version, compatible renderer, and matching
-performance data" for one Candidate.
-
-Confirmed against the real aiconfigurator source
-(python/aisimulate/src/aiconfigurator/cli/main.py, _run_support_mode):
-
-    result = common.check_support(
-        model=model, system=system, backend=backend,
-        version=version, architecture=architecture,
-    )
-    result.agg_supported / result.disagg_supported / result.exact_match
-
-and against aiconfigurator.sdk.task_v2._lookup_num_gpus_per_node, which
-resolves GPUs-per-node for a hardware SKU -- the proper API surface for
-this, not a hand-rolled read of the systems/*.yaml catalog files.
-
-RISK, stated plainly: _lookup_num_gpus_per_node is underscore-prefixed --
-not confirmed as a stable, externally-callable interface. A message asking
-aiconfigurator's maintainers to confirm this (or point at a public
-equivalent) has been sent but not yet answered as of this module's
-authorship. common.check_support is not underscore-prefixed and reads as
-the intended public entry point, but has not been independently confirmed
-stable either. Both are wrapped in a single injectable dependency so a
-maintainer-provided public replacement can swap in without touching any
-caller of resolve_runtime_binding.
+"""Runtime binding resolution (tracking issue #13545, item 3): binds one
+Candidate's target runtime image, GPU topology, and compatible renderer.
+The private aiconfigurator GPU-topology lookup is isolated behind an
+injectable dependency so it can be replaced without touching any caller.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Mapping, Protocol
 
-# Confirmed empirically this session: TrtllmConfigModifier.set_config_tep_size/
-# set_config_dep_size raise NotImplementedError for the direct renderer.
-# Candidates using these strategies must use the aic renderer instead.
+# TRT-LLM TEP and DEP strategies require the AIC renderer: the direct
+# renderer raises NotImplementedError for them.
 _DIRECT_RENDERER_UNSUPPORTED_STRATEGIES: frozenset[tuple[str, str]] = frozenset(
     {("trtllm", "tep"), ("trtllm", "dep")}
 )
 
-_RUNTIME_IMAGE_REGISTRY = "nvcr.io/nvidia/ai-dynamo"  # matches every real run this session
+_RUNTIME_IMAGE_REGISTRY = "nvcr.io/nvidia/ai-dynamo"
+
+# Matches renderers/base.py's _RUNTIME_VERSION_PATTERN exactly -- this
+# module's canonical-version check must never disagree with the real
+# downstream validation in DGDGenerationOptions.__post_init__.
+_RUNTIME_VERSION_PATTERN = re.compile(
+    r"^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$"
+)
 
 
 class RuntimeBindingError(ValueError):
@@ -54,9 +39,6 @@ class RuntimeBindingError(ValueError):
 
 
 class SupportChecker(Protocol):
-    """Matches common.check_support's real, confirmed signature and return
-    shape (.agg_supported / .disagg_supported / .exact_match)."""
-
     def __call__(
         self, *, model: str, system: str, backend: str, version: str, architecture: str | None
     ) -> Any: ...
@@ -71,46 +53,73 @@ class RuntimeBinding:
     runtime_image: str
     num_gpus_per_node: int
     renderer: str  # "direct" | "aic"
+    runtime_version_override: str | None = None
 
 
 def _default_support_checker() -> SupportChecker:
-    from aiconfigurator.sdk import common  # noqa: PLC0415 -- lazy, same reason as stack_provider.py
+    from aiconfigurator.sdk import common  # noqa: PLC0415
 
     return common.check_support
 
 
-def _default_num_gpus_per_node_lookup() -> NumGPUsPerNodeLookup:
-    from aiconfigurator.sdk.task_v2 import _lookup_num_gpus_per_node  # noqa: PLC0415
-
-    return _lookup_num_gpus_per_node
+def _candidate_strategies(candidate_config: Mapping[str, Any]) -> tuple[str | None, ...]:
+    """Agg candidates carry a single `strategy`; disagg candidates carry
+    per-role `prefill_strategy`/`decode_strategy` instead, and `strategy`
+    itself is None for disagg. Returns every strategy that actually
+    applies to this candidate so renderer selection checks all of them,
+    not only a top-level field that's absent for half of all candidates.
+    """
+    if candidate_config.get("deployment_mode") == "disagg":
+        return (
+            candidate_config.get("prefill_strategy"),
+            candidate_config.get("decode_strategy"),
+        )
+    return (candidate_config.get("strategy"),)
 
 
 def resolve_runtime_binding(
     candidate_config: Mapping[str, Any],
     *,
     model: str,
+    dynamo_version: str,
     architecture: str | None = None,
     check_support: SupportChecker | None = None,
-    lookup_num_gpus_per_node: NumGPUsPerNodeLookup | None = None,
+    lookup_num_gpus_per_node: NumGPUsPerNodeLookup,
 ) -> RuntimeBinding:
     """Resolve runtime image, num_gpus_per_node, and renderer for one
     Candidate. Raises RuntimeBindingError if no matching performance data
     exists for this candidate's deployment_mode.
 
-    check_support/lookup_num_gpus_per_node default to the real
-    aiconfigurator functions (imported lazily, so this module stays
-    importable without aiconfigurator installed) but are injectable for
-    testing without the real package -- same pattern as create_stack()'s
-    _load_runner_factory in stack_provider.py.
+    lookup_num_gpus_per_node has no default: the only known real
+    implementation, aiconfigurator.sdk.task_v2._lookup_num_gpus_per_node,
+    does not exist in the latest released aiconfigurator (0.11.0) --
+    confirmed by direct import attempt, not assumed -- and no on-disk
+    hardware-catalog fallback ships in that release either. A silent
+    default here would raise an opaque ImportError from deep inside
+    aiconfigurator on every normal call instead of failing clearly at the
+    call site. Callers must supply this explicitly until the real function
+    ships in a release; requiring it now makes that an explicit, visible
+    choice at every call site rather than a hidden landmine.
+
+    dynamo_version is required for the same reason runtime_version_override
+    exists on DGDGenerationOptions: a candidate's backend_version (e.g.
+    "1.3.0rc10") is frequently not canonical MAJOR.MINOR.PATCH, and nothing
+    about a Candidate can tell us Dynamo's own release version -- that is
+    an environment-wide constant the caller must supply, not something
+    derivable from search data.
+
+    check_support defaults to the real aiconfigurator.sdk.common.check_support
+    (imported lazily so this module stays importable without aiconfigurator
+    installed) since that one IS confirmed present and working in the
+    pinned release -- unlike the GPU lookup, it does not need to be
+    required.
     """
     check_support = check_support or _default_support_checker()
-    lookup_num_gpus_per_node = lookup_num_gpus_per_node or _default_num_gpus_per_node_lookup()
 
     backend = candidate_config["backend"]
     backend_version = candidate_config["backend_version"]
     hardware_sku = candidate_config["hardware_sku"]
     deployment_mode = candidate_config["deployment_mode"]  # "agg" | "disagg"
-    strategy = candidate_config.get("strategy")
 
     result = check_support(
         model=model,
@@ -119,10 +128,6 @@ def resolve_runtime_binding(
         version=backend_version,
         architecture=architecture,
     )
-    # deployment_mode-specific, deliberately not a blanket "is it supported at
-    # all" check -- agg_supported and disagg_supported are independent in the
-    # real result shape, and checking the wrong one (or both) would silently
-    # accept a candidate that can't actually be rendered.
     supported = result.disagg_supported if deployment_mode == "disagg" else result.agg_supported
     if not supported:
         raise RuntimeBindingError(
@@ -132,14 +137,22 @@ def resolve_runtime_binding(
 
     num_gpus_per_node = lookup_num_gpus_per_node(hardware_sku)
 
+    strategies = _candidate_strategies(candidate_config)
     renderer = (
         "aic"
-        if (backend, strategy) in _DIRECT_RENDERER_UNSUPPORTED_STRATEGIES
+        if any((backend, strategy) in _DIRECT_RENDERER_UNSUPPORTED_STRATEGIES for strategy in strategies)
         else "direct"
     )
+
+    is_canonical = bool(_RUNTIME_VERSION_PATTERN.fullmatch(backend_version))
 
     return RuntimeBinding(
         runtime_image=f"{_RUNTIME_IMAGE_REGISTRY}/{backend}-runtime:{backend_version}",
         num_gpus_per_node=num_gpus_per_node,
         renderer=renderer,
+        # Only set when needed -- matches the established, confirmed
+        # behavior elsewhere (test_runtime_version_override_is_only_
+        # written_when_explicit): don't write it for an already-canonical
+        # tag that needs no override.
+        runtime_version_override=None if is_canonical else dynamo_version,
     )
