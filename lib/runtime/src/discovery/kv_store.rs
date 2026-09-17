@@ -660,8 +660,14 @@ impl Discovery for KVStoreDiscovery {
 
         let key = kv::Key::new(key_path.clone());
 
-        // Delete the entry from the bucket
-        bucket.delete(&key).await?;
+        // Delete is idempotent at the discovery layer. This matters for endpoints whose
+        // initial publication was deferred and for shutdown paths that race an explicit
+        // unregister. Individual KV backends differ on whether deleting a missing key is
+        // an error, so normalize that difference here.
+        match bucket.delete(&key).await {
+            Ok(()) | Err(kv::StoreError::MissingKey(_)) => {}
+            Err(error) => return Err(error.into()),
+        }
 
         Ok(())
     }
