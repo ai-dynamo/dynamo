@@ -47,6 +47,7 @@ struct Totals {
     output_tokens: u64,
     responses: u64,
     complete: u64,
+    incomplete: u64,
     cancelled: u64,
     error: u64,
     /// Records the tap dropped because its queue was full.
@@ -116,6 +117,7 @@ impl Totals {
             self.output_tokens += response.output_tokens;
             match response.outcome {
                 ShadowOutcome::Complete => self.complete += 1,
+                ShadowOutcome::Incomplete => self.incomplete += 1,
                 ShadowOutcome::Cancelled => self.cancelled += 1,
                 ShadowOutcome::Error => self.error += 1,
             }

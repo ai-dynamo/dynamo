@@ -446,7 +446,6 @@ pub async fn prepare_engine(
     }
 }
 
-/// `shadow_taps` are the taps of the runtime that serves the pipeline.
 pub async fn build_pipeline<Req, Resp>(
     card: &ModelDeploymentCard,
     engine: ExecutionContext,

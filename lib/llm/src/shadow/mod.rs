@@ -110,8 +110,29 @@ pub(crate) async fn init_from_env(drt: &DistributedRuntime) -> Result<()> {
     Ok(())
 }
 
+/// Every step that can fail for a transient reason runs before anything that
+/// outlives a failure. A start that fails must leave no metric collectors and
+/// no publisher tasks, or a second start on the same runtime could not succeed.
 async fn start_taps(drt: &DistributedRuntime, config: ShadowConfig) -> Result<ShadowTaps> {
     let namespace = drt.namespace(config.namespace.clone())?;
+
+    let mut publishers = Vec::with_capacity(config.taps.len());
+    for spec in config.taps {
+        // `capacity` bounds what the frontend holds for a shadow that has
+        // stopped reading. The ZMQ socket queues behind the tap queue, and its
+        // default mark of 100,000 messages would let long prompts reach
+        // gigabytes, so it gets the same bound.
+        let send_hwm = i32::try_from(spec.capacity).unwrap_or(i32::MAX);
+        let publisher = EventPublisher::for_namespace_with_zmq_send_hwm(
+            &namespace,
+            spec.topic.clone(),
+            send_hwm,
+        )
+        .await
+        .with_context(|| format!("shadow tap `{}`: creating publisher", spec.name))?;
+        publishers.push((spec, publisher));
+    }
+
     let metrics = namespace.metrics();
     let counter = |name: &str, help: &str| metrics.create_intcountervec(name, help, &["tap"], &[]);
     let queued = counter(
@@ -127,21 +148,9 @@ async fn start_taps(drt: &DistributedRuntime, config: ShadowConfig) -> Result<Sh
         "Records a shadow tap failed to publish",
     )?;
 
-    let mut taps = Vec::with_capacity(config.taps.len());
-    for spec in config.taps {
+    let mut taps = Vec::with_capacity(publishers.len());
+    for (spec, publisher) in publishers {
         let name = spec.name.to_string();
-        // `capacity` bounds what the frontend holds for a shadow that has
-        // stopped reading. The ZMQ socket queues behind the tap queue, and its
-        // default mark of 100,000 messages would let long prompts reach
-        // gigabytes, so it gets the same bound.
-        let send_hwm = i32::try_from(spec.capacity).unwrap_or(i32::MAX);
-        let publisher = EventPublisher::for_namespace_with_zmq_send_hwm(
-            &namespace,
-            spec.topic.clone(),
-            send_hwm,
-        )
-        .await
-        .with_context(|| format!("shadow tap `{name}`: creating publisher"))?;
         tracing::info!(
             tap = name,
             namespace = config.namespace,

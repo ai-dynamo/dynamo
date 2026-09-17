@@ -388,7 +388,7 @@ impl Recorder {
         } else if dropped_early {
             ShadowOutcome::Cancelled
         } else {
-            ShadowOutcome::Complete
+            ShadowOutcome::Incomplete
         };
         let nanos = |offset: Duration| offset.as_nanos() as u64;
         let response = ShadowResponse {
@@ -457,7 +457,6 @@ pub(super) mod tests {
         })
     }
 
-    /// Records the request it was given and answers with fixed chunks.
     struct Engine {
         chunks: Vec<Annotated<LLMEngineOutput>>,
         seen: std::sync::Mutex<Vec<PreprocessedRequest>>,
@@ -770,7 +769,19 @@ pub(super) mod tests {
         assert_eq!(recorded.choices[1].finish_reason.as_deref(), Some("stop"));
     }
 
-    /// Fails the first attempt the way an unreachable worker does.
+    #[tokio::test]
+    async fn a_stream_that_ends_without_a_finish_reason_is_incomplete() {
+        let mut queues = taps(JOINED_TAP);
+        let (queue, mut receiver) = queues.remove(0);
+        let tap = ShadowTap::new(vec![queue], ShadowOrigin::Chat);
+        let engine = Engine::new(vec![chunk(vec![10], None), chunk(vec![11], None)]);
+
+        let _: Vec<_> = run(&tap, engine, "req-t").await.unwrap().collect().await;
+        let recorded = receiver.try_recv().unwrap().response.unwrap();
+        assert_eq!(recorded.outcome, ShadowOutcome::Incomplete);
+        assert_eq!(recorded.choices[0].token_ids, vec![10, 11]);
+    }
+
     struct FlakyEngine {
         calls: AtomicU64,
     }

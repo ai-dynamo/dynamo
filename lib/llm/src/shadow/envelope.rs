@@ -53,8 +53,11 @@ pub struct ShadowEnvelope {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShadowOutcome {
-    /// The stream ended and no chunk carried an error.
+    /// Every requested choice carried a finish reason, and none failed.
     Complete,
+    /// The stream ended with no error and no cancel, but not every requested
+    /// choice carried a finish reason. The primary cut the response short.
+    Incomplete,
     /// The response stream was dropped before it ended, as on a client
     /// disconnect.
     Cancelled,
