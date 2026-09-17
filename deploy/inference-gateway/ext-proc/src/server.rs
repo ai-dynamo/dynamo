@@ -999,9 +999,7 @@ impl ExtProcError {
                 message: e.to_string(),
             },
             // Keep these statuses aligned with `scheduler_error_status` in
-            // `lib/kv-router/src/services/selection/error.rs`, with the one
-            // documented exception on `RouterQueueRejected` — see the module
-            // docs on `admission`.
+            // `lib/kv-router/src/services/selection/error.rs`.
             PickError::RouterOverloaded => Self {
                 status_code: StatusCode::TooManyRequests,
                 message: e.to_string(),
@@ -1753,10 +1751,8 @@ mod tests {
     }
 
     /// A full policy-class queue is 429, like the overloaded family: the class
-    /// refused to admit the request, so the client should back off rather than
-    /// be told to look for another endpoint. See the module docs on
-    /// `admission` for why this deliberately differs from the selection
-    /// service's current 503.
+    /// refused to admit, so the client should back off rather than be sent
+    /// looking for another endpoint.
     #[test]
     fn router_queue_rejection_maps_to_429() {
         let err = ExtProcError::from_pick_error(PickError::RouterQueueRejected);

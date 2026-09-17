@@ -153,7 +153,8 @@ impl SelectionCore {
         Ok(self.select_response(selected, endpoint, Some(selection_id)))
     }
 
-    /// The wire shape of a selection; a queue rejection keeps its 503 body.
+    /// The wire shape of a selection; a queue rejection keeps its structured
+    /// body, with the rejection detail under `details`.
     async fn select_or_reject(
         &self,
         operation: SelectionOperation<'_>,

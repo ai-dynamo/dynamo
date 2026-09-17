@@ -3,56 +3,37 @@
 
 //! The EPP's half of the router admission contract.
 //!
-//! In full dynamo mode the EPP embeds the KV router in-process *and* performs
-//! the frontend duties for gateway traffic — tokenization, header handling, and
-//! mapping failures to a client status code. The Dynamo Frontend performs the
-//! same duties for its own traffic through `lib/llm/src/http/service/*`. When a
-//! rejection reason is added to the router, both hosts have to learn it; this
-//! module is the EPP's side.
+//! In full dynamo mode the EPP embeds the KV router in-process *and* does the
+//! frontend's job for gateway traffic, including turning failures into client
+//! status codes. [`classify_router_error`] recovers the typed rejection from an
+//! `anyhow::Error` so the ext_proc boundary can pick the right status instead
+//! of flattening everything to 503.
 //!
-//! [`classify_router_error`] turns an `anyhow::Error` from a routing call back
-//! into a typed rejection, so the ext_proc boundary can pick the right status
-//! class instead of flattening everything to 503.
+//! The reason is always recoverable: `KvRouter::map_scheduler_error` converts
+//! the overload family into a [`DynamoError`] and passes every other
+//! [`KvSchedulerError`] through untouched. It is lost only when a caller
+//! stringifies it — which is what the EPP used to do, so every routing failure
+//! became a 503 carrying the router's `Debug` text.
 //!
-//! # Why classification is needed at all
+//! # Status classes
 //!
-//! The router already preserves the reason. `KvRouter::map_scheduler_error`
-//! (`lib/llm/src/kv_router.rs`) converts the overload family into a
-//! `DynamoError` carrying an [`ErrorType`], and returns every other
-//! [`KvSchedulerError`] unchanged. Both survive inside the `anyhow::Error`, so
-//! the reason only disappears when a caller stringifies it. Until now the EPP
-//! did exactly that, and every routing failure became a 503 whose body carried
-//! the router's internal `Debug` text.
-//!
-//! # Which status each rejection gets
-//!
-//! The classes below follow `scheduler_error_status` in
-//! `lib/kv-router/src/services/selection/error.rs`, with one deliberate
-//! exception: a queue rejection is **429 here and 503 there**.
-//!
-//! DEP #9755 (`dep:approved`, `dep:implementing`) is prescriptive about this:
+//! These match `scheduler_error_status`
+//! (`lib/kv-router/src/services/selection/error.rs`) exactly. That mapping
+//! answered a queue rejection with 503; this change moves it to 429 alongside
+//! the overload family, per DEP #9755 (`dep:approved`, `dep:implementing`):
 //!
 //! > Terminal router-side rejection **SHOULD** use downstream throttling
 //! > semantics, such as `TooManyRequests` / HTTP 429.
 //!
-//! and names the case explicitly — "This includes router queue full, token
-//! budget exhausted, cached/uncached token queue exhausted, and SLO budget
-//! expired." Its 503 allowance is scoped to the Frontend's *pre-tokenization*
-//! admission gate, which is a different gate from a router queue decision
-//! taken after tokenization.
+//! which names "router queue full" as an instance. The DEP's 503 allowance
+//! covers the Frontend's *pre-tokenization* gate, not a router queue decision
+//! taken after tokenization. The difference is behavioural: 503 invites a
+//! gateway to fail over to another endpoint, which cannot help when the limit
+//! is a fleet-wide policy-class setting.
 //!
-//! The behavioural difference is the point. A queue rejection means this
-//! policy class is at its configured limit, which is a fleet-wide setting, so
-//! a 503 — which invites a gateway to fail over to another endpoint — sends
-//! the client somewhere that cannot help. 429 tells it to back off, which is
-//! the only useful response.
-//!
-//! No host agrees with another today: the selection service answers 503, and
-//! the integrated Frontend answers both this and the overload family with
-//! `overload_status_code()` (`lib/llm/src/http/service/error.rs`), 529 by
-//! default. Converging them is tracked on ai-dynamo/dynamo#14176, where both
-//! mappings are touched at once. Until that lands the EPP follows the DEP
-//! rather than the drifted implementation.
+//! The Frontend still answers both families with `overload_status_code()`, 529
+//! by default. That is a public configurable default across seven surfaces, so
+//! it is left alone here; converging it is raised on ai-dynamo/dynamo#14176.
 
 use dynamo_kv_router::scheduling::KvSchedulerError;
 use dynamo_runtime::error::{DynamoError, ErrorType};
@@ -114,11 +95,9 @@ impl RouterRejection {
 
 /// Classify an `anyhow::Error` returned by a routing call.
 ///
-/// Walks the error chain rather than inspecting only the outermost error, so a
-/// rejection stays classifiable if a caller adds context above it.
-///
-/// The `DynamoError` channel is checked first because
-/// `KvRouter::map_scheduler_error` converts the overload family into that form;
+/// Walks the chain, not just the outermost error, so added context cannot hide
+/// the rejection. The [`DynamoError`] channel is checked first because
+/// `map_scheduler_error` converts the overload family into that form;
 /// everything it leaves alone arrives as a bare [`KvSchedulerError`].
 pub fn classify_router_error(error: &anyhow::Error) -> RouterRejection {
     for cause in error.chain() {
@@ -132,54 +111,39 @@ pub fn classify_router_error(error: &anyhow::Error) -> RouterRejection {
         }
     }
 
-    // An unrecognized failure is treated as unavailable rather than internal:
-    // it preserves the pre-classification behaviour (503) and keeps an unknown
-    // upstream error from being reported to the client as an EPP bug.
+    // Unavailable, not internal: keeps the pre-classification status (503) and
+    // avoids reporting an unknown upstream error to the client as an EPP bug.
     RouterRejection::Unavailable
 }
 
 /// `None` when the class carries no routing meaning, so the caller keeps
 /// walking the chain.
 ///
-/// Matches the *canonical* classes, because the caller reads
-/// [`DynamoError::class`] — the entry point `ErrorClass` documents for
-/// consumers — rather than the raw stored variant. `map_scheduler_error` still
-/// builds the legacy `ResourceExhausted` and `WorkerOverloaded` variants, and
-/// `ErrorClass::normalized` folds both into `CapacityExhausted` before they
-/// arrive here. Matching those legacy names directly would work today and then
-/// break silently the day that producer moves to canonical classes: every
-/// overload would quietly become a 503, with no test failing.
+/// Matches *canonical* classes, because the caller reads
+/// [`DynamoError::class`], which normalizes. `map_scheduler_error` still builds
+/// the legacy `ResourceExhausted`/`WorkerOverloaded` names; matching those
+/// directly would work today and break silently when that producer moves to
+/// canonical classes, turning every overload into a 503 with no test failing.
 fn classify_error_class(class: ErrorType) -> Option<RouterRejection> {
     match class {
-        // Where `map_scheduler_error` lands both overload cases,
-        // AllEligibleWorkersOverloaded and PinnedWorkerOverloaded.
+        // Where `map_scheduler_error` lands both overload cases.
         ErrorType::CapacityExhausted => Some(RouterRejection::Overloaded),
         ErrorType::Unavailable => Some(RouterRejection::Unavailable),
         ErrorType::InvalidRequest => Some(RouterRejection::BadRequest),
-        // TODO(epp-deadline-429): `ErrorType::DeadlineExceeded` is left unmapped
-        // deliberately, not because it is unreachable.
-        //
-        // It already arrives today, because `ErrorClass::normalize` folds
-        // `ConnectionTimeout` and `ResponseTimeout` into it — a transport
-        // timeout, which this crate answers elsewhere with 504
-        // (`PickError::TokenizerTimeout`). ai-dynamo/dynamo#14176 adds a second,
-        // unrelated producer: `KvSchedulerError::DeadlineExceeded` for a request
-        // that outlived its queue deadline, which that PR answers with 429.
-        //
-        // One `ErrorType` for both means a blanket arm here would give one of
-        // them the wrong status. Until the two are distinguishable, both fall
-        // through to `Unavailable` (503) — unchanged from today, so no
-        // regression — and picking the right split is deferred to when #14176
-        // lands. `deadline_exceeded_is_not_yet_a_429` below pins the current
-        // answer so that change cannot happen silently.
+        // TODO(epp-deadline-429): `DeadlineExceeded` is unmapped deliberately,
+        // not because it is unreachable. It arrives today from transport
+        // timeouts (`ErrorClass::normalized` folds `ConnectionTimeout` and
+        // `ResponseTimeout` into it), which this crate answers with 504
+        // elsewhere, while #14176 adds a queue-deadline producer it answers
+        // with 429. One class, two right answers, so both keep the
+        // `Unavailable` (503) fallback until they can be told apart.
         _ => None,
     }
 }
 
 fn classify_scheduler_error(error: &KvSchedulerError) -> RouterRejection {
     // Mirrors `scheduler_error_status` in
-    // `lib/kv-router/src/services/selection/error.rs`, except for
-    // `QueueRejected` — see the module docs for why that one is 429 here.
+    // `lib/kv-router/src/services/selection/error.rs`; keep the two in step.
     //
     // `KvSchedulerError` is `#[non_exhaustive]`, so the wildcard is required
     // from this crate; it is also what keeps a newly added variant from failing
@@ -233,9 +197,8 @@ mod tests {
     #[test]
     fn dynamo_error_types_classify_without_a_scheduler_error() {
         // `map_scheduler_error` converts the overload family into this form, so
-        // the scheduler error is no longer in the chain at all. These are the
-        // legacy variants it builds today; they classify only because
-        // `DynamoError::class` normalizes them first.
+        // no scheduler error is left in the chain. These are the legacy variants
+        // it builds today, which classify only because `class()` normalizes.
         assert_eq!(
             classify_router_error(&dynamo_error(ErrorType::ResourceExhausted)),
             RouterRejection::Overloaded
@@ -250,10 +213,9 @@ mod tests {
         );
     }
 
-    /// The other half of the pair above: a producer that constructs canonical
-    /// classes directly, as `ErrorClass` tells new producers to do, must
-    /// classify identically. Without this, migrating `map_scheduler_error`
-    /// would turn every 429 into a 503 with no test failing.
+    /// The other half of the pair above: a producer building canonical classes
+    /// directly must classify identically, or migrating `map_scheduler_error`
+    /// turns every 429 into a 503 with no test failing.
     #[test]
     fn canonical_error_classes_classify_the_same_as_legacy_ones() {
         assert_eq!(
@@ -320,9 +282,9 @@ mod tests {
         assert_eq!(classify_router_error(&opaque), RouterRejection::Unavailable);
     }
 
-    /// Pins the `TODO(epp-deadline-429)` seam: a deadline is reachable today
-    /// and deliberately unmapped, so this must fail if someone adds the arm
-    /// without splitting transport timeouts from queue deadlines first.
+    /// Pins the `TODO(epp-deadline-429)` seam. A deadline is reachable today,
+    /// so this fails if the arm is added without first splitting transport
+    /// timeouts from queue deadlines.
     #[test]
     fn deadline_exceeded_is_not_yet_a_429() {
         assert_eq!(

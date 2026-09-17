@@ -223,9 +223,9 @@ pub enum PickError {
     /// 429: the workers may have capacity while the class's queue is full, and
     /// the two carry different metric labels and different client messages.
     ///
-    /// The selection service currently answers this one with 503; the EPP
-    /// deliberately does not follow it there. See the module docs on
-    /// `admission`.
+    /// 429 rather than 503 for the reason DEP #9755 gives — the class refused
+    /// to admit, so the client should back off rather than look for another
+    /// endpoint. See the module docs on `admission`.
     #[error("router queue is full")]
     RouterQueueRejected,
     /// The request contradicted existing router state, such as a duplicate
