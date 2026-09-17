@@ -1008,6 +1008,69 @@ class TestReasoningParserMetadata:
         }
 
 
+class TestReasoningParserOutputCapability:
+    def test_boundary_only_parser_rejected(self):
+        from dynamo.frontend.vllm_processor import (
+            _ensure_reasoning_parser_output_capable,
+        )
+
+        class BoundaryOnlyParser:
+            def __init__(self, tokenizer, *args, **kwargs):
+                pass
+
+            def extract_reasoning_streaming(self, *args):
+                raise NotImplementedError(
+                    "only provides boundary detection. "
+                    "Use HarmonyParser for output parsing."
+                )
+
+        with pytest.raises(RuntimeError, match="boundary detection"):
+            _ensure_reasoning_parser_output_capable(
+                "openai_gptoss", BoundaryOnlyParser, object()
+            )
+
+    def test_output_capable_parser_accepted(self):
+        from dynamo.frontend.vllm_processor import (
+            _ensure_reasoning_parser_output_capable,
+        )
+
+        class WorkingParser:
+            def __init__(self, tokenizer, *args, **kwargs):
+                pass
+
+            def extract_reasoning_streaming(self, *args):
+                return None
+
+        _ensure_reasoning_parser_output_capable("fake", WorkingParser, object())
+
+    def test_probe_tolerates_other_empty_input_failures(self):
+        from dynamo.frontend.vllm_processor import (
+            _ensure_reasoning_parser_output_capable,
+        )
+
+        class PickyParser:
+            def __init__(self, tokenizer, *args, **kwargs):
+                pass
+
+            def extract_reasoning_streaming(self, *args):
+                raise IndexError("empty input")
+
+        _ensure_reasoning_parser_output_capable("fake", PickyParser, object())
+
+    def test_real_gptoss_parser_rejected(self):
+        pytest.importorskip("vllm.reasoning.gptoss_reasoning_parser")
+        from dynamo.frontend.vllm_processor import (
+            _ensure_reasoning_parser_output_capable,
+        )
+        from vllm.reasoning import ReasoningParserManager
+
+        parser_class = ReasoningParserManager.get_reasoning_parser("openai_gptoss")
+        with pytest.raises(RuntimeError, match="openai_gptoss"):
+            _ensure_reasoning_parser_output_capable(
+                "openai_gptoss", parser_class, object()
+            )
+
+
 @pytest.mark.asyncio
 @pytest.mark.multimodal
 async def test_build_engine_inputs_preserves_multimodal_uuids(

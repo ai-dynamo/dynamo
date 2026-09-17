@@ -238,6 +238,32 @@ class _ReasoningParserMetadata:
     parser_kwargs: dict[str, Any] | None
 
 
+def _ensure_reasoning_parser_output_capable(
+    parser_name: str,
+    parser_class: type[ReasoningParser],
+    tokenizer: TokenizerLike,
+) -> None:
+    # vLLM ships boundary-only parsers (e.g. GptOssReasoningParser) that raise
+    # NotImplementedError from every output-parsing method, while this
+    # processor calls extract_reasoning_streaming per request. Probe once here
+    # so the combination is rejected at engine setup instead of failing every
+    # request with a 500 (issue #14936).
+    probe = parser_class(tokenizer)
+    try:
+        probe.extract_reasoning_streaming("", "", "", [], [], [])
+    except NotImplementedError as e:
+        raise RuntimeError(
+            f"reasoning_parser {parser_name!r} ({parser_class.__name__}) only "
+            "provides boundary detection and cannot serve the vLLM chat "
+            "processor; gpt-oss output parsing requires HarmonyParser, which "
+            "this processor does not support yet (issue #14936)"
+        ) from e
+    except Exception:
+        # The probe only cares about NotImplementedError; any other failure on
+        # empty input still proves the method is implemented.
+        pass
+
+
 def _build_reasoning_parser_metadata(
     reasoning_parser_class: type[ReasoningParser] | None,
     tokenizer: TokenizerLike,
@@ -1224,6 +1250,9 @@ class EngineFactory:
         if reasoning_parser_name:
             reasoning_parser_class = ReasoningParserManager.get_reasoning_parser(
                 reasoning_parser_name
+            )
+            _ensure_reasoning_parser_output_capable(
+                reasoning_parser_name, reasoning_parser_class, tokenizer
             )
         else:
             reasoning_parser_class = None
