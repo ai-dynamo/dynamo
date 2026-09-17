@@ -32,6 +32,7 @@ REQUIRED_CATEGORIES: dict[str, frozenset[str]] = {
             "k8s",
             "xpu_1",
             "xpu_2",
+            "tpu_1",
         }
     ),
 }
