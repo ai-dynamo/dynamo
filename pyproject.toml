@@ -16,6 +16,7 @@ dependencies = [
     "ai-dynamo-runtime==1.5.0",
     "aisimulate==0.12.0.dev2; python_version >= '3.11' and python_version < '3.14'",
     "aiohttp>=3.14.3,<4.0",
+    "fsspec>=2026.4.0,<2027.0",
     "transformers>=4.56.0",
     "kubernetes>=32.0.1,<33.0.0",
     "prometheus_client>=0.23.1,<1.0",
