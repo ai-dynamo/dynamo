@@ -1541,6 +1541,24 @@ mod tests {
         assert_eq!(args["location"], "Paris");
     }
 
+    #[test]
+    fn parse_complete_unified_normalizes_tool_name_from_request_schema() {
+        let tools = [ToolDefinition {
+            name: "get_weather".to_string(),
+            parameters: Some(serde_json::json!({"type": "object"})),
+            strict: None,
+        }];
+        let turn = concat!(
+            "<|start|>assistant to=get_weather.get_weather<|message|>",
+            "<atem:invoke name=\"get_weather.get_weather\">",
+            "<atem:parameter name=\"location\">Paris</atem:parameter>",
+            "</atem:invoke><|eom|>"
+        );
+        let (calls, _, _) = parse_complete_unified(turn, Some(&tools), "muse_glimmer").unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+    }
+
     #[tokio::test]
     async fn muse_unified_preserves_event_order_within_one_push() {
         let turn = concat!(
