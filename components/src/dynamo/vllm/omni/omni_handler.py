@@ -5,7 +5,6 @@ import functools
 import logging
 import os
 import random
-from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import (
     Any,
@@ -48,12 +47,17 @@ from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
 from dynamo.vllm.handlers import get_lora_manager
 from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
 from dynamo.vllm.omni.base_handler import BaseOmniHandler
+
+# Re-exported: EngineInputs moved to its own module so the per-modality
+# builders can annotate it without importing this handler.
+from dynamo.vllm.omni.engine_inputs import EngineInputs
 from dynamo.vllm.omni.output_formatter import (
     AudioAggregateState,
     AudioStreamState,
     OutputFormatter,
 )
 from dynamo.vllm.omni.utils import (
+    audio_output_is_cumulative,
     build_image_generation_prompt,
     image_generation_negative_prompt_from_request,
     image_generation_sampling_overrides,
@@ -94,33 +98,6 @@ def _apply_media_passthrough(
                 "no extra_args",
                 sorted(knobs),
             )
-
-
-@dataclass
-class EngineInputs:
-    """Parsed engine inputs ready for AsyncOmni.generate().
-
-    Attributes:
-        prompt: OmniTextPrompt dict for the engine.
-        sampling_params_list: Per-stage sampling parameters, or None for defaults.
-        request_type: The resolved request type (may differ from the initial parse
-            when a chat completion request carries video params).
-        fps: Frames per second, only meaningful for video requests.
-        response_format: Desired response format (e.g. "url" or "b64_json" for
-            image requests). None means use the default for the request type.
-        output_format: The output format to use for the response.
-            None means use the default for the request type.
-    """
-
-    prompt: Union[OmniTextPrompt, Dict[str, Any]]
-    sampling_params_list: list | None = None
-    request_type: RequestType = RequestType.CHAT_COMPLETION
-    fps: int = 0
-    speed: float = 1.0
-    response_format: str | None = None
-    output_format: str | None = None
-    lora_request: LoRARequest | None = None
-    stream_audio: bool = False
 
 
 class OmniHandler(BaseOmniHandler):
@@ -377,7 +354,7 @@ class OmniHandler(BaseOmniHandler):
 
         try:
             inputs = await self.build_engine_inputs(
-                parsed_request, request_type, image=image
+                parsed_request, request_type, image=image, request_id=request_id
             )
         except (ValueError, NotImplementedError, RuntimeError) as e:
             logger.error(f"Invalid request {request_id}: {e}")
@@ -417,8 +394,14 @@ class OmniHandler(BaseOmniHandler):
 
         previous_text = ""
         audio_stream_state = AudioStreamState() if inputs.stream_audio else None
+        # Read the coerced params, not the request's: the coercion above is what
+        # decides whether the engine emits disjoint deltas or whole-waveform
+        # snapshots, so aggregation has to follow its result rather than the
+        # model's identity.
         audio_aggregate_state = (
-            AudioAggregateState()
+            AudioAggregateState(
+                cumulative=audio_output_is_cumulative(inputs.sampling_params_list)
+            )
             if inputs.request_type == RequestType.AUDIO_GENERATION
             and not inputs.stream_audio
             else None
@@ -608,6 +591,7 @@ class OmniHandler(BaseOmniHandler):
         ],
         request_type: RequestType,
         image: PIL.Image.Image | None = None,
+        request_id: str | None = None,
     ) -> EngineInputs:
         """Convert a parsed request into AsyncOmni engine inputs.
 
@@ -616,6 +600,8 @@ class OmniHandler(BaseOmniHandler):
                 for image/video/audio requests, or a raw dict for chat completions.
             request_type: The RequestType determined by parse_request_type.
             image: Pre-loaded PIL Image for I2V requests (from input_reference).
+            request_id: Final request id, used by audio models (Audex) that bind
+                per-request state such as the CFG pair id to it.
 
         Returns:
             EngineInputs ready for engine_client.generate().
@@ -631,7 +617,9 @@ class OmniHandler(BaseOmniHandler):
             return self._engine_inputs_from_video(parsed_request, image=image)
         elif request_type == RequestType.AUDIO_GENERATION:
             assert isinstance(parsed_request, NvCreateAudioSpeechRequest)
-            return await self.audio.build_engine_inputs(parsed_request)
+            return await self.audio.build_engine_inputs(
+                parsed_request, request_id=request_id
+            )
 
         raise ValueError(f"Unknown request type: {request_type}")
 
