@@ -538,6 +538,19 @@ impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlaceme
         Ok(PlacementEffects { decision, released })
     }
 
+    fn preflight_batch_request(&self, request: &Request) -> Result<()> {
+        let request = request.metadata();
+        request
+            .uuid
+            .ok_or_else(|| anyhow!("KV placement requires a request UUID"))?;
+        if !request.prompt_tokens_are_placement_safe() {
+            return Err(placement_safety_error());
+        }
+        u32::try_from(request.effective_max_output_tokens())
+            .context("max_output_tokens does not fit into u32")?;
+        Ok(())
+    }
+
     fn observe(&mut self, observation: RouterEventBatch, _now_ms: f64) -> Result<Vec<Placement>> {
         self.observe_router_events(observation.into_events())
     }

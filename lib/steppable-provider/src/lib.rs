@@ -230,25 +230,6 @@ impl Drop for HostHashIdsLease {
     }
 }
 
-#[derive(Clone)]
-struct RecordedCompactRequest {
-    request: DirectRequest,
-    input_token_count: usize,
-    trace_block_size: usize,
-    hash_ids: Vec<u32>,
-}
-
-impl RecordedCompactRequest {
-    fn into_core(self) -> CompactDirectRequest {
-        CompactDirectRequest::owned(
-            self.request,
-            self.input_token_count,
-            self.trace_block_size,
-            self.hash_ids,
-        )
-    }
-}
-
 fn release_hash_buffer(callbacks: HashBufferLeaseCallbacksV1, buffer_id: HashBufferIdV1) {
     let release = callbacks
         .release_hash_buffer
@@ -261,12 +242,6 @@ fn release_hash_buffer(callbacks: HashBufferLeaseCallbacksV1, buffer_id: HashBuf
 
 struct BackendReplay {
     engine: Box<dyn SteppableReplay>,
-    config: BackendConfig,
-    /// Successful state transitions since creation. `submit_batch` replays this
-    /// journal into a fresh engine to prove every member can be admitted before
-    /// it touches the live replay, and uses it as the rollback source if the
-    /// live engine ever disagrees with the preflight.
-    journal: Vec<JournalEntry>,
     /// Explicit UUIDs accepted in the current report epoch. Keeping this in
     /// lock-step with the engine lets `submit_batch` reject duplicate input
     /// before it mutates the first request in the batch.
@@ -274,23 +249,7 @@ struct BackendReplay {
     lease_callbacks: Option<HashBufferLeaseCallbacksV1>,
     registered_hash_buffers: HashMap<HashBufferIdV1, RegisteredHashBuffer>,
     next_hash_buffer_id: u64,
-    /// A leased compact request cannot be replayed after its terminal callback
-    /// releases the host buffer. Disable journal-based batch preflight after
-    /// accepting one rather than copying the IDs into the journal.
-    batch_preflight_available: bool,
     last_error: String,
-}
-
-#[derive(Clone)]
-enum JournalEntry {
-    Submit(DirectRequest),
-    SubmitCompact(RecordedCompactRequest),
-    Cancel(Uuid),
-    StepUntil(f64),
-    AdvanceNow(f64),
-    SetCapturePerRequest(bool),
-    SetSlaThresholds(SlaThresholds),
-    TakeReport(f64),
 }
 
 fn build_engine(config: &BackendConfig) -> anyhow::Result<Box<dyn SteppableReplay>> {
@@ -346,62 +305,6 @@ fn build_engine(config: &BackendConfig) -> anyhow::Result<Box<dyn SteppableRepla
             },
         )?;
     Ok(Box::new(engine) as Box<dyn SteppableReplay>)
-}
-
-impl BackendReplay {
-    fn rebuild_from_journal(&self) -> anyhow::Result<Box<dyn SteppableReplay>> {
-        let mut rebuilt = build_engine(&self.config)?;
-        for entry in &self.journal {
-            match entry {
-                JournalEntry::Submit(request) => {
-                    rebuilt.submit(request.clone())?;
-                }
-                JournalEntry::SubmitCompact(request) => {
-                    rebuilt.submit_compact(request.clone().into_core())?;
-                }
-                JournalEntry::Cancel(uuid) => {
-                    rebuilt.cancel(*uuid)?;
-                }
-                JournalEntry::StepUntil(until_ms) => {
-                    rebuilt.step_until(*until_ms)?;
-                }
-                JournalEntry::AdvanceNow(now_ms) => rebuilt.advance_now_ms(*now_ms),
-                JournalEntry::SetCapturePerRequest(capture) => {
-                    rebuilt.set_capture_per_request(*capture);
-                }
-                JournalEntry::SetSlaThresholds(thresholds) => {
-                    rebuilt.set_sla_thresholds(*thresholds);
-                }
-                JournalEntry::TakeReport(wall_ms) => {
-                    rebuilt.take_report(*wall_ms)?;
-                }
-            }
-        }
-        Ok(rebuilt)
-    }
-
-    fn rollback_batch(&mut self) -> anyhow::Result<()> {
-        self.engine = self.rebuild_from_journal()?;
-        self.submitted_ids.clear();
-        for entry in &self.journal {
-            match entry {
-                JournalEntry::Submit(request) => {
-                    if let Some(uuid) = request.uuid {
-                        self.submitted_ids.insert(uuid);
-                    }
-                }
-                JournalEntry::SubmitCompact(request) => {
-                    if let Some(uuid) = request.request.uuid {
-                        self.submitted_ids.insert(uuid);
-                    }
-                }
-                // A successful report starts the next UUID-retention epoch.
-                JournalEntry::TakeReport(_) => self.submitted_ids.clear(),
-                _ => {}
-            }
-        }
-        Ok(())
-    }
 }
 
 fn allocated_bytes(value: String) -> ByteSliceV1 {
@@ -570,15 +473,15 @@ unsafe fn compact_request_parts(
 
 unsafe fn owned_compact_request(
     request: CompactRequestV1,
-) -> Result<RecordedCompactRequest, StatusV1> {
+) -> Result<CompactDirectRequest, StatusV1> {
     let (direct, input_token_count, trace_block_size) = unsafe { compact_request_parts(request) }?;
     let hash_ids = unsafe { borrowed_tokens(request.hash_ids) }?.to_vec();
-    Ok(RecordedCompactRequest {
-        request: direct,
+    Ok(CompactDirectRequest::owned(
+        direct,
         input_token_count,
         trace_block_size,
         hash_ids,
-    })
+    ))
 }
 
 unsafe fn create_impl(
@@ -627,13 +530,10 @@ unsafe fn create_impl(
         Ok(engine) => {
             let replay = Box::new(BackendReplay {
                 engine,
-                config,
-                journal: Vec::new(),
                 submitted_ids: HashSet::new(),
                 lease_callbacks,
                 registered_hash_buffers: HashMap::new(),
                 next_hash_buffer_id: 1,
-                batch_preflight_available: true,
                 last_error: String::new(),
             });
             // Safety: validated non-null output pointer.
@@ -669,12 +569,6 @@ unsafe fn submit_impl(
     match replay.engine.submit(request.clone()) {
         Ok(uuid) => {
             replay.submitted_ids.insert(uuid);
-            // `direct_request` always assigns an ID before crossing into the
-            // core, so retain the exact request for deterministic rollback.
-            // The core returns that same explicit ID on success.
-            let mut recorded = request;
-            recorded.uuid = Some(uuid);
-            replay.journal.push(JournalEntry::Submit(recorded));
             // Safety: validated non-null output pointer.
             unsafe { *request_id = *uuid.as_bytes() };
             StatusV1::OK
@@ -702,12 +596,9 @@ unsafe fn submit_compact_impl(
         Ok(replay) => replay,
         Err(status) => return status,
     };
-    match replay.engine.submit_compact(request.clone().into_core()) {
+    match replay.engine.submit_compact(request) {
         Ok(uuid) => {
             replay.submitted_ids.insert(uuid);
-            let mut recorded = request;
-            recorded.request.uuid = Some(uuid);
-            replay.journal.push(JournalEntry::SubmitCompact(recorded));
             unsafe { *request_id = *uuid.as_bytes() };
             StatusV1::OK
         }
@@ -832,7 +723,6 @@ unsafe fn submit_compact_hash_buffer_range_impl(
                 "validated registered compact hash buffer disappeared"
             );
             replay.submitted_ids.insert(uuid);
-            replay.batch_preflight_available = false;
             // Safety: validated non-null output pointer.
             unsafe { *request_id = *uuid.as_bytes() };
             StatusV1::OK
@@ -885,11 +775,6 @@ unsafe fn submit_batch_impl(
         Ok(replay) => replay,
         Err(status) => return status,
     };
-    if !replay.batch_preflight_available {
-        replay.last_error =
-            "batch submission is unavailable after a zero-copy compact lease".to_owned();
-        return StatusV1::UNSUPPORTED;
-    }
     let mut batch_ids = HashSet::with_capacity(converted.len());
     for request in &converted {
         if let Some(uuid) = request.uuid
@@ -899,58 +784,20 @@ unsafe fn submit_batch_impl(
             return StatusV1::REJECTED;
         }
     }
-    // `SteppableReplay` intentionally exposes only single-request admission.
-    // Exercise the complete batch against a fresh replay reconstructed from
-    // the journal before touching the live engine. A later duplicate or a
-    // router rejection therefore has no live ID, placement, or collector
-    // commitment. If the live engine nevertheless diverges, restore it from
-    // the same pre-batch journal before returning the failure.
-    let mut preflight = match replay.rebuild_from_journal() {
-        Ok(engine) => engine,
-        Err(error) => {
-            replay.last_error = format!("could not reconstruct batch preflight: {error}");
-            return StatusV1::INTERNAL;
-        }
-    };
-    for request in &converted {
-        if let Err(error) = preflight.submit(request.clone()) {
-            replay.last_error = error.to_string();
-            return StatusV1::REJECTED;
-        }
-    }
-    let mut committed = Vec::with_capacity(converted.len());
-    for (request, request_id) in converted.into_iter().zip(output.iter_mut()) {
-        match replay.engine.submit(request.clone()) {
-            Ok(uuid) => {
+    match replay.engine.submit_batch(&converted) {
+        Ok(uuids) => {
+            debug_assert_eq!(uuids.len(), output.len());
+            for (uuid, request_id) in uuids.into_iter().zip(output.iter_mut()) {
                 replay.submitted_ids.insert(uuid);
                 *request_id = *uuid.as_bytes();
-                committed.push((request, uuid));
             }
-            Err(error) => {
-                let rollback = replay.rollback_batch();
-                let rollback_succeeded = rollback.is_ok();
-                replay.last_error = match rollback {
-                    Ok(()) => error.to_string(),
-                    Err(rollback_error) => format!(
-                        "batch submission failed ({error}); rollback reconstruction failed ({rollback_error})"
-                    ),
-                };
-                output.fill([0; 16]);
-                return if rollback_succeeded {
-                    StatusV1::REJECTED
-                } else {
-                    StatusV1::INTERNAL
-                };
-            }
+            StatusV1::OK
+        }
+        Err(error) => {
+            replay.last_error = error.to_string();
+            StatusV1::REJECTED
         }
     }
-    replay
-        .journal
-        .extend(committed.into_iter().map(|(mut request, uuid)| {
-            request.uuid = Some(uuid);
-            JournalEntry::Submit(request)
-        }));
-    StatusV1::OK
 }
 
 unsafe fn cancel_impl(
@@ -970,7 +817,6 @@ unsafe fn cancel_impl(
     };
     match replay.engine.cancel(request_id) {
         Ok(Some(terminal)) => {
-            replay.journal.push(JournalEntry::Cancel(request_id));
             let terminal_status = match terminal.terminal_status {
                 Some(ReplayTerminalStatus::Completed) => 1,
                 Some(ReplayTerminalStatus::Rejected) => 2,
@@ -992,7 +838,6 @@ unsafe fn cancel_impl(
             StatusV1::OK
         }
         Ok(None) => {
-            replay.journal.push(JournalEntry::Cancel(request_id));
             // Safety: validated output pointer.
             unsafe { *canceled = 0 };
             StatusV1::OK
@@ -1051,11 +896,6 @@ unsafe fn cancel_batch_impl(
             }
         }
     }
-    replay.journal.extend(
-        request_ids
-            .iter()
-            .map(|request_id| JournalEntry::Cancel(Uuid::from_bytes(*request_id))),
-    );
     let terminals = terminals.into_boxed_slice();
     let len = terminals.len() as u64;
     let data = Box::into_raw(terminals).cast::<EngineEventV1>();
@@ -1087,9 +927,6 @@ unsafe fn step_impl(
             return StatusV1::REJECTED;
         }
     };
-    replay
-        .journal
-        .push(JournalEntry::StepUntil(request.until_ms));
     let request_facts = outcome
         .events
         .iter()
@@ -1204,7 +1041,6 @@ unsafe fn take_report_impl(
         }
     };
     replay.submitted_ids.clear();
-    replay.journal.push(JournalEntry::TakeReport(wall_ms));
     let encoded = match serde_json::to_string(&report_value) {
         Ok(encoded) => encoded,
         Err(error) => {
@@ -1299,7 +1135,6 @@ unsafe fn advance_now_ms_impl(handle: ReplayHandleV1, now_ms: f64) -> StatusV1 {
         Err(status) => return status,
     };
     replay.engine.advance_now_ms(now_ms);
-    replay.journal.push(JournalEntry::AdvanceNow(now_ms));
     StatusV1::OK
 }
 
@@ -1312,9 +1147,6 @@ unsafe fn set_capture_per_request_impl(handle: ReplayHandleV1, capture: u8) -> S
         Err(status) => return status,
     };
     replay.engine.set_capture_per_request(capture != 0);
-    replay
-        .journal
-        .push(JournalEntry::SetCapturePerRequest(capture != 0));
     StatusV1::OK
 }
 
@@ -1338,7 +1170,6 @@ unsafe fn set_sla_thresholds_impl(handle: ReplayHandleV1, thresholds: SlaThresho
         Err(status) => return status,
     };
     replay.engine.set_sla_thresholds(sla);
-    replay.journal.push(JournalEntry::SetSlaThresholds(sla));
     StatusV1::OK
 }
 
@@ -1817,9 +1648,10 @@ mod tests {
         let config = BackendConfig::one_worker();
         let replay = Box::new(BackendReplay {
             engine: build_engine(&config).expect("test engine"),
-            config,
-            journal: Vec::new(),
             submitted_ids: HashSet::new(),
+            lease_callbacks: None,
+            registered_hash_buffers: HashMap::new(),
+            next_hash_buffer_id: 1,
             last_error: String::new(),
         });
         let handle = ReplayHandleV1(Box::into_raw(replay).cast());

@@ -255,6 +255,28 @@ fn submit_hash_buffer_range(
     status
 }
 
+fn submit_direct_batch(
+    table: &PluginVTableV1Prefix,
+    handle: ReplayHandleV1,
+    requests: &[DirectRequestV1],
+) -> (StatusV1, Vec<[u8; 16]>) {
+    let mut request_ids = vec![[99; 16]; requests.len()];
+    let status = unsafe {
+        table.submit_batch.expect("submit batch")(
+            handle,
+            DirectRequestSliceV1 {
+                data: requests.as_ptr(),
+                len: requests.len() as u64,
+            },
+            RequestIdMutSliceV1 {
+                data: request_ids.as_mut_ptr(),
+                len: request_ids.len() as u64,
+            },
+        )
+    };
+    (status, request_ids)
+}
+
 #[test]
 fn descriptor_creates_and_completes_one_routed_request() {
     let descriptor = dynamo_steppable_provider::aiperf_steppable_plugin_v1();
@@ -430,6 +452,117 @@ fn leased_compact_buffer_releases_once_when_canceled() {
 
     unsafe { table.destroy.expect("destroy")(handle) };
     assert_eq!(log.count.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn submit_batch_remains_available_after_a_leased_request_reaches_terminal_state() {
+    let log = ReleaseLog::default();
+    let (table, tail, handle) = create_leased_replay(&log);
+    let hash_ids = [211_u32, 212];
+    let buffer_id = register_hash_buffer(tail, handle, &hash_ids);
+    let leased_id = [62; 16];
+    assert_eq!(
+        submit_hash_buffer_range(tail, handle, buffer_id, leased_id),
+        StatusV1::OK
+    );
+    assert!(step_to_terminal(table, handle, leased_id));
+    assert_eq!(log.count.load(Ordering::SeqCst), 1);
+
+    let batch_id = [63; 16];
+    let (status, request_ids) = submit_direct_batch(table, handle, &[request(&[1, 2], batch_id)]);
+    assert_eq!(status, StatusV1::OK);
+    assert_eq!(request_ids, vec![batch_id]);
+
+    unsafe { table.destroy.expect("destroy")(handle) };
+}
+
+#[test]
+fn submit_batch_remains_atomic_after_a_leased_request_is_canceled() {
+    let log = ReleaseLog::default();
+    let (table, tail, handle) = create_leased_replay(&log);
+    let hash_ids = [221_u32, 222];
+    let buffer_id = register_hash_buffer(tail, handle, &hash_ids);
+    let leased_id = [64; 16];
+    assert_eq!(
+        submit_hash_buffer_range(tail, handle, buffer_id, leased_id),
+        StatusV1::OK
+    );
+    let mut event: EngineEventV1 = unsafe { std::mem::zeroed() };
+    let mut canceled = 0;
+    assert_eq!(
+        unsafe { table.cancel.expect("cancel")(handle, &leased_id, &mut event, &mut canceled) },
+        StatusV1::OK
+    );
+    assert_eq!(canceled, 1);
+    assert_eq!(log.count.load(Ordering::SeqCst), 1);
+
+    let candidate = [65; 16];
+    let (status, request_ids) = submit_direct_batch(
+        table,
+        handle,
+        &[request(&[3, 4], candidate), request(&[3, 4], candidate)],
+    );
+    assert_eq!(status, StatusV1::REJECTED);
+    assert_eq!(request_ids, vec![[0; 16]; 2]);
+
+    let (status, request_ids) = submit_direct_batch(table, handle, &[request(&[3, 4], candidate)]);
+    assert_eq!(status, StatusV1::OK);
+    assert_eq!(request_ids, vec![candidate]);
+    assert_eq!(log.count.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        submit_hash_buffer_range(tail, handle, buffer_id, [66; 16]),
+        StatusV1::INVALID_ARGUMENT
+    );
+
+    unsafe { table.destroy.expect("destroy")(handle) };
+}
+
+#[test]
+fn leased_replay_batch_preflights_a_later_router_rejection_without_commitment() {
+    let log = ReleaseLog::default();
+    let (table, tail, handle) = create_leased_replay(&log);
+    let hash_ids = [231_u32, 232];
+    let buffer_id = register_hash_buffer(tail, handle, &hash_ids);
+    let leased_id = [67; 16];
+    assert_eq!(
+        submit_hash_buffer_range(tail, handle, buffer_id, leased_id),
+        StatusV1::OK
+    );
+    let mut event: EngineEventV1 = unsafe { std::mem::zeroed() };
+    let mut canceled = 0;
+    assert_eq!(
+        unsafe { table.cancel.expect("cancel")(handle, &leased_id, &mut event, &mut canceled) },
+        StatusV1::OK
+    );
+    assert_eq!(log.count.load(Ordering::SeqCst), 1);
+
+    let authored_id = b"synthetic-prompt";
+    let mut rejected = request(&[7, 8], [69; 16]);
+    rejected.flags |= REQUEST_FLAG_REPLAY_CONTEXT;
+    rejected.replay_context = aiperf_steppable_abi::ReplayContextV1 {
+        struct_size: std::mem::size_of::<aiperf_steppable_abi::ReplayContextV1>() as u32,
+        flags: 0,
+        authored_id: ByteSliceV1 {
+            data: authored_id.as_ptr(),
+            len: authored_id.len() as u64,
+        },
+        session_id: ByteSliceV1::EMPTY,
+        metadata: ByteSliceV1::EMPTY,
+        turn_index: 0,
+        prompt_token_source: 1,
+        reserved: 0,
+    };
+    let accepted = request(&[7, 8], [68; 16]);
+    let (status, ids) = submit_direct_batch(table, handle, &[accepted, rejected]);
+    assert_eq!(status, StatusV1::REJECTED);
+    assert_eq!(ids, vec![[0; 16]; 2]);
+
+    let (status, ids) = submit_direct_batch(table, handle, &[accepted]);
+    assert_eq!(status, StatusV1::OK);
+    assert_eq!(ids, vec![[68; 16]]);
+    assert_eq!(log.count.load(Ordering::SeqCst), 1);
+
+    unsafe { table.destroy.expect("destroy")(handle) };
 }
 
 #[test]
