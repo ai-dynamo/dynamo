@@ -25,9 +25,11 @@ use dynamo_protocols::types::StopReason;
 const MAX_GRAMMAR_NESTING_DEPTH: usize = 500;
 
 pub(crate) fn invalid_argument_error(message: impl Into<String>) -> anyhow::Error {
+    let message = message.into();
     DynamoError::builder()
         .error_type(ErrorType::InvalidArgument)
-        .message(message.into())
+        .message(message.clone())
+        .public_message(message)
         .build()
         .into()
 }
