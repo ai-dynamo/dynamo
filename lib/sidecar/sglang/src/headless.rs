@@ -154,8 +154,6 @@ impl HeadlessSidecar {
                 }
             }
         }
-        // Publisher Drop cancels local subscriptions; the follower never owns
-        // the leader's serving registration.
     }
 }
 

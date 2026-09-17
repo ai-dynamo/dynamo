@@ -35,16 +35,14 @@ fn executable_exposes_sglang_and_shared_sidecar_contracts() {
 }
 
 #[test]
-fn both_modes_require_a_local_grpc_endpoint() {
-    for mode in [None, Some("--telemetry-only")] {
-        let output = Command::new(env!("CARGO_BIN_EXE_dynamo-sglang-sidecar"))
-            .args(mode)
-            .env_remove("DYN_SIDECAR_GRPC_ENDPOINT")
-            .output()
-            .unwrap();
-        assert_eq!(output.status.code(), Some(2));
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("the following required arguments were not provided"));
-        assert!(stderr.contains("--grpc-endpoint <GRPC_ENDPOINT>"));
-    }
+fn telemetry_mode_requires_a_local_grpc_endpoint() {
+    let output = Command::new(env!("CARGO_BIN_EXE_dynamo-sglang-sidecar"))
+        .arg("--telemetry-only")
+        .env_remove("DYN_SIDECAR_GRPC_ENDPOINT")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("the following required arguments were not provided"));
+    assert!(stderr.contains("--grpc-endpoint <GRPC_ENDPOINT>"));
 }

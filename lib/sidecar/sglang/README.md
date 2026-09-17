@@ -85,15 +85,18 @@ SGLang server. This requires an SGLang build exposing node-local
 `kv_event_sources` through `GetServerInfo` on leaders and followers started
 with `--grpc-port`.
 
-The `launch/multinode_kv_router.sh` example also requires SGLang's explicit
-`"bind": true` KV-event option (included in
-[SGLang #39659](https://github.com/sgl-project/sglang/pull/39659)). It binds each
-rank's publisher to `127.0.0.1`, so the engine and its sidecar must share a
-network namespace. KV events can include token IDs and request metadata;
-loopback prevents remote access but does not isolate other processes in that
-namespace. If overriding this to a non-loopback bind, restrict every publisher
-port (`SGLANG_KV_EVENT_PORT + dp_rank`) to authorized consumers using a firewall
-or network policy.
+For `launch/multinode_kv_router_sidecar.sh`, use an SGLang build including commit
+[`c50b251`](https://github.com/sgl-project/sglang/commit/c50b251da8e455dfbb594f8c3b7ccae6eca72129),
+which provides node-local KV source discovery and explicit publisher binding.
+The stock v0.5.19 image guidance below applies to the single-node examples.
+
+The multinode example also requires SGLang's explicit
+`"bind": true` KV-event option. It binds each rank's publisher to `127.0.0.1`, so
+the engine and its sidecar must share a network namespace. KV events can include
+token IDs and request metadata; loopback prevents remote access but does not
+isolate other processes in that namespace. If overriding this to a non-loopback
+bind, restrict every publisher port (`SGLANG_KV_EVENT_PORT + dp_rank`) to authorized
+consumers using a firewall or network policy.
 
 ## Deploy on Kubernetes (quick start)
 

@@ -3,7 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # One node of an externally managed SGLang attention-DP group with local KV events.
-# Requires SGLang #39659 and this Dynamo sidecar on every node. Start the frontend separately.
+# Requires node-local KV source discovery and this Dynamo sidecar on every node.
+# Start the frontend separately.
 # Defaults: two nodes, one GPU per node, global TP=2 / attention DP=2.
 
 set -e
@@ -21,7 +22,7 @@ if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
     echo "Required: NODE_RANK, DIST_INIT_ADDR"
     echo "Topology: NNODES=2, TP_SIZE=NNODES, DP_SIZE=NNODES (global sizes; PP=1)"
     echo "          DP_SIZE must be divisible by NNODES so every node owns publishers."
-    echo "Model:    MODEL=Qwen/Qwen3-0.6B, MAX_MODEL_LEN=4096, MAX_CONCURRENT_SEQS=32"
+    echo "Model:    MODEL=Qwen/Qwen3-32B, MAX_MODEL_LEN=4096, MAX_CONCURRENT_SEQS=32"
     echo "Role:     ROLE=aggregated|prefill|decode (default: aggregated)"
     echo "PD:       SGLANG_BOOTSTRAP_HOST=<reachable prefill leader IP> on prefill node 0"
     echo "Ports:    SGLANG_HTTP_PORT=30000, SGLANG_GRPC_PORT=30001, SGLANG_KV_EVENT_PORT=5557"
@@ -52,7 +53,7 @@ if (( NNODES < 2 || TP_SIZE % DP_SIZE != 0 || DP_SIZE % NNODES != 0 )); then
     exit 1
 fi
 
-MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
+MODEL="${MODEL:-Qwen/Qwen3-32B}"
 ROLE="${ROLE:-aggregated}"
 SGLANG_PYTHON="${SGLANG_PYTHON:-python3}"
 SGLANG_HOST="${SGLANG_HOST:-0.0.0.0}"
