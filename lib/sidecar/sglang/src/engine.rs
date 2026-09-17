@@ -548,6 +548,7 @@ async fn watch_engine_state(
             Ok(stream) => stream,
             Err(error) => {
                 tracing::warn!(%error, "SGLang engine-state stream connection failed; retrying");
+                unregister_after_stream_loss(&endpoint, &mut registered).await;
                 if wait_for_retry(&cancel, transport.retry_interval).await {
                     return;
                 }
@@ -662,8 +663,24 @@ async fn watch_engine_state(
             is_pause = Some(state.is_pause);
         }
 
+        unregister_after_stream_loss(&endpoint, &mut registered).await;
         if wait_for_retry(&cancel, transport.retry_interval).await {
             return;
+        }
+    }
+}
+
+async fn unregister_after_stream_loss(
+    endpoint: &dynamo_runtime::component::Endpoint,
+    registered: &mut bool,
+) {
+    if !*registered {
+        return;
+    }
+    match endpoint.unregister_endpoint_instance().await {
+        Ok(()) => *registered = false,
+        Err(error) => {
+            tracing::warn!(%error, "failed to remove SGLang from discovery after stream loss")
         }
     }
 }
