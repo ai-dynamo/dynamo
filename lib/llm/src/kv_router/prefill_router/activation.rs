@@ -341,9 +341,7 @@ impl PrefillRouter {
         .await?;
 
         // A prefill card that declares a mode may declare KV tuning alongside it;
-        // honoring only half of its `RouterConfig` would be a trap. Whichever
-        // config wins, active-sequence and output-block tracking stay off for
-        // this prefill-only hop.
+        // honoring only half of its `RouterConfig` would be a trap.
         let advertised_kv_tuning = advertisement.kv_router_config.is_some();
         let prefill_kv_config =
             normalize_prefill_kv_config(advertisement.kv_router_config.or(kv_router_config));
