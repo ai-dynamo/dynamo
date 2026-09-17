@@ -1059,10 +1059,11 @@ class TestReasoningParserOutputCapability:
 
     def test_real_gptoss_parser_rejected(self):
         pytest.importorskip("vllm.reasoning.gptoss_reasoning_parser")
+        from vllm.reasoning import ReasoningParserManager
+
         from dynamo.frontend.vllm_processor import (
             _ensure_reasoning_parser_output_capable,
         )
-        from vllm.reasoning import ReasoningParserManager
 
         parser_class = ReasoningParserManager.get_reasoning_parser("openai_gptoss")
         with pytest.raises(RuntimeError, match="openai_gptoss"):
