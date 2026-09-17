@@ -6,7 +6,7 @@ sidebar-title: Disaggregated Serving
 description: Split prefill and decode across independent workers
 ---
 
-Disaggregated serving separates the prefill and decode phases of inference into independent workers, each scalable on its own and connected by a KV cache transport such as [NIXL](../../developer-guide/knowledge-base/concepts/system-architecture/disaggregated-serving.md) or Mooncake. This is the local equivalent of the disaggregated pattern in the [Kubernetes Disaggregated Serving guide](../../kubernetes/disaggregated-serving/overview.md) — the same architecture, driven by CLI flags instead of a DynamoGraphDeployment.
+Disaggregated serving separates the prefill and decode phases of inference into independent workers, each scalable on its own and connected by a KV cache transport such as [NIXL](../../developer-guide/knowledge-base/concepts/system-architecture/disaggregated-serving.md) or Mooncake (Tokenspeed only). This is the local equivalent of the disaggregated pattern in the [Kubernetes Disaggregated Serving guide](../../kubernetes/disaggregated-serving/overview.md) — the same architecture, driven by CLI flags instead of a DynamoGraphDeployment.
 
 For the architecture and when to use it, see [Disaggregated Serving](../../kubernetes/disaggregated-serving/overview.md).
 
