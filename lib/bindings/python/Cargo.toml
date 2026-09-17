@@ -1,6 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+[patch.crates-io]
+# Keep the Python wheel's nested workspace on the same tokenizer review pin.
+dynamo-tokenizers = { git = "https://github.com/alexeldeib/frontend-crates.git", rev = "bcf3ebc7bb5d065f004e7f7a3b0c546b28cf80b7" }
+
 [workspace]
 # empty workspace to exclude from top level workspace
 # excluded due to pyo3 extension module build issues
