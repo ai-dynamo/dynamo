@@ -290,6 +290,20 @@ func (r *componentWorkloadsReconciler) preserveExistingDCDState(
 	//   scaled up   3 -> 5   stays 5
 	//   scaled down 3 -> 1   stays 1
 	//
+	// KNOWN LIMITATION -- that guarantee holds WITHIN a worker generation, not across one.
+	// This lookup is by name; a worker DCD's name carries the worker hash and a follower's
+	// name derives from its leader's, so any change to the worker generation renames the
+	// follower. The Get below then misses, generation reseeds the declared width, and a
+	// deliberate scale is silently undone -- by an image bump, an env edit, or a change to an
+	// unrelated worker component in the same graph. The old follower is separately drained to
+	// zero by the rollout's undeclared-component sweep, without scale_elastic_ep.
+	//
+	// Not fixed here on purpose. The follower is a derived component wearing a declared one's
+	// name, and the durable fix is to give it real identity as a Grove scaling-group member
+	// (grove#677 / grove#686, GREP-0793) rather than to special-case the generic
+	// read-before-write below. Carrying the count across a rename in this function would be
+	// transitional code that the group work deletes.
+	//
 	// Synthesis restamps the declared launch width (`--data-parallel-size` minus the
 	// leader's own rank) every pass, but that is a creation value, not a target -- at either
 	// gate position (see the type doc); "gate off" freezes the count rather than dragging it
