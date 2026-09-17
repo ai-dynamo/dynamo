@@ -114,8 +114,15 @@ def _surfaces() -> dict[str, str]:
 
 
 def _assert_required_codecs_present(surfaces: dict[str, str]) -> None:
-    """Sanity: the listings are real, so the absence checks mean something."""
-    listing = "\n".join(surfaces.values()).lower()
+    """Sanity: the listings are real, so the absence checks mean something.
+
+    Scoped to `_SURFACES` rather than every collected listing. `bsfs` is now
+    collected too, and it always carries `vp9_superframe`/`vp9_superframe_split`
+    once any bitstream filter is enabled -- so joining all of them would let a
+    build with no vp9 codec at all satisfy this check, which is precisely the
+    vacuous pass it exists to prevent.
+    """
+    listing = "\n".join(surfaces[s] for s in _SURFACES).lower()
     for name in _REQUIRED:
         assert name in listing, (
             f"{name} missing from the shipped ffmpeg -- the build is broken, and "
@@ -311,6 +318,40 @@ def _check_image(ships_cv2: bool = False) -> None:
 # that backend's lane and is skipped in the others -- tests/conftest.py skips an
 # item whose framework marker names an absent module, so a single module marked
 # with all three would skip everywhere and silently prove nothing.
+
+
+def test_required_codec_check_ignores_bitstream_filters() -> None:
+    """A vp9 bitstream filter must not satisfy the vp9 *codec* sanity check.
+
+    The two listings overlap by name: `-bsfs` lists `vp9_superframe` whenever any
+    filter is enabled, while `vp9` as a codec lives only on encoders/decoders/
+    parsers. Feeding a build that has the filter and no codec is the shape that
+    made this check vacuous when `bsfs` was first collected.
+    """
+    broken = {
+        "encoders": " V..... libx264               H.264\n",
+        "decoders": " V..... rawvideo              raw video\n",
+        "parsers": " rawvideo\n",
+        "bsfs": "vp9_superframe\nvp9_superframe_split\n",
+    }
+    with pytest.raises(AssertionError, match="vp9 missing"):
+        _assert_required_codecs_present(broken)
+
+
+def test_required_bsf_check_ignores_codecs() -> None:
+    """...and the mirror image: a codec listing must not satisfy the BSF check.
+
+    Cheap to assert and it pins the scoping in the other direction, so a later
+    edit cannot make either check satisfiable by the other's surface.
+    """
+    no_filters = {
+        "encoders": " V..... libvpx-vp9            libvpx VP9\n",
+        "decoders": " V..... vp9                   Google VP9\n",
+        "parsers": " vp9\n",
+        "bsfs": "aac_adtstoasc\npgs_frame_merge\n",
+    }
+    with pytest.raises(AssertionError, match="h264_mp4toannexb missing"):
+        _assert_required_bsfs_present(no_filters)
 
 
 @pytest.mark.vllm
