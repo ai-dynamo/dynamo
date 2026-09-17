@@ -24,7 +24,7 @@ use crate::proto::inference_client::InferenceClient;
 
 /// Deadline for the one-shot `Control.Abort`, so a connected-but-unresponsive
 /// server cannot hang cancellation. Startup is bounded by the operator's
-/// `--grpc-startup-deadline` instead.
+/// `--grpc-startup-deadline-secs` instead.
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The engine's limits, resolved at startup from `--context-length` and
@@ -155,7 +155,7 @@ impl TrtllmClient {
         }
         Err(connection_timeout(format!(
             "TensorRT-LLM did not report a model context length before the gRPC startup \
-             deadline ({last}). Raise --grpc-startup-deadline if the engine is still \
+             deadline ({last}). Raise --grpc-startup-deadline-secs if the engine is still \
              loading, or pin the window with --context-length."
         )))
     }

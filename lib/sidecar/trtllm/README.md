@@ -118,7 +118,7 @@ requests that omit `max_tokens` are rejected.
 
 Startup waits for the engine: TensorRT-LLM binds its gRPC port before the model
 finishes loading, so the sidecar retries `GetModelInfo` until
-`--grpc-startup-deadline` rather than failing on the first answer.
+`--grpc-startup-deadline-secs` rather than failing on the first answer.
 
 Use `DYN_SIDECAR_GRPC_ENDPOINT` instead of `--grpc-endpoint` when the endpoint is
 provided through the environment.
