@@ -18,6 +18,7 @@ use dynamo_protocols::types::{
 };
 use dynamo_runtime::error::{DynamoError, ErrorType};
 
+/// Tool names and parser diagnostics can contain request data, so this helper does not mark its message public.
 fn invalid_argument(message: impl Into<String>) -> DynamoError {
     DynamoError::builder()
         .error_type(ErrorType::InvalidArgument)

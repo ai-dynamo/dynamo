@@ -1023,6 +1023,13 @@ mod context_length_validation {
             "error message should tell user what to do, got: {}",
             dynamo_err.message()
         );
+        let Some(dynamo_runtime::error::PublicDetails::ContextLength { limit, actual }) =
+            dynamo_err.public_details()
+        else {
+            panic!("context overflow should expose structured length details");
+        };
+        assert_eq!(*limit, 5);
+        assert!(actual.is_some_and(|actual| actual > *limit));
     }
 
     #[tokio::test]

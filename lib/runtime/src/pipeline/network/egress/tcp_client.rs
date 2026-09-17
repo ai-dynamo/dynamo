@@ -1904,7 +1904,6 @@ mod tests {
     #[test]
     fn test_request_frame_size_validation() {
         assert!(validate_request_frame_size(1024, 1024).is_ok());
-
         let err = validate_request_frame_size(1025, 1024).unwrap_err();
         assert!(match_error_chain(
             err.as_ref(),

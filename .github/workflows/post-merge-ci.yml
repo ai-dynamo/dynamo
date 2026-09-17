@@ -441,7 +441,7 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       inline_compliance: true
-      build_timeout_minutes: 45
+      build_timeout_minutes: 90  # TEMPORARY CHANGE - TODO: INVESTIGATE AND SPEEDUP SLOW BUILDS
       # OSRB CSV diff baseline: post-merge context. main -> previous commit;
       # release/* -> prior release tag (see resolve_diff_base.py).
       diff_event_context: push

@@ -437,7 +437,7 @@ async fn anthropic_backend_error_events_record_status_classification() {
         let svc = HarnessService::start_with_engine(engine).await;
 
         for (status, error_type, message) in [
-            (cancelled_status, "request_cancelled", "Request cancelled"),
+            (cancelled_status, "api_error", "Request cancelled"),
             (
                 reqwest::StatusCode::SERVICE_UNAVAILABLE,
                 "overloaded_error",
@@ -532,13 +532,13 @@ async fn anthropic_handler_errors_record_classification_with_response() {
                 ),
                 (
                     reqwest::StatusCode::from_u16(499).unwrap(),
-                    "request_cancelled",
+                    "api_error",
                     "Request cancelled",
                 ),
                 (
                     reqwest::StatusCode::BAD_REQUEST,
                     "invalid_request_error",
-                    "bad backend input",
+                    "Invalid request",
                 ),
                 (
                     reqwest::StatusCode::INTERNAL_SERVER_ERROR,
