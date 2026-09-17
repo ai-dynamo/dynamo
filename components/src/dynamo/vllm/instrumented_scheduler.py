@@ -246,13 +246,15 @@ class _BenchmarkGroupResult:
 
 
 @dataclass
-class _BenchmarkStageExchange:
-    """One pending warm-up stage exchange (``_BenchmarkSynchronizer.stage_report``)."""
+class _BenchmarkStageRound:
+    """Group view of one warm-up stage round (``_BenchmarkSynchronizer.stage_round``).
 
-    batch: int | None
-    deadline: float
-    reports: dict[int, bool]
-    identities: dict[int, bytes]
+    ``all_done`` once every rank has closed its build for the rung; ``ok`` is
+    then the group verdict (every rank's local outcome ok), else None.
+    """
+
+    all_done: bool
+    ok: bool | None
 
 
 @dataclass(frozen=True)
@@ -559,9 +561,10 @@ class _BenchmarkSynchronizer:
     excluded from the measured iteration wall time. Small post-GO delivery and
     model-runner launch skew can remain because this operates at scheduler level.
 
-    The KV warm-up stage exchange (``stage_report`` / ``stage_poll``) is the
-    one non-blocking phase: ranks report and poll between idle steps, because
-    a peer may still be running the collective forward passes of its build.
+    The KV warm-up stage round (``stage_round``) is a blocking phase like the
+    others, but every rank enters it at the same point of every idle step,
+    before its forward pass, so no rank ever blocks here while a peer is
+    still running the collective forward passes of its build.
     """
 
     MAX_SYNC_TIMEOUT_SECONDS = 10
@@ -573,6 +576,8 @@ class _BenchmarkSynchronizer:
     # between ranks. The phase precedes every measurement, so a long wait
     # costs startup time only.
     CAPACITY_TIMEOUT_SECONDS = 300
+    # Stage status a rank reports in a warm-up round (``stage_round``).
+    STAGE_PHASES = ("none", "building", "done")
 
     def __init__(
         self,
@@ -612,7 +617,6 @@ class _BenchmarkSynchronizer:
         self._socket.setsockopt(zmq.LINGER, 0)
         self._cleanup_complete = False
         self._flush_on_close = False
-        self._stage: _BenchmarkStageExchange | None = None
 
     @property
     def run_id(self) -> str | None:
@@ -981,123 +985,115 @@ class _BenchmarkSynchronizer:
         self._recv_follower(deadline, benchmark_id, "cleanup_complete")
         self._cleanup_complete = True
 
-    def stage_report(
-        self, batch: int | None, ok: bool, *, timeout: float | None = None
-    ) -> None:
-        """Publish this rank's outcome for the warm-up stage of rung ``batch``
-        without blocking; ``stage_poll`` then drives the exchange.
+    def stage_round(
+        self, seq: int, batch: int | None, phase: str, ok: bool | None
+    ) -> _BenchmarkStageRound:
+        """Exchange this rank's warm-up stage status with the group; blocking.
 
-        A follower sends one ``stage_status``; rank 0 records its own. Both
-        keep polling from the scheduler's idle steps, so no rank ever blocks
-        in ``schedule()`` while a peer may still be running the collective
-        forward passes of its own build. ``timeout`` (default
-        ``timeout_seconds``) bounds the wait from this report; the caller
-        passes a longer one while peers may legitimately still be building.
+        Every attention-DP rank calls this once per idle DECODE_SWEEP step, at
+        the same point of the step and before its forward pass, so no rank
+        ever waits here while a peer is still inside a collective. ``seq`` is
+        this rank's count of rounds, ``phase`` is ``"none"`` (no stage
+        active), ``"building"`` or ``"done"``, and ``ok`` is the local outcome
+        once done. Rank 0 collects every follower's status and every rank
+        receives the same group view in the same step: ``all_done`` once every
+        rank is done, with the verdict ``ok`` = every local outcome ok. A
+        follower whose ``seq`` or ``batch`` disagrees with rank 0 has fallen
+        out of lockstep; that is a protocol error, never a wait. Past the
+        protocol timeout it raises TimeoutError; a protocol violation or a
+        peer abort raises RuntimeError, like the other phases.
 
-        Isolation from the point protocol: the exchange runs only in the
-        DECODE_SWEEP window between the previous point's result commit (or
-        the grid commit) and the next point's boundary/READY, once this
-        rank's build for the rung has ended. Every rank derives the rung
-        from the negotiated plan, so every rank enters the exchange for the
-        same ``batch``, and no other protocol message is in flight in that
-        window: the only traffic is stage_status/stage_decision plus the
+        Isolation from the point protocol: rounds run only in the DECODE_SWEEP
+        idle steps between a point's result commit (or the grid commit) and
+        the next point's injection, so no other protocol message is in flight;
+        the only traffic is stage_round/stage_round_result plus the
         abort/error notices every phase honours.
         """
-        if self._stage is not None:
-            raise RuntimeError("attention-DP warm-up stage exchange already pending")
-        wait = self.timeout_seconds if timeout is None else timeout
-        self._stage = _BenchmarkStageExchange(
-            batch=batch,
-            deadline=time.monotonic() + wait,
-            reports={self.dp_rank: ok},
-            identities={},
-        )
-        if self.dp_rank != 0:
-            self._socket.send_json(
-                {
-                    "type": "stage_status",
-                    "benchmark_id": 0,
-                    "dp_rank": self.dp_rank,
-                    "batch": batch,
-                    "ok": ok,
-                }
+        if phase not in self.STAGE_PHASES:
+            raise ValueError(f"invalid attention-DP warm-up stage phase: {phase!r}")
+        if (phase == "done") != isinstance(ok, bool):
+            raise ValueError(
+                f"attention-DP warm-up stage status {phase!r} with outcome {ok!r}"
             )
-
-    def stage_poll(self) -> bool | None:
-        """Advance the pending stage exchange without blocking.
-
-        Returns the group verdict (every rank reported ok) once it is known,
-        else None so the caller yields the step and polls again. Past the
-        report deadline it raises TimeoutError; a protocol violation or a
-        peer abort raises RuntimeError, like the blocking phases.
-        """
-        stage = self._stage
-        if stage is None:
-            raise RuntimeError("attention-DP warm-up stage poll without a report")
+        status = {
+            "type": "stage_round",
+            "benchmark_id": 0,
+            "dp_rank": self.dp_rank,
+            "seq": seq,
+            "batch": batch,
+            "phase": phase,
+            "ok": ok,
+        }
         if self.dp_rank == 0:
-            return self._coordinate_stage(stage)
-        return self._follow_stage(stage)
+            return self._coordinate_stage_round(status)
+        deadline = time.monotonic() + self.timeout_seconds
+        self._socket.send_json(status)
+        reply = self._recv_follower(deadline, 0, "stage_round_result")
+        all_done = reply.get("all_done")
+        verdict = reply.get("ok")
+        if (
+            reply.get("seq") != seq
+            or not isinstance(all_done, bool)
+            or (all_done and not isinstance(verdict, bool))
+            or (not all_done and verdict is not None)
+        ):
+            raise RuntimeError(
+                f"invalid attention-DP warm-up stage round result: {reply}"
+            )
+        return _BenchmarkStageRound(all_done, verdict)
 
-    def _coordinate_stage(self, stage: _BenchmarkStageExchange) -> bool | None:
+    def _coordinate_stage_round(self, local: dict) -> _BenchmarkStageRound:
+        deadline = time.monotonic() + self.timeout_seconds
+        statuses = {self.dp_rank: local}
+        identities: dict[int, bytes] = {}
         try:
-            while len(stage.identities) < self.dp_size - 1:
-                if not self._socket.poll(0, zmq.POLLIN):
-                    if time.monotonic() < stage.deadline:
-                        return None
-                    raise TimeoutError(
-                        "timed out waiting for attention-DP warm-up stage reports "
-                        f"for batch={stage.batch}; "
-                        f"reported_ranks={sorted(stage.reports)}"
-                    )
-                identity, message = self._read_router(0)
+            while len(identities) < self.dp_size - 1:
+                identity, message = self._recv_router(deadline, 0)
                 rank = message.get("dp_rank")
+                phase = message.get("phase")
                 ok = message.get("ok")
                 if (
-                    message.get("type") != "stage_status"
+                    message.get("type") != "stage_round"
                     or not isinstance(rank, int)
                     or not 1 <= rank < self.dp_size
-                    or rank in stage.identities
+                    or rank in identities
                     or identity != str(rank).encode()
-                    or message.get("batch") != stage.batch
-                    or not isinstance(ok, bool)
+                    or phase not in self.STAGE_PHASES
+                    or (phase == "done" and not isinstance(ok, bool))
+                    or (phase != "done" and ok is not None)
                 ):
                     raise RuntimeError(
-                        f"invalid attention-DP warm-up stage report: {message}"
+                        f"invalid attention-DP warm-up stage status: {message}"
                     )
-                stage.identities[rank] = identity
-                stage.reports[rank] = ok
-            decision = all(stage.reports.values())
+                if (
+                    message.get("seq") != local["seq"]
+                    or message.get("batch") != local["batch"]
+                ):
+                    raise RuntimeError(
+                        "attention-DP warm-up ranks are not in lockstep: rank 0 is at "
+                        f"round {local['seq']} batch={local['batch']}, rank {rank} at "
+                        f"round {message.get('seq')} batch={message.get('batch')}"
+                    )
+                identities[rank] = identity
+                statuses[rank] = message
+            all_done = all(status["phase"] == "done" for status in statuses.values())
+            verdict = (
+                all(status["ok"] for status in statuses.values()) if all_done else None
+            )
             self._send_to_all(
-                stage.identities,
+                identities,
                 {
-                    "type": "stage_decision",
+                    "type": "stage_round_result",
                     "benchmark_id": 0,
-                    "batch": stage.batch,
-                    "ok": decision,
+                    "seq": local["seq"],
+                    "all_done": all_done,
+                    "ok": verdict,
                 },
             )
         except Exception as error:
-            self._stage = None
             self._notify_error(self._all_follower_identities(), str(error))
             raise
-        self._stage = None
-        return decision
-
-    def _follow_stage(self, stage: _BenchmarkStageExchange) -> bool | None:
-        if not self._socket.poll(0, zmq.POLLIN):
-            if time.monotonic() < stage.deadline:
-                return None
-            self._stage = None
-            raise TimeoutError(
-                "timed out waiting for attention-DP warm-up stage decision "
-                f"for batch={stage.batch}"
-            )
-        self._stage = None
-        reply = self._read_follower(0, "stage_decision")
-        ok = reply.get("ok")
-        if reply.get("batch") != stage.batch or not isinstance(ok, bool):
-            raise RuntimeError(f"invalid attention-DP warm-up stage decision: {reply}")
-        return ok
+        return _BenchmarkStageRound(all_done, verdict)
 
     @staticmethod
     def _deadline_elapsed(deadline: float | None) -> bool:
@@ -4666,9 +4662,13 @@ class InstrumentedScheduler(AsyncScheduler):
     _KVWARM_DOWNLOAD_TIMEOUT_S = 60
     _kvwarm_stage_t0: float | None
     _kvwarm_stage_batch: int | None
-    # Local outcome ``(batch, ok, detail)`` of the active stage while the
-    # attention-DP group verdict is pending (``_kvwarm_stage_await``).
-    _kvwarm_stage_reported: tuple[int | None, bool, dict] | None = None
+    # Local outcome ``(batch, ok, detail)`` of the active stage once this
+    # rank's build has closed, held until the group's round says every rank
+    # is done (``_kvwarm_stage_round``).
+    _kvwarm_stage_local: tuple[int | None, bool, dict] | None = None
+    # Rounds this rank has run; carried in every round so a rank that fell
+    # out of lockstep is detected instead of waited for.
+    _kvwarm_round_seq: int = 0
     # Real-KV prefill seeding state: per-batch-size seed chains, the parked
     # point with its per-request KV and new-token lengths, which shot
     # ("warm" | "measure") comes next, and whether this point staged.
@@ -5107,7 +5107,7 @@ class InstrumentedScheduler(AsyncScheduler):
         # The pool figure is the group's negotiated one (the smallest rank's;
         # local before negotiation), like the depth cap: the plan decides
         # which rung every rank builds and which points it warms, and the
-        # stage exchange (``_kvwarm_stage_outcome``) relies on every rank
+        # stage round (``_kvwarm_stage_round``) relies on every rank
         # agreeing on both.
         shadow_tail_blocks = self._kvwarm_shadow_tail_blocks(repeats)
         for batch, depth in list(plan.items()):
@@ -5131,7 +5131,8 @@ class InstrumentedScheduler(AsyncScheduler):
         self._kvwarm_borrowed_ids: set = set()
         self._kvwarm_stage_batch = None
         self._kvwarm_building = False
-        self._kvwarm_stage_reported = None
+        self._kvwarm_stage_local = None
+        self._kvwarm_round_seq = 0
         self._kvwarm_seq = 0
         logger.info(
             "KVWARM: prepared %d stage plans over %d decode points",
@@ -5177,9 +5178,12 @@ class InstrumentedScheduler(AsyncScheduler):
         """DECODE_SWEEP phase: chain-fleet build/park/turnover. True = hand this
         step back to the real scheduler.
 
-        Under attention-DP a finished build first waits for the group's
-        verdict on the rung (``_kvwarm_stage_await``); those steps are idle
-        too, so the collective forward keeps running on every rank.
+        Under attention-DP every idle step runs one stage round
+        (``_kvwarm_stage_round``): each rank reports whether it is still
+        building, and the group settles the rung in the same step on every
+        rank, so the rung's first point is injected on the same step
+        everywhere and no rank ever blocks in the point's READY barrier while
+        a peer still runs a collective.
 
         Chains shed while their last step is still in flight leave their
         blocks behind the deferred-free fence; every shed branch then yields
@@ -5198,9 +5202,21 @@ class InstrumentedScheduler(AsyncScheduler):
             return False
         if self._bench_active_req_ids or self._bench_current_point is not None:
             return False
-        if self._kvwarm_stage_reported is not None:
-            # The rung's verdict is with the group: idle until it arrives.
-            return self._kvwarm_stage_await()
+        if self._kvwarm_building:
+            if self._bench_soft_timeout_elapsed() or getattr(
+                self, "_bench_stop_requested", False
+            ):
+                # Soft timeout mid-build: never finish this fleet. Close the
+                # stage as failed so the group leaves the rung the same way.
+                closed = self._kvwarm_stage_outcome(False, {"soft_timeout": True})
+            else:
+                closed = self._kvwarm_monitor_build()
+            if self._bench_synchronizer is None:
+                # dp=1: the build's steps, and the step that closes it, stay
+                # idle steps for the real scheduler, as before.
+                return closed
+        if self._bench_synchronizer is not None and self._kvwarm_stage_round():
+            return True
         grid = self._bench_grid
         nxt = grid[0] if grid and grid[0].point_type == "decode" else None
         if nxt is None:
@@ -5211,11 +5227,6 @@ class InstrumentedScheduler(AsyncScheduler):
         ):
             # Soft timeout: never build another fleet. Release the chains and
             # let the decode step reach the coordinated timeout boundary.
-            if self._kvwarm_building and self._bench_synchronizer is not None:
-                # Peers may already be waiting for this rank's stage report;
-                # abandon the build through the exchange so every rank leaves
-                # the rung the same way.
-                return self._kvwarm_stage_outcome(False, {"soft_timeout": True})
             if self._kvwarm_chain_ids:
                 self._kvwarm_shed_chains()
             return self._bench_frees_pending()
@@ -5225,8 +5236,6 @@ class InstrumentedScheduler(AsyncScheduler):
             if self._kvwarm_chain_ids:
                 self._kvwarm_shed_chains()
             return self._bench_frees_pending()
-        if self._kvwarm_building:
-            return self._kvwarm_monitor_build()
         if self._kvwarm_stage_batch != nxt.batch_size:
             self._kvwarm_shed_chains()
             if self._bench_frees_pending():
@@ -5333,43 +5342,69 @@ class InstrumentedScheduler(AsyncScheduler):
 
         A failed build releases its chains at once (a partial or unusable
         fleet only pins KV). Without a synchronizer the outcome is final and
-        settles here; under attention-DP it is reported to the group and the
-        stage waits in ``_kvwarm_stage_reported`` for the verdict, which
-        ``_kvwarm_stage_await`` applies. True either way: the step is idle.
+        settles here; under attention-DP it waits in ``_kvwarm_stage_local``
+        for the round in which every rank reports done
+        (``_kvwarm_stage_round``). True either way: the step is idle.
         """
         batch = self._kvwarm_stage_batch
         self._kvwarm_building = False
         if not ok:
             self._kvwarm_shed_chains()
-        synchronizer = self._bench_synchronizer
-        if synchronizer is None:
+        if self._bench_synchronizer is None:
             self._kvwarm_stage_settle(batch, ok, detail)
             return True
-        synchronizer.stage_report(
-            batch, ok, timeout=self._kvwarm_stage_sync_timeout(synchronizer)
-        )
-        self._kvwarm_stage_reported = (batch, ok, detail)
+        self._kvwarm_stage_local = (batch, ok, detail)
         return True
 
-    def _kvwarm_stage_await(self) -> bool:
-        """Poll the group verdict for the reported stage; True (idle) while it
-        is pending. A group fallback zeroes the rung's plan on every rank, so
-        a rank whose own build succeeded sheds its chains too and the rung's
-        points take fake injection everywhere."""
+    def _kvwarm_stage_round(self) -> bool:
+        """One stage round per idle step: exchange this rank's stage status
+        with the group and apply the group's view.
+
+        True when the stage machinery owns this step (a build chunk for the
+        real scheduler, or an idle step while peers finish or the rung is
+        settled); False when nothing is pending and the shared-state decisions
+        of ``_kvwarm_step_busy`` may run. Every rank runs the round at the
+        same point of the same step and blocks in it, so the group view
+        arrives in the same step everywhere and the rung's first point is
+        injected on the same step by every rank; no rank waits here while a
+        peer is inside a forward pass. Attention-DP only: without a
+        synchronizer the local outcome settled in ``_kvwarm_stage_outcome``."""
+        local = self._kvwarm_stage_local
         synchronizer = self._bench_synchronizer
-        reported = self._kvwarm_stage_reported
-        if synchronizer is None or reported is None:
-            # Nothing is awaiting a verdict (dp=1 settles locally).
-            return False
-        decision = synchronizer.stage_poll()
-        if decision is None:
-            return True
-        batch, _, detail = reported
-        self._kvwarm_stage_reported = None
-        if not decision:
+        if synchronizer is None:
+            raise RuntimeError("attention-DP warm-up round without a synchronizer")
+        if local is not None:
+            batch, ok, _ = local
+            phase = "done"
+        else:
+            batch = self._kvwarm_stage_batch
+            ok = None
+            phase = "building" if self._kvwarm_building else "none"
+        self._kvwarm_round_seq += 1
+        view = synchronizer.stage_round(self._kvwarm_round_seq, batch, phase, ok)
+        if not view.all_done:
+            return phase != "none"
+        if local is None:
+            raise RuntimeError(
+                "attention-DP warm-up round settled a stage this rank never closed"
+            )
+        verdict = view.ok
+        if not isinstance(verdict, bool):
+            raise RuntimeError(
+                "attention-DP warm-up round settled a stage without a verdict"
+            )
+        batch, _, detail = local
+        self._kvwarm_stage_local = None
+        logger.info(
+            "KVWARM: stage batch=%s settled by the group (ok=%s) at round %d",
+            batch,
+            verdict,
+            self._kvwarm_round_seq,
+        )
+        if not verdict:
             detail = {**detail, "group_fallback": True}
             self._kvwarm_shed_chains()
-        self._kvwarm_stage_settle(batch, decision, detail)
+        self._kvwarm_stage_settle(batch, verdict, detail)
         return True
 
     def _kvwarm_stage_settle(self, batch: int | None, ok: bool, detail: dict) -> None:
@@ -5394,17 +5429,6 @@ class InstrumentedScheduler(AsyncScheduler):
             batch,
             detail,
         )
-
-    def _kvwarm_stage_sync_timeout(self, synchronizer: _BenchmarkSynchronizer) -> float:
-        """Wait budget for the stage exchange, counted from this rank's
-        report. Peers may still be building: a build runs to completion or,
-        at the latest, to the soft deadline, where the soft-timeout branch of
-        ``_kvwarm_step_busy`` abandons it through this same exchange. The
-        budget therefore reaches the soft deadline plus the protocol timeout
-        the blocking phases allow."""
-        deadline = getattr(self, "_bench_deadline_monotonic", None)
-        remaining = 0.0 if deadline is None else max(0.0, deadline - time.monotonic())
-        return remaining + synchronizer.timeout_seconds
 
     def _kvwarm_stage_shadow_shortfall(self, batch: int | None) -> int:
         """Free blocks the pool lacks for the shadows of the most demanding
