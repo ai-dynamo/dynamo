@@ -60,6 +60,7 @@ pub mod encoder_router;
 pub mod indexer;
 pub mod metrics;
 pub(crate) mod metrics_subscriber;
+pub mod plugins;
 pub mod prefill_router;
 pub mod publisher;
 mod request_lease;
@@ -69,9 +70,13 @@ pub mod sequence;
 pub mod shared_cache;
 
 pub use dynamo_kv_router::scheduling::OverlapScoresResponse;
-pub use embedded::{install_worker_selection_policy_registry, worker_selection_policy_registry};
+// TODO(v1.7): Remove these compatibility aliases; use kv_router::plugins instead.
 pub use encoder_router::EncoderRouter;
 pub use indexer::Indexer;
+pub use plugins::{
+    install_router_plugin_registry as install_worker_selection_policy_registry,
+    router_plugin_registry as worker_selection_policy_registry,
+};
 pub use prefill_router::PrefillRouter;
 pub use routing_host::{KvPushRouter, RoutingHost};
 pub use routing_load::{
@@ -913,17 +918,22 @@ impl KvRouter {
 
     /// Attach a request classifier before placing this router into service.
     /// Classifier lifecycles belong to decode/aggregated routing; prefill hops bypass them.
-    // TODO: wire a production installer (Python bindings / router config); hidden until then.
-    #[doc(hidden)]
     pub fn with_request_classifier(self, classifier: impl RequestClassifier) -> Result<Self> {
+        self.install_request_classifier(Box::new(classifier))?;
+        Ok(self)
+    }
+
+    /// Attach a catalog-created request classifier before placing this router into service.
+    pub fn install_request_classifier(&self, classifier: Box<dyn RequestClassifier>) -> Result<()> {
         if !self
             .selection
             .scheduler()
-            .install_request_classifier(Box::new(classifier), self.cancellation_token.child_token())
+            .install_request_classifier(classifier, self.cancellation_token.child_token())
         {
             anyhow::bail!("request classifier is already configured");
         }
-        Ok(self)
+        tracing::info!(model = %self.tracking_model_name, "installed linked request classifier");
+        Ok(())
     }
 
     /// Cached per-rank capacity and registration state for this router's classifier.
