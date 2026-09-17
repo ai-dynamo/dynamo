@@ -23,7 +23,6 @@ from typing import AsyncGenerator, Dict
 
 import aiohttp
 import pytest
-
 from dynamo.llm import HttpAsyncEngine, HttpError, HttpService
 from dynamo.runtime import DistributedRuntime
 
@@ -230,11 +229,11 @@ async def test_chat_completion_success(http_server):
 
 
 HTTP_ERROR_CASES = (
-    (MSG_CONTAINS_ERROR, 400, MSG_CONTAINS_ERROR, "Bad Request"),
+    (MSG_CONTAINS_ERROR, 400, "Bad Request", "Bad Request"),
     (
         MSG_CONTAINS_STATUS_ERROR,
         415,
-        "Unsupported media type",
+        "Unsupported Media Type",
         "Unsupported Media Type",
     ),
     (
@@ -253,7 +252,10 @@ HTTP_ERROR_CASES = (
 
 
 def expected_error_body(status: int, message: str, error_type: str) -> Dict:
-    return {"message": message, "type": error_type, "code": status}
+    body = {"message": message, "type": error_type, "code": status}
+    if status == 500:
+        body["details"] = {"backend_status": status}
+    return body
 
 
 @pytest.mark.asyncio
